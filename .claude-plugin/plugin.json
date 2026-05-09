@@ -1,6 +1,6 @@
 {
   "name": "ibkr",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Read-only Interactive Brokers (IBKR) integration for Claude Code: account, positions, quotes, option chains, daily history, and market scans via the local ibkr CLI.",
   "author": {
     "name": "osauer",

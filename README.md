@@ -253,11 +253,17 @@ created on connection attempts.
 
 ## Roadmap
 
+This is a **0.x beta release**. Per [semver](https://semver.org/#spec-item-4)
+the public API may change between 0.x versions; 1.0.0 is reserved for the
+first stable read-only release after live-gateway smoke and broader use.
+
 | Version | Theme |
 |---|---|
-| v1.0 | This release: read-only foundation |
-| v1.1 | History bars, watchlists, closed-today view, full chain pricing, JSON schema versioning |
-| v1.2 | Full IBKR scanner DSL |
+| v0.1 | This release: read-only foundation, beta |
+| v0.2 | Net-delta on `positions --by underlying`, intraday history bars, `trades --today`, watchlists, JSON schema versioning |
+| v0.3 | Full IBKR scanner DSL |
+| v0.4+ | Distribution hardening: GitHub Releases via goreleaser, Homebrew tap, plugin registry submission |
+| v1.0 | First stable read-only release (gated on smoke + downstream use) |
 | v2.0 | Trading opt-in (`-tags trading`): dry-run, paper-only default, mandatory confirmation, audit log, kill switch |
 
 ## License

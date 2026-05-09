@@ -1,9 +1,11 @@
 # Changelog
 
-## v1.0.0 — 2026-05-09
+## v0.1.0 — 2026-05-09
 
-Initial release. Standalone, read-only IBKR command-line tool with Claude Code
-integration.
+Initial beta release. Standalone, read-only IBKR command-line tool with
+Claude Code integration. **0.x semver — public API may change.** 1.0.0 is
+reserved for the first stable read-only release after live-gateway smoke
+and broader use.
 
 ### Added
 
@@ -28,8 +30,8 @@ integration.
   group stock + option legs per underlying with summed P&L. The JSON
   response always includes a `by_underlying` array regardless of the flag.
 - `history SYM [--days 90]` returns daily OHLCV bars via IBKR HMDS.
-  Calendar-driven lookback; daily granularity only in v1.0 (intraday is
-  v1.1).
+  Calendar-driven lookback; daily granularity only in v0.1 (intraday is
+  v0.2).
 - `internal/config` TOML config loader with profile selection
   (live / paper / custom) and scanner presets.
 - `internal/cache` JSON-file contract cache and inactive-symbol store.
@@ -113,8 +115,8 @@ suite passes against the live IB Gateway.
 - Per-leg option chain pricing is best-effort: the v1 implementation falls
   back gracefully when IBKR cannot resolve the option contract from
   symbol+expiry+strike+right alone, leaving cells blank rather than
-  fabricating a value. v1.1 adds full conID-resolved chain pricing.
-- Self-update is deferred to v1.1; `ibkr version` is the only metadata
+  fabricating a value. v0.2 adds full conID-resolved chain pricing.
+- Self-update is deferred to v0.2; `ibkr version` is the only metadata
   command in this release.
 - `quote` subscriptions are throttled at the CLI render layer only; the
   gateway-side subscription always runs at full rate.

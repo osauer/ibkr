@@ -4,10 +4,10 @@ Status as of 2026-05-09 22:30 CEST. Plan source: `PLAN.html`. Project layout & o
 
 ## Outstanding (next session, start here)
 
-- **Live integration smoke is the gating task.** v1.0 is feature-complete on
-  paper but Phase A additions, the new chain expiry listing, and the
-  newly-wired per-strike IV in the chain table have not yet been smoke-tested
-  against a live IB Gateway. With Gateway up:
+- **Live integration smoke is the gating task.** v0.1 (initial beta) is
+  feature-complete on paper but Phase A additions, the new chain expiry
+  listing, and the newly-wired per-strike IV in the chain table have not
+  yet been smoke-tested against a live IB Gateway. With Gateway up:
   ```
   make test                          # full suite incl. -race, all green w/o gateway
   bin/ibkr status                    # confirms connected:true
@@ -27,9 +27,11 @@ Status as of 2026-05-09 22:30 CEST. Plan source: `PLAN.html`. Project layout & o
   osauer/ibkr`) requires the public GitHub remote. User will trigger when
   ready; do not push without explicit confirmation.
 
-- **Tag v1.0.0.** Gated on: live-gateway smoke green AND public GitHub remote.
-  Once tagged, the plugin marketplace flow can be advertised in real terms,
-  and the v1.0.1 changelog header opens for any hot-fix that lands afterward.
+- **v0.1.0 tagged + pushed to GitHub** (done 2026-05-09). Plugin marketplace
+  flow (`/plugin marketplace add osauer/ibkr` + `/plugin install ibkr`) is
+  live. **Next tag is v0.2.0** (or v0.1.1 for hot-fix only). 1.0.0 is
+  reserved for the first stable read-only release after live-gateway smoke
+  and broader downstream use.
 
 - **Keep Go patched.** `make check` runs `govulncheck` and fails on stdlib
   vulns. We're on 1.26.3 at handoff, no findings.
@@ -39,10 +41,10 @@ Status as of 2026-05-09 22:30 CEST. Plan source: `PLAN.html`. Project layout & o
 Five commits on `main`. `make check` + `make test` green at every commit.
 
 - `347f3cb` — **Initial commit.** `git init` on the working tree, first commit
-  covering the entire v1.0 source. `.gitignore` extended to exclude
+  covering the entire v0.1 source. `.gitignore` extended to exclude
   `.claude/settings.local.json`, `.claude/worktrees/`, and `next-priorities.html`.
 - `a423099` — **Claude Code plugin wrap.** `skill/` → `skills/ibkr/`;
-  `.claude-plugin/plugin.json` (v1.0.0, owner=osauer) +
+  `.claude-plugin/plugin.json` (v0.1.0, owner=osauer) +
   `.claude-plugin/marketplace.json` (single-plugin marketplace, `source: "./"`);
   `hooks/hooks.json` carrying the `PreToolUse` trading-verb guard (defence in
   depth, copied from `settings/ibkr.settings.json:22-28`) and a `SessionStart`
@@ -50,7 +52,7 @@ Five commits on `main`. `make check` + `make test` green at every commit.
   skill install moved behind `--install-skill` flag (dogfood path) so the
   plugin owns skill distribution; `Makefile` `SKILL_SRC` variable +
   `install-skill` re-labelled as dogfood-only; `README.md` "Use with Claude
-  Code" rewritten as the three-step happy path; `CHANGELOG.md` v1.0.0 expanded
+  Code" rewritten as the three-step happy path; `CHANGELOG.md` v0.1.0 expanded
   with three new subsections (Operability and CLI UX, Build and quality gate,
   Claude Code plugin).
 - `8feabb9` — **Chain expiry listing** (delegated to a worktree-isolated
@@ -93,7 +95,7 @@ Two refinements over the prior HANDOFF:
 Both are post-versionless-protocol additions to IBKR. Older messages (orders,
 historical data) still carry version fields; new feature messages don't.
 
-## v1.1 backlog (current)
+## v0.2 backlog (current)
 
 Two items burned down this session (chain expiry listing, per-strike IV in
 chain table). Remaining:
@@ -107,8 +109,8 @@ chain table). Remaining:
   10-option portfolio would add ~25s to `positions`. Recommendation when
   picked up: opt-in `--with-greeks` flag (off by default), small parallel
   worker pool (3-4 concurrent subs is safe per gateway throttle). ~1-1.5h.
-- **Intraday history bars.** v1.0 ships daily-only via
-  `FetchHistoricalDailyBars`. v1.1 should add `--bar 1h` / `--bar 5m` etc.
+- **Intraday history bars.** v0.1 ships daily-only via
+  `FetchHistoricalDailyBars`. v0.2 should add `--bar 1h` / `--bar 5m` etc.
   via a wider `Connector.FetchHistoricalBars` wrapper.
 - **`trades --today`, watchlists, history JSON schema versioning.**
 - **NEW: `SubscribeOptionIV` cancellation cleanup** (flagged by agent on
@@ -131,11 +133,11 @@ Three audiences, three install paths. The repo is the single source of truth.
 | **End user** (CLI + Claude integration) | `go install github.com/osauer/ibkr/cmd/ibkr@latest` + `cmd/ibkrd@latest`, then `/plugin marketplace add osauer/ibkr` + `/plugin install ibkr` + optional `./install.sh --merge-settings` | Yes (plugin) |
 
 We are intentionally not bundling binaries inside the plugin's `bin/` for
-v1.0: the plugin and the CLI have legitimately separate audiences (regime
+v0.1: the plugin and the CLI have legitimately separate audiences (regime
 library consumer never needs the plugin). End-users who want one-shot
-install: that's a v1.3 problem (Homebrew tap or SessionStart auto-install).
+install: that's a v0.4+ problem (Homebrew tap or SessionStart auto-install).
 
-**Deferred to v1.3+ (deployment hardening):**
+**Deferred to v0.4+ (deployment hardening, pre-1.0):**
 - Cross-platform GitHub Releases via goreleaser (darwin-arm64/amd64,
   linux-amd64/arm64).
 - Homebrew tap. Tap repo name TBD; revisit when the tap actually matters.
