@@ -1,8 +1,38 @@
 # ibkr — handoff
 
-Status as of 2026-05-09 22:30 CEST. Plan source: `PLAN.html`. Project layout & overview: `README.md`. Released-since-baseline: `CHANGELOG.md`.
+Status as of 2026-05-09 20:26 CEST. Plan source: `PLAN.html`. Project layout & overview: `README.md`. Released-since-baseline: `CHANGELOG.md`.
 
 ## Outstanding (next session, start here)
+
+- **Live smoke (this session, 18:01–18:11 UTC) found four issues.**
+  Smoke matrix passed for status / account / positions / positions
+  --by underlying / quote (stocks) / history / chain expiry listing /
+  scan list / JSON path. Issues to drive forward:
+    1. **(landed)** Daemon lifecycle: 6 stale `ibkrd` processes accumulated
+       during the session because two CLIs racing on a missing socket each
+       autospawned a daemon and the second daemon evicted the first one's
+       socket. **Fixed** with flock pidfile (`<rundir>/ibkrd.lock`) +
+       dial-probe before socket eviction. See `internal/daemon/lock.go`,
+       hardened `Server.openSocket` and gated `Server.Stop` socket cleanup.
+       Live race confirmed: 10 parallel `bin/ibkr status` → exactly 1
+       daemon survives.
+    2. `quote --watch` leaves a stuck subscription. Re-running while the
+       daemon is up returns `internal: already subscribed to AAPL`.
+       Root cause: streaming handler's `streamCtx` is derived from the
+       daemon ctx, not the per-conn ctx, so client disconnect doesn't
+       cancel the subscription. Defer never runs because no broken-pipe
+       write attempt happens (no ticks → no encode → no detection).
+    3. `quote SPY` returns option-contract pricing (~$4.89), not the ETF
+       (~$700). Suspect: contract-details cache warmed by
+       `RequestAccountUpdates` for held `SPY 700P 2026-06-18` is
+       getting reused for the bare-symbol stock subscribe.
+    4. `scan top-movers` and `most-active` time out after 8s. 8s is
+       hardcoded in `handleScanRun`; needs investigation in foreground
+       daemon to distinguish "tight deadline" from "entitlement error".
+
+- **Live integration smoke remaining (this session was paper-account
+  U5091510, EUR base).** Phase A additions and the chain features
+  passed; outstanding is a clean re-run after the four fixes land.
 
 - **Live integration smoke is the gating task.** v0.1 (initial beta) is
   feature-complete on paper but Phase A additions, the new chain expiry

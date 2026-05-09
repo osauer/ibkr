@@ -44,6 +44,8 @@ type Server struct {
 	idleStop    chan struct{}
 	activeConns int
 
+	lock *instanceLock
+
 	logger *Logger
 }
 
@@ -76,14 +78,25 @@ func New(opts Options) *Server {
 
 // Start opens the IB Gateway connection, listens on the Unix socket, and
 // blocks until ctx is cancelled or Stop is called. Returns the first fatal
-// error encountered.
+// error encountered. Returns ErrAlreadyRunning (without touching the
+// gateway) if another ibkrd holds the instance lock for this socket path.
 func (s *Server) Start(ctx context.Context) error {
+	lock, err := acquireInstanceLock(s.socketPath)
+	if err != nil {
+		return err
+	}
+	s.lock = lock
+
 	if err := s.startConnector(ctx); err != nil {
+		s.lock.Release()
+		s.lock = nil
 		return err
 	}
 	defer s.stopConnector()
 
 	if err := s.openSocket(); err != nil {
+		s.lock.Release()
+		s.lock = nil
 		return err
 	}
 	s.startedAt = time.Now()
@@ -98,23 +111,31 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Stop closes the listener and IBKR connection. Safe to call multiple times.
+// A Server that never reached openSocket (e.g. lock contention exit) must
+// not touch the socket file — that would unlink the active peer's socket
+// and break the running daemon.
 func (s *Server) Stop() {
 	s.mu.Lock()
 	for _, c := range s.streams {
 		c()
 	}
 	s.streams = map[string]context.CancelFunc{}
+	owned := s.listener != nil
 	s.mu.Unlock()
-	if s.listener != nil {
+	if owned {
 		_ = s.listener.Close()
+		_ = os.Remove(s.socketPath)
 	}
-	_ = os.Remove(s.socketPath)
 	s.stopConnector()
 	if s.contractCache != nil {
 		_ = s.contractCache.Flush(context.Background())
 	}
 	if s.inactive != nil {
 		_ = s.inactive.Flush(context.Background())
+	}
+	if s.lock != nil {
+		s.lock.Release()
+		s.lock = nil
 	}
 }
 
@@ -192,8 +213,16 @@ func (s *Server) openSocket() error {
 	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir socket dir: %w", err)
 	}
-	// Best-effort cleanup of a stale socket from a crashed predecessor.
+	// We hold the instance flock; any peer holding the socket is by
+	// definition stale (its lock would be released). Dial-probe first to
+	// distinguish "stale file from a crashed predecessor" (safe to remove)
+	// from "live peer that beat us to flock acquisition" (impossible, but
+	// surface clearly if it ever happens).
 	if fi, err := os.Stat(s.socketPath); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		if c, err := net.DialTimeout("unix", s.socketPath, 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			return fmt.Errorf("socket %s already serving despite holding lock; refusing to evict", s.socketPath)
+		}
 		if err := os.Remove(s.socketPath); err != nil {
 			return fmt.Errorf("remove stale socket: %w", err)
 		}

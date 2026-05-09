@@ -231,6 +231,14 @@ causes are: IB Gateway not running, the configured `client_id` is in use by
 another session, or the `port` is wrong (paper gateway is `4002` by default
 in this project).
 
+**Single-instance lock.** Only one `ibkrd` per socket path may run at a time.
+On startup the daemon takes an exclusive flock on `<rundir>/ibkrd.lock`
+(e.g. `~/.cache/ibkr/ibkrd.lock`) and writes its PID. Concurrent CLI
+invocations that race to autospawn produce one winner; losers exit cleanly
+with `Another ibkrd is already running for socket …; exiting cleanly`. If a
+daemon dies hard (e.g. `kill -9`), the kernel releases the flock, and the
+next launch acquires it without manual cleanup.
+
 **Quotes time out** — Gateway is configured with strict live entitlements and
 the market is closed. The daemon defaults to `SetMarketDataType(2)` (frozen)
 which returns the last-known price; if your gateway is configured for `live`

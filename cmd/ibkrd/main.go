@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -100,6 +101,10 @@ func main() {
 	defer srv.Stop()
 
 	if err := srv.Start(ctx); err != nil {
+		if errors.Is(err, daemon.ErrAlreadyRunning) {
+			logger.Infof("Another ibkrd is already running for socket %s; exiting cleanly", socketPath)
+			return
+		}
 		logger.Errorf("start: %v", err)
 		os.Exit(1)
 	}
