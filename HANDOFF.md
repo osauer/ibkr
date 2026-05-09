@@ -1,38 +1,56 @@
 # ibkr — handoff
 
-Status as of 2026-05-09 20:26 CEST. Plan source: `PLAN.html`. Project layout & overview: `README.md`. Released-since-baseline: `CHANGELOG.md`.
+Status as of 2026-05-09 21:05 CEST. Plan source: `PLAN.html`. Project layout & overview: `README.md`. Released-since-baseline: `CHANGELOG.md`.
 
 ## Outstanding (next session, start here)
 
-- **Live smoke (this session, 18:01–18:11 UTC) found four issues.**
-  Smoke matrix passed for status / account / positions / positions
-  --by underlying / quote (stocks) / history / chain expiry listing /
-  scan list / JSON path. Issues to drive forward:
-    1. **(landed)** Daemon lifecycle: 6 stale `ibkrd` processes accumulated
-       during the session because two CLIs racing on a missing socket each
-       autospawned a daemon and the second daemon evicted the first one's
-       socket. **Fixed** with flock pidfile (`<rundir>/ibkrd.lock`) +
-       dial-probe before socket eviction. See `internal/daemon/lock.go`,
-       hardened `Server.openSocket` and gated `Server.Stop` socket cleanup.
-       Live race confirmed: 10 parallel `bin/ibkr status` → exactly 1
-       daemon survives.
-    2. `quote --watch` leaves a stuck subscription. Re-running while the
-       daemon is up returns `internal: already subscribed to AAPL`.
-       Root cause: streaming handler's `streamCtx` is derived from the
-       daemon ctx, not the per-conn ctx, so client disconnect doesn't
-       cancel the subscription. Defer never runs because no broken-pipe
-       write attempt happens (no ticks → no encode → no detection).
-    3. `quote SPY` returns option-contract pricing (~$4.89), not the ETF
-       (~$700). Suspect: contract-details cache warmed by
-       `RequestAccountUpdates` for held `SPY 700P 2026-06-18` is
-       getting reused for the bare-symbol stock subscribe.
-    4. `scan top-movers` and `most-active` time out after 8s. 8s is
-       hardcoded in `handleScanRun`; needs investigation in foreground
-       daemon to distinguish "tight deadline" from "entitlement error".
+- **Live smoke (2026-05-09 18:01 UTC) found four issues. All four
+  fixes landed on `main` with unit-test verification.** Live re-run
+  is the only thing pending and is gated on the IBKR handshake
+  throttle clearing (this session SIGKILL'd a clientID=15 daemon
+  during Ticket 1 testing; gateway is rate-limiting fresh handshakes
+  from 127.0.0.1, including alternate client IDs).
+    1. `123e77a` — **Daemon lifecycle / single-instance lock.** flock
+       pidfile at `<rundir>/ibkrd.lock`; loser daemons exit cleanly
+       with `Another ibkrd is already running for socket …; exiting
+       cleanly`. `openSocket` now dial-probes before evicting; `Stop`
+       only touches the socket file when listener was actually
+       opened. Live-confirmed: 10 parallel `bin/ibkr status` → 1
+       daemon.
+    2. `9f860b8` — **Streaming subscription cleanup.**
+       `SubscribeMarketData` is idempotent (duplicate subscribe
+       returns nil, reuses reqID, zero outbound traffic). `serveConn`
+       has a per-conn ctx; `dispatch` returns `terminal=true` for
+       streaming RPCs; `handleQuoteSubscribe` runs an EOF watcher
+       goroutine on the bufio.Reader so client disconnect cancels
+       streamCtx and the deferred `UnsubscribeMarketData` runs.
+    3. `e3bbf6b` — **Contract cache pollution from option positions.**
+       `seedContractCacheFromPositions` now skips non-STK positions.
+       Fixes `quote SPY` returning option pricing (~$4.89) instead of
+       ETF (~$700) — the held `SPY 700P` was seeding cacheCache["SPY"]
+       with the option's ConID, which `prepareContract` later picked
+       up for the bare-symbol stock subscribe.
+    4. `5154015` — **Scanner gateway-error surfacing + configurable
+       timeout.** `RunScannerSubscription` now registers a per-reqID
+       msgErrMsg handler so errors return as `scanner gateway error
+       (code=N): …` instead of `timed out after 8s`. Default timeout
+       bumped 8s → 20s. Per-preset `[scans.<name>] timeout` TOML field
+       wired through `internal/config` and honored by `handleScanRun`.
 
-- **Live integration smoke remaining (this session was paper-account
-  U5091510, EUR base).** Phase A additions and the chain features
-  passed; outstanding is a clean re-run after the four fixes land.
+- **Live re-run script (run when gateway recovers — typically 5+ min
+  after last failed handshake from this host):**
+  ```
+  bin/ibkr status                                # connected:true
+  bin/ibkr account                               # NLV populated
+  bin/ibkr positions                             # 16 rows w/ marks
+  bin/ibkr positions --by underlying             # grouped view
+  bin/ibkr quote AAPL,MSFT,SPY                   # SPY now ~$700, not $4.89
+  bin/ibkr quote AAPL --watch                    # rapid Ctrl-C + re-run, no "already subscribed"
+  bin/ibkr history AAPL --days 30                # HMDS daily bars
+  bin/ibkr chain AAPL                            # 27 expiries
+  bin/ibkr scan top-movers                       # 20 rows OR clear gateway-error code, never timeout
+  for i in $(seq 1 10); do bin/ibkr status >/dev/null & done; wait; pgrep -c ibkrd  # → 1
+  ```
 
 - **Live integration smoke is the gating task.** v0.1 (initial beta) is
   feature-complete on paper but Phase A additions, the new chain expiry
