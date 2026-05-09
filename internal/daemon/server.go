@@ -261,6 +261,13 @@ func (s *Server) acceptLoop(ctx context.Context) {
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	// Per-conn ctx is the lifecycle handle for everything this client
+	// initiates: when the conn closes (EOF, peer disconnect, daemon
+	// shutdown), connCancel fires and any streaming handler still alive
+	// unwinds via its derived streamCtx.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+
 	r := bufio.NewReaderSize(conn, 64<<10)
 	enc := json.NewEncoder(conn)
 	for {
@@ -277,11 +284,16 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			_ = enc.Encode(rpc.Response{ID: "", Ok: false, Error: &rpc.Error{Code: rpc.CodeBadRequest, Message: err.Error()}})
 			continue
 		}
-		s.dispatch(ctx, &req, enc)
+		// Streaming dispatches return terminal=true; this conn is then
+		// devoted to the stream until the client disconnects, so we exit
+		// the read loop and let defer close the conn.
+		if terminal := s.dispatch(connCtx, &req, enc, r); terminal {
+			return
+		}
 	}
 }
 
-func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encoder) {
+func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encoder, r *bufio.Reader) (terminal bool) {
 	switch req.Method {
 	case rpc.MethodAccountSummary:
 		s.unary(req, enc, func() (any, error) { return s.handleAccountSummary(ctx) })
@@ -302,7 +314,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodQuoteSubscribe:
-		s.handleQuoteSubscribe(ctx, req, enc)
+		s.handleQuoteSubscribe(ctx, req, enc, r)
+		return true
 	case rpc.MethodOrderPlace:
 		_, err := handleOrderPlace(ctx, req)
 		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
@@ -312,6 +325,7 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	default:
 		writeError(enc, req.ID, rpc.CodeUnknownMethod, "unknown method: "+req.Method)
 	}
+	return false
 }
 
 // unary wraps a handler so result/error envelopes are uniform.

@@ -1,12 +1,19 @@
 package daemon
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/osauer/ibkr/internal/config"
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // shortTempDir returns a tempdir under /tmp so Unix socket paths stay
@@ -129,5 +136,81 @@ func TestOpenSocketRefusesToEvictLivePeer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already serving") {
 		t.Fatalf("expected 'already serving' diagnostic, got %v", err)
+	}
+}
+
+// dispatch must report terminal=true for streaming RPCs. serveConn relies
+// on this to return out of its read loop and let defer close the conn,
+// which in turn unblocks the EOF watcher inside the streaming handler.
+// Pre-fix, dispatch returned no terminal signal and serveConn would loop
+// back into ReadBytes — but the streaming handler hadn't returned yet
+// because it had no per-conn ctx tied to the read side, so the
+// subscription leaked.
+func TestDispatchQuoteSubscribeReportsTerminal(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		cfg:     &config.Resolved{ProfileName: "live", Profile: config.Profile{Host: "127.0.0.1", Port: 4001, ClientID: 15}},
+		streams: map[string]context.CancelFunc{},
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	// No connector wired → handleQuoteSubscribe takes the
+	// gateway-unavailable early-exit, but the dispatch still has to
+	// declare itself terminal so serveConn cleans up the conn.
+	params, _ := json.Marshal(rpc.QuoteSubscribeParams{Contract: rpc.ContractParams{Symbol: "AAPL"}})
+	req := &rpc.Request{ID: "test-1", Method: rpc.MethodQuoteSubscribe, Params: params}
+
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	r := bufio.NewReader(strings.NewReader(""))
+
+	terminal := srv.dispatch(context.Background(), req, enc, r)
+	if !terminal {
+		t.Fatalf("expected dispatch to report terminal=true for MethodQuoteSubscribe")
+	}
+}
+
+// serveConn must return when the client closes its socket end while a
+// streaming RPC is in flight. The fix wires this via per-conn context
+// and an EOF watcher inside the streaming handler. With no connector,
+// the handler takes the gateway-unavailable early exit and returns;
+// dispatch reports terminal=true; serveConn returns. The whole sequence
+// must complete within a tight deadline.
+func TestServeConnExitsCleanlyAfterStreamingRequest(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		cfg:     &config.Resolved{ProfileName: "live", Profile: config.Profile{Host: "127.0.0.1", Port: 4001, ClientID: 15}},
+		streams: map[string]context.CancelFunc{},
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	clientSide, daemonSide := net.Pipe()
+	t.Cleanup(func() { _ = clientSide.Close(); _ = daemonSide.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveConn(context.Background(), daemonSide)
+	}()
+
+	params, _ := json.Marshal(rpc.QuoteSubscribeParams{Contract: rpc.ContractParams{Symbol: "AAPL"}})
+	req := &rpc.Request{ID: "test-1", Method: rpc.MethodQuoteSubscribe, Params: params}
+	if err := json.NewEncoder(clientSide).Encode(req); err != nil {
+		t.Fatalf("encode subscribe request: %v", err)
+	}
+
+	// Read the streaming handler's gateway-unavailable error response so
+	// the daemon-side write doesn't block on a backed-up pipe. Then close
+	// the client side; serveConn should exit promptly.
+	if _, err := bufio.NewReader(clientSide).ReadBytes('\n'); err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = clientSide.Close()
+
+	select {
+	case <-done:
+		// pass
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serveConn did not return within 2s after client disconnect")
 	}
 }

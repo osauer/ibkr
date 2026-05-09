@@ -120,6 +120,64 @@ func TestSubscribeMarketDataUsesContractCache(t *testing.T) {
 	}
 }
 
+// SubscribeMarketData must be idempotent: a duplicate subscribe to the
+// same symbol returns nil and reuses the existing reqID, with no second
+// outbound reqMktData on the wire. Pre-fix, the second call returned an
+// "already subscribed" error which forced daemon callers to either
+// swallow it (snapshot) or propagate to the user (streaming).
+func TestSubscribeMarketData_Idempotent(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	var out safeBuffer
+	conn := NewConnection(nil)
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.pool = &ConnectionPool{}
+	c.lease = &ConnectionLease{ClientID: 1, Active: true}
+
+	c.contractMu.Lock()
+	c.contractCache["SPY"] = ContractDetailsLite{
+		ConID:        12345,
+		Symbol:       "SPY",
+		Exchange:     "SMART",
+		PrimaryExch:  "ARCA",
+		LocalSymbol:  "SPY",
+		TradingClass: "SPY",
+	}
+	c.contractMu.Unlock()
+
+	if err := c.SubscribeMarketData("SPY", []string{"LAST"}); err != nil {
+		t.Fatalf("first subscribe: %v", err)
+	}
+	c.subMu.RLock()
+	first, ok := c.subscriptions["SPY"]
+	c.subMu.RUnlock()
+	if !ok {
+		t.Fatalf("expected subscription after first subscribe")
+	}
+	firstReqID := first.ReqID
+	bytesAfterFirst := out.Len()
+
+	if err := c.SubscribeMarketData("SPY", []string{"LAST"}); err != nil {
+		t.Fatalf("second subscribe must be idempotent (returned nil), got %v", err)
+	}
+	c.subMu.RLock()
+	second, ok := c.subscriptions["SPY"]
+	c.subMu.RUnlock()
+	if !ok {
+		t.Fatalf("expected subscription after second subscribe")
+	}
+	if second.ReqID != firstReqID {
+		t.Fatalf("expected idempotent reqID %d, got %d", firstReqID, second.ReqID)
+	}
+	if out.Len() != bytesAfterFirst {
+		t.Fatalf("second subscribe wrote %d more bytes; expected zero outbound traffic on no-op", out.Len()-bytesAfterFirst)
+	}
+}
+
 // Test UnsubscribeMarketData is idempotent (does not error if symbol absent)
 func TestUnsubscribeMarketData_Idempotent(t *testing.T) {
 	c := NewConnector(nil)

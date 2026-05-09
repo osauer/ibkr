@@ -1323,7 +1323,10 @@ func (c *Connector) Stop() error {
 	return nil
 }
 
-// SubscribeMarketData subscribes to market data for a symbol
+// SubscribeMarketData subscribes to market data for a symbol. Idempotent:
+// re-subscribing to the same symbol is a no-op (returns nil), so callers
+// that race or run sequentially do not need to coordinate. Unsubscribe is
+// the symmetric tear-down.
 func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 	symbol = strings.ToUpper(symbol)
 	if _, inactive := c.inactiveReason(symbol); inactive {
@@ -1331,9 +1334,10 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 		return nil
 	}
 	c.subMu.RLock()
-	if _, exists := c.subscriptions[symbol]; exists {
+	if sub, exists := c.subscriptions[symbol]; exists {
 		c.subMu.RUnlock()
-		return fmt.Errorf("already subscribed to %s", symbol)
+		marketDataLogger.Debugf("%s: SubscribeMarketData(%s) is a no-op; existing subscription reqID=%d", c.name, symbol, sub.ReqID)
+		return nil
 	}
 	c.subMu.RUnlock()
 
@@ -1360,8 +1364,15 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 
+	// Race protection: another goroutine may have raced past the first
+	// idempotency check. If we issued a reqID to IBKR, cancel it so we
+	// don't leak a gateway-side subscription.
 	if _, exists := c.subscriptions[symbol]; exists {
-		return fmt.Errorf("already subscribed to %s", symbol)
+		if reqID != 0 && c.conn != nil && c.conn.IsConnected() {
+			_ = c.conn.CancelMarketData(reqID)
+		}
+		marketDataLogger.Debugf("%s: SubscribeMarketData(%s) raced; reusing existing subscription", c.name, symbol)
+		return nil
 	}
 
 	if reqID != 0 {

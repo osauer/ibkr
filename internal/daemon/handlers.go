@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -277,8 +278,11 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 }
 
 // handleQuoteSubscribe streams ticks until the client disconnects, the
-// daemon shuts down, or the underlying subscription errors.
-func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc *json.Encoder) {
+// daemon shuts down, or the underlying subscription errors. Client
+// disconnect is detected by an EOF watcher reading from r: any read result
+// (a stray byte or EOF) cancels streamCtx, which unwinds the loop and
+// runs UnsubscribeMarketData via defer.
+func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc *json.Encoder, r *bufio.Reader) {
 	var p rpc.QuoteSubscribeParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		writeError(enc, req.ID, rpc.CodeBadRequest, err.Error())
@@ -303,6 +307,18 @@ func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc
 		s.mu.Unlock()
 		// Always cancel the underlying IBKR subscription.
 		_ = s.connector.UnsubscribeMarketData(p.Contract.Symbol)
+	}()
+
+	// EOF watcher: streaming clients are silent after the initial subscribe
+	// request, so any read result on r means either a stray byte (rare) or
+	// connection close (the common case). Either way cancel the stream so
+	// the deferred UnsubscribeMarketData runs. Pre-fix, no read happened
+	// while the handler blocked on tick.C, so client disconnect went
+	// undetected and the gateway-side subscription leaked across CLI
+	// invocations (manifested as `already subscribed to AAPL` on retry).
+	go func() {
+		_, _ = r.ReadByte()
+		cancel()
 	}()
 
 	if err := s.connector.SubscribeMarketData(p.Contract.Symbol, []string{"100", "101", "104"}); err != nil {
