@@ -36,6 +36,7 @@ type ScannerRow struct {
 type scannerSession struct {
 	reqID int
 	rows  []ScannerRow
+	err   error // set when the gateway returns an error tagged with reqID
 	done  chan struct{}
 	mu    sync.Mutex
 	once  sync.Once
@@ -52,7 +53,7 @@ func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubsc
 		return nil, ErrIBKRUnavailable
 	}
 	if timeout <= 0 {
-		timeout = 8 * time.Second
+		timeout = 20 * time.Second
 	}
 	instrument := sub.Instrument
 	if instrument == "" {
@@ -78,6 +79,30 @@ func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubsc
 	})
 	defer c.conn.UnregisterHandler(msgScannerData, dataHandlerID)
 
+	// Surface gateway errors tagged with our reqID instead of waiting for
+	// the deadline to fire. Layout per handleErrorMessage:
+	// [msgID(4), version, reqID, errorCode, errorMsg]. Codes 2100-2199 are
+	// informational (warnings about market-data farm state, etc.) — ignore
+	// them so they don't fail an otherwise healthy scan.
+	errHandlerID := c.conn.RegisterHandler(msgErrMsg, func(fields []string) {
+		if len(fields) < 5 {
+			return
+		}
+		gotID, err := strconv.Atoi(fields[2])
+		if err != nil || gotID != reqID {
+			return
+		}
+		code, _ := strconv.Atoi(fields[3])
+		if code >= 2100 && code <= 2199 {
+			return
+		}
+		session.mu.Lock()
+		session.err = fmt.Errorf("scanner gateway error (code=%d): %s", code, fields[4])
+		session.mu.Unlock()
+		session.once.Do(func() { close(session.done) })
+	})
+	defer c.conn.UnregisterHandler(msgErrMsg, errHandlerID)
+
 	if err := c.requestScannerSubscription(reqID, sub, instrument); err != nil {
 		return nil, err
 	}
@@ -87,6 +112,9 @@ func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubsc
 	case <-session.done:
 		session.mu.Lock()
 		defer session.mu.Unlock()
+		if session.err != nil {
+			return nil, session.err
+		}
 		return session.rows, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()

@@ -60,6 +60,7 @@ log_level    = "debug"
 type     = "TOP_PERC_GAIN"
 exchange = "STK.US.MAJOR"
 limit    = 10
+timeout  = "30s"
 `
 	if err := writeFile(path, body); err != nil {
 		t.Fatal(err)
@@ -83,6 +84,8 @@ limit    = 10
 	}
 	if got, ok := res.Scans["movers"]; !ok || got.Limit != 10 {
 		t.Errorf("scans[movers] = %+v, want Limit=10", got)
+	} else if got.Timeout.Std() != 30*time.Second {
+		t.Errorf("scans[movers].Timeout = %v, want 30s", got.Timeout.Std())
 	}
 
 	res2, err := cfg.Resolve("live")

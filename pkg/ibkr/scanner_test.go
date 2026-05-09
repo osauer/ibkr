@@ -1,9 +1,96 @@
 package ibkr
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
+
+// A gateway error message tagged with the scanner's reqID must surface as
+// a clear, code-bearing error rather than the generic "scanner timed out
+// after 8s" the user previously saw. Errors codes 2100-2199 are
+// informational warnings (market-data farm state, etc.) and must not
+// short-circuit a healthy scan.
+func TestRunScannerSubscription_SurfacesGatewayError(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	var out bytes.Buffer
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.lease = &ConnectionLease{ClientID: 1, Active: true}
+
+	// Wait until RunScannerSubscription registers its handlers, grab the
+	// reqID it allocated, then inject an error frame tagged with that reqID.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var reqID int
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			conn.handlersMu.RLock()
+			errHandlers := conn.msgHandlers[msgErrMsg]
+			conn.handlersMu.RUnlock()
+			if len(errHandlers) > 0 {
+				conn.reqIDMu.Lock()
+				reqID = conn.reqIDSeq - 1
+				conn.reqIDMu.Unlock()
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		if reqID == 0 {
+			t.Errorf("scanner handlers never registered")
+			return
+		}
+		// First send an informational warning (must be ignored).
+		warning := []string{
+			strconv.Itoa(msgErrMsg), "2",
+			strconv.Itoa(reqID),
+			"2104", "Market data farm connection is OK",
+		}
+		for _, h := range conn.snapshotHandlers(msgErrMsg) {
+			h(warning)
+		}
+		time.Sleep(5 * time.Millisecond)
+		// Then a real error tagged with our reqID.
+		errFrame := []string{
+			strconv.Itoa(msgErrMsg), "2",
+			strconv.Itoa(reqID),
+			"162", "No market data subscription for this scanner",
+		}
+		for _, h := range conn.snapshotHandlers(msgErrMsg) {
+			h(errFrame)
+		}
+	}()
+
+	rows, err := c.RunScannerSubscription(context.Background(), ScannerSubscription{
+		Type:     "TOP_PERC_GAIN",
+		Exchange: "STK.US.MAJOR",
+	}, 5*time.Second)
+	<-done
+
+	if rows != nil {
+		t.Fatalf("expected nil rows on gateway error, got %v", rows)
+	}
+	if err == nil {
+		t.Fatalf("expected error from gateway, got nil")
+	}
+	if !strings.Contains(err.Error(), "162") {
+		t.Fatalf("expected error to mention code 162, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "No market data subscription") {
+		t.Fatalf("expected error to surface gateway message, got %v", err)
+	}
+}
 
 // TestParseScannerData_LiveFixture decodes the captured msgScannerData frame
 // recorded against IB Gateway 10.37 (serverVersion 203) on 2026-05-09 to

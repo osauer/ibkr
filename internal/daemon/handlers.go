@@ -738,11 +738,15 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		Type:   preset.Type,
 		AsOf:   time.Now(),
 	}
+	scanTimeout := preset.Timeout.Std()
+	if scanTimeout <= 0 {
+		scanTimeout = 20 * time.Second
+	}
 	rows, err := s.connector.RunScannerSubscription(ctx, ibkrlib.ScannerSubscription{
 		Type:     preset.Type,
 		Exchange: preset.Exchange,
 		Limit:    limit,
-	}, 8*time.Second)
+	}, scanTimeout)
 	if err != nil {
 		return nil, err
 	}

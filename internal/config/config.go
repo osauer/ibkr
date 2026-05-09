@@ -32,11 +32,14 @@ type Daemon struct {
 	LogLevel    string   `toml:"log_level"`
 }
 
-// Scan holds a single scanner preset definition.
+// Scan holds a single scanner preset definition. Timeout is per-preset and
+// optional; <=0 falls back to the daemon's default (20s) which already
+// covers IBKR's typical scanner response window with margin.
 type Scan struct {
-	Type     string `toml:"type"`
-	Exchange string `toml:"exchange"`
-	Limit    int    `toml:"limit"`
+	Type     string   `toml:"type"`
+	Exchange string   `toml:"exchange"`
+	Limit    int      `toml:"limit"`
+	Timeout  duration `toml:"timeout"`
 }
 
 // Config is the on-disk shape of ~/.config/ibkr/config.toml.
