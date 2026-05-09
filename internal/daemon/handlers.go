@@ -574,11 +574,13 @@ func (s *Server) fillOptionLeg(ctx context.Context, row *rpc.ChainStrike, symbol
 	poll := time.NewTicker(75 * time.Millisecond)
 	defer poll.Stop()
 	var bid, ask, last float64
+	pricesArrived := false
 	for {
 		md := s.connector.GetMarketData()
 		if data, ok := md[key]; ok {
 			if data.Bid > 0 || data.Ask > 0 || data.Last > 0 {
 				bid, ask, last = data.Bid, data.Ask, data.Last
+				pricesArrived = true
 				break
 			}
 		}
@@ -589,6 +591,23 @@ func (s *Server) fillOptionLeg(ctx context.Context, row *rpc.ChainStrike, symbol
 		case <-ctx.Done():
 			return
 		case <-poll.C:
+		}
+	}
+	// Tick 13 (model option computation) often arrives a beat after the first
+	// bid/ask print. Keep polling for IV until the same deadline expires; if it
+	// never lands, leave the row IV nil rather than fabricating one.
+	var iv float64
+	if pricesArrived {
+		for time.Now().Before(deadline) {
+			if v, ok := s.connector.GetOptionIV(key); ok && v > 0 {
+				iv = v
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-poll.C:
+			}
 		}
 	}
 	if right == "C" {
@@ -604,6 +623,10 @@ func (s *Server) fillOptionLeg(ctx context.Context, row *rpc.ChainStrike, symbol
 			v := last
 			row.CallLast = &v
 		}
+		if iv > 0 {
+			v := iv
+			row.CallIV = &v
+		}
 		return
 	}
 	if bid > 0 {
@@ -617,6 +640,10 @@ func (s *Server) fillOptionLeg(ctx context.Context, row *rpc.ChainStrike, symbol
 	if last > 0 {
 		v := last
 		row.PutLast = &v
+	}
+	if iv > 0 {
+		v := iv
+		row.PutIV = &v
 	}
 }
 

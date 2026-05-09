@@ -2123,6 +2123,13 @@ func (c *Connector) SubscribeOption(underlying, expiryYMD string, strike float64
 		LastTime: time.Now(),
 	}
 	c.subMu.Unlock()
+	// Route option-computation ticks (msg 21, tick types 10/11/13) for this
+	// reqID into optIV / optQuoteMid keyed by the OPRA chain key. This is the
+	// same handler path SubscribeOptionIV uses for ATM IV; per-strike chain
+	// renders just need a different key so multiple strikes coexist.
+	c.optMu.Lock()
+	c.optReqIDs[reqID] = key
+	c.optMu.Unlock()
 	return key, reqID, nil
 }
 
