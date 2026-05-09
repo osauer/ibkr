@@ -1821,6 +1821,16 @@ func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosi
 		if contract.ConID == 0 {
 			continue
 		}
+		// Only seed bare-symbol cache entries from stock positions. The
+		// cache is indexed by the underlying ticker (e.g. "SPY") and is
+		// later read by prepareContract when resolving stock quote
+		// requests; if a held option (`SPY 700P 2026-06-18`, secType=OPT)
+		// is allowed to seed under the bare key, prepareContract picks
+		// up the option's ConID and `quote SPY` returns the option's
+		// pricing instead of the ETF's. Filter to STK only.
+		if !strings.EqualFold(contract.SecType, "STK") {
+			continue
+		}
 		symbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
 		if symbol == "" {
 			continue

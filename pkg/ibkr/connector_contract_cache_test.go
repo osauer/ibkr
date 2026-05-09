@@ -9,6 +9,7 @@ func TestSeedContractCacheFromPositions(t *testing.T) {
 		"bb": {
 			Contract: Contract{
 				Symbol:       "bb",
+				SecType:      "STK",
 				ConID:        12345,
 				Exchange:     "NYSE",
 				PrimaryExch:  "NYSE",
@@ -19,6 +20,7 @@ func TestSeedContractCacheFromPositions(t *testing.T) {
 		"duplicate": {
 			Contract: Contract{
 				Symbol:      "BB",
+				SecType:     "STK",
 				ConID:       12345,
 				PrimaryExch: "SMART",
 			},
@@ -47,6 +49,89 @@ func TestSeedContractCacheFromPositions(t *testing.T) {
 	}
 	if detail.TradingClass != "NYSE" {
 		t.Fatalf("expected trading class NYSE, got %s", detail.TradingClass)
+	}
+}
+
+// Held option positions must not seed the bare-symbol cache; doing so
+// caused `quote SPY` to return the option's pricing (~$4.89) instead
+// of the ETF's (~$700) because prepareContract picked up the option's
+// ConID for what was supposed to be a stock subscribe.
+func TestSeedContractCacheSkipsNonStockPositions(t *testing.T) {
+	conn := NewConnector(nil)
+
+	positions := map[string]*RawPosition{
+		"spy-put": {
+			Contract: Contract{
+				Symbol:       "SPY",
+				SecType:      "OPT",
+				Right:        "P",
+				Strike:       700,
+				Expiry:       "20260618",
+				ConID:        7777777,
+				Exchange:     "SMART",
+				PrimaryExch:  "AMEX",
+				LocalSymbol:  "SPY   260618P00700000",
+				TradingClass: "SPY",
+			},
+		},
+		"vix-call": {
+			Contract: Contract{
+				Symbol:  "VIX",
+				SecType: "OPT",
+				ConID:   888888,
+			},
+		},
+	}
+
+	conn.seedContractCacheFromPositions(positions)
+
+	conn.contractMu.RLock()
+	_, spyCached := conn.contractCache["SPY"]
+	_, vixCached := conn.contractCache["VIX"]
+	conn.contractMu.RUnlock()
+
+	if spyCached {
+		t.Fatalf("option position must not seed bare-symbol cache for SPY")
+	}
+	if vixCached {
+		t.Fatalf("option position must not seed bare-symbol cache for VIX")
+	}
+}
+
+// When a stock and an option for the same underlying are both held,
+// only the stock's ConID may seed the cache. The merge order does not
+// matter; the option must always be filtered out before merge.
+func TestSeedContractCachePrefersStockOverOption(t *testing.T) {
+	conn := NewConnector(nil)
+
+	positions := map[string]*RawPosition{
+		"amd-stock": {
+			Contract: Contract{
+				Symbol:      "AMD",
+				SecType:     "STK",
+				ConID:       111,
+				PrimaryExch: "NASDAQ",
+			},
+		},
+		"amd-call": {
+			Contract: Contract{
+				Symbol:  "AMD",
+				SecType: "OPT",
+				ConID:   222,
+			},
+		},
+	}
+
+	conn.seedContractCacheFromPositions(positions)
+
+	conn.contractMu.RLock()
+	detail, ok := conn.contractCache["AMD"]
+	conn.contractMu.RUnlock()
+	if !ok {
+		t.Fatalf("expected stock position to seed AMD cache")
+	}
+	if detail.ConID != 111 {
+		t.Fatalf("expected stock conID 111, got option's %d", detail.ConID)
 	}
 }
 
