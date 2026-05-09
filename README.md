@@ -130,17 +130,46 @@ when they differ.
 
 ## Use with Claude Code
 
-After `./install.sh --merge-settings`:
+End-to-end install in three steps. Step 1 installs the binary that talks to
+IB Gateway; steps 2–3 hook the binary into Claude Code via a plugin.
 
-1. The skill at `~/.claude/skills/ibkr/SKILL.md` tells Claude when to reach
-   for `ibkr` and what each subcommand does.
-2. Permission rules pre-allow read-only invocations — Claude doesn't have to
-   ask before running `ibkr account` or `ibkr positions`.
-3. A `PreToolUse` hook blocks any `ibkr order|trade|cancel` invocation
-   independent of the binary itself.
+```sh
+# 1. Install the binaries (skip if already on PATH)
+go install github.com/osauer/ibkr/cmd/ibkr@latest
+go install github.com/osauer/ibkr/cmd/ibkrd@latest
+
+# 2. From inside a Claude Code session, register and install the plugin
+/plugin marketplace add osauer/ibkr
+/plugin install ibkr
+
+# 3. (Optional but recommended) merge the read-only permission allowlist
+#    so Claude doesn't prompt for every ibkr command. Plugins cannot ship
+#    permissions, so this stays a separate step.
+./install.sh --merge-settings
+```
+
+What the plugin gives you:
+
+1. **Skill** at `skills/ibkr/SKILL.md` — Claude reads the frontmatter
+   description on session start and decides when to reach for `ibkr`,
+   then reads the body for per-command flag docs.
+2. **Hooks**:
+   - `PreToolUse` blocks any `ibkr order|trade|cancel` invocation
+     independently of the binary's own trading guard.
+   - `SessionStart` prints a clear install hint when the `ibkr` binary
+     is missing from PATH; silent on the happy path.
+3. **Permissions** (via the optional `--merge-settings` step) pre-allow
+   read-only invocations so Claude doesn't ask before running
+   `ibkr account` or `ibkr positions`.
 
 The skill instructs Claude to always pass `--json` when parsing, surface
 non-`live` data types prominently, and never fabricate Greeks or IV.
+
+### Developer / dogfood path
+
+If you're hacking on the plugin itself, replace step 2 with
+`/plugin marketplace add /Users/osauer/dev/ibkr` (an absolute local path)
+so Claude pulls from your working tree instead of GitHub.
 
 ## Testing
 

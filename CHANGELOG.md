@@ -55,6 +55,49 @@ integration.
 - Live position support via streaming `reqAccountUpdates` so position rows
   carry mark / market-value / unrealized P&L.
 
+### Operability and CLI UX
+
+- `ibkr status` is the documented entrypoint when something fails: it
+  reports daemon liveness, gateway connectivity, configured-vs-negotiated
+  TLS mode, and the daemon's last connection error. When disconnected,
+  status output embeds a 3-step troubleshooting block.
+- Connectivity is a first-class state across every read handler. When the
+  gateway is down, the daemon returns `gateway_unavailable` (not a generic
+  internal error) and the CLI's `fail()` appends a `hint: run 'ibkr
+  status' …` line. `quote AAPL,MSFT,…` aborts after the first
+  gateway-unavailable error instead of timing out per symbol.
+- TLS is treated as a contract: setting `tls = true` disables the
+  library's plain↔TLS fallback (no silent downgrade). `ibkr status`
+  surfaces `(tls=true, configured=false ⚠ fallback)` when configured ≠
+  negotiated.
+- Per-subcommand `--help` matches top-level style and exits 0 instead
+  of spawning the daemon.
+
+### Build and quality gate
+
+- `make check` is now binding: `gofmt -l` + `go vet` + `staticcheck` +
+  `govulncheck`. `make test` runs `check` before any test target, so
+  formatting / vet / staticcheck / vulnerability findings short-circuit
+  the suite. An outdated Go toolchain with known stdlib CVEs is a build
+  failure by design.
+- Daemon-side and integration tests run under `-race`. The pkg/ibkr
+  layer keeps its non-race default (the 30s pkg test would balloon
+  under -race; race detector lives where the goroutines do).
+- 24 `staticcheck` findings cleaned up across the tree (deprecated APIs,
+  nil contexts, redundant patterns) and 16 unexported helpers deleted as
+  dead code per the project's "no orphans" rule.
+
+### Claude Code plugin
+
+- The Skill bundle ships as a Claude Code plugin (`/plugin marketplace
+  add osauer/ibkr` + `/plugin install ibkr`). The repo is its own
+  marketplace: `.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json`
+  pin the version and metadata; `hooks/hooks.json` carries the
+  `PreToolUse` trading-verb guard (defence in depth) and a
+  `SessionStart` install-hint for missing-binary cases. Plugins cannot
+  ship `permissions.allow`/`deny`, so `./install.sh --merge-settings`
+  remains the canonical permissions step.
+
 ### Notes vs. baseline (regime)
 
 This is a fresh project, not an iteration on regime. The relevant baseline

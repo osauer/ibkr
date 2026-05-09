@@ -1,0 +1,14 @@
+{
+  "name": "ibkr",
+  "owner": {
+    "name": "osauer",
+    "url": "https://github.com/osauer"
+  },
+  "plugins": [
+    {
+      "name": "ibkr",
+      "source": "./",
+      "description": "Read-only Interactive Brokers integration: account, positions, quotes, option chains, daily history, and market scans. Requires the ibkr binary on PATH (install with `go install github.com/osauer/ibkr/cmd/ibkr@latest` and `cmd/ibkrd@latest`)."
+    }
+  ]
+}

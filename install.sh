@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Install ibkr + ibkrd binaries and the Claude Code skill bundle.
+# Install ibkr + ibkrd binaries and (optionally) merge Claude Code permissions.
+#
+# The Skill itself is shipped via the Claude Code plugin; install it from
+# inside Claude Code with `/plugin marketplace add osauer/ibkr` followed by
+# `/plugin install ibkr`. Plugins cannot ship permission rules, so the
+# permissions allowlist is still merged via this script.
 #
 # Usage:
-#   ./install.sh                  # build + install binaries + skill, no settings merge
-#   ./install.sh --merge-settings # also merge the skill's settings snippet
+#   ./install.sh                  # build + install binaries
+#   ./install.sh --merge-settings # also merge the permissions snippet
 #                                 # into ~/.claude/settings.json
+#   ./install.sh --install-skill  # also copy skill into ~/.claude/skills/
+#                                 # (dogfood path; redundant with plugin install)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,10 +22,12 @@ CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 SKILL_DIR="$CLAUDE_DIR/skills/ibkr"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 MERGE_SETTINGS=0
+INSTALL_SKILL=0
 
 for arg in "$@"; do
   case "$arg" in
     --merge-settings) MERGE_SETTINGS=1 ;;
+    --install-skill)  INSTALL_SKILL=1 ;;
     --help|-h)
       grep -E '^#( |$)' "$0" | sed 's/^# \?//'
       exit 0
@@ -38,10 +47,12 @@ install -d "$GOBIN_DIR"
 install -m 0755 bin/ibkr "$GOBIN_DIR/ibkr"
 install -m 0755 bin/ibkrd "$GOBIN_DIR/ibkrd"
 
-echo "==> Installing skill to $SKILL_DIR"
-install -d "$SKILL_DIR"
-install -m 0644 skill/SKILL.md "$SKILL_DIR/SKILL.md"
-install -m 0644 skill/schemas.md "$SKILL_DIR/schemas.md"
+if [[ "$INSTALL_SKILL" -eq 1 ]]; then
+  echo "==> Installing skill to $SKILL_DIR (dogfood path; redundant if plugin is installed)"
+  install -d "$SKILL_DIR"
+  install -m 0644 skills/ibkr/SKILL.md "$SKILL_DIR/SKILL.md"
+  install -m 0644 skills/ibkr/schemas.md "$SKILL_DIR/schemas.md"
+fi
 
 if [[ "$MERGE_SETTINGS" -eq 1 ]]; then
   if ! command -v jq >/dev/null 2>&1; then
@@ -75,12 +86,18 @@ fi
 echo
 echo "Done."
 echo
+echo "Use with Claude Code (recommended path):"
+echo "  /plugin marketplace add osauer/ibkr"
+echo "  /plugin install ibkr"
+echo
+echo "Then optional, to pre-allow read-only ibkr commands without per-call prompts:"
+if [[ "$MERGE_SETTINGS" -eq 1 ]]; then
+  echo "  (already merged into $SETTINGS_FILE this run)"
+else
+  echo "  ./install.sh --merge-settings"
+  echo "  (plugins cannot ship permissions; this remains the canonical permissions step)"
+fi
+echo
 echo "Sanity checks:"
 echo "  $GOBIN_DIR/ibkr version"
 echo "  $GOBIN_DIR/ibkr status"
-echo
-if [[ "$MERGE_SETTINGS" -eq 0 ]]; then
-  echo "Run with --merge-settings to also wire up Claude Code permissions and the"
-  echo "PreToolUse hook (recommended). Alternatively, manually merge"
-  echo "settings/ibkr.settings.json into $SETTINGS_FILE."
-fi

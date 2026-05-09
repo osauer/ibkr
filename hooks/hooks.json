@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e '.tool_input.command | test(\"\\\\bibkr\\\\s+(order|trade|cancel)\\\\b\")' >/dev/null && exit 2 || exit 0"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v ibkr >/dev/null 2>&1 || printf '\\n[ibkr plugin] The `ibkr` binary is not on your PATH.\\nInstall it with:\\n  go install github.com/osauer/ibkr/cmd/ibkr@latest\\n  go install github.com/osauer/ibkr/cmd/ibkrd@latest\\nThen restart your Claude Code session.\\n\\n'"
+          }
+        ]
+      }
+    ]
+  }
+}

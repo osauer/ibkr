@@ -10,6 +10,7 @@ GOBIN ?= $(shell go env GOPATH)/bin
 
 CLAUDE_DIR ?= $(HOME)/.claude
 SKILL_DIR  ?= $(CLAUDE_DIR)/skills/ibkr
+SKILL_SRC  ?= skills/ibkr
 
 .PHONY: build install test test-pkg test-daemon clean install-skill uninstall-skill all check
 
@@ -58,19 +59,21 @@ test-daemon:
 	go test -race -count=1 -timeout=180s ./internal/...
 	go test -race -count=1 -timeout=360s ./test/integration/...
 
-# Install the Claude Code skill bundle and merge the settings snippet.
+# Install the Claude Code skill bundle directly under ~/.claude/skills/.
+# Dogfood path only — end users get the skill via `/plugin install ibkr`.
 # Idempotent: re-running updates files in place.
 install-skill: build
 	install -d $(SKILL_DIR)
-	install -m 0644 skill/SKILL.md $(SKILL_DIR)/SKILL.md
-	install -m 0644 skill/schemas.md $(SKILL_DIR)/schemas.md
+	install -m 0644 $(SKILL_SRC)/SKILL.md $(SKILL_DIR)/SKILL.md
+	install -m 0644 $(SKILL_SRC)/schemas.md $(SKILL_DIR)/schemas.md
 	@echo "Installed skill to $(SKILL_DIR)"
 	@echo
-	@echo "To merge the permission rules + PreToolUse hook into your Claude Code"
-	@echo "global settings, run:"
-	@echo "  ./install.sh --merge-settings"
+	@echo "Prefer the plugin install path for end users:"
+	@echo "  /plugin marketplace add osauer/ibkr"
+	@echo "  /plugin install ibkr"
 	@echo
-	@echo "Or copy settings/ibkr.settings.json into ~/.claude/settings.json by hand."
+	@echo "Then optional: ./install.sh --merge-settings to pre-allow read-only commands"
+	@echo "(plugins cannot ship permissions; this stays the canonical permissions step)."
 
 uninstall-skill:
 	rm -rf $(SKILL_DIR)
