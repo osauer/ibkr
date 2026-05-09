@@ -2,6 +2,36 @@
 
 Status as of 2026-05-09 21:05 CEST. Plan source: `PLAN.html`. Project layout & overview: `README.md`. Released-since-baseline: `CHANGELOG.md`.
 
+## Session conclusion (2026-05-09 21:05 CEST)
+
+Four post-smoke bugs found in this session's live run; all four fixed,
+unit-tested, and committed. Gate (`make check` + `make test` -race +
+integration) green at every commit. Live re-run script is in this
+HANDOFF; gated on IB Gateway recovery.
+
+**IB Gateway state at session end:** the gateway was rate-limiting
+fresh handshakes from `127.0.0.1` regardless of clientID after this
+session SIGKILL'd a clientID=15 daemon during Ticket 1 race testing.
+Fresh attempts on clientIDs 21 and 23 were also silent at the v100
+descriptor exchange — the throttle scope is host-wide, not per-ID.
+
+**Adjacent symptom worth recording for future sessions:** while the
+throttle was active, the gateway logged
+`errorCode 320 errorMsg "Error reading request. Unable to parse field:
+'Duration' for input string: '\0041'"` against unrelated clientIDs (5,
+99 — both initiated from concurrent Claude sessions on the same host).
+The `\004` is an empty-field byte; the parser then ate the next
+field's first char ("1") trying to recover. That's a peer-side bug in
+a `reqHistoricalData` request from another client, not this daemon.
+Worth knowing: IB Gateway's handshake state machine and rate limiter
+share state, so a noisy peer extends the cooldown for everyone.
+Concurrent multi-Claude-session testing on one Gateway is fragile;
+prefer dedicated Gateways per session, or stagger the work.
+
+**Recommended unblock for next session:** restart IB Gateway, then
+run the live re-run script in this HANDOFF. The four fixes are
+self-contained and the script is ordered to validate each one.
+
 ## Outstanding (next session, start here)
 
 - **Live smoke (2026-05-09 18:01 UTC) found four issues. All four
