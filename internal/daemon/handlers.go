@@ -365,6 +365,142 @@ func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc
 	}
 }
 
+// handleChainExpiries returns the sorted, deduped option expiries for the
+// underlying. WithIV opt-in fetches per-expiry ATM implied volatility (one
+// subscribe cycle per row, run sequentially because the gateway throttles
+// aggressive subscription churn). On any per-strike error the row keeps
+// IV=nil with IVStatus="timeout"|"unavailable" — never fail the whole call.
+func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rpc.ChainExpiriesResult, error) {
+	var p rpc.ChainExpiriesParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return nil, fmt.Errorf("decode params: %w", err)
+	}
+	sym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+	if sym == "" {
+		return nil, errBadRequest("symbol required")
+	}
+	if !s.gatewayReady() {
+		return nil, ibkrlib.ErrIBKRUnavailable
+	}
+
+	expiries, strikesByExpiry, err := fetchExpiriesAndStrikes(s.connector, sym, 12*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &rpc.ChainExpiriesResult{
+		Symbol:   sym,
+		AsOf:     time.Now(),
+		Expiries: make([]rpc.ChainExpiry, 0, len(expiries)),
+	}
+
+	if !p.WithIV {
+		for _, e := range expiries {
+			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e})
+		}
+		return res, nil
+	}
+
+	// --with-iv: pick ATM strike per expiry, briefly subscribe, capture IV.
+	spot, _ := s.briefSnapshotPrice(ctx, sym, 5*time.Second)
+	for _, e := range expiries {
+		row := rpc.ChainExpiry{Date: e}
+		strikes := strikesByExpiry[e]
+		if spot <= 0 || len(strikes) == 0 {
+			row.IVStatus = "unavailable"
+			res.Expiries = append(res.Expiries, row)
+			continue
+		}
+		atm := closestStrike(strikes, spot)
+		expiryYMD := strings.ReplaceAll(e, "-", "")
+		iv, status := s.collectExpiryATMIV(ctx, sym, expiryYMD, atm, 2*time.Second)
+		if iv != nil {
+			row.IV = iv
+		}
+		row.IVStatus = status
+		res.Expiries = append(res.Expiries, row)
+	}
+	return res, nil
+}
+
+// fetchExpiriesAndStrikes is a small seam for tests — the connector's
+// FetchOptionExpiries and FetchOptionExpiryStrikes share an internal fetcher,
+// but the daemon needs both halves and the connector public surface returns
+// them via separate calls. We do one round trip via the strikes path (which
+// is a superset) and derive the sorted-expiry list from the map keys.
+var fetchExpiriesAndStrikes = func(connector chainExpiriesConnector, symbol string, timeout time.Duration) ([]string, map[string][]float64, error) {
+	strikes, err := connector.FetchOptionExpiryStrikes(symbol, timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	expiries := make([]string, 0, len(strikes))
+	for k := range strikes {
+		expiries = append(expiries, k)
+	}
+	sort.Strings(expiries)
+	return expiries, strikes, nil
+}
+
+// chainExpiriesConnector is the narrow connector surface handleChainExpiries
+// uses. Defined here (not in pkg/ibkr) so tests can stub the daemon side
+// without lifting the dependency back into the library.
+type chainExpiriesConnector interface {
+	FetchOptionExpiryStrikes(symbol string, timeout time.Duration) (map[string][]float64, error)
+}
+
+// closestStrike picks the strike closest to spot. For ties (which only happens
+// when strikes straddle spot equidistantly) the lower strike wins for
+// determinism — IBKR's IV surface is symmetric enough that this rarely matters.
+func closestStrike(strikes []float64, spot float64) float64 {
+	best := strikes[0]
+	bestDist := math.Abs(best - spot)
+	for _, k := range strikes[1:] {
+		d := math.Abs(k - spot)
+		if d < bestDist {
+			best, bestDist = k, d
+		}
+	}
+	return best
+}
+
+// collectExpiryATMIV subscribes to the ATM option for one expiry, polls the
+// connector's IV cache for up to perStrikeTimeout, then unsubscribes. Returns
+// (iv, "ok"), (nil, "timeout"), or (nil, "unavailable") on subscribe failure.
+func (s *Server) collectExpiryATMIV(ctx context.Context, symbol, expiryYMD string, strike float64, perStrikeTimeout time.Duration) (*float64, string) {
+	expiryT, err := time.Parse("20060102", expiryYMD)
+	if err != nil {
+		return nil, "unavailable"
+	}
+	reqID, err := s.connector.SubscribeOptionIV(symbol, expiryT, strike, "C")
+	if err != nil {
+		return nil, "unavailable"
+	}
+	_ = reqID
+	// Pick the streaming-quote key SubscribeOption produces so we can also
+	// unsubscribe cleanly. SubscribeOptionIV uses an internal req path that
+	// doesn't expose a market-data key; cancellation via UnsubscribeMarketData
+	// is best-effort. Keying by symbol is enough for the IV side-channel.
+	defer func() { _ = s.connector.UnsubscribeMarketData(symbol) }()
+
+	deadline := time.Now().Add(perStrikeTimeout)
+	poll := time.NewTicker(75 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		if iv, ok := s.connector.GetOptionIV(symbol); ok && iv > 0 {
+			v := iv
+			return &v, "ok"
+		}
+		if time.Now().After(deadline) {
+			return nil, "timeout"
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "timeout"
+		case <-poll.C:
+		}
+	}
+}
+
 // handleChainFetch returns ATM ± width strikes for the specified expiry.
 // Greeks are populated only when IBKR delivers them.
 func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.ChainResult, error) {

@@ -1233,6 +1233,7 @@ const (
 	updateDisplayGroup          = 69
 	unsubscribeFromGroupEvents  = 70
 	startAPI                    = 71
+	reqSecDefOptParams          = 78
 )
 
 var placeOrderBaseFields = []string{
@@ -1761,6 +1762,16 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			ibkrLogger.Debugf("Execution details completed (reqID=%s)", fields[1])
 		} else {
 			ibkrLogger.Debugf("Execution details completed")
+		}
+		return
+	case msgSecurityDefinitionOptionalParameter, msgSecurityDefinitionOptionalParameterEnd:
+		// reqSecDefOptParams (78) responses arrive once per exchange (75) before
+		// a single end marker (76). Connector.FetchOptionExpiries registers
+		// per-message handlers via RegisterHandler; route both IDs there.
+		if handlers := c.snapshotHandlers(msgID); len(handlers) > 0 {
+			for _, handler := range handlers {
+				handler(fields)
+			}
 		}
 		return
 	default:
@@ -3911,6 +3922,45 @@ func (c *Connection) CancelHistoricalData(reqID int) error {
 
 	msg := c.encodeMsg(cancelHistoricalData, 1, reqID)
 	return c.sendMessageWithType(msg, RequestTypeHistorical)
+}
+
+// RequestSecDefOptParams issues msg 78 (reqSecDefOptParams) to enumerate the
+// option chain (expirations + strikes) for an underlying. The IBKR wire format
+// (verified against ibapi.client.EClient.reqSecDefOptParams) has no version
+// field — six total fields: msgID, reqID, underlyingSymbol, futFopExchange
+// (empty for STK options), underlyingSecType, underlyingConId. The beforeSend
+// callback runs after the reqID is allocated but before the message hits the
+// wire so callers can register their per-request handler atomically.
+func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, underlyingSecType string, underlyingConId int, beforeSend func(int)) (int, error) {
+	if !c.IsConnected() {
+		return 0, fmt.Errorf("not connected to IBKR")
+	}
+	if underlyingConId == 0 {
+		return 0, fmt.Errorf("reqSecDefOptParams: underlying conID required")
+	}
+
+	c.reqIDMu.Lock()
+	reqID := c.reqIDSeq
+	c.reqIDSeq++
+	c.reqIDMu.Unlock()
+
+	msg := c.encodeMsg(
+		reqSecDefOptParams,
+		reqID,
+		underlyingSymbol,
+		futFopExchange,
+		underlyingSecType,
+		underlyingConId,
+	)
+
+	if beforeSend != nil {
+		beforeSend(reqID)
+	}
+
+	if err := c.sendMessage(msg); err != nil {
+		return 0, fmt.Errorf("failed to request sec def opt params: %w", err)
+	}
+	return reqID, nil
 }
 
 // RequestMarketDataWithPrimary subscribes to market data with an explicit primary exchange hint.

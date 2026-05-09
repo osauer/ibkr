@@ -85,6 +85,56 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 		_, err := srv.handleHistoryDaily(ctx, req)
 		assertGatewayUnavailable(t, err)
 	})
+
+	t.Run("chain.expiries", func(t *testing.T) {
+		params, _ := json.Marshal(rpc.ChainExpiriesParams{Symbol: "AAPL"})
+		req := &rpc.Request{ID: "t7", Method: rpc.MethodChainExpiries, Params: params}
+		_, err := srv.handleChainExpiries(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+}
+
+// chain.expiries with an empty symbol must surface as bad_request, not
+// internal — the CLI relies on this to render a usage hint.
+func TestChainExpiriesEmptySymbolIsBadRequest(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	params, _ := json.Marshal(rpc.ChainExpiriesParams{Symbol: " "})
+	req := &rpc.Request{ID: "tx", Method: rpc.MethodChainExpiries, Params: params}
+	_, err := srv.handleChainExpiries(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for empty symbol")
+	}
+	code, _ := classifyError(err)
+	if code != rpc.CodeBadRequest {
+		t.Fatalf("classifyError code = %q, want %q", code, rpc.CodeBadRequest)
+	}
+}
+
+// closestStrike picks the strike closest to spot. Verifies the tie-break
+// rule (lower wins) and the boundary cases at both ends of the array.
+func TestClosestStrike(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		strikes []float64
+		spot    float64
+		want    float64
+	}{
+		{"exact match", []float64{200, 210, 220}, 210, 210},
+		{"middle picks closer side", []float64{200, 210, 220}, 213, 210},
+		{"tie picks lower", []float64{200, 210}, 205, 200},
+		{"below range", []float64{200, 210, 220}, 100, 200},
+		{"above range", []float64{200, 210, 220}, 500, 220},
+		{"single strike", []float64{215}, 100, 215},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := closestStrike(tc.strikes, tc.spot); got != tc.want {
+				t.Fatalf("closestStrike(%v,%v) = %v, want %v", tc.strikes, tc.spot, got, tc.want)
+			}
+		})
+	}
 }
 
 // groupByUnderlying nests stock + option legs per underlying and sums

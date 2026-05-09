@@ -262,6 +262,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleQuoteSnapshot(ctx, req) })
 	case rpc.MethodChainFetch:
 		s.unary(req, enc, func() (any, error) { return s.handleChainFetch(ctx, req) })
+	case rpc.MethodChainExpiries:
+		s.unary(req, enc, func() (any, error) { return s.handleChainExpiries(ctx, req) })
 	case rpc.MethodScanRun:
 		s.unary(req, enc, func() (any, error) { return s.handleScanRun(ctx, req) })
 	case rpc.MethodScanList:

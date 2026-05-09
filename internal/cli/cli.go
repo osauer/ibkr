@@ -114,7 +114,7 @@ func init() {
 		{"account", "Account summary snapshot (NLV, BP, cash, margin)", "ibkr account [--json]", runAccount},
 		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--json]", runPositions},
 		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] | ibkr quote SYM YYMMDD C|P STRIKE [--watch --rate 250ms] [--json]", runQuote},
-		{"chain", "Option chain table (ATM ± width strikes)", "ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]", runChain},
+		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--with-iv] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"scan", "Run a configured scanner preset", "ibkr scan <preset> | ibkr scan list [--json]", runScan},
 		{"version", "Print version, commit, build date", "ibkr version", nil}, // version is handled in cmd/ibkr/main.go before dispatch

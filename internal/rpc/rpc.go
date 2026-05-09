@@ -20,6 +20,7 @@ const (
 	MethodQuoteSnapshot  = "quote.snapshot"
 	MethodQuoteSubscribe = "quote.subscribe"
 	MethodChainFetch     = "chain.fetch"
+	MethodChainExpiries  = "chain.expiries"
 	MethodScanRun        = "scan.run"
 	MethodScanList       = "scan.list"
 	MethodHistoryDaily   = "history.daily"
@@ -251,6 +252,31 @@ type ChainStrike struct {
 	PutIV    *float64 `json:"put_iv"`
 	PutDelta *float64 `json:"put_delta"`
 	PutOI    *int64   `json:"put_oi"`
+}
+
+// ChainExpiriesParams is the input for MethodChainExpiries. WithIV asks the
+// daemon to fetch ATM IV per expiry — slow (one subscribe cycle per row), so
+// it's opt-in. Empty Symbol → bad_request.
+type ChainExpiriesParams struct {
+	Symbol string `json:"symbol"`
+	WithIV bool   `json:"with_iv,omitempty"`
+}
+
+// ChainExpiry is one row in MethodChainExpiries' response. IV is nil when
+// --with-iv wasn't requested or when the per-strike IV fetch timed out;
+// IVStatus disambiguates ("ok" | "unavailable" | "timeout").
+type ChainExpiry struct {
+	Date     string   `json:"date"` // YYYY-MM-DD
+	IV       *float64 `json:"iv,omitempty"`
+	IVStatus string   `json:"iv_status,omitempty"`
+}
+
+// ChainExpiriesResult is MethodChainExpiries' payload. Expiries are sorted
+// ascending and deduped across exchanges by the daemon.
+type ChainExpiriesResult struct {
+	Symbol   string        `json:"symbol"`
+	Expiries []ChainExpiry `json:"expiries"`
+	AsOf     time.Time     `json:"as_of"`
 }
 
 // ChainResult is MethodChainFetch's payload.

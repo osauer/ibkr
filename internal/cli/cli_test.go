@@ -329,6 +329,70 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 	})
 }
 
+// chain SYM with no --expiry should render an expiry list (one row per
+// expiry), not the strike-table header. --with-iv adds the ATM IV column.
+func TestRenderChainExpiriesText(t *testing.T) {
+	t.Parallel()
+	t.Run("plain list", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		res := &rpc.ChainExpiriesResult{
+			Symbol: "AAPL",
+			Expiries: []rpc.ChainExpiry{
+				{Date: "2026-01-16"},
+				{Date: "2026-06-19"},
+				{Date: "2026-09-18"},
+			},
+		}
+		if code := renderChainExpiriesText(env, res, false); code != 0 {
+			t.Fatalf("code = %d", code)
+		}
+		out := stdout.String()
+		for _, want := range []string{"AAPL", "3 expiries", "2026-01-16", "2026-06-19", "2026-09-18", "ibkr chain AAPL --expiry"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "ATM IV") {
+			t.Errorf("plain list should not show ATM IV column:\n%s", out)
+		}
+	})
+
+	t.Run("with-iv mixed statuses", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		ivOK := 0.284
+		res := &rpc.ChainExpiriesResult{
+			Symbol: "AAPL",
+			Expiries: []rpc.ChainExpiry{
+				{Date: "2026-01-16", IV: &ivOK, IVStatus: "ok"},
+				{Date: "2026-06-19", IVStatus: "timeout"},
+				{Date: "2026-09-18", IVStatus: "unavailable"},
+			},
+		}
+		if code := renderChainExpiriesText(env, res, true); code != 0 {
+			t.Fatalf("code = %d", code)
+		}
+		out := stdout.String()
+		for _, want := range []string{"ATM IV", "28.4%", "(timeout)", "(unavailable)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("empty list shows guidance", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		res := &rpc.ChainExpiriesResult{Symbol: "ZZZ"}
+		_ = renderChainExpiriesText(env, res, false)
+		out := stdout.String()
+		if !strings.Contains(out, "no option expiries available") {
+			t.Errorf("missing empty-state guidance:\n%s", out)
+		}
+	})
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
