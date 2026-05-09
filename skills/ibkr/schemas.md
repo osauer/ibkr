@@ -187,6 +187,38 @@ only when IBKR delivers them; per-leg quotes may be `null` when the option
 contract cannot be resolved without conID hydration (a v1 limitation; v1.1
 adds full chain pricing).
 
+## chain-expiries
+
+`ibkr chain AAPL --json` (no `--expiry` → expiry listing) or
+`ibkr chain AAPL --with-iv --json` (adds per-expiry ATM IV).
+
+```json
+{
+  "symbol": "AAPL",
+  "as_of": "2026-05-09T14:32:11Z",
+  "expiries": [
+    {"date": "2026-05-16"},
+    {"date": "2026-05-23"},
+    {"date": "2026-06-19", "iv": 0.284, "iv_status": "ok"},
+    {"date": "2026-07-17", "iv": null, "iv_status": "timeout"}
+  ]
+}
+```
+
+Field meanings:
+- `expiries[].date` — ISO date `YYYY-MM-DD`. Sorted ascending, deduped
+  across exchanges (SMART, AMEX, CBOE, …) so each expiry appears once.
+- `expiries[].iv` — decimal (e.g. `0.284` = 28.4%) or `null`. Present
+  only when `--with-iv` was passed and the gateway delivered tick 106
+  for the ATM contract within 2s.
+- `expiries[].iv_status` — `ok`, `timeout`, or `unavailable`. Only set
+  on `--with-iv` runs. Surface non-`ok` rows clearly; do not substitute
+  a proxy value.
+
+Empty `expiries` means the symbol has no listed options (typical for
+ETFs without an option program). Surface this honestly rather than
+fabricating expiries or falling back to the existing chain command.
+
 ## history
 
 `ibkr history AAPL --days 90 --json`

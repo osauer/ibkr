@@ -39,7 +39,8 @@ release. Do not invent or simulate trade execution.
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM --watch` | Streaming ticks (Ctrl-C to stop) | streaming frames per [schemas.md#frame](schemas.md#frame) |
-| `ibkr chain SYM --expiry YYYY-MM-DD` | Option chain ATM ± width | [schemas.md#chain](schemas.md#chain) |
+| `ibkr chain SYM` | List available option expiries for the underlying | [schemas.md#chain-expiries](schemas.md#chain-expiries) |
+| `ibkr chain SYM --expiry YYYY-MM-DD` | Option chain ATM ± width for that expiry | [schemas.md#chain](schemas.md#chain) |
 | `ibkr history SYM` | Daily OHLCV bars | [schemas.md#history](schemas.md#history) |
 | `ibkr scan <preset>` | Run a configured scanner preset | [schemas.md#scan](schemas.md#scan) |
 | `ibkr scan list` | Enumerate configured scanner presets | [schemas.md#scan-list](schemas.md#scan-list) |
@@ -55,7 +56,8 @@ symbols — the CLI hoists them automatically.
   - `--by underlying` groups stock + option legs per underlying with group P&L totals; the JSON `by_underlying` array is always populated regardless of this flag.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
-- `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]`
+- `ibkr chain SYM [--with-iv] [--json]` — list expiries for the underlying. `--with-iv` adds per-expiry ATM implied volatility (slow: one subscribe cycle per expiry). Use this first when the user asks "what expiries are available for X?" before drilling into a chain.
+- `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one.
 - `ibkr history SYM [--days 90] [--json]` — calendar lookback; daily bars only in v1.0
 - `ibkr scan <preset> [--limit N] [--json]`
 - `ibkr scan list [--json]`
@@ -136,6 +138,22 @@ $ ibkr history AAPL --days 30 --json
 
 The bar count typically lags the requested calendar window because non-trading
 days are skipped. Daily granularity only in v1.0.
+
+### Option expiries
+```
+$ ibkr chain AAPL --json
+{
+  "symbol": "AAPL",
+  "as_of": "2026-05-09T14:32:09Z",
+  "expiries": [
+    {"date": "2026-05-16"},
+    {"date": "2026-05-23"},
+    {"date": "2026-06-19"}
+  ]
+}
+```
+
+Use this when the user asks "what expiries are available for X?" or "when does the next AAPL option expire?". Render as a short bulleted list. With `--with-iv`, each row also carries `iv` (decimal, e.g. `0.284` for 28.4%) and `iv_status` (`ok`, `timeout`, `unavailable`); render IV as a percentage and mention any non-`ok` status. Empty `expiries` means the symbol has no listed options — surface this rather than fabricating expiries.
 
 ### What about implied volatility?
 The CLI never derives or estimates IV. If `iv_status` is `"unavailable"`, the

@@ -20,7 +20,8 @@ Account  U1234567 · profile=live · base=EUR
 - **`ibkr positions`** — open positions (stocks + options) with live marks and P&L
 - **`ibkr quote SYM[,SYM…]`** — snapshot quotes; option contracts via `SYM YYMMDD C|P STRIKE`
 - **`ibkr quote SYM --watch --rate 250ms`** — coalesced streaming ticks
-- **`ibkr chain SYM --expiry YYYY-MM-DD --width 5`** — option-chain table
+- **`ibkr chain SYM`** — list option expiries for the underlying (`--with-iv` adds per-expiry ATM IV)
+- **`ibkr chain SYM --expiry YYYY-MM-DD --width 5`** — option-chain table for that expiry
 - **`ibkr scan <preset>`** — `top-movers`, `high-iv`, `unusual-vol`, `most-active` (configurable)
 - **`ibkr status`** — daemon + gateway health
 - **`--json`** on any of the above for parseable output
