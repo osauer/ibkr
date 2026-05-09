@@ -1,0 +1,1195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ibkr — implementation plan</title>
+<style>
+  :root {
+    --bg: #faf7f2;
+    --surface: #ffffff;
+    --ink: #1c1b18;
+    --muted: #5b574d;
+    --rule: #e6e1d7;
+    --accent: #c9532b;
+    --accent-soft: #fbe9df;
+    --ok: #2f7a4d;
+    --warn: #a86b00;
+    --danger: #b3361b;
+    --code-bg: #1e1c18;
+    --code-ink: #efe7d4;
+    --code-dim: #8b8472;
+    --code-hl: #f0a868;
+    --code-str: #a3c489;
+    --code-kw: #e08a78;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); }
+  body { font-family: var(--sans); font-size: 16px; line-height: 1.55; margin: 0; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 56px 28px 96px; }
+
+  header.cover { border-left: 4px solid var(--accent); padding: 6px 0 6px 22px; margin-bottom: 48px; }
+  header.cover .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
+  header.cover h1 { font-size: 38px; line-height: 1.15; margin: 8px 0 4px; font-weight: 600; letter-spacing: -0.01em; }
+  header.cover .sub { color: var(--muted); font-size: 16px; }
+  header.cover .meta { margin-top: 18px; display: flex; gap: 18px; flex-wrap: wrap; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  header.cover .meta span strong { color: var(--ink); font-weight: 600; }
+
+  h2 { font-size: 24px; font-weight: 600; margin: 56px 0 16px; letter-spacing: -0.005em; border-bottom: 1px solid var(--rule); padding-bottom: 8px; }
+  h3 { font-size: 18px; font-weight: 600; margin: 28px 0 10px; }
+  h4 { font-size: 15px; font-weight: 600; margin: 18px 0 8px; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); }
+  .lead { font-size: 17px; }
+  .muted { color: var(--muted); }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-family: var(--mono); font-size: 11px; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
+  .pill.ok { background: #e3f1e8; color: var(--ok); border-color: var(--ok); }
+  .pill.warn { background: #fbeacb; color: var(--warn); border-color: var(--warn); }
+  .pill.danger { background: #f7d8d2; color: var(--danger); border-color: var(--danger); }
+
+  .card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 20px 22px; margin: 14px 0; }
+  .card.tight { padding: 14px 16px; }
+  .card h3:first-child, .card h4:first-child { margin-top: 0; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  table.spec { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  table.spec th, table.spec td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  table.spec th { font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); background: #f3efe6; }
+  table.spec td code { font-size: 12.5px; }
+  table.spec tr:last-child td { border-bottom: 0; }
+
+  code, pre, .mono { font-family: var(--mono); }
+  p code, li code, td code { background: #efe9dc; padding: 1px 6px; border-radius: 4px; font-size: 0.92em; }
+  pre { background: var(--code-bg); color: var(--code-ink); padding: 18px 20px; border-radius: 10px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 14px 0; border: 1px solid #2c2924; }
+  pre .c { color: var(--code-dim); font-style: italic; }
+  pre .k { color: var(--code-kw); }
+  pre .s { color: var(--code-str); }
+  pre .h { color: var(--code-hl); }
+  pre .t { color: #a8c8e8; }
+
+  .term { background: #0e0c08; color: #e8e4d4; border-radius: 10px; border: 1px solid #2c2924; overflow: hidden; margin: 14px 0; box-shadow: 0 1px 0 rgba(0,0,0,0.05), 0 8px 30px rgba(28,27,24,0.06); }
+  .term .bar { background: #1c1a16; padding: 8px 12px; border-bottom: 1px solid #2c2924; display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: #8b8472; }
+  .term .bar .dot { width: 11px; height: 11px; border-radius: 50%; background: #3a3530; display: inline-block; }
+  .term .bar .dot.r { background: #d35858; }
+  .term .bar .dot.y { background: #d8a93c; }
+  .term .bar .dot.g { background: #5fa45f; }
+  .term .bar .title { margin-left: 8px; }
+  .term pre { background: transparent; border: 0; margin: 0; padding: 16px 20px; color: #e8e4d4; font-size: 12.5px; line-height: 1.55; }
+  .term .prompt { color: #f0a868; }
+  .term .cmd { color: #ffffff; font-weight: 600; }
+  .term .dim { color: #6e6a5d; }
+  .term .head { color: #cabc94; }
+  .term .pos { color: #9bc28b; }
+  .term .neg { color: #e08a78; }
+  .term .accent { color: #f0a868; }
+
+  pre.diagram { background: #f3efe6; color: #1c1b18; border: 1px dashed #c9c1ad; line-height: 1.4; }
+
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 14px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); background: #fbeacb; }
+  .callout.danger { border-left-color: var(--danger); background: #f7d8d2; }
+  .callout.ok { border-left-color: var(--ok); background: #e3f1e8; }
+  .callout strong { display: block; margin-bottom: 4px; font-weight: 600; }
+
+  nav.toc { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 18px; margin: 0 0 36px; }
+  nav.toc ol { margin: 0; padding-left: 20px; column-count: 2; column-gap: 24px; }
+  nav.toc li { margin: 4px 0; break-inside: avoid; }
+  nav.toc a { color: var(--ink); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+
+  ul.ac { list-style: none; padding-left: 0; }
+  ul.ac li { padding: 6px 0 6px 28px; position: relative; border-bottom: 1px dashed var(--rule); }
+  ul.ac li:last-child { border-bottom: 0; }
+  ul.ac li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 14px; height: 14px; border: 1.5px solid var(--accent); border-radius: 3px; background: transparent; }
+
+  footer.fin { margin-top: 80px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="cover">
+  <div class="eyebrow">Implementation plan · v1.0</div>
+  <h1>ibkr — a standalone IBKR CLI for Claude Code</h1>
+  <div class="sub">A read-only-first command line tool that connects to a running IB Gateway, surfaces portfolio, quote, and option-chain data to Claude Code via Bash, and is wired up via a Skill plus permission rules.</div>
+  <div class="meta">
+    <span><strong>Module:</strong> github.com/osauer/ibkr</span>
+    <span><strong>Shared lib:</strong> github.com/osauer/ibkr-go</span>
+    <span><strong>Language:</strong> Go (no CGO)</span>
+    <span><strong>Targets:</strong> darwin/arm64, linux/amd64</span>
+    <span><strong>Trading:</strong> v2 only</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#summary">1. Executive summary</a></li>
+    <li><a href="#goals">2. Goals &amp; non-goals</a></li>
+    <li><a href="#architecture">3. Architecture</a></li>
+    <li><a href="#shared-lib">4. The ibkr-go shared library</a></li>
+    <li><a href="#cli">5. CLI surface (with mockups)</a></li>
+    <li><a href="#daemon">6. Daemon &amp; IPC</a></li>
+    <li><a href="#cache">7. Cache layer</a></li>
+    <li><a href="#claude">8. Claude Code integration</a></li>
+    <li><a href="#update">9. Self-update</a></li>
+    <li><a href="#flows">10. Data flow sequences</a></li>
+    <li><a href="#code">11. Code snippets</a></li>
+    <li><a href="#layout">12. Project layout</a></li>
+    <li><a href="#testing">13. Testing strategy</a></li>
+    <li><a href="#ac">14. Acceptance criteria &amp; Definition of Done</a></li>
+    <li><a href="#roadmap">15. Roadmap to v2</a></li>
+    <li><a href="#risks">16. Risks &amp; mitigations</a></li>
+  </ol>
+</nav>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="summary">1. Executive summary</h2>
+
+<p class="lead">
+The deliverable is a Go-based <code>ibkr</code> CLI plus a small background daemon (<code>ibkrd</code>)
+that depends on a published shared library, <code>github.com/osauer/ibkr-go</code>, holding the
+TWS protocol implementation. Claude Code invokes the CLI via Bash; a bundled Skill
+documents available subcommands and the JSON output schemas. Permission rules pre-allow
+read-only invocations and a <code>PreToolUse</code> hook hard-blocks any trading subcommand until
+a deliberate v2 unlock.
+</p>
+
+<div class="grid-3">
+  <div class="card tight">
+    <h4>Core architecture</h4>
+    <ul class="muted" style="font-size:14px;margin:6px 0;">
+      <li>TWS binary protocol via IB Gateway (port 4001 live / 7497 paper)</li>
+      <li>Daemon owns the gateway connection; CLI is a thin Unix-socket client</li>
+      <li>JSON-RPC over Unix socket, newline-delimited</li>
+      <li>JSON-file cache, no CGO, no external runtime deps</li>
+    </ul>
+  </div>
+  <div class="card tight">
+    <h4>v1 scope</h4>
+    <ul class="muted" style="font-size:14px;margin:6px 0;">
+      <li>Account summary &amp; positions (incl. options)</li>
+      <li>Stock and option quotes (snapshot &amp; <code>--watch</code>)</li>
+      <li>Option chains (ATM ± N strikes)</li>
+      <li>Symbol-list quotes &amp; preset scans</li>
+      <li>Built-in self-update against GitHub releases</li>
+    </ul>
+  </div>
+  <div class="card tight">
+    <h4>v1 non-goals</h4>
+    <ul class="muted" style="font-size:14px;margin:6px 0;">
+      <li>Order placement / cancellation</li>
+      <li>Futures, FX, crypto, indices</li>
+      <li>Full IBKR scanner subscription DSL</li>
+      <li>Historical bar charting</li>
+      <li>Web/TUI dashboards</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="goals">2. Goals &amp; non-goals</h2>
+
+<h3>Functional</h3>
+<table class="spec">
+  <thead><tr><th>Capability</th><th>v1 behaviour</th></tr></thead>
+  <tbody>
+    <tr><td><code>account</code></td><td>Snapshot of NLV, buying power, available funds, excess liquidity, margin, cash, currency.</td></tr>
+    <tr><td><code>positions</code></td><td>Open positions only. Per-position: symbol, qty, avg cost, mark, market value, unrealized + realized P&amp;L, day P&amp;L %, account allocation %; option-aware columns (right/strike/expiry/Δ/IV/DTE) when applicable.</td></tr>
+    <tr><td><code>quote SYM[,SYM...]</code></td><td>One-shot bid/ask/last/IV (when delivered) for stocks/ETFs and explicit option contracts. <code>--watch</code> streams.</td></tr>
+    <tr><td><code>chain SYM --expiry</code></td><td>Calls + puts table, ATM ± <code>--width</code> strikes (default 5), Greeks where IBKR provides them.</td></tr>
+    <tr><td><code>scan &lt;preset&gt;</code></td><td>Predefined IBKR scanner presets (top-movers, high-iv, etc.) plus user symbol lists in config.</td></tr>
+    <tr><td><code>status</code></td><td>Daemon health, gateway connection state, market-data type, profile, account.</td></tr>
+    <tr><td><code>self-update</code></td><td>Fetch latest release from GitHub, verify signature, replace binaries atomically.</td></tr>
+  </tbody>
+</table>
+
+<h3>Non-functional</h3>
+<ul>
+  <li><strong>Latency.</strong> ≤ 100 ms p50 for cached commands; ≤ 1.5 s p50 for warm live snapshot. The TWS handshake amortises across the daemon's lifetime.</li>
+  <li><strong>Honest data.</strong> No fabricated IV or Greeks. Every <code>--json</code> response carries <code>data_type: live | delayed | frozen | delayed_frozen</code>; absent fields stay <code>null</code> with status strings rather than synthesised.</li>
+  <li><strong>Safety.</strong> Trading subcommand surface is unimplemented in v1. The <code>order</code> verb does not exist in the binary; permission rules and a <code>PreToolUse</code> hook refuse it independently.</li>
+  <li><strong>Footprint.</strong> Pure-Go single module, builds for darwin/arm64 and linux/amd64.</li>
+  <li><strong>Tested.</strong> Inherited regime test suite continues to pass against the extracted shared library; new daemon and CLI layers covered by unit and integration tests against a mock TWS server.</li>
+</ul>
+
+<h3>Explicit non-goals</h3>
+<ul>
+  <li>Live or paper order entry. Confirmation, dry-run, kill-switch and audit-log surfaces deserve a dedicated design pass and are scheduled for v2.</li>
+  <li>TUI / web dashboards.</li>
+  <li>Multi-broker abstraction.</li>
+  <li>Closed-today positions in the default <code>positions</code> view (delivered separately as <code>ibkr trades --today</code> in v1.1).</li>
+</ul>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="architecture">3. Architecture</h2>
+
+<p>
+Two binaries, one shared library. The CLI never speaks the IBKR protocol directly; it
+talks JSON-RPC over a Unix socket to a daemon that holds the long-lived gateway
+connection, contract cache, and subscription state.
+</p>
+
+<pre class="diagram">
+   ┌──────────────┐         Unix socket            ┌──────────────────┐         TCP / TLS         ┌────────────────┐
+   │   ibkr       │   JSON-RPC over $XDG_RUNTIME   │   ibkrd          │  ←————— port 4001 ——————→ │  IB Gateway    │
+   │   (CLI)      │ ←——————————————————————————→ │   (daemon)       │       (or 7497 paper)     │  / TWS         │
+   │   stateless  │   ~/.cache/ibkr/ibkrd.sock    │   stateful       │                           │                │
+   └──────────────┘                                └────────┬─────────┘                           └────────────────┘
+                                                            │
+                                                ┌───────────┴───────────┐
+                                                │   shared Go module    │
+                                                │   github.com/osauer/  │
+                                                │     ibkr-go           │
+                                                └───────────┬───────────┘
+                                                            │
+                                                            ▼
+                                              ┌─────────────────────────┐
+                                              │  JSON cache files       │
+                                              │  ~/.cache/ibkr/         │
+                                              │   contracts.json        │
+                                              │   inactive.json         │
+                                              └─────────────────────────┘
+
+   Config:  ~/.config/ibkr/config.toml      Logs: ~/.local/state/ibkr/ibkrd.log
+</pre>
+
+<h3>Why a daemon</h3>
+<ul>
+  <li>The TWS handshake costs 1–2 s and burns a client-ID slot; doing it per CLI invocation is wasteful and noisy in the gateway.</li>
+  <li>Streaming subscriptions need a long-lived socket.</li>
+  <li>A single owner of the client ID prevents the "another client is already connected" race.</li>
+  <li>The contract cache and the inactive-symbol set work best as in-memory state with a small persistence layer.</li>
+</ul>
+
+<h3>Why JSON-RPC over a Unix socket</h3>
+<ul>
+  <li>Zero codegen, zero protobuf toolchain. Standard library only.</li>
+  <li>Trivially debuggable: <code>socat - UNIX-CONNECT:.../ibkrd.sock</code> + paste a JSON line.</li>
+  <li>Local-only IPC; no need for TLS, auth, or wire-compat across versions — daemon and CLI ship together.</li>
+</ul>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="shared-lib">4. The ibkr-go shared library</h2>
+
+<p>
+The TWS protocol implementation lives in its own repository (<code>github.com/osauer/ibkr-go</code>)
+from day one. The new CLI and the existing regime backtest/trading platform both depend
+on it via <code>go.mod</code>. Versioned independently with semver tags.
+</p>
+
+<h3>Origin and extraction</h3>
+<ol>
+  <li>Source: the package currently at <code>regime/internal/components/ibkr</code>. It implements connection pooling, contract resolution, market snapshots, market-data subscriptions, account summary, positions, order send (used by regime), and a mock TWS server for tests.</li>
+  <li>Replace internal references to <code>regime/internal/core</code> types with package-native types (<code>ibkr.Position</code>, <code>ibkr.Account</code>, <code>ibkr.Order</code>, etc.).</li>
+  <li>Replace <code>regime/internal/logging.Component</code> with a minimal <code>Logger</code> interface (slog-compatible), default no-op.</li>
+  <li>Migrate regime's regime-specific concerns (e.g. orchestrator wiring, <code>core.TickContext.ProcessTick</code>) back into regime as a thin adapter that depends on the new module.</li>
+  <li>During transition, both repos use a <code>replace</code> directive locally; once the public module is tagged, regime cuts over.</li>
+</ol>
+
+<div class="callout">
+  <strong>Public API line</strong>
+  The shared module exposes only what both consumers genuinely need: connection lifecycle, contract resolution, snapshots, account summary, positions, subscriptions, and gated order send. Everything else stays unexported.
+</div>
+
+<h3>Public API</h3>
+<pre><span class="c">// github.com/osauer/ibkr-go</span>
+
+<span class="k">type</span> <span class="t">Client</span> <span class="k">interface</span> {
+    <span class="c">// Lifecycle</span>
+    Start(ctx <span class="t">context.Context</span>) <span class="t">error</span>
+    Stop() <span class="t">error</span>
+    Status() <span class="t">Status</span>
+    <span class="c">// Reads</span>
+    Account(ctx <span class="t">context.Context</span>) (<span class="t">*Account</span>, <span class="t">error</span>)
+    Positions(ctx <span class="t">context.Context</span>) ([]<span class="t">*Position</span>, <span class="t">error</span>)
+    Snapshot(ctx <span class="t">context.Context</span>, c <span class="t">Contract</span>) (<span class="t">*Quote</span>, <span class="t">error</span>)
+    Chain(ctx <span class="t">context.Context</span>, req <span class="t">ChainRequest</span>) (<span class="t">*Chain</span>, <span class="t">error</span>)
+    <span class="c">// Streams</span>
+    Subscribe(ctx <span class="t">context.Context</span>, c <span class="t">Contract</span>) (<span class="t">&lt;-chan Tick</span>, <span class="t">CancelFunc</span>, <span class="t">error</span>)
+    <span class="c">// Trading (compiled out in v1; gated by build tag)</span>
+    PlaceOrder(ctx <span class="t">context.Context</span>, o <span class="t">Order</span>) (<span class="t">*OrderAck</span>, <span class="t">error</span>)
+    CancelOrder(ctx <span class="t">context.Context</span>, id <span class="t">int</span>) <span class="t">error</span>
+}
+
+<span class="k">type</span> <span class="t">Contract</span> <span class="k">struct</span> {
+    Symbol     <span class="t">string</span>
+    SecType    <span class="t">string</span> <span class="c">// STK | OPT</span>
+    Exchange   <span class="t">string</span> <span class="c">// SMART</span>
+    Currency   <span class="t">string</span>
+    Expiry     <span class="t">time.Time</span>  <span class="c">// zero for stocks</span>
+    Strike     <span class="t">float64</span>
+    Right      <span class="t">string</span>     <span class="c">// "C" | "P" | ""</span>
+}
+
+<span class="k">type</span> <span class="t">Quote</span> <span class="k">struct</span> {
+    Symbol         <span class="t">string</span>
+    Bid, Ask, Last <span class="t">*float64</span>          <span class="c">// nil = not delivered</span>
+    IV             <span class="t">*float64</span>
+    IVStatus       <span class="t">string</span>            <span class="c">// "real" | "unavailable"</span>
+    DataType       <span class="t">DataType</span>          <span class="c">// Live | Delayed | Frozen | DelayedFrozen</span>
+    AsOf           <span class="t">time.Time</span>
+}
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="cli">5. CLI surface (with mockups)</h2>
+
+<p>The CLI is the single point of contact for humans and Claude. Two output modes:
+<code>--text</code> (default ANSI tables) and <code>--json</code> (stable schemas documented in the Skill).</p>
+
+<table class="spec">
+  <thead>
+    <tr><th>Command</th><th>Effect</th><th>Flags</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ibkr account</code></td><td>Account summary snapshot</td><td><code>--profile</code>, <code>--json</code></td></tr>
+    <tr><td><code>ibkr positions</code></td><td>Open positions (stocks &amp; options)</td><td><code>--symbol &lt;sym&gt;</code>, <code>--type stk|opt</code>, <code>--sort pnl|alpha|value</code>, <code>--json</code></td></tr>
+    <tr><td><code>ibkr quote SYM[,SYM...]</code></td><td>Snapshot quotes</td><td><code>--watch</code>, <code>--rate &lt;dur&gt;</code>, <code>--json</code>, <code>--timeout 5s</code></td></tr>
+    <tr><td><code>ibkr quote SYM YYMMDD C|P STRIKE</code></td><td>Single-option snapshot</td><td>same as above</td></tr>
+    <tr><td><code>ibkr chain SYM</code></td><td>Option chain table</td><td><code>--expiry YYYY-MM-DD</code>, <code>--width 5</code>, <code>--side calls|puts|both</code>, <code>--json</code></td></tr>
+    <tr><td><code>ibkr scan &lt;preset&gt;</code></td><td>Run scanner preset</td><td><code>--limit 20</code>, <code>--json</code></td></tr>
+    <tr><td><code>ibkr scan list</code></td><td>List configured presets</td><td>—</td></tr>
+    <tr><td><code>ibkr status</code></td><td>Daemon + gateway health</td><td><code>--json</code></td></tr>
+    <tr><td><code>ibkr version</code></td><td>Print version, commit, build date</td><td>—</td></tr>
+    <tr><td><code>ibkr self-update</code></td><td>Fetch + verify + apply latest GH release</td><td><code>--check</code>, <code>--prerelease</code>, <code>--yes</code></td></tr>
+    <tr><td><code>ibkrd</code></td><td>Daemon (autospawned by CLI)</td><td><code>--config</code>, <code>--profile</code>, <code>--foreground</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Streaming throttle</h3>
+<p>
+<code>quote --watch</code> emits coalesced terminal output at <code>--rate</code> (default 250 ms).
+<code>--rate 0</code> renders every tick. The internal IBKR subscription always runs at full
+gateway rate; throttling only affects terminal rendering, so subscribers reading the
+JSON stream over a pipe still see every frame.
+</p>
+
+<h3>Mockup — <code>ibkr account</code></h3>
+<div class="term">
+  <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">~/dev/ibkr · zsh</span></div>
+<pre><span class="prompt">$</span> <span class="cmd">ibkr account</span>
+
+<span class="head">Account  U1234567 · profile=paper · base=USD · data=live</span>
+
+  Net liquidation         <span class="accent">$ 248,310.42</span>
+  Buying power               $ 992,841.68
+  Available funds            $ 124,055.21
+  Excess liquidity           $ 124,055.21
+  Total cash                 $  18,422.30
+  Maintenance margin         $   2,815.04
+  Initial margin             $   3,520.55
+
+  <span class="dim">as of 14:32:08 CET · daemon up 4h22m · gateway 4001/TLS · clientID=11</span></pre>
+</div>
+
+<h3>Mockup — <code>ibkr positions</code></h3>
+<div class="term">
+  <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">~/dev/ibkr · zsh</span></div>
+<pre><span class="prompt">$</span> <span class="cmd">ibkr positions --sort pnl</span>
+
+<span class="head">Stocks &amp; ETFs                                                                            data=live</span>
+  SYMBOL    QTY      AVG COST     MARK     MKT VALUE     UNREAL P&amp;L      DAY P&amp;L     ALLOC%
+  NVDA      120      $ 412.18   $ 478.55   $  57,426.00  <span class="pos">+ $ 7,964.40</span>   <span class="pos">+ 2.31%</span>     23.1%
+  AAPL      300      $ 192.40   $ 207.88   $  62,364.00  <span class="pos">+ $ 4,644.00</span>   <span class="neg">− 0.41%</span>     25.1%
+  SPY        80      $ 510.22   $ 521.13   $  41,690.40  <span class="pos">+ $   872.80</span>   <span class="pos">+ 0.18%</span>     16.8%
+  QQQ        50      $ 470.08   $ 463.20   $  23,160.00  <span class="neg">− $   344.00</span>   <span class="neg">− 0.62%</span>      9.3%
+
+<span class="head">Options                                                                                  data=live</span>
+  UNDERLYING  SIDE  EXPIRY      STRIKE  QTY    AVG COST    MARK     UNREAL P&amp;L    Δ      IV    DTE
+  AAPL        C     2026-06-19  $215    +5     $  6.82   $  9.40   <span class="pos">+ $ 1,290</span>     0.62  28.4%   41
+  SPY         P     2026-05-16  $510    +3     $  4.10   $  2.85   <span class="neg">− $   375</span>     -0.31 19.8%    7
+
+  <span class="dim">7 positions · realized YTD: + $ 12,408.55 · as of 14:32:09 CET</span></pre>
+</div>
+
+<h3>Mockup — <code>ibkr quote AAPL --watch</code></h3>
+<div class="term">
+  <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">~/dev/ibkr · zsh</span></div>
+<pre><span class="prompt">$</span> <span class="cmd">ibkr quote AAPL --watch --rate 250ms</span>
+
+<span class="head">AAPL · NASDAQ · USD · data=live · subscribed · render=4Hz</span>
+
+  TIME       BID       ASK       LAST     SIZE   IV      Δ24H
+  14:32:11   207.85    207.88    207.86   100    —       <span class="pos">+0.18%</span>
+  14:32:11   207.85    207.88    207.87   200    —       <span class="pos">+0.18%</span>
+  14:32:12   207.86    207.88    207.88   400    —       <span class="pos">+0.19%</span>
+  14:32:13   207.86    207.89    207.88   100    —       <span class="pos">+0.19%</span>
+  <span class="dim">…  Ctrl-C to stop</span></pre>
+</div>
+
+<h3>Mockup — <code>ibkr chain AAPL</code></h3>
+<div class="term">
+  <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">~/dev/ibkr · zsh</span></div>
+<pre><span class="prompt">$</span> <span class="cmd">ibkr chain AAPL --expiry 2026-06-19 --width 5</span>
+
+<span class="head">AAPL  spot $ 207.88  ·  expiry 2026-06-19  ·  41 DTE  ·  data=live</span>
+
+                       CALLS                                              PUTS
+  ────────────────────────────────────────────  STRIKE  ────────────────────────────────────────────
+   BID     ASK    LAST     IV      Δ      OI            BID     ASK    LAST     IV      Δ      OI
+  16.20  16.45  16.30   29.4%  +0.78  12,451   195    1.10   1.18   1.13   30.8%   −0.12  18,330
+  12.80  13.05  12.90   28.7%  +0.71   9,288   200    1.85   1.92   1.88   29.6%   −0.18  21,011
+   9.50   9.70   9.60   28.1%  +0.62   8,810   205    3.40   3.55   3.45   28.9%   −0.27  16,402
+   <span class="accent">6.80   6.95   6.90</span>   <span class="accent">27.6%  +0.51</span>   7,930   <span class="accent">210</span>    <span class="accent">5.55   5.70   5.62</span>   <span class="accent">28.3%  −0.39</span>  14,118   <span class="dim">← ATM</span>
+   4.65   4.80   4.72   27.2%  +0.39   6,254   215    7.95   8.10   8.04   27.9%  −0.51  10,440
+   3.05   3.15   3.10   27.0%  +0.28   4,180   220   10.85  11.05  10.95   27.8%  −0.62   8,002
+   1.92   2.00   1.96   27.0%  +0.20   3,201   225   14.10  14.30  14.20   27.8%  −0.72   5,884
+
+  <span class="dim">Greeks shown only when IBKR delivers tick 106. Empty cells = unavailable, never derived.</span></pre>
+</div>
+
+<h3>Mockup — <code>ibkr quote AAPL --json</code></h3>
+<pre><span class="k">{</span>
+  <span class="s">"symbol"</span>: <span class="s">"AAPL"</span>,
+  <span class="s">"contract"</span>: { <span class="s">"sec_type"</span>: <span class="s">"STK"</span>, <span class="s">"exchange"</span>: <span class="s">"SMART"</span>, <span class="s">"currency"</span>: <span class="s">"USD"</span>, <span class="s">"con_id"</span>: <span class="h">265598</span> },
+  <span class="s">"bid"</span>: <span class="h">207.86</span>,
+  <span class="s">"ask"</span>: <span class="h">207.88</span>,
+  <span class="s">"last"</span>: <span class="h">207.87</span>,
+  <span class="s">"iv"</span>: <span class="k">null</span>,
+  <span class="s">"iv_status"</span>: <span class="s">"unavailable"</span>,
+  <span class="s">"data_type"</span>: <span class="s">"live"</span>,
+  <span class="s">"as_of"</span>: <span class="s">"2026-05-09T14:32:11.421+02:00"</span>
+<span class="k">}</span></pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="daemon">6. Daemon &amp; IPC</h2>
+
+<h3>Lifecycle</h3>
+<ol>
+  <li>The CLI connects to the Unix socket at <code>$XDG_RUNTIME_DIR/ibkr/ibkrd.sock</code> (fallback <code>~/.cache/ibkr/ibkrd.sock</code>).</li>
+  <li>If the socket is missing or stale, the CLI autospawns <code>ibkrd</code> as a detached process and waits up to 5 s for socket readiness.</li>
+  <li><code>ibkrd</code> reads <code>~/.config/ibkr/config.toml</code>, picks a profile (default <code>paper</code>), connects to the gateway, registers handlers, loads the cache files, and starts listening on the socket.</li>
+  <li>Idle timer: the daemon shuts itself down after <code>idle_timeout</code> (default 30 min) of no client activity. <code>ibkrd --foreground</code> disables this for development.</li>
+  <li>SIGTERM / SIGINT: drain in-flight requests, cancel subscriptions (<code>cancelMktData</code>), flush cache, close socket.</li>
+</ol>
+
+<h3>Wire format</h3>
+<p>Newline-delimited JSON. Each line is one complete JSON object. Streaming responses share an id and emit one frame per line, terminated by an <code>end:true</code> message.</p>
+
+<pre><span class="c">// Request</span>
+<span class="k">{</span> <span class="s">"id"</span>: <span class="s">"r-7f2a"</span>, <span class="s">"method"</span>: <span class="s">"quote.snapshot"</span>,
+  <span class="s">"params"</span>: <span class="k">{</span> <span class="s">"symbol"</span>: <span class="s">"AAPL"</span>, <span class="s">"timeout_ms"</span>: <span class="h">5000</span> <span class="k">}</span> <span class="k">}</span>
+
+<span class="c">// Response (single)</span>
+<span class="k">{</span> <span class="s">"id"</span>: <span class="s">"r-7f2a"</span>, <span class="s">"ok"</span>: <span class="k">true</span>,
+  <span class="s">"result"</span>: <span class="k">{</span> <span class="s">"symbol"</span>: <span class="s">"AAPL"</span>, <span class="s">"bid"</span>: <span class="h">207.86</span>, ... <span class="k">}</span> <span class="k">}</span>
+
+<span class="c">// Streaming response</span>
+<span class="k">{</span> <span class="s">"id"</span>: <span class="s">"s-91bd"</span>, <span class="s">"ok"</span>: <span class="k">true</span>, <span class="s">"stream"</span>: <span class="k">true</span>,
+  <span class="s">"frame"</span>: <span class="k">{</span> <span class="s">"t"</span>: <span class="s">"2026-05-09T14:32:11Z"</span>, <span class="s">"bid"</span>: <span class="h">207.86</span>, <span class="s">"ask"</span>: <span class="h">207.88</span> <span class="k">}</span> <span class="k">}</span>
+<span class="k">{</span> <span class="s">"id"</span>: <span class="s">"s-91bd"</span>, <span class="s">"ok"</span>: <span class="k">true</span>, <span class="s">"stream"</span>: <span class="k">true</span>, <span class="s">"end"</span>: <span class="k">true</span> <span class="k">}</span>
+
+<span class="c">// Error</span>
+<span class="k">{</span> <span class="s">"id"</span>: <span class="s">"r-7f2a"</span>, <span class="s">"ok"</span>: <span class="k">false</span>,
+  <span class="s">"error"</span>: <span class="k">{</span> <span class="s">"code"</span>: <span class="s">"symbol_inactive"</span>, <span class="s">"message"</span>: <span class="s">"IBKR reported XYZ as inactive"</span> <span class="k">}</span> <span class="k">}</span>
+</pre>
+
+<h3>Methods</h3>
+<table class="spec">
+  <thead><tr><th>Method</th><th>Params</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td><code>account.summary</code></td><td>—</td><td>Account snapshot</td></tr>
+    <tr><td><code>positions.list</code></td><td><code>{ filter? }</code></td><td>Position[]</td></tr>
+    <tr><td><code>quote.snapshot</code></td><td><code>{ contract, timeout_ms }</code></td><td>Quote</td></tr>
+    <tr><td><code>quote.subscribe</code> <span class="pill">stream</span></td><td><code>{ contract }</code></td><td>Tick frames</td></tr>
+    <tr><td><code>chain.fetch</code></td><td><code>{ symbol, expiry, width, side }</code></td><td>Chain</td></tr>
+    <tr><td><code>scan.run</code></td><td><code>{ preset, limit }</code></td><td>ScanResult[]</td></tr>
+    <tr><td><code>status.health</code></td><td>—</td><td>Daemon + gateway status</td></tr>
+    <tr><td><code>cancel</code></td><td><code>{ id }</code></td><td>—</td></tr>
+  </tbody>
+</table>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="cache">7. Cache layer</h2>
+
+<h3>Stored data</h3>
+<ul>
+  <li><strong>Resolved contracts.</strong> Symbol → ConID, primaryExch, tradingClass, secType, currency, multiplier. Hundreds to a few thousand rows; ~100 bytes each.</li>
+  <li><strong>Inactive symbol set.</strong> Symbol → reason + first_seen_at. Smaller still.</li>
+</ul>
+
+<p>The cache is single-writer (the daemon owns it), small, and overwriteable. No joins, no range scans, no transactional consistency across files. v1 persists with plain JSON files, written via temp + <code>os.Rename</code>.</p>
+
+<h3>Engine choice</h3>
+<table class="spec">
+  <thead><tr><th>Engine</th><th>Verdict</th><th>Reason</th></tr></thead>
+  <tbody>
+    <tr><td>JSON files (stdlib)</td><td><span class="pill ok">v1 default</span></td><td>Zero deps; atomic rename; jq-debuggable; fits the data shape.</td></tr>
+    <tr><td>bbolt (pure-Go embedded KV)</td><td><span class="pill">upgrade path</span></td><td>Reserved for if cache exceeds practical JSON limits or tick history is added. Same <code>ContractCache</code> interface, drop-in replacement.</td></tr>
+    <tr><td>SQLite (modernc or CGO)</td><td><span class="pill warn">rejected</span></td><td>Heavyweight for the data; CGO version breaks the no-CGO constraint; pure-Go variant adds 6–10 MB to the binary for no gain.</td></tr>
+    <tr><td>In-memory only</td><td><span class="pill warn">rejected</span></td><td>Cold-start penalty: every contract re-resolved on each daemon restart.</td></tr>
+  </tbody>
+</table>
+
+<h3>Cache interface</h3>
+<pre><span class="k">type</span> <span class="t">ContractCache</span> <span class="k">interface</span> {
+    Get(symbol <span class="t">string</span>) (<span class="t">Contract</span>, <span class="t">bool</span>)
+    Put(c <span class="t">Contract</span>)
+    Delete(symbol <span class="t">string</span>)
+    All() <span class="k">map</span>[<span class="t">string</span>]<span class="t">Contract</span>
+    Flush(ctx <span class="t">context.Context</span>) <span class="t">error</span>   <span class="c">// idempotent; called on shutdown and on idle</span>
+}
+
+<span class="c">// internal/cache/jsonfile.go  →  v1 implementation
+// internal/cache/bbolt.go     →  future implementation, same interface</span>
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="claude">8. Claude Code integration</h2>
+
+<p>
+Claude discovers the tool through three small files installed by <code>install.sh</code> (or
+<code>make install</code>). No MCP, no plugin runtime — the idiomatic Skill plus permissions
+pattern.
+</p>
+
+<div class="grid-2">
+  <div class="card tight">
+    <h4>1 · The Skill</h4>
+    <code>~/.claude/skills/ibkr/SKILL.md</code>
+    <p class="muted" style="font-size:13px;">Tells Claude when to reach for <code>ibkr</code>, what each subcommand does, and points at the JSON schema doc.</p>
+  </div>
+  <div class="card tight">
+    <h4>2 · The schema reference</h4>
+    <code>~/.claude/skills/ibkr/schemas.md</code>
+    <p class="muted" style="font-size:13px;">Lazy-loaded by the Skill. Field-by-field JSON spec for every <code>--json</code> output.</p>
+  </div>
+  <div class="card tight">
+    <h4>3 · Settings snippet</h4>
+    <code>~/.claude/settings.json</code> (merged)
+    <p class="muted" style="font-size:13px;">Pre-allows read-only <code>Bash(ibkr ...)</code> patterns. Denies trading verbs. Adds a <code>PreToolUse</code> hook for hard enforcement.</p>
+  </div>
+  <div class="card tight">
+    <h4>4 · The binaries</h4>
+    <code>$GOBIN/ibkr</code>, <code>$GOBIN/ibkrd</code>
+    <p class="muted" style="font-size:13px;"><code>go install ./cmd/ibkr ./cmd/ibkrd</code>, or release tarballs.</p>
+  </div>
+</div>
+
+<h3>SKILL.md (excerpt)</h3>
+<pre><span class="c">---</span>
+<span class="k">name:</span> ibkr
+<span class="k">description:</span> Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
+  about their IBKR account, positions, P&amp;L, market quotes, option chains, or running a
+  market scan. Read-only; never attempts to place orders.
+<span class="k">allowed-tools:</span> Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
+  Bash(ibkr chain*) Bash(ibkr scan*) Bash(ibkr status*)
+<span class="c">---</span>
+
+<span class="h">## When to use</span>
+
+If the user asks about holdings, cash, buying power, P&amp;L, a specific stock or ETF
+quote, an option chain, or wants to scan the market, run the relevant `ibkr`
+subcommand with `--json` and parse the output.
+
+<span class="h">## Output discipline</span>
+
+- Always run with `--json` when parsing, then present results as a clean Markdown table.
+- Always surface the `data_type` field (`live` / `delayed` / `frozen`). If it isn't
+  `live`, mention it in the answer.
+- Never claim an order was placed. The CLI cannot trade in v1.
+
+<span class="h">## Commands</span>
+
+- `ibkr account --json` → account summary. Schema: see [schemas.md](schemas.md#account).
+- `ibkr positions --json` → array of positions. Options have extra fields. Schema: see [schemas.md](schemas.md#positions).
+- `ibkr quote AAPL --json` → single snapshot. Schema: see [schemas.md](schemas.md#quote).
+- `ibkr chain AAPL --expiry YYYY-MM-DD --width 5 --json` → chain. Schema: see [schemas.md](schemas.md#chain).
+- `ibkr scan top-movers --json` → list. Run `ibkr scan list` first if unsure.
+
+<span class="h">## Errors</span>
+
+- `daemon_unavailable` → `ibkrd` could not start. Likely IB Gateway is not running.
+- `symbol_inactive` → IBKR has flagged the symbol delisted/halted; do not substitute.
+- `data_type: delayed` → quotes are delayed; warn the user before they act on them.
+</pre>
+
+<h3>settings.json snippet</h3>
+<pre><span class="k">{</span>
+  <span class="s">"permissions"</span>: <span class="k">{</span>
+    <span class="s">"allow"</span>: [
+      <span class="s">"Bash(ibkr account*)"</span>,
+      <span class="s">"Bash(ibkr positions*)"</span>,
+      <span class="s">"Bash(ibkr quote*)"</span>,
+      <span class="s">"Bash(ibkr chain*)"</span>,
+      <span class="s">"Bash(ibkr scan*)"</span>,
+      <span class="s">"Bash(ibkr status*)"</span>
+    ],
+    <span class="s">"deny"</span>: [
+      <span class="s">"Bash(ibkr order*)"</span>,
+      <span class="s">"Bash(ibkr trade*)"</span>,
+      <span class="s">"Bash(ibkr cancel*)"</span>,
+      <span class="s">"Bash(ibkr * --live*)"</span>
+    ]
+  <span class="k">},</span>
+  <span class="s">"hooks"</span>: <span class="k">{</span>
+    <span class="s">"PreToolUse"</span>: [<span class="k">{</span>
+      <span class="s">"matcher"</span>: <span class="s">"Bash"</span>,
+      <span class="s">"hooks"</span>: [<span class="k">{</span>
+        <span class="s">"type"</span>: <span class="s">"command"</span>,
+        <span class="s">"command"</span>: <span class="s">"jq -e '.tool_input.command | test(\"\\\\bibkr\\\\s+(order|trade|cancel)\\\\b\")' &gt;/dev/null &amp;&amp; exit 2 || exit 0"</span>
+      <span class="k">}</span>]
+    <span class="k">}</span>]
+  <span class="k">}</span>
+<span class="k">}</span></pre>
+<p class="muted" style="font-size:13px;">
+The hook reads the tool-call JSON from stdin (Claude Code's contract), tests for trading
+verbs in the Bash command, and exits 2 to block. Exit 0 lets the call proceed. Requires
+<code>jq</code> on PATH.
+</p>
+
+<div class="callout warn">
+  <strong>Defence in depth</strong>
+  Three independent layers refuse trading commands in v1: (a) the binary doesn't implement them; (b) the settings deny rule; (c) the PreToolUse hook. v2 lifts all three deliberately.
+</div>
+
+<h3>config.toml example</h3>
+<pre><span class="c"># ~/.config/ibkr/config.toml</span>
+default_profile = <span class="s">"paper"</span>
+
+[profiles.paper]
+host       = <span class="s">"127.0.0.1"</span>
+port       = <span class="h">7497</span>             <span class="c"># TWS paper</span>
+client_id  = <span class="h">11</span>
+account    = <span class="s">""</span>               <span class="c"># auto-detect</span>
+tls        = <span class="k">true</span>
+prefer_live_data = <span class="k">true</span>     <span class="c"># falls back to delayed if not entitled</span>
+
+[profiles.live]
+host       = <span class="s">"127.0.0.1"</span>
+port       = <span class="h">4001</span>             <span class="c"># IB Gateway live</span>
+client_id  = <span class="h">12</span>
+account    = <span class="s">"U1234567"</span>
+tls        = <span class="k">true</span>
+prefer_live_data = <span class="k">true</span>
+
+[daemon]
+idle_timeout = <span class="s">"30m"</span>
+log_level    = <span class="s">"info"</span>
+
+[scans.top-movers]
+type    = <span class="s">"TOP_PERC_GAIN"</span>
+exchange = <span class="s">"STK.US.MAJOR"</span>
+limit   = <span class="h">20</span>
+
+[scans.high-iv]
+type    = <span class="s">"HIGH_OPT_IMP_VOLAT"</span>
+exchange = <span class="s">"STK.US"</span>
+limit   = <span class="h">20</span>
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="update">9. Self-update</h2>
+
+<p>
+<code>ibkr self-update</code> fetches the latest signed release from GitHub, verifies it,
+and atomically swaps the running binaries.
+</p>
+
+<h3>Behaviour</h3>
+<ol>
+  <li><code>ibkr self-update --check</code> queries <code>https://api.github.com/repos/osauer/ibkr/releases/latest</code> and prints the available version vs. the current one. No mutation.</li>
+  <li><code>ibkr self-update</code> downloads the matching <code>ibkr-{os}-{arch}.tar.gz</code> asset plus its <code>SHA256SUMS</code> and <code>SHA256SUMS.minisig</code> sibling files.</li>
+  <li>Verifies the minisign signature against a public key compiled into the binary, then verifies the tarball SHA-256 against the signed sums file.</li>
+  <li>Extracts to a temp directory, then atomically replaces <code>ibkr</code> and <code>ibkrd</code> using <code>os.Rename</code> (with a backup-then-rename dance for in-use files on macOS / Linux).</li>
+  <li>If <code>ibkrd</code> is running, sends SIGTERM and waits for graceful shutdown before swapping; the next CLI invocation autospawns the new version.</li>
+  <li><code>--prerelease</code> opts into pre-release tags. <code>--yes</code> skips the confirmation prompt for non-interactive use.</li>
+</ol>
+
+<h3>Version stamping</h3>
+<p>
+The build embeds version, commit SHA, and ISO build date via <code>-ldflags</code>:
+</p>
+<pre>go build <span class="h">-ldflags</span> <span class="s">"-X main.version=v1.0.0 -X main.commit=$(git rev-parse HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"</span> ./cmd/ibkr
+</pre>
+
+<h3>Safety</h3>
+<ul>
+  <li>Refuses to run when the binary lives under a system-managed prefix (e.g. <code>/usr/local/Cellar</code> for Homebrew, <code>/nix/store</code>) — those paths are package-manager-owned.</li>
+  <li>Refuses prereleases unless <code>--prerelease</code> is set.</li>
+  <li>Verifies signature before extracting; bad signature aborts before any file is written into place.</li>
+  <li>Keeps the previous binary at <code>ibkr.bak</code> until the next successful run.</li>
+</ul>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="flows">10. Data flow sequences</h2>
+
+<h3>Cold start: <code>ibkr quote AAPL</code> with no daemon running</h3>
+<pre class="diagram">
+  user             ibkr CLI         ibkrd              IB Gateway
+   │                  │                ·                     ·
+   │ ibkr quote AAPL  │
+   │ ───────────────► │
+   │                  │ connect(ibkrd.sock)
+   │                  │ ✗ ENOENT
+   │                  │
+   │                  │ exec ibkrd  ─►  ┌────────┐
+   │                  │                 │ start  │
+   │                  │                 │ load   │
+   │                  │                 │ config │
+   │                  │                 └───┬────┘
+   │                  │                     │ TCP+TLS handshake
+   │                  │                     │ ───────────────►
+   │                  │                     │ startAPI(v203)
+   │                  │                     │ ◄───────────────
+   │                  │                     │ open socket
+   │                  │ poll until socket   │
+   │                  │ ◄───────────────────┘
+   │                  │
+   │                  │ {"method":"quote.snapshot",
+   │                  │  "params":{"symbol":"AAPL"}}
+   │                  │ ──────────────────► │
+   │                  │                     │ contract cache hit?
+   │                  │                     │   no →  reqContractDetails(AAPL)
+   │                  │                     │ ───────────────►
+   │                  │                     │ ◄─── contractDetails
+   │                  │                     │ persist to contracts.json
+   │                  │                     │ reqMktData(snapshot=true)
+   │                  │                     │ ───────────────►
+   │                  │                     │ ◄─── tickPrice / tickGeneric / tickSnapshotEnd
+   │                  │                     │ assemble Quote
+   │                  │ ◄─── result ────────│
+   │ rendered table   │
+   │ ◄────────────────│
+</pre>
+
+<h3>Warm path (daemon running, contract cached)</h3>
+<pre class="diagram">
+  ibkr CLI              ibkrd                  IB Gateway
+     │  connect(socket)    │                        ·
+     │ ──────────────────► │                        ·
+     │  quote.snapshot     │                        ·
+     │ ──────────────────► │ contract cache HIT
+     │                     │ reqMktData(snapshot)
+     │                     │ ─────────────────────►
+     │                     │ ◄─── tickSnapshotEnd
+     │ ◄─── result ────────│
+     │  render             │
+                        ~&lt; 80 ms p50 round-trip
+</pre>
+
+<h3>Streaming with throttle: <code>ibkr quote AAPL --watch --rate 250ms</code></h3>
+<pre class="diagram">
+  ibkr CLI                   ibkrd                       IB Gateway
+     │  quote.subscribe         │                              ·
+     │ ───────────────────────► │  reqMktData(snapshot=false)
+     │                          │ ───────────────────────────►
+     │ ◄── frame{bid,ask,last} ─│ ◄── tickPrice
+     │ ◄── frame ───────────────│ ◄── tickPrice
+     │       … N frames …       │      … N ticks …
+     │  (CLI coalesces frames   │
+     │   to one render every    │
+     │   --rate window)         │
+     │  ^C                      │
+     │ ───────────────────────► │  cancelMktData
+     │                          │ ───────────────────────────►
+     │ ◄── {end:true} ──────────│
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="code">11. Code snippets</h2>
+
+<h3>11.1 — CLI entrypoint (auto-spawn daemon)</h3>
+<pre><span class="c">// cmd/ibkr/main.go</span>
+<span class="k">func</span> <span class="t">main</span>() {
+    cmd, args := parseArgs(os.Args[<span class="h">1</span>:])
+    cli, err := dial.<span class="t">Connect</span>(<span class="t">defaultSocketPath</span>())
+    <span class="k">if</span> errors.Is(err, dial.<span class="t">ErrSocketMissing</span>) {
+        <span class="k">if</span> err = daemon.<span class="t">Spawn</span>(<span class="t">defaultConfigPath</span>()); err != <span class="k">nil</span> {
+            fail(<span class="s">"failed to start ibkrd: %v"</span>, err)
+        }
+        cli, err = dial.<span class="t">WaitForSocket</span>(<span class="t">defaultSocketPath</span>(), <span class="h">5</span>*<span class="t">time.Second</span>)
+    }
+    <span class="k">if</span> err != <span class="k">nil</span> { fail(<span class="s">"%v"</span>, err) }
+    <span class="k">defer</span> cli.<span class="t">Close</span>()
+
+    ctx, cancel := signalContext(<span class="t">syscall.SIGINT</span>, <span class="t">syscall.SIGTERM</span>)
+    <span class="k">defer</span> cancel()
+
+    <span class="k">switch</span> cmd {
+    <span class="k">case</span> <span class="s">"account"</span>:     runAccount(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"positions"</span>:   runPositions(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"quote"</span>:       runQuote(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"chain"</span>:       runChain(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"scan"</span>:        runScan(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"status"</span>:      runStatus(ctx, cli, args)
+    <span class="k">case</span> <span class="s">"version"</span>:     runVersion(args)
+    <span class="k">case</span> <span class="s">"self-update"</span>: runSelfUpdate(ctx, args)
+    <span class="k">default</span>:             fail(<span class="s">"unknown command: %s"</span>, cmd)
+    }
+}
+</pre>
+
+<h3>11.2 — Daemon-side handler reusing the shared library</h3>
+<pre><span class="c">// internal/daemon/handlers.go</span>
+<span class="k">func</span> (s <span class="t">*Server</span>) <span class="t">handleQuoteSnapshot</span>(ctx <span class="t">context.Context</span>, p <span class="t">QuoteSnapshotParams</span>) (<span class="t">*ibkr.Quote</span>, <span class="t">error</span>) {
+    contract, err := s.client.<span class="t">ResolveContract</span>(ctx, p.<span class="t">Symbol</span>)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> <span class="k">nil</span>, err }
+
+    timeout := p.<span class="t">Timeout</span>
+    <span class="k">if</span> timeout == <span class="h">0</span> { timeout = <span class="h">5</span> * <span class="t">time.Second</span> }
+
+    snap, err := s.client.<span class="t">Snapshot</span>(ctx, contract)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> <span class="k">nil</span>, err }
+
+    <span class="c">// Honest IV: do not interpolate, do not derive. If IBKR did not send tick 106,
+    // IVStatus stays "unavailable" and the JSON field is null.</span>
+    <span class="k">return</span> snap, <span class="k">nil</span>
+}
+</pre>
+
+<h3>11.3 — Streaming subscription with proper cancellation</h3>
+<pre><span class="k">func</span> (s <span class="t">*Server</span>) <span class="t">handleQuoteSubscribe</span>(
+    ctx <span class="t">context.Context</span>, p <span class="t">QuoteSubscribeParams</span>, send <span class="t">func</span>(<span class="t">Frame</span>) <span class="t">error</span>,
+) <span class="t">error</span> {
+    contract, err := s.client.<span class="t">ResolveContract</span>(ctx, p.<span class="t">Symbol</span>)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+
+    ch, cancel, err := s.client.<span class="t">Subscribe</span>(ctx, contract)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    <span class="k">defer</span> cancel()                  <span class="c">// always cancelMktData</span>
+
+    <span class="k">for</span> {
+        <span class="k">select</span> {
+        <span class="k">case</span> &lt;-ctx.<span class="t">Done</span>():
+            <span class="k">return</span> ctx.<span class="t">Err</span>()
+        <span class="k">case</span> tick, ok := &lt;-ch:
+            <span class="k">if</span> !ok { <span class="k">return</span> <span class="k">nil</span> }       <span class="c">// connector closed stream</span>
+            <span class="k">if</span> err := send(toFrame(tick)); err != <span class="k">nil</span> {
+                <span class="k">return</span> err              <span class="c">// client gone → cancel runs via defer</span>
+            }
+        }
+    }
+}
+</pre>
+
+<h3>11.4 — Trading-verb compile-time gate (v1)</h3>
+<pre><span class="c">//go:build !trading
+// +build !trading
+
+// internal/daemon/trading_disabled.go</span>
+
+<span class="k">func</span> (s <span class="t">*Server</span>) <span class="t">handleOrderPlace</span>(_ <span class="t">context.Context</span>, _ <span class="t">any</span>) (<span class="t">any</span>, <span class="t">error</span>) {
+    <span class="k">return</span> <span class="k">nil</span>, <span class="t">ErrTradingDisabled</span>
+}
+</pre>
+<p class="muted" style="font-size:13px;">v1 builds without <code>-tags trading</code>; the trading handlers compile to stubs that always error. v2 introduces the counterpart <code>trading_enabled.go</code> behind <code>//go:build trading</code> with confirmation, dry-run, and audit-log paths.</p>
+
+<h3>11.5 — JSON-file cache</h3>
+<pre><span class="c">// internal/cache/jsonfile.go</span>
+<span class="k">type</span> <span class="t">JSONCache</span> <span class="k">struct</span> {
+    path  <span class="t">string</span>
+    mu    <span class="t">sync.RWMutex</span>
+    data  <span class="k">map</span>[<span class="t">string</span>]<span class="t">Contract</span>
+    dirty <span class="t">bool</span>
+}
+
+<span class="k">func</span> (c <span class="t">*JSONCache</span>) <span class="t">Get</span>(symbol <span class="t">string</span>) (<span class="t">Contract</span>, <span class="t">bool</span>) {
+    c.mu.<span class="t">RLock</span>(); <span class="k">defer</span> c.mu.<span class="t">RUnlock</span>()
+    v, ok := c.data[symbol]
+    <span class="k">return</span> v, ok
+}
+
+<span class="k">func</span> (c <span class="t">*JSONCache</span>) <span class="t">Put</span>(x <span class="t">Contract</span>) {
+    c.mu.<span class="t">Lock</span>(); <span class="k">defer</span> c.mu.<span class="t">Unlock</span>()
+    <span class="k">if</span> existing, ok := c.data[x.<span class="t">Symbol</span>]; ok &amp;&amp; existing == x { <span class="k">return</span> }
+    c.data[x.<span class="t">Symbol</span>] = x
+    c.dirty = <span class="k">true</span>
+}
+
+<span class="k">func</span> (c <span class="t">*JSONCache</span>) <span class="t">Flush</span>(ctx <span class="t">context.Context</span>) <span class="t">error</span> {
+    c.mu.<span class="t">RLock</span>()
+    <span class="k">if</span> !c.dirty { c.mu.<span class="t">RUnlock</span>(); <span class="k">return</span> <span class="k">nil</span> }
+    snap := maps.<span class="t">Clone</span>(c.data)
+    c.mu.<span class="t">RUnlock</span>()
+
+    tmp := c.path + <span class="s">".tmp"</span>
+    f, err := os.<span class="t">Create</span>(tmp)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    enc := json.<span class="t">NewEncoder</span>(f)
+    enc.<span class="t">SetIndent</span>(<span class="s">""</span>, <span class="s">"  "</span>)
+    <span class="k">if</span> err := enc.<span class="t">Encode</span>(snap); err != <span class="k">nil</span> {
+        f.<span class="t">Close</span>(); os.<span class="t">Remove</span>(tmp); <span class="k">return</span> err
+    }
+    <span class="k">if</span> err := f.<span class="t">Close</span>(); err != <span class="k">nil</span> { <span class="k">return</span> err }
+    <span class="k">if</span> err := os.<span class="t">Rename</span>(tmp, c.path); err != <span class="k">nil</span> { <span class="k">return</span> err }
+
+    c.mu.<span class="t">Lock</span>(); c.dirty = <span class="k">false</span>; c.mu.<span class="t">Unlock</span>()
+    <span class="k">return</span> <span class="k">nil</span>
+}
+</pre>
+
+<h3>11.6 — Self-update: signature verification &amp; atomic swap</h3>
+<pre><span class="c">// internal/update/update.go</span>
+<span class="k">func</span> (u <span class="t">*Updater</span>) <span class="t">Apply</span>(ctx <span class="t">context.Context</span>, asset <span class="t">Asset</span>) <span class="t">error</span> {
+    tarball, err := u.<span class="t">downloadVerified</span>(ctx, asset)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    <span class="k">defer</span> os.<span class="t">Remove</span>(tarball)
+
+    <span class="c">// Verify the SHA256SUMS minisign signature against the embedded public key.</span>
+    <span class="k">if</span> err := minisign.<span class="t">Verify</span>(u.<span class="t">PublicKey</span>, asset.<span class="t">SumsPath</span>, asset.<span class="t">SigPath</span>); err != <span class="k">nil</span> {
+        <span class="k">return</span> fmt.<span class="t">Errorf</span>(<span class="s">"signature verification failed: %w"</span>, err)
+    }
+    <span class="k">if</span> err := <span class="t">verifySHA256</span>(tarball, asset.<span class="t">ExpectedSum</span>); err != <span class="k">nil</span> {
+        <span class="k">return</span> err
+    }
+
+    stagingDir, err := os.<span class="t">MkdirTemp</span>(<span class="s">""</span>, <span class="s">"ibkr-update-"</span>)
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    <span class="k">defer</span> os.<span class="t">RemoveAll</span>(stagingDir)
+    <span class="k">if</span> err := <span class="t">extractTarGz</span>(tarball, stagingDir); err != <span class="k">nil</span> { <span class="k">return</span> err }
+
+    <span class="c">// Stop ibkrd if running so the binary is not in use during rename.</span>
+    _ = u.<span class="t">stopDaemon</span>(ctx)
+
+    <span class="k">for</span> _, name := <span class="k">range</span> []<span class="t">string</span>{<span class="s">"ibkr"</span>, <span class="s">"ibkrd"</span>} {
+        target := filepath.<span class="t">Join</span>(u.<span class="t">InstallDir</span>, name)
+        backup := target + <span class="s">".bak"</span>
+        next   := filepath.<span class="t">Join</span>(stagingDir, name)
+        <span class="k">if</span> err := os.<span class="t">Rename</span>(target, backup); err != <span class="k">nil</span> &amp;&amp; !os.<span class="t">IsNotExist</span>(err) {
+            <span class="k">return</span> err
+        }
+        <span class="k">if</span> err := os.<span class="t">Rename</span>(next, target); err != <span class="k">nil</span> {
+            _ = os.<span class="t">Rename</span>(backup, target) <span class="c">// best-effort rollback</span>
+            <span class="k">return</span> err
+        }
+        _ = os.<span class="t">Remove</span>(backup)
+    }
+    <span class="k">return</span> <span class="k">nil</span>
+}
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="layout">12. Project layout</h2>
+
+<pre class="diagram">
+ibkr/
+├── README.md
+├── PLAN.html
+├── go.mod                    <span class="dim"># module github.com/osauer/ibkr</span>
+├── go.sum
+├── Makefile                  <span class="dim"># build, test, install, install-skill</span>
+├── install.sh                <span class="dim"># installs binaries + skill + settings snippet</span>
+├── cmd/
+│   ├── ibkr/
+│   │   └── main.go           <span class="dim"># CLI entrypoint, autospawn logic</span>
+│   └── ibkrd/
+│       └── main.go           <span class="dim"># Daemon entrypoint</span>
+├── internal/
+│   ├── cli/
+│   │   ├── account.go
+│   │   ├── positions.go
+│   │   ├── quote.go          <span class="dim"># includes --rate throttling</span>
+│   │   ├── chain.go
+│   │   ├── scan.go
+│   │   ├── status.go
+│   │   ├── version.go
+│   │   ├── format_text.go
+│   │   └── format_json.go
+│   ├── daemon/
+│   │   ├── server.go         <span class="dim"># UnixListener, JSON-RPC loop</span>
+│   │   ├── handlers.go
+│   │   ├── trading_disabled.go    <span class="dim"># build tag !trading</span>
+│   │   ├── trading_enabled.go     <span class="dim"># build tag trading (v2)</span>
+│   │   └── lifecycle.go      <span class="dim"># spawn, idle timer, signals</span>
+│   ├── dial/
+│   │   └── dial.go           <span class="dim"># Unix socket client</span>
+│   ├── config/
+│   │   └── config.go         <span class="dim"># TOML loader</span>
+│   ├── cache/
+│   │   ├── jsonfile.go       <span class="dim"># v1 contract / inactive cache</span>
+│   │   └── bbolt.go          <span class="dim"># future upgrade, same interface</span>
+│   └── update/
+│       ├── update.go         <span class="dim"># GH releases poll, download, verify, swap</span>
+│       └── minisign.go       <span class="dim"># minisign signature verification</span>
+├── skill/                    <span class="dim"># installed to ~/.claude/skills/ibkr/</span>
+│   ├── SKILL.md
+│   └── schemas.md
+├── settings/
+│   └── ibkr.settings.json    <span class="dim"># merged into ~/.claude/settings.json</span>
+└── test/
+    ├── integration/          <span class="dim"># real daemon + mock TWS server</span>
+    └── golden/               <span class="dim"># golden text-output snapshots</span>
+
+<span class="dim"># Sibling repository:</span>
+github.com/osauer/ibkr-go/    <span class="dim"># shared library; the package previously at regime/internal/components/ibkr</span>
+</pre>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="testing">13. Testing strategy</h2>
+
+<table class="spec">
+  <thead><tr><th>Layer</th><th>What</th><th>How</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>ibkr-go (shared library)</td>
+      <td>Inherited regime tests must pass after extraction</td>
+      <td><code>go test ./...</code> in the new module. The mock TWS server (formerly <code>regime/internal/components/ibkr/protocoltest</code>) ships with the package.</td>
+    </tr>
+    <tr>
+      <td>Daemon handlers</td>
+      <td>One handler per JSON-RPC method; happy path + 3 failure modes (unavailable, timeout, inactive)</td>
+      <td>Table-driven Go unit tests against a stub <code>Client</code> implementing the public interface.</td>
+    </tr>
+    <tr>
+      <td>CLI ↔ daemon</td>
+      <td>Round-trip: spawn daemon against mock TWS, run real <code>ibkr</code> binary, compare output</td>
+      <td>Integration test under <code>test/integration/</code>. Mock TWS replays canned protocol traces.</td>
+    </tr>
+    <tr>
+      <td>Cache layer</td>
+      <td>Crash-safety, atomic flush, concurrent reads</td>
+      <td>Unit tests with <code>t.TempDir()</code>: write, kill mid-flush, recover; concurrent <code>Get</code>/<code>Put</code> stress.</td>
+    </tr>
+    <tr>
+      <td><code>--rate</code> throttle</td>
+      <td>Coalesce semantics</td>
+      <td>Drive the formatter with a synthetic high-rate tick stream; assert render count matches expected windows.</td>
+    </tr>
+    <tr>
+      <td>Self-update</td>
+      <td>Signature verification, atomic swap, rollback on failure</td>
+      <td>Local fake release server; valid + invalid signature fixtures; injected post-extract failure to test rollback path.</td>
+    </tr>
+    <tr>
+      <td>Text formatter</td>
+      <td>Stable visual output</td>
+      <td>Golden-file snapshots under <code>test/golden/</code>; <code>go test -update</code> refreshes deliberately.</td>
+    </tr>
+    <tr>
+      <td>JSON formatter</td>
+      <td>Stable schema (Claude's contract)</td>
+      <td>Each schema in <code>schemas.md</code> has a paired Go test that marshals a fixture and asserts the field set.</td>
+    </tr>
+    <tr>
+      <td>Trading guard</td>
+      <td>Default build cannot place an order</td>
+      <td>Test asserts <code>handleOrderPlace</code> returns <code>ErrTradingDisabled</code> in the default build.</td>
+    </tr>
+    <tr>
+      <td>Smoke (manual, pre-release)</td>
+      <td>Live IB Gateway, paper account, run every command, capture logs</td>
+      <td>Documented checklist in <code>README.md</code>. No automated tests against live IBKR.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <strong>No mocking inside the daemon</strong>
+  The daemon never fabricates data. Tests use a real TWS-protocol mock server the daemon connects to over a real socket. The daemon code is unaware it is talking to a mock.
+</div>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="ac">14. Acceptance criteria &amp; Definition of Done</h2>
+
+<h3>Functional</h3>
+<ul class="ac">
+  <li><code>ibkr account</code> returns a populated NLV/BP/AvailFunds snapshot from a paper account in both text and <code>--json</code>.</li>
+  <li><code>ibkr positions</code> shows open positions, with stocks and options separated and the documented column set; option Greeks are populated when IBKR delivers them and explicitly absent otherwise.</li>
+  <li><code>ibkr quote AAPL,MSFT,SPY</code> returns three snapshots in &lt; 2 s p50 against a warm daemon.</li>
+  <li><code>ibkr quote AAPL --watch --rate 250ms</code> streams ≥ 5 distinct rendered windows during a market-open test window and exits cleanly on Ctrl-C; the gateway shows no orphan subscriptions afterwards.</li>
+  <li><code>ibkr quote AAPL --watch --rate 0</code> renders every tick.</li>
+  <li><code>ibkr chain AAPL --expiry &lt;next-monthly&gt; --width 5</code> returns 11 strikes (ATM ± 5) with calls and puts populated.</li>
+  <li><code>ibkr scan top-movers</code> returns ≤ <code>limit</code> rows from the IBKR scanner.</li>
+  <li><code>ibkr status</code> reports daemon uptime, connection state, profile, and <code>data_type</code>.</li>
+  <li><code>ibkr version</code> prints version, commit, and build date.</li>
+  <li><code>ibkr self-update --check</code> reports current and latest versions without side effects.</li>
+  <li><code>ibkr self-update</code> applies a signed update and the resulting binary reports the new version; an invalid signature aborts the update with a non-zero exit code and no file change.</li>
+</ul>
+
+<h3>Non-functional</h3>
+<ul class="ac">
+  <li>Cold-start <code>ibkr quote AAPL</code> ≤ 4 s end-to-end (handshake included).</li>
+  <li>Warm <code>ibkr quote AAPL</code> ≤ 1.5 s p50.</li>
+  <li>Daemon idle-shutdown after 30 min by default; configurable.</li>
+  <li>No fabrication: every <code>--json</code> response carries a non-empty <code>data_type</code>; IV is <code>null</code> with <code>iv_status: "unavailable"</code> when not delivered.</li>
+  <li>Trading verbs fail closed at three layers: binary stub, settings deny rule, PreToolUse hook.</li>
+  <li><code>go test ./...</code> green in both <code>ibkr-go</code> and <code>ibkr</code>; CI runs on darwin and linux; binaries built without CGO.</li>
+</ul>
+
+<h3>Documentation</h3>
+<ul class="ac">
+  <li><code>README.md</code>: install, run, troubleshooting, gateway setup pointers, self-update workflow.</li>
+  <li><code>skill/SKILL.md</code> + <code>skill/schemas.md</code>: every JSON field documented with example values.</li>
+  <li><code>CHANGELOG.md</code>: v1.0.0 entry vs. baseline.</li>
+  <li>Inline godoc on every exported symbol of <code>ibkr-go</code>.</li>
+</ul>
+
+<h3>Integration verification</h3>
+<ul class="ac">
+  <li>Manual smoke test against a paper account at IB Gateway 10.30+ documented in the release checklist.</li>
+  <li>Skill installed into a fresh <code>~/.claude/</code> demonstrates running <code>ibkr account</code> end-to-end without manual permission prompts.</li>
+  <li>Release artifact (binary + skill bundle) verified live on the GitHub releases page; checksums and signatures present.</li>
+</ul>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="roadmap">15. Roadmap to v2</h2>
+
+<table class="spec">
+  <thead><tr><th>Version</th><th>Theme</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="pill ok">v1.0</span></td>
+      <td>Read-only foundation</td>
+      <td>Everything in this plan. Production-grade for portfolio + market reads.</td>
+    </tr>
+    <tr>
+      <td><span class="pill">v1.1</span></td>
+      <td>Quality of life</td>
+      <td>Watchlists, history bars (<code>ibkr history AAPL --bars 1d,200</code>), closed-today view (<code>ibkr trades --today</code>), JSON schema versioning header.</td>
+    </tr>
+    <tr>
+      <td><span class="pill warn">v1.2</span></td>
+      <td>Scanner UX</td>
+      <td>Full IBKR scanner subscription wrapper with filter DSL.</td>
+    </tr>
+    <tr>
+      <td><span class="pill danger">v2.0</span></td>
+      <td>Trading opt-in</td>
+      <td>
+        Built behind <code>-tags trading</code>. Adds <code>order place</code>, <code>order cancel</code>, <code>order list</code>.
+        Required surface before merge:
+        (a) dry-run mode echoing the exact wire frame without sending;
+        (b) paper-only by default, live unlocked by config flag plus per-command <code>--live</code>;
+        (c) mandatory confirmation prompt for any market order;
+        (d) append-only audit log of every wire send;
+        (e) Skill update that explicitly forbids placing orders without user confirmation;
+        (f) kill switch (<code>ibkr panic</code>) that cancels all open orders.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="pill">v2.1</span></td>
+      <td>Bracket orders + multi-leg options</td>
+      <td>Vertical / iron-condor / calendar templating; child-order linking.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ─────────────────────────────────────────── -->
+<h2 id="risks">16. Risks &amp; mitigations</h2>
+
+<ul>
+  <li><strong>Shared-library extraction friction.</strong> The source package is woven with regime's logging and core types. Mitigation: extract on a feature branch; keep regime green throughout via a <code>replace</code> directive; cut over only after the new module is tagged.</li>
+  <li><strong>Client-ID collisions.</strong> The daemon must use a different ID range from regime if both run on the same machine. Mitigation: defaults of 11 (paper) and 12 (live); regime uses 1–5.</li>
+  <li><strong>Delayed-data confusion.</strong> Without entitlements a quote may be delayed. Mitigation: text formatter prints a yellow "DELAYED" badge; the Skill instructs Claude to surface this explicitly.</li>
+  <li><strong>Daemon zombies.</strong> A crashed daemon could leave a stale socket. Mitigation: the CLI checks socket liveness with a one-shot <code>status.health</code> ping before reusing; reaps and respawns on timeout.</li>
+  <li><strong>Self-update tampering.</strong> An attacker could serve a malicious release. Mitigation: minisign signature verification with a public key compiled into the binary; SHA-256 of each tarball asserted against the signed sums file before extraction.</li>
+  <li><strong>Trading creep.</strong> The easiest mistake is to "just add a quick order command." Mitigation: trading is an entire build tag, an entire roadmap version, and an entire design pass — not a follow-up PR.</li>
+</ul>
+
+<footer class="fin">
+  <span>ibkr v1.0 · implementation specification</span>
+</footer>
+
+</div>
+</body>
+</html>

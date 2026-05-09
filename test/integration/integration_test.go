@@ -1,0 +1,494 @@
+// Package integration runs end-to-end tests of the full ibkrd + ibkr CLI
+// stack against a live IB Gateway. The tests deliberately do not mock or
+// stub IBKR — they exist to prove the actual binaries connect and talk to
+// the real gateway.
+//
+// Tests skip if the IB Gateway is not reachable on the configured port; this
+// matches the project's "no mock" stance: when the live gateway is down we
+// don't paper over the gap, we surface it.
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+func atomicAdd(p *int32, delta int32) int32 { return atomic.AddInt32(p, delta) }
+
+var (
+	sharedSocket  string
+	sharedCLI     string
+	sharedDaemon  string
+	sharedStop    func()
+	sharedSkipped bool
+)
+
+// TestMain probes the IB Gateway, builds the binaries, and launches a single
+// daemon shared by every test in this package. Per-test daemons are too slow
+// (each handshake is multi-second) and risk overwhelming the gateway with
+// rapid-fire client-ID changes.
+func TestMain(m *testing.M) {
+	if !probeGatewayReachable() {
+		// No live gateway TCP listener → skip every test. Tests check sharedSkipped.
+		sharedSkipped = true
+		os.Exit(m.Run())
+	}
+	// We deliberately do NOT pre-probe with a throwaway handshake here. IB
+	// Gateway 10.37 has been observed to enter a silent state after rapid
+	// successive handshakes from different sockets, which is exactly what a
+	// pre-probe-then-real-daemon flow looks like. We let the daemon's own
+	// startup handshake be the single authoritative gateway-health signal:
+	// if launchSharedDaemon's connector fails to handshake within its own
+	// timeout, every test skips with a clear message and we don't burn
+	// further connections against a degraded gateway.
+	cli, daemon, err := buildBins()
+	if err != nil {
+		_, _ = os.Stderr.WriteString("integration: build failed: " + err.Error() + "\n")
+		os.Exit(2)
+	}
+	sharedCLI = cli
+	sharedDaemon = daemon
+	socketPath, stop, err := launchSharedDaemon(daemon)
+	if err != nil {
+		_, _ = os.Stderr.WriteString("integration: launch failed (gateway may be in degraded API-mute state — restart it and re-run): " + err.Error() + "\n")
+		sharedSkipped = true
+		if stop != nil {
+			stop()
+		}
+		os.Exit(m.Run())
+	}
+	sharedSocket = socketPath
+	sharedStop = stop
+
+	// The daemon socket appears even when ibkrd's connector ran into the
+	// "degraded mode" branch (handshake failed → daemon stays up but
+	// disconnected). Ask the daemon whether it actually reached the gateway
+	// before declaring the suite live; on a degraded gateway, every test
+	// skips cleanly instead of failing with cascading IBKR-unavailable errors.
+	if !daemonReachedGateway(socketPath) {
+		_, _ = os.Stderr.WriteString("integration: daemon started but failed to handshake with IB Gateway (likely in degraded API-mute state — restart it and re-run); skipping live tests.\n")
+		sharedSkipped = true
+	}
+
+	code := m.Run()
+	stop()
+	os.Exit(code)
+}
+
+// daemonReachedGateway calls status.health on the freshly launched daemon
+// and returns true only when the daemon reports connected=true and a
+// non-zero server version. The daemon stays up in degraded mode when its
+// connector can't handshake; we use this signal to mark the suite as
+// "no live gateway" rather than letting every test fail with internal
+// errors.
+func daemonReachedGateway(socketPath string) bool {
+	conn, err := dial.Connect(socketPath)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	var res rpc.HealthResult
+	if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
+		return false
+	}
+	return res.Connected && res.ServerVersion > 0
+}
+
+func probeGatewayReachable() bool {
+	host := "127.0.0.1"
+	port := 4001
+	if v := os.Getenv("IBKR_TEST_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			port = p
+		}
+	}
+	d := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := d.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+func skipIfNoGateway(t *testing.T) {
+	t.Helper()
+	if sharedSkipped {
+		t.Skip("IB Gateway not reachable; skipping live integration test")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only daemon")
+	}
+}
+
+func buildBins() (cli, daemon string, err error) {
+	dir, err := os.MkdirTemp("", "ibkr-integration-")
+	if err != nil {
+		return "", "", err
+	}
+	cli = filepath.Join(dir, "ibkr")
+	daemon = filepath.Join(dir, "ibkrd")
+	for _, b := range []struct{ out, src string }{
+		{cli, "../../cmd/ibkr"},
+		{daemon, "../../cmd/ibkrd"},
+	} {
+		cmd := exec.Command("go", "build", "-o", b.out, b.src)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", "", err
+		}
+	}
+	return cli, daemon, nil
+}
+
+func launchSharedDaemon(daemonBin string) (string, func(), error) {
+	dir, err := os.MkdirTemp("", "ibkr-integration-run-")
+	if err != nil {
+		return "", nil, err
+	}
+	socketPath := filepath.Join(dir, "ibkrd.sock")
+	logPath := filepath.Join(dir, "ibkrd.log")
+	cfgPath := filepath.Join(dir, "config.toml")
+	cid := nextClientID()
+	port := 4001
+	if v := os.Getenv("IBKR_TEST_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			port = p
+		}
+	}
+	cfg := "default_profile = \"live\"\n[profiles.live]\nhost = \"127.0.0.1\"\nport = " +
+		strconv.Itoa(port) + "\nclient_id = " + strconv.Itoa(cid) + "\ntls = false\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		return "", nil, err
+	}
+	cmd := exec.Command(daemonBin,
+		"--config", cfgPath,
+		"--socket", socketPath,
+		"--foreground",
+		"--log", logPath,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return "", nil, err
+	}
+	stop := func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		done := make(chan struct{})
+		go func() { _, _ = cmd.Process.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = cmd.Process.Kill()
+		}
+		_ = os.RemoveAll(dir)
+	}
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(socketPath); err == nil {
+			return socketPath, stop, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	stop()
+	return "", nil, errsf("daemon socket did not appear within 25s; see %s", logPath)
+}
+
+// errsf is a tiny wrapper to keep TestMain free of fmt imports — keeps the
+// build-time error string composition out of the hot path.
+func errsf(f string, args ...any) error {
+	return &osErr{msg: fmt.Sprintf(f, args...)}
+}
+
+type osErr struct{ msg string }
+
+func (e *osErr) Error() string { return e.msg }
+
+// nextClientID generates a unique client ID per daemon process so the IBKR
+// gateway doesn't reject overlapping handshakes (one connection per ID).
+// Range chosen well clear of regime's 100-104 reservation and the default
+// daemon client ID 15.
+var clientIDCounter int32 = 19
+
+func nextClientID() int { return int(atomicAdd(&clientIDCounter, 1)) }
+
+func client(t *testing.T) *dial.Conn {
+	t.Helper()
+	conn, err := dial.Connect(sharedSocket)
+	if err != nil {
+		t.Fatalf("dial socket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func TestStatusReportsConnected(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var res rpc.HealthResult
+	if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
+		t.Fatalf("status.health: %v", err)
+	}
+	if !res.Connected {
+		t.Fatalf("expected daemon to report connected, got %+v", res)
+	}
+	if res.ServerVersion == 0 {
+		t.Errorf("expected non-zero server version, got %d", res.ServerVersion)
+	}
+}
+
+func TestAccountSummaryReturnsLiveData(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	var res rpc.AccountResult
+	if err := conn.Call(ctx, rpc.MethodAccountSummary, nil, &res); err != nil {
+		t.Fatalf("account.summary: %v", err)
+	}
+	if res.AccountID == "" {
+		t.Fatalf("account_id missing from response: %+v", res)
+	}
+	if res.NetLiquidation == 0 {
+		t.Errorf("net_liquidation reported as zero (suspicious): %+v", res)
+	}
+	if res.DataType == "" {
+		t.Errorf("data_type must be populated, got %q", res.DataType)
+	}
+}
+
+func TestPositionsReturnLiveMarks(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	// First call may race the streaming portfolio update; retry briefly until
+	// at least one position has a non-zero mark.
+	var res rpc.PositionsResult
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.Call(ctx, rpc.MethodPositionsList, nil, &res); err != nil {
+			t.Fatalf("positions.list: %v", err)
+		}
+		if positionsHaveMarks(res.Stocks) || positionsHaveMarks(res.Options) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if len(res.Stocks)+len(res.Options) == 0 {
+		t.Skip("paper account has no open positions to verify marks against")
+	}
+	t.Errorf("no position carried a non-zero mark within 10s: %+v", res)
+}
+
+func positionsHaveMarks(rows []rpc.PositionView) bool {
+	for _, p := range rows {
+		if p.Mark != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestQuoteSnapshotReturnsPrice(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var q rpc.Quote
+	params := rpc.QuoteSnapshotParams{
+		Contract: rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+	}
+	if err := conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
+		t.Fatalf("quote.snapshot AAPL: %v", err)
+	}
+	if q.Symbol != "AAPL" {
+		t.Errorf("symbol echoed wrong: %q", q.Symbol)
+	}
+	if q.DataType == "" {
+		t.Errorf("data_type required on every quote response")
+	}
+	if q.Bid == nil && q.Ask == nil && q.Last == nil {
+		t.Errorf("AAPL snapshot delivered no bid/ask/last; suspect timeout or entitlement issue: %+v", q)
+	}
+}
+
+func TestUnknownMethodReturnsStructuredError(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := conn.Call(ctx, "no.such.method", nil, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown method")
+	}
+	rpcErr, ok := err.(*rpc.Error)
+	if !ok {
+		t.Fatalf("expected *rpc.Error, got %T: %v", err, err)
+	}
+	if rpcErr.Code != rpc.CodeUnknownMethod {
+		t.Errorf("expected code %q, got %q", rpc.CodeUnknownMethod, rpcErr.Code)
+	}
+}
+
+func TestTradingVerbsRefused(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, m := range []string{rpc.MethodOrderPlace, rpc.MethodOrderCancel} {
+		err := conn.Call(ctx, m, json.RawMessage(`{}`), nil)
+		if err == nil {
+			t.Errorf("%s: expected refusal in v1, got success", m)
+			continue
+		}
+		rpcErr, ok := err.(*rpc.Error)
+		if !ok {
+			t.Errorf("%s: expected *rpc.Error, got %T (%v)", m, err, err)
+			continue
+		}
+		if rpcErr.Code != rpc.CodeTradingDisabled {
+			t.Errorf("%s: expected code %q, got %q", m, rpc.CodeTradingDisabled, rpcErr.Code)
+		}
+	}
+}
+
+func TestCLIBinaryAccountText(t *testing.T) {
+	skipIfNoGateway(t)
+
+	cmd := exec.Command(sharedCLI, "account")
+	cmd.Env = append(os.Environ(), "IBKRD_SOCKET="+sharedSocket)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ibkr account: %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "Account") || !strings.Contains(s, "Net liquidation") {
+		t.Errorf("unexpected ibkr account text output:\n%s", s)
+	}
+}
+
+// TestScanTopMoversReturnsRows guards against the scanner field-offset
+// regression that silently dropped every msgScannerData frame. If the
+// dispatcher contract or the parser drifts again, this test catches it
+// against the real gateway. Skips when the gateway returns 0 rows (e.g. on
+// weekends/holidays the scanner can come back empty for some presets).
+func TestScanTopMoversReturnsRows(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var res rpc.ScanResult
+	params := rpc.ScanRunParams{Preset: "top-movers", Limit: 10}
+	if err := conn.Call(ctx, rpc.MethodScanRun, params, &res); err != nil {
+		t.Fatalf("scan.run top-movers: %v", err)
+	}
+	if len(res.Rows) == 0 {
+		t.Skip("scanner returned 0 rows (gateway/preset may have no candidates outside market hours)")
+	}
+	first := res.Rows[0]
+	if first.Symbol == "" {
+		t.Errorf("first scanner row has empty symbol: %+v", res)
+	}
+	if res.Type == "" {
+		t.Errorf("scan result missing scan type: %+v", res)
+	}
+}
+
+// TestChainAAPLLegsPopulated guards against the option-chain ConID resolution
+// regression. Before the fix, every leg subscribed without a resolved ConID
+// and IBKR returned code 200 ("No security definition has been found"); the
+// CLI rendered an all-blank table. The fix calls reqContractDetails first
+// and feeds the resolved ConID into reqMktData.
+//
+// The "no fabrication" invariant means cells legitimately stay nil when the
+// gateway doesn't deliver a price (e.g. illiquid strikes far from ATM). We
+// only assert that AT LEAST one strike has at least one populated leg field —
+// any more and the test would be brittle against weekend frozen-data quirks.
+func TestChainAAPLLegsPopulated(t *testing.T) {
+	skipIfNoGateway(t)
+	conn := client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	expiry := nextThirdFriday(time.Now().UTC())
+	params := rpc.ChainFetchParams{
+		Symbol: "AAPL",
+		Expiry: expiry.Format("2006-01-02"),
+		Width:  3, // 7 strikes — keeps the per-leg round-trip count modest
+		Side:   "both",
+	}
+	var res rpc.ChainResult
+	if err := conn.Call(ctx, rpc.MethodChainFetch, params, &res); err != nil {
+		t.Fatalf("chain.fetch AAPL %s: %v", params.Expiry, err)
+	}
+	wantStrikes := 2*params.Width + 1
+	if got := len(res.Strikes); got != wantStrikes {
+		t.Fatalf("expected %d strikes (ATM ± %d), got %d", wantStrikes, params.Width, got)
+	}
+	if res.Spot <= 0 {
+		t.Errorf("chain spot price not populated: %+v", res)
+	}
+	if res.DTE <= 0 {
+		t.Errorf("chain DTE should be positive, got %d", res.DTE)
+	}
+	populated := 0
+	for _, s := range res.Strikes {
+		if s.CallBid != nil || s.CallAsk != nil || s.CallLast != nil ||
+			s.PutBid != nil || s.PutAsk != nil || s.PutLast != nil {
+			populated++
+		}
+	}
+	if populated == 0 {
+		t.Errorf("no strike had any leg field populated; ConID resolution likely broken again. result=%+v", res)
+	}
+}
+
+// nextThirdFriday returns the third Friday of the month at least 7 days from
+// now. AAPL has weekly options too but third-Friday monthlies are universally
+// liquid — picking them keeps the test stable across weeks. The resulting
+// date is also always > current time, so DTE > 0 is guaranteed.
+func nextThirdFriday(now time.Time) time.Time {
+	month := now.Month()
+	year := now.Year()
+	for {
+		first := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+		// Friday is weekday 5 (Sunday=0). Third Friday = first Friday + 14 days.
+		offset := (int(time.Friday) - int(first.Weekday()) + 7) % 7
+		third := first.AddDate(0, 0, offset+14)
+		if third.Sub(now) >= 7*24*time.Hour {
+			return third
+		}
+		month++
+		if month > 12 {
+			month = 1
+			year++
+		}
+	}
+}
