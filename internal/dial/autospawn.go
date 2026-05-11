@@ -1,0 +1,138 @@
+package dial
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
+	"time"
+)
+
+// AutospawnTimeout is the budget for `ibkr daemon` to start and open its Unix
+// socket. Discovery + the gateway handshake run in the background, so the
+// socket appears as soon as the daemon reaches its accept loop — sub-second
+// on a healthy machine.
+const AutospawnTimeout = 5 * time.Second
+
+// AutospawnAndConnect spawns `ibkr daemon` (this same binary, located via
+// os.Executable), waits for the Unix socket to appear at socketPath, and
+// returns a live connection. On wait failure the returned error is annotated
+// with whatever the lock file tells us plus the last daemon log line.
+//
+// Shared between cmd/ibkr (CLI entry) and internal/mcp (stdio MCP server) —
+// both surfaces need the same "is the daemon up? if not, start it" dance.
+//
+// Pre-spawn check: if the lock file points at a live PID, the daemon is
+// already running — either still booting (socket not yet up) or stuck.
+// Spawning another daemon there is wasted work because the flock would
+// reject it; worse, when the lock file has been deleted out from under a
+// live daemon (manual `rm`, aggressive cleanup script), a fresh spawn
+// can co-exist with the old one and both hold a gateway connection.
+//
+// Shutdown race: the daemon's Stop sequence removes the socket BEFORE it
+// releases the lock. A CLI invocation that arrives during that window
+// sees "PID alive + lock present + socket gone" — looks identical to a
+// stuck daemon. To distinguish: poll PID liveness while waiting; when
+// the daemon finishes exiting, fall through to spawn a fresh one. Only
+// surface the "stuck daemon" error when the PID stays alive through the
+// full budget.
+func AutospawnAndConnect(socketPath string) (*Conn, error) {
+	lockPath := LockPath(socketPath)
+	if pid := LockHolderPID(lockPath); pid > 0 && IsProcessAlive(pid) {
+		if conn, ok := waitForSocketOrPIDDeath(socketPath, pid, AutospawnTimeout); ok {
+			return conn, nil
+		}
+		// Either the PID died during the wait (graceful shutdown finished
+		// — fall through to spawn) or the budget ran out with the PID
+		// still alive (stuck daemon — surface the error).
+		if IsProcessAlive(pid) {
+			msg := fmt.Sprintf("daemon PID %d is running but never opened the socket %s within %s\n  if it's stuck, run: kill %d",
+				pid, socketPath, AutospawnTimeout, pid)
+			if tail := TailLastLine(DefaultLogPath(), 0); tail != "" {
+				msg = fmt.Sprintf("%s\n  last daemon log: %s", msg, tail)
+			}
+			return nil, errors.New(msg)
+		}
+		// PID died — fall through to spawn.
+	}
+
+	if err := spawnDaemon(); err != nil {
+		return nil, fmt.Errorf("failed to start daemon: %w", err)
+	}
+	conn, waitErr := WaitForSocket(socketPath, AutospawnTimeout)
+	if waitErr == nil {
+		return conn, nil
+	}
+
+	pid := LockHolderPID(lockPath)
+	msg := waitErr.Error()
+	if pid > 0 && IsProcessAlive(pid) {
+		msg = fmt.Sprintf("%s\n  daemon PID %d holds %s but never opened the socket\n  if it's stuck, run: kill %d",
+			msg, pid, lockPath, pid)
+	}
+	if tail := TailLastLine(DefaultLogPath(), 0); tail != "" {
+		msg = fmt.Sprintf("%s\n  last daemon log: %s", msg, tail)
+	}
+	return nil, errors.New(msg)
+}
+
+// waitForSocketOrPIDDeath polls for two outcomes in parallel: the socket
+// becoming available (return conn, true) or the watched PID dying
+// (return nil, false). On budget exhaustion returns (nil, false) too —
+// callers distinguish stuck-but-alive from genuinely-dead by probing
+// IsProcessAlive again after the call.
+func waitForSocketOrPIDDeath(socketPath string, pid int, timeout time.Duration) (*Conn, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if conn, err := Connect(socketPath); err == nil {
+			return conn, true
+		}
+		if !IsProcessAlive(pid) {
+			return nil, false
+		}
+		time.Sleep(75 * time.Millisecond)
+	}
+	return nil, false
+}
+
+// spawnDaemon starts `ibkr daemon` detached from the calling process. The
+// current binary is located via os.Executable() — no PATH lookup, no separate
+// ibkrd binary, no IBKR_BIN env var.
+//
+// Stdout/stderr route to the daemon log file (or /dev/null on fallback).
+// Leaving Cmd.Stdout/Stderr at the zero value wired exec to a closed fd on
+// macOS and wedged the daemon during startup before it could log.
+func spawnDaemon() error {
+	bin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate self: %w", err)
+	}
+	cmd := exec.Command(bin, "daemon")
+	cmd.Stdin = nil
+
+	logPath := DefaultLogPath()
+	_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	} else {
+		devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if err != nil {
+			return fmt.Errorf("open /dev/null for daemon stdio: %w", err)
+		}
+		cmd.Stdout = devnull
+		cmd.Stderr = devnull
+		defer devnull.Close()
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Process.Release() }()
+	return nil
+}

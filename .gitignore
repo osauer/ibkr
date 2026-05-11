@@ -1,0 +1,26 @@
+# Build artifacts
+/bin/
+/dist/
+*.log
+
+# Cache files
+*.bak
+*.tmp
+
+# OS / editor noise
+**/.DS_Store
+.idea/
+.vscode/
+
+# Local test outputs
+/test/integration/run-*/
+
+# Personal Claude Code state (project-shared settings would go in settings.json)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# Working artefacts that aren't part of the source tree
+/next-priorities.html
+/PLAN.html
+/HANDOFF.md

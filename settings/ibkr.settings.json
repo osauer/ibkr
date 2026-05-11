@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ibkr account*)",
+      "Bash(ibkr positions*)",
+      "Bash(ibkr quote*)",
+      "Bash(ibkr chain*)",
+      "Bash(ibkr history*)",
+      "Bash(ibkr scan*)",
+      "Bash(ibkr status*)",
+      "Bash(ibkr version*)"
+    ],
+    "deny": [
+      "Bash(ibkr order*)",
+      "Bash(ibkr trade*)",
+      "Bash(ibkr cancel*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v jq >/dev/null 2>&1 || { echo 'ibkr settings: jq missing on PATH; failing closed on trading verbs' >&2; exit 2; }; jq -e '.tool_input.command | test(\"(^|[/\\\\s])ibkr\\\\s+(order|trade|cancel)\\\\b\")' >/dev/null && exit 2 || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

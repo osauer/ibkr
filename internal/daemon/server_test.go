@@ -1,0 +1,981 @@
+package daemon
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/osauer/ibkr/internal/config"
+	"github.com/osauer/ibkr/internal/discover"
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+// shortTempDir returns a tempdir under /tmp so Unix socket paths stay
+// inside macOS's ~104-char SUN_LEN limit. t.TempDir() builds paths under
+// /var/folders/... which routinely exceeds that.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "ibkrd-test-")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return d
+}
+
+// openSocket should clean up a stale socket file from a crashed predecessor
+// and bind a fresh listener.
+func TestOpenSocketRemovesStaleSocketFile(t *testing.T) {
+	t.Parallel()
+	dir := shortTempDir(t)
+	sockPath := filepath.Join(dir, "ibkrd.sock")
+
+	// Simulate a stale socket: bind, close listener immediately. The file
+	// remains on disk but no process is serving it, so dial fails fast.
+	staleListener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("seed stale socket: %v", err)
+	}
+	_ = staleListener.Close()
+	// Re-create the file (Close removes it on Unix); writing a regular
+	// file would not match the ModeSocket check, so we have to leave a
+	// real socket inode. The simpler approach: assert openSocket handles
+	// the present-but-dead-socket case by ensuring the file exists.
+	if _, err := os.Stat(sockPath); err == nil {
+		// fine — leftover socket inode, exactly the stale state we want
+	} else {
+		// staleListener.Close already cleaned it up; recreate as a regular
+		// file to exercise the alternate stale-path. Both are valid.
+		f, err := os.Create(sockPath)
+		if err != nil {
+			t.Fatalf("recreate stale path: %v", err)
+		}
+		_ = f.Close()
+	}
+
+	srv := &Server{socketPath: sockPath}
+	if err := srv.openSocket(); err != nil {
+		// If the leftover was a regular file (non-socket), openSocket
+		// won't try to remove it and net.Listen will fail with EADDRINUSE.
+		// Either way we should not crash the daemon.
+		if !strings.Contains(err.Error(), "address already in use") &&
+			!strings.Contains(err.Error(), "bind: address already in use") {
+			t.Fatalf("unexpected openSocket error: %v", err)
+		}
+		// Recover and retry the genuine stale-socket case to keep coverage
+		// meaningful.
+		_ = os.Remove(sockPath)
+		if err := srv.openSocket(); err != nil {
+			t.Fatalf("openSocket after manual cleanup: %v", err)
+		}
+	}
+	defer func() {
+		if srv.listener != nil {
+			_ = srv.listener.Close()
+		}
+	}()
+	if srv.listener == nil {
+		t.Fatalf("listener nil after openSocket")
+	}
+}
+
+// A Server that never opened its listener (e.g. it lost the instance-lock
+// race) must not delete the socket file on Stop(). Pre-fix, the loser's
+// deferred srv.Stop() would unlink the winner's live socket out from
+// underneath it, breaking the running daemon.
+func TestStopDoesNotRemoveSocketWhenListenerNeverOpened(t *testing.T) {
+	t.Parallel()
+	dir := shortTempDir(t)
+	sockPath := filepath.Join(dir, "ibkrd.sock")
+
+	// Simulate the winner: a real socket file that should survive.
+	winner, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("seed winner socket: %v", err)
+	}
+	defer winner.Close()
+
+	// Simulate the loser: a Server constructed with the same socketPath
+	// but no listener (because it never reached openSocket).
+	loser := &Server{
+		socketPath: sockPath,
+		streams:    map[string]context.CancelFunc{},
+	}
+	loser.Stop()
+
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("loser.Stop() removed the winner's socket: %v", err)
+	}
+}
+
+// If a peer is actively serving on the socket, openSocket must refuse to
+// evict it. This is belt-and-suspenders; the instance flock is the real
+// guard, but a stuck flock + live socket should still be diagnosed clearly
+// rather than ripping the socket out from under the live peer.
+func TestOpenSocketRefusesToEvictLivePeer(t *testing.T) {
+	t.Parallel()
+	dir := shortTempDir(t)
+	sockPath := filepath.Join(dir, "ibkrd.sock")
+
+	livePeer, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("seed live peer: %v", err)
+	}
+	defer livePeer.Close()
+
+	srv := &Server{socketPath: sockPath}
+	err = srv.openSocket()
+	if err == nil {
+		t.Fatalf("expected openSocket to refuse evicting a live peer")
+	}
+	if !strings.Contains(err.Error(), "already serving") {
+		t.Fatalf("expected 'already serving' diagnostic, got %v", err)
+	}
+}
+
+// dispatch must report terminal=true for streaming RPCs. serveConn relies
+// on this to return out of its read loop and let defer close the conn,
+// which in turn unblocks the EOF watcher inside the streaming handler.
+// Pre-fix, dispatch returned no terminal signal and serveConn would loop
+// back into ReadBytes — but the streaming handler hadn't returned yet
+// because it had no per-conn ctx tied to the read side, so the
+// subscription leaked.
+func TestDispatchQuoteSubscribeReportsTerminal(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
+		streams:  map[string]context.CancelFunc{},
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+	srv.installSubs()
+
+	// No connector wired → handleQuoteSubscribe takes the
+	// gateway-unavailable early-exit, but the dispatch still has to
+	// declare itself terminal so serveConn cleans up the conn.
+	params, _ := json.Marshal(rpc.QuoteSubscribeParams{Contract: rpc.ContractParams{Symbol: "AAPL"}})
+	req := &rpc.Request{ID: "test-1", Method: rpc.MethodQuoteSubscribe, Params: params}
+
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	r := bufio.NewReader(strings.NewReader(""))
+
+	terminal := srv.dispatch(context.Background(), req, enc, r)
+	if !terminal {
+		t.Fatalf("expected dispatch to report terminal=true for MethodQuoteSubscribe")
+	}
+}
+
+// unaryDeadline picks a per-method budget that stays under the CLI's 60s
+// per-invocation deadline (cmd/ibkr/main.go) so the daemon's classified
+// error reaches the user before the socket times out, while leaving the
+// streaming method (quote.subscribe) without a deadline. Locks the
+// invariant: every unary method must have d > 0 AND d < 60s.
+func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
+	t.Parallel()
+	cliBudget := 60 * time.Second
+
+	unary := []string{
+		rpc.MethodAccountSummary,
+		rpc.MethodPositionsList,
+		rpc.MethodQuoteSnapshot,
+		rpc.MethodChainFetch,
+		rpc.MethodChainExpiries,
+		rpc.MethodScanRun,
+		rpc.MethodScanList,
+		rpc.MethodHistoryDaily,
+		rpc.MethodStatusHealth,
+	}
+	for _, m := range unary {
+		d := unaryDeadline(m)
+		if d <= 0 {
+			t.Errorf("unaryDeadline(%q) = %s, want >0 (every unary method needs a per-request timeout)", m, d)
+		}
+		if d >= cliBudget {
+			t.Errorf("unaryDeadline(%q) = %s, must stay under CLI budget %s so daemon errors first", m, d, cliBudget)
+		}
+	}
+	if d := unaryDeadline(rpc.MethodQuoteSubscribe); d != 0 {
+		t.Errorf("unaryDeadline(%q) = %s, want 0 (streaming methods must not have a deadline)", rpc.MethodQuoteSubscribe, d)
+	}
+}
+
+// dispatch must wrap the handler ctx with a per-request deadline derived
+// from unaryDeadline. We assert this structurally by handing in a ctx
+// without a deadline and reading what the handler observes via the
+// gateway-unavailable error path (which is fast, so the deadline shows up
+// in ctx.Deadline() but is never hit).
+func TestDispatchAttachesPerRequestDeadline(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
+		streams:  map[string]context.CancelFunc{},
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	params, _ := json.Marshal(rpc.ChainFetchParams{Symbol: "AAPL", Expiry: "2026-06-19", Width: 1, Side: "both"})
+	req := &rpc.Request{ID: "td-1", Method: rpc.MethodChainFetch, Params: params}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	r := bufio.NewReader(strings.NewReader(""))
+
+	parent := context.Background()
+	srv.dispatch(parent, req, enc, r)
+
+	// Parent ctx must be untouched (no deadline) — dispatch's WithTimeout
+	// is scoped via cancel-defer to the request only.
+	if _, has := parent.Deadline(); has {
+		t.Fatal("dispatch leaked a deadline into the caller's ctx")
+	}
+}
+
+// Server.Start must open the Unix socket and start serving before the
+// gateway handshake completes — otherwise a slow or unreachable gateway
+// blocks `ibkr status` for 30-40s during the IBKR pool's TCP timeouts.
+// We exercise this by running a real Server.Start against a config
+// pointing at a closed TCP port (handshake will fail after ~8s) and
+// verifying the socket is listening within 1 second.
+func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
+	t.Parallel()
+	dir := shortTempDir(t)
+	sockPath := filepath.Join(dir, "ibkrd.sock")
+
+	// Find a free TCP port and immediately close it — the daemon's
+	// handshake against it will fail (refused connection or timeout),
+	// proving Start did not block on connector readiness.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	addr := probe.Addr().(*net.TCPAddr)
+	_ = probe.Close()
+
+	tlsFalse := false
+	cfg := &config.Resolved{
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(addr.Port), ClientID: config.IntPtr(99), TLS: &tlsFalse},
+	}
+	cfg.Daemon.SetIdleTimeout(50 * time.Millisecond)
+
+	srv := New(Options{
+		Config:     cfg,
+		SocketPath: sockPath,
+		Version:    "test",
+		Logger:     NewLogger(&bytes.Buffer{}, "error"),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startReturned := make(chan error, 1)
+	go func() {
+		startReturned <- srv.Start(ctx)
+	}()
+
+	// Within 1s the socket must be listening — proves we're not blocked
+	// on the connector handshake.
+	socketDeadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(socketDeadline) {
+		if c, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond); err == nil {
+			_ = c.Close()
+			goto socketOK
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("socket not reachable within 1s — Start blocked on connector?")
+
+socketOK:
+	// Idle watcher will fire and Start will return; let it do so cleanly.
+	select {
+	case <-startReturned:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-startReturned
+		t.Fatal("Start did not return within 3s of idle fire")
+	}
+	srv.Stop()
+}
+
+// runIdleWatcher must return when the idle timer fires with no active
+// conns. Pre-fix, the idle case closed the listener directly and returned;
+// the surrounding Start() then returned to cmd/ibkrd's main, which blocked
+// on <-ctx.Done() forever, leaking a zombie process that held the instance
+// lock. The fix moves listener teardown into Start() (via closeListener)
+// so the idle path can simply return and let the deferred Stop() finish
+// cleanup. This test pins the new contract: idle fire returns promptly.
+func TestRunIdleWatcherReturnsOnIdleFire(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Resolved{}
+	cfg.Daemon.SetIdleTimeout(50 * time.Millisecond)
+	srv := &Server{
+		cfg:      cfg,
+		streams:  map[string]context.CancelFunc{},
+		idleStop: make(chan struct{}),
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.runIdleWatcher(context.Background())
+	}()
+
+	select {
+	case <-done:
+		// pass — idle watcher returned
+	case <-time.After(2 * time.Second):
+		t.Fatal("runIdleWatcher did not return within 2s of idle timer firing")
+	}
+}
+
+// closeListener must be idempotent and safe to call when the listener was
+// never opened (loser of the lock race) or has already been closed by an
+// idle-shutdown path.
+func TestCloseListenerIdempotent(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	srv.closeListener() // never opened — must not panic
+	srv.closeListener() // still nil — must not panic
+
+	dir := shortTempDir(t)
+	srv.socketPath = filepath.Join(dir, "ibkrd.sock")
+	if err := srv.openSocket(); err != nil {
+		t.Fatalf("openSocket: %v", err)
+	}
+	srv.closeListener() // real close
+	srv.closeListener() // already nil — must not panic
+
+	if _, err := os.Stat(srv.socketPath); !os.IsNotExist(err) {
+		t.Fatalf("socket file should be unlinked after closeListener; stat err=%v", err)
+	}
+}
+
+// End-to-end check that idle-fire → Start returns → Stop releases all
+// resources. Bypasses startConnector/lock acquisition (which need a real
+// gateway / process layer) and exercises just the listener+idle plumbing
+// that the zombie bug lived in.
+func TestServerIdleShutdownReleasesListenerAndSocket(t *testing.T) {
+	t.Parallel()
+	dir := shortTempDir(t)
+	cfg := &config.Resolved{}
+	cfg.Daemon.SetIdleTimeout(50 * time.Millisecond)
+	srv := &Server{
+		cfg:        cfg,
+		socketPath: filepath.Join(dir, "ibkrd.sock"),
+		streams:    map[string]context.CancelFunc{},
+		idleStop:   make(chan struct{}),
+		logger:     NewLogger(&bytes.Buffer{}, "error"),
+	}
+	if err := srv.openSocket(); err != nil {
+		t.Fatalf("openSocket: %v", err)
+	}
+
+	// Drive the same sequence Start runs after wiring is up.
+	go srv.acceptLoop(context.Background(), srv.listener)
+	srv.runIdleWatcher(context.Background())
+	srv.closeListener() // matches Start's post-watcher cleanup
+
+	// Allow acceptLoop a moment to observe net.ErrClosed and exit.
+	time.Sleep(50 * time.Millisecond)
+
+	srv.Stop() // matches cmd/ibkrd's deferred Stop
+
+	if _, err := os.Stat(srv.socketPath); !os.IsNotExist(err) {
+		t.Fatalf("socket file should be removed after idle shutdown + Stop; stat err=%v", err)
+	}
+	if srv.listener != nil {
+		t.Fatal("listener should be nil after Stop")
+	}
+}
+
+// handshakeWatchdog publishes a hint to lastConnectError when isConnected
+// is still false after the delay. Function-pointer abstraction lets us
+// drive this with no real Connector — exactly the testability story the
+// #2 issue brief specified.
+func TestHandshakeWatchdog_PublishesHintAfterDelay(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger: NewLogger(&bytes.Buffer{}, "error"),
+	}
+	ep := discover.Endpoint{Host: "127.0.0.1", Port: 4001}
+	srv.handshakeWatchdog(context.Background(), func() bool { return false }, 1*time.Millisecond, ep)
+	srv.mu.Lock()
+	got := srv.lastConnectError
+	srv.mu.Unlock()
+	if !strings.Contains(got, "127.0.0.1:4001") || !strings.Contains(got, "TWS handshake") {
+		t.Fatalf("watchdog hint missing or malformed: %q", got)
+	}
+}
+
+// When isConnected returns true after the delay, the watchdog must stay
+// silent — no spurious hint to clobber a successful state.
+func TestHandshakeWatchdog_SilentWhenConnected(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger: NewLogger(&bytes.Buffer{}, "error"),
+	}
+	ep := discover.Endpoint{Host: "127.0.0.1", Port: 4001}
+	srv.handshakeWatchdog(context.Background(), func() bool { return true }, 1*time.Millisecond, ep)
+	srv.mu.Lock()
+	got := srv.lastConnectError
+	srv.mu.Unlock()
+	if got != "" {
+		t.Fatalf("watchdog set lastConnectError despite connected=true: %q", got)
+	}
+}
+
+// ctx cancellation before the delay fires must abort the watchdog
+// silently. Used during shutdown where the surrounding goroutine is
+// already winding down.
+func TestHandshakeWatchdog_RespectsContextCancel(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger: NewLogger(&bytes.Buffer{}, "error"),
+	}
+	ep := discover.Endpoint{Host: "127.0.0.1", Port: 4001}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int32
+	srv.handshakeWatchdog(ctx, func() bool {
+		calls.Add(1)
+		return false
+	}, 50*time.Millisecond, ep)
+	if calls.Load() != 0 {
+		t.Fatalf("watchdog called isConnected after ctx cancel")
+	}
+	srv.mu.Lock()
+	got := srv.lastConnectError
+	srv.mu.Unlock()
+	if got != "" {
+		t.Fatalf("watchdog set lastConnectError after ctx cancel: %q", got)
+	}
+}
+
+// The watchdog must not clobber a real error already published by the
+// main connect path — the gate is the lastConnectError == "" check.
+func TestHandshakeWatchdog_DoesNotClobberExistingError(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		lastConnectError: "real error from connector.Start",
+		logger:           NewLogger(&bytes.Buffer{}, "error"),
+	}
+	ep := discover.Endpoint{Host: "127.0.0.1", Port: 4001}
+	srv.handshakeWatchdog(context.Background(), func() bool { return false }, 1*time.Millisecond, ep)
+	srv.mu.Lock()
+	got := srv.lastConnectError
+	srv.mu.Unlock()
+	if got != "real error from connector.Start" {
+		t.Fatalf("watchdog clobbered real error: got %q", got)
+	}
+}
+
+// triggerReconnect is the gate that prevents stacked connect attempts.
+// While a connect is already running, calling it must return false
+// immediately — otherwise the same `ibkr status` poll loop that drives
+// the recovery would pile up parallel connect goroutines for the same
+// endpoint while the first one is still running its handshake.
+func TestTriggerReconnect_InFlightGateBlocksNewAttempt(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger:          NewLogger(&bytes.Buffer{}, "error"),
+		connectInFlight: true,
+		serverCtx:       context.Background(),
+	}
+	if srv.triggerReconnect() {
+		t.Fatal("triggerReconnect must return false when connectInFlight=true")
+	}
+}
+
+// Without a serverCtx (Server.Start hasn't run yet, or already returned
+// and cancelled it), there's no long-lived context to attach the
+// reconnect goroutine to. triggerReconnect must bail out cleanly.
+func TestTriggerReconnect_NoServerCtxBails(t *testing.T) {
+	t.Parallel()
+	srv := &Server{logger: NewLogger(&bytes.Buffer{}, "error")}
+	if srv.triggerReconnect() {
+		t.Fatal("triggerReconnect must return false when serverCtx is nil")
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv.serverCtx = cancelled
+	if srv.triggerReconnect() {
+		t.Fatal("triggerReconnect must return false when serverCtx is already cancelled")
+	}
+}
+
+// reconnectFlow re-runs discovery and re-publishes s.endpoint when the
+// probe winner has changed. This is the fix for the AUTO-mode degradation
+// detection bug: GW closed (4001), TWS opened (7496), the daemon was
+// pinned to 4001 forever; calling reconnectFlow updates the endpoint to
+// the new probe winner. We exercise the discovery+endpoint-republish
+// half here; the connector.Start tail will fail because no real IBKR is
+// listening, but s.endpoint is updated before that.
+func TestReconnectFlow_RepublishesEndpointOnNewProbeWinner(t *testing.T) {
+	// Not parallel: stubs the package-level discover.Probe.
+	saved := discover.Probe
+	discover.Probe = func(_ context.Context, _ string, port int, _ time.Duration) error {
+		if port == 7496 {
+			return nil
+		}
+		return errors.New("refused")
+	}
+	t.Cleanup(func() { discover.Probe = saved })
+
+	srv := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginDiscovered},
+		streams:  map[string]context.CancelFunc{},
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	// Use a context tight enough that the connector.Start tail unwinds
+	// quickly. We don't need it to succeed; we only need s.endpoint
+	// updated before the connect attempt.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	srv.reconnectFlow(ctx)
+
+	srv.mu.Lock()
+	got := srv.endpoint
+	srv.mu.Unlock()
+	if got.Port != 7496 {
+		t.Fatalf("after reconnectFlow, endpoint.Port = %d, want 7496 (the new probe winner)", got.Port)
+	}
+	if got.PortOrigin != discover.OriginDiscovered {
+		t.Fatalf("after reconnectFlow, endpoint.PortOrigin = %q, want discovered", got.PortOrigin)
+	}
+}
+
+// When discovery itself fails (no IBKR listener), reconnectFlow must
+// record the discovery error so `ibkr status` renders a verdict instead
+// of leaving the user staring at "starting…" forever.
+func TestReconnectFlow_RecordsDiscoveryFailure(t *testing.T) {
+	// Not parallel: stubs the package-level discover.Probe.
+	saved := discover.Probe
+	discover.Probe = func(_ context.Context, _ string, _ int, _ time.Duration) error {
+		return errors.New("refused (test)")
+	}
+	t.Cleanup(func() { discover.Probe = saved })
+
+	srv := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginDiscovered},
+		streams:  map[string]context.CancelFunc{},
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	srv.reconnectFlow(ctx)
+
+	srv.mu.Lock()
+	lastErr := srv.lastConnectError
+	srv.mu.Unlock()
+	if !strings.Contains(lastErr, "no IBKR listener") {
+		t.Fatalf("lastConnectError = %q, want it to mention discovery failure", lastErr)
+	}
+}
+
+// handleStatusHealth must trigger a rediscover+reconnect when the
+// daemon is currently degraded. This is the user-visible recovery path:
+// running `ibkr status` after moving from Gateway to TWS picks up the
+// new port without a daemon restart. We check the trigger fired by
+// observing connectInFlight transitioning from "claimed" back to
+// "cleared" inside the goroutine.
+func TestHandleStatusHealth_TriggersReconnectWhenDegraded(t *testing.T) {
+	// Not parallel: stubs the package-level discover.Probe.
+	saved := discover.Probe
+	discover.Probe = func(_ context.Context, _ string, _ int, _ time.Duration) error {
+		return errors.New("refused (test)")
+	}
+	t.Cleanup(func() { discover.Probe = saved })
+
+	srv := &Server{
+		cfg:              &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		endpoint:         discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
+		version:          "test",
+		streams:          map[string]context.CancelFunc{},
+		logger:           NewLogger(&bytes.Buffer{}, "error"),
+		lastConnectError: "test: gateway 127.0.0.1:4001 did not complete handshake",
+		serverCtx:        context.Background(),
+	}
+
+	res := srv.handleStatusHealth()
+	if res.Connected {
+		t.Fatal("expected Connected=false")
+	}
+
+	// Trigger fired synchronously up to "claim slot, launch goroutine."
+	// Wait for the goroutine to complete (discovery fails fast under our
+	// stub) and verify the post-recovery state: lastConnectError replaced
+	// with the discovery failure, in-flight flag cleared.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.mu.Lock()
+		inFlight := srv.connectInFlight
+		lastErr := srv.lastConnectError
+		srv.mu.Unlock()
+		if !inFlight {
+			if !strings.Contains(lastErr, "no IBKR listener") {
+				t.Fatalf("after rediscovery, lastConnectError = %q, want discovery failure", lastErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("connectInFlight did not clear within 2s — reconnect goroutine never ran")
+}
+
+// gatewayConnector returning nil for a degraded daemon must also
+// trigger a reconnect — every read handler funnels through it, so this
+// is what makes commands other than `status` recover automatically.
+func TestGatewayConnector_TriggersReconnectWhenDegraded(t *testing.T) {
+	// Not parallel: stubs the package-level discover.Probe.
+	saved := discover.Probe
+	discover.Probe = func(_ context.Context, _ string, _ int, _ time.Duration) error {
+		return errors.New("refused (test)")
+	}
+	t.Cleanup(func() { discover.Probe = saved })
+
+	srv := &Server{
+		cfg:       &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		endpoint:  discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
+		streams:   map[string]context.CancelFunc{},
+		logger:    NewLogger(&bytes.Buffer{}, "error"),
+		serverCtx: context.Background(),
+	}
+
+	if got := srv.gatewayConnector(); got != nil {
+		t.Fatalf("gatewayConnector with no connector should return nil, got %v", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.mu.Lock()
+		inFlight := srv.connectInFlight
+		lastErr := srv.lastConnectError
+		srv.mu.Unlock()
+		if !inFlight && lastErr != "" {
+			// Goroutine ran and recorded the discovery failure.
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("gatewayConnector did not trigger a reconnect goroutine within 2s")
+}
+
+// serveConn must return when the client closes its socket end while a
+// streaming RPC is in flight. The fix wires this via per-conn context
+// and an EOF watcher inside the streaming handler. With no connector,
+// the handler takes the gateway-unavailable early exit and returns;
+// dispatch reports terminal=true; serveConn returns. The whole sequence
+// must complete within a tight deadline.
+func TestServeConnExitsCleanlyAfterStreamingRequest(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
+		streams:  map[string]context.CancelFunc{},
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+	}
+	srv.installSubs()
+
+	clientSide, daemonSide := net.Pipe()
+	t.Cleanup(func() { _ = clientSide.Close(); _ = daemonSide.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveConn(context.Background(), daemonSide)
+	}()
+
+	params, _ := json.Marshal(rpc.QuoteSubscribeParams{Contract: rpc.ContractParams{Symbol: "AAPL"}})
+	req := &rpc.Request{ID: "test-1", Method: rpc.MethodQuoteSubscribe, Params: params}
+	if err := json.NewEncoder(clientSide).Encode(req); err != nil {
+		t.Fatalf("encode subscribe request: %v", err)
+	}
+
+	// Read the streaming handler's gateway-unavailable error response so
+	// the daemon-side write doesn't block on a backed-up pipe. Then close
+	// the client side; serveConn should exit promptly.
+	if _, err := bufio.NewReader(clientSide).ReadBytes('\n'); err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = clientSide.Close()
+
+	select {
+	case <-done:
+		// pass
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serveConn did not return within 2s after client disconnect")
+	}
+}
+
+// fakeAttempter implements connectAttempter for the failover loop tests.
+// Each instance is built for one candidate endpoint; connectOk decides
+// whether IsConnected returns true after Start runs. blockUntilCtxDone
+// makes Start sit blocked on ctx (modelling pkg/ibkr's TLS-handshake-on-
+// black-hole hang) so the per-candidate budget can be exercised.
+type fakeAttempter struct {
+	port              int
+	connectOk         bool
+	startErr          error
+	blockUntilCtxDone bool
+	connected         atomic.Bool
+	stopCalls         atomic.Int32
+
+	// observed runtime info — checked by tests
+	setMarketDataType atomic.Int32
+	requestedAccount  atomic.Value // string
+}
+
+func (f *fakeAttempter) Start(ctx context.Context) error {
+	if f.blockUntilCtxDone {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if f.startErr != nil {
+		return f.startErr
+	}
+	if f.connectOk {
+		f.connected.Store(true)
+	}
+	return nil
+}
+func (f *fakeAttempter) Stop() error {
+	f.stopCalls.Add(1)
+	f.connected.Store(false)
+	return nil
+}
+func (f *fakeAttempter) IsConnected() bool { return f.connected.Load() }
+func (f *fakeAttempter) UsingTLS() bool    { return false }
+func (f *fakeAttempter) SetMarketDataType(t int) error {
+	f.setMarketDataType.Store(int32(t))
+	return nil
+}
+func (f *fakeAttempter) RequestAccountUpdates(account string) error {
+	f.requestedAccount.Store(account)
+	return nil
+}
+
+// The failover bug fix: when discovery picks a port that completes the
+// TCP probe but never handshakes (e.g. IB Gateway up but not logged in),
+// the daemon used to stay degraded forever even though TWS on an
+// alternate port was sitting in Endpoint.Alternates. With failover, the
+// loop walks alternates in preference order and the first one to
+// handshake wins. This test pins that contract: primary (4001) fails,
+// alternate (7496) succeeds, the daemon ends up Connected against the
+// alternate with lastConnectError cleared.
+func TestConnectWithFailover_AlternateWinsWhenPrimaryFails(t *testing.T) {
+	t.Parallel()
+
+	built := make([]int, 0, 2)
+	var attempters []*fakeAttempter
+
+	srv := &Server{
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+		streams: map[string]context.CancelFunc{},
+	}
+	srv.attempterFactory = func(ep discover.Endpoint) connectAttempter {
+		built = append(built, ep.Port)
+		a := &fakeAttempter{
+			port:      ep.Port,
+			connectOk: ep.Port == 7496, // only the alternate handshakes
+		}
+		attempters = append(attempters, a)
+		return a
+	}
+
+	primary := discover.Endpoint{
+		Host:       "127.0.0.1",
+		Port:       4001,
+		ClientID:   15,
+		Alternates: []int{7496},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.connectWithFailover(ctx, primary)
+
+	// Both candidates were built, in preference order.
+	if len(built) != 2 || built[0] != 4001 || built[1] != 7496 {
+		t.Fatalf("built ports = %v, want [4001 7496]", built)
+	}
+
+	// Primary was Stopped after failing handshake; alternate was not
+	// Stopped (it's the live connector).
+	if got := attempters[0].stopCalls.Load(); got != 1 {
+		t.Fatalf("primary stopCalls = %d, want 1", got)
+	}
+	if got := attempters[1].stopCalls.Load(); got != 0 {
+		t.Fatalf("alternate stopCalls = %d, want 0 (still live)", got)
+	}
+
+	// Post-connect setup ran on the winning attempter.
+	if got := attempters[1].setMarketDataType.Load(); got != 2 {
+		t.Fatalf("alternate.SetMarketDataType arg = %d, want 2 (frozen-aware)", got)
+	}
+
+	// Endpoint published reflects the winning candidate; the daemon's
+	// recorded error is cleared.
+	srv.mu.Lock()
+	gotEp := srv.endpoint
+	gotErr := srv.lastConnectError
+	srv.mu.Unlock()
+	if gotEp.Port != 7496 {
+		t.Fatalf("endpoint.Port = %d after failover, want 7496", gotEp.Port)
+	}
+	if gotErr != "" {
+		t.Fatalf("lastConnectError = %q, want empty after success", gotErr)
+	}
+}
+
+// When every candidate's handshake fails, the daemon publishes a verdict
+// that names what was tried so `ibkr status` shows the user the full
+// picture. This is the "all candidates exhausted" branch — the user must
+// fix something upstream (login, API checkbox, port config) before the
+// daemon can recover.
+func TestConnectWithFailover_ExhaustionPublishesNamedVerdict(t *testing.T) {
+	t.Parallel()
+
+	srv := &Server{
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+		streams: map[string]context.CancelFunc{},
+	}
+	srv.attempterFactory = func(ep discover.Endpoint) connectAttempter {
+		return &fakeAttempter{port: ep.Port, connectOk: false}
+	}
+
+	primary := discover.Endpoint{
+		Host:       "127.0.0.1",
+		Port:       4001,
+		ClientID:   15,
+		Alternates: []int{7496},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.connectWithFailover(ctx, primary)
+
+	srv.mu.Lock()
+	gotErr := srv.lastConnectError
+	srv.mu.Unlock()
+	if !strings.Contains(gotErr, "none of 2 discovered endpoint(s)") {
+		t.Fatalf("lastConnectError = %q, want exhaustion verdict naming 2 endpoints", gotErr)
+	}
+	if !strings.Contains(gotErr, "127.0.0.1:4001") || !strings.Contains(gotErr, "127.0.0.1:7496") {
+		t.Fatalf("lastConnectError = %q, want it to name both 4001 and 7496", gotErr)
+	}
+}
+
+// A candidate whose handshake hangs forever (the black-hole-TLS
+// scenario: TCP accepted, no ServerHello ever sent) must not block
+// failover. The per-candidate budget caps the wait; the loop then
+// advances to the alternate, which lands Connected. This is the live
+// reproduction that revealed the bug: an IB Gateway stuck mid-login
+// would freeze the daemon against 4001 even though TWS on 7496 was
+// healthy and right there in the alternates list.
+func TestConnectWithFailover_HangingPrimaryYieldsToAlternateAfterBudget(t *testing.T) {
+	// Not parallel: mutates the package-level budget var.
+	saved := perCandidateConnectBudget
+	perCandidateConnectBudget = 50 * time.Millisecond
+	t.Cleanup(func() { perCandidateConnectBudget = saved })
+
+	var built []int
+	srv := &Server{
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+		streams: map[string]context.CancelFunc{},
+	}
+	srv.attempterFactory = func(ep discover.Endpoint) connectAttempter {
+		built = append(built, ep.Port)
+		switch ep.Port {
+		case 4001:
+			return &fakeAttempter{port: ep.Port, blockUntilCtxDone: true}
+		case 7496:
+			return &fakeAttempter{port: ep.Port, connectOk: true}
+		default:
+			t.Fatalf("unexpected candidate port %d", ep.Port)
+			return nil
+		}
+	}
+
+	primary := discover.Endpoint{
+		Host:       "127.0.0.1",
+		Port:       4001,
+		ClientID:   15,
+		Alternates: []int{7496},
+	}
+
+	// Give the loop enough wall-clock for one full candidate budget
+	// (50ms) plus alternate (effectively instant).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	srv.connectWithFailover(ctx, primary)
+	elapsed := time.Since(start)
+
+	if len(built) != 2 || built[0] != 4001 || built[1] != 7496 {
+		t.Fatalf("built ports = %v, want [4001 7496] (loop must advance past hung primary)", built)
+	}
+	// The loop should have spent ~one budget on the primary, not the
+	// full test ctx timeout. Allow generous slack for scheduler jitter.
+	if elapsed > 1*time.Second {
+		t.Fatalf("failover took %s, expected ~50ms primary + ~0ms alt; per-candidate budget did not fire", elapsed)
+	}
+	srv.mu.Lock()
+	gotPort := srv.endpoint.Port
+	gotErr := srv.lastConnectError
+	srv.mu.Unlock()
+	if gotPort != 7496 {
+		t.Fatalf("endpoint.Port = %d after failover, want 7496", gotPort)
+	}
+	if gotErr != "" {
+		t.Fatalf("lastConnectError = %q, want empty after alternate success", gotErr)
+	}
+}
+
+// No alternates → single candidate → degenerate failover that just runs
+// the primary once. Preserves the pre-failover semantics for the common
+// case where discovery saw exactly one IBKR endpoint.
+func TestConnectWithFailover_SingleCandidateNoAlternates(t *testing.T) {
+	t.Parallel()
+
+	var built []int
+	srv := &Server{
+		logger:  NewLogger(&bytes.Buffer{}, "error"),
+		streams: map[string]context.CancelFunc{},
+	}
+	srv.attempterFactory = func(ep discover.Endpoint) connectAttempter {
+		built = append(built, ep.Port)
+		return &fakeAttempter{port: ep.Port, connectOk: true}
+	}
+
+	primary := discover.Endpoint{Host: "127.0.0.1", Port: 7496, ClientID: 15}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.connectWithFailover(ctx, primary)
+
+	if len(built) != 1 || built[0] != 7496 {
+		t.Fatalf("built ports = %v, want [7496] (single candidate)", built)
+	}
+	srv.mu.Lock()
+	gotErr := srv.lastConnectError
+	srv.mu.Unlock()
+	if gotErr != "" {
+		t.Fatalf("lastConnectError = %q, want empty after single-candidate success", gotErr)
+	}
+}

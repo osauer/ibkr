@@ -1,0 +1,191 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "no-such.toml"))
+	if err != nil {
+		t.Fatalf("Load missing: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if res.Gateway.PortPinned() {
+		t.Errorf("Port should be unpinned in zero config, got %v", *res.Gateway.Port)
+	}
+	if res.Gateway.TLSPinned() {
+		t.Errorf("TLS should be unpinned in zero config, got %v", *res.Gateway.TLS)
+	}
+	if res.Gateway.HostOrDefault() != "127.0.0.1" {
+		t.Errorf("HostOrDefault = %q, want 127.0.0.1", res.Gateway.HostOrDefault())
+	}
+	if res.Gateway.ClientIDOrDefault() != 15 {
+		t.Errorf("ClientIDOrDefault = %d, want 15", res.Gateway.ClientIDOrDefault())
+	}
+	if res.Daemon.IdleTimeout.Std() != 5*time.Minute {
+		t.Errorf("default idle = %v, want 5m", res.Daemon.IdleTimeout.Std())
+	}
+	if res.Daemon.LogLevel != "info" {
+		t.Errorf("default log_level = %q, want info", res.Daemon.LogLevel)
+	}
+	if _, ok := res.Scans["top-movers"]; !ok {
+		t.Errorf("top-movers preset missing from defaults")
+	}
+}
+
+func TestLoad_PinnedFieldsAreBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `[gateway]
+host       = "127.0.0.1"
+port       = 4002
+client_id  = 16
+account    = "DU111"
+tls        = false
+
+[daemon]
+idle_timeout = "10m"
+log_level    = "debug"
+
+[scans.movers]
+type     = "TOP_PERC_GAIN"
+exchange = "STK.US.MAJOR"
+limit    = 10
+timeout  = "30s"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !res.Gateway.PortPinned() || *res.Gateway.Port != 4002 {
+		t.Errorf("Port should be pinned to 4002, got %+v", res.Gateway.Port)
+	}
+	if !res.Gateway.TLSPinned() || *res.Gateway.TLS != false {
+		t.Errorf("TLS should be pinned to false, got %+v", res.Gateway.TLS)
+	}
+	if res.Gateway.ClientIDOrDefault() != 16 {
+		t.Errorf("ClientID = %d, want 16", res.Gateway.ClientIDOrDefault())
+	}
+	if res.Gateway.Account != "DU111" {
+		t.Errorf("Account = %q, want DU111", res.Gateway.Account)
+	}
+	if res.Daemon.IdleTimeout.Std() != 10*time.Minute {
+		t.Errorf("idle = %v, want 10m", res.Daemon.IdleTimeout.Std())
+	}
+	if res.Daemon.LogLevel != "debug" {
+		t.Errorf("log_level = %q, want debug", res.Daemon.LogLevel)
+	}
+	got, ok := res.Scans["movers"]
+	if !ok {
+		t.Fatalf("scans[movers] missing")
+	}
+	if got.Limit != 10 {
+		t.Errorf("scans[movers].Limit = %d, want 10", got.Limit)
+	}
+	if got.Timeout.Std() != 30*time.Second {
+		t.Errorf("scans[movers].Timeout = %v, want 30s", got.Timeout.Std())
+	}
+}
+
+// TestLoad_PartialConfig_AutoForOmittedFields proves that omitting a field
+// leaves it nil (= auto), even when sibling fields are pinned.
+func TestLoad_PartialConfig_AutoForOmittedFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `[gateway]
+client_id = 42
+# port and tls intentionally omitted — should remain auto
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if res.Gateway.PortPinned() {
+		t.Errorf("Port should remain auto when omitted, got pinned %v", *res.Gateway.Port)
+	}
+	if res.Gateway.TLSPinned() {
+		t.Errorf("TLS should remain auto when omitted, got pinned %v", *res.Gateway.TLS)
+	}
+	if res.Gateway.ClientIDOrDefault() != 42 {
+		t.Errorf("ClientID = %d, want 42", res.Gateway.ClientIDOrDefault())
+	}
+}
+
+// TestLoad_UnknownKeys_Rejected guards the silent-acceptance regression we
+// hit shipping v0.8.0: a `[profiles.live]` config (from an older proposal)
+// parsed cleanly because BurntSushi/toml drops unknown keys by default,
+// leaving every Gateway field nil and silently demoting the daemon to AUTO
+// discovery with default client_id=15. After this fix, Load must reject
+// unknown keys and the error must name them so the user can find them.
+func TestLoad_UnknownKeys_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `default_profile = "live"
+
+[profiles.live]
+host      = "127.0.0.1"
+port      = 4001
+client_id = 15
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown TOML keys, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"unknown key", "default_profile", "profiles"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q must mention %q", msg, want)
+		}
+	}
+}
+
+// TestLoad_TLSPinnedFalse_StaysFalse guards the #3 fix: tls=false must be
+// distinguishable from "tls absent." The pointer encoding is the mechanism.
+func TestLoad_TLSPinnedFalse_StaysFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `[gateway]
+tls = false
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !res.Gateway.TLSPinned() {
+		t.Fatal("tls=false should register as pinned")
+	}
+	if *res.Gateway.TLS != false {
+		t.Errorf("TLS = %v, want false", *res.Gateway.TLS)
+	}
+}

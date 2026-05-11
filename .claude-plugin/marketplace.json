@@ -1,0 +1,15 @@
+{
+  "name": "ibkr",
+  "description": "Self-hosted marketplace for the ibkr Claude Code plugin (read-only Interactive Brokers integration).",
+  "owner": {
+    "name": "osauer",
+    "url": "https://github.com/osauer"
+  },
+  "plugins": [
+    {
+      "name": "ibkr",
+      "source": "./",
+      "description": "Read-only Interactive Brokers integration: account, positions, quotes, option chains, daily history, market scans, and fixed-fractional position sizing. Requires the `ibkr` binary on PATH; see the project README for install instructions."
+    }
+  ]
+}

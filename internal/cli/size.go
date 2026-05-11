@@ -1,0 +1,199 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+// SizeInput is the validated input to ComputeSize. Fields mirror the CLI
+// flags one-for-one so the pure function is testable without the runner.
+type SizeInput struct {
+	Symbol      string
+	Side        string  // "long" | "short"
+	Entry       float64 // quote currency
+	Stop        float64 // quote currency
+	RiskPct     float64 // percent of NLV; (0, 100]
+	Lot         int     // round shares down to this multiple; >= 1
+	FX          float64 // quote-currency units per 1 base-currency unit; > 0
+	NLV         float64 // base currency
+	BuyingPower float64 // base currency (0 disables BP check)
+	Currency    string  // base currency code, surfaced in output only
+}
+
+// SizeResult is the wire shape of `ibkr size --json` and the input to the
+// text renderer. Keep this struct stable — Claude consumes it.
+type SizeResult struct {
+	Symbol       string  `json:"symbol"`
+	Side         string  `json:"side"`
+	Entry        float64 `json:"entry"`
+	Stop         float64 `json:"stop"`
+	RiskPct      float64 `json:"risk_pct"`
+	Lot          int     `json:"lot"`
+	FX           float64 `json:"fx"`
+	NLV          float64 `json:"nlv"`
+	BaseCurrency string  `json:"base_currency,omitempty"`
+	RiskBase     float64 `json:"risk_base"`  // NLV * pct/100
+	RiskQuote    float64 `json:"risk_quote"` // RiskBase * fx
+	PerShareRisk float64 `json:"per_share_risk"`
+	Shares       int     `json:"shares"`
+	Notional     float64 `json:"notional"` // shares * entry
+	MaxLoss      float64 `json:"max_loss"` // shares * per_share_risk (quote ccy)
+	Status       string  `json:"status"`   // "ok" | "tight_risk" | "exceeds_buying_power"
+}
+
+// ComputeSize is the pure sizing function. All validation lives here so the
+// runner stays a thin wiring layer; tests cover the math and the validations
+// without spinning up a daemon. Exported because the MCP server reuses it for
+// the ibkr_size tool — the daemon has no size RPC; sizing is account-snapshot
+// + local arithmetic.
+func ComputeSize(in SizeInput) (SizeResult, error) {
+	side := strings.ToLower(strings.TrimSpace(in.Side))
+	if side == "" {
+		side = "long"
+	}
+	if side != "long" && side != "short" {
+		return SizeResult{}, fmt.Errorf("side must be long or short (got %q)", in.Side)
+	}
+	if in.Symbol == "" {
+		return SizeResult{}, fmt.Errorf("symbol is required")
+	}
+	if in.Entry <= 0 {
+		return SizeResult{}, fmt.Errorf("entry must be > 0 (got %v)", in.Entry)
+	}
+	if in.Stop <= 0 {
+		return SizeResult{}, fmt.Errorf("stop must be > 0 (got %v)", in.Stop)
+	}
+	if side == "long" && in.Stop >= in.Entry {
+		return SizeResult{}, fmt.Errorf("long trade requires stop (%v) < entry (%v)", in.Stop, in.Entry)
+	}
+	if side == "short" && in.Stop <= in.Entry {
+		return SizeResult{}, fmt.Errorf("short trade requires stop (%v) > entry (%v)", in.Stop, in.Entry)
+	}
+	if in.RiskPct <= 0 || in.RiskPct > 100 {
+		return SizeResult{}, fmt.Errorf("risk-pct must be in (0, 100] (got %v)", in.RiskPct)
+	}
+	if in.Lot < 1 {
+		return SizeResult{}, fmt.Errorf("lot must be >= 1 (got %v)", in.Lot)
+	}
+	if in.FX <= 0 {
+		return SizeResult{}, fmt.Errorf("fx must be > 0 (got %v)", in.FX)
+	}
+	if in.NLV <= 0 {
+		return SizeResult{}, fmt.Errorf("nlv must be > 0 (got %v) — is the gateway connected?", in.NLV)
+	}
+
+	perShare := math.Abs(in.Entry - in.Stop)
+	if perShare == 0 {
+		// Defensive — the side-vs-stop checks above should make this unreachable.
+		return SizeResult{}, fmt.Errorf("per-share risk is zero (entry == stop)")
+	}
+
+	riskBase := in.NLV * in.RiskPct / 100
+	riskQuote := riskBase * in.FX
+	rawShares := riskQuote / perShare
+	shares := int(math.Floor(rawShares/float64(in.Lot))) * in.Lot
+
+	res := SizeResult{
+		Symbol:       strings.ToUpper(in.Symbol),
+		Side:         side,
+		Entry:        in.Entry,
+		Stop:         in.Stop,
+		RiskPct:      in.RiskPct,
+		Lot:          in.Lot,
+		FX:           in.FX,
+		NLV:          in.NLV,
+		BaseCurrency: in.Currency,
+		RiskBase:     riskBase,
+		RiskQuote:    riskQuote,
+		PerShareRisk: perShare,
+		Shares:       shares,
+		Notional:     float64(shares) * in.Entry,
+		MaxLoss:      float64(shares) * perShare,
+		Status:       "ok",
+	}
+
+	if shares == 0 {
+		res.Status = "tight_risk"
+		return res, nil
+	}
+	if in.BuyingPower > 0 && res.Notional > in.BuyingPower*in.FX {
+		res.Status = "exceeds_buying_power"
+	}
+	return res, nil
+}
+
+func runSize(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "size")
+	symbol := fs.String("symbol", "", "underlying symbol (required)")
+	entry := fs.Float64("entry", 0, "planned entry price per share (required)")
+	stop := fs.Float64("stop", 0, "planned stop price per share (required)")
+	riskPct := fs.Float64("risk-pct", 1.0, "percent of NLV to risk on this trade")
+	side := fs.String("side", "long", "trade direction: long | short")
+	lot := fs.Int("lot", 1, "round shares down to this multiple")
+	fx := fs.Float64("fx", 1.0, "quote-currency units per 1 base-currency unit (e.g. 1.085 for EUR→USD)")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+
+	var acct rpc.AccountResult
+	if err := env.Conn.Call(ctx, rpc.MethodAccountSummary, nil, &acct); err != nil {
+		return fail(env, "size: %v", err)
+	}
+
+	in := SizeInput{
+		Symbol:      *symbol,
+		Side:        *side,
+		Entry:       *entry,
+		Stop:        *stop,
+		RiskPct:     *riskPct,
+		Lot:         *lot,
+		FX:          *fx,
+		NLV:         acct.NetLiquidation,
+		BuyingPower: acct.BuyingPower,
+		Currency:    acct.BaseCurrency,
+	}
+	res, err := ComputeSize(in)
+	if err != nil {
+		return fail(env, "size: %v", err)
+	}
+
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	return renderSizeText(env, &res)
+}
+
+func renderSizeText(env *Env, r *SizeResult) int {
+	out := env.Stdout
+	ccyBase := nonEmpty(r.BaseCurrency, "USD")
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Size  %s · %s · entry %.2f · stop %.2f\n", r.Symbol, r.Side, r.Entry, r.Stop)
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  Net liquidation         %s  (%s)\n", formatMoney(r.NLV), ccyBase)
+	fmt.Fprintf(out, "  Risk budget             %s  (%.2f%% of NLV)\n", formatMoney(r.RiskBase), r.RiskPct)
+	if r.FX != 1.0 {
+		fmt.Fprintf(out, "  Risk in quote ccy       %s  (fx %.4f)\n", formatMoney(r.RiskQuote), r.FX)
+	}
+	fmt.Fprintf(out, "  Per-share risk          %s\n", formatMoney(r.PerShareRisk))
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  Shares                  %d  (lot %d)\n", r.Shares, r.Lot)
+	fmt.Fprintf(out, "  Notional                %s\n", formatMoney(r.Notional))
+	fmt.Fprintf(out, "  Max loss at stop        %s\n", formatMoney(r.MaxLoss))
+	if r.Status != "ok" {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, env.yellow(fmt.Sprintf("  ⚠ status: %s", r.Status)))
+		switch r.Status {
+		case "tight_risk":
+			fmt.Fprintln(out, "    risk budget < per-share risk × lot — widen the stop, raise --risk-pct, or lower --lot.")
+		case "exceeds_buying_power":
+			fmt.Fprintln(out, "    notional exceeds available buying power; trim --risk-pct or revisit the entry.")
+		}
+	}
+	fmt.Fprintln(out)
+	return 0
+}

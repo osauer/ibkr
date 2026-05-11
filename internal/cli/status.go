@@ -1,0 +1,168 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+// handshakeWaitBudget bounds how long `ibkr status` waits for the daemon's
+// IB Gateway handshake to land. Sub-second on a healthy gateway. The
+// daemon's watchdog (issue #2) populates LastError after ~12s when the
+// gateway TCPs but never completes the API handshake, so this budget
+// only matters on the slow happy path (TLS fallback or a sluggish
+// gateway). 25s comfortably covers both.
+const handshakeWaitBudget = 25 * time.Second
+
+// handshakePollInterval is the cadence at which `status` re-asks the
+// daemon for its health snapshot during the wait.
+const handshakePollInterval = 500 * time.Millisecond
+
+func runStatus(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "status")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	var res rpc.HealthResult
+	if err := env.Conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
+		return fail(env, "status: %v", err)
+	}
+
+	// On a freshly autospawned daemon the handshake hasn't landed by the
+	// time this first call returns. Wait for a definite verdict (connected
+	// or error) so the user gets a real answer instead of "retry in a few
+	// seconds." Skipped under --json: scripts want a snapshot, not a wait.
+	if !*jsonOut && isHandshakeInFlight(res) {
+		fetch := func(ctx context.Context) (rpc.HealthResult, error) {
+			var r rpc.HealthResult
+			err := env.Conn.Call(ctx, rpc.MethodStatusHealth, nil, &r)
+			return r, err
+		}
+		res = waitForHandshake(ctx, env.Stderr, fetch, res, handshakeWaitBudget, handshakePollInterval)
+	}
+
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	out := env.Stdout
+	state := "ok"
+	connecting := false
+	if !res.Connected {
+		if res.LastError != "" {
+			state = "degraded — gateway not connected"
+		} else {
+			state = "starting — gateway handshake in progress"
+			connecting = true
+		}
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "ibkr daemon %s  ·  uptime %s  ·  %s\n", res.DaemonVersion, time.Duration(res.UptimeSeconds)*time.Second, state)
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  Account:        %s\n", nonEmpty(res.Account, "auto-detect"))
+	fmt.Fprintf(out, "  Gateway:        %s:%d %s\n", res.GatewayHost, res.GatewayPort, formatGatewayBadge(res))
+	if len(res.Alternates) > 0 {
+		fmt.Fprintf(out, "                  also up: %s\n", joinPorts(res.Alternates))
+	}
+	fmt.Fprintf(out, "  Client ID:      %d\n", res.ClientID)
+	fmt.Fprintf(out, "  Connected:      %v\n", res.Connected)
+	switch {
+	case res.Connected:
+		fmt.Fprintf(out, "  Server version: %d\n", res.ServerVersion)
+		fmt.Fprintf(out, "  Data type:      %s\n", nonEmpty(res.DataType, "live"))
+	case connecting:
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "  Handshake did not complete within %s. Check the daemon log for\n", handshakeWaitBudget)
+		fmt.Fprintln(out, "  the underlying error, then verify in IB Gateway:")
+		fmt.Fprintln(out, "    Configure → Settings → API → Settings → 'Enable ActiveX and Socket Clients'")
+		fmt.Fprintln(out, "    Trusted IPs include 127.0.0.1 (or empty)")
+		fmt.Fprintln(out, "    Login fully completed (not paused at 2FA)")
+		fmt.Fprintln(out, "  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log")
+	default:
+		if res.LastError != "" {
+			fmt.Fprintf(out, "  Reason:         %s\n", res.LastError)
+		}
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log")
+	}
+	fmt.Fprintln(out)
+	if !res.Connected {
+		return 1
+	}
+	return 0
+}
+
+// isHandshakeInFlight reports whether the daemon has reported neither a
+// successful connection nor a connect error yet — i.e. the gateway
+// handshake goroutine started but hasn't produced a verdict.
+func isHandshakeInFlight(res rpc.HealthResult) bool {
+	return !res.Connected && res.LastError == ""
+}
+
+// healthFetcher is the closure waitForHandshake uses to re-poll the
+// daemon. Indirected so tests can drive the wait deterministically
+// without a live socket.
+type healthFetcher func(ctx context.Context) (rpc.HealthResult, error)
+
+// waitForHandshake polls fetch until it returns a verdict (Connected, or
+// LastError set) or budget elapses.
+func waitForHandshake(ctx context.Context, w io.Writer, fetch healthFetcher, initial rpc.HealthResult, budget, pollInterval time.Duration) rpc.HealthResult {
+	fmt.Fprintf(w, "ibkr: waiting for IB Gateway handshake (up to %s)", budget)
+	defer fmt.Fprintln(w)
+
+	res := initial
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return res
+		case <-time.After(pollInterval):
+		}
+		fmt.Fprint(w, ".")
+		next, err := fetch(ctx)
+		if err != nil {
+			return res
+		}
+		res = next
+		if !isHandshakeInFlight(res) {
+			return res
+		}
+	}
+	return res
+}
+
+// formatGatewayBadge renders the TLS state and the discovery origin
+// compactly. Examples:
+//
+//	(tls=false, discovered)
+//	(tls=true, pinned)
+//	(tls=true, configured=false ⚠ fallback)
+//
+// The fallback marker only fires when configured ≠ negotiated, which can
+// only happen when EnableTLSFallback is on (i.e. TLS auto). Pinned TLS
+// (true or false) suppresses fallback entirely, so configured always
+// equals negotiated.
+func formatGatewayBadge(res rpc.HealthResult) string {
+	tlsTok := fmt.Sprintf("tls=%v", res.GatewayTLS)
+	if res.Connected && res.GatewayTLS != res.NegotiatedTLS {
+		tlsTok = fmt.Sprintf("tls=%v, configured=%v ⚠ fallback", res.NegotiatedTLS, res.GatewayTLS)
+	}
+	origin := res.PortOrigin
+	if origin == "" {
+		// Pre-AUTO daemon or empty discovery info — render compactly.
+		return fmt.Sprintf("(%s)", tlsTok)
+	}
+	return fmt.Sprintf("(%s, %s)", tlsTok, origin)
+}
+
+func joinPorts(ports []int) string {
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = fmt.Sprintf("%d", p)
+	}
+	return strings.Join(parts, ", ")
+}
