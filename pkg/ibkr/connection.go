@@ -38,6 +38,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1568,9 +1569,23 @@ func (c *Connection) startAPI() error {
 	return nil
 }
 
-// readMessages continuously reads messages from the connection
+// readMessages continuously reads messages from the connection.
+//
+// Wrapped in a panic guard because this goroutine is the only consumer of
+// the TCP read side: if a handler or decoder panics (bad protobuf shape,
+// unexpected wire field, …) without recovery, the reader dies silently
+// while c.status stays StatusConnected — every subsequent Write queues
+// forever waiting for a reply that no one is reading. A recovered panic
+// is converted to a disconnect so the reconnect loop can take over.
 func (c *Connection) readMessages() {
 	defer c.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			connectLogger.Errorf("readMessages panic recovered (Client ID: %d): %v\n%s",
+				c.config.ClientID, r, debug.Stack())
+			c.handleDisconnection(fmt.Errorf("reader panic: %v", r))
+		}
+	}()
 	c.signalReadStarted()
 
 	for {
@@ -2516,10 +2531,6 @@ func (c *Connection) sendMessage(msg []byte) error {
 
 		lengthBytes := make([]byte, 4)
 		binary.BigEndian.PutUint32(lengthBytes, uint32(len(msg)))
-		prefixLen := binary.BigEndian.Uint32(lengthBytes)
-		if int(prefixLen) != len(msg) {
-			panic(fmt.Sprintf("length mismatch: prefix=%d body=%d", prefixLen, len(msg)))
-		}
 
 		if err := c.waitForHandshakeReady(); err != nil {
 			return err

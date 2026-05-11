@@ -47,6 +47,14 @@ type Server struct {
 	// underlying daemon conn. Guarded by subMu.
 	subMu sync.Mutex
 	subs  map[string]context.CancelFunc
+
+	// serveCtx is the parent context for streaming resource subscriptions.
+	// Set at the top of Serve() so subscriptions are children of the
+	// server's lifecycle, not context.Background() — when Serve returns
+	// (client EOF, ctx cancel) all in-flight subscription goroutines see
+	// the cancel and unwind. shutdownSubscriptions still nudges them on
+	// the way out for prompt teardown of the daemon-side refcount.
+	serveCtx context.Context
 }
 
 // NewServer wires the MCP server to a live daemon connection and the version
@@ -73,6 +81,7 @@ func (s *Server) SetDialer(d func() (*dial.Conn, error)) {
 // and the daemon-side refcount decrements promptly.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.out = bufio.NewWriter(out)
+	s.serveCtx = ctx
 	defer s.out.Flush()
 	defer s.shutdownSubscriptions()
 

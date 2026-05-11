@@ -1,5 +1,10 @@
 # ibkr
 
+[![ci](https://github.com/osauer/ibkr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/osauer/ibkr/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/osauer/ibkr?display_name=tag&sort=semver)](https://github.com/osauer/ibkr/releases/latest)
+[![go.mod](https://img.shields.io/github/go-mod/go-version/osauer/ibkr)](go.mod)
+[![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
+
 **A read-only client for your Interactive Brokers account, designed for scripts, agents, and engineers.** One Go binary, three surfaces — a CLI, a stdio MCP server, and a Go library — all returning the same JSON. The wire-level TWS API protocol is implemented from scratch in `pkg/ibkr`; no Python bridge, no IBKR jars to ship.
 
 ```sh
@@ -202,6 +207,7 @@ A future v2 may add trading behind an explicit `--tags=trading` build tag. Per [
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify against the bundled `SHA256SUMS`.
 - **Local build**: `git clone … && make install`.
+- **Reproducible builds**: release tarballs are built with `-trimpath -buildvcs=false` and stamp the version/commit/date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) produces byte-identical binaries — bring your own checksum and verify against the published `SHA256SUMS`.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.
 

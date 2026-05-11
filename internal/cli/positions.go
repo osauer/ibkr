@@ -1,9 +1,10 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -44,11 +45,11 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 func applySort(rows []rpc.PositionView, by string) {
 	switch by {
 	case "pnl":
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].UnrealizedPnL > rows[j].UnrealizedPnL })
+		slices.SortStableFunc(rows, func(a, b rpc.PositionView) int { return cmp.Compare(b.UnrealizedPnL, a.UnrealizedPnL) })
 	case "value":
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].MarketValue > rows[j].MarketValue })
+		slices.SortStableFunc(rows, func(a, b rpc.PositionView) int { return cmp.Compare(b.MarketValue, a.MarketValue) })
 	default:
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Symbol < rows[j].Symbol })
+		slices.SortStableFunc(rows, func(a, b rpc.PositionView) int { return cmp.Compare(a.Symbol, b.Symbol) })
 	}
 }
 

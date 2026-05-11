@@ -292,7 +292,17 @@ func (s *Server) handleResourcesSubscribe(id, params json.RawMessage) {
 		return
 	}
 
-	streamCtx, cancel := context.WithCancel(context.Background())
+	// Parent the streaming context on the Serve()-scoped context so a
+	// client EOF (or ctx cancel from the outer process) propagates to
+	// every active subscription without relying solely on
+	// shutdownSubscriptions() draining the map. Falls back to Background
+	// only if Serve hasn't initialized yet — defensive, not a path that
+	// fires in practice.
+	parent := s.serveCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	streamCtx, cancel := context.WithCancel(parent)
 	s.subMu.Lock()
 	s.subs[pu.OriginalURI] = cancel
 	s.subMu.Unlock()

@@ -288,18 +288,28 @@ func (rl *RateLimiter) processRequests() {
 			// Handle retries if needed
 			if err != nil && req.Retries < req.MaxRetries {
 				req.Retries++
-				// Re-queue with exponential backoff
-				go func() {
-					backoff := time.Duration(req.Retries) * time.Second
-					time.Sleep(backoff)
+				// Re-queue with exponential backoff. Honor rl.ctx so a
+				// shutdown mid-backoff doesn't leak a goroutine sleeping
+				// out the remainder of the delay.
+				rl.wg.Add(1)
+				go func(backoff time.Duration) {
+					defer rl.wg.Done()
+					select {
+					case <-time.After(backoff):
+					case <-rl.ctx.Done():
+						req.ResultChan <- rl.ctx.Err()
+						return
+					}
 					select {
 					case rl.requestQueue <- req:
 						// Re-queued successfully
+					case <-rl.ctx.Done():
+						req.ResultChan <- rl.ctx.Err()
 					default:
 						// Queue full, give up
 						req.ResultChan <- fmt.Errorf("retry failed: queue full")
 					}
-				}()
+				}(time.Duration(req.Retries) * time.Second)
 			} else {
 				// Send result back
 				req.ResultChan <- err

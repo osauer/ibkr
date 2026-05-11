@@ -35,6 +35,7 @@ type ConnectionPool struct {
 
 	// Monitoring
 	stopChan chan struct{}
+	stopOnce sync.Once
 	wg       sync.WaitGroup
 
 	connectFn    func(*Connection, context.Context) error
@@ -169,13 +170,12 @@ func (p *ConnectionPool) Start(ctx context.Context) error {
 func (p *ConnectionPool) Stop() error {
 	poolLogger.Infof("Stopping connection pool")
 
-	// Signal shutdown
-	select {
-	case <-p.stopChan:
-		// already closed
-	default:
-		close(p.stopChan)
-	}
+	// Signal shutdown. sync.Once guards against the non-atomic
+	// select-default-then-close pattern: two concurrent Stop() callers
+	// could both observe the default branch and race into close(),
+	// triggering a panic. sync.Once collapses both cases to a single
+	// idempotent close.
+	p.stopOnce.Do(func() { close(p.stopChan) })
 
 	// Wait for monitor to stop
 	p.wg.Wait()
