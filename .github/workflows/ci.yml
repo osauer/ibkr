@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   check:
-    name: lint + vet + vulncheck
+    name: make check (lint + vet + vulncheck + parity)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,30 +26,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt: the following files need formatting:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: staticcheck
+      # Install the optional gate tools the Makefile expects on PATH.
+      # plugin-check is skipped via CHECK_DEPS override below because the
+      # `claude` CLI isn't available on stock GitHub runners; parity-check
+      # (the MCP↔CLI drift gate) and the rest stay strict.
+      - name: install lint tools
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
-
-      - name: govulncheck
-        run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+
+      - name: make check
+        run: make check CHECK_DEPS=parity-check
 
   test:
-    name: test (${{ matrix.os }})
+    name: make test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,13 +54,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: pkg tests
-        run: go test -count=1 -timeout=180s ./pkg/ibkr/...
+      - name: make test-pkg
+        run: make test-pkg
 
-      - name: daemon + integration tests (-race)
-        run: |
-          go test -race -count=1 -timeout=240s ./internal/...
-          go test -race -count=1 -timeout=420s ./test/integration/...
+      - name: make test-daemon (-race; integration tests self-skip when no gateway)
+        run: make test-daemon
 
   cross-compile:
     name: cross-compile release matrix

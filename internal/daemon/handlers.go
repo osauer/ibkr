@@ -924,6 +924,35 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	return q, nil
 }
 
+// handleCancel terminates a streaming subscription previously started via
+// MethodQuoteSubscribe. The wire contract is intentionally strict: an
+// unknown id returns CodeBadRequest because callers only ever cancel ids
+// the daemon handed them, and "silent success" would mask client-side
+// programming errors. Cancel is idempotent against itself only via the
+// underlying context cancel — re-cancelling the same id after it has
+// already been released returns the same bad_request, which is fine.
+//
+// Returning an empty result keeps the JSON-RPC shape uniform with other
+// unary methods (Ok: true, Result: {}); callers that don't care about
+// the body can ignore it.
+func (s *Server) handleCancel(req *rpc.Request) (struct{}, error) {
+	var p rpc.CancelParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return struct{}{}, &badRequestError{msg: err.Error()}
+	}
+	if p.ID == "" {
+		return struct{}{}, &badRequestError{msg: "id required"}
+	}
+	s.mu.Lock()
+	cancel, ok := s.streams[p.ID]
+	s.mu.Unlock()
+	if !ok {
+		return struct{}{}, &badRequestError{msg: "no active stream with id " + p.ID}
+	}
+	cancel()
+	return struct{}{}, nil
+}
+
 // handleQuoteSubscribe attaches a fan-out tap to the daemon's per-symbol
 // market-data subscription and streams coalesced frames to the caller
 // until the client disconnects, the daemon shuts down, or a terminal

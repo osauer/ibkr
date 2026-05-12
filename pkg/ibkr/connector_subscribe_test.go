@@ -187,6 +187,27 @@ func TestUnsubscribeMarketData_Idempotent(t *testing.T) {
 	}
 }
 
+// SubscribeMarketData stores the symbol under strings.ToUpper(symbol);
+// UnsubscribeMarketData must apply the same normalisation before lookup,
+// otherwise a caller passing user-typed lowercase silently fails to
+// release the IBKR market-data line (the entry stays in c.subscriptions,
+// the IBKR-side reqMktData stays open, the 100-line subscription budget
+// erodes).
+func TestUnsubscribeMarketData_CaseInsensitive(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	// Mirror what SubscribeMarketData would have inserted: upper-case key,
+	// not yet observed (so Unsubscribe takes the no-cancel path and does
+	// not require a live writer).
+	c.subscriptions["SPY"] = &Subscription{Symbol: "SPY", ReqID: 123, Observed: false}
+
+	if err := c.UnsubscribeMarketData("spy"); err != nil {
+		t.Fatalf("unexpected error from case-mismatched Unsubscribe: %v", err)
+	}
+	if _, still := c.subscriptions["SPY"]; still {
+		t.Fatalf("subscription still present after lowercase Unsubscribe — case-normalisation regressed")
+	}
+}
+
 // When a subscription has not yet been observed, Unsubscribe should not attempt
 // to call CancelMarketData (which would panic in this test because the underlying
 // connection has no writer). This guards against 300 spam during shutdown.

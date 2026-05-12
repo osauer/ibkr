@@ -57,7 +57,15 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # One-time installs:
 #   go install honnef.co/go/tools/cmd/staticcheck@latest
 #   go install golang.org/x/vuln/cmd/govulncheck@latest
-check: plugin-check parity-check ## gofmt + go vet + staticcheck + govulncheck + plugin-check + parity-check (binding pre-commit gate)
+#
+# CHECK_DEPS gates the optional pieces of the check matrix. Default is the
+# full strict gate (plugin-check + parity-check). CI without the `claude`
+# CLI on PATH overrides with CHECK_DEPS=parity-check — the MCP↔CLI drift
+# gate (parity-check) is what we cannot skip; plugin-manifest validation
+# is recoverable because the schema is small and changes go through PR
+# review anyway.
+CHECK_DEPS ?= plugin-check parity-check
+check: $(CHECK_DEPS) ## gofmt + go vet + staticcheck + govulncheck + plugin-check + parity-check (binding pre-commit gate)
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt: the following files need formatting:"; \
@@ -89,16 +97,18 @@ fmt: ## Apply gofmt -w to the whole tree
 	gofmt -w .
 
 # Library tests. Some require a live gateway; CI should run these against a
-# paper account with IBKR_LIVE_TESTS=1.
+# paper account with IBKR_LIVE_TESTS=1. Timeout sized for CI's slower
+# runners — local runs typically finish in <30s.
 test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library)
-	go test -count=1 -timeout=120s ./pkg/ibkr/...
+	go test -count=1 -timeout=180s ./pkg/ibkr/...
 
 # Daemon + CLI integration tests. -race is on for the daemon path because
 # this layer carries the goroutines (subscriptions, idle timer, signal
-# handlers); race detector earns its slot here.
+# handlers); race detector earns its slot here. Integration tests skip
+# cleanly when no IBKR gateway is reachable.
 test-daemon: ## Run internal/... and test/integration/... under -race
-	go test -race -count=1 -timeout=180s ./internal/...
-	go test -race -count=1 -timeout=360s ./test/integration/...
+	go test -race -count=1 -timeout=240s ./internal/...
+	go test -race -count=1 -timeout=420s ./test/integration/...
 
 # Install the Claude Code skill bundle directly under ~/.claude/skills/.
 # Dogfood path only — end users get the skill via `/plugin install ibkr`.

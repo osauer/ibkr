@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +26,19 @@ import (
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
 )
+
+// maxFrameBytes caps each newline-delimited JSON-RPC request the daemon will
+// read from a single Unix-socket peer. Bound is generous (1 MiB) — every
+// real CLI/MCP request is well under 10 KiB; the cap exists to prevent a
+// hostile or buggy client from OOM'ing the daemon by sending a long
+// newline-free byte stream that bufio.ReadBytes would otherwise grow into.
+const maxFrameBytes = 1 << 20
+
+// errFrameTooLarge is the sentinel returned by readBoundedLine when a peer
+// sends more than maxFrameBytes without a terminating newline. The serve
+// loop converts it to a CodeBadRequest response and closes the connection
+// (we may be mid-frame and can't resync safely).
+var errFrameTooLarge = fmt.Errorf("request frame exceeds %d bytes", maxFrameBytes)
 
 // handshakeWatchdogDelay bounds how long the daemon waits for the IBKR
 // handshake to complete before publishing a degraded-state hint to
@@ -819,9 +833,17 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	r := bufio.NewReaderSize(conn, 64<<10)
 	enc := json.NewEncoder(conn)
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := readBoundedLine(r, maxFrameBytes)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+				return
+			}
+			if errors.Is(err, errFrameTooLarge) {
+				// Frame too big to dispatch and we may be mid-frame
+				// (no newline seen) — drop the connection after a
+				// classified error so a buggy client gets a clear
+				// signal instead of a silent close.
+				_ = enc.Encode(rpc.Response{ID: "", Ok: false, Error: &rpc.Error{Code: rpc.CodeBadRequest, Message: err.Error()}})
 				return
 			}
 			s.logger.Debugf("conn read: %v", err)
@@ -838,7 +860,63 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// readBoundedLine reads from r up to and including the next '\n', returning
+// the line bytes including the trailing newline. Returns errFrameTooLarge
+// if no newline appears within maxBytes — the caller should treat this as
+// terminal and close the connection (mid-frame state is unrecoverable
+// without an out-of-band resync token, which the protocol does not have).
+//
+// Uses bufio.ReadSlice in a loop so the per-iteration allocation stays
+// bounded by bufio's internal buffer; the accumulated len(buf) check
+// short-circuits before append can grow without bound.
+func readBoundedLine(r *bufio.Reader, maxBytes int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf)+len(chunk) > maxBytes {
+			return nil, errFrameTooLarge
+		}
+		buf = append(buf, chunk...)
+		if err == nil {
+			return buf, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Got a partial chunk that filled bufio's internal buffer
+			// without finding '\n'; keep reading.
+			continue
+		}
+		return buf, err
+	}
+}
+
+// recoverHandler is the defer target the dispatcher uses to convert a
+// handler panic into an internal_error response on the *same* JSON-RPC id
+// instead of letting it unwind through serveConn and kill the listener
+// goroutine. The stack trace lands in the daemon log so the panic is
+// debuggable; the misbehaving client gets a classified error and the
+// other connected clients keep working.
+func recoverHandler(logger *Logger, enc *json.Encoder, req *rpc.Request) {
+	rec := recover()
+	if rec == nil {
+		return
+	}
+	method := ""
+	id := ""
+	if req != nil {
+		method = req.Method
+		id = req.ID
+	}
+	logger.Errorf("panic in handler method=%s id=%s: %v\n%s", method, id, rec, debug.Stack())
+	writeError(enc, id, rpc.CodeInternal, fmt.Sprintf("internal panic: %v", rec))
+}
+
 func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encoder, r *bufio.Reader) (terminal bool) {
+	// A handler panic must not unwind through serveConn — that would kill
+	// the per-connection goroutine and disconnect *other* clients sharing
+	// the listener. Convert to a classified error on the request's id so
+	// the panic is debuggable from the log and the misbehaving caller
+	// gets a clean error.
+	defer recoverHandler(s.logger, enc, req)
 	// Per-request deadline. Streaming methods get no deadline (the stream
 	// itself owns its lifetime). Unary deadlines are bounded below the
 	// CLI's 60s per-invocation budget so the daemon errors first with a
@@ -875,6 +953,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	case rpc.MethodQuoteSubscribe:
 		s.handleQuoteSubscribe(ctx, req, enc, r)
 		return true
+	case rpc.MethodCancel:
+		s.unary(req, enc, func() (any, error) { return s.handleCancel(req) })
 	case rpc.MethodOrderPlace:
 		_, err := handleOrderPlace(ctx, req)
 		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())

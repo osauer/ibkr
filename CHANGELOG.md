@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.12.2 — 2026-05-12 22:05 CEST
+
+Fix release. Five defects from a code-review pass on v0.12.1, all small, all with regression tests in the same change. No flags removed, no wire shapes broken, no behaviour change for existing successful calls — the changes either close a silent leak, harden the daemon against hostile/buggy clients, or move CI to match the README's gating promise.
+
+### `cancel` RPC actually cancels now
+
+`rpc.MethodCancel = "cancel"` was declared and `handleQuoteSubscribe` carefully registered each stream into `s.streams[req.ID]` so a peer could cancel it — but the daemon's dispatcher had no case for the method, so every `cancel` request came back `unknown_method` and the `subEntry` refcount stayed held until the client's TCP socket EOFed. For long-lived MCP clients that subscribe many resources, that's the difference between releasing IBKR market-data slots on-demand and burning them until the session ends. Added the dispatcher case plus `handleCancel` (rejects empty/unknown ids with classified `bad_request` — silent success would mask client-side bugs). Two regression tests cover the happy path and the unknown-id path. Live smoke against the running daemon now returns `{"ok":false,"error":{"code":"bad_request","message":"no active stream with id …"}}` for unknown ids instead of `unknown_method`.
+
+### `UnsubscribeMarketData` is case-insensitive
+
+`SubscribeMarketData` upper-cases the symbol before storing it in `c.subscriptions`; `UnsubscribeMarketData` did not, so `Unsubscribe("aapl")` after `Subscribe("aapl")` was a silent no-op — the IBKR-side `reqMktData` line stayed open and ate one of the ~100 subscription slots until the connection bounced. Hits anyone forwarding user-typed symbols straight through without pre-normalising. One-line fix in the library plus a regression test (`TestUnsubscribeMarketData_CaseInsensitive`) that pins the contract.
+
+### Daemon survives handler panics and oversize frames
+
+The Unix-socket RPC server had two latent denial-of-service surfaces. `serveConn` used `bufio.ReadBytes('\n')` with no upper bound, so a peer sending a newline-free megabyte would grow the read buffer until OOM. The dispatcher had no panic recovery, so a `json.Marshal(NaN)` or any other handler panic would unwind through the per-connection goroutine and disconnect every other client sharing the listener. Added a 1 MiB per-frame cap (`readBoundedLine` + `errFrameTooLarge`) — well above any real CLI/MCP payload — and a `defer recoverHandler(...)` in `dispatch` that converts a panic into a classified `internal` error on the request's own id, with the full stack trace landing in the daemon log for postmortem. Five regression tests: two unit tests on the bounded reader (rejects oversize, accepts at exactly the cap), two on the recover helper (writes error response, tolerates nil request), one end-to-end on `serveConn` that pushes a 2 MiB blob through a `net.Pipe` and asserts a classified `bad_request` response without OOM or hang.
+
+### Bundled settings now allow `ibkr size`
+
+`settings/ibkr.settings.json` listed every read-only verb in `permissions.allow` except `Bash(ibkr size*)` — the position-sizing helper that shipped in v0.11. Users who copied the file into `~/.claude/settings.json` (a path the README explicitly recommends) got a permission prompt every time they ran `ibkr size`. The SKILL.md frontmatter had it; settings did not. One-line addition.
+
+### CI now invokes `make check && make test`, not an inlined re-implementation
+
+The README labels `make check` and `make test` as the binding gates — but CI re-implemented gofmt/vet/staticcheck/govulncheck inline and skipped `plugin-check` and `parity-check` entirely. The MCP↔CLI drift test (`parity-check`) ran only by side effect of `go test ./internal/...`; the plugin-manifest validation never ran in CI at all. The new CI workflow shells out to `make check CHECK_DEPS=parity-check`, `make test-pkg`, and `make test-daemon`, with `CHECK_DEPS` introduced in the Makefile as the documented escape hatch for environments without the `claude` CLI on PATH (the parity gate stays strict). `make check` and `make test` are now single-source-of-truth gates: a contributor's local run is the same gate CI applies. Test timeouts in `test-pkg` and `test-daemon` bumped to match the previous CI values (180 s / 240 s / 420 s) so the consolidation doesn't tighten anything CI was depending on.
+
 ## v0.12.1 — 2026-05-12 21:36 CEST
 
 Bug-fix release. The headline feature from v0.10.0 — per-leg option Greeks on `ibkr positions` — has been quietly broken since the IBKR gateway rolled forward to server version 165 or later. The handler that parses the model-computation tick was reading the wrong field as `reqID`, so every Greek the gateway sent landed on a key nobody was looking up, and `greeks_coverage` came back 0/N on every call. That's fixed here, alongside two related issues that compounded the symptom and one zombie-position bug. Three new optional fields show up on each option row in JSON: `option_bid`, `option_ask`, `option_prev_close`, plus `iv`. No flags or wire shapes were removed; existing consumers see the same output plus those four optional fields.

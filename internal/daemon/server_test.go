@@ -987,3 +987,210 @@ func TestConnectWithFailover_SingleCandidateNoAlternates(t *testing.T) {
 		t.Fatalf("lastConnectError = %q, want empty after single-candidate success", gotErr)
 	}
 }
+
+// MethodCancel terminates a previously registered stream by id. The dispatcher
+// used to omit a case for it entirely, so any caller using the documented
+// "cancel" wire op got unknown_method back and the stream's refcount stayed
+// held until the underlying socket EOFed. This test pins the wiring.
+func TestDispatchMethodCancelCancelsRegisteredStream(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	cancelled := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.mu.Lock()
+	srv.streams["stream-id"] = func() {
+		cancel()
+		cancelled <- struct{}{}
+	}
+	srv.mu.Unlock()
+
+	params, _ := json.Marshal(rpc.CancelParams{ID: "stream-id"})
+	req := &rpc.Request{ID: "req-1", Method: rpc.MethodCancel, Params: params}
+
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	r := bufio.NewReader(strings.NewReader(""))
+
+	terminal := srv.dispatch(context.Background(), req, enc, r)
+	if terminal {
+		t.Fatalf("cancel should not be terminal — it's a unary op on the same connection")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatalf("registered cancel func was never invoked")
+	}
+	if ctx.Err() == nil {
+		t.Fatalf("expected stream context to be cancelled")
+	}
+
+	var resp rpc.Response
+	if err := json.Unmarshal(encOut.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (raw %q)", err, encOut.String())
+	}
+	if !resp.Ok || resp.Error != nil || resp.ID != "req-1" {
+		t.Fatalf("unexpected response: %+v err=%+v", resp, resp.Error)
+	}
+}
+
+// Cancelling an id the daemon never handed out is a programming error —
+// returning silent success would mask client bugs. The dispatcher maps it
+// to CodeBadRequest via the badRequestError sentinel that classifyError
+// already understands.
+func TestDispatchMethodCancelUnknownIDReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	params, _ := json.Marshal(rpc.CancelParams{ID: "never-existed"})
+	req := &rpc.Request{ID: "req-1", Method: rpc.MethodCancel, Params: params}
+
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	r := bufio.NewReader(strings.NewReader(""))
+
+	if terminal := srv.dispatch(context.Background(), req, enc, r); terminal {
+		t.Fatalf("cancel should not be terminal")
+	}
+
+	var resp rpc.Response
+	if err := json.Unmarshal(encOut.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Ok || resp.Error == nil || resp.Error.Code != rpc.CodeBadRequest {
+		t.Fatalf("expected bad_request, got %+v", resp)
+	}
+}
+
+// A panic in a handler must not unwind through serveConn (which would
+// kill the per-connection goroutine and disconnect *other* clients).
+// recoverHandler converts the panic into an internal_error response on
+// the same JSON-RPC id and lets the dispatcher continue.
+func TestRecoverHandlerWritesErrorAndDoesNotPropagate(t *testing.T) {
+	t.Parallel()
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	req := &rpc.Request{ID: "req-1", Method: "fake.panic"}
+	logger := NewLogger(&bytes.Buffer{}, "error")
+
+	// Use a helper closure so the defer scope matches the dispatcher's.
+	func() {
+		defer recoverHandler(logger, enc, req)
+		panic("simulated handler panic")
+	}()
+
+	var resp rpc.Response
+	if err := json.Unmarshal(encOut.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v raw=%q", err, encOut.String())
+	}
+	if resp.Ok || resp.Error == nil {
+		t.Fatalf("expected error response, got %+v", resp)
+	}
+	if resp.Error.Code != rpc.CodeInternal {
+		t.Fatalf("expected CodeInternal, got %q", resp.Error.Code)
+	}
+	if resp.ID != "req-1" {
+		t.Fatalf("expected id to echo request, got %q", resp.ID)
+	}
+}
+
+// recoverHandler must tolerate a nil request (a panic that fires before
+// req is populated). It writes an error with id="" rather than nil-deref.
+func TestRecoverHandlerHandlesNilRequest(t *testing.T) {
+	t.Parallel()
+	var encOut bytes.Buffer
+	enc := json.NewEncoder(&encOut)
+	logger := NewLogger(&bytes.Buffer{}, "error")
+
+	func() {
+		defer recoverHandler(logger, enc, nil)
+		panic("nil-req panic")
+	}()
+
+	var resp rpc.Response
+	if err := json.Unmarshal(encOut.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Ok || resp.Error == nil || resp.Error.Code != rpc.CodeInternal {
+		t.Fatalf("expected internal error, got %+v", resp)
+	}
+}
+
+// readBoundedLine returns errFrameTooLarge before the input can OOM the
+// daemon. Without this cap, a peer sending a newline-free byte stream
+// would grow bufio's accumulator until process memory exhaustion.
+func TestReadBoundedLineRejectsOversize(t *testing.T) {
+	t.Parallel()
+	// Make a payload bigger than the cap. The reader must reject before
+	// returning a line.
+	const cap = 1024
+	big := bytes.Repeat([]byte{'x'}, cap+16)
+	r := bufio.NewReaderSize(bytes.NewReader(big), 256)
+	_, err := readBoundedLine(r, cap)
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("expected errFrameTooLarge, got %v", err)
+	}
+}
+
+// readBoundedLine returns the line including the trailing newline for any
+// payload up to and including maxBytes. Regression: an off-by-one earlier
+// in the implementation would reject lines exactly maxBytes long.
+func TestReadBoundedLineAcceptsAtCap(t *testing.T) {
+	t.Parallel()
+	const cap = 64
+	// 63 'x' + '\n' = 64 bytes total — exactly at cap.
+	line := append(bytes.Repeat([]byte{'x'}, cap-1), '\n')
+	r := bufio.NewReaderSize(bytes.NewReader(line), 32)
+	got, err := readBoundedLine(r, cap)
+	if err != nil {
+		t.Fatalf("unexpected error at cap: %v", err)
+	}
+	if !bytes.Equal(got, line) {
+		t.Fatalf("got %q, want %q", got, line)
+	}
+}
+
+// End-to-end: serveConn must reject an oversize newline-free blob with a
+// classified bad_request response and close cleanly — not OOM and not
+// hang forever waiting for a newline.
+func TestServeConnRejectsOversizedFrame(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	serverSide, clientSide := net.Pipe()
+	t.Cleanup(func() { _ = clientSide.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveConn(context.Background(), serverSide)
+	}()
+
+	// Push more bytes than the cap with no newline. The serve loop should
+	// detect the breach mid-stream and respond before we send everything.
+	// Two subtleties:
+	//   - writer must NOT Close clientSide on its own — that races with
+	//     the server's in-flight error-response Write through the
+	//     synchronous pipe and turns a clean reject into a "closed pipe"
+	//     on Decode. Test cleanup handles the close.
+	//   - payload must comfortably exceed maxFrameBytes so the bounded
+	//     reader's bufio refill at the cap boundary is satisfied by
+	//     still-pending writer data (otherwise bufio.ReadSlice blocks
+	//     waiting for a refill the writer can't supply).
+	big := bytes.Repeat([]byte{'x'}, 2*maxFrameBytes)
+	go func() { _, _ = clientSide.Write(big) }()
+
+	dec := json.NewDecoder(clientSide)
+	var resp rpc.Response
+	if err := dec.Decode(&resp); err != nil {
+		t.Fatalf("expected bad_request response, decode error: %v", err)
+	}
+	if resp.Ok || resp.Error == nil || resp.Error.Code != rpc.CodeBadRequest {
+		t.Fatalf("expected bad_request, got %+v", resp)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serveConn did not return after oversize-frame rejection")
+	}
+}

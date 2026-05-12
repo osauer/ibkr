@@ -1585,8 +1585,13 @@ func (c *Connector) EnsureMarketDataSubscription(symbol string, fields []string,
 	return true, nil
 }
 
-// UnsubscribeMarketData unsubscribes from market data
+// UnsubscribeMarketData unsubscribes from market data. Symbol is normalised
+// to upper-case so Unsubscribe("aapl") cleanly tears down a subscription
+// created by Subscribe("aapl") — Subscribe stores under ToUpper(symbol),
+// so a case-mismatched Unsubscribe would otherwise silently leak the
+// IBKR market-data line.
 func (c *Connector) UnsubscribeMarketData(symbol string) error {
+	symbol = strings.ToUpper(symbol)
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 
