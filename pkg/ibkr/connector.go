@@ -80,6 +80,7 @@ type Connector struct {
 	optQuoteBid     map[string]float64  // last observed option bid per underlying
 	optQuoteAsk     map[string]float64  // last observed option ask per underlying
 	optQuoteMid     map[string]float64  // derived option mid per underlying
+	optPrevClose    map[string]float64  // tick 9 on the option contract itself (NOT the underlying)
 	optGreeks       map[string]Greeks   // last observed model-computation greeks per option key
 	optUnderlyingPx map[string]float64  // model-computation underlying price per option key
 	optParams       map[string]struct { // subscription params used
@@ -242,6 +243,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		optQuoteBid:      make(map[string]float64),
 		optQuoteAsk:      make(map[string]float64),
 		optQuoteMid:      make(map[string]float64),
+		optPrevClose:     make(map[string]float64),
 		optGreeks:        make(map[string]Greeks),
 		optUnderlyingPx:  make(map[string]float64),
 		optParams: make(map[string]struct {
@@ -2640,6 +2642,12 @@ func (c *Connector) handleTickPrice(fields []string) {
 				c.optQuoteBid[optSym] = price
 			case 2:
 				c.optQuoteAsk[optSym] = price
+			case 9:
+				// Per-contract previous close (the option's own prior settle,
+				// NOT the underlying's). Used for option-level daily P&L
+				// attribution; without this, callers fall back to the
+				// underlying's prev close which is meaningless for an option.
+				c.optPrevClose[optSym] = price
 			case 37:
 				c.optQuoteMid[optSym] = price
 			}
@@ -2769,19 +2777,32 @@ func (c *Connector) handleTickGeneric(fields []string) {
 }
 
 // handleOptionComputation processes IBKR option computation ticks (msgID 21),
-// which provide implied volatility, greeks, and theoretical prices for option contracts.
+// which provide implied volatility, greeks, and theoretical prices for option
+// contracts.
+//
+// Wire format for IBKR server version ≥ MIN_SERVER_VER_PRICE_BASED_VOLATILITY
+// (= 165):
+//
+//	[msgID, reqID, tickType, tickAttrib, impliedVol, delta, optPrice,
+//	 pvDividend, gamma, vega, theta, underlyingPrice]
+//
+// The connection enforces serverVersion ≥ 124 (`minServerVersionRequired`),
+// and current TWS / IB Gateway builds report 200+, so callers always see
+// this layout. fields[1]=reqID, fields[2]=tickType, fields[3]=tickAttrib
+// (option-computation flags; not consumed yet).
 func (c *Connector) handleOptionComputation(fields []string) {
-	// Expected IB payload:
-	// [msgID, version, reqID, tickType, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, underlyingPrice]
+	// New format has 12 fields (legacy had 12 too, but the meaning shifted).
+	// The trailing space in IBKR's wire-encoded frame can produce a 13th
+	// empty token after Split; accept ≥ 12.
 	if len(fields) < 12 {
 		return
 	}
 
-	reqID, err := strconv.Atoi(fields[2])
+	reqID, err := strconv.Atoi(fields[1])
 	if err != nil {
 		return
 	}
-	tickType, err := strconv.Atoi(fields[3])
+	tickType, err := strconv.Atoi(fields[2])
 	if err != nil {
 		return
 	}
@@ -2794,6 +2815,7 @@ func (c *Connector) handleOptionComputation(fields []string) {
 		return v
 	}
 
+	// fields[3] is tickAttrib (option computation flags); not consumed yet.
 	impliedVol := parseFloat(fields[4])
 	delta := parseFloat(fields[5])
 	optionPrice := parseFloat(fields[6])
@@ -3607,6 +3629,35 @@ func (c *Connector) GetOptionQuoteMid(symbol string) (float64, bool) {
 	defer c.optMu.RUnlock()
 	v, ok := c.optQuoteMid[symbol]
 	return v, ok
+}
+
+// GetOptionQuoteBidAsk returns the last observed bid and ask for an option key.
+// Returns (0, 0, false) when no quote has been observed; (bid, 0, true) or
+// (0, ask, true) when only one side has been seen. Use for stale-mark
+// detection on illiquid contracts where the mark can sit in the middle of
+// a wide spread without any actual trade printing.
+func (c *Connector) GetOptionQuoteBidAsk(symbol string) (bid, ask float64, ok bool) {
+	c.optMu.RLock()
+	defer c.optMu.RUnlock()
+	b, hasB := c.optQuoteBid[symbol]
+	a, hasA := c.optQuoteAsk[symbol]
+	if !hasB && !hasA {
+		return 0, 0, false
+	}
+	return b, a, true
+}
+
+// GetOptionPrevClose returns the option contract's own previous regular-
+// session close (tick 9 on the option subscription, not the underlying's).
+// Required for option-level daily P&L attribution.
+func (c *Connector) GetOptionPrevClose(symbol string) (float64, bool) {
+	c.optMu.RLock()
+	defer c.optMu.RUnlock()
+	v, ok := c.optPrevClose[symbol]
+	if !ok || v <= 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 // GetOptionParams returns the option params used for subscription for a symbol

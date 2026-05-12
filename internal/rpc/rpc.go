@@ -322,6 +322,22 @@ type PositionView struct {
 	Gamma *float64 `json:"gamma,omitempty"`
 	Theta *float64 `json:"theta,omitempty"`
 	Vega  *float64 `json:"vega,omitempty"`
+
+	// Option-only contract-level fields populated from the per-leg
+	// market-data subscription that captures Greeks (msg 21 tickType 13)
+	// plus tick 1/2/9 for the option itself. Nil when the subscription
+	// budget expired without delivering the tick — never zero-substituted.
+	//
+	// OptionBid / OptionAsk let callers detect a wide spread on illiquid
+	// contracts where the mark is a midpoint that may not be tradable.
+	// OptionPrevClose is the option contract's own prior settle (NOT the
+	// underlying's PrevClose above); required for option-level daily P&L
+	// without the underlying-vs-option confusion the agent-feedback flagged.
+	// IV is the model-computation implied volatility for this leg.
+	OptionBid       *float64 `json:"option_bid,omitempty"`
+	OptionAsk       *float64 `json:"option_ask,omitempty"`
+	OptionPrevClose *float64 `json:"option_prev_close,omitempty"`
+	IV              *float64 `json:"iv,omitempty"`
 }
 
 // PositionsResult wraps the array so the daemon can attach metadata later.

@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.12.1 — 2026-05-12 21:36 CEST
+
+Bug-fix release. The headline feature from v0.10.0 — per-leg option Greeks on `ibkr positions` — has been quietly broken since the IBKR gateway rolled forward to server version 165 or later. The handler that parses the model-computation tick was reading the wrong field as `reqID`, so every Greek the gateway sent landed on a key nobody was looking up, and `greeks_coverage` came back 0/N on every call. That's fixed here, alongside two related issues that compounded the symptom and one zombie-position bug. Three new optional fields show up on each option row in JSON: `option_bid`, `option_ask`, `option_prev_close`, plus `iv`. No flags or wire shapes were removed; existing consumers see the same output plus those four optional fields.
+
+### Greeks now arrive and get routed to the right contract
+
+`pkg/ibkr.handleOptionComputation` decoded tick 21 (model-computation Greeks) using offsets that only matched the pre-server-version-165 wire layout — `fields[2]` was treated as `reqID`, `fields[3]` as `tickType`. Modern gateways send `[msgID, reqID, tickType, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, underlyingPrice]`, so the handler was reading `tickType` (10/11/12/13) as the reqID. That ID isn't in the connector's option-request map, so the handler exited early and the Greek values fell on the floor. Result: `greeks_coverage: 0` on every option-bearing positions call, including the agent-feedback example. Fixed by reading `reqID` at `fields[1]` and `tickType` at `fields[2]`. New regression test in `connector_greeks_test.go` (`TestHandleOptionComputationWireOffsetIsAtFieldOne`) pins the wire offset so a future revert can't silently re-introduce the bug. Existing handler tests were updated to use the modern layout — under the old layout the test rows happened to align by coincidence, which is part of why the bug shipped.
+
+### Held options skip the slow contract round-trip
+
+`SubscribeOption` resolves each option's ConID via `reqContractData` before requesting market data. That round-trip can take a few hundred ms when the gateway is warm — but under load it sometimes silently times out, and the code then tries a second exchange, eating the full 10 s before giving up. For a 13-leg book that wipes the 30 s positions deadline before Greeks can be requested at all. The fix is honest: `msgPortfolioValue` already carries the full contract spec (ConID, exchange, trading class) for every held position, so the daemon now seeds the option-contract cache from portfolio data as it arrives. `SubscribeOption` hits cache for held positions and skips the round-trip entirely. New test `TestHandlePortfolioValueSeedsOptionContractCache` covers it.
+
+### Per-leg option market data exposed in JSON
+
+Each option row in the `positions` response now carries four new optional fields populated from the per-leg market-data subscription the daemon already opens for Greeks:
+
+- `option_bid` / `option_ask` — the option contract's own bid and ask, not derived from the underlying. The mark sits between them. When the spread is wide on illiquid contracts (RDDT $185C, GME $30C), the mark may not be tradable — these two fields are how callers can tell.
+- `option_prev_close` — the option contract's own previous regular-session close (tick 9 from the option's own market-data feed). The existing `prev_close` field on option rows continues to carry the underlying's prev close for backward compatibility, which the agent feedback correctly flagged as confusing. The new field is the one to use for option-level day-over-day P&L.
+- `iv` — the implied volatility from the model-computation tick, as a fraction (0.30 = 30%).
+
+All four fields are nil-omitted when the subscription didn't capture them in the budget — no fabricated zeros.
+
+### Delisted positions no longer inflate `effective_delta`
+
+A held delisted ticker (the user's HGENQ-style zombie) arrives via `msgPortfolioValue` with mark=0 — the gateway streams the position but rejects market-data subscriptions for it. On the first `positions` call after daemon start, the connector hasn't yet flagged the symbol inactive, so the zombie contributed its full share count (20 000 in the test book) to `effective_delta`. The second call would correctly exclude it once the inactive flag landed, so the same daemon reported wildly different effective deltas back-to-back. `buildPortfolioAggregates` now skips stocks with mark ≤ 0 from the aggregate; the position row still renders with mark=0, which is the honest answer. New test `TestBuildPortfolioAggregatesExcludesZombieStocks` covers it.
+
+### Other notes
+
+- `optionGreeksBudget` was 1.5 s; bumped to 2.5 s to give the gateway a comfortable margin once Greeks actually flow. Per-leg observed latency on the test book was 750–1100 ms in cache-warm conditions; 2.5 s leaves room without blowing the 30 s positions deadline (4-way parallel × 13 legs × 2.5 s worst case = 8.1 s).
+- The wire-decode fix means `handleOptionComputation` now reads `fields[3]` as `tickAttrib` (option-computation flags). The field is parsed but not yet consumed; we'll wire it through to the renderer if it turns out to carry information worth surfacing.
+
 ## v0.12.0 — 2026-05-12 07:45 CEST
 
 Four things land together: a real ad-hoc scanner path that lets agents compose a scan without rewriting the user's config, per-row enrichment so scanner output actually carries last/change/volume/IV/52w instead of bare symbols, a fresh seven-preset default set validated against the live gateway catalog, and two longstanding hardening fixes (wire-frame cap, status/scan readiness consistency) that surfaced during scanner work. Plus a test-harness orphan-prevention fix for `make test`. No CLI flag removals; all wire shapes back-compatible (existing `last`/`change`/`volume` fields on `rpc.ScanRow` switched from scalars to pointers, which is JSON-wire-compatible — `omitempty` drops nil same as zero). The default `[scans]` map changed — see migration note below.

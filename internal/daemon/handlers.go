@@ -200,7 +200,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// computation tick within budget, fill per-leg Delta/Gamma/Theta/
 	// Vega. Same bounded fan-out and TTL-cached pattern as prev close.
 	s.prewarmOptionGreeks(ctx, c, res.Options)
-	s.fillOptionGreeks(res.Options)
+	s.fillOptionGreeks(c, res.Options)
 
 	// FX decoration: read the per-currency snapshot maintained by the
 	// daemon's reqAccountUpdates subscription (no extra gateway round
@@ -415,7 +415,7 @@ const positionsPrewarmWorkers = 4
 // enough that a 15-leg book cold-fetch stays under ~6 s wall time at
 // 4-way parallelism. Negative-cache means subsequent calls within the
 // TTL pay zero for legs that already returned empty.
-const optionGreeksBudget = 1500 * time.Millisecond
+const optionGreeksBudget = 2500 * time.Millisecond
 
 // prewarmOptionGreeks dispatches up to positionsPrewarmWorkers concurrent
 // brief subscribes for each option leg, harvests the model-computation
@@ -525,9 +525,11 @@ func captureOptionGreeks(ctx context.Context, c *ibkrlib.Connector, under, expir
 }
 
 // fillOptionGreeks copies cached Greeks onto each option leg's
-// Delta/Gamma/Theta/Vega fields. Legs whose Greeks are absent (or
-// were negative-cached) keep nil pointers — never zero-substituted.
-func (s *Server) fillOptionGreeks(options []rpc.PositionView) {
+// Delta/Gamma/Theta/Vega fields, plus the option-contract-level bid/ask,
+// IV, and prev_close pulled from the connector's tick maps (populated by
+// the prewarm subscription). Legs whose data is absent keep nil pointers —
+// never zero-substituted.
+func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionView) {
 	if s.greeks == nil {
 		return
 	}
@@ -539,25 +541,45 @@ func (s *Server) fillOptionGreeks(options []rpc.PositionView) {
 			continue
 		}
 		e, ok := s.greeks.get(key, now)
-		if !ok || !e.ok {
+		if ok && e.ok {
+			g := e.value
+			if g.Delta != 0 {
+				d := g.Delta
+				p.Delta = &d
+			}
+			if g.Gamma != 0 {
+				d := g.Gamma
+				p.Gamma = &d
+			}
+			if g.Theta != 0 {
+				d := g.Theta
+				p.Theta = &d
+			}
+			if g.Vega != 0 {
+				d := g.Vega
+				p.Vega = &d
+			}
+		}
+		if c == nil {
 			continue
 		}
-		g := e.value
-		if g.Delta != 0 {
-			d := g.Delta
-			p.Delta = &d
+		if bid, ask, ok := c.GetOptionQuoteBidAsk(key); ok {
+			if bid > 0 {
+				b := bid
+				p.OptionBid = &b
+			}
+			if ask > 0 {
+				a := ask
+				p.OptionAsk = &a
+			}
 		}
-		if g.Gamma != 0 {
-			d := g.Gamma
-			p.Gamma = &d
+		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
+			v := iv
+			p.IV = &v
 		}
-		if g.Theta != 0 {
-			d := g.Theta
-			p.Theta = &d
-		}
-		if g.Vega != 0 {
-			d := g.Vega
-			p.Vega = &d
+		if pc, ok := c.GetOptionPrevClose(key); ok {
+			v := pc
+			p.OptionPrevClose = &v
 		}
 	}
 }
@@ -654,8 +676,19 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		}
 	}
 	// Stock legs add raw share-equivalent exposure to effective + dollar
-	// delta (delta=1 for stock by definition).
+	// delta (delta=1 for stock by definition). Stocks with mark=0 are
+	// excluded — these are delisted-but-IBKR-still-reports zombies (e.g.
+	// HGENQ) that the gateway streams via msgPortfolioValue with no live
+	// quote. Including them inflates effective_delta by their full share
+	// count on the first call after daemon start (before market-data
+	// probe flags them inactive), then drops on the second call when the
+	// inactive flag kicks in. Filtering on mark==0 keeps the aggregate
+	// stable across calls — the position row still renders with mark=0,
+	// which is the honest answer.
 	for _, st := range stocks {
+		if st.Mark <= 0 {
+			continue
+		}
 		effDelta += st.Quantity
 		haveDelta = true
 		if st.Mark > 0 {

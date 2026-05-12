@@ -2354,6 +2354,35 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 	}
 	c.positionsMu.Unlock()
 
+	// Seed the option contract cache from portfolio data so SubscribeOption
+	// can skip the reqContractData round-trip for held options. msgPortfolioValue
+	// carries the full contract spec including ConID; resolveOptionContract
+	// will hit this cache on the next call. Without this seed, every held
+	// option leg pays a 5 s × N-exchange-attempts penalty on cold cache,
+	// blowing the positions deadline before the Greeks tick can be captured.
+	//
+	// Note: msgPortfolioValue field 9 is *primaryExchange* (not Exchange);
+	// the parsed Contract above stores it under Exchange, which is a wire
+	// quirk we don't fix here. We feed it into PrimaryExch in the cache —
+	// SubscribeOption initialises Exchange="SMART" for option contracts,
+	// and applyContractDetailLite only overwrites Exchange if the cache
+	// has a non-empty value, so leaving Exchange="" preserves the SMART
+	// default the gateway expects for option market-data subscriptions.
+	if contract.SecType == "OPT" && conID != 0 {
+		cacheKey := optionContractKey(contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+		detail := ContractDetailsLite{
+			Symbol:       contract.Symbol,
+			Exchange:     "",
+			PrimaryExch:  contract.Exchange,
+			ConID:        conID,
+			LocalSymbol:  contract.LocalSymbol,
+			TradingClass: contract.TradingClass,
+		}
+		c.optionContractMu.Lock()
+		c.optionContractCache[cacheKey] = detail
+		c.optionContractMu.Unlock()
+	}
+
 	portfolioLogger.Infof("Updated: %s %.2f @ %.2f, PnL: %.2f",
 		key, position, marketPrice, unrealizedPNL)
 }
