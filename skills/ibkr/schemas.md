@@ -280,26 +280,38 @@ for the nearest 12 expiries by default; daemon caches results).
 ```json
 {
   "symbol": "AAPL",
+  "spot": 207.42,
   "as_of": "2026-05-09T14:32:11Z",
   "expiries": [
-    {"date": "2026-05-16", "iv": 0.312, "iv_status": "ok"},
-    {"date": "2026-05-23", "iv": 0.298, "iv_status": "ok"},
-    {"date": "2026-06-19", "iv": 0.284, "iv_status": "ok"},
-    {"date": "2026-07-17", "iv": null, "iv_status": "timeout"},
-    {"date": "2026-12-18"}
+    {"date": "2026-05-16", "dte": 7, "iv": 0.312, "iv_status": "ok", "implied_move": 9.04, "implied_move_pct": 0.0436},
+    {"date": "2026-05-23", "dte": 14, "iv": 0.298, "iv_status": "ok", "implied_move": 12.21, "implied_move_pct": 0.0589},
+    {"date": "2026-06-19", "dte": 41, "iv": 0.284, "iv_status": "ok", "implied_move": 19.85, "implied_move_pct": 0.0957},
+    {"date": "2026-07-17", "dte": 69, "iv": null, "iv_status": "timeout"},
+    {"date": "2026-12-18", "dte": 223}
   ]
 }
 ```
 
 Field meanings:
+- `spot` — underlying mid the daemon used to pick the per-expiry ATM
+  strike and compute `implied_move`. Zero when the spot probe failed
+  or `--no-iv` was passed.
 - `expiries[].date` — ISO date `YYYY-MM-DD`. Sorted ascending, deduped
   across exchanges (SMART, AMEX, CBOE, …) so each expiry appears once.
+- `expiries[].dte` — calendar days from today (local) to the expiry.
+  Same-day expiries have `dte` = 0.
 - `expiries[].iv` — decimal (e.g. `0.284` = 28.4%) or `null`. Present
   when the daemon fetched IV for that expiry (default: nearest 12;
   `--all-expiries` extends).
 - `expiries[].iv_status` — `ok`, `timeout`, or `unavailable`. Set
   when IV was fetched (or attempted); absent on bare rows beyond the
   default cap. Surface non-`ok` rows clearly; do not substitute a proxy.
+- `expiries[].implied_move` — the 1-σ expected dollar move by
+  expiration, computed `spot × IV × √(DTE/365)`. The desk-standard
+  "expected move" used to size event trades and pick option strikes.
+  Populated only when spot and IV are both known; `null` otherwise.
+- `expiries[].implied_move_pct` — `implied_move / spot` as a fraction
+  (e.g. `0.0436` means 4.36% expected move by expiry).
 
 Empty `expiries` means the symbol has no listed options (typical for
 ETFs without an option program). Surface this honestly rather than
@@ -419,7 +431,7 @@ actionable; surface them only when the user is debugging discovery.
 
 ## size
 
-`ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] --json`
+`ibkr size --symbol SYM --entry F --stop F [--target F] [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] --json`
 
 ```json
 {
@@ -427,6 +439,7 @@ actionable; surface them only when the user is debugging discovery.
   "side": "long",
   "entry": 207.50,
   "stop": 202.50,
+  "target": 217.50,
   "risk_pct": 1.0,
   "lot": 1,
   "fx": 1.0,
@@ -438,6 +451,10 @@ actionable; surface them only when the user is debugging discovery.
   "shares": 496,
   "notional": 102920.0,
   "max_loss": 2480.0,
+  "r": 2.0,
+  "reward_quote": 4960.0,
+  "reward_base": 4960.0,
+  "breakeven_win_rate": 0.3333,
   "status": "ok"
 }
 ```
@@ -450,6 +467,16 @@ actionable; surface them only when the user is debugging discovery.
 - `per_share_risk = |entry - stop|`, in quote currency.
 - `shares = floor(risk_quote / per_share_risk / lot) * lot`.
 - `notional` and `max_loss` are in quote currency.
+- `target`, `r`, `reward_quote`, `reward_base`, `breakeven_win_rate` —
+  populated **only** when `--target` is supplied. Long trades require
+  `target > entry`; short trades require `target < entry`.
+  - `r = |target - entry| / per_share_risk` — the reward-to-risk
+    multiple. The standard discretionary threshold is `r >= 2`.
+  - `reward_quote = shares * |target - entry|` (quote currency); 
+    `reward_base = reward_quote / fx`.
+  - `breakeven_win_rate = 1 / (1 + r)` — the strategy's break-even
+    hit rate at this R. Surface as a percentage when explaining to
+    a user (e.g. `r = 2.0` → 33.3% breakeven).
 - `status` is one of:
   - `ok` — sized within buying power.
   - `tight_risk` — `shares == 0` because the budget can't cover one lot at the
@@ -458,6 +485,6 @@ actionable; surface them only when the user is debugging discovery.
   - `exceeds_buying_power` — `notional > buying_power * fx`. Suggest trimming
     `--risk-pct` or revisiting the entry.
 
-The CLI never derives entry or stop from market data — they're the user's
-trade plan. The CLI also performs no order action; this is math against the
-live account snapshot.
+The CLI never derives entry, stop, or target from market data — they're the
+user's trade plan. The CLI also performs no order action; this is math
+against the live account snapshot.

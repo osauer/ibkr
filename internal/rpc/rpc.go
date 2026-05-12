@@ -418,16 +418,34 @@ type ChainExpiriesParams struct {
 // ChainExpiry is one row in MethodChainExpiries' response. IV is nil when
 // --with-iv wasn't requested or when the per-strike IV fetch timed out;
 // IVStatus disambiguates ("ok" | "unavailable" | "timeout").
+//
+// DTE is the integer day count from "today (local)" to the expiry date,
+// inclusive of the expiry day (so a same-day expiry has DTE=0, next-day
+// has DTE=1). Surfaced separately from ImpliedMove so consumers can
+// derive their own term-structure math.
+//
+// ImpliedMove is the 1-σ expected dollar move by expiration, computed as
+// spot × IV × √(DTE/365). Populated only when IV and spot are both
+// available; otherwise nil. The matching ImpliedMovePct is the same value
+// expressed as a fraction of spot (so `0.042` means 4.2%).
 type ChainExpiry struct {
-	Date     string   `json:"date"` // YYYY-MM-DD
-	IV       *float64 `json:"iv,omitempty"`
-	IVStatus string   `json:"iv_status,omitempty"`
+	Date           string   `json:"date"` // YYYY-MM-DD
+	DTE            int      `json:"dte,omitempty"`
+	IV             *float64 `json:"iv,omitempty"`
+	IVStatus       string   `json:"iv_status,omitempty"`
+	ImpliedMove    *float64 `json:"implied_move,omitempty"`
+	ImpliedMovePct *float64 `json:"implied_move_pct,omitempty"`
 }
 
 // ChainExpiriesResult is MethodChainExpiries' payload. Expiries are sorted
 // ascending and deduped across exchanges by the daemon.
+//
+// Spot is the underlying mid the daemon used to pick the per-expiry ATM
+// strike and to compute ImpliedMove. Zero when the spot probe failed or
+// WithIV wasn't requested.
 type ChainExpiriesResult struct {
 	Symbol   string        `json:"symbol"`
+	Spot     float64       `json:"spot,omitempty"`
 	Expiries []ChainExpiry `json:"expiries"`
 	AsOf     time.Time     `json:"as_of"`
 }

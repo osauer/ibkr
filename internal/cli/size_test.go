@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 )
@@ -155,6 +156,30 @@ func TestComputeSize(t *testing.T) {
 			},
 			wantErr: "side must be long or short",
 		},
+		{
+			name: "long with target <= entry rejected",
+			mutate: func(in *SizeInput) {
+				in.Target = 205 // < entry 207.50
+			},
+			wantErr: "long trade requires target",
+		},
+		{
+			name: "short with target >= entry rejected",
+			mutate: func(in *SizeInput) {
+				in.Side = "short"
+				in.Entry = 202.50
+				in.Stop = 207.50
+				in.Target = 205 // > entry 202.50
+			},
+			wantErr: "short trade requires target",
+		},
+		{
+			name: "negative target rejected",
+			mutate: func(in *SizeInput) {
+				in.Target = -10
+			},
+			wantErr: "target must be > 0",
+		},
 	}
 
 	for _, tc := range tests {
@@ -194,6 +219,67 @@ func TestComputeSize(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestComputeSizeRMultiple covers the optional reward-side math. R-multiple
+// is the desk-standard "is this trade worth taking" filter; breakeven win
+// rate is its dual. Pure derivation from entry/stop/target — once shares
+// are sized, RewardQuote is just shares × per-share reward.
+func TestComputeSizeRMultiple(t *testing.T) {
+	t.Parallel()
+
+	base := SizeInput{
+		Symbol: "AAPL", Side: "long",
+		Entry: 200, Stop: 195, // per-share risk 5
+		RiskPct: 1.0, Lot: 1, FX: 1.0,
+		NLV: 100_000, BuyingPower: 400_000, Currency: "EUR",
+	}
+	t.Run("no target -> reward fields stay nil", func(t *testing.T) {
+		res, err := ComputeSize(base)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if res.R != nil || res.RewardQuote != nil || res.BreakevenWinRate != nil || res.Target != nil {
+			t.Errorf("expected reward fields nil without target, got R=%v reward=%v be=%v target=%v",
+				res.R, res.RewardQuote, res.BreakevenWinRate, res.Target)
+		}
+	})
+	t.Run("long 2R target -> R=2 and 33.3% breakeven", func(t *testing.T) {
+		in := base
+		in.Target = 210 // reward 10, risk 5 → R=2
+		res, err := ComputeSize(in)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if res.R == nil || math.Abs(*res.R-2.0) > 1e-9 {
+			t.Fatalf("R = %v, want 2.0", res.R)
+		}
+		if res.BreakevenWinRate == nil || math.Abs(*res.BreakevenWinRate-(1.0/3.0)) > 1e-9 {
+			t.Fatalf("breakeven = %v, want 0.3333", res.BreakevenWinRate)
+		}
+		// 200 shares × 10 reward = 2000 quote ccy.
+		if res.RewardQuote == nil || math.Abs(*res.RewardQuote-2000) > 1e-9 {
+			t.Fatalf("reward_quote = %v, want 2000", res.RewardQuote)
+		}
+	})
+	t.Run("short 3R target -> R=3 and 25% breakeven", func(t *testing.T) {
+		in := SizeInput{
+			Symbol: "AAPL", Side: "short",
+			Entry: 200, Stop: 205, Target: 185, // risk 5, reward 15
+			RiskPct: 1.0, Lot: 1, FX: 1.0,
+			NLV: 100_000, BuyingPower: 400_000, Currency: "EUR",
+		}
+		res, err := ComputeSize(in)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if res.R == nil || math.Abs(*res.R-3.0) > 1e-9 {
+			t.Fatalf("R = %v, want 3.0", res.R)
+		}
+		if res.BreakevenWinRate == nil || math.Abs(*res.BreakevenWinRate-0.25) > 1e-9 {
+			t.Fatalf("breakeven = %v, want 0.25", res.BreakevenWinRate)
+		}
+	})
 }
 
 // renderSizeText must surface the user-facing fields and only mention status
@@ -241,6 +327,44 @@ func TestRenderSizeText(t *testing.T) {
 		out := stdout.String()
 		if !strings.Contains(out, "Risk in quote ccy") || !strings.Contains(out, "1.0850") {
 			t.Errorf("expected Risk-in-quote-ccy row with fx 1.0850:\n%s", out)
+		}
+	})
+
+	t.Run("target -> reward block rendered", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		tgt, r, rew, be := 210.0, 2.0, 2000.0, 1.0/3.0
+		res := &SizeResult{
+			Symbol: "AAPL", Side: "long", Entry: 200, Stop: 195, Target: &tgt,
+			RiskPct: 1.0, Lot: 1, FX: 1.0, NLV: 100_000, BaseCurrency: "EUR",
+			RiskBase: 1000, RiskQuote: 1000, PerShareRisk: 5,
+			Shares: 200, Notional: 40000, MaxLoss: 1000,
+			R: &r, RewardQuote: &rew, BreakevenWinRate: &be, Status: "ok",
+		}
+		_ = renderSizeText(env, res)
+		out := stdout.String()
+		for _, want := range []string{"target 210", "Max gain at target", "Reward:risk", "2.00R", "Breakeven win rate", "33.3%"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in output:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("no target -> reward block suppressed", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		res := &SizeResult{
+			Symbol: "AAPL", Side: "long", Entry: 200, Stop: 195,
+			RiskPct: 1.0, Lot: 1, FX: 1.0, NLV: 100_000, BaseCurrency: "EUR",
+			RiskBase: 1000, RiskQuote: 1000, PerShareRisk: 5,
+			Shares: 200, Notional: 40000, MaxLoss: 1000, Status: "ok",
+		}
+		_ = renderSizeText(env, res)
+		out := stdout.String()
+		for _, banned := range []string{"target", "Reward:risk", "Breakeven", "Max gain at target"} {
+			if strings.Contains(out, banned) {
+				t.Errorf("expected reward block suppressed; found %q:\n%s", banned, out)
+			}
 		}
 	})
 

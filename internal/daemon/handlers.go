@@ -1047,8 +1047,9 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 
 	if !p.WithIV {
+		today := todayLocal()
 		for _, e := range expiries {
-			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e})
+			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e, DTE: dteFromDate(today, e)})
 		}
 		return res, nil
 	}
@@ -1066,8 +1067,12 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// shared across all expiries — pre-fix this ran once before the loop
 	// already; only the loop changed shape (parallel + cached).
 	spot, _ := briefSnapshotPrice(ctx, c, sym, 5*time.Second)
+	if spot > 0 {
+		res.Spot = spot
+	}
 
 	now := time.Now()
+	today := todayLocal()
 	rows := make([]rpc.ChainExpiry, len(work))
 	type job struct {
 		idx       int
@@ -1077,7 +1082,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 	var jobs []job
 	for i, e := range work {
-		row := rpc.ChainExpiry{Date: e}
+		row := rpc.ChainExpiry{Date: e, DTE: dteFromDate(today, e)}
 		// Cache lookup first — a hit avoids the round-trip entirely.
 		if cached, ok := s.expiryIVs.get(sym, e, now); ok {
 			if cached.iv > 0 {
@@ -1144,15 +1149,67 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 
+	// Decorate each row with the 1-σ implied move now that IV is settled.
+	// Pure derivation from spot + IV + DTE — no extra round trips. Skips
+	// rows missing any of the three so the field stays nil rather than
+	// silently absorbing a zero.
+	for i := range rows {
+		if mv, mvPct, ok := computeImpliedMove(spot, rows[i].IV, rows[i].DTE); ok {
+			rows[i].ImpliedMove = &mv
+			rows[i].ImpliedMovePct = &mvPct
+		}
+	}
+
 	// Append the working set, then the rest (without IV) when caller
 	// asked for the full list. AllExpiries=false drops the tail.
 	res.Expiries = append(res.Expiries, rows...)
 	if p.AllExpiries && len(expiries) > len(work) {
 		for _, e := range expiries[len(work):] {
-			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e})
+			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e, DTE: dteFromDate(today, e)})
 		}
 	}
 	return res, nil
+}
+
+// todayLocal returns today's date at midnight local time. Surfaced as a
+// helper so dteFromDate and the no-IV / AllExpiries-tail paths agree on
+// the reference instant — they all read the same wall clock at handler
+// entry.
+func todayLocal() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+}
+
+// dteFromDate returns the calendar day count from today's local date to
+// the YYYY-MM-DD expiry. Same-day returns 0; one calendar day out returns
+// 1. Returns 0 on parse failure or expired dates — callers treat 0 as
+// "intraday" and downstream math (sqrt(DTE/365)) safely yields 0 too.
+func dteFromDate(today time.Time, expiry string) int {
+	t, err := time.ParseInLocation("2006-01-02", expiry, today.Location())
+	if err != nil {
+		return 0
+	}
+	days := int(t.Sub(today).Hours() / 24)
+	if days < 0 {
+		return 0
+	}
+	return days
+}
+
+// computeImpliedMove returns the 1-σ expected dollar move by expiration,
+// computed from spot × IV × √(DTE/365). Industry-standard "expected move
+// by expiry" formula — same shape the CBOE option calculator uses.
+//
+// Returns (move, movePct, true) when spot > 0, IV is non-nil and > 0,
+// and DTE >= 0. The percent value is `move / spot` (a fraction, so 0.042
+// means 4.2%). A DTE of 0 yields a zero move, which is correct: at expiry
+// the option's time value collapses to intrinsic.
+func computeImpliedMove(spot float64, iv *float64, dte int) (float64, float64, bool) {
+	if spot <= 0 || iv == nil || *iv <= 0 || dte < 0 {
+		return 0, 0, false
+	}
+	mv := spot * (*iv) * math.Sqrt(float64(dte)/365.0)
+	return mv, mv / spot, true
 }
 
 // fetchExpiriesAndStrikes is a small seam for tests — the connector's

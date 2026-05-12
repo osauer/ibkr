@@ -11,11 +11,17 @@ import (
 
 // SizeInput is the validated input to ComputeSize. Fields mirror the CLI
 // flags one-for-one so the pure function is testable without the runner.
+//
+// Target is optional. When set, ComputeSize derives the R-multiple
+// (reward-to-risk ratio = profit-to-stop distance / entry-to-stop
+// distance) and the breakeven win rate. Long trades require target >
+// entry; short trades require target < entry.
 type SizeInput struct {
 	Symbol      string
 	Side        string  // "long" | "short"
 	Entry       float64 // quote currency
 	Stop        float64 // quote currency
+	Target      float64 // optional take-profit; 0 disables the R block
 	RiskPct     float64 // percent of NLV; (0, 100]
 	Lot         int     // round shares down to this multiple; >= 1
 	FX          float64 // quote-currency units per 1 base-currency unit; > 0
@@ -26,23 +32,35 @@ type SizeInput struct {
 
 // SizeResult is the wire shape of `ibkr size --json` and the input to the
 // text renderer. Keep this struct stable — Claude consumes it.
+//
+// Target / R / RewardQuote / RewardBase / BreakevenWinRate are populated
+// only when the input carries a non-zero Target. R is the reward-to-risk
+// ratio (|target − entry| / |entry − stop|), the canonical "is this trade
+// worth taking" filter; ≥ 2R is the common discretionary threshold.
+// BreakevenWinRate is 1 / (1 + R) — at this win rate the strategy breaks
+// even, so any sustained edge above it is profitable.
 type SizeResult struct {
-	Symbol       string  `json:"symbol"`
-	Side         string  `json:"side"`
-	Entry        float64 `json:"entry"`
-	Stop         float64 `json:"stop"`
-	RiskPct      float64 `json:"risk_pct"`
-	Lot          int     `json:"lot"`
-	FX           float64 `json:"fx"`
-	NLV          float64 `json:"nlv"`
-	BaseCurrency string  `json:"base_currency,omitempty"`
-	RiskBase     float64 `json:"risk_base"`  // NLV * pct/100
-	RiskQuote    float64 `json:"risk_quote"` // RiskBase * fx
-	PerShareRisk float64 `json:"per_share_risk"`
-	Shares       int     `json:"shares"`
-	Notional     float64 `json:"notional"` // shares * entry
-	MaxLoss      float64 `json:"max_loss"` // shares * per_share_risk (quote ccy)
-	Status       string  `json:"status"`   // "ok" | "tight_risk" | "exceeds_buying_power"
+	Symbol           string   `json:"symbol"`
+	Side             string   `json:"side"`
+	Entry            float64  `json:"entry"`
+	Stop             float64  `json:"stop"`
+	Target           *float64 `json:"target,omitempty"`
+	RiskPct          float64  `json:"risk_pct"`
+	Lot              int      `json:"lot"`
+	FX               float64  `json:"fx"`
+	NLV              float64  `json:"nlv"`
+	BaseCurrency     string   `json:"base_currency,omitempty"`
+	RiskBase         float64  `json:"risk_base"`  // NLV * pct/100
+	RiskQuote        float64  `json:"risk_quote"` // RiskBase * fx
+	PerShareRisk     float64  `json:"per_share_risk"`
+	Shares           int      `json:"shares"`
+	Notional         float64  `json:"notional"`    // shares * entry
+	MaxLoss          float64  `json:"max_loss"`    // shares * per_share_risk (quote ccy)
+	R                *float64 `json:"r,omitempty"` // (|target-entry|) / (|entry-stop|)
+	RewardQuote      *float64 `json:"reward_quote,omitempty"`
+	RewardBase       *float64 `json:"reward_base,omitempty"`
+	BreakevenWinRate *float64 `json:"breakeven_win_rate,omitempty"` // 1 / (1+R), fraction
+	Status           string   `json:"status"`                       // "ok" | "tight_risk" | "exceeds_buying_power"
 }
 
 // ComputeSize is the pure sizing function. All validation lives here so the
@@ -72,6 +90,17 @@ func ComputeSize(in SizeInput) (SizeResult, error) {
 	}
 	if side == "short" && in.Stop <= in.Entry {
 		return SizeResult{}, fmt.Errorf("short trade requires stop (%v) > entry (%v)", in.Stop, in.Entry)
+	}
+	if in.Target != 0 {
+		if in.Target < 0 {
+			return SizeResult{}, fmt.Errorf("target must be > 0 (got %v)", in.Target)
+		}
+		if side == "long" && in.Target <= in.Entry {
+			return SizeResult{}, fmt.Errorf("long trade requires target (%v) > entry (%v)", in.Target, in.Entry)
+		}
+		if side == "short" && in.Target >= in.Entry {
+			return SizeResult{}, fmt.Errorf("short trade requires target (%v) < entry (%v)", in.Target, in.Entry)
+		}
 	}
 	if in.RiskPct <= 0 || in.RiskPct > 100 {
 		return SizeResult{}, fmt.Errorf("risk-pct must be in (0, 100] (got %v)", in.RiskPct)
@@ -116,6 +145,20 @@ func ComputeSize(in SizeInput) (SizeResult, error) {
 		Status:       "ok",
 	}
 
+	if in.Target != 0 {
+		tgt := in.Target
+		res.Target = &tgt
+		perShareReward := math.Abs(in.Target - in.Entry)
+		r := perShareReward / perShare
+		res.R = &r
+		rewardQuote := float64(shares) * perShareReward
+		rewardBase := rewardQuote / in.FX
+		res.RewardQuote = &rewardQuote
+		res.RewardBase = &rewardBase
+		be := 1.0 / (1.0 + r)
+		res.BreakevenWinRate = &be
+	}
+
 	if shares == 0 {
 		res.Status = "tight_risk"
 		return res, nil
@@ -131,6 +174,7 @@ func runSize(ctx context.Context, env *Env, args []string) int {
 	symbol := fs.String("symbol", "", "underlying symbol (required)")
 	entry := fs.Float64("entry", 0, "planned entry price per share (required)")
 	stop := fs.Float64("stop", 0, "planned stop price per share (required)")
+	target := fs.Float64("target", 0, "optional take-profit price; enables R-multiple and breakeven win-rate output")
 	riskPct := fs.Float64("risk-pct", 1.0, "percent of NLV to risk on this trade")
 	side := fs.String("side", "long", "trade direction: long | short")
 	lot := fs.Int("lot", 1, "round shares down to this multiple")
@@ -150,6 +194,7 @@ func runSize(ctx context.Context, env *Env, args []string) int {
 		Side:        *side,
 		Entry:       *entry,
 		Stop:        *stop,
+		Target:      *target,
 		RiskPct:     *riskPct,
 		Lot:         *lot,
 		FX:          *fx,
@@ -172,7 +217,11 @@ func renderSizeText(env *Env, r *SizeResult) int {
 	out := env.Stdout
 	ccyBase := nonEmpty(r.BaseCurrency, "USD")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Size  %s · %s · entry %.2f · stop %.2f\n", r.Symbol, r.Side, r.Entry, r.Stop)
+	header := fmt.Sprintf("Size  %s · %s · entry %.2f · stop %.2f", r.Symbol, r.Side, r.Entry, r.Stop)
+	if r.Target != nil {
+		header += fmt.Sprintf(" · target %.2f", *r.Target)
+	}
+	fmt.Fprintln(out, header)
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  Net liquidation         %s  (%s)\n", formatMoney(r.NLV), ccyBase)
 	fmt.Fprintf(out, "  Risk budget             %s  (%.2f%% of NLV)\n", formatMoney(r.RiskBase), r.RiskPct)
@@ -184,6 +233,18 @@ func renderSizeText(env *Env, r *SizeResult) int {
 	fmt.Fprintf(out, "  Shares                  %d  (lot %d)\n", r.Shares, r.Lot)
 	fmt.Fprintf(out, "  Notional                %s\n", formatMoney(r.Notional))
 	fmt.Fprintf(out, "  Max loss at stop        %s\n", formatMoney(r.MaxLoss))
+
+	// Reward / R block: only when --target was supplied. R-multiple is the
+	// canonical "is this trade worth taking" filter — ≥2R is the common
+	// discretionary threshold. Breakeven win rate is the dual reading:
+	// what hit-rate the strategy needs to be flat at this R.
+	if r.R != nil && r.RewardQuote != nil && r.BreakevenWinRate != nil {
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "  Max gain at target      %s\n", formatMoney(*r.RewardQuote))
+		fmt.Fprintf(out, "  Reward:risk             %.2fR\n", *r.R)
+		fmt.Fprintf(out, "  Breakeven win rate      %.1f%%\n", *r.BreakevenWinRate*100)
+	}
+
 	if r.Status != "ok" {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.yellow(fmt.Sprintf("  ⚠ status: %s", r.Status)))

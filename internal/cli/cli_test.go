@@ -445,6 +445,29 @@ func TestRenderChainExpiriesText(t *testing.T) {
 			t.Errorf("missing empty-state guidance:\n%s", out)
 		}
 	})
+
+	t.Run("with-iv shows DTE + implied move column", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		iv := 0.30
+		mv := 17.19
+		pct := 0.0860
+		res := &rpc.ChainExpiriesResult{
+			Symbol: "AAPL",
+			Spot:   200.00,
+			Expiries: []rpc.ChainExpiry{
+				{Date: "2026-06-19", DTE: 30, IV: &iv, IVStatus: "ok", ImpliedMove: &mv, ImpliedMovePct: &pct},
+				{Date: "2026-09-18", DTE: 120, IVStatus: "timeout"},
+			},
+		}
+		_ = renderChainExpiriesText(env, res, true)
+		out := stdout.String()
+		for _, want := range []string{"DTE", "EXPECTED MOVE", "spot", "30", "120", "8.6%", "(timeout)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in output:\n%s", want, out)
+			}
+		}
+	})
 }
 
 // SKILL.md must mention every subcommand registered in commands so users

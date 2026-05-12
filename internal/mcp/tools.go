@@ -103,7 +103,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_chain",
-		Description: "Option chain. Omit `expiry` to get the expiry list (with ATM IV per expiry by default — daemon caches results). Provide `expiry` (YYYY-MM-DD) for the ATM±width strike grid. `no_iv` returns the fast skeleton; `all_expiries` lifts the default 12-expiry cap.",
+		Description: "Option chain. Omit `expiry` to get the expiry list (with ATM IV, DTE, and 1-σ implied move per expiry by default — daemon caches IV results). The implied move is `spot × IV × √(DTE/365)`, the canonical expected dollar move by expiration. Provide `expiry` (YYYY-MM-DD) for the ATM±width strike grid. `no_iv` returns the fast skeleton (DTE only); `all_expiries` lifts the default 12-expiry cap.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":       schemaString("underlying ticker"),
 			"expiry":       schemaString("expiry date YYYY-MM-DD; omit to list available expiries"),
@@ -204,11 +204,12 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_size",
-		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order.",
+		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":   schemaString("ticker the trade plan applies to (for reporting only)"),
 			"entry":    json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"planned entry price per share, quote currency"}`),
 			"stop":     json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"planned stop price per share, quote currency"}`),
+			"target":   json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional take-profit price; when set, response includes r (reward:risk multiple) and breakeven_win_rate"}`),
 			"risk_pct": json.RawMessage(`{"type":"number","exclusiveMinimum":0,"maximum":100,"description":"percent of NLV to risk (default 1.0)"}`),
 			"side":     schemaEnum([]string{"long", "short"}, "trade direction (default long)"),
 			"lot":      json.RawMessage(`{"type":"integer","minimum":1,"description":"round shares down to this multiple (default 1; use 100 for one option contract's worth of stock)"}`),
@@ -220,6 +221,7 @@ var Tools = []Tool{
 				Side    string  `json:"side"`
 				Entry   float64 `json:"entry"`
 				Stop    float64 `json:"stop"`
+				Target  float64 `json:"target"`
 				RiskPct float64 `json:"risk_pct"`
 				Lot     int     `json:"lot"`
 				FX      float64 `json:"fx"`
@@ -248,6 +250,7 @@ var Tools = []Tool{
 				Side:        in.Side,
 				Entry:       in.Entry,
 				Stop:        in.Stop,
+				Target:      in.Target,
 				RiskPct:     in.RiskPct,
 				Lot:         in.Lot,
 				FX:          in.FX,

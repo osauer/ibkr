@@ -124,17 +124,26 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 		return 0
 	}
 	cappedAt := chainExpiriesCapBoundary(r.Expiries, withIV)
-	fmt.Fprintf(out, "%s  %d expiries available\n", r.Symbol, len(r.Expiries))
+	header := fmt.Sprintf("%s  %d expiries available", r.Symbol, len(r.Expiries))
+	if r.Spot > 0 {
+		header += fmt.Sprintf("  ·  spot %s", formatMoney(r.Spot))
+	}
+	fmt.Fprintln(out, header)
 	fmt.Fprintln(out)
 	if withIV {
-		fmt.Fprintln(out, "  EXPIRY        ATM IV")
+		// EXPIRY · DTE · ATM IV · 1-σ EXPECTED MOVE BY EXPIRY ($ + %)
+		// Expected move is the canonical spot × IV × √(DTE/365) — same
+		// shape CBOE's option calculator and most desk tools use. Pre-
+		// computed on the daemon side; renderer just lays it out.
+		fmt.Fprintln(out, "  EXPIRY        DTE   ATM IV   EXPECTED MOVE")
 		for _, e := range r.Expiries {
-			fmt.Fprintf(out, "  %-10s    %s\n", e.Date, fmtIVRow(e.IV, e.IVStatus))
+			fmt.Fprintf(out, "  %-10s  %4s   %s   %s\n",
+				e.Date, fmtDTE(e.DTE), fmtIVRow(e.IV, e.IVStatus), fmtImpliedMove(e.ImpliedMove, e.ImpliedMovePct))
 		}
 	} else {
-		fmt.Fprintln(out, "  EXPIRY")
+		fmt.Fprintln(out, "  EXPIRY        DTE")
 		for _, e := range r.Expiries {
-			fmt.Fprintf(out, "  %s\n", e.Date)
+			fmt.Fprintf(out, "  %-10s  %4s\n", e.Date, fmtDTE(e.DTE))
 		}
 	}
 	fmt.Fprintln(out)
@@ -200,4 +209,22 @@ func fmtPct(p *float64) string {
 		return padDash(6)
 	}
 	return fmt.Sprintf("%5.1f%%", *p*100)
+}
+
+// fmtDTE renders the day-to-expiry count right-aligned to a 4-char column.
+// 0 is rendered as a numeric `0` (same-day expiry, intraday) — never an
+// em-dash, because 0 carries information.
+func fmtDTE(dte int) string {
+	return fmt.Sprintf("%4d", dte)
+}
+
+// fmtImpliedMove renders the 1-σ expected dollar move and its percent of
+// spot in a single fixed-width cell. Empty cell (em-dashes) when the
+// daemon couldn't compute the move — typically because the per-expiry IV
+// fetch didn't land.
+func fmtImpliedMove(move, pct *float64) string {
+	if move == nil || pct == nil || *move == 0 {
+		return padDash(16)
+	}
+	return fmt.Sprintf("±%-7s (%4.1f%%)", strings.TrimSpace(formatMoney(*move)), *pct*100)
 }
