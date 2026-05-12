@@ -3,31 +3,58 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
+// runScan dispatches the four shapes of `ibkr scan`:
+//
+//	ibkr scan <preset>                      → run a named preset
+//	ibkr scan list                          → enumerate configured presets
+//	ibkr scan params [--instrument STK]     → dump gateway catalog
+//	ibkr scan --type X --exchange Y         → ad-hoc one-off scan
+//
+// Ad-hoc is the agent-facing path: avoids having to write a preset to the
+// user's config.toml just to run a one-time scan. Preset stays as the
+// friendly shorthand for human users and recurring agent workflows.
 func runScan(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "scan")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	limit := fs.Int("limit", 0, "max rows (0 = preset default)")
+	limit := fs.Int("limit", 0, "max rows (0 = preset default / 50 cap for ad-hoc)")
+	adHocType := fs.String("type", "", "ad-hoc scanCode (e.g. TOP_PERC_GAIN) — required with --exchange when no preset is given")
+	adHocExch := fs.String("exchange", "", "ad-hoc locationCode (e.g. STK.US.MAJOR) — required with --type when no preset is given")
+	paramsInstrument := fs.String("instrument", "", "filter the params dump by instrument type (e.g. STK); only meaningful for `ibkr scan params`")
+	paramsRaw := fs.Bool("raw", false, "include the gateway's raw XML payload in the params dump (~200 KB)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	rest := fs.Args()
-	if len(rest) == 0 {
-		return fail(env, "scan: usage: ibkr scan <preset> | ibkr scan list")
-	}
-	if rest[0] == "list" {
+
+	switch {
+	case len(rest) == 1 && rest[0] == "list":
 		return runScanList(ctx, env, *jsonOut)
+	case len(rest) >= 1 && rest[0] == "params":
+		return runScanParams(ctx, env, *paramsInstrument, *paramsRaw, *jsonOut)
+	case len(rest) == 0 && *adHocType != "" && *adHocExch != "":
+		params := rpc.ScanRunParams{Type: *adHocType, Exchange: *adHocExch, Limit: *limit}
+		return runScanCall(ctx, env, params, *jsonOut)
+	case len(rest) == 0 && (*adHocType != "" || *adHocExch != ""):
+		return fail(env, "scan: ad-hoc mode requires both --type and --exchange (see 'ibkr scan params' for valid values)")
+	case len(rest) == 1:
+		params := rpc.ScanRunParams{Preset: rest[0], Limit: *limit}
+		return runScanCall(ctx, env, params, *jsonOut)
+	default:
+		return fail(env, "scan: usage: ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] | ibkr scan --type X --exchange Y")
 	}
-	preset := rest[0]
-	params := rpc.ScanRunParams{Preset: preset, Limit: *limit}
+}
+
+func runScanCall(ctx context.Context, env *Env, params rpc.ScanRunParams, jsonOut bool) int {
 	var res rpc.ScanResult
 	if err := env.Conn.Call(ctx, rpc.MethodScanRun, params, &res); err != nil {
 		return fail(env, "scan: %v", err)
 	}
-	if *jsonOut {
+	if jsonOut {
 		return printJSON(env, res)
 	}
 	return renderScanText(env, &res)
@@ -43,24 +70,141 @@ func runScanList(ctx context.Context, env *Env, jsonOut bool) int {
 	}
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  PRESET                TYPE                    EXCHANGE             LIMIT")
+	fmt.Fprintln(out, "  PRESET                TYPE                              EXCHANGE             LIMIT")
 	for _, p := range res.Presets {
-		fmt.Fprintf(out, "  %-20s  %-22s  %-18s   %d\n", p.Name, p.Type, p.Exchange, p.Limit)
+		fmt.Fprintf(out, "  %-20s  %-32s  %-18s   %d\n", p.Name, p.Type, p.Exchange, p.Limit)
 	}
 	fmt.Fprintln(out)
 	return 0
 }
 
+func runScanParams(ctx context.Context, env *Env, instrument string, raw, jsonOut bool) int {
+	params := rpc.ScanParamsParams{Instrument: instrument, IncludeRawXML: raw}
+	var res rpc.ScanParamsResult
+	if err := env.Conn.Call(ctx, rpc.MethodScanParams, params, &res); err != nil {
+		return fail(env, "scan params: %v", err)
+	}
+	if jsonOut {
+		return printJSON(env, res)
+	}
+	return renderScanParamsText(env, &res, instrument)
+}
+
 func renderScanText(env *Env, r *rpc.ScanResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
+	label := r.Preset
+	if label == "" {
+		label = "(ad-hoc)"
+	}
 	fmt.Fprintf(out, "Scan: %s (%s)  ·  %d rows  ·  as of %s\n",
-		r.Preset, r.Type, len(r.Rows), formatTimeShort(r.AsOf))
+		label, r.Type, len(r.Rows), formatTimeShort(r.AsOf))
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  RANK  SYMBOL    NOTE")
+	// Columns match `ibkr quote`'s width/colour conventions: signed change
+	// in green/red, em-dash for nil. The 52w range is rendered as a single
+	// "low..high" string so the eye can pick out whether the current price
+	// is near the top or bottom of the range without scanning two columns.
+	// Each value column is pre-formatted to its exact visible width before
+	// ANSI colour wrapping so the column lines up whether colour is on or
+	// off and whether the value is present or nil (em-dash).
+	fmt.Fprintf(out, "  %-4s  %-9s %12s  %8s  %9s  %7s  %20s  %s\n",
+		"RANK", "SYMBOL", "LAST", "CHG%", "VOL", "IV", "52W RANGE", "NOTE")
 	for _, row := range r.Rows {
-		fmt.Fprintf(out, "  %-4d  %-9s %s\n", row.Rank, row.Symbol, row.Comment)
+		fmt.Fprintf(out, "  %-4d  %-9s %s  %s  %s  %s  %s  %s\n",
+			row.Rank,
+			row.Symbol,
+			formatPrice(row.Last, 12),
+			env.formatChangePct(row.ChangePct, 8),
+			formatVolumeCompact(row.Volume, 9),
+			ivStatus(row.IV),
+			formatRange52w(env, row.Week52Low, row.Week52High),
+			row.Comment,
+		)
 	}
 	fmt.Fprintln(out)
+	return 0
+}
+
+// formatPrice renders a price right-aligned to width w with a leading
+// dollar sign (consistent with positions / quote tables). Nil → em-dash.
+// $ is part of the visible width so the column aligns whether the price
+// is present or not.
+func formatPrice(p *float64, w int) string {
+	if p == nil {
+		return padDash(w)
+	}
+	return fmt.Sprintf("%*s", w, fmt.Sprintf("$%.2f", *p))
+}
+
+// formatVolumeCompact renders share volume right-aligned to width w with
+// K/M/B suffixes — the convention TWS and finance terminals use, easier
+// to scan than literal thousand-separated counts. Nil → em-dash.
+func formatVolumeCompact(v *int64, w int) string {
+	if v == nil || *v <= 0 {
+		return padDash(w)
+	}
+	n := float64(*v)
+	switch {
+	case n >= 1e9:
+		return fmt.Sprintf("%*s", w, fmt.Sprintf("%.2fB", n/1e9))
+	case n >= 1e6:
+		return fmt.Sprintf("%*s", w, fmt.Sprintf("%.2fM", n/1e6))
+	case n >= 1e3:
+		return fmt.Sprintf("%*s", w, fmt.Sprintf("%.1fK", n/1e3))
+	default:
+		return fmt.Sprintf("%*d", w, *v)
+	}
+}
+
+// formatRange52w renders the 52-week low..high pair in dim grey to keep
+// the eye drawn to the live price and change columns. Either side nil →
+// em-dash for that half. The "low..high" connector is two dots; uses no
+// space so the column stays compact.
+func formatRange52w(env *Env, lo, hi *float64) string {
+	lowStr := "—"
+	if lo != nil {
+		lowStr = fmt.Sprintf("$%.2f", *lo)
+	}
+	highStr := "—"
+	if hi != nil {
+		highStr = fmt.Sprintf("$%.2f", *hi)
+	}
+	combined := fmt.Sprintf("%9s..%-9s", lowStr, highStr)
+	if lo == nil && hi == nil {
+		return env.dim(combined)
+	}
+	return env.dim(combined)
+}
+
+func renderScanParamsText(env *Env, r *rpc.ScanParamsResult, instrument string) int {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Scanner catalog  ·  %d instruments  ·  %d locations  ·  %d scan types",
+		len(r.Instruments), len(r.Locations), len(r.ScanTypes))
+	if instrument != "" {
+		fmt.Fprintf(out, "  (instrument=%s)", instrument)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  as of %s\n\n", formatTimeShort(r.AsOf))
+
+	fmt.Fprintln(out, "  SCAN TYPES (--type)")
+	fmt.Fprintln(out, "  CODE                                  INSTRUMENTS         DISPLAY NAME")
+	for _, st := range r.ScanTypes {
+		fmt.Fprintf(out, "  %-36s  %-18s  %s\n",
+			st.Code, strings.Join(st.Instruments, ","), st.DisplayName)
+	}
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(out, "  LOCATIONS (--exchange)")
+	fmt.Fprintln(out, "  CODE                                  DISPLAY NAME")
+	for _, loc := range r.Locations {
+		fmt.Fprintf(out, "  %-36s  %s\n", loc.Code, loc.DisplayName)
+	}
+	fmt.Fprintln(out)
+
+	if r.RawXML != "" {
+		fmt.Fprintf(out, "  RAW XML (%d bytes follows)\n\n", len(r.RawXML))
+		fmt.Fprintln(out, r.RawXML)
+	}
 	return 0
 }

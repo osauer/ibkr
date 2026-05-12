@@ -1626,38 +1626,92 @@ func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string,
 	}
 }
 
-// handleScanRun runs a configured scanner preset. v1 returns an empty result
-// with explanatory comment if the preset is unknown.
+// adHocScanLimitCap is the maximum number of rows an ad-hoc scan
+// (Preset == "") may request. Presets carry their own limit and bypass
+// this cap; the cap is here to keep a careless agent from asking the
+// gateway for thousands of rows on an ad-hoc call. The TWS Market
+// Scanner UI itself ranks to 50 by default.
+const adHocScanLimitCap = 50
+
+// defaultScanSubscriptionTimeout is how long the daemon waits for the
+// gateway's first scannerData frame before giving up. 20 s is enough
+// during regular trading hours but cold-starts off-hours (especially for
+// scanCodes that depend on a current-session open or live option flow
+// — HIGH_OPEN_GAP, TOP_PERC_GAIN, HIGH_OPT_IMP_VOLAT_OVER_HIST,
+// HOT_BY_OPT_VOLUME) routinely need 25-45 s for the scanner subsystem
+// to warm up. 35 s is the empirical sweet spot — long enough to absorb
+// the warmup, short enough that a genuinely dead gateway still fails
+// fast rather than hanging the user.
+const defaultScanSubscriptionTimeout = 35 * time.Second
+
+// handleScanRun runs a scanner. Two modes:
+//
+//  1. Preset (p.Preset != ""): looks up [scans.<name>] in config and runs
+//     it. Limit override honored; preset.Timeout applies. Returns
+//     bad_request if the preset is unknown.
+//  2. Ad-hoc (p.Preset == ""): runs scanCode = p.Type / locationCode =
+//     p.Exchange directly. Both fields required; missing either → bad_request.
+//     Limit clamped to adHocScanLimitCap. Fixed 20s timeout.
 func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.ScanResult, error) {
 	var p rpc.ScanRunParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		return nil, fmt.Errorf("decode params: %w", err)
 	}
-	preset, ok := s.cfg.Scans[p.Preset]
-	if !ok {
-		return nil, errBadRequest(fmt.Sprintf("unknown preset %q (run 'ibkr scan list' for available)", p.Preset))
+
+	var (
+		scanType    string
+		scanExch    string
+		scanLimit   int
+		scanTimeout time.Duration
+		presetName  string
+	)
+	switch {
+	case p.Preset != "":
+		preset, ok := s.cfg.Scans[p.Preset]
+		if !ok {
+			return nil, errBadRequest(fmt.Sprintf("unknown preset %q (run 'ibkr scan list' for available)", p.Preset))
+		}
+		scanType = preset.Type
+		scanExch = preset.Exchange
+		scanLimit = p.Limit
+		if scanLimit <= 0 {
+			scanLimit = preset.Limit
+		}
+		scanTimeout = preset.Timeout.Std()
+		if scanTimeout <= 0 {
+			scanTimeout = defaultScanSubscriptionTimeout
+		}
+		presetName = p.Preset
+	default:
+		// Ad-hoc.
+		if strings.TrimSpace(p.Type) == "" {
+			return nil, errBadRequest("ad-hoc scan requires either preset or type (scanCode); see 'ibkr scan params' for available scanCodes")
+		}
+		if strings.TrimSpace(p.Exchange) == "" {
+			return nil, errBadRequest("ad-hoc scan requires exchange (locationCode); see 'ibkr scan params' for available locationCodes")
+		}
+		scanType = p.Type
+		scanExch = p.Exchange
+		scanLimit = p.Limit
+		if scanLimit <= 0 || scanLimit > adHocScanLimitCap {
+			scanLimit = adHocScanLimitCap
+		}
+		scanTimeout = defaultScanSubscriptionTimeout
 	}
+
 	c := s.gatewayConnector()
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
-	limit := p.Limit
-	if limit <= 0 {
-		limit = preset.Limit
-	}
 	res := &rpc.ScanResult{
-		Preset: p.Preset,
-		Type:   preset.Type,
+		Preset: presetName,
+		Type:   scanType,
 		AsOf:   time.Now(),
 	}
-	scanTimeout := preset.Timeout.Std()
-	if scanTimeout <= 0 {
-		scanTimeout = 20 * time.Second
-	}
 	rows, err := c.RunScannerSubscription(ctx, ibkrlib.ScannerSubscription{
-		Type:     preset.Type,
-		Exchange: preset.Exchange,
-		Limit:    limit,
+		Type:     scanType,
+		Exchange: scanExch,
+		Limit:    scanLimit,
 	}, scanTimeout)
 	if err != nil {
 		return nil, err
@@ -1669,7 +1723,174 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 			Comment: r.Comment,
 		})
 	}
+	s.enrichScanRows(ctx, c, res.Rows)
 	return res, nil
+}
+
+// scanEnrichWindow is the per-row deadline for collecting market-data ticks
+// after subscribing. Most US stocks deliver bid/ask/last + prev-close + IV
+// + 52w within 2-4 s during RTH; the slowest generic-tick set (tick 165
+// Misc Stats) tail-arrives up to ~6 s. Off-hours, ticks often don't arrive
+// at all; rows then surface with whatever made it (typically prev-close
+// only) and the other fields nil — the honest read.
+const scanEnrichWindow = 6 * time.Second
+
+// scanEnrichConcurrency bounds the in-flight enrichment subscriptions.
+// IBKR Pro accounts typically have a 100-slot market-data cap; the daemon
+// holds a few for `quote --watch`, positions Greeks, MCP subscribers, etc.
+// 20 leaves comfortable headroom and reduces a 50-row scan to 2-3 waves
+// at scanEnrichWindow each (~12-18 s wall clock, well under the
+// MethodScanRun unary deadline).
+const scanEnrichConcurrency = 20
+
+// enrichScanRows fans out one Hold-based subscribe per row symbol,
+// collects last/prev-close/change/volume/IV/52w from the daemon's tick
+// cache, and writes the result back into rows in place. Bounded by
+// scanEnrichConcurrency goroutines. Per-row failures are silent: the row
+// keeps its existing rank+symbol+comment, the numeric fields stay nil,
+// and the renderer shows "—" — never a fabricated value.
+//
+// Ctx cancellation propagates: a CLI Ctrl-C during enrichment aborts
+// in-flight subscriptions and lets the result return with whatever data
+// arrived first, again with no fabrication.
+func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows []rpc.ScanRow) {
+	if len(rows) == 0 || c == nil {
+		return
+	}
+	sem := make(chan struct{}, scanEnrichConcurrency)
+	var wg sync.WaitGroup
+	for i := range rows {
+		i := i
+		if rows[i].Symbol == "" {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.enrichOneScanRow(ctx, c, &rows[i])
+		}()
+	}
+	wg.Wait()
+}
+
+// enrichOneScanRow holds a market-data subscription on the row's symbol,
+// polls the connector's tick cache until the row has at least a last
+// price (the minimum signal worth rendering) or the per-row window
+// elapses, then writes whatever arrived back into the row.
+//
+// The shape of "good enough" is intentionally loose: we keep polling
+// even after `last` arrives because IV and 52w typically lag bid/ask/last
+// by 1-2 s, and the row is more useful with them than without.
+func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row *rpc.ScanRow) {
+	releaseSub, err := s.subs.Hold(row.Symbol)
+	if err != nil {
+		// Hold can only fail with ErrIBKRUnavailable (gateway dropped
+		// mid-scan) or an internal subscribe error. Either way, the
+		// row stays bare — no fabrication.
+		return
+	}
+	defer releaseSub()
+
+	deadline := time.Now().Add(scanEnrichWindow)
+	poll := time.NewTicker(75 * time.Millisecond)
+	defer poll.Stop()
+	var snap *ibkrlib.MarketData
+	for {
+		md := c.GetMarketData()
+		if data, ok := md[row.Symbol]; ok {
+			snap = data
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+		}
+	}
+	if snap == nil {
+		return
+	}
+	if snap.Last > 0 {
+		v := snap.Last
+		row.Last = &v
+	}
+	if snap.Close > 0 {
+		v := snap.Close
+		row.PrevClose = &v
+	}
+	if row.Last != nil && row.PrevClose != nil {
+		ch, pct := computeQuoteChange(row.Last, row.PrevClose)
+		row.Change = ch
+		row.ChangePct = pct
+	}
+	if snap.Volume > 0 {
+		v := snap.Volume
+		row.Volume = &v
+	}
+	if snap.IV > 0 {
+		v := snap.IV
+		row.IV = &v
+	}
+	if snap.Week52High > 0 {
+		v := snap.Week52High
+		row.Week52High = &v
+	}
+	if snap.Week52Low > 0 {
+		v := snap.Week52Low
+		row.Week52Low = &v
+	}
+}
+
+// handleScanParams fetches the gateway's scanner catalog (scanCodes,
+// locationCodes, instruments) so agents can discover what's available
+// without guessing at the magic strings. Result includes the raw XML
+// only when explicitly requested — the payload is ~200 KB on a US Pro
+// gateway and overwhelms typical agent context budgets if always sent.
+func (s *Server) handleScanParams(ctx context.Context, req *rpc.Request) (*rpc.ScanParamsResult, error) {
+	var p rpc.ScanParamsParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("decode params: %w", err)
+		}
+	}
+	c := s.gatewayConnector()
+	if c == nil {
+		return nil, ibkrlib.ErrIBKRUnavailable
+	}
+	params, err := c.RunScannerParameters(ctx, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	out := &rpc.ScanParamsResult{AsOf: time.Now()}
+	for _, in := range params.Instruments {
+		out.Instruments = append(out.Instruments, rpc.ScanParamInstrument{Name: in.Name, Type: in.Type})
+	}
+	for _, loc := range params.Locations {
+		out.Locations = append(out.Locations, rpc.ScanParamLocation{Code: loc.Code, DisplayName: loc.DisplayName})
+	}
+	scans := params.ScanTypes
+	if p.Instrument != "" {
+		scans = params.FilterByInstrument(p.Instrument)
+	}
+	for _, st := range scans {
+		out.ScanTypes = append(out.ScanTypes, rpc.ScanParamScanType{
+			Code:        st.Code,
+			DisplayName: st.DisplayName,
+			Instruments: st.Instruments,
+		})
+	}
+	if p.IncludeRawXML {
+		out.RawXML = params.RawXML
+	}
+	return out, nil
 }
 
 // handleScanList enumerates the configured presets.
@@ -1727,7 +1948,15 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		LastError:     lastErr,
 	}
 	if c != nil {
-		res.Connected = c.IsConnected()
+		// Report IsReady, not IsConnected: the gateway being TCP-reachable
+		// is not enough — handlers must be armed (post-handshake) for any
+		// data verb to succeed. Reporting IsConnected here while every
+		// other verb gates on IsReady made `status` lie when the connector
+		// got stuck in the {ready=false, conn=true} state (overnight TWS
+		// hiccups, market-data farm reconnects). triggerReconnect (above)
+		// already fired by the time we're here, so the next call sees the
+		// recovered state.
+		res.Connected = c.IsReady()
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
 	}

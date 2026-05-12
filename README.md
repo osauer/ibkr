@@ -67,7 +67,7 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 - **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Options addressed as `SYM YYMMDD C|P STRIKE`. Streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
 - **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid. Per-strike call/put delta surfaces on the wire. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
 - **Daily OHLCV history.** `ibkr history AAPL --days 30`.
-- **Scanner presets.** `top-movers`, `high-iv`, `unusual-vol`, `most-active` out of the box. Add your own in `config.toml`.
+- **Scanners — preset or ad-hoc.** Seven built-in presets out of the box (`top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank`, `unusual-opt-vol`) covering direction, volume, opening gaps, and the two options-flow signals an option seller / buyer actually cares about. `ibkr scan <preset>` for the shorthand, `ibkr scan --type SCANCODE --exchange LOCATIONCODE` for one-off ad-hoc queries (agents prefer this — no config write needed), `ibkr scan params [--instrument STK]` to dump the gateway's full catalog of valid `scanCode` / `locationCode` values. Add your own presets in `config.toml`.
 - **Position sizing.** `ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1` does fixed-fractional math against live NLV. Add `--target` to also get the **R-multiple** (reward:risk) and the breakeven win rate — the standard "is this trade worth taking" filter (≥ 2R typical). Pure arithmetic; never proposes or attempts an order.
 
 Everything supports `--json`. Tables are color-coded by sign on a terminal (P&L green/red, non-live data badges yellow); pipes, redirects, and `--json` are always plain. `NO_COLOR=1` disables; `IBKR_COLOR=always|never` overrides.
@@ -159,6 +159,32 @@ One binary, two halves. CLI and MCP server are stateless and short-lived. The da
 
 The wire between CLI and daemon has no version field today; the CLI prints a stderr warning on version skew and points at the fix (`pkill -x ibkr` and let the next call respawn).
 
+## Protocol coverage
+
+`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol — no Python bridge, no third-party dependencies on InteractiveBrokers source. The table below shows what's plumbed today. Wire ops with both a "read-side method" *and* a write-side counterpart (e.g. `placeOrder`) are exposed in the library but **refused at the daemon layer in v0.x** by a `//go:build !trading` stub; the binary cannot send them. The full per-method godoc lives in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
+
+| Capability                       | Wire opcodes                                                              | Library entry point                                                | Status                |
+|----------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------------------|-----------------------|
+| Account summary                  | `reqAccountSummary` (62), `accountSummary` (63), `acctValue` (6)          | `Connector.RequestAccountSummary`, `GetAccountSummary`             | ready                 |
+| Positions + portfolio            | `reqPositions` (61), `position` (61), `portfolioValue` (7), $LEDGER:ALL   | `Connector.GetPositions`, `GetCachedPositions`                     | ready                 |
+| Snapshot quote                   | `reqMktData` (1) snapshot=true, `tickPrice` (1), `tickSnapshotEnd` (57)   | `Connector.FetchMarketSnapshot`                                    | ready                 |
+| Streaming quote                  | `reqMktData` (1) snapshot=false, `tickPrice`/`tickSize`/`tickGeneric`     | `Connector.SubscribeMarketData`, `GetMarketData`                   | ready                 |
+| Generic-tick set                 | gen-ticks 100, 101, 104, 106, 165 (option vol, OI, HV, IV, Misc Stats)    | populated into `MarketData` automatically                          | ready                 |
+| Contract resolution              | `reqContractData` (9), `contractData` (10)                                | `Connector.FetchContractDetails`                                   | ready                 |
+| Option chains                    | `reqSecDefOptParams` (78), `tickOptionComputation` (21)                   | `Connector.FetchOptionExpiries`, `FetchOptionExpiryStrikes`, `GetOptionGreeks`, `GetOptionIV` | ready                 |
+| Daily historical bars            | `reqHistoricalData` (20), `historicalData` (17)                           | `Connector.FetchHistoricalDailyBars`                               | ready                 |
+| Market scanner                   | `reqScannerSubscription` (22), `reqScannerParameters` (24)                | `Connector.RunScannerSubscription`, `RunScannerParameters`         | ready (v0.12)         |
+| Market-data type switch          | `reqMarketDataType` (59), `marketDataType` (58)                           | `Connector.SetMarketDataType`                                      | ready                 |
+| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.PlaceOrder`, `CancelOrder`                              | wire-ready, refused by daemon in v0.x |
+| Real-time bars                   | `reqRealTimeBars` (50)                                                    | —                                                                  | not implemented       |
+| Market depth (L2)                | `reqMktDepth` (10), `reqMktDepthL2` (13)                                  | —                                                                  | not implemented       |
+| Fundamental data                 | `reqFundamentalData` (52)                                                 | —                                                                  | not implemented       |
+| News bulletins                   | `reqNewsBulletins` (12)                                                   | —                                                                  | not implemented       |
+| Financial Advisor (FA)           | `reqFA` (18)                                                              | —                                                                  | not implemented       |
+| IV / option-price calculators    | `reqCalcImpliedVolatility` (54), `reqCalcOptionPrice` (55)                | —                                                                  | not implemented       |
+
+Tested against IB Gateway server-versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on. The library has no claim to be a full TWS API replacement — it covers the read-side surface the `ibkr` binary needs, with a small forward-compatibility buffer (the order ops) for a v2 line that hasn't shipped. Open an issue if you want a "not implemented" row plumbed; the wire format is documented and additions tend to be self-contained.
+
 ## Configure
 
 No config file is required. The daemon TCP-probes `4001` (Gateway live), `4002` (Gateway paper), `7496` (TWS live), `7497` (TWS paper), picks the first responder, and falls over to alternates if the first one accepts TCP but never completes the handshake. The account is auto-detected via `managedAccounts`. Default client ID is `15`.
@@ -188,6 +214,37 @@ limit    = 20
 **TLS semantics.** A pinned `tls` value (true or false) is strict. An omitted `tls` means "auto": plain first, TLS on no-handshake-data.
 
 **Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[scans.<name>]`.
+
+### Adding scanners
+
+Two paths, depending on who's calling:
+
+**Humans — add a preset to `config.toml`.** Use this when you want a stable shorthand you'll call by name:
+
+```toml
+[scans.tech-gainers]
+type     = "TOP_PERC_GAIN"
+exchange = "STK.NASDAQ"
+limit    = 25
+```
+
+Then `ibkr scan tech-gainers`. **Caveat:** writing **any** `[scans.*]` block makes the seven built-in defaults disappear — the `[scans]` table is replace-not-merge. Copy the defaults from [internal/config/config.go](internal/config/config.go) into your file if you want to keep them. Daemon restart (`pkill -x ibkr`; next call respawns) is required for new presets to be visible.
+
+**Agents — use the ad-hoc form, no config write needed:**
+
+```
+ibkr scan --type TOP_PERC_GAIN --exchange STK.NASDAQ --limit 25 --json
+```
+
+Ad-hoc rows are capped at 50 (vs. preset's user-set limit) to keep an agent from accidentally pulling thousands.
+
+**Finding the right `scanCode` and `locationCode`.** The TWS Market Scanner UI hides these strings behind human labels. Dump your gateway's actual catalog with:
+
+```
+ibkr scan params --instrument STK [--json]
+```
+
+The catalog varies by gateway version and by your market-data subscriptions — `scanCode`s like `HIGH_OPT_IMP_VOLAT_OVER_HIST` require US options data. `--instrument STK` narrows to stock scans; omit for everything. Add `--raw` to get the full XML (~200 KB–2 MB) if you need a less-common field. There's no need to memorize the values — the catalog is the source of truth.
 
 ## Safety
 

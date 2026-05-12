@@ -631,7 +631,11 @@ func (s *Server) triggerReconnect() bool {
 		s.mu.Unlock()
 		return false
 	}
-	if s.connector != nil && s.connector.IsConnected() {
+	// IsReady, not IsConnected: TCP-up is not enough. If the connector
+	// landed in the {ready=false, conn=true} state (handlers cleared
+	// during a transient gateway hiccup), we must re-establish — and the
+	// only way out is to tear the old TCP socket down in reconnectFlow.
+	if s.connector != nil && s.connector.IsReady() {
 		s.mu.Unlock()
 		return false
 	}
@@ -743,7 +747,10 @@ func (s *Server) gatewayConnector() *ibkrlib.Connector {
 	s.mu.Lock()
 	c := s.connector
 	s.mu.Unlock()
-	if c == nil || !c.IsConnected() {
+	// IsReady, not IsConnected: handlers also need to be armed. A connector
+	// in {ready=false, conn=true} can't serve data — return nil so the
+	// caller surfaces ErrIBKRUnavailable, while triggerReconnect rebuilds.
+	if c == nil || !c.IsReady() {
 		s.triggerReconnect()
 		return nil
 	}
@@ -859,6 +866,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleScanRun(ctx, req) })
 	case rpc.MethodScanList:
 		s.unary(req, enc, func() (any, error) { return s.handleScanList(), nil })
+	case rpc.MethodScanParams:
+		s.unary(req, enc, func() (any, error) { return s.handleScanParams(ctx, req) })
 	case rpc.MethodHistoryDaily:
 		s.unary(req, enc, func() (any, error) { return s.handleHistoryDaily(ctx, req) })
 	case rpc.MethodStatusHealth:
@@ -895,8 +904,23 @@ func unaryDeadline(method string) time.Duration {
 	switch method {
 	case rpc.MethodChainFetch, rpc.MethodChainExpiries:
 		return 25 * time.Second
-	case rpc.MethodScanRun, rpc.MethodHistoryDaily, rpc.MethodPositionsList:
+	case rpc.MethodHistoryDaily, rpc.MethodPositionsList:
 		return 30 * time.Second
+	case rpc.MethodScanRun:
+		// Up to 35 s scanner-subscription budget (off-hours cold-start
+		// for HIGH_OPEN_GAP / TOP_PERC_GAIN / HIGH_OPT_IMP_VOLAT_OVER_HIST
+		// can take 25-45 s) + per-row enrichment in waves of
+		// scanEnrichConcurrency × scanEnrichWindow each. Typical RTH scan:
+		// ~15 s. Worst case off-hours: 35 s scan + 20 s enrichment + slack.
+		// The CLI per-invocation deadline at cmd/ibkr/main.go is bumped to
+		// 90 s in lockstep so the daemon's classified error reaches the
+		// user instead of a raw socket timeout.
+		return 75 * time.Second
+	case rpc.MethodScanParams:
+		// ~200 KB XML payload, single round trip — usually <2 s. Generous
+		// budget to absorb a degraded gateway without timing out before
+		// the connection error surfaces.
+		return 15 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
 	case rpc.MethodStatusHealth, rpc.MethodScanList:

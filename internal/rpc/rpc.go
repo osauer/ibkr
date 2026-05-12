@@ -23,6 +23,7 @@ const (
 	MethodChainExpiries  = "chain.expiries"
 	MethodScanRun        = "scan.run"
 	MethodScanList       = "scan.list"
+	MethodScanParams     = "scan.params"
 	MethodHistoryDaily   = "history.daily"
 	MethodStatusHealth   = "status.health"
 	MethodCancel         = "cancel"
@@ -126,10 +127,66 @@ type ChainFetchParams struct {
 	Side   string `json:"side"`   // calls | puts | both
 }
 
-// ScanRunParams runs a configured scanner preset.
+// ScanRunParams runs a scanner. Two modes:
+//
+//  1. Preset shorthand: set Preset to the name of a [scans.<name>] block
+//     from config.toml (or one of the built-in defaults). Type/Exchange
+//     are ignored.
+//  2. Ad-hoc: leave Preset empty and set Type (scanCode) and Exchange
+//     (locationCode) directly. Useful for agents that don't want to
+//     persist a preset to the user's config file.
+//
+// Exactly one of Preset or Type is required. Limit is optional in both
+// modes; <=0 falls back to the preset's configured Limit (mode 1) or
+// the daemon's hard cap of 50 (mode 2).
 type ScanRunParams struct {
-	Preset string `json:"preset"`
-	Limit  int    `json:"limit,omitempty"`
+	Preset   string `json:"preset,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Exchange string `json:"exchange,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+// ScanParamsParams requests the gateway's full scanner catalog. Instrument
+// filters the ScanTypes list to those valid for the given instrument
+// (e.g. "STK"); empty returns every type. IncludeRawXML attaches the raw
+// XML payload to the response for callers that want to grep for fields
+// not surfaced in the parsed struct (filter values, instrument flags,
+// etc.). The XML is typically ~200 KB on a US Pro gateway.
+type ScanParamsParams struct {
+	Instrument    string `json:"instrument,omitempty"`
+	IncludeRawXML bool   `json:"include_raw_xml,omitempty"`
+}
+
+// ScanParamsResult mirrors pkg/ibkr.ScannerParameters but stays in the
+// rpc package so consumers (CLI, MCP) don't need to import pkg/ibkr.
+// Code comments on the wire-level types live with the parser.
+type ScanParamsResult struct {
+	Instruments []ScanParamInstrument `json:"instruments"`
+	Locations   []ScanParamLocation   `json:"locations"`
+	ScanTypes   []ScanParamScanType   `json:"scan_types"`
+	RawXML      string                `json:"raw_xml,omitempty"`
+	AsOf        time.Time             `json:"as_of"`
+}
+
+// ScanParamInstrument is one row in ScanParamsResult.Instruments.
+type ScanParamInstrument struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// ScanParamLocation is one row in ScanParamsResult.Locations.
+type ScanParamLocation struct {
+	Code        string `json:"code"`
+	DisplayName string `json:"display_name"`
+}
+
+// ScanParamScanType is one row in ScanParamsResult.ScanTypes. Instruments
+// is the list of instrument-type tokens this scan is valid for (e.g.
+// ["STK", "ETF"]); empty means "all".
+type ScanParamScanType struct {
+	Code        string   `json:"code"`
+	DisplayName string   `json:"display_name"`
+	Instruments []string `json:"instruments,omitempty"`
 }
 
 // CancelParams cancels an in-flight stream by id.
@@ -461,15 +518,26 @@ type ChainResult struct {
 	AsOf     time.Time     `json:"as_of"`
 }
 
-// ScanRow is one row of a scanner result.
+// ScanRow is one row of a scanner result. The IBKR scanner subscription
+// only returns rank+symbol+three-mostly-empty-comment-fields per row, so
+// every numeric field below is populated by the daemon via a follow-up
+// snapshot subscribe on the symbol. Pointers (not scalars) so consumers
+// can distinguish "the gateway didn't deliver this tick within the
+// enrichment window" from "the value is genuinely zero" — the no-fabrication
+// invariant. Comment carries the raw scanner-side text when non-empty
+// (rare; most scan types leave it blank).
 type ScanRow struct {
-	Rank    int     `json:"rank"`
-	Symbol  string  `json:"symbol"`
-	Last    float64 `json:"last,omitempty"`
-	Change  float64 `json:"change,omitempty"`
-	Pct     float64 `json:"pct,omitempty"`
-	Volume  int64   `json:"volume,omitempty"`
-	Comment string  `json:"comment,omitempty"`
+	Rank       int      `json:"rank"`
+	Symbol     string   `json:"symbol"`
+	Last       *float64 `json:"last,omitempty"`
+	PrevClose  *float64 `json:"prev_close,omitempty"`
+	Change     *float64 `json:"change,omitempty"`
+	ChangePct  *float64 `json:"change_pct,omitempty"`
+	Volume     *int64   `json:"volume,omitempty"`
+	IV         *float64 `json:"iv,omitempty"`
+	Week52High *float64 `json:"week_52_high,omitempty"`
+	Week52Low  *float64 `json:"week_52_low,omitempty"`
+	Comment    string   `json:"comment,omitempty"`
 }
 
 // ScanResult wraps the rows.

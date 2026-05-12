@@ -18,6 +18,17 @@ import (
 // to amortize render churn without lagging visibly behind the gateway.
 const defaultCoalesceInterval = 150 * time.Millisecond
 
+// defaultGenericTicks is the generic-tick list the daemon requests on every
+// symbol subscription. Picked to cover the fields the CLI / MCP consumers
+// expect to render: 100 = option volume, 101 = option open interest,
+// 104 = historical volatility, 106 = option implied volatility (averaged
+// across the chain — the "IV of the underlying" retail platforms display),
+// 165 = Misc Stats (delivers 13w/26w/52w highs/lows as tickPrice msgs
+// with tick types 15-20). 106 and 165 are load-bearing for `ibkr scan`
+// row enrichment; the previous list ("100,101,104") left IV and 52w
+// columns silently blank.
+var defaultGenericTicks = []string{"100", "101", "104", "106", "165"}
+
 // ibkrMarketConnector is the slice of *ibkrlib.Connector that subManager
 // touches. Defining it as an interface lets unit tests drive the manager
 // with a fake instead of a real gateway connection — required by the
@@ -100,7 +111,7 @@ func (m *subManager) Subscribe(sym string) (<-chan rpc.Frame, func(), error) {
 		// First reference for this symbol — open the IBKR line. pkg/ibkr's
 		// SubscribeMarketData is itself idempotent, so a duplicate call from
 		// a stale prior session resolves without surfacing an error here.
-		if err := c.SubscribeMarketData(sym, []string{"100", "101", "104"}); err != nil {
+		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
 			m.mu.Unlock()
 			return nil, func() {}, fmt.Errorf("subscribe %s: %w", sym, err)
 		}
@@ -144,7 +155,7 @@ func (m *subManager) Hold(sym string) (func(), error) {
 	m.mu.Lock()
 	e, exists := m.subs[sym]
 	if !exists {
-		if err := c.SubscribeMarketData(sym, []string{"100", "101", "104"}); err != nil {
+		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
 			m.mu.Unlock()
 			return func() {}, fmt.Errorf("subscribe %s: %w", sym, err)
 		}

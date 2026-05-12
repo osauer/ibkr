@@ -202,12 +202,41 @@ func (c *Config) Resolve() (*Resolved, error) {
 	}, nil
 }
 
+// defaultScans is the built-in preset set, used when the user has no
+// [scans.*] block in config.toml. Every Type / Exchange string here was
+// validated against a live IB Gateway server-version 203 catalog via
+// `ibkr scan params` before being committed — see the validation script
+// in the v0.11 PR. If a future gateway drops one of these scanCodes the
+// preset will return an error to the user; `ibkr scan params` is the
+// canonical recovery path.
+//
+// Selection rationale (US stock + options trader):
+//   - Direction symmetric: top-movers + top-losers, not just gainers.
+//   - Volume both ways: most-active is raw share volume (mega-caps);
+//     unusual-vol is volume relative to a stock's own history (catches
+//     names that are unusual *for themselves*).
+//   - Two options scans because they cover different use cases:
+//     high-iv-rank surfaces names where IV is elevated vs. their own
+//     history (the option-seller's "something brewing" signal);
+//     unusual-opt-vol surfaces names where option volume is hot vs.
+//     average (the flow signal).
+//   - gappers catches the open-print earnings/news reactions that drive
+//     the first hour of every session.
+//
+// Absolute-IV (HIGH_OPT_IMP_VOLAT) was deliberately not included — it
+// surfaces the same structural high-IV biotech/SPAC names every day and
+// is rarely the actionable signal an option seller wants. Users who
+// still want it can copy this map into their config.toml and add the
+// extra preset.
 func defaultScans() map[string]Scan {
 	return map[string]Scan{
-		"top-movers":  {Type: "TOP_PERC_GAIN", Exchange: "STK.US.MAJOR", Limit: 20},
-		"high-iv":     {Type: "HIGH_OPT_IMP_VOLAT", Exchange: "STK.US", Limit: 20},
-		"unusual-vol": {Type: "HOT_BY_VOLUME", Exchange: "STK.US.MAJOR", Limit: 20},
-		"most-active": {Type: "MOST_ACTIVE", Exchange: "STK.US.MAJOR", Limit: 20},
+		"top-movers":      {Type: "TOP_PERC_GAIN", Exchange: "STK.US.MAJOR", Limit: 20},
+		"top-losers":      {Type: "TOP_PERC_LOSE", Exchange: "STK.US.MAJOR", Limit: 20},
+		"most-active":     {Type: "MOST_ACTIVE", Exchange: "STK.US.MAJOR", Limit: 20},
+		"unusual-vol":     {Type: "HOT_BY_VOLUME", Exchange: "STK.US.MAJOR", Limit: 20},
+		"gappers":         {Type: "HIGH_OPEN_GAP", Exchange: "STK.US.MAJOR", Limit: 20},
+		"high-iv-rank":    {Type: "HIGH_OPT_IMP_VOLAT_OVER_HIST", Exchange: "STK.US", Limit: 20},
+		"unusual-opt-vol": {Type: "HOT_BY_OPT_VOLUME", Exchange: "STK.US.MAJOR", Limit: 20},
 	}
 }
 

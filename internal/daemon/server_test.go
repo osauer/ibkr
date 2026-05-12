@@ -175,33 +175,41 @@ func TestDispatchQuoteSubscribeReportsTerminal(t *testing.T) {
 	}
 }
 
-// unaryDeadline picks a per-method budget that stays under the CLI's 60s
-// per-invocation deadline (cmd/ibkr/main.go) so the daemon's classified
+// unaryDeadline picks a per-method budget that stays under the matching
+// CLI per-invocation deadline (cmd/ibkr/main.go) so the daemon's classified
 // error reaches the user before the socket times out, while leaving the
-// streaming method (quote.subscribe) without a deadline. Locks the
-// invariant: every unary method must have d > 0 AND d < 60s.
+// streaming method (quote.subscribe) without a deadline. Locks two
+// invariants: every unary method has d > 0, and d stays under the CLI's
+// budget for that command. Most commands share the default 60s CLI budget;
+// `scan` has a 90s budget because cold-start off-hours scanner subsystem
+// warmup is genuine and longer than other paths.
 func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 	t.Parallel()
-	cliBudget := 60 * time.Second
+	const cliDefault = 60 * time.Second
+	const cliScan = 90 * time.Second
 
-	unary := []string{
-		rpc.MethodAccountSummary,
-		rpc.MethodPositionsList,
-		rpc.MethodQuoteSnapshot,
-		rpc.MethodChainFetch,
-		rpc.MethodChainExpiries,
-		rpc.MethodScanRun,
-		rpc.MethodScanList,
-		rpc.MethodHistoryDaily,
-		rpc.MethodStatusHealth,
+	cases := []struct {
+		method    string
+		cliBudget time.Duration
+	}{
+		{rpc.MethodAccountSummary, cliDefault},
+		{rpc.MethodPositionsList, cliDefault},
+		{rpc.MethodQuoteSnapshot, cliDefault},
+		{rpc.MethodChainFetch, cliDefault},
+		{rpc.MethodChainExpiries, cliDefault},
+		{rpc.MethodScanRun, cliScan},
+		{rpc.MethodScanList, cliDefault},
+		{rpc.MethodScanParams, cliDefault},
+		{rpc.MethodHistoryDaily, cliDefault},
+		{rpc.MethodStatusHealth, cliDefault},
 	}
-	for _, m := range unary {
-		d := unaryDeadline(m)
+	for _, tc := range cases {
+		d := unaryDeadline(tc.method)
 		if d <= 0 {
-			t.Errorf("unaryDeadline(%q) = %s, want >0 (every unary method needs a per-request timeout)", m, d)
+			t.Errorf("unaryDeadline(%q) = %s, want >0 (every unary method needs a per-request timeout)", tc.method, d)
 		}
-		if d >= cliBudget {
-			t.Errorf("unaryDeadline(%q) = %s, must stay under CLI budget %s so daemon errors first", m, d, cliBudget)
+		if d >= tc.cliBudget {
+			t.Errorf("unaryDeadline(%q) = %s, must stay under CLI budget %s so daemon errors first", tc.method, d, tc.cliBudget)
 		}
 	}
 	if d := unaryDeadline(rpc.MethodQuoteSubscribe); d != 0 {

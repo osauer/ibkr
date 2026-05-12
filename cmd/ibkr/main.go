@@ -115,9 +115,19 @@ func main() {
 	// (deadlocked, SIGSTOP'd, kernel-stuck) cannot hang the CLI forever.
 	// Streaming commands (`quote --watch` is the only one today) bypass
 	// — a long-lived watch must outlive any unary budget.
+	//
+	// `scan` gets a larger budget because the daemon-side MethodScanRun
+	// deadline is 75 s (35 s gateway scanner-subscription warmup off-hours
+	// + per-row enrichment); the CLI ceiling must exceed it so the
+	// classified daemon error reaches the user instead of a raw socket
+	// timeout from cancelling the in-flight request.
 	if !isStreamingInvocation(cmd, rest) {
+		budget := 60 * time.Second
+		if cmd == "scan" {
+			budget = 90 * time.Second
+		}
 		var dlCancel context.CancelFunc
-		ctx, dlCancel = context.WithTimeout(ctx, 60*time.Second)
+		ctx, dlCancel = context.WithTimeout(ctx, budget)
 		defer dlCancel()
 	}
 

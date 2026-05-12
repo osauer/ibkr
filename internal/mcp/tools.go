@@ -178,17 +178,19 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_scan",
-		Description: "Run a configured scanner preset. Omit `preset` to enumerate the available presets first.",
+		Description: "Run a market scanner. Three call shapes: (1) preset by name — `{preset: \"top-movers\"}` — for the configured shortcuts; (2) ad-hoc — `{type: \"TOP_PERC_GAIN\", exchange: \"STK.US.MAJOR\"}` — to compose a scan without writing to the user's config; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For ad-hoc, call `ibkr_scan_params` first to discover the scanCode (`type`) and locationCode (`exchange`) values this gateway accepts. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"preset": schemaString("preset name (e.g. \"top-movers\"); omit to list available presets"),
-			"limit":  json.RawMessage(`{"type":"integer","minimum":1,"description":"max rows to return"}`),
+			"preset":   schemaString("preset name from `ibkr_scan` with no args (e.g. \"top-movers\"); omit for ad-hoc or list mode"),
+			"type":     schemaString("ad-hoc scanCode (e.g. \"TOP_PERC_GAIN\") — required with `exchange` when no `preset` is given"),
+			"exchange": schemaString("ad-hoc locationCode (e.g. \"STK.US.MAJOR\") — required with `type` when no `preset` is given"),
+			"limit":    json.RawMessage(`{"type":"integer","minimum":1,"description":"max rows; preset default when omitted; ad-hoc capped at 50"}`),
 		}, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in rpc.ScanRunParams
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
 			}
-			if in.Preset == "" {
+			if in.Preset == "" && in.Type == "" && in.Exchange == "" {
 				var res rpc.ScanListResult
 				if err := conn.Call(ctx, rpc.MethodScanList, nil, &res); err != nil {
 					return nil, err
@@ -197,6 +199,25 @@ var Tools = []Tool{
 			}
 			var res rpc.ScanResult
 			if err := conn.Call(ctx, rpc.MethodScanRun, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:        "ibkr_scan_params",
+		Description: "Discover the scanner catalog this IBKR gateway supports: every scanCode (the `type` for ad-hoc `ibkr_scan`) and every locationCode (`exchange`), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version and by the user's market-data permissions. Pass `instrument: \"STK\"` to narrow scan_types to stocks; pass `include_raw_xml: true` only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB).",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"instrument":      schemaString("filter scan_types to those valid for this instrument (e.g. \"STK\", \"OPT\", \"ETF\"); empty returns all"),
+			"include_raw_xml": json.RawMessage(`{"type":"boolean","description":"include the gateway's raw XML payload (~200 KB); default false"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.ScanParamsParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.ScanParamsResult
+			if err := conn.Call(ctx, rpc.MethodScanParams, in, &res); err != nil {
 				return nil, err
 			}
 			return json.Marshal(res)

@@ -96,6 +96,16 @@ type MarketData struct {
 	Close float64 `json:"close"`
 	VWAP  float64 `json:"vwap"`
 
+	// Week-range highs/lows from generic tick 165 (Misc Stats). Zero when
+	// the gateway hasn't delivered the tick yet — caller must distinguish
+	// "not arrived" from "exactly zero" via the timestamp / Observed state.
+	Week13Low  float64 `json:"week_13_low,omitempty"`
+	Week13High float64 `json:"week_13_high,omitempty"`
+	Week26Low  float64 `json:"week_26_low,omitempty"`
+	Week26High float64 `json:"week_26_high,omitempty"`
+	Week52Low  float64 `json:"week_52_low,omitempty"`
+	Week52High float64 `json:"week_52_high,omitempty"`
+
 	Volume  int64 `json:"volume"`
 	BidSize int   `json:"bid_size"`
 	AskSize int   `json:"ask_size"`

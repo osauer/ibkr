@@ -30,3 +30,41 @@ func TestEnsureMarketDataSubscription_NotReady(t *testing.T) {
 	// Prevent flakiness
 	_ = time.Now()
 }
+
+// IsConnected and IsReady can diverge: a connector with a live TCP socket
+// but cleared handlers reports {IsConnected: true, IsReady: false}. The
+// daemon must gate data verbs on IsReady so this stuck state surfaces as
+// "unavailable" rather than silently returning empty payloads. The fix in
+// internal/daemon (handlers.go handleStatusHealth + server.go
+// gatewayConnector/triggerReconnect) depends on this asymmetry existing
+// at the pkg/ibkr level — this test pins it so a future refactor of
+// pkg/ibkr can't quietly collapse the two predicates.
+func TestConnector_IsReadyAndIsConnectedCanDiverge(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	// IsConnected requires lease+pool+conn (see Connector.isConnected) so
+	// the test must populate all three to faithfully model a connector
+	// that completed handshake.
+	c.conn = conn
+	c.pool = &ConnectionPool{}
+	c.lease = &ConnectionLease{ClientID: 1, Active: true}
+	c.running = true
+
+	c.ready = true
+	if !c.IsReady() {
+		t.Fatalf("ready=true, conn=up: expected IsReady() true, got false")
+	}
+	if !c.IsConnected() {
+		t.Fatalf("ready=true, conn=up: expected IsConnected() true, got false")
+	}
+
+	c.ready = false
+	if c.IsReady() {
+		t.Fatalf("ready=false, conn=up: expected IsReady() false, got true")
+	}
+	if !c.IsConnected() {
+		t.Fatalf("ready=false, conn=up: expected IsConnected() still true, got false (divergence is the whole point)")
+	}
+}

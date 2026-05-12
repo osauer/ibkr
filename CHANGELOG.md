@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.12.0 — 2026-05-12 07:45 CEST
+
+Four things land together: a real ad-hoc scanner path that lets agents compose a scan without rewriting the user's config, per-row enrichment so scanner output actually carries last/change/volume/IV/52w instead of bare symbols, a fresh seven-preset default set validated against the live gateway catalog, and two longstanding hardening fixes (wire-frame cap, status/scan readiness consistency) that surfaced during scanner work. Plus a test-harness orphan-prevention fix for `make test`. No CLI flag removals; all wire shapes back-compatible (existing `last`/`change`/`volume` fields on `rpc.ScanRow` switched from scalars to pointers, which is JSON-wire-compatible — `omitempty` drops nil same as zero). The default `[scans]` map changed — see migration note below.
+
+### Scanner subscription timeout bumped 20 s → 35 s; clearer error on cold-start
+
+The wire-level scanner-subscription timeout was 20 s — fine during RTH, too tight off-hours when IBKR's scanner farm needs 25-45 s to warm up for the time-of-day-dependent scanCodes (HIGH_OPEN_GAP, TOP_PERC_GAIN, HIGH_OPT_IMP_VOLAT_OVER_HIST, HOT_BY_OPT_VOLUME). Bumped to 35 s. The timeout error text now says *"scanner subsystem did not respond within Ns (often a cold-start off-hours; retry in a few seconds, especially for HIGH_OPEN_GAP / TOP_PERC_GAIN / option-IV scans)"* instead of the previous "scanner timed out after Ns" so users know retry is the right response. Daemon `MethodScanRun` ceiling raised 30 → 75 s and the CLI per-invocation budget for `scan` raised 60 → 90 s so the daemon's classified error reaches the user instead of a socket timeout. The matching `Scan.Timeout` field in `config.toml` still overrides the default — useful for users who want to fail fast or wait longer per preset.
+
+### `ibkr scan` rows now carry market data, not just symbols
+
+IBKR's `reqScannerSubscription` protocol returns only `rank` + `symbol` per row (plus three free-text fields that are empty for the common scan types — verified at the wire level for `MOST_ACTIVE` and `HOT_BY_VOLUME` against server v203). v0.11 surfaced that bare leaderboard verbatim, which made the output essentially useless: a list of tickers with no way to tell whether they were up or down, liquid or illiquid, near 52-week highs or lows. v0.12 enriches each row by issuing parallel `Hold`-based market-data subscriptions in a bounded worker pool (20 concurrent × 6 s per-row window), then merging the resulting ticks back into the row before serialisation. Fields added to `rpc.ScanRow`: `last`, `prev_close`, `change`, `change_pct`, `volume` (compact K/M/B in the text renderer), `iv` (averaged option IV from generic tick 106 — fraction, 0.234 = 23.4%), `week_52_high`, `week_52_low`. The text renderer adds matching columns with green/red colour on `change_pct` and dim 52w range, identical width/colour conventions to `ibkr quote` so the eye doesn't have to re-train. Nil fields stay nil — no fabricated proxies, em-dash in the text renderer — which is the load-bearing read: off-hours, most ticks don't arrive, and the honest column is empty rather than misleading. Enrichment happens daemon-side so MCP / JSON consumers see the same enriched payload as the text renderer.
+
+Plumbing: `pkg/ibkr/connector.go` `Subscription` struct gains `Week13/26/52Low/High` and `IV`; `handleTickPrice` switch extended for tick types 15-20; `handleTickGeneric` for tick 106 now also writes to the subscription (it previously routed only to the chain-IV cache); `MarketData` / `GetMarketData()` surface the new fields; the daemon's `subManager.Hold` now requests generic ticks `100,101,104,106,165` so the gateway actually delivers the new ticks (previously asked for `100,101,104` — IV and 52w were unreachable from the snapshot path). `MethodScanRun` unary deadline bumped from 30 s to 50 s to accommodate enrichment waves.
+
+### `ibkr scan` — three new shapes
+
+Until v0.11 the only way to run a scan was a preset by name, which forced anyone wanting to try a different `scanCode` / `locationCode` to first edit `~/.config/ibkr/config.toml` and restart the daemon. That hard-coded gate has been replaced with two new modes:
+
+- **Ad-hoc:** `ibkr scan --type TOP_PERC_GAIN --exchange STK.NASDAQ --limit 25 [--json]`. No preset required. Rows are capped at 50. MCP tool `ibkr_scan` accepts the same `type` and `exchange` fields. Designed for agent workflows that need to compose a scan on the fly.
+- **Catalog dump:** `ibkr scan params [--instrument STK] [--raw] [--json]`. Pulls IBKR's full `reqScannerParameters` XML, parses it, and returns the three lists agents need to compose a valid scan: `instruments` (e.g. STK / OPT / ETF), `locations` (every `locationCode`), and `scan_types` (every `scanCode` with display name + applicable instrument types). The catalog varies by gateway version and market-data permissions — never assume a `scanCode` exists without checking. `--instrument STK` narrows to stock scans; `--raw` attaches the full XML (~200 KB–2 MB) for the rare case where a field outside the parsed result is needed. MCP exposes this as `ibkr_scan_params`.
+
+Preset mode is unchanged. The MCP `ibkr_scan` tool's empty-args branch (no `preset` / `type` / `exchange`) returns the preset list, same as before.
+
+### New default preset set (replaces the four v0.10.x defaults)
+
+Validated against live IB Gateway server-version 203 via the new `scan params` dump before being committed. The selection covers the screens an active US stock + options trader actually runs:
+
+| preset             | scanCode                        | exchange      | rationale                                  |
+|--------------------|---------------------------------|---------------|--------------------------------------------|
+| `top-movers`       | TOP_PERC_GAIN                   | STK.US.MAJOR  | unchanged                                  |
+| `top-losers`       | TOP_PERC_LOSE                   | STK.US.MAJOR  | symmetric counterpart (was missing)        |
+| `most-active`      | MOST_ACTIVE                     | STK.US.MAJOR  | unchanged                                  |
+| `unusual-vol`      | HOT_BY_VOLUME                   | STK.US.MAJOR  | unchanged                                  |
+| `gappers`          | HIGH_OPEN_GAP                   | STK.US.MAJOR  | opening earnings/news reactions            |
+| `high-iv-rank`     | HIGH_OPT_IMP_VOLAT_OVER_HIST    | STK.US        | replaces `high-iv`; IV vs own history is the option-seller signal — absolute IV always surfaces the same biotech/SPAC names |
+| `unusual-opt-vol`  | HOT_BY_OPT_VOLUME               | STK.US.MAJOR  | the canonical "smart money flow" scan      |
+
+**Migration note.** `high-iv` is gone, replaced by `high-iv-rank` with a different `scanCode` (`HIGH_OPT_IMP_VOLAT_OVER_HIST` vs. `HIGH_OPT_IMP_VOLAT`). Users who pinned `[scans.*]` blocks in their own `config.toml` are unaffected (the table is replace-not-merge — your file always wins). Users who relied on the built-in defaults will see the new set after upgrading; run `ibkr scan list` to view it.
+
+### Wire-frame cap raised to 16 MB, stream-desync recovery hardened
+
+`pkg/ibkr.readMessage` had a 1 MB cap on a single TWS message frame. The IBKR scanner-parameters XML on a US Pro gateway with options data is 1–2 MB. Hitting the cap was silent until v0.12: the previous read loop logged the error and `continue`d, which left the reader positioned mid-frame and turned subsequent body bytes into bogus length prefixes — one local repro saw 500 k+ "message too large" log lines in a few seconds before disconnect. Two surgical changes: (a) cap raised to 16 MB, well above any realistic IBKR frame; (b) any non-timeout / non-EOF read error now signals disconnection and exits the read goroutine, so reconnect logic can rebuild a clean stream rather than blindly continuing. Unit test in `pkg/ibkr/scanner_params_test.go` plus integration test `TestScanParamsReturnsCatalog` pin the cap behavior.
+
+### `status.connected` now reflects `IsReady`, not `IsConnected`
+
+The daemon was using TCP-level `IsConnected()` for `status.health.connected` but every data verb (quote, chain, scan, positions) gated on `IsReady()` — the post-handshake "handlers armed" state. When the connector landed in `{ready=false, conn=up}` (overnight TWS hiccup, market-data farm reconnect), `ibkr status` cheerfully reported `connected: true, data_type: "live"` while every other call returned `gateway_unavailable`. Worse, `triggerReconnect` only fired when TCP dropped — so the stuck state was unrecoverable without a daemon restart. Three lines changed: status.connected, `gatewayConnector`, and the early-exit guard in `triggerReconnect` all now consult `IsReady()`. Stuck-state recovery is now self-healing. Pinned by `TestConnector_IsReadyAndIsConnectedCanDiverge` in `pkg/ibkr/connector_ready_test.go`.
+
+### Integration test harness no longer orphans daemons
+
+`test/integration` spawned `ibkr daemon --foreground` without `Setpgid`. macOS doesn't propagate parent death; if `go test` was SIGKILL'd, timed out, or panicked before `TestMain` reached `stop()`, the spawned daemon stayed alive indefinitely. The harness now: (a) places the daemon in its own process group via `SysProcAttr.Setpgid`, (b) signals the whole group via `kill(-pgid, …)` in `stop()` so any future grandchildren die too, (c) installs a `signal.Notify` handler for SIGINT/SIGTERM that routes through `stop()` before `os.Exit`. SIGKILL is still unrecoverable — nothing we can do there — but every other interrupt path now cleans up. File now has `//go:build !windows` (Setpgid is Unix-only; the package was already Unix-only in practice).
+
 ## v0.11.0 — 2026-05-12 05:48 CEST
 
 Two trader-math additions that fit the existing snapshot surface — both pure derivations from data the daemon already pulls. No new RPCs, no new gateway round trips, no journaling. The wire response shapes for `chain.expiries` and `size` carry new optional fields; consumers that ignore them work unchanged. Plugin tag and binary tag both move in lockstep.

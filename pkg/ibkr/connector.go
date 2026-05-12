@@ -135,8 +135,23 @@ type Subscription struct {
 	Open      float64
 	High      float64
 	Low       float64
-	LastTime  time.Time
-	Observed  bool // true once we receive any tick for this reqID
+	// Week-range highs/lows arrive via generic tick 165 (Misc Stats) as
+	// tickPrice messages with tick types 15-20. Captured here so consumers
+	// (notably scan-row enrichment, where 52w range is a standard column)
+	// can read them without a separate market-data call.
+	Week13Low  float64
+	Week13High float64
+	Week26Low  float64
+	Week26High float64
+	Week52Low  float64
+	Week52High float64
+	// IV is the option implied volatility tick (generic tick 106), present
+	// only when the streaming subscribe requested it. Stored as a fraction
+	// (0.234 == 23.4%); the gateway sometimes emits the percent form, which
+	// the handler normalizes.
+	IV       float64
+	LastTime time.Time
+	Observed bool // true once we receive any tick for this reqID
 }
 
 const (
@@ -1422,7 +1437,7 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 		var err error
 		switch {
 		case ready:
-			reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,165,221,233", false, false)
+			reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
 		case contract.PrimaryExch != "":
 			reqID, err = c.conn.RequestMarketDataWithPrimary(symbol, contract.PrimaryExch)
 		default:
@@ -1507,7 +1522,7 @@ func (c *Connector) EnsureMarketDataSubscription(symbol string, fields []string,
 			err   error
 		)
 
-		reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,165,221,233", false, false)
+		reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
 		if err != nil {
 			return 0, err
 		}
@@ -2669,6 +2684,12 @@ func (c *Connector) handleTickPrice(fields []string) {
 	// Close (9) is yesterday's regular-session close — the anchor for
 	// change-vs-prev-close. IBKR sends it automatically once per reqMktData,
 	// regardless of generic-tick flags.
+	//
+	// Tick types 15-20 (week-range highs/lows) only arrive when the
+	// streaming subscribe asked for generic tick 165 (Misc Stats). They are
+	// load-bearing for the scan-row 52w column; without them the column
+	// would be silently blank for symbols that didn't have an explicit
+	// historical-bars fetch.
 	switch tickType {
 	case 1:
 		sub.Bid = price
@@ -2684,6 +2705,18 @@ func (c *Connector) handleTickPrice(fields []string) {
 		sub.PrevClose = price
 	case 14:
 		sub.Open = price
+	case 15:
+		sub.Week13Low = price
+	case 16:
+		sub.Week13High = price
+	case 17:
+		sub.Week26Low = price
+	case 18:
+		sub.Week26High = price
+	case 19:
+		sub.Week52Low = price
+	case 20:
+		sub.Week52High = price
 	}
 	sub.LastTime = time.Now()
 }
@@ -2713,7 +2746,8 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		return
 	}
 
-	// 106 = Option Implied Volatility
+	// 106 = Option Implied Volatility (averaged across the chain — the
+	// "IV of the underlying" that retail platforms display).
 	if tickType == 106 && val > 0 {
 		iv := val
 		if iv > 1.5 { // normalize percent inputs
@@ -2722,6 +2756,15 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		c.optMu.Lock()
 		c.optIV[symbol] = iv
 		c.optMu.Unlock()
+		// Also write to the per-symbol subscription so GetMarketData sees
+		// it without having to consult the option-IV cache separately —
+		// scan-row enrichment and `quote --json` both read from there.
+		c.subMu.Lock()
+		if sub, ok := c.subscriptions[symbol]; ok {
+			sub.IV = iv
+			sub.LastTime = time.Now()
+		}
+		c.subMu.Unlock()
 	}
 }
 
@@ -3812,18 +3855,25 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 
 	for symbol, sub := range c.subscriptions {
 		data[symbol] = &MarketData{
-			Symbol:    symbol,
-			Bid:       sub.Bid,
-			Ask:       sub.Ask,
-			Last:      sub.LastPrice,
-			BidSize:   int(sub.BidSize),
-			AskSize:   int(sub.AskSize),
-			Volume:    sub.Volume,
-			Close:     sub.PrevClose,
-			Open:      sub.Open,
-			High:      sub.High,
-			Low:       sub.Low,
-			Timestamp: sub.LastTime,
+			Symbol:     symbol,
+			Bid:        sub.Bid,
+			Ask:        sub.Ask,
+			Last:       sub.LastPrice,
+			BidSize:    int(sub.BidSize),
+			AskSize:    int(sub.AskSize),
+			Volume:     sub.Volume,
+			Close:      sub.PrevClose,
+			Open:       sub.Open,
+			High:       sub.High,
+			Low:        sub.Low,
+			Week13Low:  sub.Week13Low,
+			Week13High: sub.Week13High,
+			Week26Low:  sub.Week26Low,
+			Week26High: sub.Week26High,
+			Week52Low:  sub.Week52Low,
+			Week52High: sub.Week52High,
+			IV:         sub.IV,
+			Timestamp:  sub.LastTime,
 		}
 	}
 

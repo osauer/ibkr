@@ -312,3 +312,117 @@ func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 		t.Errorf("Volume: want 9876543, got %d", sub.Volume)
 	}
 }
+
+// TestHandleTickPrice_WeekRangeCapture pins the new tick types added in
+// v0.12 for scan-row enrichment. 13W/26W/52W highs/lows arrive as
+// standard tickPrice messages (msg ID 1) with tick types 15-20; capture
+// is load-bearing for the scanner's 52w column. A previous build silently
+// dropped these into the default branch, so an absent test made the
+// regression invisible.
+func TestHandleTickPrice_WeekRangeCapture(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[42] = "AAPL"
+	c.subscriptions["AAPL"] = &Subscription{Symbol: "AAPL"}
+	c.subMu.Unlock()
+
+	cases := []struct {
+		tickType string
+		price    string
+		field    func(*Subscription) float64
+		want     float64
+		name     string
+	}{
+		{"15", "150.10", func(s *Subscription) float64 { return s.Week13Low }, 150.10, "13w low"},
+		{"16", "240.55", func(s *Subscription) float64 { return s.Week13High }, 240.55, "13w high"},
+		{"17", "140.00", func(s *Subscription) float64 { return s.Week26Low }, 140.00, "26w low"},
+		{"18", "245.00", func(s *Subscription) float64 { return s.Week26High }, 245.00, "26w high"},
+		{"19", "120.00", func(s *Subscription) float64 { return s.Week52Low }, 120.00, "52w low"},
+		{"20", "260.50", func(s *Subscription) float64 { return s.Week52High }, 260.50, "52w high"},
+	}
+	for _, tc := range cases {
+		c.handleTickPrice([]string{"1", "2", "42", tc.tickType, tc.price})
+	}
+	c.subMu.RLock()
+	sub := c.subscriptions["AAPL"]
+	c.subMu.RUnlock()
+	for _, tc := range cases {
+		if got := tc.field(sub); got != tc.want {
+			t.Errorf("%s: got %.2f, want %.2f", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestHandleTickGeneric_IVRoutesToSubscription pins the v0.12 change that
+// also writes tick 106 (averaged option implied vol) into the per-symbol
+// subscription struct — not just into the optIV map. Without this, the
+// scan-row IV column would stay blank even when the gateway delivers the
+// tick, because the enrichment path reads from GetMarketData() which is
+// derived from subscriptions.
+func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[7] = "AAPL"
+	c.subscriptions["AAPL"] = &Subscription{Symbol: "AAPL"}
+	c.subMu.Unlock()
+
+	// Fraction-form: 0.234 → IV = 0.234 (23.4%)
+	c.handleTickGeneric([]string{"45", "1", "7", "106", "0.234"})
+	c.subMu.RLock()
+	if got := c.subscriptions["AAPL"].IV; got != 0.234 {
+		t.Errorf("fraction-form IV: got %.4f, want 0.234", got)
+	}
+	c.subMu.RUnlock()
+
+	// Percent-form: 23.4 should normalize to 0.234.
+	c.subMu.Lock()
+	c.reqIDMap[8] = "MSFT"
+	c.subscriptions["MSFT"] = &Subscription{Symbol: "MSFT"}
+	c.subMu.Unlock()
+	c.handleTickGeneric([]string{"45", "1", "8", "106", "23.4"})
+	c.subMu.RLock()
+	got := c.subscriptions["MSFT"].IV
+	c.subMu.RUnlock()
+	if got < 0.233 || got > 0.235 {
+		t.Errorf("percent-form IV normalization: got %.4f, want ~0.234", got)
+	}
+}
+
+// TestGetMarketData_SurfacesWeekRangeAndIV pins the daemon-facing read
+// path: scan-row enrichment polls GetMarketData() and copies into the
+// row. If a future refactor accidentally drops the new fields from the
+// MarketData materialisation, this test catches it before the column
+// silently goes blank.
+func TestGetMarketData_SurfacesWeekRangeAndIV(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.subscriptions["AAPL"] = &Subscription{
+		Symbol:     "AAPL",
+		Week52Low:  120.00,
+		Week52High: 260.50,
+		Week26Low:  140.00,
+		Week26High: 245.00,
+		Week13Low:  150.10,
+		Week13High: 240.55,
+		IV:         0.234,
+	}
+	c.subMu.Unlock()
+
+	md := c.GetMarketData()
+	got, ok := md["AAPL"]
+	if !ok {
+		t.Fatal("AAPL not in GetMarketData() output")
+	}
+	if got.Week52Low != 120.00 || got.Week52High != 260.50 {
+		t.Errorf("52w range: got %.2f..%.2f, want 120.00..260.50", got.Week52Low, got.Week52High)
+	}
+	if got.Week26Low != 140.00 || got.Week26High != 245.00 {
+		t.Errorf("26w range: got %.2f..%.2f, want 140.00..245.00", got.Week26Low, got.Week26High)
+	}
+	if got.Week13Low != 150.10 || got.Week13High != 240.55 {
+		t.Errorf("13w range: got %.2f..%.2f, want 150.10..240.55", got.Week13Low, got.Week13High)
+	}
+	if got.IV != 0.234 {
+		t.Errorf("IV: got %.4f, want 0.234", got.IV)
+	}
+}

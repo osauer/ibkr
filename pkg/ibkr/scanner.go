@@ -119,7 +119,14 @@ func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubsc
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("scanner timed out after %s", timeout)
+		// Off-hours / cold-start scanner-subsystem timeout is the
+		// dominant cause here — TWS spawns scanner farms lazily and
+		// some scanCodes (HIGH_OPEN_GAP, TOP_PERC_GAIN,
+		// HIGH_OPT_IMP_VOLAT_OVER_HIST, HOT_BY_OPT_VOLUME) can take
+		// 25-45 s to warm on a freshly-connected gateway. Mention it
+		// in the error text so the user knows retry is the right
+		// response, rather than thinking the daemon is wedged.
+		return nil, fmt.Errorf("scanner subsystem did not respond within %s (often a cold-start off-hours; retry in a few seconds, especially for HIGH_OPEN_GAP / TOP_PERC_GAIN / option-IV scans)", timeout)
 	}
 }
 

@@ -44,9 +44,19 @@ func TestParity(t *testing.T) {
 		}
 	}
 	for name := range mcpNames {
-		if !cliNames[name] {
-			t.Errorf("MCP tool ibkr_%s has no CLI counterpart (cli.Commands has no command named %q) — drop the tool or add the CLI command", name, name)
+		if cliNames[name] {
+			continue
 		}
+		// MCP tools can expose CLI subverbs as their own tool (e.g.
+		// `ibkr scan params` → `ibkr_scan_params`). Accept the tool if
+		// the prefix up to the first underscore is itself a CLI command,
+		// since MCP clients use a flat tool surface and a focused tool
+		// per subverb is easier for agents than one mega-tool with a
+		// mode discriminator.
+		if i := strings.Index(name, "_"); i > 0 && cliNames[name[:i]] {
+			continue
+		}
+		t.Errorf("MCP tool ibkr_%s has no CLI counterpart (cli.Commands has no command named %q nor a parent command for a subverb) — drop the tool or add the CLI command", name, name)
 	}
 	for name := range ExcludedCLI {
 		if !cliNames[name] {

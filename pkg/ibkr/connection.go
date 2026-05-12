@@ -1611,8 +1611,17 @@ func (c *Connection) readMessages() {
 					c.handleDisconnection(err)
 					return
 				}
+				// Any other error means stream alignment is uncertain —
+				// "message too large" is the canonical case: a length
+				// prefix that overflowed the cap leaves the reader
+				// positioned in the middle of the previous frame's body,
+				// so continuing reads garbage as length prefixes
+				// indefinitely (one production incident hit 500k+ such
+				// errors before disconnect). Fail fast: log, signal
+				// disconnect, let reconnect logic rebuild a clean stream.
 				ibkrLogger.Errorf("Error reading message: %v", err)
-				continue
+				c.handleDisconnection(err)
+				return
 			}
 
 			// Process the message
@@ -2917,7 +2926,12 @@ func (c *Connection) readMessage() ([]byte, error) {
 		return []byte{}, nil
 	}
 
-	if msgLength > 1024*1024 { // Sanity check: 1MB max
+	// Sanity cap: 16 MB. The IBKR scanner-parameters XML on a US Pro
+	// account with many subscriptions can run 1-3 MB; an old 1 MB cap
+	// truncated that response and desynced the stream. 16 MB is well
+	// above any realistic IBKR frame and still slams the door on a
+	// gateway that's gone rogue (or a wire that's been hijacked).
+	if msgLength > 16*1024*1024 {
 		return nil, fmt.Errorf("message too large: %d bytes", msgLength)
 	}
 
@@ -3679,7 +3693,7 @@ func (c *Connection) RequestMarketData(symbol string) (int, error) {
 		contract.PrimaryExch = ""
 	}
 
-	return c.RequestMarketDataWithContract(contract, "100,101,104,165,221,233", false, false)
+	return c.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
 }
 
 func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
@@ -4024,7 +4038,7 @@ func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange
 		TradingClass: tradingClassHint,
 	}
 
-	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,165,221,233", false, false)...)
+	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,165,221,233", false, false)...)
 
 	if err := c.rateLimiter.AcquireMarketDataSlot(c.ctx); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
