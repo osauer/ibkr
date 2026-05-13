@@ -74,7 +74,11 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 check: $(CHECK_DEPS) ## gofmt + go vet + staticcheck + govulncheck + plugin-check + parity-check (binding pre-commit gate)
-	@unformatted=$$(gofmt -l .); \
+	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths
+	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
+	@# .gitignore by listing tracked + untracked-but-not-ignored files —
+	@# the right scope for a pre-commit format gate.
+	@unformatted=$$(git ls-files --cached --others --exclude-standard '*.go' | xargs gofmt -l); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt: the following files need formatting:"; \
 		echo "$$unformatted"; \
@@ -101,8 +105,9 @@ plugin-check: ## Validate plugin/marketplace manifests with `claude plugin valid
 parity-check: ## Verify MCP tool inventory matches the CLI surface
 	go test -count=1 -run 'TestParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
 
-fmt: ## Apply gofmt -w to the whole tree
-	gofmt -w .
+fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
+	@# Same scope as `make check` so `make fmt && make check` is idempotent.
+	git ls-files --cached --others --exclude-standard '*.go' | xargs gofmt -w
 
 # Library tests. Some require a live gateway; CI should run these against a
 # paper account with IBKR_LIVE_TESTS=1. Timeout sized for CI's slower
