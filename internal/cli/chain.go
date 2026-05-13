@@ -229,7 +229,11 @@ func fmtDTE(dte int) string {
 // fetch didn't land.
 func fmtImpliedMove(move, pct *float64) string {
 	if move == nil || pct == nil || *move == 0 {
-		return padDash(16)
+		return padDash(17)
 	}
-	return fmt.Sprintf("±%-7s (%4.1f%%)", strings.TrimSpace(formatMoney(*move)), *pct*100)
+	// Money portion padded to 8 visible cells so the parenthesized percent
+	// column aligns regardless of single- vs three-digit dollar magnitudes
+	// ("$ 7.51" vs "$ 100.04"). Width 8 covers up to "$ 999.99" which is
+	// well above any realistic 1-σ move on common underlyings.
+	return fmt.Sprintf("±%-8s (%4.1f%%)", strings.TrimSpace(formatMoney(*move)), *pct*100)
 }

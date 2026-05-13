@@ -222,6 +222,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 			formatMoney(g.GroupMarketValue), env.formatPnL(g.GroupUnrealizedPnL, 0))
 	}
 	fmt.Fprintln(out)
+	renderPortfolioSummary(env, r)
 	fmt.Fprintf(out, "  %d underlyings  ·  as of %s\n",
 		len(r.ByUnderlying), formatTimeShort(r.AsOf))
 	return 0

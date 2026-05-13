@@ -383,6 +383,40 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 	})
 }
 
+// The by-underlying view shows the Portfolio aggregate block (effective
+// delta, dollar delta, theta, gamma, vega, FX sensitivity, greeks
+// coverage) at the bottom — same as the flat positions view — so the
+// conclusion numbers are visible in both layouts.
+func TestRenderPositionsByUnderlying_IncludesPortfolio(t *testing.T) {
+	t.Parallel()
+	delta, theta := 1847.0, -42.18
+	res := &rpc.PositionsResult{
+		ByUnderlying: []rpc.PositionGroup{
+			{
+				Underlying:         "AAPL",
+				Options:            []rpc.PositionView{{Symbol: "AAPL", Right: "C", Strike: 210, Expiry: "20251219", Quantity: 1, Mark: 5}},
+				GroupMarketValue:   500,
+				GroupUnrealizedPnL: 0,
+			},
+		},
+		Portfolio: &rpc.PositionsPortfolio{
+			EffectiveDelta: &delta,
+			DailyTheta:     &theta,
+			GreeksCoverage: 1,
+			GreeksTotal:    1,
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderPositionsByUnderlying(env, res)
+	out := stdout.String()
+	for _, want := range []string{"Portfolio", "Effective delta", "1847.0", "Daily theta", "1 / 1 legs"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // Full-coverage Greeks gets a positive checkmark line (not the partial-
 // coverage caveat). The checkmark is green when Color is enabled so the
 // screen reads as "everything captured" at a glance.
