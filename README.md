@@ -5,7 +5,7 @@
 [![go.mod](https://img.shields.io/github/go-mod/go-version/osauer/ibkr)](go.mod)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**A read-only client for your Interactive Brokers account, designed for scripts, agents, and engineers.** One Go binary, three surfaces — a CLI, a stdio MCP server, and a Go library — all returning the same JSON. The wire-level TWS API protocol is implemented from scratch in `pkg/ibkr`; no Python bridge, no IBKR jars to ship.
+**A read-only client for your Interactive Brokers account, designed for scripts, agents, and engineers.** One Go binary, three surfaces — a CLI, a stdio MCP server, and a Go library — all returning the same JSON. No Python or Java runtime to install.
 
 ```sh
 $ ibkr account
@@ -49,6 +49,8 @@ From a Claude Desktop or Claude Code session with `ibkr mcp` wired up:
 
 Read-only is structural — four independent layers refuse `order`, `trade`, `cancel`. [Details](#safety).
 
+**Contents** — [Install](#install-in-two-commands) · [Features](#what-you-get) · [Pick your path](#pick-your-path) · [Architecture](#architecture) · [Protocol coverage](#protocol-coverage) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Testing](#testing) · [Troubleshooting](#troubleshooting)
+
 ## Install in two commands
 
 ```sh
@@ -63,11 +65,11 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 ## What you get
 
 - **Account snapshot.** NLV, buying power, cash, margin, available funds — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Multi-currency accounts also get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion, so you can see how much of your NLV is FX-exposed.
-- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus the contract's own bid/ask, implied vol, and prior settle (so you can spot wide spreads on illiquid contracts and compute option-level daily P&L without the underlying-vs-option mix-up). A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, vega, plus an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
+- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
 - **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Options addressed as `SYM YYMMDD C|P STRIKE`. Streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
 - **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid. Per-strike call/put delta surfaces on the wire. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
 - **Daily OHLCV history.** `ibkr history AAPL --days 30`.
-- **Scanners — preset or ad-hoc.** Seven built-in presets out of the box (`top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank`, `unusual-opt-vol`) covering direction, volume, opening gaps, and the two options-flow signals an option seller / buyer actually cares about. `ibkr scan <preset>` for the shorthand, `ibkr scan --type SCANCODE --exchange LOCATIONCODE` for one-off ad-hoc queries (agents prefer this — no config write needed), `ibkr scan params [--instrument STK]` to dump the gateway's full catalog of valid `scanCode` / `locationCode` values. Add your own presets in `config.toml`.
+- **Scanners — preset or ad-hoc.** Seven built-in presets (`top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank`, `unusual-opt-vol`) covering direction, volume, opening gaps, and option-flow signals. `ibkr scan <preset>` for the shorthand; `ibkr scan --type SCANCODE --exchange LOCATIONCODE` for ad-hoc queries; `ibkr scan params [--instrument STK]` to dump the gateway's valid `scanCode` / `locationCode` catalog. Add your own presets in `config.toml`.
 - **Position sizing.** `ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1` does fixed-fractional math against live NLV. Add `--target` to also get the **R-multiple** (reward:risk) and the breakeven win rate — the standard "is this trade worth taking" filter (≥ 2R typical). Pure arithmetic; never proposes or attempts an order.
 
 Everything supports `--json`. Tables are color-coded by sign on a terminal (P&L green/red, non-live data badges yellow); pipes, redirects, and `--json` are always plain. `NO_COLOR=1` disables; `IBKR_COLOR=always|never` overrides.

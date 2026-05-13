@@ -19,6 +19,7 @@
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+CLAUDE.md
 
 # Working artefacts that aren't part of the source tree
 /next-priorities.html
