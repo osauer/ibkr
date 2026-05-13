@@ -62,8 +62,8 @@ type subManager struct {
 	subs     map[string]*subEntry
 	coalesce time.Duration
 
-	initMu     sync.Mutex
-	initLocks  map[string]*sync.Mutex
+	initMu    sync.Mutex
+	initLocks map[string]*sync.Mutex
 
 	// connector is re-fetched on every tick so a daemon-side reconnect
 	// (gatewayConnector returning a fresh *Connector) is observed without

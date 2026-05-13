@@ -71,10 +71,10 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 	if len(ledger) == 0 {
 		return nil
 	}
-	baseCcy = normSym(baseCcy)
+	baseCcy = normCcy(baseCcy)
 	out := make([]rpc.CurrencyExposure, 0, len(ledger))
 	for ccy, row := range ledger {
-		upper := normSym(ccy)
+		upper := normCcy(ccy)
 		if upper == baseCcy {
 			continue
 		}
@@ -208,7 +208,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// Empty map → no FX data yet (pre-handshake or single-currency
 	// account); leaves all pointers nil.
 	ledger := c.CurrencyLedgerSnapshot()
-	baseCcy := normSym(s.cachedBaseCurrency())
+	baseCcy := normCcy(s.cachedBaseCurrency())
 	fillFXRates(res.Stocks, ledger, baseCcy)
 	fillFXRates(res.Options, ledger, baseCcy)
 
@@ -241,7 +241,7 @@ func (s *Server) cachedBaseCurrency() string {
 // the gateway's occasional float drift (e.g. 1.0000000001).
 func baseCurrencyFromRaw(raw map[string]string) string {
 	if v, ok := raw["Currency"]; ok {
-		ccy := normSym(v)
+		ccy := normCcy(v)
 		if ccy != "" && ccy != "BASE" {
 			return ccy
 		}
@@ -253,7 +253,7 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 		if !ok {
 			continue
 		}
-		ccy = normSym(ccy)
+		ccy = normCcy(ccy)
 		if ccy == "" || ccy == "BASE" {
 			continue
 		}
@@ -275,7 +275,7 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 func fillFXRates(rows []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) {
 	for i := range rows {
 		p := &rows[i]
-		ccy := normSym(p.Currency)
+		ccy := normCcy(p.Currency)
 		if ccy == "" || ccy == baseCcy {
 			continue
 		}
@@ -554,15 +554,16 @@ func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionVi
 // Returns "" when any required field is missing (e.g. a malformed
 // position string we couldn't parse).
 //
-// Accepts both "OPTION" (the AssetType enum value stamped by
-// pkg/ibkr's convertIBKRPositions) and "OPT" (the IBKR wire-level
-// SecType) so a future shift in the SecType pipeline doesn't silently
-// strand every option leg with a no-key skip — the original v0.10.0
-// release had only the "OPT" check and reported greeks_coverage 0/N
-// for every option-bearing account, because positions came through
-// as "OPTION".
+// Accepts both rpc.SecTypeOption ("OPTION" — the AssetType enum value
+// stamped by pkg/ibkr's convertIBKRPositions, the canonical wire value)
+// and "OPT" (the IBKR API request-side short form, here as a defensive
+// fallback for any code path that still threads the short form through).
+// The original v0.10.0 release had only the "OPT" check and reported
+// greeks_coverage 0/N for every option-bearing account, because
+// positions came through as "OPTION"; this dual-tolerance is the
+// belt-and-braces fix.
 func optionGreeksKey(p rpc.PositionView) string {
-	if p.SecType != "OPTION" && p.SecType != "OPT" {
+	if p.SecType != rpc.SecTypeOption && p.SecType != "OPT" {
 		return ""
 	}
 	under := normSym(p.Symbol)
@@ -615,8 +616,8 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 				dollarDelta += *o.Delta * o.Quantity * float64(mult) * spot
 				haveDollarDelta = true
 				if dollarCcy == "" {
-					dollarCcy = normSym(o.Currency)
-				} else if normSym(o.Currency) != dollarCcy {
+					dollarCcy = normCcy(o.Currency)
+				} else if normCcy(o.Currency) != dollarCcy {
 					dollarMixed = true
 				}
 			}
@@ -656,7 +657,7 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		if st.Mark > 0 {
 			dollarDelta += st.Quantity * st.Mark
 			haveDollarDelta = true
-			ccy := normSym(st.Currency)
+			ccy := normCcy(st.Currency)
 			if dollarCcy == "" {
 				dollarCcy = ccy
 			} else if ccy != dollarCcy {

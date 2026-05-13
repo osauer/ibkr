@@ -20,8 +20,8 @@ const pollCadence = 75 * time.Millisecond
 // context.DeadlineExceeded).
 //
 // The IBKR Subscribe/Unsubscribe call is the caller's responsibility — this
-// helper only owns the loop. Use ptrIfPos and ptrIfNonZero to lift the
-// scalar fields the predicate observed.
+// helper only owns the loop. Use ptrIfPos to lift the scalar fields the
+// predicate observed.
 func pollUntil(ctx context.Context, deadline time.Time, fn func() (done bool)) error {
 	if fn() {
 		return nil
@@ -66,18 +66,6 @@ func ptrIfPos[T int | int64 | float64](v T) *T {
 		return &x
 	}
 	return nil
-}
-
-// ptrIfNonZero returns &v when v is non-zero and nil otherwise. Used for
-// fields where 0 is a legitimate "missing" sentinel but negative values
-// are valid (e.g. Greeks delta on puts).
-func ptrIfNonZero[T comparable](v T) *T {
-	var zero T
-	if v == zero {
-		return nil
-	}
-	x := v
-	return &x
 }
 
 // normCcy normalises a currency code: uppercase, trimmed. Centralises the
