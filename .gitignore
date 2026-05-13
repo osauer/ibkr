@@ -21,6 +21,10 @@
 .claude/scheduled_tasks.lock
 CLAUDE.md
 
+# Claude Code agent worktrees — created at the repo root with
+# <adjective>-<noun>-<6 hex chars> names (e.g. optimistic-newton-2eb23f/)
+/*-*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+
 # Working artefacts that aren't part of the source tree
 /next-priorities.html
 /PLAN.html
