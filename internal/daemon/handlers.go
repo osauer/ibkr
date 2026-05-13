@@ -153,6 +153,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 			Exchange:      pos.Asset.Exchange,
 			Currency:      pos.Asset.Currency,
 			Quantity:      pos.Quantity,
+			Multiplier:    maxInt(pos.Asset.Multiplier, 1),
 			AvgCost:       pos.EntryPrice,
 			Mark:          pos.CurrentPrice,
 			MarketValue:   pos.CurrentPrice * pos.Quantity * float64(maxInt(pos.Asset.Multiplier, 1)),

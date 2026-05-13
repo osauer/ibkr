@@ -1865,11 +1865,11 @@ func (c *Connector) GetPositions() ([]*Position, error) {
 			}
 		}
 
+		// IBKR sends UnrealizedPNL directly on every msgPortfolioValue; a
+		// synthesised value would mix per-share currentPrice with per-contract
+		// AverageCost on options (multiplier-inclusive on the OPT side) and
+		// land 100× wrong. Trust the wire.
 		unrealizedPnL := pos.UnrealizedPNL
-		if unrealizedPnL == 0 && currentPrice != 0 && pos.AverageCost != 0 {
-			delta := currentPrice - pos.AverageCost
-			unrealizedPnL = delta * pos.Position * float64(pos.Contract.Multiplier)
-		}
 
 		assetMultiplier := pos.Contract.Multiplier
 		if assetType == AssetTypeStock && assetMultiplier == 100 {

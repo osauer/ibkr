@@ -297,11 +297,16 @@ type FrameError struct {
 // (illiquid leg, OOH model abstention, subscribe slot churn) — never zero-
 // substituted.
 type PositionView struct {
-	Symbol         string   `json:"symbol"`
-	SecType        string   `json:"sec_type"`
-	Exchange       string   `json:"exchange,omitempty"`
-	Currency       string   `json:"currency,omitempty"`
-	Quantity       float64  `json:"quantity"`
+	Symbol   string  `json:"symbol"`
+	SecType  string  `json:"sec_type"`
+	Exchange string  `json:"exchange,omitempty"`
+	Currency string  `json:"currency,omitempty"`
+	Quantity float64 `json:"quantity"`
+	// Multiplier is the contract multiplier — 1 for stocks, 100 for standard
+	// equity options, sometimes higher for index options. Needed by JSON
+	// consumers to convert between per-share Mark and per-contract AvgCost
+	// on options (IBKR's averageCost is multiplier-inclusive on OPT).
+	Multiplier     int      `json:"multiplier"`
 	AvgCost        float64  `json:"avg_cost"`
 	Mark           float64  `json:"mark"`
 	PrevClose      *float64 `json:"prev_close,omitempty"`

@@ -108,7 +108,7 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 	for _, p := range rows {
 		row := fmt.Sprintf("  %-*s  %*.0f  %s  %s  %s  %s  %s",
 			wSymbol, p.Symbol, wQty, p.Quantity,
-			padLeftVisible(formatMoney(p.AvgCost), wAvg),
+			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
 			padRightVisible(env.formatDayChange(p.DayChange, p.DayChangePct, 0), wDayChg),
 			padLeftVisible(formatMoney(p.MarketValue), wMkt),
@@ -151,7 +151,7 @@ func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, show
 		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %*.2f  %*.0f  %s  %s  %s",
 			wUnder, p.Symbol, wSide, p.Right, wExpiry, formatExpiry(p.Expiry),
 			wStrike, p.Strike, wQty, p.Quantity,
-			padLeftVisible(formatMoney(p.AvgCost), wAvg),
+			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
 		if showRealized {
@@ -305,7 +305,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 			writeRow(
 				"Stock",
 				fmt.Sprintf("%.0f sh", s.Quantity),
-				formatMoney(s.AvgCost),
+				formatMoney(avgCostPerShare(*s)),
 				formatMoney(s.Mark),
 				env.formatDayChange(s.DayChange, s.DayChangePct, 0),
 				formatMoney(s.MarketValue),
@@ -315,7 +315,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 			writeRow(
 				fmt.Sprintf("%s %s %.2f", formatExpiry(o.Expiry), o.Right, o.Strike),
 				fmt.Sprintf("%.0f ct", o.Quantity),
-				formatMoney(o.AvgCost),
+				formatMoney(avgCostPerShare(o)),
 				formatMoney(o.Mark),
 				env.formatGreeksLine(o),
 				formatMoney(o.MarketValue),
@@ -404,6 +404,19 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 		vega = fmt.Sprintf("ν%+0.2f", *o.Vega)
 	}
 	return delta + " " + gamma + " " + theta + " " + vega
+}
+
+// avgCostPerShare normalises AvgCost to per-share units for visual
+// comparison with Mark in the same row. IBKR's averageCost is per-share
+// for stocks but per-contract (multiplier-inclusive) for options — so a
+// $3.00 premium call comes off the wire as $300, which reads like a typo
+// next to a $3 mark. Dividing by multiplier on OPT restores symmetry.
+// JSON output stays IBKR-faithful; only the rendered column normalises.
+func avgCostPerShare(p rpc.PositionView) float64 {
+	if p.SecType == "OPT" && p.Multiplier > 0 {
+		return p.AvgCost / float64(p.Multiplier)
+	}
+	return p.AvgCost
 }
 
 func formatExpiry(s string) string {

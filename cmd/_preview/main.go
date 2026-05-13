@@ -93,46 +93,55 @@ func fixtureAccount() *rpc.AccountResult {
 func fixturePositions() *rpc.PositionsResult {
 	// AAPL: long stock plus a covered call and a protective put.
 	aaplStock := rpc.PositionView{
-		Symbol: "AAPL", Quantity: 100, AvgCost: 192.10, Mark: 207.42,
+		Symbol: "AAPL", SecType: "STK", Multiplier: 1,
+		Quantity: 100, AvgCost: 192.10, Mark: 207.42,
 		DayChange: f64(1.32), DayChangePct: f64(0.64),
 		MarketValue: 20742.00, UnrealizedPnL: 1532.00,
 	}
+	// AvgCost is per-contract on OPT (multiplier-inclusive) — mirrors what
+	// IBKR sends over the wire. The CLI normalises to per-share on display.
 	aaplCall := rpc.PositionView{
-		Symbol: "AAPL", Right: "C", Strike: 210, Expiry: "20251219",
-		Quantity: 2, AvgCost: 5.10, Mark: 7.85,
+		Symbol: "AAPL", SecType: "OPT", Multiplier: 100,
+		Right: "C", Strike: 210, Expiry: "20251219",
+		Quantity: 2, AvgCost: 510.00, Mark: 7.85,
 		MarketValue: 1570.00, UnrealizedPnL: 550.00,
 		Delta: f64(0.42), Gamma: f64(0.018), Theta: f64(-0.08), Vega: f64(0.42),
 	}
 	aaplPut := rpc.PositionView{
-		Symbol: "AAPL", Right: "P", Strike: 195, Expiry: "20251219",
-		Quantity: -1, AvgCost: 3.85, Mark: 3.21,
+		Symbol: "AAPL", SecType: "OPT", Multiplier: 100,
+		Right: "P", Strike: 195, Expiry: "20251219",
+		Quantity: -1, AvgCost: 385.00, Mark: 3.21,
 		MarketValue: -321.00, UnrealizedPnL: 64.00,
 		Delta: f64(-0.18), Gamma: f64(0.024), Theta: f64(-0.06), Vega: f64(0.31),
 	}
 
 	// NVDA: long stock plus a long upside call.
 	nvdaStock := rpc.PositionView{
-		Symbol: "NVDA", Quantity: 250, AvgCost: 119.05, Mark: 128.54,
+		Symbol: "NVDA", SecType: "STK", Multiplier: 1,
+		Quantity: 250, AvgCost: 119.05, Mark: 128.54,
 		DayChange: f64(-0.98), DayChangePct: f64(-0.77),
 		MarketValue: 32135.00, UnrealizedPnL: 2372.50,
 	}
 	nvdaCall := rpc.PositionView{
-		Symbol: "NVDA", Right: "C", Strike: 135, Expiry: "20250621",
-		Quantity: 5, AvgCost: 6.20, Mark: 4.80,
+		Symbol: "NVDA", SecType: "OPT", Multiplier: 100,
+		Right: "C", Strike: 135, Expiry: "20250621",
+		Quantity: 5, AvgCost: 620.00, Mark: 4.80,
 		MarketValue: 2400.00, UnrealizedPnL: -700.00,
 		Delta: f64(0.31), Gamma: f64(0.029), Theta: f64(-0.12), Vega: f64(0.55),
 	}
 
 	// SPY: pure-options hedge — a long downside put pair.
 	spyPut1 := rpc.PositionView{
-		Symbol: "SPY", Right: "P", Strike: 560, Expiry: "20260619",
-		Quantity: 3, AvgCost: 8.40, Mark: 6.75,
+		Symbol: "SPY", SecType: "OPT", Multiplier: 100,
+		Right: "P", Strike: 560, Expiry: "20260619",
+		Quantity: 3, AvgCost: 840.00, Mark: 6.75,
 		MarketValue: 2025.00, UnrealizedPnL: -495.00,
 		Delta: f64(-0.22), Gamma: f64(0.008), Theta: f64(-0.11), Vega: f64(0.68),
 	}
 	spyPut2 := rpc.PositionView{
-		Symbol: "SPY", Right: "P", Strike: 540, Expiry: "20260619",
-		Quantity: 2, AvgCost: 4.10, Mark: 3.05,
+		Symbol: "SPY", SecType: "OPT", Multiplier: 100,
+		Right: "P", Strike: 540, Expiry: "20260619",
+		Quantity: 2, AvgCost: 410.00, Mark: 3.05,
 		MarketValue: 610.00, UnrealizedPnL: -210.00,
 		Delta: f64(-0.14), Gamma: f64(0.005), Theta: f64(-0.09), Vega: f64(0.61),
 	}
