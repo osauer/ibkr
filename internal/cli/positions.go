@@ -276,10 +276,29 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 		wQty    = 9
 		wAvg    = 10
 		wMark   = 10
-		wChange = 27
 		wMkt    = 13
 		wUnreal = 13
 	)
+	// wChange sizes itself to the widest CHANGE/GREEKS cell actually
+	// rendered in this call: header width floor ("CHANGE / GREEKS" =
+	// 15 cells), full greek tuple at the ceiling (27 cells). When no
+	// option carries captured Greeks — the gateway pipeline goes silent
+	// OOH, or the model-computation tick never landed — every greek
+	// cell is the 15-cell placeholder, so the column shrinks to 15 and
+	// the eye stops reading the trailing pad as an empty column.
+	wChange := len("CHANGE / GREEKS")
+	for _, g := range r.ByUnderlying {
+		if g.Stock != nil {
+			if v := visibleLen(env.formatDayChange(g.Stock.DayChange, g.Stock.DayChangePct, 0)); v > wChange {
+				wChange = v
+			}
+		}
+		for _, o := range g.Options {
+			if v := visibleLen(env.formatGreeksLine(o)); v > wChange {
+				wChange = v
+			}
+		}
+	}
 	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
 		wLeg, "LEG", wQty, "QTY", wAvg, "AVG", wMark, "MARK",
 		wChange, "CHANGE / GREEKS", wMkt, "MKT VALUE", wUnreal, "UNREAL P&L")
@@ -412,8 +431,13 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 // $3.00 premium call comes off the wire as $300, which reads like a typo
 // next to a $3 mark. Dividing by multiplier on OPT restores symmetry.
 // JSON output stays IBKR-faithful; only the rendered column normalises.
+//
+// SecType must match what the daemon actually emits: pkg/ibkr exports
+// AssetTypeOption = "OPTION" and handlers.go fills PositionView.SecType
+// with string(pos.Asset.AssetType), so the canonical wire value is the
+// full word, not the three-letter short form a TWS user might expect.
 func avgCostPerShare(p rpc.PositionView) float64 {
-	if p.SecType == "OPT" && p.Multiplier > 0 {
+	if p.SecType == "OPTION" && p.Multiplier > 0 {
 		return p.AvgCost / float64(p.Multiplier)
 	}
 	return p.AvgCost
