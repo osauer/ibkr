@@ -228,6 +228,14 @@ type HistoryDailyResult struct {
 // honest answer is "yesterday closed at X, no live print yet". No
 // fabrication: never substitute mid-of-bid-ask for Last when computing
 // Change.
+//
+// Unit conventions:
+//   - ChangePct is in PERCENT units (0.70 means 0.70 %, not 70 %). The
+//     CLI renderer appends a trailing % without multiplying.
+//   - IV is a DECIMAL FRACTION (0.247 means 24.7 %). The CLI renderer
+//     multiplies by 100 before printing. Same convention across every
+//     IV-bearing field in this package (chain expiries, chain strikes,
+//     scan rows, position rows).
 type Quote struct {
 	Symbol    string         `json:"symbol"`
 	Contract  ContractParams `json:"contract"`
@@ -547,6 +555,9 @@ type ChainResult struct {
 // enrichment window" from "the value is genuinely zero" — the no-fabrication
 // invariant. Comment carries the raw scanner-side text when non-empty
 // (rare; most scan types leave it blank).
+//
+// Unit conventions follow Quote: ChangePct is in PERCENT units (5.41
+// means 5.41 %), IV is a DECIMAL FRACTION (0.342 means 34.2 %).
 type ScanRow struct {
 	Rank       int      `json:"rank"`
 	Symbol     string   `json:"symbol"`
