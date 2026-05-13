@@ -174,8 +174,9 @@ func fixturePositions() *rpc.PositionsResult {
 		Portfolio: &rpc.PositionsPortfolio{
 			EffectiveDelta:      f64(1847.0),
 			DollarDelta:         f64(326584.50),
-			DollarDeltaCurrency: "EUR",
+			DollarDeltaCurrency: "USD",
 			DailyTheta:          f64(-42.18),
+			DailyThetaCurrency:  "USD",
 			Gamma:               f64(12.4),
 			Vega:                f64(1205.00),
 			GreeksCoverage:      5,
@@ -271,29 +272,31 @@ func fixtureHistory() *rpc.HistoryDailyResult {
 	}
 }
 
-// fixtureScan is a 5-row top-gainers preset — covers full-data rows and
-// a partial row (no IV, no 52w range) so the em-dash placeholder path
-// renders.
+// fixtureScan is a 6-row mixed-exchange screen — USD-quoted US rows,
+// one EUR row, one HKD row, plus a partial row (no IV, no 52w range,
+// no Currency) so the em-dash + fallback paths both render. Exercises
+// the per-row Currency rendering introduced in v0.13.
 func fixtureScan() *rpc.ScanResult {
-	mkRow := func(rank int, sym string, last, pct, iv, lo, hi float64, vol int64, note string) rpc.ScanRow {
+	mkRow := func(rank int, sym, ccy string, last, pct, iv, lo, hi float64, vol int64) rpc.ScanRow {
 		return rpc.ScanRow{
-			Rank: rank, Symbol: sym,
+			Rank: rank, Symbol: sym, Currency: ccy,
 			Last: f64(last), ChangePct: f64(pct), IV: f64(iv),
 			Week52Low: f64(lo), Week52High: f64(hi),
-			Volume: &vol, Comment: note,
+			Volume: &vol,
 		}
 	}
 	// CHG% is in percent units (7.21 = 7.21%) — formatChangePct prints
 	// the value with a trailing % without multiplying.
-	partial := rpc.ScanRow{Rank: 5, Symbol: "ZZZ", Last: f64(12.34), ChangePct: f64(4.10)}
+	partial := rpc.ScanRow{Rank: 6, Symbol: "ZZZ", Last: f64(12.34), ChangePct: f64(4.10)}
 	return &rpc.ScanResult{
 		Preset: "top_pct_gain",
 		Type:   "TOP_PERC_GAIN",
 		Rows: []rpc.ScanRow{
-			mkRow(1, "AAPL", 207.85, 7.21, 0.247, 142.10, 219.50, 38_400_000, ""),
-			mkRow(2, "NVDA", 128.54, 5.12, 0.382, 75.20, 145.80, 248_000_000, ""),
-			mkRow(3, "AMD", 145.22, 4.28, 0.318, 89.40, 178.90, 62_500_000, ""),
-			mkRow(4, "TSLA", 244.18, 3.14, 0.452, 138.80, 299.20, 95_300_000, ""),
+			mkRow(1, "AAPL", "USD", 207.85, 7.21, 0.247, 142.10, 219.50, 38_400_000),
+			mkRow(2, "NVDA", "USD", 128.54, 5.12, 0.382, 75.20, 145.80, 248_000_000),
+			mkRow(3, "AMD", "USD", 145.22, 4.28, 0.318, 89.40, 178.90, 62_500_000),
+			mkRow(4, "SAP", "EUR", 174.50, 2.85, 0.221, 130.20, 188.40, 4_100_000),
+			mkRow(5, "0700", "HKD", 412.20, 3.42, 0.298, 285.00, 458.80, 18_400_000),
 			partial,
 		},
 		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),

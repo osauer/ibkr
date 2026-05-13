@@ -200,7 +200,28 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 		fmt.Fprintf(out, "  %-*s  %s  %s\n", labelWidth, "Dollar delta", env.bold(val), ccy)
 	}
 	if p.DailyTheta != nil {
-		fmt.Fprintf(out, "  %-*s  %s  / day\n", labelWidth, "Daily theta", env.formatPnLRight(*p.DailyTheta, valueWidth))
+		// Match the Dollar delta line's pattern: render bare (no symbol)
+		// and name the currency to the right. MIX → render bare with an
+		// explicit "(mixed currencies)" tail so a reader knows the sum
+		// spans multiple ccys and can't be stamped with a single symbol.
+		ccy := p.DailyThetaCurrency
+		val := padLeftVisible(formatMoneyBare(*p.DailyTheta), valueWidth)
+		switch {
+		case *p.DailyTheta > 0:
+			val = env.green(val)
+		case *p.DailyTheta < 0:
+			val = env.red(val)
+		default:
+			val = env.dim(val)
+		}
+		switch ccy {
+		case "":
+			fmt.Fprintf(out, "  %-*s  %s  / day\n", labelWidth, "Daily theta", val)
+		case "MIX":
+			fmt.Fprintf(out, "  %-*s  %s  / day (mixed currencies)\n", labelWidth, "Daily theta", val)
+		default:
+			fmt.Fprintf(out, "  %-*s  %s  %s / day\n", labelWidth, "Daily theta", val, ccy)
+		}
 	}
 	if p.Gamma != nil {
 		val := padLeftVisible(formatSignedGrouped(*p.Gamma, 4), valueWidth)

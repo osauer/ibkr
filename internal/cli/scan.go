@@ -128,11 +128,11 @@ func renderScanText(env *Env, r *rpc.ScanResult) int {
 		fmt.Fprintf(out, "  %-4d  %-9s %s  %s  %s  %s  %s  %s\n",
 			row.Rank,
 			row.Symbol,
-			formatPrice(row.Last, 12),
+			formatPrice(row.Last, 12, row.Currency),
 			env.formatChangePct(row.ChangePct, 8),
 			formatVolumeCompact(row.Volume, 9),
 			ivStatus(row.IV),
-			formatRange52w(env, row.Week52Low, row.Week52High),
+			formatRange52w(env, row.Week52Low, row.Week52High, row.Currency),
 			row.Comment,
 		)
 	}
@@ -140,15 +140,18 @@ func renderScanText(env *Env, r *rpc.ScanResult) int {
 	return 0
 }
 
-// formatPrice renders a price right-aligned to width w with a leading
-// dollar sign (consistent with positions / quote tables). Nil → em-dash.
-// $ is part of the visible width so the column aligns whether the price
-// is present or not.
-func formatPrice(p *float64, w int) string {
+// formatPrice renders a price right-aligned to width w with the row's
+// currency symbol attached (dense style — "$192.50", not "$ 192.50" —
+// so the scan grid stays narrow). Empty ccy falls back to "$" for
+// back-compat with daemons that don't emit ScanRow.Currency yet.
+// Nil → em-dash. The symbol is part of the visible width so the column
+// aligns whether the price is present or not.
+func formatPrice(p *float64, w int, ccy string) string {
 	if p == nil {
 		return padDash(w)
 	}
-	return fmt.Sprintf("%*s", w, fmt.Sprintf("$%.2f", *p))
+	sym := strings.TrimSpace(moneyPrefix(ccy))
+	return fmt.Sprintf("%*s", w, fmt.Sprintf("%s%.2f", sym, *p))
 }
 
 // formatVolumeCompact renders share volume right-aligned to width w with
@@ -174,15 +177,17 @@ func formatVolumeCompact(v *int64, w int) string {
 // formatRange52w renders the 52-week low..high pair in dim grey to keep
 // the eye drawn to the live price and change columns. Either side nil →
 // em-dash for that half. The "low..high" connector is two dots; uses no
-// space so the column stays compact.
-func formatRange52w(env *Env, lo, hi *float64) string {
+// space so the column stays compact. Currency follows the row; empty
+// ccy falls back to "$".
+func formatRange52w(env *Env, lo, hi *float64, ccy string) string {
+	sym := strings.TrimSpace(moneyPrefix(ccy))
 	lowStr := "—"
 	if lo != nil {
-		lowStr = fmt.Sprintf("$%.2f", *lo)
+		lowStr = fmt.Sprintf("%s%.2f", sym, *lo)
 	}
 	highStr := "—"
 	if hi != nil {
-		highStr = fmt.Sprintf("$%.2f", *hi)
+		highStr = fmt.Sprintf("%s%.2f", sym, *hi)
 	}
 	return env.dim(fmt.Sprintf("%9s..%-9s", lowStr, highStr))
 }
