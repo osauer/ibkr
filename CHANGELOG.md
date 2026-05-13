@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## v0.12.5 — 2026-05-13 09:20 CEST
+
+Cleanup release. The v0.12.4 audit surfaced that `Connector.GetPositions` had no callers anywhere in the repo — every position read goes through `GetCachedPositions` → `convertIBKRPositions`. The two functions weren't equivalent: `GetPositions` sent a fresh `reqPositions` to the gateway, which would actively clear the cache populated by the streaming `RequestAccountUpdates` subscription and lose mark/value/P&L. Anyone who wired through it would have got snapshot positions with no live prices, on a connection whose streaming state was now broken. Deleted. No flag changes, no behaviour change for the daemon, no API change anyone is using.
+
+### Removed
+
+- **`Connector.GetPositions` (~115 LOC).** Old snapshot-based positions API, superseded by `GetCachedPositions` during the v0.10.x refactor that introduced `RequestAccountUpdates` streaming. The function did three problematic things: (1) called `conn.RequestPositions()` which clears the cache the streaming subscription populates — calling it would have left the daemon's portfolio state corrupt until the next gateway push; (2) waited up to 15 s synchronously for `positionEnd` — fine for a one-shot CLI but wrong for a long-lived daemon; (3) contained the off-by-100× synthetic-P&L fallback that v0.12.4 already removed in case anyone wired through it. Doc-comment references in `RequestAccountUpdates`, `convertIBKRPositions`, and `pkg/ibkr/doc.go` were updated to point at `GetCachedPositions` as the canonical positions read.
+
 ## v0.12.4 — 2026-05-13 08:57 CEST
 
 Patch release. Two small fixes that came out of an audit pass on the `AvgCost` plumbing. The visible one: `AVG COST` on option rows in `ibkr positions` no longer prints the per-contract premium that looked like a typo next to the per-share Mark. The other is latent — a synthetic-P&L fallback in an unused code path that would have produced 100× wrong numbers on options if ever called. No flag changes. JSON output stays IBKR-faithful; only the rendered column normalises.

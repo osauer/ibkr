@@ -1782,126 +1782,6 @@ func (c *Connector) CancelOrder(orderID int) error {
 	return nil
 }
 
-// GetPositions retrieves current positions from IBKR
-func (c *Connector) GetPositions() ([]*Position, error) {
-	if !c.isConnected() {
-		c.logWarn("GetPositions: Not connected (running=%v, lease=%v, conn=%v)",
-			c.running, c.lease != nil, c.conn != nil)
-		// Return empty positions in degraded mode
-		return []*Position{}, nil
-	}
-
-	// Get connection from pool using our lease
-	c.mu.RLock()
-	lease := c.lease
-	c.mu.RUnlock()
-
-	if lease == nil {
-		return nil, fmt.Errorf("no active lease")
-	}
-
-	conn, err := c.pool.GetConnection(lease.LeaseID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
-	}
-
-	// Request latest positions
-	if err := conn.RequestPositions(); err != nil {
-		c.logWarn("Failed to request positions: %v", err)
-		return nil, err
-	}
-
-	// Wait for positions to complete with a generous timeout
-	if err := conn.WaitForPositionsEnd(15 * time.Second); err != nil {
-		c.logWarn("Warning: %v (proceeding with partial data)", err)
-		// Continue with whatever positions we have
-	}
-
-	// Get positions from connection
-	ibkrPositions := conn.GetPositions()
-
-	// Seed contract cache with any identifiers reported alongside positions so we
-	// avoid redundant contract lookups during startup warm-ups.
-	c.seedContractCacheFromPositions(ibkrPositions)
-
-	// Convert IBKR positions to core positions
-	result := make([]*Position, 0, len(ibkrPositions))
-	for key, pos := range ibkrPositions {
-		if pos == nil {
-			continue
-		}
-		if pos.Contract.SecType == "STK" && pos.Contract.ConID == 0 {
-			c.registerInactiveCandidate(pos.Contract.Symbol, "position missing contract id")
-			c.logInfo("Skipping position for %s: missing contract ID (likely inactive)", pos.Contract.Symbol)
-			continue
-		}
-		// Determine asset type
-		assetType := AssetTypeStock
-		if pos.Contract.SecType == "OPT" {
-			assetType = AssetTypeOption
-		}
-
-		if pos.Contract.SecType == "STK" && c.IsSymbolInactive(pos.Contract.Symbol) {
-			c.logDebug("Skipping position for inactive symbol %s (qty=%.2f)", pos.Contract.Symbol, pos.Position)
-			continue
-		}
-
-		// For options, include strike and expiry in the symbol
-		symbol := pos.Contract.Symbol
-		if pos.Contract.SecType == "OPT" {
-			// Format: SPY_231215_P440
-			symbol = fmt.Sprintf("%s_%s_%s%.0f",
-				pos.Contract.Symbol,
-				pos.Contract.Expiry,
-				pos.Contract.Right,
-				pos.Contract.Strike)
-		}
-
-		currentPrice := pos.MarketPrice
-		if currentPrice == 0 && pos.Position != 0 {
-			denom := pos.Position * float64(pos.Contract.Multiplier)
-			if denom != 0 && pos.MarketValue != 0 {
-				currentPrice = math.Abs(pos.MarketValue / denom)
-			}
-		}
-
-		// IBKR sends UnrealizedPNL directly on every msgPortfolioValue; a
-		// synthesised value would mix per-share currentPrice with per-contract
-		// AverageCost on options (multiplier-inclusive on the OPT side) and
-		// land 100× wrong. Trust the wire.
-		unrealizedPnL := pos.UnrealizedPNL
-
-		assetMultiplier := pos.Contract.Multiplier
-		if assetType == AssetTypeStock && assetMultiplier == 100 {
-			assetMultiplier = 1
-		}
-
-		// Create core position
-		corePos := &Position{
-			ID: fmt.Sprintf("pos-%s-%d", key, time.Now().Unix()),
-			Asset: Asset{
-				Symbol:     symbol,
-				Exchange:   pos.Contract.Exchange,
-				AssetType:  assetType,
-				Multiplier: assetMultiplier,
-				Currency:   pos.Contract.Currency,
-			},
-			Quantity:      pos.Position,
-			EntryPrice:    pos.AverageCost,
-			CurrentPrice:  currentPrice,
-			UnrealizedPnL: unrealizedPnL,
-			RealizedPnL:   pos.RealizedPNL,
-			OpenedAt:      time.Now(), // IBKR doesn't provide this
-			UpdatedAt:     time.Now(),
-		}
-
-		result = append(result, corePos)
-	}
-
-	c.logInfo("Retrieved %d positions from IBKR", len(result))
-	return result, nil
-}
-
 func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosition) {
 	if len(positions) == 0 {
 		return
@@ -2261,8 +2141,8 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 
 // RequestAccountUpdates subscribes to streaming account + portfolio updates.
 // The gateway pushes mark prices, market values, and unrealized P&L for each
-// open position via msgPortfolioValue, populating the same internal map that
-// GetPositions reads. Pass an empty account to use the connector's bound one.
+// open position via msgPortfolioValue, populating the internal map that
+// GetCachedPositions reads. Pass an empty account to use the connector's bound one.
 func (c *Connector) RequestAccountUpdates(account string) error {
 	if !c.isConnected() {
 		return ErrIBKRUnavailable
@@ -2297,7 +2177,7 @@ func (c *Connector) GetCachedPositions() ([]*Position, error) {
 }
 
 // convertIBKRPositions adapts wire-level RawPosition rows into the domain
-// Position shape, sharing the conversion logic used by GetPositions.
+// Position shape used by [Connector.GetCachedPositions].
 func (c *Connector) convertIBKRPositions(ibkrPositions map[string]*RawPosition) []*Position {
 	result := make([]*Position, 0, len(ibkrPositions))
 	for key, pos := range ibkrPositions {

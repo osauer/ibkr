@@ -10,9 +10,14 @@
 //
 // What's plumbed today (v0.12):
 //
-//   - Account & positions: reqAccountSummary (62), reqPositions (61),
-//     portfolio_value (msg 7), $LEDGER:ALL multi-currency exposure.
-//     Entry points: [Connector.RequestAccountSummary], [Connector.GetPositions].
+//   - Account & positions: reqAccountSummary (62), reqAccountUpdates (6),
+//     portfolio_value (msg 7), $LEDGER:ALL multi-currency exposure. Positions
+//     come from the streaming portfolioValue subscription started by
+//     [Connector.RequestAccountUpdates]; read the cache with
+//     [Connector.GetCachedPositions]. No reqPositions round-trip on the read
+//     path — it would clear the cache and lose mark/value/P&L.
+//     Entry points: [Connector.RequestAccountSummary],
+//     [Connector.RequestAccountUpdates], [Connector.GetCachedPositions].
 //   - Market data, snapshot: reqMktData (1) with snapshot=true.
 //     Entry point: [Connector.FetchMarketSnapshot].
 //   - Market data, streaming: reqMktData (1) with snapshot=false; default
