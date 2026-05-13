@@ -87,22 +87,33 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 		pad := (groupSpan - len(label)) / 2
 		return strings.Repeat(" ", pad) + label + strings.Repeat(" ", groupSpan-len(label)-pad)
 	}
-	fmt.Fprintf(out, "  %s   %s   %s\n", groupHeader("CALLS"), strings.Repeat(" ", 8), groupHeader("PUTS"))
-	fmt.Fprintf(out, "  %6s %6s %6s %6s   %8s   %6s %6s %6s %6s\n",
+	groupLine := fmt.Sprintf("  %s   %s   %s", groupHeader("CALLS"), strings.Repeat(" ", 8), groupHeader("PUTS"))
+	colLine := fmt.Sprintf("  %6s %6s %6s %6s   %8s   %6s %6s %6s %6s",
 		"BID", "ASK", "LAST", "IV", "STRIKE", "BID", "ASK", "LAST", "IV")
+	fmt.Fprintln(out, env.dim(groupLine))
+	fmt.Fprintln(out, env.dim(colLine))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(colLine))))
 	for _, s := range c.Strikes {
+		// Bold the ATM strike: it's the single hero number per strike grid —
+		// the anchor a reader uses to navigate the wings. Other strikes stay
+		// plain so the eye picks ATM out without competing emphasis.
+		strike := fmt.Sprintf("%8.2f", s.Strike)
 		marker := ""
 		if s.IsATM {
+			strike = env.bold(strike)
 			marker = " ← ATM"
 		}
-		fmt.Fprintf(out, "  %s %s %s %s   %8.2f   %s %s %s %s%s\n",
+		fmt.Fprintf(out, "  %s %s %s %s   %s   %s %s %s %s%s\n",
 			fmt2(s.CallBid), fmt2(s.CallAsk), fmt2(s.CallLast), fmtPct(s.CallIV),
-			s.Strike,
+			strike,
 			fmt2(s.PutBid), fmt2(s.PutAsk), fmt2(s.PutLast), fmtPct(s.PutIV),
 			marker)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  Greeks shown only when IBKR delivers tick 106. Empty cells = unavailable, never derived.")
+	// Caption is intentionally about IV (the model-computation cell that
+	// can be unavailable); Bid/Ask/Last are exchange ticks and a missing
+	// value there means an illiquid leg with no quotes, not "unavailable".
+	fmt.Fprintln(out, env.dim("  IV is delivered as a model-computation tick. Empty cells = unavailable, never derived."))
 	return 0
 }
 

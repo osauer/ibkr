@@ -217,13 +217,13 @@ func TestQuoteSnapshotAlignment(t *testing.T) {
 		t.Fatalf("render: code=%d", code)
 	}
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
-	// First line is blank (Fprintln(out)), then header, then 2 data rows.
-	if len(lines) < 4 {
-		t.Fatalf("expected 4 lines, got %d:\n%s", len(lines), stdout.String())
+	// First line is blank (Fprintln(out)), then header, rule, 2 data rows.
+	if len(lines) < 5 {
+		t.Fatalf("expected 5 lines, got %d:\n%s", len(lines), stdout.String())
 	}
 	header := lines[1]
-	rowFull := lines[2]
-	rowNil := lines[3]
+	rowFull := lines[3]
+	rowNil := lines[4]
 	if visLen(header) != visLen(rowFull) {
 		t.Errorf("header (%d) vs full row (%d) width mismatch:\n%s\n%s", visLen(header), visLen(rowFull), header, rowFull)
 	}
@@ -261,13 +261,14 @@ func TestChainAlignment(t *testing.T) {
 		t.Fatalf("render: code=%d", code)
 	}
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
-	// blank, header (symbol/spot), blank, group-header (CALLS/PUTS), col-header (BID/ASK/...), 2 strike rows, ...
-	if len(lines) < 7 {
-		t.Fatalf("expected >=7 lines, got %d:\n%s", len(lines), stdout.String())
+	// blank, header (symbol/spot), blank, group-header (CALLS/PUTS),
+	// col-header (BID/ASK/...), rule, 2 strike rows, ...
+	if len(lines) < 8 {
+		t.Fatalf("expected >=8 lines, got %d:\n%s", len(lines), stdout.String())
 	}
 	colHeader := lines[4]
-	rowFull := lines[5]
-	rowEmpty := lines[6]
+	rowFull := lines[6]
+	rowEmpty := lines[7]
 	// All three lines must end at the same visible column. The trailing
 	// " ← ATM" marker only attaches to ATM strikes, so trim it before
 	// comparing widths.
@@ -303,12 +304,12 @@ func TestHistoryAlignment(t *testing.T) {
 		t.Fatalf("render: code=%d", code)
 	}
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
-	// blank, summary, blank, header, row
-	if len(lines) < 5 {
-		t.Fatalf("expected >=5 lines, got %d:\n%s", len(lines), stdout.String())
+	// blank, summary, blank, header, rule, row
+	if len(lines) < 6 {
+		t.Fatalf("expected >=6 lines, got %d:\n%s", len(lines), stdout.String())
 	}
 	header := lines[3]
-	row := lines[4]
+	row := lines[5]
 	// Header right-aligns OPEN to col 23 (the right edge of the OPEN column).
 	if !strings.Contains(header, "      OPEN") {
 		t.Errorf("expected right-aligned OPEN label, got: %q", header)

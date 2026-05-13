@@ -65,60 +65,101 @@ func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
 	// always-on column adds dead width to the table.
 	showRealized := anyRealized(r.Stocks) || anyRealized(r.Options)
 	if len(r.Stocks) > 0 {
-		fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(r.DataType))
-		// Headers built from the same field widths as the data row so labels
-		// land precisely under their columns. Numeric (QTY) right-aligns to
-		// match its right-aligned data; money labels left-align with the $ sign.
-		// DAY CHG sits between MARK and MKT VALUE so the reader's eye picks up
-		// today's move before scanning the position-level value/P&L.
-		if showRealized {
-			fmt.Fprintf(out, "  %-9s %7s   %-12s %-11s %-22s %-15s %-12s  %s\n",
-				"SYMBOL", "QTY", "AVG COST", "MARK", "DAY CHG", "MKT VALUE", "UNREAL P&L", "REAL P&L")
-		} else {
-			fmt.Fprintf(out, "  %-9s %7s   %-12s %-11s %-22s %-15s %s\n",
-				"SYMBOL", "QTY", "AVG COST", "MARK", "DAY CHG", "MKT VALUE", "UNREAL P&L")
-		}
-		for _, p := range r.Stocks {
-			if showRealized {
-				fmt.Fprintf(out, "  %-9s %7.0f   %-12s %-11s %-22s %-15s %s  %s\n",
-					p.Symbol, p.Quantity, formatMoney(p.AvgCost), formatMoney(p.Mark),
-					env.formatDayChange(p.DayChange, p.DayChangePct, 22),
-					formatMoney(p.MarketValue), env.formatPnL(p.UnrealizedPnL, 12), env.formatPnL(p.RealizedPnL, 0))
-			} else {
-				fmt.Fprintf(out, "  %-9s %7.0f   %-12s %-11s %-22s %-15s %s\n",
-					p.Symbol, p.Quantity, formatMoney(p.AvgCost), formatMoney(p.Mark),
-					env.formatDayChange(p.DayChange, p.DayChangePct, 22),
-					formatMoney(p.MarketValue), env.formatPnL(p.UnrealizedPnL, 0))
-			}
-		}
-		fmt.Fprintln(out)
+		renderStocksTable(env, r.Stocks, r.DataType, showRealized)
 	}
 	if len(r.Options) > 0 {
-		fmt.Fprintf(out, "Options%s\n", env.suffixBadge(r.DataType))
-		if showRealized {
-			fmt.Fprintf(out, "  %-10s  %-4s  %-10s  %7s  %5s    %-12s %-11s %-12s  %s\n",
-				"UNDERLYING", "SIDE", "EXPIRY", "STRIKE", "QTY", "AVG COST", "MARK", "UNREAL P&L", "REAL P&L")
-		} else {
-			fmt.Fprintf(out, "  %-10s  %-4s  %-10s  %7s  %5s    %-12s %-11s %s\n",
-				"UNDERLYING", "SIDE", "EXPIRY", "STRIKE", "QTY", "AVG COST", "MARK", "UNREAL P&L")
-		}
-		for _, p := range r.Options {
-			if showRealized {
-				fmt.Fprintf(out, "  %-10s  %-4s  %-10s  %7.2f  %5.0f    %-12s %-11s %s  %s\n",
-					p.Symbol, p.Right, formatExpiry(p.Expiry), p.Strike, p.Quantity,
-					formatMoney(p.AvgCost), formatMoney(p.Mark), env.formatPnL(p.UnrealizedPnL, 12), env.formatPnL(p.RealizedPnL, 0))
-			} else {
-				fmt.Fprintf(out, "  %-10s  %-4s  %-10s  %7.2f  %5.0f    %-12s %-11s %s\n",
-					p.Symbol, p.Right, formatExpiry(p.Expiry), p.Strike, p.Quantity,
-					formatMoney(p.AvgCost), formatMoney(p.Mark), env.formatPnL(p.UnrealizedPnL, 0))
-			}
-		}
-		fmt.Fprintln(out)
+		renderOptionsTable(env, r.Options, r.DataType, showRealized)
 	}
 	renderPortfolioSummary(env, r)
 	fmt.Fprintf(out, "  %d positions  ·  as of %s\n",
 		len(r.Stocks)+len(r.Options), formatTimeShort(r.AsOf))
 	return 0
+}
+
+// renderStocksTable prints the stocks block with a dim column header + rule
+// and right-aligned money columns. Same layout language as the by-underlying
+// view so a reader switching between the two doesn't have to re-learn where
+// each value lives.
+func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool) {
+	out := env.Stdout
+	// Widths fit realistic data: AvgCost/Mark hold "$ 9,999.99" (10) or
+	// "$ 99,999.99" (11); MarketValue holds up to "$ 9,999,999.99" (14);
+	// UNREAL P&L holds signed money to the same magnitude. DAY CHG holds
+	// the composite "+$X.XX (+Y.YY%)" cell — 22 cells leaves slack for
+	// 3-digit percent moves on penny stocks.
+	const (
+		wSymbol = 9
+		wQty    = 7
+		wAvg    = 11
+		wMark   = 11
+		wDayChg = 22
+		wMkt    = 14
+		wPnL    = 13
+	)
+	fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(dataType))
+	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
+		wSymbol, "SYMBOL", wQty, "QTY", wAvg, "AVG COST", wMark, "MARK",
+		wDayChg, "DAY CHG", wMkt, "MKT VALUE", wPnL, "UNREAL P&L")
+	if showRealized {
+		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
+	}
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
+	for _, p := range rows {
+		row := fmt.Sprintf("  %-*s  %*.0f  %s  %s  %s  %s  %s",
+			wSymbol, p.Symbol, wQty, p.Quantity,
+			padLeftVisible(formatMoney(p.AvgCost), wAvg),
+			padLeftVisible(formatMoney(p.Mark), wMark),
+			padRightVisible(env.formatDayChange(p.DayChange, p.DayChangePct, 0), wDayChg),
+			padLeftVisible(formatMoney(p.MarketValue), wMkt),
+			env.formatPnLRight(p.UnrealizedPnL, wPnL))
+		if showRealized {
+			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
+		}
+		fmt.Fprintln(out, row)
+	}
+	fmt.Fprintln(out)
+}
+
+// renderOptionsTable prints the options block in the same column language
+// as renderStocksTable. Strike is a 2-decimal float column, right-aligned;
+// AvgCost/Mark/UnrealPnL hold money right-aligned so decimal points line up
+// even when magnitudes vary (single-digit premium vs four-digit underlying).
+func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool) {
+	out := env.Stdout
+	const (
+		wUnder  = 10
+		wSide   = 4
+		wExpiry = 10
+		wStrike = 8
+		wQty    = 5
+		wAvg    = 11
+		wMark   = 11
+		wPnL    = 13
+	)
+	fmt.Fprintf(out, "Options%s\n", env.suffixBadge(dataType))
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s  %*s  %*s  %*s  %*s",
+		wUnder, "UNDERLYING", wSide, "SIDE", wExpiry, "EXPIRY",
+		wStrike, "STRIKE", wQty, "QTY",
+		wAvg, "AVG COST", wMark, "MARK", wPnL, "UNREAL P&L")
+	if showRealized {
+		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
+	}
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
+	for _, p := range rows {
+		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %*.2f  %*.0f  %s  %s  %s",
+			wUnder, p.Symbol, wSide, p.Right, wExpiry, formatExpiry(p.Expiry),
+			wStrike, p.Strike, wQty, p.Quantity,
+			padLeftVisible(formatMoney(p.AvgCost), wAvg),
+			padLeftVisible(formatMoney(p.Mark), wMark),
+			env.formatPnLRight(p.UnrealizedPnL, wPnL))
+		if showRealized {
+			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
+		}
+		fmt.Fprintln(out, row)
+	}
+	fmt.Fprintln(out)
 }
 
 // renderPortfolioSummary prints the daemon-computed aggregate block when
