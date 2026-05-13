@@ -487,6 +487,48 @@ func formatSignedGrouped(v float64, decimals int) string {
 	return sign + groupThousands(intPart) + frac
 }
 
+// visibleLen returns the visible (terminal-cell) length of s, ignoring
+// ANSI CSI escape sequences (\x1b[...m). Box-drawing and currency-
+// symbol runes are counted as one cell each, matching how terminals
+// render them. Use this in lieu of len() when computing widths for
+// strings that may have been color-wrapped.
+func visibleLen(s string) int {
+	n := 0
+	in := false
+	for _, r := range s {
+		if in {
+			if r == 'm' {
+				in = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			in = true
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// padRightVisible pads s on the right with spaces until its visible
+// length is w, preserving any embedded ANSI escapes. No-op when s is
+// already at or beyond width.
+func padRightVisible(s string, w int) string {
+	if d := w - visibleLen(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
+}
+
+// padLeftVisible is padRightVisible's right-aligning counterpart.
+func padLeftVisible(s string, w int) string {
+	if d := w - visibleLen(s); d > 0 {
+		return strings.Repeat(" ", d) + s
+	}
+	return s
+}
+
 // padDash returns a right-aligned em-dash placeholder of visible width w.
 // Em-dash is one terminal column despite being three UTF-8 bytes, so we
 // can't rely on Printf's %Ns width verb (it counts bytes). Used for empty

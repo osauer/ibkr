@@ -282,18 +282,18 @@ func TestRenderPositionsByUnderlying(t *testing.T) {
 	if !strings.Contains(out, "Stock") {
 		t.Errorf("AAPL block missing Stock leg:\n%s", out)
 	}
-	// TSLA has no stock leg — no "Stock" line should appear under it. Find
-	// the TSLA section and verify.
+	// TSLA has no stock leg — no "Stock" line should appear under it.
 	tslaIdx := strings.Index(out, "TSLA")
 	if tslaIdx < 0 {
 		t.Fatalf("TSLA block not found")
 	}
 	tslaBlock := out[tslaIdx:]
-	if strings.Contains(tslaBlock, "    Stock ") {
+	if strings.Contains(tslaBlock, "Stock  ") {
 		t.Errorf("TSLA pure-options group should not have Stock line:\n%s", tslaBlock)
 	}
-	if !strings.Contains(out, "Group") {
-		t.Errorf("missing Group totals:\n%s", out)
+	// Multi-leg AAPL group renders a Total row; single-leg TSLA does not.
+	if !strings.Contains(out, "Total") {
+		t.Errorf("multi-leg AAPL group should carry a Total row:\n%s", out)
 	}
 }
 

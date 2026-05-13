@@ -206,8 +206,16 @@ func anyRealized(rows []rpc.PositionView) bool {
 	return false
 }
 
-// renderPositionsByUnderlying prints one block per underlying with the stock
-// leg (if any) followed by the option legs and a group P&L line.
+// renderPositionsByUnderlying prints one block per underlying with the
+// stock leg (if any), the option legs (with inline Greeks), and a
+// per-underlying Total row when there's more than one leg.
+//
+// Every row uses the same column layout — LEG, QTY, AVG, MARK,
+// CHANGE/GREEKS, MKT VALUE, UNREAL P&L — so the eye reads down each
+// column instead of zigzagging across row-type-specific layouts. Money
+// columns right-align so decimal points line up; sign-coloured cells
+// (day change, unrealised P&L, Δ) pad before colour wrap so visible
+// widths stay correct under ANSI escapes.
 func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
@@ -216,29 +224,78 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 		return 0
 	}
 	fmt.Fprintf(out, "Positions by underlying%s\n", env.suffixBadge(r.DataType))
+	fmt.Fprintln(out)
+
+	// Column header.  Widths chosen to fit realistic data: identifier
+	// holds "2026-06-18 C 1191.67" (~20); change/greeks holds
+	// "Δ +0.62  Γ +0.307  Θ -0.01  ν +0.01" (~33).
+	const (
+		wLeg    = 22
+		wQty    = 9
+		wAvg    = 10
+		wMark   = 10
+		wChange = 33
+		wMkt    = 13
+		wUnreal = 13
+	)
+	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
+		wLeg, "LEG", wQty, "QTY", wAvg, "AVG", wMark, "MARK",
+		wChange, "CHANGE / GREEKS", wMkt, "MKT VALUE", wUnreal, "UNREAL P&L")
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
+
+	writeRow := func(leg, qty, avg, mark, change, mkt, unreal string) {
+		fmt.Fprintf(out, "  %s  %s  %s  %s  %s  %s  %s\n",
+			padRightVisible(leg, wLeg),
+			padLeftVisible(qty, wQty),
+			padLeftVisible(avg, wAvg),
+			padLeftVisible(mark, wMark),
+			padRightVisible(change, wChange),
+			padLeftVisible(mkt, wMkt),
+			padLeftVisible(unreal, wUnreal))
+	}
+
 	for _, g := range r.ByUnderlying {
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "  %s\n", g.Underlying)
+		fmt.Fprintln(out, "  "+env.bold(g.Underlying))
+
 		if g.Stock != nil {
 			s := g.Stock
-			fmt.Fprintf(out, "    Stock     %7.0f sh   avg %-12s mark %-11s day %-22s mkt %s   unreal %s\n",
-				s.Quantity, formatMoney(s.AvgCost), formatMoney(s.Mark),
-				env.formatDayChange(s.DayChange, s.DayChangePct, 22),
-				formatMoney(s.MarketValue), env.formatPnL(s.UnrealizedPnL, 0))
+			writeRow(
+				"Stock",
+				fmt.Sprintf("%.0f sh", s.Quantity),
+				formatMoney(s.AvgCost),
+				formatMoney(s.Mark),
+				env.formatDayChange(s.DayChange, s.DayChangePct, 0),
+				formatMoney(s.MarketValue),
+				env.formatPnLRight(s.UnrealizedPnL, wUnreal))
 		}
-		if len(g.Options) > 0 {
-			fmt.Fprintln(out, "    Options")
-			for _, o := range g.Options {
-				fmt.Fprintf(out, "      %s %s %7.2f   %5.0f ct   avg %-12s mark %-11s unreal %s\n",
-					formatExpiry(o.Expiry), o.Right, o.Strike, o.Quantity,
-					formatMoney(o.AvgCost), formatMoney(o.Mark), env.formatPnL(o.UnrealizedPnL, 0))
-				if greeks := env.formatGreeksLine(o); greeks != "" {
-					fmt.Fprintln(out, "        "+greeks)
-				}
-			}
+		for _, o := range g.Options {
+			writeRow(
+				fmt.Sprintf("%s %s %.2f", formatExpiry(o.Expiry), o.Right, o.Strike),
+				fmt.Sprintf("%.0f ct", o.Quantity),
+				formatMoney(o.AvgCost),
+				formatMoney(o.Mark),
+				env.formatGreeksLine(o),
+				formatMoney(o.MarketValue),
+				env.formatPnLRight(o.UnrealizedPnL, wUnreal))
 		}
-		fmt.Fprintf(out, "    Group     mkt %-15s unreal %s\n",
-			formatMoney(g.GroupMarketValue), env.formatPnL(g.GroupUnrealizedPnL, 0))
+
+		// Total row only when there's more than one leg — for a single
+		// stock or a single option the per-leg row already carries the
+		// values that would otherwise be duplicated.
+		legs := 0
+		if g.Stock != nil {
+			legs++
+		}
+		legs += len(g.Options)
+		if legs > 1 {
+			writeRow(
+				env.dim("─── Total"),
+				"", "", "", "",
+				formatMoney(g.GroupMarketValue),
+				env.formatPnLRight(g.GroupUnrealizedPnL, wUnreal))
+		}
 	}
 	fmt.Fprintln(out)
 	renderPortfolioSummary(env, r)
