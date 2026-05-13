@@ -58,3 +58,32 @@ func TestGreeksCacheNegativeEntry(t *testing.T) {
 		t.Errorf("ok bit should be false on negative entry")
 	}
 }
+
+// TestGreeksCacheNegativeTTLShorterThanPositive: a negative entry past
+// the short negative TTL must miss so the caller re-subscribes, even
+// though a positive entry at the same age would still hit. Without
+// this asymmetry, a cold-daemon prewarm miss would lock retries out
+// for the full positive TTL — well past the point the connector has
+// warmed and the gateway is delivering model ticks again.
+func TestGreeksCacheNegativeTTLShorterThanPositive(t *testing.T) {
+	if greeksNegativeTTL >= greeksTTL {
+		t.Fatalf("negative TTL (%v) must be strictly shorter than positive TTL (%v) — the asymmetry is the point", greeksNegativeTTL, greeksTTL)
+	}
+	c := newGreeksCache()
+	stale := time.Now().Add(-(greeksNegativeTTL + time.Second))
+
+	c.put("AAPL_260117C200", greeksEntry{ok: false, asOf: stale})
+	if _, ok := c.get("AAPL_260117C200", time.Now()); ok {
+		t.Errorf("negative entry past negativeTTL should miss so retries unblock")
+	}
+
+	// Same age, but positive — must still hit. Pins the asymmetry.
+	c.put("AAPL_260117P200", greeksEntry{
+		value: ibkrlib.Greeks{Delta: 0.5},
+		ok:    true,
+		asOf:  stale,
+	})
+	if _, ok := c.get("AAPL_260117P200", time.Now()); !ok {
+		t.Errorf("positive entry within positiveTTL must still hit at the same age — positive cache is load-bearing for back-to-back calls")
+	}
+}

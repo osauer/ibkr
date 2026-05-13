@@ -26,6 +26,16 @@ import (
 // tickType 13) silently drops for far-OTM and illiquid OOH legs; we
 // still want to remember "we tried and got nothing" so we don't re-
 // poll a dead stream on the next call.
+//
+// Negative entries use a much shorter TTL than positive entries. A
+// cold-daemon prewarm commonly fails to receive model ticks within
+// the 2.5 s budget — the option-tick pipeline takes a few seconds to
+// settle on a fresh connector. Under a single 60 s TTL, that one
+// transient miss locked retries out for a full minute, well past the
+// point the gateway started delivering ticks. A short negative TTL
+// lets the next prewarm re-subscribe and capture the live values
+// promptly, while still protecting the gateway from rapid re-poll
+// loops within a few seconds.
 type greeksCache struct {
 	mu      sync.RWMutex
 	entries map[string]greeksEntry
@@ -38,7 +48,22 @@ type greeksEntry struct {
 	asOf       time.Time
 }
 
-const greeksTTL = 60 * time.Second
+const (
+	// greeksTTL bounds positive entries — captured Greeks shift slowly
+	// relative to spot (delta drifts on the order of minutes for liquid
+	// names), and a stale cached value is far better than nil for the
+	// portfolio aggregate. 60 s is short enough that an aggressive
+	// `watch -n 60 ibkr positions` re-warms each cycle, long enough that
+	// back-to-back invocations during a decision pause cost zero gateway
+	// round trips.
+	greeksTTL = 60 * time.Second
+
+	// greeksNegativeTTL bounds ok=false entries. Held short so a single
+	// cold-handshake miss doesn't lock out retries for a full minute —
+	// see type-doc comment. Long enough to suppress a tight retry loop
+	// from a misbehaving caller within the same RPC tick.
+	greeksNegativeTTL = 10 * time.Second
+)
 
 func newGreeksCache() *greeksCache {
 	return &greeksCache{entries: map[string]greeksEntry{}}
@@ -51,7 +76,11 @@ func (c *greeksCache) get(key string, now time.Time) (greeksEntry, bool) {
 	if !ok {
 		return greeksEntry{}, false
 	}
-	if now.Sub(e.asOf) > greeksTTL {
+	ttl := greeksTTL
+	if !e.ok {
+		ttl = greeksNegativeTTL
+	}
+	if now.Sub(e.asOf) > ttl {
 		return greeksEntry{}, false
 	}
 	return e, true
