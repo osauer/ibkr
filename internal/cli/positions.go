@@ -138,33 +138,51 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 	}
 	out := env.Stdout
 	fmt.Fprintln(out, env.bold("Portfolio"))
+	// All numeric values right-align to col (labelStart + labelWidth +
+	// space + valueWidth) so the unit text (share-equivalents, USD,
+	// / day, etc.) lands at a single column regardless of value
+	// magnitude. labelWidth covers the widest label ("FX sensitivity /
+	// 1%" = 19); valueWidth covers a 5-digit gamma with commas and a
+	// sign (e.g. "+12,584.6938" = 12).
+	const labelWidth = 22
+	const valueWidth = 14
+	rightPad := func(s string, w int) string {
+		if pad := w - len(s); pad > 0 {
+			return strings.Repeat(" ", pad) + s
+		}
+		return s
+	}
 	if p.EffectiveDelta != nil {
-		fmt.Fprintf(out, "  Effective delta         %s share-equivalents\n",
-			env.bold(fmt.Sprintf("%+10.1f", *p.EffectiveDelta)))
+		val := rightPad(formatSignedGrouped(*p.EffectiveDelta, 1), valueWidth)
+		fmt.Fprintf(out, "  %-*s  %s  share-equivalents\n", labelWidth, "Effective delta", env.bold(val))
 	}
 	if p.DollarDelta != nil {
 		ccy := p.DollarDeltaCurrency
 		if ccy == "" {
 			ccy = "?"
 		}
-		fmt.Fprintf(out, "  Dollar delta            %s %s\n", env.bold(formatMoneyBare(*p.DollarDelta)), ccy)
+		val := rightPad(formatMoneyBare(*p.DollarDelta), valueWidth)
+		fmt.Fprintf(out, "  %-*s  %s  %s\n", labelWidth, "Dollar delta", env.bold(val), ccy)
 	}
 	if p.DailyTheta != nil {
-		fmt.Fprintf(out, "  Daily theta             %s   /day\n", env.formatPnL(*p.DailyTheta, 0))
+		fmt.Fprintf(out, "  %-*s  %s  / day\n", labelWidth, "Daily theta", env.formatPnLRight(*p.DailyTheta, valueWidth))
 	}
 	if p.Gamma != nil {
-		fmt.Fprintf(out, "  Gamma                   %+10.4f\n", *p.Gamma)
+		val := rightPad(formatSignedGrouped(*p.Gamma, 4), valueWidth)
+		fmt.Fprintf(out, "  %-*s  %s\n", labelWidth, "Gamma", val)
 	}
 	if p.Vega != nil {
-		fmt.Fprintf(out, "  Vega                    %+10.2f / 1 vol pt\n", *p.Vega)
+		val := rightPad(formatSignedGrouped(*p.Vega, 2), valueWidth)
+		fmt.Fprintf(out, "  %-*s  %s  / 1 vol pt\n", labelWidth, "Vega", val)
 	}
 	if p.GreeksTotal > 0 {
+		cov := rightPad(fmt.Sprintf("%d / %d", p.GreeksCoverage, p.GreeksTotal), valueWidth)
 		if p.GreeksCoverage < p.GreeksTotal {
-			fmt.Fprintf(out, "  Greeks coverage         %d / %d legs (some legs unpriced — model abstained or OOH)\n",
-				p.GreeksCoverage, p.GreeksTotal)
+			fmt.Fprintf(out, "  %-*s  %s  legs (partial — model abstained or OOH)\n",
+				labelWidth, "Greeks coverage", cov)
 		} else {
-			fmt.Fprintf(out, "  Greeks coverage         %d / %d legs  %s\n",
-				p.GreeksCoverage, p.GreeksTotal, env.green("✓"))
+			fmt.Fprintf(out, "  %-*s  %s  legs  %s\n",
+				labelWidth, "Greeks coverage", cov, env.green("✓"))
 		}
 	}
 	if p.FXSensitivityPerPct != nil {
@@ -172,8 +190,9 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 		if base == "" {
 			base = "base"
 		}
-		fmt.Fprintf(out, "  FX sensitivity / 1%%     %s %s  (non-base exposure × 1%%)\n",
-			formatMoneyBare(*p.FXSensitivityPerPct), base)
+		val := rightPad(formatMoneyBare(*p.FXSensitivityPerPct), valueWidth)
+		fmt.Fprintf(out, "  %-*s  %s  %s per +1%% FX\n",
+			labelWidth, "FX sensitivity", val, base)
 	}
 	fmt.Fprintln(out)
 }

@@ -410,7 +410,7 @@ func TestRenderPositionsByUnderlying_IncludesPortfolio(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderPositionsByUnderlying(env, res)
 	out := stdout.String()
-	for _, want := range []string{"Portfolio", "Effective delta", "1847.0", "Daily theta", "1 / 1 legs"} {
+	for _, want := range []string{"Portfolio", "Effective delta", "+1,847.0", "Daily theta", "Greeks coverage", "1 / 1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -434,12 +434,12 @@ func TestPortfolioFullGreeksCoverageMark(t *testing.T) {
 	}
 	renderPortfolioSummary(env, res)
 	out := stdout.String()
-	for _, want := range []string{"12 / 12 legs", "✓"} {
+	for _, want := range []string{"Greeks coverage", "12 / 12", "✓"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "some legs unpriced") {
+	if strings.Contains(out, "partial") {
 		t.Errorf("full-coverage line should not carry the partial-coverage caveat:\n%s", out)
 	}
 	if !strings.Contains(out, ansiGreen) {

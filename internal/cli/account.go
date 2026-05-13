@@ -33,13 +33,16 @@ func renderAccountText(env *Env, a *rpc.AccountResult) int {
 		nonEmpty(a.AccountID, "—"), base, env.suffixBadge(a.DataType))
 	fmt.Fprintln(out, env.rule(44))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Net liquidation         %s\n", env.bold(env.formatMoneyNegCcy(a.NetLiquidation, base)))
-	fmt.Fprintf(out, "  Buying power            %s\n", env.formatMoneyNegCcy(a.BuyingPower, base))
-	fmt.Fprintf(out, "  Available funds         %s\n", env.formatMoneyNegCcy(a.AvailableFunds, base))
-	fmt.Fprintf(out, "  Excess liquidity        %s\n", env.formatMoneyNegCcy(a.ExcessLiquidity, base))
-	fmt.Fprintf(out, "  Total cash              %s\n", env.formatMoneyNegCcy(a.TotalCash, base))
-	fmt.Fprintf(out, "  Maintenance margin      %s\n", env.formatMoneyNegCcy(a.MaintenanceMargin, base))
-	fmt.Fprintf(out, "  Initial margin          %s\n", env.formatMoneyNegCcy(a.InitialMargin, base))
+	// Width 14 fits the widest typical NLV with a thousands-grouped
+	// currency symbol ("€ 992,841.68" is 12; -€ 999,999.99 is 13).
+	const accountValWidth = 14
+	fmt.Fprintf(out, "  Net liquidation         %s\n", env.bold(env.formatMoneyNegCcyRight(a.NetLiquidation, base, accountValWidth)))
+	fmt.Fprintf(out, "  Buying power            %s\n", env.formatMoneyNegCcyRight(a.BuyingPower, base, accountValWidth))
+	fmt.Fprintf(out, "  Available funds         %s\n", env.formatMoneyNegCcyRight(a.AvailableFunds, base, accountValWidth))
+	fmt.Fprintf(out, "  Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.ExcessLiquidity, base, accountValWidth))
+	fmt.Fprintf(out, "  Total cash              %s\n", env.formatMoneyNegCcyRight(a.TotalCash, base, accountValWidth))
+	fmt.Fprintf(out, "  Maintenance margin      %s\n", env.formatMoneyNegCcyRight(a.MaintenanceMargin, base, accountValWidth))
+	fmt.Fprintf(out, "  Initial margin          %s\n", env.formatMoneyNegCcyRight(a.InitialMargin, base, accountValWidth))
 	fmt.Fprintln(out)
 	renderCurrencyExposure(env, a)
 	fmt.Fprintf(out, "  as of %s\n", formatTimeShort(a.AsOf))

@@ -399,6 +399,26 @@ func (e *Env) formatMoneyNegCcy(v float64, ccy string) string {
 	}
 }
 
+// formatMoneyNegCcyRight is formatMoneyNegCcy with right-alignment
+// padding to w visible cells, preserving the color wrap. Padding is
+// applied before the ANSI wrap so column alignment holds regardless of
+// color state. Used by the account renderer so a column of mixed
+// magnitudes ("€ 5,968.85" vs "€ 992,841.68") reads as a single column.
+func (e *Env) formatMoneyNegCcyRight(v float64, ccy string, w int) string {
+	s := formatMoneyCcy(v, ccy)
+	if pad := w - len(s); pad > 0 {
+		s = strings.Repeat(" ", pad) + s
+	}
+	switch {
+	case v < 0:
+		return e.red(s)
+	case v == 0:
+		return e.dim(s)
+	default:
+		return s
+	}
+}
+
 // formatPnL renders a P&L amount with optional column padding, colored
 // green/red by sign when env.Color is on. Width=0 disables padding (use
 // at the last column). Padding is applied BEFORE the ANSI wrap so escape
@@ -419,6 +439,52 @@ func (e *Env) formatPnL(v float64, width int) string {
 	default:
 		return e.dim(s)
 	}
+}
+
+// formatPnLRight is formatPnL but right-aligns the value within the
+// given visible width by prepending spaces. Used by the Portfolio
+// aggregate where numeric columns line up on the right edge — a
+// thousands-grouped money string varies in width and would otherwise
+// leave the trailing unit text at random positions.
+func (e *Env) formatPnLRight(v float64, width int) string {
+	s := formatMoney(v)
+	if pad := width - len(s); pad > 0 {
+		s = strings.Repeat(" ", pad) + s
+	}
+	switch {
+	case v > 0:
+		return e.green(s)
+	case v < 0:
+		return e.red(s)
+	default:
+		return e.dim(s)
+	}
+}
+
+// formatSignedGrouped renders v with a leading sign and the integer
+// part separated by commas, at the given decimal precision. Use for
+// non-money numeric values (effective delta, gamma, vega) where the
+// magnitude can run into 4-5 digits — bare `%+.Nf` is harder to read
+// at a glance than `+30,572.9`.
+func formatSignedGrouped(v float64, decimals int) string {
+	neg := v < 0
+	abs := v
+	if neg {
+		abs = -v
+	}
+	s := fmt.Sprintf("%.*f", decimals, abs)
+	dot := strings.IndexByte(s, '.')
+	var intPart, frac string
+	if dot >= 0 {
+		intPart, frac = s[:dot], s[dot:]
+	} else {
+		intPart, frac = s, ""
+	}
+	sign := "+"
+	if neg {
+		sign = "-"
+	}
+	return sign + groupThousands(intPart) + frac
 }
 
 // padDash returns a right-aligned em-dash placeholder of visible width w.
