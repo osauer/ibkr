@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ibkr positions` no longer prints literal `BASE per +1% FX`.** The portfolio FX-sensitivity line now names the actual base currency (e.g. `EUR per +1% FX`). The daemon resolved the base from a bare `Currency` tag in the streaming account-summary map, but IBKR populates that tag with the literal string `"BASE"` (the gateway's pseudo-currency name, not the account's real base), so `FXBaseCurrency` came back as `"BASE"` and the renderer dutifully printed it. The resolver now scans the `$LEDGER:ALL` rows for an `ExchangeRate_<ccy>=1.0` entry — the currency whose rate is exactly 1.0 is the base by definition — and only uses the `Currency` tag when its value isn't the literal `"BASE"`. Five regression tests in `internal/daemon/fx_decorator_test.go` cover the pseudo-currency case, a real-currency `Currency` tag, the `ExchangeRate`-only fallback, the no-signal case (returns empty, never invents a default), and the empty/pre-handshake map.
+
+### Changed
+
+- **Smaller binaries.** `make build` and `make release-binaries` now pass `-s -w` to the linker, which strips the external symbol table and DWARF debug info. The `bin/ibkr` artefact drops from 9.6 MB to 6.5 MB on darwin/arm64 (~32%); release tarballs shrink proportionally. What's traded away: external debuggers (`delve`), `go tool nm`/`objdump`, and third-party profilers can no longer symbolicate the binary. Go panic stack traces remain fully readable — the runtime carries its own function metadata, separate from the symbol table. Startup time is unchanged; this is purely a size optimisation. Same convention used in Docker, Kubernetes, and most production Go binaries.
+
 ## v0.12.2 — 2026-05-12 22:05 CEST
 
 Fix release. Five defects from a code-review pass on v0.12.1, all small, all with regression tests in the same change. No flags removed, no wire shapes broken, no behaviour change for existing successful calls — the changes either close a silent leak, harden the daemon against hostile/buggy clients, or move CI to match the README's gating promise.

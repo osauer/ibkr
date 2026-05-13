@@ -8,7 +8,15 @@ VERSION  ?= $(shell git describe --tags --match='v*' --always --dirty 2>/dev/nul
 COMMIT   ?= $(shell git rev-parse HEAD 2>/dev/null || echo none)
 DATE     ?= $(shell TZ=UTC date +%Y-%m-%dT%H:%M:%SZ)
 
-LDFLAGS = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+# `-s -w` strip the external symbol table and DWARF debug info. Cuts the
+# binary by ~32% (9.6 MB → 6.5 MB on darwin/arm64). Go runtime keeps its
+# own function metadata so panic stack traces remain readable; what's
+# lost is delve symbolication, `go tool nm`/`objdump`, and external
+# profilers that read external symbols. Startup time is unchanged —
+# this is a size optimisation, not a speed one.
+STRIP_LDFLAGS = -s -w
+
+LDFLAGS = $(STRIP_LDFLAGS) -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 # Install location for `make install`. Defaults to ~/.local/bin (XDG
 # user-local convention; usually already on PATH). Override for a system
@@ -156,7 +164,7 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 		exit 1; \
 	fi
 	$(eval RELEASE_COMMIT := $(shell git rev-parse $(RELEASE_VERSION)^{commit}))
-	$(eval RELEASE_LDFLAGS := -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(DATE))
+	$(eval RELEASE_LDFLAGS := $(STRIP_LDFLAGS) -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(DATE))
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)
 	@for target in $(RELEASE_TARGETS); do \
