@@ -70,9 +70,22 @@ func runScanList(ctx context.Context, env *Env, jsonOut bool) int {
 	}
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  PRESET                TYPE                              EXCHANGE             LIMIT")
+	// Numeric LIMIT right-aligns in its column; text labels left-align so the
+	// preset name reads as the row anchor. Built off the same widths as the
+	// data row so labels stay glued to their columns.
+	const (
+		wPreset = 20
+		wType   = 32
+		wExch   = 18
+		wLimit  = 5
+	)
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s",
+		wPreset, "PRESET", wType, "TYPE", wExch, "EXCHANGE", wLimit, "LIMIT")
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, p := range res.Presets {
-		fmt.Fprintf(out, "  %-20s  %-32s  %-18s   %d\n", p.Name, p.Type, p.Exchange, p.Limit)
+		fmt.Fprintf(out, "  %-*s  %-*s  %-*s  %*d\n",
+			wPreset, p.Name, wType, p.Type, wExch, p.Exchange, wLimit, p.Limit)
 	}
 	fmt.Fprintln(out)
 	return 0
@@ -107,8 +120,10 @@ func renderScanText(env *Env, r *rpc.ScanResult) int {
 	// Each value column is pre-formatted to its exact visible width before
 	// ANSI colour wrapping so the column lines up whether colour is on or
 	// off and whether the value is present or nil (em-dash).
-	fmt.Fprintf(out, "  %-4s  %-9s %12s  %8s  %9s  %7s  %20s  %s\n",
+	header := fmt.Sprintf("  %-4s  %-9s %12s  %8s  %9s  %7s  %20s  %s",
 		"RANK", "SYMBOL", "LAST", "CHG%", "VOL", "IV", "52W RANGE", "NOTE")
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, row := range r.Rows {
 		fmt.Fprintf(out, "  %-4d  %-9s %s  %s  %s  %s  %s  %s\n",
 			row.Rank,
@@ -169,11 +184,7 @@ func formatRange52w(env *Env, lo, hi *float64) string {
 	if hi != nil {
 		highStr = fmt.Sprintf("$%.2f", *hi)
 	}
-	combined := fmt.Sprintf("%9s..%-9s", lowStr, highStr)
-	if lo == nil && hi == nil {
-		return env.dim(combined)
-	}
-	return env.dim(combined)
+	return env.dim(fmt.Sprintf("%9s..%-9s", lowStr, highStr))
 }
 
 func renderScanParamsText(env *Env, r *rpc.ScanParamsResult, instrument string) int {
@@ -187,18 +198,29 @@ func renderScanParamsText(env *Env, r *rpc.ScanParamsResult, instrument string) 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  as of %s\n\n", formatTimeShort(r.AsOf))
 
+	// Two sub-tables: SCAN TYPES and LOCATIONS. Each gets a dim header +
+	// rule beneath, matching the table convention used by the other
+	// command renderers.
+	const (
+		wCode = 36
+		wInst = 18
+	)
+	scanHeader := fmt.Sprintf("  %-*s  %-*s  %s", wCode, "CODE", wInst, "INSTRUMENTS", "DISPLAY NAME")
 	fmt.Fprintln(out, "  SCAN TYPES (--type)")
-	fmt.Fprintln(out, "  CODE                                  INSTRUMENTS         DISPLAY NAME")
+	fmt.Fprintln(out, env.dim(scanHeader))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(scanHeader))))
 	for _, st := range r.ScanTypes {
-		fmt.Fprintf(out, "  %-36s  %-18s  %s\n",
-			st.Code, strings.Join(st.Instruments, ","), st.DisplayName)
+		fmt.Fprintf(out, "  %-*s  %-*s  %s\n",
+			wCode, st.Code, wInst, strings.Join(st.Instruments, ","), st.DisplayName)
 	}
 	fmt.Fprintln(out)
 
+	locHeader := fmt.Sprintf("  %-*s  %s", wCode, "CODE", "DISPLAY NAME")
 	fmt.Fprintln(out, "  LOCATIONS (--exchange)")
-	fmt.Fprintln(out, "  CODE                                  DISPLAY NAME")
+	fmt.Fprintln(out, env.dim(locHeader))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(locHeader))))
 	for _, loc := range r.Locations {
-		fmt.Fprintf(out, "  %-36s  %s\n", loc.Code, loc.DisplayName)
+		fmt.Fprintf(out, "  %-*s  %s\n", wCode, loc.Code, loc.DisplayName)
 	}
 	fmt.Fprintln(out)
 
