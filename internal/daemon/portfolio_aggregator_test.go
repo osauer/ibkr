@@ -144,6 +144,72 @@ func TestBuildPortfolioAggregatesMixedCurrencyDollarDelta(t *testing.T) {
 	}
 }
 
+// TestBuildPortfolioAggregatesDailyThetaCurrency: theta is summed in the
+// option leg's contract currency. Single-currency book → DailyThetaCurrency
+// echoes that currency; mixed-currency book → "MIX" so a renderer knows
+// not to stamp a single symbol on a sum that's apples-and-oranges.
+func TestBuildPortfolioAggregatesDailyThetaCurrency(t *testing.T) {
+	t.Run("single-currency book carries the leg currency", func(t *testing.T) {
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: f(-0.10)},
+			{Symbol: "TSLA", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "USD", Theta: f(-0.05)},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		if got.DailyThetaCurrency != "USD" {
+			t.Errorf("DailyThetaCurrency = %q, want USD", got.DailyThetaCurrency)
+		}
+	})
+	t.Run("EUR-only book carries EUR", func(t *testing.T) {
+		options := []rpc.PositionView{
+			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 3, Currency: "EUR", Theta: f(-0.08)},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		if got.DailyThetaCurrency != "EUR" {
+			t.Errorf("DailyThetaCurrency = %q, want EUR", got.DailyThetaCurrency)
+		}
+	})
+	t.Run("mixed-currency theta-bearing legs → MIX", func(t *testing.T) {
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: f(-0.10)},
+			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR", Theta: f(-0.05)},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		if got.DailyThetaCurrency != "MIX" {
+			t.Errorf("DailyThetaCurrency = %q, want MIX", got.DailyThetaCurrency)
+		}
+	})
+	t.Run("theta-currency tracking is independent of dollar-delta-currency tracking", func(t *testing.T) {
+		// First leg contributes only to delta (no theta tick), second
+		// only to theta (no delta tick). The two aggregates' currency
+		// fields must be independent.
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD",
+				Delta: f(0.5), PrevClose: f(200)}, // delta-only, USD
+			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR",
+				Theta: f(-0.05)}, // theta-only, EUR
+		}
+		got := buildPortfolioAggregates(nil, options)
+		if got.DollarDeltaCurrency != "USD" {
+			t.Errorf("DollarDeltaCurrency = %q, want USD (only USD leg has spot/delta)", got.DollarDeltaCurrency)
+		}
+		if got.DailyThetaCurrency != "EUR" {
+			t.Errorf("DailyThetaCurrency = %q, want EUR (only EUR leg has theta)", got.DailyThetaCurrency)
+		}
+	})
+	t.Run("no theta-bearing legs → empty currency", func(t *testing.T) {
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD"},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		if got.DailyTheta != nil {
+			t.Errorf("DailyTheta should be nil with no theta-bearing legs, got %v", got.DailyTheta)
+		}
+		if got.DailyThetaCurrency != "" {
+			t.Errorf("DailyThetaCurrency = %q, want empty (no theta data)", got.DailyThetaCurrency)
+		}
+	})
+}
+
 // TestOptionGreeksKey verifies the cache key matches the format
 // produced by Connector.SubscribeOption — drift between the two means
 // every cached entry is a miss.

@@ -597,11 +597,17 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 	var effDelta, dollarDelta, daily, gamma, vega float64
 	var haveDelta, haveDollarDelta, haveTheta, haveGamma, haveVega bool
 	greeksCovered := 0
-	dollarCcy := ""
-	dollarMixed := false
+	// Per-aggregate currency tracking. dollarCcy/thetaCcy follow the same
+	// "single ISO when every contributor agrees, MIX otherwise" rule.
+	// Tracked separately because the contributing leg sets can differ:
+	// a leg can report theta without delta (some IBKR ticks land partial),
+	// so a uniform dollarCcy doesn't necessarily mean a uniform thetaCcy.
+	dollarCcy, thetaCcy := "", ""
+	dollarMixed, thetaMixed := false, false
 	for _, o := range options {
 		p.GreeksTotal++
 		mult := optionMultiplier(o)
+		legCcy := normCcy(o.Currency)
 		if o.Delta != nil {
 			effDelta += *o.Delta * o.Quantity * float64(mult)
 			haveDelta = true
@@ -616,8 +622,8 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 				dollarDelta += *o.Delta * o.Quantity * float64(mult) * spot
 				haveDollarDelta = true
 				if dollarCcy == "" {
-					dollarCcy = normCcy(o.Currency)
-				} else if normCcy(o.Currency) != dollarCcy {
+					dollarCcy = legCcy
+				} else if legCcy != dollarCcy {
 					dollarMixed = true
 				}
 			}
@@ -625,6 +631,11 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		if o.Theta != nil {
 			daily += *o.Theta * o.Quantity * float64(mult)
 			haveTheta = true
+			if thetaCcy == "" {
+				thetaCcy = legCcy
+			} else if legCcy != thetaCcy {
+				thetaMixed = true
+			}
 		}
 		if o.Gamma != nil {
 			gamma += *o.Gamma * o.Quantity * float64(mult)
@@ -682,6 +693,11 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 	if haveTheta {
 		v := daily
 		p.DailyTheta = &v
+		if thetaMixed {
+			p.DailyThetaCurrency = "MIX"
+		} else {
+			p.DailyThetaCurrency = thetaCcy
+		}
 	}
 	if haveGamma {
 		v := gamma
@@ -1646,9 +1662,10 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 	}
 	for _, r := range rows {
 		res.Rows = append(res.Rows, rpc.ScanRow{
-			Rank:    r.Rank,
-			Symbol:  r.Symbol,
-			Comment: r.Comment,
+			Rank:     r.Rank,
+			Symbol:   r.Symbol,
+			Currency: normCcy(r.Currency),
+			Comment:  r.Comment,
 		})
 	}
 	s.enrichScanRows(ctx, c, res.Rows)
