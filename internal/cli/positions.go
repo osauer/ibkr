@@ -227,14 +227,15 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 	fmt.Fprintln(out)
 
 	// Column header.  Widths chosen to fit realistic data: identifier
-	// holds "2026-06-18 C 1191.67" (~20); change/greeks holds
-	// "Δ +0.62  Γ +0.307  Θ -0.01  ν +0.01" (~33).
+	// holds "2026-06-18 C 1191.67" (~20); change/greeks holds the
+	// compact greek tuple "Δ+0.62 Γ+0.31 Θ-0.01 ν+0.01" (27 cells) or
+	// the stock day-change cell "+1.32 (+0.64%)" (~14 cells).
 	const (
 		wLeg    = 22
 		wQty    = 9
 		wAvg    = 10
 		wMark   = 10
-		wChange = 33
+		wChange = 27
 		wMkt    = 13
 		wUnreal = 13
 	)
@@ -256,7 +257,6 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 	}
 
 	for _, g := range r.ByUnderlying {
-		fmt.Fprintln(out)
 		fmt.Fprintln(out, "  "+env.bold(g.Underlying))
 
 		if g.Stock != nil {
@@ -327,18 +327,20 @@ func (e *Env) formatDayChange(chg, pct *float64, w int) string {
 	}
 }
 
-// formatGreeksLine renders a per-leg Greeks suffix when at least one
-// component is populated. Delta carries sign coloring (it's the headline
-// risk component); gamma/theta/vega print with sign but no color so the
+// formatGreeksLine renders a per-leg Greeks tuple in the most compact
+// form that stays readable: no space between symbol and number, single
+// space between greeks, 2 decimals everywhere ("Δ+0.62 Γ+0.31 Θ-0.01
+// ν+0.01" — 27 cells). Delta carries sign coloring (the headline risk
+// component); gamma / theta / vega print with sign but no color so the
 // eye is drawn to delta first. Empty string when no Greeks landed in
-// budget so callers can suppress the whole line.
+// budget so callers can suppress the whole cell.
 func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 	if o.Delta == nil && o.Gamma == nil && o.Theta == nil && o.Vega == nil {
 		return ""
 	}
 	var parts []string
 	if o.Delta != nil {
-		s := fmt.Sprintf("Δ %+0.2f", *o.Delta)
+		s := fmt.Sprintf("Δ%+0.2f", *o.Delta)
 		switch {
 		case *o.Delta > 0:
 			s = e.green(s)
@@ -348,15 +350,15 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 		parts = append(parts, s)
 	}
 	if o.Gamma != nil {
-		parts = append(parts, fmt.Sprintf("Γ %+0.3f", *o.Gamma))
+		parts = append(parts, fmt.Sprintf("Γ%+0.2f", *o.Gamma))
 	}
 	if o.Theta != nil {
-		parts = append(parts, fmt.Sprintf("Θ %+0.2f", *o.Theta))
+		parts = append(parts, fmt.Sprintf("Θ%+0.2f", *o.Theta))
 	}
 	if o.Vega != nil {
-		parts = append(parts, fmt.Sprintf("ν %+0.2f", *o.Vega))
+		parts = append(parts, fmt.Sprintf("ν%+0.2f", *o.Vega))
 	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, " ")
 }
 
 func formatExpiry(s string) string {
