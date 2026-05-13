@@ -137,16 +137,17 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 		return
 	}
 	out := env.Stdout
-	fmt.Fprintln(out, "Portfolio")
+	fmt.Fprintln(out, env.bold("Portfolio"))
 	if p.EffectiveDelta != nil {
-		fmt.Fprintf(out, "  Effective delta         %+10.1f share-equivalents\n", *p.EffectiveDelta)
+		fmt.Fprintf(out, "  Effective delta         %s share-equivalents\n",
+			env.bold(fmt.Sprintf("%+10.1f", *p.EffectiveDelta)))
 	}
 	if p.DollarDelta != nil {
 		ccy := p.DollarDeltaCurrency
 		if ccy == "" {
 			ccy = "?"
 		}
-		fmt.Fprintf(out, "  Dollar delta            %s %s\n", formatMoneyBare(*p.DollarDelta), ccy)
+		fmt.Fprintf(out, "  Dollar delta            %s %s\n", env.bold(formatMoneyBare(*p.DollarDelta)), ccy)
 	}
 	if p.DailyTheta != nil {
 		fmt.Fprintf(out, "  Daily theta             %s   /day\n", env.formatPnL(*p.DailyTheta, 0))
@@ -157,9 +158,14 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 	if p.Vega != nil {
 		fmt.Fprintf(out, "  Vega                    %+10.2f / 1 vol pt\n", *p.Vega)
 	}
-	if p.GreeksTotal > 0 && p.GreeksCoverage < p.GreeksTotal {
-		fmt.Fprintf(out, "  Greeks coverage         %d / %d legs (some legs unpriced — model abstained or OOH)\n",
-			p.GreeksCoverage, p.GreeksTotal)
+	if p.GreeksTotal > 0 {
+		if p.GreeksCoverage < p.GreeksTotal {
+			fmt.Fprintf(out, "  Greeks coverage         %d / %d legs (some legs unpriced — model abstained or OOH)\n",
+				p.GreeksCoverage, p.GreeksTotal)
+		} else {
+			fmt.Fprintf(out, "  Greeks coverage         %d / %d legs  %s\n",
+				p.GreeksCoverage, p.GreeksTotal, env.green("✓"))
+		}
 	}
 	if p.FXSensitivityPerPct != nil {
 		base := p.FXBaseCurrency
@@ -207,6 +213,9 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 				fmt.Fprintf(out, "      %s %s %7.2f   %5.0f ct   avg %-12s mark %-11s unreal %s\n",
 					formatExpiry(o.Expiry), o.Right, o.Strike, o.Quantity,
 					formatMoney(o.AvgCost), formatMoney(o.Mark), env.formatPnL(o.UnrealizedPnL, 0))
+				if greeks := env.formatGreeksLine(o); greeks != "" {
+					fmt.Fprintln(out, "        "+greeks)
+				}
 			}
 		}
 		fmt.Fprintf(out, "    Group     mkt %-15s unreal %s\n",
@@ -239,6 +248,38 @@ func (e *Env) formatDayChange(chg, pct *float64, w int) string {
 	default:
 		return e.dim(s)
 	}
+}
+
+// formatGreeksLine renders a per-leg Greeks suffix when at least one
+// component is populated. Delta carries sign coloring (it's the headline
+// risk component); gamma/theta/vega print with sign but no color so the
+// eye is drawn to delta first. Empty string when no Greeks landed in
+// budget so callers can suppress the whole line.
+func (e *Env) formatGreeksLine(o rpc.PositionView) string {
+	if o.Delta == nil && o.Gamma == nil && o.Theta == nil && o.Vega == nil {
+		return ""
+	}
+	var parts []string
+	if o.Delta != nil {
+		s := fmt.Sprintf("Δ %+0.2f", *o.Delta)
+		switch {
+		case *o.Delta > 0:
+			s = e.green(s)
+		case *o.Delta < 0:
+			s = e.red(s)
+		}
+		parts = append(parts, s)
+	}
+	if o.Gamma != nil {
+		parts = append(parts, fmt.Sprintf("Γ %+0.3f", *o.Gamma))
+	}
+	if o.Theta != nil {
+		parts = append(parts, fmt.Sprintf("Θ %+0.2f", *o.Theta))
+	}
+	if o.Vega != nil {
+		parts = append(parts, fmt.Sprintf("ν %+0.2f", *o.Vega))
+	}
+	return strings.Join(parts, "  ")
 }
 
 func formatExpiry(s string) string {

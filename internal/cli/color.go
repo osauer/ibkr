@@ -3,18 +3,22 @@ package cli
 import (
 	"io"
 	"os"
+	"strings"
 )
 
 // ANSI SGR codes used across renderers. Kept to a tight palette so colored
 // output stays signal — green/red for sign, dim for the absent/zero
-// placeholder, yellow for warning badges. Bold is reserved for in-table
-// markers (e.g. ATM) and is not currently used.
+// placeholder, yellow for warning badges, bold for the section title and
+// the single hero number per screen (e.g. Net Liquidation on `ibkr account`,
+// EXPECTED MOVE on `ibkr chain`, effective/dollar delta on the Portfolio
+// aggregate). Bold is the strongest emphasis — use it sparingly.
 const (
 	ansiReset  = "\x1b[0m"
 	ansiRed    = "\x1b[31m"
 	ansiGreen  = "\x1b[32m"
 	ansiYellow = "\x1b[33m"
 	ansiDim    = "\x1b[2m"
+	ansiBold   = "\x1b[1m"
 )
 
 // ShouldColor reports whether ANSI color escapes should be emitted to w.
@@ -78,4 +82,20 @@ func (e *Env) dim(s string) string {
 		return s
 	}
 	return ansiDim + s + ansiReset
+}
+
+func (e *Env) bold(s string) string {
+	if e == nil || !e.Color {
+		return s
+	}
+	return ansiBold + s + ansiReset
+}
+
+// rule returns a dim horizontal-rule string of width n cells, used as a
+// section separator under titles. Uses the box-drawing char "─" (one
+// terminal cell wide) so visible width matches n regardless of color
+// state. Width chosen by caller — a rule wider than the content beneath
+// reads as a separator, narrower as a title underline.
+func (e *Env) rule(n int) string {
+	return e.dim(strings.Repeat("─", n))
 }

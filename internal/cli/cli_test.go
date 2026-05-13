@@ -383,6 +383,85 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 	})
 }
 
+// Full-coverage Greeks gets a positive checkmark line (not the partial-
+// coverage caveat). The checkmark is green when Color is enabled so the
+// screen reads as "everything captured" at a glance.
+func TestPortfolioFullGreeksCoverageMark(t *testing.T) {
+	t.Parallel()
+	delta := 1500.0
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	res := &rpc.PositionsResult{
+		Portfolio: &rpc.PositionsPortfolio{
+			EffectiveDelta: &delta,
+			GreeksCoverage: 12,
+			GreeksTotal:    12,
+		},
+	}
+	renderPortfolioSummary(env, res)
+	out := stdout.String()
+	for _, want := range []string{"12 / 12 legs", "✓"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "some legs unpriced") {
+		t.Errorf("full-coverage line should not carry the partial-coverage caveat:\n%s", out)
+	}
+	if !strings.Contains(out, ansiGreen) {
+		t.Errorf("expected green wrap on the checkmark:\n%s", out)
+	}
+}
+
+// Option legs in the by-underlying view get a Greeks suffix line beneath
+// them when at least one Greek landed in budget. No suffix when all four
+// are nil so non-greek-bearing positions stay tight.
+func TestRenderPositionsByUnderlying_GreeksSuffix(t *testing.T) {
+	t.Parallel()
+	t.Run("greeks present → suffix line rendered", func(t *testing.T) {
+		delta, gamma, theta, vega := 0.42, 0.018, -0.08, 0.42
+		opt := rpc.PositionView{
+			Symbol: "AAPL", Right: "C", Strike: 210, Expiry: "20251219",
+			Quantity: 2, AvgCost: 5.10, Mark: 7.85, UnrealizedPnL: 550,
+			Delta: &delta, Gamma: &gamma, Theta: &theta, Vega: &vega,
+		}
+		res := &rpc.PositionsResult{
+			ByUnderlying: []rpc.PositionGroup{
+				{Underlying: "AAPL", Options: []rpc.PositionView{opt}, GroupMarketValue: 1570, GroupUnrealizedPnL: 550},
+			},
+		}
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		if code := renderPositionsByUnderlying(env, res); code != 0 {
+			t.Fatalf("code = %d", code)
+		}
+		out := stdout.String()
+		for _, want := range []string{"Δ", "+0.42", "Γ", "Θ", "ν"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing greek symbol %q:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("all greeks nil → no suffix line", func(t *testing.T) {
+		opt := rpc.PositionView{
+			Symbol: "AAPL", Right: "C", Strike: 210, Expiry: "20251219",
+			Quantity: 2, AvgCost: 5.10, Mark: 7.85, UnrealizedPnL: 550,
+		}
+		res := &rpc.PositionsResult{
+			ByUnderlying: []rpc.PositionGroup{
+				{Underlying: "AAPL", Options: []rpc.PositionView{opt}, GroupMarketValue: 1570, GroupUnrealizedPnL: 550},
+			},
+		}
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		_ = renderPositionsByUnderlying(env, res)
+		out := stdout.String()
+		if strings.ContainsAny(out, "ΔΓΘν") {
+			t.Errorf("greek line must not appear when all greeks are nil:\n%s", out)
+		}
+	})
+}
+
 // chain SYM with no --expiry should render an expiry list (one row per
 // expiry), not the strike-table header. --with-iv adds the ATM IV column.
 func TestRenderChainExpiriesText(t *testing.T) {
@@ -465,6 +544,29 @@ func TestRenderChainExpiriesText(t *testing.T) {
 		for _, want := range []string{"DTE", "EXPECTED MOVE", "spot", "30", "120", "8.6%", "(timeout)"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in output:\n%s", want, out)
+			}
+		}
+	})
+
+	// The formula caption under the expiry-with-IV table is a deliberate
+	// educational anchor — it teaches first-time readers what EXPECTED MOVE
+	// is computed from and aligns with the CBOE option-calculator convention.
+	t.Run("with-iv shows formula caption", func(t *testing.T) {
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		iv, mv, pct := 0.30, 17.19, 0.0860
+		res := &rpc.ChainExpiriesResult{
+			Symbol: "AAPL",
+			Spot:   200.00,
+			Expiries: []rpc.ChainExpiry{
+				{Date: "2026-06-19", DTE: 30, IV: &iv, IVStatus: "ok", ImpliedMove: &mv, ImpliedMovePct: &pct},
+			},
+		}
+		_ = renderChainExpiriesText(env, res, true)
+		out := stdout.String()
+		for _, want := range []string{"spot × IV × √(DTE/365)", "CBOE convention"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q:\n%s", want, out)
 			}
 		}
 	})

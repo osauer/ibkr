@@ -135,11 +135,16 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 		// Expected move is the canonical spot × IV × √(DTE/365) — same
 		// shape CBOE's option calculator and most desk tools use. Pre-
 		// computed on the daemon side; renderer just lays it out.
-		fmt.Fprintln(out, "  EXPIRY        DTE   ATM IV   EXPECTED MOVE")
+		fmt.Fprintln(out, "  EXPIRY        DTE   ATM IV   "+env.bold("EXPECTED MOVE"))
 		for _, e := range r.Expiries {
 			fmt.Fprintf(out, "  %-10s  %4s   %s   %s\n",
-				e.Date, fmtDTE(e.DTE), fmtIVRow(e.IV, e.IVStatus), fmtImpliedMove(e.ImpliedMove, e.ImpliedMovePct))
+				e.Date,
+				env.dim(fmtDTE(e.DTE)),
+				fmtIVRow(e.IV, e.IVStatus),
+				env.bold(fmtImpliedMove(e.ImpliedMove, e.ImpliedMovePct)))
 		}
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, env.dim("  spot × IV × √(DTE/365)  ·  1-σ; CBOE convention"))
 	} else {
 		fmt.Fprintln(out, "  EXPIRY        DTE")
 		for _, e := range r.Expiries {

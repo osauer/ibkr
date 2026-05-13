@@ -31,8 +31,9 @@ func renderAccountText(env *Env, a *rpc.AccountResult) int {
 	base := nonEmpty(a.BaseCurrency, "USD")
 	fmt.Fprintf(out, "Account  %s · base=%s%s\n",
 		nonEmpty(a.AccountID, "—"), base, env.suffixBadge(a.DataType))
+	fmt.Fprintln(out, env.rule(44))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Net liquidation         %s\n", env.formatMoneyNegCcy(a.NetLiquidation, base))
+	fmt.Fprintf(out, "  Net liquidation         %s\n", env.bold(env.formatMoneyNegCcy(a.NetLiquidation, base)))
 	fmt.Fprintf(out, "  Buying power            %s\n", env.formatMoneyNegCcy(a.BuyingPower, base))
 	fmt.Fprintf(out, "  Available funds         %s\n", env.formatMoneyNegCcy(a.AvailableFunds, base))
 	fmt.Fprintf(out, "  Excess liquidity        %s\n", env.formatMoneyNegCcy(a.ExcessLiquidity, base))
@@ -58,6 +59,7 @@ func renderCurrencyExposure(env *Env, a *rpc.AccountResult) {
 	out := env.Stdout
 	base := nonEmpty(a.BaseCurrency, "USD")
 	fmt.Fprintf(out, "Currency exposure  (base=%s)\n", base)
+	fmt.Fprintln(out, env.rule(60))
 	fmt.Fprintf(out, "  %-4s   %16s   %12s   %16s\n",
 		"CCY", "NET LIQ (CCY)", "FX→BASE", "NET LIQ (BASE)")
 	for _, ex := range a.CurrencyExposure {
