@@ -77,6 +77,23 @@ const (
 	FrameErrDaemonShutdown       = "daemon_shutdown"
 )
 
+// SecType values carried on PositionView.SecType. The daemon fills the
+// field with string(pkg/ibkr.AssetType), so the canonical wire values
+// are the full words below — not the three-letter short forms IBKR
+// accepts on ContractParams (a different path; see the doc-comment
+// there).
+//
+// Compare against these constants in renderers and filters rather than
+// literal strings — the v0.12.4 "OPT" vs "OPTION" drift was the
+// canonical "two callers, two literals" failure, prevented by a single
+// source of truth.
+const (
+	SecTypeStock  = "STOCK"
+	SecTypeOption = "OPTION"
+	SecTypeFuture = "FUTURE"
+	SecTypeIndex  = "INDEX"
+)
+
 // Request is the envelope sent from CLI to daemon.
 type Request struct {
 	ID     string          `json:"id"`
@@ -112,11 +129,21 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
-// ContractParams names a tradeable instrument. SecType "STK" for stocks/ETFs;
-// "OPT" for options (Expiry, Strike, Right required).
+// ContractParams names a tradeable instrument on the REQUEST side.
+//
+// Asymmetry to watch for: SecType here uses the IBKR API's three-letter
+// short form ("STK", "OPT", "FUT", "IND") because that's what the gateway
+// accepts in reqMktData / reqContractDetails. The RESPONSE side
+// (PositionView.SecType) uses the full word ("STOCK", "OPTION", ...) —
+// see the SecType* constants above. The two shapes flow on different
+// paths and the gateway uses different vocabularies at each end; this
+// type uses the request vocabulary.
+//
+// SecType "STK" for stocks/ETFs; "OPT" for options (Expiry, Strike,
+// Right required).
 type ContractParams struct {
 	Symbol   string  `json:"symbol"`
-	SecType  string  `json:"sec_type,omitempty"` // STK | OPT
+	SecType  string  `json:"sec_type,omitempty"` // STK | OPT | FUT | IND (request-side; see asymmetry note)
 	Exchange string  `json:"exchange,omitempty"` // SMART
 	Currency string  `json:"currency,omitempty"`
 	Expiry   string  `json:"expiry,omitempty"` // YYYYMMDD
@@ -410,8 +437,12 @@ type PositionsResult struct {
 //
 // DailyTheta is Σ (theta × signed contract qty × multiplier). IBKR
 // already reports theta as daily decay, so the sum is the daily P&L
-// from time decay assuming everything else holds (in contract
-// currency).
+// from time decay assuming everything else holds. The value is in
+// DailyThetaCurrency, computed with the same single-ccy-or-"MIX"
+// convention as DollarDeltaCurrency: a single ISO code when every
+// contributing option leg agrees, "MIX" when not. Renderers should
+// surface "MIX" rather than picking a symbol — the sum is genuinely
+// undefined in mixed-currency books.
 //
 // GreeksCoverage is the count of option legs whose Greeks were captured
 // over the total — useful for the renderer to flag partial coverage
@@ -421,6 +452,7 @@ type PositionsPortfolio struct {
 	DollarDelta         *float64 `json:"dollar_delta,omitempty"`
 	DollarDeltaCurrency string   `json:"dollar_delta_currency,omitempty"`
 	DailyTheta          *float64 `json:"daily_theta,omitempty"`
+	DailyThetaCurrency  string   `json:"daily_theta_currency,omitempty"`
 	Gamma               *float64 `json:"gamma,omitempty"`
 	Vega                *float64 `json:"vega,omitempty"`
 	GreeksCoverage      int      `json:"greeks_coverage"`
@@ -578,11 +610,18 @@ type ChainResult struct {
 // invariant. Comment carries the raw scanner-side text when non-empty
 // (rare; most scan types leave it blank).
 //
+// Currency is the ISO-4217 code for Last / PrevClose / Change / Week52*
+// — needed so non-US ad-hoc scans (e.g. --exchange STK.EU.IBIS) render
+// with the right symbol instead of a hardcoded $. Empty string means
+// "the daemon couldn't resolve a currency for this row"; renderers
+// should fall back to $ in that case for back-compat with old daemons.
+//
 // Unit conventions follow Quote: ChangePct is in PERCENT units (5.41
 // means 5.41 %), IV is a DECIMAL FRACTION (0.342 means 34.2 %).
 type ScanRow struct {
 	Rank       int      `json:"rank"`
 	Symbol     string   `json:"symbol"`
+	Currency   string   `json:"currency,omitempty"`
 	Last       *float64 `json:"last,omitempty"`
 	PrevClose  *float64 `json:"prev_close,omitempty"`
 	Change     *float64 `json:"change,omitempty"`

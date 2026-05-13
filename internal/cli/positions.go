@@ -419,12 +419,11 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 // next to a $3 mark. Dividing by multiplier on OPT restores symmetry.
 // JSON output stays IBKR-faithful; only the rendered column normalises.
 //
-// SecType must match what the daemon actually emits: pkg/ibkr exports
-// AssetTypeOption = "OPTION" and handlers.go fills PositionView.SecType
-// with string(pos.Asset.AssetType), so the canonical wire value is the
-// full word, not the three-letter short form a TWS user might expect.
+// The SecType compare uses rpc.SecTypeOption rather than a literal so
+// the v0.12.4-class "OPT" vs "OPTION" drift can't recur silently — the
+// constant is the single source of truth for the wire value.
 func avgCostPerShare(p rpc.PositionView) float64 {
-	if p.SecType == "OPTION" && p.Multiplier > 0 {
+	if p.SecType == rpc.SecTypeOption && p.Multiplier > 0 {
 		return p.AvgCost / float64(p.Multiplier)
 	}
 	return p.AvgCost

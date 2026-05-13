@@ -26,27 +26,27 @@ func TestAvgCostPerShare(t *testing.T) {
 	}{
 		{
 			name: "stock returns raw avg cost (already per-share)",
-			in:   rpc.PositionView{SecType: "STOCK", Multiplier: 1, AvgCost: 192.10},
+			in:   rpc.PositionView{SecType: rpc.SecTypeStock, Multiplier: 1, AvgCost: 192.10},
 			want: 192.10,
 		},
 		{
 			name: "option with mult=100 divides by multiplier",
-			in:   rpc.PositionView{SecType: "OPTION", Multiplier: 100, AvgCost: 510.00},
+			in:   rpc.PositionView{SecType: rpc.SecTypeOption, Multiplier: 100, AvgCost: 510.00},
 			want: 5.10,
 		},
 		{
 			name: "option with mult=1000 (some index options) divides correctly",
-			in:   rpc.PositionView{SecType: "OPTION", Multiplier: 1000, AvgCost: 4200.00},
+			in:   rpc.PositionView{SecType: rpc.SecTypeOption, Multiplier: 1000, AvgCost: 4200.00},
 			want: 4.20,
 		},
 		{
 			name: "option with unknown multiplier (0) returns raw — better than div-by-zero",
-			in:   rpc.PositionView{SecType: "OPTION", Multiplier: 0, AvgCost: 510.00},
+			in:   rpc.PositionView{SecType: rpc.SecTypeOption, Multiplier: 0, AvgCost: 510.00},
 			want: 510.00,
 		},
 		{
 			name: "stock with omitted multiplier returns raw",
-			in:   rpc.PositionView{SecType: "STOCK", AvgCost: 192.10},
+			in:   rpc.PositionView{SecType: rpc.SecTypeStock, AvgCost: 192.10},
 			want: 192.10,
 		},
 		{
@@ -61,7 +61,7 @@ func TestAvgCostPerShare(t *testing.T) {
 		},
 		{
 			name: "negative avg cost (theoretically possible on short premium) is preserved through division",
-			in:   rpc.PositionView{SecType: "OPTION", Multiplier: 100, AvgCost: -300.00},
+			in:   rpc.PositionView{SecType: rpc.SecTypeOption, Multiplier: 100, AvgCost: -300.00},
 			want: -3.00,
 		},
 	}
