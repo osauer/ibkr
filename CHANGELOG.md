@@ -4,11 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-Drift-cleanup pack. Bundle of patch-class fixes that surfaced during the
-v0.12.3 design-system rollout and the v0.12.4 AVG COST audit, plus two
-wire-shape additions that the patch class couldn't carry. Splits as
-v0.12.6 (patch-class items below) plus v0.13.0 (wire-shape additions),
-or as a single v0.13.0 minor — release-time call.
+## v0.13.0 — 2026-05-13 21:37 CEST
+
+Drift-cleanup minor. Bundles the patch-class fixes that surfaced during
+the v0.12.3 design-system rollout and the v0.12.4 AVG COST audit with
+two wire-shape additions: per-row `currency` on scan results and
+`daily_theta_currency` on the portfolio aggregate. Both wire changes
+are additive (`omitempty`) — old MCP / JSON consumers keep working
+without changes.
 
 ### Fixed
 
