@@ -15,7 +15,6 @@ This document is the authoritative description of every `--json` output the
 ```json
 {
   "account_id": "U1234567",
-  "profile": "live",
   "base_currency": "EUR",
   "net_liquidation": 248310.42,
   "buying_power": 992841.68,
@@ -24,6 +23,19 @@ This document is the authoritative description of every `--json` output the
   "total_cash": 18422.30,
   "maintenance_margin": 2815.04,
   "initial_margin": 3520.55,
+  "currency_exposure": [
+    {
+      "currency": "USD",
+      "net_liquidation_ccy": 92418.07,
+      "cash_ccy": 12005.50,
+      "stock_market_value_ccy": 80412.57,
+      "option_market_value_ccy": 0,
+      "unrealized_pnl_ccy": 1842.40,
+      "realized_pnl_ccy": 0,
+      "exchange_rate": 1.0823,
+      "net_liquidation_base": 85398.92
+    }
+  ],
   "data_type": "live",
   "as_of": "2026-05-09T14:32:08+02:00"
 }
@@ -34,6 +46,17 @@ Field meanings:
 - `buying_power` — funds available for new positions.
 - `available_funds` — cash net of margin requirements.
 - `excess_liquidity` — buffer above maintenance margin.
+- `currency_exposure[]` — one row per non-base currency the gateway
+  reported via `$LEDGER:ALL`. Empty / omitted on a single-currency
+  account or pre-handshake. Rows reconcile within ~0.5%:
+  `net_liquidation_ccy × exchange_rate ≈ net_liquidation_base`.
+  - `exchange_rate` is BASE per CCY (how many base-currency units 1
+    unit of the named currency converts to — matches IBKR's `$LEDGER`
+    semantics so the reconciliation works without inversion).
+  - `*_ccy` fields are in the named currency; `net_liquidation_base`
+    is in the account's `base_currency`. Zero fields are real zeros
+    from the gateway (e.g. no options held in that currency), not
+    "unavailable".
 - `data_type` — one of `live`, `delayed`, `frozen`, `delayed_frozen`.
 
 ## positions
@@ -52,9 +75,15 @@ Field meanings:
       "exchange": "NASDAQ",
       "currency": "USD",
       "quantity": 120,
+      "multiplier": 1,
       "avg_cost": 412.18,
       "mark": 478.55,
+      "prev_close": 471.20,
+      "day_change": 7.35,
+      "day_change_pct": 1.56,
       "market_value": 57426.00,
+      "market_value_ccy": 57426.00,
+      "fx_rate": 1.0823,
       "unrealized_pnl": 7964.40,
       "realized_pnl": 0
     }
@@ -65,44 +94,104 @@ Field meanings:
       "sec_type": "OPTION",
       "currency": "USD",
       "quantity": 5,
+      "multiplier": 100,
       "avg_cost": 682.0,
-      "mark": 940.0,
+      "mark": 9.40,
       "market_value": 4700.00,
       "unrealized_pnl": 1290.0,
       "realized_pnl": 0,
       "expiry": "20260619",
       "strike": 215.0,
-      "right": "C"
+      "right": "C",
+      "delta": 0.42,
+      "gamma": 0.018,
+      "theta": -0.08,
+      "vega": 0.42,
+      "option_bid": 9.35,
+      "option_ask": 9.45,
+      "option_prev_close": 8.92,
+      "iv": 0.284
+    }
+  ],
+  "portfolio": {
+    "effective_delta": 1847.0,
+    "dollar_delta": 326584.5,
+    "dollar_delta_currency": "USD",
+    "daily_theta": -42.18,
+    "gamma": 12.4,
+    "vega": 1205.0,
+    "greeks_coverage": 5,
+    "greeks_total": 5,
+    "fx_sensitivity_per_pct": -854.32,
+    "fx_base_currency": "EUR"
+  },
+  "by_underlying": [
+    {
+      "underlying": "AAPL",
+      "stock": { "...": "STOCK row, same shape as stocks[]" },
+      "options": [ { "...": "OPTION row, same shape as options[]" } ],
+      "group_market_value": 25400.0,
+      "group_unrealized_pnl": 2838.0
     }
   ]
 }
 ```
 
-The `stocks` and `options` arrays are always present (possibly empty). For
-options, the `symbol` is the underlying (e.g. `AAPL`), and `expiry` /
-`strike` / `right` together identify the contract.
+The `stocks`, `options`, and `by_underlying` arrays are always present
+(possibly empty). For options, the `symbol` is the underlying (e.g. `AAPL`),
+and `expiry` / `strike` / `right` together identify the contract.
 
-`avg_cost` for options is the per-contract premium; the gateway does NOT
-multiply by 100. `market_value` and `unrealized_pnl` are already in account
-currency and applied the multiplier.
+### Field meanings
 
-The response also includes `by_underlying`: an array of groups (one per
-underlying symbol) with the stock leg (`stock`, optional), the option legs
-(`options`, may be empty), and the summed `group_market_value` /
-`group_unrealized_pnl`. This is always populated; consumers that want a
-flat view should ignore it.
-
-```json
-"by_underlying": [
-  {
-    "underlying": "AAPL",
-    "stock": {"symbol": "AAPL", "quantity": 100, ...},
-    "options": [{"symbol": "AAPL", "right": "C", "strike": 215, ...}],
-    "group_market_value": 25400.0,
-    "group_unrealized_pnl": 2838.0
-  }
-]
-```
+- `sec_type` — wire constants from `pkg/ibkr.AssetType`: `STOCK`,
+  `OPTION`, `FUTURE`, `INDEX`. Compare against the full word, not a
+  three-letter short form.
+- `multiplier` — 1 for stocks, 100 for standard equity options, sometimes
+  higher for index/futures options. Always present (defaults to 1 when
+  the gateway didn't supply one).
+- `avg_cost` — **per-share** for stocks, **per-contract** (multiplier-
+  inclusive) for options. To get the per-share premium on options divide
+  by `multiplier`. The CLI does this automatically on the rendered AVG
+  COST column; JSON output stays IBKR-faithful. `market_value` and
+  `unrealized_pnl` are already in account-currency dollars with the
+  multiplier applied.
+- `prev_close`, `day_change`, `day_change_pct` — populated on STOCK rows
+  via the daemon's prev-close prewarm. `null` when the gateway hasn't
+  delivered tick 9 (rare on the happy path; usually pre-market).
+- `market_value_ccy`, `fx_rate` — only set on non-base-currency positions.
+  `market_value` remains in account base for back-compat; `market_value_ccy`
+  is the contract-currency view, `fx_rate` the gateway-reported BASE/CCY
+  conversion. Both nil/zero on same-currency books — no synthesis.
+- `delta`, `gamma`, `theta`, `vega` — option-only, populated when the
+  daemon captured a model-computation tick (msg 21 tickType 13) within
+  budget. `null` = unavailable (illiquid leg, OOH model abstention, busy
+  subscribe slot); never zero-substituted.
+- `option_bid`, `option_ask`, `option_prev_close`, `iv` — option-only,
+  populated from the per-leg market-data subscription the daemon already
+  opens for Greeks. `iv` is a decimal fraction (0.284 = 28.4%).
+- `portfolio` — daemon-computed aggregate block. Present when at least
+  one option leg captured Greeks OR any non-base currency exposure has a
+  known FX rate. Inner fields are nil when their inputs were unavailable
+  — never zero-substituted.
+  - `effective_delta` — sum of per-leg signed share-equivalents (stocks
+    contribute signed quantity; options contribute
+    delta × signed_qty × multiplier).
+  - `dollar_delta` / `dollar_delta_currency` — share-equivalents
+    multiplied by each leg's contract-currency spot. Currency named
+    separately so callers can convert if needed.
+  - `daily_theta` — Σ (theta × signed_qty × multiplier). IBKR reports
+    theta as daily decay, so the sum is the daily P&L from time decay
+    assuming everything else holds.
+  - `greeks_coverage` / `greeks_total` — count of option legs whose
+    Greeks were captured / total option legs. Render partial-coverage
+    explicitly to the user.
+  - `fx_sensitivity_per_pct` — Σ (non-base market value in base) × 0.01;
+    "how many base-currency units of P&L move per 1% FX shift". In
+    `fx_base_currency`.
+- `by_underlying[]` — groups stock leg (optional) + option legs by
+  underlying. Always populated regardless of the `--by underlying` flag,
+  which only affects the text view. `group_*` totals sum every leg in
+  the group.
 
 ## quote
 

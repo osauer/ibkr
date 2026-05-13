@@ -105,12 +105,14 @@ $ ibkr positions --json
   "data_type": "live",
   "as_of": "2026-05-09T14:32:09Z",
   "stocks": [
-    {"symbol": "AAPL", "quantity": 100, "avg_cost": 192.40, "mark": 207.88,
+    {"symbol": "AAPL", "sec_type": "STOCK", "multiplier": 1,
+     "quantity": 100, "avg_cost": 192.40, "mark": 207.88,
      "unrealized_pnl": 1548.0, "realized_pnl": 0}
   ],
   "options": [
-    {"symbol": "AAPL", "right": "C", "expiry": "20260619", "strike": 215,
-     "quantity": 5, "avg_cost": 6.82, "mark": 9.40, "unrealized_pnl": 1290}
+    {"symbol": "AAPL", "sec_type": "OPTION", "multiplier": 100,
+     "right": "C", "expiry": "20260619", "strike": 215,
+     "quantity": 5, "avg_cost": 682.0, "mark": 9.40, "unrealized_pnl": 1290}
   ],
   "by_underlying": [
     {"underlying": "AAPL", "stock": {...}, "options": [...],
@@ -123,6 +125,14 @@ Render to the user as two compact tables (stocks, options) with money formatted
 as currency and totals. Always mention the `data_type` if it is not `live`. If
 the user asks "what's my exposure to AAPL?" or "how am I doing per name?",
 reach for the `by_underlying` grouping.
+
+`avg_cost` is **per-share** for stocks but **per-contract** for options
+(the gateway sends it multiplier-inclusive). To compare to `mark` (which
+is always per-share) divide by `multiplier`: a $6.82 premium call comes
+off the wire as `avg_cost: 682.0` with `multiplier: 100`. The CLI's text
+renderer does this division on the AVG COST column; if you're parsing
+JSON yourself, do it too. `market_value` and `unrealized_pnl` already
+have the multiplier applied — don't double-multiply.
 
 Option rows carry per-leg `delta`/`gamma`/`theta`/`vega` when the gateway
 delivered a model-computation tick within budget. The `portfolio` block sums
