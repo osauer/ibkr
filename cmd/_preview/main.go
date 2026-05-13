@@ -1,4 +1,4 @@
-// Command _preview renders the three signature CLI screens with realistic
+// Command _preview renders the user-facing CLI screens with realistic
 // synthetic fixture data — used for social-preview screenshots, README
 // updates, and visual review without exposing a live account.
 //
@@ -6,10 +6,17 @@
 // skip this tool, so it never lands in release tarballs. Invoke by file
 // path:
 //
-//	go run cmd/_preview/main.go            # all three screens
-//	go run cmd/_preview/main.go account    # one screen
-//	go run cmd/_preview/main.go positions
-//	go run cmd/_preview/main.go chain
+//	go run cmd/_preview/main.go              # every screen, top-to-bottom
+//	go run cmd/_preview/main.go account      # one screen
+//	go run cmd/_preview/main.go positions    # positions --by underlying
+//	go run cmd/_preview/main.go positions-flat
+//	go run cmd/_preview/main.go chain        # chain SYM (expiry list)
+//	go run cmd/_preview/main.go chain-strikes
+//	go run cmd/_preview/main.go quote
+//	go run cmd/_preview/main.go history
+//	go run cmd/_preview/main.go scan
+//	go run cmd/_preview/main.go size
+//	go run cmd/_preview/main.go status
 //
 // Color is forced on so a tee'd capture (`… | tee /tmp/preview.txt`) keeps
 // the ANSI escapes that screenshot tools like freezer.dev / ray.so /
@@ -31,23 +38,36 @@ func main() {
 		which = os.Args[1]
 	}
 	env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Color: true}
-	switch which {
-	case "account":
-		cli.PreviewRenderAccount(env, fixtureAccount())
-	case "positions":
-		cli.PreviewRenderPositionsByUnderlying(env, fixturePositions())
-	case "chain":
-		cli.PreviewRenderChainExpiries(env, fixtureChain(), true)
-	case "all":
-		cli.PreviewRenderAccount(env, fixtureAccount())
-		fmt.Fprintln(os.Stdout)
-		cli.PreviewRenderPositionsByUnderlying(env, fixturePositions())
-		fmt.Fprintln(os.Stdout)
-		cli.PreviewRenderChainExpiries(env, fixtureChain(), true)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown preview: %q (want account | positions | chain | all)\n", which)
+	screens := map[string]func(){
+		"account":        func() { cli.PreviewRenderAccount(env, fixtureAccount()) },
+		"positions":      func() { cli.PreviewRenderPositionsByUnderlying(env, fixturePositions()) },
+		"positions-flat": func() { cli.PreviewRenderPositions(env, fixturePositions()) },
+		"chain":          func() { cli.PreviewRenderChainExpiries(env, fixtureChain(), true) },
+		"chain-strikes":  func() { cli.PreviewRenderChainStrikes(env, fixtureChainStrikes()) },
+		"quote":          func() { cli.PreviewRenderQuoteSnapshot(env, fixtureQuotes()) },
+		"history":        func() { cli.PreviewRenderHistory(env, fixtureHistory()) },
+		"scan":           func() { cli.PreviewRenderScan(env, fixtureScan()) },
+		"size":           func() { cli.PreviewRenderSize(env, fixtureSize()) },
+		"status":         func() { cli.PreviewRenderStatus(env, fixtureStatus()) },
+	}
+	order := []string{"status", "account", "positions", "positions-flat", "chain", "chain-strikes", "quote", "history", "scan", "size"}
+
+	if which == "all" {
+		for i, key := range order {
+			if i > 0 {
+				fmt.Fprintln(os.Stdout)
+			}
+			screens[key]()
+		}
+		return
+	}
+	fn, ok := screens[which]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown preview: %q\n", which)
+		fmt.Fprintln(os.Stderr, "screens: account | positions | positions-flat | chain | chain-strikes | quote | history | scan | size | status | all")
 		os.Exit(2)
 	}
+	fn()
 }
 
 func fixtureAccount() *rpc.AccountResult {
@@ -118,6 +138,8 @@ func fixturePositions() *rpc.PositionsResult {
 	}
 
 	return &rpc.PositionsResult{
+		Stocks:  []rpc.PositionView{aaplStock, nvdaStock},
+		Options: []rpc.PositionView{aaplCall, aaplPut, nvdaCall, spyPut1, spyPut2},
 		ByUnderlying: []rpc.PositionGroup{
 			{
 				Underlying:         "AAPL",
@@ -154,6 +176,154 @@ func fixturePositions() *rpc.PositionsResult {
 		},
 		AsOf:     time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
 		DataType: "live",
+	}
+}
+
+// fixtureChainStrikes is a 5-strike SPY June chain centered on the spot at
+// 583.18. The ATM row carries only the strike (no quotes) to exercise the
+// em-dash placeholder path — illiquid wings on real symbols look the same.
+func fixtureChainStrikes() *rpc.ChainResult {
+	mk := func(b, a, l, iv float64) (*float64, *float64, *float64, *float64) {
+		return f64(b), f64(a), f64(l), f64(iv)
+	}
+	cb1, ca1, cl1, civ1 := mk(20.10, 20.35, 20.20, 0.182)
+	pb1, pa1, pl1, piv1 := mk(0.42, 0.51, 0.47, 0.241)
+	cb2, ca2, cl2, civ2 := mk(11.20, 11.45, 11.30, 0.171)
+	pb2, pa2, pl2, piv2 := mk(1.85, 1.95, 1.90, 0.205)
+	cb4, ca4, cl4, civ4 := mk(0.95, 1.05, 1.00, 0.215)
+	pb4, pa4, pl4, piv4 := mk(11.05, 11.30, 11.15, 0.182)
+	cb5, ca5, cl5, civ5 := mk(0.18, 0.24, 0.20, 0.238)
+	pb5, pa5, pl5, piv5 := mk(20.10, 20.40, 20.25, 0.198)
+	return &rpc.ChainResult{
+		Symbol:   "SPY",
+		Spot:     583.18,
+		Expiry:   "2026-06-20",
+		DTE:      38,
+		DataType: "live",
+		Strikes: []rpc.ChainStrike{
+			{Strike: 565, CallBid: cb1, CallAsk: ca1, CallLast: cl1, CallIV: civ1, PutBid: pb1, PutAsk: pa1, PutLast: pl1, PutIV: piv1},
+			{Strike: 575, CallBid: cb2, CallAsk: ca2, CallLast: cl2, CallIV: civ2, PutBid: pb2, PutAsk: pa2, PutLast: pl2, PutIV: piv2},
+			{Strike: 585, IsATM: true},
+			{Strike: 595, CallBid: cb4, CallAsk: ca4, CallLast: cl4, CallIV: civ4, PutBid: pb4, PutAsk: pa4, PutLast: pl4, PutIV: piv4},
+			{Strike: 605, CallBid: cb5, CallAsk: ca5, CallLast: cl5, CallIV: civ5, PutBid: pb5, PutAsk: pa5, PutLast: pl5, PutIV: piv5},
+		},
+		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
+	}
+}
+
+// fixtureQuotes is a 3-symbol snapshot mixing a live quote (full data),
+// a partial quote (Last only, no previous close — pre-market case), and
+// a delayed quote (entitlement-limited).
+func fixtureQuotes() []rpc.Quote {
+	// change_pct is in percent (0.70 = 0.70%), matching the position view's
+	// day-change-pct convention and how the daemon serializes the tick.
+	bid1, ask1, last1 := 207.82, 207.88, 207.85
+	prev1, chg1, pct1 := 206.40, 1.45, 0.70
+	bidSz1, askSz1 := 240, 510
+	vol1 := int64(38_400_000)
+	iv1 := 0.247
+
+	last2 := 128.54
+
+	bid3, ask3, last3 := 461.04, 461.20, 461.12
+	prev3, chg3, pct3 := 463.50, -2.38, -0.51
+	vol3 := int64(8_120_000)
+
+	return []rpc.Quote{
+		{
+			Symbol: "AAPL", Bid: &bid1, Ask: &ask1, Last: &last1,
+			PrevClose: &prev1, Change: &chg1, ChangePct: &pct1,
+			BidSize: &bidSz1, AskSize: &askSz1, Volume: &vol1,
+			IV: &iv1, DataType: "live",
+		},
+		{Symbol: "NVDA", Last: &last2, DataType: "live"},
+		{
+			Symbol: "SPY", Bid: &bid3, Ask: &ask3, Last: &last3,
+			PrevClose: &prev3, Change: &chg3, ChangePct: &pct3,
+			Volume:   &vol3,
+			DataType: "delayed",
+		},
+	}
+}
+
+func fixtureHistory() *rpc.HistoryDailyResult {
+	return &rpc.HistoryDailyResult{
+		Symbol:   "AAPL",
+		Days:     5,
+		DataType: "live",
+		Bars: []rpc.HistoryBar{
+			{Date: "2026-05-06", Open: 204.30, High: 207.10, Low: 203.85, Close: 206.40, Volume: 41_200_000},
+			{Date: "2026-05-07", Open: 206.50, High: 208.95, Low: 205.70, Close: 207.85, Volume: 36_500_000},
+			{Date: "2026-05-08", Open: 207.90, High: 210.40, Low: 207.10, Close: 209.55, Volume: 44_800_000},
+			{Date: "2026-05-09", Open: 209.20, High: 210.05, Low: 206.30, Close: 207.42, Volume: 39_100_000},
+			{Date: "2026-05-12", Open: 207.55, High: 209.80, Low: 206.95, Close: 208.91, Volume: 31_700_000},
+		},
+		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
+	}
+}
+
+// fixtureScan is a 5-row top-gainers preset — covers full-data rows and
+// a partial row (no IV, no 52w range) so the em-dash placeholder path
+// renders.
+func fixtureScan() *rpc.ScanResult {
+	mkRow := func(rank int, sym string, last, pct, iv, lo, hi float64, vol int64, note string) rpc.ScanRow {
+		return rpc.ScanRow{
+			Rank: rank, Symbol: sym,
+			Last: f64(last), ChangePct: f64(pct), IV: f64(iv),
+			Week52Low: f64(lo), Week52High: f64(hi),
+			Volume: &vol, Comment: note,
+		}
+	}
+	// CHG% is in percent units (7.21 = 7.21%) — formatChangePct prints
+	// the value with a trailing % without multiplying.
+	partial := rpc.ScanRow{Rank: 5, Symbol: "ZZZ", Last: f64(12.34), ChangePct: f64(4.10)}
+	return &rpc.ScanResult{
+		Preset: "top_pct_gain",
+		Type:   "TOP_PERC_GAIN",
+		Rows: []rpc.ScanRow{
+			mkRow(1, "AAPL", 207.85, 7.21, 0.247, 142.10, 219.50, 38_400_000, ""),
+			mkRow(2, "NVDA", 128.54, 5.12, 0.382, 75.20, 145.80, 248_000_000, ""),
+			mkRow(3, "AMD", 145.22, 4.28, 0.318, 89.40, 178.90, 62_500_000, ""),
+			mkRow(4, "TSLA", 244.18, 3.14, 0.452, 138.80, 299.20, 95_300_000, ""),
+			partial,
+		},
+		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
+	}
+}
+
+// fixtureSize mirrors a typical EUR account sizing a long AAPL trade
+// with a 2R target — covers the full screen including the reward block.
+func fixtureSize() *cli.SizeResult {
+	tgt, r, reward, be := 215.50, 2.0, 4000.0, 1.0/3.0
+	return &cli.SizeResult{
+		Symbol: "AAPL", Side: "long",
+		Entry: 207.50, Stop: 202.50, Target: &tgt,
+		RiskPct: 1.0, Lot: 1, FX: 1.0,
+		NLV: 248310.42, BaseCurrency: "EUR",
+		RiskBase: 2483.10, RiskQuote: 2483.10,
+		PerShareRisk: 5.00,
+		Shares:       496, Notional: 102920.00, MaxLoss: 2480.00,
+		R: &r, RewardQuote: &reward, BreakevenWinRate: &be,
+		Status: "ok",
+	}
+}
+
+// fixtureStatus is a healthy connected daemon — the happy-path screen
+// the user sees after `ibkr status` on a working setup.
+func fixtureStatus() *rpc.HealthResult {
+	return &rpc.HealthResult{
+		DaemonVersion: "v1.0.0",
+		UptimeSeconds: 1842,
+		Account:       "U7842931",
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   4001,
+		GatewayTLS:    false,
+		NegotiatedTLS: false,
+		PortOrigin:    "discovered",
+		ClientID:      17,
+		Connected:     true,
+		ServerVersion: 178,
+		DataType:      "live",
 	}
 }
 
