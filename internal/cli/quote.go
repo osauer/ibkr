@@ -105,8 +105,10 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 	// on the price first then the move — same left-to-right priority you
 	// see on every retail platform. Em-dash placeholders preserve column
 	// alignment when ticks haven't arrived yet (frozen, dead pre-market).
-	fmt.Fprintf(out, "  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %7s  %s\n",
+	header := fmt.Sprintf("  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %7s  %s",
 		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "LAST", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, q := range qs {
 		// Tint the data-type column yellow when not live so a row of
 		// frozen/delayed quotes is obvious at a glance — same policy as
@@ -231,8 +233,10 @@ func runQuoteWatch(ctx context.Context, env *Env, sym string, jsonOut bool, rate
 	if !jsonOut {
 		fmt.Fprintln(env.Stdout)
 		fmt.Fprintf(env.Stdout, "%s · streaming · render every %s · Ctrl-C to stop\n", sym, rate)
-		fmt.Fprintf(env.Stdout, "  %-8s  %10s  %-6s  %10s  %-6s  %10s\n",
+		header := fmt.Sprintf("  %-8s  %10s  %-6s  %10s  %-6s  %10s",
 			"TIME", "BID", "BID_SZ", "ASK", "ASK_SZ", "LAST")
+		fmt.Fprintln(env.Stdout, env.dim(header))
+		fmt.Fprintln(env.Stdout, env.dim(strings.Repeat("─", visibleLen(header))))
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
