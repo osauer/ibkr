@@ -223,16 +223,36 @@ func renderSizeText(env *Env, r *SizeResult) int {
 	}
 	fmt.Fprintln(out, header)
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Net liquidation         %s  (%s)\n", formatMoney(r.NLV), ccyBase)
-	fmt.Fprintf(out, "  Risk budget             %s  (%.2f%% of NLV)\n", formatMoney(r.RiskBase), r.RiskPct)
-	if r.FX != 1.0 {
-		fmt.Fprintf(out, "  Risk in quote ccy       %s  (fx %.4f)\n", formatMoney(r.RiskQuote), r.FX)
+
+	// labelWidth covers the widest label ("Risk in quote ccy" = 17,
+	// "Max gain at target" = 18, "Breakeven win rate" = 18); valueWidth
+	// fits a 7-digit notional with grouping ("$ 9,999,999.99" = 14).
+	const (
+		labelWidth = 20
+		valueWidth = 14
+	)
+	label := func(s string) string {
+		return fmt.Sprintf("  %-*s", labelWidth, s)
 	}
-	fmt.Fprintf(out, "  Per-share risk          %s\n", formatMoney(r.PerShareRisk))
+	money := func(v float64) string {
+		return env.formatMoneyNegCcyRight(v, ccyBase, valueWidth)
+	}
+
+	fmt.Fprintf(out, "%s  %s  (%s)\n", label("Net liquidation"), money(r.NLV), ccyBase)
+	fmt.Fprintf(out, "%s  %s  (%.2f%% of NLV)\n", label("Risk budget"), money(r.RiskBase), r.RiskPct)
+	if r.FX != 1.0 {
+		fmt.Fprintf(out, "%s  %s  (fx %.4f)\n", label("Risk in quote ccy"), money(r.RiskQuote), r.FX)
+	}
+	fmt.Fprintf(out, "%s  %s\n", label("Per-share risk"), money(r.PerShareRisk))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Shares                  %d  (lot %d)\n", r.Shares, r.Lot)
-	fmt.Fprintf(out, "  Notional                %s\n", formatMoney(r.Notional))
-	fmt.Fprintf(out, "  Max loss at stop        %s\n", formatMoney(r.MaxLoss))
+
+	// Shares is the hero — the sizing tool's whole purpose is to tell the
+	// user how many to buy. Bold it; the lot suffix stays plain so the
+	// hero doesn't get a competing visual sibling on the same line.
+	shares := padLeftVisible(fmt.Sprintf("%d", r.Shares), valueWidth)
+	fmt.Fprintf(out, "%s  %s  (lot %d)\n", label("Shares"), env.bold(shares), r.Lot)
+	fmt.Fprintf(out, "%s  %s\n", label("Notional"), money(r.Notional))
+	fmt.Fprintf(out, "%s  %s\n", label("Max loss at stop"), money(r.MaxLoss))
 
 	// Reward / R block: only when --target was supplied. R-multiple is the
 	// canonical "is this trade worth taking" filter — ≥2R is the common
@@ -240,9 +260,11 @@ func renderSizeText(env *Env, r *SizeResult) int {
 	// what hit-rate the strategy needs to be flat at this R.
 	if r.R != nil && r.RewardQuote != nil && r.BreakevenWinRate != nil {
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "  Max gain at target      %s\n", formatMoney(*r.RewardQuote))
-		fmt.Fprintf(out, "  Reward:risk             %.2fR\n", *r.R)
-		fmt.Fprintf(out, "  Breakeven win rate      %.1f%%\n", *r.BreakevenWinRate*100)
+		fmt.Fprintf(out, "%s  %s\n", label("Max gain at target"), money(*r.RewardQuote))
+		rStr := padLeftVisible(fmt.Sprintf("%.2fR", *r.R), valueWidth)
+		fmt.Fprintf(out, "%s  %s\n", label("Reward:risk"), rStr)
+		beStr := padLeftVisible(fmt.Sprintf("%.1f%%", *r.BreakevenWinRate*100), valueWidth)
+		fmt.Fprintf(out, "%s  %s\n", label("Breakeven win rate"), beStr)
 	}
 
 	if r.Status != "ok" {
