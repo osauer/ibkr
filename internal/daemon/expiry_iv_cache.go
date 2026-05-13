@@ -1,9 +1,6 @@
 package daemon
 
-import (
-	"sync"
-	"time"
-)
+import "time"
 
 // expiryIVCache memoises per-(symbol, expiry) ATM implied volatility lookups
 // so repeated `ibkr chain SYM` calls within the TTL skip the per-expiry
@@ -17,8 +14,7 @@ import (
 // US sessions plus a buffer) so we don't have to reason about overnight
 // futures vs equities.
 type expiryIVCache struct {
-	mu      sync.RWMutex
-	entries map[expiryIVKey]expiryIVEntry
+	inner *ttlMap[expiryIVKey, expiryIVEntry]
 }
 
 type expiryIVKey struct {
@@ -29,37 +25,29 @@ type expiryIVKey struct {
 type expiryIVEntry struct {
 	iv     float64 // 0 when status != "ok"
 	status string  // "ok" | "timeout" | "unavailable"
-	asOf   time.Time
 }
 
 func newExpiryIVCache() *expiryIVCache {
-	return &expiryIVCache{entries: map[expiryIVKey]expiryIVEntry{}}
+	return &expiryIVCache{
+		inner: newTTLMap[expiryIVKey, expiryIVEntry](func(_ expiryIVEntry, now time.Time) time.Duration {
+			return expiryIVTTL(now)
+		}),
+	}
 }
 
 // get returns (entry, true) when a non-stale entry exists for the key.
 // Staleness is decided against now per expiryIVTTL — callers don't have
 // to thread their own clock in (tests inject via testNow if needed).
 func (c *expiryIVCache) get(symbol, expiry string, now time.Time) (expiryIVEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.entries[expiryIVKey{symbol: symbol, expiry: expiry}]
-	if !ok {
-		return expiryIVEntry{}, false
-	}
-	if now.Sub(e.asOf) > expiryIVTTL(now) {
-		return expiryIVEntry{}, false
-	}
-	return e, true
+	return c.inner.get(expiryIVKey{symbol: symbol, expiry: expiry}, now)
 }
 
 // put records the IV result. Negative-cache "timeout" and "unavailable"
 // entries get the same TTL as successful fills — without that, a single
 // dead expiry would be re-fetched on every chain refresh and chew through
 // the gateway's market-data slot budget.
-func (c *expiryIVCache) put(symbol, expiry string, e expiryIVEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[expiryIVKey{symbol: symbol, expiry: expiry}] = e
+func (c *expiryIVCache) put(symbol, expiry string, e expiryIVEntry, now time.Time) {
+	c.inner.put(expiryIVKey{symbol: symbol, expiry: expiry}, e, now)
 }
 
 // expiryIVTTL picks the freshness budget for a cached IV based on whether

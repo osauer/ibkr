@@ -381,6 +381,62 @@ func TestStatusHealthReportsDisconnected(t *testing.T) {
 	}
 }
 
+// Malformed params on any unary handler must classify as bad_request, not
+// internal. Before the fix every handler returned fmt.Errorf("decode params:")
+// which fell through to CodeInternal — the CLI couldn't distinguish a
+// client-side mistake from a daemon bug.
+func TestDecodeParamsMalformedIsBadRequest(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	malformed := json.RawMessage(`{"symbol":`)
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"positions.list", func() error {
+			_, err := srv.handlePositionsList(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"chain.expiries", func() error {
+			_, err := srv.handleChainExpiries(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"chain.fetch", func() error {
+			_, err := srv.handleChainFetch(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"scan.run", func() error {
+			_, err := srv.handleScanRun(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"history.daily", func() error {
+			_, err := srv.handleHistoryDaily(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"quote.snapshot", func() error {
+			_, err := srv.handleQuoteSnapshot(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"cancel", func() error {
+			_, err := srv.handleCancel(&rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("expected error for malformed params")
+			}
+			code, _ := classifyError(err)
+			if code != rpc.CodeBadRequest {
+				t.Fatalf("%s: code = %q, want %q (err=%v)", tc.name, code, rpc.CodeBadRequest, err)
+			}
+		})
+	}
+}
+
 // classifyError is the seam between handler errors and CLI-visible codes.
 func TestClassifyError(t *testing.T) {
 	t.Parallel()

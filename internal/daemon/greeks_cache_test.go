@@ -14,7 +14,7 @@ func TestGreeksCacheRoundTrip(t *testing.T) {
 	c := newGreeksCache()
 	now := time.Now()
 	g := ibkrlib.Greeks{Delta: 0.5, Theta: -0.1}
-	c.put("AAPL_260117C200", greeksEntry{value: g, ok: true, asOf: now})
+	c.put("AAPL_260117C200", greeksEntry{value: g, ok: true}, now)
 
 	got, ok := c.get("AAPL_260117C200", now)
 	if !ok {
@@ -35,7 +35,7 @@ func TestGreeksCacheRoundTrip(t *testing.T) {
 func TestGreeksCacheTTLExpiry(t *testing.T) {
 	c := newGreeksCache()
 	stale := time.Now().Add(-2 * greeksTTL)
-	c.put("AAPL_260117C200", greeksEntry{value: ibkrlib.Greeks{Delta: 0.5}, ok: true, asOf: stale})
+	c.put("AAPL_260117C200", greeksEntry{value: ibkrlib.Greeks{Delta: 0.5}, ok: true}, stale)
 
 	if _, ok := c.get("AAPL_260117C200", time.Now()); ok {
 		t.Fatalf("expected stale entry to miss, got hit")
@@ -49,7 +49,7 @@ func TestGreeksCacheTTLExpiry(t *testing.T) {
 func TestGreeksCacheNegativeEntry(t *testing.T) {
 	c := newGreeksCache()
 	now := time.Now()
-	c.put("AAPL_260117C200", greeksEntry{ok: false, asOf: now})
+	c.put("AAPL_260117C200", greeksEntry{ok: false}, now)
 	got, ok := c.get("AAPL_260117C200", now)
 	if !ok {
 		t.Fatalf("negative cache entry should hit within TTL")
@@ -72,7 +72,7 @@ func TestGreeksCacheNegativeTTLShorterThanPositive(t *testing.T) {
 	c := newGreeksCache()
 	stale := time.Now().Add(-(greeksNegativeTTL + time.Second))
 
-	c.put("AAPL_260117C200", greeksEntry{ok: false, asOf: stale})
+	c.put("AAPL_260117C200", greeksEntry{ok: false}, stale)
 	if _, ok := c.get("AAPL_260117C200", time.Now()); ok {
 		t.Errorf("negative entry past negativeTTL should miss so retries unblock")
 	}
@@ -81,8 +81,7 @@ func TestGreeksCacheNegativeTTLShorterThanPositive(t *testing.T) {
 	c.put("AAPL_260117P200", greeksEntry{
 		value: ibkrlib.Greeks{Delta: 0.5},
 		ok:    true,
-		asOf:  stale,
-	})
+	}, stale)
 	if _, ok := c.get("AAPL_260117P200", time.Now()); !ok {
 		t.Errorf("positive entry within positiveTTL must still hit at the same age — positive cache is load-bearing for back-to-back calls")
 	}

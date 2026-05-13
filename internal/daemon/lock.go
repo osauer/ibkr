@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/osauer/ibkr/internal/dial"
 )
 
 // ErrAlreadyRunning means another ibkrd holds the instance lock for this
@@ -25,11 +27,10 @@ type instanceLock struct {
 // <socketDir>/ibkrd.lock and writes the current PID. Returns
 // ErrAlreadyRunning if the lock is contended.
 func acquireInstanceLock(socketPath string) (*instanceLock, error) {
-	dir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	path := dial.LockPath(socketPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir lock dir: %w", err)
 	}
-	path := filepath.Join(dir, "ibkr.lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)

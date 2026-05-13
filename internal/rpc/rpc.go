@@ -43,6 +43,28 @@ const (
 	CodeInternal           = "internal"
 )
 
+// MarketDataType values carried on Quote.DataType, Frame.DataType,
+// HealthResult.DataType, ScanRow.DataType, and PositionView.DataType.
+// IBKR's tickMarketDataType message (58) maps gateway feed state into one
+// of these strings; the CLI renders a badge based on the value.
+//
+// Empty string means "the gateway hasn't sent a notice yet" — typically a
+// few hundred ms after a fresh subscription. Treated as live for
+// rendering purposes (see IsLiveDataType).
+const (
+	MarketDataLive          = "live"
+	MarketDataFrozen        = "frozen"
+	MarketDataDelayed       = "delayed"
+	MarketDataDelayedFrozen = "delayed-frozen"
+)
+
+// IsLiveDataType reports whether the gateway's per-reqID feed state is
+// "live ticks", treating empty-string the same as live (no notice yet).
+// Used by renderers to decide whether to dim a row or show a phase badge.
+func IsLiveDataType(dt string) bool {
+	return dt == "" || dt == MarketDataLive
+}
+
 // Frame-level error codes used in FrameError.Code. These are terminal: a
 // frame carrying any of these is the last frame the consumer will receive
 // on its subscription. Distinct from the request-envelope error codes

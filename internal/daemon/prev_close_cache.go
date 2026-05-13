@@ -1,9 +1,6 @@
 package daemon
 
-import (
-	"sync"
-	"time"
-)
+import "time"
 
 // prevCloseCache memoises per-symbol previous-regular-session-close prices
 // so positions / quote calls don't issue a fresh market-data subscribe
@@ -17,13 +14,11 @@ import (
 // the next 19 positions calls in the same session don't re-poll the same
 // dead stream. The TTL applies symmetrically.
 type prevCloseCache struct {
-	mu      sync.RWMutex
-	entries map[string]prevCloseEntry
+	inner *ttlMap[string, prevCloseEntry]
 }
 
 type prevCloseEntry struct {
 	value float64 // 0 → negative cache (subscription returned no Close)
-	asOf  time.Time
 }
 
 // prevCloseTTL is the maximum age of a cached prev-close before the next
@@ -34,26 +29,19 @@ type prevCloseEntry struct {
 const prevCloseTTL = 12 * time.Hour
 
 func newPrevCloseCache() *prevCloseCache {
-	return &prevCloseCache{entries: map[string]prevCloseEntry{}}
+	return &prevCloseCache{
+		inner: newTTLMap[string, prevCloseEntry](func(_ prevCloseEntry, _ time.Time) time.Duration {
+			return prevCloseTTL
+		}),
+	}
 }
 
 func (c *prevCloseCache) get(symbol string, now time.Time) (prevCloseEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.entries[symbol]
-	if !ok {
-		return prevCloseEntry{}, false
-	}
-	if now.Sub(e.asOf) > prevCloseTTL {
-		return prevCloseEntry{}, false
-	}
-	return e, true
+	return c.inner.get(symbol, now)
 }
 
-func (c *prevCloseCache) put(symbol string, e prevCloseEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[symbol] = e
+func (c *prevCloseCache) put(symbol string, e prevCloseEntry, now time.Time) {
+	c.inner.put(symbol, e, now)
 }
 
 // computePositionDayChange returns (chg, chg_pct) pointers describing how

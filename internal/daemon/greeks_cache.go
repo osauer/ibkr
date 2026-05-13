@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"sync"
 	"time"
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
@@ -37,15 +36,13 @@ import (
 // promptly, while still protecting the gateway from rapid re-poll
 // loops within a few seconds.
 type greeksCache struct {
-	mu      sync.RWMutex
-	entries map[string]greeksEntry
+	inner *ttlMap[string, greeksEntry]
 }
 
 type greeksEntry struct {
 	value      ibkrlib.Greeks
 	underlying float64 // model-computation underlying price, 0 if unavailable
 	ok         bool    // false → negative cache: we tried and got nothing valid
-	asOf       time.Time
 }
 
 const (
@@ -66,28 +63,20 @@ const (
 )
 
 func newGreeksCache() *greeksCache {
-	return &greeksCache{entries: map[string]greeksEntry{}}
+	return &greeksCache{
+		inner: newTTLMap[string, greeksEntry](func(e greeksEntry, _ time.Time) time.Duration {
+			if !e.ok {
+				return greeksNegativeTTL
+			}
+			return greeksTTL
+		}),
+	}
 }
 
 func (c *greeksCache) get(key string, now time.Time) (greeksEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.entries[key]
-	if !ok {
-		return greeksEntry{}, false
-	}
-	ttl := greeksTTL
-	if !e.ok {
-		ttl = greeksNegativeTTL
-	}
-	if now.Sub(e.asOf) > ttl {
-		return greeksEntry{}, false
-	}
-	return e, true
+	return c.inner.get(key, now)
 }
 
-func (c *greeksCache) put(key string, e greeksEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[key] = e
+func (c *greeksCache) put(key string, e greeksEntry, now time.Time) {
+	c.inner.put(key, e, now)
 }

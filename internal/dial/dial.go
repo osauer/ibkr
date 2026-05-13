@@ -163,15 +163,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, out any) err
 		return fmt.Errorf("write request: %w", err)
 	}
 
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = c.c.SetReadDeadline(time.Now())
-		case <-stop:
-		}
-	}()
+	defer c.installCancelWatcher(ctx)()
 
 	line, err := c.r.ReadBytes('\n')
 	if err != nil {
@@ -213,16 +205,8 @@ func (c *Conn) Stream(ctx context.Context, method string, params any, onFrame fu
 		return fmt.Errorf("write request: %w", err)
 	}
 
-	// Cancellation closes the socket so the read loop returns.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = c.c.SetReadDeadline(time.Now())
-		case <-stop:
-		}
-	}()
+	// Cancellation forces an immediate read deadline so the read loop returns.
+	defer c.installCancelWatcher(ctx)()
 
 	for {
 		line, err := c.r.ReadBytes('\n')
@@ -286,4 +270,20 @@ func (c *Conn) applyDeadline(ctx context.Context) error {
 		return c.c.SetDeadline(time.Time{})
 	}
 	return c.c.SetDeadline(dl)
+}
+
+// installCancelWatcher spawns a goroutine that, on ctx cancellation, forces
+// an immediate read deadline so any in-flight ReadBytes returns. Returns a
+// cleanup function the caller must defer — defers don't compose with bare
+// goroutine + channel-close patterns cleanly otherwise.
+func (c *Conn) installCancelWatcher(ctx context.Context) func() {
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.c.SetReadDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+	return func() { close(stop) }
 }

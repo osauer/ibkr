@@ -13,7 +13,7 @@ func TestExpiryIVCacheHit(t *testing.T) {
 	t.Parallel()
 	c := newExpiryIVCache()
 	now := time.Date(2026, 5, 11, 10, 0, 0, 0, expiryIVNYZone)
-	c.put("AAPL", "2026-06-19", expiryIVEntry{iv: 0.28, status: "ok", asOf: now})
+	c.put("AAPL", "2026-06-19", expiryIVEntry{iv: 0.28, status: "ok"}, now)
 
 	got, ok := c.get("AAPL", "2026-06-19", now.Add(30*time.Second))
 	if !ok {
@@ -30,7 +30,7 @@ func TestExpiryIVCacheMissOnStale(t *testing.T) {
 	t.Parallel()
 	c := newExpiryIVCache()
 	tradingHour := time.Date(2026, 5, 11, 14, 0, 0, 0, expiryIVNYZone) // 2 pm ET
-	c.put("AAPL", "2026-06-19", expiryIVEntry{iv: 0.30, status: "ok", asOf: tradingHour})
+	c.put("AAPL", "2026-06-19", expiryIVEntry{iv: 0.30, status: "ok"}, tradingHour)
 
 	if _, ok := c.get("AAPL", "2026-06-19", tradingHour.Add(2*time.Minute)); ok {
 		t.Errorf("get returned ok after staleness window")
@@ -44,7 +44,7 @@ func TestExpiryIVCacheNegativeCachePersists(t *testing.T) {
 	t.Parallel()
 	c := newExpiryIVCache()
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, expiryIVNYZone)
-	c.put("AMD", "2026-12-18", expiryIVEntry{status: "timeout", asOf: now})
+	c.put("AMD", "2026-12-18", expiryIVEntry{status: "timeout"}, now)
 
 	got, ok := c.get("AMD", "2026-12-18", now.Add(30*time.Second))
 	if !ok {
@@ -92,7 +92,7 @@ func TestExpiryIVCacheRaceSafe(t *testing.T) {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()
-			c.put("AAPL", "2026-06-19", expiryIVEntry{iv: float64(i) / 100, status: "ok", asOf: now})
+			c.put("AAPL", "2026-06-19", expiryIVEntry{iv: float64(i) / 100, status: "ok"}, now)
 		}(i)
 		go func() {
 			defer wg.Done()

@@ -114,7 +114,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 		// frozen/delayed quotes is obvious at a glance — same policy as
 		// the table-header badge.
 		dt := q.DataType
-		if dt != "" && dt != "live" {
+		if !rpc.IsLiveDataType(dt) {
 			dt = env.yellow(dt)
 		}
 		fmt.Fprintf(out, "  %-9s  %s  %-6s  %s  %-6s  %s  %s  %s  %s  %-7s  %s  %s\n",
@@ -180,14 +180,12 @@ func (e *Env) formatChangePct(p *float64, w int) string {
 // when color is enabled so the banner stands out from the tick rows.
 func (e *Env) watchDataTypeBanner(dt string) string {
 	switch dt {
-	case "frozen":
+	case rpc.MarketDataFrozen:
 		return e.yellow("data=frozen ⚠  · markets closed; only the last-recorded quote is available — no further updates expected")
-	case "delayed-frozen":
+	case rpc.MarketDataDelayedFrozen:
 		return e.yellow("data=delayed-frozen ⚠  · markets closed; showing yesterday's close — no further updates expected")
-	case "delayed":
+	case rpc.MarketDataDelayed:
 		return e.yellow("data=delayed ⚠  · 15-20 min delayed quotes (entitlement-limited)")
-	case "live":
-		return ""
 	default:
 		return ""
 	}
@@ -350,7 +348,7 @@ func runQuoteRenderer(env *Env, frames <-chan rpc.Frame, done <-chan error, rate
 		// (above), then signal the loop to exit so the user gets a clean
 		// session end instead of a "Ctrl-C to stop" hint that does
 		// nothing useful.
-		if pending.DataType == "frozen" || pending.DataType == "delayed-frozen" {
+		if pending.DataType == rpc.MarketDataFrozen || pending.DataType == rpc.MarketDataDelayedFrozen {
 			autoExit = true
 		}
 		pending = nil

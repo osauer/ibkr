@@ -2395,9 +2395,11 @@ func (c *Connector) handleTickPrice(fields []string) {
 	reqIDStr := fields[2]
 	tickTypeStr := fields[3]
 	priceStr := strings.TrimSpace(fields[4])
-	// Parse reqID with validation
-	reqID := 0
-	if n, err := fmt.Sscanf(reqIDStr, "%d", &reqID); err != nil || n != 1 || reqID == 0 {
+	// Parse reqID with validation. strconv.Atoi is ~10× cheaper than
+	// fmt.Sscanf on this per-tick hot path (no reflection, no format
+	// machinery) — the field is a small ASCII integer.
+	reqID, err := strconv.Atoi(reqIDStr)
+	if err != nil || reqID == 0 {
 		marketDataLogger.Warnf("Invalid reqID in tick price: %q (error: %v)", reqIDStr, err)
 		return
 	}
@@ -2408,8 +2410,8 @@ func (c *Connector) handleTickPrice(fields []string) {
 	c.subMu.RUnlock()
 
 	// Parse tickType with validation
-	tickType := 0
-	if n, err := fmt.Sscanf(tickTypeStr, "%d", &tickType); err != nil || n != 1 {
+	tickType, err := strconv.Atoi(tickTypeStr)
+	if err != nil {
 		if exists {
 			marketDataLogger.Warnf("Invalid tickType in tick price for reqID %d: %q (error: %v)", reqID, tickTypeStr, err)
 		}
@@ -2429,8 +2431,8 @@ func (c *Connector) handleTickPrice(fields []string) {
 	}
 
 	// Parse price with validation
-	price := 0.0
-	if n, err := fmt.Sscanf(priceStr, "%f", &price); err != nil || n != 1 {
+	price, err := strconv.ParseFloat(priceStr, 64)
+	if err != nil {
 		if exists {
 			marketDataLogger.Warnf("Invalid price in tick price for reqID %d: %q (error: %v)", reqID, priceStr, err)
 		}
@@ -2624,12 +2626,9 @@ func (c *Connector) handleTickGeneric(fields []string) {
 	tickTypeStr := fields[3]
 	valueStr := fields[4]
 
-	reqID := 0
-	fmt.Sscanf(reqIDStr, "%d", &reqID)
-	tickType := 0
-	fmt.Sscanf(tickTypeStr, "%d", &tickType)
-	val := 0.0
-	fmt.Sscanf(valueStr, "%f", &val)
+	reqID, _ := strconv.Atoi(reqIDStr)
+	tickType, _ := strconv.Atoi(tickTypeStr)
+	val, _ := strconv.ParseFloat(valueStr, 64)
 
 	// Map reqID to underlying symbol
 	c.subMu.RLock()
@@ -3621,12 +3620,9 @@ func (c *Connector) handleTickSize(fields []string) {
 	tickTypeStr := fields[3]
 	sizeStr := fields[4]
 
-	reqID := 0
-	fmt.Sscanf(reqIDStr, "%d", &reqID)
-	tickType := 0
-	fmt.Sscanf(tickTypeStr, "%d", &tickType)
-	size := int64(0)
-	fmt.Sscanf(sizeStr, "%d", &size)
+	reqID, _ := strconv.Atoi(reqIDStr)
+	tickType, _ := strconv.Atoi(tickTypeStr)
+	size, _ := strconv.ParseInt(sizeStr, 10, 64)
 
 	// Find the symbol for this request ID
 	c.subMu.RLock()

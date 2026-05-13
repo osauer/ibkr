@@ -10,7 +10,7 @@ func TestPrevCloseCacheRoundTrip(t *testing.T) {
 	t.Parallel()
 	c := newPrevCloseCache()
 	now := time.Now()
-	c.put("AAPL", prevCloseEntry{value: 207.34, asOf: now})
+	c.put("AAPL", prevCloseEntry{value: 207.34}, now)
 
 	got, ok := c.get("AAPL", now.Add(1*time.Minute))
 	if !ok {
@@ -27,7 +27,7 @@ func TestPrevCloseCacheStaleEntryMisses(t *testing.T) {
 	t.Parallel()
 	c := newPrevCloseCache()
 	old := time.Now().Add(-24 * time.Hour)
-	c.put("AAPL", prevCloseEntry{value: 207.34, asOf: old})
+	c.put("AAPL", prevCloseEntry{value: 207.34}, old)
 
 	if _, ok := c.get("AAPL", time.Now()); ok {
 		t.Errorf("stale entry should miss after TTL window")
@@ -40,7 +40,7 @@ func TestPrevCloseCacheNegativeEntryPersists(t *testing.T) {
 	t.Parallel()
 	c := newPrevCloseCache()
 	now := time.Now()
-	c.put("ZZZZ", prevCloseEntry{value: 0, asOf: now})
+	c.put("ZZZZ", prevCloseEntry{value: 0}, now)
 
 	got, ok := c.get("ZZZZ", now.Add(30*time.Minute))
 	if !ok {

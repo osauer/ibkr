@@ -187,14 +187,8 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 	// sign (e.g. "+12,584.6938" = 12).
 	const labelWidth = 22
 	const valueWidth = 14
-	rightPad := func(s string, w int) string {
-		if pad := w - len(s); pad > 0 {
-			return strings.Repeat(" ", pad) + s
-		}
-		return s
-	}
 	if p.EffectiveDelta != nil {
-		val := rightPad(formatSignedGrouped(*p.EffectiveDelta, 1), valueWidth)
+		val := padLeftVisible(formatSignedGrouped(*p.EffectiveDelta, 1), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s  share-equivalents\n", labelWidth, "Effective delta", env.bold(val))
 	}
 	if p.DollarDelta != nil {
@@ -202,22 +196,22 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 		if ccy == "" {
 			ccy = "?"
 		}
-		val := rightPad(formatMoneyBare(*p.DollarDelta), valueWidth)
+		val := padLeftVisible(formatMoneyBare(*p.DollarDelta), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s  %s\n", labelWidth, "Dollar delta", env.bold(val), ccy)
 	}
 	if p.DailyTheta != nil {
 		fmt.Fprintf(out, "  %-*s  %s  / day\n", labelWidth, "Daily theta", env.formatPnLRight(*p.DailyTheta, valueWidth))
 	}
 	if p.Gamma != nil {
-		val := rightPad(formatSignedGrouped(*p.Gamma, 4), valueWidth)
+		val := padLeftVisible(formatSignedGrouped(*p.Gamma, 4), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s\n", labelWidth, "Gamma", val)
 	}
 	if p.Vega != nil {
-		val := rightPad(formatSignedGrouped(*p.Vega, 2), valueWidth)
+		val := padLeftVisible(formatSignedGrouped(*p.Vega, 2), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s  / 1 vol pt\n", labelWidth, "Vega", val)
 	}
 	if p.GreeksTotal > 0 {
-		cov := rightPad(fmt.Sprintf("%d / %d", p.GreeksCoverage, p.GreeksTotal), valueWidth)
+		cov := padLeftVisible(fmt.Sprintf("%d / %d", p.GreeksCoverage, p.GreeksTotal), valueWidth)
 		if p.GreeksCoverage < p.GreeksTotal {
 			fmt.Fprintf(out, "  %-*s  %s  legs (partial — model abstained or OOH)\n",
 				labelWidth, "Greeks coverage", cov)
@@ -231,7 +225,7 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 		if base == "" {
 			base = "base"
 		}
-		val := rightPad(formatMoneyBare(*p.FXSensitivityPerPct), valueWidth)
+		val := padLeftVisible(formatMoneyBare(*p.FXSensitivityPerPct), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s  %s per +1%% FX\n",
 			labelWidth, "FX sensitivity", val, base)
 	}
@@ -377,14 +371,7 @@ func (e *Env) formatDayChange(chg, pct *float64, w int) string {
 	if pad := w - len(s); pad > 0 {
 		s += strings.Repeat(" ", pad)
 	}
-	switch {
-	case *chg > 0:
-		return e.green(s)
-	case *chg < 0:
-		return e.red(s)
-	default:
-		return e.dim(s)
-	}
+	return e.colorBySign(*chg, s, signPnL)
 }
 
 // formatGreeksLine renders a per-leg Greeks tuple in the most compact

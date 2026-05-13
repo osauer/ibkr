@@ -71,10 +71,10 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 	if len(ledger) == 0 {
 		return nil
 	}
-	baseCcy = strings.ToUpper(strings.TrimSpace(baseCcy))
+	baseCcy = normSym(baseCcy)
 	out := make([]rpc.CurrencyExposure, 0, len(ledger))
 	for ccy, row := range ledger {
-		upper := strings.ToUpper(strings.TrimSpace(ccy))
+		upper := normSym(ccy)
 		if upper == baseCcy {
 			continue
 		}
@@ -104,10 +104,8 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 // applies the optional symbol/type filter.
 func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rpc.PositionsResult, error) {
 	var p rpc.PositionsListParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("decode params: %w", err)
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
 	c := s.gatewayConnector()
 	if c == nil {
@@ -124,7 +122,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 		Stocks:   []rpc.PositionView{},
 		Options:  []rpc.PositionView{},
 	}
-	wantSym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+	wantSym := normSym(p.Symbol)
 	wantType := strings.ToLower(strings.TrimSpace(p.Type))
 
 	for _, pos := range positions {
@@ -210,7 +208,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// Empty map → no FX data yet (pre-handshake or single-currency
 	// account); leaves all pointers nil.
 	ledger := c.CurrencyLedgerSnapshot()
-	baseCcy := strings.ToUpper(strings.TrimSpace(s.cachedBaseCurrency()))
+	baseCcy := normSym(s.cachedBaseCurrency())
 	fillFXRates(res.Stocks, ledger, baseCcy)
 	fillFXRates(res.Options, ledger, baseCcy)
 
@@ -243,7 +241,7 @@ func (s *Server) cachedBaseCurrency() string {
 // the gateway's occasional float drift (e.g. 1.0000000001).
 func baseCurrencyFromRaw(raw map[string]string) string {
 	if v, ok := raw["Currency"]; ok {
-		ccy := strings.ToUpper(strings.TrimSpace(v))
+		ccy := normSym(v)
 		if ccy != "" && ccy != "BASE" {
 			return ccy
 		}
@@ -255,7 +253,7 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 		if !ok {
 			continue
 		}
-		ccy = strings.ToUpper(strings.TrimSpace(ccy))
+		ccy = normSym(ccy)
 		if ccy == "" || ccy == "BASE" {
 			continue
 		}
@@ -277,7 +275,7 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 func fillFXRates(rows []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) {
 	for i := range rows {
 		p := &rows[i]
-		ccy := strings.ToUpper(strings.TrimSpace(p.Currency))
+		ccy := normSym(p.Currency)
 		if ccy == "" || ccy == baseCcy {
 			continue
 		}
@@ -337,7 +335,7 @@ func (s *Server) prewarmPrevCloses(ctx context.Context, c *ibkrlib.Connector, st
 	seen := map[string]bool{}
 	var jobs []string
 	for _, p := range stocks {
-		sym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+		sym := normSym(p.Symbol)
 		if sym == "" || seen[sym] {
 			continue
 		}
@@ -347,35 +345,13 @@ func (s *Server) prewarmPrevCloses(ctx context.Context, c *ibkrlib.Connector, st
 		}
 		jobs = append(jobs, sym)
 	}
-	if len(jobs) == 0 {
-		return
-	}
-
-	jobCh := make(chan string, len(jobs))
-	for _, j := range jobs {
-		jobCh <- j
-	}
-	close(jobCh)
-
-	workers := positionsPrewarmWorkers
-	if workers > len(jobs) {
-		workers = len(jobs)
-	}
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for sym := range jobCh {
-				if ctx.Err() != nil {
-					return
-				}
-				pc := briefSnapshotClose(ctx, c, sym, 1*time.Second)
-				s.prevCloses.put(sym, prevCloseEntry{value: pc, asOf: time.Now()})
-			}
-		}()
-	}
-	wg.Wait()
+	runBounded(jobs, positionsPrewarmWorkers, func(sym string) {
+		if ctx.Err() != nil {
+			return
+		}
+		pc := briefSnapshotClose(ctx, c, sym, 1*time.Second)
+		s.prevCloses.put(sym, prevCloseEntry{value: pc}, time.Now())
+	})
 }
 
 // fillDailyChange populates PrevClose / DayChange / DayChangePct on each
@@ -389,7 +365,7 @@ func (s *Server) fillDailyChange(stocks []rpc.PositionView) {
 	now := time.Now()
 	for i := range stocks {
 		p := &stocks[i]
-		sym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+		sym := normSym(p.Symbol)
 		e, ok := s.prevCloses.get(sym, now)
 		if !ok || e.value <= 0 {
 			continue
@@ -411,7 +387,7 @@ func (s *Server) fillOptionUnderlyingPrevClose(options []rpc.PositionView) {
 	now := time.Now()
 	for i := range options {
 		p := &options[i]
-		under := strings.ToUpper(strings.TrimSpace(p.Symbol))
+		under := normSym(p.Symbol)
 		e, ok := s.prevCloses.get(under, now)
 		if !ok || e.value <= 0 {
 			continue
@@ -470,36 +446,13 @@ func (s *Server) prewarmOptionGreeks(ctx context.Context, c *ibkrlib.Connector, 
 			right:  p.Right,
 		})
 	}
-	if len(jobs) == 0 {
-		return
-	}
-
-	jobCh := make(chan job, len(jobs))
-	for _, j := range jobs {
-		jobCh <- j
-	}
-	close(jobCh)
-
-	workers := positionsPrewarmWorkers
-	if workers > len(jobs) {
-		workers = len(jobs)
-	}
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range jobCh {
-				if ctx.Err() != nil {
-					return
-				}
-				entry := captureOptionGreeks(ctx, c, j.under, j.expiry, j.strike, j.right, optionGreeksBudget)
-				entry.asOf = time.Now()
-				s.greeks.put(j.key, entry)
-			}
-		}()
-	}
-	wg.Wait()
+	runBounded(jobs, positionsPrewarmWorkers, func(j job) {
+		if ctx.Err() != nil {
+			return
+		}
+		entry := captureOptionGreeks(ctx, c, j.under, j.expiry, j.strike, j.right, optionGreeksBudget)
+		s.greeks.put(j.key, entry, time.Now())
+	})
 }
 
 // captureOptionGreeks runs one option subscribe → poll → unsubscribe
@@ -518,27 +471,19 @@ func captureOptionGreeks(ctx context.Context, c *ibkrlib.Connector, under, expir
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
-	deadline := time.Now().Add(budget)
-	poll := time.NewTicker(75 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		if g, ok := c.GetOptionGreeks(key); ok {
-			out.value = g
-			out.ok = true
-			if u, uok := c.GetOptionUnderlyingPrice(key); uok && u > 0 {
-				out.underlying = u
-			}
-			return out
+	_ = pollUntil(ctx, time.Now().Add(budget), func() bool {
+		g, ok := c.GetOptionGreeks(key)
+		if !ok {
+			return false
 		}
-		if time.Now().After(deadline) {
-			return out
+		out.value = g
+		out.ok = true
+		if u, uok := c.GetOptionUnderlyingPrice(key); uok && u > 0 {
+			out.underlying = u
 		}
-		select {
-		case <-ctx.Done():
-			return out
-		case <-poll.C:
-		}
-	}
+		return true
+	})
+	return out
 }
 
 // fillOptionGreeks copies cached Greeks onto each option leg's
@@ -620,7 +565,7 @@ func optionGreeksKey(p rpc.PositionView) string {
 	if p.SecType != "OPTION" && p.SecType != "OPT" {
 		return ""
 	}
-	under := strings.ToUpper(strings.TrimSpace(p.Symbol))
+	under := normSym(p.Symbol)
 	if under == "" || len(p.Expiry) < 8 || p.Strike <= 0 || p.Right == "" {
 		return ""
 	}
@@ -670,8 +615,8 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 				dollarDelta += *o.Delta * o.Quantity * float64(mult) * spot
 				haveDollarDelta = true
 				if dollarCcy == "" {
-					dollarCcy = strings.ToUpper(strings.TrimSpace(o.Currency))
-				} else if strings.ToUpper(strings.TrimSpace(o.Currency)) != dollarCcy {
+					dollarCcy = normSym(o.Currency)
+				} else if normSym(o.Currency) != dollarCcy {
 					dollarMixed = true
 				}
 			}
@@ -711,7 +656,7 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		if st.Mark > 0 {
 			dollarDelta += st.Quantity * st.Mark
 			haveDollarDelta = true
-			ccy := strings.ToUpper(strings.TrimSpace(st.Currency))
+			ccy := normSym(st.Currency)
 			if dollarCcy == "" {
 				dollarCcy = ccy
 			} else if ccy != dollarCcy {
@@ -768,32 +713,24 @@ func briefSnapshotClose(ctx context.Context, c *ibkrlib.Connector, symbol string
 	if c == nil {
 		return 0
 	}
-	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	sym := normSym(symbol)
 	if sym == "" {
 		return 0
 	}
-	if err := c.SubscribeMarketData(sym, []string{"100", "101", "104"}); err != nil {
-		// Already subscribed → fall through and read.
-	}
+	// SubscribeMarketData is idempotent — a pre-existing subscription is
+	// not an error here, just fall through and read.
+	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
-	deadline := time.Now().Add(timeout)
-	poll := time.NewTicker(75 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		md := c.GetMarketData()
-		if data, ok := md[sym]; ok && data.Close > 0 {
-			return data.Close
+	var close float64
+	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		if d.Close > 0 {
+			close = d.Close
+			return true
 		}
-		if time.Now().After(deadline) {
-			return 0
-		}
-		select {
-		case <-ctx.Done():
-			return 0
-		case <-poll.C:
-		}
-	}
+		return false
+	})
+	return close
 }
 
 // groupByUnderlying produces one PositionGroup per underlying symbol present
@@ -839,8 +776,8 @@ func groupByUnderlying(stocks, options []rpc.PositionView) []rpc.PositionGroup {
 // requests, leaving snapshot calls hanging until the deadline.
 func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rpc.Quote, error) {
 	var p rpc.QuoteSnapshotParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return nil, fmt.Errorf("decode params: %w", err)
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
 	if p.Contract.Symbol == "" {
 		return nil, errBadRequest("contract.symbol required")
@@ -854,7 +791,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		timeout = 5 * time.Second
 	}
 
-	sym := strings.ToUpper(strings.TrimSpace(p.Contract.Symbol))
+	sym := normSym(p.Contract.Symbol)
 	q := &rpc.Quote{
 		Symbol:   sym,
 		Contract: p.Contract,
@@ -878,52 +815,17 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	}
 	defer releaseSub()
 
-	deadline := time.Now().Add(timeout)
-	poll := time.NewTicker(75 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		md := c.GetMarketData()
-		if data, ok := md[sym]; ok {
-			if data.Bid > 0 {
-				v := data.Bid
-				q.Bid = &v
-			}
-			if data.Ask > 0 {
-				v := data.Ask
-				q.Ask = &v
-			}
-			if data.Last > 0 {
-				v := data.Last
-				q.Last = &v
-			}
-			if data.Close > 0 {
-				v := data.Close
-				q.PrevClose = &v
-			}
-			if data.BidSize > 0 {
-				v := data.BidSize
-				q.BidSize = &v
-			}
-			if data.AskSize > 0 {
-				v := data.AskSize
-				q.AskSize = &v
-			}
-			if data.Volume > 0 {
-				v := data.Volume
-				q.Volume = &v
-			}
-			if q.Bid != nil || q.Ask != nil || q.Last != nil {
-				break
-			}
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-poll.C:
-		}
+	if err := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		q.Bid = ptrIfPos(d.Bid)
+		q.Ask = ptrIfPos(d.Ask)
+		q.Last = ptrIfPos(d.Last)
+		q.PrevClose = ptrIfPos(d.Close)
+		q.BidSize = ptrIfPos(d.BidSize)
+		q.AskSize = ptrIfPos(d.AskSize)
+		q.Volume = ptrIfPos(d.Volume)
+		return q.Bid != nil || q.Ask != nil || q.Last != nil
+	}); err != nil && err != context.DeadlineExceeded {
+		return nil, err
 	}
 	// Compute deltas daemon-side so every consumer (CLI text, JSON,
 	// MCP) sees the same numbers without re-deriving them.
@@ -954,8 +856,8 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 // the body can ignore it.
 func (s *Server) handleCancel(req *rpc.Request) (struct{}, error) {
 	var p rpc.CancelParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return struct{}{}, &badRequestError{msg: err.Error()}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return struct{}{}, err
 	}
 	if p.ID == "" {
 		return struct{}{}, &badRequestError{msg: "id required"}
@@ -1068,13 +970,13 @@ func computeQuoteChange(last, prevClose *float64) (*float64, *float64) {
 func marketDataTypeName(t int) string {
 	switch t {
 	case 1:
-		return "live"
+		return rpc.MarketDataLive
 	case 2:
-		return "frozen"
+		return rpc.MarketDataFrozen
 	case 3:
-		return "delayed"
+		return rpc.MarketDataDelayed
 	case 4:
-		return "delayed-frozen"
+		return rpc.MarketDataDelayedFrozen
 	default:
 		return ""
 	}
@@ -1102,10 +1004,10 @@ const chainExpiryWorkers = 4
 // with IVStatus="timeout"|"unavailable" — never fail the whole call.
 func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rpc.ChainExpiriesResult, error) {
 	var p rpc.ChainExpiriesParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return nil, fmt.Errorf("decode params: %w", err)
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
-	sym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+	sym := normSym(p.Symbol)
 	if sym == "" {
 		return nil, errBadRequest("symbol required")
 	}
@@ -1177,7 +1079,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 			row.IVStatus = "unavailable"
 			rows[i] = row
 			// Negative-cache so we don't re-poll every refresh.
-			s.expiryIVs.put(sym, e, expiryIVEntry{status: "unavailable", asOf: now})
+			s.expiryIVs.put(sym, e, expiryIVEntry{status: "unavailable"}, now)
 			continue
 		}
 		atm := closestStrike(strikes, spot)
@@ -1186,46 +1088,26 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		jobs = append(jobs, job{idx: i, expiry: e, expiryYMD: expiryYMD, atm: atm})
 	}
 
-	if len(jobs) > 0 {
-		jobCh := make(chan job, len(jobs))
-		for _, j := range jobs {
-			jobCh <- j
+	// Workers write index-disjoint rows[j.idx], so no per-write mutex is
+	// needed — wg.Wait inside runBounded provides happens-before to the
+	// caller. The expiryIVs cache is responsible for its own locking.
+	runBounded(jobs, chainExpiryWorkers, func(j job) {
+		if ctx.Err() != nil {
+			return
 		}
-		close(jobCh)
-
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		workers := chainExpiryWorkers
-		if workers > len(jobs) {
-			workers = len(jobs)
+		iv, status := collectExpiryATMIV(ctx, c, sym, j.expiryYMD, j.atm, 2*time.Second)
+		entry := expiryIVEntry{status: status}
+		if iv != nil {
+			entry.iv = *iv
 		}
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for j := range jobCh {
-					if ctx.Err() != nil {
-						return
-					}
-					iv, status := collectExpiryATMIV(ctx, c, sym, j.expiryYMD, j.atm, 2*time.Second)
-					entry := expiryIVEntry{status: status, asOf: time.Now()}
-					if iv != nil {
-						entry.iv = *iv
-					}
-					s.expiryIVs.put(sym, j.expiry, entry)
-					mu.Lock()
-					if iv != nil {
-						rows[j.idx].IV = iv
-					}
-					rows[j.idx].IVStatus = status
-					mu.Unlock()
-				}
-			}()
+		s.expiryIVs.put(sym, j.expiry, entry, time.Now())
+		if iv != nil {
+			rows[j.idx].IV = iv
 		}
-		wg.Wait()
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+		rows[j.idx].IVStatus = status
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Decorate each row with the 1-σ implied move now that IV is settled.
@@ -1409,8 +1291,8 @@ func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expir
 // Greeks are populated only when IBKR delivers them.
 func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.ChainResult, error) {
 	var p rpc.ChainFetchParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return nil, fmt.Errorf("decode params: %w", err)
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
 	if p.Symbol == "" {
 		return nil, errBadRequest("symbol required")
@@ -1481,39 +1363,22 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		}
 	}
 
-	jobCh := make(chan job, len(jobs))
-	for _, j := range jobs {
-		jobCh <- j
-	}
-	close(jobCh)
-
-	const maxWorkers = 4
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for w := 0; w < maxWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range jobCh {
-				if ctx.Err() != nil {
-					return
-				}
-				var local rpc.ChainStrike
-				local.Strike = res.Strikes[j.idx].Strike
-				fillOptionLeg(ctx, c, &local, p.Symbol, expiryYMD, local.Strike, j.right)
-				// Two workers hitting the same row write to disjoint
-				// fields (call-side vs put-side), but Go's memory model
-				// still requires a happens-before for the publish. One
-				// mutex around the whole strikes slice is plenty —
-				// contention is bounded at one merge per leg (~22
-				// short critical sections).
-				mu.Lock()
-				mergeStrikeSide(&res.Strikes[j.idx], &local, j.right)
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
+	// Two workers can target the same strike (one C-leg, one P-leg)
+	// writing disjoint fields. Go's memory model still requires a
+	// happens-before for the publish, so one mutex around mergeStrikeSide
+	// is plenty — contention is bounded at one merge per leg.
+	var mergeMu sync.Mutex
+	runBounded(jobs, 4, func(j job) {
+		if ctx.Err() != nil {
+			return
+		}
+		var local rpc.ChainStrike
+		local.Strike = res.Strikes[j.idx].Strike
+		fillOptionLeg(ctx, c, &local, p.Symbol, expiryYMD, local.Strike, j.right)
+		mergeMu.Lock()
+		mergeStrikeSide(&res.Strikes[j.idx], &local, j.right)
+		mergeMu.Unlock()
+	})
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1548,25 +1413,15 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
 	deadline := time.Now().Add(2500 * time.Millisecond)
-	poll := time.NewTicker(75 * time.Millisecond)
-	defer poll.Stop()
 	var bid, ask, last float64
-	for {
-		md := c.GetMarketData()
-		if data, ok := md[key]; ok {
-			if data.Bid > 0 || data.Ask > 0 || data.Last > 0 {
-				bid, ask, last = data.Bid, data.Ask, data.Last
-				break
-			}
+	if err := pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
+		if d.Bid > 0 || d.Ask > 0 || d.Last > 0 {
+			bid, ask, last = d.Bid, d.Ask, d.Last
+			return true
 		}
-		if time.Now().After(deadline) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-poll.C:
-		}
+		return false
+	}); err != nil && err != context.DeadlineExceeded {
+		return
 	}
 	// Tick 13 (model option computation) typically arrives a beat after
 	// the first bid/ask print. IV gets its own 1 s budget, capped to
@@ -1582,16 +1437,15 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	if ivDeadline.After(deadline) {
 		ivDeadline = deadline
 	}
-	for time.Now().Before(ivDeadline) {
-		if v, ok := c.GetOptionIV(key); ok && v > 0 {
+	if err := pollUntil(ctx, ivDeadline, func() bool {
+		v, ok := c.GetOptionIV(key)
+		if ok && v > 0 {
 			iv = v
-			break
+			return true
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-poll.C:
-		}
+		return false
+	}); err != nil && err != context.DeadlineExceeded {
+		return
 	}
 	// Greeks: the same SubscribeOption path drives msg-21 model-
 	// computation ticks, so by the time we have IV the per-leg Delta
@@ -1678,31 +1532,25 @@ func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string,
 	if c == nil {
 		return 0, 0, 0, ""
 	}
-	sym := strings.ToUpper(strings.TrimSpace(symbol))
-	if err := c.SubscribeMarketData(sym, []string{"100", "101", "104"}); err != nil {
-		// Already subscribed → fall through and just read.
-	}
+	sym := normSym(symbol)
+	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
-	deadline := time.Now().Add(timeout)
-	poll := time.NewTicker(75 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		md := c.GetMarketData()
-		if data, ok := md[sym]; ok {
-			if data.Bid > 0 || data.Ask > 0 || data.Last > 0 {
-				return data.Bid, data.Ask, data.Last, marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
-			}
+	if err := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		if d.Bid > 0 || d.Ask > 0 || d.Last > 0 {
+			bid, ask, last = d.Bid, d.Ask, d.Last
+			// Capture data-type while the subscription is still live;
+			// once UnsubscribeMarketData fires (defer above), the
+			// connector's symbol→reqID mapping is gone and the type
+			// would always read "unknown".
+			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			return true
 		}
-		if time.Now().After(deadline) {
-			return 0, 0, 0, ""
-		}
-		select {
-		case <-ctx.Done():
-			return 0, 0, 0, ""
-		case <-poll.C:
-		}
+		return false
+	}); err != nil {
+		return 0, 0, 0, ""
 	}
+	return bid, ask, last, dataType
 }
 
 // adHocScanLimitCap is the maximum number of rows an ad-hoc scan
@@ -1733,8 +1581,8 @@ const defaultScanSubscriptionTimeout = 35 * time.Second
 //     Limit clamped to adHocScanLimitCap. Fixed 20s timeout.
 func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.ScanResult, error) {
 	var p rpc.ScanRunParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return nil, fmt.Errorf("decode params: %w", err)
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
 
 	var (
@@ -1935,10 +1783,8 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 // gateway and overwhelms typical agent context budgets if always sent.
 func (s *Server) handleScanParams(ctx context.Context, req *rpc.Request) (*rpc.ScanParamsResult, error) {
 	var p rpc.ScanParamsParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("decode params: %w", err)
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
 	c := s.gatewayConnector()
 	if c == nil {
@@ -2051,10 +1897,10 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 // ~63 bars. Days defaults to 90.
 func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc.HistoryDailyResult, error) {
 	var p rpc.HistoryDailyParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return nil, fmt.Errorf("decode params: %w", err)
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
 	}
-	sym := strings.ToUpper(strings.TrimSpace(p.Symbol))
+	sym := normSym(p.Symbol)
 	if sym == "" {
 		return nil, errBadRequest("symbol required")
 	}
@@ -2109,6 +1955,18 @@ type badRequestError struct{ msg string }
 func (e *badRequestError) Error() string { return e.msg }
 
 func errBadRequest(msg string) error { return &badRequestError{msg: msg} }
+
+// decodeParams unmarshals req.Params into dst and tags failures as bad-request
+// errors so classifyError surfaces them as CodeBadRequest instead of internal.
+func decodeParams[T any](raw json.RawMessage, dst *T) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return errBadRequest("decode params: " + err.Error())
+	}
+	return nil
+}
 
 // strikeStep picks a sensible strike interval based on spot. Mirrors common
 // IBKR option spacings; refined chains use whatever IBKR returns.

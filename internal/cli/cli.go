@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // Env is the per-invocation context shared by every subcommand.
@@ -357,7 +358,7 @@ func formatTimeShort(t time.Time) string {
 // is enabled so it pops above the table without needing the ⚠ glyph to do
 // all the work.
 func (e *Env) dataTypeBadge(dt string) string {
-	if dt == "" || dt == "live" {
+	if rpc.IsLiveDataType(dt) {
 		return ""
 	}
 	return e.yellow("data=" + dt + " ⚠")
@@ -384,19 +385,49 @@ func (e *Env) formatMoneyNeg(v float64) string {
 	return e.formatMoneyNegCcy(v, "USD")
 }
 
+// colorBySign wraps s with the env's red/green/dim color based on v.
+// Centralises the sign→color rule shared by the money / P&L / day-change
+// / Greeks formatters. signMode picks how zero is treated:
+//
+//	signNeg  — only negative is colored (red); zero/positive plain;
+//	           equal-zero is dim. Used by money displays where positive is
+//	           the resting state.
+//	signPnL  — negative red, positive green, zero dim. Used by P&L,
+//	           DayChange, Greeks delta — anywhere both directions matter.
+func (e *Env) colorBySign(v float64, s string, mode signMode) string {
+	switch mode {
+	case signNeg:
+		if v < 0 {
+			return e.red(s)
+		}
+		if v == 0 {
+			return e.dim(s)
+		}
+		return s
+	case signPnL:
+		if v > 0 {
+			return e.green(s)
+		}
+		if v < 0 {
+			return e.red(s)
+		}
+		return e.dim(s)
+	}
+	return s
+}
+
+type signMode int
+
+const (
+	signNeg signMode = iota // negative red, positive plain, zero dim
+	signPnL                 // positive green, negative red, zero dim
+)
+
 // formatMoneyNegCcy is the currency-aware variant of formatMoneyNeg.
 // Empty currency falls through to "$" so existing test golden output
 // stays valid until callers thread their currency through.
 func (e *Env) formatMoneyNegCcy(v float64, ccy string) string {
-	s := formatMoneyCcy(v, ccy)
-	switch {
-	case v < 0:
-		return e.red(s)
-	case v == 0:
-		return e.dim(s)
-	default:
-		return s
-	}
+	return e.colorBySign(v, formatMoneyCcy(v, ccy), signNeg)
 }
 
 // formatMoneyNegCcyRight is formatMoneyNegCcy with right-alignment
@@ -409,14 +440,7 @@ func (e *Env) formatMoneyNegCcyRight(v float64, ccy string, w int) string {
 	if pad := w - len(s); pad > 0 {
 		s = strings.Repeat(" ", pad) + s
 	}
-	switch {
-	case v < 0:
-		return e.red(s)
-	case v == 0:
-		return e.dim(s)
-	default:
-		return s
-	}
+	return e.colorBySign(v, s, signNeg)
 }
 
 // formatPnL renders a P&L amount with optional column padding, colored
@@ -431,14 +455,7 @@ func (e *Env) formatPnL(v float64, width int) string {
 			s += strings.Repeat(" ", pad)
 		}
 	}
-	switch {
-	case v > 0:
-		return e.green(s)
-	case v < 0:
-		return e.red(s)
-	default:
-		return e.dim(s)
-	}
+	return e.colorBySign(v, s, signPnL)
 }
 
 // formatPnLRight is formatPnL but right-aligns the value within the
@@ -451,14 +468,7 @@ func (e *Env) formatPnLRight(v float64, width int) string {
 	if pad := width - len(s); pad > 0 {
 		s = strings.Repeat(" ", pad) + s
 	}
-	switch {
-	case v > 0:
-		return e.green(s)
-	case v < 0:
-		return e.red(s)
-	default:
-		return e.dim(s)
-	}
+	return e.colorBySign(v, s, signPnL)
 }
 
 // formatSignedGrouped renders v with a leading sign and the integer

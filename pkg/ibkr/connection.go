@@ -220,10 +220,14 @@ type Connection struct {
 	statusMu sync.RWMutex
 
 	// Connection state
-	connectedAt   time.Time
-	lastHeartbeat time.Time
-	errorCount    int
-	lastError     error
+	connectedAt time.Time
+	// lastHeartbeatNano holds the most recent heartbeat time as Unix
+	// nanoseconds. Stored atomically so the per-message read path doesn't
+	// need to take statusMu.Lock just to bump the timestamp — readers were
+	// previously serialised behind every inbound tick.
+	lastHeartbeatNano atomic.Int64
+	errorCount        int
+	lastError         error
 
 	// Reconnection control
 	reconnectChan chan struct{}
@@ -806,10 +810,10 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 	c.resetStartAPIFailure()
 	c.resumeTransport()
 
+	c.lastHeartbeatNano.Store(time.Now().UnixNano())
 	c.statusMu.Lock()
 	c.status = StatusConnected
 	c.connectedAt = time.Now()
-	c.lastHeartbeat = time.Now()
 	c.errorCount = 0
 	c.lastError = nil
 	c.statusMu.Unlock()
@@ -964,8 +968,8 @@ func (c *Connection) heartbeatMonitor() {
 		case <-ticker.C:
 			c.statusMu.RLock()
 			status := c.status
-			lastHeartbeat := c.lastHeartbeat
 			c.statusMu.RUnlock()
+			lastHeartbeat := time.Unix(0, c.lastHeartbeatNano.Load())
 
 			if status != StatusConnected {
 				continue
@@ -984,10 +988,7 @@ func (c *Connection) heartbeatMonitor() {
 				// Don't disconnect immediately on heartbeat failure,
 				// let the timeout mechanism handle it
 			} else {
-				// Update heartbeat timestamp on successful send
-				c.statusMu.Lock()
-				c.lastHeartbeat = time.Now()
-				c.statusMu.Unlock()
+				c.lastHeartbeatNano.Store(time.Now().UnixNano())
 			}
 		}
 	}
@@ -1063,7 +1064,7 @@ func (c *Connection) GetConnectionInfo() map[string]interface{} {
 		"status":         c.status.String(),
 		"error_count":    c.errorCount,
 		"connected_at":   c.connectedAt,
-		"last_heartbeat": c.lastHeartbeat,
+		"last_heartbeat": time.Unix(0, c.lastHeartbeatNano.Load()),
 		"server_version": c.serverVersion,
 	}
 
@@ -1627,10 +1628,9 @@ func (c *Connection) readMessages() {
 			// Process the message
 			c.processMessage(msgBytes)
 
-			// Update heartbeat
-			c.statusMu.Lock()
-			c.lastHeartbeat = time.Now()
-			c.statusMu.Unlock()
+			// Update heartbeat (atomic so the read path doesn't serialise
+			// behind statusMu.Lock on every inbound tick).
+			c.lastHeartbeatNano.Store(time.Now().UnixNano())
 		}
 	}
 }
@@ -1691,10 +1691,7 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	case msgCurrentTimeMillis:
 		if len(fields) > 1 {
 			if ms, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
-				ts := time.Unix(0, ms*int64(time.Millisecond))
-				c.statusMu.Lock()
-				c.lastHeartbeat = ts
-				c.statusMu.Unlock()
+				c.lastHeartbeatNano.Store(ms * int64(time.Millisecond))
 			}
 		}
 	case msgManagedAccts:
@@ -3742,10 +3739,7 @@ func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTic
 		return 0, err
 	}
 
-	c.reqIDMu.Lock()
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	c.reqIDMu.Unlock()
+	reqID := c.GetNextRequestID()
 
 	// Copy the contract to avoid caller mutations affecting queued send.
 	contractCopy := contract
@@ -3875,10 +3869,7 @@ func (c *Connection) RequestHistoricalData(contract Contract, endDateTime, durat
 
 	duration = normalizeHistoricalDuration(duration)
 
-	c.reqIDMu.Lock()
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	c.reqIDMu.Unlock()
+	reqID := c.GetNextRequestID()
 
 	multiplier := ""
 	if contract.Multiplier != 0 {
@@ -4004,10 +3995,7 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 		return 0, fmt.Errorf("reqSecDefOptParams: underlying conID required")
 	}
 
-	c.reqIDMu.Lock()
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	c.reqIDMu.Unlock()
+	reqID := c.GetNextRequestID()
 
 	msg := c.encodeMsg(
 		reqSecDefOptParams,
@@ -4044,10 +4032,7 @@ func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange
 		return 0, err
 	}
 
-	c.reqIDMu.Lock()
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	c.reqIDMu.Unlock()
+	reqID := c.GetNextRequestID()
 
 	// Determine security type and base exchange based on symbol
 	secType, exchange, currency, primaryHint := classifySymbol(symbol)
@@ -4097,10 +4082,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 		return 0, err
 	}
 
-	c.reqIDMu.Lock()
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	c.reqIDMu.Unlock()
+	reqID := c.GetNextRequestID()
 
 	secType := "OPT"
 	exchange := "SMART"
@@ -4500,10 +4482,7 @@ func (c *Connection) RequestExecutions(filter ExecutionFilter) (int, error) {
 	reqID := filter.ReqID
 	if c.serverVersion >= minServerVerExecutionDataChain {
 		if reqID == 0 {
-			c.reqIDMu.Lock()
-			reqID = c.reqIDSeq
-			c.reqIDSeq++
-			c.reqIDMu.Unlock()
+			reqID = c.GetNextRequestID()
 		}
 	} else {
 		reqID = 0

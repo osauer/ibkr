@@ -93,8 +93,8 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	switch {
 	case res.Connected:
 		fmt.Fprintf(out, "  Server version: %d\n", res.ServerVersion)
-		dt := nonEmpty(res.DataType, "live")
-		if res.DataType != "" && res.DataType != "live" {
+		dt := nonEmpty(res.DataType, rpc.MarketDataLive)
+		if !rpc.IsLiveDataType(res.DataType) {
 			dt = env.yellow(dt + " ⚠")
 		}
 		fmt.Fprintf(out, "  Data type:      %s\n", dt)

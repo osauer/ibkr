@@ -216,10 +216,12 @@ func NewRateLimiter(ctx context.Context) *RateLimiter {
 	return rl
 }
 
-// Stop gracefully shuts down the rate limiter
+// Stop gracefully shuts down the rate limiter. The request queue is not
+// closed: producers (Submit and the retry goroutine) race with shutdown and
+// would panic on send to a closed channel. Instead, ctx cancellation signals
+// both producers and consumers to exit, and the queue is GC'd once unreferenced.
 func (rl *RateLimiter) Stop() {
 	rl.cancel()
-	close(rl.requestQueue)
 	rl.wg.Wait()
 }
 
@@ -248,7 +250,13 @@ func (rl *RateLimiter) SubmitWithPriority(reqType RequestType, sendFunc func() e
 		MaxRetries: maxRetries,
 	}
 
-	// Try to queue the request
+	// Try to queue the request. Check ctx first so a shutdown in progress
+	// returns immediately instead of racing the send.
+	select {
+	case <-rl.ctx.Done():
+		return fmt.Errorf("rate limiter stopped")
+	default:
+	}
 	select {
 	case rl.requestQueue <- req:
 		// Wait for result with timeout
@@ -261,6 +269,8 @@ func (rl *RateLimiter) SubmitWithPriority(reqType RequestType, sendFunc func() e
 		case <-rl.ctx.Done():
 			return fmt.Errorf("rate limiter stopped")
 		}
+	case <-rl.ctx.Done():
+		return fmt.Errorf("rate limiter stopped")
 	default:
 		// Queue is full
 		rl.incrementRejected()
@@ -277,11 +287,7 @@ func (rl *RateLimiter) processRequests() {
 		select {
 		case <-rl.ctx.Done():
 			return
-		case req, ok := <-rl.requestQueue:
-			if !ok {
-				return
-			}
-
+		case req := <-rl.requestQueue:
 			// Process the request with appropriate rate limiting
 			err := rl.executeRequest(req)
 

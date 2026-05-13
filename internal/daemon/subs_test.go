@@ -23,6 +23,10 @@ type fakeConnector struct {
 	subscribed     map[string]int // count of SubscribeMarketData calls per symbol
 	unsubscribed   map[string]int // count of UnsubscribeMarketData calls per symbol
 	subscribeError error
+	// subscribeDelay simulates a slow IBKR Subscribe call so tests can
+	// observe whether two cold-Subscribes for distinct symbols serialise
+	// behind one another.
+	subscribeDelay time.Duration
 }
 
 func newFakeConnector() *fakeConnector {
@@ -37,6 +41,9 @@ func newFakeConnector() *fakeConnector {
 func (f *fakeConnector) SubscribeMarketData(symbol string, _ []string) error {
 	if f.subscribeError != nil {
 		return f.subscribeError
+	}
+	if f.subscribeDelay > 0 {
+		time.Sleep(f.subscribeDelay)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -310,6 +317,45 @@ func TestCloseEmitsDaemonShutdown(t *testing.T) {
 		if f.Error == nil || f.Error.Code != rpc.FrameErrDaemonShutdown {
 			t.Errorf("%s: expected daemon_shutdown frame, got %+v", name, f)
 		}
+	}
+}
+
+// TestColdSubscribesForDifferentSymbolsDoNotSerialise covers the
+// per-symbol locking invariant: a slow IBKR Subscribe for symbol A
+// must not block a concurrent first-Subscribe for symbol B.
+//
+// Before the per-symbol init lock, both cold-Subscribes serialised on
+// the global subManager.mu, so the total elapsed time was ~2 × delay.
+// After the fix they overlap and total time stays near 1 × delay.
+func TestColdSubscribesForDifferentSymbolsDoNotSerialise(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConnector()
+	delay := 50 * time.Millisecond
+	fake.subscribeDelay = delay
+	m := newTestManager(fake)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	start := time.Now()
+	for _, sym := range []string{"AAA", "BBB"} {
+		sym := sym
+		go func() {
+			defer wg.Done()
+			_, release, err := m.Subscribe(sym)
+			if err != nil {
+				t.Errorf("subscribe %s: %v", sym, err)
+				return
+			}
+			release()
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	// Allow generous headroom for CI jitter, but reject the
+	// pathological serialised case (~2 × delay).
+	if elapsed > 2*delay-10*time.Millisecond {
+		t.Fatalf("cold subscribes serialised: elapsed=%v want < %v", elapsed, 2*delay-10*time.Millisecond)
 	}
 }
 

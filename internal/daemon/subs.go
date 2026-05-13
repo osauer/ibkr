@@ -46,10 +46,24 @@ type ibkrMarketConnector interface {
 // + concurrent snapshot polls). At most one IBKR market-data line is held
 // per symbol regardless of consumer count; the line is released the moment
 // the last consumer goes away.
+//
+// Locking:
+//   - subsMu guards the `subs` map only — held briefly for lookup/insert/
+//     delete operations.
+//   - Per-symbol init locks (initLocks, guarded by initMu) serialise the
+//     IBKR Subscribe/Unsubscribe call for each symbol. Two cold-Subscribes
+//     for different symbols proceed in parallel; two cold-Subscribes for
+//     the same symbol serialise (only the first does the IBKR call).
+//   - Per-entry locks (subEntry.mu) guard refcount, taps, and the cached
+//     change-detection state. Tick fan-out and refcount changes for symbol
+//     A do not block any operation on symbol B.
 type subManager struct {
-	mu       sync.Mutex
+	subsMu   sync.Mutex
 	subs     map[string]*subEntry
 	coalesce time.Duration
+
+	initMu     sync.Mutex
+	initLocks  map[string]*sync.Mutex
 
 	// connector is re-fetched on every tick so a daemon-side reconnect
 	// (gatewayConnector returning a fresh *Connector) is observed without
@@ -60,13 +74,16 @@ type subManager struct {
 }
 
 type subEntry struct {
-	sym      string
+	sym  string
+	stop chan struct{}
+
+	// mu guards everything below. Per-symbol scope so fan-out and
+	// release on one symbol don't block operations on another.
+	mu       sync.Mutex
 	refcount int
 	taps     map[*frameTap]struct{}
-	stop     chan struct{}
 
-	// Cached last-emitted state for change-detection. Mutated only by the
-	// tick loop while holding subManager.mu, same as taps.
+	// Cached last-emitted state for change-detection.
 	lastBid, lastAsk, lastLast float64
 	lastBidSize, lastAskSize   int
 	lastDataType               string
@@ -81,8 +98,76 @@ func newSubManager(connector func() ibkrMarketConnector) *subManager {
 	return &subManager{
 		subs:      map[string]*subEntry{},
 		coalesce:  defaultCoalesceInterval,
+		initLocks: map[string]*sync.Mutex{},
 		connector: connector,
 	}
+}
+
+// symInitLock returns (creating on demand) the per-symbol init mutex.
+// Callers hold it for the duration of an IBKR SubscribeMarketData /
+// UnsubscribeMarketData call so the IBKR-side state for that symbol is
+// serialised, without blocking operations on other symbols.
+func (m *subManager) symInitLock(sym string) *sync.Mutex {
+	m.initMu.Lock()
+	defer m.initMu.Unlock()
+	if m.initLocks == nil {
+		m.initLocks = map[string]*sync.Mutex{}
+	}
+	if lock, ok := m.initLocks[sym]; ok {
+		return lock
+	}
+	lock := &sync.Mutex{}
+	m.initLocks[sym] = lock
+	return lock
+}
+
+// acquire is the shared body of Subscribe and Hold. addTap=true attaches a
+// frame channel; addTap=false (Hold) keeps the IBKR line open without
+// receiving frames.
+func (m *subManager) acquire(sym string, addTap bool) (*frameTap, error) {
+	c := m.connector()
+	if c == nil {
+		return nil, ibkrlib.ErrIBKRUnavailable
+	}
+
+	initLock := m.symInitLock(sym)
+	initLock.Lock()
+	defer initLock.Unlock()
+
+	m.subsMu.Lock()
+	e, exists := m.subs[sym]
+	m.subsMu.Unlock()
+
+	if !exists {
+		// First reference for this symbol — open the IBKR line outside
+		// any cross-symbol lock. pkg/ibkr's SubscribeMarketData is itself
+		// idempotent, so a duplicate call from a stale prior session
+		// resolves without surfacing an error here.
+		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
+			return nil, fmt.Errorf("subscribe %s: %w", sym, err)
+		}
+		e = &subEntry{
+			sym:  sym,
+			taps: map[*frameTap]struct{}{},
+			stop: make(chan struct{}),
+		}
+		m.subsMu.Lock()
+		m.subs[sym] = e
+		m.subsMu.Unlock()
+		go m.tickLoop(e)
+	}
+
+	var tap *frameTap
+	if addTap {
+		tap = &frameTap{ch: make(chan rpc.Frame, 16)}
+	}
+	e.mu.Lock()
+	if tap != nil {
+		e.taps[tap] = struct{}{}
+	}
+	e.refcount++
+	e.mu.Unlock()
+	return tap, nil
 }
 
 // Subscribe acquires a market-data reference for sym and returns a frame
@@ -98,42 +183,17 @@ func (m *subManager) Subscribe(sym string) (<-chan rpc.Frame, func(), error) {
 	if sym == "" {
 		return nil, func() {}, errors.New("subscribe: symbol required")
 	}
-	c := m.connector()
-	if c == nil {
-		return nil, func() {}, ibkrlib.ErrIBKRUnavailable
+	tap, err := m.acquire(sym, true)
+	if err != nil {
+		return nil, func() {}, err
 	}
-
-	tap := &frameTap{ch: make(chan rpc.Frame, 16)}
-
-	m.mu.Lock()
-	e, exists := m.subs[sym]
-	if !exists {
-		// First reference for this symbol — open the IBKR line. pkg/ibkr's
-		// SubscribeMarketData is itself idempotent, so a duplicate call from
-		// a stale prior session resolves without surfacing an error here.
-		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
-			m.mu.Unlock()
-			return nil, func() {}, fmt.Errorf("subscribe %s: %w", sym, err)
-		}
-		e = &subEntry{
-			sym:  sym,
-			taps: map[*frameTap]struct{}{},
-			stop: make(chan struct{}),
-		}
-		m.subs[sym] = e
-		go m.tickLoop(e)
-	}
-	e.taps[tap] = struct{}{}
-	e.refcount++
-	m.mu.Unlock()
-
 	released := false
 	release := func() {
 		if released {
 			return
 		}
 		released = true
-		m.releaseTap(sym, tap)
+		m.release(sym, tap)
 	}
 	return tap.ch, release, nil
 }
@@ -147,91 +207,60 @@ func (m *subManager) Hold(sym string) (func(), error) {
 	if sym == "" {
 		return func() {}, errors.New("hold: symbol required")
 	}
-	c := m.connector()
-	if c == nil {
-		return func() {}, ibkrlib.ErrIBKRUnavailable
+	if _, err := m.acquire(sym, false); err != nil {
+		return func() {}, err
 	}
-
-	m.mu.Lock()
-	e, exists := m.subs[sym]
-	if !exists {
-		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
-			m.mu.Unlock()
-			return func() {}, fmt.Errorf("subscribe %s: %w", sym, err)
-		}
-		e = &subEntry{
-			sym:  sym,
-			taps: map[*frameTap]struct{}{},
-			stop: make(chan struct{}),
-		}
-		m.subs[sym] = e
-		go m.tickLoop(e)
-	}
-	e.refcount++
-	m.mu.Unlock()
-
 	released := false
 	return func() {
 		if released {
 			return
 		}
 		released = true
-		m.releaseHold(sym)
+		m.release(sym, nil)
 	}, nil
 }
 
-// releaseTap drops a tap from sym's entry, decrements the refcount, and
-// (on the last reference) tears down the IBKR line and the tick loop.
-func (m *subManager) releaseTap(sym string, tap *frameTap) {
-	m.mu.Lock()
+// release drops a reference. If tap is non-nil it is also removed from the
+// fan-out and its channel closed. On the last reference, the IBKR line is
+// unsubscribed and the tick loop stopped.
+func (m *subManager) release(sym string, tap *frameTap) {
+	initLock := m.symInitLock(sym)
+	initLock.Lock()
+	defer initLock.Unlock()
+
+	m.subsMu.Lock()
 	e, ok := m.subs[sym]
+	m.subsMu.Unlock()
 	if !ok {
-		m.mu.Unlock()
 		return
 	}
-	if _, present := e.taps[tap]; present {
-		delete(e.taps, tap)
-		// Closing the tap's channel signals the consumer's range loop to
-		// exit. Safe because no other goroutine sends on tap.ch.
-		close(tap.ch)
+
+	e.mu.Lock()
+	if tap != nil {
+		if _, present := e.taps[tap]; present {
+			delete(e.taps, tap)
+			// Closing the tap's channel signals the consumer's range
+			// loop to exit. Safe because the tick loop also takes e.mu
+			// before sending, so no concurrent send can race the close.
+			close(tap.ch)
+		}
 	}
-	teardown := false
 	e.refcount--
-	if e.refcount <= 0 {
-		delete(m.subs, sym)
-		teardown = true
-	}
-	m.mu.Unlock()
+	teardown := e.refcount <= 0
+	e.mu.Unlock()
+
 	if teardown {
+		m.subsMu.Lock()
+		delete(m.subs, sym)
+		m.subsMu.Unlock()
 		m.teardown(e, sym)
 	}
 }
 
-// releaseHold drops a hold, decrementing the refcount. Symmetric with
-// releaseTap minus the tap-channel close (the holder never had one).
-func (m *subManager) releaseHold(sym string) {
-	m.mu.Lock()
-	e, ok := m.subs[sym]
-	if !ok {
-		m.mu.Unlock()
-		return
-	}
-	teardown := false
-	e.refcount--
-	if e.refcount <= 0 {
-		delete(m.subs, sym)
-		teardown = true
-	}
-	m.mu.Unlock()
-	if teardown {
-		m.teardown(e, sym)
-	}
-}
-
-// teardown stops the tick loop and unsubscribes the IBKR line. Caller has
-// already removed the entry from m.subs under the lock; this happens
-// outside the lock so the IBKR call (which can block) doesn't serialize
-// other Subscribe/Hold calls behind it.
+// teardown stops the tick loop and unsubscribes the IBKR line. The IBKR
+// call happens under the per-symbol init lock (held by the caller) so a
+// concurrent Subscribe for the same symbol waits for unsubscribe to
+// complete before issuing a fresh subscribe.
 func (m *subManager) teardown(e *subEntry, sym string) {
 	close(e.stop)
 	if c := m.connector(); c != nil {
@@ -245,8 +274,7 @@ func (m *subManager) teardown(e *subEntry, sym string) {
 //
 // Gateway-loss detection is the connector() returning nil mid-stream: in
 // that case the loop emits a terminal gateway_lost frame to every tap,
-// closes them, and returns. tearing-down state is done under the lock to
-// match Subscribe/Hold's invariants.
+// closes them, and returns.
 func (m *subManager) tickLoop(e *subEntry) {
 	coalesce := m.coalesce
 	if coalesce <= 0 {
@@ -273,21 +301,12 @@ func (m *subManager) tickLoop(e *subEntry) {
 			}
 			dt := marketDataTypeName(c.GetMarketDataTypeForSymbol(e.sym))
 
-			m.mu.Lock()
-			// Re-check that the entry is still alive — a concurrent
-			// teardown can race with a tick: refcount went to zero, the
-			// last release ran, then the tick fires before the loop sees
-			// the stop signal. Drop the tick rather than fanning out to
-			// already-closed channels.
-			if _, alive := m.subs[e.sym]; !alive {
-				m.mu.Unlock()
-				return
-			}
+			e.mu.Lock()
 			if e.emitted &&
 				md.Bid == e.lastBid && md.Ask == e.lastAsk && md.Last == e.lastLast &&
 				md.BidSize == e.lastBidSize && md.AskSize == e.lastAskSize &&
 				dt == e.lastDataType {
-				m.mu.Unlock()
+				e.mu.Unlock()
 				continue
 			}
 			frame := buildFrame(md, dt)
@@ -304,7 +323,7 @@ func (m *subManager) tickLoop(e *subEntry) {
 			e.lastBidSize, e.lastAskSize = md.BidSize, md.AskSize
 			e.lastDataType = dt
 			e.emitted = true
-			m.mu.Unlock()
+			e.mu.Unlock()
 		}
 	}
 }
@@ -314,16 +333,25 @@ func (m *subManager) tickLoop(e *subEntry) {
 // against double-call: a second invocation against an already-torn-down sym
 // is a no-op.
 func (m *subManager) emitError(sym string, code, message string) {
+	initLock := m.symInitLock(sym)
+	initLock.Lock()
+	defer initLock.Unlock()
+
 	frame := rpc.Frame{
 		T:     time.Now(),
 		Error: &rpc.FrameError{Code: code, Message: message},
 	}
-	m.mu.Lock()
+	m.subsMu.Lock()
 	e, ok := m.subs[sym]
+	if ok {
+		delete(m.subs, sym)
+	}
+	m.subsMu.Unlock()
 	if !ok {
-		m.mu.Unlock()
 		return
 	}
+
+	e.mu.Lock()
 	for tap := range e.taps {
 		select {
 		case tap.ch <- frame:
@@ -335,8 +363,8 @@ func (m *subManager) emitError(sym string, code, message string) {
 		}
 		close(tap.ch)
 	}
-	delete(m.subs, sym)
-	m.mu.Unlock()
+	e.taps = map[*frameTap]struct{}{}
+	e.mu.Unlock()
 	m.teardown(e, sym)
 }
 
@@ -344,12 +372,12 @@ func (m *subManager) emitError(sym string, code, message string) {
 // tears them down. Called from Server.Stop so MCP clients and CLI watchers
 // see a structured terminal frame instead of an opaque socket close.
 func (m *subManager) Close() {
-	m.mu.Lock()
+	m.subsMu.Lock()
 	syms := make([]string, 0, len(m.subs))
 	for sym := range m.subs {
 		syms = append(syms, sym)
 	}
-	m.mu.Unlock()
+	m.subsMu.Unlock()
 	for _, sym := range syms {
 		m.emitError(sym, rpc.FrameErrDaemonShutdown, "ibkr daemon shutting down")
 	}
@@ -358,34 +386,24 @@ func (m *subManager) Close() {
 // activeCount reports the number of distinct symbols currently held by
 // the manager. Used by tests; safe to call concurrently.
 func (m *subManager) activeCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
 	return len(m.subs)
 }
 
 // buildFrame projects an *ibkrlib.MarketData snapshot into the wire frame
 // shape, using nil pointers for fields the gateway hasn't delivered yet.
+// Note: the original code lifted on `!= 0` for all fields, but bid/ask/last
+// only carry positive prices and negative values would be a protocol bug,
+// so ptrIfPos is the safer semantic.
 func buildFrame(md *ibkrlib.MarketData, dt string) rpc.Frame {
-	f := rpc.Frame{T: time.Now(), DataType: dt}
-	if md.Bid != 0 {
-		v := md.Bid
-		f.Bid = &v
+	return rpc.Frame{
+		T:        time.Now(),
+		DataType: dt,
+		Bid:      ptrIfPos(md.Bid),
+		Ask:      ptrIfPos(md.Ask),
+		Last:     ptrIfPos(md.Last),
+		BidSize:  ptrIfPos(md.BidSize),
+		AskSize:  ptrIfPos(md.AskSize),
 	}
-	if md.Ask != 0 {
-		v := md.Ask
-		f.Ask = &v
-	}
-	if md.Last != 0 {
-		v := md.Last
-		f.Last = &v
-	}
-	if md.BidSize != 0 {
-		v := md.BidSize
-		f.BidSize = &v
-	}
-	if md.AskSize != 0 {
-		v := md.AskSize
-		f.AskSize = &v
-	}
-	return f
 }
