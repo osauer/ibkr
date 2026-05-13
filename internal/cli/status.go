@@ -49,31 +49,55 @@ func runStatus(ctx context.Context, env *Env, args []string) int {
 	if *jsonOut {
 		return printJSON(env, res)
 	}
+	renderStatusText(env, &res)
+	if !res.Connected {
+		return 1
+	}
+	return 0
+}
+
+// renderStatusText prints the health snapshot as the user-facing status
+// screen. Split out from runStatus so the preview tool and future tests
+// can exercise the rendering without a live socket.
+func renderStatusText(env *Env, res *rpc.HealthResult) {
 	out := env.Stdout
+
+	// State is the headline signal: ok / degraded / starting. Color it so
+	// the answer to "is the gateway up?" lands on the first line without
+	// having to scan the Connected row. degraded → yellow (warning,
+	// matches the data-type badges); starting → dim (transient, no
+	// action needed); ok → plain.
 	state := "ok"
 	connecting := false
 	if !res.Connected {
 		if res.LastError != "" {
-			state = "degraded — gateway not connected"
+			state = env.yellow("degraded ⚠ gateway not connected")
 		} else {
-			state = "starting — gateway handshake in progress"
+			state = env.dim("starting · gateway handshake in progress")
 			connecting = true
 		}
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "ibkr daemon %s  ·  uptime %s  ·  %s\n", res.DaemonVersion, time.Duration(res.UptimeSeconds)*time.Second, state)
+	fmt.Fprintf(out, "ibkr daemon %s  ·  uptime %s  ·  %s\n",
+		res.DaemonVersion, time.Duration(res.UptimeSeconds)*time.Second, state)
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  Account:        %s\n", nonEmpty(res.Account, "auto-detect"))
-	fmt.Fprintf(out, "  Gateway:        %s:%d %s\n", res.GatewayHost, res.GatewayPort, formatGatewayBadge(res))
+	fmt.Fprintf(out, "  Gateway:        %s:%d %s\n", res.GatewayHost, res.GatewayPort, formatGatewayBadge(*res))
 	if len(res.Alternates) > 0 {
 		fmt.Fprintf(out, "                  also up: %s\n", joinPorts(res.Alternates))
 	}
 	fmt.Fprintf(out, "  Client ID:      %d\n", res.ClientID)
-	fmt.Fprintf(out, "  Connected:      %v\n", res.Connected)
+	// Bold the Connected value: it's the single hero answer per screen —
+	// everything else on the page is context for this one yes/no.
+	fmt.Fprintf(out, "  Connected:      %s\n", env.bold(fmt.Sprintf("%v", res.Connected)))
 	switch {
 	case res.Connected:
 		fmt.Fprintf(out, "  Server version: %d\n", res.ServerVersion)
-		fmt.Fprintf(out, "  Data type:      %s\n", nonEmpty(res.DataType, "live"))
+		dt := nonEmpty(res.DataType, "live")
+		if res.DataType != "" && res.DataType != "live" {
+			dt = env.yellow(dt + " ⚠")
+		}
+		fmt.Fprintf(out, "  Data type:      %s\n", dt)
 	case connecting:
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "  Handshake did not complete within %s. Check the daemon log for\n", handshakeWaitBudget)
@@ -81,19 +105,15 @@ func runStatus(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(out, "    Configure → Settings → API → Settings → 'Enable ActiveX and Socket Clients'")
 		fmt.Fprintln(out, "    Trusted IPs include 127.0.0.1 (or empty)")
 		fmt.Fprintln(out, "    Login fully completed (not paused at 2FA)")
-		fmt.Fprintln(out, "  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log")
+		fmt.Fprintln(out, env.dim("  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log"))
 	default:
 		if res.LastError != "" {
-			fmt.Fprintf(out, "  Reason:         %s\n", res.LastError)
+			fmt.Fprintf(out, "  Reason:         %s\n", env.red(res.LastError))
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log")
+		fmt.Fprintln(out, env.dim("  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log"))
 	}
 	fmt.Fprintln(out)
-	if !res.Connected {
-		return 1
-	}
-	return 0
 }
 
 // isHandshakeInFlight reports whether the daemon has reported neither a
