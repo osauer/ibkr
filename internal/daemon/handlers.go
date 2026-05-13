@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -218,35 +219,50 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	return res, nil
 }
 
-// cachedBaseCurrency returns the account's base currency. We resolve it
-// from the gateway's continuously-fresh accountSummary map (the same
-// source CurrencyLedgerSnapshot consults) — the raw map carries the
-// AccountReady/AccountType/etc. "BASE" tags, but the canonical
-// base-currency answer comes from any tag with the bare key form
-// (e.g. NetLiquidation without a suffix) plus the currency the gateway
-// echoes alongside. Empty string when unknown; callers fall back to
-// treating every currency as non-base, which surfaces an exposure row
-// but no sensitivity (the safer "I don't know yet" answer).
+// cachedBaseCurrency returns the account's base currency, derived from
+// the gateway's continuously-fresh accountSummary map. Empty string when
+// unknown; callers fall back to treating every currency as non-base,
+// which surfaces an exposure row but no sensitivity (the safer "I don't
+// know yet" answer).
 func (s *Server) cachedBaseCurrency() string {
 	c := s.gatewayConnector()
 	if c == nil {
 		return ""
 	}
-	raw := c.AccountSummaryRaw()
-	// $LEDGER:ALL emits a "BASE" row with ExchangeRate=1; the base
-	// currency itself is named in the AccountType/AccountReady tags,
-	// but the most reliable signal is the unsuffixed NetLiquidation
-	// tag plus the currency the gateway reported alongside. Fall back
-	// to scanning the ledger for the currency whose ExchangeRate==1.
-	for k, v := range raw {
-		if k == "Currency" {
-			return strings.ToUpper(strings.TrimSpace(v))
+	return baseCurrencyFromRaw(c.AccountSummaryRaw())
+}
+
+// baseCurrencyFromRaw resolves the account's base currency by scanning
+// the raw accountSummary map. The bare "Currency" tag IBKR emits carries
+// the literal string "BASE" (the pseudo-currency name, not the actual
+// base currency), so it is useless on its own — we only return it when
+// the value is something other than "BASE". The reliable signal is the
+// `$LEDGER:ALL` subscription's `ExchangeRate_<ccy>` rows: the currency
+// whose rate is ~1.0 is the base by definition. A small epsilon tolerates
+// the gateway's occasional float drift (e.g. 1.0000000001).
+func baseCurrencyFromRaw(raw map[string]string) string {
+	if v, ok := raw["Currency"]; ok {
+		ccy := strings.ToUpper(strings.TrimSpace(v))
+		if ccy != "" && ccy != "BASE" {
+			return ccy
 		}
 	}
-	for ccy, row := range c.CurrencyLedgerSnapshot() {
-		if row.ExchangeRate == 1.0 {
-			return strings.ToUpper(strings.TrimSpace(ccy))
+	const erPrefix = "ExchangeRate_"
+	const eps = 1e-6
+	for k, v := range raw {
+		ccy, ok := strings.CutPrefix(k, erPrefix)
+		if !ok {
+			continue
 		}
+		ccy = strings.ToUpper(strings.TrimSpace(ccy))
+		if ccy == "" || ccy == "BASE" {
+			continue
+		}
+		rate, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || math.Abs(rate-1.0) > eps {
+			continue
+		}
+		return ccy
 	}
 	return ""
 }

@@ -141,3 +141,71 @@ func TestBuildCurrencyExposureFallbackByFXRate(t *testing.T) {
 		t.Errorf("Currency = %q, want USD", got[0].Currency)
 	}
 }
+
+// TestBaseCurrencyFromRaw_IgnoresLiteralBASE is the regression for the
+// "FX sensitivity ... BASE per +1% FX" rendering: when IBKR emits a bare
+// `Currency` tag whose value is the literal string "BASE" (the gateway's
+// pseudo-currency name, not the actual base currency identity), we MUST
+// fall through to the ExchangeRate_<ccy>=1.0 signal instead of returning
+// "BASE" as if it were a real currency.
+func TestBaseCurrencyFromRaw_IgnoresLiteralBASE(t *testing.T) {
+	raw := map[string]string{
+		"Currency":          "BASE",
+		"ExchangeRate_EUR":  "1.0",
+		"ExchangeRate_USD":  "0.9214",
+		"ExchangeRate_BASE": "1.0",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "EUR" {
+		t.Errorf("baseCurrencyFromRaw = %q, want EUR (literal BASE must be ignored)", got)
+	}
+}
+
+// TestBaseCurrencyFromRaw_RealCurrencyTag: if the gateway happens to
+// emit a Currency tag whose value is an actual currency code (rare but
+// not impossible), prefer it over the ledger scan.
+func TestBaseCurrencyFromRaw_RealCurrencyTag(t *testing.T) {
+	raw := map[string]string{
+		"Currency":         "eur",
+		"ExchangeRate_USD": "0.9214",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "EUR" {
+		t.Errorf("baseCurrencyFromRaw = %q, want EUR", got)
+	}
+}
+
+// TestBaseCurrencyFromRaw_ExchangeRateOnly: no Currency tag at all,
+// pure $LEDGER:ALL output — the ExchangeRate_<ccy>=1.0 row identifies
+// the base.
+func TestBaseCurrencyFromRaw_ExchangeRateOnly(t *testing.T) {
+	raw := map[string]string{
+		"ExchangeRate_EUR": "1.0",
+		"ExchangeRate_USD": "0.9214",
+		"ExchangeRate_GBP": "1.1500",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "EUR" {
+		t.Errorf("baseCurrencyFromRaw = %q, want EUR", got)
+	}
+}
+
+// TestBaseCurrencyFromRaw_NoSignal: nothing usable in the raw map — we
+// return empty, never invent a default.
+func TestBaseCurrencyFromRaw_NoSignal(t *testing.T) {
+	raw := map[string]string{
+		"NetLiquidation":   "100000",
+		"AccountReady":     "true",
+		"ExchangeRate_USD": "0.9214",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "" {
+		t.Errorf("baseCurrencyFromRaw = %q, want empty", got)
+	}
+}
+
+// TestBaseCurrencyFromRaw_EmptyMap: pre-handshake state.
+func TestBaseCurrencyFromRaw_EmptyMap(t *testing.T) {
+	if got := baseCurrencyFromRaw(nil); got != "" {
+		t.Errorf("baseCurrencyFromRaw(nil) = %q, want empty", got)
+	}
+	if got := baseCurrencyFromRaw(map[string]string{}); got != "" {
+		t.Errorf("baseCurrencyFromRaw(empty) = %q, want empty", got)
+	}
+}
