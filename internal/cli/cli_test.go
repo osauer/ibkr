@@ -476,7 +476,7 @@ func TestRenderPositionsByUnderlying_GreeksSuffix(t *testing.T) {
 			}
 		}
 	})
-	t.Run("all greeks nil → no suffix line", func(t *testing.T) {
+	t.Run("all greeks nil → placeholders rendered, column shape preserved", func(t *testing.T) {
 		opt := rpc.PositionView{
 			Symbol: "AAPL", Right: "C", Strike: 210, Expiry: "20251219",
 			Quantity: 2, AvgCost: 5.10, Mark: 7.85, UnrealizedPnL: 550,
@@ -490,8 +490,16 @@ func TestRenderPositionsByUnderlying_GreeksSuffix(t *testing.T) {
 		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 		_ = renderPositionsByUnderlying(env, res)
 		out := stdout.String()
-		if strings.ContainsAny(out, "ΔΓΘν") {
-			t.Errorf("greek line must not appear when all greeks are nil:\n%s", out)
+		// Symbols stay visible so a reader can see Greeks aren't yet
+		// available rather than missing them as a blank cell.
+		for _, want := range []string{"Δ", "Γ", "Θ", "ν", "—"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("placeholder greek glyph %q missing:\n%s", want, out)
+			}
+		}
+		// No actual values should have been fabricated.
+		if strings.Contains(out, "+0.00") || strings.Contains(out, "-0.00") {
+			t.Errorf("nil greeks must not render as a zero substitute:\n%s", out)
 		}
 	})
 }

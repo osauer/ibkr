@@ -332,13 +332,14 @@ func (e *Env) formatDayChange(chg, pct *float64, w int) string {
 // space between greeks, 2 decimals everywhere ("Δ+0.62 Γ+0.31 Θ-0.01
 // ν+0.01" — 27 cells). Delta carries sign coloring (the headline risk
 // component); gamma / theta / vega print with sign but no color so the
-// eye is drawn to delta first. Empty string when no Greeks landed in
-// budget so callers can suppress the whole cell.
+// eye is drawn to delta first.
+//
+// Greeks that the daemon didn't capture render as a dim "Δ  —" / "Γ  —"
+// / "Θ  —" / "ν  —" placeholder so the column shape stays consistent
+// across rows — a blank cell would otherwise read as "Greeks don't
+// apply here" rather than the truth ("not yet captured, retry").
 func (e *Env) formatGreeksLine(o rpc.PositionView) string {
-	if o.Delta == nil && o.Gamma == nil && o.Theta == nil && o.Vega == nil {
-		return ""
-	}
-	var parts []string
+	delta := e.dim("Δ —")
 	if o.Delta != nil {
 		s := fmt.Sprintf("Δ%+0.2f", *o.Delta)
 		switch {
@@ -347,18 +348,21 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 		case *o.Delta < 0:
 			s = e.red(s)
 		}
-		parts = append(parts, s)
+		delta = s
 	}
+	gamma := e.dim("Γ —")
 	if o.Gamma != nil {
-		parts = append(parts, fmt.Sprintf("Γ%+0.2f", *o.Gamma))
+		gamma = fmt.Sprintf("Γ%+0.2f", *o.Gamma)
 	}
+	theta := e.dim("Θ —")
 	if o.Theta != nil {
-		parts = append(parts, fmt.Sprintf("Θ%+0.2f", *o.Theta))
+		theta = fmt.Sprintf("Θ%+0.2f", *o.Theta)
 	}
+	vega := e.dim("ν —")
 	if o.Vega != nil {
-		parts = append(parts, fmt.Sprintf("ν%+0.2f", *o.Vega))
+		vega = fmt.Sprintf("ν%+0.2f", *o.Vega)
 	}
-	return strings.Join(parts, " ")
+	return delta + " " + gamma + " " + theta + " " + vega
 }
 
 func formatExpiry(s string) string {
