@@ -118,6 +118,7 @@ Field meanings:
     "dollar_delta": 326584.5,
     "dollar_delta_currency": "USD",
     "daily_theta": -42.18,
+    "daily_theta_currency": "USD",
     "gamma": 12.4,
     "vega": 1205.0,
     "greeks_coverage": 5,
@@ -179,9 +180,13 @@ and `expiry` / `strike` / `right` together identify the contract.
   - `dollar_delta` / `dollar_delta_currency` — share-equivalents
     multiplied by each leg's contract-currency spot. Currency named
     separately so callers can convert if needed.
-  - `daily_theta` — Σ (theta × signed_qty × multiplier). IBKR reports
-    theta as daily decay, so the sum is the daily P&L from time decay
-    assuming everything else holds.
+  - `daily_theta` / `daily_theta_currency` — Σ (theta × signed_qty ×
+    multiplier). IBKR reports theta as daily decay, so the sum is the
+    daily P&L from time decay assuming everything else holds. The
+    currency follows the same single-ccy-or-"MIX" convention as
+    `dollar_delta_currency`: an ISO code when every contributing option
+    leg agrees, "MIX" when the book mixes currencies (in which case
+    the sum is genuinely undefined — render it without a single symbol).
   - `greeks_coverage` / `greeks_total` — count of option legs whose
     Greeks were captured / total option legs. Render partial-coverage
     explicitly to the user.
@@ -446,6 +451,7 @@ Three invocations share this result shape — preset, ad-hoc, and list-only diff
     {
       "rank": 1,
       "symbol": "NVDA",
+      "currency": "USD",
       "last": 458.02,
       "prev_close": 434.50,
       "change": 23.52,
@@ -466,6 +472,7 @@ Row fields:
 
 - `rank` — IBKR scanner ranking (0-indexed in the response, 1-indexed in the text renderer for readability).
 - `symbol` — ticker.
+- `currency` — ISO-4217 code for `last`/`prev_close`/`change`/`week_52_*`. Populated from the gateway's scannerData row (the contract currency comes back alongside symbol/exchange). Omitted by daemons older than v0.13.0; consumers should treat empty as "unknown" and fall back to `$`.
 - `last`, `prev_close`, `change`, `change_pct`, `volume` — populated by a follow-up market-data subscribe the daemon issues per row. IBKR's scanner subscription itself returns *only* rank + symbol (by protocol design — the leaderboard is a separate service from market data), so the daemon enriches each row in parallel. Nil fields mean the gateway didn't deliver the corresponding tick within the per-row enrichment window — common off-hours, especially for IV.
 - `iv` — underlying's averaged option implied volatility (from generic tick 106). Stored as a fraction: 0.234 = 23.4%. Present only when the symbol has actively-traded options *and* the gateway delivers the tick within the window.
 - `week_52_high`, `week_52_low` — 52-week price range (from generic tick 165). Used to gauge where the current price sits within the year's extremes.
