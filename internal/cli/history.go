@@ -44,8 +44,10 @@ func renderHistoryText(env *Env, r *rpc.HistoryDailyResult) int {
 		fmt.Fprintln(out)
 		return 0
 	}
-	fmt.Fprintf(out, "  %-10s  %10s  %10s  %10s  %10s  %s\n",
+	header := fmt.Sprintf("  %-10s  %10s  %10s  %10s  %10s  %s",
 		"DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME")
+	fmt.Fprintln(out, env.dim(header))
+	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, b := range r.Bars {
 		volPtr := b.Volume
 		fmt.Fprintf(out, "  %-10s  %10.2f  %10.2f  %10.2f  %10.2f  %s\n",
