@@ -113,8 +113,8 @@ func main() {
 
 	// Apply a default per-invocation deadline so a non-responsive daemon
 	// (deadlocked, SIGSTOP'd, kernel-stuck) cannot hang the CLI forever.
-	// Streaming commands (`quote --watch` is the only one today) bypass
-	// — a long-lived watch must outlive any unary budget.
+	// Streaming commands (`quote --watch`, `account --watch`, `positions
+	// --watch`) bypass — a long-lived watch must outlive any unary budget.
 	//
 	// `scan` gets a larger budget because the daemon-side MethodScanRun
 	// deadline is 75 s (35 s gateway scanner-subscription warmup off-hours

@@ -38,8 +38,8 @@ release. Do not invent or simulate trade execution.
 | Command | Purpose | Schema |
 |---|---|---|
 | `ibkr status` | Daemon + gateway health (run this first if anything fails) | [schemas.md#status](schemas.md#status) |
-| `ibkr account` | Account summary (NLV, BP, cash, margin) | [schemas.md#account](schemas.md#account) |
-| `ibkr positions` | Open positions; stocks and options separated | [schemas.md#positions](schemas.md#positions) |
+| `ibkr account` | Account summary (NLV, BP, cash, margin, daily P&L); add `--watch` for in-place refresh | [schemas.md#account](schemas.md#account) |
+| `ibkr positions` | Open positions (stocks + options) with per-position daily P&L; add `--watch` for in-place refresh | [schemas.md#positions](schemas.md#positions) |
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM --watch` | Streaming ticks (Ctrl-C to stop) | streaming frames per [schemas.md#frame](schemas.md#frame) |
@@ -59,9 +59,10 @@ symbols — the CLI hoists them automatically.
 ### Per-command flags
 
 - `ibkr status [--json]`
-- `ibkr account [--json]`
-- `ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--json]`
+- `ibkr account [--watch [--rate 1s]] [--json]` — `--watch` re-polls on the rate (default 1s) and redraws in place on a TTY; appends snapshots separated by a dim rule when piped. `--watch` and `--json` are mutually exclusive.
+- `ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch [--rate 2s]] [--json]`
   - `--by underlying` groups stock + option legs per underlying with group P&L totals; the JSON `by_underlying` array is always populated regardless of this flag.
+  - `--watch` re-polls on the rate (default 2s); same TTY/pipe behaviour as `account --watch`. Mutually exclusive with `--json`.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
 - `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
