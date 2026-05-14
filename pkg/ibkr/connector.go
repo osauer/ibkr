@@ -77,6 +77,13 @@ type Connector struct {
 	historicalMu      sync.Mutex
 	historicalReqs    map[int]*historicalRequest
 	historicalBackoff map[string]int
+
+	// pnl holds account-level and per-conId Daily P&L subscription state.
+	// The cache is on the Connector (not the Connection) so a Connection
+	// rebuild (reconnect) restarts the subscription cleanly — the daemon's
+	// post-connect setup re-issues reqPnL and per-position calls re-issue
+	// reqPnLSingle as needed. Never nil after NewConnector.
+	pnl *pnlCache
 }
 
 // ConnectorConfig holds configuration for the IBKR connector
@@ -221,6 +228,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		optUnderlyingPx:   make(map[string]float64),
 		historicalReqs:    make(map[int]*historicalRequest),
 		historicalBackoff: make(map[string]int),
+		pnl:               newPnLCache(),
 	}
 	conn.fetchContractDetails = conn.FetchContractDetails
 	return conn
@@ -642,6 +650,20 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 		c.ready = false
 	}
 	c.mu.Unlock()
+	// Forget the PnL reqIDs — they belong to a now-dead Connection. The
+	// daemon's post-connect setup callback re-subscribes once the next
+	// handshake completes; per-position subscriptions resume lazily on
+	// the next positions call.
+	if c.pnl != nil {
+		c.pnl.mu.Lock()
+		c.pnl.accountReqID = 0
+		c.pnl.accountAcct = ""
+		c.pnl.account = AccountDailyPnL{}
+		c.pnl.positionReqIDs = make(map[int]int)
+		c.pnl.positionByReqID = make(map[int]int)
+		c.pnl.positionSnapshot = make(map[int]PositionDailyPnL)
+		c.pnl.mu.Unlock()
+	}
 }
 
 // GetMarketDataTypeForSymbol returns the gateway's per-reqID
@@ -1258,6 +1280,12 @@ func (c *Connector) Stop() error {
 	c.mu.Unlock()
 
 	c.logInfo("Stopping IBKR connector")
+
+	// Cancel any live PnL subscriptions before the connection drops.
+	// Best-effort: the gateway drops subscriptions on socket close anyway,
+	// but explicit cancels keep the gateway-side reqID slot count tidy
+	// across daemon restarts.
+	c.cancelAllPnL()
 
 	// Release lease if we have one (fires onDisconnect → onConnectionLost
 	// callback chain; safe now that c.mu is released).
@@ -1926,7 +1954,8 @@ func (c *Connector) convertIBKRPositions(ibkrPositions map[string]*RawPosition) 
 			assetMultiplier = 1
 		}
 		result = append(result, &Position{
-			ID: fmt.Sprintf("pos-%s-%d", key, time.Now().Unix()),
+			ID:    fmt.Sprintf("pos-%s-%d", key, time.Now().Unix()),
+			ConID: pos.Contract.ConID,
 			Asset: Asset{
 				Symbol:     symbol,
 				Exchange:   pos.Contract.Exchange,
@@ -2012,6 +2041,16 @@ func (c *Connector) registerHandlers(conn *Connection) {
 		c.processSystemNotice(alias, note)
 	})
 
+	// Daily P&L streams: msgPnL (94) for account-level, msgPnLSingle (95)
+	// for per-conId. Subscriptions are owned by Connector.SubscribeAccountPnL
+	// / Connector.SubscribePositionDailyPnL; handlers update the connector's
+	// pnl cache for non-blocking reads by AccountDailyPnL / PositionDailyPnL.
+	conn.RegisterHandler(msgPnL, func(fields []string) {
+		c.handlePnL(fields)
+	})
+	conn.RegisterHandler(msgPnLSingle, func(fields []string) {
+		c.handlePnLSingle(fields)
+	})
 }
 
 // handleTickPrice processes tick price updates.

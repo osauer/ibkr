@@ -784,6 +784,13 @@ func (f *fakeAttempter) RequestAccountUpdates(account string) error {
 	f.requestedAccount.Store(account)
 	return nil
 }
+func (f *fakeAttempter) SubscribeAccountPnL(account string) error {
+	// Subscription kickoff has the same lifecycle as RequestAccountUpdates
+	// from the daemon's perspective: best-effort, fire-and-forget. The
+	// fake records nothing extra — the failover tests don't assert PnL
+	// subscription state and adding tracking would just be noise.
+	return nil
+}
 
 // The failover bug fix: when discovery picks a port that completes the
 // TCP probe but never handshakes (e.g. IB Gateway up but not logged in),

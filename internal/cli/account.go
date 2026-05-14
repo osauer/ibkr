@@ -56,11 +56,14 @@ func renderAccountText(env *Env, a *rpc.AccountResult) int {
 	fmt.Fprintf(out, "    Cushion                 %s\n", env.formatCushion(a.Cushion, accountValWidth))
 	fmt.Fprintln(out)
 
-	// P&L block sign-colours both directions — Unrealized/Realized are
-	// performance numbers, distinct from balances above.
-	fmt.Fprintln(out, env.dim("  P&L (today)"))
-	fmt.Fprintf(out, "    Unrealized              %s\n", env.formatSignedMoneyRight(a.UnrealizedPnL, base, accountValWidth))
-	fmt.Fprintf(out, "    Realized                %s\n", env.formatSignedMoneyRight(a.RealizedPnL, base, accountValWidth))
+	// Session P&L: inception-to-now Unrealized (vs cost basis on every
+	// open position) plus today's Realized closed-trade total. Sign-
+	// coloured both directions. The "Daily P&L" block further down is a
+	// different time horizon (start-of-trading-day delta from reqPnL) —
+	// they answer different questions and we surface both honestly.
+	fmt.Fprintln(out, env.dim("  Session P&L"))
+	fmt.Fprintf(out, "    Unrealized (open)       %s\n", env.formatSignedMoneyRight(a.UnrealizedPnL, base, accountValWidth))
+	fmt.Fprintf(out, "    Realized (today)        %s\n", env.formatSignedMoneyRight(a.RealizedPnL, base, accountValWidth))
 	fmt.Fprintln(out)
 
 	fmt.Fprintln(out, env.dim("  Margin"))
@@ -80,6 +83,7 @@ func renderAccountText(env *Env, a *rpc.AccountResult) int {
 		fmt.Fprintln(out)
 	}
 
+	renderDailyPnL(env, a, base, accountValWidth)
 	renderCurrencyExposure(env, a)
 	fmt.Fprintf(out, "  as of %s\n", formatTimeShort(a.AsOf))
 	return 0
@@ -129,6 +133,35 @@ func (e *Env) formatSignedMoneyRight(v float64, ccy string, w int) string {
 		s = strings.Repeat(" ", pad) + s
 	}
 	return e.colorBySign(v, s, signPnL)
+}
+
+// renderDailyPnL prints the account's start-of-trading-day P&L block when
+// the gateway has emitted at least one reqPnL frame (DailyPnL != nil).
+// The two decomposition lines (unrealized / realized) render only when
+// the gateway supplied them — older server versions emit only the bare
+// daily total. Silent when no data; never zero-substituted.
+//
+// "of which unrealized / realized" deliberately differs from the Session
+// P&L block's "Unrealized (open) / Realized (today)" labels above — both
+// blocks carry P&L numbers and the eye needs an unambiguous cue to tell
+// them apart on a glance. The Session block is inception-to-now; this
+// one is start-of-trading-day to now.
+func renderDailyPnL(env *Env, a *rpc.AccountResult, base string, width int) {
+	if a.DailyPnL == nil {
+		return
+	}
+	out := env.Stdout
+	fmt.Fprintf(out, "  Daily P&L               %s\n",
+		env.formatPnLCcyPtrRight(a.DailyPnL, base, width))
+	if a.DailyPnLUnrealized != nil {
+		fmt.Fprintf(out, "    of which unrealized   %s\n",
+			env.formatPnLCcyPtrRight(a.DailyPnLUnrealized, base, width))
+	}
+	if a.DailyPnLRealized != nil {
+		fmt.Fprintf(out, "    of which realized     %s\n",
+			env.formatPnLCcyPtrRight(a.DailyPnLRealized, base, width))
+	}
+	fmt.Fprintln(out)
 }
 
 // renderCurrencyExposure prints one row per non-base currency holding.

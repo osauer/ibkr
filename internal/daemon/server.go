@@ -327,6 +327,7 @@ type connectAttempter interface {
 	UsingTLS() bool
 	SetMarketDataType(int) error
 	RequestAccountUpdates(account string) error
+	SubscribeAccountPnL(account string) error
 }
 
 // newConnector constructs (but does not start) the IBKR connector from
@@ -575,6 +576,17 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// rows carry live mark/value/P&L.
 	if err := a.RequestAccountUpdates(ep.Account); err != nil {
 		s.logger.Warnf("RequestAccountUpdates failed (positions will lack marks): %v", err)
+	}
+	// Subscribe to the account-level Daily P&L stream (TWS msg 94). Failure
+	// is non-fatal: account.summary keeps working without daily fields,
+	// and per-position daily lookups still degrade gracefully because the
+	// connector cache returns nil pointers on miss. Empty account means
+	// the discover/config path couldn't pin one — skip the call entirely
+	// since reqPnL requires an account.
+	if ep.Account != "" {
+		if err := a.SubscribeAccountPnL(ep.Account); err != nil {
+			s.logger.Warnf("SubscribeAccountPnL failed (account.summary will lack daily P&L): %v", err)
+		}
 	}
 }
 

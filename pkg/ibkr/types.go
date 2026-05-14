@@ -47,8 +47,16 @@ type Greeks struct {
 }
 
 // Position represents a held position in the portfolio.
+//
+// ConID is IBKR's stable per-contract identifier (zero only for the
+// degenerate STK placeholder rows that get filtered out before this
+// type is exposed). It's required for the daemon's per-position Daily
+// P&L subscription (reqPnLSingle keys off conId, not symbol/expiry),
+// so we propagate it from RawPosition.Contract.ConID instead of
+// rebuilding it downstream.
 type Position struct {
 	ID            string    `json:"id"`
+	ConID         int       `json:"con_id,omitempty"`
 	Asset         Asset     `json:"asset"`
 	Quantity      float64   `json:"quantity"`
 	EntryPrice    float64   `json:"entry_price"`

@@ -64,11 +64,16 @@ func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
 	// value — most accounts in a same-day snapshot have all zeros, and an
 	// always-on column adds dead width to the table.
 	showRealized := anyRealized(r.Stocks) || anyRealized(r.Options)
+	// Daily P&L renders when the daemon delivered at least one populated
+	// value — pre-handshake or unentitled accounts get all-nil and we
+	// suppress the column entirely instead of showing a full column of
+	// em-dashes.
+	showDailyPnL := anyDailyPnL(r.Stocks) || anyDailyPnL(r.Options)
 	if len(r.Stocks) > 0 {
-		renderStocksTable(env, r.Stocks, r.DataType, showRealized)
+		renderStocksTable(env, r.Stocks, r.DataType, showRealized, showDailyPnL)
 	}
 	if len(r.Options) > 0 {
-		renderOptionsTable(env, r.Options, r.DataType, showRealized)
+		renderOptionsTable(env, r.Options, r.DataType, showRealized, showDailyPnL)
 	}
 	renderPortfolioSummary(env, r)
 	fmt.Fprintf(out, "  %d positions  ·  as of %s\n",
@@ -80,13 +85,14 @@ func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
 // and right-aligned money columns. Same layout language as the by-underlying
 // view so a reader switching between the two doesn't have to re-learn where
 // each value lives.
-func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool) {
+func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool, showDailyPnL bool) {
 	out := env.Stdout
 	// Widths fit realistic data: AvgCost/Mark hold "$ 9,999.99" (10) or
 	// "$ 99,999.99" (11); MarketValue holds up to "$ 9,999,999.99" (14);
 	// UNREAL P&L holds signed money to the same magnitude. DAY $ holds
 	// the composite "+$ 132,000.00 (+0.64%)" cell — 24 cells fits a
-	// 6-digit money on a single-symbol concentrated position.
+	// 6-digit money on a single-symbol concentrated position. DAILY P&L
+	// matches UNREAL P&L width — the magnitudes are comparable.
 	const (
 		wSymbol = 9
 		wQty    = 7
@@ -100,6 +106,9 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
 		wSymbol, "SYMBOL", wQty, "QTY", wAvg, "AVG COST", wMark, "MARK",
 		wDayChg, "DAY $", wMkt, "MKT VALUE", wPnL, "UNREAL P&L")
+	if showDailyPnL {
+		header += fmt.Sprintf("  %*s", wPnL, "DAILY P&L")
+	}
 	if showRealized {
 		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
 	}
@@ -113,6 +122,9 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 			padRightVisible(env.formatDayChange(p.DayChangeMoney, p.DayChangePct, p.Currency, 0), wDayChg),
 			padLeftVisible(formatMoney(p.MarketValue), wMkt),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
+		if showDailyPnL {
+			row += "  " + env.formatPnLPtrRight(p.DailyPnL, wPnL)
+		}
 		if showRealized {
 			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
 		}
@@ -125,7 +137,7 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 // as renderStocksTable. Strike is a 2-decimal float column, right-aligned;
 // AvgCost/Mark/UnrealPnL hold money right-aligned so decimal points line up
 // even when magnitudes vary (single-digit premium vs four-digit underlying).
-func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool) {
+func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool, showDailyPnL bool) {
 	out := env.Stdout
 	const (
 		wUnder  = 10
@@ -142,6 +154,9 @@ func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, show
 		wUnder, "UNDERLYING", wSide, "SIDE", wExpiry, "EXPIRY",
 		wStrike, "STRIKE", wQty, "QTY",
 		wAvg, "AVG COST", wMark, "MARK", wPnL, "UNREAL P&L")
+	if showDailyPnL {
+		header += fmt.Sprintf("  %*s", wPnL, "DAILY P&L")
+	}
 	if showRealized {
 		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
 	}
@@ -154,6 +169,9 @@ func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, show
 			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
+		if showDailyPnL {
+			row += "  " + env.formatPnLPtrRight(p.DailyPnL, wPnL)
+		}
 		if showRealized {
 			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
 		}
@@ -256,6 +274,19 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 func anyRealized(rows []rpc.PositionView) bool {
 	for _, p := range rows {
 		if p.RealizedPnL != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyDailyPnL reports whether at least one row has a non-nil DailyPnL —
+// the signal the daemon delivered actual values rather than a full
+// column of "pre-handshake / unentitled" nils. Used to gate the
+// DAILY P&L column on/off so we don't render a column of em-dashes.
+func anyDailyPnL(rows []rpc.PositionView) bool {
+	for _, p := range rows {
+		if p.DailyPnL != nil {
 			return true
 		}
 	}

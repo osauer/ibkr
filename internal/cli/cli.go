@@ -471,6 +471,59 @@ func (e *Env) formatPnLRight(v float64, width int) string {
 	return e.colorBySign(v, s, signPnL)
 }
 
+// formatPnLPtrRight wraps formatPnLRight for *float64 P&L pointers, where
+// nil means "no data" and renders as an em-dash to match every other
+// nil-able numeric column. The wire contract is "nil = unavailable,
+// never zero-substituted" — em-dash on nil keeps the column honest.
+func (e *Env) formatPnLPtrRight(v *float64, width int) string {
+	if v == nil {
+		return padDash(width)
+	}
+	return e.formatPnLRight(*v, width)
+}
+
+// formatPnLCcyRight is formatPnLRight with a currency prefix attached
+// (using the same prefix table as formatMoneyCcy). For account-level
+// P&L lines where the base currency belongs next to every figure for
+// non-USD accounts. Width counts visible cells of the full prefix+value.
+func (e *Env) formatPnLCcyRight(v float64, ccy string, width int) string {
+	s := formatMoneyCcyForPnL(v, ccy)
+	if pad := width - len(s); pad > 0 {
+		s = strings.Repeat(" ", pad) + s
+	}
+	return e.colorBySign(v, s, signPnL)
+}
+
+// formatPnLCcyPtrRight is formatPnLCcyRight with nil handling.
+func (e *Env) formatPnLCcyPtrRight(v *float64, ccy string, width int) string {
+	if v == nil {
+		return padDash(width)
+	}
+	return e.formatPnLCcyRight(*v, ccy, width)
+}
+
+// formatMoneyCcyForPnL is formatMoneyCcy without the zero-as-em-dash
+// branch — for sign-coloured P&L lines a value of exactly zero is a
+// real result ("flat day") and must render as a number, not a dash.
+// The em-dash for "no data" is reserved for nil pointers handled by
+// the *Ptr* wrappers.
+func formatMoneyCcyForPnL(v float64, ccy string) string {
+	prefix := moneyPrefix(ccy)
+	neg := v < 0
+	abs := v
+	if neg {
+		abs = -v
+	}
+	s := fmt.Sprintf("%.2f", abs)
+	dot := strings.IndexByte(s, '.')
+	intPart, frac := s[:dot], s[dot:]
+	out := prefix + groupThousands(intPart) + frac
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
 // formatSignedGrouped renders v with a leading sign and the integer
 // part separated by commas, at the given decimal precision. Use for
 // non-money numeric values (effective delta, gamma, vega) where the

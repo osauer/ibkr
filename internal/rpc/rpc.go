@@ -395,6 +395,17 @@ type PositionView struct {
 	UnrealizedPnL  float64  `json:"unrealized_pnl"`
 	RealizedPnL    float64  `json:"realized_pnl"`
 
+	// DailyPnL is the start-of-trading-day to now P&L for this single
+	// contract, sourced from IBKR's reqPnLSingle stream (TWS msg 95).
+	// Distinct from UnrealizedPnL above, which is session-running.
+	// nil means "no subscription yet" (daemon hasn't pre-warmed this
+	// conId), "no frame received yet", "no entitlement", or "DBL_MAX
+	// sentinel". Never zero-substituted. For options, the daily figure
+	// can swing dramatically on small underlying moves; consumers
+	// rendering a per-leg value should pair it with the option's
+	// effective delta to interpret responsibly.
+	DailyPnL *float64 `json:"daily_pnl,omitempty"`
+
 	// Option-only fields (zero values when not applicable).
 	Expiry string  `json:"expiry,omitempty"`
 	Strike float64 `json:"strike,omitempty"`
@@ -527,6 +538,16 @@ type PositionGroup struct {
 // All scalar fields are zero (not nil) on absence — the renderer treats
 // zero as "show em-dash" for non-money fields like Cushion to avoid
 // fabricating signal.
+//
+// DailyPnL / DailyPnLUnrealized / DailyPnLRealized are populated from
+// the gateway's reqPnL stream (TWS msg 94): start-of-trading-day to now.
+// Distinct from the session-running UnrealizedPnL / RealizedPnL above.
+// All three are *float64 — nil means "no data yet" (pre-handshake,
+// before the first stream frame), "no entitlement" (the gateway doesn't
+// emit PnL for unentitled accounts), or "DBL_MAX sentinel" (gateway
+// hasn't computed the slice). Never zero-substituted. DailyPnLUnrealized
+// / DailyPnLRealized stay nil on older server versions that emit only
+// the bare dailyPnL field.
 type AccountResult struct {
 	AccountID            string             `json:"account_id"`
 	AccountType          string             `json:"account_type,omitempty"`
@@ -546,6 +567,9 @@ type AccountResult struct {
 	LookAheadMaintMargin float64            `json:"look_ahead_maint_margin"`
 	LookAheadAvailable   float64            `json:"look_ahead_available_funds"`
 	LookAheadExcess      float64            `json:"look_ahead_excess_liquidity"`
+	DailyPnL             *float64           `json:"daily_pnl,omitempty"`
+	DailyPnLUnrealized   *float64           `json:"daily_pnl_unrealized,omitempty"`
+	DailyPnLRealized     *float64           `json:"daily_pnl_realized,omitempty"`
 	CurrencyExposure     []CurrencyExposure `json:"currency_exposure,omitempty"`
 	// DataType is reserved for account-feed state; the account-summary
 	// path is gateway-direct with no live/delayed dimension and the field

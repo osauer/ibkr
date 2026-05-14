@@ -82,6 +82,15 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 		res.LookAheadExcess = *raw.LookAheadExcess
 	}
 	res.CurrencyExposure = buildCurrencyExposure(raw.CurrencyLedger, res.BaseCurrency)
+	// Daily P&L: read the connector's most-recent reqPnL frame. ok=false
+	// before the first frame arrives — leave pointers nil (no fabrication).
+	// The subscription is started at post-connect setup; reads here are
+	// non-blocking cache lookups.
+	if snap, ok := c.AccountDailyPnL(); ok {
+		res.DailyPnL = snap.DailyPnL
+		res.DailyPnLUnrealized = snap.UnrealizedDailyPnL
+		res.DailyPnLRealized = snap.RealizedDailyPnL
+	}
 	return res, nil
 }
 
@@ -148,6 +157,12 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	wantSym := normSym(p.Symbol)
 	wantType := strings.ToLower(strings.TrimSpace(p.Type))
 
+	// conIDByPositionKey lets fillDailyPnL look up the IBKR conId for
+	// each rendered view without threading it through PositionView (which
+	// stays focused on the user-visible wire shape). Key is built by
+	// positionViewKey so it survives sort + group passes.
+	conIDByPositionKey := map[string]int{}
+
 	for _, pos := range positions {
 		if pos == nil {
 			continue
@@ -197,6 +212,9 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 		} else {
 			res.Stocks = append(res.Stocks, view)
 		}
+		if pos.ConID > 0 {
+			conIDByPositionKey[positionViewKey(view)] = pos.ConID
+		}
 	}
 	slices.SortStableFunc(res.Stocks, func(a, b rpc.PositionView) int { return cmp.Compare(a.Symbol, b.Symbol) })
 	slices.SortStableFunc(res.Options, func(a, b rpc.PositionView) int {
@@ -238,10 +256,105 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	fillFXRates(res.Stocks, ledger, baseCcy)
 	fillFXRates(res.Options, ledger, baseCcy)
 
+	// Daily P&L: kick off reqPnLSingle subscriptions (idempotent — the
+	// connector cache shorts repeated calls) and fill view.DailyPnL from
+	// whatever the connector has cached so far. First call after daemon
+	// startup pre-warms; subsequent calls within a few seconds read fresh
+	// values. Nil pointer means "no frame yet" / "no entitlement" /
+	// "DBL_MAX sentinel" — never zero-substituted.
+	s.fillDailyPnL(c, res.Stocks, conIDByPositionKey)
+	s.fillDailyPnL(c, res.Options, conIDByPositionKey)
+
 	res.ByUnderlying = groupByUnderlying(res.Stocks, res.Options)
 	res.Portfolio = buildPortfolioAggregates(res.Stocks, res.Options)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
 	return res, nil
+}
+
+// positionViewKey produces a stable identifier for a PositionView,
+// usable as a map key to associate auxiliary state (conId, daily P&L
+// pointer) without threading those fields through the wire shape. Two
+// views built from the same underlying position produce the same key;
+// stock and option keys are namespaced so they cannot collide.
+func positionViewKey(v rpc.PositionView) string {
+	if v.SecType == rpc.SecTypeOption {
+		return fmt.Sprintf("OPT|%s|%s|%s|%.4f", v.Symbol, v.Expiry, v.Right, v.Strike)
+	}
+	return "STK|" + v.Symbol
+}
+
+// maxDailyPnLSubscriptions caps the per-positions-call fan-out of
+// reqPnLSingle subscriptions. IBKR doesn't document a hard limit, but
+// community reporting puts the gateway's tolerance around 50 streams;
+// accounts with more positions than that get daily P&L on the first 50
+// and nil on the rest. Honest, not silent-zero. Renders as em-dash.
+const maxDailyPnLSubscriptions = 50
+
+// fillDailyPnL subscribes (if needed) to reqPnLSingle for each row's
+// conId and copies the connector's most-recent cached value into
+// view.DailyPnL. Idempotent — repeat invocations within a single
+// positions call (stocks then options) build on the same cache.
+//
+// Two branches per row:
+//   - cache already populated → just copy the value
+//   - cache empty → subscribe (if we have an account and we're under
+//     maxDailyPnLSubscriptions), copy nil
+//
+// Subscribing requires an account; if account is unknown the
+// subscribe branch is skipped, but the read branch still fires —
+// which matters for unit tests that seed the cache directly.
+func (s *Server) fillDailyPnL(c *ibkrlib.Connector, rows []rpc.PositionView, conIDs map[string]int) {
+	if c == nil || len(rows) == 0 {
+		return
+	}
+	account := s.cachedAccount()
+	for i := range rows {
+		view := &rows[i]
+		conID, ok := conIDs[positionViewKey(*view)]
+		if !ok || conID <= 0 {
+			continue
+		}
+		if _, exists := c.PositionDailyPnL(conID); !exists && account != "" {
+			if s.activeDailyPnLCount(c) >= maxDailyPnLSubscriptions {
+				continue
+			}
+			if err := c.SubscribePositionDailyPnL(account, conID); err != nil {
+				continue
+			}
+		}
+		if snap, exists := c.PositionDailyPnL(conID); exists && snap.DailyPnL != nil {
+			v := *snap.DailyPnL
+			view.DailyPnL = &v
+		}
+	}
+}
+
+// activeDailyPnLCount is a thin probe of how many per-conId PnL
+// subscriptions the connector currently holds. Exposed via the
+// connector's cache; the daemon uses it to honor maxDailyPnLSubscriptions
+// without reaching into pkg/ibkr internals.
+func (s *Server) activeDailyPnLCount(c *ibkrlib.Connector) int {
+	return c.ActiveDailyPnLSubscriptions()
+}
+
+// cachedAccount returns the account code the daemon believes is active.
+// Pulled from the connector's continuously-fresh accountSummary stream;
+// empty when pre-handshake.
+func (s *Server) cachedAccount() string {
+	c := s.gatewayConnector()
+	if c == nil {
+		return ""
+	}
+	raw := c.AccountSummaryRaw()
+	if id, ok := raw["AccountCode"]; ok && id != "" {
+		return id
+	}
+	// Some gateways emit the account code only on managedAccounts; the
+	// connector's account field is the canonical source.
+	if id := c.AccountID(); id != "" {
+		return id
+	}
+	return ""
 }
 
 // cachedBaseCurrency returns the account's base currency, derived from

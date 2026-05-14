@@ -42,7 +42,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_account",
-		Description: "Account summary: net liquidation, buying power, cash, margin — all in base currency. For multi-currency accounts, also returns currency_exposure: one row per non-base currency holding with net liquidation in that currency, gateway-reported exchange rate, and the base-currency conversion. Useful for attributing P&L between underlying moves and FX moves.",
+		Description: "Account summary: net liquidation, buying power, cash, margin — all in base currency. Includes daily_pnl (start-of-trading-day to now), with daily_pnl_unrealized and daily_pnl_realized breakdown when the gateway provides them — these are distinct from session-running unrealized/realized totals. For multi-currency accounts, also returns currency_exposure: one row per non-base currency holding with net liquidation in that currency, gateway-reported exchange rate, and the base-currency conversion. Useful for attributing P&L between underlying moves and FX moves.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.AccountResult
@@ -54,7 +54,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_positions",
-		Description: "Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy.",
+		Description: "Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Each row carries unrealized_pnl (session-running) and daily_pnl (start-of-trading-day to now, from IBKR's reqPnLSingle stream). daily_pnl is null when the daemon hasn't yet pre-warmed that contract's subscription or the account isn't entitled; never zero-substituted. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol": schemaString("filter to a single underlying symbol (case-insensitive)"),
 			"type":   schemaEnum([]string{"stk", "opt"}, "filter to stock or option positions"),
