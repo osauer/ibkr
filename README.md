@@ -21,9 +21,9 @@ Account  U1234567 · base=EUR · type=IB-MARGIN
     Gross position value    € 188,420.10
     Cushion                         0.50 ✓
 
-  P&L (today)
-    Unrealized             +€   2,418.07
-    Realized               -€     312.50
+  Session P&L
+    Unrealized (open)      +€   2,418.07
+    Realized (today)       -€     312.50
 
   Margin
     Initial                 €  29,182.32
@@ -34,6 +34,10 @@ Account  U1234567 · base=EUR · type=IB-MARGIN
     Maintenance             €  24,318.10
     Available funds         € 124,055.21
     Excess liquidity        € 124,055.21
+
+  Daily P&L                 €   1,247.30
+    of which unrealized     €     962.10
+    of which realized       €     285.20
 
 Currency exposure  (base=EUR)
   CCY     NET LIQ (CCY)       FX→BASE    NET LIQ (BASE)
@@ -80,8 +84,8 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 
 ## What you get
 
-- **Account snapshot.** NLV, buying power, cash, margin, available funds, gross position value, session unrealized/realized P&L, and the margin cushion — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Margin accounts also get the look-ahead block (post-overnight-cycle projections of init/maint/available/excess), which catches "fine intraday, blown by 5pm" cases. Multi-currency accounts get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion.
-- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. The `DAY $` column shows the position-level dollar move (qty × per-share move for stocks; qty × multiplier × move for options) next to the underlying's percent — money first because that's what a trader scans for. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
+- **Account snapshot.** NLV, buying power, cash, margin, available funds, gross position value, session unrealized/realized P&L, the margin cushion, and IBKR's start-of-trading-day Daily P&L (account-level) — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Margin accounts also get the look-ahead block (post-overnight-cycle projections of init/maint/available/excess), which catches "fine intraday, blown by 5pm" cases. Multi-currency accounts get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion.
+- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. The `DAY $` column shows the position-level dollar move (qty × per-share move for stocks; qty × multiplier × move for options) next to the underlying's percent — money first because that's what a trader scans for. An optional `DAILY P&L` column surfaces IBKR's per-conid start-of-trading-day delta (from `reqPnLSingle`) when at least one row has a value; the column is suppressed otherwise. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
 - **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Options addressed as `SYM YYMMDD C|P STRIKE`. Streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
 - **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid. Per-strike call/put delta surfaces on the wire. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
 - **Daily OHLCV history.** `ibkr history AAPL --days 30`.

@@ -90,6 +90,9 @@ func fixtureAccount() *rpc.AccountResult {
 		LookAheadMaintMargin: 24318.10,
 		LookAheadAvailable:   124055.21,
 		LookAheadExcess:      124055.21,
+		DailyPnL:             f64(1247.30),
+		DailyPnLUnrealized:   f64(962.10),
+		DailyPnLRealized:     f64(285.20),
 		CurrencyExposure: []rpc.CurrencyExposure{
 			{Currency: "USD", NetLiquidationCcy: 92418.07, ExchangeRate: 1.0823, NetLiquidationBase: 85398.92},
 			{Currency: "GBP", NetLiquidationCcy: 12061.40, ExchangeRate: 1.1718, NetLiquidationBase: 14034.83},
@@ -108,7 +111,7 @@ func fixturePositions() *rpc.PositionsResult {
 		Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 100, AvgCost: 192.10, Mark: 207.42,
 		DayChange: f64(1.32), DayChangePct: f64(0.64), DayChangeMoney: f64(132.00),
-		MarketValue: 20742.00, UnrealizedPnL: 1532.00,
+		MarketValue: 20742.00, UnrealizedPnL: 1532.00, DailyPnL: f64(132.00),
 	}
 	// AvgCost is per-contract on OPT (multiplier-inclusive) — mirrors what
 	// IBKR sends over the wire. The CLI normalises to per-share on display.
@@ -132,7 +135,7 @@ func fixturePositions() *rpc.PositionsResult {
 		Symbol: "NVDA", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 250, AvgCost: 119.05, Mark: 128.54,
 		DayChange: f64(-0.98), DayChangePct: f64(-0.77), DayChangeMoney: f64(-245.00),
-		MarketValue: 32135.00, UnrealizedPnL: 2372.50,
+		MarketValue: 32135.00, UnrealizedPnL: 2372.50, DailyPnL: f64(-245.00),
 	}
 	nvdaCall := rpc.PositionView{
 		Symbol: "NVDA", SecType: rpc.SecTypeOption, Multiplier: 100,
