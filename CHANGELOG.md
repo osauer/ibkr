@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.18.2 — 2026-05-14 22:43 CEST
+
+### Fixed
+
+- **README hero image not rendering inline on github.com.** The PNGs
+  added in v0.18.1 carried a Display P3 colour profile (sips default
+  on retina macOS captures); GitHub's blob viewer happily decoded
+  them when clicked, but inline rendering on the rendered README
+  page left a blank space. Re-encoded `docs/social/positions.png`
+  and `docs/social/social-preview.png` with the sRGB IEC61966-2.1
+  profile so they display inline. No content change to either image.
+
 ## v0.18.1 — 2026-05-14 22:29 CEST
 
 Polish pass on v0.18.0: matches the two `--watch` defaults, mentions
