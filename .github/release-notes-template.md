@@ -2,7 +2,7 @@
 
 `ibkr` is a read-only interface to your Interactive Brokers account, reachable from a Go library, a shell CLI, a stdio MCP server (Claude Desktop, Cursor, Continue, Zed), and a Claude Code plugin. Hand it to an assistant, a cron job, a notebook, or your own service.
 
-This is the first public baseline. Small enough to read in an evening.
+<!-- __HIGHLIGHTS__: per-release, one or two bullets on what changed for the reader. -->
 
 ## Install in two commands
 
@@ -23,13 +23,7 @@ ibkr positions --by underlying
 
 **Prerequisite**: a running [IB Gateway 10.37+](https://www.interactivebrokers.com/en/trading/ib-gateway.php) or TWS (paper or live) on the same machine. The daemon auto-discovers it across the four standard ports.
 
-## What you get
-
-- Account snapshot, positions (with stock + option leg grouping), live or coalesced streaming quotes, option chains, daily OHLCV history, market scans across configurable IB scanner codes, and fixed-fractional position sizing pegged to live NLV.
-- `--json` on every command.
-- Read-only by construction; the [Safety](https://github.com/osauer/ibkr#safety) section in the README walks through the four guards.
-
-See the [README](https://github.com/osauer/ibkr#readme) for the full menu and the troubleshooting matrix.
+See the [README](https://github.com/osauer/ibkr#readme) for the full feature menu and the troubleshooting matrix. Read-only by construction; the [Safety](https://github.com/osauer/ibkr#safety) section walks through the four guards.
 
 ---
 

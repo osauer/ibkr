@@ -1,18 +1,10 @@
 # Changelog
 
-All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries before v0.13 predate the format adoption and use descriptive subsections instead of the standard categories — they are kept verbatim as a historical record.
-
-## [Unreleased]
+All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
 ## v0.14.0 — 2026-05-14 11:05 CEST
 
-Audit-driven cleanup minor. Two correctness fixes for the portfolio
-aggregator land first; the rest is ~5,000 LOC of subtraction across
-three waves: v0.10–v0.12 lifecycle scaffolding never wired through,
-dormant subsystems flagged in the post-v0.13 review, and test suites
-for surfaces the binary refuses or doesn't exercise. Every cut is
-documented below; no behaviour change for the daemon or CLI; library
-consumers reading the items below see them disappear.
+Audit-driven cleanup: two portfolio-aggregate correctness fixes, plus ~5,000 LOC of subtraction across lifecycle scaffolding, dormant subsystems, and dead test suites. No behaviour change for the daemon or CLI; library consumers see the removed items disappear.
 
 ### Fixed
 
@@ -55,12 +47,6 @@ consumers reading the items below see them disappear.
   unconditional. README's safety section no longer claims a build tag exists.
 
 ### Removed
-
-Three-wave subtraction pass for v0.10–v0.12 lifecycle scaffolding,
-post-v0.13 audit findings, and test suites for surfaces the binary
-refuses or doesn't exercise. ~5,000 LOC out total. No behaviour change
-for the daemon or CLI; library consumers reading the items below see
-them disappear.
 
 First wave — v0.10–v0.12 lifecycle scaffolding never wired through:
 
@@ -268,7 +254,7 @@ Cleanup release. The v0.12.4 audit surfaced that `Connector.GetPositions` had no
 
 ## v0.12.4 — 2026-05-13 08:57 CEST
 
-Patch release. Two small fixes that came out of an audit pass on the `AvgCost` plumbing. The visible one: `AVG COST` on option rows in `ibkr positions` no longer prints the per-contract premium that looked like a typo next to the per-share Mark. The other is latent — a synthetic-P&L fallback in an unused code path that would have produced 100× wrong numbers on options if ever called. No flag changes. JSON output stays IBKR-faithful; only the rendered column normalises.
+Two `AvgCost` plumbing fixes from an audit pass: the visible `AVG COST` column on option rows now normalises to per-share, and a latent off-by-100× synthetic-P&L fallback in an unused code path is gone. JSON output stays IBKR-faithful; only the rendered column normalises.
 
 ### Fixed
 
@@ -345,7 +331,7 @@ A held delisted ticker (the user's HGENQ-style zombie) arrives via `msgPortfolio
 
 ## v0.12.0 — 2026-05-12 07:45 CEST
 
-Four things land together: a real ad-hoc scanner path that lets agents compose a scan without rewriting the user's config, per-row enrichment so scanner output actually carries last/change/volume/IV/52w instead of bare symbols, a fresh seven-preset default set validated against the live gateway catalog, and two longstanding hardening fixes (wire-frame cap, status/scan readiness consistency) that surfaced during scanner work. Plus a test-harness orphan-prevention fix for `make test`. No CLI flag removals; all wire shapes back-compatible (existing `last`/`change`/`volume` fields on `rpc.ScanRow` switched from scalars to pointers, which is JSON-wire-compatible — `omitempty` drops nil same as zero). The default `[scans]` map changed — see migration note below.
+Four scanner-track changes: an ad-hoc scan path that doesn't require editing config, per-row enrichment (last / change / volume / IV / 52w instead of bare symbols), a fresh seven-preset default set validated against the live gateway catalog, and two hardening fixes (wire-frame cap, status/scan readiness). Plus a test-harness orphan-prevention fix for `make test`. Wire shapes back-compatible (the existing `last`/`change`/`volume` fields on `rpc.ScanRow` became pointers — `omitempty` drops nil same as zero). The default `[scans]` map changed — see the migration note below.
 
 ### Scanner subscription timeout bumped 20 s → 35 s; clearer error on cold-start
 
@@ -505,7 +491,7 @@ Even with the fixes above, only the first option in a multi-leg book currently c
 
 ## v0.10.0 — 2026-05-11 19:58 CEST
 
-Two feedback items from a user audit of the MCP surface landed: option Greeks per leg + portfolio aggregates, and FX exposure attribution for non-base currency holdings. A third item (per-position margin contribution) was deferred to v0.11.0 — it needs wire-protocol additions (a `WhatIf` slot in the placeOrder encoder plus an openOrder response parser for margin-delta fields) and paper-account verification that's outside the scope of this release. None of these v0.10.0 additions place orders, charge anything, or require any new IBKR entitlement.
+Two items from an MCP-surface audit: option Greeks per leg + portfolio aggregates, and FX exposure attribution for non-base currency holdings. No order placement, no new IBKR entitlement required.
 
 ### Option Greeks per leg + portfolio aggregates
 
@@ -530,14 +516,6 @@ Nil discipline preserved: a leg whose model tick didn't arrive within budget sho
 `ibkr positions` decorates each non-base position with `fx_rate` and `market_value_ccy`. The `portfolio` block adds `fx_sensitivity_per_pct` — the base-currency P&L change per 1% FX move (Σ non-base NetLiq × FX × 0.01). That answers "how much of my book is currency-exposed" in the actionable form; it is **not** historical FX-vs-underlying P&L attribution (which would require per-lot execution-time FX tracking — a v2 feature).
 
 Implementation: the daemon now asks for `$LEDGER:ALL` alongside the existing tags, which makes IBKR emit one block per currency. The data was always available — we just weren't requesting it. No extra round trip on `ibkr positions`: the per-currency snapshot is read from the connector's continuously-fresh `reqAccountUpdates` state.
-
-### Discovery now fails over to alternate ports
-
-When both IB Gateway and TWS are running on localhost, the daemon used to pick whichever responded to the TCP probe first (4001 → 4002 → 7496 → 7497) and stop there. If that app's API socket accepted TCP but never completed the IBKR handshake — the textbook signature of "Gateway is up but not logged in" or "checkbox unchecked" — the daemon stayed degraded indefinitely, even though the other app was sitting in `Endpoint.Alternates` ready to talk.
-
-The connect path now walks the primary endpoint *then each alternate* in preference order. Each candidate gets a hard 25s budget — long enough for a healthy slow handshake (~sub-second to ~20s) but short enough that the loop reliably advances even when the SDK's TLS retry would otherwise hang against a black-hole peer. The first candidate to complete the handshake wins; the alternates that responded to TCP but never handshook are torn down cleanly between attempts. On exhaustion, `ibkr status` shows a verdict that names every endpoint that was tried — not just the original probe winner — so the user knows where the real problem is.
-
-User-visible effect: a stale Gateway window left over from earlier in the day no longer blocks `ibkr` from picking up the active TWS session.
 
 ## v0.9.3 — 2026-05-11 16:14 CEST
 

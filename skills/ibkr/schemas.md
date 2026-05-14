@@ -179,7 +179,7 @@ and `expiry` / `strike` / `right` together identify the contract.
     delta × signed_qty × multiplier).
   - `dollar_delta` / `dollar_delta_currency` — share-equivalents
     multiplied by each leg's contract-currency spot. Currency named
-    separately so callers can convert if needed.
+    separately for client-side conversion.
   - `daily_theta` / `daily_theta_currency` — Σ (theta × signed_qty ×
     multiplier). IBKR reports theta as daily decay, so the sum is the
     daily P&L from time decay assuming everything else holds. The
@@ -361,8 +361,7 @@ goes away.
 
 The `is_atm: true` row is the strike closest to spot. Greeks are populated
 only when IBKR delivers them; per-leg quotes may be `null` when the option
-contract cannot be resolved without conID hydration (a v1 limitation; v1.1
-adds full chain pricing).
+contract cannot be resolved without conID hydration.
 
 ## chain-expiries
 
@@ -434,7 +433,7 @@ Field meanings:
 - `bars[].date` — ISO date `YYYY-MM-DD`. Bars are ordered oldest → newest.
 - `volume` — daily total share/contract volume.
 
-Daily granularity only in v1.0; intraday bars are v1.1.
+Daily granularity only; intraday bars are not implemented.
 
 ## scan
 

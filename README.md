@@ -5,7 +5,7 @@
 [![go.mod](https://img.shields.io/github/go-mod/go-version/osauer/ibkr)](go.mod)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**A read-only client for your Interactive Brokers account, designed for scripts, agents, and engineers.** One Go binary, three surfaces — a CLI, a stdio MCP server, and a Go library — all returning the same JSON. No Python or Java runtime to install.
+**A read-only client for your Interactive Brokers account.** One Go binary, three surfaces — CLI, stdio MCP server, Go library — all returning the same JSON. No Python or Java runtime to install.
 
 ```sh
 $ ibkr account
@@ -185,7 +185,7 @@ The wire between CLI and daemon has no version field today; the CLI prints a std
 | Financial Advisor (FA)           | `reqFA` (18)                                                              | —                                                                  | not implemented       |
 | IV / option-price calculators    | `reqCalcImpliedVolatility` (54), `reqCalcOptionPrice` (55)                | —                                                                  | not implemented       |
 
-Tested against IB Gateway server-versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on. The library has no claim to be a full TWS API replacement — it covers the read-side surface the `ibkr` binary needs, with a small forward-compatibility buffer (the order ops) for a v2 line that hasn't shipped. Open an issue if you want a "not implemented" row plumbed; the wire format is documented and additions tend to be self-contained.
+Tested against IB Gateway server-versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on. The library has no claim to be a full TWS API replacement — it covers the read-side surface the `ibkr` binary needs, with a small forward-compatibility buffer (the order ops) for a v2 line that hasn't shipped. Open an issue if you want a "not implemented" row plumbed; the wire format is documented and additions are usually self-contained.
 
 ## Configure
 

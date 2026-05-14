@@ -29,7 +29,7 @@ While `ibkr` is on the `0.x` line, only the latest minor version receives securi
 
 `ibkr` is structurally read-only — four independent layers refuse `order`, `trade`, and `cancel` verbs (see [README §Safety](README.md#safety)). The daemon listens only on a Unix-domain socket in the user's runtime directory, never on a TCP port. It speaks to a locally-running IB Gateway or TWS over loopback. No market data, credentials, or account state leave the local machine via this code.
 
-Reports that demonstrate a deviation from any of those properties — a successful `order` / `trade` / `cancel` reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or data egress beyond the local IB Gateway — are priority.
+Reports that demonstrate a deviation from any of those properties — a successful `order` / `trade` / `cancel` reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or data egress beyond the local IB Gateway — take priority.
 
 ## Diagnostic data sensitivity
 
