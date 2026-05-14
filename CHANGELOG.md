@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.18.1 — 2026-05-14 22:29 CEST
+
+Polish pass on v0.18.0: matches the two `--watch` defaults, mentions
+`--watch` in the skill + CLI help where v0.18.0 forgot to, and adds a
+hero screenshot to the README.
+
+### Added
+
+- **README hero image.** `docs/social/positions.png` shows
+  `ibkr positions --by underlying` with per-leg Greeks and the
+  portfolio rollup, replacing the inline ASCII code block.
+  `docs/social/social-preview.png` is the 1280×640 variant for the
+  repo's GitHub social preview (Settings → General → Social preview).
+
+### Changed
+
+- **`ibkr positions --watch` default rate is now `1s`** (was `2s`),
+  matching `ibkr account --watch`. The 2s default was justified in
+  the v0.18.0 changelog with "positions.list does more work than
+  account.summary" — true in absolute terms, but both are
+  microsecond-scale cache reads on the daemon side. Unified default
+  makes the two surfaces feel consistent. Override with `--rate`.
+
+### Fixed
+
+- **`--watch` mentions on `ibkr account` / `ibkr positions`** in the
+  skill table, the per-command flag listings, and the
+  `isStreamingInvocation` comment in `cmd/ibkr/main.go`. The
+  v0.18.0 docs only mentioned `quote --watch`.
+
 ## v0.18.0 — 2026-05-14 21:38 CEST
 
 `ibkr account` and `ibkr positions` now answer "how am I doing today?"
