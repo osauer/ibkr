@@ -84,8 +84,19 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	res.CurrencyExposure = buildCurrencyExposure(raw.CurrencyLedger, res.BaseCurrency)
 	// Daily P&L: read the connector's most-recent reqPnL frame. ok=false
 	// before the first frame arrives — leave pointers nil (no fabrication).
-	// The subscription is started at post-connect setup; reads here are
-	// non-blocking cache lookups.
+	// Subscribe lazily on the first call when the cache is empty: post-
+	// connect setup skips the subscribe in auto-detect mode (ep.Account is
+	// empty until the gateway emits managedAccounts after handshake), so
+	// the first `account` call doubles as the kickoff. SubscribeAccountPnL
+	// is idempotent — subsequent calls for the same account are no-ops.
+	// Reads remain non-blocking cache lookups.
+	if account := s.cachedAccount(); account != "" {
+		if _, ok := c.AccountDailyPnL(); !ok {
+			if err := c.SubscribeAccountPnL(account); err != nil {
+				s.logger.Debugf("SubscribeAccountPnL(%s) failed: %v", account, err)
+			}
+		}
+	}
 	if snap, ok := c.AccountDailyPnL(); ok {
 		res.DailyPnL = snap.DailyPnL
 		res.DailyPnLUnrealized = snap.UnrealizedDailyPnL
