@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## v0.14.0 — 2026-05-14 11:05 CEST
+
+Audit-driven cleanup minor. Two correctness fixes for the portfolio
+aggregator land first; the rest is ~5,000 LOC of subtraction across
+three waves: v0.10–v0.12 lifecycle scaffolding never wired through,
+dormant subsystems flagged in the post-v0.13 review, and test suites
+for surfaces the binary refuses or doesn't exercise. Every cut is
+documented below; no behaviour change for the daemon or CLI; library
+consumers reading the items below see them disappear.
+
 ### Fixed
 
 - **Portfolio aggregates honour the option contract multiplier from the wire.**
