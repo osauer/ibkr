@@ -293,28 +293,30 @@ func TestRenderPositionsByUnderlying(t *testing.T) {
 	}
 }
 
-// DAY CHG column renders a "+$X (+Y%)" cell painted by sign when the
-// daemon provided both pointers; otherwise an em-dash placeholder of
-// the same width so the column stays aligned.
+// DAY $ column renders a "+$ Money (+Y%)" cell painted by sign when the
+// daemon provided DayChangeMoney + DayChangePct; otherwise an em-dash
+// placeholder of the same width so the column stays aligned. Money
+// leads because the position-level dollar move is the headline trader
+// signal; the underlying's percent stays for cross-symbol comparability.
 func TestRenderPositions_DayChangeColumn(t *testing.T) {
 	t.Parallel()
 	t.Run("painted positive", func(t *testing.T) {
 		var stdout bytes.Buffer
 		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
-		chg, pct := 1.42, 0.99
+		money, pct := 142.00, 0.99
 		res := &rpc.PositionsResult{
 			Stocks: []rpc.PositionView{
 				{Symbol: "AMD", Quantity: 100, AvgCost: 134.20, Mark: 145.22,
-					DayChange: &chg, DayChangePct: &pct,
+					DayChangeMoney: &money, DayChangePct: &pct,
 					MarketValue: 14522, UnrealizedPnL: 1102},
 			},
 		}
 		_ = renderPositionsText(env, res)
 		out := stdout.String()
-		if !strings.Contains(out, "DAY CHG") {
-			t.Errorf("missing DAY CHG header:\n%s", out)
+		if !strings.Contains(out, "DAY $") {
+			t.Errorf("missing DAY $ header:\n%s", out)
 		}
-		if !strings.Contains(out, "+1.42") || !strings.Contains(out, "+0.99%") {
+		if !strings.Contains(out, "+$ 142.00") || !strings.Contains(out, "+0.99%") {
 			t.Errorf("missing painted day-change values:\n%s", out)
 		}
 		if !strings.Contains(out, ansiGreen) {

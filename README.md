@@ -9,15 +9,31 @@
 
 ```sh
 $ ibkr account
-Account  U1234567 · base=EUR
+Account  U1234567 · base=EUR · type=IB-MARGIN
 
-  Net liquidation         € 248,310.42
-  Buying power            € 992,841.68
-  Available funds         € 124,055.21
-  Excess liquidity        € 124,055.21
-  Total cash              € 119,084.21
-  Maintenance margin      €  24,318.10
-  Initial margin          €  29,182.32
+  Net liquidation           € 248,310.42
+
+  Balances
+    Buying power            € 992,841.68
+    Available funds         € 124,055.21
+    Excess liquidity        € 124,055.21
+    Total cash              € 119,084.21
+    Gross position value    € 188,420.10
+    Cushion                         0.50 ✓
+
+  P&L (today)
+    Unrealized             +€   2,418.07
+    Realized               -€     312.50
+
+  Margin
+    Initial                 €  29,182.32
+    Maintenance             €  24,318.10
+
+  Look-ahead margin
+    Initial                 €  29,182.32
+    Maintenance             €  24,318.10
+    Available funds         € 124,055.21
+    Excess liquidity        € 124,055.21
 
 Currency exposure  (base=EUR)
   CCY     NET LIQ (CCY)       FX→BASE    NET LIQ (BASE)
@@ -64,8 +80,8 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 
 ## What you get
 
-- **Account snapshot.** NLV, buying power, cash, margin, available funds — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Multi-currency accounts also get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion, so you can see how much of your NLV is FX-exposed.
-- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
+- **Account snapshot.** NLV, buying power, cash, margin, available funds, gross position value, session unrealized/realized P&L, and the margin cushion — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Margin accounts also get the look-ahead block (post-overnight-cycle projections of init/maint/available/excess), which catches "fine intraday, blown by 5pm" cases. Multi-currency accounts get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion.
+- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. The `DAY $` column shows the position-level dollar move (qty × per-share move for stocks; qty × multiplier × move for options) next to the underlying's percent — money first because that's what a trader scans for. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name.
 - **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Options addressed as `SYM YYMMDD C|P STRIKE`. Streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
 - **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid. Per-strike call/put delta surfaces on the wire. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
 - **Daily OHLCV history.** `ibkr history AAPL --days 30`.
@@ -157,6 +173,8 @@ flowchart LR
 ```
 
 One binary, two halves. CLI and MCP server are stateless and short-lived. The daemon (same binary, `ibkr daemon`) holds the gateway connection, contract cache, subscription state, and a per-symbol prev-close cache. Clients reach it over a Unix socket. The daemon autospawns on the first call and idle-exits after five minutes. One client ID held for its lifetime, so a single TWS handshake amortises across every subsequent call.
+
+A `flock` instance lock on `<socket-dir>/ibkrd.lock` makes the daemon singleton — any second `ibkr daemon` exits with `another ibkrd holds the instance lock`. So the CLI, the MCP server, and as many MCP-enabled sessions as you have open all share **one daemon, one socket, one IBKR client-ID slot at the gateway**. The MCP server (`ibkr mcp`) keeps its socket connection open for the lifetime of the client (Claude Desktop, etc.) — this is by design, so tool calls return instantly — and that pinned connection keeps the daemon's active-connections count above zero, so the daemon stays alive as long as any MCP client is live. Quit the MCP host and the daemon idles out on its usual five-minute timer.
 
 The wire between CLI and daemon has no version field today; the CLI prints a stderr warning on version skew and points at the fix (`pkill -x ibkr` and let the next call respawn).
 

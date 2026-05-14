@@ -32,6 +32,7 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	}
 	res := &rpc.AccountResult{
 		AccountID:    raw.AccountID,
+		AccountType:  raw.AccountType,
 		BaseCurrency: raw.Currency,
 		AsOf:         raw.AsOf,
 	}
@@ -55,6 +56,30 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	}
 	if raw.InitMarginReq != nil {
 		res.InitialMargin = *raw.InitMarginReq
+	}
+	if raw.GrossPositionValue != nil {
+		res.GrossPositionValue = *raw.GrossPositionValue
+	}
+	if raw.UnrealizedPnL != nil {
+		res.UnrealizedPnL = *raw.UnrealizedPnL
+	}
+	if raw.RealizedPnL != nil {
+		res.RealizedPnL = *raw.RealizedPnL
+	}
+	if raw.Cushion != nil {
+		res.Cushion = *raw.Cushion
+	}
+	if raw.LookAheadInitMargin != nil {
+		res.LookAheadInitMargin = *raw.LookAheadInitMargin
+	}
+	if raw.LookAheadMaintMargin != nil {
+		res.LookAheadMaintMargin = *raw.LookAheadMaintMargin
+	}
+	if raw.LookAheadAvailable != nil {
+		res.LookAheadAvailable = *raw.LookAheadAvailable
+	}
+	if raw.LookAheadExcess != nil {
+		res.LookAheadExcess = *raw.LookAheadExcess
 	}
 	res.CurrencyExposure = buildCurrencyExposure(raw.CurrencyLedger, res.BaseCurrency)
 	return res, nil
@@ -199,6 +224,9 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// Vega. Same bounded fan-out and TTL-cached pattern as prev close.
 	s.prewarmOptionGreeks(ctx, c, res.Options)
 	s.fillOptionGreeks(c, res.Options)
+	// Option day-change-money runs after Greeks because fillOptionGreeks
+	// is where OptionPrevClose is read from the per-leg tick stream.
+	fillOptionDayChangeMoney(res.Options)
 
 	// FX decoration: read the per-currency snapshot maintained by the
 	// daemon's reqAccountUpdates subscription (no extra gateway round
@@ -352,10 +380,16 @@ func (s *Server) prewarmPrevCloses(ctx context.Context, c *ibkrlib.Connector, st
 	})
 }
 
-// fillDailyChange populates PrevClose / DayChange / DayChangePct on each
-// stock row from the cache. Rows whose underlying has no positive cached
-// prev close (cache miss, dead stream) are left untouched — pointers stay
-// nil and the renderer shows an em-dash.
+// fillDailyChange populates PrevClose / DayChange / DayChangePct /
+// DayChangeMoney on each stock row from the cache. Rows whose underlying
+// has no positive cached prev close (cache miss, dead stream) are left
+// untouched — pointers stay nil and the renderer shows an em-dash.
+//
+// DayChangeMoney is qty × DayChange (stocks have multiplier 1; the
+// dollar impact on the position equals the per-share move times shares
+// held). Computed inline rather than in computePositionDayChange so the
+// option path can supply its own (Mark − OptionPrevClose) inputs without
+// duplicating the price-level math.
 func (s *Server) fillDailyChange(stocks []rpc.PositionView) {
 	if s.prevCloses == nil {
 		return
@@ -371,6 +405,37 @@ func (s *Server) fillDailyChange(stocks []rpc.PositionView) {
 		v := e.value
 		p.PrevClose = &v
 		p.DayChange, p.DayChangePct = computePositionDayChange(p.Mark, e.value)
+		if p.DayChange != nil {
+			money := p.Quantity * *p.DayChange
+			p.DayChangeMoney = &money
+		}
+	}
+}
+
+// fillOptionDayChangeMoney computes the position-level dollar move on
+// each option leg using the contract's own prev close (OptionPrevClose,
+// populated by fillOptionGreeks from the per-leg tick stream — not the
+// underlying's PrevClose, which would give the wrong answer). Skips legs
+// where either input is missing; pointers stay nil and the renderer
+// shows an em-dash.
+//
+// Formula: qty × multiplier × (Mark − OptionPrevClose). Multiplier
+// defaults to 100 when the wire value is zero — matches the convention
+// in avgCostPerShare and IBKR's per-contract pricing for standard equity
+// options (a real zero would mean a non-standard contract spec we can't
+// price honestly).
+func fillOptionDayChangeMoney(options []rpc.PositionView) {
+	for i := range options {
+		p := &options[i]
+		if p.OptionPrevClose == nil || p.Mark <= 0 || *p.OptionPrevClose <= 0 {
+			continue
+		}
+		mult := p.Multiplier
+		if mult <= 0 {
+			mult = 100
+		}
+		money := p.Quantity * float64(mult) * (p.Mark - *p.OptionPrevClose)
+		p.DayChangeMoney = &money
 	}
 }
 

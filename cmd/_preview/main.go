@@ -72,15 +72,24 @@ func main() {
 
 func fixtureAccount() *rpc.AccountResult {
 	return &rpc.AccountResult{
-		AccountID:         "U7842931",
-		BaseCurrency:      "EUR",
-		NetLiquidation:    248310.42,
-		BuyingPower:       992841.68,
-		AvailableFunds:    124055.21,
-		ExcessLiquidity:   124055.21,
-		TotalCash:         119084.21,
-		MaintenanceMargin: 24318.10,
-		InitialMargin:     29182.32,
+		AccountID:            "U7842931",
+		AccountType:          "IB-MARGIN",
+		BaseCurrency:         "EUR",
+		NetLiquidation:       248310.42,
+		BuyingPower:          992841.68,
+		AvailableFunds:       124055.21,
+		ExcessLiquidity:      124055.21,
+		TotalCash:            119084.21,
+		MaintenanceMargin:    24318.10,
+		InitialMargin:        29182.32,
+		GrossPositionValue:   188420.10,
+		UnrealizedPnL:        2418.07,
+		RealizedPnL:          -312.50,
+		Cushion:              0.50,
+		LookAheadInitMargin:  29182.32,
+		LookAheadMaintMargin: 24318.10,
+		LookAheadAvailable:   124055.21,
+		LookAheadExcess:      124055.21,
 		CurrencyExposure: []rpc.CurrencyExposure{
 			{Currency: "USD", NetLiquidationCcy: 92418.07, ExchangeRate: 1.0823, NetLiquidationBase: 85398.92},
 			{Currency: "GBP", NetLiquidationCcy: 12061.40, ExchangeRate: 1.1718, NetLiquidationBase: 14034.83},
@@ -96,9 +105,9 @@ func fixtureAccount() *rpc.AccountResult {
 func fixturePositions() *rpc.PositionsResult {
 	// AAPL: long stock plus a covered call and a protective put.
 	aaplStock := rpc.PositionView{
-		Symbol: "AAPL", SecType: rpc.SecTypeStock, Multiplier: 1,
+		Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 100, AvgCost: 192.10, Mark: 207.42,
-		DayChange: f64(1.32), DayChangePct: f64(0.64),
+		DayChange: f64(1.32), DayChangePct: f64(0.64), DayChangeMoney: f64(132.00),
 		MarketValue: 20742.00, UnrealizedPnL: 1532.00,
 	}
 	// AvgCost is per-contract on OPT (multiplier-inclusive) — mirrors what
@@ -120,9 +129,9 @@ func fixturePositions() *rpc.PositionsResult {
 
 	// NVDA: long stock plus a long upside call.
 	nvdaStock := rpc.PositionView{
-		Symbol: "NVDA", SecType: rpc.SecTypeStock, Multiplier: 1,
+		Symbol: "NVDA", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 250, AvgCost: 119.05, Mark: 128.54,
-		DayChange: f64(-0.98), DayChangePct: f64(-0.77),
+		DayChange: f64(-0.98), DayChangePct: f64(-0.77), DayChangeMoney: f64(-245.00),
 		MarketValue: 32135.00, UnrealizedPnL: 2372.50,
 	}
 	nvdaCall := rpc.PositionView{

@@ -22,17 +22,27 @@ var ErrIBKRUnavailable = errors.New("ibkr connection unavailable")
 //
 // Fields are pointers when their absence is meaningful (IBKR may omit tags
 // the user does not have permission for, e.g., margin fields on a cash
-// account). Callers must check for nil before dereferencing.
+// account, or LookAhead* on cash). Callers must check for nil before
+// dereferencing.
 type RawAccountSummary struct {
-	AccountID         string
-	NetLiquidation    *float64
-	BuyingPower       *float64
-	AvailableFunds    *float64
-	ExcessLiquidity   *float64
-	TotalCashValue    *float64
-	MaintenanceMargin *float64
-	InitMarginReq     *float64
-	Currency          string
+	AccountID            string
+	AccountType          string
+	NetLiquidation       *float64
+	BuyingPower          *float64
+	AvailableFunds       *float64
+	ExcessLiquidity      *float64
+	TotalCashValue       *float64
+	MaintenanceMargin    *float64
+	InitMarginReq        *float64
+	GrossPositionValue   *float64
+	UnrealizedPnL        *float64
+	RealizedPnL          *float64
+	Cushion              *float64
+	LookAheadInitMargin  *float64
+	LookAheadMaintMargin *float64
+	LookAheadAvailable   *float64
+	LookAheadExcess      *float64
+	Currency             string
 	// CurrencyLedger holds the per-currency rollup the gateway emitted
 	// in response to the $LEDGER:ALL tag — one entry per non-BASE
 	// currency present in the portfolio. Empty for same-currency
@@ -75,7 +85,7 @@ const (
 	// account types but stopped returning a bare-form row once we added
 	// $LEDGER:ALL. The parser accepts both forms so an account that does
 	// still echo the long form is read correctly.
-	accountSummaryTags = "NetLiquidation,BuyingPower,AvailableFunds,ExcessLiquidity,TotalCashValue,MaintMarginReq,InitMarginReq,$LEDGER:ALL"
+	accountSummaryTags = "NetLiquidation,BuyingPower,AvailableFunds,ExcessLiquidity,TotalCashValue,MaintMarginReq,InitMarginReq,GrossPositionValue,UnrealizedPnL,RealizedPnL,Cushion,LookAheadInitMarginReq,LookAheadMaintMarginReq,LookAheadAvailableFunds,LookAheadExcessLiquidity,AccountType,$LEDGER:ALL"
 )
 
 // RequestAccountSummary issues a synchronous reqAccountSummary against IBKR
@@ -168,6 +178,14 @@ func parseAccountSummary(raw map[string]string, accountID string) *RawAccountSum
 		{[]string{"TotalCashValue"}, &summary.TotalCashValue},
 		{[]string{"MaintMarginReq", "MaintenanceMarginReq"}, &summary.MaintenanceMargin},
 		{[]string{"InitMarginReq"}, &summary.InitMarginReq},
+		{[]string{"GrossPositionValue"}, &summary.GrossPositionValue},
+		{[]string{"UnrealizedPnL"}, &summary.UnrealizedPnL},
+		{[]string{"RealizedPnL"}, &summary.RealizedPnL},
+		{[]string{"Cushion"}, &summary.Cushion},
+		{[]string{"LookAheadInitMarginReq"}, &summary.LookAheadInitMargin},
+		{[]string{"LookAheadMaintMarginReq"}, &summary.LookAheadMaintMargin},
+		{[]string{"LookAheadAvailableFunds"}, &summary.LookAheadAvailable},
+		{[]string{"LookAheadExcessLiquidity"}, &summary.LookAheadExcess},
 	}
 
 	for _, b := range tagBindings {
@@ -186,6 +204,13 @@ func parseAccountSummary(raw map[string]string, accountID string) *RawAccountSum
 			}
 			break
 		}
+	}
+
+	// AccountType is a string tag (e.g. "INDIVIDUAL", "IB-MARGIN") rather
+	// than a numeric value, so it does not pass through the float-bindings
+	// loop. The gateway emits it with an empty currency field.
+	if v, _, ok := lookupAccountValue(raw, "AccountType"); ok {
+		summary.AccountType = strings.TrimSpace(v)
 	}
 
 	summary.CurrencyLedger = extractCurrencyLedger(raw)

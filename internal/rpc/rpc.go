@@ -375,12 +375,20 @@ type PositionView struct {
 	// equity options, sometimes higher for index options. Needed by JSON
 	// consumers to convert between per-share Mark and per-contract AvgCost
 	// on options (IBKR's averageCost is multiplier-inclusive on OPT).
-	Multiplier     int      `json:"multiplier"`
-	AvgCost        float64  `json:"avg_cost"`
-	Mark           float64  `json:"mark"`
-	PrevClose      *float64 `json:"prev_close,omitempty"`
+	Multiplier int      `json:"multiplier"`
+	AvgCost    float64  `json:"avg_cost"`
+	Mark       float64  `json:"mark"`
+	PrevClose  *float64 `json:"prev_close,omitempty"`
+	// DayChange is per-share for stocks (Mark − stock prev close); for
+	// options it stays nil because we don't track contract-level prev
+	// close on the underlying-grouped path. DayChangePct is the same
+	// ratio expressed as a percent. DayChangeMoney is the *position*-level
+	// dollar impact: quantity × DayChange for stocks; quantity × multiplier
+	// × (Mark − OptionPrevClose) for options when OptionPrevClose is
+	// populated. nil when any input is missing — never fabricated.
 	DayChange      *float64 `json:"day_change,omitempty"`
 	DayChangePct   *float64 `json:"day_change_pct,omitempty"`
+	DayChangeMoney *float64 `json:"day_change_money,omitempty"`
 	MarketValue    float64  `json:"market_value"`
 	MarketValueCcy *float64 `json:"market_value_ccy,omitempty"`
 	FXRate         *float64 `json:"fx_rate,omitempty"`
@@ -507,17 +515,38 @@ type PositionGroup struct {
 // row per non-base currency the gateway reported via $LEDGER:ALL. Rows
 // reconcile within ~0.5%: NetLiquidationCcy × ExchangeRate ≈ contribution
 // to base NetLiquidation. Empty array on a same-currency account.
+//
+// UnrealizedPnL / RealizedPnL are the gateway-reported base-currency
+// session totals. Cushion is ExcessLiquidity / NetLiquidation as
+// reported by the gateway (not derived locally) — a ratio, unitless.
+// AccountType is one of IBKR's account-type strings ("INDIVIDUAL",
+// "IB-MARGIN", "REG-T-MARGIN", "PORTFOLIO", "CASH", …); empty when the
+// gateway didn't deliver it (older server versions or non-margin accounts).
+// LookAhead* fields project the post-overnight-margin-cycle state — useful
+// to spot "fine now, blown by tonight" cases on portfolio-margin books.
+// All scalar fields are zero (not nil) on absence — the renderer treats
+// zero as "show em-dash" for non-money fields like Cushion to avoid
+// fabricating signal.
 type AccountResult struct {
-	AccountID         string             `json:"account_id"`
-	BaseCurrency      string             `json:"base_currency"`
-	NetLiquidation    float64            `json:"net_liquidation"`
-	BuyingPower       float64            `json:"buying_power"`
-	AvailableFunds    float64            `json:"available_funds"`
-	ExcessLiquidity   float64            `json:"excess_liquidity"`
-	TotalCash         float64            `json:"total_cash"`
-	MaintenanceMargin float64            `json:"maintenance_margin"`
-	InitialMargin     float64            `json:"initial_margin"`
-	CurrencyExposure  []CurrencyExposure `json:"currency_exposure,omitempty"`
+	AccountID            string             `json:"account_id"`
+	AccountType          string             `json:"account_type,omitempty"`
+	BaseCurrency         string             `json:"base_currency"`
+	NetLiquidation       float64            `json:"net_liquidation"`
+	BuyingPower          float64            `json:"buying_power"`
+	AvailableFunds       float64            `json:"available_funds"`
+	ExcessLiquidity      float64            `json:"excess_liquidity"`
+	TotalCash            float64            `json:"total_cash"`
+	MaintenanceMargin    float64            `json:"maintenance_margin"`
+	InitialMargin        float64            `json:"initial_margin"`
+	GrossPositionValue   float64            `json:"gross_position_value"`
+	UnrealizedPnL        float64            `json:"unrealized_pnl"`
+	RealizedPnL          float64            `json:"realized_pnl"`
+	Cushion              float64            `json:"cushion"`
+	LookAheadInitMargin  float64            `json:"look_ahead_init_margin"`
+	LookAheadMaintMargin float64            `json:"look_ahead_maint_margin"`
+	LookAheadAvailable   float64            `json:"look_ahead_available_funds"`
+	LookAheadExcess      float64            `json:"look_ahead_excess_liquidity"`
+	CurrencyExposure     []CurrencyExposure `json:"currency_exposure,omitempty"`
 	// DataType is reserved for account-feed state; the account-summary
 	// path is gateway-direct with no live/delayed dimension and the field
 	// is currently left empty (omitted). Kept for shape parity with the

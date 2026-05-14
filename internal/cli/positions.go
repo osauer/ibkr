@@ -84,22 +84,22 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 	out := env.Stdout
 	// Widths fit realistic data: AvgCost/Mark hold "$ 9,999.99" (10) or
 	// "$ 99,999.99" (11); MarketValue holds up to "$ 9,999,999.99" (14);
-	// UNREAL P&L holds signed money to the same magnitude. DAY CHG holds
-	// the composite "+$X.XX (+Y.YY%)" cell — 22 cells leaves slack for
-	// 3-digit percent moves on penny stocks.
+	// UNREAL P&L holds signed money to the same magnitude. DAY $ holds
+	// the composite "+$ 132,000.00 (+0.64%)" cell — 24 cells fits a
+	// 6-digit money on a single-symbol concentrated position.
 	const (
 		wSymbol = 9
 		wQty    = 7
 		wAvg    = 11
 		wMark   = 11
-		wDayChg = 22
+		wDayChg = 24
 		wMkt    = 14
 		wPnL    = 13
 	)
 	fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(dataType))
 	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
 		wSymbol, "SYMBOL", wQty, "QTY", wAvg, "AVG COST", wMark, "MARK",
-		wDayChg, "DAY CHG", wMkt, "MKT VALUE", wPnL, "UNREAL P&L")
+		wDayChg, "DAY $", wMkt, "MKT VALUE", wPnL, "UNREAL P&L")
 	if showRealized {
 		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
 	}
@@ -110,7 +110,7 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 			wSymbol, p.Symbol, wQty, p.Quantity,
 			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
-			padRightVisible(env.formatDayChange(p.DayChange, p.DayChangePct, 0), wDayChg),
+			padRightVisible(env.formatDayChange(p.DayChangeMoney, p.DayChangePct, p.Currency, 0), wDayChg),
 			padLeftVisible(formatMoney(p.MarketValue), wMkt),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
 		if showRealized {
@@ -304,7 +304,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 	wChange := len("CHANGE / GREEKS")
 	for _, g := range r.ByUnderlying {
 		if g.Stock != nil {
-			if v := visibleLen(env.formatDayChange(g.Stock.DayChange, g.Stock.DayChangePct, 0)); v > wChange {
+			if v := visibleLen(env.formatDayChange(g.Stock.DayChangeMoney, g.Stock.DayChangePct, g.Stock.Currency, 0)); v > wChange {
 				wChange = v
 			}
 		}
@@ -341,7 +341,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 				fmt.Sprintf("%.0f sh", s.Quantity),
 				formatMoney(avgCostPerShare(*s)),
 				formatMoney(s.Mark),
-				env.formatDayChange(s.DayChange, s.DayChangePct, 0),
+				env.formatDayChange(s.DayChangeMoney, s.DayChangePct, s.Currency, 0),
 				formatMoney(s.MarketValue),
 				env.formatPnLRight(s.UnrealizedPnL, wUnreal))
 		}
@@ -379,20 +379,31 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 	return 0
 }
 
-// formatDayChange renders the combined "+$1.42 (+0.99%)" cell — both
-// values painted by sign as a unit (you almost never want one of these
-// in isolation). Em-dash placeholder of width w when either is nil so
-// the column stays aligned. Padding lives outside the ANSI wrap so
-// visible width matches w regardless of color state.
-func (e *Env) formatDayChange(chg, pct *float64, w int) string {
-	if chg == nil || pct == nil {
+// formatDayChange renders the combined "+$132.00 (+0.64%)" cell — the
+// dollar impact on the position (qty × per-share move for stocks; qty ×
+// multiplier × move for options) followed by the underlying's percent.
+// Money leads because it's the answer most traders are scanning for;
+// percent stays for cross-symbol comparability. Both painted by sign as
+// a unit. Em-dash placeholder of width w when money is unavailable —
+// per-share change without size is misleading on options (a $0.10 leg
+// move on 10 contracts is $100, not $0.10).
+//
+// money carries position currency for the money side; pct is unitless.
+// Padding lives outside the ANSI wrap so visible width matches w
+// regardless of color state.
+func (e *Env) formatDayChange(money, pct *float64, ccy string, w int) string {
+	if money == nil || pct == nil {
 		return padDash(w)
 	}
-	s := fmt.Sprintf("%+.2f (%+.2f%%)", *chg, *pct)
+	moneyStr := formatMoneyCcy(*money, ccy)
+	if *money > 0 {
+		moneyStr = "+" + moneyStr
+	}
+	s := fmt.Sprintf("%s (%+.2f%%)", moneyStr, *pct)
 	if pad := w - len(s); pad > 0 {
 		s += strings.Repeat(" ", pad)
 	}
-	return e.colorBySign(*chg, s, signPnL)
+	return e.colorBySign(*money, s, signPnL)
 }
 
 // formatGreeksLine renders a per-leg Greeks tuple in the most compact

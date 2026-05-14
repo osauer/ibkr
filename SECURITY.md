@@ -4,8 +4,15 @@
 
 Please report security issues privately — not via public GitHub issues.
 
-1. **Preferred:** open a draft advisory via GitHub Private Vulnerability Reporting at <https://github.com/osauer/ibkr/security/advisories/new>.
-2. **Email:** `oliver.sauer@gmail.com`, subject `[ibkr] security`. Plain English is fine; a proof-of-concept is appreciated but not required.
+Open a draft advisory via GitHub Private Vulnerability Reporting at
+<https://github.com/osauer/ibkr/security/advisories/new>. Plain English is
+fine; a proof-of-concept is appreciated but not required. GitHub will email
+the maintainer privately and let you correspond in the advisory thread
+without exposing details until the fix ships.
+
+No GitHub account? Open a regular issue titled `security: request private
+channel` (no details), and the maintainer will reply with a one-time
+reporting address.
 
 ## Response
 
