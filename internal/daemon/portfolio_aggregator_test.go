@@ -7,8 +7,6 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-func f(v float64) *float64 { return &v }
-
 // TestBuildPortfolioAggregatesEmpty covers the degenerate case: no
 // positions → always non-nil result, all aggregates nil.
 func TestBuildPortfolioAggregatesEmpty(t *testing.T) {
@@ -51,12 +49,12 @@ func TestBuildPortfolioAggregatesOptionsSumGreeks(t *testing.T) {
 	options := []rpc.PositionView{
 		// Long 5 calls, delta=0.5, theta=-0.10. Underlying 200 (PrevClose anchor).
 		{Symbol: "AAPL", SecType: "OPT", Quantity: 5, Currency: "USD",
-			Delta: f(0.5), Theta: f(-0.10), Gamma: f(0.02), Vega: f(15),
-			PrevClose: f(200)},
+			Delta: new(0.5), Theta: new(-0.10), Gamma: new(0.02), Vega: new(float64(15)),
+			PrevClose: new(float64(200))},
 		// Short 2 puts, delta=-0.3 → qty=-2 → contributes -2 * -0.3 * 100 = +60
 		{Symbol: "AAPL", SecType: "OPT", Quantity: -2, Currency: "USD",
-			Delta: f(-0.3), Theta: f(-0.05), Gamma: f(0.015), Vega: f(10),
-			PrevClose: f(200)},
+			Delta: new(-0.3), Theta: new(-0.05), Gamma: new(0.015), Vega: new(float64(10)),
+			PrevClose: new(float64(200))},
 	}
 	got := buildPortfolioAggregates(nil, options)
 
@@ -91,10 +89,10 @@ func TestBuildPortfolioAggregatesOptionsSumGreeks(t *testing.T) {
 func TestBuildPortfolioAggregatesPartialCoverage(t *testing.T) {
 	options := []rpc.PositionView{
 		{Symbol: "AAPL", SecType: "OPT", Quantity: 1, Currency: "USD",
-			Delta: f(0.5), Theta: f(-0.10)}, // priced
+			Delta: new(0.5), Theta: new(-0.10)}, // priced
 		{Symbol: "TSLA", SecType: "OPT", Quantity: 2, Currency: "USD"}, // no Greeks
 		{Symbol: "MSFT", SecType: "OPT", Quantity: 1, Currency: "USD",
-			Delta: f(0.4)}, // partial: only delta
+			Delta: new(0.4)}, // partial: only delta
 	}
 	got := buildPortfolioAggregates(nil, options)
 
@@ -151,8 +149,8 @@ func TestBuildPortfolioAggregatesMixedCurrencyDollarDelta(t *testing.T) {
 func TestBuildPortfolioAggregatesDailyThetaCurrency(t *testing.T) {
 	t.Run("single-currency book carries the leg currency", func(t *testing.T) {
 		options := []rpc.PositionView{
-			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: f(-0.10)},
-			{Symbol: "TSLA", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "USD", Theta: f(-0.05)},
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: new(-0.10)},
+			{Symbol: "TSLA", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "USD", Theta: new(-0.05)},
 		}
 		got := buildPortfolioAggregates(nil, options)
 		if got.DailyThetaCurrency != "USD" {
@@ -161,7 +159,7 @@ func TestBuildPortfolioAggregatesDailyThetaCurrency(t *testing.T) {
 	})
 	t.Run("EUR-only book carries EUR", func(t *testing.T) {
 		options := []rpc.PositionView{
-			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 3, Currency: "EUR", Theta: f(-0.08)},
+			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 3, Currency: "EUR", Theta: new(-0.08)},
 		}
 		got := buildPortfolioAggregates(nil, options)
 		if got.DailyThetaCurrency != "EUR" {
@@ -170,8 +168,8 @@ func TestBuildPortfolioAggregatesDailyThetaCurrency(t *testing.T) {
 	})
 	t.Run("mixed-currency theta-bearing legs → MIX", func(t *testing.T) {
 		options := []rpc.PositionView{
-			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: f(-0.10)},
-			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR", Theta: f(-0.05)},
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: new(-0.10)},
+			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR", Theta: new(-0.05)},
 		}
 		got := buildPortfolioAggregates(nil, options)
 		if got.DailyThetaCurrency != "MIX" {
@@ -184,9 +182,9 @@ func TestBuildPortfolioAggregatesDailyThetaCurrency(t *testing.T) {
 		// fields must be independent.
 		options := []rpc.PositionView{
 			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD",
-				Delta: f(0.5), PrevClose: f(200)}, // delta-only, USD
+				Delta: new(0.5), PrevClose: new(float64(200))}, // delta-only, USD
 			{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR",
-				Theta: f(-0.05)}, // theta-only, EUR
+				Theta: new(-0.05)}, // theta-only, EUR
 		}
 		got := buildPortfolioAggregates(nil, options)
 		if got.DollarDeltaCurrency != "USD" {

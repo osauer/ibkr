@@ -24,13 +24,11 @@ func TestQuoteRenderer_Rate0EmitsEveryFrame(t *testing.T) {
 	done := make(chan error, 1)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := runQuoteRenderer(env, frames, done, 0, false); err != nil {
 			t.Errorf("renderer returned: %v", err)
 		}
-	}()
+	})
 
 	const n = 50
 	bid, ask, last := 100.0, 100.5, 100.25
@@ -60,11 +58,9 @@ func TestQuoteRenderer_RateThrottlesEmits(t *testing.T) {
 
 	rate := 30 * time.Millisecond
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_ = runQuoteRenderer(env, frames, done, rate, false)
-	}()
+	})
 
 	bid, ask, last := 1.0, 2.0, 3.0
 	start := time.Now()

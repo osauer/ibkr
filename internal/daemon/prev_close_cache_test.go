@@ -63,9 +63,9 @@ func TestComputePositionDayChange(t *testing.T) {
 		wantChg *float64
 		wantPct *float64
 	}{
-		{"both positive +", 150.50, 148.00, ptrFloat(2.50), ptrFloat(1.6892)},
-		{"both positive -", 95.00, 100.00, ptrFloat(-5), ptrFloat(-5)},
-		{"flat", 100, 100, ptrFloat(0), ptrFloat(0)},
+		{"both positive +", 150.50, 148.00, new(2.50), new(1.6892)},
+		{"both positive -", 95.00, 100.00, new(float64(-5)), new(float64(-5))},
+		{"flat", 100, 100, new(float64(0)), new(float64(0))},
 		{"mark zero", 0, 100, nil, nil},
 		{"prev zero", 100, 0, nil, nil},
 		{"prev negative", 100, -1, nil, nil},
@@ -78,8 +78,6 @@ func TestComputePositionDayChange(t *testing.T) {
 		})
 	}
 }
-
-func ptrFloat(v float64) *float64 { return &v }
 
 func assertFloatPtr(t *testing.T, label string, got, want *float64) {
 	t.Helper()

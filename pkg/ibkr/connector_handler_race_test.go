@@ -234,9 +234,7 @@ func TestConnector_ConcurrentHandlerRegistrationAndMessages(t *testing.T) {
 	messageCount := 100
 
 	// Start sending messages concurrently
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := range messageCount {
 			msg := []string{"1", "2", "42", "1", fmt.Sprintf("%.2f", 580.0+float64(i)*0.01)}
 			mockConn.handlersMu.RLock()
@@ -247,15 +245,13 @@ func TestConnector_ConcurrentHandlerRegistrationAndMessages(t *testing.T) {
 			}
 			time.Sleep(time.Microsecond)
 		}
-	}()
+	})
 
 	// Register handlers concurrently
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		time.Sleep(10 * time.Microsecond) // Small delay to simulate real timing
 		connector.registerHandlers(mockConn)
-	}()
+	})
 
 	wg.Wait()
 

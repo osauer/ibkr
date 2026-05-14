@@ -1713,12 +1713,10 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 			return
 		case sem <- struct{}{}:
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			s.enrichOneScanRow(ctx, c, &rows[i])
-		}()
+		})
 	}
 	wg.Wait()
 }

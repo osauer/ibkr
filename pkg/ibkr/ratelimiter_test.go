@@ -51,13 +51,11 @@ func TestRateLimiterStopRace(t *testing.T) {
 
 		var wg sync.WaitGroup
 		for range 20 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				for range 50 {
 					_ = rl.SubmitWithPriority(RequestTypeGeneral, func() error { return nil }, 0, 1)
 				}
-			}()
+			})
 		}
 
 		time.Sleep(2 * time.Millisecond)
