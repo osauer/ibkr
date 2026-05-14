@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/osauer/ibkr/internal/cli"
@@ -292,9 +293,9 @@ var Tools = []Tool{
 // command without an MCP tool fails the gate unless the exclusion is recorded.
 //
 // `quote` is intentionally absent from this map — it has both a snapshot
-// MCP tool (ibkr_quote) and, for the `--watch` mode, MCP resource templates
-// (ibkr://quote/{symbol}, ibkr://option/{...}) gated by TestStreamingParity
-// in resources_test.go.
+// MCP tool (ibkr_quote) and, for the `--watch` mode, the MCP resource
+// template ibkr://quote/{symbol} gated by TestStreamingParity in
+// resources_test.go.
 var ExcludedCLI = map[string]string{
 	"version": "info-only CLI verb; not useful as a tool call",
 	"setup":   "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
@@ -349,12 +350,7 @@ func sortedKeys(m map[string]json.RawMessage) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// O(n²) insertion sort — n is ≤ 7 across all tools, not worth importing sort.
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-		}
-	}
+	slices.Sort(keys)
 	return keys
 }
 

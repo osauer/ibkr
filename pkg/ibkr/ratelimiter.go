@@ -59,7 +59,6 @@ type RateLimitedRequest struct {
 	Type       RequestType
 	SendFunc   func() error
 	ResultChan chan error
-	Priority   int // Higher priority = processed first
 	Timestamp  time.Time
 	Retries    int
 	MaxRetries int
@@ -73,8 +72,7 @@ const (
 	RequestTypeMarketData
 	RequestTypeHistorical
 	RequestTypeOrder
-	RequestTypeAccount
-	RequestTypeHeartbeat // Special priority for heartbeats
+	RequestTypeHeartbeat
 )
 
 // TokenBucket implements token bucket algorithm for rate limiting
@@ -225,27 +223,27 @@ func (rl *RateLimiter) Stop() {
 	rl.wg.Wait()
 }
 
-// Submit submits a request for rate-limited execution
+// Submit submits a request for rate-limited execution with the default
+// retry count (3). For one-shot requests where any failure should bubble
+// straight back to the caller (heartbeat path, test fixtures), use
+// SubmitWithRetries(reqType, sendFunc, 0).
 func (rl *RateLimiter) Submit(reqType RequestType, sendFunc func() error) error {
-	return rl.SubmitWithPriority(reqType, sendFunc, 0, 3) // Default: priority 0, max 3 retries
+	return rl.SubmitWithRetries(reqType, sendFunc, 3)
 }
 
-// SubmitWithPriority submits a request with custom priority and retry settings
-func (rl *RateLimiter) SubmitWithPriority(reqType RequestType, sendFunc func() error, priority int, maxRetries int) error {
+// SubmitWithRetries submits a request with a custom retry count. The queue
+// is strictly FIFO — a higher-priority "queue jump" parameter existed
+// before v0.16.0 but processRequests never read it (no priority queue was
+// ever wired); removing it killed the dead API in favour of an honest one.
+func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() error, maxRetries int) error {
 	if err := rl.checkCircuit(reqType); err != nil {
 		return err
-	}
-
-	// For heartbeats, use highest priority
-	if reqType == RequestTypeHeartbeat {
-		priority = 1000
 	}
 
 	req := &RateLimitedRequest{
 		Type:       reqType,
 		SendFunc:   sendFunc,
 		ResultChan: make(chan error, 1),
-		Priority:   priority,
 		Timestamp:  time.Now(),
 		MaxRetries: maxRetries,
 	}
@@ -500,12 +498,4 @@ func (rl *RateLimiter) checkCircuit(reqType RequestType) error {
 	}
 
 	return fmt.Errorf("rate limiter circuit breaker open until %s", rl.circuitOpenUntil.Format(time.RFC3339))
-}
-
-// min returns the minimum of two float64 values
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }

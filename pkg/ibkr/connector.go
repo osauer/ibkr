@@ -261,11 +261,6 @@ func (c *Connector) useInactiveSymbolStore(ctx context.Context, store inactiveSy
 	return nil
 }
 
-// Name returns the component name
-func (c *Connector) Name() string {
-	return c.name
-}
-
 func (c *Connector) logInfo(format string, args ...any) {
 	connectorLogger.Infof("%s: "+format, append([]any{c.name}, args...)...)
 }
@@ -521,52 +516,36 @@ func (c *Connector) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start connection pool: %w", err)
 	}
 
-	// Log summary of established IBKR connections and their client IDs
+	// Log summary of established IBKR connections and their client IDs.
+	// GetPoolStatus is in-tree and always builds "connections" as a
+	// map[int]map[string]any — no map[any]any fallback needed.
 	{
 		status := c.pool.GetPoolStatus()
 		total := status["total_connections"]
 		connected := status["connected_count"]
 		details, _ := status["connections"].(map[int]map[string]any)
-		// Fallback if type cast fails due to interface{} map types
-		if details == nil {
-			if m, ok := status["connections"].(map[any]any); ok {
-				// Convert to a readable list
-				var list []string
-				for k, v := range m {
-					cm, _ := v.(map[string]any)
-					if cm != nil {
-						list = append(list, fmt.Sprintf("%v(%v)", k, cm["status"]))
-					} else {
-						list = append(list, fmt.Sprintf("%v", k))
-					}
-				}
-				c.logInfo("IBKR pool total=%v connected=%v clients=%v", total, connected, strings.Join(list, ", "))
-			}
-		} else {
-			// Build list of configured->actual client IDs and statuses
-			var list []string
-			for cid, info := range details {
-				st, _ := info["status"].(string)
-				actualAny, ok := info["client_id"]
-				actual := cid
-				if ok {
-					switch v := actualAny.(type) {
-					case int:
-						actual = v
-					case int64:
-						actual = int(v)
-					case float64:
-						actual = int(v)
-					}
-				}
-				if actual != cid {
-					list = append(list, fmt.Sprintf("%d->%d(%s)", cid, actual, st))
-				} else {
-					list = append(list, fmt.Sprintf("%d(%s)", cid, st))
+		var list []string
+		for cid, info := range details {
+			st, _ := info["status"].(string)
+			actualAny, ok := info["client_id"]
+			actual := cid
+			if ok {
+				switch v := actualAny.(type) {
+				case int:
+					actual = v
+				case int64:
+					actual = int(v)
+				case float64:
+					actual = int(v)
 				}
 			}
-			c.logInfo("IBKR pool total=%v connected=%v clients=%s", total, connected, strings.Join(list, ", "))
+			if actual != cid {
+				list = append(list, fmt.Sprintf("%d->%d(%s)", cid, actual, st))
+			} else {
+				list = append(list, fmt.Sprintf("%d(%s)", cid, st))
+			}
 		}
+		c.logInfo("IBKR pool total=%v connected=%v clients=%s", total, connected, strings.Join(list, ", "))
 	}
 
 	// Request a connection lease
@@ -1704,11 +1683,6 @@ func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosi
 	c.contractMu.Unlock()
 }
 
-// GetPool returns the connection pool for testing
-func (c *Connector) GetPool() *ConnectionPool {
-	return c.pool
-}
-
 // maintainLease sends heartbeats to keep the lease active
 func (c *Connector) maintainLease() {
 	ticker := time.NewTicker(30 * time.Second)
@@ -2155,25 +2129,6 @@ func (c *Connector) handleTickPrice(fields []string) {
 		tickTypeName = "rt_volume"
 	default:
 		tickTypeName = fmt.Sprintf("tick_%d", tickType)
-	}
-
-	// Handle option implied volatility specially
-	if tickType == 106 { // Option Implied Volatility
-		c.subMu.RLock()
-		symbol, exists := c.reqIDMap[reqID]
-		c.subMu.RUnlock()
-		if exists && price > 0 {
-			// Normalize: if coming in percent (e.g., 35.0), convert to fraction
-			iv := price
-			if iv > 1.5 { // heuristic threshold
-				iv = iv / 100.0
-			}
-			c.optMu.Lock()
-			c.optIV[symbol] = iv
-			c.optMu.Unlock()
-		}
-		// Do not treat 106 as a price for subscription
-		return
 	}
 
 	// If this tick belongs to an option reqID, capture option quote mid and do not update underlying subscription
@@ -2854,16 +2809,10 @@ func (c *Connector) nextHistoricalBackoff(symbol string) time.Duration {
 	c.historicalMu.Lock()
 	defer c.historicalMu.Unlock()
 
-	count := c.historicalBackoff[symbol] + 1
-	if count > 10 {
-		count = 10
-	}
+	count := min(c.historicalBackoff[symbol]+1, 10)
 	c.historicalBackoff[symbol] = count
 
-	delay := base * time.Duration(1<<(count-1))
-	if delay > maxDelay {
-		delay = maxDelay
-	}
+	delay := min(base*time.Duration(1<<(count-1)), maxDelay)
 	return delay
 }
 

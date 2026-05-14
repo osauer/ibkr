@@ -2,12 +2,13 @@ package daemon
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,7 +95,7 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 			NetLiquidationBase:   nlBase,
 		})
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Currency < out[j].Currency })
+	slices.SortStableFunc(out, func(a, b rpc.CurrencyExposure) int { return cmp.Compare(a.Currency, b.Currency) })
 	return out
 }
 
@@ -172,15 +173,15 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 			res.Stocks = append(res.Stocks, view)
 		}
 	}
-	sort.SliceStable(res.Stocks, func(i, j int) bool { return res.Stocks[i].Symbol < res.Stocks[j].Symbol })
-	sort.SliceStable(res.Options, func(i, j int) bool {
-		if res.Options[i].Symbol == res.Options[j].Symbol {
-			if res.Options[i].Expiry == res.Options[j].Expiry {
-				return res.Options[i].Strike < res.Options[j].Strike
-			}
-			return res.Options[i].Expiry < res.Options[j].Expiry
+	slices.SortStableFunc(res.Stocks, func(a, b rpc.PositionView) int { return cmp.Compare(a.Symbol, b.Symbol) })
+	slices.SortStableFunc(res.Options, func(a, b rpc.PositionView) int {
+		if c := cmp.Compare(a.Symbol, b.Symbol); c != 0 {
+			return c
 		}
-		return res.Options[i].Symbol < res.Options[j].Symbol
+		if c := cmp.Compare(a.Expiry, b.Expiry); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Strike, b.Strike)
 	})
 
 	// Pre-warm prev-close cache for the held stock underlyings, then
@@ -501,23 +502,15 @@ func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionVi
 		}
 		e, ok := s.greeks.get(key, now)
 		if ok && e.ok {
+			// e.ok is the cache's "captured tick" gate; per the wire
+			// contract on PositionView.Delta etc. ("never zero-substituted"),
+			// a genuine zero from the model — deep-ITM theta ≈ 0, ATM-
+			// straddle delta ≈ 0 — must surface as a non-nil pointer.
 			g := e.value
-			if g.Delta != 0 {
-				d := g.Delta
-				p.Delta = &d
-			}
-			if g.Gamma != 0 {
-				d := g.Gamma
-				p.Gamma = &d
-			}
-			if g.Theta != 0 {
-				d := g.Theta
-				p.Theta = &d
-			}
-			if g.Vega != 0 {
-				d := g.Vega
-				p.Vega = &d
-			}
+			p.Delta = &g.Delta
+			p.Gamma = &g.Gamma
+			p.Theta = &g.Theta
+			p.Vega = &g.Vega
 			// Underlying spot from the same model-computation tick that
 			// produced the Greeks. The aggregator pairs it with delta so
 			// dollar delta is computed against the spot the delta was
@@ -676,15 +669,13 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		}
 		effDelta += st.Quantity
 		haveDelta = true
-		if st.Mark > 0 {
-			dollarDelta += st.Quantity * st.Mark
-			haveDollarDelta = true
-			ccy := normCcy(st.Currency)
-			if dollarCcy == "" {
-				dollarCcy = ccy
-			} else if ccy != dollarCcy {
-				dollarMixed = true
-			}
+		dollarDelta += st.Quantity * st.Mark
+		haveDollarDelta = true
+		ccy := normCcy(st.Currency)
+		if dollarCcy == "" {
+			dollarCcy = ccy
+		} else if ccy != dollarCcy {
+			dollarMixed = true
 		}
 	}
 
@@ -801,7 +792,7 @@ func groupByUnderlying(stocks, options []rpc.PositionView) []rpc.PositionGroup {
 	for _, g := range groups {
 		out = append(out, *g)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Underlying < out[j].Underlying })
+	slices.SortStableFunc(out, func(a, b rpc.PositionGroup) int { return cmp.Compare(a.Underlying, b.Underlying) })
 	return out
 }
 
@@ -1239,7 +1230,7 @@ var fetchExpiriesAndStrikes = func(connector chainExpiriesConnector, symbol stri
 	for k := range strikes {
 		expiries = append(expiries, k)
 	}
-	sort.Strings(expiries)
+	slices.Sort(expiries)
 	return expiries, strikes, nil
 }
 
@@ -1522,7 +1513,11 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	// shape today; if a future chain consumer wants them we extend
 	// ChainStrike rather than fold them into the same fields.
 	var delta *float64
-	if g, ok := c.GetOptionGreeks(key); ok && g.Delta != 0 {
+	if g, ok := c.GetOptionGreeks(key); ok {
+		// GetOptionGreeks' ok flag is the "at least one field populated
+		// from a valid model-computation tick" gate; genuine zero delta
+		// (far-OTM near expiry) must surface as a non-nil pointer per
+		// the wire contract.
 		d := g.Delta
 		delta = &d
 	}
@@ -1895,7 +1890,7 @@ func (s *Server) handleScanList() *rpc.ScanListResult {
 			Limit:    preset.Limit,
 		})
 	}
-	sort.SliceStable(out.Presets, func(i, j int) bool { return out.Presets[i].Name < out.Presets[j].Name })
+	slices.SortStableFunc(out.Presets, func(a, b rpc.ScanPresetSummary) int { return cmp.Compare(a.Name, b.Name) })
 	return out
 }
 
@@ -1950,9 +1945,6 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		res.Connected = c.IsReady()
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
-	}
-	if res.Connected {
-		res.DataType = "live"
 	}
 	return res
 }

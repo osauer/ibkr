@@ -2,6 +2,182 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.16.0 — 2026-05-14 18:10 CEST
+
+Taste-driven sweep prompted by a three-orchestrator senior review. Every
+HIGH finding is fixed: a wire-contract violation around option Greeks, a
+data race in the message-dispatch path, a half-wired MCP option-resource
+template that shipped broken since v0.10.2, and a pocket of orphan exports
+in `pkg/ibkr` that the v0.15.0 sweep left behind. The pkg/ibkr API surface
+shrinks: this is the v0.16.0 minor bump's only externally-visible change.
+
+### Added
+
+- **`TestFillOptionGreeksPreservesGenuineZero`** in `internal/daemon`.
+  Pins the wire contract from `internal/rpc/rpc.go`
+  ("Delta/Gamma/Theta/Vega ... never zero-substituted"): a deep-ITM
+  call's gamma → 0 / theta → 0 now surfaces as a non-nil pointer instead
+  of being silently filtered out. Previously the per-field `g.Delta != 0`
+  filter at `handlers.go::fillOptionGreeks` discarded real zeros, making
+  consumers branching on `nil-as-unavailable` lie about model output.
+
+- **`TestRegisterUnregisterRace`** in `pkg/ibkr`. Drives concurrent
+  `snapshotHandlers` and `UnregisterHandler` against the same msgID
+  under `-race` — the previous implementation released the read lock
+  before iterating its captured slice while `UnregisterHandler` shifted
+  entries in place via `append(entries[:i], entries[i+1:]...)` on the
+  same backing array. `deferContractDetailsCleanup` (connector.go) was
+  the canonical production trigger.
+
+- **`make hook-regex-check`** Makefile target, invoked from
+  `make plugin-check`. Diffs the PreToolUse jq regex between
+  `hooks/hooks.json` (the bundled plugin) and `settings/ibkr.settings.json`
+  (the user-copyable settings template). Both must run the same regex
+  against `.tool_input.command` or the trading-verb defense drifts between
+  distribution paths.
+
+- **`TestStreamingParity` is now in `make parity-check`.** The strict
+  pre-commit gate previously ran only `TestParity|TestNoTradingTools|
+  TestSchemasAreValidJSON`. `TestStreamingParity` lives in the same
+  package and is the binding gate for streaming-resource templates, but
+  a contributor renaming or adding an `ibkr://...` template would not
+  fail `make check`.
+
+### Changed
+
+- **`fillOptionGreeks` and chain `fillOptionLeg` no longer per-field
+  filter Greeks against `!= 0`.** The cache's `e.ok` (and
+  `Connector.GetOptionGreeks`'s ok flag) already gate "captured tick vs
+  miss"; the per-field filter discarded genuine model zeros. The wire
+  contract on `PositionView.{Delta,Gamma,Theta,Vega}` and
+  `ChainStrike.{Call,Put}Delta` is "nil = unavailable, never zero-
+  substituted" — now honored.
+
+- **`snapshotHandlers` iterates under the RLock.** The previous release
+  built the snapshot inside the lock, released, then iterated outside —
+  fine if reader and writer never overlapped, but
+  `deferContractDetailsCleanup` calls `UnregisterHandler` from a goroutine
+  while `readMessages` dispatches through the snapshot. Lifting the loop
+  under the lock costs zero extra allocations (the per-call slice copy
+  already happened) and closes the race.
+
+- **`RateLimiter.SubmitWithPriority(reqType, fn, priority, maxRetries)`
+  is now `SubmitWithRetries(reqType, fn, maxRetries)`.** The priority
+  parameter was a lie: `processRequests` drained `requestQueue` in
+  strict FIFO order with no priority discrimination; the heartbeat path's
+  `priority = 1000` bought exactly nothing. The collapsed signature is
+  honest about what the queue does. **Library callers of pkg/ibkr's
+  rate limiter must rename their call sites** — the only in-tree caller
+  was the heartbeat path, which now passes `maxRetries: 0`.
+
+- **`handleStatusHealth` no longer hardcodes `res.DataType = "live"`.**
+  v0.15.0 retired hardcoded-live from AccountResult / PositionsResult /
+  HistoryDailyResult; HealthResult survived the cleanup. `HealthResult.
+  DataType` remains on the wire shape (omitempty) for renderer-fallback
+  compatibility but the daemon never writes it — `status` has no
+  per-reqID feed type to honestly report.
+
+- **MCP server resource templates now expose only stock quotes.** The
+  v0.10.2-era `ibkr://option/{symbol}/{expiry}/{right}/{strike}` template
+  was advertised in the manifest, parsed end-to-end, and listed in
+  `TestStreamingParity` — but `handleResourcesRead` and
+  `runResourceSubscription` unconditionally sent `SecType: "STK"` to the
+  daemon, so option subscriptions never actually delivered frames. The
+  template, scheme, parse branch, `parsedURI.IsOption` field, and
+  `TestParseQuoteURIOption` are all removed. Re-introduction needs a
+  proper OPT `ContractParams` build at the seam plus an end-to-end
+  integration test.
+
+- **`internal/daemon/handlers.go` and `pkg/ibkr/{connection,
+  connector_expiries}.go` switched from `sort.SliceStable` /
+  `sort.Strings` / `sort.Float64s` to `slices.SortStableFunc` /
+  `slices.Sort`.** Same repo, same Go floor — converging on one idiom.
+  The `modernize` analyser doesn't catch this category because the
+  imports are distinct packages, not pattern-replaceable.
+
+- **`internal/mcp/tools.go::sortedKeys`** uses `slices.Sort` instead of
+  a 13-line hand-rolled insertion sort. The "not worth importing sort"
+  argument from before Go 1.21 doesn't survive a second look.
+
+- **`internal/dial/dial.go`** uses `errors.As(err, &ne)` for `net.Error`
+  classification instead of the bare `err.(net.Error)` type assertion —
+  matches the CLAUDE.md user-rules convention and tolerates a future
+  wrapped `net.OpError`.
+
+### Removed
+
+- **Orphan exported APIs in `pkg/ibkr`**, all with zero non-self callers
+  and no keep-on-purpose history:
+  - `Connection.RequestOpenOrders` — a scaffold no-op (`return nil`).
+  - `Connector.GetPool` — exported test shim with no caller (the
+    package-private `c.pool` field is reachable from in-package tests).
+  - `Connector.Name` — returned the hardcoded string `"IBKRConnector"`
+    with no observed caller.
+  - `RateLimitedRequest.Priority` field and `SubmitWithPriority` —
+    queue is strictly FIFO; field was set but never read. See §Changed
+    for the renamed entry point.
+  - `RequestType.RequestTypeAccount` — unused enum value (the switches
+    in `executeRequest` and `checkCircuit` never matched it).
+
+- **Duplicate `tickType == 106` branch in
+  `pkg/ibkr/connector.go::handleTickPrice`.** The same Option Implied
+  Volatility tick is handled by `handleTickGeneric` (msgID 45), which
+  is the registered handler for the IBKR wire frame that actually
+  carries tick 106. The mirror branch in handleTickPrice (msgID 1)
+  only wrote to `c.optIV` and missed `sub.IV`, so even if the gateway
+  ever delivered 106 on msgID 1 (it doesn't, per current TWS API),
+  scan-row enrichment would have seen stale data.
+
+- **Unreachable `map[any]any` fallback in
+  `pkg/ibkr/connector.go::Connector.Start`.** `pool.GetPoolStatus`
+  unconditionally builds `connections` as `map[int]map[string]any`;
+  the defensive type assertion against `map[any]any` could never fire.
+  Trimmed ~14 LOC of double-pathway log handling.
+
+- **Per-frame allocation in `processMessage`.** The 14-entry
+  `suppressedMessages` map literal that gated the per-frame debug-log
+  line was being rebuilt on every inbound IBKR frame (hundreds per
+  second during RTH). Hoisted to a package-level
+  `suppressedMessageLogIDs` var; the lookup is the same shape, the
+  allocation churn isn't.
+
+- **Package-level `func min(a, b float64) float64`** in
+  `pkg/ibkr/ratelimiter.go`. Shadowed Go 1.21's predeclared `min` —
+  the `modernize` gate doesn't catch shadows. Removing the local form
+  let the analyser flag four additional `if x > N { x = N }` patterns
+  that now use the builtin.
+
+- **`OptionQuoteURITemplate` / `optionQuoteScheme` / `parsedURI.IsOption`
+  / `TestParseQuoteURIOption`** in `internal/mcp/resources.go`. See
+  §Changed for the rationale; consumers of the option template (none
+  known) should rebuild on top of `ibkr_quote` until a proper OPT
+  resource path is reintroduced.
+
+- **Tautological `if alt != base` in `pkg/ibkr/connection.go::tlsAttempts`.**
+  Immediately after `alt := !base`, the inner condition was always true.
+
+- **Redundant `if st.Mark > 0` in
+  `internal/daemon/handlers.go::buildPortfolioAggregates`.** The loop
+  body already `continue`d on `st.Mark <= 0` three lines earlier.
+
+- **Integration-test scaffolding wrappers in `test/integration/
+  integration_test.go`:**
+  - `errsf` / `osErr` — one-line wrappers documenting themselves as
+    "tiny wrapper to keep TestMain free of fmt imports" while `fmt` is
+    imported and used in their bodies. Replaced with `fmt.Errorf`.
+  - `atomicAdd` — single-caller rename of `atomic.AddInt32` that
+    obscured the standard call.
+
+### Fixed
+
+- **`Connector.Start` no longer threads the never-fires `map[any]any`
+  branch.** See §Removed; behaviour change is "one log line instead of
+  two equivalent log paths."
+
+- **`buildPortfolioAggregates` always counts dollar-delta for the
+  surviving stock rows.** Mark is positive by the time the body runs;
+  the inner `if` was dead code that suggested otherwise.
+
 ## v0.15.1 — 2026-05-14 15:56 CEST
 
 Diagnostics + release-process hardening prompted by a post-v0.15.0

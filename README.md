@@ -78,10 +78,9 @@ Everything supports `--json`. Tables are color-coded by sign on a terminal (P&L 
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` is a stdio MCP server. The tool inventory mirrors the CLI 1:1, and `make check` fails if the two surfaces drift. The server also exposes streaming quotes as MCP resources:
+`ibkr mcp` is a stdio MCP server. The tool inventory mirrors the CLI 1:1, and `make check` fails if the two surfaces drift. The server also exposes streaming quotes for stocks and ETFs as an MCP resource:
 
-- `ibkr://quote/{symbol}` — stocks and ETFs
-- `ibkr://option/{symbol}/{expiry}/{right}/{strike}` — option contracts (`expiry` is `YYMMDD`, `right` is `C` or `P`)
+- `ibkr://quote/{symbol}`
 
 `resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. `ibkr setup claude-desktop` handles Claude Desktop end-to-end. For other clients, paste this into the client's MCP config (path varies):
 

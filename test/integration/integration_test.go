@@ -36,8 +36,6 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-func atomicAdd(p *int32, delta int32) int32 { return atomic.AddInt32(p, delta) }
-
 var (
 	sharedSocket  string
 	sharedCLI     string
@@ -228,18 +226,8 @@ func launchSharedDaemon(cliBin string) (string, func(), error) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	stop()
-	return "", nil, errsf("daemon socket did not appear within 25s; see %s", logPath)
+	return "", nil, fmt.Errorf("daemon socket did not appear within 25s; see %s", logPath)
 }
-
-// errsf is a tiny wrapper to keep TestMain free of fmt imports — keeps the
-// build-time error string composition out of the hot path.
-func errsf(f string, args ...any) error {
-	return &osErr{msg: fmt.Sprintf(f, args...)}
-}
-
-type osErr struct{ msg string }
-
-func (e *osErr) Error() string { return e.msg }
 
 // nextClientID generates a unique client ID per daemon process so the IBKR
 // gateway doesn't reject overlapping handshakes (one connection per ID).
@@ -247,7 +235,7 @@ func (e *osErr) Error() string { return e.msg }
 // daemon client ID 15.
 var clientIDCounter int32 = 19
 
-func nextClientID() int { return int(atomicAdd(&clientIDCounter, 1)) }
+func nextClientID() int { return int(atomic.AddInt32(&clientIDCounter, 1)) }
 
 func client(t *testing.T) *dial.Conn {
 	t.Helper()

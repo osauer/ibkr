@@ -21,8 +21,7 @@ import (
 func TestStreamingParity(t *testing.T) {
 	t.Parallel()
 	wantURIs := map[string]string{
-		StockQuoteURITemplate:  "stock-quote",
-		OptionQuoteURITemplate: "option-quote",
+		StockQuoteURITemplate: "stock-quote",
 	}
 	gotURIs := map[string]string{}
 	for _, rt := range ResourceTemplates {
@@ -77,52 +76,6 @@ func TestParseQuoteURIStock(t *testing.T) {
 			}
 			if pu.Sym != tc.wantSym {
 				t.Errorf("Sym: got %q, want %q", pu.Sym, tc.wantSym)
-			}
-			if pu.IsOption {
-				t.Errorf("IsOption: got true, want false for stock URI")
-			}
-		})
-	}
-}
-
-// TestParseQuoteURIOption covers the option template, including decimal
-// strikes and validation rejections.
-func TestParseQuoteURIOption(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		uri     string
-		wantSym string
-		wantErr bool
-	}{
-		{"integer strike", "ibkr://option/AAPL/240119/C/195", "AAPL_240119C195", false},
-		{"decimal strike", "ibkr://option/SPX/240119/P/4500.5", "SPX_240119P4500.5", false},
-		{"lowercase right", "ibkr://option/aapl/240119/c/195", "AAPL_240119C195", false},
-		{"missing strike", "ibkr://option/AAPL/240119/C", "", true},
-		{"too many parts", "ibkr://option/AAPL/240119/C/195/extra", "", true},
-		{"bad expiry", "ibkr://option/AAPL/2024-01-19/C/195", "", true},
-		{"bad right", "ibkr://option/AAPL/240119/X/195", "", true},
-		{"non-numeric strike", "ibkr://option/AAPL/240119/C/abc", "", true},
-		{"negative strike", "ibkr://option/AAPL/240119/C/-195", "", true},
-		{"missing symbol", "ibkr://option//240119/C/195", "", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pu, err := parseQuoteURI(tc.uri)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %+v", pu)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if pu.Sym != tc.wantSym {
-				t.Errorf("Sym: got %q, want %q", pu.Sym, tc.wantSym)
-			}
-			if !pu.IsOption {
-				t.Errorf("IsOption: got false, want true")
 			}
 		})
 	}

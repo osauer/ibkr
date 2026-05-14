@@ -98,12 +98,33 @@ check: $(CHECK_DEPS) modernize-check ## gofmt + go vet + staticcheck + govulnche
 plugin-check: ## Validate plugin/marketplace manifests with `claude plugin validate`
 	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code or skip with: make check plugin-check= "; exit 1; }
 	claude plugin validate .
+	@$(MAKE) --no-print-directory hook-regex-check
+
+# Single-source gate for the trading-verb defense. The PreToolUse hook is
+# duplicated across hooks/hooks.json (the bundled plugin) and
+# settings/ibkr.settings.json (the user-copyable settings template); both
+# must run the same jq regex against `.tool_input.command`, otherwise the
+# defense drifts between distribution paths. Strips the human-readable
+# label prefix before diffing so the two commands can name themselves
+# distinctly in their failure-closed messages.
+hook-regex-check: ## Ensure plugin + settings PreToolUse regexes match
+	@command -v jq >/dev/null 2>&1 || { echo "jq missing on PATH; install jq or skip"; exit 1; }
+	@plugin=$$(jq -r '.hooks.PreToolUse[0].hooks[0].command' hooks/hooks.json | sed "s/'ibkr plugin: /'LABEL: /"); \
+	settings=$$(jq -r '.hooks.PreToolUse[0].hooks[0].command' settings/ibkr.settings.json | sed "s/'ibkr settings: /'LABEL: /"); \
+	if [ "$$plugin" != "$$settings" ]; then \
+		echo "hooks/hooks.json and settings/ibkr.settings.json PreToolUse commands differ:" >&2; \
+		echo "  plugin:   $$plugin" >&2; \
+		echo "  settings: $$settings" >&2; \
+		exit 1; \
+	fi
 
 # Drift gate for the MCP surface: TestParity in internal/mcp asserts that
 # every cli.Commands() entry has a matching ibkr_<name> MCP tool (or is on
-# the documented exclude list). Cheap enough to live in the pre-commit gate.
+# the documented exclude list). TestStreamingParity is the streaming-
+# resource counterpart — it pins the ibkr://… template inventory the
+# server actually exposes. Cheap enough to live in the pre-commit gate.
 parity-check: ## Verify MCP tool inventory matches the CLI surface
-	go test -count=1 -run 'TestParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
+	go test -count=1 -run 'TestParity|TestStreamingParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
 
 # Idiom-drift gate. `go fix -diff` is the toolchain-native fixer (tracks the
 # Go version pinned in go.mod); `go tool modernize` runs the broader gopls
@@ -141,9 +162,11 @@ fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
 	@# Same scope as `make check` so `make fmt && make check` is idempotent.
 	git ls-files --cached --others --exclude-standard '*.go' | xargs gofmt -w
 
-# Library tests. Some require a live gateway; CI should run these against a
-# paper account with IBKR_LIVE_TESTS=1. Timeout sized for CI's slower
-# runners — local runs typically finish in <30s.
+# Library tests. The pkg/ibkr suite is fully hermetic — wire-level
+# captured fixtures (wire_fixtures_test.go, scanner_test.go) plus net.Pipe-
+# driven handshake tests; no live gateway is required. The end-to-end
+# gateway path is covered by test/integration. Timeout sized for CI's
+# slower runners — local runs typically finish in <30s.
 test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library)
 	go test -count=1 -timeout=180s ./pkg/ibkr/...
 

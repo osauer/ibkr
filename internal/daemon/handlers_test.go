@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
@@ -354,6 +356,59 @@ func TestScanRunUnknownPresetIsBadRequest(t *testing.T) {
 	if code != rpc.CodeBadRequest {
 		t.Fatalf("classifyError code = %q, want %q", code, rpc.CodeBadRequest)
 	}
+}
+
+// Greeks zero-substitution regression: a genuinely-zero Greek from the
+// model (deep-ITM theta ≈ 0, ATM-straddle delta ≈ 0) must surface as a
+// non-nil pointer. The previous per-field `!= 0` filter silently dropped
+// real zeros and made consumers branching on `nil-as-unavailable` lie.
+// Wire contract is documented at rpc.PositionView.Delta etc. ("never
+// zero-substituted").
+func TestFillOptionGreeksPreservesGenuineZero(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	srv.greeks = newGreeksCache()
+
+	opt := rpc.PositionView{
+		Symbol:  "AAPL",
+		SecType: rpc.SecTypeOption,
+		Expiry:  "20260619",
+		Strike:  195,
+		Right:   "C",
+	}
+	key := optionGreeksKey(opt)
+	if key == "" {
+		t.Fatalf("optionGreeksKey returned empty for %+v", opt)
+	}
+	// Deep-ITM near expiry: delta ≈ 1.0, gamma ≈ 0, theta ≈ 0, vega > 0.
+	srv.greeks.put(key, greeksEntry{
+		value: ibkrlib.Greeks{Delta: 1.0, Gamma: 0, Theta: 0, Vega: 0.5},
+		ok:    true,
+	}, time.Now())
+
+	options := []rpc.PositionView{opt}
+	srv.fillOptionGreeks(nil, options)
+	p := options[0]
+
+	if p.Delta == nil || *p.Delta != 1.0 {
+		t.Errorf("Delta = %v, want 1.0", ptrStr(p.Delta))
+	}
+	if p.Gamma == nil || *p.Gamma != 0 {
+		t.Errorf("Gamma = %v, want non-nil 0", ptrStr(p.Gamma))
+	}
+	if p.Theta == nil || *p.Theta != 0 {
+		t.Errorf("Theta = %v, want non-nil 0", ptrStr(p.Theta))
+	}
+	if p.Vega == nil || *p.Vega != 0.5 {
+		t.Errorf("Vega = %v, want 0.5", ptrStr(p.Vega))
+	}
+}
+
+func ptrStr(p *float64) string {
+	if p == nil {
+		return "nil"
+	}
+	return strconv.FormatFloat(*p, 'f', -1, 64)
 }
 
 // status.health is the only read endpoint that must succeed when the

@@ -85,8 +85,11 @@ func fixtureAccount() *rpc.AccountResult {
 			{Currency: "USD", NetLiquidationCcy: 92418.07, ExchangeRate: 1.0823, NetLiquidationBase: 85398.92},
 			{Currency: "GBP", NetLiquidationCcy: 12061.40, ExchangeRate: 1.1718, NetLiquidationBase: 14034.83},
 		},
-		DataType: "live",
-		AsOf:     time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
+		// AccountResult.DataType is omitempty-emit-empty per the v0.15.0
+		// wire-honesty pass; the field exists on the struct for renderer-
+		// fallback compatibility but the daemon never sets it. Mirror that
+		// here so the screenshots match the real binary's output.
+		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
 	}
 }
 
@@ -184,8 +187,8 @@ func fixturePositions() *rpc.PositionsResult {
 			FXSensitivityPerPct: f64(-854.32),
 			FXBaseCurrency:      "EUR",
 		},
-		AsOf:     time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
-		DataType: "live",
+		AsOf: time.Date(2026, 5, 13, 14, 32, 18, 0, time.UTC),
+		// PositionsResult.DataType is omitempty-emit-empty per v0.15.0.
 	}
 }
 
@@ -257,10 +260,10 @@ func fixtureQuotes() []rpc.Quote {
 }
 
 func fixtureHistory() *rpc.HistoryDailyResult {
+	// HistoryDailyResult.DataType is omitempty-emit-empty per v0.15.0.
 	return &rpc.HistoryDailyResult{
-		Symbol:   "AAPL",
-		Days:     5,
-		DataType: "live",
+		Symbol: "AAPL",
+		Days:   5,
 		Bars: []rpc.HistoryBar{
 			{Date: "2026-05-06", Open: 204.30, High: 207.10, Low: 203.85, Close: 206.40, Volume: 41_200_000},
 			{Date: "2026-05-07", Open: 206.50, High: 208.95, Low: 205.70, Close: 207.85, Volume: 36_500_000},
@@ -335,7 +338,10 @@ func fixtureStatus() *rpc.HealthResult {
 		ClientID:      17,
 		Connected:     true,
 		ServerVersion: 178,
-		DataType:      "live",
+		// HealthResult.DataType is omitempty-emit-empty post-v0.16.0
+		// (the daemon stopped hardcoding "live" — status has no per-
+		// reqID feed type to honestly report). Renderer falls back to
+		// MarketDataLive when empty.
 	}
 }
 

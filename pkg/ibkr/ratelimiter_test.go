@@ -19,20 +19,20 @@ func TestRateLimiterCircuitBreakerTriggers(t *testing.T) {
 	sendErr := fmt.Errorf("ERROR 100: rate limit exceeded")
 
 	for i := 0; i < rl.circuitThreshold; i++ {
-		err := rl.SubmitWithPriority(RequestTypeGeneral, func() error { return sendErr }, 0, 0)
+		err := rl.SubmitWithRetries(RequestTypeGeneral, func() error { return sendErr }, 0)
 		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "error 100") {
 			t.Fatalf("expected rate limit error, got %v", err)
 		}
 	}
 
-	err := rl.SubmitWithPriority(RequestTypeGeneral, func() error { return sendErr }, 0, 0)
+	err := rl.SubmitWithRetries(RequestTypeGeneral, func() error { return sendErr }, 0)
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "circuit") {
 		t.Fatalf("expected circuit breaker error, got %v", err)
 	}
 
 	time.Sleep(rl.circuitCooldown + 50*time.Millisecond)
 
-	if err := rl.SubmitWithPriority(RequestTypeGeneral, func() error { return nil }, 0, 0); err != nil {
+	if err := rl.SubmitWithRetries(RequestTypeGeneral, func() error { return nil }, 0); err != nil {
 		t.Fatalf("expected successful request after cooldown, got %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestRateLimiterStopRace(t *testing.T) {
 		for range 20 {
 			wg.Go(func() {
 				for range 50 {
-					_ = rl.SubmitWithPriority(RequestTypeGeneral, func() error { return nil }, 0, 1)
+					_ = rl.SubmitWithRetries(RequestTypeGeneral, func() error { return nil }, 1)
 				}
 			})
 		}

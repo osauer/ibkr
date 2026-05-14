@@ -2,7 +2,7 @@ package ibkr
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -265,7 +265,7 @@ func (f *optionExpiryFetch) snapshot() ([]string, map[string][]float64) {
 			expiries = append(expiries, normalised)
 		}
 	}
-	sort.Strings(expiries)
+	slices.Sort(expiries)
 
 	strikes := make(map[string][]float64, len(f.strikes))
 	for raw, set := range f.strikes {
@@ -277,12 +277,12 @@ func (f *optionExpiryFetch) snapshot() ([]string, map[string][]float64) {
 		for k := range set {
 			out = append(out, k)
 		}
-		sort.Float64s(out)
+		slices.Sort(out)
 		// Multiple raw expiries from different exchanges can normalise to the
 		// same key; merge instead of overwriting.
 		if existing, ok := strikes[normalised]; ok {
 			merged := append(existing, out...)
-			sort.Float64s(merged)
+			slices.Sort(merged)
 			strikes[normalised] = dedupeFloats(merged)
 		} else {
 			strikes[normalised] = out

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,16 +12,17 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-// Resource template URIs exposed by the streaming MCP surface. Two templates
-// because stocks and options have different shape — see Q5 in the design
-// session: `ibkr://quote/{symbol}` for stocks, an explicit option template
-// for option contracts so URI templates stay shape-pure.
+// Resource template URIs exposed by the streaming MCP surface. Stock
+// quotes only — the v0.10.2-era `ibkr://option/...` template was removed
+// in v0.16.0 because the resource handlers hardcoded `SecType: "STK"` on
+// the daemon request, so option subscriptions never actually delivered
+// frames. If real demand surfaces, reintroduce with a proper OPT
+// `ContractParams` build at the resource→daemon seam plus an end-to-end
+// integration test driving the option subscribe through to a Frame.
 const (
-	StockQuoteURITemplate  = "ibkr://quote/{symbol}"
-	OptionQuoteURITemplate = "ibkr://option/{symbol}/{expiry}/{right}/{strike}"
+	StockQuoteURITemplate = "ibkr://quote/{symbol}"
 
-	stockQuoteScheme  = "ibkr://quote/"
-	optionQuoteScheme = "ibkr://option/"
+	stockQuoteScheme = "ibkr://quote/"
 )
 
 // ResourceTemplate is the wire shape returned by resources/templates/list.
@@ -46,26 +46,14 @@ var ResourceTemplates = []ResourceTemplate{
 		Description: "Live snapshot + streaming quote for an equity / ETF symbol. resources/read returns the latest tick; resources/subscribe streams coalesced ticks until unsubscribe.",
 		MIMEType:    "application/json",
 	},
-	{
-		URITemplate: OptionQuoteURITemplate,
-		Name:        "option-quote",
-		Description: "Live snapshot + streaming quote for an option contract. expiry is YYMMDD; right is C or P; strike is the numeric strike price.",
-		MIMEType:    "application/json",
-	},
 }
 
 // parsedURI is what URI parsing produces: the symbol the daemon
-// subscribes against (always the synthetic SYMBOL or SYMBOL_YYMMDDC|PSTRIKE
-// form the rest of the daemon already speaks).
+// subscribes against.
 type parsedURI struct {
-	// Sym is the canonical symbol passed to the daemon's subscribe RPC.
-	// For stocks, it's the bare ticker (uppercase). For options, the
-	// synthetic AAPL_240119C00195000-style identifier the rest of the
-	// daemon uses internally.
+	// Sym is the canonical symbol passed to the daemon's subscribe RPC
+	// (uppercased bare ticker for the stock template).
 	Sym string
-
-	// IsOption is true for OptionQuoteURITemplate URIs.
-	IsOption bool
 
 	// OriginalURI is preserved for use as the resource notification
 	// target — MCP clients track subscriptions by URI string.
@@ -76,61 +64,18 @@ type parsedURI struct {
 // canonical symbol the daemon expects, or an error suitable for surfacing
 // as an MCP invalid-params response.
 //
-// Accepted shapes:
-//   - ibkr://quote/AAPL                              → stock, sym="AAPL"
-//   - ibkr://option/AAPL/240119/C/195                → option, sym="AAPL_240119C195"
-//   - ibkr://option/AAPL/240119/P/195.5              → option, sym="AAPL_240119P195.5" (decimals OK)
+// Accepted shape:
+//   - ibkr://quote/AAPL  → sym="AAPL"
 func parseQuoteURI(uri string) (parsedURI, error) {
 	uri = strings.TrimSpace(uri)
-	switch {
-	case strings.HasPrefix(uri, stockQuoteScheme):
-		rest := uri[len(stockQuoteScheme):]
-		if rest == "" || strings.Contains(rest, "/") {
-			return parsedURI{}, fmt.Errorf("invalid stock quote URI %q: expected %s", uri, StockQuoteURITemplate)
-		}
-		sym := strings.ToUpper(rest)
-		return parsedURI{Sym: sym, OriginalURI: uri}, nil
-
-	case strings.HasPrefix(uri, optionQuoteScheme):
-		rest := uri[len(optionQuoteScheme):]
-		parts := strings.Split(rest, "/")
-		if len(parts) != 4 {
-			return parsedURI{}, fmt.Errorf("invalid option quote URI %q: expected %s", uri, OptionQuoteURITemplate)
-		}
-		symbol, expiry, right, strikeStr := strings.ToUpper(parts[0]), parts[1], strings.ToUpper(parts[2]), parts[3]
-		if symbol == "" {
-			return parsedURI{}, fmt.Errorf("invalid option quote URI %q: missing symbol", uri)
-		}
-		if len(expiry) != 6 {
-			return parsedURI{}, fmt.Errorf("invalid option quote URI %q: expiry must be YYMMDD", uri)
-		}
-		if right != "C" && right != "P" {
-			return parsedURI{}, fmt.Errorf("invalid option quote URI %q: right must be C or P", uri)
-		}
-		// Strike validation: must parse as a positive number. We don't
-		// reformat it (preserve user-supplied precision) — the daemon's
-		// existing option-symbol path tolerates either integer or decimal
-		// strike strings.
-		strike, err := strconv.ParseFloat(strikeStr, 64)
-		if err != nil || strike <= 0 {
-			return parsedURI{}, fmt.Errorf("invalid option quote URI %q: strike must be a positive number", uri)
-		}
-		// Synthetic key matches the format runQuoteOption builds:
-		//   fmt.Sprintf("%s_%s%s%.0f", symbol, expiry, right, strike)
-		// Stripping the trailing .0 keeps integer-only strikes clean
-		// (AAPL_240119C195) and uses a normal float string for fractional
-		// strikes — daemon's downstream parser accepts both.
-		var sym string
-		if strike == float64(int64(strike)) {
-			sym = fmt.Sprintf("%s_%s%s%d", symbol, expiry, right, int64(strike))
-		} else {
-			sym = fmt.Sprintf("%s_%s%s%s", symbol, expiry, right, strikeStr)
-		}
-		return parsedURI{Sym: sym, IsOption: true, OriginalURI: uri}, nil
-
-	default:
-		return parsedURI{}, fmt.Errorf("unrecognised resource URI %q (expected one of: %s, %s)", uri, StockQuoteURITemplate, OptionQuoteURITemplate)
+	if !strings.HasPrefix(uri, stockQuoteScheme) {
+		return parsedURI{}, fmt.Errorf("unrecognised resource URI %q (expected %s)", uri, StockQuoteURITemplate)
 	}
+	rest := uri[len(stockQuoteScheme):]
+	if rest == "" || strings.Contains(rest, "/") {
+		return parsedURI{}, fmt.Errorf("invalid stock quote URI %q: expected %s", uri, StockQuoteURITemplate)
+	}
+	return parsedURI{Sym: strings.ToUpper(rest), OriginalURI: uri}, nil
 }
 
 // uriContainsTradingVerb is the safety counterpart for resource URIs,

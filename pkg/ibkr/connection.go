@@ -40,7 +40,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,10 +211,7 @@ func (c *Connection) tlsAttempts() []bool {
 	base := c.config.UseTLS
 	seq := []bool{base}
 	if c.config.EnableTLSFallback {
-		alt := !base
-		if alt != base {
-			seq = append(seq, alt)
-		}
+		seq = append(seq, !base)
 	}
 	return seq
 }
@@ -628,18 +625,12 @@ func (c *Connection) Connect(ctx context.Context) error {
 	currentClientID := originalClientID
 
 	// Limit to 5 retries max
-	maxRetries := c.config.MaxClientIDRetries
-	if maxRetries > 5 {
-		maxRetries = 5
-	}
-	if maxRetries < 1 {
-		maxRetries = 1
-	}
+	maxRetries := max(min(c.config.MaxClientIDRetries, 5), 1)
 
 	connectLogger.Infof("Starting connection process with Client ID %d, MaxRetries=%d",
 		originalClientID, maxRetries)
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		c.config.ClientID = currentClientID
 		connectLogger.Infof("Attempting connection with Client ID %d (attempt %d/%d)",
 			currentClientID, attempt+1, maxRetries)
@@ -1232,6 +1223,29 @@ const (
 	reqSecDefOptParams          = 78
 )
 
+// suppressedMessageLogIDs gates the debug-log line in processMessage so
+// the hot-path tick storms (msgTickPrice + msgTickSize + msgTickGeneric
+// alone account for the bulk of inbound frames during RTH) don't
+// drown out the messages a contributor actually wants to see. Package-
+// level so the lookup happens against a fixed map instead of building
+// a fresh 14-entry literal on every inbound frame.
+var suppressedMessageLogIDs = map[int]bool{
+	msgTickPrice:         true, // Tick price updates (1)
+	msgTickSize:          true, // Tick size updates (2)
+	msgTickString:        true, // Tick string updates (46)
+	msgTickGeneric:       true, // Generic tick updates (45)
+	msgMarketDataType:    true, // Market data type (58)
+	msgTickNews:          true, // Tick news (81)
+	msgAccountSummary:    true, // Account summary (63)
+	msgAccountSummaryEnd: true, // Account summary end (64)
+	msgPosition:          true, // Position updates (61)
+	msgPositionEnd:       true, // Position sync complete (62)
+	15:                   true, // Managed accounts
+	9:                    true, // Next valid ID
+	4:                    true, // Error messages (handled separately)
+	msgCurrentTimeMillis: true, // Heartbeat variant with ms precision (109)
+}
+
 var placeOrderBaseFields = []string{
 	"3", "0", "0", "", "", "", "0.0", "", "", "SMART", "", "USD", "", "", "", "", "BUY", "0", "LMT", "0", "", "DAY", "", "", "", "0", "", "1", "0", "0", "0", "0", "0", "0", "0", "", "0", "", "", "", "", "", "", "", "0", "", "-1", "0", "", "", "0", "", "", "1", "1", "", "0", "", "", "", "", "", "0", "", "", "", "", "0", "", "", "", "", "", "", "", "", "", "", "0", "", "", "0", "0", "", "", "0", "", "0", "0", "0", "0", "", "", "", "", "", "", "0", "", "", "", "", "0", "0", "0", "", ""}
 
@@ -1646,27 +1660,8 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		c.wireTap.RecordInbound(msgID, msgBytes, fields)
 	}
 
-	// Log only critical messages, not routine ones
-	// Suppress common message types that occur frequently
-	suppressedMessages := map[int]bool{
-		msgTickPrice:         true, // Tick price updates (1)
-		msgTickSize:          true, // Tick size updates (2)
-		msgTickString:        true, // Tick string updates (46)
-		msgTickGeneric:       true, // Generic tick updates (45)
-		msgMarketDataType:    true, // Market data type (58)
-		msgTickNews:          true, // Tick news (81)
-		msgAccountSummary:    true, // Account summary (63)
-		msgAccountSummaryEnd: true, // Account summary end (64)
-		msgPosition:          true, // Position updates (61)
-		msgPositionEnd:       true, // Position sync complete (62)
-		15:                   true, // Managed accounts
-		9:                    true, // Next valid ID
-		4:                    true, // Error messages (handled separately)
-		msgCurrentTimeMillis: true, // Heartbeat variant with ms precision (109)
-	}
-
 	// Only log unusual messages for debugging
-	if msgID != 0 && !suppressedMessages[msgID] && msgID != msgCurrentTime {
+	if msgID != 0 && !suppressedMessageLogIDs[msgID] && msgID != msgCurrentTime {
 		ibkrLogger.Debugf("Received message ID %d with %d fields", msgID, len(fields))
 	}
 
@@ -2608,13 +2603,10 @@ func (c *Connection) logOutgoingMessageHex(msg []byte) {
 	}
 
 	// Show first 80 bytes or entire message if shorter
-	dumpLen := len(msg)
-	if dumpLen > 80 {
-		dumpLen = 80
-	}
+	dumpLen := min(len(msg), 80)
 
 	var hexStr strings.Builder
-	for i := 0; i < dumpLen; i++ {
+	for i := range dumpLen {
 		hexStr.WriteString(fmt.Sprintf("%02x ", msg[i]))
 		if (i+1)%16 == 0 {
 			hexStr.WriteString("\n                ")
@@ -2707,7 +2699,7 @@ func (c *Connection) allSuspiciousSummaries() []string {
 	for sym := range c.suspectSummaries {
 		keys = append(keys, sym)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	result := make([]string, 0, len(keys))
 	for _, sym := range keys {
 		result = append(result, fmt.Sprintf("%s: %s", sym, c.suspectSummaries[sym]))
@@ -3113,10 +3105,16 @@ func parseSystemNotificationPayload(payload []byte) (*systemNotification, error)
 }
 
 // snapshotHandlers returns a copy of the handler list for a message ID.
+// The copy is built under the read lock so a concurrent UnregisterHandler
+// (which shifts elements in place via append(entries[:i], entries[i+1:]...)
+// inside the writer's lock) can't race the loop's per-entry reads on the
+// same backing array. deferContractDetailsCleanup is the canonical
+// concurrent caller — it runs UnregisterHandler from its own goroutine
+// while readMessages dispatches the next msgID through this snapshot.
 func (c *Connection) snapshotHandlers(msgID int) []func([]string) {
 	c.handlersMu.RLock()
+	defer c.handlersMu.RUnlock()
 	entries := c.msgHandlers[msgID]
-	c.handlersMu.RUnlock()
 	if len(entries) == 0 {
 		return nil
 	}
@@ -3559,9 +3557,6 @@ func setBoolField(fields []string, idx int, value bool) {
 		fields[idx] = "0"
 	}
 }
-
-// RequestOpenOrders requests the broker to send all open orders (scaffold no-op)
-func (c *Connection) RequestOpenOrders() error { return nil }
 
 // GetNextOrderID returns the next synthetic order ID used by tests and scaffolding.
 func (c *Connection) GetNextOrderID() int {
@@ -4207,7 +4202,12 @@ func (c *Connection) CancelMarketData(reqID int) error {
 	return err
 }
 
-// RequestPositions requests current positions
+// RequestPositions requests current positions via the one-shot reqPositions
+// wire path. Library-callable; the daemon prefers the streaming portfolio
+// path through Connector.GetCachedPositions backed by RequestAccountUpdates
+// (no reqPositions round-trip on the read path — see doc.go). Kept here so
+// downstream callers that bypass Connector can still drive the alternate
+// path. Pairs with WaitForPositionsEnd.
 func (c *Connection) RequestPositions() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -4228,7 +4228,9 @@ func (c *Connection) RequestPositions() error {
 	return c.sendMessage(msg)
 }
 
-// WaitForPositionsEnd waits for position sync to complete with timeout
+// WaitForPositionsEnd waits for the matching msgPositionEnd frame after a
+// RequestPositions call. Library-callable companion to RequestPositions
+// (daemon uses the streaming path; see RequestPositions for details).
 func (c *Connection) WaitForPositionsEnd(timeout time.Duration) error {
 	select {
 	case <-c.positionsEndChan:
@@ -4349,8 +4351,7 @@ func (c *Connection) RequestCurrentTime() error {
 	}
 
 	msg := c.encodeMsg(reqCurrentTime, "1")
-	// Use high priority for heartbeats
-	return c.rateLimiter.SubmitWithPriority(RequestTypeHeartbeat, func() error {
+	return c.rateLimiter.SubmitWithRetries(RequestTypeHeartbeat, func() error {
 		return c.withTransport(false, func() error {
 			lengthBytes := make([]byte, 4)
 			binary.BigEndian.PutUint32(lengthBytes, uint32(len(msg)))
@@ -4365,7 +4366,7 @@ func (c *Connection) RequestCurrentTime() error {
 
 			return c.writer.Flush()
 		})
-	}, 1000, 0) // High priority, no retries for heartbeats
+	}, 0) // No retries: heartbeat failures should surface immediately
 }
 
 // pauseTransport prevents non-handshake writers from accessing the socket.

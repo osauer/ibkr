@@ -286,25 +286,20 @@ itself, not the notification channel.
 
 ## MCP streaming resources
 
-The MCP server (`ibkr mcp`) exposes live quotes via two URI templates,
-discoverable through `resources/templates/list`:
+The MCP server (`ibkr mcp`) exposes live stock and ETF quotes via the
+`ibkr://quote/{symbol}` URI template, discoverable through
+`resources/templates/list`:
 
 ```
 ibkr://quote/{symbol}
-ibkr://option/{symbol}/{expiry}/{right}/{strike}
 ```
 
-- `{symbol}` is uppercase ticker.
-- `{expiry}` is `YYMMDD`.
-- `{right}` is `C` or `P` (uppercase or lowercase accepted).
-- `{strike}` is the numeric strike (integer or decimal).
+`{symbol}` is the uppercase ticker.
 
-Examples:
+Example:
 
 ```
 ibkr://quote/AAPL
-ibkr://option/AAPL/240119/C/195
-ibkr://option/SPX/240119/P/4500.5
 ```
 
 `resources/read` returns the current snapshot ([quote](#quote) shape)

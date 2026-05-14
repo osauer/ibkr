@@ -43,10 +43,14 @@ const (
 	CodeInternal           = "internal"
 )
 
-// MarketDataType values carried on Quote.DataType, Frame.DataType,
-// ChainResult.DataType, and HealthResult.DataType. IBKR's
-// tickMarketDataType message (58) maps gateway feed state into one of
-// these strings; the CLI renders a badge based on the value.
+// MarketDataType values carried on Quote.DataType, Frame.DataType, and
+// ChainResult.DataType. IBKR's tickMarketDataType message (58) maps
+// gateway feed state into one of these strings; the CLI renders a badge
+// based on the value. HealthResult.DataType remains on the wire shape
+// (omitempty) for renderer-fallback compatibility but is no longer
+// written by the daemon — `status` has no per-reqID data-type to honestly
+// report (the same reasoning that retired the field for AccountResult /
+// PositionsResult / HistoryDailyResult in v0.15.0).
 //
 // Empty string means "the gateway hasn't sent a notice yet" — typically a
 // few hundred ms after a fresh subscription. Treated as live for

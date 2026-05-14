@@ -214,7 +214,8 @@ func (c *Conn) Stream(ctx context.Context, method string, params any, onFrame fu
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				return ctx.Err()
 			}
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
 				return ctx.Err()
 			}
 			return err
