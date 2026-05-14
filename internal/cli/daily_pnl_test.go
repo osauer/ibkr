@@ -8,9 +8,10 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-// TestRenderAccount_DailyPnLBlock pins the new Daily P&L block: visible
-// when DailyPnL is non-nil, with the optional unrealized/realized lines
-// when those decompositions are populated.
+// TestRenderAccount_DailyPnLBlock pins the Daily P&L row + breakdown:
+// the headline figure sits on the hero row beneath Net liquidation; the
+// unrealized/realized decomposition (when supplied) renders as a
+// "Daily P&L breakdown" sub-block below the rest of the snapshot.
 func TestRenderAccount_DailyPnLBlock(t *testing.T) {
 	t.Parallel()
 	daily := 1247.30
@@ -30,17 +31,19 @@ func TestRenderAccount_DailyPnLBlock(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Daily P&L", "1,247.30", "of which unrealized", "962.10", "of which realized", "285.20"} {
+	for _, want := range []string{"Daily P&L", "1,247.30", "Daily P&L breakdown", "of which unrealized", "962.10", "of which realized", "285.20"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
 	}
 }
 
-// TestRenderAccount_DailyPnLSilentWhenNil — when the daemon couldn't
-// reach reqPnL (pre-handshake, unentitled, gateway down), no block
-// renders at all. Silent failure, not "—" placeholder lines.
-func TestRenderAccount_DailyPnLSilentWhenNil(t *testing.T) {
+// TestRenderAccount_DailyPnLPlaceholderWhenNil — the row always renders
+// (so a first-time user sees the field exists) but a nil DailyPnL paints
+// a dim em-dash plus a "subscribing — value lands on next call" hint.
+// This matches the lazy reqPnL kickoff documented in CHANGELOG v0.17.0:
+// the first call subscribes, the next one carries values.
+func TestRenderAccount_DailyPnLPlaceholderWhenNil(t *testing.T) {
 	t.Parallel()
 	a := &rpc.AccountResult{
 		AccountID:      "U1234567",
@@ -53,14 +56,20 @@ func TestRenderAccount_DailyPnLSilentWhenNil(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	if strings.Contains(out, "Daily P&L") {
-		t.Errorf("Daily P&L line should be omitted when DailyPnL is nil:\n%s", out)
+	if !strings.Contains(out, "Daily P&L") {
+		t.Errorf("Daily P&L row should always render so the field is discoverable:\n%s", out)
+	}
+	if !strings.Contains(out, "subscribing") {
+		t.Errorf("nil Daily P&L should carry a subscribing hint:\n%s", out)
+	}
+	if strings.Contains(out, "Daily P&L breakdown") {
+		t.Errorf("breakdown block should stay hidden when no decomposition is supplied:\n%s", out)
 	}
 }
 
 // TestRenderAccount_DailyPnLOnlyBareDaily — older gateway versions
-// emit just the bare dailyPnL field. The block renders, but the
-// unrealized/realized lines stay hidden.
+// emit just the bare dailyPnL field. The headline row renders; the
+// breakdown sub-block stays hidden.
 func TestRenderAccount_DailyPnLOnlyBareDaily(t *testing.T) {
 	t.Parallel()
 	daily := 50.00
@@ -77,17 +86,19 @@ func TestRenderAccount_DailyPnLOnlyBareDaily(t *testing.T) {
 	if !strings.Contains(out, "Daily P&L") {
 		t.Errorf("Daily P&L line should render:\n%s", out)
 	}
+	if strings.Contains(out, "Daily P&L breakdown") {
+		t.Errorf("breakdown block should be hidden on short-form payloads:\n%s", out)
+	}
 	if strings.Contains(out, "of which unrealized") {
 		t.Errorf("unrealized sub-line should be omitted on short-form payloads:\n%s", out)
 	}
-	if strings.Contains(out, "of which realized") {
-		t.Errorf("realized sub-line should be omitted on short-form payloads:\n%s", out)
-	}
 }
 
-// TestRenderPositions_DailyColumnVisibleWhenPopulated — at least one
-// row carries a non-nil DailyPnL → DAILY P&L column header appears.
-func TestRenderPositions_DailyColumnVisibleWhenPopulated(t *testing.T) {
+// TestRenderPositions_DayPnLColumnAlwaysVisible — the DAY P&L column
+// renders unconditionally so the field is discoverable on the very
+// first call. Populated rows show the value; nil rows show em-dash so
+// the column shape stays honest.
+func TestRenderPositions_DayPnLColumnAlwaysVisible(t *testing.T) {
 	t.Parallel()
 	d := 47.30
 	res := &rpc.PositionsResult{
@@ -100,18 +111,20 @@ func TestRenderPositions_DailyColumnVisibleWhenPopulated(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderPositionsText(env, res)
 	out := stdout.String()
-	if !strings.Contains(out, "DAILY P&L") {
-		t.Errorf("missing DAILY P&L column header:\n%s", out)
+	if !strings.Contains(out, "DAY P&L") {
+		t.Errorf("missing DAY P&L column header:\n%s", out)
 	}
 	if !strings.Contains(out, "47.30") {
 		t.Errorf("missing daily value:\n%s", out)
 	}
 }
 
-// TestRenderPositions_DailyColumnSuppressedWhenAllNil — every row has
-// DailyPnL == nil. The column is suppressed entirely (no header, no
-// column of em-dashes).
-func TestRenderPositions_DailyColumnSuppressedWhenAllNil(t *testing.T) {
+// TestRenderPositions_DayPnLColumnRendersWhenAllNil — every row has
+// DailyPnL == nil. The column still renders (always-on policy), with
+// an em-dash placeholder per row. Pre-fix the column was suppressed,
+// which made the field invisible on the first call after a daemon
+// restart and led to "where is the daily P&L?" confusion.
+func TestRenderPositions_DayPnLColumnRendersWhenAllNil(t *testing.T) {
 	t.Parallel()
 	res := &rpc.PositionsResult{
 		Stocks: []rpc.PositionView{
@@ -123,15 +136,18 @@ func TestRenderPositions_DailyColumnSuppressedWhenAllNil(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderPositionsText(env, res)
 	out := stdout.String()
-	if strings.Contains(out, "DAILY P&L") {
-		t.Errorf("DAILY P&L column should be hidden when no row has a value:\n%s", out)
+	if !strings.Contains(out, "DAY P&L") {
+		t.Errorf("DAY P&L column should always render:\n%s", out)
+	}
+	if !strings.Contains(out, "—") {
+		t.Errorf("expected em-dash placeholder when DailyPnL is nil:\n%s", out)
 	}
 }
 
-// TestRenderPositions_DailyColumnEmDashOnMixed — at least one row has
-// a value (so the column renders) and another row has nil (so it
-// shows em-dash). Pins the "honest mixed state" contract.
-func TestRenderPositions_DailyColumnEmDashOnMixed(t *testing.T) {
+// TestRenderPositions_DayPnLColumnEmDashOnMixed — at least one row has
+// a value and another row has nil (so it shows em-dash). Pins the
+// "honest mixed state" contract.
+func TestRenderPositions_DayPnLColumnEmDashOnMixed(t *testing.T) {
 	t.Parallel()
 	d := 100.00
 	res := &rpc.PositionsResult{
@@ -146,8 +162,8 @@ func TestRenderPositions_DailyColumnEmDashOnMixed(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderPositionsText(env, res)
 	out := stdout.String()
-	if !strings.Contains(out, "DAILY P&L") {
-		t.Errorf("DAILY P&L column should appear:\n%s", out)
+	if !strings.Contains(out, "DAY P&L") {
+		t.Errorf("DAY P&L column should appear:\n%s", out)
 	}
 	if !strings.Contains(out, "100.00") {
 		t.Errorf("missing populated daily value:\n%s", out)
@@ -156,6 +172,31 @@ func TestRenderPositions_DailyColumnEmDashOnMixed(t *testing.T) {
 	// rest of the renderer uses for nil values.
 	if !strings.Contains(out, "—") {
 		t.Errorf("expected em-dash for NVDA's nil daily P&L:\n%s", out)
+	}
+}
+
+// TestRenderPositions_OptionsCarryDayPnL — the DAY P&L column appears
+// on the options table too, sourced from the same reqPnLSingle stream
+// as stocks. Pre-v0.18 there was no per-position day metric on options.
+func TestRenderPositions_OptionsCarryDayPnL(t *testing.T) {
+	t.Parallel()
+	d := -245.00
+	res := &rpc.PositionsResult{
+		Options: []rpc.PositionView{
+			{Symbol: "RDDT", Right: "C", Strike: 165, Expiry: "20260618",
+				Quantity: 5, AvgCost: 8.11, Mark: 7.62,
+				MarketValue: 3810, UnrealizedPnL: -245, DailyPnL: &d},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderPositionsText(env, res)
+	out := stdout.String()
+	if !strings.Contains(out, "DAY P&L") {
+		t.Errorf("options table should carry DAY P&L column:\n%s", out)
+	}
+	if !strings.Contains(out, "245.00") {
+		t.Errorf("missing daily value on option row:\n%s", out)
 	}
 }
 

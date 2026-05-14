@@ -2,6 +2,69 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.18.0 — 2026-05-14 21:38 CEST
+
+`ibkr account` and `ibkr positions` now answer "how am I doing today?"
+on the first call (no more "wait for the second invocation"), refresh
+in place via `--watch`, and read on a standard 100-col terminal without
+horizontal squinting.
+
+### Added
+
+- **`--watch` on `ibkr account` and `ibkr positions`.** Re-polls the
+  daemon on a fixed interval (`--rate 1s` for account, `2s` for
+  positions; both override). On a TTY the screen clears and the
+  snapshot redraws in place; in a pipe, snapshots are appended
+  separated by a dim rule so log captures stay parseable. Polling is
+  pull-based — no new RPCs were added; this just calls the existing
+  `account.summary` / `positions.list` on a ticker. The default cli
+  budget is bypassed for streaming invocations so a long watch isn't
+  killed at 60 s.
+
+- **`Daily P&L` row on `ibkr account`** is now always visible. When
+  the gateway hasn't yet delivered a `reqPnL` frame, the row renders
+  with a dim em-dash + `(subscribing — value lands on next call)`
+  hint. The lazy reqPnL kickoff from v0.17.0 is unchanged; the row
+  is just discoverable from call one instead of being silent until
+  the daemon's cache warms.
+
+- **`DAY P&L` column on `ibkr positions`** (replaces v0.17's
+  `DAILY P&L`) is also always visible. Stocks and options share the
+  same column source — IBKR's per-conId `reqPnLSingle` (TWS msg 95)
+  — so the table answers "today's P&L" with one column instead of
+  two near-duplicates. Nil rows render as em-dash; the column is
+  never suppressed.
+
+### Changed
+
+- **`Daily P&L` is the second line of `ibkr account`,** sitting
+  directly under `Net liquidation`. The decomposition (`of which
+  unrealized / realized`) moved to a `Daily P&L breakdown` sub-block
+  at the bottom of the snapshot. Rationale: NLV and today's delta
+  are the two numbers a trader scans for first; everything else is
+  supporting detail.
+
+- **`ibkr account` is more compact.** Five blank-line section
+  separators removed — the dim section headers (`Balances`,
+  `Session P&L`, `Margin`, …) provide enough visual break on their
+  own, saving roughly half a screen.
+
+- **`ibkr positions` table is narrower.** The wide `DAY $` column
+  (24 cells with the `+$ X.YZ (+P.QQ%)` composite) is gone in favour
+  of the `DAY P&L` column above; total width drops from ~120 cells
+  to ~85 (96 with the optional `REAL P&L`), fitting a standard
+  100-col terminal without horizontal scrolling. The
+  `day_change_money` / `day_change_pct` JSON fields are unchanged
+  (consumers may still want them) and the `--by underlying` view's
+  `CHANGE / GREEKS` cell still surfaces them inline.
+
+### Removed
+
+- **`DAY $` column on the flat `ibkr positions` view.** Replaced by
+  the unified `DAY P&L` column described above. The wire-level
+  `day_change_money` / `day_change_pct` fields are still emitted
+  in JSON; only the rendered table changes.
+
 ## v0.17.0 — 2026-05-14 21:16 CEST
 
 Adds Daily P&L (account-level and per-position), expands the account

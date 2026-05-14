@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -11,23 +13,45 @@ import (
 func runAccount(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "account")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
+	rate := fs.Duration("rate", time.Second, "poll interval for --watch")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 
-	var res rpc.AccountResult
-	if err := env.Conn.Call(ctx, rpc.MethodAccountSummary, nil, &res); err != nil {
-		return fail(env, "account: %v", err)
+	fetchAndRender := func(out io.Writer) int {
+		var res rpc.AccountResult
+		if err := env.Conn.Call(ctx, rpc.MethodAccountSummary, nil, &res); err != nil {
+			return fail(env, "account: %v", err)
+		}
+		if *jsonOut {
+			return printJSONTo(env, out, res)
+		}
+		return renderAccountTextTo(env, out, &res)
 	}
 
-	if *jsonOut {
-		return printJSON(env, res)
+	if *watch {
+		if *jsonOut {
+			return fail(env, "account: --watch and --json are mutually exclusive")
+		}
+		return runWatch(ctx, env, *rate, "account", fetchAndRender)
 	}
-	return renderAccountText(env, &res)
+	return fetchAndRender(env.Stdout)
 }
 
+// renderAccountText is preserved for tests and preview that pass an Env
+// holding the destination writer. The new entry point with an explicit
+// writer is renderAccountTextTo; this thin wrapper keeps existing callers
+// working unchanged.
 func renderAccountText(env *Env, a *rpc.AccountResult) int {
-	out := env.Stdout
+	return renderAccountTextTo(env, env.Stdout, a)
+}
+
+// renderAccountTextTo writes the account snapshot to out. The block is
+// laid out so the two questions a trader asks first — "what's it worth?"
+// and "how am I doing today?" — land on the first two lines, with the
+// rest of the snapshot reading top-to-bottom in priority order.
+func renderAccountTextTo(env *Env, out io.Writer, a *rpc.AccountResult) int {
 	fmt.Fprintln(out)
 	base := nonEmpty(a.BaseCurrency, "USD")
 	header := fmt.Sprintf("Account  %s · base=%s", nonEmpty(a.AccountID, "—"), base)
@@ -37,56 +61,84 @@ func renderAccountText(env *Env, a *rpc.AccountResult) int {
 	header += env.suffixBadge(a.DataType)
 	fmt.Fprintln(out, header)
 	fmt.Fprintln(out, env.rule(44))
-	fmt.Fprintln(out)
 	// Width 14 fits the widest typical NLV with a thousands-grouped
 	// currency symbol ("€ 992,841.68" is 12; -€ 999,999.99 is 13).
-	const accountValWidth = 14
-	// Hero number first — bolded — so the answer to "how much do I have?"
-	// lands on the first row regardless of section structure beneath.
+	const valW = 14
+
+	// Hero block: net liquidation + today's delta. These are the two
+	// numbers a trader scans for first; everything below is supporting
+	// detail. Daily P&L sits here even when nil so the line is present
+	// from call one — the lazy reqPnL subscription kicks in on the
+	// first call and lands a value on the next refresh.
 	fmt.Fprintf(out, "  Net liquidation         %s\n",
-		env.bold(env.formatMoneyNegCcyRight(a.NetLiquidation, base, accountValWidth)))
-	fmt.Fprintln(out)
+		env.bold(env.formatMoneyNegCcyRight(a.NetLiquidation, base, valW)))
+	writeDailyPnLLine(env, out, a, base, valW)
 
 	fmt.Fprintln(out, env.dim("  Balances"))
-	fmt.Fprintf(out, "    Buying power            %s\n", env.formatMoneyNegCcyRight(a.BuyingPower, base, accountValWidth))
-	fmt.Fprintf(out, "    Available funds         %s\n", env.formatMoneyNegCcyRight(a.AvailableFunds, base, accountValWidth))
-	fmt.Fprintf(out, "    Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.ExcessLiquidity, base, accountValWidth))
-	fmt.Fprintf(out, "    Total cash              %s\n", env.formatMoneyNegCcyRight(a.TotalCash, base, accountValWidth))
-	fmt.Fprintf(out, "    Gross position value    %s\n", env.formatMoneyNegCcyRight(a.GrossPositionValue, base, accountValWidth))
-	fmt.Fprintf(out, "    Cushion                 %s\n", env.formatCushion(a.Cushion, accountValWidth))
-	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    Buying power            %s\n", env.formatMoneyNegCcyRight(a.BuyingPower, base, valW))
+	fmt.Fprintf(out, "    Available funds         %s\n", env.formatMoneyNegCcyRight(a.AvailableFunds, base, valW))
+	fmt.Fprintf(out, "    Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.ExcessLiquidity, base, valW))
+	fmt.Fprintf(out, "    Total cash              %s\n", env.formatMoneyNegCcyRight(a.TotalCash, base, valW))
+	fmt.Fprintf(out, "    Gross position value    %s\n", env.formatMoneyNegCcyRight(a.GrossPositionValue, base, valW))
+	fmt.Fprintf(out, "    Cushion                 %s\n", env.formatCushion(a.Cushion, valW))
 
 	// Session P&L: inception-to-now Unrealized (vs cost basis on every
 	// open position) plus today's Realized closed-trade total. Sign-
-	// coloured both directions. The "Daily P&L" block further down is a
-	// different time horizon (start-of-trading-day delta from reqPnL) —
-	// they answer different questions and we surface both honestly.
+	// coloured both directions. Different time horizon than the Daily
+	// P&L line above (start-of-trading-day delta from reqPnL).
 	fmt.Fprintln(out, env.dim("  Session P&L"))
-	fmt.Fprintf(out, "    Unrealized (open)       %s\n", env.formatSignedMoneyRight(a.UnrealizedPnL, base, accountValWidth))
-	fmt.Fprintf(out, "    Realized (today)        %s\n", env.formatSignedMoneyRight(a.RealizedPnL, base, accountValWidth))
-	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    Unrealized (open)       %s\n", env.formatSignedMoneyRight(a.UnrealizedPnL, base, valW))
+	fmt.Fprintf(out, "    Realized (today)        %s\n", env.formatSignedMoneyRight(a.RealizedPnL, base, valW))
 
 	fmt.Fprintln(out, env.dim("  Margin"))
-	fmt.Fprintf(out, "    Initial                 %s\n", env.formatMoneyNegCcyRight(a.InitialMargin, base, accountValWidth))
-	fmt.Fprintf(out, "    Maintenance             %s\n", env.formatMoneyNegCcyRight(a.MaintenanceMargin, base, accountValWidth))
-	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    Initial                 %s\n", env.formatMoneyNegCcyRight(a.InitialMargin, base, valW))
+	fmt.Fprintf(out, "    Maintenance             %s\n", env.formatMoneyNegCcyRight(a.MaintenanceMargin, base, valW))
 
 	// Look-ahead block: only when at least one value lands. Cash accounts
 	// (and stub gateways pre-handshake) leave the whole quad zero, which
 	// would otherwise render as four em-dashes adding noise.
 	if a.LookAheadInitMargin != 0 || a.LookAheadMaintMargin != 0 || a.LookAheadAvailable != 0 || a.LookAheadExcess != 0 {
 		fmt.Fprintln(out, env.dim("  Look-ahead margin"))
-		fmt.Fprintf(out, "    Initial                 %s\n", env.formatMoneyNegCcyRight(a.LookAheadInitMargin, base, accountValWidth))
-		fmt.Fprintf(out, "    Maintenance             %s\n", env.formatMoneyNegCcyRight(a.LookAheadMaintMargin, base, accountValWidth))
-		fmt.Fprintf(out, "    Available funds         %s\n", env.formatMoneyNegCcyRight(a.LookAheadAvailable, base, accountValWidth))
-		fmt.Fprintf(out, "    Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.LookAheadExcess, base, accountValWidth))
-		fmt.Fprintln(out)
+		fmt.Fprintf(out, "    Initial                 %s\n", env.formatMoneyNegCcyRight(a.LookAheadInitMargin, base, valW))
+		fmt.Fprintf(out, "    Maintenance             %s\n", env.formatMoneyNegCcyRight(a.LookAheadMaintMargin, base, valW))
+		fmt.Fprintf(out, "    Available funds         %s\n", env.formatMoneyNegCcyRight(a.LookAheadAvailable, base, valW))
+		fmt.Fprintf(out, "    Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.LookAheadExcess, base, valW))
 	}
 
-	renderDailyPnL(env, a, base, accountValWidth)
-	renderCurrencyExposure(env, a)
+	// Daily P&L decomposition (unrealized / realized) sits at the bottom
+	// because the headline figure is already on the hero row. Optional —
+	// older gateways don't supply the breakdown.
+	if a.DailyPnLUnrealized != nil || a.DailyPnLRealized != nil {
+		fmt.Fprintln(out, env.dim("  Daily P&L breakdown"))
+		if a.DailyPnLUnrealized != nil {
+			fmt.Fprintf(out, "    of which unrealized   %s\n",
+				env.formatPnLCcyPtrRight(a.DailyPnLUnrealized, base, valW))
+		}
+		if a.DailyPnLRealized != nil {
+			fmt.Fprintf(out, "    of which realized     %s\n",
+				env.formatPnLCcyPtrRight(a.DailyPnLRealized, base, valW))
+		}
+	}
+
+	renderCurrencyExposureTo(env, out, a)
 	fmt.Fprintf(out, "  as of %s\n", formatTimeShort(a.AsOf))
 	return 0
+}
+
+// writeDailyPnLLine prints the hero-row Daily P&L line. When the gateway
+// hasn't delivered a frame yet, the line still renders with a dim em-dash
+// + "(subscribing — value lands on next call)" hint so a first-time user
+// sees the field exists. The lazy reqPnL kickoff is documented in
+// CHANGELOG v0.17.0 — first call subscribes, next call has values.
+func writeDailyPnLLine(env *Env, out io.Writer, a *rpc.AccountResult, base string, w int) {
+	if a.DailyPnL == nil {
+		fmt.Fprintf(out, "  Daily P&L               %s  %s\n",
+			env.dim(padDash(w)),
+			env.dim("(subscribing — value lands on next call)"))
+		return
+	}
+	fmt.Fprintf(out, "  Daily P&L               %s\n",
+		env.formatPnLCcyPtrRight(a.DailyPnL, base, w))
 }
 
 // formatCushion renders the margin cushion as a 2-decimal ratio with a
@@ -135,47 +187,15 @@ func (e *Env) formatSignedMoneyRight(v float64, ccy string, w int) string {
 	return e.colorBySign(v, s, signPnL)
 }
 
-// renderDailyPnL prints the account's start-of-trading-day P&L block when
-// the gateway has emitted at least one reqPnL frame (DailyPnL != nil).
-// The two decomposition lines (unrealized / realized) render only when
-// the gateway supplied them — older server versions emit only the bare
-// daily total. Silent when no data; never zero-substituted.
-//
-// "of which unrealized / realized" deliberately differs from the Session
-// P&L block's "Unrealized (open) / Realized (today)" labels above — both
-// blocks carry P&L numbers and the eye needs an unambiguous cue to tell
-// them apart on a glance. The Session block is inception-to-now; this
-// one is start-of-trading-day to now.
-func renderDailyPnL(env *Env, a *rpc.AccountResult, base string, width int) {
-	if a.DailyPnL == nil {
-		return
-	}
-	out := env.Stdout
-	fmt.Fprintf(out, "  Daily P&L               %s\n",
-		env.formatPnLCcyPtrRight(a.DailyPnL, base, width))
-	if a.DailyPnLUnrealized != nil {
-		fmt.Fprintf(out, "    of which unrealized   %s\n",
-			env.formatPnLCcyPtrRight(a.DailyPnLUnrealized, base, width))
-	}
-	if a.DailyPnLRealized != nil {
-		fmt.Fprintf(out, "    of which realized     %s\n",
-			env.formatPnLCcyPtrRight(a.DailyPnLRealized, base, width))
-	}
-	fmt.Fprintln(out)
-}
-
-// renderCurrencyExposure prints one row per non-base currency holding.
+// renderCurrencyExposureTo prints one row per non-base currency holding.
 // Empty when the account is single-currency or the daemon hasn't
-// received the $LEDGER:ALL response yet (pre-handshake). The row's
-// CCY column shows the contract currency; the per-row amount is
-// rendered with that currency's symbol; the base column uses the
-// account base currency.
-func renderCurrencyExposure(env *Env, a *rpc.AccountResult) {
+// received the $LEDGER:ALL response yet (pre-handshake).
+func renderCurrencyExposureTo(env *Env, out io.Writer, a *rpc.AccountResult) {
 	if len(a.CurrencyExposure) == 0 {
 		return
 	}
-	out := env.Stdout
 	base := nonEmpty(a.BaseCurrency, "USD")
+	fmt.Fprintln(out)
 	fmt.Fprintf(out, "Currency exposure  (base=%s)\n", base)
 	fmt.Fprintln(out, env.rule(60))
 	fmt.Fprintf(out, "  %-4s   %16s   %12s   %16s\n",
@@ -187,7 +207,6 @@ func renderCurrencyExposure(env *Env, a *rpc.AccountResult) {
 			fmtFX(ex.ExchangeRate),
 			formatMoneyCcy(ex.NetLiquidationBase, base))
 	}
-	fmt.Fprintln(out)
 }
 
 // fmtFX renders an exchange rate to 4 decimals. Em-dash when zero — the

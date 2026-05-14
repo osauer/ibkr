@@ -293,54 +293,32 @@ func TestRenderPositionsByUnderlying(t *testing.T) {
 	}
 }
 
-// DAY $ column renders a "+$ Money (+Y%)" cell painted by sign when the
-// daemon provided DayChangeMoney + DayChangePct; otherwise an em-dash
-// placeholder of the same width so the column stays aligned. Money
-// leads because the position-level dollar move is the headline trader
-// signal; the underlying's percent stays for cross-symbol comparability.
-func TestRenderPositions_DayChangeColumn(t *testing.T) {
+// The DAY $ column on the flat positions view is gone (v0.18+) — DAY P&L
+// (sourced from reqPnLSingle) is the single per-position day metric so
+// stocks and options answer "today's P&L" the same way. The DayChangeMoney
+// / DayChangePct fields stay on the wire (JSON consumers may still want
+// them) and the by-underlying view renders them in CHANGE/GREEKS.
+func TestRenderPositions_DayDollarColumnRemoved(t *testing.T) {
 	t.Parallel()
-	t.Run("painted positive", func(t *testing.T) {
-		var stdout bytes.Buffer
-		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
-		money, pct := 142.00, 0.99
-		res := &rpc.PositionsResult{
-			Stocks: []rpc.PositionView{
-				{Symbol: "AMD", Quantity: 100, AvgCost: 134.20, Mark: 145.22,
-					DayChangeMoney: &money, DayChangePct: &pct,
-					MarketValue: 14522, UnrealizedPnL: 1102},
-			},
-		}
-		_ = renderPositionsText(env, res)
-		out := stdout.String()
-		if !strings.Contains(out, "DAY $") {
-			t.Errorf("missing DAY $ header:\n%s", out)
-		}
-		if !strings.Contains(out, "+$ 142.00") || !strings.Contains(out, "+0.99%") {
-			t.Errorf("missing painted day-change values:\n%s", out)
-		}
-		if !strings.Contains(out, ansiGreen) {
-			t.Errorf("expected green wrap on positive day change:\n%s", out)
-		}
-	})
-	t.Run("nil renders em-dash", func(t *testing.T) {
-		var stdout bytes.Buffer
-		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-		res := &rpc.PositionsResult{
-			Stocks: []rpc.PositionView{
-				{Symbol: "AMD", Quantity: 100, AvgCost: 134.20, Mark: 145.22,
-					MarketValue: 14522, UnrealizedPnL: 1102},
-			},
-		}
-		_ = renderPositionsText(env, res)
-		out := stdout.String()
-		if !strings.Contains(out, "—") {
-			t.Errorf("expected em-dash placeholder for missing day change:\n%s", out)
-		}
-		if strings.Contains(out, "+0.00") || strings.Contains(out, "0.00%") {
-			t.Errorf("nil day change must not render as zero:\n%s", out)
-		}
-	})
+	money, pct := 142.00, 0.99
+	d := 142.00
+	res := &rpc.PositionsResult{
+		Stocks: []rpc.PositionView{
+			{Symbol: "AMD", Quantity: 100, AvgCost: 134.20, Mark: 145.22,
+				DayChangeMoney: &money, DayChangePct: &pct,
+				MarketValue: 14522, UnrealizedPnL: 1102, DailyPnL: &d},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderPositionsText(env, res)
+	out := stdout.String()
+	if strings.Contains(out, "DAY $") {
+		t.Errorf("flat view should no longer carry the DAY $ column:\n%s", out)
+	}
+	if !strings.Contains(out, "DAY P&L") {
+		t.Errorf("flat view should carry the unified DAY P&L column:\n%s", out)
+	}
 }
 
 // Realized P&L is rendered only when at least one row carries a non-zero

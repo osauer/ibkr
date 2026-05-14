@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -17,6 +19,8 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 	typeF := fs.String("type", "", "filter by type: stk | opt")
 	sortBy := fs.String("sort", "alpha", "sort: alpha | pnl | value")
 	by := fs.String("by", "", "group view: underlying (default = flat stocks/options tables)")
+	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
+	rate := fs.Duration("rate", 2*time.Second, "poll interval for --watch")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -24,22 +28,30 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "positions: --by must be 'underlying' (got %q)", *by)
 	}
 
-	params := rpc.PositionsListParams{Symbol: *symbol, Type: *typeF}
-	var res rpc.PositionsResult
-	if err := env.Conn.Call(ctx, rpc.MethodPositionsList, params, &res); err != nil {
-		return fail(env, "positions: %v", err)
+	fetchAndRender := func(out io.Writer) int {
+		params := rpc.PositionsListParams{Symbol: *symbol, Type: *typeF}
+		var res rpc.PositionsResult
+		if err := env.Conn.Call(ctx, rpc.MethodPositionsList, params, &res); err != nil {
+			return fail(env, "positions: %v", err)
+		}
+		applySort(res.Stocks, *sortBy)
+		applySort(res.Options, *sortBy)
+		if *jsonOut {
+			return printJSONTo(env, out, res)
+		}
+		if *by == "underlying" {
+			return renderPositionsByUnderlyingTo(env, out, &res)
+		}
+		return renderPositionsTextTo(env, out, &res)
 	}
 
-	applySort(res.Stocks, *sortBy)
-	applySort(res.Options, *sortBy)
-
-	if *jsonOut {
-		return printJSON(env, res)
+	if *watch {
+		if *jsonOut {
+			return fail(env, "positions: --watch and --json are mutually exclusive")
+		}
+		return runWatch(ctx, env, *rate, "positions", fetchAndRender)
 	}
-	if *by == "underlying" {
-		return renderPositionsByUnderlying(env, &res)
-	}
-	return renderPositionsText(env, &res)
+	return fetchAndRender(env.Stdout)
 }
 
 func applySort(rows []rpc.PositionView, by string) {
@@ -53,8 +65,13 @@ func applySort(rows []rpc.PositionView, by string) {
 	}
 }
 
+// renderPositionsText is preserved as a thin wrapper for tests and
+// preview that pass an Env holding the destination writer.
 func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
-	out := env.Stdout
+	return renderPositionsTextTo(env, env.Stdout, r)
+}
+
+func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult) int {
 	fmt.Fprintln(out)
 	if len(r.Stocks) == 0 && len(r.Options) == 0 {
 		fmt.Fprintf(out, "No open positions%s\n\n", env.suffixBadge(r.DataType))
@@ -64,51 +81,41 @@ func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
 	// value — most accounts in a same-day snapshot have all zeros, and an
 	// always-on column adds dead width to the table.
 	showRealized := anyRealized(r.Stocks) || anyRealized(r.Options)
-	// Daily P&L renders when the daemon delivered at least one populated
-	// value — pre-handshake or unentitled accounts get all-nil and we
-	// suppress the column entirely instead of showing a full column of
-	// em-dashes.
-	showDailyPnL := anyDailyPnL(r.Stocks) || anyDailyPnL(r.Options)
 	if len(r.Stocks) > 0 {
-		renderStocksTable(env, r.Stocks, r.DataType, showRealized, showDailyPnL)
+		renderStocksTable(env, out, r.Stocks, r.DataType, showRealized)
 	}
 	if len(r.Options) > 0 {
-		renderOptionsTable(env, r.Options, r.DataType, showRealized, showDailyPnL)
+		renderOptionsTable(env, out, r.Options, r.DataType, showRealized)
 	}
-	renderPortfolioSummary(env, r)
+	renderPortfolioSummaryTo(env, out, r)
 	fmt.Fprintf(out, "  %d positions  ·  as of %s\n",
 		len(r.Stocks)+len(r.Options), formatTimeShort(r.AsOf))
 	return 0
 }
 
-// renderStocksTable prints the stocks block with a dim column header + rule
-// and right-aligned money columns. Same layout language as the by-underlying
-// view so a reader switching between the two doesn't have to re-learn where
-// each value lives.
-func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool, showDailyPnL bool) {
-	out := env.Stdout
-	// Widths fit realistic data: AvgCost/Mark hold "$ 9,999.99" (10) or
-	// "$ 99,999.99" (11); MarketValue holds up to "$ 9,999,999.99" (14);
-	// UNREAL P&L holds signed money to the same magnitude. DAY $ holds
-	// the composite "+$ 132,000.00 (+0.64%)" cell — 24 cells fits a
-	// 6-digit money on a single-symbol concentrated position. DAILY P&L
-	// matches UNREAL P&L width — the magnitudes are comparable.
+// renderStocksTable prints the stocks block. The DAY column carries IBKR's
+// per-conId start-of-trading-day P&L from reqPnLSingle (TWS msg 95) — the
+// same metric across stocks and options. Always rendered; nil rows show
+// the "subscribing" placeholder on the first call after a daemon restart
+// and a value on the next refresh.
+//
+// Widths are sized for realistic data on a 100-col terminal: AvgCost/Mark
+// hold "$ 9,999.99" (10) or "$ 99,999.99" (11); MarketValue holds up to
+// "$ 9,999,999.99" (14); UNREAL/DAILY hold signed money to that magnitude.
+// Total ~80 cells before optional REAL P&L column, ~93 with it.
+func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool) {
 	const (
-		wSymbol = 9
+		wSymbol = 8
 		wQty    = 7
 		wAvg    = 11
 		wMark   = 11
-		wDayChg = 24
 		wMkt    = 14
 		wPnL    = 13
 	)
 	fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(dataType))
-	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %-*s  %*s  %*s",
+	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %*s  %*s  %*s",
 		wSymbol, "SYMBOL", wQty, "QTY", wAvg, "AVG COST", wMark, "MARK",
-		wDayChg, "DAY $", wMkt, "MKT VALUE", wPnL, "UNREAL P&L")
-	if showDailyPnL {
-		header += fmt.Sprintf("  %*s", wPnL, "DAILY P&L")
-	}
+		wMkt, "MKT VALUE", wPnL, "DAY P&L", wPnL, "UNREAL P&L")
 	if showRealized {
 		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
 	}
@@ -119,12 +126,9 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 			wSymbol, p.Symbol, wQty, p.Quantity,
 			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
-			padRightVisible(env.formatDayChange(p.DayChangeMoney, p.DayChangePct, p.Currency, 0), wDayChg),
 			padLeftVisible(formatMoney(p.MarketValue), wMkt),
+			env.formatPnLPtrRight(p.DailyPnL, wPnL),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
-		if showDailyPnL {
-			row += "  " + env.formatPnLPtrRight(p.DailyPnL, wPnL)
-		}
 		if showRealized {
 			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
 		}
@@ -134,13 +138,12 @@ func renderStocksTable(env *Env, rows []rpc.PositionView, dataType string, showR
 }
 
 // renderOptionsTable prints the options block in the same column language
-// as renderStocksTable. Strike is a 2-decimal float column, right-aligned;
-// AvgCost/Mark/UnrealPnL hold money right-aligned so decimal points line up
-// even when magnitudes vary (single-digit premium vs four-digit underlying).
-func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, showRealized bool, showDailyPnL bool) {
-	out := env.Stdout
+// as renderStocksTable. The DAY P&L column matches stocks — same source
+// (reqPnLSingle), same alignment — so a reader can scan one column down
+// to see "today's P&L" across the whole book.
+func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool) {
 	const (
-		wUnder  = 10
+		wUnder  = 9
 		wSide   = 4
 		wExpiry = 10
 		wStrike = 8
@@ -150,28 +153,24 @@ func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, show
 		wPnL    = 13
 	)
 	fmt.Fprintf(out, "Options%s\n", env.suffixBadge(dataType))
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s  %*s  %*s  %*s  %*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s  %*s  %*s  %*s  %*s  %*s",
 		wUnder, "UNDERLYING", wSide, "SIDE", wExpiry, "EXPIRY",
 		wStrike, "STRIKE", wQty, "QTY",
-		wAvg, "AVG COST", wMark, "MARK", wPnL, "UNREAL P&L")
-	if showDailyPnL {
-		header += fmt.Sprintf("  %*s", wPnL, "DAILY P&L")
-	}
+		wAvg, "AVG COST", wMark, "MARK",
+		wPnL, "DAY P&L", wPnL, "UNREAL P&L")
 	if showRealized {
 		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
 	}
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, p := range rows {
-		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %*.2f  %*.0f  %s  %s  %s",
+		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %*.2f  %*.0f  %s  %s  %s  %s",
 			wUnder, p.Symbol, wSide, p.Right, wExpiry, formatExpiry(p.Expiry),
 			wStrike, p.Strike, wQty, p.Quantity,
 			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
 			padLeftVisible(formatMoney(p.Mark), wMark),
+			env.formatPnLPtrRight(p.DailyPnL, wPnL),
 			env.formatPnLRight(p.UnrealizedPnL, wPnL))
-		if showDailyPnL {
-			row += "  " + env.formatPnLPtrRight(p.DailyPnL, wPnL)
-		}
 		if showRealized {
 			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
 		}
@@ -180,12 +179,17 @@ func renderOptionsTable(env *Env, rows []rpc.PositionView, dataType string, show
 	fmt.Fprintln(out)
 }
 
-// renderPortfolioSummary prints the daemon-computed aggregate block when
+// renderPortfolioSummary keeps its old name as the test entry-point.
+func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
+	renderPortfolioSummaryTo(env, env.Stdout, r)
+}
+
+// renderPortfolioSummaryTo prints the daemon-computed aggregate block when
 // at least one component is populated. Empty when there are no options
 // (Greeks coverage zero AND no FX rollup) so single-stock accounts don't
 // see an empty header. Lines render only when their pointer is non-nil
 // — never zero-substituted.
-func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
+func renderPortfolioSummaryTo(env *Env, out io.Writer, r *rpc.PositionsResult) {
 	if r.Portfolio == nil {
 		return
 	}
@@ -195,7 +199,6 @@ func renderPortfolioSummary(env *Env, r *rpc.PositionsResult) {
 	if !hasGreeks && !hasFX {
 		return
 	}
-	out := env.Stdout
 	fmt.Fprintln(out, env.bold("Portfolio"))
 	// All numeric values right-align to col (labelStart + labelWidth +
 	// space + valueWidth) so the unit text (share-equivalents, USD,
@@ -280,20 +283,12 @@ func anyRealized(rows []rpc.PositionView) bool {
 	return false
 }
 
-// anyDailyPnL reports whether at least one row has a non-nil DailyPnL —
-// the signal the daemon delivered actual values rather than a full
-// column of "pre-handshake / unentitled" nils. Used to gate the
-// DAILY P&L column on/off so we don't render a column of em-dashes.
-func anyDailyPnL(rows []rpc.PositionView) bool {
-	for _, p := range rows {
-		if p.DailyPnL != nil {
-			return true
-		}
-	}
-	return false
+// renderPositionsByUnderlying is the test-friendly wrapper.
+func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
+	return renderPositionsByUnderlyingTo(env, env.Stdout, r)
 }
 
-// renderPositionsByUnderlying prints one block per underlying with the
+// renderPositionsByUnderlyingTo prints one block per underlying with the
 // stock leg (if any), the option legs (with inline Greeks), and a
 // per-underlying Total row when there's more than one leg.
 //
@@ -303,8 +298,7 @@ func anyDailyPnL(rows []rpc.PositionView) bool {
 // columns right-align so decimal points line up; sign-coloured cells
 // (day change, unrealised P&L, Δ) pad before colour wrap so visible
 // widths stay correct under ANSI escapes.
-func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
-	out := env.Stdout
+func renderPositionsByUnderlyingTo(env *Env, out io.Writer, r *rpc.PositionsResult) int {
 	fmt.Fprintln(out)
 	if len(r.ByUnderlying) == 0 {
 		fmt.Fprintf(out, "No open positions%s\n\n", env.suffixBadge(r.DataType))
@@ -404,7 +398,7 @@ func renderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) int {
 		}
 	}
 	fmt.Fprintln(out)
-	renderPortfolioSummary(env, r)
+	renderPortfolioSummaryTo(env, out, r)
 	fmt.Fprintf(out, "  %d underlyings  ·  as of %s\n",
 		len(r.ByUnderlying), formatTimeShort(r.AsOf))
 	return 0

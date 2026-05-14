@@ -124,8 +124,8 @@ var commands []Command
 func init() {
 	commands = []Command{
 		{"status", "Daemon + gateway health (run this first if anything fails)", "ibkr status [--json]", runStatus},
-		{"account", "Account summary snapshot (NLV, BP, cash, margin)", "ibkr account [--json]", runAccount},
-		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--json]", runPositions},
+		{"account", "Account summary snapshot (NLV, BP, cash, margin, daily P&L)", "ibkr account [--watch --rate 1s] [--json]", runAccount},
+		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch --rate 2s] [--json]", runPositions},
 		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] | ibkr quote SYM YYMMDD C|P STRIKE [--watch --rate 250ms] [--json]", runQuote},
 		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
@@ -221,7 +221,13 @@ func flagSet(env *Env, name string) *flag.FlagSet {
 // printJSON writes obj as indented JSON, returning a non-zero exit code if
 // marshal fails (which would indicate a programming error).
 func printJSON(env *Env, obj any) int {
-	enc := json.NewEncoder(env.Stdout)
+	return printJSONTo(env, env.Stdout, obj)
+}
+
+// printJSONTo is printJSON with an explicit destination writer. Used by
+// renderers that emit to a buffer (watch loop) before flushing to stdout.
+func printJSONTo(env *Env, out io.Writer, obj any) int {
+	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(obj); err != nil {
 		fmt.Fprintf(env.Stderr, "ibkr: encode json: %v\n", err)

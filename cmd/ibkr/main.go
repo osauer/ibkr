@@ -165,10 +165,12 @@ func warnIfDaemonVersionMismatch(conn *dial.Conn, cliVersion string) {
 }
 
 // isStreamingInvocation reports whether the CLI invocation will hold the
-// daemon socket open for an open-ended stream. Today only `quote --watch`
-// qualifies.
+// daemon socket open for an open-ended stream. `quote`, `account`, and
+// `positions` all support `--watch` as a long-running poll/render loop.
 func isStreamingInvocation(cmd string, args []string) bool {
-	if cmd != "quote" {
+	switch cmd {
+	case "quote", "account", "positions":
+	default:
 		return false
 	}
 	for _, a := range args {
