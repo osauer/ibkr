@@ -148,61 +148,9 @@ func TestRequestAccountSummary_NoConnectorReturnsErrIBKRUnavailable(t *testing.T
 	}
 }
 
-func TestRequestAccountSummary_HappyPathParsesSummary(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
-	conn := NewConnection(nil)
-	defer conn.rateLimiter.Stop()
-	conn.status = StatusConnected
-	setServerVersionReady(conn, maxClientVersion)
-	c.conn = conn
-	c.running = true
-	c.ready = true
-
-	// Pre-populate the connection's accumulator the way the gateway would
-	// have done via msgAccountSummary handlers, then signal end-of-stream
-	// so RequestAccountSummary's wait succeeds.
-	conn.accountMu.Lock()
-	conn.account = "U1234567"
-	conn.accountSummary["NetLiquidation"] = "123456.78"
-	conn.accountSummary["BuyingPower"] = "493827.12"
-	conn.accountSummary["TotalCashValue"] = "10000.00"
-	conn.accountMu.Unlock()
-
-	// Drive end-of-stream asynchronously so the call's WaitForAccountSummaryEnd
-	// returns. We use a goroutine because the call blocks on the channel.
-	go func() {
-		// Tiny stagger so RequestAccountSummary has time to subscribe.
-		time.Sleep(10 * time.Millisecond)
-		select {
-		case conn.acctSummaryEndChan <- struct{}{}:
-		default:
-		}
-	}()
-
-	// We expect the underlying RequestAccountSummary on Connection to fail
-	// because there's no real socket, but the *encode* path will attempt to
-	// write. To bypass the network, override sendMessage by using the
-	// "not connected" guard only at the Connection level. The simpler path:
-	// use a short timeout that succeeds via the asynchronous end signal we
-	// just queued, after which parseAccountSummary reads the populated map.
-	//
-	// However, RequestAccountSummary on Connection also calls sendMessage,
-	// which writes to a nil net.Conn and panics. To avoid the actual send,
-	// we directly populate the channel ourselves (already done above) and
-	// also bypass the request emission by manipulating the lower layer:
-	//   - The simplest deterministic route is to test this through
-	//     Connection.handleAccountSummary directly to populate state, then
-	//     signal end, then call our parseAccountSummary helper. The
-	//     orchestration layer (RequestAccountSummary) requires a real
-	//     transport which is out of scope for unit tests.
-	t.Skip("orchestration test deferred to integration; parseAccountSummary covers parser logic")
-}
-
 func TestRequestAccountSummary_TimeoutDoesNotLeakGoroutines(t *testing.T) {
 	// A real network failure means RequestAccountSummary will fail to send;
 	// we verify the connector returns an error promptly without leaking.
-	before := runtime.NumGoroutine()
-
 	c := NewConnector(&ConnectorConfig{})
 	conn := NewConnection(nil)
 	defer conn.rateLimiter.Stop()
@@ -210,6 +158,11 @@ func TestRequestAccountSummary_TimeoutDoesNotLeakGoroutines(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = false
+
+	// Snapshot the baseline AFTER construction so the threshold protects only
+	// against per-call leaks, not against the rate-limiter / heartbeat
+	// goroutines NewConnection always spawns.
+	before := runtime.NumGoroutine()
 
 	for range 50 {
 		_, _ = c.RequestAccountSummary(context.Background(), 100*time.Millisecond)

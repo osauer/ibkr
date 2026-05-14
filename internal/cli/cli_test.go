@@ -3,8 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -610,49 +608,6 @@ func TestRenderChainExpiriesText(t *testing.T) {
 			}
 		}
 	})
-}
-
-// SKILL.md must mention every subcommand registered in commands so users
-// (and Claude) learn the full read-only surface. This guards against the
-// drift class where a new subcommand lands in the binary but never makes
-// it into the plugin's documentation — failing `make check` instead of
-// shipping a half-documented release.
-//
-// The check is intentionally loose (substring `\`ibkr <name>` in the
-// markdown body) so prose-style mentions count as well as the commands
-// table. Any new entry to commands forces the maintainer to write at
-// least one line about it in SKILL.md.
-// skillExcluded are CLI verbs that intentionally have no SKILL.md entry —
-// one-shot human-run configuration verbs the LLM should never invoke.
-// Symmetric to internal/mcp.ExcludedCLI but separately maintained: the
-// skill is a human-prose contract, MCP is a wire contract, and they
-// could diverge if a future verb belongs in one surface but not the other.
-var skillExcluded = map[string]string{
-	"setup": "one-time human-run configuration verb (writes claude_desktop_config.json); not for Claude to invoke",
-}
-
-func TestSkillDocumentsEveryCommand(t *testing.T) {
-	t.Parallel()
-	skillPath := filepath.Join("..", "..", "skills", "ibkr", "SKILL.md")
-	body, err := os.ReadFile(skillPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", skillPath, err)
-	}
-	text := string(body)
-	for _, c := range commands {
-		needle := "`ibkr " + c.Name
-		if _, excluded := skillExcluded[c.Name]; excluded {
-			// Negative assertion: if a documented exclusion accidentally
-			// makes it into SKILL.md, the contributor must pick one.
-			if strings.Contains(text, needle) {
-				t.Errorf("CLI command %q is in skillExcluded but also mentioned in SKILL.md — pick one", c.Name)
-			}
-			continue
-		}
-		if !strings.Contains(text, needle) {
-			t.Errorf("SKILL.md does not mention `ibkr %s` (looked for %q); add it to the commands table or per-command flags section, or list it in skillExcluded with a reason", c.Name, needle)
-		}
-	}
 }
 
 func equalSlice(a, b []string) bool {

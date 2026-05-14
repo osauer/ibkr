@@ -11,61 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConnectionPlaceAndCancelOrderEncodesMessages(t *testing.T) {
-	conn := NewConnection(DefaultConfig())
-	defer conn.rateLimiter.Stop()
-	conn.status = StatusConnected
-	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 1
-
-	var buf bytes.Buffer
-	conn.writer = bufio.NewWriter(&buf)
-
-	order := &IBKROrder{
-		Symbol:    "AAPL",
-		SecType:   "STK",
-		Exchange:  "SMART",
-		Currency:  "USD",
-		Action:    "BUY",
-		TotalQty:  100,
-		OrderType: "LMT",
-		LmtPrice:  180.25,
-		TIF:       "DAY",
-		Account:   "DU123456",
-		OrderRef:  "test_ref",
-	}
-
-	require.NoError(t, conn.PlaceOrder(order))
-	require.NotZero(t, order.OrderID)
-	require.Greater(t, buf.Len(), 0)
-
-	fields := extractPayloadFields(t, &buf)
-	require.Equal(t, "3", fields[0])
-	require.Equal(t, strconv.Itoa(order.OrderID), fields[1])
-	require.Equal(t, "AAPL", fields[3])
-	require.Equal(t, "STK", fields[4])
-	require.Equal(t, "180.25", fields[19])
-	require.Equal(t, "DU123456", fields[23])
-	require.Equal(t, "1", fields[27]) // transmit flag
-	require.Equal(t, "DAY", fields[21])
-
-	conn.ordersMu.RLock()
-	_, ok := conn.openOrders[order.OrderID]
-	conn.ordersMu.RUnlock()
-	require.True(t, ok, "order should be tracked after placement")
-
-	buf.Reset()
-	require.NoError(t, conn.CancelOrder(order.OrderID))
-	cancelFields := extractPayloadFields(t, &buf)
-	require.Equal(t, "4", cancelFields[0])
-	require.Equal(t, strconv.Itoa(order.OrderID), cancelFields[1])
-
-	conn.ordersMu.RLock()
-	_, ok = conn.openOrders[order.OrderID]
-	conn.ordersMu.RUnlock()
-	require.False(t, ok, "order should be cleared after cancel request")
-}
-
+// TestPlaceOrderDoesNotSendDoubleMaxSentinels pins the v0.7-era regression
+// where unset numeric fields ended up as `MAX_FLOAT` strings on the wire.
+// The bundled `ibkr` binary refuses every order verb at the daemon
+// dispatcher, so this is the one wire-shape contract worth keeping for
+// library callers (downstream forks, clean-room ports) who may genuinely
+// drive Connection.PlaceOrder.
 func TestPlaceOrderDoesNotSendDoubleMaxSentinels(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()

@@ -46,10 +46,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Removed
 
-Two-wave subtraction pass for v0.10–v0.12 lifecycle scaffolding and
-post-v0.13 audit findings. ~2,000 LOC out total. No behaviour change for
-the daemon or CLI; library consumers reading the items below see them
-disappear.
+Three-wave subtraction pass for v0.10–v0.12 lifecycle scaffolding,
+post-v0.13 audit findings, and test suites for surfaces the binary
+refuses or doesn't exercise. ~5,000 LOC out total. No behaviour change
+for the daemon or CLI; library consumers reading the items below see
+them disappear.
 
 First wave — v0.10–v0.12 lifecycle scaffolding never wired through:
 
@@ -132,6 +133,66 @@ Second wave — dormant subsystems flagged in the post-v0.13 audit:
   the two Python generator scripts (`generate_reqmktdata_fixtures.py`,
   `generate_reqcontractdata_fixture.py`). Committed years ago, never
   consumed by any Go test, no Make target. Undiscoverable dev tools.
+
+Third wave — test suites for surfaces the binary refuses or doesn't exercise:
+
+- **Order-test suites that test code the `ibkr` binary refuses.** The whole
+  of `pkg/ibkr/orders_test.go` (~559 LOC: `TestOrderPlacement`,
+  `TestOrderValidation`, `TestLiveOrderFlow`, `BenchmarkOrderValidation`,
+  `setupTestConnection`) and `pkg/ibkr/connector_orders_test.go` (~411 LOC:
+  `TestConnectorOrderFlow`, `TestOrderMessageEncoding`,
+  `TestOrderValidationExtended`, `BenchmarkOrderPlacement`). Big suites
+  gated on `testing.Short` + `IBKR_RUN_ORDER_FLOW=1` + `skipIfLiveTrading`,
+  with mostly `t.Logf`/`t.Skip` assertions even when they DO run, against
+  a feature `internal/daemon/trading_disabled.go` refuses unconditionally.
+  The integration test `TestTradingVerbsRefused` pins the actual binary
+  contract; that's the one that matters. `connection_orders_test.go`
+  shrinks to a single regression — `TestPlaceOrderDoesNotSendDoubleMaxSentinels`,
+  the v0.7-era wire-shape pin worth keeping for downstream forks /
+  clean-room ports. `skipIfLiveTrading` + `isLiveTradingEnv` helpers in
+  `testenv_test.go` go with the suites (no other callers).
+
+- **`TestRequestAccountSummary_HappyPathParsesSummary`** in
+  `pkg/ibkr/account_summary_test.go`. 50 lines of careful scaffolding
+  followed by an unconditional `t.Skip` admitting "orchestration test
+  deferred to integration." Parser logic is already covered by the four
+  `TestParseAccountSummary_*` siblings. Misled future readers into
+  thinking happy-path orchestration was covered. (Side fix:
+  `TestRequestAccountSummary_TimeoutDoesNotLeakGoroutines` snapshots the
+  goroutine baseline AFTER constructor setup — the leak detector now
+  measures only per-call leaks, not pre-existing rate-limiter
+  goroutines that the deleted test had been polluting the baseline with.)
+
+- **`TestHandlerRegistration_NoRaceCondition` and three sister tests**
+  (`pkg/ibkr/connector_handler_race_test.go`, ~267 LOC,
+  `TestConnector_HandlersRegisteredBeforeReady`,
+  `TestConnector_EarlyMessageHandling`,
+  `TestConnector_ConcurrentHandlerRegistrationAndMessages`). Tests
+  manually pulled handler closures from `mockConn.msgHandlers` and called
+  them directly, bypassing the production read-loop / dispatch path
+  where any real registration race would actually live. Test names
+  promised concurrency coverage they didn't deliver — a future race
+  in `Connection.Run` / `processMessage` would have passed every one
+  of them. If a real race-test is wanted later, drive `Connection.Run`
+  against a `net.Pipe`.
+
+- **`TestSkillDocumentsEveryCommand`** in `internal/cli/cli_test.go` plus
+  the `skillExcluded` map. Greped SKILL.md for the literal `` `ibkr <name> ``
+  substring per CLI command — a brittle prose-pattern check that fails on
+  honest doc rewords and passes on subtly-wrong rewordings. The structured
+  parity gate in `internal/mcp/tools_test.go::TestParity` is the one that
+  matters (wire-surface drift, not prose).
+
+- **`pkg/ibkr/protocoltest/` package** plus `cmd/matrix/main.go`
+  (~850 LOC). Advertised as a "wire-format encoder/decoder spec used by
+  unit tests," but `TestEncodeMessageVariants` only checked byte-length
+  sanity and the null delimiter — no decode round-trip, no comparison to
+  the production `Connection.encodeMsg`. The captured-fixture pattern
+  in `pkg/ibkr/wire_fixtures_test.go` + `scanner_test.go::TestParseScannerData_LiveFixture`
+  is what actually catches wire regressions, and it never imported
+  `protocoltest`. A future wire-spec contract test (one that diffs
+  `EncodeMessage` against `Connection.encodeMsg`) is welcome — but this
+  package wasn't that test.
 
 ### Documentation
 
