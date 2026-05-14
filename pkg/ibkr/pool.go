@@ -515,7 +515,7 @@ func (p *ConnectionPool) checkLeases() {
 }
 
 // GetPoolStatus returns the current pool status
-func (p *ConnectionPool) GetPoolStatus() map[string]interface{} {
+func (p *ConnectionPool) GetPoolStatus() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -553,7 +553,7 @@ func (p *ConnectionPool) GetPoolStatus() map[string]interface{} {
 	}
 
 	// Build connection details
-	connectionDetails := make(map[int]map[string]interface{})
+	connectionDetails := make(map[int]map[string]any)
 	for clientID, conn := range p.connections {
 		connectionDetails[clientID] = conn.GetConnectionInfo()
 
@@ -567,7 +567,7 @@ func (p *ConnectionPool) GetPoolStatus() map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"total_connections": len(p.connections),
 		"connected_count":   connectedCount,
 		"available_count":   availableCount,

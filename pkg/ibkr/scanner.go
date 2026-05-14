@@ -143,7 +143,7 @@ func (c *Connector) requestScannerSubscription(reqID int, sub ScannerSubscriptio
 	//   maturityDateAbove, maturityDateBelow, couponRateAbove, couponRateBelow,
 	//   excludeConvertible, averageOptionVolumeAbove, scannerSettingPairs,
 	//   stockTypeFilter
-	fields := []interface{}{
+	fields := []any{
 		reqScannerSubscription,
 		reqID,
 		strconv.Itoa(limit),

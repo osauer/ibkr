@@ -291,7 +291,7 @@ func TestOrderMessageEncoding(t *testing.T) {
 	}
 
 	// Test that we can create the message without errors
-	fields := []interface{}{
+	fields := []any{
 		placeOrder,
 		45, // version
 		order.OrderID,

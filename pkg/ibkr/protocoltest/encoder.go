@@ -10,7 +10,7 @@ import (
 // EncodeMessage reproduces the production encodeMsg behavior with a toggle for
 // including or omitting the null terminator that follows the binary message type
 // in v100+ sessions.
-func EncodeMessage(serverVersion int, includeNullAfterType bool, fields ...interface{}) ([]byte, error) {
+func EncodeMessage(serverVersion int, includeNullAfterType bool, fields ...any) ([]byte, error) {
 	var buf bytes.Buffer
 
 	for i, field := range fields {
@@ -29,7 +29,7 @@ func EncodeMessage(serverVersion int, includeNullAfterType bool, fields ...inter
 	return buf.Bytes(), nil
 }
 
-func writeBinaryType(buf *bytes.Buffer, field interface{}, includeNull bool) error {
+func writeBinaryType(buf *bytes.Buffer, field any, includeNull bool) error {
 	var msgType int32
 
 	switch v := field.(type) {
@@ -52,7 +52,7 @@ func writeBinaryType(buf *bytes.Buffer, field interface{}, includeNull bool) err
 	return nil
 }
 
-func writeASCIIField(buf *bytes.Buffer, field interface{}) error {
+func writeASCIIField(buf *bytes.Buffer, field any) error {
 	switch v := field.(type) {
 	case int:
 		buf.WriteString(strconv.Itoa(v))
