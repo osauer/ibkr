@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/osauer/ibkr/pkg/ibkr/internal/logging"
@@ -1451,11 +1452,27 @@ func (c *Connection) readHandshakeCString() (string, error) {
 	return strings.TrimSuffix(data, "\x00"), nil
 }
 
+// isHandshakeNoDataErr reports whether err means "the peer hung up before
+// sending a plaintext handshake response" — the trigger for TLS fallback. We
+// accept three flavors because the kernel and runtime produce different
+// signals for the same situation:
+//
+//   - io.EOF / io.ErrUnexpectedEOF: graceful close after we sent the request.
+//   - syscall.ECONNRESET: RST landed before any data — what Darwin's TCP
+//     stack produces on the macOS-latest GitHub Actions runner when a
+//     tls.Listen-backed server receives non-TLS bytes (Linux runners see
+//     EOF for the same scenario).
+//   - net.Error with Timeout(): the server accepted but never replied within
+//     our short handshake budget — same outcome (no plaintext) for our
+//     fallback purpose.
 func isHandshakeNoDataErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 	var netErr net.Error
