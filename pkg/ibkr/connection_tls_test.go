@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -204,6 +205,41 @@ func TestDialEndpoint_TLSHandshakeRespectsContextCancel(t *testing.T) {
 		t.Fatal("dialEndpoint did not return within 3s of ctx cancel — handshake still blocking")
 	}
 }
+
+// TestIsHandshakeNoDataErr pins down the error flavors that should trigger
+// TLS fallback. The macOS-latest CI runner produces ECONNRESET where Linux
+// runners and local macOS produce EOF for the same plaintext-to-TLS-server
+// scenario; the classifier must accept both, or TestConnectionTLSFallback
+// becomes a portability flake.
+func TestIsHandshakeNoDataErr(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil is not no-data", nil, false},
+		{"EOF triggers fallback", io.EOF, true},
+		{"unexpected EOF triggers fallback", io.ErrUnexpectedEOF, true},
+		{"connection reset triggers fallback (Darwin RST flavor)", syscall.ECONNRESET, true},
+		{"wrapped ECONNRESET still triggers fallback", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, true},
+		{"net timeout triggers fallback", &timeoutErr{}, true},
+		{"plain non-net error does not trigger", errors.New("nope"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isHandshakeNoDataErr(tc.err); got != tc.want {
+				t.Errorf("isHandshakeNoDataErr(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 func TestConnectionTLSFallback(t *testing.T) {
 	addr, stop := startFakeIBTLS(t)
