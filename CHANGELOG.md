@@ -2,70 +2,100 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## [Unreleased]
+## v0.17.0 — 2026-05-14 21:16 CEST
 
-Daily P&L lands on the account row and on each open position. The
-gateway's `reqPnL` (TWS msg 92) and `reqPnLSingle` (msg 94) streams are
-now plumbed end-to-end: wire encoder/decoder in `pkg/ibkr`, daemon-side
-subscription at post-connect setup with idempotent per-position
-subscribes on first `positions.list` call, and renderer-side surfacing
-on `ibkr account` (a `Daily P&L` block with optional unrealised /
-realised decomposition) and `ibkr positions` (a `DAILY P&L` column,
-shown only when at least one row carries a value).
+Adds Daily P&L (account-level and per-position), expands the account
+snapshot with the fields a trader actually scans for, and switches the
+positions table from per-share day moves to position-level dollar moves.
 
 ### Added
 
-- **`reqPnL` (out 92) / `cancelPnL` (out 93) / `reqPnLSingle` (out 94) /
-  `cancelPnLSingle` (out 95) wire encoders, and inbound handlers for
-  `msgPnL` (94) / `msgPnLSingle` (95)** in `pkg/ibkr/pnl.go`. The IBKR
-  `DBL_MAX` "not yet computed" sentinel is normalised to a nil pointer
-  at parse time; older gateway versions that emit only the bare
-  `dailyPnL` field (no unrealised / realised breakdown) are accepted
-  via the short-form payload branch.
+- **Daily P&L on the account row.** A `Daily P&L` block on `ibkr account`
+  carries IBKR's start-of-trading-day delta from the `reqPnL` stream
+  (TWS msg 94), with optional `of which unrealized / realized` subrows
+  when the gateway supplies them. Distinct from the session-running
+  unrealized/realized totals already surfaced. The block renders only
+  when the gateway has delivered a frame; otherwise silent.
+
+- **Daily P&L per position.** A new `DAILY P&L` column on
+  `ibkr positions` carries IBKR's per-conId start-of-trading-day delta
+  from `reqPnLSingle` (msg 95). Shown only when at least one row has
+  a value; nil rows render as em-dash. The daemon caps active per-
+  position subscriptions at 50; overflow rows render em-dash, never a
+  fabricated zero.
+
+- **Account screen now surfaces** `account_type`, `gross_position_value`,
+  `unrealized_pnl` (session-running), `realized_pnl` (today's closed),
+  `cushion` (with severity bands — red < 0.10, yellow < 0.30, green
+  ≥ 0.30), and the `look_ahead_*` quad (init / maint / available funds
+  / excess liquidity — post-overnight-cycle projection). All from the
+  existing `reqAccountSummary` stream, no new gateway round trips. The
+  look-ahead block suppresses itself when every value is zero (cash
+  accounts, pre-handshake).
+
+- **MCP-keeps-daemon-alive note** in `README.md` §Architecture,
+  documenting that an MCP client's persistent stdio connection pins
+  the daemon's `activeConns ≥ 1` for the lifetime of the client.
+  Idle-shutdown fires when the MCP host quits.
+
+- **`reqPnL` / `cancelPnL` / `reqPnLSingle` / `cancelPnLSingle` wire
+  encoders and inbound handlers** in `pkg/ibkr/pnl.go`. IBKR's
+  `DBL_MAX` "not yet computed" sentinel is normalised to nil at parse
+  time. Older gateways emitting only the bare `dailyPnL` field
+  (without unrealized / realized) are accepted via a short-form
+  payload branch.
 
 - **`Connector.SubscribeAccountPnL` / `SubscribePositionDailyPnL`** —
-  idempotent subscription kickoffs. Account-level subscription starts
-  in the daemon's `postConnectSetup` right next to `RequestAccountUpdates`;
-  per-position subscriptions are lazy (first `positions.list` call
-  warms up to `maxDailyPnLSubscriptions = 50` legs). Cache lives on
-  the `*Connector` so a Connection-rebuild resets state cleanly.
+  idempotent subscription kickoffs. Cache lives on the `*Connector`
+  so a Connection rebuild resets state cleanly. Counterpart
+  `AccountDailyPnL()` and `PositionDailyPnL(conID)` readers are
+  non-blocking cache lookups.
 
-- **`AccountResult.{DailyPnL,DailyPnLUnrealized,DailyPnLRealized}` and
-  `PositionView.DailyPnL`** — all `*float64`. `nil` distinguishes
-  "no frame yet" / "no entitlement" / "DBL_MAX sentinel" from "zero
-  P&L on a flat day". Distinct from the session-running
-  `UnrealizedPnL` / `RealizedPnL` already surfaced via
-  `reqAccountUpdates`.
-
-- **`ibkr account` Daily P&L block.** Renders only when the gateway
-  has delivered a frame; otherwise silent (no em-dash placeholder).
-  Sub-lines (unrealised / realised) render only when the gateway
-  supplied them.
-
-- **`ibkr positions` DAILY P&L column.** Shown only when at least one
-  row carries a value; nil rows render as em-dash. Suppressed entirely
-  when every row is nil (pre-handshake, unentitled account).
-
-- **MCP tool descriptions for `ibkr_account` and `ibkr_positions`**
-  call out the new `daily_pnl*` fields so MCP clients (Claude Code and
-  similar agents) know to read them.
-
-- **Unit, daemon, renderer, and integration tests.** Wire encoder /
-  decoder coverage on serverVersion ≥ 100, `DBL_MAX` sentinel
-  handling, daemon cache round-trip via test-only seed helpers, CLI
-  rendering with mixed populated / nil rows, and a gateway-gated
-  integration test that polls for the streaming arrival.
+- **Unit, daemon, renderer, and integration tests** at every layer
+  of the new PnL pipeline.
 
 ### Changed
 
-- **`pkg/ibkr.Position` now carries `ConID`.** Required for the daemon
-  to issue `reqPnLSingle` keyed by contract ID rather than re-resolving
-  through symbol / expiry / strike / right. Additive — existing JSON
-  consumers ignore the new field.
+- **Account renderer regrouped** into `Balances` / `Session P&L` /
+  `Margin` / `Look-ahead margin` / `Daily P&L` blocks. The hero
+  `Net liquidation` stays at the top. Section names line up with the
+  IBKR Account Window so the labelling translates 1:1.
 
-- **`internal/daemon.connectAttempter`** gains `SubscribeAccountPnL`.
-  `*ibkrlib.Connector` satisfies it structurally; the test fake
-  records nothing extra.
+- **`DAY CHG` column on `ibkr positions` is now `DAY $`.** It renders
+  the position-level money move (qty × per-share for stocks; qty ×
+  multiplier × Δ for options when `OptionPrevClose` is populated),
+  with the underlying's percent in parens. Money leads because that's
+  the figure a trader scans for. Sign-coloured. JSON consumers that
+  grep rendered output for `DAY CHG` need to switch to `DAY $`; the
+  underlying `day_change` / `day_change_pct` JSON fields are
+  unchanged, and a new `day_change_money` field is additive.
+
+- **`pkg/ibkr.Position` now carries `ConID`.** Required for the daemon
+  to key `reqPnLSingle` by contract ID. Additive on the JSON wire.
+
+- **`AccountResult` / `PositionView` gain pointer P&L fields:**
+  `daily_pnl`, `daily_pnl_unrealized`, `daily_pnl_realized` on
+  `AccountResult`, `daily_pnl` on `PositionView`. All `*float64` —
+  `nil` distinguishes "no frame yet" / "no entitlement" / "DBL_MAX
+  sentinel" from a real zero.
+
+### Fixed
+
+- **Account-level Daily P&L now lands on auto-detect accounts.** The
+  post-connect subscription only fired when `[gateway].account` was
+  pinned in config; in the common auto-detect path the daemon didn't
+  know the account code until after handshake's `managedAccounts`
+  message, and the subscribe was silently skipped. Now
+  `account.summary` lazy-subscribes via the runtime-resolved account.
+  The first call kicks the stream; the next call (within a few
+  seconds) shows values.
+
+### Security
+
+- **`SECURITY.md` no longer carries the maintainer's personal email.**
+  Reports now flow through GitHub Private Vulnerability Reporting
+  (already the preferred path). A no-GitHub-account escape hatch is
+  documented.
 
 ## v0.16.0 — 2026-05-14 18:10 CEST
 
