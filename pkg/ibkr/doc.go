@@ -8,7 +8,7 @@
 //
 // # Protocol coverage
 //
-// What's plumbed today (v0.12):
+// What's plumbed today (v0.13):
 //
 //   - Account & positions: reqAccountSummary (62), reqAccountUpdates (6),
 //     portfolio_value (msg 7), $LEDGER:ALL multi-currency exposure. Positions
@@ -43,9 +43,11 @@
 //     delayed / delayed-frozen at runtime.
 //     Entry point: [Connector.SetMarketDataType].
 //   - Order placement: placeOrder (3), cancelOrder (4). Wire-implemented
-//     but the CLI/MCP/daemon never reach it in v0.x — see
-//     internal/daemon/trading_disabled.go. Direct library callers can
-//     use [Connector.PlaceOrder], [Connector.CancelOrder].
+//     but the bundled CLI / MCP / daemon refuse the verbs in v0.x — the
+//     daemon's order-method handlers return ErrTradingDisabled
+//     unconditionally (see internal/daemon/trading_disabled.go). Library
+//     callers can drive the wire directly via [Connector.SubmitOrder] /
+//     [Connector.CancelOrder].
 //
 // What's not implemented (would-need-plumbing if a use case appears):
 //
@@ -69,11 +71,12 @@
 //
 // The TWS protocol intermingles read and write opcodes; this package
 // exposes both because clean-room reimplementing the protocol means
-// reimplementing the write side too. The `ibkr` binary refuses to send
-// any write opcode via a `//go:build !trading` build-tag stub. Library
-// callers building their own application are responsible for their own
-// safety; if you want the same guarantee, build with `-tags=trading=off`
-// or simply do not call [Connector.PlaceOrder] / [Connector.CancelOrder].
+// reimplementing the write side too. The bundled `ibkr` binary refuses
+// every order verb at the daemon's RPC dispatch layer — see
+// internal/daemon/trading_disabled.go — so the CLI / MCP / hook chain
+// physically cannot send placeOrder / cancelOrder. Library callers
+// driving Connector directly are on their own; if you want the same
+// guarantee, do not call [Connector.SubmitOrder] / [Connector.CancelOrder].
 //
 // # Trademark
 //

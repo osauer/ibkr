@@ -83,6 +83,90 @@ func TestBuildPortfolioAggregatesOptionsSumGreeks(t *testing.T) {
 	}
 }
 
+// TestBuildPortfolioAggregatesHonorsMultiplierFromWire pins the v0.13.x
+// fix: optionMultiplier reads PositionView.Multiplier instead of
+// hard-coding 100. Without this the aggregator silently lies by an
+// integer factor on index options (NDX 100, NDXP 100, mini-options 10,
+// some indexes 1000). The wire already carries the value via
+// pos.Asset.Multiplier; ignoring it was a self-deceptive helper that
+// took the answer and threw it away.
+func TestBuildPortfolioAggregatesHonorsMultiplierFromWire(t *testing.T) {
+	// Index-style option: Multiplier=1000. Without honouring the wire
+	// value the aggregator would compute 1*0.5*100 = 50 (10× too low).
+	options := []rpc.PositionView{
+		{Symbol: "NDX", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD",
+			Multiplier: 1000,
+			Delta:      new(0.5), Theta: new(-0.20),
+			Underlying: new(float64(20000))},
+	}
+	got := buildPortfolioAggregates(nil, options)
+	// 1 * 0.5 * 1000 = 500
+	if got.EffectiveDelta == nil || math.Abs(*got.EffectiveDelta-500) > 1e-9 {
+		t.Errorf("EffectiveDelta = %v, want 500 (mult=1000 honoured)", got.EffectiveDelta)
+	}
+	// 1 * 0.5 * 1000 * 20000 = 10_000_000
+	if got.DollarDelta == nil || math.Abs(*got.DollarDelta-10_000_000) > 1e-9 {
+		t.Errorf("DollarDelta = %v, want 10_000_000 (mult=1000 honoured)", got.DollarDelta)
+	}
+	// 1 * -0.20 * 1000 = -200
+	if got.DailyTheta == nil || math.Abs(*got.DailyTheta-(-200)) > 1e-9 {
+		t.Errorf("DailyTheta = %v, want -200 (mult=1000 honoured)", got.DailyTheta)
+	}
+}
+
+// TestBuildPortfolioAggregatesPrefersUnderlyingOverPrevClose pins the
+// v0.13.x fix: dollar delta now uses the model-computation underlying
+// captured alongside the Greeks (lockstep with the delta), and only
+// falls back to PrevClose when the leg's Greeks tick didn't carry a
+// spot. Pairing today's delta with the underlying's prior close gives
+// an apples-to-oranges answer that lies by the size of any overnight
+// gap — a 3% gap was a 3% lie in dollar_delta.
+func TestBuildPortfolioAggregatesPrefersUnderlyingOverPrevClose(t *testing.T) {
+	t.Run("Underlying takes precedence over PrevClose", func(t *testing.T) {
+		// Yesterday's close 200, today's spot 206 (3% gap up).
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 5, Currency: "USD",
+				Delta:      new(0.5),
+				Underlying: new(float64(206)),
+				PrevClose:  new(float64(200))},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		// 5 * 0.5 * 100 * 206 = 51_500. With the bug it would have been 50_000.
+		if got.DollarDelta == nil || math.Abs(*got.DollarDelta-51_500) > 1e-9 {
+			t.Errorf("DollarDelta = %v, want 51500 (Underlying preferred)", got.DollarDelta)
+		}
+	})
+
+	t.Run("Underlying alone (no PrevClose) populates dollar delta", func(t *testing.T) {
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD",
+				Delta:      new(0.5),
+				Underlying: new(float64(206))},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		// 1 * 0.5 * 100 * 206 = 10300
+		if got.DollarDelta == nil || math.Abs(*got.DollarDelta-10_300) > 1e-9 {
+			t.Errorf("DollarDelta = %v, want 10300 (Underlying-only path)", got.DollarDelta)
+		}
+	})
+
+	t.Run("PrevClose still serves as fallback when Underlying missing", func(t *testing.T) {
+		// Mirrors the cold-start case: per-leg Greeks tick captured
+		// delta but no model-spot — still better to anchor on prev close
+		// than to drop the dollar contribution.
+		options := []rpc.PositionView{
+			{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD",
+				Delta:     new(0.5),
+				PrevClose: new(float64(200))},
+		}
+		got := buildPortfolioAggregates(nil, options)
+		// 1 * 0.5 * 100 * 200 = 10000
+		if got.DollarDelta == nil || math.Abs(*got.DollarDelta-10_000) > 1e-9 {
+			t.Errorf("DollarDelta = %v, want 10000 (PrevClose fallback)", got.DollarDelta)
+		}
+	})
+}
+
 // TestBuildPortfolioAggregatesPartialCoverage: some legs have Greeks,
 // some don't. Coverage counts must reflect that; sums aggregate only
 // what's present.

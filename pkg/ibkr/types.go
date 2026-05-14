@@ -46,22 +46,6 @@ type Greeks struct {
 	Rho   float64 `json:"rho"`
 }
 
-// AccountSummary represents account information from broker.
-type AccountSummary struct {
-	AccountID          string  `json:"account_id"`
-	NetLiquidation     float64 `json:"net_liquidation"`
-	BuyingPower        float64 `json:"buying_power"`
-	CashBalance        float64 `json:"cash_balance"`
-	RealizedPNL        float64 `json:"realized_pnl"`
-	UnrealizedPNL      float64 `json:"unrealized_pnl"`
-	AvailableFunds     float64 `json:"available_funds"`
-	ExcessLiquidity    float64 `json:"excess_liquidity"`
-	MaintenanceMargin  float64 `json:"maintenance_margin"`
-	InitialMargin      float64 `json:"initial_margin"`
-	GrossPositionValue float64 `json:"gross_position_value"`
-	EquityWithLoan     float64 `json:"equity_with_loan"`
-}
-
 // Position represents a held position in the portfolio.
 type Position struct {
 	ID            string    `json:"id"`
@@ -124,37 +108,6 @@ type MarketData struct {
 	Session   string `json:"session,omitempty"`
 	DataType  string `json:"data_type,omitempty"`
 	IsDelayed bool   `json:"is_delayed,omitempty"`
-}
-
-// MarketPhase represents the current trading session phase.
-type MarketPhase string
-
-const (
-	MarketPhaseClosed     MarketPhase = "CLOSED"
-	MarketPhasePreMarket  MarketPhase = "PRE_MARKET"
-	MarketPhaseOpening    MarketPhase = "OPENING"
-	MarketPhaseOpen       MarketPhase = "OPEN"
-	MarketPhaseClosing    MarketPhase = "CLOSING"
-	MarketPhaseAfterHours MarketPhase = "AFTER_HOURS"
-)
-
-// FreshThresholdForPhase returns the maximum acceptable age for market data
-// given a specific market phase.
-func FreshThresholdForPhase(phase MarketPhase) time.Duration {
-	switch phase {
-	case MarketPhaseOpen, MarketPhaseOpening:
-		return 5 * time.Second
-	case MarketPhaseClosing:
-		return 15 * time.Second
-	case MarketPhasePreMarket:
-		return 30 * time.Minute
-	case MarketPhaseAfterHours:
-		return 4 * time.Hour
-	case MarketPhaseClosed:
-		return 72 * time.Hour
-	default:
-		return 5 * time.Second
-	}
 }
 
 // Order represents a trading order.

@@ -168,7 +168,7 @@ The wire between CLI and daemon has no version field today; the CLI prints a std
 | Capability                       | Wire opcodes                                                              | Library entry point                                                | Status                |
 |----------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------------------|-----------------------|
 | Account summary                  | `reqAccountSummary` (62), `accountSummary` (63), `acctValue` (6)          | `Connector.RequestAccountSummary`, `GetAccountSummary`             | ready                 |
-| Positions + portfolio            | `reqPositions` (61), `position` (61), `portfolioValue` (7), $LEDGER:ALL   | `Connector.GetPositions`, `GetCachedPositions`                     | ready                 |
+| Positions + portfolio            | `reqPositions` (61), `position` (61), `portfolioValue` (7), $LEDGER:ALL   | `Connector.GetCachedPositions`                                     | ready                 |
 | Snapshot quote                   | `reqMktData` (1) snapshot=true, `tickPrice` (1), `tickSnapshotEnd` (57)   | `Connector.FetchMarketSnapshot`                                    | ready                 |
 | Streaming quote                  | `reqMktData` (1) snapshot=false, `tickPrice`/`tickSize`/`tickGeneric`     | `Connector.SubscribeMarketData`, `GetMarketData`                   | ready                 |
 | Generic-tick set                 | gen-ticks 100, 101, 104, 106, 165 (option vol, OI, HV, IV, Misc Stats)    | populated into `MarketData` automatically                          | ready                 |
@@ -177,7 +177,7 @@ The wire between CLI and daemon has no version field today; the CLI prints a std
 | Daily historical bars            | `reqHistoricalData` (20), `historicalData` (17)                           | `Connector.FetchHistoricalDailyBars`                               | ready                 |
 | Market scanner                   | `reqScannerSubscription` (22), `reqScannerParameters` (24)                | `Connector.RunScannerSubscription`, `RunScannerParameters`         | ready (v0.12)         |
 | Market-data type switch          | `reqMarketDataType` (59), `marketDataType` (58)                           | `Connector.SetMarketDataType`                                      | ready                 |
-| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.PlaceOrder`, `CancelOrder`                              | wire-ready, refused by daemon in v0.x |
+| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.SubmitOrder`, `CancelOrder`                             | wire-ready, refused by daemon in v0.x |
 | Real-time bars                   | `reqRealTimeBars` (50)                                                    | —                                                                  | not implemented       |
 | Market depth (L2)                | `reqMktDepth` (10), `reqMktDepthL2` (13)                                  | —                                                                  | not implemented       |
 | Fundamental data                 | `reqFundamentalData` (52)                                                 | —                                                                  | not implemented       |
@@ -252,16 +252,16 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 `ibkr` is read-only in 0.x. Four independent layers refuse `order`, `trade`, `cancel`:
 
-1. The daemon's order-handler dispatch is stubbed via `//go:build !trading` ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)). `MethodOrderPlace` and `MethodOrderCancel` always return `ErrTradingDisabled`. `pkg/ibkr` exposes order types for forward compatibility, but no CLI subcommand reaches them.
+1. The daemon's order-handler dispatch returns `ErrTradingDisabled` for both `MethodOrderPlace` and `MethodOrderCancel` ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)). `pkg/ibkr` exposes order types and a wire-side `Connector.SubmitOrder` for library consumers, but no CLI subcommand reaches them.
 2. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies the verbs in `permissions.deny`.
 3. The plugin's `PreToolUse` hook hard-blocks the verb patterns and fails closed if `jq` is missing from PATH.
 4. A unit test in `internal/mcp` refuses to ship the MCP server with any tool whose name contains `order`, `trade`, `cancel`, `submit`, or `place`.
 
-A future v2 may add trading behind an explicit `--tags=trading` build tag. Per [semver](https://semver.org/#spec-item-4), 0.x releases may break compatibility between minor versions. 1.0 is reserved for the first stable read-only line.
+Per [semver](https://semver.org/#spec-item-4), 0.x releases may break compatibility between minor versions. 1.0 is reserved for the first stable read-only line.
 
 ## Other install paths
 
-- **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@latest`. Requires Go 1.25+.
+- **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@latest`. Requires Go 1.26+.
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify against the bundled `SHA256SUMS`.

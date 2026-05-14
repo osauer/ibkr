@@ -400,6 +400,16 @@ type PositionView struct {
 	OptionAsk       *float64 `json:"option_ask,omitempty"`
 	OptionPrevClose *float64 `json:"option_prev_close,omitempty"`
 	IV              *float64 `json:"iv,omitempty"`
+
+	// Underlying is the model-computation underlying spot IBKR sent alongside
+	// the Greeks (msg 21 tickType 13). The portfolio aggregator pairs delta
+	// with this spot to compute dollar delta, so the dollar figure stays
+	// consistent with the delta it was modelled against — pairing today's
+	// delta with the underlying's prior close gives an apples-and-oranges
+	// answer that lies by the size of any overnight gap. nil when the per-
+	// leg Greeks tick didn't carry a spot (illiquid leg, model abstention)
+	// — never zero-substituted.
+	Underlying *float64 `json:"underlying,omitempty"`
 }
 
 // PositionsResult wraps the array so the daemon can attach metadata later.

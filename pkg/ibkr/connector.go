@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -37,8 +36,6 @@ type Connector struct {
 	pool   *ConnectionPool
 	lease  *ConnectionLease
 	conn   *Connection
-
-	gatewayBootstrapper GatewayBootstrapper
 
 	fetchContractDetails func(string, time.Duration) ([]ContractDetailsLite, error)
 	contractTimingHook   func(string, time.Duration, bool)
@@ -90,14 +87,6 @@ type Connector struct {
 		right  string
 	}
 
-	// Error tracking for runtime stability reporting
-	errMu     sync.Mutex
-	errTotals map[int]int64
-	errEvents []struct {
-		code int
-		t    time.Time
-	}
-
 	// Historical data requests (HMDS)
 	historicalMu      sync.Mutex
 	historicalReqs    map[int]*historicalRequest
@@ -109,7 +98,6 @@ type ConnectorConfig struct {
 	ServiceName       string
 	PreferredClientID int
 	PoolConfig        *PoolConfig
-	GatewayBootstrap  GatewayBootstrapper
 }
 
 // Subscription represents a market data subscription.
@@ -252,10 +240,8 @@ func NewConnector(config *ConnectorConfig) *Connector {
 			expiry time.Time
 			right  string
 		}),
-		gatewayBootstrapper: config.GatewayBootstrap,
-		errTotals:           make(map[int]int64),
-		historicalReqs:      make(map[int]*historicalRequest),
-		historicalBackoff:   make(map[string]int),
+		historicalReqs:    make(map[int]*historicalRequest),
+		historicalBackoff: make(map[string]int),
 	}
 	conn.fetchContractDetails = conn.FetchContractDetails
 	return conn
@@ -598,20 +584,6 @@ func (c *Connector) Start(ctx context.Context) error {
 
 	// Request a connection lease
 	lease, err := c.pool.RequestLease(ctx, c.config.ServiceName, c.config.PreferredClientID)
-	if err != nil && c.gatewayBootstrapper != nil {
-		c.logInfo("Failed to acquire IBKR lease: %v", err)
-		c.logInfo("Attempting to bootstrap IBKR gateway before retrying lease request")
-		if bootErr := c.gatewayBootstrapper.EnsureGateway(ctx); bootErr != nil {
-			c.logWarn("Gateway bootstrap attempt failed: %v", bootErr)
-		} else {
-			// Allow gateway a brief moment to come online before retrying
-			select {
-			case <-time.After(3 * time.Second):
-			case <-ctx.Done():
-			}
-			lease, err = c.pool.RequestLease(ctx, c.config.ServiceName, c.config.PreferredClientID)
-		}
-	}
 	if err != nil {
 		// Try to continue without IBKR for resilience
 		c.logWarn("Failed to get connection lease: %v", err)
@@ -706,29 +678,6 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 	c.mu.Unlock()
 }
 
-// GetStatus returns a compact status map for API consumption (system/status endpoint)
-func (c *Connector) GetStatus() map[string]any {
-	c.mu.RLock()
-	conn := c.conn
-	running := c.running
-	c.mu.RUnlock()
-
-	total, observed := c.GetSubscriptionStats()
-	totals, last5m := c.GetErrorStats(5 * time.Minute)
-	m := map[string]any{
-		"running":          running,
-		"connected":        conn != nil && conn.IsConnected(),
-		"subscriptions":    total,
-		"subscriptions_ok": observed,
-		"errors_total":     totals,
-		"errors_last5m":    last5m,
-	}
-	if conn != nil {
-		m["connection"] = conn.GetConnectionInfo()
-	}
-	return m
-}
-
 // GetMarketDataTypeForSymbol returns the gateway's per-reqID
 // market-data-type notice for the symbol's active subscription:
 // 1=RealTime, 2=Frozen, 3=Delayed, 4=DelayedFrozen, 0=unknown (no
@@ -750,56 +699,6 @@ func (c *Connector) GetMarketDataTypeForSymbol(symbol string) int {
 		return 0
 	}
 	return conn.GetMarketDataType(sub.ReqID)
-}
-
-// GetSubscriptionStats returns (total, observed) subscription counts.
-func (c *Connector) GetSubscriptionStats() (int, int) {
-	c.subMu.RLock()
-	defer c.subMu.RUnlock()
-	total := len(c.subscriptions)
-	observed := 0
-	for _, s := range c.subscriptions {
-		if s != nil && s.Observed {
-			observed++
-		}
-	}
-	return total, observed
-}
-
-// recordError note an IBKR error code for stability reporting.
-func (c *Connector) recordError(code int) {
-	c.errMu.Lock()
-	defer c.errMu.Unlock()
-	c.errTotals[code]++
-	// keep a bounded timeline (max 2000 events) for windowed stats
-	c.errEvents = append(c.errEvents, struct {
-		code int
-		t    time.Time
-	}{code: code, t: time.Now()})
-	if len(c.errEvents) > 2000 {
-		c.errEvents = c.errEvents[len(c.errEvents)-1500:]
-	}
-}
-
-// GetErrorStats returns total counts and counts within a window.
-func (c *Connector) GetErrorStats(window time.Duration) (map[int]int64, map[int]int64) {
-	cutoff := time.Now().Add(-window)
-	c.errMu.Lock()
-	defer c.errMu.Unlock()
-	totals := make(map[int]int64, len(c.errTotals))
-	maps.Copy(totals, c.errTotals)
-	last := map[int]int64{}
-	// prune and count window
-	j := 0
-	for _, ev := range c.errEvents {
-		if ev.t.After(cutoff) {
-			last[ev.code]++
-			c.errEvents[j] = ev
-			j++
-		}
-	}
-	c.errEvents = c.errEvents[:j]
-	return totals, last
 }
 
 // ContractDetailsLite contains the subset of details needed for calendar building
@@ -1614,34 +1513,6 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 	return nil
 }
 
-// PlaceOrder sends an order to IBKR
-func (c *Connector) PlaceOrder(order *Order) error {
-	if !c.isConnected() {
-		return fmt.Errorf("not connected to IBKR")
-	}
-
-	c.orderMu.Lock()
-	defer c.orderMu.Unlock()
-
-	// Validate order
-	if err := c.validateOrder(order); err != nil {
-		return fmt.Errorf("order validation failed: %w", err)
-	}
-
-	// Store order
-	c.openOrders[order.ID] = order
-
-	// TODO: Send order to IBKR via TCP connection
-	c.logInfo("Placing order: %s %s %.0f %s @ %s",
-		order.ID, order.Side, order.Quantity, order.Symbol, order.OrderType)
-
-	// For now, simulate order placement
-	order.Status = OrderStatusSubmitted
-	order.CreatedAt = time.Now()
-
-	return nil
-}
-
 // RawOrder represents an IBKR order
 type RawOrder struct {
 	OrderID    int
@@ -1839,120 +1710,6 @@ func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosi
 		}
 	}
 	c.contractMu.Unlock()
-}
-
-// GetAccountSummary retrieves account information from IBKR
-func (c *Connector) GetAccountSummary() (*AccountSummary, error) {
-	if !c.isConnected() {
-		c.logWarn("GetAccountSummary: Not connected (running=%v, lease=%v, conn=%v)",
-			c.running, c.lease != nil, c.conn != nil)
-		// No connection - return error
-		return nil, fmt.Errorf("IBKR connection not available")
-	}
-
-	// Get connection from pool using our lease
-	c.mu.RLock()
-	lease := c.lease
-	c.mu.RUnlock()
-
-	if lease == nil {
-		return nil, fmt.Errorf("no active lease")
-	}
-
-	conn, err := c.pool.GetConnection(lease.LeaseID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
-	}
-
-	// Request account summary with a unique request ID
-	reqID := conn.GetNextRequestID()
-	if err := conn.RequestAccountSummary(reqID, ""); err != nil {
-		c.logWarn("Failed to request account summary: %v", err)
-		return nil, err
-	}
-
-	// Wait for account summary to complete with a generous timeout
-	if err := conn.WaitForAccountSummaryEnd(15 * time.Second); err != nil {
-		c.logWarn("Warning: %v (proceeding with partial data)", err)
-		// Continue with whatever account data we have
-	}
-
-	// Get account summary from connection
-	accountData := conn.GetAccountSummary()
-
-	summary := buildAccountSummary(accountData, conn.GetAccountCode())
-
-	// Cancel the subscription to avoid continuous updates
-	conn.CancelAccountSummary(reqID)
-
-	c.logInfo("Account Summary: NetLiq=%.2f, Buying=%.2f, ExcessLiq=%.2f, MaintMargin=%.2f",
-		summary.NetLiquidation, summary.BuyingPower, summary.ExcessLiquidity, summary.MaintenanceMargin)
-
-	return summary, nil
-}
-
-func buildAccountSummary(accountData map[string]string, accountCode string) *AccountSummary {
-	parseFloat := func(keys ...string) float64 {
-		suffixes := []string{"_USD", "_BASE", "_EUR", "_S", "_C", "_CUR"}
-		for _, key := range keys {
-			for _, suffix := range suffixes {
-				if val, exists := accountData[key+suffix]; exists {
-					if f, err := strconv.ParseFloat(val, 64); err == nil {
-						return f
-					}
-				}
-			}
-			if val, exists := accountData[key]; exists {
-				if f, err := strconv.ParseFloat(val, 64); err == nil {
-					return f
-				}
-			}
-		}
-		return 0
-	}
-
-	netLiq := parseFloat("NetLiquidation", "NetLiquidationValue")
-	availableFunds := parseFloat("AvailableFunds")
-	excessLiquidity := parseFloat("ExcessLiquidity")
-	maintMargin := parseFloat("MaintMarginReq", "FullMaintMarginReq")
-	initMargin := parseFloat("InitMarginReq", "FullInitMarginReq")
-	buyingPower := parseFloat("BuyingPower")
-	if buyingPower == 0 {
-		buyingPower = availableFunds
-	}
-	if buyingPower == 0 && excessLiquidity > 0 {
-		buyingPower = excessLiquidity
-	}
-	if buyingPower == 0 && maintMargin > 0 {
-		buyingPower = math.Max(netLiq-maintMargin, 0)
-	}
-	cashBalance := parseFloat("TotalCashValue", "CashBalance")
-	realized := parseFloat("RealizedPnL")
-	unrealized := parseFloat("UnrealizedPnL")
-	grossPositionValue := parseFloat("GrossPositionValue")
-	equityWithLoan := parseFloat("EquityWithLoanValue")
-
-	if maintMargin == 0 && netLiq > 0 && excessLiquidity > 0 {
-		maintMargin = netLiq - excessLiquidity
-	}
-	if excessLiquidity == 0 && netLiq > 0 && maintMargin > 0 {
-		excessLiquidity = netLiq - maintMargin
-	}
-
-	return &AccountSummary{
-		AccountID:          accountCode,
-		NetLiquidation:     netLiq,
-		BuyingPower:        buyingPower,
-		CashBalance:        cashBalance,
-		RealizedPNL:        realized,
-		UnrealizedPNL:      unrealized,
-		AvailableFunds:     availableFunds,
-		ExcessLiquidity:    excessLiquidity,
-		MaintenanceMargin:  maintMargin,
-		InitialMargin:      initMargin,
-		GrossPositionValue: grossPositionValue,
-		EquityWithLoan:     equityWithLoan,
-	}
 }
 
 // GetPool returns the connection pool for testing
@@ -2270,31 +2027,6 @@ func (c *Connector) RequestExecutions(filter ExecutionFilter) (int, error) {
 		return 0, fmt.Errorf("IBKR connection not available")
 	}
 	return conn.RequestExecutions(filter)
-}
-
-// validateOrder performs basic order validation
-func (c *Connector) validateOrder(order *Order) error {
-	if order == nil {
-		return fmt.Errorf("order is nil")
-	}
-
-	if order.Symbol == "" {
-		return fmt.Errorf("symbol is required")
-	}
-
-	if order.Quantity <= 0 {
-		return fmt.Errorf("quantity must be positive")
-	}
-
-	if order.Side != OrderSideBuy && order.Side != OrderSideSell {
-		return fmt.Errorf("invalid order side: %s", order.Side)
-	}
-
-	if order.OrderType == OrderTypeLimit && order.LimitPrice <= 0 {
-		return fmt.Errorf("limit price required for limit orders")
-	}
-
-	return nil
 }
 
 // registerHandlers sets up message handlers for IBKR responses.
@@ -2828,11 +2560,6 @@ func (c *Connector) handleIBKRError(fields []string) {
 				symbol = alias.symbol
 			}
 		}
-	}
-
-	// Record for stability reporting
-	if code != 0 {
-		c.recordError(code)
 	}
 
 	rawMsg := ""

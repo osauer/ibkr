@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/osauer/ibkr/internal/cache"
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/daemon"
 	"github.com/osauer/ibkr/internal/dial"
@@ -69,27 +68,13 @@ func runDaemon(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cacheDir := filepath.Dir(socketPath)
-	contracts, err := cache.OpenJSONCache(filepath.Join(cacheDir, "contracts.json"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open contracts cache: %v\n", err)
-		os.Exit(2)
-	}
-	inactive, err := cache.OpenInactiveStore(filepath.Join(cacheDir, "inactive.json"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open inactive store: %v\n", err)
-		os.Exit(2)
-	}
-
 	logger := daemon.NewLogger(logWriter, resolved.Daemon.LogLevel)
 
 	srv := daemon.New(daemon.Options{
-		Config:        resolved,
-		SocketPath:    socketPath,
-		Version:       version,
-		ContractCache: contracts,
-		Inactive:      inactive,
-		Logger:        logger,
+		Config:     resolved,
+		SocketPath: socketPath,
+		Version:    version,
+		Logger:     logger,
 	})
 	defer srv.Stop()
 

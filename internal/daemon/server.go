@@ -21,7 +21,6 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/cache"
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -70,9 +69,7 @@ type Server struct {
 	startedAt  time.Time
 	version    string
 
-	listener      net.Listener
-	contractCache *cache.JSONCache
-	inactive      *cache.InactiveStore
+	listener net.Listener
 
 	mu               sync.Mutex
 	endpoint         discover.Endpoint // post-discovery, fully concrete; mutated on reconnect (issue: AUTO rediscover)
@@ -139,12 +136,10 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Config        *config.Resolved
-	SocketPath    string
-	Version       string
-	ContractCache *cache.JSONCache
-	Inactive      *cache.InactiveStore
-	Logger        *Logger
+	Config     *config.Resolved
+	SocketPath string
+	Version    string
+	Logger     *Logger
 }
 
 // New constructs a Server with the supplied options.
@@ -153,17 +148,15 @@ func New(opts Options) *Server {
 		opts.Logger = NewLogger(os.Stderr, opts.Config.Daemon.LogLevel)
 	}
 	s := &Server{
-		cfg:           opts.Config,
-		socketPath:    opts.SocketPath,
-		version:       opts.Version,
-		contractCache: opts.ContractCache,
-		inactive:      opts.Inactive,
-		streams:       map[string]context.CancelFunc{},
-		idleStop:      make(chan struct{}),
-		logger:        opts.Logger,
-		expiryIVs:     newExpiryIVCache(),
-		prevCloses:    newPrevCloseCache(),
-		greeks:        newGreeksCache(),
+		cfg:        opts.Config,
+		socketPath: opts.SocketPath,
+		version:    opts.Version,
+		streams:    map[string]context.CancelFunc{},
+		idleStop:   make(chan struct{}),
+		logger:     opts.Logger,
+		expiryIVs:  newExpiryIVCache(),
+		prevCloses: newPrevCloseCache(),
+		greeks:     newGreeksCache(),
 	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
@@ -316,12 +309,6 @@ func (s *Server) Stop() {
 		_ = os.Remove(s.socketPath)
 	}
 	s.stopConnector()
-	if s.contractCache != nil {
-		_ = s.contractCache.Flush(context.Background())
-	}
-	if s.inactive != nil {
-		_ = s.inactive.Flush(context.Background())
-	}
 	if s.lock != nil {
 		s.lock.Release()
 		s.lock = nil

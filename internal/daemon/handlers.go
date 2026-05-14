@@ -15,7 +15,6 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/cache"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -521,6 +520,14 @@ func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionVi
 				d := g.Vega
 				p.Vega = &d
 			}
+			// Underlying spot from the same model-computation tick that
+			// produced the Greeks. The aggregator pairs it with delta so
+			// dollar delta is computed against the spot the delta was
+			// modelled at — see rpc.PositionView.Underlying doc.
+			if e.underlying > 0 {
+				u := e.underlying
+				p.Underlying = &u
+			}
 		}
 		if c == nil {
 			continue
@@ -611,11 +618,17 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		if o.Delta != nil {
 			effDelta += *o.Delta * o.Quantity * float64(mult)
 			haveDelta = true
-			// Dollar delta needs a spot; use the option's mark-side
-			// underlying if available, else fall back to PrevClose
-			// which carries the underlying's prev close at this point.
+			// Dollar delta needs a spot. Prefer the model-computation
+			// underlying captured alongside the Greeks (kept in lockstep
+			// so the dollar figure is consistent with the delta it was
+			// computed against). Fall back to the underlying's prev close
+			// only when the leg's Greeks tick didn't carry a spot —
+			// honest stand-in on a quiet day, but apples-to-oranges
+			// after any overnight gap.
 			spot := 0.0
-			if o.PrevClose != nil && *o.PrevClose > 0 {
+			if o.Underlying != nil && *o.Underlying > 0 {
+				spot = *o.Underlying
+			} else if o.PrevClose != nil && *o.PrevClose > 0 {
 				spot = *o.PrevClose
 			}
 			if spot > 0 {
@@ -713,12 +726,20 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 }
 
 // optionMultiplier returns the contract multiplier used to scale a per-
-// option Greek into a share-equivalent quantity. Standard equity options
-// are 100; minis (e.g. NDXP) and some indexes differ. The position view
-// doesn't carry the multiplier today, so we use 100 as the safe default
-// — accurate for the overwhelming majority of retail accounts and
-// labeled in the docs as such.
-func optionMultiplier(_ rpc.PositionView) int { return 100 }
+// option Greek into a share-equivalent quantity. PositionView.Multiplier
+// is populated from the wire (msgPortfolioValue → pos.Asset.Multiplier),
+// reliable across standard equity options (100), minis (10), and index
+// options (sometimes 50 or 1000). Falls back to 100 only when the wire
+// didn't carry a value — the safe default for retail equity options.
+// Without this fallback an account that never received a multiplier tick
+// would zero out every option contribution to effective_delta /
+// dollar_delta / daily_theta.
+func optionMultiplier(p rpc.PositionView) int {
+	if p.Multiplier > 0 {
+		return p.Multiplier
+	}
+	return 100
+}
 
 // briefSnapshotClose subscribes to sym for up to timeout, polls the
 // connector's market-data cache for a positive tick 9 (previous
@@ -849,14 +870,6 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
 	q.AsOf = time.Now()
 
-	if s.contractCache != nil {
-		s.contractCache.Put(cache.Contract{
-			Symbol:   sym,
-			SecType:  q.Contract.SecType,
-			Exchange: q.Contract.Exchange,
-			Currency: q.Contract.Currency,
-		})
-	}
 	return q, nil
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -261,7 +260,7 @@ func TestRequestAccountSummary_ContextCancelReturnsContextErr(t *testing.T) {
 
 func TestAccountSummaryTags_IncludesAllExpectedTags(t *testing.T) {
 	// Guard against accidental tag-list edits that would silently strip
-	// fields we publicly document on AccountSummary.
+	// fields the daemon's RawAccountSummary path needs.
 	wantTags := []string{
 		"NetLiquidation",
 		"BuyingPower",
@@ -277,8 +276,3 @@ func TestAccountSummaryTags_IncludesAllExpectedTags(t *testing.T) {
 		}
 	}
 }
-
-// Compile-time guard: AccountSummary must round-trip the AccountID field as a
-// plain string (no struct-tag tricks) so JSON encoders downstream behave
-// predictably.
-var _ = strconv.Itoa

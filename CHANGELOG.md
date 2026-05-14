@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **Portfolio aggregates honour the option contract multiplier from the wire.**
+  `optionMultiplier` previously took a `PositionView` and discarded it, returning
+  a hard-coded `100`. The wire already populates `PositionView.Multiplier` from
+  `pos.Asset.Multiplier` (it has since v0.12.4), so for index options on
+  multipliers other than 100 — NDX/SPX 100, mini-options 10, some indexes
+  1000 — `effective_delta`, `dollar_delta`, and `daily_theta` were silently
+  off by an integer factor. Helper now reads `p.Multiplier`, falling back to
+  100 only when the wire didn't carry a value. New regression test
+  `TestBuildPortfolioAggregatesHonorsMultiplierFromWire` pins the index-option
+  case at `Multiplier=1000`.
+
+- **`dollar_delta` is computed against the spot the Greeks were modelled at.**
+  The aggregator's comment claimed it would "use the option's mark-side
+  underlying if available, else fall back to PrevClose," but there was no
+  mark-side branch — it always used PrevClose. After any overnight gap the
+  number lied by the size of the gap (a 3% gap → a 3% lie). The greeks cache
+  already captured the model-computation underlying alongside the per-leg
+  Greeks in `greeksEntry.underlying` and just dropped it on the floor. New
+  `PositionView.Underlying` field surfaces the captured spot to the aggregator
+  via `fillOptionGreeks`; the aggregator prefers it and falls back to PrevClose
+  only when the leg's Greeks tick didn't carry a spot. New regression tests
+  cover the precedence and fallback paths.
+
 ### Changed
 
 - Toolchain floor raised to Go 1.26. Internal modernization to Go 1.21–1.26
@@ -13,6 +38,68 @@ All notable changes to this project are documented here. The format follows [Kee
 - Added `make modernize-check` gate (runs `go fix -diff` + `go tool modernize`).
   Wired into `make check` so idiom drift fails CI. Modernize version is pinned
   via the `tool` directive in `go.mod` — no `@latest` install in CI.
+- **`internal/daemon/trading_disabled.go` no longer hides behind `//go:build !trading`.**
+  The build-tag gate promised a `trading_enabled.go` counterpart for v2 that
+  doesn't exist and isn't planned. Same dispatcher rejection
+  (`MethodOrderPlace` / `MethodOrderCancel` → `ErrTradingDisabled`), now
+  unconditional. README's safety section no longer claims a build tag exists.
+
+### Removed
+
+Subtraction pass for the v0.10–v0.12 lifecycle scaffolding that never wired
+through to a consumer. ~1300 LOC removed. No behaviour change for the daemon
+or CLI; library consumers reading the items below see them disappear.
+
+- **`Connector.PlaceOrder(*Order)` simulator stub.** Comment said `// For now,
+  simulate order placement`; status got stamped `Submitted` without touching
+  the wire. Library consumers should call `Connector.SubmitOrder` (the real
+  wire path, unchanged). README's protocol-coverage table and `pkg/ibkr/doc.go`
+  now name `SubmitOrder` instead of `PlaceOrder`. The dependent
+  `Connector.validateOrder` (only called by the deleted stub) is gone too.
+- **`OrderManager` + `OrderFill` + 12 methods + `isOrderOpen`.** Parallel
+  in-memory order tracker; zero non-test callers. The Connector's own
+  `openOrders` map handles tracking.
+- **Two `AccountSummary` shapes collapsed to one.** `Connector.GetAccountSummary`
+  (returning `*AccountSummary`) and its parser `buildAccountSummary` were
+  shadowed by `Connector.RequestAccountSummary` (returning `*RawAccountSummary`)
+  the daemon actually uses. The two parsers also disagreed subtly (one invented
+  `BuyingPower` from margin if absent). Live path unchanged.
+- **`IBKRStatus` enum + maintenance-window detector** (`pkg/ibkr/connector_status.go`).
+  4-state coarse status that wrapped the existing 5-state `ConnectionStatus`;
+  zero non-test callers.
+- **`DBInactiveSymbolStore` Postgres-backed inactive-symbol store.** Zero
+  callers; `go.mod` carried no SQL driver. The `InactiveSymbolStore` interface
+  stays — library consumers can still implement it.
+- **`Connector.GetStatus` / `GetSubscriptionStats` / `GetErrorStats` +
+  `recordError` + the `errMu`/`errTotals`/`errEvents` plumbing.** A "system
+  status endpoint" that doesn't exist in this binary; everything fed it is
+  now removed.
+- **`MarketPhase` type + 6 constants + `FreshThresholdForPhase`.** Zero
+  callers, including tests.
+- **`GatewayBootstrapper` interface, `GatewayBootstrapFunc` adapter, and the
+  Connector retry branch.** The hook field was wired through `ConnectorConfig`
+  → `Connector.gatewayBootstrapper` → a retry-on-lease-failure call path —
+  but no production code ever assigned it. The daemon autospawns via
+  `internal/dial/autospawn.go` instead.
+- **`ConnectionConfig.ClientIDIncrement`.** Documented as `1=linear, 2=exponential`
+  but `Connect` always did `currentClientID++`. Setting it to 2 had no effect.
+- **Daemon `cache` package** (`internal/cache/`). The package held two
+  storage primitives: `JSONCache` for contract details (`Put`-only — daemon
+  never read; the Connector has its own contract cache) and `InactiveStore`
+  (opened, threaded through, `Flush`ed on shutdown — never `Mark`ed and
+  never read). Both removed; the package is empty so the directory is too.
+  Files at `~/.local/state/ibkr/contracts.json` and `inactive.json` from
+  prior daemons can be deleted by hand — they're no longer touched.
+
+### Documentation
+
+- **README** picked up four drift fixes: `Connector.GetPositions` (deleted in
+  v0.12.5), `Connector.PlaceOrder` (now `SubmitOrder`), `go install` Go
+  floor (1.25 → 1.26 to match `go.mod`), and the safety-layer description
+  (no more `//go:build !trading`).
+- **`pkg/ibkr/doc.go`** header updated `(v0.12)` → `(v0.13)`; order-placement
+  bullet and read-only-safety section now point at `SubmitOrder` and describe
+  the daemon dispatch refusal accurately.
 
 ## v0.13.0 — 2026-05-13 21:37 CEST
 

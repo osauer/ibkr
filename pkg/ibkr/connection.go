@@ -110,7 +110,6 @@ type ConnectionConfig struct {
 
 	// Client ID retry settings
 	MaxClientIDRetries int // Max attempts to find free client ID (default 5)
-	ClientIDIncrement  int // How to increment client ID on retry (1=linear, 2=exponential)
 
 	// Reconnection settings (from hedge patterns)
 	AutoReconnect     bool
@@ -168,7 +167,6 @@ func DefaultConfig() *ConnectionConfig {
 		Port:                  4001, // IB Gateway port
 		ClientID:              1,
 		MaxClientIDRetries:    5,
-		ClientIDIncrement:     1, // Sequential increment (simpler and more predictable)
 		AutoReconnect:         true,
 		MaxRetries:            10,
 		InitialDelay:          5 * time.Second,
@@ -439,9 +437,6 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		}
 		if config.MaxClientIDRetries == 0 {
 			config.MaxClientIDRetries = def.MaxClientIDRetries
-		}
-		if config.ClientIDIncrement == 0 {
-			config.ClientIDIncrement = def.ClientIDIncrement
 		}
 		if config.MaxRetries == 0 {
 			config.MaxRetries = def.MaxRetries
