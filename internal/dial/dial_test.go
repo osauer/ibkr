@@ -184,8 +184,8 @@ func TestDaemonVersion(t *testing.T) {
 		// thing we need is to echo it back. Real daemons parse properly.
 		req := string(buf[:n])
 		id := "unknown"
-		if i := strings.Index(req, `"id":"`); i >= 0 {
-			rest := req[i+len(`"id":"`):]
+		if _, after, ok := strings.Cut(req, `"id":"`); ok {
+			rest := after
 			if j := strings.Index(rest, `"`); j > 0 {
 				id = rest[:j]
 			}
@@ -275,8 +275,8 @@ func TestCallDeadlineDoesNotLeakIntoStream(t *testing.T) {
 		readReq := func() string {
 			n, _ := c.Read(buf)
 			req := string(buf[:n])
-			if i := strings.Index(req, `"id":"`); i >= 0 {
-				rest := req[i+len(`"id":"`):]
+			if _, after, ok := strings.Cut(req, `"id":"`); ok {
+				rest := after
 				if j := strings.Index(rest, `"`); j > 0 {
 					return rest[:j]
 				}

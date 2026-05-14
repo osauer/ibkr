@@ -1371,7 +1371,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		right string
 	}
 	var jobs []job
-	for idx := 0; idx < n; idx++ {
+	for idx := range n {
 		if wantCalls {
 			jobs = append(jobs, job{idx: idx, right: "C"})
 		}
@@ -1705,7 +1705,6 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 	sem := make(chan struct{}, scanEnrichConcurrency)
 	var wg sync.WaitGroup
 	for i := range rows {
-		i := i
 		if rows[i].Symbol == "" {
 			continue
 		}

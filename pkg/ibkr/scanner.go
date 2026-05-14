@@ -185,7 +185,7 @@ func parseScannerData(fields []string) []ScannerRow {
 	const fieldsPerRow = 16
 	rows := make([]ScannerRow, 0, n)
 	idx := 4
-	for i := 0; i < n; i++ {
+	for range n {
 		if idx+fieldsPerRow > len(fields) {
 			break
 		}

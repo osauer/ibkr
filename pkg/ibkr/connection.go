@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"math/rand"
 	"net"
@@ -1511,7 +1512,7 @@ func (c *Connection) startAPI() error {
 	var clientIDError error
 
 	// Read initial responses
-	for i := 0; i < 10; i++ { // Try to read up to 10 initial messages
+	for range 10 { // Try to read up to 10 initial messages
 		msgBytes, err := c.readMessage()
 		if err != nil {
 			// Check if we have a client ID error before returning
@@ -2468,10 +2469,7 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	if parserMisalign {
 		context = c.parserContext(symbolAlias)
 		if c.wireTap != nil {
-			reqID := int(note.tickerID)
-			if reqID < 0 {
-				reqID = 0
-			}
+			reqID := max(int(note.tickerID), 0)
 			c.wireTap.HandleParserError(ParseError{
 				ClientID: c.config.ClientID,
 				ReqID:    reqID,
@@ -2693,19 +2691,19 @@ func (c *Connection) logOutgoingMessageHex(msg []byte) {
 		dumpLen = 80
 	}
 
-	hexStr := ""
+	var hexStr strings.Builder
 	for i := 0; i < dumpLen; i++ {
-		hexStr += fmt.Sprintf("%02x ", msg[i])
+		hexStr.WriteString(fmt.Sprintf("%02x ", msg[i]))
 		if (i+1)%16 == 0 {
-			hexStr += "\n                "
+			hexStr.WriteString("\n                ")
 		}
 	}
 	if dumpLen < len(msg) {
-		hexStr += fmt.Sprintf("... (%d more bytes)", len(msg)-dumpLen)
+		hexStr.WriteString(fmt.Sprintf("... (%d more bytes)", len(msg)-dumpLen))
 	}
 
 	log.Printf("[WIRE OUT] msgType=%d len=%d nullAfterType=%v\n                %s",
-		msgType, len(msg), hasNullAfterType, hexStr)
+		msgType, len(msg), hasNullAfterType, hexStr.String())
 }
 
 // logSuspiciousOutbound inspects encoded payloads to highlight frames that
@@ -3132,16 +3130,16 @@ func (c *Connection) decodeMessage(msgBytes []byte) []string {
 			result = append(result, string(remaining))
 			return result
 		}
-		raw := bytes.Split(remaining, []byte{'\x00'})
-		for _, field := range raw {
+		raw := bytes.SplitSeq(remaining, []byte{'\x00'})
+		for field := range raw {
 			result = append(result, string(field))
 		}
 		return result
 	}
 
 	var result []string
-	raw := bytes.Split(msgBytes, []byte{'\x00'})
-	for _, field := range raw {
+	raw := bytes.SplitSeq(msgBytes, []byte{'\x00'})
+	for field := range raw {
 		result = append(result, string(field))
 	}
 	return result
@@ -4416,9 +4414,7 @@ func (c *Connection) GetPositions() map[string]*RawPosition {
 
 	// Return a copy to prevent external modification
 	result := make(map[string]*RawPosition)
-	for k, v := range c.positions {
-		result[k] = v
-	}
+	maps.Copy(result, c.positions)
 	return result
 }
 
@@ -4445,9 +4441,7 @@ func (c *Connection) GetAccountSummary() map[string]string {
 
 	// Return a copy to prevent external modification
 	result := make(map[string]string)
-	for k, v := range c.accountSummary {
-		result[k] = v
-	}
+	maps.Copy(result, c.accountSummary)
 	return result
 }
 

@@ -54,7 +54,7 @@ func DetectIBKRApp(ctx context.Context) IBKRApp {
 // list line. Returns 0 when no leading integer is present (e.g. CSV from
 // Windows tasklist, where the PID is in a later column).
 func firstPID(line string) int {
-	for _, tok := range strings.Fields(line) {
+	for tok := range strings.FieldsSeq(line) {
 		if pid, err := strconv.Atoi(tok); err == nil {
 			return pid
 		}

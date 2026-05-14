@@ -322,7 +322,7 @@ func (s *Server) write(resp rpcResponse) {
 	if err != nil {
 		// json.Marshal of a fixed struct only fails on cycles — none here.
 		// Fall back to a minimal in-band error so the client doesn't hang.
-		b = []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":%q}}`, codeInternalError, err.Error()))
+		b = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":%q}}`, codeInternalError, err.Error())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

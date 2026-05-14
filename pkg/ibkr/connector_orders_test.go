@@ -400,8 +400,7 @@ func BenchmarkOrderPlacement(b *testing.B) {
 		TIF:       "DAY",
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		order.OrderID = conn.GetNextOrderID()
 		// Just test the order preparation, not actual sending
 		conn.ordersMu.Lock()

@@ -113,8 +113,8 @@ func extractPayloadFields(t *testing.T, buf *bytes.Buffer) []string {
 			payload = payload[1:]
 		}
 	}
-	parts := bytes.Split(payload, []byte{0})
-	for _, part := range parts {
+	parts := bytes.SplitSeq(payload, []byte{0})
+	for part := range parts {
 		fields = append(fields, string(part))
 	}
 	return fields

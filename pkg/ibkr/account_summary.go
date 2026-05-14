@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -149,9 +150,7 @@ func parseAccountSummary(raw map[string]string, accountID string) *RawAccountSum
 		CurrencyLedger: make(map[string]CurrencyLedger),
 		Raw:            make(map[string]string, len(raw)),
 	}
-	for k, v := range raw {
-		summary.Raw[k] = v
-	}
+	maps.Copy(summary.Raw, raw)
 
 	// Each binding accepts one or more accepted tag names — the parser
 	// tries each in order and uses the first that resolves. This makes the

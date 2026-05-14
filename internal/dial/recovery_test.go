@@ -170,7 +170,7 @@ func TestTailLastLineCapsReadAtMaxBytes(t *testing.T) {
 	path := filepath.Join(dir, "log")
 	// Write 10K of filler then the last line we care about.
 	var buf strings.Builder
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		buf.WriteString(strconv.Itoa(i))
 		buf.WriteByte('\n')
 	}
