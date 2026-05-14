@@ -162,7 +162,12 @@ type QuoteSubscribeParams struct {
 	Contract ContractParams `json:"contract"`
 }
 
-// PositionsListParams supports filters in future versions; v1 ignores fields.
+// PositionsListParams filters the positions response. Both fields are
+// honoured by the daemon (`internal/daemon/handlers.go::handlePositionsList`).
+// Symbol matches the underlying (or the synthetic option key); empty returns
+// every position. Type narrows to stocks ("stk") or options ("opt"); empty
+// returns both. Filters are applied before the FX / Greeks decoration, so a
+// narrowed query is also faster.
 type PositionsListParams struct {
 	Symbol string `json:"symbol,omitempty"`
 	Type   string `json:"type,omitempty"` // stk | opt

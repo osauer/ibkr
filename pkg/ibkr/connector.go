@@ -56,12 +56,6 @@ type Connector struct {
 	orderUpdates     []Order
 	orderMu          sync.RWMutex
 
-	// Execution and commission listeners (fan-out to sinks like ExecutionSink)
-	execMu        sync.RWMutex
-	execListeners []func(*ExecutionReport)
-	commMu        sync.RWMutex
-	commListeners []func(*CommissionReport)
-
 	// Lightweight contract details cache to improve routing during OOH sessions
 	contractMu         sync.RWMutex
 	contractCache      map[string]ContractDetailsLite
@@ -291,10 +285,6 @@ func (c *Connector) logInfo(format string, args ...any) {
 
 func (c *Connector) logWarn(format string, args ...any) {
 	connectorLogger.Warnf("%s: "+format, append([]any{c.name}, args...)...)
-}
-
-func (c *Connector) logError(format string, args ...any) {
-	connectorLogger.Errorf("%s: "+format, append([]any{c.name}, args...)...)
 }
 
 func (c *Connector) logDebug(format string, args ...any) {
@@ -1980,55 +1970,6 @@ func (c *Connector) convertIBKRPositions(ibkrPositions map[string]*RawPosition) 
 	return result
 }
 
-// RegisterExecutionListener attaches a callback invoked for each execution report received.
-// Multiple listeners are supported; listeners added before the connection is ready are
-// automatically wired in when handlers register.
-func (c *Connector) RegisterExecutionListener(listener func(*ExecutionReport)) {
-	if listener == nil {
-		return
-	}
-
-	c.execMu.Lock()
-	c.execListeners = append(c.execListeners, listener)
-	c.execMu.Unlock()
-
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn != nil {
-		c.installExecutionHandler(conn)
-	}
-}
-
-// RegisterCommissionListener attaches a callback invoked for each commission report received.
-func (c *Connector) RegisterCommissionListener(listener func(*CommissionReport)) {
-	if listener == nil {
-		return
-	}
-
-	c.commMu.Lock()
-	c.commListeners = append(c.commListeners, listener)
-	c.commMu.Unlock()
-
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn != nil {
-		c.installCommissionHandler(conn)
-	}
-}
-
-// RequestExecutions forwards a reqExecutions call to the active IBKR connection.
-func (c *Connector) RequestExecutions(filter ExecutionFilter) (int, error) {
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil || !conn.IsConnected() {
-		return 0, fmt.Errorf("IBKR connection not available")
-	}
-	return conn.RequestExecutions(filter)
-}
-
 // registerHandlers sets up message handlers for IBKR responses.
 // We keep handlers simple and thread-safe, and register them before any
 // subscriptions so early messages (e.g., farm notices, nextValidId) are handled.
@@ -2095,20 +2036,6 @@ func (c *Connector) registerHandlers(conn *Connection) {
 		c.processSystemNotice(alias, note)
 	})
 
-	// Register execution and commission handlers if listeners are present.
-	c.execMu.RLock()
-	hasExecListeners := len(c.execListeners) > 0
-	c.execMu.RUnlock()
-	if hasExecListeners {
-		c.installExecutionHandler(conn)
-	}
-
-	c.commMu.RLock()
-	hasCommissionListeners := len(c.commListeners) > 0
-	c.commMu.RUnlock()
-	if hasCommissionListeners {
-		c.installCommissionHandler(conn)
-	}
 }
 
 // handleTickPrice processes tick price updates.
@@ -3663,96 +3590,4 @@ func isTerminalOrderStatus(status OrderStatus) bool {
 	default:
 		return false
 	}
-}
-
-func (c *Connector) installExecutionHandler(conn *Connection) {
-	if conn == nil {
-		return
-	}
-
-	conn.RegisterHandler(msgExecutionData, func(fields []string) {
-		report, err := parseExecutionReport(fields, conn.ServerVersion())
-		if err != nil {
-			c.logWarn("Failed to parse execution report: %v", err)
-			return
-		}
-		c.dispatchExecutionReport(report)
-	})
-}
-
-func (c *Connector) installCommissionHandler(conn *Connection) {
-	if conn == nil {
-		return
-	}
-
-	conn.RegisterHandler(msgCommissionReport, func(fields []string) {
-		report, err := parseCommissionAndFees(fields)
-		if err != nil {
-			c.logWarn("Failed to parse commission report: %v", err)
-			return
-		}
-		c.dispatchCommissionReport(report)
-	})
-}
-
-func (c *Connector) dispatchExecutionReport(report *ExecutionReport) {
-	if report == nil {
-		return
-	}
-	listeners := c.snapshotExecutionListeners()
-	for _, listener := range listeners {
-		if listener == nil {
-			continue
-		}
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					c.logError("Execution listener panic (execID=%s): %v", report.ExecID, r)
-				}
-			}()
-			listener(report)
-		}()
-	}
-}
-
-func (c *Connector) dispatchCommissionReport(report *CommissionReport) {
-	if report == nil {
-		return
-	}
-	listeners := c.snapshotCommissionListeners()
-	for _, listener := range listeners {
-		if listener == nil {
-			continue
-		}
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					c.logError("Commission listener panic (execID=%s): %v", report.ExecID, r)
-				}
-			}()
-			listener(report)
-		}()
-	}
-}
-
-func (c *Connector) snapshotExecutionListeners() []func(*ExecutionReport) {
-	c.execMu.RLock()
-	defer c.execMu.RUnlock()
-	if len(c.execListeners) == 0 {
-		return nil
-	}
-	listeners := make([]func(*ExecutionReport), len(c.execListeners))
-	copy(listeners, c.execListeners)
-	return listeners
-}
-
-func (c *Connector) snapshotCommissionListeners() []func(*CommissionReport) {
-	c.commMu.RLock()
-	defer c.commMu.RUnlock()
-	if len(c.commListeners) == 0 {
-		return nil
-	}
-	listeners := make([]func(*CommissionReport), len(c.commListeners))
-	copy(listeners, c.commListeners)
-	return listeners
 }

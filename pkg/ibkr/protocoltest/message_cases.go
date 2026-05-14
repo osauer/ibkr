@@ -98,11 +98,6 @@ var SampleCases = []MessageCase{
 		Fields:      []any{15, 1, true},
 	},
 	{
-		Name:        "reqExecutions",
-		Description: "Execution reports filtered by account",
-		Fields:      []any{7, 3, 6001, 0, "DU1234567", "20240501-00:00:00", "ES", "FUT", "GLOBEX", ""},
-	},
-	{
 		Name:        "reqIds",
 		Description: "Request new order IDs",
 		Fields:      []any{8, 1, 20},

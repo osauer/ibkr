@@ -23,10 +23,9 @@ const (
 
 // wireEnv keys
 const (
-	envWireEnable      = "IBKR_WIRE_INTERCEPTOR"
-	envWireLogPath     = "IBKR_WIRE_LOG_PATH"
-	envWireRingSize    = "IBKR_WIRE_RING_SIZE"
-	envWireMaxAttempts = "IBKR_WIRE_MAX_AUTOFIX_ATTEMPTS"
+	envWireEnable   = "IBKR_WIRE_INTERCEPTOR"
+	envWireLogPath  = "IBKR_WIRE_LOG_PATH"
+	envWireRingSize = "IBKR_WIRE_RING_SIZE"
 )
 
 // WireFrame captures a single encoded message with decoded fields.
@@ -44,37 +43,12 @@ type WireFrame struct {
 	Notes       string        `json:"notes,omitempty"`
 }
 
-// OverrideOperation defines a simple field manipulation that callers may
-// install at runtime to patch outbound wire frames. Originally driven by an
-// AI-assisted diagnostic loop; the override execution path is preserved so
-// future tooling can attach.
-type OverrideOperation struct {
-	Action string `json:"action"`          // "insert", "set", "delete"
-	Index  int    `json:"index"`           // zero-based field index
-	Value  string `json:"value,omitempty"` // value to insert or set
-}
-
-// messageOverride stores runtime mutations for a message id.
-type messageOverride struct {
-	MsgID      int
-	Operations []OverrideOperation
-	Reason     string
-	Attempts   int
-	AppliedAt  time.Time
-	LastError  time.Time
-}
-
-// ParseError encapsulates a live parser failure from IBKR.
-type ParseError struct {
-	ClientID int
-	ReqID    int
-	Symbol   string
-	Code     int
-	Message  string
-	Context  []string
-}
-
-// WireInterceptor coordinates wire capture, AI-assisted diagnostics, and runtime overrides.
+// WireInterceptor passively records the IBKR wire protocol for diagnostics.
+// Off by default; enable with IBKR_WIRE_INTERCEPTOR=1. The recorder mirrors
+// every frame into a per-process ring buffer (size IBKR_WIRE_RING_SIZE,
+// default 256) and, when IBKR_WIRE_LOG_PATH is set, also appends one JSON
+// object per line to the named file. Captured frames are account-sensitive
+// — see SECURITY.md.
 type WireInterceptor struct {
 	clientID int
 
@@ -87,13 +61,7 @@ type WireInterceptor struct {
 	jsonFile *os.File
 	jsonEnc  *json.Encoder
 
-	overridesMu sync.Mutex
-	overrides   map[int]*messageOverride
-
-	maxAttempts int
-
-	enabled   bool
-	autoApply bool
+	enabled bool
 }
 
 // Close releases any resources associated with the interceptor.
@@ -130,13 +98,6 @@ func NewWireInterceptorFromEnv(clientID int) (*WireInterceptor, error) {
 		}
 	}
 
-	maxAttempts := 3
-	if value := strings.TrimSpace(os.Getenv(envWireMaxAttempts)); value != "" {
-		if v, err := strconv.Atoi(value); err == nil && v > 0 {
-			maxAttempts = v
-		}
-	}
-
 	var jsonFile *os.File
 	if path := strings.TrimSpace(os.Getenv(envWireLogPath)); path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -156,14 +117,12 @@ func NewWireInterceptorFromEnv(clientID int) (*WireInterceptor, error) {
 	}
 
 	return &WireInterceptor{
-		clientID:    clientID,
-		ringCap:     ringSize,
-		ring:        make([]WireFrame, 0, ringSize),
-		jsonFile:    jsonFile,
-		jsonEnc:     enc,
-		overrides:   make(map[int]*messageOverride),
-		maxAttempts: maxAttempts,
-		enabled:     true,
+		clientID: clientID,
+		ringCap:  ringSize,
+		ring:     make([]WireFrame, 0, ringSize),
+		jsonFile: jsonFile,
+		jsonEnc:  enc,
+		enabled:  true,
 	}, nil
 }
 
@@ -192,55 +151,6 @@ func (w *WireInterceptor) RecordInbound(msgID int, raw []byte, fields []string) 
 	w.appendFrame(frame)
 	w.persistFrame(frame)
 	w.logFrame(frame)
-}
-
-// ApplyOutboundOverrides mutates the provided fields if an override exists.
-func (w *WireInterceptor) ApplyOutboundOverrides(msgID int, fields []string) ([]string, bool) {
-	if !w.Enabled() {
-		return fields, false
-	}
-	w.overridesMu.Lock()
-	override, ok := w.overrides[msgID]
-	w.overridesMu.Unlock()
-	if !ok || override == nil || len(override.Operations) == 0 {
-		return fields, false
-	}
-
-	if !w.autoApply {
-		return fields, false
-	}
-
-	if override.Attempts >= w.maxAttempts {
-		return fields, false
-	}
-
-	modified := make([]string, len(fields))
-	copy(modified, fields)
-
-	updated, changed := applyOperations(modified, override.Operations)
-	if !changed {
-		return fields, false
-	}
-
-	override.Attempts++
-	override.AppliedAt = time.Now()
-	w.overridesMu.Lock()
-	w.overrides[msgID] = override
-	w.overridesMu.Unlock()
-
-	wireLogger.Warnf("Applied runtime override for %s (attempt %d)", resolveMessageName(msgID), override.Attempts)
-	return updated, true
-}
-
-// HandleParserError records a parser error from the gateway. Earlier versions
-// of the package fed this into an AI-assisted suggestion loop; v1 of the
-// standalone tool simply logs the failure so the wire log can be inspected
-// post-hoc.
-func (w *WireInterceptor) HandleParserError(err ParseError) {
-	if !w.Enabled() {
-		return
-	}
-	wireLogger.Warnf("Parser error %d (reqID=%d symbol=%s): %s", err.Code, err.ReqID, err.Symbol, err.Message)
 }
 
 func (w *WireInterceptor) newFrame(dir WireDirection, msgID int, raw []byte, fields []string) WireFrame {
@@ -345,45 +255,4 @@ func resolveMessageName(msgID int) string {
 	default:
 		return fmt.Sprintf("msg(%d)", msgID)
 	}
-}
-
-func applyOperations(fields []string, ops []OverrideOperation) ([]string, bool) {
-	if len(ops) == 0 {
-		return fields, false
-	}
-	modified := false
-	out := fields
-	for _, op := range ops {
-		switch strings.ToLower(op.Action) {
-		case "set":
-			if op.Index < 0 || op.Index >= len(out) {
-				continue
-			}
-			if out[op.Index] != op.Value {
-				out[op.Index] = op.Value
-				modified = true
-			}
-		case "insert":
-			if op.Index < 0 {
-				continue
-			}
-			if op.Index < len(out) && out[op.Index] == op.Value {
-				continue
-			}
-			if op.Index >= len(out) {
-				out = append(out, op.Value)
-			} else {
-				out = append(out[:op.Index+1], out[op.Index:]...)
-				out[op.Index] = op.Value
-			}
-			modified = true
-		case "delete":
-			if op.Index < 0 || op.Index >= len(out) {
-				continue
-			}
-			out = append(out[:op.Index], out[op.Index+1:]...)
-			modified = true
-		}
-	}
-	return out, modified
 }

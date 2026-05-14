@@ -7,7 +7,6 @@ toolchain go1.26.3
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/stretchr/testify v1.11.1
-	google.golang.org/protobuf v1.36.11
 )
 
 require (

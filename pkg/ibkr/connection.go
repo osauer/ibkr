@@ -1101,18 +1101,8 @@ const (
 	// Required for protobuf-encoded placeOrder messages
 	minServerVerProtoBufPlaceOrder = 203
 
-	minServerVerExecutionDataChain         = 42
-	minServerVerModelsSupport              = 103
-	minServerVerLastLiquidity              = 136
-	minServerVerPendingPriceRevision       = 178
-	minServerVerSubmitter                  = 198
-	minServerVerParametrizedDaysExecutions = 200
-
 	// Required for startApi optional capabilities
 	minServerVerStartAPICapab = 72
-
-	// IBKR protobuf-encoded inbound messages use an offset of 200
-	protoMsgOffset = 200
 
 	// Message IDs from IBKR protocol
 	msgTickPrice                              = 1
@@ -1125,7 +1115,6 @@ const (
 	msgAcctUpdateTime                         = 8
 	msgNextValidID                            = 9
 	msgContractData                           = 10
-	msgExecutionData                          = 11
 	msgMarketDepth                            = 12
 	msgMarketDepthL2                          = 13
 	msgNewsBulletins                          = 14
@@ -1147,11 +1136,9 @@ const (
 	msgContractDataEnd                        = 52
 	msgOpenOrderEnd                           = 53
 	msgAcctDownloadEnd                        = 54
-	msgExecDetailsEnd                         = 55
 	msgDeltaNeutralValidation                 = 56
 	msgTickSnapshotEnd                        = 57
 	msgMarketDataType                         = 58
-	msgCommissionReport                       = 59
 	msgPosition                               = 61
 	msgPositionEnd                            = 62
 	msgAccountSummary                         = 63
@@ -1193,7 +1180,6 @@ const (
 	msgTickByTick                             = 99
 	msgOrderBound                             = 100
 	msgSystemNotification                     = 204
-	msgExecutionRequestAck                    = 255 // Observed ack for reqExecutions with no payload (gateway v10.30+)
 
 	// Outgoing message IDs
 	reqMktData                  = 1
@@ -1202,7 +1188,6 @@ const (
 	cancelOrder                 = 4
 	reqOpenOrders               = 5
 	reqAcctData                 = 6
-	reqExecutions               = 7
 	reqIds                      = 8
 	reqContractData             = 9
 	reqMktDepth                 = 10
@@ -1790,25 +1775,6 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			}
 			return
 		}
-	case msgExecutionRequestAck:
-		// Gateway >= v10.30 sends an explicit ack (255) after reqExecutions when no fills are returned.
-		if len(fields) > 1 && fields[1] != "" {
-			ibkrLogger.Infof("[INFO] Execution request acknowledged (reqID=%s)", fields[1])
-		} else {
-			ibkrLogger.Infof("[INFO] Execution request acknowledged (msgID=255)")
-		}
-		return
-	case msgExecDetailsEnd:
-		if handlers := c.snapshotHandlers(msgExecDetailsEnd); len(handlers) > 0 {
-			for _, handler := range handlers {
-				handler(fields)
-			}
-		} else if len(fields) > 1 && fields[1] != "" {
-			ibkrLogger.Debugf("Execution details completed (reqID=%s)", fields[1])
-		} else {
-			ibkrLogger.Debugf("Execution details completed")
-		}
-		return
 	case msgSecurityDefinitionOptionalParameter, msgSecurityDefinitionOptionalParameterEnd:
 		// reqSecDefOptParams (78) responses arrive once per exchange (75) before
 		// a single end marker (76). Connector.FetchOptionExpiries registers
@@ -1995,9 +1961,6 @@ func (c *Connection) handleErrorMessage(fields []string) {
 		if code == 354 {
 			c.releaseMarketDataSlot()
 		}
-		if code == 320 || code == 321 || code == 322 {
-			c.reportParserError(reqID, code, errorMsg, fields)
-		}
 	} else if code == 10197 {
 		// Competing live session blocks real-time data; switch to delayed
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
@@ -2039,23 +2002,6 @@ func (c *Connection) HasCompetingLiveSession() bool {
 	c.competingMu.RLock()
 	defer c.competingMu.RUnlock()
 	return c.competingLiveSession
-}
-
-func (c *Connection) reportParserError(reqIDStr string, code int, msg string, fields []string) {
-	if c.wireTap == nil {
-		return
-	}
-	reqID := parseIntSafe(reqIDStr)
-	entry, _ := c.lookupReqAlias(reqID)
-	symbol := entry.symbol
-	c.wireTap.HandleParserError(ParseError{
-		ClientID: c.config.ClientID,
-		ReqID:    reqID,
-		Symbol:   symbol,
-		Code:     code,
-		Message:  msg,
-		Context:  cloneStringSlice(fields),
-	})
 }
 
 // handleCompetingLiveSession forces delayed market data when IBKR reports code 10197.
@@ -2480,17 +2426,6 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	context := ""
 	if parserMisalign {
 		context = c.parserContext(symbolAlias)
-		if c.wireTap != nil {
-			reqID := max(int(note.tickerID), 0)
-			c.wireTap.HandleParserError(ParseError{
-				ClientID: c.config.ClientID,
-				ReqID:    reqID,
-				Symbol:   symbolAlias,
-				Code:     note.code,
-				Message:  note.message,
-				Context:  cloneStringSlice(fields),
-			})
-		}
 	}
 
 	msgText := note.message
@@ -2584,18 +2519,6 @@ func (c *Connection) sendMessage(msg []byte) error {
 			fields := c.decodeMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
-			if c.wireTap != nil && len(fields) > 0 {
-				if updatedFields, changed := c.wireTap.ApplyOutboundOverrides(msgID, cloneStringSlice(fields)); changed {
-					if updatedMsg, err := c.encodeFromFields(updatedFields); err != nil {
-						wireLogger.Errorf("Failed to re-encode override for %s: %v", resolveMessageName(msgID), err)
-					} else {
-						msg = updatedMsg
-						fields = updatedFields
-						msgID = determineMessageID(c.serverVersion, msg)
-					}
-				}
-			}
-
 			c.logSuspiciousOutbound(msgID, fields)
 			if c.wireTap != nil {
 				c.wireTap.RecordOutbound(msgID, msg, fields)
@@ -2643,18 +2566,6 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 		return c.withTransport(false, func() error {
 			fields := c.decodeMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
-
-			if c.wireTap != nil && len(fields) > 0 {
-				if updatedFields, changed := c.wireTap.ApplyOutboundOverrides(msgID, cloneStringSlice(fields)); changed {
-					if updatedMsg, err := c.encodeFromFields(updatedFields); err != nil {
-						wireLogger.Errorf("Failed to re-encode override for %s: %v", resolveMessageName(msgID), err)
-					} else {
-						msg = updatedMsg
-						fields = updatedFields
-						msgID = determineMessageID(c.serverVersion, msg)
-					}
-				}
-			}
 
 			c.logSuspiciousOutbound(msgID, fields)
 			if c.wireTap != nil {
@@ -3083,22 +2994,6 @@ func (c *Connection) encodeMsg(fields ...any) []byte {
 	return append([]byte(nil), buf.Bytes()...)
 }
 
-func (c *Connection) encodeFromFields(fields []string) ([]byte, error) {
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("encodeFromFields: empty field slice")
-	}
-	msgID, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return nil, fmt.Errorf("encodeFromFields: invalid msg id %q: %w", fields[0], err)
-	}
-	args := make([]any, len(fields))
-	args[0] = msgID
-	for i := 1; i < len(fields); i++ {
-		args[i] = fields[i]
-	}
-	return c.encodeMsg(args...), nil
-}
-
 func ensureASCII(label, value string) error {
 	if value == "" {
 		return nil
@@ -3132,10 +3027,6 @@ func (c *Connection) decodeMessage(msgBytes []byte) []string {
 	if c.serverVersion >= 100 && len(msgBytes) >= 4 {
 		msgType := binary.BigEndian.Uint32(msgBytes[:4])
 
-		if fields, ok := c.tryDecodeProtoMessage(msgType, msgBytes[4:]); ok {
-			return fields
-		}
-
 		result := []string{strconv.Itoa(int(msgType))}
 		remaining := msgBytes[4:]
 		if msgType == uint32(msgSystemNotification) {
@@ -3155,30 +3046,6 @@ func (c *Connection) decodeMessage(msgBytes []byte) []string {
 		result = append(result, string(field))
 	}
 	return result
-}
-
-func (c *Connection) tryDecodeProtoMessage(msgType uint32, payload []byte) ([]string, bool) {
-	if c.serverVersion < minServerVerProtoBufPlaceOrder {
-		return nil, false
-	}
-	switch msgType {
-	case uint32(protoMsgOffset + msgExecutionData):
-		fields, err := decodeExecutionDetailsProto(payload, c.serverVersion)
-		if err != nil {
-			ibkrLogger.Warnf("Failed to decode protobuf execution message: %v", err)
-			return nil, false
-		}
-		return fields, true
-	case uint32(protoMsgOffset + msgExecDetailsEnd):
-		fields, err := decodeExecutionDetailsEndProto(payload)
-		if err != nil {
-			ibkrLogger.Warnf("Failed to decode protobuf execution end message: %v", err)
-			return nil, false
-		}
-		return fields, true
-	default:
-		return nil, false
-	}
 }
 
 type systemNotification struct {
@@ -4477,71 +4344,6 @@ func (c *Connection) RequestAccountUpdates(account string) error {
 }
 
 // RequestCurrentTime requests the current server time (used for heartbeat)
-func (c *Connection) RequestExecutions(filter ExecutionFilter) (int, error) {
-	if !c.IsConnected() {
-		return 0, fmt.Errorf("not connected to IBKR")
-	}
-	if err := c.requireServerVersion("RequestExecutions"); err != nil {
-		return 0, err
-	}
-
-	reqID := filter.ReqID
-	if c.serverVersion >= minServerVerExecutionDataChain {
-		if reqID == 0 {
-			reqID = c.GetNextRequestID()
-		}
-	} else {
-		reqID = 0
-	}
-
-	if (filter.LastNDays > 0 || len(filter.SpecificDates) > 0) && c.serverVersion < minServerVerParametrizedDaysExecutions {
-		return reqID, fmt.Errorf("server version %d does not support parametrized execution requests", c.serverVersion)
-	}
-
-	fields := make([]any, 0, 16)
-	fields = append(fields, reqExecutions)
-	fields = append(fields, 3) // message version
-
-	if c.serverVersion >= minServerVerExecutionDataChain {
-		fields = append(fields, reqID)
-	}
-
-	if c.serverVersion >= 9 {
-		fields = append(fields,
-			filter.ClientID,
-			filter.Account,
-			filter.Time,
-			filter.Symbol,
-			filter.SecType,
-			filter.Exchange,
-			filter.Side,
-		)
-
-		if c.serverVersion >= minServerVerParametrizedDaysExecutions {
-			lastNDays := filter.LastNDays
-			if lastNDays <= 0 {
-				lastNDays = 2147483647
-			}
-			fields = append(fields, lastNDays)
-
-			if len(filter.SpecificDates) > 0 {
-				fields = append(fields, len(filter.SpecificDates))
-				for _, date := range filter.SpecificDates {
-					fields = append(fields, date)
-				}
-			} else {
-				fields = append(fields, 0)
-			}
-		}
-	}
-
-	msg := c.encodeMsg(fields...)
-	if err := c.sendMessage(msg); err != nil {
-		return reqID, err
-	}
-	return reqID, nil
-}
-
 func (c *Connection) RequestCurrentTime() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")

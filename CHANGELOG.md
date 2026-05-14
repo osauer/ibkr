@@ -46,9 +46,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Removed
 
-Subtraction pass for the v0.10–v0.12 lifecycle scaffolding that never wired
-through to a consumer. ~1300 LOC removed. No behaviour change for the daemon
-or CLI; library consumers reading the items below see them disappear.
+Two-wave subtraction pass for v0.10–v0.12 lifecycle scaffolding and
+post-v0.13 audit findings. ~2,000 LOC out total. No behaviour change for
+the daemon or CLI; library consumers reading the items below see them
+disappear.
+
+First wave — v0.10–v0.12 lifecycle scaffolding never wired through:
 
 - **`Connector.PlaceOrder(*Order)` simulator stub.** Comment said `// For now,
   simulate order placement`; status got stamped `Submitted` without touching
@@ -91,6 +94,45 @@ or CLI; library consumers reading the items below see them disappear.
   Files at `~/.local/state/ibkr/contracts.json` and `inactive.json` from
   prior daemons can be deleted by hand — they're no longer touched.
 
+Second wave — dormant subsystems flagged in the post-v0.13 audit:
+
+- **Wire interceptor's override path.** `ApplyOutboundOverrides`,
+  `OverrideOperation`, `messageOverride`, `applyOperations`, the `autoApply`
+  bit, the `overrides` map, the `IBKR_WIRE_MAX_AUTOFIX_ATTEMPTS` env var,
+  and `HandleParserError` (with its `ParseError` type and the
+  `reportParserError` Connection method that fed it). Production used
+  passive recording only; the override machinery sat behind an `autoApply`
+  bit no production caller ever flipped, with a doc-comment admitting
+  "preserved so future tooling can attach." Per CLAUDE.md "no speculation."
+  Passive recording (`RecordInbound` / `RecordOutbound` / ring buffer +
+  optional JSON-lines persistence via `IBKR_WIRE_LOG_PATH`) is unchanged.
+  The orphan `encodeFromFields` helper in `Connection` (only consumed by
+  the deleted re-encode path) goes too.
+- **Execution-report family.** `RegisterExecutionListener` /
+  `RegisterCommissionListener` / `Connector.RequestExecutions` /
+  `Connection.RequestExecutions`, the `ExecutionReport` /
+  `CommissionReport` / `ExecutionFilter` types, the parsers
+  (`parseExecutionReport`, `parseCommissionAndFees`,
+  `decodeExecutionDetailsProto`, `decodeExecutionDetailsEndProto`,
+  `parseExecutionDetailsPayload`, `parseExecutionFields`,
+  `parseContractFields`, the surrounding protobuf-decode helpers in
+  `protobuf_decode.go`), the dispatcher cases for `msgExecutionData` /
+  `msgExecDetailsEnd` / `msgExecutionRequestAck`, the `Connector`'s
+  `execListeners` / `commListeners` / `installExecutionHandler` /
+  `installCommissionHandler` / `dispatchExecutionReport` /
+  `dispatchCommissionReport` / `snapshotExecutionListeners` /
+  `snapshotCommissionListeners` / `logError`, plus the dormant
+  `tryDecodeProtoMessage` codepath and seven now-orphan IBKR server-version
+  / message-id constants. Plumbed end-to-end but zero non-test consumers
+  in v0.13; `pkg/ibkr/doc.go`'s "Protocol coverage" never advertised it.
+- **`google.golang.org/protobuf` dependency.** The execution family was
+  the only consumer; `go mod tidy` removed it. `pkg/ibkr` now has zero
+  third-party Go dependencies on its hot path.
+- **`pkg/ibkr/testdata/reqmktdata_{index,option,stock}_sv176.bin`** plus
+  the two Python generator scripts (`generate_reqmktdata_fixtures.py`,
+  `generate_reqcontractdata_fixture.py`). Committed years ago, never
+  consumed by any Go test, no Make target. Undiscoverable dev tools.
+
 ### Documentation
 
 - **README** picked up four drift fixes: `Connector.GetPositions` (deleted in
@@ -100,6 +142,17 @@ or CLI; library consumers reading the items below see them disappear.
 - **`pkg/ibkr/doc.go`** header updated `(v0.12)` → `(v0.13)`; order-placement
   bullet and read-only-safety section now point at `SubmitOrder` and describe
   the daemon dispatch refusal accurately.
+- **README troubleshooting** picks up an entry for the wire-capture
+  diagnostic env vars (`IBKR_WIRE_INTERCEPTOR`, `IBKR_WIRE_LOG_PATH`,
+  `IBKR_WIRE_RING_SIZE`, `IBKR_PACKET_LOG_TEMPLATE`) — all four are off
+  by default, were silently consulted at runtime, and previously had no
+  user-facing documentation.
+- **SECURITY.md** gains a "Diagnostic data sensitivity" section
+  spelling out what the wire-capture files contain (account IDs, contract
+  identifiers, P&L) and how to handle them when sharing for debugging.
+- **`internal/rpc.PositionsListParams`** doc-comment corrected: it
+  previously said "v1 ignores fields" but the daemon has been honouring
+  both `Symbol` and `Type` filters since v0.13.
 
 ## v0.13.0 — 2026-05-13 21:37 CEST
 
