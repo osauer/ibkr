@@ -111,18 +111,23 @@ parity-check: ## Verify MCP tool inventory matches the CLI surface
 # Version of modernize is pinned via the `tool` directive in go.mod, so this
 # gate is reproducible without an `@latest` install step.
 #
-# Stream discipline matters here: `go fix -diff` writes the unified diff to
-# stdout and module-download chatter to stderr; `go tool modernize` writes
-# diagnostics to stderr (analysis-driver convention). Capturing 2>&1 trips
-# the gate on cold CI caches because `go: downloading …` lands in $out. So
-# we capture stdout for go fix and stderr-via-stream-swap for modernize.
+# Stream discipline + chatter filter:
+#   - `go fix -diff` writes the unified diff to stdout, download chatter to
+#     stderr → capture stdout (no redirect needed; stderr stays visible).
+#   - `go tool modernize` writes diagnostics AND `go: downloading …` lines to
+#     stderr (the latter when go.mod's tool deps aren't cached — every fresh
+#     CI run hits this). Same stream means we can't separate by redirection;
+#     instead we capture stderr via stream-swap and grep the chatter out.
+# A future kindness: `go: downloading` is the only chatter we've observed, so
+# if the tool ever grows another routine stderr message, extend the filter
+# explicitly instead of weakening it.
 modernize-check: ## go fix -diff + modernize gate (Go idiom drift vs go.mod's go version)
 	@out=$$(go fix -diff ./...); \
 	if [ -n "$$out" ]; then \
 		echo "go fix found pending changes:"; echo "$$out"; \
 		echo "apply with: make modernize"; exit 1; \
 	fi
-	@out=$$(go tool modernize ./... 2>&1 1>/dev/null); \
+	@out=$$(go tool modernize ./... 2>&1 1>/dev/null | grep -v '^go: downloading'); \
 	if [ -n "$$out" ]; then \
 		echo "modernize found pending changes:"; echo "$$out"; \
 		echo "apply with: make modernize"; exit 1; \
