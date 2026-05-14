@@ -239,9 +239,3 @@ func defaultScans() map[string]Scan {
 		"unusual-opt-vol": {Type: "HOT_BY_OPT_VOLUME", Exchange: "STK.US.MAJOR", Limit: 20},
 	}
 }
-
-// IntPtr / BoolPtr are convenience helpers for tests and code constructing
-// a Gateway programmatically. Hand-written pointer literals are a noisy
-// idiom in Go; these read better at the call site.
-func IntPtr(v int) *int    { return &v }
-func BoolPtr(v bool) *bool { return &v }

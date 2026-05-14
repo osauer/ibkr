@@ -152,7 +152,7 @@ func TestOpenSocketRefusesToEvictLivePeer(t *testing.T) {
 func TestDispatchQuoteSubscribeReportsTerminal(t *testing.T) {
 	t.Parallel()
 	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)}},
 		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
 		streams:  map[string]context.CancelFunc{},
 		logger:   NewLogger(&bytes.Buffer{}, "error"),
@@ -225,7 +225,7 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 func TestDispatchAttachesPerRequestDeadline(t *testing.T) {
 	t.Parallel()
 	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)}},
 		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
 		streams:  map[string]context.CancelFunc{},
 		logger:   NewLogger(&bytes.Buffer{}, "error"),
@@ -271,7 +271,7 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 
 	tlsFalse := false
 	cfg := &config.Resolved{
-		Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(addr.Port), ClientID: config.IntPtr(99), TLS: &tlsFalse},
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(addr.Port), ClientID: new(99), TLS: &tlsFalse},
 	}
 	cfg.Daemon.SetIdleTimeout(50 * time.Millisecond)
 
@@ -541,7 +541,7 @@ func TestReconnectFlow_RepublishesEndpointOnNewProbeWinner(t *testing.T) {
 	t.Cleanup(func() { discover.Probe = saved })
 
 	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: new(15)}},
 		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginDiscovered},
 		streams:  map[string]context.CancelFunc{},
 		logger:   NewLogger(&bytes.Buffer{}, "error"),
@@ -578,7 +578,7 @@ func TestReconnectFlow_RecordsDiscoveryFailure(t *testing.T) {
 	t.Cleanup(func() { discover.Probe = saved })
 
 	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: new(15)}},
 		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginDiscovered},
 		streams:  map[string]context.CancelFunc{},
 		logger:   NewLogger(&bytes.Buffer{}, "error"),
@@ -612,7 +612,7 @@ func TestHandleStatusHealth_TriggersReconnectWhenDegraded(t *testing.T) {
 	t.Cleanup(func() { discover.Probe = saved })
 
 	srv := &Server{
-		cfg:              &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		cfg:              &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: new(15)}},
 		endpoint:         discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
 		version:          "test",
 		streams:          map[string]context.CancelFunc{},
@@ -659,7 +659,7 @@ func TestGatewayConnector_TriggersReconnectWhenDegraded(t *testing.T) {
 	t.Cleanup(func() { discover.Probe = saved })
 
 	srv := &Server{
-		cfg:       &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: config.IntPtr(15)}},
+		cfg:       &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", ClientID: new(15)}},
 		endpoint:  discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
 		streams:   map[string]context.CancelFunc{},
 		logger:    NewLogger(&bytes.Buffer{}, "error"),
@@ -694,7 +694,7 @@ func TestGatewayConnector_TriggersReconnectWhenDegraded(t *testing.T) {
 func TestServeConnExitsCleanlyAfterStreamingRequest(t *testing.T) {
 	t.Parallel()
 	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)}},
+		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)}},
 		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
 		streams:  map[string]context.CancelFunc{},
 		logger:   NewLogger(&bytes.Buffer{}, "error"),

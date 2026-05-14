@@ -23,7 +23,7 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	cfg := &config.Resolved{
-		Gateway: config.Gateway{Host: "127.0.0.1", Port: config.IntPtr(4001), ClientID: config.IntPtr(15)},
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)},
 	}
 	s := &Server{
 		cfg:        cfg,

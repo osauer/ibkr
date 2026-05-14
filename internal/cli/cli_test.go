@@ -214,14 +214,14 @@ func TestFormatSize(t *testing.T) {
 		want string
 	}{
 		{nil, "—"},
-		{intPtr(0), "—"},
-		{intPtr(-5), "—"},
-		{intPtr(42), "42"},
-		{intPtr(999), "999"},
-		{intPtr(1200), "1.2K"},
-		{intPtr(12345), "12K"},
-		{intPtr(1_400_000), "1.4M"},
-		{intPtr(12_500_000), "12M"},
+		{new(0), "—"},
+		{new(-5), "—"},
+		{new(42), "42"},
+		{new(999), "999"},
+		{new(1200), "1.2K"},
+		{new(12345), "12K"},
+		{new(1_400_000), "1.4M"},
+		{new(12_500_000), "12M"},
 	}
 	for _, tc := range cases {
 		got := formatSize(tc.in)
@@ -253,8 +253,6 @@ func TestRenderQuoteSnapshotIncludesSizeColumns(t *testing.T) {
 		}
 	}
 }
-
-func intPtr(v int) *int { return &v }
 
 // renderPositionsByUnderlying produces one block per underlying showing
 // stock + option legs and a Group line. Pure-options underlyings omit the
