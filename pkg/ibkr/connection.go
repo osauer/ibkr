@@ -1053,11 +1053,11 @@ func (c *Connection) SetOnDisconnect(fn func(error)) {
 }
 
 // GetConnectionInfo returns current connection details
-func (c *Connection) GetConnectionInfo() map[string]interface{} {
+func (c *Connection) GetConnectionInfo() map[string]any {
 	c.statusMu.RLock()
 	defer c.statusMu.RUnlock()
 
-	info := map[string]interface{}{
+	info := map[string]any{
 		"client_id":      c.config.ClientID,
 		"host":           c.config.Host,
 		"port":           c.config.Port,
@@ -1466,7 +1466,7 @@ func isHandshakeNoDataErr(err error) bool {
 
 // startAPI sends the start API message to initialize the connection
 func (c *Connection) startAPI() error {
-	fields := []interface{}{startAPI, 2, c.config.ClientID}
+	fields := []any{startAPI, 2, c.config.ClientID}
 	if c.serverVersion >= minServerVerStartAPICapab {
 		// Optional capabilities placeholder – currently unused but must be omitted
 		// entirely when the server version predates the field.
@@ -2490,7 +2490,7 @@ func (c *Connection) handleSystemNotification(fields []string) {
 
 	if note.timestamp.IsZero() {
 		format := "[IBKR cid=%d] System notice %s %s: %s"
-		args := []interface{}{c.config.ClientID, scope, codeLabel, msgText}
+		args := []any{c.config.ClientID, scope, codeLabel, msgText}
 		switch {
 		case parserMisalign:
 			ibkrLogger.Errorf(format, args...)
@@ -2504,7 +2504,7 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	}
 
 	format := "[IBKR cid=%d] System notice %s %s @ %s: %s"
-	args := []interface{}{c.config.ClientID, scope, codeLabel, note.timestamp.UTC().Format(time.RFC3339), msgText}
+	args := []any{c.config.ClientID, scope, codeLabel, note.timestamp.UTC().Format(time.RFC3339), msgText}
 	switch {
 	case parserMisalign:
 		ibkrLogger.Errorf(format, args...)
@@ -3027,7 +3027,7 @@ func (c *Connection) waitForHandshakeReady() error {
 // The IBKR protocol uses null-terminated fields within a length-prefixed frame.
 // We strictly maintain field order per the TWS API reference (e.g., reqMktData v11)
 // and avoid introducing extra placeholders that would shift subsequent fields.
-func (c *Connection) encodeMsg(fields ...interface{}) []byte {
+func (c *Connection) encodeMsg(fields ...any) []byte {
 	var buf bytes.Buffer
 
 	for i, field := range fields {
@@ -3081,7 +3081,7 @@ func (c *Connection) encodeFromFields(fields []string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encodeFromFields: invalid msg id %q: %w", fields[0], err)
 	}
-	args := make([]interface{}, len(fields))
+	args := make([]any, len(fields))
 	args[0] = msgID
 	for i := 1; i < len(fields); i++ {
 		args[i] = fields[i]
@@ -3309,7 +3309,7 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 	localSymbol := contract.LocalSymbol
 	tradingClass := contract.TradingClass
 
-	fields := []interface{}{
+	fields := []any{
 		reqContractData,
 		8,     // version
 		reqID, // request id
@@ -3442,7 +3442,7 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 	fields := clonePlaceOrderFields()
 	assignPlaceOrderFields(fields, order)
 
-	interfaces := make([]interface{}, len(fields))
+	interfaces := make([]any, len(fields))
 	interfaces[0] = placeOrder
 	for i := 1; i < len(fields); i++ {
 		interfaces[i] = fields[i]
@@ -3475,7 +3475,7 @@ func (c *Connection) CancelOrder(orderID int) error {
 		return fmt.Errorf("not connected to IBKR")
 	}
 
-	fields := []interface{}{cancelOrder, 1, orderID}
+	fields := []any{cancelOrder, 1, orderID}
 	msg := c.encodeMsg(fields...)
 	if err := c.sendMessageWithType(msg, RequestTypeOrder); err != nil {
 		return err
@@ -3773,7 +3773,7 @@ func (c *Connection) requireServerVersion(method string) error {
 	return nil
 }
 
-func (c *Connection) buildReqMktDataFields(contract Contract, reqID int, genericTicks string, snapshot bool, regulatorySnap bool) []interface{} {
+func (c *Connection) buildReqMktDataFields(contract Contract, reqID int, genericTicks string, snapshot bool, regulatorySnap bool) []any {
 	// All fields required for serverVersion >= 124
 	// Per official IBKR API reqMktData message version 11
 
@@ -3787,7 +3787,7 @@ func (c *Connection) buildReqMktDataFields(contract Contract, reqID int, generic
 		multiplierField = strconv.Itoa(contract.Multiplier)
 	}
 
-	fields := []interface{}{
+	fields := []any{
 		reqMktData,
 		11, // message version
 		reqID,
@@ -3882,7 +3882,7 @@ func (c *Connection) RequestHistoricalData(contract Contract, endDateTime, durat
 		strikeField = strconv.FormatFloat(contract.Strike, 'f', -1, 64)
 	}
 
-	fields := make([]interface{}, 0, 34)
+	fields := make([]any, 0, 34)
 	fields = append(fields,
 		reqHistoricalData,
 		reqID,
@@ -4492,7 +4492,7 @@ func (c *Connection) RequestExecutions(filter ExecutionFilter) (int, error) {
 		return reqID, fmt.Errorf("server version %d does not support parametrized execution requests", c.serverVersion)
 	}
 
-	fields := make([]interface{}, 0, 16)
+	fields := make([]any, 0, 16)
 	fields = append(fields, reqExecutions)
 	fields = append(fields, 3) // message version
 

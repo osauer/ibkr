@@ -298,20 +298,20 @@ func (c *Connector) Name() string {
 	return c.name
 }
 
-func (c *Connector) logInfo(format string, args ...interface{}) {
-	connectorLogger.Infof("%s: "+format, append([]interface{}{c.name}, args...)...)
+func (c *Connector) logInfo(format string, args ...any) {
+	connectorLogger.Infof("%s: "+format, append([]any{c.name}, args...)...)
 }
 
-func (c *Connector) logWarn(format string, args ...interface{}) {
-	connectorLogger.Warnf("%s: "+format, append([]interface{}{c.name}, args...)...)
+func (c *Connector) logWarn(format string, args ...any) {
+	connectorLogger.Warnf("%s: "+format, append([]any{c.name}, args...)...)
 }
 
-func (c *Connector) logError(format string, args ...interface{}) {
-	connectorLogger.Errorf("%s: "+format, append([]interface{}{c.name}, args...)...)
+func (c *Connector) logError(format string, args ...any) {
+	connectorLogger.Errorf("%s: "+format, append([]any{c.name}, args...)...)
 }
 
-func (c *Connector) logDebug(format string, args ...interface{}) {
-	connectorLogger.Debugf("%s: "+format, append([]interface{}{c.name}, args...)...)
+func (c *Connector) logDebug(format string, args ...any) {
+	connectorLogger.Debugf("%s: "+format, append([]any{c.name}, args...)...)
 }
 
 func (c *Connector) recordContractTiming(symbol string, elapsed time.Duration, resolved bool) {
@@ -552,14 +552,14 @@ func (c *Connector) Start(ctx context.Context) error {
 		status := c.pool.GetPoolStatus()
 		total := status["total_connections"]
 		connected := status["connected_count"]
-		details, _ := status["connections"].(map[int]map[string]interface{})
+		details, _ := status["connections"].(map[int]map[string]any)
 		// Fallback if type cast fails due to interface{} map types
 		if details == nil {
-			if m, ok := status["connections"].(map[interface{}]interface{}); ok {
+			if m, ok := status["connections"].(map[any]any); ok {
 				// Convert to a readable list
 				var list []string
 				for k, v := range m {
-					cm, _ := v.(map[string]interface{})
+					cm, _ := v.(map[string]any)
 					if cm != nil {
 						list = append(list, fmt.Sprintf("%v(%v)", k, cm["status"]))
 					} else {
@@ -706,7 +706,7 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 }
 
 // GetStatus returns a compact status map for API consumption (system/status endpoint)
-func (c *Connector) GetStatus() map[string]interface{} {
+func (c *Connector) GetStatus() map[string]any {
 	c.mu.RLock()
 	conn := c.conn
 	running := c.running
@@ -714,7 +714,7 @@ func (c *Connector) GetStatus() map[string]interface{} {
 
 	total, observed := c.GetSubscriptionStats()
 	totals, last5m := c.GetErrorStats(5 * time.Minute)
-	m := map[string]interface{}{
+	m := map[string]any{
 		"running":          running,
 		"connected":        conn != nil && conn.IsConnected(),
 		"subscriptions":    total,

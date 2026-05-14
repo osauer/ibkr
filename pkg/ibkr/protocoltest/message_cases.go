@@ -5,7 +5,7 @@ import "time"
 // MessageCase describes a single outbound IBKR message to encode.
 type MessageCase struct {
 	Name        string
-	Fields      []interface{}
+	Fields      []any
 	Description string
 }
 
@@ -15,42 +15,42 @@ var SampleCases = []MessageCase{
 	{
 		Name:        "startAPI",
 		Description: "Session bootstrap message including client ID and empty capabilities",
-		Fields:      []interface{}{71, 2, 101, ""},
+		Fields:      []any{71, 2, 101, ""},
 	},
 	{
 		Name:        "reqCurrentTime",
 		Description: "Heartbeat request for server clock",
-		Fields:      []interface{}{49, "1"},
+		Fields:      []any{49, "1"},
 	},
 	{
 		Name:        "reqManagedAccts",
 		Description: "Request managed accounts list",
-		Fields:      []interface{}{17, "1"},
+		Fields:      []any{17, "1"},
 	},
 	{
 		Name:        "reqAccountSummary",
 		Description: "Account summary subscription",
-		Fields:      []interface{}{62, "1", 9001, "All", "NetLiquidation,TotalCashValue"},
+		Fields:      []any{62, "1", 9001, "All", "NetLiquidation,TotalCashValue"},
 	},
 	{
 		Name:        "cancelAccountSummary",
 		Description: "Cancel account summary subscription",
-		Fields:      []interface{}{63, "1", 9001},
+		Fields:      []any{63, "1", 9001},
 	},
 	{
 		Name:        "reqPositions",
 		Description: "Request positions subscription",
-		Fields:      []interface{}{61, "1"},
+		Fields:      []any{61, "1"},
 	},
 	{
 		Name:        "cancelPositions",
 		Description: "Cancel positions subscription",
-		Fields:      []interface{}{64, "1"},
+		Fields:      []any{64, "1"},
 	},
 	{
 		Name:        "reqAcctData",
 		Description: "Legacy account updates subscription",
-		Fields:      []interface{}{6, "2", "1", "DU1234567"},
+		Fields:      []any{6, "2", "1", "DU1234567"},
 	},
 	{
 		Name:        "reqMktData",
@@ -60,12 +60,12 @@ var SampleCases = []MessageCase{
 	{
 		Name:        "cancelMktData",
 		Description: "Cancel market data subscription",
-		Fields:      []interface{}{2, 1, 381},
+		Fields:      []any{2, 1, 381},
 	},
 	{
 		Name:        "reqMarketDataType",
 		Description: "Switch market data type to live",
-		Fields:      []interface{}{59, 1, 1},
+		Fields:      []any{59, 1, 1},
 	},
 	{
 		Name:        "reqContractData",
@@ -80,37 +80,37 @@ var SampleCases = []MessageCase{
 	{
 		Name:        "cancelHistoricalData",
 		Description: "Cancel historical data request",
-		Fields:      []interface{}{25, 1, 9001},
+		Fields:      []any{25, 1, 9001},
 	},
 	{
 		Name:        "reqOpenOrders",
 		Description: "Fetch client open orders",
-		Fields:      []interface{}{5, 1},
+		Fields:      []any{5, 1},
 	},
 	{
 		Name:        "reqAllOpenOrders",
 		Description: "Fetch open orders for all clients",
-		Fields:      []interface{}{16, 1},
+		Fields:      []any{16, 1},
 	},
 	{
 		Name:        "reqAutoOpenOrders",
 		Description: "Enable auto-open order binding",
-		Fields:      []interface{}{15, 1, true},
+		Fields:      []any{15, 1, true},
 	},
 	{
 		Name:        "reqExecutions",
 		Description: "Execution reports filtered by account",
-		Fields:      []interface{}{7, 3, 6001, 0, "DU1234567", "20240501-00:00:00", "ES", "FUT", "GLOBEX", ""},
+		Fields:      []any{7, 3, 6001, 0, "DU1234567", "20240501-00:00:00", "ES", "FUT", "GLOBEX", ""},
 	},
 	{
 		Name:        "reqIds",
 		Description: "Request new order IDs",
-		Fields:      []interface{}{8, 1, 20},
+		Fields:      []any{8, 1, 20},
 	},
 }
 
-func reqMktDataFields() []interface{} {
-	fields := []interface{}{
+func reqMktDataFields() []any {
+	fields := []any{
 		1,  // reqMktData
 		11, // version
 		5001,
@@ -136,8 +136,8 @@ func reqMktDataFields() []interface{} {
 	return fields
 }
 
-func reqContractDataFields() []interface{} {
-	return []interface{}{
+func reqContractDataFields() []any {
+	return []any{
 		9, // reqContractData
 		8, // version
 		7001,
@@ -159,10 +159,10 @@ func reqContractDataFields() []interface{} {
 	}
 }
 
-func reqHistoricalDataFields() []interface{} {
+func reqHistoricalDataFields() []any {
 	end := time.Date(2024, time.January, 5, 0, 0, 0, 0, time.UTC).Format("20060102-150405")
 
-	return []interface{}{
+	return []any{
 		20,   // reqHistoricalData
 		9001, // reqID
 		0,    // conID (included for server >= minServerVerTradingClass)
