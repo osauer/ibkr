@@ -46,15 +46,15 @@ func TestRateLimiterCircuitBreakerTriggers(t *testing.T) {
 // Stop closed requestQueue while Submit and the retry goroutine could still
 // send to it, occasionally panicking with "send on closed channel".
 func TestRateLimiterStopRace(t *testing.T) {
-	for trial := 0; trial < 25; trial++ {
+	for range 25 {
 		rl := NewRateLimiter(context.Background())
 
 		var wg sync.WaitGroup
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for j := 0; j < 50; j++ {
+				for range 50 {
 					_ = rl.SubmitWithPriority(RequestTypeGeneral, func() error { return nil }, 0, 1)
 				}
 			}()

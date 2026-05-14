@@ -237,7 +237,7 @@ func TestConnector_ConcurrentHandlerRegistrationAndMessages(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < messageCount; i++ {
+		for i := range messageCount {
 			msg := []string{"1", "2", "42", "1", fmt.Sprintf("%.2f", 580.0+float64(i)*0.01)}
 			mockConn.handlersMu.RLock()
 			handlers := append([]handlerEntry(nil), mockConn.msgHandlers[1]...)

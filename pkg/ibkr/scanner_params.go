@@ -247,7 +247,7 @@ func scanTypeFromXML(st xmlScanType) ScannerScanType {
 		DisplayName: strings.TrimSpace(st.DisplayName),
 	}
 	if inst := strings.TrimSpace(st.Instruments); inst != "" {
-		for _, p := range strings.Split(inst, ",") {
+		for p := range strings.SplitSeq(inst, ",") {
 			if p = strings.TrimSpace(p); p != "" {
 				out.Instruments = append(out.Instruments, p)
 			}

@@ -298,7 +298,7 @@ func normaliseExpiry8(raw string) (string, bool) {
 	if len(raw) != 8 {
 		return "", false
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if raw[i] < '0' || raw[i] > '9' {
 			return "", false
 		}

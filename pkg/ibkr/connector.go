@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -786,9 +787,7 @@ func (c *Connector) GetErrorStats(window time.Duration) (map[int]int64, map[int]
 	c.errMu.Lock()
 	defer c.errMu.Unlock()
 	totals := make(map[int]int64, len(c.errTotals))
-	for k, v := range c.errTotals {
-		totals[k] = v
-	}
+	maps.Copy(totals, c.errTotals)
 	last := map[int]int64{}
 	// prune and count window
 	j := 0
@@ -3831,7 +3830,7 @@ func (c *Connector) DrainOrderUpdates() []*Order {
 
 	// reset buffer while retaining capacity
 	clearLen := len(c.orderUpdates)
-	for i := 0; i < clearLen; i++ {
+	for i := range clearLen {
 		c.orderUpdates[i] = Order{}
 	}
 	c.orderUpdates = c.orderUpdates[:0]

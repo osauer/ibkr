@@ -98,7 +98,7 @@ func TestStreamingConcurrentSubscribers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), streamingTestTimeout)
 	defer cancel()
 
-	for i := 0; i < subscribers; i++ {
+	for i := range subscribers {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

@@ -34,7 +34,7 @@ func TestQuoteRenderer_Rate0EmitsEveryFrame(t *testing.T) {
 
 	const n = 50
 	bid, ask, last := 100.0, 100.5, 100.25
-	for i := 0; i < n; i++ {
+	for range n {
 		frames <- rpc.Frame{T: time.Now(), Bid: &bid, Ask: &ask, Last: &last}
 	}
 	done <- nil

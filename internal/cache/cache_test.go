@@ -54,7 +54,7 @@ func TestJSONCache_ConcurrentReadsAndWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(2)
 		go func(i int) { defer wg.Done(); c.Put(Contract{Symbol: "S", ConID: i}) }(i)
 		go func() { defer wg.Done(); _, _ = c.Get("S") }()

@@ -212,7 +212,7 @@ func TestRequestAccountSummary_TimeoutDoesNotLeakGoroutines(t *testing.T) {
 	c.running = true
 	c.ready = false
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		_, _ = c.RequestAccountSummary(context.Background(), 100*time.Millisecond)
 	}
 

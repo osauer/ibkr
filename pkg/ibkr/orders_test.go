@@ -433,8 +433,7 @@ func BenchmarkOrderValidation(b *testing.B) {
 		LmtPrice:  150.00,
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = ValidateOrder(order)
 	}
 }
@@ -443,8 +442,7 @@ func BenchmarkOrderValidation(b *testing.B) {
 func BenchmarkOrderManagerAdd(b *testing.B) {
 	om := NewOrderManager()
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		order := &IBKROrder{
 			OrderID:  i,
 			Symbol:   "TEST",
@@ -513,7 +511,7 @@ func TestLiveOrderFlow(t *testing.T) {
 
 	// Wait for status updates
 	var lastStatus string
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		time.Sleep(1 * time.Second)
 
 		conn.ordersMu.RLock()
@@ -541,7 +539,7 @@ func TestLiveOrderFlow(t *testing.T) {
 
 	// Wait for cancellation
 	cancelled := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		time.Sleep(1 * time.Second)
 
 		conn.ordersMu.RLock()

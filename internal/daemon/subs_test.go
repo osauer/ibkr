@@ -338,7 +338,6 @@ func TestColdSubscribesForDifferentSymbolsDoNotSerialise(t *testing.T) {
 	wg.Add(2)
 	start := time.Now()
 	for _, sym := range []string{"AAA", "BBB"} {
-		sym := sym
 		go func() {
 			defer wg.Done()
 			_, release, err := m.Subscribe(sym)

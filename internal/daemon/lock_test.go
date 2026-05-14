@@ -81,7 +81,7 @@ func TestAcquireInstanceLockConcurrent(t *testing.T) {
 	}
 	results := make(chan result, N)
 	start := make(chan struct{})
-	for i := 0; i < N; i++ {
+	for range N {
 		go func() {
 			<-start
 			l, err := acquireInstanceLock(socketPath)
@@ -92,7 +92,7 @@ func TestAcquireInstanceLockConcurrent(t *testing.T) {
 
 	var winners, losers int
 	var winner *instanceLock
-	for i := 0; i < N; i++ {
+	for range N {
 		r := <-results
 		switch {
 		case r.err == nil && r.lock != nil:

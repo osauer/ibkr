@@ -334,14 +334,14 @@ func groupThousands(s string) string {
 	if n <= 3 {
 		return s
 	}
-	out := ""
+	var out strings.Builder
 	for i, r := range s {
 		if i > 0 && (n-i)%3 == 0 {
-			out += ","
+			out.WriteString(",")
 		}
-		out += string(r)
+		out.WriteString(string(r))
 	}
-	return out
+	return out.String()
 }
 
 // formatTimeShort returns "HH:MM:SS Z" suitable for status lines.
