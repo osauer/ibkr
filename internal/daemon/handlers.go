@@ -33,7 +33,6 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 		AccountID:    raw.AccountID,
 		BaseCurrency: raw.Currency,
 		AsOf:         raw.AsOf,
-		DataType:     "live",
 	}
 	if raw.NetLiquidation != nil {
 		res.NetLiquidation = *raw.NetLiquidation
@@ -116,10 +115,9 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	}
 
 	res := &rpc.PositionsResult{
-		AsOf:     time.Now(),
-		DataType: "live",
-		Stocks:   []rpc.PositionView{},
-		Options:  []rpc.PositionView{},
+		AsOf:    time.Now(),
+		Stocks:  []rpc.PositionView{},
+		Options: []rpc.PositionView{},
 	}
 	wantSym := normSym(p.Symbol)
 	wantType := strings.ToLower(strings.TrimSpace(p.Type))
@@ -150,10 +148,10 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 			Exchange:      pos.Asset.Exchange,
 			Currency:      pos.Asset.Currency,
 			Quantity:      pos.Quantity,
-			Multiplier:    maxInt(pos.Asset.Multiplier, 1),
+			Multiplier:    max(pos.Asset.Multiplier, 1),
 			AvgCost:       pos.EntryPrice,
 			Mark:          pos.CurrentPrice,
-			MarketValue:   pos.CurrentPrice * pos.Quantity * float64(maxInt(pos.Asset.Multiplier, 1)),
+			MarketValue:   pos.CurrentPrice * pos.Quantity * float64(max(pos.Asset.Multiplier, 1)),
 			UnrealizedPnL: pos.UnrealizedPnL,
 			RealizedPnL:   pos.RealizedPnL,
 		}
@@ -834,7 +832,6 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		Symbol:   sym,
 		Contract: p.Contract,
 		IVStatus: "unavailable",
-		DataType: "live",
 		AsOf:     time.Now(),
 	}
 	if q.Contract.SecType == "" {
@@ -861,7 +858,15 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		q.BidSize = ptrIfPos(d.BidSize)
 		q.AskSize = ptrIfPos(d.AskSize)
 		q.Volume = ptrIfPos(d.Volume)
-		return q.Bid != nil || q.Ask != nil || q.Last != nil
+		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
+		if ready {
+			// Capture the gateway's feed state while the subscription is
+			// still live — once the deferred unsubscribe fires, the
+			// connector's symbol→reqID mapping is gone and the type would
+			// always read "". Empty IsLiveDataType is renderer-safe.
+			q.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+		}
+		return ready
 	}); err != nil && err != context.DeadlineExceeded {
 		return nil, err
 	}
@@ -1291,12 +1296,13 @@ func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expir
 	if err != nil {
 		return nil, "unavailable"
 	}
-	_ = reqID
-	// Pick the streaming-quote key SubscribeOption produces so we can also
-	// unsubscribe cleanly. SubscribeOptionIV uses an internal req path that
-	// doesn't expose a market-data key; cancellation via UnsubscribeMarketData
-	// is best-effort. Keying by symbol is enough for the IV side-channel.
-	defer func() { _ = c.UnsubscribeMarketData(symbol) }()
+	// reqID-scoped cancel: the 4-worker fan-out at collectExpiryIVs runs
+	// multiple expiries against the same underlier concurrently. A
+	// symbol-scoped UnsubscribeMarketData here would either no-op (the
+	// common case, since SubscribeOptionIV doesn't install a streaming
+	// entry under the symbol) or — worse — tear down an unrelated
+	// quote --watch subscription.
+	defer c.CancelOptionIV(reqID)
 
 	deadline := time.Now().Add(perStrikeTimeout)
 	poll := time.NewTicker(75 * time.Millisecond)
@@ -1945,11 +1951,10 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 		return nil, err
 	}
 	res := &rpc.HistoryDailyResult{
-		Symbol:   sym,
-		Days:     days,
-		DataType: "live",
-		AsOf:     time.Now(),
-		Bars:     make([]rpc.HistoryBar, 0, len(bars)),
+		Symbol: sym,
+		Days:   days,
+		AsOf:   time.Now(),
+		Bars:   make([]rpc.HistoryBar, 0, len(bars)),
 	}
 	for _, b := range bars {
 		res.Bars = append(res.Bars, rpc.HistoryBar{
@@ -2029,11 +2034,4 @@ func daysUntil(expiryYMD string) int {
 		return 0
 	}
 	return int(time.Until(t).Hours() / 24)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -53,7 +53,6 @@ type Connector struct {
 	// Order management
 	openOrders       map[string]*Order
 	brokerOrderIndex map[string]string // IB order ID -> internal order ID
-	orderUpdates     []Order
 	orderMu          sync.RWMutex
 
 	// Lightweight contract details cache to improve routing during OOH sessions
@@ -62,24 +61,17 @@ type Connector struct {
 	inactiveMu         sync.RWMutex
 	inactiveSymbols    map[string]inactiveSymbolState
 	inactiveCandidates map[string]inactiveCandidateState
-	inactiveStore      InactiveSymbolStore
+	inactiveStore      inactiveSymbolStore
 
 	// Option IV tracking (by underlying symbol)
-	optMu sync.RWMutex
-	optIV map[string]float64 // last observed implied vol (fraction, e.g., 0.30)
-	// Option quote tracking for derivation when 106 absent
-	optReqIDs       map[int]string      // option reqID -> underlying symbol
-	optQuoteBid     map[string]float64  // last observed option bid per underlying
-	optQuoteAsk     map[string]float64  // last observed option ask per underlying
-	optQuoteMid     map[string]float64  // derived option mid per underlying
-	optPrevClose    map[string]float64  // tick 9 on the option contract itself (NOT the underlying)
-	optGreeks       map[string]Greeks   // last observed model-computation greeks per option key
-	optUnderlyingPx map[string]float64  // model-computation underlying price per option key
-	optParams       map[string]struct { // subscription params used
-		strike float64
-		expiry time.Time
-		right  string
-	}
+	optMu           sync.RWMutex
+	optIV           map[string]float64 // last observed implied vol (fraction, e.g., 0.30)
+	optReqIDs       map[int]string     // option reqID -> underlying symbol
+	optQuoteBid     map[string]float64 // last observed option bid per underlying
+	optQuoteAsk     map[string]float64 // last observed option ask per underlying
+	optPrevClose    map[string]float64 // tick 9 on the option contract itself (NOT the underlying)
+	optGreeks       map[string]Greeks  // last observed model-computation greeks per option key
+	optUnderlyingPx map[string]float64 // model-computation underlying price per option key
 
 	// Historical data requests (HMDS)
 	historicalMu      sync.Mutex
@@ -212,28 +204,21 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	}
 
 	conn := &Connector{
-		name:             "IBKRConnector",
-		config:           config,
-		pool:             NewConnectionPool(config.PoolConfig),
-		subscriptions:    make(map[string]*Subscription),
-		reqIDMap:         make(map[int]string),
-		openOrders:       make(map[string]*Order),
-		brokerOrderIndex: make(map[string]string),
-		orderUpdates:     make([]Order, 0, 8),
-		contractCache:    make(map[string]ContractDetailsLite),
-		optIV:            make(map[string]float64),
-		optReqIDs:        make(map[int]string),
-		optQuoteBid:      make(map[string]float64),
-		optQuoteAsk:      make(map[string]float64),
-		optQuoteMid:      make(map[string]float64),
-		optPrevClose:     make(map[string]float64),
-		optGreeks:        make(map[string]Greeks),
-		optUnderlyingPx:  make(map[string]float64),
-		optParams: make(map[string]struct {
-			strike float64
-			expiry time.Time
-			right  string
-		}),
+		name:              "IBKRConnector",
+		config:            config,
+		pool:              NewConnectionPool(config.PoolConfig),
+		subscriptions:     make(map[string]*Subscription),
+		reqIDMap:          make(map[int]string),
+		openOrders:        make(map[string]*Order),
+		brokerOrderIndex:  make(map[string]string),
+		contractCache:     make(map[string]ContractDetailsLite),
+		optIV:             make(map[string]float64),
+		optReqIDs:         make(map[int]string),
+		optQuoteBid:       make(map[string]float64),
+		optQuoteAsk:       make(map[string]float64),
+		optPrevClose:      make(map[string]float64),
+		optGreeks:         make(map[string]Greeks),
+		optUnderlyingPx:   make(map[string]float64),
 		historicalReqs:    make(map[int]*historicalRequest),
 		historicalBackoff: make(map[string]int),
 	}
@@ -241,8 +226,10 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	return conn
 }
 
-// UseInactiveSymbolStore preloads the connector with persisted inactive symbols.
-func (c *Connector) UseInactiveSymbolStore(ctx context.Context, store InactiveSymbolStore) error {
+// useInactiveSymbolStore preloads the connector with persisted inactive
+// symbols. Unexported because the inactiveSymbolStore contract can only
+// be satisfied from inside the package.
+func (c *Connector) useInactiveSymbolStore(ctx context.Context, store inactiveSymbolStore) error {
 	if store == nil {
 		return nil
 	}
@@ -468,10 +455,16 @@ func (c *Connector) dropSubscription(symbol string) {
 	}
 	upper := strings.ToUpper(symbol)
 
+	// Lift the cancel target under the lock, then release before calling
+	// CancelMarketData — that path goes through the rate limiter (up to
+	// 30 s) and the connection's writeMu, neither of which should run
+	// while subMu is held: every other subscription reader (handleTick,
+	// GetMarketData, scan enrichment) blocks on subMu.
 	c.subMu.Lock()
+	var cancelReqID int
 	if sub, ok := c.subscriptions[upper]; ok {
-		if conn := c.conn; conn != nil && conn.IsConnected() && sub.ReqID != 0 {
-			_ = conn.CancelMarketData(sub.ReqID)
+		if sub.ReqID != 0 {
+			cancelReqID = sub.ReqID
 		}
 		delete(c.subscriptions, upper)
 	}
@@ -480,7 +473,12 @@ func (c *Connector) dropSubscription(symbol string) {
 			delete(c.reqIDMap, reqID)
 		}
 	}
+	conn := c.conn
 	c.subMu.Unlock()
+
+	if cancelReqID != 0 && conn != nil && conn.IsConnected() {
+		_ = conn.CancelMarketData(cancelReqID)
+	}
 
 	c.optMu.Lock()
 	for reqID, sym := range c.optReqIDs {
@@ -488,7 +486,6 @@ func (c *Connector) dropSubscription(symbol string) {
 			delete(c.optReqIDs, reqID)
 		}
 	}
-	delete(c.optParams, upper)
 	c.optMu.Unlock()
 }
 
@@ -761,7 +758,7 @@ func shouldPersistInactiveReason(reason string) bool {
 	return false
 }
 
-func (c *Connector) getInactiveStore() InactiveSymbolStore {
+func (c *Connector) getInactiveStore() inactiveSymbolStore {
 	c.inactiveMu.RLock()
 	store := c.inactiveStore
 	c.inactiveMu.RUnlock()
@@ -1340,14 +1337,18 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 	}
 
 	c.subMu.Lock()
-	defer c.subMu.Unlock()
 
 	// Race protection: another goroutine may have raced past the first
 	// idempotency check. If we issued a reqID to IBKR, cancel it so we
-	// don't leak a gateway-side subscription.
+	// don't leak a gateway-side subscription — but release subMu first
+	// so the cancel's rate-limited socket write doesn't block every
+	// other subscription reader.
 	if _, exists := c.subscriptions[symbol]; exists {
-		if reqID != 0 && c.conn != nil && c.conn.IsConnected() {
-			_ = c.conn.CancelMarketData(reqID)
+		raceReqID := reqID
+		conn := c.conn
+		c.subMu.Unlock()
+		if raceReqID != 0 && conn != nil && conn.IsConnected() {
+			_ = conn.CancelMarketData(raceReqID)
 		}
 		marketDataLogger.Debugf("%s: SubscribeMarketData(%s) raced; reusing existing subscription", c.name, symbol)
 		return nil
@@ -1363,6 +1364,7 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 		Fields:   fields,
 		LastTime: time.Now(),
 	}
+	c.subMu.Unlock()
 
 	marketDataLogger.Infof("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
 
@@ -2193,14 +2195,6 @@ func (c *Connector) handleTickPrice(fields []string) {
 				// attribution; without this, callers fall back to the
 				// underlying's prev close which is meaningless for an option.
 				c.optPrevClose[optSym] = price
-			case 37:
-				c.optQuoteMid[optSym] = price
-			}
-			// Derive mid if we have bid/ask
-			if b, okb := c.optQuoteBid[optSym]; okb {
-				if a, oka := c.optQuoteAsk[optSym]; oka && b > 0 && a > 0 {
-					c.optQuoteMid[optSym] = (b + a) / 2
-				}
 			}
 			c.optMu.Unlock()
 		}
@@ -2382,14 +2376,7 @@ func (c *Connector) handleOptionComputation(fields []string) {
 		if optionPrice > 0 {
 			c.optQuoteAsk[symbol] = optionPrice
 		}
-	case 12: // last traded
-		if optionPrice > 0 {
-			c.optQuoteMid[symbol] = optionPrice
-		}
 	case 13: // model computation — canonical source for greeks
-		if optionPrice > 0 {
-			c.optQuoteMid[symbol] = optionPrice
-		}
 		if impliedVol > 0 {
 			if impliedVol > 1.5 {
 				impliedVol /= 100.0
@@ -2421,13 +2408,6 @@ func (c *Connector) handleOptionComputation(fields []string) {
 		}
 		if !math.IsNaN(underlyingPrice) && underlyingPrice > 0 && underlyingPrice < 1e9 {
 			c.optUnderlyingPx[symbol] = underlyingPrice
-		}
-	}
-
-	// Derive mid when both bid/ask present
-	if b, ok := c.optQuoteBid[symbol]; ok && b > 0 {
-		if a, ok := c.optQuoteAsk[symbol]; ok && a > 0 {
-			c.optQuoteMid[symbol] = (b + a) / 2
 		}
 	}
 
@@ -3160,14 +3140,6 @@ func (c *Connector) GetOptionUnderlyingPrice(symbol string) (float64, bool) {
 	return v, ok
 }
 
-// GetOptionQuoteMid returns last observed option mid for the ATM-ish subscription
-func (c *Connector) GetOptionQuoteMid(symbol string) (float64, bool) {
-	c.optMu.RLock()
-	defer c.optMu.RUnlock()
-	v, ok := c.optQuoteMid[symbol]
-	return v, ok
-}
-
 // GetOptionQuoteBidAsk returns the last observed bid and ask for an option key.
 // Returns (0, 0, false) when no quote has been observed; (bid, 0, true) or
 // (0, ask, true) when only one side has been seen. Use for stale-mark
@@ -3197,28 +3169,42 @@ func (c *Connector) GetOptionPrevClose(symbol string) (float64, bool) {
 	return v, true
 }
 
-// GetOptionParams returns the option params used for subscription for a symbol
-func (c *Connector) GetOptionParams(symbol string) (float64, time.Time, string, bool) {
-	c.optMu.RLock()
-	defer c.optMu.RUnlock()
-	p, ok := c.optParams[symbol]
-	if !ok {
-		return 0, time.Time{}, "", false
+// CancelOptionIV cancels an option-IV subscription previously returned by
+// SubscribeOptionIV. Idempotent: zero reqID or an unknown reqID is a
+// no-op. Best-effort on the wire — a failed CancelMarketData is logged
+// but not returned, since the typical caller is a deferred cleanup.
+//
+// Use this instead of UnsubscribeMarketData(symbol) for option-IV
+// subscriptions: SubscribeOptionIV does not install a subscriptions[symbol]
+// entry, so the symbol-scoped unsubscribe either no-ops or — worse —
+// tears down an unrelated streaming-quote subscription for the same
+// underlier.
+func (c *Connector) CancelOptionIV(reqID int) {
+	if reqID == 0 {
+		return
 	}
-	return p.strike, p.expiry, p.right, true
-}
-
-// SetDerivedOptionIV stores a derived IV value for a symbol
-func (c *Connector) SetDerivedOptionIV(symbol string, iv float64) {
-	symbol = strings.ToUpper(symbol)
 	c.optMu.Lock()
-	defer c.optMu.Unlock()
-	c.optIV[symbol] = iv
+	_, isOption := c.optReqIDs[reqID]
+	delete(c.optReqIDs, reqID)
+	c.optMu.Unlock()
+	if !isOption {
+		return
+	}
+	c.subMu.Lock()
+	delete(c.reqIDMap, reqID)
+	conn := c.conn
+	c.subMu.Unlock()
+	if conn != nil && conn.IsConnected() {
+		if err := conn.CancelMarketData(reqID); err != nil {
+			marketDataLogger.Debugf("%s: CancelOptionIV(reqID=%d): %v", c.name, reqID, err)
+		}
+	}
 }
 
 // SubscribeOptionIV subscribes to an ATM-ish option contract to receive implied volatility ticks (106).
 // expiry should be in UTC; right is "C" or "P". ctx cancellation aborts
-// the underlying contract-resolution round trip.
+// the underlying contract-resolution round trip. The returned reqID is
+// the cancel key — pair every Subscribe with a CancelOptionIV.
 func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -3248,11 +3234,6 @@ func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry
 	c.subMu.Unlock()
 	c.optMu.Lock()
 	c.optReqIDs[reqID] = symbol
-	c.optParams[symbol] = struct {
-		strike float64
-		expiry time.Time
-		right  string
-	}{strike: strike, expiry: expiry, right: right}
 	c.optMu.Unlock()
 
 	c.logInfo("Subscribed option IV for %s %s %.2f %s (ReqID: %d)", symbol, expStr, strike, right, reqID)
@@ -3418,10 +3399,6 @@ func (c *Connector) handleOrderStatus(fields []string) {
 		order.CancelledAt = &now
 	}
 
-	// enqueue update snapshot for consumers
-	updateCopy := *order
-	c.orderUpdates = append(c.orderUpdates, updateCopy)
-
 	// Remove from open orders once terminal
 	if isTerminalOrderStatus(order.Status) {
 		delete(c.openOrders, internalID)
@@ -3463,33 +3440,6 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 	}
 
 	return data
-}
-
-// DrainOrderUpdates returns the accumulated order updates since the last call.
-// Callers receive copies of the tracked orders reflecting the most recent
-// statuses observed from IBKR. The internal buffer is cleared atomically.
-func (c *Connector) DrainOrderUpdates() []*Order {
-	c.orderMu.Lock()
-	defer c.orderMu.Unlock()
-
-	if len(c.orderUpdates) == 0 {
-		return nil
-	}
-
-	updates := make([]*Order, len(c.orderUpdates))
-	for i := range c.orderUpdates {
-		copy := c.orderUpdates[i]
-		updates[i] = &copy
-	}
-
-	// reset buffer while retaining capacity
-	clearLen := len(c.orderUpdates)
-	for i := range clearLen {
-		c.orderUpdates[i] = Order{}
-	}
-	c.orderUpdates = c.orderUpdates[:0]
-
-	return updates
 }
 
 func isNumeric(value string) bool {

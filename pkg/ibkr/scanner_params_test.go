@@ -8,8 +8,6 @@ import (
 // TestParseScannerParametersXML_SyntheticTree verifies the XML walker
 // handles IBKR's three signature constructs: nested location trees,
 // instrument lists, and comma-separated instrument tokens on scan types.
-// A live-fixture test (TestParseScannerParametersXML_LiveFixture) layers
-// on top of this once the daemon has captured a real payload.
 func TestParseScannerParametersXML_SyntheticTree(t *testing.T) {
 	const body = `<?xml version="1.0" encoding="UTF-8"?>
 <ScanParameterResponse>

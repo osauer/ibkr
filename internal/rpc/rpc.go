@@ -44,9 +44,9 @@ const (
 )
 
 // MarketDataType values carried on Quote.DataType, Frame.DataType,
-// HealthResult.DataType, ScanRow.DataType, and PositionView.DataType.
-// IBKR's tickMarketDataType message (58) maps gateway feed state into one
-// of these strings; the CLI renders a badge based on the value.
+// ChainResult.DataType, and HealthResult.DataType. IBKR's
+// tickMarketDataType message (58) maps gateway feed state into one of
+// these strings; the CLI renders a badge based on the value.
 //
 // Empty string means "the gateway hasn't sent a notice yet" — typically a
 // few hundred ms after a fresh subscription. Treated as live for
@@ -264,11 +264,14 @@ type HistoryBar struct {
 	Volume int64   `json:"volume"`
 }
 
-// HistoryDailyResult wraps the daily bars for the CLI.
+// HistoryDailyResult wraps the daily bars for the CLI. Historical daily
+// bars are gateway-stored data with no live/delayed dimension; DataType
+// is therefore unused on this response and kept only as a reserved field
+// (omitempty) for shape parity with the streaming surfaces.
 type HistoryDailyResult struct {
 	Symbol   string       `json:"symbol"`
 	Days     int          `json:"days"`
-	DataType string       `json:"data_type"`
+	DataType string       `json:"data_type,omitempty"`
 	Bars     []HistoryBar `json:"bars"`
 	AsOf     time.Time    `json:"as_of"`
 }
@@ -428,7 +431,10 @@ type PositionView struct {
 // numbers. Always-non-nil pointer; fields inside are nil when their inputs
 // were unavailable — see PositionsPortfolio doc for the contract.
 type PositionsResult struct {
-	DataType     string              `json:"data_type"`
+	// DataType reflects the per-position mark-price feed when the daemon
+	// can summarise it; left empty (omitted) when positions arrive purely
+	// from the portfolio update stream without per-symbol feed state.
+	DataType     string              `json:"data_type,omitempty"`
 	AsOf         time.Time           `json:"as_of"`
 	Stocks       []PositionView      `json:"stocks"`
 	Options      []PositionView      `json:"options"`
@@ -508,8 +514,12 @@ type AccountResult struct {
 	MaintenanceMargin float64            `json:"maintenance_margin"`
 	InitialMargin     float64            `json:"initial_margin"`
 	CurrencyExposure  []CurrencyExposure `json:"currency_exposure,omitempty"`
-	DataType          string             `json:"data_type"`
-	AsOf              time.Time          `json:"as_of"`
+	// DataType is reserved for account-feed state; the account-summary
+	// path is gateway-direct with no live/delayed dimension and the field
+	// is currently left empty (omitted). Kept for shape parity with the
+	// market-data surfaces.
+	DataType string    `json:"data_type,omitempty"`
+	AsOf     time.Time `json:"as_of"`
 }
 
 // CurrencyExposure is one row in AccountResult.CurrencyExposure.

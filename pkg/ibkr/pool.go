@@ -49,7 +49,6 @@ type PoolConfig struct {
 	HeartbeatTimeout time.Duration     // Lease heartbeat timeout
 	MonitorInterval  time.Duration     // Lease monitoring interval
 	BaseConfig       *ConnectionConfig // Base config for all connections
-	EagerConnect     bool              // If true, preconnect all clients on Start
 }
 
 // DefaultPoolConfig returns a production-ready pool configuration
@@ -60,7 +59,6 @@ func DefaultPoolConfig() *PoolConfig {
 		HeartbeatTimeout: 2 * time.Minute,
 		MonitorInterval:  10 * time.Second,
 		BaseConfig:       DefaultConfig(),
-		EagerConnect:     false,
 	}
 }
 
@@ -116,52 +114,15 @@ func NewConnectionPool(config *PoolConfig) *ConnectionPool {
 	return pool
 }
 
-// Start initializes all connections and starts monitoring
+// Start initializes the pool. Connections are established lazily — the
+// first lease request for a given client ID triggers its TCP handshake.
+// Eager pre-connect was an option earlier in the project, but no caller
+// ever opted in, so the branch was subtracted.
 func (p *ConnectionPool) Start(ctx context.Context) error {
-	poolLogger.Infof("Starting connection pool with %d configured client IDs", len(p.config.ClientIDs))
-	if !p.config.EagerConnect {
-		poolLogger.Infof("Using lazy connection mode; connections establish when leases are granted")
-	}
+	poolLogger.Infof("Starting connection pool with %d configured client IDs (lazy connect)", len(p.config.ClientIDs))
 
-	var connectErrors []error
-	if p.config.EagerConnect {
-		poolLogger.Infof("Eager-connect enabled; establishing all connections upfront")
-
-		var wg sync.WaitGroup
-		errChan := make(chan error, len(p.connections))
-
-		for clientID := range p.connections {
-			wg.Add(1)
-			go func(id int) {
-				defer wg.Done()
-				if _, err := p.ensureConnection(ctx, id); err != nil {
-					poolLogger.Warnf("Failed to eager-connect client %d: %v", id, err)
-					errChan <- fmt.Errorf("client %d: %w", id, err)
-				}
-			}(clientID)
-		}
-
-		wg.Wait()
-		close(errChan)
-
-		for err := range errChan {
-			connectErrors = append(connectErrors, err)
-		}
-	}
-
-	// Start lease monitor regardless of eager connect outcome
 	p.wg.Add(1)
 	go p.monitorLeases()
-
-	if len(connectErrors) > 0 {
-		successCount := len(p.config.ClientIDs) - len(connectErrors)
-		poolLogger.Infof("Connection pool started with %d/%d eager connections", successCount, len(p.config.ClientIDs))
-		if successCount == 0 {
-			return fmt.Errorf("all eager connection attempts failed")
-		}
-	} else if p.config.EagerConnect {
-		poolLogger.Infof("All %d eager connections established successfully", len(p.config.ClientIDs))
-	}
 
 	return nil
 }

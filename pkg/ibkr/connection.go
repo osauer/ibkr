@@ -65,12 +65,18 @@ const (
 var (
 	errStartAPIFailed  = errors.New("ibkr start api failure")
 	errHandshakeNoData = errors.New("ibkr handshake: no response")
-	ibkrLogger         = logging.Component("IBKR")
-	connectLogger      = logging.Component("IBKR Connect")
-	wireLogger         = logging.Component("IBKR Wire")
-	handshakeLogger    = logging.Component("IBKR Handshake")
-	portfolioLogger    = logging.Component("IBKR Portfolio")
-	marketLogger       = logging.Component("IBKR MarketData")
+	// errClientIDInUse marks the IBKR "code 326" condition (gateway-side
+	// client-ID collision) and the unnumbered system-message form of the
+	// same notice. Consumers branch on this via errors.Is so the retry
+	// path is decoupled from the human-readable wording. Producers wrap
+	// it with the original gateway text via %w for context.
+	errClientIDInUse = errors.New("ibkr: client id already in use")
+	ibkrLogger       = logging.Component("IBKR")
+	connectLogger    = logging.Component("IBKR Connect")
+	wireLogger       = logging.Component("IBKR Wire")
+	handshakeLogger  = logging.Component("IBKR Handshake")
+	portfolioLogger  = logging.Component("IBKR Portfolio")
+	marketLogger     = logging.Component("IBKR MarketData")
 )
 
 func (s ConnectionStatus) String() string {
@@ -608,14 +614,12 @@ func (c *Connection) ensurePacketLogger() {
 	c.SetPacketLogger(logger)
 }
 
+// isClientIDInUseError reports whether err is — or wraps — the
+// "code 326 / client id already in use" condition. Use errors.Is at
+// call sites where possible; this helper exists for non-IBKR-error
+// wrappers that haven't been threaded through %w yet.
 func isClientIDInUseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "error code 326") ||
-		strings.Contains(msg, "client id is already in use") ||
-		strings.Contains(msg, "unable to connect as the client id")
+	return errors.Is(err, errClientIDInUse)
 }
 
 // Connect establishes connection to IBKR Gateway with automatic client ID retry
@@ -655,14 +659,11 @@ func (c *Connection) Connect(ctx context.Context) error {
 			continue
 		}
 
-		// Check if error is client ID related (error 326)
-		// Match various forms of the client ID error message
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "error code 326") ||
-			strings.Contains(errStr, "client id is already in use") ||
-			strings.Contains(errStr, "client id already in use") ||
-			strings.Contains(errStr, "unable to connect as client id") {
-
+		// Client-ID collision (gateway error 326): try the next sequential
+		// ID. The sentinel decouples this branch from the human-readable
+		// error wording, which has historically varied across gateway
+		// builds.
+		if errors.Is(err, errClientIDInUse) {
 			// Client ID in use, try next sequential ID
 			prevClientID := currentClientID
 			currentClientID++
@@ -1512,10 +1513,11 @@ func (c *Connection) startAPI() error {
 	for range 10 { // Try to read up to 10 initial messages
 		msgBytes, err := c.readMessage()
 		if err != nil {
-			// Check if we have a client ID error before returning
+			// Capture a client-ID-collision lastError observed mid-read so
+			// the caller's retry loop branches on errClientIDInUse rather
+			// than the read error itself.
 			c.statusMu.RLock()
-			if c.lastError != nil && (strings.Contains(c.lastError.Error(), "Error code 326") ||
-				strings.Contains(c.lastError.Error(), "client id is already in use")) {
+			if errors.Is(c.lastError, errClientIDInUse) {
 				clientIDError = c.lastError
 			}
 			c.statusMu.RUnlock()
@@ -1523,21 +1525,16 @@ func (c *Connection) startAPI() error {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				break // Timeout is expected after initial messages
 			}
-			if err == io.EOF {
-				// Check one more time for client ID error
+			if errors.Is(err, io.EOF) {
+				// EOF after startAPI: if the gateway told us our client ID
+				// was in use, surface that specifically so Connect() can
+				// pick the next ID instead of bailing out.
 				c.statusMu.RLock()
-				if c.lastError != nil {
-					lastErr := c.lastError
-					c.statusMu.RUnlock()
-					// Return the actual error if it's client ID related
-					errStr := strings.ToLower(lastErr.Error())
-					if strings.Contains(errStr, "client id") || strings.Contains(errStr, "error code 326") {
-						return lastErr
-					}
-				} else {
-					c.statusMu.RUnlock()
+				lastErr := c.lastError
+				c.statusMu.RUnlock()
+				if errors.Is(lastErr, errClientIDInUse) {
+					return lastErr
 				}
-				// If we got error 326, return that specific error
 				if clientIDError != nil {
 					return clientIDError
 				}
@@ -1551,10 +1548,8 @@ func (c *Connection) startAPI() error {
 		// Process the initial message
 		c.processMessage(msgBytes)
 
-		// Check if lastError contains client ID error
 		c.statusMu.RLock()
-		if c.lastError != nil && (strings.Contains(c.lastError.Error(), "Error code 326") ||
-			strings.Contains(c.lastError.Error(), "client id is already in use")) {
+		if errors.Is(c.lastError, errClientIDInUse) {
 			clientIDError = c.lastError
 		}
 		c.statusMu.RUnlock()
@@ -1947,10 +1942,12 @@ func (c *Connection) handleErrorMessage(fields []string) {
 		ibkrLogger.Errorf("[cid=%d] Critical Error: %s (Code %d)", c.config.ClientID, errorMsg, code)
 		c.handleDisconnection(fmt.Errorf("connection error %d: %s", code, errorMsg))
 	} else if code == 326 {
-		// Client ID already in use - store this error so Connect can retry
+		// Client ID already in use — surface as the sentinel so the
+		// connect retry loop branches on errors.Is rather than substring-
+		// matching this exact format string.
 		ibkrLogger.Infof("[cid=%d] System notice: %s", c.config.ClientID, errorMsg)
 		c.statusMu.Lock()
-		c.lastError = fmt.Errorf("Error code 326: %s", errorMsg)
+		c.lastError = fmt.Errorf("%w: code 326: %s", errClientIDInUse, errorMsg)
 		c.statusMu.Unlock()
 	} else if code == 200 {
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
@@ -1979,14 +1976,16 @@ func (c *Connection) handleErrorMessage(fields []string) {
 			// Only log if it's not just the code number
 			if _, err := strconv.Atoi(errorMsg); err != nil {
 				ibkrLogger.Infof("[cid=%d] System: %s", c.config.ClientID, errorMsg)
-				// Check if this is a client ID error message without a code
+				// Some gateway builds emit the client-ID-in-use notice
+				// without a numeric code — recognise the substring once
+				// here and convert to the sentinel so downstream branches
+				// stay free of string matching.
 				errLower := strings.ToLower(errorMsg)
 				if strings.Contains(errLower, "unable to connect as client id") ||
 					strings.Contains(errLower, "client id is already in use") ||
 					strings.Contains(errLower, "client id already in use") {
-					// Store this as an error so Connect can retry
 					c.statusMu.Lock()
-					c.lastError = fmt.Errorf("%s", errorMsg)
+					c.lastError = fmt.Errorf("%w: %s", errClientIDInUse, errorMsg)
 					c.statusMu.Unlock()
 				}
 			}

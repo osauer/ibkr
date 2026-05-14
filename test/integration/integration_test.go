@@ -293,9 +293,6 @@ func TestAccountSummaryReturnsLiveData(t *testing.T) {
 	if res.NetLiquidation == 0 {
 		t.Errorf("net_liquidation reported as zero (suspicious): %+v", res)
 	}
-	if res.DataType == "" {
-		t.Errorf("data_type must be populated, got %q", res.DataType)
-	}
 }
 
 func TestPositionsReturnLiveMarks(t *testing.T) {
@@ -447,16 +444,12 @@ func TestScanTopMoversReturnsRows(t *testing.T) {
 	}
 }
 
-// isScannerTimeout matches the several error shapes a stuck scanner
-// subscription can surface as: the wire-level "scanner subsystem did not
-// respond within Ns" (pkg/ibkr, v0.12+ message — earlier "scanner timed
-// out" kept for older daemons in the build cache), "scanner parameters
-// timed out after Ns", and the socket-side "i/o timeout" /
-// "context deadline exceeded" (when the daemon's per-method ceiling
-// fires first). All of these are off-hours / cold-scanner-subsystem
-// symptoms outside our control — the regression we care about is the
-// wire/parser layer, which is exercised by the catalog test on a warm
-// daemon.
+// isScannerTimeout matches only the scanner-subscription-specific
+// timeout shapes that surface from a cold or off-hours scanner farm.
+// Generic "context deadline exceeded" / "i/o timeout" used to be in
+// this list too — they were dropped because they also fire on a
+// deadlocked handler, a dropped socket, or any other regression a
+// scanner test should catch, not skip.
 func isScannerTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -464,9 +457,7 @@ func isScannerTimeout(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "scanner subsystem did not respond") ||
 		strings.Contains(s, "scanner timed out") ||
-		strings.Contains(s, "scanner parameters timed out") ||
-		strings.Contains(s, "context deadline exceeded") ||
-		strings.Contains(s, "i/o timeout")
+		strings.Contains(s, "scanner parameters timed out")
 }
 
 // TestScanParamsReturnsCatalog exercises the reqScannerParameters round-trip
@@ -485,11 +476,10 @@ func TestScanParamsReturnsCatalog(t *testing.T) {
 
 	var full rpc.ScanParamsResult
 	if err := conn.Call(ctx, rpc.MethodScanParams, rpc.ScanParamsParams{}, &full); err != nil {
-		// Fresh daemon → scanner subsystem can be cold; treat any timeout
-		// as off-hours flakiness rather than a regression.
-		if isScannerTimeout(err) {
-			t.Skipf("scan params timed out (off-hours / cold scanner subsystem): %v", err)
-		}
+		// The catalog request is gateway-stored data, not a live scanner
+		// subscription — no off-hours skip applies here. This test is the
+		// time-of-day-independent regression guard for the wire/parser
+		// path, so an error must fail, not be silently swallowed.
 		t.Fatalf("scan.params (unfiltered): %v", err)
 	}
 	if len(full.Instruments) == 0 || len(full.Locations) == 0 || len(full.ScanTypes) == 0 {

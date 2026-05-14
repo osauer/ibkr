@@ -32,51 +32,39 @@ func shortTempDir(t *testing.T) string {
 	return d
 }
 
-// openSocket should clean up a stale socket file from a crashed predecessor
-// and bind a fresh listener.
+// openSocket must clean up a stale socket inode left by a crashed
+// predecessor and bind a fresh listener. Setting SetUnlinkOnClose(false)
+// before closing the staging listener forces the inode to survive, so
+// the test deterministically exercises the stale-socket branch
+// (previously a fallback to a regular-file path made either branch
+// satisfy the assertion).
 func TestOpenSocketRemovesStaleSocketFile(t *testing.T) {
 	t.Parallel()
 	dir := shortTempDir(t)
 	sockPath := filepath.Join(dir, "ibkrd.sock")
 
-	// Simulate a stale socket: bind, close listener immediately. The file
-	// remains on disk but no process is serving it, so dial fails fast.
 	staleListener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("seed stale socket: %v", err)
 	}
+	ul, ok := staleListener.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("expected *net.UnixListener, got %T", staleListener)
+	}
+	ul.SetUnlinkOnClose(false)
 	_ = staleListener.Close()
-	// Re-create the file (Close removes it on Unix); writing a regular
-	// file would not match the ModeSocket check, so we have to leave a
-	// real socket inode. The simpler approach: assert openSocket handles
-	// the present-but-dead-socket case by ensuring the file exists.
-	if _, err := os.Stat(sockPath); err == nil {
-		// fine — leftover socket inode, exactly the stale state we want
-	} else {
-		// staleListener.Close already cleaned it up; recreate as a regular
-		// file to exercise the alternate stale-path. Both are valid.
-		f, err := os.Create(sockPath)
-		if err != nil {
-			t.Fatalf("recreate stale path: %v", err)
-		}
-		_ = f.Close()
+
+	fi, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("staged stale socket missing after Close: %v", err)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("staged path is not a socket inode: mode=%v", fi.Mode())
 	}
 
 	srv := &Server{socketPath: sockPath}
 	if err := srv.openSocket(); err != nil {
-		// If the leftover was a regular file (non-socket), openSocket
-		// won't try to remove it and net.Listen will fail with EADDRINUSE.
-		// Either way we should not crash the daemon.
-		if !strings.Contains(err.Error(), "address already in use") &&
-			!strings.Contains(err.Error(), "bind: address already in use") {
-			t.Fatalf("unexpected openSocket error: %v", err)
-		}
-		// Recover and retry the genuine stale-socket case to keep coverage
-		// meaningful.
-		_ = os.Remove(sockPath)
-		if err := srv.openSocket(); err != nil {
-			t.Fatalf("openSocket after manual cleanup: %v", err)
-		}
+		t.Fatalf("openSocket: %v", err)
 	}
 	defer func() {
 		if srv.listener != nil {
@@ -84,8 +72,17 @@ func TestOpenSocketRemovesStaleSocketFile(t *testing.T) {
 		}
 	}()
 	if srv.listener == nil {
-		t.Fatalf("listener nil after openSocket")
+		t.Fatal("listener nil after openSocket")
 	}
+	// Round-trip dial verifies the fresh listener is actually serving on
+	// the path; without this, an openSocket that misorders Listen→Chmod
+	// could leave a half-initialised state that the listener-nil check
+	// alone would miss.
+	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("dial fresh listener: %v", err)
+	}
+	_ = conn.Close()
 }
 
 // A Server that never opened its listener (e.g. it lost the instance-lock
@@ -217,34 +214,43 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 	}
 }
 
-// dispatch must wrap the handler ctx with a per-request deadline derived
-// from unaryDeadline. We assert this structurally by handing in a ctx
-// without a deadline and reading what the handler observes via the
-// gateway-unavailable error path (which is fast, so the deadline shows up
-// in ctx.Deadline() but is never hit).
-func TestDispatchAttachesPerRequestDeadline(t *testing.T) {
+// requestCtx must derive a child context carrying the per-method unary
+// deadline, and must NOT leak that deadline back into the caller's
+// parent context. Tests the actual deadline-attachment behaviour
+// dispatch relies on — previously this test asserted only that
+// context.Background() has no deadline, which is true by construction.
+func TestRequestCtxAppliesUnaryDeadline(t *testing.T) {
 	t.Parallel()
-	srv := &Server{
-		cfg:      &config.Resolved{Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)}},
-		endpoint: discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15},
-		streams:  map[string]context.CancelFunc{},
-		logger:   NewLogger(&bytes.Buffer{}, "error"),
-	}
-
-	params, _ := json.Marshal(rpc.ChainFetchParams{Symbol: "AAPL", Expiry: "2026-06-19", Width: 1, Side: "both"})
-	req := &rpc.Request{ID: "td-1", Method: rpc.MethodChainFetch, Params: params}
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	r := bufio.NewReader(strings.NewReader(""))
 
 	parent := context.Background()
-	srv.dispatch(parent, req, enc, r)
+	ctx, cancel := requestCtx(parent, rpc.MethodChainFetch)
+	defer cancel()
 
-	// Parent ctx must be untouched (no deadline) — dispatch's WithTimeout
-	// is scoped via cancel-defer to the request only.
-	if _, has := parent.Deadline(); has {
-		t.Fatal("dispatch leaked a deadline into the caller's ctx")
+	dl, has := ctx.Deadline()
+	if !has {
+		t.Fatal("requestCtx returned a ctx with no deadline for a unary method")
+	}
+	want := unaryDeadline(rpc.MethodChainFetch)
+	if d := time.Until(dl); d <= 0 || d > want+time.Second {
+		t.Fatalf("ctx deadline = %s from now, want ~%s", d, want)
+	}
+	if _, leaked := parent.Deadline(); leaked {
+		t.Fatal("requestCtx leaked the deadline back into the caller's ctx")
+	}
+}
+
+// Streaming methods (no unary deadline) must get the parent context
+// through unchanged so the stream's own lifetime owns cancellation.
+func TestRequestCtxNoDeadlineForStreamingMethod(t *testing.T) {
+	t.Parallel()
+
+	parent := t.Context()
+
+	ctx, cancel := requestCtx(parent, rpc.MethodQuoteSubscribe)
+	defer cancel()
+
+	if _, has := ctx.Deadline(); has {
+		t.Fatal("streaming method's ctx unexpectedly carries a deadline")
 	}
 }
 

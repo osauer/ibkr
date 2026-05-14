@@ -32,7 +32,7 @@ func (s *stubInactiveStore) RemoveInactiveSymbol(ctx context.Context, symbol str
 	return nil
 }
 
-func TestConnectorUseInactiveSymbolStoreSeedsState(t *testing.T) {
+func TestConnectoruseInactiveSymbolStoreSeedsState(t *testing.T) {
 	cfg := &ConnectorConfig{PoolConfig: DefaultPoolConfig()}
 	conn := NewConnector(cfg)
 	store := &stubInactiveStore{
@@ -43,8 +43,8 @@ func TestConnectorUseInactiveSymbolStoreSeedsState(t *testing.T) {
 			},
 		},
 	}
-	if err := conn.UseInactiveSymbolStore(context.Background(), store); err != nil {
-		t.Fatalf("UseInactiveSymbolStore: %v", err)
+	if err := conn.useInactiveSymbolStore(context.Background(), store); err != nil {
+		t.Fatalf("useInactiveSymbolStore: %v", err)
 	}
 	if !conn.IsSymbolInactive("hgenq") {
 		t.Fatalf("expected symbol seeded as inactive")
@@ -57,8 +57,8 @@ func TestConnectorPersistsDelistedSymbolReasons(t *testing.T) {
 	store := &stubInactiveStore{
 		load: map[string]inactiveSymbolState{},
 	}
-	if err := conn.UseInactiveSymbolStore(context.Background(), store); err != nil {
-		t.Fatalf("UseInactiveSymbolStore: %v", err)
+	if err := conn.useInactiveSymbolStore(context.Background(), store); err != nil {
+		t.Fatalf("useInactiveSymbolStore: %v", err)
 	}
 
 	conn.markSymbolInactive("HGENQ", "No security definition has been found for the request")

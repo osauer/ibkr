@@ -911,11 +911,9 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	// timeout. Without this, a slow handler (e.g. chain.fetch's
 	// per-strike contract resolution) could outlive the CLI cancellation
 	// and leak gateway market-data slots.
-	if d := unaryDeadline(req.Method); d > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, d)
-		defer cancel()
-	}
+	var cancel context.CancelFunc
+	ctx, cancel = requestCtx(ctx, req.Method)
+	defer cancel()
 	switch req.Method {
 	case rpc.MethodAccountSummary:
 		s.unary(req, enc, func() (any, error) { return s.handleAccountSummary(ctx) })
@@ -952,6 +950,17 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		writeError(enc, req.ID, rpc.CodeUnknownMethod, "unknown method: "+req.Method)
 	}
 	return false
+}
+
+// requestCtx returns a derived context with the per-method unary
+// deadline applied, plus its cancel func. Streaming methods (deadline
+// == 0) pass parent through with a no-op cancel so callers can defer
+// uniformly.
+func requestCtx(parent context.Context, method string) (context.Context, context.CancelFunc) {
+	if d := unaryDeadline(method); d > 0 {
+		return context.WithTimeout(parent, d)
+	}
+	return parent, func() {}
 }
 
 // unaryDeadline returns the per-request deadline for a method, or 0 for

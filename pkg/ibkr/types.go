@@ -59,10 +59,6 @@ type Position struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 
 	Greeks *Greeks `json:"greeks,omitempty"`
-
-	VaR            float64 `json:"var"`
-	MaxLoss        float64 `json:"max_loss"`
-	MarginRequired float64 `json:"margin_required"`
 }
 
 // MarketData represents a market data tick.
@@ -112,28 +108,25 @@ type MarketData struct {
 
 // Order represents a trading order.
 type Order struct {
-	ID            string      `json:"id"`
-	BrokerID      string      `json:"broker_id"`
-	Symbol        string      `json:"symbol"`
-	Asset         Asset       `json:"asset"`
-	Side          OrderSide   `json:"side"`
-	Quantity      float64     `json:"quantity"`
-	OrderType     OrderType   `json:"order_type"`
-	LimitPrice    float64     `json:"limit_price"`
-	StopPrice     float64     `json:"stop_price"`
-	TimeInForce   TimeInForce `json:"time_in_force"`
-	Status        OrderStatus `json:"status"`
-	FilledQty     float64     `json:"filled_qty"`
-	FilledPrice   float64     `json:"filled_price"`
-	Commission    float64     `json:"commission"`
-	StrategyID    string      `json:"strategy_id"`
-	ParentOrderID string      `json:"parent_order_id"`
-	InstanceID    string      `json:"instance_id,omitempty"`
-	Reason        string      `json:"reason"`
-	CreatedAt     time.Time   `json:"created_at"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-	FilledAt      *time.Time  `json:"filled_at,omitempty"`
-	CancelledAt   *time.Time  `json:"cancelled_at,omitempty"`
+	ID          string      `json:"id"`
+	BrokerID    string      `json:"broker_id"`
+	Symbol      string      `json:"symbol"`
+	Asset       Asset       `json:"asset"`
+	Side        OrderSide   `json:"side"`
+	Quantity    float64     `json:"quantity"`
+	OrderType   OrderType   `json:"order_type"`
+	LimitPrice  float64     `json:"limit_price"`
+	StopPrice   float64     `json:"stop_price"`
+	TimeInForce TimeInForce `json:"time_in_force"`
+	Status      OrderStatus `json:"status"`
+	FilledQty   float64     `json:"filled_qty"`
+	FilledPrice float64     `json:"filled_price"`
+	Commission  float64     `json:"commission"`
+	Reason      string      `json:"reason"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+	FilledAt    *time.Time  `json:"filled_at,omitempty"`
+	CancelledAt *time.Time  `json:"cancelled_at,omitempty"`
 
 	AllowOutsideRth bool `json:"outside_rth,omitempty"`
 }

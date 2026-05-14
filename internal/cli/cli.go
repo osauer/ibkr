@@ -253,19 +253,19 @@ func isGatewayUnavailable(msg string) bool {
 }
 
 // formatMoney renders a USD-style amount with grouping; "$ 248,310.42".
-// Kept as the legacy entry point so per-row renderers that don't (yet)
-// thread a currency continue to compile; new callers should prefer
-// formatMoneyCcy.
+// Used by renderers that work with intrinsically USD-only data (chain
+// strikes, history, scan rows); position renderers thread the actual
+// currency through formatMoneyCcy.
 func formatMoney(v float64) string {
 	return formatMoneyCcy(v, "USD")
 }
 
 // formatMoneyCcy renders a money amount with the right currency prefix.
 // Symbols ($, €, £) for the common cases; the 3-letter ISO code as a
-// prefix for everything else. Empty currency falls back to "$" to
-// preserve the legacy formatMoney shape. The width of the prefix is
-// padded so a column of mixed currencies stays roughly aligned (1 char
-// for symbols, 3 chars for ISO).
+// prefix for everything else. Empty currency falls back to "$" to match
+// formatMoney's USD default. The width of the prefix is padded so a
+// column of mixed currencies stays roughly aligned (1 char for symbols,
+// 3 chars for ISO).
 func formatMoneyCcy(v float64, ccy string) string {
 	prefix := moneyPrefix(ccy)
 	if v == 0 {

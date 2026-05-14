@@ -2,6 +2,163 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.15.0 — 2026-05-14 14:39 CEST
+
+Taste-driven audit pass: every HIGH finding from the senior-review sweep is
+fixed. The bulk is correctness — sentinel-based reconnect classification, lock
+ordering on the subscription path, reqID-scoped option-IV cancellation, and an
+honest `data_type` story across the wire surfaces — plus a round of orphan
+subtraction in `pkg/ibkr` and four tests rewritten to actually pin the
+behaviour they advertised.
+
+### Added
+
+- **`Connector.CancelOptionIV(reqID int)`** in `pkg/ibkr`. Cancels an
+  option-IV subscription previously returned by `SubscribeOptionIV` using its
+  reqID — the chain-IV fan-out (`internal/daemon/handlers.go::collectExpiryATMIV`)
+  now pairs every subscribe with this reqID-scoped cancel instead of the
+  previous symbol-scoped `UnsubscribeMarketData(symbol)`, which under
+  concurrent fan-out could no-op or rip down an unrelated streaming-quote
+  subscription on the same underlier.
+
+- **`errClientIDInUse` sentinel** in `pkg/ibkr/connection.go`. The reconnect
+  path's "code 326 / client id already in use" classification is now done via
+  `errors.Is`. Producers wrap with `%w`; consumers stopped substring-matching
+  their own format strings, which had coupled the retry decision to the exact
+  human-readable wording at two call sites separated by 400 lines.
+
+- **`requestCtx(parent, method)` helper** in `internal/daemon/server.go`,
+  factoring the per-method unary deadline out of `dispatch`. Lets a real test
+  observe the child context's deadline rather than asserting (uselessly) that
+  `context.Background()` has none.
+
+### Changed
+
+- **`Quote.DataType` is now plumbed from the live subscription** rather than
+  hardcoded `"live"`. The daemon reads the per-reqID feed state via
+  `Connector.GetMarketDataTypeForSymbol` while the subscription is still open,
+  so consumers branching on `data_type` see the real value (live / delayed /
+  frozen / delayed-frozen) instead of a constant.
+
+- **`AccountResult.DataType`, `PositionsResult.DataType`, and
+  `HistoryDailyResult.DataType` are `omitempty` and emitted empty.** These
+  surfaces do not have a meaningful live/delayed dimension (account-summary
+  is gateway-direct; historical bars are stored data; positions arrive from
+  the portfolio stream, not per-symbol market data). The fields were
+  previously hardcoded `"live"` — a lie that hid genuine feed-state issues
+  from any renderer that branched on the value.
+
+- **`dropSubscription` and `SubscribeMarketData` no longer hold `subMu`
+  across `CancelMarketData`.** Both sites lift the cancel target under the
+  lock, release `subMu`, then call into the rate-limited socket write — so
+  the 30 s rate-limiter ceiling and the connection's `writeMu` no longer
+  block every other subscription reader (tick handlers, `GetMarketData`,
+  scan-row enrichment) for the duration of the cancel.
+
+- **`InactiveSymbolStore` interface and `Connector.UseInactiveSymbolStore`
+  unexported** to `inactiveSymbolStore` and `useInactiveSymbolStore`. The
+  interface method signatures take the unexported `inactiveSymbolState`, so
+  the contract was satisfiable only from inside the package — the public
+  shape was a misadvertised extension point. Tests stay in-package and keep
+  using the renamed entry.
+
+- **`rpc.go` MarketDataType doc** now lists only the struct fields that
+  actually carry it (`Quote`, `Frame`, `ChainResult`, `HealthResult`).
+  Previously it named two fields (`PositionView.DataType`, `ScanRow.DataType`)
+  that have never existed on the struct.
+
+- **`internal/cli/cli.go::formatMoney`** doc no longer calls itself a "legacy
+  entry point." It is a USD-only convenience used by renderers that work with
+  intrinsically USD-only data (chain strikes, history rows, scan results) —
+  not a deprecated form.
+
+### Removed
+
+- **Speculative / orphan exports in `pkg/ibkr`:**
+  - `Connector.GetOptionQuoteMid`, `Connector.GetOptionParams`,
+    `Connector.SetDerivedOptionIV`, `Connector.DrainOrderUpdates` —
+    exported with zero non-test callers anywhere in the tree. Their
+    write-only supporting state (`optQuoteMid` map + tick-handler writes,
+    `optParams` map + writes, `orderUpdates` slice + `onOrderStatus` write
+    site) went with them. The cascaded reduction trims ~70 lines from
+    `connector.go` and removes two derive-mid blocks whose only consumer
+    was the orphan getter.
+  - `Connector.PrewarmContracts` + `PrewarmConfig` (and their dedicated
+    file `prewarm.go` + `prewarm_test.go`). Only the test exercised them;
+    the daemon prewarms differently via `handlers.go::prewarmPrevCloses`
+    and `prewarmOptionGreeks`, which are unaffected.
+  - `PoolConfig.EagerConnect` field and the whole eager-connect code path
+    in `ConnectionPool.Start`. The field was never set to true anywhere —
+    the daemon always uses lazy connect. The branch was unreachable in
+    production.
+
+- **Dead struct fields:** `Position.{VaR, MaxLoss, MarginRequired}` and
+  `Order.{StrategyID, ParentOrderID, InstanceID}`. Declared on exported
+  types in `pkg/ibkr/types.go`; never assigned or read by any caller.
+
+- **Hand-rolled `maxInt(a, b int) int`** in `internal/daemon/handlers.go`,
+  replaced by Go 1.21's builtin `max`. The `modernize` gate does not flag
+  custom-named helpers — this was a human-review find.
+
+- **`debug_handshake_test.go` and `gateway_test.go`** in `pkg/ibkr`. Both
+  required a live Gateway on a specific port and `t.Skipf`'d on every CI
+  run without one, contributing zero signal while shipping the appearance
+  of coverage. The shared helper `buildHandshakeFrame` stays in
+  `handshake_test.go` where the real handshake unit tests live.
+
+- **Orphan promise in `scanner_params_test.go`** — the comment advertising
+  a `TestParseScannerParametersXML_LiveFixture` that was never written.
+
+### Fixed
+
+- **`collectExpiryATMIV` no longer cancels with the wrong handle.** The
+  previous `defer UnsubscribeMarketData(symbol)` either no-op'd (the common
+  case, because `SubscribeOptionIV` does not install a
+  `subscriptions[symbol]` entry) or — when an unrelated `quote --watch` was
+  active on the same underlier — tore that quote subscription down out from
+  under its owner. The fan-out at `chainExpiryWorkers` parallelism now uses
+  the reqID-scoped `CancelOptionIV` so concurrent expiries on one symbol
+  cannot interfere with each other or with anyone else.
+
+- **`io.EOF` comparisons in the reconnect classifier** now use
+  `errors.Is(err, io.EOF)` instead of `err == io.EOF`, matching the two
+  other sites in the same file. Wrapped EOF from a future transport shim
+  would otherwise have been silently misclassified.
+
+### Tests
+
+- **`TestRequestCtxAppliesUnaryDeadline` (new)** replaces the tautological
+  `TestDispatchAttachesPerRequestDeadline`, which asserted only that
+  `context.Background()` had no deadline — true by construction. The new
+  test exercises `requestCtx` directly and verifies the child carries a
+  deadline within ±1 s of `unaryDeadline(method)` while the parent stays
+  untouched. A companion test pins the streaming branch returning the
+  parent context unchanged.
+
+- **`TestOpenSocketRemovesStaleSocketFile` rewritten.** The previous form
+  could pass without exercising the stale-socket branch at all: closing the
+  staging listener cleaned up the inode, so the fallback wrote a regular
+  file (not a socket) and the assertion accepted EADDRINUSE as success.
+  Now uses `(*net.UnixListener).SetUnlinkOnClose(false)` to deterministically
+  stage a stale socket inode and dial-probes the freshly bound listener.
+
+- **`TestOrderHandlersAlwaysRefuse` and
+  `TestDispatchOrderVerbsClassifyAsTradingDisabled` (new)** in
+  `internal/daemon/trading_disabled_test.go`. The build-tagged simulator that
+  used to override these handlers was removed in v0.14, but no unit test
+  pinned the always-refused behaviour — `TestTradingVerbsRefused` in
+  `test/integration` only ran with a live gateway. These tests now backstop
+  both the handler-level refusal (`errors.Is(err, ErrTradingDisabled)`) and
+  the dispatcher-level wire classification (`rpc.CodeTradingDisabled`).
+
+- **`isScannerTimeout` narrowed** to scanner-subscription-specific error
+  shapes only. Generic `"context deadline exceeded"` and `"i/o timeout"`
+  were dropped — those fire on any handler deadlock or socket drop, which
+  the integration tests should fail on, not skip. `TestScanParamsReturnsCatalog`
+  also lost its `t.Skipf` entirely: catalog requests are gateway-stored data,
+  not subject to off-hours scanner-subscription warmup, so a timeout there
+  is a real regression in the wire/parser path and must surface.
+
 ## v0.14.0 — 2026-05-14 11:05 CEST
 
 Audit-driven cleanup: two portfolio-aggregate correctness fixes, plus ~5,000 LOC of subtraction across lifecycle scaffolding, dormant subsystems, and dead test suites. No behaviour change for the daemon or CLI; library consumers see the removed items disappear.
