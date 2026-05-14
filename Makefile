@@ -32,7 +32,7 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish version plugin-check parity-check
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish version plugin-check parity-check modernize modernize-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -73,7 +73,7 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # is recoverable because the schema is small and changes go through PR
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
-check: $(CHECK_DEPS) ## gofmt + go vet + staticcheck + govulncheck + plugin-check + parity-check (binding pre-commit gate)
+check: $(CHECK_DEPS) modernize-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check (binding pre-commit gate)
 	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths
 	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
 	@# .gitignore by listing tracked + untracked-but-not-ignored files —
@@ -104,6 +104,27 @@ plugin-check: ## Validate plugin/marketplace manifests with `claude plugin valid
 # the documented exclude list). Cheap enough to live in the pre-commit gate.
 parity-check: ## Verify MCP tool inventory matches the CLI surface
 	go test -count=1 -run 'TestParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
+
+# Idiom-drift gate. `go fix -diff` is the toolchain-native fixer (tracks the
+# Go version pinned in go.mod); `go tool modernize` runs the broader gopls
+# analyzer suite (range N, wg.Go, b.Loop, maps.Copy, SplitSeq, new(expr), …).
+# Version of modernize is pinned via the `tool` directive in go.mod, so this
+# gate is reproducible without an `@latest` install step.
+modernize-check: ## go fix -diff + modernize gate (Go idiom drift vs go.mod's go version)
+	@out=$$(go fix -diff ./... 2>&1); \
+	if [ -n "$$out" ]; then \
+		echo "go fix found pending changes:"; echo "$$out"; \
+		echo "apply with: make modernize"; exit 1; \
+	fi
+	@out=$$(go tool modernize ./... 2>&1); \
+	if [ -n "$$out" ]; then \
+		echo "modernize found pending changes:"; echo "$$out"; \
+		echo "apply with: make modernize"; exit 1; \
+	fi
+
+modernize: ## Apply go fix + modernize rewrites in place
+	go fix ./...
+	go tool modernize -fix ./...
 
 fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
 	@# Same scope as `make check` so `make fmt && make check` is idempotent.
