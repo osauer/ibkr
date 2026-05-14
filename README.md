@@ -7,41 +7,9 @@
 
 **A read-only client for your Interactive Brokers account.** One Go binary, three surfaces — CLI, stdio MCP server, Go library — all returning the same JSON. No Python or Java runtime to install.
 
+![ibkr positions — stocks and options grouped by underlying, with per-leg Greeks (Δ Γ Θ ν) and a portfolio rollup of effective delta, dollar delta, daily theta, and FX sensitivity](docs/social/positions.png)
+
 ```sh
-$ ibkr account
-Account  U1234567 · base=EUR · type=IB-MARGIN
-────────────────────────────────────────────
-  Net liquidation           € 248,310.42
-  Daily P&L                 €   1,247.30
-  Balances
-    Buying power            € 992,841.68
-    Available funds         € 124,055.21
-    Excess liquidity        € 124,055.21
-    Total cash              € 119,084.21
-    Gross position value    € 188,420.10
-    Cushion                         0.50 ✓
-  Session P&L
-    Unrealized (open)      +€   2,418.07
-    Realized (today)       -€     312.50
-  Margin
-    Initial                 €  29,182.32
-    Maintenance             €  24,318.10
-  Look-ahead margin
-    Initial                 €  29,182.32
-    Maintenance             €  24,318.10
-    Available funds         € 124,055.21
-    Excess liquidity        € 124,055.21
-  Daily P&L breakdown
-    of which unrealized     €     962.10
-    of which realized       €     285.20
-
-Currency exposure  (base=EUR)
-  CCY     NET LIQ (CCY)       FX→BASE    NET LIQ (BASE)
-  USD       $ 92,418.07         1.0823        € 85,398.92
-  GBP       £ 12,061.40         1.1718        € 14,034.83
-
-  as of 14:32:18
-
 $ ibkr account --watch        # in-place refresh, ^C to stop
 
 $ ibkr quote AAPL --json | jq '{last, prev_close, change, change_pct}'
