@@ -20,7 +20,7 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 	sortBy := fs.String("sort", "alpha", "sort: alpha | pnl | value")
 	by := fs.String("by", "", "group view: underlying (default = flat stocks/options tables)")
 	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
-	rate := fs.Duration("rate", 2*time.Second, "poll interval for --watch")
+	rate := fs.Duration("rate", time.Second, "poll interval for --watch")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
