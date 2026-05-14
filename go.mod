@@ -2,6 +2,8 @@ module github.com/osauer/ibkr
 
 go 1.26.0
 
+toolchain go1.26.3
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/stretchr/testify v1.11.1
