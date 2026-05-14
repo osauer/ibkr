@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- Toolchain floor raised to Go 1.26. Internal modernization to Go 1.21–1.26
+  idioms (`any`, `range N`, `maps.Copy`, `strings.SplitSeq` / `FieldsSeq`,
+  `b.Loop`, `wg.Go`, `new(expr)`, `strings.Cut`, `fmt.Appendf`,
+  `strings.Builder`, `max`). No behavior change. Build now needs Go 1.26+.
+- Added `make modernize-check` gate (runs `go fix -diff` + `go tool modernize`).
+  Wired into `make check` so idiom drift fails CI. Modernize version is pinned
+  via the `tool` directive in `go.mod` — no `@latest` install in CI.
+
 ## v0.13.0 — 2026-05-13 21:37 CEST
 
 Drift-cleanup minor. Bundles the patch-class fixes that surfaced during
