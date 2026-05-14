@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.15.1 — 2026-05-14 15:56 CEST
+
+Diagnostics + release-process hardening prompted by a post-v0.15.0
+investigation: a `chain SPY` timeout during smoke-testing went
+unexplained until an audit caught two issues — `handleChainExpiries`
+was unobservable when it failed, and the binary I'd "verified" was a
+stale pre-commit build, not the release artefact. Both are addressed
+here. No runtime behaviour change to existing surfaces.
+
+### Added
+
+- **Per-stage budget logging in `handleChainExpiries` and
+  `handleChainFetch`.** Each handler emits one INFO line at every
+  exit (success and error) with the wall-clock breakdown — e.g.
+  `chain.expiries SPY done in 8013ms (expiries+strikes=8002ms, spot=0ms,
+  iv-fanout=0ms)`. The next investigator can read the line and know
+  immediately whether a 25 s budget went to the SECDEF round-trip, the
+  spot snapshot, or the IV fan-out. Previously a chain timeout left
+  55 seconds of dead log silence and required reading the source to
+  guess where the budget was spent.
+
+- **`make release-verify` target** (and `scripts/release-verify.sh`).
+  Wired into `make release` between the rebuild and the cross-compile,
+  so a binary that cannot talk to the gateway cannot reach GitHub
+  Releases. The smoke matrix runs against an isolated daemon under
+  `/tmp` (no contact with the user's running one) and asserts:
+    1. The binary stamps the expected version.
+    2. `status` reports `connected=true` and the daemon version matches.
+    3. `account.summary` returns a non-empty `account_id` and emits
+       no `data_type` field (v0.15 omitempty contract).
+    4. `positions.list` returns valid `stocks` / `options` arrays and
+       emits no `data_type` field.
+    5. `quote SPY` returns `symbol=SPY` with a `data_type` that is
+       either empty (no tick in budget — degraded but acceptable) or
+       one of the canonical strings (`live`, `delayed`, `frozen`,
+       `delayed-frozen`).
+
+  Each check runs under a 15 s per-command deadline (override via
+  `IBKR_RELEASE_VERIFY_TIMEOUT`). Option-chain commands are deliberately
+  excluded — IBKR's secdef-farm is genuinely degraded pre-RTH and a
+  chain request can legitimately take ≥25 s on a cold cache, which is
+  not what a release gate should branch on.
+
+### Changed
+
+- **`make release` now calls `make release-verify` between `make build`
+  and `git push origin TAG`.** A verify failure aborts the release
+  before any tag, plugin tag, or binary reaches origin; recovery is
+  `git tag -d $RELEASE_VERSION` and try again. Closes the gap that
+  caused v0.15.0 to ship a binary I'd never actually smoke-tested
+  against the gateway (my "verified" run was against the pre-commit
+  v0.14.0-dirty build).
+
 ## v0.15.0 — 2026-05-14 14:39 CEST
 
 Taste-driven audit pass: every HIGH finding from the senior-review sweep is

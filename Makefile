@@ -32,7 +32,7 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish version plugin-check parity-check modernize modernize-check
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify version plugin-check parity-check modernize modernize-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -191,6 +191,24 @@ DIST_DIR = dist
 # `git checkout`. -buildvcs=false suppresses runtime/debug.BuildInfo's
 # vcs.modified flag — the -ldflags vars are authoritative for releases,
 # and the dirty/clean signal is only useful for in-tree dev builds.
+release-verify: ## Smoke-test the local bin/ibkr against a live gateway (called by `make release`)
+	@# Standalone so a release-flow failure can be diagnosed in isolation:
+	@#   make release-verify RELEASE_VERSION=v0.15.1
+	@# The script spawns an isolated daemon under /tmp, runs a fixed
+	@# matrix (version, status, account, positions, quote SPY), asserts
+	@# the v0.15+ data_type contract on each surface, and tears the
+	@# daemon down. Requires a reachable IBKR Gateway — the gate is
+	@# binding by design (see release-verify.sh).
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-verify: RELEASE_VERSION is required, e.g. make release-verify RELEASE_VERSION=v0.15.1" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -x bin/ibkr ]; then \
+		echo "release-verify: bin/ibkr missing — run 'make build' first" >&2; \
+		exit 1; \
+	fi
+	./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
+
 release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-binaries: RELEASE_VERSION is required, e.g. make release-binaries RELEASE_VERSION=v0.6.0" >&2; \
@@ -302,6 +320,11 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	$(MAKE) build
+	@# Binding live-gateway smoke against the freshly-stamped binary.
+	@# Runs against an isolated daemon so it doesn't disturb the user's
+	@# running one. A failure here aborts the release BEFORE any tag is
+	@# pushed; recover with `git tag -d $(RELEASE_VERSION)`.
+	$(MAKE) release-verify RELEASE_VERSION=$(RELEASE_VERSION)
 	git push origin $(RELEASE_VERSION)
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	claude plugin tag . --push --message "$$msg"

@@ -1051,7 +1051,20 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
+	// Per-stage budget visibility. Captured at INFO so an off-hours
+	// timeout shows immediately where the 25 s budget went — "spent 8 s
+	// in expiries+strikes, 0 ms in IV fan-out" tells investigators the
+	// SECDEF farm is sick, not the IV path.
+	start := time.Now()
+	var spotMs, expiriesMs, fanoutMs int64
+	defer func() {
+		s.logger.Infof("chain.expiries %s done in %dms (expiries+strikes=%dms, spot=%dms, iv-fanout=%dms)",
+			sym, time.Since(start).Milliseconds(), expiriesMs, spotMs, fanoutMs)
+	}()
+
+	tExpiries := time.Now()
 	expiries, strikesByExpiry, err := fetchExpiriesAndStrikes(c, sym, 12*time.Second)
+	expiriesMs = time.Since(tExpiries).Milliseconds()
 	if err != nil {
 		return nil, wrapChainExpiriesErr(sym, err)
 	}
@@ -1082,7 +1095,9 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// Spot is required to pick the ATM strike. A single brief subscribe
 	// shared across all expiries — pre-fix this ran once before the loop
 	// already; only the loop changed shape (parallel + cached).
+	tSpot := time.Now()
 	spot, _ := briefSnapshotPrice(ctx, c, sym, 5*time.Second)
+	spotMs = time.Since(tSpot).Milliseconds()
 	if spot > 0 {
 		res.Spot = spot
 	}
@@ -1126,6 +1141,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// Workers write index-disjoint rows[j.idx], so no per-write mutex is
 	// needed — wg.Wait inside runBounded provides happens-before to the
 	// caller. The expiryIVs cache is responsible for its own locking.
+	tFanout := time.Now()
 	runBounded(jobs, chainExpiryWorkers, func(j job) {
 		if ctx.Err() != nil {
 			return
@@ -1141,6 +1157,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		}
 		rows[j.idx].IVStatus = status
 	})
+	fanoutMs = time.Since(tFanout).Milliseconds()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1349,7 +1366,20 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	}
 	dte := daysUntil(expiryYMD)
 
+	// Per-stage budget visibility (same rationale as handleChainExpiries).
+	// "snapshot=4s, legs=21s" tells investigators where the 25 s budget
+	// went without re-running with debug logging.
+	start := time.Now()
+	sym := strings.ToUpper(p.Symbol)
+	var snapshotMs, legsMs int64
+	defer func() {
+		s.logger.Infof("chain.fetch %s %s done in %dms (snapshot=%dms, legs=%dms)",
+			sym, expiryYMD, time.Since(start).Milliseconds(), snapshotMs, legsMs)
+	}()
+
+	tSnapshot := time.Now()
 	spot, dataType := briefSnapshotPrice(ctx, c, p.Symbol, 5*time.Second)
+	snapshotMs = time.Since(tSnapshot).Milliseconds()
 	if spot <= 0 {
 		if s.gatewayConnector() == nil {
 			return nil, ibkrlib.ErrIBKRUnavailable
@@ -1404,6 +1434,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	// happens-before for the publish, so one mutex around mergeStrikeSide
 	// is plenty — contention is bounded at one merge per leg.
 	var mergeMu sync.Mutex
+	tLegs := time.Now()
 	runBounded(jobs, 4, func(j job) {
 		if ctx.Err() != nil {
 			return
@@ -1415,6 +1446,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		mergeStrikeSide(&res.Strikes[j.idx], &local, j.right)
 		mergeMu.Unlock()
 	})
+	legsMs = time.Since(tLegs).Milliseconds()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
