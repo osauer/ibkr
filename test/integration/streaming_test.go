@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -159,15 +160,23 @@ func TestStreamingMCPResourceSubscribe(t *testing.T) {
 	srv := mcp.NewServer(conn, "test")
 	srv.SetDialer(func() (*dial.Conn, error) { return dial.Connect(sharedSocket) })
 
-	in := &bytes.Buffer{}
-	in.WriteString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")
-	in.WriteString(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
-	in.WriteString(`{"jsonrpc":"2.0","id":2,"method":"resources/templates/list"}` + "\n")
-	in.WriteString(`{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"ibkr://quote/` + streamingTestSymbol + `"}}` + "\n")
+	buf := &bytes.Buffer{}
+	buf.WriteString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")
+	buf.WriteString(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
+	buf.WriteString(`{"jsonrpc":"2.0","id":2,"method":"resources/templates/list"}` + "\n")
+	buf.WriteString(`{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"ibkr://quote/` + streamingTestSymbol + `"}}` + "\n")
 
 	out := &safeBuffer{}
 	ctx, cancel := context.WithTimeout(context.Background(), streamingTestTimeout)
 	defer cancel()
+
+	// Wrap the buffer so Read blocks on EOF until ctx is cancelled. A bare
+	// bytes.Buffer EOFs the instant the four request lines drain, which
+	// makes srv.Serve return; its deferred shutdownSubscriptions cancels
+	// the just-spawned subscription goroutine before the daemon's 150ms
+	// tick loop has fanned out the first frame. In production an MCP
+	// client (Claude Desktop, etc.) keeps stdin open for its lifetime.
+	in := &stayOpenReader{buf: buf, done: ctx.Done()}
 
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ctx, in, out) }()
@@ -192,6 +201,23 @@ func TestStreamingMCPResourceSubscribe(t *testing.T) {
 	if !strings.Contains(body, `"method":"notifications/resources/updated"`) {
 		t.Fatalf("no resources/updated notification within %s — fan-out or notification path broken\n%s", streamingTestTimeout, body)
 	}
+}
+
+// stayOpenReader feeds a bytes.Buffer to a consumer that should block on
+// EOF — mimicking a real MCP client whose stdin stays open for the client's
+// lifetime. Once the buffer drains, Read blocks until done fires.
+type stayOpenReader struct {
+	buf  *bytes.Buffer
+	done <-chan struct{}
+}
+
+func (r *stayOpenReader) Read(p []byte) (int, error) {
+	n, err := r.buf.Read(p)
+	if err == nil || n > 0 {
+		return n, err
+	}
+	<-r.done
+	return 0, io.EOF
 }
 
 // safeBuffer is a goroutine-safe bytes.Buffer wrapper. The mcp.Server

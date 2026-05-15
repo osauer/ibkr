@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.19.1 — 2026-05-15 21:28 CEST
+
+### Fixed
+
+- **`TestStreamingMCPResourceSubscribe` no longer flakes against a live
+  gateway.** The test fed `srv.Serve` a `bytes.Buffer` that EOFed the
+  instant the four request lines drained. `Serve`'s deferred
+  `shutdownSubscriptions()` then cancelled the just-spawned subscription
+  goroutine before the daemon's 150 ms tick loop had fanned out the
+  first frame, so no `notifications/resources/updated` ever reached the
+  output buffer. Wrapped the input with a `stayOpenReader` that blocks
+  on EOF until the test's context is cancelled — mirrors how a real MCP
+  client (Claude Desktop, Cursor, …) keeps stdin open for its lifetime.
+  Test now passes in ~4.2s, deterministic across repeated runs. No
+  production behaviour change; the bug was in the test harness, not the
+  MCP server.
+
+- **`Makefile`: gofmt step filters staged-for-deletion paths.** `git
+  ls-files --cached` includes files removed from the working tree but
+  still in the index, so `gofmt -l` emitted `lstat …: no such file or
+  directory` warnings during the brief window between `git rm` and
+  `git commit`. Filtered the input list through a per-file existence
+  check; `make check` is now clean even mid-deletion.
+
 ## v0.19.0 — 2026-05-15 08:50 CEST
 
 Taste-review pass: three HIGH findings from a senior-review of the
