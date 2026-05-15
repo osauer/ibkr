@@ -65,8 +65,6 @@ func TestSubscribeMarketDataUsesContractCache(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.pool = &ConnectionPool{}
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 
 	c.contractMu.Lock()
 	c.contractCache["SPY"] = ContractDetailsLite{
@@ -135,8 +133,6 @@ func TestSubscribeMarketData_Idempotent(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.pool = &ConnectionPool{}
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 
 	c.contractMu.Lock()
 	c.contractCache["SPY"] = ContractDetailsLite{
@@ -240,8 +236,6 @@ func TestHandleIBKRError_RefreshOn200(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.pool = &ConnectionPool{}
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 
 	c.contractMu.Lock()
 	c.contractCache["SPY"] = ContractDetailsLite{
@@ -285,8 +279,6 @@ func TestEnsureMarketDataSubscription_RefreshReleasesSlot(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.pool = &ConnectionPool{}
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 
 	c.contractMu.Lock()
 	c.contractCache["SPY"] = ContractDetailsLite{
@@ -299,8 +291,10 @@ func TestEnsureMarketDataSubscription_RefreshReleasesSlot(t *testing.T) {
 	}
 	c.contractMu.Unlock()
 
-	// Simulate an existing subscription that consumed a slot
-	if err := conn.rateLimiter.AcquireMarketDataSlot(conn.ctx); err != nil {
+	// Simulate an existing subscription that consumed a slot. Goes through
+	// the tracking helper so the reqID is registered and a subsequent
+	// release-on-cancel can actually free the slot.
+	if err := conn.acquireMarketDataSlot(conn.ctx, 42); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
 
@@ -315,7 +309,7 @@ func TestEnsureMarketDataSubscription_RefreshReleasesSlot(t *testing.T) {
 
 	// Force refresh by passing a tiny stale window
 	if !c.IsReady() {
-		t.Fatalf("connector not ready for test setup (ready=%v leaseNil=%v poolNil=%v connNil=%v connStatus=%v)", c.ready, c.lease == nil, c.pool == nil, c.conn == nil, conn.Status())
+		t.Fatalf("connector not ready for test setup (ready=%v connNil=%v connStatus=%v)", c.ready, c.conn == nil, conn.Status())
 	}
 
 	refreshed, err := c.EnsureMarketDataSubscription("SPY", []string{"LAST"}, time.Millisecond)

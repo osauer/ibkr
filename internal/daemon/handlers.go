@@ -178,53 +178,47 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 		if pos == nil {
 			continue
 		}
-		isOpt := pos.Asset.AssetType == ibkrlib.AssetTypeOption
+		isOpt := pos.Contract.SecType == "OPT"
 		if wantType == "stk" && isOpt {
 			continue
 		}
 		if wantType == "opt" && !isOpt {
 			continue
 		}
-		baseSym := pos.Asset.Symbol
-		// For options the synthetic symbol carries expiry/strike — strip back to underlying for filter.
-		under := baseSym
-		if i := strings.IndexByte(baseSym, '_'); i > 0 {
-			under = baseSym[:i]
-		}
-		if wantSym != "" && wantSym != strings.ToUpper(under) && wantSym != strings.ToUpper(baseSym) {
+		sym := pos.Contract.Symbol
+		if wantSym != "" && wantSym != strings.ToUpper(sym) {
 			continue
 		}
+		multiplier := max(pos.Contract.Multiplier, 1)
+		// Stocks may carry a multiplier of 100 in the raw wire row; the
+		// wire-shape contract on PositionView reports per-share semantics
+		// for stocks (multiplier 1).
+		if !isOpt && multiplier == 100 {
+			multiplier = 1
+		}
 		view := rpc.PositionView{
-			Symbol:        baseSym,
-			SecType:       string(pos.Asset.AssetType),
-			Exchange:      pos.Asset.Exchange,
-			Currency:      pos.Asset.Currency,
-			Quantity:      pos.Quantity,
-			Multiplier:    max(pos.Asset.Multiplier, 1),
-			AvgCost:       pos.EntryPrice,
-			Mark:          pos.CurrentPrice,
-			MarketValue:   pos.CurrentPrice * pos.Quantity * float64(max(pos.Asset.Multiplier, 1)),
-			UnrealizedPnL: pos.UnrealizedPnL,
-			RealizedPnL:   pos.RealizedPnL,
+			Symbol:        sym,
+			SecType:       positionSecType(pos.Contract.SecType),
+			Exchange:      pos.Contract.Exchange,
+			Currency:      pos.Contract.Currency,
+			Quantity:      pos.Position,
+			Multiplier:    multiplier,
+			AvgCost:       pos.AverageCost,
+			Mark:          pos.MarketPrice,
+			MarketValue:   pos.MarketPrice * pos.Position * float64(multiplier),
+			UnrealizedPnL: pos.UnrealizedPNL,
+			RealizedPnL:   pos.RealizedPNL,
 		}
 		if isOpt {
-			view.Symbol = under
-			parts := strings.Split(baseSym, "_")
-			if len(parts) == 3 {
-				view.Expiry = parts[1]
-				if len(parts[2]) > 0 {
-					view.Right = string(parts[2][0])
-					var strike float64
-					_, _ = fmt.Sscanf(parts[2][1:], "%f", &strike)
-					view.Strike = strike
-				}
-			}
+			view.Expiry = pos.Contract.Expiry
+			view.Right = pos.Contract.Right
+			view.Strike = pos.Contract.Strike
 			res.Options = append(res.Options, view)
 		} else {
 			res.Stocks = append(res.Stocks, view)
 		}
-		if pos.ConID > 0 {
-			conIDByPositionKey[positionViewKey(view)] = pos.ConID
+		if pos.Contract.ConID > 0 {
+			conIDByPositionKey[positionViewKey(view)] = pos.Contract.ConID
 		}
 	}
 	slices.SortStableFunc(res.Stocks, func(a, b rpc.PositionView) int { return cmp.Compare(a.Symbol, b.Symbol) })
@@ -280,6 +274,22 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	res.Portfolio = buildPortfolioAggregates(res.Stocks, res.Options)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
 	return res, nil
+}
+
+// positionSecType maps IBKR's raw SecType codes ("STK", "OPT", "FUT", "IND")
+// to the canonical wire values carried on PositionView.SecType.
+func positionSecType(raw string) string {
+	switch raw {
+	case "STK":
+		return rpc.SecTypeStock
+	case "OPT":
+		return rpc.SecTypeOption
+	case "FUT":
+		return rpc.SecTypeFuture
+	case "IND":
+		return rpc.SecTypeIndex
+	}
+	return raw
 }
 
 // positionViewKey produces a stable identifier for a PositionView,

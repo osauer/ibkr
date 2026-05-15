@@ -329,6 +329,13 @@ type Connection struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 
+	// Tracks which reqIDs currently hold a market data slot. The error
+	// handler and CancelMarketData can both fire for the same reqID — without
+	// this bookkeeping a single subscription would over-release the slot
+	// semaphore on cleanup. Keyed by reqID; presence == slot held.
+	marketDataSlotsMu sync.Mutex
+	marketDataSlots   map[int]struct{}
+
 	// Start API failure tracking for adaptive backoff
 	startAPIMu          sync.Mutex
 	startAPIFailures    int
@@ -479,6 +486,7 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		ctx:                 ctx,
 		cancel:              cancel,
 		rateLimiter:         NewRateLimiter(ctx),
+		marketDataSlots:     make(map[int]struct{}),
 		positionsEndChan:    make(chan struct{}, 1),
 		acctSummaryEndChan:  make(chan struct{}, 1),
 		serverVersion:       0,
@@ -1955,12 +1963,16 @@ func (c *Connection) handleErrorMessage(fields []string) {
 		c.statusMu.Unlock()
 	} else if code == 200 {
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
-		c.releaseMarketDataSlot()
+		if rid, err := strconv.Atoi(reqID); err == nil {
+			c.releaseMarketDataSlot(rid)
+		}
 	} else if code == 320 || code == 321 || code == 322 || code == 354 {
 		// Market data errors
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
 		if code == 354 {
-			c.releaseMarketDataSlot()
+			if rid, err := strconv.Atoi(reqID); err == nil {
+				c.releaseMarketDataSlot(rid)
+			}
 		}
 	} else if code == 10197 {
 		// Competing live session blocks real-time data; switch to delayed
@@ -2026,11 +2038,38 @@ func (c *Connection) handleCompetingLiveSession(reqID, errorMsg string) {
 	}
 }
 
-func (c *Connection) releaseMarketDataSlot() {
+// acquireMarketDataSlot acquires a market data slot and records the holding
+// reqID so subsequent releases (by error or by Cancel) are idempotent.
+func (c *Connection) acquireMarketDataSlot(ctx context.Context, reqID int) error {
+	if c.rateLimiter == nil {
+		return nil
+	}
+	if err := c.rateLimiter.AcquireMarketDataSlot(ctx); err != nil {
+		return err
+	}
+	c.marketDataSlotsMu.Lock()
+	c.marketDataSlots[reqID] = struct{}{}
+	c.marketDataSlotsMu.Unlock()
+	return nil
+}
+
+// releaseMarketDataSlot releases a market data slot iff this reqID currently
+// holds one. Error handlers and CancelMarketData both call this for the same
+// reqID; the bookkeeping makes the call idempotent so the underlying semaphore
+// never over-releases.
+func (c *Connection) releaseMarketDataSlot(reqID int) {
 	if c.rateLimiter == nil {
 		return
 	}
-	c.rateLimiter.ReleaseMarketDataSlot()
+	c.marketDataSlotsMu.Lock()
+	_, held := c.marketDataSlots[reqID]
+	if held {
+		delete(c.marketDataSlots, reqID)
+	}
+	c.marketDataSlotsMu.Unlock()
+	if held {
+		c.rateLimiter.ReleaseMarketDataSlot()
+	}
 }
 
 func (c *Connection) registerStartAPIFailure() time.Duration {
@@ -2519,6 +2558,9 @@ func (c *Connection) sendMessage(msg []byte) error {
 			return err
 		}
 		return c.withTransport(false, func() error {
+			if c.writer == nil {
+				return fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)")
+			}
 			fields := c.decodeMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
@@ -2567,6 +2609,9 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 			return err
 		}
 		return c.withTransport(false, func() error {
+			if c.writer == nil {
+				return fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)")
+			}
 			fields := c.decodeMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
@@ -3628,7 +3673,7 @@ func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTic
 	fields := c.buildReqMktDataFields(contractCopy, reqID, genericTicks, snapshot, regulatorySnap)
 	msg := c.encodeMsg(fields...)
 
-	if err := c.rateLimiter.AcquireMarketDataSlot(c.ctx); err != nil {
+	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 
@@ -3636,7 +3681,7 @@ func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTic
 		contractCopy.Symbol, reqID, contractCopy.SecType, contractCopy.Exchange, contractCopy.PrimaryExch, contractCopy.ConID)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {
-		c.rateLimiter.ReleaseMarketDataSlot()
+		c.releaseMarketDataSlot(reqID)
 		return 0, fmt.Errorf("failed to request market data: %w", err)
 	}
 
@@ -3934,14 +3979,14 @@ func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange
 
 	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,165,221,233", false, false)...)
 
-	if err := c.rateLimiter.AcquireMarketDataSlot(c.ctx); err != nil {
+	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 	marketLogger.Infof("Requesting market data for %s (ReqID: %d, SecType: %s, Exch: %s, Primary: %s)",
 		symbol, reqID, secType, exchange, contract.PrimaryExch)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {
-		c.rateLimiter.ReleaseMarketDataSlot()
+		c.releaseMarketDataSlot(reqID)
 		return 0, fmt.Errorf("failed to request market data: %w", err)
 	}
 	return reqID, nil
@@ -3996,7 +4041,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 
 	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,221", false, false)...)
 
-	if err := c.rateLimiter.AcquireMarketDataSlot(c.ctx); err != nil {
+	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 
@@ -4004,7 +4049,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 		symbol, expiryFormatted, strike, right, reqID)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {
-		c.rateLimiter.ReleaseMarketDataSlot()
+		c.releaseMarketDataSlot(reqID)
 		return 0, fmt.Errorf("failed to request options market data: %w", err)
 	}
 
@@ -4205,8 +4250,10 @@ func (c *Connection) CancelMarketData(reqID int) error {
 	msg := c.encodeMsg(cancelMktData, 1, reqID)
 	err := c.sendMessageWithType(msg, RequestTypeMarketData)
 
-	// Release market data slot when canceling subscription
-	c.rateLimiter.ReleaseMarketDataSlot()
+	// Release market data slot when canceling subscription. Idempotent —
+	// if an error handler (200/354) already released this reqID, the slot
+	// map has dropped the entry and this is a no-op.
+	c.releaseMarketDataSlot(reqID)
 
 	return err
 }

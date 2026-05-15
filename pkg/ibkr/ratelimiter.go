@@ -162,14 +162,14 @@ func (s *Semaphore) TryAcquire() bool {
 	}
 }
 
-// Release frees a slot
+// Release frees a slot. Panics if the semaphore is empty — an over-release
+// is always a bookkeeping bug at the caller (mismatched Acquire/Release pair),
+// and silently absorbing it would mask the root cause.
 func (s *Semaphore) Release() {
 	select {
 	case <-s.ch:
-		// Released
 	default:
-		// Channel was empty (shouldn't happen in normal use)
-		rateLimiterLogger.Warnf("Release called on empty semaphore")
+		panic("ibkr: Semaphore.Release called without matching Acquire")
 	}
 }
 

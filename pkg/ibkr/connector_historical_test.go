@@ -277,7 +277,6 @@ func TestFetchHistoricalDailyBarsReturnsData(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["SPY"] = ContractDetailsLite{
 		ConID:        756733,
 		LocalSymbol:  "SPY",
@@ -352,7 +351,6 @@ func TestFetchHistoricalDailyBarsUsesSmartExchange(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["GLD"] = ContractDetailsLite{
 		ConID:        1234567,
 		LocalSymbol:  "GLD",
@@ -427,7 +425,6 @@ func TestFetchHistoricalDailyBarsFallbackToPrimaryExchange(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["GLD"] = ContractDetailsLite{
 		ConID:        1234567,
 		LocalSymbol:  "GLD",
@@ -511,7 +508,6 @@ func TestFetchHistoricalDailyBarsRetriesOn162(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["VIX"] = ContractDetailsLite{
 		ConID:        13455763,
 		LocalSymbol:  "VIX",
@@ -600,7 +596,6 @@ func TestFetchHistoricalDailyBarsErrorsWhenContractDetailsMissing(t *testing.T) 
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 
 	c.fetchContractDetails = func(symbol string, timeout time.Duration) ([]ContractDetailsLite, error) {
 		return nil, fmt.Errorf("timeout waiting for contract details")
@@ -633,7 +628,6 @@ func TestFetchHistoricalDailyBarsWaitsForLateContractDetails(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 
 	c.fetchContractDetails = func(symbol string, timeout time.Duration) ([]ContractDetailsLite, error) {
 		go func() {

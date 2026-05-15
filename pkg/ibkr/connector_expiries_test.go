@@ -25,7 +25,6 @@ func TestFetchOptionExpiriesAcrossExchangesDedupesAndSorts(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["AAPL"] = ContractDetailsLite{
 		ConID:        265598,
 		LocalSymbol:  "AAPL",
@@ -148,7 +147,6 @@ func TestFetchOptionExpiryStrikesMergesAcrossExchanges(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["AAPL"] = ContractDetailsLite{ConID: 265598, LocalSymbol: "AAPL", TradingClass: "AAPL", Exchange: "SMART", PrimaryExch: "NASDAQ"}
 
 	go func() {
@@ -219,7 +217,6 @@ func TestFetchOptionExpiriesReturnsErrorOnEmptyTimeout(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["AAPL"] = ContractDetailsLite{ConID: 265598, LocalSymbol: "AAPL", TradingClass: "AAPL", Exchange: "SMART", PrimaryExch: "NASDAQ"}
 
 	start := time.Now()
@@ -246,7 +243,6 @@ func TestFetchOptionExpiriesReturnsPartialOnLateTimeout(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1}
 	c.contractCache["AAPL"] = ContractDetailsLite{ConID: 265598, LocalSymbol: "AAPL", TradingClass: "AAPL", Exchange: "SMART", PrimaryExch: "NASDAQ"}
 
 	go func() {

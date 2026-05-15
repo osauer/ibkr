@@ -350,14 +350,10 @@ func (s *Server) newConnector(ep discover.Endpoint) *ibkrlib.Connector {
 	conn.UseTLS = ep.TLS
 	conn.EnableTLSFallback = ep.EnableTLSFallback
 
-	pool := ibkrlib.DefaultPoolConfig()
-	pool.ClientIDs = []int{ep.ClientID}
-	pool.BaseConfig = conn
-
 	cc := &ibkrlib.ConnectorConfig{
 		ServiceName:       "ibkrd",
 		PreferredClientID: ep.ClientID,
-		PoolConfig:        pool,
+		BaseConfig:        conn,
 	}
 	return ibkrlib.NewConnector(cc)
 }

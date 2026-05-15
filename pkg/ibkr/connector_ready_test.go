@@ -48,8 +48,6 @@ func TestConnector_IsReadyAndIsConnectedCanDiverge(t *testing.T) {
 	// the test must populate all three to faithfully model a connector
 	// that completed handshake.
 	c.conn = conn
-	c.pool = &ConnectionPool{}
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 	c.running = true
 
 	c.ready = true

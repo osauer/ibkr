@@ -2,6 +2,92 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.19.0 — 2026-05-15 08:50 CEST
+
+Taste-review pass: three HIGH findings from a senior-review of the
+whole repository, applied. The release subtracts ~700 LOC of speculative
+multi-client scaffolding, removes a leaky encode/decode boundary
+between the library and the daemon, and replaces a silent-warn pattern
+in the rate limiter with a fail-loud guard. No CLI/MCP behaviour
+change; `pkg/ibkr` library surface narrows.
+
+### Changed
+
+- **`pkg/ibkr.Connector` owns a single `*Connection`.** Multi-client
+  pool scaffolding (`ConnectionPool`, `ConnectionLease`, leases,
+  heartbeats, `findAvailableConnection`, `monitorLeases`,
+  `maintainLease`) is retired. Production was always running with
+  `ClientIDs=[1]` since v0.10.2, and the lease/heartbeat machinery was
+  never exercised — the daemon couldn't even route a
+  `RequestHistoricalData` to a different connection from a
+  `SubscribeMarketData`. Collapse to a one-connection-per-Connector
+  design removes ~500 LOC from `pool.go` plus ~50 LOC from
+  `connector.go`. Reconnection on loss stays the daemon's job (via
+  `s.triggerReconnect`); the connector reports honest connectivity
+  rather than masking it with retry state.
+
+- **`Connector.GetCachedPositions()` returns `[]*RawPosition`** instead
+  of the synthetic `[]*Position`. The daemon's `handlePositionsList`
+  reads typed `Contract.{Symbol, SecType, Expiry, Right, Strike}`
+  fields directly — no more `fmt.Sprintf("%s_%s_%s%.0f", …)` encode
+  followed by `strings.Split` + `fmt.Sscanf` decode in adjacent layers.
+  One source of truth, no round-trip cost.
+
+- **`Semaphore.Release` is fail-loud.** The previous "swallow with
+  Warnf" branch hid mismatched Acquire/Release pairs in the market-data
+  slot tracking. The Release path now panics on empty-semaphore release
+  (a real bug at the caller), and the Connection layer routes every
+  Acquire/Release through reqID-aware helpers
+  (`acquireMarketDataSlot(ctx, reqID)` /
+  `releaseMarketDataSlot(reqID)`) so the error handlers for codes
+  200/354 and `CancelMarketData` are idempotent against a single
+  subscription's lifecycle. Subtracts the v0.10.2-era
+  "(shouldn't happen in normal use)" Warnf branch in favour of CLAUDE.md
+  "Fix root causes, not symptoms."
+
+- **`ConnectorConfig`** now exposes `BaseConfig *ConnectionConfig`
+  directly (was nested as `PoolConfig.BaseConfig`). Library consumers
+  building a `*Connector` by hand need to flatten:
+  `ConnectorConfig{BaseConfig: cfg, PreferredClientID: 15}`.
+
+### Removed
+
+- **`pkg/ibkr` types: `Position`, `Asset`, `AssetType`,
+  `AssetTypeStock`/`AssetTypeOption`/`AssetTypeFuture`/`AssetTypeIndex`,
+  `Order.Asset`** field, `ConnectionPool`, `ConnectionLease`,
+  `PoolConfig`, `DefaultPoolConfig`, `NewConnectionPool`,
+  `Connector.GetPoolStatus`, `Connector.maintainLease`,
+  `Connector.reconnect` (lease-driven). Downstream library callers
+  that imported the dropped types should switch to `RawPosition.Contract.*`
+  for the position shape and to `ConnectorConfig.BaseConfig` for the
+  pool-config flattening.
+
+- **`pkg/ibkr/connector_positions_test.go`**: the no-synthesis property
+  it asserted is now structural (the handler reads `pos.UnrealizedPNL`
+  directly with no synthesis layer in between).
+
+- **`pkg/ibkr/pool.go` + `pool_test.go`**: ~700 LOC gone with the pool
+  collapse.
+
+### Fixed
+
+- **`Connection.sendMessage` / `sendMessageWithType`** now return an
+  error rather than panic when called with a nil writer. The state is
+  inconsistent (claims connected but transport not yet attached) and
+  surfacing it as an error lets the rate limiter unwind cleanly instead
+  of taking the process down.
+
+### Internal
+
+- The taste review's MED items (MarketData zero-write fields, the order
+  tracking around `SubmitOrder`, `handleTickPrice` triple-switch, the
+  19-mutex `Connection` struct, `RequestMarketData` /
+  `RequestMarketDataWithPrimary` duplication, `briefSnapshot*`
+  template-coding, the README server-version doc-drift,
+  `TestConnection_EventDrivenVsSleep`) are deferred to follow-up
+  passes — listed here so future-me doesn't relitigate the same
+  ground.
+
 ## v0.18.2 — 2026-05-14 22:43 CEST
 
 ### Fixed

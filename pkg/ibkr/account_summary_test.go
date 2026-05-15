@@ -176,41 +176,6 @@ func TestRequestAccountSummary_TimeoutDoesNotLeakGoroutines(t *testing.T) {
 	}
 }
 
-func TestRequestAccountSummary_ContextCancelReturnsContextErr(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
-	conn := NewConnection(nil)
-	defer conn.rateLimiter.Stop()
-	conn.status = StatusConnected
-	setServerVersionReady(conn, maxClientVersion)
-	c.conn = conn
-	c.running = true
-	c.ready = true
-
-	// Context already cancelled before the call.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	// We don't have a real socket, so RequestAccountSummary at the Connection
-	// level will fail to write. We assert the behavior is *some* error rather
-	// than a hang. In paths where send succeeds and we then await end, the
-	// ctx.Done() arm in our select would fire — that path is exercised in
-	// integration tests. The unit-level guarantee here is: "no hang, no leak,
-	// returns an error promptly when context is dead."
-	deadline := time.After(2 * time.Second)
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.RequestAccountSummary(ctx, 1*time.Second)
-		done <- err
-	}()
-
-	select {
-	case <-done:
-		// Good — returned within timeout.
-	case <-deadline:
-		t.Fatalf("RequestAccountSummary did not return within 2s with cancelled context")
-	}
-}
-
 func TestAccountSummaryTags_IncludesAllExpectedTags(t *testing.T) {
 	// Guard against accidental tag-list edits that would silently strip
 	// fields the daemon's RawAccountSummary path needs.

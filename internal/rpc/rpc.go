@@ -81,11 +81,10 @@ const (
 	FrameErrDaemonShutdown       = "daemon_shutdown"
 )
 
-// SecType values carried on PositionView.SecType. The daemon fills the
-// field with string(pkg/ibkr.AssetType), so the canonical wire values
-// are the full words below — not the three-letter short forms IBKR
-// accepts on ContractParams (a different path; see the doc-comment
-// there).
+// SecType values carried on PositionView.SecType. The daemon maps IBKR's
+// raw three-letter SecType codes ("STK", "OPT") onto the canonical wire
+// values below in positionSecType — full words, not the short forms IBKR
+// accepts on ContractParams (a different path; see the doc-comment there).
 //
 // Compare against these constants in renderers and filters rather than
 // literal strings — the v0.12.4 "OPT" vs "OPTION" drift was the

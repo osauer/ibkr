@@ -33,8 +33,6 @@ var ErrContractDetailsTimeout = errors.New("timeout waiting for contract details
 type Connector struct {
 	name   string
 	config *ConnectorConfig
-	pool   *ConnectionPool
-	lease  *ConnectionLease
 	conn   *Connection
 
 	fetchContractDetails func(string, time.Duration) ([]ContractDetailsLite, error)
@@ -86,11 +84,14 @@ type Connector struct {
 	pnl *pnlCache
 }
 
-// ConnectorConfig holds configuration for the IBKR connector
+// ConnectorConfig holds configuration for the IBKR connector. The Connector
+// owns a single [*Connection] keyed by [PreferredClientID]; multi-client
+// scaffolding was subtracted in favour of a one-client-one-connection
+// design.
 type ConnectorConfig struct {
 	ServiceName       string
 	PreferredClientID int
-	PoolConfig        *PoolConfig
+	BaseConfig        *ConnectionConfig
 }
 
 // Subscription represents a market data subscription.
@@ -186,34 +187,43 @@ func (e *HistoricalRequestError) Error() string {
 	return fmt.Sprintf("historical data error %d", e.Code)
 }
 
-// NewConnector creates a new IBKR connector
+// NewConnector creates a new IBKR connector that will manage a single
+// [*Connection] bound to PreferredClientID.
 func NewConnector(config *ConnectorConfig) *Connector {
 	if config == nil {
 		config = &ConnectorConfig{
 			ServiceName: "regime-connector",
-			PoolConfig:  DefaultPoolConfig(),
 		}
 	}
-	if config.PoolConfig == nil {
-		config.PoolConfig = DefaultPoolConfig()
+	if config.BaseConfig == nil {
+		config.BaseConfig = DefaultConfig()
 	}
-	if config.PoolConfig.BaseConfig == nil {
-		config.PoolConfig.BaseConfig = DefaultConfig()
+	if config.PreferredClientID == 0 {
+		config.PreferredClientID = config.BaseConfig.ClientID
+	}
+	if config.PreferredClientID == 0 {
+		config.PreferredClientID = 1
 	}
 
-	if template := strings.TrimSpace(os.Getenv("IBKR_PACKET_LOG_TEMPLATE")); template != "" && config.PoolConfig.BaseConfig.PacketLogPath == "" {
+	// Honour IBKR_PACKET_LOG_TEMPLATE if set and BaseConfig didn't already pin
+	// a packet log path. Template tokens: trailing path-separator means
+	// "treat as directory"; otherwise the "%d" placeholder gets the client ID.
+	if template := strings.TrimSpace(os.Getenv("IBKR_PACKET_LOG_TEMPLATE")); template != "" && config.BaseConfig.PacketLogPath == "" {
 		if strings.HasSuffix(template, string(os.PathSeparator)) {
 			template = filepath.Join(template, "ibkr_client_%d.log")
 		} else if !strings.Contains(template, "%d") {
 			template = template + "_%d.log"
 		}
-		config.PoolConfig.BaseConfig.PacketLogPath = template
+		config.BaseConfig.PacketLogPath = fmt.Sprintf(template, config.PreferredClientID)
 	}
 
-	conn := &Connector{
+	connCfg := *config.BaseConfig
+	connCfg.ClientID = config.PreferredClientID
+
+	c := &Connector{
 		name:              "IBKRConnector",
 		config:            config,
-		pool:              NewConnectionPool(config.PoolConfig),
+		conn:              NewConnection(&connCfg),
 		subscriptions:     make(map[string]*Subscription),
 		reqIDMap:          make(map[int]string),
 		openOrders:        make(map[string]*Order),
@@ -230,8 +240,8 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		historicalBackoff: make(map[string]int),
 		pnl:               newPnLCache(),
 	}
-	conn.fetchContractDetails = conn.FetchContractDetails
-	return conn
+	c.fetchContractDetails = c.FetchContractDetails
+	return c
 }
 
 // useInactiveSymbolStore preloads the connector with persisted inactive
@@ -508,7 +518,10 @@ func (c *Connector) SetMarketDataType(dataType int) error {
 	return conn.SetMarketDataType(dataType)
 }
 
-// Start initializes the IBKR connector
+// Start initializes the IBKR connector. Attaches connect/disconnect hooks
+// and opens the single TCP connection. Returns nil even if the gateway is
+// unreachable so the daemon can run in degraded mode and rebuild later via
+// triggerReconnect.
 func (c *Connector) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
@@ -517,50 +530,12 @@ func (c *Connector) Start(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
-	c.logInfo("Starting IBKR connector")
+	c.logInfo("Starting IBKR connector (client_id: %d)", c.config.PreferredClientID)
 
-	// Start connection pool
-	if err := c.pool.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start connection pool: %w", err)
-	}
+	c.attachConnectionHooks(c.conn)
 
-	// Log summary of established IBKR connections and their client IDs.
-	// GetPoolStatus is in-tree and always builds "connections" as a
-	// map[int]map[string]any — no map[any]any fallback needed.
-	{
-		status := c.pool.GetPoolStatus()
-		total := status["total_connections"]
-		connected := status["connected_count"]
-		details, _ := status["connections"].(map[int]map[string]any)
-		var list []string
-		for cid, info := range details {
-			st, _ := info["status"].(string)
-			actualAny, ok := info["client_id"]
-			actual := cid
-			if ok {
-				switch v := actualAny.(type) {
-				case int:
-					actual = v
-				case int64:
-					actual = int(v)
-				case float64:
-					actual = int(v)
-				}
-			}
-			if actual != cid {
-				list = append(list, fmt.Sprintf("%d->%d(%s)", cid, actual, st))
-			} else {
-				list = append(list, fmt.Sprintf("%d(%s)", cid, st))
-			}
-		}
-		c.logInfo("IBKR pool total=%v connected=%v clients=%s", total, connected, strings.Join(list, ", "))
-	}
-
-	// Request a connection lease
-	lease, err := c.pool.RequestLease(ctx, c.config.ServiceName, c.config.PreferredClientID)
-	if err != nil {
-		// Try to continue without IBKR for resilience
-		c.logWarn("Failed to get connection lease: %v", err)
+	if err := c.conn.Connect(ctx); err != nil {
+		c.logWarn("Failed to connect to IBKR: %v", err)
 		c.logWarn("Running in degraded mode without IBKR connection")
 		c.mu.Lock()
 		c.running = true
@@ -569,45 +544,10 @@ func (c *Connector) Start(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
-	c.lease = lease
-	c.mu.Unlock()
-
-	// Get the actual connection and attach hooks before the connection thread starts.
-	conn, err := c.pool.GetConnectionPrepared(lease.LeaseID, func(conn *Connection) {
-		c.attachConnectionHooks(conn)
-	})
-	if err != nil {
-		c.logWarn("Failed to get connection: %v", err)
-		c.mu.Lock()
-		c.running = true
-		c.mu.Unlock()
-		return nil
-	}
-
-	c.mu.Lock()
-	c.conn = conn
 	c.running = true
 	c.mu.Unlock()
 
-	// Start lease heartbeat
-	go c.maintainLease()
-
-	// Report both lease (configured) and actual connection client IDs
-	actualID := lease.ClientID
-	if info := conn.GetConnectionInfo(); info != nil {
-		if v, ok := info["client_id"]; ok {
-			switch t := v.(type) {
-			case int:
-				actualID = t
-			case int64:
-				actualID = int(t)
-			case float64:
-				actualID = int(t)
-			}
-		}
-	}
-	c.logInfo("IBKR connector started successfully (lease_client_id: %d, actual_client_id: %d)",
-		lease.ClientID, actualID)
+	c.logInfo("IBKR connector started successfully (client_id: %d)", c.config.PreferredClientID)
 
 	return nil
 }
@@ -620,8 +560,9 @@ func (c *Connector) attachConnectionHooks(conn *Connection) {
 		c.onConnectionLost(conn)
 	})
 
-	// If the connection is already established (e.g., eager pool), ensure
-	// handlers are registered immediately so the connector is ready.
+	// If the connection is already established (e.g., reused after a hot
+	// reconfigure), ensure handlers are registered immediately so the
+	// connector is ready.
 	if conn.IsConnected() {
 		c.onConnectionEstablished(conn)
 	}
@@ -1258,24 +1199,21 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 // *Connector struct itself without first refactoring the daemon to
 // hold a lifecycle lock across handler calls.
 func (c *Connector) Stop() error {
-	// Drop c.mu BEFORE calling into pool.ReleaseLease — that path fires
-	// the registered onDisconnect callback (attachConnectionHooks.func2),
-	// which calls back into onConnectionLost and tries to acquire c.mu.
-	// Holding mu across the callback would deadlock the shutdown path,
-	// hanging the daemon process indefinitely after idle timeout / SIGTERM
-	// because main goroutine is blocked unwinding stopConnector.
+	// Drop c.mu BEFORE calling into conn.Disconnect — that path fires the
+	// registered onDisconnect callback (attachConnectionHooks.func2), which
+	// calls back into onConnectionLost and tries to acquire c.mu. Holding
+	// mu across the callback would deadlock the shutdown path, hanging the
+	// daemon process after idle timeout / SIGTERM.
 	//
-	// Marking running=false before releasing the lock is the right
-	// boundary: any reentrant caller that re-checks c.running mid-shutdown
-	// sees a stopped connector and no-ops, and we don't have to invent a
-	// second-state flag for "in the middle of shutting down".
+	// Marking running=false before releasing the lock is the right boundary:
+	// any reentrant caller that re-checks c.running mid-shutdown sees a
+	// stopped connector and no-ops.
 	c.mu.Lock()
 	if !c.running {
 		c.mu.Unlock()
 		return nil
 	}
-	lease := c.lease
-	pool := c.pool
+	conn := c.conn
 	c.running = false
 	c.mu.Unlock()
 
@@ -1287,17 +1225,10 @@ func (c *Connector) Stop() error {
 	// across daemon restarts.
 	c.cancelAllPnL()
 
-	// Release lease if we have one (fires onDisconnect → onConnectionLost
-	// callback chain; safe now that c.mu is released).
-	if lease != nil {
-		if err := pool.ReleaseLease(lease.LeaseID); err != nil {
-			c.logWarn("Error releasing lease: %v", err)
+	if conn != nil {
+		if err := conn.Disconnect(); err != nil {
+			c.logWarn("Error disconnecting: %v", err)
 		}
-	}
-
-	// Stop connection pool
-	if err := pool.Stop(); err != nil {
-		c.logWarn("Error stopping connection pool: %v", err)
 	}
 
 	c.logInfo("IBKR connector stopped")
@@ -1711,69 +1642,18 @@ func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosi
 	c.contractMu.Unlock()
 }
 
-// maintainLease sends heartbeats to keep the lease active
-func (c *Connector) maintainLease() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		c.mu.RLock()
-		running := c.running
-		lease := c.lease
-		c.mu.RUnlock()
-
-		if !running || lease == nil {
-			return
-		}
-
-		if err := c.pool.HeartbeatLease(lease.LeaseID); err != nil {
-			c.logWarn("Failed to heartbeat lease: %v", err)
-			// Try to get a new lease
-			c.reconnect()
-		}
-	}
-}
-
-// reconnect attempts to get a new connection lease
-func (c *Connector) reconnect() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	lease, err := c.pool.RequestLease(ctx, c.config.ServiceName, c.config.PreferredClientID)
-	if err != nil {
-		c.logWarn("Failed to get new lease: %v", err)
-		return
-	}
-
-	conn, err := c.pool.GetConnection(lease.LeaseID)
-	if err != nil {
-		c.logWarn("Failed to get connection for new lease: %v", err)
-		return
-	}
-
-	c.mu.Lock()
-	c.lease = lease
-	c.conn = conn
-	c.mu.Unlock()
-
-	c.logInfo("Reconnected with new lease (Client ID: %d)", lease.ClientID)
-}
-
-// isConnected checks if we have an active IBKR connection
+// isConnected checks if we have an active IBKR connection. Reconnection on
+// loss is the daemon's responsibility (server.triggerReconnect); the
+// connector reports honest connectivity rather than masking it with retry
+// state.
 func (c *Connector) isConnected() bool {
 	c.mu.RLock()
-	hasLease := c.lease != nil
-	hasPool := c.pool != nil
-	hasConn := c.conn != nil
+	conn := c.conn
 	c.mu.RUnlock()
-
-	// If we don't have basic requirements, not connected
-	if !hasLease || !hasPool || !hasConn {
+	if conn == nil {
 		return false
 	}
-
-	// Check if the connection is actually connected
-	return c.conn.IsConnected()
+	return conn.IsConnected()
 }
 
 // IsConnected exposes connection status for API/monitoring layers
@@ -1910,69 +1790,38 @@ func (c *Connector) RequestAccountUpdates(account string) error {
 //
 // Intended for the daemon: call RequestAccountUpdates at startup and let the
 // gateway keep the cache fresh; clients then call GetCachedPositions for a
-// non-destructive read.
-func (c *Connector) GetCachedPositions() ([]*Position, error) {
+// non-destructive read. Returns wire-level [RawPosition] rows directly —
+// downstream consumers read typed contract fields (Symbol, SecType, Expiry,
+// Right, Strike) instead of re-parsing an encoded symbol.
+//
+// Filters out the degenerate STK placeholder rows (ConID == 0) and any stock
+// symbols currently flagged inactive by the connector.
+func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 	if !c.isConnected() {
-		return []*Position{}, nil
+		return nil, nil
 	}
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
 	if conn == nil {
-		return []*Position{}, nil
+		return nil, nil
 	}
 	ibkrPositions := conn.GetPositions()
 	c.seedContractCacheFromPositions(ibkrPositions)
-	return c.convertIBKRPositions(ibkrPositions), nil
-}
-
-// convertIBKRPositions adapts wire-level RawPosition rows into the domain
-// Position shape used by [Connector.GetCachedPositions].
-func (c *Connector) convertIBKRPositions(ibkrPositions map[string]*RawPosition) []*Position {
-	result := make([]*Position, 0, len(ibkrPositions))
-	for key, pos := range ibkrPositions {
+	result := make([]*RawPosition, 0, len(ibkrPositions))
+	for _, pos := range ibkrPositions {
 		if pos == nil {
 			continue
 		}
 		if pos.Contract.SecType == "STK" && pos.Contract.ConID == 0 {
 			continue
 		}
-		assetType := AssetTypeStock
-		if pos.Contract.SecType == "OPT" {
-			assetType = AssetTypeOption
-		}
 		if pos.Contract.SecType == "STK" && c.IsSymbolInactive(pos.Contract.Symbol) {
 			continue
 		}
-		symbol := pos.Contract.Symbol
-		if pos.Contract.SecType == "OPT" {
-			symbol = fmt.Sprintf("%s_%s_%s%.0f",
-				pos.Contract.Symbol, pos.Contract.Expiry, pos.Contract.Right, pos.Contract.Strike)
-		}
-		assetMultiplier := pos.Contract.Multiplier
-		if assetType == AssetTypeStock && assetMultiplier == 100 {
-			assetMultiplier = 1
-		}
-		result = append(result, &Position{
-			ID:    fmt.Sprintf("pos-%s-%d", key, time.Now().Unix()),
-			ConID: pos.Contract.ConID,
-			Asset: Asset{
-				Symbol:     symbol,
-				Exchange:   pos.Contract.Exchange,
-				AssetType:  assetType,
-				Multiplier: assetMultiplier,
-				Currency:   pos.Contract.Currency,
-			},
-			Quantity:      pos.Position,
-			EntryPrice:    pos.AverageCost,
-			CurrentPrice:  pos.MarketPrice,
-			UnrealizedPnL: pos.UnrealizedPNL,
-			RealizedPnL:   pos.RealizedPNL,
-			OpenedAt:      time.Now(),
-			UpdatedAt:     time.Now(),
-		})
+		result = append(result, pos)
 	}
-	return result
+	return result, nil
 }
 
 // registerHandlers sets up message handlers for IBKR responses.

@@ -1,10 +1,10 @@
 // Package ibkr implements connectivity with the Interactive Brokers gateway:
-// connection pooling/leases, request/response encoding, market data
+// connection lifecycle, request/response encoding, market data
 // subscriptions, basic contract detail queries, and lightweight caches.
 //
 // Design highlights:
-//   - ConnectionPool hands out leases (client IDs) and maintains heartbeats.
-//   - Connector multiplexes subscriptions and exposes compact status for APIs.
+//   - Connector owns a single Connection keyed by client ID; multi-client
+//     pool scaffolding was retired in favour of one-client-one-connection.
 //   - Option IV: track real IBKR IV (tick 106). When 106 is absent, the package
 //     can also subscribe to representative option quotes to derive mid prices,
 //     but it should NOT fabricate IV; consumers must treat IV as unavailable.
@@ -18,25 +18,6 @@ package ibkr
 
 import "time"
 
-// Asset represents any tradeable instrument.
-type Asset struct {
-	Symbol     string    `json:"symbol"`
-	AssetType  AssetType `json:"asset_type"`
-	Exchange   string    `json:"exchange"`
-	Multiplier int       `json:"multiplier"`
-	Currency   string    `json:"currency"`
-}
-
-// AssetType defines the type of financial instrument.
-type AssetType string
-
-const (
-	AssetTypeStock  AssetType = "STOCK"
-	AssetTypeOption AssetType = "OPTION"
-	AssetTypeFuture AssetType = "FUTURE"
-	AssetTypeIndex  AssetType = "INDEX"
-)
-
 // Greeks represents option sensitivities.
 type Greeks struct {
 	Delta float64 `json:"delta"`
@@ -44,29 +25,6 @@ type Greeks struct {
 	Theta float64 `json:"theta"`
 	Vega  float64 `json:"vega"`
 	Rho   float64 `json:"rho"`
-}
-
-// Position represents a held position in the portfolio.
-//
-// ConID is IBKR's stable per-contract identifier (zero only for the
-// degenerate STK placeholder rows that get filtered out before this
-// type is exposed). It's required for the daemon's per-position Daily
-// P&L subscription (reqPnLSingle keys off conId, not symbol/expiry),
-// so we propagate it from RawPosition.Contract.ConID instead of
-// rebuilding it downstream.
-type Position struct {
-	ID            string    `json:"id"`
-	ConID         int       `json:"con_id,omitempty"`
-	Asset         Asset     `json:"asset"`
-	Quantity      float64   `json:"quantity"`
-	EntryPrice    float64   `json:"entry_price"`
-	CurrentPrice  float64   `json:"current_price"`
-	UnrealizedPnL float64   `json:"unrealized_pnl"`
-	RealizedPnL   float64   `json:"realized_pnl"`
-	OpenedAt      time.Time `json:"opened_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-
-	Greeks *Greeks `json:"greeks,omitempty"`
 }
 
 // MarketData represents a market data tick.
@@ -119,7 +77,6 @@ type Order struct {
 	ID          string      `json:"id"`
 	BrokerID    string      `json:"broker_id"`
 	Symbol      string      `json:"symbol"`
-	Asset       Asset       `json:"asset"`
 	Side        OrderSide   `json:"side"`
 	Quantity    float64     `json:"quantity"`
 	OrderType   OrderType   `json:"order_type"`

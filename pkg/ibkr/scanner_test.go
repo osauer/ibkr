@@ -26,7 +26,6 @@ func TestRunScannerSubscription_SurfacesGatewayError(t *testing.T) {
 	c.conn = conn
 	c.running = true
 	c.ready = true
-	c.lease = &ConnectionLease{ClientID: 1, Active: true}
 
 	// Wait until RunScannerSubscription registers its handlers, grab the
 	// reqID it allocated, then inject an error frame tagged with that reqID.

@@ -33,7 +33,7 @@ func (s *stubInactiveStore) RemoveInactiveSymbol(ctx context.Context, symbol str
 }
 
 func TestConnectoruseInactiveSymbolStoreSeedsState(t *testing.T) {
-	cfg := &ConnectorConfig{PoolConfig: DefaultPoolConfig()}
+	cfg := &ConnectorConfig{BaseConfig: DefaultConfig(), PreferredClientID: 1}
 	conn := NewConnector(cfg)
 	store := &stubInactiveStore{
 		load: map[string]inactiveSymbolState{
@@ -52,7 +52,7 @@ func TestConnectoruseInactiveSymbolStoreSeedsState(t *testing.T) {
 }
 
 func TestConnectorPersistsDelistedSymbolReasons(t *testing.T) {
-	cfg := &ConnectorConfig{PoolConfig: DefaultPoolConfig()}
+	cfg := &ConnectorConfig{BaseConfig: DefaultConfig(), PreferredClientID: 1}
 	conn := NewConnector(cfg)
 	store := &stubInactiveStore{
 		load: map[string]inactiveSymbolState{},
