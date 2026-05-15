@@ -78,7 +78,15 @@ check: $(CHECK_DEPS) modernize-check ## gofmt + go vet + staticcheck + govulnche
 	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
 	@# .gitignore by listing tracked + untracked-but-not-ignored files —
 	@# the right scope for a pre-commit format gate.
-	@unformatted=$$(git ls-files --cached --others --exclude-standard '*.go' | xargs gofmt -l); \
+	@#
+	@# Filter out paths git knows about but that don't exist on disk
+	@# (staged-for-deletion mid-commit), otherwise gofmt prints
+	@# `lstat …: no such file or directory` to stderr for each one.
+	@unformatted=$$( \
+		git ls-files --cached --others --exclude-standard '*.go' | \
+		while IFS= read -r f; do [ -e "$$f" ] && printf '%s\n' "$$f"; done | \
+		xargs gofmt -l \
+	); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt: the following files need formatting:"; \
 		echo "$$unformatted"; \
