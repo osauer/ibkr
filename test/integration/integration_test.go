@@ -446,7 +446,15 @@ func TestCLIBinaryAccountText(t *testing.T) {
 func TestScanTopMoversReturnsRows(t *testing.T) {
 	skipIfNoGateway(t)
 	conn := client(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 80 s = daemon's unaryDeadline(MethodScanRun) (75 s = 35 s scanner +
+	// 20 s enrichment + slack) + socket slack. On a fresh client ID against
+	// TWS, the cold path is observably ~40 s (28 s scanner-farm warmup +
+	// 5 s contract-details warmup + 6 s market-data tick collection); 40 s
+	// is on the knife edge and any variance pushes the test ctx over.
+	// Setting test ctx ≥ daemon unary deadline lets the daemon's classified
+	// "scanner subsystem did not respond within 35s" reach the test on a
+	// truly-stuck scanner farm, where isScannerTimeout cleanly skips.
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
 	defer cancel()
 
 	var res rpc.ScanResult
@@ -553,7 +561,11 @@ func TestScanParamsReturnsCatalog(t *testing.T) {
 func TestScanAdHocAgainstDefaultLocation(t *testing.T) {
 	skipIfNoGateway(t)
 	conn := client(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Same rationale as TestScanTopMoversReturnsRows: ctx must outlive the
+	// daemon's full unaryDeadline(MethodScanRun) = 75 s so the cold-path
+	// completes and the classified scanner-timeout (if it fires) reaches
+	// the test instead of being pre-empted.
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
 	defer cancel()
 
 	params := rpc.ScanRunParams{Type: "TOP_PERC_GAIN", Exchange: "STK.US.MAJOR", Limit: 5}
