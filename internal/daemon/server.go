@@ -120,6 +120,14 @@ type Server struct {
 	// spot, but long enough to make back-to-back calls free.
 	greeks *greeksCache
 
+	// zeroGamma holds the current/most-recent dealer zero-gamma
+	// compute for SPX, keyed on NY trading-session date. The compute
+	// is a multi-minute fan-out across hundreds of option legs; this
+	// cache singleflights concurrent callers and outlives any single
+	// RPC ctx so a client disconnect mid-compute doesn't kill the
+	// run that other pollers are waiting on.
+	zeroGamma *gammaZeroCache
+
 	lock *instanceLock
 
 	logger *Logger
@@ -157,6 +165,7 @@ func New(opts Options) *Server {
 		expiryIVs:  newExpiryIVCache(),
 		prevCloses: newPrevCloseCache(),
 		greeks:     newGreeksCache(),
+		zeroGamma:  newGammaZeroCache(),
 	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
@@ -943,6 +952,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleHistoryDaily(ctx, req) })
 	case rpc.MethodBreadthSPX:
 		s.unary(req, enc, func() (any, error) { return s.handleBreadthSPX(ctx, req) })
+	case rpc.MethodGammaZeroSPX:
+		s.unary(req, enc, func() (any, error) { return s.handleGammaZeroSPX(ctx, req) })
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodQuoteSubscribe:
@@ -1006,6 +1017,15 @@ func unaryDeadline(method string) time.Duration {
 		// arrives in 1-2 s; the budget is sized for the slower
 		// historical leg on the first call of the day.
 		return 20 * time.Second
+	case rpc.MethodGammaZeroSPX:
+		// 55 s — under the CLI's 60 s ceiling but generous enough to
+		// support meaningful WaitMs values. The actual compute runs
+		// on a daemon-internal goroutine outside this budget; the
+		// only thing under the deadline is the snapshot + (optional)
+		// wait for the cached result. A caller that sets WaitMs >
+		// 50000 ms will get a clean "computing" envelope back once
+		// the deadline ticks, not a socket timeout.
+		return 55 * time.Second
 	case rpc.MethodScanRun:
 		// Up to 35 s scanner-subscription budget (off-hours cold-start
 		// for HIGH_OPEN_GAP / TOP_PERC_GAIN / HIGH_OPT_IMP_VOLAT_OVER_HIST

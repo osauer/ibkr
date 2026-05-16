@@ -244,6 +244,25 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_gamma",
+		Description: "SPX dealer zero-gamma estimate (Indicator 4 of the risk-regime dashboard). Computed from IBKR's SPX + SPXW option chain using the Perfiliev convention (dealers long calls, short puts) over the 6 nearest non-0DTE-post-settlement expirations, ±10 % strike width. Returns two complementary signals: a *signed* zero-gamma price level (regime hint) plus a *magnitude* `gamma_total_abs` and `top_strikes` view that's robust to the dealer-sign assumption (use this when covered-call ETFs or autocall barriers are likely to invert the naive sign). Compute is heavy — the first call of an NY trading day kicks a multi-minute background job and returns `status: \"computing\"` with `eta_seconds`; subsequent callers within the same session receive `status: \"ready\"` instantly. Set `wait_ms` to block up to N milliseconds for the result (capped at the per-method deadline). `force: true` ignores the cached result and starts fresh. Honest caveat: this is a regime hint, not a precision level — for the full methodology see `docs/specs/risk-regime-dashboard.md`.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"wait_ms": json.RawMessage(`{"type":"integer","minimum":0,"description":"block up to this many ms for the result; 0 (default) returns the current status immediately"}`),
+			"force":   json.RawMessage(`{"type":"boolean","description":"diagnostics-only: ignore the cached result and start a fresh compute; default false"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.GammaZeroSPXParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.GammaZeroSPXResult
+			if err := conn.Call(ctx, rpc.MethodGammaZeroSPX, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{

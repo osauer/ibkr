@@ -35,6 +35,7 @@ func newTestServer(t *testing.T) *Server {
 		logger:     NewLogger(&bytes.Buffer{}, "error"),
 		expiryIVs:  newExpiryIVCache(),
 		prevCloses: newPrevCloseCache(),
+		zeroGamma:  newGammaZeroCache(),
 	}
 	s.installSubs()
 	return s
@@ -98,6 +99,12 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 	t.Run("breadth.spx", func(t *testing.T) {
 		req := &rpc.Request{ID: "t6b", Method: rpc.MethodBreadthSPX, Params: json.RawMessage(`{}`)}
 		_, err := srv.handleBreadthSPX(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+
+	t.Run("gamma.zero_spx", func(t *testing.T) {
+		req := &rpc.Request{ID: "t6c", Method: rpc.MethodGammaZeroSPX, Params: json.RawMessage(`{}`)}
+		_, err := srv.handleGammaZeroSPX(ctx, req)
 		assertGatewayUnavailable(t, err)
 	})
 

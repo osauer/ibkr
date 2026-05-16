@@ -130,6 +130,7 @@ func init() {
 		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"breadth", "S&P 500 stocks-above-50DMA reading (S&P DJI S5FI index)", "ibkr breadth [--days 30] [--json]", runBreadth},
+		{"gamma", "SPX dealer zero-gamma estimate (heavy compute; once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--json]", runGamma},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
 		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil}, // dispatched in cmd/ibkr/main.go — no daemon contact
