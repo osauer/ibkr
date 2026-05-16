@@ -27,6 +27,7 @@ const (
 	MethodHistoryDaily   = "history.daily"
 	MethodStatusHealth   = "status.health"
 	MethodBreadthSPX     = "breadth.spx"
+	MethodGammaZeroSPX   = "gamma.zero_spx"
 	MethodCancel         = "cancel"
 	MethodOrderPlace     = "order.place"  // refused in v1
 	MethodOrderCancel    = "order.cancel" // refused in v1
@@ -336,6 +337,195 @@ type BreadthSPXResult struct {
 	// — "live", "delayed", "frozen", "delayed-frozen", or "" when no
 	// notice has arrived yet. Renderers use this to dim the headline.
 	DataType string `json:"data_type,omitempty"`
+}
+
+// GammaZeroSPXStatus values are returned on GammaZeroSPXResult.Status and
+// drive the dashboard generator's "render the number" vs "render a
+// loading state" choice. The compute is heavy (several minutes against
+// hundreds of option legs) and runs on a daemon-internal goroutine, so
+// the wire shape always carries a state — the first caller of the day
+// receives "computing" and a renderer hint; subsequent callers receive
+// "ready" with a cached payload until the next NY trading session.
+const (
+	// GammaZeroStatusComputing — a background compute is in flight; the
+	// EtaSeconds / Progress fields carry refresh hints. Callers who can
+	// wait may set BreadthSPXParams.WaitMs > 0 on the request to block
+	// up to that budget for the result.
+	GammaZeroStatusComputing = "computing"
+	// GammaZeroStatusReady — Result is populated and reflects the most
+	// recent NY trading session's calculation.
+	GammaZeroStatusReady = "ready"
+	// GammaZeroStatusError — the last compute failed; Error carries the
+	// classified reason. Callers retry by re-invoking the method.
+	GammaZeroStatusError = "error"
+)
+
+// GammaZeroSPXParams is the input for MethodGammaZeroSPX. All fields are
+// optional; defaults match the v1 calibration window documented in
+// docs/specs/risk-regime-dashboard.md.
+type GammaZeroSPXParams struct {
+	// WaitMs is the maximum time the daemon blocks on an in-flight or
+	// just-kicked-off compute before returning the current state. 0
+	// (the default) means "return immediately with whatever state we
+	// have." A non-zero value is capped daemon-side to keep the RPC
+	// under the per-method deadline.
+	WaitMs int `json:"wait_ms,omitempty"`
+	// Force, when true, ignores a cached result for the current session
+	// and kicks a fresh compute. Useful for diagnostics; the dashboard
+	// generator should leave this off and let the daily cache handle
+	// freshness.
+	Force bool `json:"force,omitempty"`
+}
+
+// GammaZeroParams echoes the v1 calibration window back to the caller so
+// renderers can show "computed over N expirations within ±X%." Future
+// versions can add fields here without breaking the result shape — every
+// renderer-relevant tuning parameter lives on this echo.
+type GammaZeroParams struct {
+	// ExpiryCount is the number of nearest non-0DTE-post-settlement
+	// expirations included in the aggregation.
+	ExpiryCount int `json:"expiry_count"`
+	// StrikeWidthPct is the half-width of the strike grid around spot,
+	// expressed as a fraction (0.10 = ATM ± 10 %).
+	StrikeWidthPct float64 `json:"strike_width_pct"`
+	// SweepRangePct is the half-range of the spot sweep used to find
+	// the zero-crossing (0.15 = [0.85, 1.15] × spot).
+	SweepRangePct float64 `json:"sweep_range_pct"`
+	// WorkerCount is the per-leg fan-out concurrency. 4 matches the
+	// documented safe gateway throttle; bumping it requires retuning
+	// AcquireMarketDataSlot.
+	WorkerCount int `json:"worker_count"`
+}
+
+// GammaProfilePoint is one (spot, dealer_gex) sample from the sweep.
+// GEX is signed under the Perfiliev convention (call gamma positive,
+// put gamma negative); a sign flip across two adjacent points is what
+// the renderer reads as a "zero crossing."
+type GammaProfilePoint struct {
+	Spot float64 `json:"spot"`
+	GEX  float64 `json:"gex"`
+}
+
+// StrikeConcentration is one row of the "where dealer hedging
+// concentrates" table — the top strikes ranked by sign-agnostic gamma
+// notional |Γ| × OI × multiplier × spot² × 0.01. This is the more
+// robust signal in regimes where the Perfiliev dealer-sign assumption
+// can invert (covered-call ETF flow, autocall barrier proximity); the
+// renderer can present it alongside ZeroGamma as a "call wall / put
+// wall" view that's methodology-agnostic.
+type StrikeConcentration struct {
+	Strike float64 `json:"strike"`
+	Expiry string  `json:"expiry"` // YYYY-MM-DD
+	Right  string  `json:"right"`  // "C" | "P"
+	AbsGEX float64 `json:"abs_gex"`
+	OI     int64   `json:"open_interest"`
+}
+
+// GammaZeroComputed is the actual zero-gamma payload — populated when
+// GammaZeroSPXResult.Status is GammaZeroStatusReady. Kept as a separate
+// struct so the envelope (Status / Eta / Progress / Result pointer)
+// can evolve independently of the computation payload.
+//
+// Sign convention: ZeroGamma assumes the 2018-era "dealers long calls,
+// short puts" Perfiliev convention. This is a defensible baseline at
+// the SPX index level but can invert near autocallable barriers and
+// when covered-call ETF flow dominates. Treat ZeroGamma as a regime
+// hint, not a precise level; consult TopStrikes (sign-agnostic) for
+// the more robust positioning view. See docs/specs/risk-regime-dashboard.md
+// for the full methodology disclosure.
+type GammaZeroComputed struct {
+	// SpotSPX is the SPX price at which the aggregation was anchored.
+	SpotSPX float64 `json:"spot_spx"`
+	// SpotAt is the gateway-observation timestamp for SpotSPX. Distinct
+	// from AsOf which covers the whole computation.
+	SpotAt time.Time `json:"spot_at"`
+
+	// ZeroGamma is the dealer-flip level under the Perfiliev convention.
+	// nil when no crossing exists within the sweep window (rare; usually
+	// means dealers are strongly long-gamma across the regime). Inspect
+	// GammaSign in that case.
+	ZeroGamma *float64 `json:"zero_gamma"`
+	// GapPct is (SpotSPX − ZeroGamma) / ZeroGamma × 100. nil iff
+	// ZeroGamma is nil. Sign convention: positive = spot above flip
+	// (dampening regime); negative = below flip (amplifying regime).
+	GapPct *float64 `json:"gap_pct"`
+	// GammaSign is "positive" or "negative" and is meaningful only when
+	// ZeroGamma is nil — it tells the renderer which side of zero the
+	// whole sweep landed on so the UI can say "all long-gamma" or "all
+	// short-gamma in window."
+	GammaSign string `json:"gamma_sign,omitempty"`
+	// Profile is the full (spot, gex) sweep, oldest first. 60 points
+	// over [0.85, 1.15] × SpotSPX. Renderers chart this as the
+	// gamma-exposure curve and visually confirm the zero crossing.
+	Profile []GammaProfilePoint `json:"profile"`
+
+	// GammaTotalAbs is the sign-agnostic magnitude signal at SpotSPX:
+	// Σ |Γ| × OI × 100 × SpotSPX² × 0.01. In dollar gamma terms — the
+	// total notional dealer hedging flow for a 1% SPX move, independent
+	// of any positioning assumption. Larger = market is more sensitive
+	// to dealer rebalancing.
+	GammaTotalAbs float64 `json:"gamma_total_abs"`
+	// TopStrikes is the top-N strikes ranked by absolute gamma notional.
+	// Concentration here is more reliable than the signed ZeroGamma in
+	// regimes where the dealer-sign assumption may invert.
+	TopStrikes []StrikeConcentration `json:"top_strikes"`
+
+	// Expirations is the YYYY-MM-DD list of expirations actually
+	// included in the aggregation (after 0DTE-post-settlement filtering
+	// and SPXW/SPX merging).
+	Expirations []string `json:"expirations"`
+	// LegCount is the number of option legs that successfully delivered
+	// OI + IV within the per-leg budget. Compare to the theoretical
+	// max from Params to spot-check whether the gateway throttled the
+	// run (e.g., 240 out of 480 means half the chain dropped — surface
+	// to the renderer as a confidence flag).
+	LegCount int `json:"leg_count"`
+	// Warnings is a structured list of non-fatal conditions: e.g.,
+	// "no_crossing_in_window", "spxw_partial_oi", "low_leg_coverage".
+	// Empty when the computation was clean. Renderers surface these
+	// as inline badges; the dashboard generator can fail loud or soft
+	// based on which codes appear.
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Params echoes the v1 calibration window so a renderer can show
+	// "computed over 6 expirations within ATM ± 10%" without consulting
+	// out-of-band documentation.
+	Params GammaZeroParams `json:"params"`
+	// Source identifies the data provenance for the headline numbers.
+	Source string `json:"source"`
+	// Method is a short stable token for the computation path. v1:
+	// "perfiliev-bs-sweep-v1". Full methodology disclosure lives in
+	// docs/specs/risk-regime-dashboard.md so renderers can deep-link.
+	Method string `json:"method"`
+	// AsOf is the daemon's wall-clock when the compute finished.
+	AsOf time.Time `json:"as_of"`
+	// DurationMS is honest about how long the compute took on the wall
+	// clock; useful for tuning ExpiryCount / StrikeWidthPct.
+	DurationMS int64 `json:"duration_ms"`
+}
+
+// GammaZeroSPXResult is the envelope returned by MethodGammaZeroSPX.
+// Always carries a Status; Result is populated when Status is "ready".
+// The split (envelope vs computed payload) keeps the wire stable while
+// the compute pipeline can evolve — adding fields to GammaZeroComputed
+// doesn't churn the polling contract.
+type GammaZeroSPXResult struct {
+	// Status is one of GammaZeroStatusComputing / Ready / Error.
+	Status string `json:"status"`
+	// StartedAt is when the currently-relevant compute kicked off — for
+	// "computing", that's the in-flight job; for "ready", it's the
+	// compute that produced Result. Nil if no compute has ever started.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	// EtaSeconds is an initial estimate of the total wall-clock the
+	// compute will need from kickoff. Used by renderers to show a
+	// progress meter or set a polling cadence. 0 when Status != computing.
+	EtaSeconds int `json:"eta_seconds,omitempty"`
+	// Progress is a 0-100 hint, best-effort. 0 when Status != computing.
+	Progress int `json:"progress,omitempty"`
+	// Result is populated when Status == "ready".
+	Result *GammaZeroComputed `json:"result,omitempty"`
+	// Error is populated when Status == "error".
+	Error string `json:"error,omitempty"`
 }
 
 // Quote is the daemon's snapshot result.
