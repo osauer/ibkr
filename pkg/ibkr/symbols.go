@@ -36,6 +36,16 @@ func classifySymbol(symbol string) (string, string, string, string) {
 		exchange = "CBOE"
 		primary = "CBOE"
 
+	// S&P 500 stocks-above-50DMA breadth index. Published by S&P DJI,
+	// distributed via the INDEX exchange — used by the risk-regime
+	// dashboard as Indicator 5. Same INDEX exchange covers the sibling
+	// series (S5TW/S5OH/S5TH for 20/100/200-day MA) if a future caller
+	// needs them; intentionally not pre-registered to avoid spec creep.
+	case "S5FI":
+		secType = "IND"
+		exchange = "INDEX"
+		primary = "INDEX"
+
 	// Common ETFs
 	case "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT":
 		secType = "STK"
@@ -64,7 +74,7 @@ func contractDisplayHints(symbol, secType string) (string, string) {
 	switch secType {
 	case "IND":
 		switch symbol {
-		case "VIX", "SPX", "NDX", "DJI", "DJX", "DXY":
+		case "VIX", "SPX", "NDX", "DJI", "DJX", "DXY", "S5FI":
 			return symbol, symbol
 		}
 	case "CMDTY":

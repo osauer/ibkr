@@ -115,6 +115,12 @@ type Subscription struct {
 	BidSize   int64
 	AskSize   int64
 	Volume    int64
+	// OpenInt is the option open interest at this contract: tick 27
+	// (callOpenInterest) for CALL legs, tick 28 (putOpenInterest) for
+	// PUT legs. One leg subscription receives exactly one of the two —
+	// they do not race. Zero when the gateway hasn't delivered the tick
+	// yet; consumers must distinguish "not arrived" via Observed/LastTime.
+	OpenInt   int64
 	PrevClose float64
 	Open      float64
 	High      float64
@@ -3118,6 +3124,9 @@ func (c *Connector) handleTickSize(fields []string) {
 
 	// IBKR tick types: 0=BID_SIZE, 3=ASK_SIZE, 8=VOLUME (cumulative day total).
 	// 5=LAST_SIZE is intentionally dropped — too noisy and not surfaced.
+	// 27=callOpenInterest, 28=putOpenInterest land on the same OpenInt
+	// slot because a given option-leg subscription is for one specific
+	// right; the gateway emits at most one of the two per subscription.
 	switch tickType {
 	case 0:
 		sub.BidSize = size
@@ -3125,6 +3134,8 @@ func (c *Connector) handleTickSize(fields []string) {
 		sub.AskSize = size
 	case 8:
 		sub.Volume = size
+	case 27, 28:
+		sub.OpenInt = size
 	}
 	sub.LastTime = time.Now()
 }
@@ -3261,6 +3272,7 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 			BidSize:    int(sub.BidSize),
 			AskSize:    int(sub.AskSize),
 			Volume:     sub.Volume,
+			OpenInt:    sub.OpenInt,
 			Close:      sub.PrevClose,
 			Open:       sub.Open,
 			High:       sub.High,
