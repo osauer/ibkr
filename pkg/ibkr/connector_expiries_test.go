@@ -203,6 +203,100 @@ func TestFetchOptionExpiryStrikesMergesAcrossExchanges(t *testing.T) {
 	}
 }
 
+// TestFetchOptionExpiriesMergesAcrossTradingClasses pins SPX vs SPXW
+// handling: IBKR's reqSecDefOptParams emits one msg-75 frame per
+// (exchange, tradingClass) pair. For SPX, that means SPX-class AM-
+// settled monthly expirations *and* SPXW-class PM-settled weekly/daily
+// expirations arrive as separate frames. The fetch must merge both
+// trading classes' expiry sets into the single returned list.
+//
+// This is load-bearing for the risk-regime dashboard's zero-gamma
+// indicator: SPXW dailies dominate front-week dealer gamma, so dropping
+// them would silently bias the computed flip level by hundreds of SPX
+// points. If a future refactor introduces tradingClass filtering on
+// this read path, this test traps the regression.
+func TestFetchOptionExpiriesMergesAcrossTradingClasses(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	conn.writer = bufio.NewWriter(&bytes.Buffer{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.contractCache["SPX"] = ContractDetailsLite{
+		ConID:        416904,
+		LocalSymbol:  "SPX",
+		TradingClass: "SPX",
+		Exchange:     "CBOE",
+		PrimaryExch:  "CBOE",
+	}
+
+	go func() {
+		var reqID int
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			conn.handlersMu.RLock()
+			n := len(conn.msgHandlers[msgSecurityDefinitionOptionalParameter])
+			conn.handlersMu.RUnlock()
+			if n > 0 {
+				conn.reqIDMu.Lock()
+				reqID = conn.reqIDSeq - 1
+				conn.reqIDMu.Unlock()
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		// SPX-class frame: third-Friday AM-settled monthlies + quarterlies.
+		spx := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameter),
+			strconv.Itoa(reqID),
+			"CBOE", "416904", "SPX", "100",
+			"3", "20260619", "20260918", "20261218",
+			"3", "4500", "5000", "5500",
+		}
+		// SPXW-class frame: same root, distinct PM-settled weeklies + dailies.
+		// 20260619 overlaps the SPX-class frame (third Friday has both A.M.
+		// and P.M.-settled listings); the merge must dedupe the date itself
+		// even though the contracts behind it are economically distinct.
+		spxw := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameter),
+			strconv.Itoa(reqID),
+			"CBOE", "416904", "SPXW", "100",
+			"4", "20260520", "20260522", "20260619", "20260626",
+			"3", "4990", "5000", "5010",
+		}
+		end := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameterEnd),
+			strconv.Itoa(reqID),
+		}
+		for _, h := range conn.snapshotHandlers(msgSecurityDefinitionOptionalParameter) {
+			h(spx)
+			h(spxw)
+		}
+		for _, h := range conn.snapshotHandlers(msgSecurityDefinitionOptionalParameterEnd) {
+			h(end)
+		}
+	}()
+
+	expiries, err := c.FetchOptionExpiries("SPX", time.Second)
+	if err != nil {
+		t.Fatalf("FetchOptionExpiries: %v", err)
+	}
+
+	// All five distinct dates, sorted ascending; the shared 20260619 appears
+	// exactly once even though both trading classes listed it.
+	want := []string{
+		"2026-05-20", "2026-05-22", "2026-06-19",
+		"2026-06-26", "2026-09-18", "2026-12-18",
+	}
+	if !reflect.DeepEqual(expiries, want) {
+		t.Fatalf("SPX/SPXW merge mismatch: got %v, want %v", expiries, want)
+	}
+}
+
 // TestFetchOptionExpiriesReturnsErrorOnEmptyTimeout ensures that a fetch
 // which sees no msg-75 frames and times out returns an error rather than an
 // empty success — daemons need this to surface as gateway_unavailable instead
