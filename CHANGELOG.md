@@ -2,7 +2,71 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## v0.19.1 — 2026-05-15 21:28 CEST
+## v0.20.0 — 2026-05-16 19:30 CEST
+
+Two new read-only endpoints feed the risk-regime dashboard spec
+(`docs/specs/risk-regime-dashboard.md`) directly from IBKR data,
+replacing what were previously manual-entry indicators. Both default
+to "what the spec asks for" and degrade honestly when the gateway's
+feed state isn't live.
+
+### Added
+
+- **`ibkr breadth` / `ibkr_breadth` / `breadth.spx`** — current S&P 500
+  stocks-above-50-DMA reading plus ~30 trailing daily values for
+  sparkline rendering. Sourced from S&P DJI's `S5FI` index via IBKR's
+  `INDEX` exchange — no constituent fan-out, no daemon-side SMA
+  recomputation. Threshold derivation lives in the renderer (the spec
+  itself calls those bands user-tunable). End-to-end honest about the
+  gateway's `data_type`; falls back to PrevClose when no Last is
+  delivered within budget.
+
+- **`ibkr gamma` / `ibkr_gamma` / `gamma.zero_spx`** — dealer
+  zero-gamma estimate for SPX. The compute is heavy: fan-out across
+  hundreds of SPX + SPXW option legs at the documented 4-concurrent
+  gateway throttle, multi-minute wall clock. The endpoint is
+  background-and-poll: the first caller of an NY trading session kicks
+  the job and gets `status: "computing"` with an ETA hint; subsequent
+  callers within the same session receive `status: "ready"` with the
+  cached payload. Singleflight prevents duplicate fan-outs against the
+  same gateway slot pool.
+
+  Returns **two complementary signals** so the dashboard can be honest
+  about regime hints versus precise levels:
+  - Signed `zero_gamma` + 60-point `profile` under the Perfiliev
+    convention (calls long, puts short). Documented as a regime hint
+    that can invert near covered-call ETF flow or autocall barriers.
+  - Sign-agnostic `gamma_total_abs` + `top_strikes` magnitude view.
+    Robust to the dealer-positioning assumption; what to read when
+    the signed sign is suspicious.
+
+  Methodology token `perfiliev-bs-sweep-v1`. Full disclosure
+  (limitations, calibration ritual, deferred backlog) in
+  `docs/specs/risk-regime-dashboard.md`.
+
+- **Risk Regime Dashboard build spec** committed at
+  `docs/specs/risk-regime-dashboard.md`, including a "Daemon
+  methodology" section that names every assumption the two new
+  endpoints make. Authors of dashboard renderers should read it
+  before trusting the numbers.
+
+### Changed
+
+- **`pkg/ibkr.MarketData.OpenInt` is now populated.** The field has
+  existed since the type was introduced but no parser wrote to it:
+  the gateway was delivering option open-interest ticks (27 / 28) on
+  every leg subscription and the connector silently dropped them.
+  `handleTickSize` now writes both call-OI and put-OI into the field
+  (one leg subscription receives at most one of the two — they don't
+  race). Wire-fixture tests pin both paths through to `GetMarketData`.
+
+- **`pkg/ibkr.classifySymbol` knows `S5FI`** (`IND` / `INDEX` /
+  `USD`), with a matching entry in `contractDisplayHints` for stable
+  routing. Sibling breadth indices (S5TW/S5OH/S5TH for 20/100/200-day
+  MAs) are intentionally not pre-registered — the spec only asks for
+  50-day.
+
+
 
 ### Fixed
 
