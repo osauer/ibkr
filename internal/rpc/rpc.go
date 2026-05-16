@@ -26,6 +26,7 @@ const (
 	MethodScanParams     = "scan.params"
 	MethodHistoryDaily   = "history.daily"
 	MethodStatusHealth   = "status.health"
+	MethodBreadthSPX     = "breadth.spx"
 	MethodCancel         = "cancel"
 	MethodOrderPlace     = "order.place"  // refused in v1
 	MethodOrderCancel    = "order.cancel" // refused in v1
@@ -277,6 +278,64 @@ type HistoryDailyResult struct {
 	DataType string       `json:"data_type,omitempty"`
 	Bars     []HistoryBar `json:"bars"`
 	AsOf     time.Time    `json:"as_of"`
+}
+
+// BreadthSPXParams is the input for MethodBreadthSPX. All fields are
+// optional with sensible defaults — the dashboard generator calls this
+// with empty params for the canonical view.
+type BreadthSPXParams struct {
+	// HistoryDays bounds the trailing daily series. Default 30 when
+	// zero or negative; capped at 90 to keep the wire payload bounded.
+	HistoryDays int `json:"history_days,omitempty"`
+	// TimeoutMs bounds the wait for the first valid S5FI tick. Default
+	// 5000 ms when zero. The default is generous because the INDEX
+	// exchange feed can be slow to deliver the first tick on a fresh
+	// subscription.
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+}
+
+// BreadthDailyValue is one trailing daily close of the S5FI index. The
+// units match the headline Value: percentage points in [0, 100].
+type BreadthDailyValue struct {
+	Date  string  `json:"date"`  // YYYY-MM-DD
+	Value float64 `json:"value"` // % of SPX constituents above 50-day SMA
+}
+
+// BreadthSPXResult is the payload for MethodBreadthSPX. The headline
+// Value is the current reading; History is the trailing series in
+// oldest-first order for sparkline rendering. Threshold derivation
+// (green/yellow/red) is intentionally left to the renderer — the spec
+// itself says thresholds should be tunable, so the daemon stays out of
+// that policy choice.
+//
+// The Source / Method strings name the data provenance and computation
+// path so renderers can disclose how the number was derived. Method is
+// a short token; longer methodology disclosure lives in the spec doc.
+type BreadthSPXResult struct {
+	// Value is the current S5FI reading: percentage of S&P 500
+	// constituents trading above their own 50-day simple moving
+	// average. 0–100, with 50 the symmetric midpoint. Spec rule of
+	// thumb: > 55 healthy, 40–55 watch, < 40 with SPX at highs is the
+	// classic late-cycle divergence.
+	Value float64 `json:"value"`
+	// History is the trailing daily series, oldest first. Length is
+	// bounded by BreadthSPXParams.HistoryDays.
+	History []BreadthDailyValue `json:"history"`
+	// Source identifies the data provenance for the headline value.
+	// Free-form; renderers display verbatim.
+	Source string `json:"source"`
+	// Method is a short token naming the computation path so renderers
+	// can disclose methodology. v1 token: "s5fi-direct".
+	Method string `json:"method"`
+	// AsOf is the daemon's wall-clock when the result was assembled.
+	AsOf time.Time `json:"as_of"`
+	// SpotAt is the gateway-observation timestamp for the headline
+	// Value, distinct from AsOf which covers history + headline.
+	SpotAt time.Time `json:"spot_at"`
+	// DataType reflects the gateway's feed state when Value was captured
+	// — "live", "delayed", "frozen", "delayed-frozen", or "" when no
+	// notice has arrived yet. Renderers use this to dim the headline.
+	DataType string `json:"data_type,omitempty"`
 }
 
 // Quote is the daemon's snapshot result.

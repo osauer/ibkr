@@ -95,6 +95,12 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 		assertGatewayUnavailable(t, err)
 	})
 
+	t.Run("breadth.spx", func(t *testing.T) {
+		req := &rpc.Request{ID: "t6b", Method: rpc.MethodBreadthSPX, Params: json.RawMessage(`{}`)}
+		_, err := srv.handleBreadthSPX(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+
 	t.Run("chain.expiries", func(t *testing.T) {
 		params, _ := json.Marshal(rpc.ChainExpiriesParams{Symbol: "AAPL"})
 		req := &rpc.Request{ID: "t7", Method: rpc.MethodChainExpiries, Params: params}

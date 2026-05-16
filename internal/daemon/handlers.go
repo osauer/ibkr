@@ -2192,6 +2192,120 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 	return res, nil
 }
 
+// handleBreadthSPX returns the current S&P 500 stocks-above-50DMA reading
+// (S&P DJI's S5FI index) plus a trailing daily series for sparkline
+// rendering. The headline number is the percentage of S&P 500 constituents
+// trading above their 50-day SMA, in [0, 100]. The dashboard generator
+// uses this as Indicator 5 of the risk-regime panel.
+//
+// Methodology — "s5fi-direct": we read the index directly from S&P DJI's
+// distribution feed (routed via IBKR's INDEX exchange). No constituent
+// fan-out, no daemon-side SMA recomputation; S&P DJI does the math and
+// publishes the result. The tradeoff is honesty: when the index updates
+// (intraday, but lagged on retail feeds) is whatever S&P publishes, and
+// when the gateway feed is delayed we surface that via DataType.
+//
+// Threshold derivation (green / yellow / red) is intentionally not on
+// this result. The spec itself flags those bands as user-tunable, so the
+// daemon stays out of policy and the renderer applies whatever cuts the
+// user has configured.
+func (s *Server) handleBreadthSPX(ctx context.Context, req *rpc.Request) (*rpc.BreadthSPXResult, error) {
+	var p rpc.BreadthSPXParams
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	historyDays := p.HistoryDays
+	if historyDays <= 0 {
+		historyDays = 30
+	}
+	if historyDays > 90 {
+		historyDays = 90
+	}
+	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	c := s.gatewayConnector()
+	if c == nil {
+		return nil, ibkrlib.ErrIBKRUnavailable
+	}
+
+	const sym = "S5FI"
+	res := &rpc.BreadthSPXResult{
+		Source: "S&P DJI via IBKR (S5FI INDEX)",
+		Method: "s5fi-direct",
+		AsOf:   time.Now(),
+	}
+
+	// Route the headline subscription through the daemon's sub manager
+	// (same as quote.snapshot) so a concurrent watcher or future scheduled
+	// refresh shares the gateway line via refcount.
+	releaseSub, err := s.subs.Hold(sym)
+	if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+		return nil, err
+	}
+	defer releaseSub()
+
+	var spotObservedAt time.Time
+	pollErr := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		// Index series report the headline value as the Last tick. Bid /
+		// Ask are not meaningful for breadth indices — they're computed,
+		// not quoted — so we anchor exclusively on Last and accept the
+		// gateway's Close as a stale fallback when Last hasn't arrived.
+		if d.Last > 0 {
+			res.Value = d.Last
+			res.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			spotObservedAt = time.Now()
+			return true
+		}
+		return false
+	})
+	if pollErr != nil && pollErr != context.DeadlineExceeded {
+		return nil, pollErr
+	}
+	// Honest disclosure: if no Last arrived within the budget, fall back
+	// to the gateway's PrevClose (yesterday's daily settlement). Renderers
+	// see DataType="" and an older SpotAt and can dim accordingly.
+	if res.Value == 0 {
+		md := c.GetMarketData()[sym]
+		if md != nil && md.Close > 0 {
+			res.Value = md.Close
+			res.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			// Leave SpotAt zero so renderers can distinguish stale-fallback
+			// from a live observation.
+		}
+	}
+	res.SpotAt = spotObservedAt
+
+	// Trailing series. We pad the lookback so weekends / holidays don't
+	// shrink the rendered sparkline below historyDays — the gateway returns
+	// trading days only, and pulling exactly N calendar days routinely
+	// yields N - 8 to N - 12 bars depending on the month.
+	lookback := historyDays + historyDays/3 + 7
+	bars, err := c.FetchHistoricalDailyBars(sym, lookback, 30*time.Second)
+	if err != nil {
+		// History is best-effort: the headline value is what the dashboard
+		// needs in order to render. Surface the partial result rather than
+		// fail the whole call when the historical feed hiccups.
+		s.logger.Warnf("breadth.spx history fetch failed: %v (returning headline only)", err)
+	} else {
+		if len(bars) > historyDays {
+			bars = bars[len(bars)-historyDays:]
+		}
+		res.History = make([]rpc.BreadthDailyValue, 0, len(bars))
+		for _, b := range bars {
+			res.History = append(res.History, rpc.BreadthDailyValue{
+				Date:  barDate(b),
+				Value: b.Close,
+			})
+		}
+	}
+
+	res.AsOf = time.Now()
+	return res, nil
+}
+
 // barDate returns the bar's date as YYYY-MM-DD. IBKR's daily bar dates arrive
 // as YYYYMMDD strings; the parsed Time field is best-effort.
 func barDate(b ibkrlib.HistoricalBar) string {

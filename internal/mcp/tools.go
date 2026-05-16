@@ -225,6 +225,25 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_breadth",
+		Description: "S&P 500 market-breadth reading for the risk-regime dashboard: the percentage of S&P 500 constituents trading above their 50-day SMA. Data source is S&P DJI's S5FI index, distributed via IBKR's INDEX exchange — no constituent fan-out, no daemon-side SMA recomputation. Returns the current headline value (0–100), a trailing daily series for sparkline rendering, a gateway-feed `data_type` (live/delayed/frozen/empty), and `source`/`method` strings so the UI can disclose provenance. Threshold derivation (green/yellow/red) is intentionally left to the consumer; the spec calls those bands user-tunable. Use this once per session — the value only changes after each S&P-published update.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"history_days": json.RawMessage(`{"type":"integer","minimum":1,"maximum":90,"description":"trailing daily-series length (default 30)"}`),
+			"timeout_ms":   json.RawMessage(`{"type":"integer","minimum":100,"description":"per-snapshot wait for the first valid S5FI tick (default 5000 ms)"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.BreadthSPXParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.BreadthSPXResult
+			if err := conn.Call(ctx, rpc.MethodBreadthSPX, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{

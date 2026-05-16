@@ -941,6 +941,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleScanParams(ctx, req) })
 	case rpc.MethodHistoryDaily:
 		s.unary(req, enc, func() (any, error) { return s.handleHistoryDaily(ctx, req) })
+	case rpc.MethodBreadthSPX:
+		s.unary(req, enc, func() (any, error) { return s.handleBreadthSPX(ctx, req) })
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodQuoteSubscribe:
@@ -987,9 +989,23 @@ func requestCtx(parent context.Context, method string) (context.Context, context
 func unaryDeadline(method string) time.Duration {
 	switch method {
 	case rpc.MethodChainFetch, rpc.MethodChainExpiries:
-		return 25 * time.Second
+		// 50 s = 5 s spot snapshot + 4 waves × ~10 s/wave cold-start. The
+		// cold path on a fresh-client-ID TWS session pays per-leg contract-
+		// details warmup (2-3 s × first-wave timeouts → retries) on top of
+		// the per-leg market-data tick window; observed cold cost on a
+		// 14-leg AAPL fetch is 25-30 s and at 25 s the handler is cut off
+		// mid-leg-fanout. CLI ceiling is 60 s ([cmd/ibkr/main.go:125]) so
+		// 50 s leaves room for the classified daemon error to surface
+		// before the socket times out.
+		return 50 * time.Second
 	case rpc.MethodHistoryDaily, rpc.MethodPositionsList:
 		return 30 * time.Second
+	case rpc.MethodBreadthSPX:
+		// 20 s = 5 s S5FI snapshot wait + up to 12 s historical-bars
+		// fetch on a cold cache + slack. The headline value usually
+		// arrives in 1-2 s; the budget is sized for the slower
+		// historical leg on the first call of the day.
+		return 20 * time.Second
 	case rpc.MethodScanRun:
 		// Up to 35 s scanner-subscription budget (off-hours cold-start
 		// for HIGH_OPEN_GAP / TOP_PERC_GAIN / HIGH_OPT_IMP_VOLAT_OVER_HIST
