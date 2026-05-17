@@ -16,7 +16,6 @@ func TestClassifySymbol_Table(t *testing.T) {
 		{"TLT", "STK", "SMART", "USD", "ARCA"},
 		{"ES", "FUT", "GLOBEX", "USD", ""},
 		{"NDX", "IND", "NASDAQ", "USD", "NASDAQ"},
-		{"S5FI", "IND", "INDEX", "USD", "INDEX"},
 		{"AAPL", "STK", "SMART", "USD", ""},
 	}
 
@@ -39,7 +38,6 @@ func TestContractDisplayHints(t *testing.T) {
 		{"SPY", "STK", "", ""},
 		{"VIX", "IND", "VIX", "VIX"},
 		{"DXY", "IND", "DXY", "DXY"},
-		{"S5FI", "IND", "S5FI", "S5FI"},
 		{"ES", "FUT", "", ""},
 	}
 

@@ -36,15 +36,18 @@ func classifySymbol(symbol string) (string, string, string, string) {
 		exchange = "CBOE"
 		primary = "CBOE"
 
-	// S&P 500 stocks-above-50DMA breadth index. Published by S&P DJI,
-	// distributed via the INDEX exchange — used by the risk-regime
-	// dashboard as Indicator 5. Same INDEX exchange covers the sibling
-	// series (S5TW/S5OH/S5TH for 20/100/200-day MA) if a future caller
-	// needs them; intentionally not pre-registered to avoid spec creep.
-	case "S5FI":
-		secType = "IND"
-		exchange = "INDEX"
-		primary = "INDEX"
+	// The S&P 500 stocks-above-50DMA breadth index (S5FI family on
+	// S&P DJI; MMFI on TradingView; $SPXA50R on StockCharts) is NOT
+	// catalogued in IBKR's contract database under any of the standard
+	// names — verified via reqContractDetails probe against the CBOE
+	// US Indexes subscription. IBKR's "CBOE US Indexes" feed covers
+	// tradeable CBOE-listed indices (SPX, VIX, RUT, NDX, SKEW, VVIX,
+	// …); S&P DJI's breadth statistics are calculated, not listed, so
+	// they're a different data product that IBKR doesn't appear to
+	// redistribute. The breadth.spx endpoint therefore needs either a
+	// constituent-fan-out fallback (compute from 500 daily bars) or
+	// the dashboard treats Indicator 5 as manual-entry. See
+	// docs/specs/risk-regime-dashboard.md for the disposition.
 
 	// Common ETFs
 	case "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT":
@@ -74,7 +77,7 @@ func contractDisplayHints(symbol, secType string) (string, string) {
 	switch secType {
 	case "IND":
 		switch symbol {
-		case "VIX", "SPX", "NDX", "DJI", "DJX", "DXY", "S5FI":
+		case "VIX", "SPX", "NDX", "DJI", "DJX", "DXY":
 			return symbol, symbol
 		}
 	case "CMDTY":
