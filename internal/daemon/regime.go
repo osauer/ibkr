@@ -44,7 +44,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res := &rpc.RegimeSnapshotResult{
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 	}
-	deps := productionRegimeDeps(c)
+	deps := productionRegimeDeps(c, s.logger.Warnf)
 
 	// All five fetches in parallel. The slowest one bounds the wall
 	// clock; on a warm daemon all five complete within a few seconds
@@ -72,6 +72,13 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 //  2. The unit tests need to drive each fetcher with canned data
 //     without spinning up a real daemon or gateway connection.
 //
+// logWarnf is the operator-visible signal for partial failures:
+// history-bar fetch errors and insufficient-bar truncations land here
+// rather than getting silently swallowed. A null sub-field in the
+// returned envelope only tells the consumer *that* a field is missing;
+// the daemon log tells them *why*. Tests inject a capture closure to
+// assert the right diagnostic landed.
+//
 // Indicators 4 (gamma) and 5 (breadth) already delegate to their own
 // handlers (handleGammaZeroSPX, handleBreadthSPX); they don't need a
 // deps struct because they already have a server-level seam.
@@ -79,12 +86,13 @@ type regimeDeps struct {
 	snapshot func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
 	history  func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error)
 	miscData func(sym string) *ibkrlib.MarketData
+	logWarnf func(format string, args ...any)
 }
 
 // productionRegimeDeps wires the deps struct to the live connector.
 // Tests pass a hand-rolled regimeDeps with closures returning canned
 // values instead.
-func productionRegimeDeps(c *ibkrlib.Connector) *regimeDeps {
+func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any)) *regimeDeps {
 	return &regimeDeps{
 		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, string) {
 			return briefSnapshotPrice(ctx, c, sym, timeout)
@@ -95,6 +103,7 @@ func productionRegimeDeps(c *ibkrlib.Connector) *regimeDeps {
 		miscData: func(sym string) *ibkrlib.MarketData {
 			return c.GetMarketData()[sym]
 		},
+		logWarnf: logWarnf,
 	}
 }
 
@@ -171,7 +180,12 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// 50-day SMA on HYG. Pull ~70 calendar days to account for
 	// non-trading-day shrinkage, average the last 50 closes.
 	bars, err := deps.history("HYG", 70, 20*time.Second)
-	if err == nil {
+	switch {
+	case err != nil:
+		warnDeps(deps, "regime: HYG 50DMA history fetch failed: %v", err)
+	case len(bars) < 50:
+		warnDeps(deps, "regime: HYG 50DMA insufficient bars: got %d, need 50", len(bars))
+	default:
 		sma := averageClose(bars, 50)
 		if sma > 0 {
 			out.HYG50DMA = new(sma)
@@ -225,7 +239,12 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	// (defaultHistoricalWhat for CASH); pull ~12 calendar days to
 	// span 7 trading days even across a weekend / holiday.
 	bars, err := deps.history("USD.JPY", 12, 20*time.Second)
-	if err == nil && len(bars) >= 8 {
+	switch {
+	case err != nil:
+		warnDeps(deps, "regime: USD.JPY history fetch failed: %v", err)
+	case len(bars) < 8:
+		warnDeps(deps, "regime: USD.JPY history insufficient bars: got %d, need 8", len(bars))
+	default:
 		// bars are oldest-first; pick the close from 7 trading days
 		// before the most recent close.
 		idx := len(bars) - 8
@@ -312,6 +331,16 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 
 // ----------------------------------------------------------------------------
 // Helpers shared across the per-indicator fetchers.
+
+// warnDeps is the per-deps log shim. Production deps wire logWarnf to
+// the daemon logger; tests inject a capture closure; nil is a no-op
+// for the rare caller that doesn't care.
+func warnDeps(d *regimeDeps, format string, args ...any) {
+	if d == nil || d.logWarnf == nil {
+		return
+	}
+	d.logWarnf(format, args...)
+}
 
 // averageClose returns the simple average of the last N daily closes
 // from a bars slice (oldest-first). Returns 0 if the slice has
