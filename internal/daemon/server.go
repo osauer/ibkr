@@ -593,6 +593,54 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 			s.logger.Warnf("SubscribeAccountPnL failed (account.summary will lack daily P&L): %v", err)
 		}
 	}
+
+	// Pre-warm contract-details cache for the regime-dashboard symbols
+	// in the background. Without this the first regime call of the day
+	// races five parallel goroutines against fresh contract resolution
+	// — confirmed observed at v0.22.0: first cold call returned with
+	// hyg_50dma and weekly_change_pct missing; second call (caches
+	// warm) returned all fields. Pre-warming eliminates the variance
+	// without changing the regime request path.
+	go s.prewarmRegimeSymbols()
+}
+
+// prewarmRegimeSymbols resolves contract details for the five regime
+// indicators concurrently so the first user-initiated regime call hits
+// a warm contractCache instead of competing with itself for 5 s
+// resolve budgets. Non-fatal: any per-symbol failure is logged at warn
+// level and the symbol still works via the regime fetcher's own
+// resolution attempt — pre-warming is an optimization, not a gate.
+//
+// USD.JPY normalises to the IDEALPRO FX-pair contract via the same
+// classifySymbol path the regime USD/JPY fetcher uses; the connector
+// cache is keyed consistently so a warmed entry hits later.
+func (s *Server) prewarmRegimeSymbols() {
+	c := s.gatewayConnector()
+	if c == nil {
+		return
+	}
+	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY"}
+	var wg sync.WaitGroup
+	wg.Add(len(syms))
+	for _, sym := range syms {
+		go func() {
+			defer wg.Done()
+			// 30 s budget per symbol. Empirically a healthy
+			// weekday gateway resolves contract details in well
+			// under a second; weekend/frozen state can stretch
+			// past 20 s for some symbols (observed: HYG at 21 s
+			// post-connect). The pre-warm goroutine is
+			// fire-and-forget and doesn't gate any user-facing
+			// path, so a generous budget here is cheap and the
+			// payoff (first regime call lands without 5-way
+			// contract-resolve contention) is real.
+			if _, err := c.FetchContractDetails(sym, 30*time.Second); err != nil {
+				s.logger.Warnf("regime pre-warm: %s contract details: %v", sym, err)
+			}
+		}()
+	}
+	wg.Wait()
+	s.logger.Infof("regime pre-warm: contract cache primed for %v", syms)
 }
 
 // handshakeWatchdog publishes a degraded-state hint to lastConnectError if
