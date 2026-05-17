@@ -39,6 +39,25 @@ const (
 	// without flooding the JSON payload.
 	topStrikesK = 8
 
+	// Throttle-signal abort. SPX's option-chain fan-out makes hundreds
+	// of reqContractDetails calls in close succession; the gateway can
+	// rate-limit by returning empty contractDataEnd responses ("no
+	// security definition") instead of real details. Continuing the
+	// fan-out under that condition just deepens the rate-limit hole.
+	//
+	// Rule: after at least throttleSampleSize completions, if the
+	// observed contract-resolve failure ratio exceeds throttleAbortPct,
+	// stop launching new fetches and surface a "throttled" warning on
+	// whatever we managed to collect.
+	//
+	// 50 / 5 % numbers are conservative — 50 is a meaningful sample
+	// floor without delaying the abort, and 5 % is well above the
+	// expected baseline of zero (every strike we enqueue came from the
+	// gateway's own list, so a healthy session should hit ~0 % resolve
+	// failures).
+	throttleSampleSize = 50
+	throttleAbortPct   = 0.05
+
 	// computeETA is the static initial seconds-to-complete estimate the
 	// cache stamps on a fresh kickoff. Calibration:
 	//   6 expirations × ~80 strikes × 2 sides = 960 legs (worst case)
@@ -66,18 +85,32 @@ type legData struct {
 	gammaAtSnapshot float64
 }
 
+// legFetchStatus distinguishes per-leg outcomes for the fan-out so
+// the aggregator can detect gateway throttling.
+//
+// The OK/SoftDrop split is purely informational (both yield "skip
+// this leg"); the NoContract bucket is the one that drives the
+// throttle abort, because a contract-resolve failure on a strike we
+// just enumerated from the gateway's own list is the canonical
+// rate-limit signal.
+type legFetchStatus int
+
+const (
+	legFetchOK         legFetchStatus = iota // OI + IV captured
+	legFetchSoftDrop                         // subscribed OK but data didn't land in budget
+	legFetchNoContract                       // gateway couldn't resolve the contract
+)
+
 // legFetcher abstracts the per-leg subscribe-collect-unsubscribe so
 // tests can drive computeGammaZeroSPX with a fake. The fetcher is
-// expected to block for at most the budget the caller passes via ctx;
-// returning ok=false signals "couldn't capture useful data, skip this
-// leg" — the aggregator's leg-count metric tracks the dropouts.
+// expected to block for at most the budget the caller passes via ctx.
 type legFetcher func(
 	ctx context.Context,
 	c *ibkrlib.Connector,
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, ok bool)
+) (oi int64, iv, gamma float64, status legFetchStatus)
 
 // productionLegFetcher is the live-gateway implementation. It
 // subscribes the option contract, polls until OI and IV land or the
@@ -91,13 +124,19 @@ func productionLegFetcher(
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, ok bool) {
+) (oi int64, iv, gamma float64, status legFetchStatus) {
 	if c == nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, legFetchNoContract
 	}
 	key, _, err := c.SubscribeOption(ctx, underlying, expiryYMD, strike, right)
 	if err != nil {
-		return 0, 0, 0, false
+		// SubscribeOption's error path is dominated by
+		// resolveOptionContract failing with either "contract details
+		// unavailable" (empty contractDataEnd) or
+		// ErrContractDetailsTimeout. Both are the canonical throttle
+		// signal: we enqueued strikes that came from the gateway's
+		// own enumeration, so a healthy session resolves them.
+		return 0, 0, 0, legFetchNoContract
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
@@ -116,14 +155,14 @@ func productionLegFetcher(
 		return false
 	})
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return 0, 0, 0, false
+		return 0, 0, 0, legFetchSoftDrop
 	}
 	// Read whatever final values landed before the deadline — the
 	// pollMarketData inner closure already captured them in the
 	// shared locals, but partial captures (OI without IV or vice
 	// versa) are dropped because the aggregator needs both.
 	if oi == 0 || iv == 0 {
-		return 0, 0, 0, false
+		return 0, 0, 0, legFetchSoftDrop
 	}
 	// Gateway-computed gamma at the current spot. May be 0 if the
 	// model-computation tick (21) hasn't fired for this leg; that's
@@ -131,7 +170,7 @@ func productionLegFetcher(
 	if g, gok := c.GetOptionGreeks(key); gok {
 		gamma = g.Gamma
 	}
-	return oi, iv, gamma, true
+	return oi, iv, gamma, legFetchOK
 }
 
 // computeGammaZeroSPX runs the full Phase 2 compute. The caller (the
@@ -270,24 +309,32 @@ func computeGammaZeroSPX(
 	// is bounded at one append per completed leg (cheap relative to the
 	// per-leg roundtrip).
 	var (
-		legs  []legData
-		mu    sync.Mutex
-		done  atomic.Int32
-		total = int32(len(jobs))
+		legs           []legData
+		mu             sync.Mutex
+		done           atomic.Int32
+		noContract     atomic.Int32
+		throttledAbort atomic.Bool
+		total          = int32(len(jobs))
 	)
 	runBounded(jobs, params.WorkerCount, func(j legSpec) {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || throttledAbort.Load() {
 			return
 		}
-		oi, iv, gamma, ok := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
+		oi, iv, gamma, status := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
 		// Always increment the progress counter — failed legs still
 		// represent work attempted. 10 % is consumed by spot+expiries
 		// stages above; the fan-out scales linearly from 10 → 85.
 		d := done.Add(1)
+		if status == legFetchNoContract {
+			nc := noContract.Add(1)
+			if throttleDetected(d, nc) {
+				throttledAbort.Store(true)
+			}
+		}
 		if total > 0 {
 			progress.Store(10 + int32(75*float64(d)/float64(total)))
 		}
-		if !ok {
+		if status != legFetchOK {
 			return
 		}
 		dte := dteYears(j.expiryYMD, spotAt)
@@ -315,6 +362,10 @@ func computeGammaZeroSPX(
 		return nil, ctx.Err()
 	}
 	if len(legs) == 0 {
+		if throttledAbort.Load() {
+			return nil, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
+				noContract.Load(), done.Load())
+		}
 		return nil, fmt.Errorf("zero-gamma: all %d legs failed to return OI+IV", len(jobs))
 	}
 	progress.Store(85)
@@ -341,8 +392,12 @@ func computeGammaZeroSPX(
 	// 9. Top strikes by magnitude.
 	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK)
 
-	// Warnings.
+	// Warnings. Ordered "throttled" first because it explains why
+	// coverage is low, not the other way around.
 	var warnings []string
+	if throttledAbort.Load() {
+		warnings = append(warnings, "throttled")
+	}
 	coverage := float64(len(legs)) / float64(len(jobs))
 	if coverage < 0.5 {
 		warnings = append(warnings, "low_leg_coverage")
@@ -412,6 +467,21 @@ func snapshotSPXForGamma(ctx context.Context, c *ibkrlib.Connector, timeout time
 		dataType = "live"
 	}
 	return spot, bid, ask, last, dataType
+}
+
+// throttleDetected reports whether the fan-out's observed
+// contract-resolve failure ratio is high enough to abort. Pure helper
+// so the threshold and sample-size policy can be unit-tested without
+// driving the full compute pipeline.
+//
+// Returns false until we have at least throttleSampleSize completions
+// — the ratio is meaningless on tiny samples and would cause spurious
+// aborts on routine startup variance.
+func throttleDetected(done, noContract int32) bool {
+	if done < throttleSampleSize {
+		return false
+	}
+	return float64(noContract)/float64(done) > throttleAbortPct
 }
 
 // isAcceptableDataType reports whether the gateway's per-reqID feed

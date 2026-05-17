@@ -279,6 +279,35 @@ func TestRankTopStrikesByAbsGEX(t *testing.T) {
 	}
 }
 
+// TestThrottleDetected pins the throttle-abort threshold and sample-size
+// policy. The fan-out short-circuits when the no-contract failure rate
+// exceeds 5 % after at least 50 completions — chosen so we don't bail
+// on startup noise but do react to a degraded gateway before the fan-out
+// runs to completion and compounds the rate-limit pressure.
+func TestThrottleDetected(t *testing.T) {
+	cases := []struct {
+		name             string
+		done, noContract int32
+		want             bool
+	}{
+		{"below_sample_size_high_ratio", 49, 49, false},  // 100 % but only 49 samples
+		{"at_sample_size_below_threshold", 50, 2, false}, // 4 % — just under
+		{"at_sample_size_at_threshold", 50, 3, true},     // 6 % — over
+		{"deep_run_under_threshold", 400, 19, false},     // 4.75 %
+		{"deep_run_over_threshold", 400, 21, true},       // 5.25 %
+		{"zero_no_contract", 200, 0, false},              // healthy gateway
+		{"zero_completions", 0, 0, false},                // pre-warmup
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := throttleDetected(tc.done, tc.noContract); got != tc.want {
+				t.Errorf("throttleDetected(done=%d, nc=%d) = %v, want %v",
+					tc.done, tc.noContract, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsAcceptableDataType pins the stale-data refusal logic. Live
 // and frozen pass — frozen is "yesterday's official close" which the
 // spec accepts for daily refresh. Delayed and delayed-frozen are
