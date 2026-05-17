@@ -279,21 +279,22 @@ func TestRankTopStrikesByAbsGEX(t *testing.T) {
 	}
 }
 
-// TestIsLiveOrEmptyDataType pins the stale-data refusal logic: only
-// "live" and empty pass; "frozen" / "delayed" / "delayed-frozen" are
-// rejected so the compute doesn't anchor on stale spot.
-func TestIsLiveOrEmptyDataType(t *testing.T) {
+// TestIsAcceptableDataType pins the stale-data refusal logic. Live
+// and frozen pass — frozen is "yesterday's official close" which the
+// spec accepts for daily refresh. Delayed and delayed-frozen are
+// rejected because 15-min lag corrupts the BS-vs-spot anchoring.
+func TestIsAcceptableDataType(t *testing.T) {
 	cases := map[string]bool{
 		"":               true,
 		"live":           true,
-		"frozen":         false,
+		"frozen":         true,
 		"delayed":        false,
 		"delayed-frozen": false,
 		"unknown":        false, // forward-compat: unknown values are stale-by-default
 	}
 	for dt, want := range cases {
-		if got := isLiveOrEmptyDataType(dt); got != want {
-			t.Errorf("isLiveOrEmptyDataType(%q) = %v, want %v", dt, got, want)
+		if got := isAcceptableDataType(dt); got != want {
+			t.Errorf("isAcceptableDataType(%q) = %v, want %v", dt, got, want)
 		}
 	}
 }

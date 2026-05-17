@@ -216,7 +216,7 @@ func computeGammaZeroSPX(
 	if spot <= 0 {
 		return nil, fmt.Errorf("zero-gamma: no SPX spot available (gateway returned no live tick)")
 	}
-	if !isLiveOrEmptyDataType(dataType) {
+	if !isAcceptableDataType(dataType) {
 		return nil, fmt.Errorf("zero-gamma: SPX spot is %s; refusing to compute on stale data", dataType)
 	}
 	spotAt := now()
@@ -224,9 +224,14 @@ func computeGammaZeroSPX(
 	_ = ask
 	_ = last
 
-	// 2. Expirations + strikes.
+	// 2. Expirations + strikes. SPX has hundreds of listed expirations
+	// (AM-settled SPX + PM-settled SPXW) and tens of thousands of
+	// strikes — the secDefOptParams response is large and streams in
+	// over several seconds. 30 s mirrors the per-method budget the
+	// existing handleChainExpiries handler runs with for the same call
+	// (server.go's unaryDeadline for MethodChainExpiries is 50 s).
 	progress.Store(5)
-	allStrikes, err := c.FetchOptionExpiryStrikes(sym, 10*time.Second)
+	allStrikes, err := c.FetchOptionExpiryStrikes(sym, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("zero-gamma: fetch SPX expiries: %w", err)
 	}
@@ -409,14 +414,37 @@ func snapshotSPXForGamma(ctx context.Context, c *ibkrlib.Connector, timeout time
 	return spot, bid, ask, last, dataType
 }
 
-// isLiveOrEmptyDataType reports whether the gateway's per-reqID feed
-// state is acceptable for compute. The two acceptable values are
-// "live" and "" (the latter means no notice arrived yet, which the
-// rest of the codebase treats as live per rpc.IsLiveDataType). Frozen
-// or delayed feeds are rejected — the compute is anchored on a single
-// spot snapshot and stale data corrupts everything downstream.
-func isLiveOrEmptyDataType(dt string) bool {
-	return dt == "" || dt == "live"
+// isAcceptableDataType reports whether the gateway's per-reqID feed
+// state is acceptable for the zero-gamma compute.
+//
+// Accepted:
+//   - "live" — real-time ticks; obvious choice.
+//   - "frozen" — IBKR's term for the last live tick captured before
+//     a session boundary or feed pause. For SPX this is typically
+//     yesterday's regular-session close. The spec explicitly says
+//     a daily refresh is sufficient, and frozen is exactly that:
+//     the official anchor for an end-of-day-style compute, just
+//     labelled honestly. Renderers can dim the headline by reading
+//     `data_type=frozen` from the result envelope.
+//   - "" — no marketDataType notice has arrived yet (typical in the
+//     first few hundred ms of a fresh subscription). Treated as
+//     live per rpc.IsLiveDataType convention.
+//
+// Rejected:
+//   - "delayed" / "delayed-frozen" — typically 15-minute-old data
+//     because the account isn't entitled to live for the symbol.
+//     A 15-min staleness biases every BS gamma in the sweep against
+//     the spot snapshot, and we can't compensate for the lag
+//     post-hoc. The renderer should surface this as a configuration
+//     issue rather than an unreliable headline.
+//   - Anything else (unexpected value) — stale-by-default.
+func isAcceptableDataType(dt string) bool {
+	switch dt {
+	case "", "live", "frozen":
+		return true
+	default:
+		return false
+	}
 }
 
 // selectExpirations picks the nearest N expirations that are NOT
