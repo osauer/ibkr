@@ -154,7 +154,7 @@ func fetchRegimeHYGSPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeHYGS
 	return out
 }
 
-const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routing arrives in a sibling commit; until then this row surfaces Status=unavailable."
+const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier; the row surfaces Status=unavailable when the gateway has no FX ticks (typically: account lacks IDEALPRO market-data subscription, or markets closed with no frozen tick to fall back on)."
 
 func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJPY {
 	out := rpc.RegimeUSDJPY{
@@ -162,14 +162,15 @@ func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJ
 		Notes:  usdJpyNotes,
 	}
 
-	// Native FX routing depends on classifySymbol learning the dotted
-	// FX-pair pattern (sibling commit). Until then briefSnapshotPrice
-	// will route USD.JPY as STK and the gateway returns "no security
-	// definition". Surface that as unavailable rather than faking.
+	// briefSnapshotPrice routes "USD.JPY" through pkg/ibkr.classifySymbol
+	// to CASH/IDEALPRO/JPY (see commit 6ac583c). A 0 result here means
+	// either the gateway has no FX entitlement for this account or
+	// there's no frozen tick to fall back on; either way, surface as
+	// unavailable rather than faking a value.
 	last, dt := briefSnapshotPrice(ctx, c, "USD.JPY", 5*time.Second)
 	if last <= 0 {
 		out.Status = rpc.RegimeStatusUnavailable
-		out.ErrorMessage = "USD.JPY routing not yet available (CASH/IDEALPRO classifier pending)"
+		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"
 		return out
 	}
 	out.Last = new(last)
