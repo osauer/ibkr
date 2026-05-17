@@ -773,8 +773,16 @@ func (c *Connector) prepareContract(symbol string, fetchTimeout time.Duration, a
 	secType, exchange, currency, primary := classifySymbol(upper)
 	localSymbol, tradingClass := contractDisplayHints(upper, secType)
 
+	// FX pairs split the user-supplied "USD.JPY" into Symbol=USD,
+	// Currency=JPY on the wire; the dotted/slash string itself is not a
+	// valid IBKR symbol field.
+	wireSymbol := upper
+	if base, _, ok := FxPair(upper); ok {
+		wireSymbol = base
+	}
+
 	contract := Contract{
-		Symbol:       upper,
+		Symbol:       wireSymbol,
 		SecType:      secType,
 		Exchange:     exchange,
 		PrimaryExch:  primary,
@@ -888,7 +896,11 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 	}
 	// Prepare contract using the same classification as market data
 	secType, exchange, currency, primary := classifySymbol(symbol)
-	contract := Contract{Symbol: symbol, SecType: secType, Exchange: exchange, Currency: currency}
+	wireSymbol := symbol
+	if base, _, ok := FxPair(symbol); ok {
+		wireSymbol = base
+	}
+	contract := Contract{Symbol: wireSymbol, SecType: secType, Exchange: exchange, Currency: currency}
 	if primary != "" {
 		contract.PrimaryExch = primary
 	}
@@ -2753,8 +2765,12 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 	}
 
 	secType, exchange, currency, primary := classifySymbol(symbol)
+	wireSymbol := symbol
+	if base, _, ok := FxPair(symbol); ok {
+		wireSymbol = base
+	}
 	baseContract := Contract{
-		Symbol:      symbol,
+		Symbol:      wireSymbol,
 		SecType:     secType,
 		Exchange:    exchange,
 		PrimaryExch: primary,
@@ -2860,7 +2876,10 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 
 func defaultHistoricalWhat(secType string) string {
 	switch strings.ToUpper(secType) {
-	case "IND", "CMDTY":
+	case "IND", "CMDTY", "CASH":
+		// CASH has no consolidated trade tape on IBKR; reqHistoricalData
+		// requires MIDPOINT for FX pairs. IND/CMDTY follow the same rule
+		// because they're also non-trading reference series.
 		return "MIDPOINT"
 	default:
 		return "TRADES"
@@ -2897,8 +2916,14 @@ func historicalWhatSequence(symbol, secType, baseWhat, altWhat string) []string 
 		appendWhat("MIDPOINT")
 	default:
 		appendWhat(baseWhat)
-		if strings.EqualFold(strings.TrimSpace(secType), "STK") {
+		switch strings.ToUpper(strings.TrimSpace(secType)) {
+		case "STK":
 			appendWhat("ADJUSTED_LAST")
+		case "CASH":
+			// FX has no trade tape — don't bother probing TRADES;
+			// IBKR rejects with code 162 and the retry would just
+			// burn the deadline.
+			return seq
 		}
 		if !strings.EqualFold(baseWhat, altWhat) {
 			appendWhat(altWhat)

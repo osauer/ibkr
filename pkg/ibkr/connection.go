@@ -3629,8 +3629,13 @@ func (c *Connection) RequestMarketData(symbol string) (int, error) {
 	secType, exchange, currency, primaryExchange := classifySymbol(symbol)
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
 
+	wireSymbol := symbol
+	if base, _, ok := FxPair(symbol); ok {
+		wireSymbol = base
+	}
+
 	contract := Contract{
-		Symbol:       symbol,
+		Symbol:       wireSymbol,
 		SecType:      secType,
 		Exchange:     exchange,
 		PrimaryExch:  primaryExchange,
@@ -3967,8 +3972,13 @@ func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange
 
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
 
+	wireSymbol := symbol
+	if base, _, ok := FxPair(symbol); ok {
+		wireSymbol = base
+	}
+
 	contract := Contract{
-		Symbol:       symbol,
+		Symbol:       wireSymbol,
 		SecType:      secType,
 		Exchange:     exchange,
 		PrimaryExch:  primaryExchange,

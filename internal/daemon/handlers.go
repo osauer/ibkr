@@ -1029,6 +1029,16 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		q.Contract.SecType = "STK"
 	}
 	q.Contract.Symbol = sym
+	// FX pairs (USD.JPY / USD/JPY) route through CASH/IDEALPRO regardless
+	// of what the caller stamped on the request. Override the echoed
+	// Contract so JSON consumers see the canonical routing — the actual
+	// IBKR subscription is driven by pkg/ibkr.classifySymbol(sym) inside
+	// the connector and is correct either way.
+	if _, quote, ok := ibkrlib.FxPair(sym); ok {
+		q.Contract.SecType = "CASH"
+		q.Contract.Exchange = "IDEALPRO"
+		q.Contract.Currency = quote
+	}
 
 	// Route through the daemon's subscription manager so a snapshot
 	// running concurrently with `quote --watch` (or another snapshot, or

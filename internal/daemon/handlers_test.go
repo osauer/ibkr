@@ -70,6 +70,20 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 		assertGatewayUnavailable(t, err)
 	})
 
+	// FX-pair quote (USD.JPY) routes through the same handler as STK but
+	// flows through pkg/ibkr.classifySymbol → CASH/IDEALPRO inside the
+	// connector. With the gateway down, the handler must short-circuit
+	// before it tries to subscribe, exactly like the STK path above.
+	t.Run("quote.snapshot/fx-pair", func(t *testing.T) {
+		params, _ := json.Marshal(rpc.QuoteSnapshotParams{
+			Contract:  rpc.ContractParams{Symbol: "USD.JPY"},
+			TimeoutMs: 100,
+		})
+		req := &rpc.Request{ID: "t2fx", Method: rpc.MethodQuoteSnapshot, Params: params}
+		_, err := srv.handleQuoteSnapshot(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+
 	t.Run("chain.fetch", func(t *testing.T) {
 		params, _ := json.Marshal(rpc.ChainFetchParams{
 			Symbol: "AAPL", Expiry: "2026-06-19", Width: 1, Side: "both",

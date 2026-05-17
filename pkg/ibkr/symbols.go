@@ -1,16 +1,68 @@
 package ibkr
 
+import "strings"
+
 // Symbol classification helpers.
 //
 // IBKR requires correct contract hints (secType, exchange, primary) for
 // subscription stability, especially for indices and off-hours routing.
 // classifySymbol encodes minimal, stable hints we use consistently across
 // reqMktData and reqContractData.
+//
+// FX pairs are accepted in two equivalent forms: dotted (USD.JPY — the
+// canonical wire identifier, matching IBKR's own LocalSymbol convention)
+// and slash (USD/JPY — the human-readable form). Both classify to
+// CASH/IDEALPRO with the quote currency in the Currency field. Callers
+// constructing a wire-side Contract must additionally call FxPair to lift
+// the base currency into Contract.Symbol — the dotted/slash string is not
+// a valid IBKR symbol field on its own.
+
+// fxMajors is the G10 set we recognise as FX pairs. Keeping the list
+// explicit avoids misclassifying stock tickers that happen to contain a
+// dot or slash (e.g. BRK.B, "BTC/USD" on a crypto venue we don't route).
+var fxMajors = map[string]struct{}{
+	"USD": {}, "EUR": {}, "JPY": {}, "GBP": {}, "CHF": {},
+	"AUD": {}, "NZD": {}, "CAD": {},
+}
+
+// FxPair parses an FX-pair symbol in either dotted (USD.JPY) or slash
+// (USD/JPY) form. Returns the base currency, quote currency, and ok=true
+// only when both legs are in fxMajors. Case-insensitive; trims whitespace.
+func FxPair(symbol string) (base, quote string, ok bool) {
+	s := strings.ToUpper(strings.TrimSpace(symbol))
+	var sep string
+	switch {
+	case strings.Count(s, ".") == 1:
+		sep = "."
+	case strings.Count(s, "/") == 1:
+		sep = "/"
+	default:
+		return "", "", false
+	}
+	left, right, _ := strings.Cut(s, sep)
+	if len(left) != 3 || len(right) != 3 {
+		return "", "", false
+	}
+	if _, ok := fxMajors[left]; !ok {
+		return "", "", false
+	}
+	if _, ok := fxMajors[right]; !ok {
+		return "", "", false
+	}
+	return left, right, true
+}
 
 // classifySymbol returns (secType, exchange, currency, primaryExchangeHint)
-// for common indices/ETFs/stocks to keep contract requests and market data
-// routing consistent across the codebase.
+// for common indices/ETFs/stocks/FX-pairs to keep contract requests and
+// market data routing consistent across the codebase.
 func classifySymbol(symbol string) (string, string, string, string) {
+	// FX pairs route through IDEALPRO with the quote currency on the
+	// Currency field; the base currency goes on Contract.Symbol (callers
+	// must apply FxPair when building the wire contract).
+	if _, quote, ok := FxPair(symbol); ok {
+		return "CASH", "IDEALPRO", quote, "IDEALPRO"
+	}
+
 	// Defaults
 	secType := "STK"
 	exchange := "SMART"
