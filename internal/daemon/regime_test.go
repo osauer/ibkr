@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,10 +18,16 @@ import (
 // the bits they need and the closures pull from these maps —
 // missing keys yield zeros, which mirrors the production "no tick"
 // path the fetchers gate on.
+//
+// warnLog accumulates log lines a fetcher emits on partial failure
+// (history error, insufficient bars). Tests assert against it to
+// verify the operator-visible diagnostic landed; nil here means the
+// fetcher had no failures worth logging.
 type fakeDeps struct {
 	snapshots map[string]fakeQuote
 	bars      map[string]fakeHistory
 	misc      map[string]*ibkrlib.MarketData
+	warnLog   *[]string
 }
 
 type fakeQuote struct {
@@ -44,6 +52,11 @@ func (f *fakeDeps) build() *regimeDeps {
 		},
 		miscData: func(sym string) *ibkrlib.MarketData {
 			return f.misc[sym]
+		},
+		logWarnf: func(format string, args ...any) {
+			if f.warnLog != nil {
+				*f.warnLog = append(*f.warnLog, fmt.Sprintf(format, args...))
+			}
 		},
 	}
 }
@@ -178,6 +191,7 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 	})
 
 	t.Run("50dma_history_error", func(t *testing.T) {
+		var warns []string
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
@@ -189,6 +203,7 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 			misc: map[string]*ibkrlib.MarketData{
 				"SPY": {Week52High: 540.0},
 			},
+			warnLog: &warns,
 		}).build()
 		got := fetchRegimeHYGSPY(ctx, deps)
 		if got.Status != rpc.RegimeStatusOK {
@@ -196,6 +211,45 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		}
 		if !slices.Contains(got.FieldsMissing, "hyg_50dma") {
 			t.Errorf("fields_missing=%v, want to include hyg_50dma", got.FieldsMissing)
+		}
+		// Operator-visible diagnostic: the silent-swallow that hid this
+		// failure pre-fix is now a warn-level log line carrying the
+		// underlying error. Without this the renderer's "hyg_50dma
+		// missing" is uninterpretable — was it a timeout? entitlement?
+		// transient gateway hiccup? The log answers.
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "HYG 50DMA") && strings.Contains(s, "history fetch failed")
+		}) {
+			t.Errorf("expected warn log for HYG history error, got %v", warns)
+		}
+	})
+
+	t.Run("50dma_insufficient_bars_logged", func(t *testing.T) {
+		var warns []string
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+				"SPY": {price: 530.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(30, 79.5)}, // < 50
+			},
+			misc: map[string]*ibkrlib.MarketData{
+				"SPY": {Week52High: 540.0},
+			},
+			warnLog: &warns,
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.HYG50DMA != nil {
+			t.Errorf("HYG50DMA must be nil when bars insufficient, got %v", *got.HYG50DMA)
+		}
+		if !slices.Contains(got.FieldsMissing, "hyg_50dma") {
+			t.Errorf("fields_missing=%v, want hyg_50dma", got.FieldsMissing)
+		}
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "insufficient bars")
+		}) {
+			t.Errorf("expected warn log for insufficient-bars case, got %v", warns)
 		}
 	})
 
@@ -251,6 +305,7 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 	})
 
 	t.Run("thin_history", func(t *testing.T) {
+		var warns []string
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"USD.JPY": {price: 160.0, dataType: rpc.MarketDataLive},
@@ -258,6 +313,7 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 			bars: map[string]fakeHistory{
 				"USD.JPY": {bars: makeBars(3, 158.0)}, // < 8 bars
 			},
+			warnLog: &warns,
 		}).build()
 		got := fetchRegimeUSDJPY(ctx, deps)
 		if got.Status != rpc.RegimeStatusOK {
@@ -268,6 +324,37 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 		}
 		if !slices.Contains(got.FieldsMissing, "weekly_change_pct") {
 			t.Errorf("fields_missing=%v, want weekly_change_pct", got.FieldsMissing)
+		}
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "USD.JPY") && strings.Contains(s, "insufficient")
+		}) {
+			t.Errorf("expected warn log for thin USD.JPY history, got %v", warns)
+		}
+	})
+
+	t.Run("fx_history_error_logged", func(t *testing.T) {
+		var warns []string
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"USD.JPY": {price: 160.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"USD.JPY": {err: errors.New("contract details unresolved")},
+			},
+			warnLog: &warns,
+		}).build()
+		got := fetchRegimeUSDJPY(ctx, deps)
+		if got.Close7DAgo != nil {
+			t.Errorf("Close7DAgo must be nil on history error")
+		}
+		// Operator-visible: this is the FX-race case that bit us in
+		// review — pre-fix the daemon silently swallowed the
+		// contract-resolution timeout, leaving users to guess at the
+		// missing weekly_change_pct.
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "USD.JPY") && strings.Contains(s, "contract details")
+		}) {
+			t.Errorf("expected warn log for FX history error, got %v", warns)
 		}
 	})
 
