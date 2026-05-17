@@ -75,6 +75,13 @@ func classifySymbol(symbol string) (string, string, string, string) {
 		secType = "IND"
 		exchange = "CBOE"
 		primary = "CBOE"
+	// VIX3M is the CBOE 3-month implied volatility index, the
+	// denominator of the VIX term-structure signal (Indicator 1 of
+	// the risk-regime dashboard).
+	case "VIX3M":
+		secType = "IND"
+		exchange = "CBOE"
+		primary = "CBOE"
 	case "SPX":
 		secType = "IND"
 		exchange = "CBOE"
