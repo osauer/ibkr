@@ -25,14 +25,23 @@ import (
 // fetcher had no failures worth logging.
 type fakeDeps struct {
 	snapshots map[string]fakeQuote
-	bars      map[string]fakeHistory
-	misc      map[string]*ibkrlib.MarketData
-	warnLog   *[]string
+	// rich holds the Week52High value the snapshotWith52WHigh dep
+	// returns for a given symbol. Tests that don't set an entry simulate
+	// the "Misc Stats tick 165 didn't land in the budget" case.
+	rich    map[string]fakeRichQuote
+	bars    map[string]fakeHistory
+	warnLog *[]string
 }
 
 type fakeQuote struct {
 	price    float64
 	dataType string
+}
+
+type fakeRichQuote struct {
+	price      float64
+	week52High float64
+	dataType   string
 }
 
 type fakeHistory struct {
@@ -46,12 +55,13 @@ func (f *fakeDeps) build() *regimeDeps {
 			q := f.snapshots[sym]
 			return q.price, q.dataType
 		},
+		snapshotWith52WHigh: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
+			r := f.rich[sym]
+			return r.price, r.week52High, r.dataType
+		},
 		history: func(sym string, _ int, _ time.Duration) ([]ibkrlib.HistoricalBar, error) {
 			h := f.bars[sym]
 			return h.bars, h.err
-		},
-		miscData: func(sym string) *ibkrlib.MarketData {
-			return f.misc[sym]
 		},
 		logWarnf: func(format string, args ...any) {
 			if f.warnLog != nil {
@@ -143,13 +153,12 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
-				"SPY": {price: 530.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
 			},
 			bars: map[string]fakeHistory{
 				"HYG": {bars: makeBars(60, 79.5)},
-			},
-			misc: map[string]*ibkrlib.MarketData{
-				"SPY": {Week52High: 540.0},
 			},
 		}).build()
 		got := fetchRegimeHYGSPY(ctx, deps)
@@ -171,12 +180,16 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				// SPY tick arrived but Misc-Stats 165 did not — the
+				// cold-start case the new helper surfaces honestly
+				// instead of returning the stale cache value.
 				"SPY": {price: 530.0, dataType: rpc.MarketDataLive},
 			},
 			bars: map[string]fakeHistory{
 				"HYG": {bars: makeBars(60, 79.5)},
 			},
-			// no misc data → SPY52WHigh stays nil
 		}).build()
 		got := fetchRegimeHYGSPY(ctx, deps)
 		if got.Status != rpc.RegimeStatusOK {
@@ -195,13 +208,12 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
-				"SPY": {price: 530.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
 			},
 			bars: map[string]fakeHistory{
 				"HYG": {err: errors.New("history fetch failed")},
-			},
-			misc: map[string]*ibkrlib.MarketData{
-				"SPY": {Week52High: 540.0},
 			},
 			warnLog: &warns,
 		}).build()
@@ -229,13 +241,12 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
-				"SPY": {price: 530.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
 			},
 			bars: map[string]fakeHistory{
 				"HYG": {bars: makeBars(30, 79.5)}, // < 50
-			},
-			misc: map[string]*ibkrlib.MarketData{
-				"SPY": {Week52High: 540.0},
 			},
 			warnLog: &warns,
 		}).build()
@@ -257,8 +268,8 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		deps := (&fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
-				// SPY missing
 			},
+			// SPY's rich snapshot didn't land at all
 		}).build()
 		got := fetchRegimeHYGSPY(ctx, deps)
 		if got.Status != rpc.RegimeStatusError {

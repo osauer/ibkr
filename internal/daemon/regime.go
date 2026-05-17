@@ -79,14 +79,20 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 // the daemon log tells them *why*. Tests inject a capture closure to
 // assert the right diagnostic landed.
 //
+// snapshotWith52WHigh is the SPY-specific seam: the default snapshot
+// path returns on the first price tick, too fast for IBKR's Misc
+// Stats tick 165 (Week-range highs/lows) to arrive. The HYG/SPY
+// indicator needs the 52w high to evaluate the spec's yellow-band
+// trigger; without it the indicator drops to a 2-state signal.
+//
 // Indicators 4 (gamma) and 5 (breadth) already delegate to their own
 // handlers (handleGammaZeroSPX, handleBreadthSPX); they don't need a
 // deps struct because they already have a server-level seam.
 type regimeDeps struct {
-	snapshot func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
-	history  func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error)
-	miscData func(sym string) *ibkrlib.MarketData
-	logWarnf func(format string, args ...any)
+	snapshot            func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
+	snapshotWith52WHigh func(ctx context.Context, sym string, timeout time.Duration) (price float64, week52High float64, dataType string)
+	history             func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error)
+	logWarnf            func(format string, args ...any)
 }
 
 // productionRegimeDeps wires the deps struct to the live connector.
@@ -97,11 +103,11 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, string) {
 			return briefSnapshotPrice(ctx, c, sym, timeout)
 		},
+		snapshotWith52WHigh: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
+			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
+		},
 		history: func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error) {
 			return c.FetchHistoricalDailyBars(sym, days, timeout)
-		},
-		miscData: func(sym string) *ibkrlib.MarketData {
-			return c.GetMarketData()[sym]
 		},
 		logWarnf: logWarnf,
 	}
@@ -163,18 +169,19 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	out.HYGPrice = new(hyg)
 	out.HYGDataType = hygDT
 
-	// SPY: pull spot + 52-week high in one snapshot. The streaming
-	// subscribe path delivers Misc Stats tick 165 for week_52_high,
-	// but briefSnapshotPrice only returns the price triple. For v1
-	// the SPY 52w high is exposed via GetMarketData after the
-	// subscription closes — we accept what's in the cache. A
-	// fancier renderer can pull the 52w high separately if needed.
-	spy, _ := deps.snapshot(ctx, "SPY", 5*time.Second)
+	// SPY: pull spot + 52-week high in one combined subscribe so tick
+	// 165 (Misc Stats) has time to land. Either field may still come
+	// back zero — the predicate inside snapshotWith52WHigh returns
+	// partial results on timeout so a cold-start gateway still
+	// surfaces what it had. 8s budget (vs 5s for plain snapshots)
+	// because the Misc-Stats tick reliably arrives later than the
+	// price triple in observed traces.
+	spy, spy52, _ := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
 	if spy > 0 {
 		out.SPYPrice = new(spy)
 	}
-	if md := deps.miscData("SPY"); md != nil && md.Week52High > 0 {
-		out.SPY52WHigh = new(md.Week52High)
+	if spy52 > 0 {
+		out.SPY52WHigh = new(spy52)
 	}
 
 	// 50-day SMA on HYG. Pull ~70 calendar days to account for
