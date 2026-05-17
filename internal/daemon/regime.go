@@ -42,18 +42,18 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	}
 
 	res := &rpc.RegimeSnapshotResult{
-		AsOf:    time.Now(),
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 	}
+	deps := productionRegimeDeps(c)
 
 	// All five fetches in parallel. The slowest one bounds the wall
 	// clock; on a warm daemon all five complete within a few seconds
 	// (gamma returns from cache after the first call of the day).
 	var wg sync.WaitGroup
 	wg.Add(5)
-	go func() { defer wg.Done(); res.VIXTermStructure = fetchRegimeVIXTerm(ctx, c) }()
-	go func() { defer wg.Done(); res.HYGSPYDivergence = fetchRegimeHYGSPY(ctx, c) }()
-	go func() { defer wg.Done(); res.USDJPY = fetchRegimeUSDJPY(ctx, c) }()
+	go func() { defer wg.Done(); res.VIXTermStructure = fetchRegimeVIXTerm(ctx, deps) }()
+	go func() { defer wg.Done(); res.HYGSPYDivergence = fetchRegimeHYGSPY(ctx, deps) }()
+	go func() { defer wg.Done(); res.USDJPY = fetchRegimeUSDJPY(ctx, deps) }()
 	go func() { defer wg.Done(); res.GammaZero = fetchRegimeGamma(ctx, s) }()
 	go func() { defer wg.Done(); res.Breadth = fetchRegimeBreadth(ctx, s) }()
 	wg.Wait()
@@ -62,22 +62,58 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	return res, nil
 }
 
+// regimeDeps is the dependency surface the three quote-and-history
+// indicators (VIX, HYG/SPY, USD/JPY) share. It exists for two
+// concrete reasons:
+//
+//  1. The three fetchers all call briefSnapshotPrice +
+//     FetchHistoricalDailyBars + GetMarketData lookups, so a single
+//     struct keeps the call sites uniform.
+//  2. The unit tests need to drive each fetcher with canned data
+//     without spinning up a real daemon or gateway connection.
+//
+// Indicators 4 (gamma) and 5 (breadth) already delegate to their own
+// handlers (handleGammaZeroSPX, handleBreadthSPX); they don't need a
+// deps struct because they already have a server-level seam.
+type regimeDeps struct {
+	snapshot func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
+	history  func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error)
+	miscData func(sym string) *ibkrlib.MarketData
+}
+
+// productionRegimeDeps wires the deps struct to the live connector.
+// Tests pass a hand-rolled regimeDeps with closures returning canned
+// values instead.
+func productionRegimeDeps(c *ibkrlib.Connector) *regimeDeps {
+	return &regimeDeps{
+		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, string) {
+			return briefSnapshotPrice(ctx, c, sym, timeout)
+		},
+		history: func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error) {
+			return c.FetchHistoricalDailyBars(sym, days, timeout)
+		},
+		miscData: func(sym string) *ibkrlib.MarketData {
+			return c.GetMarketData()[sym]
+		},
+	}
+}
+
 // ----------------------------------------------------------------------------
 // Per-indicator fetchers. Each one returns a fully-populated row even on
 // failure — the regime envelope never carries nil sub-objects.
 
 const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing). Signal requires sustained inversion over 2-3 sessions, not a single Fed-day spike."
 
-func fetchRegimeVIXTerm(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeVIXTerm {
+func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm {
 	out := rpc.RegimeVIXTerm{Notes: vixTermNotes}
 
-	vix, vixDT := briefSnapshotPrice(ctx, c, "VIX", 5*time.Second)
+	vix, vixDT := deps.snapshot(ctx, "VIX", 5*time.Second)
 	if vix <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "VIX: no spot tick"
 		return out
 	}
-	vix3m, _ := briefSnapshotPrice(ctx, c, "VIX3M", 5*time.Second)
+	vix3m, _ := deps.snapshot(ctx, "VIX3M", 5*time.Second)
 	if vix3m <= 0 {
 		// One arm of the pair is enough to be informative, but the
 		// ratio cannot be computed; surface VIX alone with an
@@ -96,7 +132,7 @@ func fetchRegimeVIXTerm(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeVIX
 	r := vix / vix3m
 	out.Ratio = &r
 	out.DataType = vixDT
-	if isLiveDataTypeWire(vixDT) {
+	if rpc.IsLiveDataType(vixDT) {
 		out.Status = rpc.RegimeStatusOK
 	} else {
 		out.Status = rpc.RegimeStatusStale
@@ -106,10 +142,10 @@ func fetchRegimeVIXTerm(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeVIX
 
 const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high; red when HYG in clear downtrend (5+ sessions below 50-day) while SPY at/near highs. Daemon returns raw measurements — consumer compares HYG vs hyg_50dma and SPY vs spy_52w_high. Observation window 2-4 weeks; single-day moves are noise."
 
-func fetchRegimeHYGSPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeHYGSPYDivergence {
+func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDivergence {
 	out := rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes}
 
-	hyg, hygDT := briefSnapshotPrice(ctx, c, "HYG", 5*time.Second)
+	hyg, hygDT := deps.snapshot(ctx, "HYG", 5*time.Second)
 	if hyg <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "HYG: no spot tick"
@@ -124,17 +160,17 @@ func fetchRegimeHYGSPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeHYGS
 	// the SPY 52w high is exposed via GetMarketData after the
 	// subscription closes — we accept what's in the cache. A
 	// fancier renderer can pull the 52w high separately if needed.
-	spy, _ := briefSnapshotPrice(ctx, c, "SPY", 5*time.Second)
+	spy, _ := deps.snapshot(ctx, "SPY", 5*time.Second)
 	if spy > 0 {
 		out.SPYPrice = new(spy)
 	}
-	if md := c.GetMarketData()["SPY"]; md != nil && md.Week52High > 0 {
+	if md := deps.miscData("SPY"); md != nil && md.Week52High > 0 {
 		out.SPY52WHigh = new(md.Week52High)
 	}
 
 	// 50-day SMA on HYG. Pull ~70 calendar days to account for
 	// non-trading-day shrinkage, average the last 50 closes.
-	bars, err := c.FetchHistoricalDailyBars("HYG", 70, 20*time.Second)
+	bars, err := deps.history("HYG", 70, 20*time.Second)
 	if err == nil {
 		sma := averageClose(bars, 50)
 		if sma > 0 {
@@ -142,21 +178,30 @@ func fetchRegimeHYGSPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeHYGS
 		}
 	}
 
-	if out.HYGPrice != nil && out.SPYPrice != nil {
-		out.Status = rpc.RegimeStatusOK
-		if !isLiveDataTypeWire(hygDT) {
-			out.Status = rpc.RegimeStatusStale
-		}
-	} else {
+	if out.HYGPrice == nil || out.SPYPrice == nil {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "HYG or SPY spot missing"
+		return out
+	}
+	out.Status = rpc.RegimeStatusOK
+	if !rpc.IsLiveDataType(hygDT) {
+		out.Status = rpc.RegimeStatusStale
+	}
+	// Advisory sub-field annotations — the row's primary measurements
+	// landed, but a renderer may want to dim "52w-high" or "50DMA"
+	// cells that didn't.
+	if out.SPY52WHigh == nil {
+		out.FieldsMissing = append(out.FieldsMissing, "spy_52w_high")
+	}
+	if out.HYG50DMA == nil {
+		out.FieldsMissing = append(out.FieldsMissing, "hyg_50dma")
 	}
 	return out
 }
 
 const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier; the row surfaces Status=unavailable when the gateway has no FX ticks (typically: account lacks IDEALPRO market-data subscription, or markets closed with no frozen tick to fall back on)."
 
-func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJPY {
+func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	out := rpc.RegimeUSDJPY{
 		Symbol: "USD.JPY",
 		Notes:  usdJpyNotes,
@@ -167,7 +212,7 @@ func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJ
 	// either the gateway has no FX entitlement for this account or
 	// there's no frozen tick to fall back on; either way, surface as
 	// unavailable rather than faking a value.
-	last, dt := briefSnapshotPrice(ctx, c, "USD.JPY", 5*time.Second)
+	last, dt := deps.snapshot(ctx, "USD.JPY", 5*time.Second)
 	if last <= 0 {
 		out.Status = rpc.RegimeStatusUnavailable
 		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"
@@ -179,7 +224,7 @@ func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJ
 	// 7-trading-days-ago close. FX history uses MIDPOINT bars
 	// (defaultHistoricalWhat for CASH); pull ~12 calendar days to
 	// span 7 trading days even across a weekend / holiday.
-	bars, err := c.FetchHistoricalDailyBars("USD.JPY", 12, 20*time.Second)
+	bars, err := deps.history("USD.JPY", 12, 20*time.Second)
 	if err == nil && len(bars) >= 8 {
 		// bars are oldest-first; pick the close from 7 trading days
 		// before the most recent close.
@@ -194,10 +239,16 @@ func fetchRegimeUSDJPY(ctx context.Context, c *ibkrlib.Connector) rpc.RegimeUSDJ
 		}
 	}
 
-	if isLiveDataTypeWire(dt) {
+	if rpc.IsLiveDataType(dt) {
 		out.Status = rpc.RegimeStatusOK
 	} else {
 		out.Status = rpc.RegimeStatusStale
+	}
+	if out.Close7DAgo == nil {
+		out.FieldsMissing = append(out.FieldsMissing, "close_7d_ago")
+	}
+	if out.WeeklyChange == nil {
+		out.FieldsMissing = append(out.FieldsMissing, "weekly_change_pct")
 	}
 	return out
 }
@@ -253,7 +304,7 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 		return out
 	}
 	out.Status = rpc.RegimeStatusOK
-	if !isLiveDataTypeWire(envelope.DataType) {
+	if !rpc.IsLiveDataType(envelope.DataType) {
 		out.Status = rpc.RegimeStatusStale
 	}
 	return out
@@ -276,11 +327,4 @@ func averageClose(bars []ibkrlib.HistoricalBar, n int) float64 {
 		sum += b.Close
 	}
 	return sum / float64(n)
-}
-
-// isLiveDataTypeWire is the wire-level "live or pending" check the
-// renderer would apply. Kept local to avoid a cross-package import
-// just for one helper.
-func isLiveDataTypeWire(dt string) bool {
-	return dt == "" || dt == rpc.MarketDataLive
 }

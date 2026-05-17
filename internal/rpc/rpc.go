@@ -552,28 +552,40 @@ const (
 
 // RegimeVIXTerm is Indicator 1: VIX/VIX3M ratio. Watch for sustained
 // inversion (ratio > 1.0) over 2-3 sessions, not a single spike.
+//
+// FieldsMissing is an advisory list of pointer-typed fields above
+// (e.g. "vix3m", "ratio") that did NOT land within the fetch budget
+// even though the row's primary measurement succeeded. Absent when
+// nothing is missing. Use it to dim a sub-cell without re-classifying
+// the whole row as `error`.
 type RegimeVIXTerm struct {
-	Status       string   `json:"status"`
-	VIX          *float64 `json:"vix"`
-	VIX3M        *float64 `json:"vix3m"`
-	Ratio        *float64 `json:"ratio"` // VIX / VIX3M
-	DataType     string   `json:"data_type,omitempty"`
-	Notes        string   `json:"notes"`
-	ErrorMessage string   `json:"error_message,omitempty"`
+	Status        string   `json:"status"`
+	VIX           *float64 `json:"vix"`
+	VIX3M         *float64 `json:"vix3m"`
+	Ratio         *float64 `json:"ratio"` // VIX / VIX3M
+	DataType      string   `json:"data_type,omitempty"`
+	Notes         string   `json:"notes"`
+	ErrorMessage  string   `json:"error_message,omitempty"`
+	FieldsMissing []string `json:"fields_missing,omitempty"`
 }
 
 // RegimeHYGSPYDivergence is Indicator 2: HYG vs SPY context. The
 // daemon surfaces raw measurements; the consumer compares HYG's
 // current to its 50-day SMA and SPY's current to its 52-week high.
+//
+// FieldsMissing carries optional sub-fields ("spy_52w_high",
+// "hyg_50dma") that didn't land — both are best-effort and don't
+// downgrade the row's primary status.
 type RegimeHYGSPYDivergence struct {
-	Status       string   `json:"status"`
-	HYGPrice     *float64 `json:"hyg_price"`
-	HYG50DMA     *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
-	SPYPrice     *float64 `json:"spy_price"`
-	SPY52WHigh   *float64 `json:"spy_52w_high"`
-	HYGDataType  string   `json:"hyg_data_type,omitempty"`
-	Notes        string   `json:"notes"`
-	ErrorMessage string   `json:"error_message,omitempty"`
+	Status        string   `json:"status"`
+	HYGPrice      *float64 `json:"hyg_price"`
+	HYG50DMA      *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
+	SPYPrice      *float64 `json:"spy_price"`
+	SPY52WHigh    *float64 `json:"spy_52w_high"`
+	HYGDataType   string   `json:"hyg_data_type,omitempty"`
+	Notes         string   `json:"notes"`
+	ErrorMessage  string   `json:"error_message,omitempty"`
+	FieldsMissing []string `json:"fields_missing,omitempty"`
 }
 
 // RegimeUSDJPY is Indicator 3: USD/JPY exchange rate. Spec measures
@@ -581,14 +593,15 @@ type RegimeHYGSPYDivergence struct {
 // the consumer can compute the change. Source is FX-pair routing
 // (CASH/IDEALPRO); routing arrives in a sibling commit.
 type RegimeUSDJPY struct {
-	Status       string   `json:"status"`
-	Symbol       string   `json:"symbol"` // "USD.JPY" canonical form
-	Last         *float64 `json:"last"`
-	Close7DAgo   *float64 `json:"close_7d_ago"`      // close from 7 trading days ago
-	WeeklyChange *float64 `json:"weekly_change_pct"` // (last − close_7d_ago) / close_7d_ago × 100
-	DataType     string   `json:"data_type,omitempty"`
-	Notes        string   `json:"notes"`
-	ErrorMessage string   `json:"error_message,omitempty"`
+	Status        string   `json:"status"`
+	Symbol        string   `json:"symbol"` // "USD.JPY" canonical form
+	Last          *float64 `json:"last"`
+	Close7DAgo    *float64 `json:"close_7d_ago"`      // close from 7 trading days ago
+	WeeklyChange  *float64 `json:"weekly_change_pct"` // (last − close_7d_ago) / close_7d_ago × 100
+	DataType      string   `json:"data_type,omitempty"`
+	Notes         string   `json:"notes"`
+	ErrorMessage  string   `json:"error_message,omitempty"`
+	FieldsMissing []string `json:"fields_missing,omitempty"`
 }
 
 // RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
@@ -596,9 +609,10 @@ type RegimeUSDJPY struct {
 // call of an NY trading day; subsequent calls return the cached
 // result. Method token + warnings carry methodology disclosures.
 type RegimeGammaZero struct {
-	Status   string             `json:"status"`
-	Envelope GammaZeroSPXResult `json:"envelope"`
-	Notes    string             `json:"notes"`
+	Status        string             `json:"status"`
+	Envelope      GammaZeroSPXResult `json:"envelope"`
+	Notes         string             `json:"notes"`
+	FieldsMissing []string           `json:"fields_missing,omitempty"`
 }
 
 // RegimeBreadth is Indicator 5: the existing breadth.spx envelope
@@ -606,9 +620,10 @@ type RegimeGammaZero struct {
 // known ticker; this row currently returns Status="unavailable" with
 // a notes pointer to the disposition decision in the spec doc.
 type RegimeBreadth struct {
-	Status   string           `json:"status"`
-	Envelope BreadthSPXResult `json:"envelope"`
-	Notes    string           `json:"notes"`
+	Status        string           `json:"status"`
+	Envelope      BreadthSPXResult `json:"envelope"`
+	Notes         string           `json:"notes"`
+	FieldsMissing []string         `json:"fields_missing,omitempty"`
 }
 
 // RegimeSnapshotParams is the input for MethodRegimeSnapshot. Empty

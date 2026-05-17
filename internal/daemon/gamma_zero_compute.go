@@ -85,32 +85,25 @@ type legData struct {
 	gammaAtSnapshot float64
 }
 
-// legFetchStatus distinguishes per-leg outcomes for the fan-out so
-// the aggregator can detect gateway throttling.
-//
-// The OK/SoftDrop split is purely informational (both yield "skip
-// this leg"); the NoContract bucket is the one that drives the
-// throttle abort, because a contract-resolve failure on a strike we
-// just enumerated from the gateway's own list is the canonical
-// rate-limit signal.
-type legFetchStatus int
-
-const (
-	legFetchOK         legFetchStatus = iota // OI + IV captured
-	legFetchSoftDrop                         // subscribed OK but data didn't land in budget
-	legFetchNoContract                       // gateway couldn't resolve the contract
-)
-
 // legFetcher abstracts the per-leg subscribe-collect-unsubscribe so
 // tests can drive computeGammaZeroSPX with a fake. The fetcher is
 // expected to block for at most the budget the caller passes via ctx.
+//
+// ok reports whether OI + IV both landed within budget — the
+// aggregator only counts a leg when ok is true.
+//
+// throttleSignal reports a contract-resolve failure on a strike that
+// came from the gateway's own enumeration. The aggregator counts
+// these in the noContract tally that drives the throttle abort.
+// Soft drops (subscribed but data didn't land) leave both flags
+// false: they're skip-this-leg without raising the throttle alarm.
 type legFetcher func(
 	ctx context.Context,
 	c *ibkrlib.Connector,
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, status legFetchStatus)
+) (oi int64, iv, gamma float64, ok, throttleSignal bool)
 
 // productionLegFetcher is the live-gateway implementation. It
 // subscribes the option contract, polls until OI and IV land or the
@@ -124,9 +117,9 @@ func productionLegFetcher(
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, status legFetchStatus) {
+) (oi int64, iv, gamma float64, ok, throttleSignal bool) {
 	if c == nil {
-		return 0, 0, 0, legFetchNoContract
+		return 0, 0, 0, false, true
 	}
 	key, _, err := c.SubscribeOption(ctx, underlying, expiryYMD, strike, right)
 	if err != nil {
@@ -136,7 +129,7 @@ func productionLegFetcher(
 		// ErrContractDetailsTimeout. Both are the canonical throttle
 		// signal: we enqueued strikes that came from the gateway's
 		// own enumeration, so a healthy session resolves them.
-		return 0, 0, 0, legFetchNoContract
+		return 0, 0, 0, false, true
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
@@ -155,14 +148,14 @@ func productionLegFetcher(
 		return false
 	})
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return 0, 0, 0, legFetchSoftDrop
+		return 0, 0, 0, false, false
 	}
 	// Read whatever final values landed before the deadline — the
 	// pollMarketData inner closure already captured them in the
 	// shared locals, but partial captures (OI without IV or vice
 	// versa) are dropped because the aggregator needs both.
 	if oi == 0 || iv == 0 {
-		return 0, 0, 0, legFetchSoftDrop
+		return 0, 0, 0, false, false
 	}
 	// Gateway-computed gamma at the current spot. May be 0 if the
 	// model-computation tick (21) hasn't fired for this leg; that's
@@ -170,7 +163,7 @@ func productionLegFetcher(
 	if g, gok := c.GetOptionGreeks(key); gok {
 		gamma = g.Gamma
 	}
-	return oi, iv, gamma, legFetchOK
+	return oi, iv, gamma, true, false
 }
 
 // computeGammaZeroSPX runs the full Phase 2 compute. The caller (the
@@ -320,12 +313,12 @@ func computeGammaZeroSPX(
 		if ctx.Err() != nil || throttledAbort.Load() {
 			return
 		}
-		oi, iv, gamma, status := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
+		oi, iv, gamma, ok, throttleSignal := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
 		// Always increment the progress counter — failed legs still
 		// represent work attempted. 10 % is consumed by spot+expiries
 		// stages above; the fan-out scales linearly from 10 → 85.
 		d := done.Add(1)
-		if status == legFetchNoContract {
+		if throttleSignal {
 			nc := noContract.Add(1)
 			if throttleDetected(d, nc) {
 				throttledAbort.Store(true)
@@ -334,7 +327,7 @@ func computeGammaZeroSPX(
 		if total > 0 {
 			progress.Store(10 + int32(75*float64(d)/float64(total)))
 		}
-		if status != legFetchOK {
+		if !ok {
 			return
 		}
 		dte := dteYears(j.expiryYMD, spotAt)
@@ -588,43 +581,24 @@ func compactExpiry(date string) string {
 
 // dteYears computes years-to-expiry from an option's YYYYMMDD expiry
 // string. Uses 4 PM ET on expiration day as the conservative
-// settlement reference (matches selectExpirations' cutoff). Negative
-// or zero on parse failure — the compute's per-leg gate filters those
-// out.
+// settlement reference (matches selectExpirations' cutoff). Zero on
+// parse failure or non-positive deltas — the compute's per-leg gate
+// filters those out.
 func dteYears(expiryYMD string, now time.Time) float64 {
-	if len(expiryYMD) != 8 {
-		return 0
-	}
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		loc = time.UTC
 	}
-	y, _ := strconvAtoi(expiryYMD[:4])
-	m, _ := strconvAtoi(expiryYMD[4:6])
-	d, _ := strconvAtoi(expiryYMD[6:8])
-	if y == 0 || m == 0 || d == 0 {
+	day, err := time.ParseInLocation("20060102", expiryYMD, loc)
+	if err != nil {
 		return 0
 	}
-	expWall := time.Date(y, time.Month(m), d, 16, 0, 0, 0, loc)
+	expWall := time.Date(day.Year(), day.Month(), day.Day(), 16, 0, 0, 0, loc)
 	delta := expWall.Sub(now.In(loc))
 	if delta <= 0 {
 		return 0
 	}
 	return delta.Hours() / (24 * 365.0)
-}
-
-// strconvAtoi is a tiny inline parser to avoid adding strconv to this
-// file's imports purely for an obvious helper. Returns 0 on any
-// non-digit. Mirrors strconv.Atoi for the digit-only happy path.
-func strconvAtoi(s string) (int, error) {
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("non-digit in %q", s)
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, nil
 }
 
 // sweepProfile builds the (spot, signed_gex) sweep over [1−range,

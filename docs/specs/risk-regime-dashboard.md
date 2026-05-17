@@ -184,6 +184,11 @@ A `spec_doc` field on the envelope points back here for deep-linking.
 
 **Live-test result on 2026-05-17 (frozen weekend data)**:
 
+Read this as the *normal* weekend response — three rows stale, two
+unavailable. Live-market behavior populates `ratio` + `last` fields
+on the stale-during-weekend rows and surfaces gamma as `computing`
+on the first call of the NY session.
+
 ```json
 {
   "vix_term_structure": { "vix": 18.43, "vix3m": 21.36, "ratio": 0.863, "status": "stale" },

@@ -296,24 +296,41 @@ func TestFindZeroCrossing(t *testing.T) {
 	})
 }
 
-// TestRemainingEta floors the ETA at 5 seconds and decrements it
-// correctly as the job ages. Used by the polling UX to avoid
-// flicker near the end of a long compute.
+// TestRemainingEta exercises the progress-derived ETA. Below
+// progress=5 the fallback is initial-minus-elapsed; above that
+// threshold the formula projects from elapsed × (100-p)/p. Floor at
+// 5s, ceiling at 4× the static initial estimate.
 func TestRemainingEta(t *testing.T) {
 	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
 	job := &gammaComputation{startedAt: now, etaSeconds: 300}
 
-	if got := remainingEta(job, now); got != 300 {
-		t.Errorf("at start: got %d, want 300", got)
+	// progress=0 early — fallback to initial - elapsed
+	if got := remainingEta(job, now, 0); got != 300 {
+		t.Errorf("at start (progress=0): got %d, want 300", got)
 	}
-	if got := remainingEta(job, now.Add(60*time.Second)); got != 240 {
-		t.Errorf("at +60s: got %d, want 240", got)
+	if got := remainingEta(job, now.Add(60*time.Second), 0); got != 240 {
+		t.Errorf("at +60s (progress=0): got %d, want 240", got)
 	}
-	if got := remainingEta(job, now.Add(299*time.Second)); got != 5 {
-		t.Errorf("near end: got %d, want 5 (floor)", got)
+
+	// progress=50 with elapsed=60s — project 60s remaining
+	if got := remainingEta(job, now.Add(60*time.Second), 50); got != 60 {
+		t.Errorf("progress=50 +60s: got %d, want 60", got)
 	}
-	if got := remainingEta(job, now.Add(10*time.Minute)); got != 5 {
-		t.Errorf("past initial estimate: got %d, want 5 (floor)", got)
+
+	// progress=99 — formula yields ~elapsed × 1/99; floor at 5
+	if got := remainingEta(job, now.Add(300*time.Second), 99); got != 5 {
+		t.Errorf("progress=99 +300s: got %d, want 5 (floor)", got)
+	}
+
+	// Runaway compute: progress=10 after 10 minutes → formula says
+	// 600 × 90 / 10 = 5400s, which must be capped at 4 × 300 = 1200s.
+	if got := remainingEta(job, now.Add(10*time.Minute), 10); got != 1200 {
+		t.Errorf("runaway (progress=10 +10m): got %d, want 1200 (cap)", got)
+	}
+
+	// Fallback path past the initial estimate also floors at 5
+	if got := remainingEta(job, now.Add(10*time.Minute), 0); got != 5 {
+		t.Errorf("past initial estimate (progress=0): got %d, want 5 (floor)", got)
 	}
 }
 

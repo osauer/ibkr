@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -50,6 +52,7 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 	default:
 		fmt.Fprintf(out, "   %s — %s\n", r.VIXTermStructure.Status, r.VIXTermStructure.ErrorMessage)
 	}
+	renderFieldsMissing(out, env, r.VIXTermStructure.FieldsMissing)
 	fmt.Fprintf(out, "   %s\n", env.dim(r.VIXTermStructure.Notes))
 	fmt.Fprintln(out)
 
@@ -66,6 +69,7 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 			fmtF2(r.HYGSPYDivergence.SPYPrice),
 			fmtF2(r.HYGSPYDivergence.SPY52WHigh))
 	}
+	renderFieldsMissing(out, env, r.HYGSPYDivergence.FieldsMissing)
 	fmt.Fprintf(out, "   %s\n", env.dim(r.HYGSPYDivergence.Notes))
 	fmt.Fprintln(out)
 
@@ -80,6 +84,7 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 	default:
 		fmt.Fprintf(out, "   %s — %s\n", r.USDJPY.Status, r.USDJPY.ErrorMessage)
 	}
+	renderFieldsMissing(out, env, r.USDJPY.FieldsMissing)
 	fmt.Fprintf(out, "   %s\n", env.dim(r.USDJPY.Notes))
 	fmt.Fprintln(out)
 
@@ -152,4 +157,14 @@ func derefF(p *float64) float64 {
 		return 0
 	}
 	return *p
+}
+
+// renderFieldsMissing prints a dimmed advisory line listing optional
+// sub-fields the row couldn't populate. No-op when empty so rows
+// without missing fields stay clean.
+func renderFieldsMissing(out io.Writer, env *Env, missing []string) {
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "   %s\n", env.dim("(missing: "+strings.Join(missing, ", ")+")"))
 }

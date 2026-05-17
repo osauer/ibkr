@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,7 +171,7 @@ func (c *gammaZeroCache) startLocked(parent context.Context, key string, now tim
 		// as Status=error on the next poll.
 		defer func() {
 			if r := recover(); r != nil {
-				job.err = &computePanicError{value: r}
+				job.err = fmt.Errorf("zero-gamma compute panicked: %v", r)
 			}
 		}()
 		res, err := compute(bgCtx, &job.progress)
@@ -206,33 +207,34 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 		env.Result = g.result
 		return env
 	}
+	progress := g.progress.Load()
 	env.Status = rpc.GammaZeroStatusComputing
-	env.EtaSeconds = remainingEta(g, nowFn())
-	env.Progress = int(g.progress.Load())
+	env.EtaSeconds = remainingEta(g, nowFn(), progress)
+	env.Progress = int(progress)
 	return env
 }
 
-// remainingEta returns a refined ETA: max(initial - elapsed, 5s).
-// Floor at 5s so the renderer doesn't flicker between "0s" and
-// "computing" near the end of the run.
-func remainingEta(g *gammaComputation, now time.Time) int {
+// remainingEta returns a refined ETA in seconds. Once enough work has
+// landed (progress > 5), the estimate is projected from elapsed time:
+// remaining ≈ elapsed × (100 - progress) / progress. Before then the
+// projection is meaningless on tiny samples, so we fall back to the
+// static initial estimate minus elapsed.
+//
+// Capped at 4× the static estimate so a stalled compute (progress
+// frozen at 10 % after 10 minutes) doesn't surface absurd
+// projections. Floor at 5s so the renderer doesn't flicker between
+// "0s" and "computing" near the end of the run.
+func remainingEta(g *gammaComputation, now time.Time, progress int32) int {
 	elapsed := int(now.Sub(g.startedAt).Seconds())
-	remaining := g.etaSeconds - elapsed
-	if remaining < 5 {
-		return 5
+	cap := 4 * g.etaSeconds
+	var remaining int
+	if progress > 5 {
+		remaining = int(float64(elapsed) * float64(100-progress) / float64(progress))
+	} else {
+		remaining = g.etaSeconds - elapsed
 	}
-	return remaining
-}
-
-// computePanicError wraps a recovered panic for surfacing as a typed
-// error on the envelope. Distinguished from a regular error so the
-// telemetry on the daemon side can flag panics for investigation.
-type computePanicError struct {
-	value any
-}
-
-func (e *computePanicError) Error() string {
-	return "internal panic during zero-gamma compute"
+	remaining = min(remaining, cap)
+	return max(remaining, 5)
 }
 
 // findZeroCrossing scans the sweep profile and returns the spot at

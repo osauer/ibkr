@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## v0.21.0 — 2026-05-17 10:35 EEST
+## v0.21.0 — 2026-05-17 12:54 EEST
 
 Wraps the risk-regime dashboard work into a single user-facing
 command. Where v0.20.0 added two indicator endpoints (gamma + breadth)
@@ -20,11 +20,21 @@ for indicator 3.
   measurements plus a `notes` field embedding the spec's threshold
   bands verbatim, so an LLM consumer can interpret the response
   without reading the methodology doc. The envelope also carries a
-  `spec_doc` pointer for deep-linking. Designed for two consumers:
-  the dashboard generator (single endpoint to render) and the
-  MCP-native natural-language interface (a Claude conversation asking
-  "how does the market regime look today?" produces a complete answer
-  from one tool call).
+  `spec_doc` pointer for deep-linking. The pitch is "state of all
+  five in one tool call" rather than "all five populated": gamma's
+  first call of an NY trading day returns `status: "computing"` while
+  the background compute runs, and breadth surfaces as `unavailable`
+  on retail IBKR because the S5FI feed isn't entitled. The notes
+  field on each row explains its disposition so an LLM consumer can
+  reason without consulting the methodology doc.
+
+- **`fields_missing` advisory slice** on the HYG/SPY and USD/JPY
+  regime rows. Optional sub-fields (`hyg_50dma`, `spy_52w_high`,
+  `close_7d_ago`, `weekly_change_pct`) can fail to land independently
+  of the row's primary spot. Rather than degrade the whole row to
+  `error` on a thin history fetch, the row stays `ok` and the slice
+  names what's missing — consumers (LLM or otherwise) can hedge the
+  read instead of guessing whether the daemon asked.
 
   Indicator 4 (gamma) is auto-kicked on the first regime call of an
   NY trading day; subsequent calls return the cached result. The
@@ -59,6 +69,21 @@ for indicator 3.
   `historicalWhatSequence` skips the TRADES fallback for CASH
   instruments. FX has no consolidated trade tape; the TRADES retry
   would burn the deadline and return error 162.
+
+- **`gamma.zero_spx` `eta_seconds` is progress-derived** once the
+  compute has made meaningful progress (>5% complete). Projects from
+  elapsed × remaining-progress so the countdown stays honest when a
+  run overruns the static 360s estimate. Floored at 5s; capped at 4×
+  the initial estimate so a stalled leg can't return absurd
+  projections.
+
+### Fixed
+
+- **Regime aggregator code hygiene** — removed a duplicate
+  `isLiveDataTypeWire` helper that shadowed `rpc.IsLiveDataType`, and
+  a double `AsOf = time.Now()` write that pre-stamped the envelope
+  before the fan-out. No behaviour change; the code is shorter and
+  the wall-clock anchor is unambiguous.
 
 
 
