@@ -163,12 +163,50 @@ Display at the top of the dashboard:
 
 -----
 
+## Daemon API — `regime.snapshot` (v0.21.0+)
+
+`ibkr regime` / `ibkr_regime` / `regime.snapshot` returns all five
+indicators in one JSON envelope. The daemon never derives
+green/yellow/red status — the bands above are user-tunable per
+this spec, so threshold derivation lives in the renderer (or in an
+LLM consumer's reasoning when called via MCP). Each indicator row
+on the response carries:
+
+- raw measurement(s) — pointers so "not arrived yet" vs "exactly
+  zero" stays distinguishable;
+- a `status` field — `ok`, `stale` (gateway delivered a frozen or
+  delayed tick), `computing` (gamma's background compute), `unavailable`
+  (no data source), or `error`;
+- a `notes` field — the spec's threshold bands embedded verbatim,
+  so an LLM consumer doesn't need to consult this document.
+
+A `spec_doc` field on the envelope points back here for deep-linking.
+
+**Live-test result on 2026-05-17 (frozen weekend data)**:
+
+```json
+{
+  "vix_term_structure": { "vix": 18.43, "vix3m": 21.36, "ratio": 0.863, "status": "stale" },
+  "hyg_spy_divergence": { "hyg_price": 79.55, "spy_price": 737.34, "status": "stale" },
+  "usd_jpy":            { "last": 158.7285, "status": "stale" },
+  "gamma_zero":         { "status": "error", "envelope": { "error": "no SPX spot available" } },
+  "breadth":            { "status": "unavailable" }
+}
+```
+
+Read this as: weekend hours, gateway in frozen mode. VIX ratio 0.863
+applied against the spec gives **green** (<0.92 is healthy contango).
+Gamma errored because SPX is not delivering any tick over weekend
+nights — expected; rerun during market hours. Breadth is unavailable
+because IBKR doesn't carry the S5FI feed (see Indicator 5 below).
+
 ## Daemon methodology — what the IBKR daemon actually computes
 
 This section documents how Indicators 4 (Dealer Zero-Gamma) and 5
 (Market Breadth) are sourced from the IBKR gateway. Indicators 1–3
 (VIX term structure, HYG/SPX divergence, USD/JPY) use the standard
-quote/history endpoints and need no special disclosure.
+quote/history endpoints; USD/JPY routes through native CASH/IDEALPRO
+FX (added in v0.21.0).
 
 ### Indicator 5 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 

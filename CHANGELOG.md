@@ -2,7 +2,65 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## v0.20.0 — 2026-05-16 19:30 CEST
+## v0.21.0 — 2026-05-17 10:35 EEST
+
+Wraps the risk-regime dashboard work into a single user-facing
+command. Where v0.20.0 added two indicator endpoints (gamma + breadth)
+in isolation, v0.21.0 makes them readable from a Claude Desktop
+conversation in plain English, alongside the three indicators that
+already worked, by adding one aggregator + the FX routing required
+for indicator 3.
+
+### Added
+
+- **`ibkr regime` / `ibkr_regime` / `regime.snapshot`** — risk-regime
+  snapshot in a single call. Returns all five dashboard indicators
+  (VIX/VIX3M ratio, HYG vs SPY divergence, USD/JPY, SPX zero-gamma,
+  SPX breadth) in one JSON envelope. Each row carries raw
+  measurements plus a `notes` field embedding the spec's threshold
+  bands verbatim, so an LLM consumer can interpret the response
+  without reading the methodology doc. The envelope also carries a
+  `spec_doc` pointer for deep-linking. Designed for two consumers:
+  the dashboard generator (single endpoint to render) and the
+  MCP-native natural-language interface (a Claude conversation asking
+  "how does the market regime look today?" produces a complete answer
+  from one tool call).
+
+  Indicator 4 (gamma) is auto-kicked on the first regime call of an
+  NY trading day; subsequent calls return the cached result. The
+  daemon never derives green/yellow/red status colours from raw
+  values — the spec explicitly calls those bands user-tunable, so
+  threshold derivation stays in the renderer.
+
+- **Native CASH/IDEALPRO FX-pair routing**. `pkg/ibkr/classifySymbol`
+  now accepts G10 FX pairs in both dotted (`USD.JPY` — canonical) and
+  slash (`USD/JPY`) forms; the connector lifts the base currency onto
+  `Contract.Symbol` and routes through IDEALPRO with the quote
+  currency on `Contract.Currency`. Works through the existing `ibkr
+  quote` + `ibkr history` paths — no new RPC method, no new CLI
+  command, no new MCP tool. Lets regime's USD/JPY row read live FX
+  data instead of a stock-proxy substitute.
+
+  G10 majors only: USD/EUR/JPY/GBP/CHF/AUD/NZD/CAD. The allowlist
+  protects stock tickers with dots (BRK.B, RDS.A) from being
+  misclassified.
+
+- **VIX3M** in `classifySymbol` (IND/CBOE) so the regime aggregator's
+  VIX-term ratio computes without a "no security definition" fallback.
+
+### Changed
+
+- **`pkg/ibkr.FxPair(symbol)` is exported.** Daemon-side callers (the
+  echoed `Contract` rewrite in `handleQuoteSnapshot`) use the same
+  parser as the classifier so the dotted/slash rule stays in one
+  place.
+
+- **`defaultHistoricalWhat("CASH") == "MIDPOINT"`** and
+  `historicalWhatSequence` skips the TRADES fallback for CASH
+  instruments. FX has no consolidated trade tape; the TRADES retry
+  would burn the deadline and return error 162.
+
+
 
 Two new read-only endpoints feed the risk-regime dashboard spec
 (`docs/specs/risk-regime-dashboard.md`) directly from IBKR data,
