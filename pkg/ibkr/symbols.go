@@ -109,7 +109,7 @@ func classifySymbol(symbol string) (string, string, string, string) {
 	// docs/specs/risk-regime-dashboard.md for the disposition.
 
 	// Common ETFs
-	case "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT":
+	case "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "HYG":
 		secType = "STK"
 		exchange = "SMART"
 		primary = "ARCA" // Often better coverage OOH
