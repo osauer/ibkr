@@ -308,8 +308,12 @@ version: ## Print the version string the next build would embed
 # - HEAD not synced with origin/<MAIN_BRANCH> (tag would point at a commit
 #   GitHub doesn't have)
 # - tag already exists locally or on origin
-# Sequence: gate → create annotated tag → rebuild binaries (now stamped
-# with the new tag) → push tag. Does NOT push commits — push those first.
+# Sequence: gate → build with VERSION override → smoke against live
+# gateway → create annotated tag → push tag. The smoke runs BEFORE
+# tagging so a gateway failure leaves no orphan tag to clean up; the
+# build target accepts VERSION=$(RELEASE_VERSION) so the smoke daemon
+# stamps the target version even before the tag exists.
+# Does NOT push commits — push those first.
 release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE="..."]
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release: RELEASE_VERSION is required, e.g. make release RELEASE_VERSION=v0.3.1" >&2; \
@@ -348,14 +352,19 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		exit 1; \
 	fi
 	$(MAKE) check test
-	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
-	git tag -a $(RELEASE_VERSION) -m "$$msg"
-	$(MAKE) build
+	@# Build the release binary with the target version stamped BEFORE
+	@# tagging — pass VERSION explicitly so the build doesn't fall back
+	@# to `git describe` (which wouldn't see the tag yet). The smoke
+	@# script asserts `bin/ibkr version == $(RELEASE_VERSION)`, so the
+	@# stamp has to match.
+	$(MAKE) build VERSION=$(RELEASE_VERSION)
 	@# Binding live-gateway smoke against the freshly-stamped binary.
 	@# Runs against an isolated daemon so it doesn't disturb the user's
-	@# running one. A failure here aborts the release BEFORE any tag is
-	@# pushed; recover with `git tag -d $(RELEASE_VERSION)`.
+	@# running one. A failure here aborts the release BEFORE the tag is
+	@# ever created — no orphan tag to clean up.
 	$(MAKE) release-verify RELEASE_VERSION=$(RELEASE_VERSION)
+	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
+	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	git push origin $(RELEASE_VERSION)
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	claude plugin tag . --push --message "$$msg"
