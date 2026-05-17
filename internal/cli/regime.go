@@ -232,14 +232,30 @@ func tallyComposite(rows []regimeRow) regimeComposite {
 	return c
 }
 
+// verdictFloor is the minimum ranked-row count required for the
+// renderer to claim a verdict above "insufficient signal." The spec's
+// interpretation table assumes the dashboard is built from all five
+// indicators; below this floor any positive claim ("Normal regime")
+// is based on too few measurements to be honest. Three was chosen
+// because the spec's yellow- and red-band thresholds both reference
+// "majority of indicators" — a verdict needs to see at least majority
+// coverage before it stops being a guess.
+const verdictFloor = 3
+
 // verdict maps the (red, yellow) tally onto the spec's interpretation
 // table (docs/specs/risk-regime-dashboard.md:109-115). Honest about
 // "no ranked indicators" — a renderer that pretends to have a verdict
-// when every row is computing/unavailable would just be lying.
+// when every row is computing/unavailable would just be lying. The
+// verdictFloor extends the same honesty: a bold-green "Normal regime"
+// with 1-of-5 ranked is misleading even when the count summary
+// underneath names the unranked tally, because readers scan the bold
+// line first.
 func (c regimeComposite) verdict() string {
 	switch {
 	case c.ranked == 0:
 		return "No ranked indicators — see rows below for state"
+	case c.ranked < verdictFloor:
+		return "Insufficient signal — too few indicators ranked"
 	case c.ranked == c.total && c.red == c.total:
 		return "Full risk-off conditions"
 	case c.red >= 3:

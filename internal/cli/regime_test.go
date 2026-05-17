@@ -242,6 +242,16 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 		{"three red with two unranked", 0, 0, 3, 5, "Regime shift likely — execute pre-committed plan"},
 		// Coverage edge: nothing ranked → no verdict claim
 		{"all unranked", 0, 0, 0, 5, "No ranked indicators — see rows below for state"},
+		// Honesty floor: a positive "Normal regime" verdict requires
+		// at least verdictFloor (3) ranked rows. Below that the
+		// renderer surfaces "Insufficient signal" instead of bold-
+		// green-on-thin-coverage. Confirmed in review: the original
+		// v0.22.0 dashboard on weekend frozen data printed "Normal
+		// regime" with 1 of 5 ranked — exactly the misleading state
+		// this floor blocks.
+		{"one green ranked = insufficient", 1, 0, 0, 5, "Insufficient signal — too few indicators ranked"},
+		{"two green ranked = insufficient", 2, 0, 0, 5, "Insufficient signal — too few indicators ranked"},
+		{"one red + one yellow = insufficient (below floor even with reds)", 0, 1, 1, 5, "Insufficient signal — too few indicators ranked"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
