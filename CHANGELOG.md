@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.23.1 — 2026-05-17 20:56 CEST
+
+A one-fix follow-up to v0.23.0. The prewarm shipped in v0.23.0 wasn't
+actually warming the cache it was meant to warm; this release closes
+that gap so cold-start regime calls really do benefit from it.
+
+### Fixed
+
+- **Cold-start regime calls now actually benefit from v0.23.0's
+  prewarm.** `prewarmRegimeSymbols` fires `FetchContractDetails` for
+  each indicator right after the daemon connects, expecting to prime
+  `contractCache`. But `FetchContractDetails` only wrote to the cache
+  on its timeout path — on the success path it returned the contract
+  and discarded it. The prewarm goroutine also discards its return
+  value, so the cache stayed cold for any symbol whose response
+  arrived within budget. The next regime call then re-issued the same
+  request with a 2 s `prepareContract` budget that times out for HYG
+  (no primary exchange in `classifySymbol`), aborting HYG's history
+  fetch with "contract details unresolved" and sending SPY's
+  market-data subscription out with ConID 0 on every first call after
+  a daemon restart. `FetchContractDetails` now populates the cache
+  from the success branch too, guarded the same non-clobbering way
+  `deferContractDetailsCleanup` already does. Verified: first-call
+  `hyg_50dma` and the SPY 52w high land without "(pending)"
+  daemon-log anomalies after a cold restart.
+
 ## v0.23.0 — 2026-05-17 20:14 CEST
 
 v0.22.0 shipped the regime dashboard's redesigned UX; v0.23.0 makes
