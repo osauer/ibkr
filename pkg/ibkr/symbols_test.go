@@ -15,6 +15,14 @@ func TestClassifySymbol_Table(t *testing.T) {
 		{"SPY", "STK", "SMART", "USD", "ARCA"},
 		{"GLD", "STK", "SMART", "USD", "ARCA"},
 		{"TLT", "STK", "SMART", "USD", "ARCA"},
+		// HYG (iShares iBoxx High Yield Corporate Bond ETF) is on
+		// ArcaEdge like the other ETFs above. The regime dashboard's
+		// HYG/SPY divergence row needs `FetchHistoricalDailyBars(HYG)`
+		// to compute HYG's 50DMA; without primary="ARCA" the gateway
+		// has no fast-lookup hint and the contract-details round trip
+		// overruns the regime fetcher's budget, leaving hyg_50dma
+		// null on every cold-start call.
+		{"HYG", "STK", "SMART", "USD", "ARCA"},
 		{"ES", "FUT", "GLOBEX", "USD", ""},
 		{"NDX", "IND", "NASDAQ", "USD", "NASDAQ"},
 		{"AAPL", "STK", "SMART", "USD", ""},
