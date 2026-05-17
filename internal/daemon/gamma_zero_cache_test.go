@@ -146,6 +146,72 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 	}
 }
 
+// TestGammaZeroCache_RetriesErrorAfterTTL pins the no-poison
+// invariant: a transient compute error must NOT stick in cache for
+// the rest of the NY trading session. Before this fix the cache
+// returned c.current unconditionally on session-key match; a
+// gateway-side cold-start timeout at 9:30 AM ET poisoned every
+// regime/gamma call until midnight NY rolled the session key.
+//
+// Within the TTL window: same-session callers see the cached error
+// (no thundering herd). Past the TTL: a fresh compute is kicked.
+// In-flight jobs and successful results stay sticky in both cases.
+func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+
+	var computeRuns atomic.Int32
+	bonk := errors.New("gateway timeout")
+	errCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		computeRuns.Add(1)
+		return nil, bonk
+	}
+
+	job1, fresh1 := c.kickOrJoin(context.Background(), now, 300, errCompute)
+	<-job1.done
+	if !fresh1 || job1.err == nil {
+		t.Fatalf("first kickoff: fresh=%v err=%v, want fresh=true err!=nil", fresh1, job1.err)
+	}
+
+	// Same instant: same-session caller must see the cached error,
+	// not trigger a new compute. This is the dampener against retry
+	// storms while a gateway is genuinely flapping.
+	job2, fresh2 := c.kickOrJoin(context.Background(), now, 300, errCompute)
+	if fresh2 || job2 != job1 {
+		t.Errorf("within TTL: got fresh=%v job=%p (want fresh=false job=%p)", fresh2, job2, job1)
+	}
+	if got := computeRuns.Load(); got != 1 {
+		t.Errorf("within TTL: compute ran %d times, want 1", got)
+	}
+
+	// Past the TTL: same session key, but the cached error is now
+	// stale-on-error. kickOrJoin must launch a fresh attempt.
+	past := now.Add(gammaErrorRetryTTL + time.Second)
+	successCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		computeRuns.Add(1)
+		return &rpc.GammaZeroComputed{SpotSPX: 5050}, nil
+	}
+	job3, fresh3 := c.kickOrJoin(context.Background(), past, 300, successCompute)
+	if !fresh3 || job3 == job1 {
+		t.Errorf("past TTL: got fresh=%v job=%p (want fresh=true new job)", fresh3, job3)
+	}
+	<-job3.done
+	if job3.err != nil || job3.result == nil {
+		t.Errorf("retry compute should have succeeded: err=%v result=%v", job3.err, job3.result)
+	}
+	if got := computeRuns.Load(); got != 2 {
+		t.Errorf("past TTL: compute ran %d times, want 2", got)
+	}
+
+	// Past the TTL again, but now the cache holds a SUCCESS — the
+	// retry path must not fire on healthy state.
+	future := past.Add(2 * gammaErrorRetryTTL)
+	job4, fresh4 := c.kickOrJoin(context.Background(), future, 300, errCompute)
+	if fresh4 || job4 != job3 {
+		t.Errorf("success cache must stay sticky regardless of age: fresh=%v job=%p want job=%p", fresh4, job4, job3)
+	}
+}
+
 // TestGammaZeroCache_SnapshotStates exhaustively covers the three
 // envelope states (computing / ready / error) the snapshot helper
 // must produce — the dashboard generator branches on Status, so a

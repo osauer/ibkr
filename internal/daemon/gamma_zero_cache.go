@@ -53,6 +53,24 @@ type gammaComputation struct {
 	etaSeconds int                // static estimate captured at kickoff
 }
 
+// gammaErrorRetryTTL is the minimum age of a cached error before
+// kickOrJoin re-attempts. Before this fix a single transient
+// gateway-side timeout (e.g. cold-start SPX contract-details race)
+// would stick in cache and poison every regime/gamma call for the
+// rest of the NY trading session — confirmed observed at v0.22.0.
+//
+// "Age" is measured against startedAt rather than the deferred
+// finishedAt: the cache's now parameter and startedAt share a clock,
+// so the TTL check stays testable with synthetic times, and the
+// production semantic ("60 s since we kicked the failing attempt") is
+// the right one — long error paths shouldn't have an extra 60-s
+// quiet period on top of their own duration.
+//
+// 60 s is long enough to dampen retry storms against a genuinely down
+// gateway while short enough that a one-shot blip clears on the
+// user's next normal poll.
+const gammaErrorRetryTTL = 60 * time.Second
+
 // isDone reports whether the compute has finished (success or error).
 // Safe for concurrent readers — the done channel close is the
 // happens-before signal that the result / err fields are stable.
@@ -110,6 +128,16 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, now time.Time, etaSe
 	defer c.mu.Unlock()
 
 	if c.current != nil && c.current.sessionKey == key {
+		// Same session — but a cached error past the retry TTL must NOT
+		// block fresh attempts. Without this check, a one-shot
+		// gateway-side timeout poisons every regime/gamma call for the
+		// rest of the NY trading session. In-flight jobs (isDone=false)
+		// always pass through to the shared singleflight regardless of
+		// age; success results stay sticky for the whole session.
+		if c.current.isDone() && c.current.err != nil && now.Sub(c.current.startedAt) >= gammaErrorRetryTTL {
+			job = c.startLocked(parent, key, now, etaSeconds, compute)
+			return job, true
+		}
 		// Same session: serve the in-flight or recently-completed job.
 		// Callers that need to bypass cache (diagnostics) use force().
 		return c.current, false
