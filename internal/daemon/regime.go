@@ -184,9 +184,13 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		out.SPY52WHigh = new(spy52)
 	}
 
-	// 50-day SMA on HYG. Pull ~70 calendar days to account for
-	// non-trading-day shrinkage, average the last 50 closes.
-	bars, err := deps.history("HYG", 70, 20*time.Second)
+	// 50-day SMA on HYG. 50 trading days ≈ 70 calendar days when
+	// the window has zero holidays; the US market closes 9-10 days
+	// per year, so a 70-day window can come up short on the wrong
+	// side of Memorial Day / Labor Day / Thanksgiving. 90 calendar
+	// days gives ~10 days of slack — the IBKR HMDS API only bills
+	// the call, not the bar count, so this is free.
+	bars, err := deps.history("HYG", 90, 20*time.Second)
 	switch {
 	case err != nil:
 		warnDeps(deps, "regime: HYG 50DMA history fetch failed: %v", err)
@@ -243,9 +247,12 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	out.DataType = dt
 
 	// 7-trading-days-ago close. FX history uses MIDPOINT bars
-	// (defaultHistoricalWhat for CASH); pull ~12 calendar days to
-	// span 7 trading days even across a weekend / holiday.
-	bars, err := deps.history("USD.JPY", 12, 20*time.Second)
+	// (defaultHistoricalWhat for CASH); FX trades 24/5 so 7 trading
+	// days = 7 weekday FX sessions. 14 calendar days covers 7 FX
+	// sessions even when a Monday or Friday bank holiday interrupts
+	// the count (US: MLK Day, Memorial Day, Labor Day, Thanksgiving,
+	// etc. all fall on Mondays and clip one US-tradable FX day).
+	bars, err := deps.history("USD.JPY", 14, 20*time.Second)
 	switch {
 	case err != nil:
 		warnDeps(deps, "regime: USD.JPY history fetch failed: %v", err)
