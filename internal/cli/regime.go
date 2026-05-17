@@ -54,7 +54,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON (the canonical surface for renderers + LLMs)")
 	explain := fs.Bool("explain", false, "print the spec's per-indicator threshold prose under each row")
 	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
-	rate := fs.Duration("rate", 60*time.Second, "poll interval for --watch (default 60s — regime data updates slowly)")
+	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m — regime indicators move on minute-to-hour scales, not sub-minute)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
