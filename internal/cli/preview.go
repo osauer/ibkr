@@ -49,3 +49,7 @@ func PreviewRenderSize(env *Env, r *SizeResult) {
 func PreviewRenderStatus(env *Env, h *rpc.HealthResult) {
 	renderStatusText(env, h)
 }
+
+func PreviewRenderRegime(env *Env, r *rpc.RegimeSnapshotResult) {
+	renderRegimeText(env, r)
+}
