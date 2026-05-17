@@ -952,6 +952,18 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 			} else {
 				c.clearInactiveCandidate(symbol)
 				first := results[0]
+				// Populate the cache so callers that discard the
+				// returned slice (e.g. the daemon's prewarm
+				// goroutine) still warm contractCache for the
+				// next prepareContract / ensureContractDetails
+				// lookup. The guard matches deferContractDetailsCleanup:
+				// don't clobber an already-resolved entry that
+				// another path may have raced to populate.
+				c.contractMu.Lock()
+				if existing, ok := c.contractCache[symbol]; !ok || existing.ConID == 0 {
+					c.contractCache[symbol] = first
+				}
+				c.contractMu.Unlock()
 				c.logDebug("Contract details fetch success reqID=%d symbol=%s count=%d conID=%d exch=%s primary=%s local=%s class=%s",
 					reqID, symbol, len(results), first.ConID, first.Exchange, first.PrimaryExch, first.LocalSymbol, first.TradingClass)
 			}
