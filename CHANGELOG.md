@@ -2,6 +2,100 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.23.0 — 2026-05-17 20:14 CEST
+
+v0.22.0 shipped the regime dashboard's redesigned UX; v0.23.0 makes
+the data underneath honest. A senior-dev review of `ibkr regime`
+found that on cold-cache calls only one of five indicators came back
+fully populated, the daemon silently swallowed history-fetch errors,
+the gamma compute's first failure of the day stuck for the rest of
+the NY session, SPY's 52-week high never actually arrived, and the
+composite verdict happily printed bold-green "Normal regime" with
+1 of 5 indicators ranked. None of those are catastrophic — they're
+the difference between "looks like it works" and "real, reliable,
+robust." This release is the gap.
+
+### Fixed
+
+- **History-fetch errors are no longer silently swallowed.** The
+  daemon now logs at warn level when `fetchRegimeHYGSPY` or
+  `fetchRegimeUSDJPY` lose their `FetchHistoricalDailyBars` call, and
+  when the returned bar slice is too thin for the SMA / lookback the
+  fetcher wanted. A null `hyg_50dma` or `weekly_change_pct` in the
+  envelope used to tell the consumer *that* a field was missing
+  without telling them *why* — the daemon log now answers, with the
+  specific error or the bar-count shortfall named.
+
+- **Gamma cache no longer poisons the rest of the NY session on a
+  single transient error.** A one-shot gateway-side timeout (e.g. the
+  cold-start "fetch SPX expiries: timeout waiting for contract
+  details" race) used to stick in `c.current` until midnight NY
+  rolled the session key. The cache now treats a cached error older
+  than 60 s as stale-on-error and falls through to a fresh kick.
+  In-flight jobs and successful results stay sticky regardless of
+  age — the retry path only fires on the (errored, isDone, > 60 s old)
+  shape so a flapping gateway doesn't get retry-stormed.
+
+- **SPY 52-week high actually lands now.** The HYG/SPY indicator
+  needed SPY's 52-week high to evaluate the spec's yellow-band
+  trigger ("HYG breaks 50dma while SPY near highs"), but the original
+  `briefSnapshotPrice` returned on the first price tick and
+  unsubscribed before the gateway could deliver tick 165 (Misc
+  Stats / week-range highs and lows). A new
+  `briefSnapshotPriceWith52WHigh` keeps the subscription open until
+  both the price triple and `Week52High` have landed, or 8 s
+  expires — partial results stay honest if a field doesn't arrive.
+
+- **Cold-start contract-resolution race partially eliminated via
+  pre-warm.** A new `prewarmRegimeSymbols` goroutine fires off
+  `FetchContractDetails` for all five regime indicators right after
+  daemon connect, on a 30 s per-symbol budget. Empirically this
+  resolves the VIX, VIX3M, and USD.JPY first-call gap — `USD.JPY`'s
+  `weekly_change_pct` now lands on the very first regime call after
+  daemon restart. HYG and SPY may still race on cold start because
+  their contract-details responses arrive marked "pending" for
+  STK-with-no-PrimaryExch; deeper fix is queued as separate work.
+
+- **Lookback buffers widened so a single US holiday doesn't drop a
+  row.** HYG 50DMA pulls 90 calendar days now (was 70) — 50 trading
+  days is closer to 71 calendar days with zero holidays in the
+  window, and one Memorial Day / Labor Day / Thanksgiving in the
+  trailing window short-counts the SMA's bars. USD/JPY 7-trading-day
+  lookback pulls 14 calendar days (was 12) so a Monday/Friday bank
+  holiday doesn't drop a bar.
+
+### Changed
+
+- **Composite verdict surfaces "Insufficient signal" when fewer than
+  3 indicators ranked.** Previously the verdict block printed bold
+  "Normal regime" whenever fewer than 3 reds and 3 yellows had been
+  seen — including the v0.22.0 weekend behaviour where 4 of 5 rows
+  returned unranked (computing / unavailable / spec-field missing)
+  and the verdict was effectively one VIX/VIX3M tick. The dim count
+  summary below was honest about coverage; the bold line above it
+  wasn't. Three was chosen because the spec's yellow- and red-band
+  rules both reference "majority of indicators" — a verdict needs at
+  least majority coverage before it stops being a guess.
+
+- **`ibkr regime --watch` default `--rate` is 5 minutes (was 60 s).**
+  The spec calls for daily refresh; the indicators move on minute-to-
+  hour scales. 60 s re-polled the daemon ~60× more than the data
+  warranted, padding daemon log noise and gateway slot pressure for
+  no payoff. Users who want tighter cadence can override with
+  `--rate=30s`.
+
+### Added
+
+- **TTY spinner during the regime fetch.** A single-call
+  `bin/ibkr regime` sat silent for 10-20 s while the daemon's
+  five-way fan-out completed — the slowest fetcher bounds the wall
+  clock and stdout stayed blank the whole time. When stdout is a TTY
+  and the call isn't `--json`, a one-line braille spinner names the
+  indicators in flight and clears before the dashboard's first line
+  lands. Non-TTY callers (pipes, file redirects) and `--json` keep
+  their atomic-stdout shape unchanged; the existing buffer-based
+  tests and renderer contract are not affected.
+
 ## v0.22.0 — 2026-05-17 12:38 CEST
 
 `ibkr regime` had shipped with a deliberate-placeholder renderer — five
