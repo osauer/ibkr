@@ -182,6 +182,34 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	}
 	if spy52 > 0 {
 		out.SPY52WHigh = new(spy52)
+	} else {
+		// Frozen-mode fallback: in MarketDataType=2 the gateway sends
+		// the price triple as one static snapshot then goes silent —
+		// tick 165 (Misc Stats) never arrives, no matter the budget.
+		// Compute max(High) over ~1 trading year of daily bars instead,
+		// so the indicator stays 3-state at all hours rather than
+		// dropping to 2-state every time the market is closed. The
+		// live tick is still primary above; this branch fires only
+		// when the gateway didn't supply a value.
+		//
+		// 365 calendar days yields ~252 trading bars after weekends and
+		// the 9-10 US holidays per year; FetchHistoricalDailyBars maps
+		// >365 to "1 Y" anyway, so 365 is the exact knee.
+		spyBars, err := deps.history("SPY", 365, 20*time.Second)
+		switch {
+		case err != nil:
+			warnDeps(deps, "regime: SPY 52w high history fetch failed: %v", err)
+		case len(spyBars) < 50:
+			// 50 is a soft floor — any shorter window doesn't
+			// meaningfully approximate a 52w high. Stay symmetric
+			// with HYG 50DMA's diagnostic shape.
+			warnDeps(deps, "regime: SPY 52w high insufficient bars: got %d, want ~252", len(spyBars))
+		default:
+			hi := maxHigh(spyBars, 252)
+			if hi > 0 {
+				out.SPY52WHigh = new(hi)
+			}
+		}
 	}
 
 	// 50-day SMA on HYG. 50 trading days ≈ 70 calendar days when
@@ -370,4 +398,26 @@ func averageClose(bars []ibkrlib.HistoricalBar, n int) float64 {
 		sum += b.Close
 	}
 	return sum / float64(n)
+}
+
+// maxHigh returns the largest High over the last N daily bars
+// (oldest-first). If the slice has fewer than N rows the whole slice
+// is scanned — partial data is still useful for the 52w-high fallback
+// where the indicator needs a best-effort upper bound. Returns 0 only
+// on an empty slice.
+func maxHigh(bars []ibkrlib.HistoricalBar, n int) float64 {
+	if len(bars) == 0 {
+		return 0
+	}
+	tail := bars
+	if len(bars) > n {
+		tail = bars[len(bars)-n:]
+	}
+	hi := 0.0
+	for _, b := range tail {
+		if b.High > hi {
+			hi = b.High
+		}
+	}
+	return hi
 }
