@@ -49,8 +49,9 @@ func main() {
 		"scan":           func() { cli.PreviewRenderScan(env, fixtureScan()) },
 		"size":           func() { cli.PreviewRenderSize(env, fixtureSize()) },
 		"status":         func() { cli.PreviewRenderStatus(env, fixtureStatus()) },
+		"regime":         func() { cli.PreviewRenderRegime(env, fixtureRegime()) },
 	}
-	order := []string{"status", "account", "positions", "positions-flat", "chain", "chain-strikes", "quote", "history", "scan", "size"}
+	order := []string{"status", "account", "positions", "positions-flat", "chain", "chain-strikes", "quote", "history", "scan", "size", "regime"}
 
 	if which == "all" {
 		for i, key := range order {
@@ -64,7 +65,7 @@ func main() {
 	fn, ok := screens[which]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown preview: %q\n", which)
-		fmt.Fprintln(os.Stderr, "screens: account | positions | positions-flat | chain | chain-strikes | quote | history | scan | size | status | all")
+		fmt.Fprintln(os.Stderr, "screens: account | positions | positions-flat | chain | chain-strikes | quote | history | scan | size | status | regime | all")
 		os.Exit(2)
 	}
 	fn()
@@ -385,3 +386,55 @@ func fixtureChain() *rpc.ChainExpiriesResult {
 }
 
 func f64(v float64) *float64 { return &v }
+
+// fixtureRegime returns a realistic mid-session regime envelope that
+// exercises every render branch: one OK-live row, one stale row with a
+// missing sub-field, one OK row with weekly change, one row in the
+// computing state, and one structurally-unavailable row. Numbers track
+// the spec's "Live-test result on 2026-05-17" snippet so the screen and
+// the spec doc agree.
+func fixtureRegime() *rpc.RegimeSnapshotResult {
+	return &rpc.RegimeSnapshotResult{
+		AsOf:    time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC),
+		SpecDoc: "docs/specs/risk-regime-dashboard.md",
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status:   rpc.RegimeStatusOK,
+			VIX:      f64(18.43),
+			VIX3M:    f64(21.36),
+			Ratio:    f64(18.43 / 21.36),
+			DataType: rpc.MarketDataLive,
+			Notes:    "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing).",
+		},
+		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
+			Status:        rpc.RegimeStatusStale,
+			HYGPrice:      f64(79.55),
+			HYG50DMA:      f64(80.10),
+			SPYPrice:      f64(737.34),
+			HYGDataType:   rpc.MarketDataDelayedFrozen,
+			Notes:         "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high.",
+			FieldsMissing: []string{"spy_52w_high"},
+		},
+		USDJPY: rpc.RegimeUSDJPY{
+			Status:       rpc.RegimeStatusOK,
+			Symbol:       "USD.JPY",
+			Last:         f64(158.7285),
+			Close7DAgo:   f64(158.05),
+			WeeklyChange: f64(0.43),
+			DataType:     rpc.MarketDataLive,
+			Notes:        "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength (yellow); >2% in 3 days or >3% in a week (red).",
+		},
+		GammaZero: rpc.RegimeGammaZero{
+			Status: rpc.RegimeStatusComputing,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status:     rpc.GammaZeroStatusComputing,
+				EtaSeconds: 42,
+				Progress:   40,
+			},
+			Notes: "SPX dealer zero-gamma flip level. Spec thresholds: SPX >2% above zero_gamma (green); within 2% (yellow); below (red). Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
+		},
+		Breadth: rpc.RegimeBreadth{
+			Status: rpc.RegimeStatusUnavailable,
+			Notes:  "% S&P 500 stocks above their 50-day SMA. IBKR doesn't catalogue the S5FI feed on retail subscriptions — treat as a manual-entry slot for v1.",
+		},
+	}
+}
