@@ -276,6 +276,108 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 			t.Errorf("status=%q, want error when SPY spot missing", got.Status)
 		}
 	})
+
+	t.Run("spy_52w_high_falls_back_to_daily_bars_when_tick_missing", func(t *testing.T) {
+		// Off-hours / frozen-mode reproducer. The gateway delivers SPY's
+		// bid/ask/last as a single snapshot then goes silent — tick 165
+		// (Misc Stats) never lands no matter how long we wait, so
+		// snapshotWith52WHigh returns week52High=0. The indicator must
+		// derive 52w high from daily bars rather than surface a null
+		// field and drop to a 2-state signal at any hour the market is
+		// closed.
+		bars := make([]ibkrlib.HistoricalBar, 252)
+		for i := range bars {
+			bars[i] = ibkrlib.HistoricalBar{Close: 500.0, High: 500.0 + float64(i)}
+		}
+		// The peak is at the last bar (251) by construction; the helper
+		// must scan the full 252-bar window, not just the latest.
+		bars[100].High = 999.0 // peak somewhere in the middle
+		const wantMaxHigh = 999.0
+
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataFrozen},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {bars: bars},
+			},
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPY52WHigh == nil {
+			t.Fatalf("SPY52WHigh must fall back to daily-bar max(High) when tick 165 is absent, got nil")
+		}
+		if *got.SPY52WHigh != wantMaxHigh {
+			t.Errorf("SPY52WHigh=%v, want %v (peak in synthetic bars)", *got.SPY52WHigh, wantMaxHigh)
+		}
+		if slices.Contains(got.FieldsMissing, "spy_52w_high") {
+			t.Errorf("fields_missing=%v, must NOT include spy_52w_high once fallback supplied it", got.FieldsMissing)
+		}
+	})
+
+	t.Run("spy_52w_high_live_tick_takes_precedence_over_fallback", func(t *testing.T) {
+		// When the gateway *did* deliver tick 165, that value is the
+		// truth — even if our daily-bar derivation would compute
+		// something larger (e.g. an intraday spike not yet reflected in
+		// the closing-day bar set). Don't second-guess the gateway.
+		bars := make([]ibkrlib.HistoricalBar, 252)
+		for i := range bars {
+			bars[i] = ibkrlib.HistoricalBar{Close: 500.0, High: 999.0}
+		}
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 600.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {bars: bars},
+			},
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPY52WHigh == nil || *got.SPY52WHigh != 600.0 {
+			t.Errorf("SPY52WHigh=%v, want 600 (live gateway value, not the 999 we'd derive)", got.SPY52WHigh)
+		}
+	})
+
+	t.Run("spy_52w_high_fallback_history_error_logged", func(t *testing.T) {
+		// Symmetric with the HYG 50DMA history-error case: if the
+		// fallback's history fetch fails, the renderer learns *why*
+		// spy_52w_high is missing from the daemon log rather than
+		// staring at a silent null field. Operator-visible diagnostic,
+		// not just an advisory missing-field note.
+		var warns []string
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataFrozen},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {err: errors.New("history fetch failed")},
+			},
+			warnLog: &warns,
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPY52WHigh != nil {
+			t.Errorf("SPY52WHigh must be nil when both live tick and fallback fail, got %v", *got.SPY52WHigh)
+		}
+		if !slices.Contains(got.FieldsMissing, "spy_52w_high") {
+			t.Errorf("fields_missing=%v, want spy_52w_high", got.FieldsMissing)
+		}
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "SPY") && strings.Contains(s, "52w") && strings.Contains(s, "history fetch failed")
+		}) {
+			t.Errorf("expected warn log for SPY 52w fallback history error, got %v", warns)
+		}
+	})
 }
 
 func TestFetchRegimeUSDJPY(t *testing.T) {
