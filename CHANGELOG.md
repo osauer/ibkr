@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.23.2 — 2026-05-17 21:28 CEST
+
+Two off-hours bugs in the regime dashboard's HYG/SPY divergence row
+fixed in one release. Before v0.23.2 the row was silently dropping to
+a 2-state signal every time the market was closed: `spy_52w_high` came
+back null because the underlying tick stream doesn't exist in frozen
+mode, and `hyg_50dma` came back null because HYG's contract was never
+resolving. Both fields now land on the first regime call after a cold
+daemon restart, with NYSE closed.
+
+### Fixed
+
+- **SPY 52-week high now lands on off-hours regime calls.** The
+  HYG/SPY divergence row needs SPY's 52w high to evaluate the
+  yellow-band trigger ("HYG breaks 50DMA while SPY within 3% of 52w
+  high"). It was sourced from generic tick 165 (Misc Stats) in
+  `briefSnapshotPriceWith52WHigh`, which is part of IBKR's streaming
+  tick set. In `MarketDataType=2` (frozen — every non-RTH call) the
+  gateway sends one static snapshot of bid/ask/last and then goes
+  silent; tick 165 never arrives, no matter the budget. The row came
+  back with `spy_52w_high: null` on every weekend / overnight /
+  holiday regime call, dropping the indicator's signal from 3-state
+  to 2-state for most of when the dashboard actually gets read.
+  `fetchRegimeHYGSPY` now falls back to `max(High)` over the most
+  recent ~252 daily bars (one trading year) from the same HMDS path
+  the indicator already uses for HYG's 50DMA. The live tick is still
+  primary — the fallback fires only when the gateway returned zero,
+  so RTH calls get the gateway's real-time intraday-accurate value
+  and never the slightly-stale derivation.
+
+- **HYG 50-day SMA now lands on cold-start regime calls.** HYG was
+  the only regime indicator symbol missing from the ETF case block in
+  `classifySymbol`, so it went out to the IBKR gateway with
+  `primary=""`. Without a fast-lookup hint the gateway did a wider
+  security-master search that routinely overruns the regime fetcher's
+  2 s `prepareContract` budget (observed empirically at ~21 s; the
+  prewarm budget is 30 s precisely for this reason). HYG's history
+  fetch aborted with "contract details unresolved", and `hyg_50dma`
+  surfaced as null on every cold-start call. `classifySymbol` now
+  routes HYG through ARCA alongside SPY, QQQ, IWM, DIA, GLD, TLT —
+  HYG is on ArcaEdge like the others. The "reqContractData anomaly
+  symbol=HYG primary=''" warning at `connection.go:3268` (which is a
+  diagnostic gate, not a separate bug) no longer fires for HYG
+  either. Investigation confirmed HYG was the only affected regime
+  symbol; no broader audit needed.
+
 ## v0.23.1 — 2026-05-17 20:56 CEST
 
 A one-fix follow-up to v0.23.0. The prewarm shipped in v0.23.0 wasn't
