@@ -2,6 +2,97 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.22.0 — 2026-05-17 12:38 CEST
+
+`ibkr regime` had shipped with a deliberate-placeholder renderer — five
+indicator rows dumped one after another, each followed by a paragraph
+of dim spec prose, the composite verdict that the spec demands at the
+top nowhere to be seen. This release replaces it with the dashboard the
+spec was actually asking for: one bold verdict line, a count summary
+that's honest about which indicators were excluded from the count, and
+one compressed row per indicator with a colored band glyph and the
+threshold band in the dim parenthetical. The full spec prose moves
+behind `--explain` so it's still one keystroke away when you want it.
+
+The wire shape and JSON output are unchanged. Threshold derivation now
+lives in the renderer with the spec defaults; the daemon still emits
+raw measurements only.
+
+### Changed
+
+- **`ibkr regime` text output is the dashboard the spec describes.**
+  The old screen took ~30 lines per call and dedicated ~3 KB of dim
+  prose to per-row methodology notes. The new screen takes ~12 lines:
+  a bold `Normal regime` / `Watch closely` / `Regime shift likely` /
+  `Full risk-off conditions` headline taken verbatim from the spec's
+  interpretation table, a dim `2 green · 1 yellow · 0 red  ·  3 of 5
+  ranked · 2 unranked` summary, then one row per indicator with a
+  colored badge glyph (filled circle for ranked rows, distinct glyphs
+  for `computing` and `unavailable`), the value cell, the colored band
+  word (green / yellow / red), and the threshold band as a dim
+  parenthetical. JSON output is unchanged.
+
+- **Composite count excludes `computing` and `unavailable` rows.** The
+  count summary names ranked and unranked separately so a reader sees
+  that some indicators were excluded from the verdict rather than
+  assuming it was computed over all five. Empirically this matters: on
+  retail IBKR accounts indicator 5 (breadth) is structurally
+  unavailable, and on the first regime call of the NY trading day
+  indicator 4 (gamma) is `computing`. The previous renderer offered no
+  visible signal that those rows weren't contributing.
+
+- **`--watch` flag, sibling parity with `account` / `positions` /
+  `quote`.** Re-polls on a fixed interval with in-place TTY redraw;
+  default rate is 60 s because regime data updates slowly and a tighter
+  rate just burns gateway round-trips. Mutually exclusive with `--json`.
+
+- **`--explain` flag for the spec prose.** Default output shows the
+  threshold band as a compact parenthetical (e.g. `(<0.92 contango)`).
+  Pass `--explain` to print the full spec language under each row, the
+  same prose that previously bloated every default render. The JSON
+  surface still carries the prose verbatim on the `notes` field for
+  programmatic consumers.
+
+- **Threshold derivation moved into the renderer.** Spec defaults are
+  baked as renderer constants (`vixRatioGreen = 0.92` etc.). Daemon
+  still emits raw measurements only — the spec calls the bands
+  user-tunable, which means defaults in the renderer rather than
+  policy in the daemon. Configurability is deferred until asked for.
+
+- **HYG vs SPY row stays unranked when `spy_52w_high` is missing**
+  rather than guessing. The spec's yellow band requires SPY within 3 %
+  of its 52-week high; without that data the renderer can't band
+  honestly, so the row counts as unranked and the reason names the
+  missing field. This was a HIGH-finding correctness consideration
+  during the taste review: don't guess what we can't compute.
+
+### Removed
+
+- **The `Spec doc:` line on the default render.** The path served no
+  human navigation purpose. The JSON envelope still carries `spec_doc`
+  for programmatic consumers — that surface is unchanged.
+
+- **The `(missing: ...)` advisory line under each row.** The same
+  information is now communicated by the band classification itself
+  (an unranked row whose reason names the missing field). One source
+  of truth instead of two.
+
+### Added
+
+- **`PreviewRenderRegime` + a `regime` fixture in `cmd/_preview`.** The
+  flagship regime command had shipped without entering the screenshot
+  preview pipeline. `go run cmd/_preview/main.go regime` now renders a
+  realistic mid-session shape: VIX OK + live, HYG stale + yellow, USD/JPY
+  OK + weekly change, gamma computing + ETA, breadth structurally
+  unavailable. Every render branch lit up in one screen.
+
+- **Renderer test coverage for `regime`.** Eight tests pin the new shape
+  (composite verdict, one-line-per-row layout, band words, gamma ETA
+  inline, breadth reason inline, no spec-doc line, `--explain` mode,
+  default-omits-prose). Eleven more pin the threshold-derivation logic
+  (full composite verdict table, VIX bands, USD/JPY yen-strengthening
+  asymmetry, HYG/SPY honesty-floor when 52w-high is missing).
+
 ## v0.21.0 — 2026-05-17 12:54 EEST
 
 Wraps the risk-regime dashboard work into a single user-facing
