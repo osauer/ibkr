@@ -263,6 +263,18 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_regime",
+		Description: "Risk-regime snapshot: returns all five risk-regime dashboard indicators in one JSON envelope so an LLM consumer doesn't have to know individual tickers, IBKR data paths, or the methodology spec. Each indicator carries raw measurements plus a `notes` field embedding the spec's threshold bands verbatim — green / yellow / red derivation is the consumer's job, not the daemon's. Indicator 4 (SPX dealer zero-gamma) auto-kicks a multi-minute background compute on the first call of an NY trading day; the row surfaces status=\"computing\" with an ETA, and subsequent calls return the cached result. Indicator 5 (SPX breadth) is currently status=\"unavailable\" because IBKR doesn't carry the S5FI feed under any known ticker on retail subscriptions — the `notes` field explains the disposition. The result also carries `spec_doc` pointing at the canonical methodology reference so the consumer can deep-link. Useful for: \"how does the market regime look today?\", \"are we close to any of the spec's regime-shift thresholds?\", \"give me the daily-check dashboard.\"",
+		JSONSchema:  schemaObject(nil, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+			var res rpc.RegimeSnapshotResult
+			if err := conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{

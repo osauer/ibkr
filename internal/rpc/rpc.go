@@ -28,6 +28,7 @@ const (
 	MethodStatusHealth   = "status.health"
 	MethodBreadthSPX     = "breadth.spx"
 	MethodGammaZeroSPX   = "gamma.zero_spx"
+	MethodRegimeSnapshot = "regime.snapshot"
 	MethodCancel         = "cancel"
 	MethodOrderPlace     = "order.place"  // refused in v1
 	MethodOrderCancel    = "order.cancel" // refused in v1
@@ -526,6 +527,120 @@ type GammaZeroSPXResult struct {
 	Result *GammaZeroComputed `json:"result,omitempty"`
 	// Error is populated when Status == "error".
 	Error string `json:"error,omitempty"`
+}
+
+// RegimeIndicatorStatus is the high-level availability/freshness state
+// for one row of the regime snapshot. Renderers branch on it; the
+// daemon never derives green/yellow/red status from raw values (the
+// spec calls those thresholds user-tunable). Specific values:
+//
+//   - "ok"          — the indicator carries a real, fresh measurement
+//   - "stale"       — measurement returned but the gateway labeled it
+//     delayed/frozen; renderer should dim
+//   - "computing"   — heavy compute is in-flight (gamma's first call
+//     of the day); poll again to see the result
+//   - "unavailable" — IBKR doesn't carry the feed on this account; the
+//     `notes` field explains why and what to do
+//   - "error"       — fetch failed; `error_message` carries the reason
+const (
+	RegimeStatusOK          = "ok"
+	RegimeStatusStale       = "stale"
+	RegimeStatusComputing   = "computing"
+	RegimeStatusUnavailable = "unavailable"
+	RegimeStatusError       = "error"
+)
+
+// RegimeVIXTerm is Indicator 1: VIX/VIX3M ratio. Watch for sustained
+// inversion (ratio > 1.0) over 2-3 sessions, not a single spike.
+type RegimeVIXTerm struct {
+	Status       string   `json:"status"`
+	VIX          *float64 `json:"vix"`
+	VIX3M        *float64 `json:"vix3m"`
+	Ratio        *float64 `json:"ratio"` // VIX / VIX3M
+	DataType     string   `json:"data_type,omitempty"`
+	Notes        string   `json:"notes"`
+	ErrorMessage string   `json:"error_message,omitempty"`
+}
+
+// RegimeHYGSPYDivergence is Indicator 2: HYG vs SPY context. The
+// daemon surfaces raw measurements; the consumer compares HYG's
+// current to its 50-day SMA and SPY's current to its 52-week high.
+type RegimeHYGSPYDivergence struct {
+	Status       string   `json:"status"`
+	HYGPrice     *float64 `json:"hyg_price"`
+	HYG50DMA     *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
+	SPYPrice     *float64 `json:"spy_price"`
+	SPY52WHigh   *float64 `json:"spy_52w_high"`
+	HYGDataType  string   `json:"hyg_data_type,omitempty"`
+	Notes        string   `json:"notes"`
+	ErrorMessage string   `json:"error_message,omitempty"`
+}
+
+// RegimeUSDJPY is Indicator 3: USD/JPY exchange rate. Spec measures
+// "weekly move" — daemon surfaces last and 7-trading-days-ago close so
+// the consumer can compute the change. Source is FX-pair routing
+// (CASH/IDEALPRO); routing arrives in a sibling commit.
+type RegimeUSDJPY struct {
+	Status       string   `json:"status"`
+	Symbol       string   `json:"symbol"` // "USD.JPY" canonical form
+	Last         *float64 `json:"last"`
+	Close7DAgo   *float64 `json:"close_7d_ago"`      // close from 7 trading days ago
+	WeeklyChange *float64 `json:"weekly_change_pct"` // (last − close_7d_ago) / close_7d_ago × 100
+	DataType     string   `json:"data_type,omitempty"`
+	Notes        string   `json:"notes"`
+	ErrorMessage string   `json:"error_message,omitempty"`
+}
+
+// RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
+// envelope embedded inline. Auto-kicked by regime.snapshot on first
+// call of an NY trading day; subsequent calls return the cached
+// result. Method token + warnings carry methodology disclosures.
+type RegimeGammaZero struct {
+	Status   string             `json:"status"`
+	Envelope GammaZeroSPXResult `json:"envelope"`
+	Notes    string             `json:"notes"`
+}
+
+// RegimeBreadth is Indicator 5: the existing breadth.spx envelope
+// embedded inline. In v1 IBKR doesn't carry the S5FI feed under any
+// known ticker; this row currently returns Status="unavailable" with
+// a notes pointer to the disposition decision in the spec doc.
+type RegimeBreadth struct {
+	Status   string           `json:"status"`
+	Envelope BreadthSPXResult `json:"envelope"`
+	Notes    string           `json:"notes"`
+}
+
+// RegimeSnapshotParams is the input for MethodRegimeSnapshot. Empty
+// body means "fetch all five indicators with default parameters." A
+// future caller could trim to a subset, but v1 always returns all
+// rows — partial responses are surfaced via per-indicator Status.
+type RegimeSnapshotParams struct{}
+
+// RegimeSnapshotResult is the wire payload for the dashboard
+// generator and the MCP natural-language interface. One JSON
+// envelope, all five rows. Each row carries:
+//   - raw measurements (no derived status colors)
+//   - a `notes` field embedding the spec's threshold bands verbatim,
+//     so a consumer can interpret without reading the spec doc
+//   - a structured Status the renderer branches on for UI state
+//
+// Compatibility note for renderers: the daemon never returns nil for
+// any indicator field — empty / unavailable indicators surface
+// Status="unavailable" with populated Notes. Numerical fields are
+// pointers so "not arrived yet" vs "exactly zero" stays
+// distinguishable.
+type RegimeSnapshotResult struct {
+	AsOf             time.Time              `json:"as_of"`
+	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
+	HYGSPYDivergence RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
+	USDJPY           RegimeUSDJPY           `json:"usd_jpy"`
+	GammaZero        RegimeGammaZero        `json:"gamma_zero"`
+	Breadth          RegimeBreadth          `json:"breadth"`
+	// SpecDoc points consumers (especially LLM-driven ones) at the
+	// canonical methodology + threshold reference so they don't
+	// hallucinate band edges. Same path on every response.
+	SpecDoc string `json:"spec_doc"`
 }
 
 // Quote is the daemon's snapshot result.

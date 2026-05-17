@@ -954,6 +954,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleBreadthSPX(ctx, req) })
 	case rpc.MethodGammaZeroSPX:
 		s.unary(req, enc, func() (any, error) { return s.handleGammaZeroSPX(ctx, req) })
+	case rpc.MethodRegimeSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodQuoteSubscribe:
@@ -1026,6 +1028,14 @@ func unaryDeadline(method string) time.Duration {
 		// 50000 ms will get a clean "computing" envelope back once
 		// the deadline ticks, not a socket timeout.
 		return 55 * time.Second
+	case rpc.MethodRegimeSnapshot:
+		// 45 s — the regime aggregator fans out 5 fetches concurrently;
+		// slowest leg bounds the wall clock. VIX/HYG/SPY/USD-JPY spot
+		// snapshots run at 5 s each, HYG's 50-day SMA history pulls in
+		// ~10-15 s on a cold cache, gamma returns from its own cache
+		// instantly after the first call of the day. 45 s leaves slack
+		// for the historical-bars worst-case on first call.
+		return 45 * time.Second
 	case rpc.MethodScanRun:
 		// Up to 35 s scanner-subscription budget (off-hours cold-start
 		// for HIGH_OPEN_GAP / TOP_PERC_GAIN / HIGH_OPT_IMP_VOLAT_OVER_HIST

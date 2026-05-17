@@ -108,6 +108,12 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 		assertGatewayUnavailable(t, err)
 	})
 
+	t.Run("regime.snapshot", func(t *testing.T) {
+		req := &rpc.Request{ID: "t6d", Method: rpc.MethodRegimeSnapshot, Params: json.RawMessage(`{}`)}
+		_, err := srv.handleRegimeSnapshot(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+
 	t.Run("chain.expiries", func(t *testing.T) {
 		params, _ := json.Marshal(rpc.ChainExpiriesParams{Symbol: "AAPL"})
 		req := &rpc.Request{ID: "t7", Method: rpc.MethodChainExpiries, Params: params}
