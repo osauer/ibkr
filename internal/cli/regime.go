@@ -82,7 +82,62 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 		}
 		return runWatch(ctx, env, *rate, "regime", fetchAndRender)
 	}
-	return fetchAndRender(env.Stdout)
+	// Single-call TTY path: the daemon's fan-out can sit silent for
+	// 10-20 s on a cold cache while the five fetchers race contract-
+	// resolution against history pulls. Surface motion so the user
+	// sees the command is alive instead of staring at a blank
+	// terminal. Pipe / non-TTY callers and --json keep their atomic
+	// stdout shape unchanged.
+	if *jsonOut || !isTerminal(env.Stdout) {
+		return fetchAndRender(env.Stdout)
+	}
+	stop := startRegimeSpinner(env)
+	code := fetchAndRender(env.Stdout)
+	stop()
+	return code
+}
+
+// startRegimeSpinner writes a single dim status line to stderr-style
+// stdout (so it never appears in captured stdout that consumers might
+// parse) and animates a braille spinner until the returned stop
+// function is called. The clear-line sequence is written one last time
+// on stop so the regime renderer's own header lands at column 0 with
+// no leftover spinner characters underneath.
+//
+// Lives in stdout (not stderr) because env.Stdout is what the rest of
+// the CLI writes to — keeping motion on the same stream prevents a
+// stderr capture (e.g. `bin/ibkr regime 2>/dev/null`) from swallowing
+// the spinner while the final output stays on stdout. The non-TTY
+// guard at the call site means a pipe never sees these escapes.
+func startRegimeSpinner(env *Env) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	// Braille spinner — narrow, dense, reads as motion at 10 fps.
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	indicators := "VIX VIX3M HYG SPY USD.JPY gamma breadth"
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				// Clear the spinner line so the renderer's first
+				// fmt.Fprintln(out) blank line lands at col 0.
+				fmt.Fprint(env.Stdout, "\r\x1b[K")
+				return
+			case <-ticker.C:
+				fmt.Fprintf(env.Stdout, "\r\x1b[K%s %s",
+					env.dim("Fetching regime: "+indicators), frames[i])
+				i = (i + 1) % len(frames)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 // renderRegimeText is the writer-less entry point preserved for tests
