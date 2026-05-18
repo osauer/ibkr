@@ -555,6 +555,48 @@ const (
 	RegimeStatusError       = "error"
 )
 
+// Quality is the provenance + freshness envelope for one scalar regime
+// field. Attached as a sibling pointer to each value pointer; nil
+// Quality means "no provenance recorded" (legacy/migration only). The
+// envelope is purely additive to the row-level Status/DataType —
+// renderers prefer Quality when present.
+//
+// FreshnessClass values:
+//   - "live"     — gateway live tick observed at AsOf
+//   - "frozen"   — gateway frozen/delayed tick (typically last
+//     regular-session close) at AsOf
+//   - "derived"  — computed from historical bars (e.g.
+//     max(High) over 252 daily bars)
+//   - "modelled" — computed from a model with documented caveats (the
+//     gamma sweep's perfiliev-bs-sweep-v1)
+//
+// Confidence values:
+//   - "firm"     — direct gateway measurement
+//   - "estimate" — derived from historical bars
+//   - "proxy"    — modelled with methodology disclosure (caller's
+//     Method/Warnings document the assumptions)
+type Quality struct {
+	AsOf           time.Time `json:"as_of"`
+	FreshnessClass string    `json:"freshness_class"`
+	Confidence     string    `json:"confidence"`
+	// Source is a one-line human-readable provenance description, e.g.
+	// "VIX tick", "SPY 252d max(High) fallback", "perfiliev-bs-sweep-v1".
+	// Surfaced by --explain; renderers can ignore it for the compact
+	// in-row annotation.
+	Source string `json:"source,omitempty"`
+}
+
+const (
+	FreshnessLive     = "live"
+	FreshnessFrozen   = "frozen"
+	FreshnessDerived  = "derived"
+	FreshnessModelled = "modelled"
+
+	ConfidenceFirm     = "firm"
+	ConfidenceEstimate = "estimate"
+	ConfidenceProxy    = "proxy"
+)
+
 // RegimeVIXTerm is Indicator 1: VIX/VIX3M ratio. Watch for sustained
 // inversion (ratio > 1.0) over 2-3 sessions, not a single spike.
 //
@@ -572,6 +614,12 @@ type RegimeVIXTerm struct {
 	Notes         string   `json:"notes"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
+	// Per-scalar provenance. Each *Quality is nil when the corresponding
+	// value pointer is nil; otherwise the daemon populates it at the
+	// fetch site so renderers can show "firm live", "frozen", or
+	// "estimate · 18s" without re-deriving from DataType.
+	VIXQuality   *Quality `json:"vix_quality,omitempty"`
+	VIX3MQuality *Quality `json:"vix3m_quality,omitempty"`
 }
 
 // RegimeHYGSPYDivergence is Indicator 2: HYG vs SPY context. The
@@ -591,6 +639,13 @@ type RegimeHYGSPYDivergence struct {
 	Notes         string   `json:"notes"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
+	// Per-scalar provenance. SPY52WHigh has two paths (live tick 165 vs
+	// history fallback); the Quality field is what the renderer reads to
+	// distinguish firm-tick from derived-fallback.
+	HYGQuality        *Quality `json:"hyg_quality,omitempty"`
+	HYG50DMAQuality   *Quality `json:"hyg_50dma_quality,omitempty"`
+	SPYQuality        *Quality `json:"spy_quality,omitempty"`
+	SPY52WHighQuality *Quality `json:"spy_52w_high_quality,omitempty"`
 }
 
 // RegimeUSDJPY is Indicator 3: USD/JPY exchange rate. Spec measures
@@ -607,6 +662,10 @@ type RegimeUSDJPY struct {
 	Notes         string   `json:"notes"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
+	// Per-scalar provenance. Last is firm-live (or firm-frozen);
+	// Close7DAgo is always estimate-derived (MIDPOINT historical bar).
+	LastQuality       *Quality `json:"last_quality,omitempty"`
+	Close7DAgoQuality *Quality `json:"close_7d_ago_quality,omitempty"`
 }
 
 // RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
@@ -618,6 +677,12 @@ type RegimeGammaZero struct {
 	Envelope      GammaZeroSPXResult `json:"envelope"`
 	Notes         string             `json:"notes"`
 	FieldsMissing []string           `json:"fields_missing,omitempty"`
+	// Per-scalar provenance for the two values the renderer prints:
+	// ZeroGamma is proxy-modelled (carries the perfiliev-bs-sweep-v1
+	// methodology); GammaTotalAbs is estimate-derived (sign-agnostic
+	// notional summed over observed OI+IV).
+	ZeroGammaQuality     *Quality `json:"zero_gamma_quality,omitempty"`
+	GammaTotalAbsQuality *Quality `json:"gamma_total_abs_quality,omitempty"`
 }
 
 // RegimeBreadth is Indicator 5: the existing breadth.spx envelope
@@ -629,6 +694,11 @@ type RegimeBreadth struct {
 	Envelope      BreadthSPXResult `json:"envelope"`
 	Notes         string           `json:"notes"`
 	FieldsMissing []string         `json:"fields_missing,omitempty"`
+	// Per-scalar provenance for the breadth percentage. In v1 IBKR
+	// doesn't carry the S5FI feed under any retail subscription, so
+	// this is typically nil (unavailable). When ranked, firm-live or
+	// firm-frozen depending on the envelope's DataType.
+	ValueQuality *Quality `json:"value_quality,omitempty"`
 }
 
 // RegimeSnapshotParams is the input for MethodRegimeSnapshot. Empty
