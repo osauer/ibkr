@@ -121,6 +121,7 @@ const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied
 
 func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm {
 	out := rpc.RegimeVIXTerm{Notes: vixTermNotes}
+	now := time.Now()
 
 	// VIX itself usually delivers a live mark (tick 37) even off-hours.
 	// VIX3M is a thinner CBOE index whose calculation only updates with
@@ -146,6 +147,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 		// ratio cannot be computed; surface VIX alone with an
 		// error_message so the consumer knows the ratio is missing.
 		out.VIX = new(vix)
+		out.VIXQuality = firmTickQuality(now, vixDT, "VIX tick")
 		out.DataType = vixDT
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "VIX3M: no tick within budget (thin CBOE index, common off-hours)"
@@ -154,6 +156,8 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 
 	out.VIX = new(vix)
 	out.VIX3M = new(vix3m)
+	out.VIXQuality = firmTickQuality(now, vixDT, "VIX tick")
+	out.VIX3MQuality = firmTickQuality(now, vix3mDT, "VIX3M tick (thin CBOE; off-hours typically frozen)")
 	r := vix / vix3m
 	out.Ratio = &r
 	// The ratio is only as fresh as the staler leg. Both must be live
@@ -174,6 +178,7 @@ const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec th
 
 func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDivergence {
 	out := rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes}
+	now := time.Now()
 
 	hyg, hygDT := deps.snapshot(ctx, "HYG", 5*time.Second)
 	if hyg <= 0 {
@@ -183,6 +188,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	}
 	out.HYGPrice = new(hyg)
 	out.HYGDataType = hygDT
+	out.HYGQuality = firmTickQuality(now, hygDT, "HYG tick (ARCA)")
 
 	// SPY: pull spot + 52-week high in one combined subscribe so tick
 	// 165 (Misc Stats) has time to land. Either field may still come
@@ -191,12 +197,14 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// surfaces what it had. 8s budget (vs 5s for plain snapshots)
 	// because the Misc-Stats tick reliably arrives later than the
 	// price triple in observed traces.
-	spy, spy52, _ := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
+	spy, spy52, spyDT := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
 	if spy > 0 {
 		out.SPYPrice = new(spy)
+		out.SPYQuality = firmTickQuality(now, spyDT, "SPY tick")
 	}
 	if spy52 > 0 {
 		out.SPY52WHigh = new(spy52)
+		out.SPY52WHighQuality = firmTickQuality(now, spyDT, "SPY tick 165 (Misc Stats)")
 	} else {
 		// Frozen-mode fallback: in MarketDataType=2 the gateway sends
 		// the price triple as one static snapshot then goes silent —
@@ -223,6 +231,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 			hi := maxHigh(spyBars, 252)
 			if hi > 0 {
 				out.SPY52WHigh = new(hi)
+				out.SPY52WHighQuality = derivedQuality(now, "SPY 252d max(High) fallback")
 			}
 		}
 	}
@@ -243,6 +252,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		sma := averageClose(bars, 50)
 		if sma > 0 {
 			out.HYG50DMA = new(sma)
+			out.HYG50DMAQuality = derivedQuality(now, "HYG 50-bar SMA")
 		}
 	}
 
@@ -274,6 +284,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 		Symbol: "USD.JPY",
 		Notes:  usdJpyNotes,
 	}
+	now := time.Now()
 
 	// briefSnapshotPrice routes "USD.JPY" through pkg/ibkr.classifySymbol
 	// to CASH/IDEALPRO/JPY (see commit 6ac583c). A 0 result here means
@@ -287,6 +298,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 		return out
 	}
 	out.Last = new(last)
+	out.LastQuality = firmTickQuality(now, dt, "USD.JPY CASH tick (IDEALPRO)")
 	out.DataType = dt
 
 	// 7-trading-days-ago close. FX history uses MIDPOINT bars
@@ -309,6 +321,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 			c7 := bars[idx].Close
 			if c7 > 0 {
 				out.Close7DAgo = new(c7)
+				out.Close7DAgoQuality = derivedQuality(now, "USD.JPY MIDPOINT bar t-7")
 				chg := (last - c7) / c7 * 100
 				out.WeeklyChange = &chg
 			}
@@ -349,6 +362,15 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	switch envelope.Status {
 	case rpc.GammaZeroStatusReady:
 		out.Status = rpc.RegimeStatusOK
+		if envelope.Result != nil {
+			// Both scalars derive from the same compute, so AsOf is the
+			// compute's completion timestamp. ZeroGamma is modelled (the
+			// BS sweep's interpolation); GammaTotalAbs is the firmer
+			// sign-agnostic notional aggregated from OI+IV observations
+			// — still an estimate because per-leg coverage varies.
+			out.ZeroGammaQuality = modelledQuality(envelope.Result.AsOf, envelope.Result.Method)
+			out.GammaTotalAbsQuality = derivedQuality(envelope.Result.AsOf, "BS-sweep |Γ|·OI·spot²")
+		}
 	case rpc.GammaZeroStatusComputing:
 		out.Status = rpc.RegimeStatusComputing
 	case rpc.GammaZeroStatusError:
@@ -383,6 +405,7 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	if !rpc.IsLiveDataType(envelope.DataType) {
 		out.Status = rpc.RegimeStatusStale
 	}
+	out.ValueQuality = firmTickQuality(time.Now(), envelope.DataType, "IBKR S5FI tick")
 	return out
 }
 
@@ -397,6 +420,51 @@ func warnDeps(d *regimeDeps, format string, args ...any) {
 		return
 	}
 	d.logWarnf(format, args...)
+}
+
+// firmTickQuality builds a Quality for a value that came directly from
+// a gateway tick. FreshnessClass tracks live vs frozen based on the
+// data-type the gateway labelled the subscription with; Confidence is
+// "firm" because the value is a direct gateway measurement (not
+// computed from history or a model).
+func firmTickQuality(at time.Time, dataType, source string) *rpc.Quality {
+	cls := rpc.FreshnessLive
+	if !rpc.IsLiveDataType(dataType) {
+		cls = rpc.FreshnessFrozen
+	}
+	return &rpc.Quality{
+		AsOf:           at,
+		FreshnessClass: cls,
+		Confidence:     rpc.ConfidenceFirm,
+		Source:         source,
+	}
+}
+
+// derivedQuality builds a Quality for a value computed from historical
+// bars (e.g. a 50-day SMA or a 252-bar max). The freshness class is
+// "derived" because the value reflects the most recent close anchoring
+// the bar fetch, not a live tick; confidence is "estimate" — a fallback
+// when a firm tick was unavailable or always-derived by methodology.
+func derivedQuality(at time.Time, source string) *rpc.Quality {
+	return &rpc.Quality{
+		AsOf:           at,
+		FreshnessClass: rpc.FreshnessDerived,
+		Confidence:     rpc.ConfidenceEstimate,
+		Source:         source,
+	}
+}
+
+// modelledQuality builds a Quality for a value produced by a model
+// (currently only the gamma compute's zero-flip estimate). The Source
+// field carries the method token so consumers can deep-link to the
+// methodology disclosure without re-reading the spec doc.
+func modelledQuality(at time.Time, method string) *rpc.Quality {
+	return &rpc.Quality{
+		AsOf:           at,
+		FreshnessClass: rpc.FreshnessModelled,
+		Confidence:     rpc.ConfidenceProxy,
+		Source:         method,
+	}
 }
 
 // averageClose returns the simple average of the last N daily closes

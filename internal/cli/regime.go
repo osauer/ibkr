@@ -47,6 +47,12 @@ type regimeRow struct {
 	reason    string     // parenthetical band justification ("<0.92 contango")
 	status    string     // rpc.RegimeStatus*; drives glyph for unranked + stale suffix
 	stateNote string     // override for unranked / loading rows ("42s ETA · 40% done")
+	// quality is the row's compact provenance tag, e.g. "· est 18s" or
+	// "· modelled". Empty string when every value on the row came from
+	// a firm-live tick — the default case stays unannotated to keep the
+	// rendering uncluttered. Each row builder computes this from the
+	// rpc.Quality pointers attached to the values it consumed.
+	quality string
 }
 
 func runRegime(ctx context.Context, env *Env, args []string) int {
@@ -153,12 +159,13 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 // rule; five one-line indicator rows; optional --explain footer with
 // the spec's prose per row. Pass explain=true for the verbose mode.
 func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, explain bool) int {
+	now := r.AsOf
 	rows := []regimeRow{
-		rowVIXTerm(r.VIXTermStructure),
-		rowHYGSPY(r.HYGSPYDivergence),
-		rowUSDJPY(r.USDJPY),
-		rowGamma(r.GammaZero),
-		rowBreadth(r.Breadth),
+		rowVIXTerm(now, r.VIXTermStructure),
+		rowHYGSPY(now, r.HYGSPYDivergence),
+		rowUSDJPY(now, r.USDJPY),
+		rowGamma(now, r.GammaZero),
+		rowBreadth(now, r.Breadth),
 	}
 	c := tallyComposite(rows)
 
@@ -212,12 +219,79 @@ func renderRow(env *Env, r regimeRow) string {
 	if r.reason != "" {
 		reason = env.dim("(" + r.reason + ")")
 	}
+	// Compose the suffix: quality tag (from Quality envelopes) takes
+	// precedence over the legacy "· stale tick" indicator. The two
+	// surface the same idea via different layers — the tag is more
+	// specific (firm vs estimate vs modelled), so prefer it when the
+	// daemon populated Quality.
 	suffix := ""
-	if r.status == rpc.RegimeStatusStale {
+	switch {
+	case r.quality != "":
+		suffix = "  " + env.dim(r.quality)
+	case r.status == rpc.RegimeStatusStale:
 		suffix = "  " + env.dim("· stale tick")
 	}
 	return fmt.Sprintf("  %s  %s  %s  %s%s%s",
 		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, reason, suffix)
+}
+
+// qualityTag compresses a set of *rpc.Quality pointers into a short
+// suffix string for the row's right edge. Returns "" when every
+// attached Quality is firm-live (the default-case row reads as fresh
+// with no extra ink). Picks the worst-of across attached values:
+//
+//   - any modelled/proxy → "· modelled"  (e.g. gamma's BS-sweep zero-flip)
+//   - any derived/estimate → "· est"     (e.g. SPY 52w-high fallback)
+//   - any firm/frozen → "· frozen"       (gateway-frozen tick)
+//   - otherwise → ""                     (all firm/live)
+//
+// Age suffix ("· est 18s") appends when the worst Quality.AsOf is more
+// than 5 s older than now — surfaces the "this value is from a fetch
+// that finished 18 s before the snapshot timestamp" case the user
+// asked for. Skipped when age ≤ 5 s so the row stays uncluttered.
+func qualityTag(now time.Time, qs ...*rpc.Quality) string {
+	worst := ""
+	worstAt := time.Time{}
+	rank := func(q *rpc.Quality) int {
+		if q == nil {
+			return 0
+		}
+		switch {
+		case q.FreshnessClass == rpc.FreshnessModelled || q.Confidence == rpc.ConfidenceProxy:
+			return 4
+		case q.FreshnessClass == rpc.FreshnessDerived || q.Confidence == rpc.ConfidenceEstimate:
+			return 3
+		case q.FreshnessClass == rpc.FreshnessFrozen:
+			return 2
+		case q.FreshnessClass == rpc.FreshnessLive:
+			return 1
+		}
+		return 0
+	}
+	worstRank := 0
+	for _, q := range qs {
+		if r := rank(q); r > worstRank {
+			worstRank = r
+			worstAt = q.AsOf
+		}
+	}
+	switch worstRank {
+	case 4:
+		worst = "· modelled"
+	case 3:
+		worst = "· est"
+	case 2:
+		worst = "· frozen"
+	default:
+		return ""
+	}
+	if !worstAt.IsZero() {
+		age := now.Sub(worstAt)
+		if age > 5*time.Second {
+			return fmt.Sprintf("%s %ds", worst, int(age.Seconds()))
+		}
+	}
+	return worst
 }
 
 // glyph picks the row badge from the row's band and status. Ranked rows
@@ -346,7 +420,7 @@ func (c regimeComposite) summary() string {
 // lays out. Threshold derivation lives here, with the spec defaults
 // from the top of the file.
 
-func rowVIXTerm(r rpc.RegimeVIXTerm) regimeRow {
+func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 	row := regimeRow{name: "VIX/VIX3M", status: r.Status}
 	if r.Status == rpc.RegimeStatusError || r.Ratio == nil {
 		row.value = "—"
@@ -354,6 +428,7 @@ func rowVIXTerm(r rpc.RegimeVIXTerm) regimeRow {
 		return row
 	}
 	row.value = fmt.Sprintf("%.3f  (%.2f / %.2f)", *r.Ratio, deref(r.VIX), deref(r.VIX3M))
+	row.quality = qualityTag(now, r.VIXQuality, r.VIX3MQuality)
 	switch {
 	case *r.Ratio < vixRatioGreen:
 		row.band, row.reason = bandGreen, fmt.Sprintf("<%.2f  contango", vixRatioGreen)
@@ -365,7 +440,7 @@ func rowVIXTerm(r rpc.RegimeVIXTerm) regimeRow {
 	return row
 }
 
-func rowHYGSPY(r rpc.RegimeHYGSPYDivergence) regimeRow {
+func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	row := regimeRow{name: "HYG vs SPY", status: r.Status}
 	if r.Status == rpc.RegimeStatusError {
 		row.value = "—"
@@ -379,6 +454,7 @@ func rowHYGSPY(r rpc.RegimeHYGSPYDivergence) regimeRow {
 		hyg50 = fmt.Sprintf("%.2f", *r.HYG50DMA)
 	}
 	row.value = fmt.Sprintf("HYG %.2f / 50dma %s", deref(r.HYGPrice), hyg50)
+	row.quality = qualityTag(now, r.HYGQuality, r.HYG50DMAQuality, r.SPYQuality, r.SPY52WHighQuality)
 	// Banding. Cannot reach red without a multi-session history; the
 	// renderer's worst-case for HYG-below-50dma is yellow even when
 	// SPY is at highs. This is a documented v1 floor.
@@ -400,7 +476,7 @@ func rowHYGSPY(r rpc.RegimeHYGSPYDivergence) regimeRow {
 	return row
 }
 
-func rowUSDJPY(r rpc.RegimeUSDJPY) regimeRow {
+func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 	row := regimeRow{name: "USD/JPY", status: r.Status}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
 		row.value = "—"
@@ -416,6 +492,7 @@ func rowUSDJPY(r rpc.RegimeUSDJPY) regimeRow {
 		wkly = fmt.Sprintf("%s%.2f%%/wk", sign, *r.WeeklyChange)
 	}
 	row.value = fmt.Sprintf("%.4f  %s", deref(r.Last), wkly)
+	row.quality = qualityTag(now, r.LastQuality, r.Close7DAgoQuality)
 	// Spec: yen strengthening (USD/JPY *falling*) is the risk signal.
 	// Convention: WeeklyChange negative = yen strengthening.
 	if r.WeeklyChange == nil {
@@ -434,7 +511,7 @@ func rowUSDJPY(r rpc.RegimeUSDJPY) regimeRow {
 	return row
 }
 
-func rowGamma(r rpc.RegimeGammaZero) regimeRow {
+func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 	row := regimeRow{name: "SPY γ-zero", status: r.Status}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
@@ -482,6 +559,10 @@ func rowGamma(r rpc.RegimeGammaZero) regimeRow {
 		default:
 			row.band, row.reason = bandRed, "spot below flip"
 		}
+		// Gamma's two scalars are always modelled (zero_gamma via the
+		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
+		// row will carry "· modelled" regardless of ranking.
+		row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
 		return row
 	}
 	row.value = "—"
@@ -489,7 +570,7 @@ func rowGamma(r rpc.RegimeGammaZero) regimeRow {
 	return row
 }
 
-func rowBreadth(r rpc.RegimeBreadth) regimeRow {
+func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 	row := regimeRow{name: "SPX breadth", status: r.Status}
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		switch r.Status {
@@ -503,6 +584,7 @@ func rowBreadth(r rpc.RegimeBreadth) regimeRow {
 	}
 	v := r.Envelope.Value
 	row.value = fmt.Sprintf("%.1f%% above 50-DMA", v)
+	row.quality = qualityTag(now, r.ValueQuality)
 	// Renderer caveat: spec red band also requires "SPX within 3% of
 	// 52w high" but we don't have SPX 52w-high context inside this row.
 	// Conservative call: report red on raw breadth only; do not
@@ -527,21 +609,62 @@ func rowBreadth(r rpc.RegimeBreadth) regimeRow {
 // which already embeds the spec's threshold language.
 
 func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
+	type qField struct {
+		name string
+		q    *rpc.Quality
+	}
 	type entry struct {
 		name, notes string
 		missing     []string
+		quals       []qField
 	}
 	entries := []entry{
-		{"VIX/VIX3M", r.VIXTermStructure.Notes, r.VIXTermStructure.FieldsMissing},
-		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing},
-		{"USD/JPY", r.USDJPY.Notes, r.USDJPY.FieldsMissing},
-		{"SPY γ-zero", r.GammaZero.Notes, r.GammaZero.FieldsMissing},
-		{"SPX breadth", r.Breadth.Notes, r.Breadth.FieldsMissing},
+		{"VIX/VIX3M", r.VIXTermStructure.Notes, r.VIXTermStructure.FieldsMissing, []qField{
+			{"VIX", r.VIXTermStructure.VIXQuality},
+			{"VIX3M", r.VIXTermStructure.VIX3MQuality},
+		}},
+		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing, []qField{
+			{"HYG", r.HYGSPYDivergence.HYGQuality},
+			{"HYG_50DMA", r.HYGSPYDivergence.HYG50DMAQuality},
+			{"SPY", r.HYGSPYDivergence.SPYQuality},
+			{"SPY_52w_high", r.HYGSPYDivergence.SPY52WHighQuality},
+		}},
+		{"USD/JPY", r.USDJPY.Notes, r.USDJPY.FieldsMissing, []qField{
+			{"Last", r.USDJPY.LastQuality},
+			{"Close_7d_ago", r.USDJPY.Close7DAgoQuality},
+		}},
+		{"SPY γ-zero", r.GammaZero.Notes, r.GammaZero.FieldsMissing, []qField{
+			{"Zero_gamma", r.GammaZero.ZeroGammaQuality},
+			{"|Gamma|.OI_sum", r.GammaZero.GammaTotalAbsQuality},
+		}},
+		{"SPX breadth", r.Breadth.Notes, r.Breadth.FieldsMissing, []qField{
+			{"Value", r.Breadth.ValueQuality},
+		}},
 	}
 	fmt.Fprintln(out, env.dim("  Spec thresholds + methodology (see "+r.SpecDoc+" for full disclosure):"))
 	fmt.Fprintln(out)
 	for _, e := range entries {
 		fmt.Fprintf(out, "  %s\n", env.bold(e.name))
+		// Per-scalar provenance block. Each field shows freshness +
+		// confidence + age + source so the reader can audit any number
+		// they're about to act on. Nil-Quality fields are silently
+		// skipped — keeps legacy daemons / fixtures working.
+		for _, qf := range e.quals {
+			if qf.q == nil {
+				continue
+			}
+			age := r.AsOf.Sub(qf.q.AsOf)
+			ageStr := ""
+			if age > time.Second {
+				ageStr = fmt.Sprintf(" · age %ds", int(age.Seconds()))
+			}
+			src := ""
+			if qf.q.Source != "" {
+				src = " · " + qf.q.Source
+			}
+			fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf("%-15s %s %s%s%s",
+				qf.name, qf.q.Confidence, qf.q.FreshnessClass, ageStr, src)))
+		}
 		fmt.Fprintf(out, "  %s\n", env.dim(e.notes))
 		if len(e.missing) > 0 {
 			fmt.Fprintf(out, "  %s\n", env.dim("(missing: "+strings.Join(e.missing, ", ")+")"))

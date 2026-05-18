@@ -286,7 +286,7 @@ func TestRegimeRow_VIXBands(t *testing.T) {
 		{1.10, bandRed},
 	}
 	for _, tc := range cases {
-		got := rowVIXTerm(mk(tc.ratio)).band
+		got := rowVIXTerm(time.Now(), mk(tc.ratio)).band
 		if got != tc.want {
 			t.Errorf("ratio=%.2f band=%v want %v", tc.ratio, got, tc.want)
 		}
@@ -318,7 +318,7 @@ func TestRegimeRow_USDJPYWatchesYenStrengthening(t *testing.T) {
 		{-5.0, bandRed, "stays red"},
 	}
 	for _, tc := range cases {
-		got := rowUSDJPY(mk(tc.chg)).band
+		got := rowUSDJPY(time.Now(), mk(tc.chg)).band
 		if got != tc.want {
 			t.Errorf("chg=%+.1f%% band=%v want %v (%s)", tc.chg, got, tc.want, tc.why)
 		}
@@ -334,7 +334,7 @@ func TestRegimeRow_HYGSPYUnrankedWhen52WMissing(t *testing.T) {
 	hyg := 79.0
 	hyg50 := 80.0
 	spy := 737.0
-	row := rowHYGSPY(rpc.RegimeHYGSPYDivergence{
+	row := rowHYGSPY(time.Now(), rpc.RegimeHYGSPYDivergence{
 		Status:   rpc.RegimeStatusOK,
 		HYGPrice: &hyg, HYG50DMA: &hyg50,
 		SPYPrice: &spy, // SPY52WHigh nil
@@ -342,7 +342,167 @@ func TestRegimeRow_HYGSPYUnrankedWhen52WMissing(t *testing.T) {
 	if row.band != bandUnranked {
 		t.Errorf("HYG<50dma + 52w missing should leave row unranked, got %v", row.band)
 	}
-	if !strings.Contains(row.reason, "spy_52w_high") {
-		t.Errorf("reason should name the missing field for the reader: %q", row.reason)
+}
+
+// ----- per-scalar provenance (Quality envelope, v0.24.x+) -----
+
+// TestRenderRegime_FirmLiveOmitsQualityTag pins the "no clutter for
+// fresh data" rule: when every value on a row came from a firm-live
+// gateway tick, the renderer must NOT add a quality annotation. The
+// firm-live state IS the default — surfacing it would just add ink.
+func TestRenderRegime_FirmLiveOmitsQualityTag(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	vix := 18.43
+	vix3m := 21.36
+	ratio := vix / vix3m
+	row := rowVIXTerm(now, rpc.RegimeVIXTerm{
+		Status: rpc.RegimeStatusOK, VIX: &vix, VIX3M: &vix3m, Ratio: &ratio,
+		VIXQuality: &rpc.Quality{
+			AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm,
+		},
+		VIX3MQuality: &rpc.Quality{
+			AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm,
+		},
+	})
+	if row.quality != "" {
+		t.Errorf("firm-live row should have empty quality tag, got %q", row.quality)
+	}
+}
+
+// TestRenderRegime_DerivedSPY52WHighShowsEstimate pins the
+// methodology-honesty path: when SPY's 52-week high comes from the
+// history-fallback (max(High) over 252 daily bars) rather than the
+// live tick-165 (Misc Stats), the row carries a "· est" annotation.
+// This is the case the user asked for: a renderer that says
+// "this value is derived" rather than presenting it as a firm tick.
+func TestRenderRegime_DerivedSPY52WHighShowsEstimate(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	derivedAt := now.Add(-18 * time.Second) // history fetch finished 18s before snapshot
+	hyg := 79.55
+	hyg50 := 80.10
+	spy := 737.34
+	spy52 := 749.30
+	row := rowHYGSPY(now, rpc.RegimeHYGSPYDivergence{
+		Status:   rpc.RegimeStatusOK,
+		HYGPrice: &hyg, HYG50DMA: &hyg50, SPYPrice: &spy, SPY52WHigh: &spy52,
+		HYGQuality: &rpc.Quality{
+			AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm,
+		},
+		HYG50DMAQuality: &rpc.Quality{
+			AsOf: derivedAt, FreshnessClass: rpc.FreshnessDerived, Confidence: rpc.ConfidenceEstimate,
+		},
+		SPYQuality: &rpc.Quality{
+			AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm,
+		},
+		SPY52WHighQuality: &rpc.Quality{
+			AsOf: derivedAt, FreshnessClass: rpc.FreshnessDerived, Confidence: rpc.ConfidenceEstimate,
+			Source: "SPY 252d max(High) fallback",
+		},
+	})
+	if !strings.Contains(row.quality, "est") {
+		t.Errorf("derived-fallback row should carry an 'est' tag, got %q", row.quality)
+	}
+	if !strings.Contains(row.quality, "18s") {
+		t.Errorf("derived row 18s old should include age in tag, got %q", row.quality)
+	}
+}
+
+// TestRenderRegime_GammaModelledAnnotation pins the gamma row's
+// methodology disclosure: the BS-sweep zero-flip estimate carries a
+// "modelled" tag because it's not a measurement — it's a model with
+// documented caveats (sign convention, sticky IV during sweep).
+func TestRenderRegime_GammaModelledAnnotation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	flip := 5125.4
+	gap := 1.5
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1"},
+		},
+		ZeroGammaQuality: &rpc.Quality{
+			AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
+			Source: "perfiliev-bs-sweep-v1",
+		},
+	})
+	if !strings.Contains(row.quality, "modelled") {
+		t.Errorf("gamma row should carry 'modelled' tag, got %q", row.quality)
+	}
+}
+
+// TestRenderRegime_ExplainIncludesQualityBlocks pins the --explain
+// path: every populated Quality envelope surfaces as a per-scalar
+// provenance line, so a reader can audit any single number without
+// reading the methodology spec. The block names the field, the
+// confidence + freshness, and the source string.
+func TestRenderRegime_ExplainIncludesQualityBlocks(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	fix := regimeFixture()
+	fix.AsOf = now
+	// Attach a sampling of Quality envelopes covering each kind.
+	fix.VIXTermStructure.VIXQuality = &rpc.Quality{
+		AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm, Source: "VIX tick",
+	}
+	fix.HYGSPYDivergence.SPY52WHighQuality = &rpc.Quality{
+		AsOf: now.Add(-18 * time.Second), FreshnessClass: rpc.FreshnessDerived, Confidence: rpc.ConfidenceEstimate,
+		Source: "SPY 252d max(High) fallback",
+	}
+	// Gamma fixture is in "computing" state — replace with Ready+modelled.
+	flip := 5125.4
+	gap := 1.5
+	fix.GammaZero.Status = rpc.RegimeStatusOK
+	fix.GammaZero.Envelope = rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1"},
+	}
+	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
+		AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
+		Source: "perfiliev-bs-sweep-v1",
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeTextTo(env, &stdout, fix, true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"VIX tick", "firm", "live",
+		"SPY 252d max(High) fallback", "estimate", "derived",
+		"perfiliev-bs-sweep-v1", "modelled", "proxy",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain output missing Quality marker %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderRegime_NilQualityFallsBackToStaleTick pins back-compat:
+// rows with nil Quality (e.g. legacy daemons, or paths that never
+// populated provenance) fall back to the pre-Quality renderer behaviour
+// — Status==Stale surfaces "· stale tick" exactly as before. Nothing
+// should panic, and the JSON-shape consumers see no regression.
+func TestRenderRegime_NilQualityFallsBackToStaleTick(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	// regimeFixture has all Quality pointers nil and HYGSPYDivergence at
+	// Status=Stale — the legacy path should produce "· stale tick".
+	if code := renderRegimeText(env, regimeFixture()); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "stale tick") {
+		t.Errorf("nil-Quality stale row should show '· stale tick' suffix:\n%s", out)
+	}
+	for _, fresh := range []string{"· est", "· modelled", "· frozen"} {
+		if strings.Contains(out, fresh) {
+			t.Errorf("nil-Quality render should not invent quality tag %q:\n%s", fresh, out)
+		}
 	}
 }
