@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.23.3 — 2026-05-18 07:30 CEST
+
+A small follow-up to v0.23.2 covering the regime dashboard's VIX term
+structure row. The VIX3M leg was intermittently dropping to null on
+cold off-hours calls — reproduced twice in succession against IB
+Gateway 10.37 in frozen mode — and the surfaced error message pointed
+readers at a classifier bug that doesn't exist. Both behaviours fixed
+in `fetchRegimeVIXTerm`.
+
+Scope honesty: this release does NOT touch the gamma_zero row's
+`fetch SPX expiries: timeout waiting for contract details` failure
+surfaced by the same investigation. That one is gateway-side — only
+`secdefeu` connects on the affected account, and SPX index contract
+definitions live in `secdefus`. A daemon-side fix isn't possible until
+the sec-def farm gap is resolved.
+
+### Fixed
+
+- **VIX3M snapshot budget lifted from 5 s to 8 s.** VIX3M is a much
+  thinner CBOE index than the VIX itself; outside RTH the gateway
+  pushes its snapshot tick later than the VIX leg, and 5 s reliably
+  lost the tick on cold off-hours calls even with a warm contract
+  cache (ConID 47511905 resolved on every call; the tick just didn't
+  arrive in budget). 8 s matches the SPY 52w-high budget which sees
+  the same pattern. Doesn't make the gateway any faster — bounds the
+  intermittent miss rate.
+
+- **VIX3M error message no longer claims a classifier bug that
+  doesn't exist.** The pre-fix string `(classifySymbol entry may be
+  missing)` was historical guidance from when the entry truly was
+  missing; the VIX3M routing to `IND/CBOE/USD/CBOE` has shipped since
+  the original regime indicator landed, and the daemon log confirms
+  ConID resolution on every call. Replaced with a description of the
+  actual failure mode (`no spot tick within budget (thin CBOE index,
+  common off-hours)`) so readers aren't pointed at a non-existent
+  bug.
+
 ## v0.23.2 — 2026-05-17 21:28 CEST
 
 Two off-hours bugs in the regime dashboard's HYG/SPY divergence row
