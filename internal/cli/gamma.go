@@ -60,9 +60,9 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 			fmt.Fprintf(out, "  Progress    %d %%\n", r.Progress)
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, env.dim("  This compute runs once per NY trading day. Re-run `ibkr gamma`"))
-		fmt.Fprintln(out, env.dim("  to pick up the cached result when it's ready, or add --no-wait"))
-		fmt.Fprintln(out, env.dim("  to poll without blocking."))
+		fmt.Fprintln(out, env.dim("  Compute runs once per NY trading session (typical 2-4 min on a warm"))
+		fmt.Fprintln(out, env.dim("  contract cache); subsequent calls within the day return cached."))
+		fmt.Fprintln(out, env.dim("  Re-run `ibkr gamma` to block again, or add --no-wait to poll."))
 		fmt.Fprintln(out)
 		return 0
 

@@ -1830,10 +1830,16 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 	}
 
 	// Generic ticks mirror RequestOptionsMarketData: 100=opt volume,
-	// 101=opt open interest, 104=hist vol, 106=implied vol. Without 106
-	// the chain strikes view shows blank IV columns whenever IBKR doesn't
-	// happen to dispatch a model-computation tick (msg 21) — common after
-	// hours and pre-market. Explicit subscription closes that gap.
+	// 101=opt open interest, 104=hist vol, 106=opt implied vol. For
+	// individual OPT subscriptions the canonical per-strike IV source
+	// is the OPTION_COMPUTATION model tick (msg 21, tickType 13) which
+	// handleOptionComputation routes into optIV[OPRA_key] — readable
+	// via GetOptionIV; 106 is documented for STK/IND (the 30-day
+	// chain-averaged IV of the underlying) and is not reliably
+	// delivered for option contracts, so callers must not depend on
+	// subscriptions[…].IV for per-strike values. We still ask for 106
+	// because it's harmless and the gateway occasionally fills it on
+	// recently-traded contracts, but GetOptionIV is the source of truth.
 	reqID, err := conn.RequestMarketDataWithContract(contract, "100,101,104,106", false, false)
 	if err != nil {
 		return "", 0, err
