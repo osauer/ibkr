@@ -2,6 +2,108 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.25.0 — 2026-05-18 16:05 CEST
+
+The gamma compute now works end-to-end during US regular trading hours
+and the regime dashboard tells you how trustworthy each value is. Plus
+a wire-level smoke gate that would have caught the gamma bug the first
+time it was tested.
+
+### Fixed
+
+- **`ibkr gamma` actually returns a result during regular hours.** The
+  Phase 2 zero-gamma compute had two latent bugs that combined to make
+  every leg time out:
+  1. `productionLegFetcher` polled `MarketData.IV` (only fed by IBKR
+     generic tick 106, which the gateway does NOT deliver for OPT
+     subscriptions) instead of `GetOptionIV(key)` (fed by the
+     OPTION_COMPUTATION model tick, msg 21 — the canonical per-strike
+     IV source). Verified at the wire level: model ticks arrive with
+     non-NaN IV; the consumer was reading the wrong field.
+  2. The IBKR gateway delivers OI ticks (27 / 28) under
+     `MarketDataType=1` (live) but model ticks (msg 21) under
+     `MarketDataType=2` (frozen-aware) — never both in the same mode.
+     The gamma fan-out now temporarily switches to type=1 and restores
+     to type=2 on return, so each leg sees both ticks. Verified
+     end-to-end: cold compute completes in ~1 min during regular
+     hours with real leg coverage.
+
+  Pre-market is still degraded — IBKR's model engine doesn't fire when
+  options aren't trading. The compute now surfaces a clear pre-market
+  error within 30 s instead of hanging behind a misleading "computing"
+  status. A BS-IV-from-last-trade fallback for pre-market is a
+  documented follow-up.
+
+### Added
+
+- **Per-scalar provenance on every regime indicator.** A new
+  `rpc.Quality` envelope (`AsOf`, `FreshnessClass`, `Confidence`,
+  `Source`) hangs off each scalar field on each row. Daemon fetchers
+  populate it at the assignment site so the renderer can show:
+
+  ```
+  ●  VIX/VIX3M     0.870  (18.40 / 21.14)  green   (<0.92 contango)
+  ●  HYG vs SPY    HYG 79.67 / 50dma 79.87 yellow  (HYG < 50dma …)   · est 9s
+  ●  USD/JPY       158.7300  +1.15%/wk     green   (<1% weekly)      · est 9s
+  ```
+
+  Firm-live rows stay unannotated (no clutter); derived rows declare
+  themselves as estimates; modelled rows (gamma) declare themselves
+  as modelled. `--explain` extends with per-scalar provenance blocks
+  so any single number can be audited:
+
+  ```
+  HYG vs SPY
+    HYG             firm live · age 5s · HYG tick (ARCA)
+    HYG_50DMA       estimate derived · age 5s · HYG 50-bar SMA
+    SPY             firm live · age 5s · SPY tick
+    SPY_52w_high    firm live · age 5s · SPY tick 165 (Misc Stats)
+  ```
+
+  The wire shape is additive — every new `*Quality` is `omitempty`,
+  existing `Status` / `DataType` / `FieldsMissing` keep their meaning.
+  JSON consumers that ignore unknown fields are unaffected.
+
+- **Wire-level smoke gate (`make smoke`).** A new lifecycle script
+  (`scripts/wire-smoke.sh`) spawns an isolated daemon with
+  `IBKR_WIRE_INTERCEPTOR=1`, runs a fixed read-only command sequence
+  against a live gateway, and asserts per-command protocol-level
+  invariants via `bin/wire-assert`. Hooked into `make release` after
+  `release-verify` and SKIPs cleanly when no gateway is reachable so
+  `make release` still works on a laptop without paper-account IBKR.
+  Six v1 invariants: `status-handshake`, `quote-spy`, `account-summary`,
+  `chain-iv-source`, `regime-subs`, `gamma-noflag`. The
+  `chain-iv-source` check is exactly the assertion that would have
+  caught the v0.24.x IV-source bug on the first test run.
+
+- **Early-abort watchdog in the gamma compute.** When zero legs land
+  in the first 30 s of the fan-out the compute aborts with a
+  pre-market-aware error message instead of grinding for minutes.
+  Distinguishes "the gateway isn't pushing the ticks we need" from
+  "the gateway is throttling contract resolution".
+
+- **Regression test pinning the IV-data-model invariant.**
+  `TestModelTickPopulatesOptionIVNotSubscriptionIV` documents that
+  model ticks land in `optIV[OPRA_key]` (readable via `GetOptionIV`)
+  and NOT in `subscriptions[…].IV`, so future refactors can't
+  silently re-introduce the v0.24.x IV-source bug.
+
+### Changed
+
+- **Misleading "re-run later for the cached result" copy removed**
+  from `ibkr regime` and `ibkr gamma`. Replaced with honest framing:
+  the compute runs once per NY session (typically 2-4 min on a warm
+  contract cache), subsequent calls within the day return cached, and
+  error states tell you the cache will retry after 60 s.
+
+- **Corrected misleading comment in `SubscribeOption` about generic
+  tick 106.** The previous comment claimed requesting tick 106 closed
+  a gap when model-computation ticks weren't dispatched off-hours.
+  Field experience and wire traces show tick 106 is not reliably
+  delivered for OPT contracts; the canonical per-strike IV source is
+  the OPTION_COMPUTATION model tick (msg 21) routed via
+  `GetOptionIV`. Comment now names the source-of-truth correctly.
+
 ## v0.24.0 — 2026-05-18 12:33 CEST
 
 The regime dashboard's robustness pass. Three indicators that had been
