@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,7 +41,7 @@ const (
 	// without flooding the JSON payload.
 	topStrikesK = 8
 
-	// Throttle-signal abort. SPX's option-chain fan-out makes hundreds
+	// Throttle-signal abort. The option-chain fan-out makes hundreds
 	// of reqContractDetails calls in close succession; the gateway can
 	// rate-limit by returning empty contractDataEnd responses ("no
 	// security definition") instead of real details. Continuing the
@@ -123,22 +125,45 @@ func productionLegFetcher(
 	}
 	key, _, err := c.SubscribeOption(ctx, underlying, expiryYMD, strike, right)
 	if err != nil {
-		// SubscribeOption's error path is dominated by
-		// resolveOptionContract failing with either "contract details
-		// unavailable" (empty contractDataEnd) or
-		// ErrContractDetailsTimeout. Both are the canonical throttle
-		// signal: we enqueued strikes that came from the gateway's
-		// own enumeration, so a healthy session resolves them.
-		return 0, 0, 0, false, true
+		// SubscribeOption's error path has two distinct shapes:
+		//
+		//   - "contract details unavailable for option …": the gateway
+		//     responded definitively that no listed contract matches
+		//     this (expiry, strike, right) triple. This can happen
+		//     when the chain enumeration's deduped strike set
+		//     includes candidates that don't exist on every expiry
+		//     (rare on SPY's single trading class; common on
+		//     multi-class chains). These aren't throttle signals.
+		//
+		//   - ErrContractDetailsTimeout / "timeout waiting for option
+		//     contract details": the gateway didn't respond within the
+		//     5 s budget. This IS the canonical throttle signal —
+		//     reqContractDetails is queueing.
+		//
+		// Without this split, the compute trips the 5 % throttle abort
+		// on its first 50 attempts whenever non-existent strikes
+		// dominate the early sample, even though the gateway is
+		// responding fast and correctly.
+		msg := err.Error()
+		throttle := !strings.Contains(msg, "contract details unavailable")
+		return 0, 0, 0, false, throttle
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
-	// 5 s per-leg budget covers both OI and IV. OI ticks (27/28) often
+	// 15 s per-leg budget covers both OI and IV. OI ticks (27/28) often
 	// arrive ~1 s after first bid/ask; IV (model-computation tick 21)
-	// can be slower for far-OTM legs. We treat the leg as successful
-	// as soon as OI is positive AND IV is positive — gamma is read
-	// from GetOptionGreeks immediately after.
-	deadline := time.Now().Add(5 * time.Second)
+	// can be slower for far-OTM legs and *much* slower pre-market or
+	// post-close, when the gateway's model-computation queue isn't
+	// running hot. The previous 5 s budget routinely lost IV ticks
+	// off-hours for OTM legs, dropping the leg even though OI had
+	// landed; the compute then aborted with "all N legs failed" because
+	// no leg cleared both gates. 15 s matches the SubscribeOption
+	// resolveOptionContract timeout — the leg is still bounded, just
+	// long enough to capture IV when the gateway is producing them at
+	// reduced cadence. We treat the leg as successful as soon as OI is
+	// positive AND IV is positive — gamma is read from
+	// GetOptionGreeks immediately after.
+	deadline := time.Now().Add(15 * time.Second)
 	err = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
 		if d.OpenInt > 0 && d.IV > 0 {
 			oi = d.OpenInt
@@ -173,19 +198,30 @@ func productionLegFetcher(
 // success or a classified error on failure (stale spot, no usable
 // legs, gateway disconnect).
 //
+// Underlying: SPY (the S&P 500 ETF), not SPX. SPY has continuous
+// extended-hours quoting on SMART/ARCA, a single trading class (so the
+// secDefOptParams response is a clean per-expiry strike grid rather
+// than a multi-class superset that triggers spurious "no security
+// definition" errors), and active dealer hedging flow that produces
+// real IV ticks pre-market. SPX (the index) by contrast has no spot
+// trading outside RTH, so IBKR's model-computation engine doesn't push
+// IV ticks for SPX options off-hours, and the compute consistently
+// failed to land a single leg. The regime signal is unchanged — SPY
+// dealer gamma tracks SPX dealer gamma closely (both are dominated by
+// the same dealer-positioning regime) — but the underlying number is
+// SPY-scale (~SPX/10).
+//
 // Methodology (perfiliev-bs-sweep-v1):
 //
-//  1. Snapshot SPX spot. Refuse on stale (data_type != live and not
+//  1. Snapshot SPY spot. Refuse on stale (data_type != live and not
 //     empty-pending) — the compute is anchored on a single spot and a
 //     known-bad spot poisons everything downstream.
 //
 //  2. Enumerate expirations + listed strikes via FetchOptionExpiryStrikes.
-//     The merge across SPX/SPXW trading classes is automatic at this
-//     layer (pinned by TestFetchOptionExpiriesMergesAcrossTradingClasses).
 //
 //  3. Pick the nearest N non-0DTE-post-settlement expirations. The
 //     0DTE filter is the *evening* of expiration day in NY: at 09:30
-//     ET on a 3rd Friday SPX expiry, we still include it; at 16:15 ET
+//     ET on a 3rd Friday expiry, we still include it; at 16:15 ET
 //     on any expiry day, we drop it.
 //
 //  4. Per expiry, filter listed strikes to those within ±StrikeWidthPct
@@ -241,44 +277,56 @@ func computeGammaZeroSPX(
 	params = normalizeGammaParams(params)
 	startWall := now()
 
-	// 1. SPX spot snapshot.
+	// 1. SPY spot snapshot.
 	progress.Store(2)
-	const sym = "SPX"
-	spot, bid, ask, last, dataType := snapshotSPXForGamma(ctx, c, 5*time.Second)
+	const sym = "SPY"
+	spot, bid, ask, last, dataType := snapshotUnderlyingForGamma(ctx, c, sym, 5*time.Second)
 	if spot <= 0 {
-		return nil, fmt.Errorf("zero-gamma: no SPX spot available (gateway returned no live tick)")
+		return nil, fmt.Errorf("zero-gamma: no %s spot available (gateway returned no live tick)", sym)
 	}
 	if !isAcceptableDataType(dataType) {
-		return nil, fmt.Errorf("zero-gamma: SPX spot is %s; refusing to compute on stale data", dataType)
+		return nil, fmt.Errorf("zero-gamma: %s spot is %s; refusing to compute on stale data", sym, dataType)
 	}
 	spotAt := now()
 	_ = bid
 	_ = ask
 	_ = last
 
-	// 2. Expirations + strikes. SPX has hundreds of listed expirations
-	// (AM-settled SPX + PM-settled SPXW) and tens of thousands of
-	// strikes — the secDefOptParams response is large and streams in
-	// over several seconds. 30 s mirrors the per-method budget the
-	// existing handleChainExpiries handler runs with for the same call
-	// (server.go's unaryDeadline for MethodChainExpiries is 50 s).
+	// 2. Expirations + strikes. The secDefOptParams response is large
+	// and streams in over several seconds. 30 s mirrors the per-method
+	// budget the existing handleChainExpiries handler runs with for
+	// the same call (server.go's unaryDeadline for MethodChainExpiries
+	// is 50 s).
 	progress.Store(5)
 	allStrikes, err := c.FetchOptionExpiryStrikes(sym, 30*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("zero-gamma: fetch SPX expiries: %w", err)
+		return nil, fmt.Errorf("zero-gamma: fetch %s expiries: %w", sym, err)
 	}
 	if len(allStrikes) == 0 {
-		return nil, fmt.Errorf("zero-gamma: gateway returned no SPX expirations")
+		return nil, fmt.Errorf("zero-gamma: gateway returned no %s expirations", sym)
 	}
 
 	// 3. Select expirations.
 	pickedExp := selectExpirations(allStrikes, spotAt, params.ExpiryCount)
 	if len(pickedExp) == 0 {
-		return nil, fmt.Errorf("zero-gamma: no usable SPX expirations after 0DTE filtering")
+		return nil, fmt.Errorf("zero-gamma: no usable %s expirations after 0DTE filtering", sym)
 	}
 	progress.Store(10)
 
-	// 4. Build the per-expiry strike grids.
+	// 4. Build the per-expiry strike grids, ordered ATM-outward.
+	//
+	// Iteration order matters: secDefOptParams returns a dedupe SUPERSET
+	// of strikes across exchanges, so the strike list contains
+	// candidates that don't exist as listed contracts on every expiry
+	// (especially far-OTM strikes that exist only for select events).
+	// Far-OTM legs also rarely have IV ticks flowing pre-market — the
+	// model-computation engine only fires for actively-quoted strikes.
+	// Processing strikes nearest-ATM first means the compute hits
+	// liquid, listed strikes quickly and accumulates legs while the
+	// worker pool drains the long tail of dead candidates in the
+	// background. With the empirical 5 % throttle threshold, this also
+	// avoids a worst-case where the first 50 attempts are all far-OTM
+	// failures and the compute aborts before ever reaching ATM.
 	type legSpec struct {
 		expiryYMD string
 		strike    float64
@@ -287,15 +335,16 @@ func computeGammaZeroSPX(
 	var jobs []legSpec
 	for _, expDate := range pickedExp {
 		strikes := filterStrikesAroundSpot(allStrikes[expDate], spot, params.StrikeWidthPct)
+		ordered := sortStrikesATMOutward(strikes, spot)
 		expYMD := compactExpiry(expDate)
-		for _, k := range strikes {
+		for _, k := range ordered {
 			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "C"})
 			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "P"})
 		}
 	}
 	if len(jobs) == 0 {
-		return nil, fmt.Errorf("zero-gamma: no SPX strikes within ±%.0f%% of spot %.2f",
-			params.StrikeWidthPct*100, spot)
+		return nil, fmt.Errorf("zero-gamma: no %s strikes within ±%.0f%% of spot %.2f",
+			sym, params.StrikeWidthPct*100, spot)
 	}
 
 	// 5. Fan-out. Mutex around shared aggregation slice; the contention
@@ -400,22 +449,22 @@ func computeGammaZeroSPX(
 	}
 
 	res := &rpc.GammaZeroComputed{
-		SpotSPX:       spot,
-		SpotAt:        spotAt,
-		ZeroGamma:     zg,
-		GapPct:        gapPct,
-		GammaSign:     gammaSign,
-		Profile:       profile,
-		GammaTotalAbs: gammaTotalAbs,
-		TopStrikes:    topStrikes,
-		Expirations:   pickedExp,
-		LegCount:      len(legs),
-		Warnings:      warnings,
-		Params:        params,
-		Source:        "computed from IBKR option chain (SPX + SPXW)",
-		Method:        "perfiliev-bs-sweep-v1",
-		AsOf:          now(),
-		DurationMS:    now().Sub(startWall).Milliseconds(),
+		SpotUnderlying: spot,
+		SpotAt:         spotAt,
+		ZeroGamma:      zg,
+		GapPct:         gapPct,
+		GammaSign:      gammaSign,
+		Profile:        profile,
+		GammaTotalAbs:  gammaTotalAbs,
+		TopStrikes:     topStrikes,
+		Expirations:    pickedExp,
+		LegCount:       len(legs),
+		Warnings:       warnings,
+		Params:         params,
+		Source:         "computed from IBKR SPY option chain",
+		Method:         "perfiliev-bs-sweep-v1",
+		AsOf:           now(),
+		DurationMS:     now().Sub(startWall).Milliseconds(),
 	}
 	progress.Store(100)
 	return res, nil
@@ -440,12 +489,17 @@ func normalizeGammaParams(p rpc.GammaZeroParams) rpc.GammaZeroParams {
 	return p
 }
 
-// snapshotSPXForGamma wraps briefSnapshotFull with the SPX-specific
-// fallbacks the compute pipeline needs. Returns (spot, bid, ask,
-// last, dataType) — spot picks last → mid → bid → ask in that order,
-// matching the existing briefSnapshotPrice convention.
-func snapshotSPXForGamma(ctx context.Context, c *ibkrlib.Connector, timeout time.Duration) (spot, bid, ask, last float64, dataType string) {
-	bid, ask, last, dataType = briefSnapshotFull(ctx, c, "SPX", timeout)
+// snapshotUnderlyingForGamma wraps briefSnapshotFull with the gamma
+// compute's spot-resolution policy. Returns (spot, bid, ask, last,
+// dataType) — spot picks last → mid → bid → ask → mark → close,
+// matching the briefSnapshotPrice convention. Mark (tick 37) covers
+// most off-hours frozen states; close (tick 9) is the last-resort
+// anchor for the rare case where the gateway hasn't even pushed a
+// mark yet (cold post-restart). Without these the compute could not
+// anchor a spot. Caller passes the underlying symbol (currently SPY).
+func snapshotUnderlyingForGamma(ctx context.Context, c *ibkrlib.Connector, sym string, timeout time.Duration) (spot, bid, ask, last float64, dataType string) {
+	var mark, closePx float64
+	bid, ask, last, mark, closePx, dataType = briefSnapshotFull(ctx, c, sym, timeout)
 	switch {
 	case last > 0:
 		spot = last
@@ -455,6 +509,10 @@ func snapshotSPXForGamma(ctx context.Context, c *ibkrlib.Connector, timeout time
 		spot = bid
 	case ask > 0:
 		spot = ask
+	case mark > 0:
+		spot = mark
+	case closePx > 0:
+		spot = closePx
 	}
 	if dataType == "" && spot > 0 {
 		dataType = "live"
@@ -547,6 +605,27 @@ func selectExpirations(strikes map[string][]float64, now time.Time, count int) [
 		candidates = candidates[:count]
 	}
 	return candidates
+}
+
+// sortStrikesATMOutward returns the input strike list reordered by
+// absolute distance from spot, nearest first. Used by the gamma
+// compute's leg-job builder so the worker pool hits liquid near-ATM
+// strikes before the long tail of far-OTM candidates, most of which
+// don't have IV ticks flowing pre-market and (for SPY/SPX) include
+// chain-dedupe ghost strikes that aren't actually listed on every
+// expiry. Stable for ties (strikes equidistant from spot keep their
+// pre-sort order); strikes are float64 so exact ties on $0.50/$1
+// grids are vanishingly rare in practice.
+func sortStrikesATMOutward(strikes []float64, spot float64) []float64 {
+	if len(strikes) <= 1 {
+		return strikes
+	}
+	out := make([]float64, len(strikes))
+	copy(out, strikes)
+	sort.SliceStable(out, func(i, j int) bool {
+		return math.Abs(out[i]-spot) < math.Abs(out[j]-spot)
+	})
+	return out
 }
 
 // filterStrikesAroundSpot returns the subset of listed strikes within

@@ -2,6 +2,103 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.24.0 — 2026-05-18 12:33 CEST
+
+The regime dashboard's robustness pass. Three indicators that had been
+intermittently failing off-hours (VIX/VIX3M, HYG/SPY, USD/JPY) now
+rank reliably from the first `ibkr regime` call after a cold daemon
+start. Indicator 4 (gamma) moved from SPX to SPY so it can land
+during extended hours when SPX option IV ticks aren't flowing. The
+wire shape of the gamma envelope changed (`spot_spx` →
+`spot_underlying`) — that's the visible reason for the minor-version
+bump.
+
+### Changed
+
+- **Indicator 4 (gamma) now computes against SPY instead of SPX.**
+  SPY trades extended hours on SMART/ARCA with continuous market-maker
+  quotes and a single option trading class; SPX has no spot trading
+  outside RTH and IBKR's model-computation engine doesn't push IV
+  ticks for SPX options pre-market. The previous SPX compute
+  consistently failed to land a single leg off-hours. The regime
+  signal is unchanged — SPY dealer gamma tracks SPX dealer gamma
+  closely (same dealer-positioning regime); only the absolute level
+  is SPY-scale (~SPX/10). Renderer label is now `SPY γ-zero`. Spec
+  doc and MCP tool description updated to match.
+
+- **`GammaZeroComputed.SpotSPX` renamed to `SpotUnderlying`** with
+  JSON tag `spot_underlying` (was `spot_spx`). Consumers parsing the
+  gamma envelope must re-map.
+
+- **Gamma compute iterates strikes ATM-outward, not low-to-high.**
+  `secDefOptParams` returns a deduped strike SUPERSET across
+  exchanges, so the chain contains candidates that aren't listed on
+  every expiry — especially far-OTM strikes that exist only for
+  select events. Processing nearest-ATM first means the compute hits
+  liquid, listed strikes quickly and accumulates legs while the
+  worker pool drains the long tail of dead candidates. Also avoids a
+  worst case where the first 50 attempts are all far-OTM failures
+  and the 5 % throttle threshold aborts before reaching ATM.
+
+### Added
+
+- **`Connector.SeedContractDetails(symbol, detail)`** — public API
+  to pre-seed the in-memory contract cache. Refuses to overwrite an
+  entry that already has a non-zero ConID, so a live gateway
+  response always wins. The daemon's regime prewarm uses this with a
+  static map of stable spot conIDs (VIX, VIX3M, HYG, SPY, USD.JPY,
+  SPX) so the regime row's historical fetches keep working even when
+  the gateway's `reqContractDetails` is silent — observed for hours
+  on end against an account where only `secdefeu` connects.
+
+- **Tick 37 (mark price) captured on every market data subscription**
+  via the new `Subscription.MarkPrice` / `MarketData.MarkPrice`
+  fields. Index symbols (VIX, VIX3M, SPX) don't emit bid/ask/last —
+  only mark — and previously the brief-snapshot helpers returned 0
+  for them, which made VIX/VIX3M unrankable off-hours.
+
+### Fixed
+
+- **`ibkr regime`'s VIX/VIX3M row ranks reliably off-hours.**
+  `briefSnapshotPrice` now falls back through last → mid → bid → ask
+  → mark → close. Mark (tick 37) is the index path; close (tick 9)
+  is the last-resort anchor for thin CBOE indices that emit only
+  yesterday's regular-session close pre-open. The row's `data_type`
+  honestly reports "frozen" when the value came from the close, so
+  the renderer dims the row instead of pretending it's live.
+
+- **Gamma compute's "no security definition" no longer triggers
+  spurious throttle abort.** The signal was conflated with real
+  gateway throttling; with the abort firing in the first 50 attempts
+  before any near-ATM strike was reached, the compute consistently
+  errored before producing a result. The fetcher now distinguishes
+  "contract details unavailable" (skip this leg) from
+  `ErrContractDetailsTimeout` (genuine throttle).
+
+- **Gamma per-leg budget lifted from 5 s to 15 s.** OI ticks (27/28)
+  arrive quickly but IV (tick 21, model-computation) can be much
+  slower for OTM legs pre-market when the gateway's
+  model-computation queue isn't running hot. The previous 5 s
+  routinely dropped legs that had OI without IV; 15 s captures the
+  full pair without unbounded waits.
+
+- **`contractDetailsLateGrace` raised from 3 s to 30 s** so late
+  ContractData frames from slow gateways (observed at 15-45 s
+  post-request against cold-after-TWS-restart accounts) still
+  populate the cache. Subsequent `prepareContract` /
+  `ensureContractDetails` calls then hit a warm entry instead of
+  re-running the slow round-trip.
+
+### Honest limitations
+
+This release does NOT solve the case where IBKR's gateway isn't
+streaming option market data at all (observed pre-market against
+some account states: SPY option subscriptions resolve cleanly but
+OI/IV ticks never arrive). The gamma compute is still bounded by
+whatever the gateway is willing to push; on a healthy market-hours
+gateway with extended-hours liquidity, it lands. On a wedged
+gateway, it doesn't. Restart TWS or wait for US market open.
+
 ## v0.23.3 — 2026-05-18 07:30 CEST
 
 A small follow-up to v0.23.2 covering the regime dashboard's VIX term

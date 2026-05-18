@@ -430,7 +430,7 @@ func fixtureRegime() *rpc.RegimeSnapshotResult {
 				EtaSeconds: 42,
 				Progress:   40,
 			},
-			Notes: "SPX dealer zero-gamma flip level. Spec thresholds: SPX >2% above zero_gamma (green); within 2% (yellow); below (red). Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
+			Notes: "SPY dealer zero-gamma flip level. Spec thresholds: SPY >2% above zero_gamma (green); within 2% (yellow); below (red). Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
 		},
 		Breadth: rpc.RegimeBreadth{
 			Status: rpc.RegimeStatusUnavailable,

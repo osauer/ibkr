@@ -140,6 +140,46 @@ func TestSeedContractCachePrefersStockOverOption(t *testing.T) {
 	}
 }
 
+// SeedContractDetails fills the cache for a symbol that has not been
+// resolved through the gateway yet, but must yield to a live response
+// later — the daemon's regime prewarm uses this to keep the historical
+// path working even when the gateway's reqContractDetails is silent.
+func TestSeedContractDetails(t *testing.T) {
+	c := NewConnector(nil)
+
+	if ok := c.SeedContractDetails("HYG", ContractDetailsLite{Symbol: "HYG", ConID: 43652089, Exchange: "SMART", PrimaryExch: "ARCA"}); !ok {
+		t.Fatalf("first SeedContractDetails should report applied")
+	}
+	c.contractMu.RLock()
+	got, ok := c.contractCache["HYG"]
+	c.contractMu.RUnlock()
+	if !ok || got.ConID != 43652089 {
+		t.Fatalf("seeded entry missing or wrong: %+v", got)
+	}
+
+	// Second seed with the same symbol must not overwrite — a live
+	// gateway response (when one eventually lands) is canonical.
+	if ok := c.SeedContractDetails("HYG", ContractDetailsLite{Symbol: "HYG", ConID: 99999999, Exchange: "SMART"}); ok {
+		t.Errorf("seeding over an existing live entry should not report applied")
+	}
+	c.contractMu.RLock()
+	got = c.contractCache["HYG"]
+	c.contractMu.RUnlock()
+	if got.ConID != 43652089 {
+		t.Errorf("seeded entry was clobbered: %+v", got)
+	}
+
+	// Empty symbol and zero ConID are rejected — these would corrupt
+	// the cache and trigger downstream "protocol violation" errors in
+	// historical-data encoders.
+	if ok := c.SeedContractDetails("", ContractDetailsLite{ConID: 1}); ok {
+		t.Errorf("empty symbol should be rejected")
+	}
+	if ok := c.SeedContractDetails("XYZ", ContractDetailsLite{Symbol: "XYZ", ConID: 0}); ok {
+		t.Errorf("zero ConID should be rejected")
+	}
+}
+
 func TestFetchContractDetailsUsesCache(t *testing.T) {
 	conn := NewConnector(nil)
 	conn.contractMu.Lock()

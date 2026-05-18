@@ -104,7 +104,7 @@ func TestRenderRegime_RowsFitOneLineEach(t *testing.T) {
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
-	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "USD/JPY", "SPX γ-zero", "SPX breadth"}
+	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "USD/JPY", "SPY γ-zero", "SPX breadth"}
 	for _, name := range indicators {
 		hits := strings.Count(stdout.String(), name)
 		if hits != 1 {

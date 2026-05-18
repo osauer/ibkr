@@ -122,6 +122,13 @@ const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied
 func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm {
 	out := rpc.RegimeVIXTerm{Notes: vixTermNotes}
 
+	// VIX itself usually delivers a live mark (tick 37) even off-hours.
+	// VIX3M is a thinner CBOE index whose calculation only updates with
+	// active SPX option flow; pre-open it routinely emits no live ticks
+	// at all and the snapshot helper falls back to the previous
+	// regular-session close (tick 9) so the ratio still ranks. The
+	// data-type field honestly reports "frozen" in that case so the
+	// renderer dims the row instead of pretending it's live.
 	vix, vixDT := deps.snapshot(ctx, "VIX", 5*time.Second)
 	if vix <= 0 {
 		out.Status = rpc.RegimeStatusError
@@ -130,10 +137,10 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	}
 	// 8 s budget (vs 5 s for VIX) because VIX3M is a much thinner
 	// CBOE index: off-hours the gateway sometimes takes longer than
-	// the VIX leg to push a snapshot, and 5 s reliably lost the tick
-	// on cold-frozen-mode calls even with a warm contract cache. 8 s
+	// the VIX leg to push the close tick, and 5 s reliably lost it on
+	// cold-frozen-mode calls even with a warm contract cache. 8 s
 	// matches the SPY 52w-high budget for the same reason.
-	vix3m, _ := deps.snapshot(ctx, "VIX3M", 8*time.Second)
+	vix3m, vix3mDT := deps.snapshot(ctx, "VIX3M", 8*time.Second)
 	if vix3m <= 0 {
 		// One arm of the pair is enough to be informative, but the
 		// ratio cannot be computed; surface VIX alone with an
@@ -141,7 +148,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 		out.VIX = new(vix)
 		out.DataType = vixDT
 		out.Status = rpc.RegimeStatusError
-		out.ErrorMessage = "VIX3M: no spot tick within budget (thin CBOE index, common off-hours)"
+		out.ErrorMessage = "VIX3M: no tick within budget (thin CBOE index, common off-hours)"
 		return out
 	}
 
@@ -149,8 +156,13 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	out.VIX3M = new(vix3m)
 	r := vix / vix3m
 	out.Ratio = &r
+	// The ratio is only as fresh as the staler leg. Both must be live
+	// to call the whole row "live".
 	out.DataType = vixDT
-	if rpc.IsLiveDataType(vixDT) {
+	if !rpc.IsLiveDataType(vix3mDT) {
+		out.DataType = vix3mDT
+	}
+	if rpc.IsLiveDataType(out.DataType) {
 		out.Status = rpc.RegimeStatusOK
 	} else {
 		out.Status = rpc.RegimeStatusStale
@@ -317,7 +329,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "SPX dealer zero-gamma flip level. Spec thresholds: SPX >2% above zero_gamma (green); within 2% (yellow); below (red). The flip itself is the regime event — no waiting period. Methodology: Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes; sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs, autocallables, sticky IV). First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed flip level when positioning is unusual."
+const gammaNotes = "SPY dealer zero-gamma flip level. Spec thresholds: SPY >2% above zero_gamma (green); within 2% (yellow); below (red). The flip itself is the regime event — no waiting period. Underlying is SPY (the S&P 500 ETF) rather than SPX (the index) so the compute is robust off-hours: SPY trades extended hours with continuous market-maker quotes and a single trading class, which keeps option IV ticks flowing and the chain enumeration clean; SPX has no spot trading outside RTH and IBKR's model-computation engine doesn't push IV ticks for SPX options pre-market. The regime signal is unchanged — SPY dealer gamma tracks SPX dealer gamma closely — but the absolute level is SPY-scale (~SPX/10). Methodology: Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes; sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs, autocallables, sticky IV). First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed flip level when positioning is unusual."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}

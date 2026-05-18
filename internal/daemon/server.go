@@ -604,22 +604,65 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	go s.prewarmRegimeSymbols()
 }
 
-// prewarmRegimeSymbols resolves contract details for the five regime
-// indicators concurrently so the first user-initiated regime call hits
-// a warm contractCache instead of competing with itself for 5 s
-// resolve budgets. Non-fatal: any per-symbol failure is logged at warn
-// level and the symbol still works via the regime fetcher's own
-// resolution attempt — pre-warming is an optimization, not a gate.
+// regimeSymbolSeed is the static fallback used by prewarmRegimeSymbols
+// when the gateway's reqContractDetails is unresponsive (per-account
+// rate limit, post-restart cold state, or any other transient
+// silence). These conIDs identify the spot instruments by their IBKR
+// contract identity, which is stable across years for spot ETFs/FX/CBOE
+// indices — observed unchanged in the daemon log over weeks. A live
+// gateway response always wins over a seeded value (the
+// SeedContractDetails guard refuses to overwrite a non-zero entry), so
+// the seed is purely a fallback for the broken-gateway case. If IBKR
+// ever renumbers one of these (extremely rare for spot instruments),
+// the only symptom is the regime row's historical-derived field going
+// stale until someone updates the constant.
+var regimeSymbolSeed = map[string]ibkrlib.ContractDetailsLite{
+	"VIX":     {Symbol: "VIX", ConID: 13455763, Exchange: "CBOE", PrimaryExch: "CBOE"},
+	"VIX3M":   {Symbol: "VIX3M", ConID: 47511905, Exchange: "CBOE", PrimaryExch: "CBOE"},
+	"HYG":     {Symbol: "HYG", ConID: 43652089, Exchange: "SMART", PrimaryExch: "ARCA"},
+	"SPY":     {Symbol: "SPY", ConID: 756733, Exchange: "SMART", PrimaryExch: "ARCA"},
+	"USD.JPY": {Symbol: "USD", ConID: 15016059, Exchange: "IDEALPRO", PrimaryExch: "IDEALPRO"},
+	// SPX anchors the zero-gamma compute (Indicator 4). Without a
+	// seeded underlying conID, the compute's first step — fetching
+	// the option chain — can stall on the same reqContractDetails
+	// silence that blocks the historical fetchers above.
+	"SPX": {Symbol: "SPX", ConID: 416904, Exchange: "CBOE", PrimaryExch: "CBOE"},
+}
+
+// prewarmRegimeSymbols populates the connector's contract-details
+// cache for the five regime-dashboard symbols so the first
+// user-initiated regime call's historical fetches don't depend on a
+// fresh reqContractDetails round-trip.
+//
+// Two layers, applied in order:
+//
+//  1. Seed each symbol from regimeSymbolSeed (above) — fast and works
+//     even when the gateway's reqContractDetails is silent (rate
+//     limit, cold state). Without this the seed, a slow / wedged
+//     reqContractDetails leaves hyg_50dma and weekly_change_pct
+//     missing for the entire daemon lifetime.
+//
+//  2. Fire FetchContractDetails in parallel anyway. On a healthy
+//     gateway the live response overwrites the seed in
+//     SeedContractDetails' caller (the cleanup goroutine's "ConID==0
+//     can be overwritten" guard ensures live wins over seed). On a
+//     degraded gateway the live request times out at 30 s but the
+//     seed remains in place, and the regime row still ranks.
 //
 // USD.JPY normalises to the IDEALPRO FX-pair contract via the same
-// classifySymbol path the regime USD/JPY fetcher uses; the connector
-// cache is keyed consistently so a warmed entry hits later.
+// classifySymbol path the regime USD/JPY fetcher uses; the seed entry
+// is keyed on the dotted-pair form so the look-up matches.
 func (s *Server) prewarmRegimeSymbols() {
 	c := s.gatewayConnector()
 	if c == nil {
 		return
 	}
-	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY"}
+	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "SPX"}
+	for _, sym := range syms {
+		if seed, ok := regimeSymbolSeed[sym]; ok {
+			c.SeedContractDetails(sym, seed)
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Add(len(syms))
 	for _, sym := range syms {
@@ -635,7 +678,7 @@ func (s *Server) prewarmRegimeSymbols() {
 			// payoff (first regime call lands without 5-way
 			// contract-resolve contention) is real.
 			if _, err := c.FetchContractDetails(sym, 30*time.Second); err != nil {
-				s.logger.Warnf("regime pre-warm: %s contract details: %v", sym, err)
+				s.logger.Warnf("regime pre-warm: %s contract details: %v (using seeded conID)", sym, err)
 			}
 		}()
 	}

@@ -32,15 +32,19 @@ type MarketData struct {
 	Symbol    string    `json:"symbol"`
 	Timestamp time.Time `json:"timestamp"`
 
-	Last  float64 `json:"last"`
-	Bid   float64 `json:"bid"`
-	Ask   float64 `json:"ask"`
-	Mid   float64 `json:"mid"`
-	Open  float64 `json:"open"`
-	High  float64 `json:"high"`
-	Low   float64 `json:"low"`
-	Close float64 `json:"close"`
-	VWAP  float64 `json:"vwap"`
+	Last float64 `json:"last"`
+	Bid  float64 `json:"bid"`
+	Ask  float64 `json:"ask"`
+	Mid  float64 `json:"mid"`
+	// MarkPrice is tick 37 from IBKR — the gateway's calculated fair
+	// price. Populated for every symbol, but only load-bearing for
+	// indices (VIX, VIX3M, SPX), which don't emit bid/ask/last.
+	MarkPrice float64 `json:"mark_price,omitempty"`
+	Open      float64 `json:"open"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+	VWAP      float64 `json:"vwap"`
 
 	// Week-range highs/lows from generic tick 165 (Misc Stats). Zero when
 	// the gateway hasn't delivered the tick yet — caller must distinguish
