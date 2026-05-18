@@ -445,11 +445,12 @@ func rowGamma(r rpc.RegimeGammaZero) regimeRow {
 			note += fmt.Sprintf(" · %d%%", r.Envelope.Progress)
 		}
 		row.stateNote = note
-		row.reason = "re-run later for the cached result"
+		row.reason = "first call of the NY session; re-poll for result"
 		return row
 	case rpc.RegimeStatusError:
 		row.value = ""
 		row.stateNote = ifNonEmpty(r.Envelope.Error, "compute failed")
+		row.reason = "next regime call after 60 s will retry"
 		return row
 	case rpc.RegimeStatusOK:
 		c := r.Envelope.Result

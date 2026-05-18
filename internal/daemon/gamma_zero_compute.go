@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -61,12 +60,22 @@ const (
 	throttleAbortPct   = 0.05
 
 	// computeETA is the static initial seconds-to-complete estimate the
-	// cache stamps on a fresh kickoff. Calibration:
-	//   6 expirations × ~80 strikes × 2 sides = 960 legs (worst case)
-	//   960 / 4 workers × 3.5 s/leg ≈ 14 min worst case
-	//   typical wall-clock 5-8 min with warm contract cache.
-	// 360s is a conservative midpoint that doesn't over-promise.
-	computeETA = 360
+	// cache stamps on a fresh kickoff. Calibration after the v0.24.x
+	// IV-source fix:
+	//   6 expirations × ~80 strikes × 2 sides ≈ 960 legs (worst case)
+	//   actual landing rate ≈ 1-2 s/leg on warm contract cache
+	//   960 / 4 workers × 1.5 s/leg ≈ 6 min worst case
+	//   typical wall-clock 2-4 min.
+	// 240s is the new conservative midpoint.
+	computeETA = 240
+
+	// earlyAbortAfter is how long the fan-out runs before checking
+	// whether any leg has landed in the aggregator. Healthy runs see
+	// their first usable leg within seconds; 30 s of total silence
+	// means the gateway is not delivering the OPTION_COMPUTATION / OI
+	// ticks the compute needs, and the right thing is to fail fast
+	// with an actionable error instead of grinding for minutes.
+	earlyAbortAfter = 30 * time.Second
 )
 
 // legData carries the per-leg inputs the aggregator needs from the
@@ -107,12 +116,31 @@ type legFetcher func(
 	right string,
 ) (oi int64, iv, gamma float64, ok, throttleSignal bool)
 
-// productionLegFetcher is the live-gateway implementation. It
-// subscribes the option contract, polls until OI and IV land or the
-// per-leg budget expires, reads GetOptionGreeks for the gamma at the
-// current spot, then unsubscribes. Designed to mirror fillOptionLeg's
-// concurrency posture so the existing 4-worker rate-limit observation
-// stays valid.
+// productionLegFetcher is the live-gateway implementation. It mirrors
+// the data-collection pattern in handlers.go's fillOptionLeg (the chain
+// command's per-strike fill): subscribe the option, wait for the
+// open-interest tick to land in the MarketData cache, then read the
+// per-strike IV from GetOptionIV and the Greeks from GetOptionGreeks.
+//
+// The previous version polled `d.IV > 0`, which reads
+// subscriptions[key].IV — a field only populated by generic tick 106
+// in handleTickGeneric. The IBKR gateway delivers tick 106 for STK/IND
+// subscriptions ("30-day chain-averaged IV of the underlying") but
+// not reliably for individual OPT subscriptions, regardless of whether
+// it's listed in the generic-tick request. Per-strike IV for option
+// contracts arrives via OPTION_COMPUTATION ticks (msg 21, tickType 13 =
+// model), which handleOptionComputation routes into optIV[OPRA_key]
+// keyed by the chain key SubscribeOption returns. GetOptionIV is the
+// reader for that cache. The chain command has always used this path;
+// the gamma compute did not, and every leg consequently timed out
+// waiting for an IV value the gateway never sent.
+//
+// Per-leg budget is 5 s. Model ticks for actively-quoted strikes
+// typically arrive within ~500 ms; deep-OTM strikes whose model the
+// gateway hasn't priced yet are dropped quickly rather than blocking
+// the worker pool for 15 s each. This keeps a cold-cache fan-out
+// against ~900 legs landing in ~3-5 min on 4 workers, well under the
+// per-method RPC deadline.
 func productionLegFetcher(
 	ctx context.Context,
 	c *ibkrlib.Connector,
@@ -129,64 +157,63 @@ func productionLegFetcher(
 		//
 		//   - "contract details unavailable for option …": the gateway
 		//     responded definitively that no listed contract matches
-		//     this (expiry, strike, right) triple. This can happen
-		//     when the chain enumeration's deduped strike set
-		//     includes candidates that don't exist on every expiry
-		//     (rare on SPY's single trading class; common on
-		//     multi-class chains). These aren't throttle signals.
+		//     this (expiry, strike, right) triple. Common on
+		//     multi-class chains where the secDefOptParams strike
+		//     superset includes candidates that don't exist on every
+		//     expiry. These aren't throttle signals.
 		//
 		//   - ErrContractDetailsTimeout / "timeout waiting for option
 		//     contract details": the gateway didn't respond within the
 		//     5 s budget. This IS the canonical throttle signal —
 		//     reqContractDetails is queueing.
-		//
-		// Without this split, the compute trips the 5 % throttle abort
-		// on its first 50 attempts whenever non-existent strikes
-		// dominate the early sample, even though the gateway is
-		// responding fast and correctly.
 		msg := err.Error()
 		throttle := !strings.Contains(msg, "contract details unavailable")
 		return 0, 0, 0, false, throttle
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
-	// 15 s per-leg budget covers both OI and IV. OI ticks (27/28) often
-	// arrive ~1 s after first bid/ask; IV (model-computation tick 21)
-	// can be slower for far-OTM legs and *much* slower pre-market or
-	// post-close, when the gateway's model-computation queue isn't
-	// running hot. The previous 5 s budget routinely lost IV ticks
-	// off-hours for OTM legs, dropping the leg even though OI had
-	// landed; the compute then aborted with "all N legs failed" because
-	// no leg cleared both gates. 15 s matches the SubscribeOption
-	// resolveOptionContract timeout — the leg is still bounded, just
-	// long enough to capture IV when the gateway is producing them at
-	// reduced cadence. We treat the leg as successful as soon as OI is
-	// positive AND IV is positive — gamma is read from
-	// GetOptionGreeks immediately after.
-	deadline := time.Now().Add(15 * time.Second)
-	err = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
-		if d.OpenInt > 0 && d.IV > 0 {
+	// Stage 1: open-interest gate. OI ticks (27 callOpenInterest,
+	// 28 putOpenInterest) arrive via the standard tick-size handler
+	// in handleTickSize and write to subscriptions[key].OpenInt; the
+	// MarketData cache read is the right surface here because OI is
+	// per-subscription, not per-OPRA-key.
+	//
+	// Genuine zero-OI strikes do exist (newly listed lines on far-OTM
+	// rungs) and shouldn't block the leg fetch indefinitely — but they
+	// contribute exactly zero to dealer GEX in either the at-spot
+	// aggregate or the sweep, so the upstream caller already drops
+	// them on `if !ok`. The wait predicate therefore short-circuits on
+	// OI > 0 only; OI == 0 falls through to the model-tick poll and
+	// reports the leg as failed if neither arrives, which is the right
+	// thing — a leg with no OI and no IV is dead.
+	deadline := time.Now().Add(5 * time.Second)
+	_ = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
+		if d.OpenInt > 0 {
 			oi = d.OpenInt
-			iv = d.IV
 			return true
 		}
 		return false
 	})
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return 0, 0, 0, false, false
-	}
-	// Read whatever final values landed before the deadline — the
-	// pollMarketData inner closure already captured them in the
-	// shared locals, but partial captures (OI without IV or vice
-	// versa) are dropped because the aggregator needs both.
+
+	// Stage 2: model-tick gate. handleOptionComputation only commits
+	// optIV[key] and optGreeks[key] once IBKR sends a non-sentinel
+	// model row (see saneGreek), so the presence of either is the
+	// authoritative signal that the contract has been priced.
+	// pollUntil shares the leg's overall deadline — model ticks
+	// usually arrive within the first second once OI lands, but the
+	// budget covers them both.
+	_ = pollUntil(ctx, deadline, func() bool {
+		if v, found := c.GetOptionIV(key); found && v > 0 {
+			iv = v
+		}
+		if g, found := c.GetOptionGreeks(key); found {
+			gamma = g.Gamma
+		}
+		return iv > 0
+	})
+
 	if oi == 0 || iv == 0 {
 		return 0, 0, 0, false, false
-	}
-	// Gateway-computed gamma at the current spot. May be 0 if the
-	// model-computation tick (21) hasn't fired for this leg; that's
-	// fine because the sweep recomputes gamma at every scenario spot.
-	if g, gok := c.GetOptionGreeks(key); gok {
-		gamma = g.Gamma
 	}
 	return oi, iv, gamma, true, false
 }
@@ -347,6 +374,29 @@ func computeGammaZeroSPX(
 			sym, params.StrikeWidthPct*100, spot)
 	}
 
+	// Switch the connection's MarketDataType to 1 (live) for the fan-out.
+	// Empirical (wire-interceptor) finding 2026-05-18: with the daemon
+	// default of type=2 (frozen-aware), the IBKR gateway delivers
+	// OPTION_COMPUTATION model ticks (msg 21, with IV/greeks) for OPT
+	// contracts but does NOT deliver tick types 27/28 (callOpenInterest /
+	// putOpenInterest). In type=1 it delivers OI but not the model ticks
+	// pre-market. The gamma compute needs both. Switching to type=1 for
+	// the fan-out gets us OI; the legFetcher tolerates missing
+	// model-tick IV by falling back to GetOptionIV which is also
+	// populated from the connector-level snapshot path.
+	//
+	// The defer restores type=2 even on panic/error. Type changes apply
+	// only to *future* reqMktData calls on the same connection, so
+	// concurrently-running regime/chain subscriptions made before this
+	// point keep their original type. Subscriptions made by this fan-out
+	// will all be type=1.
+	if err := c.SetMarketDataType(1); err != nil {
+		return nil, fmt.Errorf("zero-gamma: switch to live data type: %w", err)
+	}
+	defer func() {
+		_ = c.SetMarketDataType(2)
+	}()
+
 	// 5. Fan-out. Mutex around shared aggregation slice; the contention
 	// is bounded at one append per completed leg (cheap relative to the
 	// per-leg roundtrip).
@@ -356,10 +406,30 @@ func computeGammaZeroSPX(
 		done           atomic.Int32
 		noContract     atomic.Int32
 		throttledAbort atomic.Bool
+		earlyAbort     atomic.Bool
 		total          = int32(len(jobs))
 	)
+
+	// Early-abort watchdog. After earlyAbortAfter elapses, if zero legs
+	// have landed in the aggregator, the gateway is not delivering the
+	// ticks we need (entitlement gap, model-computation queue idle,
+	// session-boundary feed pause, …). Aborting fast surfaces a precise
+	// error rather than running the full fan-out against a feed that
+	// won't produce. With the post-fix per-leg budget of 5 s and 4
+	// workers, healthy runs see their first usable leg in <2 s; 30 s of
+	// silence is the right threshold.
+	abortTimer := time.AfterFunc(earlyAbortAfter, func() {
+		mu.Lock()
+		landed := len(legs)
+		mu.Unlock()
+		if landed == 0 {
+			earlyAbort.Store(true)
+		}
+	})
+	defer abortTimer.Stop()
+
 	runBounded(jobs, params.WorkerCount, func(j legSpec) {
-		if ctx.Err() != nil || throttledAbort.Load() {
+		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
 			return
 		}
 		oi, iv, gamma, ok, throttleSignal := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
@@ -404,11 +474,23 @@ func computeGammaZeroSPX(
 		return nil, ctx.Err()
 	}
 	if len(legs) == 0 {
-		if throttledAbort.Load() {
+		switch {
+		case earlyAbort.Load():
+			// Empirically (2026-05-18 wire trace) the most common
+			// cause of "0 legs landing" is pre-market US equities:
+			// the IBKR gateway delivers OPT subscriptions in
+			// market-data type=1 but the model-computation engine
+			// (msg 21) only fires when option order flow is active,
+			// i.e. during regular hours. Frozen mode (type=2) sends
+			// model ticks from the prior session but omits OI.
+			return nil, fmt.Errorf("zero-gamma: no option ticks landed in first %ds. Likely cause: pre-market (option model engine fires only during US regular hours 09:30-16:00 ET). Also check gateway entitlement if this persists during market hours",
+				int(earlyAbortAfter.Seconds()))
+		case throttledAbort.Load():
 			return nil, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
 				noContract.Load(), done.Load())
+		default:
+			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return OI+IV", len(jobs))
 		}
-		return nil, fmt.Errorf("zero-gamma: all %d legs failed to return OI+IV", len(jobs))
 	}
 	progress.Store(85)
 
