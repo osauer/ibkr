@@ -240,6 +240,19 @@ release-verify: ## Smoke-test the local bin/ibkr against a live gateway (called 
 	fi
 	./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
 
+smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
+	@mkdir -p bin
+	go build -o bin/wire-assert ./cmd/wire-assert
+
+smoke: build smoke-build ## Wire-level smoke gate against a live gateway (SKIP cleanly if no gateway)
+	@# Drives the freshly-built bin/ibkr against a live gateway with the
+	@# wire interceptor enabled and asserts per-command protocol-level
+	@# invariants. Catches bugs the unit suite can't see — e.g. the
+	@# v0.24.x productionLegFetcher polled the wrong source for IV.
+	@# SKIPs (exit 0) when no gateway is reachable so `make release`
+	@# works on a laptop without paper-account IBKR access.
+	./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+
 release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-binaries: RELEASE_VERSION is required, e.g. make release-binaries RELEASE_VERSION=v0.6.0" >&2; \
@@ -363,6 +376,12 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# running one. A failure here aborts the release BEFORE the tag is
 	@# ever created — no orphan tag to clean up.
 	$(MAKE) release-verify RELEASE_VERSION=$(RELEASE_VERSION)
+	@# Wire-level smoke. release-verify checks the JSON shape; this
+	@# checks the protocol underneath. SKIPs cleanly without a gateway
+	@# (release works on a laptop without IBKR), but binding when the
+	@# gateway is up. Catches wire-level regressions release-verify
+	@# can't see — see scripts/wire-smoke.sh for the invariant catalogue.
+	$(MAKE) smoke
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	git push origin $(RELEASE_VERSION)
