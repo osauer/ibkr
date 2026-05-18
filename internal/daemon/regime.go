@@ -128,17 +128,20 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 		out.ErrorMessage = "VIX: no spot tick"
 		return out
 	}
-	vix3m, _ := deps.snapshot(ctx, "VIX3M", 5*time.Second)
+	// 8 s budget (vs 5 s for VIX) because VIX3M is a much thinner
+	// CBOE index: off-hours the gateway sometimes takes longer than
+	// the VIX leg to push a snapshot, and 5 s reliably lost the tick
+	// on cold-frozen-mode calls even with a warm contract cache. 8 s
+	// matches the SPY 52w-high budget for the same reason.
+	vix3m, _ := deps.snapshot(ctx, "VIX3M", 8*time.Second)
 	if vix3m <= 0 {
 		// One arm of the pair is enough to be informative, but the
 		// ratio cannot be computed; surface VIX alone with an
 		// error_message so the consumer knows the ratio is missing.
-		// VIX3M will fail until classifySymbol routes it to CBOE/IND;
-		// without that the gateway returns "no security definition".
 		out.VIX = new(vix)
 		out.DataType = vixDT
 		out.Status = rpc.RegimeStatusError
-		out.ErrorMessage = "VIX3M: no spot tick (classifySymbol entry may be missing)"
+		out.ErrorMessage = "VIX3M: no spot tick within budget (thin CBOE index, common off-hours)"
 		return out
 	}
 
