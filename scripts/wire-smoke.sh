@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+#
+# wire-smoke.sh — exercise the freshly-built ibkr binary against a live
+# IBKR Gateway with the wire interceptor enabled, and assert per-command
+# protocol-level invariants.
+#
+# This catches the kind of regression where the daemon "works" by
+# returning JSON but the underlying wire conversation is broken (e.g.
+# the v0.24.x productionLegFetcher bug, where the gateway was sending
+# the right ticks and the daemon was reading the wrong field).
+#
+# Wired into `make release` AFTER `release-verify` so a binary that
+# ships honest JSON but a broken wire flow can never reach a tag.
+# Designed to be:
+#   - Binding when a gateway is reachable
+#   - SKIP (exit 0) when no gateway is up — same posture as
+#     test/integration so `make release` works on a laptop without IBKR
+#   - Deterministic per-run within the live-vs-off-hours dimension
+#     (the script auto-detects frozen mode and loosens budgets)
+#
+# Usage:
+#   scripts/wire-smoke.sh <bin-path> <wire-assert-path>
+#
+# Example:
+#   scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+#
+# Environment hooks:
+#   IBKR_TEST_PORT      — gateway port to probe (default: 7496 TWS live)
+#   IBKR_TEST_HOST      — gateway host (default: 127.0.0.1)
+#   IBKR_SMOKE_TIMEOUT  — per-command wall-clock timeout in seconds (default: 30)
+#
+set -euo pipefail
+
+BIN="${1:?usage: wire-smoke.sh <bin/ibkr> <bin/wire-assert>}"
+ASSERT="${2:?usage: wire-smoke.sh <bin/ibkr> <bin/wire-assert>}"
+
+if [[ ! -x "$BIN" ]]; then
+    echo "wire-smoke: $BIN not executable" >&2
+    exit 2
+fi
+if [[ ! -x "$ASSERT" ]]; then
+    echo "wire-smoke: $ASSERT not executable (run 'make smoke-build')" >&2
+    exit 2
+fi
+
+GATEWAY_HOST="${IBKR_TEST_HOST:-127.0.0.1}"
+GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
+# 60s default. The chain fetch can legitimately take ~30s when 22 legs
+# need contract resolution from a cold cache (observed 2026-05-18:
+# chain SPY --width 5 → 30018ms wall clock). 30s was too tight; 60s
+# gives the legitimate path room without letting a wedged daemon hang.
+PER_CMD_TIMEOUT="${IBKR_SMOKE_TIMEOUT:-60}"
+
+# 1. Gateway-presence probe. Same posture as test/integration: a missing
+# gateway is SKIP (exit 0), not FAIL — `make release` must work for a
+# contributor on a laptop without paper-account IBKR access. The probe
+# uses bash's /dev/tcp to avoid a netcat dependency.
+if ! timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${GATEWAY_PORT}" 2>/dev/null; then
+    echo "wire-smoke: SKIP — no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT}"
+    exit 0
+fi
+echo "wire-smoke: gateway present at ${GATEWAY_HOST}:${GATEWAY_PORT}"
+
+# 2. Isolated daemon under /tmp. Mirrors release-verify.sh so the smoke
+# gate never touches the user's canonical daemon. Wire interceptor is
+# enabled here, not in the production code — IBKR_WIRE_INTERCEPTOR is
+# the test surface designed for exactly this use case.
+TMPDIR_BASE="${TMPDIR:-/tmp}"
+SMOKE_DIR="$(mktemp -d "$TMPDIR_BASE/ibkr-wire-smoke-XXXXXX")"
+SOCKET="$SMOKE_DIR/ibkr.sock"
+LOG="$SMOKE_DIR/ibkr-daemon.log"
+LOCK="$SMOKE_DIR/ibkr.lock"
+WIRE_LOG="$SMOKE_DIR/wire.jsonl"
+
+export IBKR_SOCKET="$SOCKET"
+export IBKR_LOG="$LOG"
+export IBKR_WIRE_INTERCEPTOR=1
+export IBKR_WIRE_LOG_PATH="$WIRE_LOG"
+export IBKR_WIRE_RING_SIZE=4096
+
+cleanup() {
+    local code=$?
+    # SIGTERM the daemon we spawned (PID in the lockfile under SMOKE_DIR).
+    if [[ -r "$LOCK" ]]; then
+        local pid
+        pid="$(tr -d '[:space:]' < "$LOCK" 2>/dev/null || true)"
+        if [[ -n "$pid" && "$pid" -gt 0 ]] 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in $(seq 1 30); do
+                if ! kill -0 "$pid" 2>/dev/null; then break; fi
+                sleep 0.1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+    # On failure, surface the daemon log tail and the last few wire
+    # frames — the failure-mode is in the wire data, not in the CLI's
+    # exit code, so we need both.
+    if [[ $code -ne 0 ]]; then
+        if [[ -r "$LOG" ]]; then
+            echo ""
+            echo "wire-smoke: daemon log tail ($LOG):" >&2
+            tail -30 "$LOG" >&2 || true
+        fi
+        if [[ -r "$WIRE_LOG" ]]; then
+            echo ""
+            echo "wire-smoke: last 5 wire frames ($WIRE_LOG):" >&2
+            tail -5 "$WIRE_LOG" >&2 || true
+        fi
+    fi
+    rm -rf "$SMOKE_DIR" 2>/dev/null || true
+    return $code
+}
+trap cleanup EXIT INT TERM
+
+# Stop any pre-existing daemons that would race for the client-ID slot.
+# Same logic as release-verify.sh:99 — verbatim because the problem and
+# the fix are identical.
+stop_existing_daemons() {
+    local pids
+    pids="$(pgrep -f 'ibkr daemon' 2>/dev/null || true)"
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+    echo "wire-smoke: stopping pre-existing daemon(s):"
+    for pid in $pids; do
+        local cmd
+        cmd="$(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
+        echo "  pid=$pid cmd=$cmd"
+    done
+    for pid in $pids; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for _ in $(seq 1 50); do
+        local remaining=""
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                remaining="$remaining $pid"
+            fi
+        done
+        if [[ -z "$remaining" ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    for pid in $pids; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+}
+stop_existing_daemons
+
+# Run a CLI command with a deadline; on failure, print the command +
+# output. Sets $LAST_CMD_OUTPUT and $LAST_CMD_EXIT for the caller.
+run_cli() {
+    local label="$1"
+    shift
+    LAST_CMD_EXIT=0
+    LAST_CMD_OUTPUT="$(timeout "$PER_CMD_TIMEOUT" "$BIN" "$@" 2>&1)" || LAST_CMD_EXIT=$?
+}
+
+# Run one named wire-assert check against the whole JSONL. Per-command
+# scoping was tempting but in practice the daemon pre-warms subscriptions
+# at boot (SPY for the regime path, ARCA contract lookups, etc.), so
+# isolating "frames produced by THIS command" gives false negatives. The
+# isolated tmp daemon's wire log is small enough — and the per-command
+# command order is deterministic enough — that whole-file scans work.
+assert_wire() {
+    local check="$1"
+    local loose_flag=""
+    if [[ "${LOOSE:-0}" -eq 1 ]]; then
+        loose_flag="--loose"
+    fi
+    if ! "$ASSERT" --jsonl "$WIRE_LOG" --check "$check" $loose_flag; then
+        echo "" >&2
+        echo "wire-smoke: aborting on first failure" >&2
+        exit 1
+    fi
+}
+
+echo "wire-smoke: isolated daemon → $SOCKET"
+echo "wire-smoke: wire log → $WIRE_LOG"
+
+# 4. Boot the daemon by issuing a status call (which autospawns one at
+# the isolated socket). Wait for the gateway to be connected — give it
+# 25s, same budget as the integration suite.
+echo "  [boot] autospawning daemon..."
+
+for attempt in $(seq 1 25); do
+    if "$BIN" status --json 2>/dev/null | grep -q '"connected": *true'; then
+        break
+    fi
+    sleep 1
+    if [[ $attempt -eq 25 ]]; then
+        echo "wire-smoke: FAIL: daemon never reached connected=true within 25s" >&2
+        exit 1
+    fi
+done
+assert_wire status-handshake
+echo "  [boot] ok"
+
+# 5. Detect frozen/off-hours mode by querying SPY's data_type. If
+# frozen/delayed, set LOOSE=1 so the chain-iv-source check warns
+# instead of failing (model engine doesn't fire when options aren't
+# trading — that's an IBKR characteristic, not a regression).
+
+run_cli quote-spy quote SPY --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: quote SPY exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+data_type="$(echo "$LAST_CMD_OUTPUT" | grep -o '"data_type": *"[^"]*"' | head -1 | sed 's/.*"\(.*\)"/\1/')"
+case "$data_type" in
+    live)
+        LOOSE=0
+        echo "  [mode] live"
+        ;;
+    frozen|delayed|delayed-frozen|"")
+        LOOSE=1
+        echo "  [mode] $data_type — loose (model engine may be idle)"
+        ;;
+    *)
+        LOOSE=1
+        echo "  [mode] unknown ($data_type) — loose"
+        ;;
+esac
+assert_wire quote-spy
+
+# 6. account.summary — pins account-level reqAccountSummary path.
+echo "  [account]..."
+
+run_cli account account --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: account exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+assert_wire account-summary
+
+# 7. chain with a near expiry — pins the IV-source path that the
+# v0.24.x bug broke. In loose mode this check warns instead of failing.
+echo "  [chain SPY 1-wide]..."
+
+# Pick a near expiry. The chain expiry-listing command returns them in
+# DTE order; we grab the second (skipping today's 0DTE which can be
+# quirky) and strip the date.
+expiries="$("$BIN" chain SPY 2>/dev/null | awk '/^[[:space:]]+20[0-9]{2}-[0-9]{2}-[0-9]{2}/ {print $1}' | head -3 | tail -1)"
+if [[ -z "$expiries" ]]; then
+    echo "wire-smoke: FAIL: could not list SPY expiries via 'ibkr chain SPY'" >&2
+    exit 1
+fi
+run_cli chain-iv chain SPY --expiry "$expiries" --width 1 --side both --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: chain exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+assert_wire chain-iv-source
+
+# 8. regime — the dashboard's fan-out. Asserts all 5 indicator
+# subscribes go out.
+echo "  [regime]..."
+
+run_cli regime regime --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: regime exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+assert_wire regime-subs
+
+# 9. gamma --no-wait — proves the non-blocking gamma path returns a
+# terminal status without hanging.
+echo "  [gamma --no-wait]..."
+
+run_cli gamma gamma --no-wait --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: gamma --no-wait exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+assert_wire gamma-noflag
+
+echo ""
+mode_label="strict"
+if [[ "${LOOSE:-0}" -eq 1 ]]; then mode_label="loose"; fi
+echo "wire-smoke: PASS — ${BIN} wire flow is healthy (mode=${mode_label})"
