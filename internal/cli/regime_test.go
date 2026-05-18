@@ -506,3 +506,209 @@ func TestRenderRegime_NilQualityFallsBackToStaleTick(t *testing.T) {
 		}
 	}
 }
+
+// ----- v0.26.0: gamma row no-crossing branches + jargon cleanup -----
+
+// TestRegimeRow_GammaPositiveSignBandsGreen pins the new no-crossing
+// branch: when the swept profile never crosses zero AND the whole
+// profile is positive, the row ranks green (dealer long-γ across the
+// window, stabilizing regime). Previously this hid behind an
+// "unavailable" glyph; now it surfaces as a real regime statement.
+func TestRegimeRow_GammaPositiveSignBandsGreen(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				GammaSign:      "positive",
+				GammaTotalAbs:  2.7e9,
+				// ZeroGamma / GapPct both nil — no crossing in window
+			},
+		},
+	})
+	if row.band != bandGreen {
+		t.Errorf("positive GammaSign should band green, got %v", row.band)
+	}
+	if !strings.Contains(row.reason, "long-γ") {
+		t.Errorf("positive GammaSign reason should mention long-γ, got %q", row.reason)
+	}
+	if !strings.Contains(row.value, "737") {
+		t.Errorf("value cell should still surface spot, got %q", row.value)
+	}
+}
+
+// TestRegimeRow_GammaNegativeSignBandsRed pins the amplifying-regime
+// branch: short-γ across the whole sweep is a red band, not unranked.
+func TestRegimeRow_GammaNegativeSignBandsRed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				GammaSign:      "negative",
+				GammaTotalAbs:  3.1e9,
+			},
+		},
+	})
+	if row.band != bandRed {
+		t.Errorf("negative GammaSign should band red, got %v", row.band)
+	}
+	if !strings.Contains(row.reason, "short-γ") {
+		t.Errorf("negative GammaSign reason should mention short-γ, got %q", row.reason)
+	}
+}
+
+// TestRegimeRow_GammaNoDataStaysUnranked pins the genuine "empty
+// profile" path: with no crossing AND no signed signal, the row stays
+// unranked (current behaviour for empty / pathological compute).
+func TestRegimeRow_GammaNoDataStaysUnranked(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				GammaSign:      "no_data",
+			},
+		},
+	})
+	if row.band != bandUnranked {
+		t.Errorf("no_data sign should stay unranked, got %v", row.band)
+	}
+}
+
+// TestRegimeRow_GammaUsesGammaZeroLabel pins the jargon cleanup: the
+// value cell uses "γ-zero", not "flip". Same for the reason strings.
+// "flip" stays in code identifiers but does not appear in user-facing
+// row text.
+func TestRegimeRow_GammaUsesGammaZeroLabel(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	zg := 735.0
+	gap := 0.5
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				ZeroGamma:      &zg,
+				GapPct:         &gap,
+			},
+		},
+	})
+	if strings.Contains(row.value, "flip") {
+		t.Errorf("value cell must not contain 'flip' jargon: %q", row.value)
+	}
+	if strings.Contains(row.reason, "flip") {
+		t.Errorf("reason must not contain 'flip' jargon: %q", row.reason)
+	}
+	if !strings.Contains(row.value, "γ-zero") {
+		t.Errorf("value cell should label the crossing as 'γ-zero': %q", row.value)
+	}
+}
+
+// TestQualityTag_ModelledSuppressesShortAge pins the new modelled-age
+// behaviour: a model output 37 s old reads as fresh, not stale. The
+// "· modelled" tag stays unannotated until the model age crosses 5 min,
+// at which point the tag adopts a stale-model warning form.
+func TestQualityTag_ModelledSuppressesShortAge(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		age  time.Duration
+		want string
+	}{
+		{"1s", 1 * time.Second, "· modelled"},
+		{"37s", 37 * time.Second, "· modelled"},
+		{"4m_59s", 4*time.Minute + 59*time.Second, "· modelled"},
+		{"6m", 6 * time.Minute, "· modelled 6m old"},
+		{"45m", 45 * time.Minute, "· modelled 45m old"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &rpc.Quality{
+				AsOf:           now.Add(-tc.age),
+				FreshnessClass: rpc.FreshnessModelled,
+				Confidence:     rpc.ConfidenceProxy,
+			}
+			got := qualityTag(now, q)
+			if got != tc.want {
+				t.Errorf("age=%s tag=%q, want %q", tc.age, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderRegime_ExplainCarriesGammaZeroExplanation pins the
+// renderer's --explain extension: the gamma row carries a plain-English
+// paragraph explaining what the level means and how to read the bands,
+// so a non-quant reader doesn't need to leave the terminal for the
+// methodology spec.
+func TestRenderRegime_ExplainCarriesGammaZeroExplanation(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeTextTo(env, &stdout, regimeFixture(), true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	// Three load-bearing phrases — the read must explain what γ-zero is,
+	// what happens above it, and what happens below it.
+	for _, want := range []string{"γ-zero", "stabilizing", "amplifying"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain output missing γ-zero plain-English term %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderRegime_ExplainSurfacesDerivedIVDisclosure pins the
+// "compute used N derived IVs" line that fires when any leg used the
+// BS-IV Newton-Raphson fallback. The fallback runs pre-market when the
+// gateway's model-computation engine is idle; the disclosure makes the
+// prior-session-price anchor visible to a reader auditing the result.
+func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	fix := regimeFixture()
+	fix.AsOf = now
+	zg := 735.0
+	gap := 0.27
+	fix.GammaZero.Status = rpc.RegimeStatusOK
+	fix.GammaZero.Envelope = rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			SpotUnderlying: 737.0,
+			ZeroGamma:      &zg,
+			GapPct:         &gap,
+			LegCount:       240,
+			DerivedIVLegs:  240,
+			Method:         "perfiliev-bs-sweep-v1",
+		},
+	}
+	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
+		AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
+		Source: "perfiliev-bs-sweep-v1 · BS-IV from prior-session last price",
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeTextTo(env, &stdout, fix, true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"240/240 legs", "BS-IV", "prior-session"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain output missing derived-IV disclosure %q:\n%s", want, out)
+		}
+	}
+}

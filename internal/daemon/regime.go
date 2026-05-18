@@ -342,7 +342,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "SPY dealer zero-gamma flip level. Spec thresholds: SPY >2% above zero_gamma (green); within 2% (yellow); below (red). The flip itself is the regime event — no waiting period. Underlying is SPY (the S&P 500 ETF) rather than SPX (the index) so the compute is robust off-hours: SPY trades extended hours with continuous market-maker quotes and a single trading class, which keeps option IV ticks flowing and the chain enumeration clean; SPX has no spot trading outside RTH and IBKR's model-computation engine doesn't push IV ticks for SPX options pre-market. The regime signal is unchanged — SPY dealer gamma tracks SPX dealer gamma closely — but the absolute level is SPY-scale (~SPX/10). Methodology: Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes; sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs, autocallables, sticky IV). First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed flip level when positioning is unusual."
+const gammaNotes = "SPY dealer γ-zero level (the spot where dealer net gamma crosses zero). Spec thresholds: SPY >2% above γ-zero (green, stabilizing); within 2% (yellow, regime can flip on a single session); below (red, amplifying). The crossing itself is the regime event — no waiting period. Underlying is SPY (the S&P 500 ETF) rather than SPX (the index) so the compute is robust off-hours: SPY trades extended hours with continuous market-maker quotes and a single trading class, which keeps option IV ticks flowing and the chain enumeration clean; SPX has no spot trading outside RTH and IBKR's model-computation engine doesn't push IV ticks for SPX options pre-market. The regime signal is unchanged — SPY dealer gamma tracks SPX dealer gamma closely — but the absolute level is SPY-scale (~SPX/10). Methodology: Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes; sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs, autocallables, sticky IV). Pre-market: when the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs and surfaced in the row's source disclosure. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed γ-zero level when positioning is unusual."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
@@ -368,7 +368,18 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 			// BS sweep's interpolation); GammaTotalAbs is the firmer
 			// sign-agnostic notional aggregated from OI+IV observations
 			// — still an estimate because per-leg coverage varies.
-			out.ZeroGammaQuality = modelledQuality(envelope.Result.AsOf, envelope.Result.Method)
+			//
+			// When DerivedIVLegs == LegCount, every IV in the compute came
+			// from the BS-IV Newton-Raphson fallback against
+			// prior-session prices (typical pre-market). The Source
+			// string disclosure surfaces that to the --explain reader so
+			// the prior-prices anchor is visible without re-reading the
+			// methodology spec.
+			source := envelope.Result.Method
+			if r := envelope.Result; r.DerivedIVLegs > 0 && r.DerivedIVLegs == r.LegCount {
+				source = r.Method + " · BS-IV from prior-session last price"
+			}
+			out.ZeroGammaQuality = modelledQuality(envelope.Result.AsOf, source)
 			out.GammaTotalAbsQuality = derivedQuality(envelope.Result.AsOf, "BS-sweep |Γ|·OI·spot²")
 		}
 	case rpc.GammaZeroStatusComputing:

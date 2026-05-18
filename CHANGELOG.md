@@ -2,7 +2,76 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## v0.25.0 — 2026-05-18 16:05 CEST
+## v0.26.0 — 2026-05-18 18:50 CEST
+
+Pre-market gamma now produces a result instead of timing out; the regime
+gamma row ranks the no-crossing case instead of marking it unavailable;
+"γ-zero" replaces "flip" in user-facing strings.
+
+### Added
+
+- **BS-IV Newton-Raphson fallback for pre-market gamma.** When the IBKR
+  gateway's model-computation engine is idle (typical pre-market — it
+  fires only against active option order flow), the Phase 2 compute now
+  back-solves implied volatility from each option's prior-session close
+  (tick 9, always pushed on subscribe). New `bsImpliedVolatility` /
+  `bsCallPrice` / `bsVega` helpers in
+  [blackscholes.go](internal/daemon/blackscholes.go); put prices convert
+  to equivalent calls via parity, the solver refuses (returns 0) on
+  intrinsic violation, sub-1h DTE, or σ outside `[0.01, 5.0]`. Stage 2b
+  is factored as `bsIVFallback` so the composition is unit-testable
+  without a live gateway — `TestBSIVFallback_AssemblesLegFromSyntheticPrice`
+  is the regression pin.
+
+- **`DerivedIVLegs` on the gamma envelope** counts how many legs used
+  the fallback. Pre-market this is typically `== LegCount` (engine
+  idle); during regular hours it stays at 0. The regime row's
+  `Quality.Source` carries `"perfiliev-bs-sweep-v1 · BS-IV from
+  prior-session last price"` when every leg used the fallback, and
+  `--explain` adds a `"compute used N/N legs with BS-IV from
+  prior-session last price"` disclosure line.
+
+- **Regime gamma row ranks the no-crossing case.** When the swept
+  profile never crosses zero, the renderer bands on `GammaSign`:
+  positive → green (dealer long-γ, stabilizing), negative → red (dealer
+  short-γ, amplifying), no_data → unranked. Value cell shows
+  `spot 736.91 · short-γ |Γ|·OI 4.1bn`; three regression tests pin the
+  three no-crossing branches.
+
+- **`--explain` paragraph for the gamma row.** Plain-English description
+  of what γ-zero means and how to read the bands, so a non-quant reader
+  doesn't have to leave the terminal for the methodology spec.
+
+- **`gamma-premarket-derived` wire-smoke check.** In loose mode
+  (off-hours / frozen), asserts `derived_iv_legs > 0` in the gamma
+  envelope. Reads the daemon's JSON response rather than a wire frame
+  because the counter is a daemon-internal aggregation. `wire-assert`
+  grew `--gamma-envelope-path` and a `checkInputs` struct; cataloged
+  alongside the existing six in `--list`. Strict mode skips it
+  automatically.
+
+### Changed
+
+- **"Flip" → "γ-zero" in user-facing strings.** Renderer row labels,
+  reasons, the `ibkr gamma` command output, and `rpc.GammaZeroComputed`
+  field docs. "Flip" survives only in code identifiers and `--explain`
+  prose where the term is contextually defined.
+
+- **`qualityTag` suppresses age on modelled rows.** A model output 37s
+  old is no more stale than one 1s old — the inputs were captured at the
+  same compute. The row shows `· modelled` until the cached model
+  crosses 5 minutes, then `· modelled 6m old`. Live-tick rows keep the
+  existing seconds-old age suffix.
+
+### Fixed
+
+- **Pre-market "no option ticks landed" abort.** The 30s early-abort
+  error message now blames both failed paths (model ticks and BS-IV
+  fallback) and points at gateway entitlement / farm-connection notices
+  in the daemon log, since the BS-IV fallback recovers the routine
+  pre-market case.
+
+
 
 The gamma compute now works end-to-end during US regular trading hours
 and the regime dashboard tells you how trustworthy each value is. Plus

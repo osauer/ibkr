@@ -446,14 +446,14 @@ type GammaZeroComputed struct {
 	// Distinct from AsOf which covers the whole computation.
 	SpotAt time.Time `json:"spot_at"`
 
-	// ZeroGamma is the dealer-flip level under the Perfiliev convention.
-	// nil when no crossing exists within the sweep window (rare; usually
-	// means dealers are strongly long-gamma across the regime). Inspect
-	// GammaSign in that case.
+	// ZeroGamma is the dealer γ-zero level under the Perfiliev convention
+	// (the spot where dealer net gamma crosses zero). nil when no
+	// crossing exists within the sweep window — inspect GammaSign in
+	// that case to learn whether the whole sweep is long-γ or short-γ.
 	ZeroGamma *float64 `json:"zero_gamma"`
 	// GapPct is (SpotUnderlying − ZeroGamma) / ZeroGamma × 100. nil iff
-	// ZeroGamma is nil. Sign convention: positive = spot above flip
-	// (dampening regime); negative = below flip (amplifying regime).
+	// ZeroGamma is nil. Sign convention: positive = spot above γ-zero
+	// (dampening regime); negative = below γ-zero (amplifying regime).
 	GapPct *float64 `json:"gap_pct"`
 	// GammaSign is "positive" or "negative" and is meaningful only when
 	// ZeroGamma is nil — it tells the renderer which side of zero the
@@ -486,6 +486,14 @@ type GammaZeroComputed struct {
 	// run (e.g., 240 out of 480 means half the chain dropped — surface
 	// to the renderer as a confidence flag).
 	LegCount int `json:"leg_count"`
+	// DerivedIVLegs counts how many of those legs used the BS-IV
+	// Newton-Raphson fallback because the gateway never pushed a
+	// model-computation tick. Pre-market this is typically equal to
+	// LegCount (the model engine is idle); during regular hours it
+	// should stay at 0. Renderers surface a "compute used N derived
+	// IVs" disclosure so the prior-session-price anchor is visible
+	// to a reader who's about to act on the γ-zero level.
+	DerivedIVLegs int `json:"derived_iv_legs,omitempty"`
 	// Warnings is a structured list of non-fatal conditions: e.g.,
 	// "no_crossing_in_window", "spxw_partial_oi", "low_leg_coverage".
 	// Empty when the computation was clean. Renderers surface these

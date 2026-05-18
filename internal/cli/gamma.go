@@ -88,7 +88,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	fmt.Fprintln(out)
 
 	if c.ZeroGamma != nil {
-		fmt.Fprintf(out, "  Zero-gamma  %.2f", *c.ZeroGamma)
+		fmt.Fprintf(out, "  γ-zero      %.2f", *c.ZeroGamma)
 		if c.GapPct != nil {
 			gap := *c.GapPct
 			sign := "+"
@@ -99,11 +99,26 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		}
 		fmt.Fprintln(out)
 	} else {
-		fmt.Fprintf(out, "  Zero-gamma  no crossing in sweep window (all %s gamma)\n", c.GammaSign)
+		// No crossing in the swept window. The signed profile is
+		// one-sided; surface that as a regime statement rather than
+		// "all <raw enum> gamma" which produces "all no_data gamma"
+		// for the degenerate case.
+		switch c.GammaSign {
+		case "positive":
+			fmt.Fprintln(out, "  γ-zero      no crossing — dealer long-γ across ±15% sweep (stabilizing regime, γ-zero well below spot)")
+		case "negative":
+			fmt.Fprintln(out, "  γ-zero      no crossing — dealer short-γ across ±15% sweep (amplifying regime, γ-zero well above spot)")
+		default:
+			fmt.Fprintln(out, "  γ-zero      no crossing — sweep produced no signed profile")
+		}
 	}
 
 	fmt.Fprintf(out, "  |Γ|·OI sum  %.3e (sign-agnostic magnitude)\n", c.GammaTotalAbs)
 	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
+	if c.DerivedIVLegs > 0 {
+		fmt.Fprintf(out, "  Derived IV  %d/%d legs back-solved via Black-Scholes from prior-session prices\n",
+			c.DerivedIVLegs, c.LegCount)
+	}
 	fmt.Fprintf(out, "  Method      %s\n", c.Method)
 	fmt.Fprintf(out, "  Source      %s\n", c.Source)
 	if c.DurationMS > 0 {
@@ -132,7 +147,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, env.dim("  Disclosure: the signed zero-gamma assumes the 2018 \"dealers long calls,"))
+	fmt.Fprintln(out, env.dim("  Disclosure: the signed γ-zero assumes the 2018 \"dealers long calls,"))
 	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))
 	fmt.Fprintln(out, env.dim("  autocall hedging the sign can invert; treat as a regime hint, not a"))
 	fmt.Fprintln(out, env.dim("  level. The magnitude signal above is methodology-agnostic."))

@@ -156,3 +156,94 @@ func TestAbsGEX_NoSignConvention(t *testing.T) {
 		t.Errorf("zero-OI absGEX = %v, want 0", v)
 	}
 }
+
+// TestBSImpliedVolatility_RoundTrip pins the Newton-Raphson back-solver:
+// price an option via bsCallPrice at a known σ, then invert and require
+// the recovered σ matches. Covers ATM / OTM / ITM and the put-via-parity
+// path. Tolerance is 0.001 (10 bps of vol), tight enough to catch a
+// material derivation bug without being noise-sensitive on the slowest-
+// converging deep-OTM corners.
+func TestBSImpliedVolatility_RoundTrip(t *testing.T) {
+	cases := []struct {
+		name                       string
+		spot, strike, t, vol, r, q float64
+		isCall                     bool
+	}{
+		{"atm_call_30dte", 100, 100, 30.0 / 365.0, 0.20, 0, 0, true},
+		{"atm_put_30dte", 100, 100, 30.0 / 365.0, 0.20, 0, 0, false},
+		{"otm_call_5pct", 100, 105, 30.0 / 365.0, 0.25, 0, 0, true},
+		{"otm_put_5pct", 100, 95, 30.0 / 365.0, 0.25, 0, 0, false},
+		{"itm_call_5pct", 100, 95, 30.0 / 365.0, 0.20, 0, 0, true},
+		{"itm_put_5pct", 100, 105, 30.0 / 365.0, 0.20, 0, 0, false},
+		{"spy_weekly_low_vol", 737, 740, 7.0 / 365.0, 0.12, 0, 0, true},
+		{"spy_weekly_high_vol", 737, 740, 7.0 / 365.0, 0.55, 0, 0, true},
+		{"spx_30dte_atm", 5000, 5000, 30.0 / 365.0, 0.18, 0.04, 0.015, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Generate a synthetic price under the test case's σ. For
+			// puts, derive via parity: P = C − S·e^(-qT) + K·e^(-rT).
+			callPx := bsCallPrice(tc.spot, tc.strike, tc.t, tc.vol, tc.r, tc.q)
+			price := callPx
+			if !tc.isCall {
+				price = callPx - tc.spot*math.Exp(-tc.q*tc.t) + tc.strike*math.Exp(-tc.r*tc.t)
+			}
+			got := bsImpliedVolatility(price, tc.spot, tc.strike, tc.t, tc.r, tc.q, tc.isCall)
+			if got == 0 {
+				t.Fatalf("solver refused a valid price (synthetic σ=%.2f, price=%.4f)", tc.vol, price)
+			}
+			if math.Abs(got-tc.vol) > 0.001 {
+				t.Errorf("σ recovery: got %.5f, want %.5f (Δ=%.5f)", got, tc.vol, math.Abs(got-tc.vol))
+			}
+		})
+	}
+}
+
+// TestBSImpliedVolatility_Refusals pins the four refusal cases the BS-IV
+// solver must return 0 for. Each is a real condition the pre-market
+// fan-out hits: stale deep-OTM prints, sub-1h expiries (vega collapses
+// to noise), and pathological inputs (zeros). Refusal is the safe
+// outcome — propagating a bad σ into the sweep poisons every gamma
+// estimate at that strike.
+func TestBSImpliedVolatility_Refusals(t *testing.T) {
+	cases := []struct {
+		name                   string
+		price, spot, strike, t float64
+		isCall                 bool
+	}{
+		{"zero_price", 0, 100, 100, 30.0 / 365.0, true},
+		{"negative_price", -1, 100, 100, 30.0 / 365.0, true},
+		{"zero_spot", 5, 0, 100, 30.0 / 365.0, true},
+		{"zero_strike", 5, 100, 0, 30.0 / 365.0, true},
+		{"sub_1h_dte", 5, 100, 100, 0.5 / (365.0 * 24.0), true}, // 30 min DTE
+		// Intrinsic > price: a $5 strike ITM by $20 cannot price below $20
+		// without violating no-arbitrage; refuse rather than back out a
+		// non-physical σ.
+		{"intrinsic_violation_call", 5, 120, 100, 30.0 / 365.0, true},
+		// Same for puts: spot $80, K=100 → intrinsic ~$20, but price $5
+		// is below intrinsic — stale-print signature.
+		{"intrinsic_violation_put", 5, 80, 100, 30.0 / 365.0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bsImpliedVolatility(tc.price, tc.spot, tc.strike, tc.t, 0, 0, tc.isCall)
+			if got != 0 {
+				t.Errorf("expected refusal (σ=0) for %s, got σ=%.6f", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestBSImpliedVolatility_BoundsClamp pins the [0.01, 5.0] convergence
+// band: a price priced at σ_true = 600 % must be refused (returns 0) —
+// a 600 % implied vol on a listed SPY weekly is almost certainly a
+// stale deep-OTM print rather than real market state, and the band
+// exists to refuse rather than propagate a non-physical σ.
+func TestBSImpliedVolatility_BoundsClamp(t *testing.T) {
+	highPrice := bsCallPrice(100, 100, 30.0/365.0, 6.0, 0, 0)
+	got := bsImpliedVolatility(highPrice, 100, 100, 30.0/365.0, 0, 0, true)
+	if got != 0 {
+		t.Errorf("expected refusal (σ=0) for σ_true=6.0 input price=%.4f, got σ=%.4f",
+			highPrice, got)
+	}
+}
