@@ -3,6 +3,7 @@
 [![ci](https://github.com/osauer/ibkr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/osauer/ibkr/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/osauer/ibkr?display_name=tag&sort=semver)](https://github.com/osauer/ibkr/releases/latest)
 [![go.mod](https://img.shields.io/github/go-mod/go-version/osauer/ibkr)](go.mod)
+[![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
 **A read-only client for your Interactive Brokers account.** One Go binary, three surfaces — CLI, stdio MCP server, Go library — all returning the same JSON. No Python or Java runtime to install.
