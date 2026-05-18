@@ -1771,13 +1771,29 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 }
 
 // briefSnapshotPrice subscribes to a symbol, polls the cache for the first
-// usable price, and unsubscribes. Returns the price (last → mid → bid → ask)
-// and the gateway's data-type notice. Zero price + empty data type on
-// timeout. Pre-fix the data-type string was hardcoded "live"; the chain
-// + watch UX now needs the truthful value (frozen / delayed / etc.) to
-// render the after-hours badge.
+// usable price, and unsubscribes. Returns the price (last → mid → bid → ask
+// → mark → close) and the gateway's data-type notice. Zero price + empty
+// data type on timeout. Pre-fix the data-type string was hardcoded "live";
+// the chain + watch UX now needs the truthful value (frozen / delayed /
+// etc.) to render the after-hours badge.
+//
+// Fallback ladder reflects how IBKR delivers ticks across instrument types:
+//
+//   - last/bid/ask: standard for stocks, ETFs, FX in live or frozen mode.
+//   - mark (tick 37): the gateway's calculated fair price. Indices (VIX,
+//     SPX) emit this as their only price because indices don't trade.
+//   - close (tick 9): yesterday's regular-session close. Thin CBOE
+//     indices like VIX3M routinely emit ONLY this off-hours — no bid,
+//     ask, last, or mark for the full snapshot budget. Without this
+//     last-resort fallback, VIX3M would never rank pre-open even with
+//     a healthy gateway, and the VIX/VIX3M term-structure regime row
+//     would drop to error.
+//
+// Returning the close keeps the indicator informative; the data-type
+// field ("frozen" or similar) tells the renderer to dim the row rather
+// than treating it as live.
 func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
-	bid, ask, last, dt := briefSnapshotFull(ctx, c, symbol, timeout)
+	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
 	if dt == "" {
 		dt = "live"
 	}
@@ -1790,6 +1806,10 @@ func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string
 		return bid, dt
 	case ask > 0:
 		return ask, dt
+	case mark > 0:
+		return mark, dt
+	case closePx > 0:
+		return closePx, dt
 	default:
 		return 0, ""
 	}
@@ -1866,35 +1886,51 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 	return price, week52High, dataType
 }
 
-// briefSnapshotFull does the same as briefSnapshotPrice but returns the raw
-// bid/ask/last triple plus the gateway's data-type name (live, frozen,
-// delayed, delayed-frozen, or "" on timeout). The data type is captured
-// while the subscription is still live — once UnsubscribeMarketData
-// fires (defer), the connector's symbol→reqID mapping is gone and the
-// type would always read "unknown".
-func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (bid, ask, last float64, dataType string) {
+// briefSnapshotFull subscribes to a symbol, polls until a live tick
+// (bid/ask/last/mark) lands, and returns the raw quintuple
+// (bid, ask, last, mark, close) plus the gateway's data-type name (live,
+// frozen, delayed, delayed-frozen, or "" when nothing arrived). The
+// data type is captured while the subscription is still live — once
+// UnsubscribeMarketData fires (defer), the connector's symbol→reqID
+// mapping is gone and the type would always read "unknown".
+//
+// Mark price (tick 37) is treated as a live tick because indices like
+// VIX and SPX emit it as their only price — they don't trade so there
+// is no bid/ask/last.
+//
+// Close (tick 9, the prior regular-session close) is captured on every
+// poll iteration but does NOT terminate the wait. It is a backstop for
+// instruments that emit no live tick within the budget — thin CBOE
+// indices like VIX3M routinely send only close pre-open. On timeout the
+// values from the last poll iteration are returned, which means close
+// may be non-zero even when the live-tick predicate never fired;
+// callers fall back to it as a last resort. The data-type field is
+// populated regardless of which ticks landed so the renderer can
+// truthfully label the row "frozen" instead of pretending it's live.
+func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (bid, ask, last, mark, closePx float64, dataType string) {
 	if c == nil {
-		return 0, 0, 0, ""
+		return 0, 0, 0, 0, 0, ""
 	}
 	sym := normSym(symbol)
 	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
-	if err := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
-		if d.Bid > 0 || d.Ask > 0 || d.Last > 0 {
-			bid, ask, last = d.Bid, d.Ask, d.Last
+	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		// Capture every tick we've seen so far; on timeout the final
+		// iteration's values are what the caller observes.
+		bid, ask, last, mark, closePx = d.Bid, d.Ask, d.Last, d.MarkPrice, d.Close
+		if dataType == "" && (bid > 0 || ask > 0 || last > 0 || mark > 0 || closePx > 0) {
 			// Capture data-type while the subscription is still live;
 			// once UnsubscribeMarketData fires (defer above), the
 			// connector's symbol→reqID mapping is gone and the type
 			// would always read "unknown".
 			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
-			return true
 		}
-		return false
-	}); err != nil {
-		return 0, 0, 0, ""
-	}
-	return bid, ask, last, dataType
+		// Only a true live tick terminates the wait; close alone keeps
+		// us polling so a slow bid/ask still wins if it lands in time.
+		return bid > 0 || ask > 0 || last > 0 || mark > 0
+	})
+	return bid, ask, last, mark, closePx, dataType
 }
 
 // adHocScanLimitCap is the maximum number of rows an ad-hoc scan

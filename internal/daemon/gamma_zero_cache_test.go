@@ -28,7 +28,7 @@ func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		computeRuns.Add(1)
 		<-block
-		return &rpc.GammaZeroComputed{SpotSPX: 5000}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 	}
 
 	var first, second *gammaComputation
@@ -65,7 +65,7 @@ func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 	}
 
 	<-first.done
-	if first.result == nil || first.result.SpotSPX != 5000 {
+	if first.result == nil || first.result.SpotUnderlying != 5000 {
 		t.Errorf("first.result mismatch: %+v", first.result)
 	}
 }
@@ -81,7 +81,7 @@ func TestGammaZeroCache_SessionRollover(t *testing.T) {
 	var computeRuns atomic.Int32
 	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		computeRuns.Add(1)
-		return &rpc.GammaZeroComputed{SpotSPX: 5000}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 	}
 
 	job1, fresh1 := c.kickOrJoin(context.Background(), day1, 300, compute)
@@ -117,11 +117,11 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 			close(cancelled)
 			return nil, ctx.Err()
 		case <-time.After(2 * time.Second):
-			return &rpc.GammaZeroComputed{SpotSPX: 5000}, nil
+			return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 		}
 	}
 	fastCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		return &rpc.GammaZeroComputed{SpotSPX: 5050}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5050}, nil
 	}
 
 	job1, _ := c.kickOrJoin(context.Background(), now, 300, slowCompute)
@@ -141,7 +141,7 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 	}
 
 	<-job2.done
-	if job2.result == nil || job2.result.SpotSPX != 5050 {
+	if job2.result == nil || job2.result.SpotUnderlying != 5050 {
 		t.Errorf("force job result mismatch: %+v", job2.result)
 	}
 }
@@ -189,7 +189,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	past := now.Add(gammaErrorRetryTTL + time.Second)
 	successCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		computeRuns.Add(1)
-		return &rpc.GammaZeroComputed{SpotSPX: 5050}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5050}, nil
 	}
 	job3, fresh3 := c.kickOrJoin(context.Background(), past, 300, successCompute)
 	if !fresh3 || job3 == job1 {
@@ -233,7 +233,7 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	computingCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		p.Store(42)
 		<-block
-		return &rpc.GammaZeroComputed{SpotSPX: 5000}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 	}
 	job, _ := c.kickOrJoin(context.Background(), now, 300, computingCompute)
 	time.Sleep(20 * time.Millisecond)
@@ -255,7 +255,7 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	if env.Status != rpc.GammaZeroStatusReady {
 		t.Errorf("ready snapshot: got %q, want %q", env.Status, rpc.GammaZeroStatusReady)
 	}
-	if env.Result == nil || env.Result.SpotSPX != 5000 {
+	if env.Result == nil || env.Result.SpotUnderlying != 5000 {
 		t.Errorf("ready result missing: %+v", env.Result)
 	}
 

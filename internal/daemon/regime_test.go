@@ -144,6 +144,30 @@ func TestFetchRegimeVIXTerm(t *testing.T) {
 			t.Errorf("no measurements should be populated: got VIX=%v VIX3M=%v", got.VIX, got.VIX3M)
 		}
 	})
+
+	// Mixed-freshness pair: the snapshot helper returns the previous
+	// regular-session close for VIX3M (with dataType=frozen) when no
+	// live tick lands. The row ranks at stale status — both legs are
+	// usable for the ratio, but the UX must indicate that the value
+	// isn't live so the renderer dims it.
+	t.Run("vix3m_frozen_leg_downgrades_to_stale", func(t *testing.T) {
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"VIX":   {price: 18.0, dataType: rpc.MarketDataLive},
+				"VIX3M": {price: 21.0, dataType: rpc.MarketDataFrozen},
+			},
+		}).build()
+		got := fetchRegimeVIXTerm(ctx, deps)
+		if got.Status != rpc.RegimeStatusStale {
+			t.Fatalf("status=%q, want stale (live VIX + frozen VIX3M leg)", got.Status)
+		}
+		if got.Ratio == nil || *got.Ratio < 0.857 || *got.Ratio > 0.858 {
+			t.Errorf("ratio=%v, want ≈0.857", got.Ratio)
+		}
+		if got.DataType != rpc.MarketDataFrozen {
+			t.Errorf("data_type=%q, want %q (staler leg wins)", got.DataType, rpc.MarketDataFrozen)
+		}
+	})
 }
 
 func TestFetchRegimeHYGSPY(t *testing.T) {

@@ -435,7 +435,7 @@ func rowUSDJPY(r rpc.RegimeUSDJPY) regimeRow {
 }
 
 func rowGamma(r rpc.RegimeGammaZero) regimeRow {
-	row := regimeRow{name: "SPX γ-zero", status: r.Status}
+	row := regimeRow{name: "SPY γ-zero", status: r.Status}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
@@ -461,7 +461,7 @@ func rowGamma(r rpc.RegimeGammaZero) regimeRow {
 		flip := "—"
 		gap := ""
 		if c.ZeroGamma != nil {
-			flip = fmt.Sprintf("%.0f", *c.ZeroGamma)
+			flip = fmt.Sprintf("%.2f", *c.ZeroGamma)
 			if c.GapPct != nil {
 				sign := "+"
 				if *c.GapPct < 0 {
@@ -470,7 +470,7 @@ func rowGamma(r rpc.RegimeGammaZero) regimeRow {
 				gap = fmt.Sprintf("  %s%.1f%%", sign, *c.GapPct)
 			}
 		}
-		row.value = fmt.Sprintf("spot %.0f → flip %s%s", c.SpotSPX, flip, gap)
+		row.value = fmt.Sprintf("spot %.2f → flip %s%s", c.SpotUnderlying, flip, gap)
 		switch {
 		case c.ZeroGamma == nil || c.GapPct == nil:
 			row.band, row.reason = bandUnranked, "no zero-crossing in sweep"
@@ -534,7 +534,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		{"VIX/VIX3M", r.VIXTermStructure.Notes, r.VIXTermStructure.FieldsMissing},
 		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing},
 		{"USD/JPY", r.USDJPY.Notes, r.USDJPY.FieldsMissing},
-		{"SPX γ-zero", r.GammaZero.Notes, r.GammaZero.FieldsMissing},
+		{"SPY γ-zero", r.GammaZero.Notes, r.GammaZero.FieldsMissing},
 		{"SPX breadth", r.Breadth.Notes, r.Breadth.FieldsMissing},
 	}
 	fmt.Fprintln(out, env.dim("  Spec thresholds + methodology (see "+r.SpecDoc+" for full disclosure):"))

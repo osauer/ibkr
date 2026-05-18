@@ -112,6 +112,14 @@ type Subscription struct {
 	LastPrice float64
 	Bid       float64
 	Ask       float64
+	// MarkPrice is tick 37 — the gateway's calculated "fair" price for
+	// the symbol. For tradeable instruments (ETFs, equities) it is
+	// usually redundant with last/(bid+ask)/2; for indices like VIX,
+	// VIX3M, and SPX, IBKR delivers tick 37 as the ONLY price (indices
+	// don't trade, so they have no bid/ask/last). Consumers use this
+	// as a final fallback so an index symbol still yields a usable
+	// scalar when bid/ask/last all stay zero.
+	MarkPrice float64
 	BidSize   int64
 	AskSize   int64
 	Volume    int64
@@ -876,6 +884,39 @@ const (
 	minServerVerLastTradeDate    = 182
 )
 
+// SeedContractDetails inserts a known-good ContractDetailsLite into the
+// connector's in-memory cache iff no live entry already exists for the
+// symbol. The guard mirrors the late-arrival cache write in
+// FetchContractDetails: a real gateway response always wins over a
+// seeded value.
+//
+// Why this exists: IBKR rate-limits reqContractDetails per account
+// (~50 calls per 10 minutes on retail). Once that bucket is exhausted,
+// further requests sit in the gateway's queue silently — no error, no
+// late frame, just nothing. Historical data fetches that depend on
+// ConID then block the regime row's secondary fields
+// (hyg_50dma, weekly_change_pct, etc.) for the rest of the daemon
+// lifetime even though reqMktData / reqHistoricalData themselves work
+// fine. Seeding the cache with stable, well-known spot conIDs at
+// daemon startup lets the historical path short-circuit the broken
+// reqContractDetails entirely.
+//
+// Returns true iff the seed was applied (i.e. the symbol wasn't
+// already cached with a non-zero ConID).
+func (c *Connector) SeedContractDetails(symbol string, detail ContractDetailsLite) bool {
+	if symbol == "" || detail.ConID == 0 {
+		return false
+	}
+	key := strings.ToUpper(strings.TrimSpace(symbol))
+	c.contractMu.Lock()
+	defer c.contractMu.Unlock()
+	if existing, ok := c.contractCache[key]; ok && existing.ConID != 0 {
+		return false
+	}
+	c.contractCache[key] = detail
+	return true
+}
+
 // FetchContractDetails requests contract details for a symbol and waits for completion.
 // NOTE: This implementation assumes single-flight usage per process due to global handlers.
 func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) ([]ContractDetailsLite, error) {
@@ -976,7 +1017,24 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 	}
 }
 
-const contractDetailsLateGrace = 3 * time.Second
+// contractDetailsLateGrace is how long the deferred cleanup goroutine
+// keeps listening for ContractData frames after FetchContractDetails has
+// already timed out and returned to its caller. A late frame within this
+// window still populates the cache so the next prepareContract /
+// ensureContractDetails call hits a warm entry without a fresh
+// round-trip.
+//
+// Bumped from 3 s to 30 s after observing TWS gateways that respond to
+// reqContractDetails between 15-45 s post-request — especially for thin
+// CBOE indices (VIX3M) and FX (USD.JPY) in the first hour after a TWS
+// cold start. Under 3 s of grace those late frames were always lost,
+// which kept the regime row's hyg_50dma / weekly_change_pct fields
+// missing for the entire daemon lifetime even though the underlying
+// data was on its way. 30 s is short enough that a permanently
+// unresponsive gateway still surfaces the failure within one regime
+// interval, and the goroutine's handler-registration footprint is
+// bounded by the number of distinct symbols (a handful).
+const contractDetailsLateGrace = 30 * time.Second
 
 func (c *Connector) deferContractDetailsCleanup(symbol string, reqID int, detailsCh <-chan ContractDetailsLite, doneCh <-chan struct{}, dataHandlerID, endHandlerID uint64) {
 	go func() {
@@ -2137,6 +2195,10 @@ func (c *Connector) handleTickPrice(fields []string) {
 		sub.Week52Low = price
 	case 20:
 		sub.Week52High = price
+	case 37:
+		// Mark price — see Subscription.MarkPrice. For indices this is
+		// often the only price tick the gateway sends.
+		sub.MarkPrice = price
 	}
 	sub.LastTime = time.Now()
 }
@@ -3306,6 +3368,7 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 			Bid:        sub.Bid,
 			Ask:        sub.Ask,
 			Last:       sub.LastPrice,
+			MarkPrice:  sub.MarkPrice,
 			BidSize:    int(sub.BidSize),
 			AskSize:    int(sub.AskSize),
 			Volume:     sub.Volume,

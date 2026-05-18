@@ -435,10 +435,15 @@ type StrikeConcentration struct {
 // the more robust positioning view. See docs/specs/risk-regime-dashboard.md
 // for the full methodology disclosure.
 type GammaZeroComputed struct {
-	// SpotSPX is the SPX price at which the aggregation was anchored.
-	SpotSPX float64 `json:"spot_spx"`
-	// SpotAt is the gateway-observation timestamp for SpotSPX. Distinct
-	// from AsOf which covers the whole computation.
+	// SpotUnderlying is the price of the underlying instrument
+	// (currently SPY — see Source) at which the aggregation was
+	// anchored. Field was renamed from SpotSPX when the compute moved
+	// from SPX to the more liquid SPY chain (SPY has continuous
+	// extended-hours quoting and a single trading class, which keeps
+	// the compute robust off-hours).
+	SpotUnderlying float64 `json:"spot_underlying"`
+	// SpotAt is the gateway-observation timestamp for SpotUnderlying.
+	// Distinct from AsOf which covers the whole computation.
 	SpotAt time.Time `json:"spot_at"`
 
 	// ZeroGamma is the dealer-flip level under the Perfiliev convention.
@@ -446,7 +451,7 @@ type GammaZeroComputed struct {
 	// means dealers are strongly long-gamma across the regime). Inspect
 	// GammaSign in that case.
 	ZeroGamma *float64 `json:"zero_gamma"`
-	// GapPct is (SpotSPX − ZeroGamma) / ZeroGamma × 100. nil iff
+	// GapPct is (SpotUnderlying − ZeroGamma) / ZeroGamma × 100. nil iff
 	// ZeroGamma is nil. Sign convention: positive = spot above flip
 	// (dampening regime); negative = below flip (amplifying regime).
 	GapPct *float64 `json:"gap_pct"`
@@ -456,15 +461,15 @@ type GammaZeroComputed struct {
 	// short-gamma in window."
 	GammaSign string `json:"gamma_sign,omitempty"`
 	// Profile is the full (spot, gex) sweep, oldest first. 60 points
-	// over [0.85, 1.15] × SpotSPX. Renderers chart this as the
+	// over [0.85, 1.15] × SpotUnderlying. Renderers chart this as the
 	// gamma-exposure curve and visually confirm the zero crossing.
 	Profile []GammaProfilePoint `json:"profile"`
 
-	// GammaTotalAbs is the sign-agnostic magnitude signal at SpotSPX:
-	// Σ |Γ| × OI × 100 × SpotSPX² × 0.01. In dollar gamma terms — the
-	// total notional dealer hedging flow for a 1% SPX move, independent
-	// of any positioning assumption. Larger = market is more sensitive
-	// to dealer rebalancing.
+	// GammaTotalAbs is the sign-agnostic magnitude signal at
+	// SpotUnderlying: Σ |Γ| × OI × 100 × SpotUnderlying² × 0.01. In
+	// dollar gamma terms — the total notional dealer hedging flow for
+	// a 1% underlying move, independent of any positioning assumption.
+	// Larger = market is more sensitive to dealer rebalancing.
 	GammaTotalAbs float64 `json:"gamma_total_abs"`
 	// TopStrikes is the top-N strikes ranked by absolute gamma notional.
 	// Concentration here is more reliable than the signed ZeroGamma in

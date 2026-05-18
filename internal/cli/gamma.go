@@ -44,7 +44,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "SPX Dealer Zero-Gamma")
+	fmt.Fprintln(out, "SPY Dealer Zero-Gamma")
 	fmt.Fprintln(out)
 
 	switch r.Status {
@@ -81,7 +81,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 
 	c := r.Result
-	fmt.Fprintf(out, "  SPX spot    %.2f", c.SpotSPX)
+	fmt.Fprintf(out, "  SPY spot    %.2f", c.SpotUnderlying)
 	if !c.SpotAt.IsZero() {
 		fmt.Fprintf(out, "  (%s)", c.SpotAt.Format("15:04:05 MST"))
 	}

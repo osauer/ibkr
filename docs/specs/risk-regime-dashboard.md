@@ -68,21 +68,21 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 
 -----
 
-### 4. Dealer Zero-Gamma Level (SPX)
+### 4. Dealer Zero-Gamma Level (SPY)
 
 **What it is:** The S&P 500 price level where market-maker hedging flips from dampening volatility to amplifying it. Above the level, dealers buy dips and sell rips. Below it, they sell into selloffs and buy into rallies — the dangerous regime.
 
-**Source:** SpotGamma free posts on X/Twitter, Menthor Q free content, or paid feeds (SpotGamma, Tier1Alpha).
+**Underlying:** The compute uses SPY (the S&P 500 ETF), not SPX (the index). SPY trades extended hours on SMART/ARCA with continuous market-maker quotes, has a single trading class, and IBKR pushes IV ticks for its options pre-market. SPX has no spot trading outside RTH and its option IV ticks aren't computed by the gateway pre-market, which made the SPX-based compute consistently fail to land a single leg off-hours. SPY dealer gamma tracks SPX dealer gamma closely (both are dominated by the same dealer-positioning regime) — the regime signal is unchanged, only the absolute level is SPY-scale (~SPX/10).
 
-**Note for builder:** This is the hardest data point to automate. Free version: scrape latest public post from designated accounts. Paid version: API integration.
+**Source:** Computed locally from IBKR's SPY option chain via the Perfiliev BS-sweep (`ibkr_gamma`, `gamma.zero_spx`).
 
 **Thresholds:**
 
-- Green: SPX > 2% above zero-gamma level
-- Yellow: SPX within 2% of zero-gamma
-- Red: SPX trading below zero-gamma level
+- Green: SPY > 2% above zero-gamma level
+- Yellow: SPY within 2% of zero-gamma
+- Red: SPY trading below zero-gamma level
 
-**Observation window:** The **flip itself is the event.** Once SPX closes below zero-gamma, the regime has shifted; no waiting period needed.
+**Observation window:** The **flip itself is the event.** Once SPY closes below zero-gamma, the regime has shifted; no waiting period needed.
 
 -----
 
