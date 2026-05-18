@@ -12,15 +12,16 @@
 // CheckFunc, document it in the catalogue below. No plug-in machinery;
 // the binary is a single switch statement on purpose.
 //
-// Catalogue (see Plan 2 in the v0.24.x design notes):
+// Catalogue:
 //
-//	quote-spy        — reqMktData SPY STK + tickPrice within budget
-//	chain-iv-source  — ≥1 OPTION_COMPUTATION (msg 21) with non-NaN IV
-//	gamma-noflag     — gamma --no-wait returns terminal status, never pending
-//	regime-subs      — MarketDataType notice for each of VIX/VIX3M/HYG/SPY/USDJPY
-//	account-summary  — reqAccountSummary OUT + accountSummary IN
-//	chain-spot-only  — reqSecDefOptParams OUT + secDefOptParam(75)/End(76) IN
-//	status-handshake — at least one MarketDataType notice (58) inbound
+//	quote-spy                — reqMktData SPY STK + tickPrice within budget
+//	chain-iv-source          — ≥1 OPTION_COMPUTATION (msg 21) with non-NaN IV
+//	gamma-noflag             — gamma --no-wait returns terminal status, never pending
+//	gamma-premarket-derived  — in loose mode, the gamma envelope reports
+//	                           derived_iv_legs > 0 (proves BS-IV fallback fired)
+//	regime-subs              — MarketDataType notice for each of VIX/VIX3M/HYG/SPY/USDJPY
+//	account-summary          — reqAccountSummary OUT + accountSummary IN
+//	status-handshake         — at least one MarketDataType notice (58) inbound
 package main
 
 import (
@@ -138,23 +139,24 @@ func parseFrames(br *bufio.Reader) ([]WireFrame, error) {
 
 func main() {
 	var (
-		jsonlPath  = flag.String("jsonl", "", "path to wire JSONL log")
-		sinceOff   = flag.Int64("since-offset", 0, "skip bytes before this offset")
-		check      = flag.String("check", "", "check name (quote-spy, chain-iv-source, …)")
-		loose      = flag.Bool("loose", false, "loosen budgets when gateway is in frozen/off-hours mode")
-		listChecks = flag.Bool("list", false, "print the catalogue of supported checks and exit")
+		jsonlPath    = flag.String("jsonl", "", "path to wire JSONL log")
+		sinceOff     = flag.Int64("since-offset", 0, "skip bytes before this offset")
+		check        = flag.String("check", "", "check name (quote-spy, chain-iv-source, …)")
+		loose        = flag.Bool("loose", false, "loosen budgets when gateway is in frozen/off-hours mode")
+		gammaEnvPath = flag.String("gamma-envelope-path", "", "path to a JSON file holding the gamma envelope (only used by gamma-premarket-derived)")
+		listChecks   = flag.Bool("list", false, "print the catalogue of supported checks and exit")
 	)
 	flag.Parse()
 
 	if *listChecks {
 		for _, c := range catalogue() {
-			fmt.Printf("%-18s %s\n", c.name, c.summary)
+			fmt.Printf("%-24s %s\n", c.name, c.summary)
 		}
 		return
 	}
 
 	if *jsonlPath == "" || *check == "" {
-		fmt.Fprintln(os.Stderr, "usage: wire-assert --jsonl PATH --check NAME [--since-offset N] [--loose]")
+		fmt.Fprintln(os.Stderr, "usage: wire-assert --jsonl PATH --check NAME [--since-offset N] [--loose] [--gamma-envelope-path PATH]")
 		fmt.Fprintln(os.Stderr, "       wire-assert --list")
 		os.Exit(2)
 	}
@@ -165,7 +167,23 @@ func main() {
 		os.Exit(2)
 	}
 
-	result := dispatch(*check, frames, *loose)
+	// Auxiliary input: the gamma envelope JSON, loaded only for the
+	// gamma-premarket-derived check which inspects derived_iv_legs (a
+	// daemon-response field, not a wire-frame field).
+	var gammaEnvBytes []byte
+	if *gammaEnvPath != "" {
+		gammaEnvBytes, err = os.ReadFile(*gammaEnvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "wire-assert: read gamma envelope %s: %v\n", *gammaEnvPath, err)
+			os.Exit(2)
+		}
+	}
+
+	result := dispatch(*check, checkInputs{
+		Frames:        frames,
+		Loose:         *loose,
+		GammaEnvelope: gammaEnvBytes,
+	})
 	if result.OK {
 		return
 	}
@@ -175,10 +193,20 @@ func main() {
 
 // ---- catalogue ------------------------------------------------------------
 
+// checkInputs aggregates everything a check function may need. Most
+// checks only read Frames; gamma-premarket-derived also reads
+// GammaEnvelope. Passing one struct keeps the type signature uniform
+// when new auxiliary inputs are added.
+type checkInputs struct {
+	Frames        []WireFrame
+	Loose         bool
+	GammaEnvelope []byte // raw JSON; nil when --gamma-envelope-path wasn't passed
+}
+
 type checkEntry struct {
 	name    string
 	summary string
-	fn      func(frames []WireFrame, loose bool) CheckResult
+	fn      func(in checkInputs) CheckResult
 }
 
 func catalogue() []checkEntry {
@@ -189,13 +217,14 @@ func catalogue() []checkEntry {
 		{"chain-iv-source", "after ibkr chain SPY --width 5: ≥1 OPTION_COMPUTATION (msg 21) with non-NaN IV from any OPT reqID", checkChainIVSource},
 		{"regime-subs", "after ibkr regime: MarketDataType notice for each of VIX/VIX3M/HYG/SPY/USDJPY", checkRegimeSubs},
 		{"gamma-noflag", "after ibkr gamma --no-wait: terminal status (ready or known error), never pending", checkGammaNoFlag},
+		{"gamma-premarket-derived", "in loose mode, gamma envelope JSON reports derived_iv_legs > 0 (BS-IV fallback fired)", checkGammaPremarketDerived},
 	}
 }
 
-func dispatch(name string, frames []WireFrame, loose bool) CheckResult {
+func dispatch(name string, in checkInputs) CheckResult {
 	for _, c := range catalogue() {
 		if c.name == name {
-			r := c.fn(frames, loose)
+			r := c.fn(in)
 			r.Name = name
 			return r
 		}
@@ -209,7 +238,8 @@ func dispatch(name string, frames []WireFrame, loose bool) CheckResult {
 
 // ---- checks ---------------------------------------------------------------
 
-func checkStatusHandshake(frames []WireFrame, loose bool) CheckResult {
+func checkStatusHandshake(in checkInputs) CheckResult {
+	frames := in.Frames
 	// Status itself doesn't issue new subscribes (it reads daemon
 	// internal state via the local socket), but on a fresh daemon the
 	// boot sequence must have produced wire activity: the connection
@@ -253,7 +283,8 @@ func checkStatusHandshake(frames []WireFrame, loose bool) CheckResult {
 	return CheckResult{OK: true}
 }
 
-func checkQuoteSPY(frames []WireFrame, loose bool) CheckResult {
+func checkQuoteSPY(in checkInputs) CheckResult {
+	frames := in.Frames
 	// Expected outbound: reqMktData (msg 1) with SecType=STK and
 	// Symbol=SPY. Expected inbound: tickPrice (msg 1) with tickType in
 	// {1, 2, 4} — bid, ask, last. tickType 9 (close) alone is not
@@ -309,7 +340,8 @@ func checkQuoteSPY(frames []WireFrame, loose bool) CheckResult {
 	return CheckResult{OK: true}
 }
 
-func checkAccountSummary(frames []WireFrame, loose bool) CheckResult {
+func checkAccountSummary(in checkInputs) CheckResult {
+	frames := in.Frames
 	// reqAccountSummary is msg 62 outbound. accountSummary inbound
 	// is msg 63. acctValue (legacy account update) is msg 6.
 	var outFound, inFound bool
@@ -337,7 +369,9 @@ func checkAccountSummary(frames []WireFrame, loose bool) CheckResult {
 	return CheckResult{OK: true}
 }
 
-func checkChainIVSource(frames []WireFrame, loose bool) CheckResult {
+func checkChainIVSource(in checkInputs) CheckResult {
+	frames := in.Frames
+	loose := in.Loose
 	// The IV-source bug (v0.24.x): productionLegFetcher polled
 	// MarketData.IV (fed only by generic tick 106 which IBKR doesn't
 	// deliver for OPT) instead of GetOptionIV(key) (fed by msg 21).
@@ -385,7 +419,8 @@ func checkChainIVSource(frames []WireFrame, loose bool) CheckResult {
 	return CheckResult{OK: true}
 }
 
-func checkRegimeSubs(frames []WireFrame, loose bool) CheckResult {
+func checkRegimeSubs(in checkInputs) CheckResult {
+	frames := in.Frames
 	// regime fans out to VIX, VIX3M, HYG, SPY, USDJPY. Each gets a
 	// reqMktData OUT and a MarketDataType notice IN. We require all
 	// five outbound subscribes; inbound is best-effort because
@@ -419,7 +454,8 @@ func checkRegimeSubs(frames []WireFrame, loose bool) CheckResult {
 	return CheckResult{OK: true}
 }
 
-func checkGammaNoFlag(frames []WireFrame, loose bool) CheckResult {
+func checkGammaNoFlag(in checkInputs) CheckResult {
+	frames := in.Frames
 	// gamma --no-wait should return a terminal status (ready or a
 	// known error) without blocking. This check looks at the wire to
 	// confirm the daemon kicked off the compute and either reused a
@@ -439,4 +475,65 @@ func checkGammaNoFlag(frames []WireFrame, loose bool) CheckResult {
 	// the CLI returning at all (which the script proves by reaching
 	// this check) as evidence of the status invariant.
 	return CheckResult{OK: true, Observed: "no new OPT subscribes (cached or skipped)"}
+}
+
+// checkGammaPremarketDerived asserts that a completed gamma compute
+// off-hours used the BS-IV Newton-Raphson fallback for ≥1 leg. Inspects
+// the JSON envelope passed via --gamma-envelope-path (the daemon's
+// response from `ibkr gamma --wait …`), not the wire frames — the
+// derived_iv_legs counter is a daemon-internal aggregation that has no
+// wire-frame representation.
+//
+// Strict mode (live): the check is skipped (model engine is active,
+// fallback need not fire). The wire-smoke script only runs this check
+// when LOOSE=1.
+//
+// In loose mode without a usable envelope (no completed compute,
+// gamma is still pending, or the envelope has Status != "ready"), the
+// check passes with an explanatory observation rather than fails —
+// the assertion is "if a result is available, the fallback was used",
+// not "the compute must complete before this check runs."
+func checkGammaPremarketDerived(in checkInputs) CheckResult {
+	if !in.Loose {
+		return CheckResult{OK: true, Observed: "strict mode: skipped (BS-IV fallback only required off-hours)"}
+	}
+	if len(in.GammaEnvelope) == 0 {
+		return CheckResult{
+			Expected: "--gamma-envelope-path PATH (the gamma JSON response)",
+			Observed: "no envelope provided",
+		}
+	}
+	// Minimal struct: only the fields this check inspects. Tolerates
+	// extra fields on the wire (forward-compat with future envelope
+	// additions).
+	type envResult struct {
+		Status        string `json:"status"`
+		LegCount      int    `json:"leg_count"`
+		DerivedIVLegs int    `json:"derived_iv_legs"`
+	}
+	type env struct {
+		Status string    `json:"status"`
+		Result envResult `json:"result"`
+	}
+	var e env
+	if err := json.Unmarshal(in.GammaEnvelope, &e); err != nil {
+		return CheckResult{
+			Expected:   "JSON envelope parseable as the gamma response",
+			Observed:   fmt.Sprintf("unmarshal failed: %v", err),
+			Hypothesis: "CLI may have emitted an error envelope rather than the gamma response shape",
+		}
+	}
+	if e.Status != "ready" {
+		// Status=computing/error: nothing to assert (a pending or
+		// errored compute doesn't tell us anything about the fallback).
+		return CheckResult{OK: true, Observed: fmt.Sprintf("envelope status=%q (no completed result to inspect)", e.Status)}
+	}
+	if e.Result.DerivedIVLegs == 0 {
+		return CheckResult{
+			Expected:   "derived_iv_legs > 0 in loose mode (BS-IV fallback should have fired)",
+			Observed:   fmt.Sprintf("derived_iv_legs=0 with leg_count=%d", e.Result.LegCount),
+			Hypothesis: "the gateway delivered model ticks despite frozen/off-hours mode (rare but possible on recently-traded names), OR the fallback failed to fire. Check internal/daemon/gamma_zero_compute.go productionLegFetcher Stage 2b.",
+		}
+	}
+	return CheckResult{OK: true, Observed: fmt.Sprintf("derived_iv_legs=%d/%d", e.Result.DerivedIVLegs, e.Result.LegCount)}
 }

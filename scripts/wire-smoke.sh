@@ -164,13 +164,21 @@ run_cli() {
 # isolating "frames produced by THIS command" gives false negatives. The
 # isolated tmp daemon's wire log is small enough — and the per-command
 # command order is deterministic enough — that whole-file scans work.
+#
+# Optional second arg: the path to a JSON envelope to forward via
+# --gamma-envelope-path. Only the gamma-premarket-derived check reads
+# this; passing it for other checks is harmless.
 assert_wire() {
     local check="$1"
-    local loose_flag=""
+    local envelope="${2:-}"
+    local args=(--jsonl "$WIRE_LOG" --check "$check")
     if [[ "${LOOSE:-0}" -eq 1 ]]; then
-        loose_flag="--loose"
+        args+=(--loose)
     fi
-    if ! "$ASSERT" --jsonl "$WIRE_LOG" --check "$check" $loose_flag; then
+    if [[ -n "$envelope" ]]; then
+        args+=(--gamma-envelope-path "$envelope")
+    fi
+    if ! "$ASSERT" "${args[@]}"; then
         echo "" >&2
         echo "wire-smoke: aborting on first failure" >&2
         exit 1
@@ -280,6 +288,38 @@ if [[ $LAST_CMD_EXIT -ne 0 ]]; then
     exit 1
 fi
 assert_wire gamma-noflag
+
+# 10. gamma-premarket-derived — only meaningful in loose mode (off-hours).
+# Block on the compute via the default `gamma --json` path (~50s wait),
+# poll a few times if still computing, then assert derived_iv_legs > 0
+# proves the BS-IV Newton-Raphson fallback fired. Strict mode skips
+# internally — the model engine is active during RTH and the fallback
+# isn't expected to engage.
+#
+# Polling: the daemon's per-RPC deadline is 55s, so `gamma --json`
+# returns Status=computing if the compute outlives the budget. We poll
+# up to 5 times (≈4-5 min total) to give the compute room to complete
+# on a cold contract cache.
+if [[ "${LOOSE:-0}" -eq 1 ]]; then
+    echo "  [gamma (loose: BS-IV fallback assertion)]..."
+    GAMMA_ENV="$SMOKE_DIR/gamma-envelope.json"
+    for attempt in 1 2 3 4 5; do
+        LAST_CMD_EXIT=0
+        LAST_CMD_OUTPUT="$(timeout 60 "$BIN" gamma --json 2>&1)" || LAST_CMD_EXIT=$?
+        if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+            echo "wire-smoke: FAIL: gamma --json exit=$LAST_CMD_EXIT (attempt $attempt)" >&2
+            echo "$LAST_CMD_OUTPUT" >&2
+            exit 1
+        fi
+        printf '%s' "$LAST_CMD_OUTPUT" > "$GAMMA_ENV"
+        if echo "$LAST_CMD_OUTPUT" | grep -q '"status": *"ready"'; then
+            break
+        fi
+        echo "    poll $attempt: still computing"
+        sleep 2
+    done
+    assert_wire gamma-premarket-derived "$GAMMA_ENV"
+fi
 
 echo ""
 mode_label="strict"

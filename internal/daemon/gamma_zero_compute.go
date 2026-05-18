@@ -96,25 +96,54 @@ type legData struct {
 	gammaAtSnapshot float64
 }
 
+// legResult is the per-leg payload returned by a legFetcher. Bundled as
+// a struct because adding the BS-IV-derived flag pushed the original
+// 5-tuple into "what do these positional booleans mean" territory.
+//
+// OK reports whether OI + IV both landed (whether from the gateway's
+// model tick or the BS-IV fallback) within budget — the aggregator
+// only counts a leg when OK is true.
+//
+// Throttle reports a contract-resolve failure on a strike that came
+// from the gateway's own enumeration. The aggregator counts these in
+// the noContract tally that drives the throttle abort. Soft drops
+// (subscribed but data didn't land) leave Throttle false: they're
+// skip-this-leg without raising the throttle alarm.
+//
+// IVDerived is true when the IV was back-solved from an observed
+// option price (Black-Scholes Newton-Raphson) rather than pushed by
+// the gateway as a model-computation tick. Pre-market the model
+// engine doesn't fire because there's no live option flow; the
+// fallback path lets the compute still produce a number, at the cost
+// of using yesterday's close as the price anchor. Surfaced to the
+// caller so the result envelope can disclose how many legs used the
+// fallback.
+type legResult struct {
+	OI        int64
+	IV        float64
+	Gamma     float64
+	IVDerived bool
+	OK        bool
+	Throttle  bool
+}
+
 // legFetcher abstracts the per-leg subscribe-collect-unsubscribe so
 // tests can drive computeGammaZeroSPX with a fake. The fetcher is
 // expected to block for at most the budget the caller passes via ctx.
 //
-// ok reports whether OI + IV both landed within budget — the
-// aggregator only counts a leg when ok is true.
-//
-// throttleSignal reports a contract-resolve failure on a strike that
-// came from the gateway's own enumeration. The aggregator counts
-// these in the noContract tally that drives the throttle abort.
-// Soft drops (subscribed but data didn't land) leave both flags
-// false: they're skip-this-leg without raising the throttle alarm.
+// snapshotSpot + snapshotAt are passed so the fetcher can compute a BS
+// back-solve when the gateway doesn't deliver a model tick (the typical
+// pre-market state). Both are captured by computeGammaZeroSPX before
+// the fan-out begins; the fetcher does NOT take its own spot snapshot.
 type legFetcher func(
 	ctx context.Context,
 	c *ibkrlib.Connector,
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, ok, throttleSignal bool)
+	snapshotSpot float64,
+	snapshotAt time.Time,
+) legResult
 
 // productionLegFetcher is the live-gateway implementation. It mirrors
 // the data-collection pattern in handlers.go's fillOptionLeg (the chain
@@ -122,18 +151,26 @@ type legFetcher func(
 // open-interest tick to land in the MarketData cache, then read the
 // per-strike IV from GetOptionIV and the Greeks from GetOptionGreeks.
 //
-// The previous version polled `d.IV > 0`, which reads
-// subscriptions[key].IV — a field only populated by generic tick 106
-// in handleTickGeneric. The IBKR gateway delivers tick 106 for STK/IND
-// subscriptions ("30-day chain-averaged IV of the underlying") but
-// not reliably for individual OPT subscriptions, regardless of whether
-// it's listed in the generic-tick request. Per-strike IV for option
-// contracts arrives via OPTION_COMPUTATION ticks (msg 21, tickType 13 =
-// model), which handleOptionComputation routes into optIV[OPRA_key]
-// keyed by the chain key SubscribeOption returns. GetOptionIV is the
-// reader for that cache. The chain command has always used this path;
-// the gamma compute did not, and every leg consequently timed out
-// waiting for an IV value the gateway never sent.
+// Three-stage data collection:
+//
+//	Stage 1  — OI gate. Tick 27 (callOpenInterest) / 28
+//	           (putOpenInterest), per-subscription cache.
+//	Stage 2  — gateway model tick. Tick 21 (OPTION_COMPUTATION,
+//	           tickType=13) routes into optIV[key] / optGreeks[key];
+//	           fastest path with the gateway's own σ.
+//	Stage 2b — BS-IV fallback. When the gateway never pushed a model
+//	           tick (typical pre-market: the IBKR model-computation
+//	           engine only fires when option order flow is active),
+//	           solve for σ via Newton-Raphson against the option's
+//	           prior-session close (tick 9, always pushed on subscribe
+//	           regardless of trading state). The leg's gamma is then
+//	           computed via bsGamma using the derived σ.
+//
+// Without Stage 2b, the pre-market compute aborts because zero legs
+// land IV — exactly the behaviour the v0.25.0 release notes call out as
+// a known limitation. With Stage 2b, the compute produces a result
+// anchored on yesterday's close prices; the result envelope's
+// Quality.Source disclosure makes the use-of-prior-prices honest.
 //
 // Per-leg budget is 5 s. Model ticks for actively-quoted strikes
 // typically arrive within ~500 ms; deep-OTM strikes whose model the
@@ -147,9 +184,11 @@ func productionLegFetcher(
 	underlying, expiryYMD string,
 	strike float64,
 	right string,
-) (oi int64, iv, gamma float64, ok, throttleSignal bool) {
+	snapshotSpot float64,
+	snapshotAt time.Time,
+) legResult {
 	if c == nil {
-		return 0, 0, 0, false, true
+		return legResult{Throttle: true}
 	}
 	key, _, err := c.SubscribeOption(ctx, underlying, expiryYMD, strike, right)
 	if err != nil {
@@ -168,7 +207,7 @@ func productionLegFetcher(
 		//     reqContractDetails is queueing.
 		msg := err.Error()
 		throttle := !strings.Contains(msg, "contract details unavailable")
-		return 0, 0, 0, false, throttle
+		return legResult{Throttle: throttle}
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
@@ -182,10 +221,11 @@ func productionLegFetcher(
 	// rungs) and shouldn't block the leg fetch indefinitely — but they
 	// contribute exactly zero to dealer GEX in either the at-spot
 	// aggregate or the sweep, so the upstream caller already drops
-	// them on `if !ok`. The wait predicate therefore short-circuits on
+	// them on `if !OK`. The wait predicate therefore short-circuits on
 	// OI > 0 only; OI == 0 falls through to the model-tick poll and
 	// reports the leg as failed if neither arrives, which is the right
 	// thing — a leg with no OI and no IV is dead.
+	var oi int64
 	deadline := time.Now().Add(5 * time.Second)
 	_ = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
 		if d.OpenInt > 0 {
@@ -202,6 +242,7 @@ func productionLegFetcher(
 	// pollUntil shares the leg's overall deadline — model ticks
 	// usually arrive within the first second once OI lands, but the
 	// budget covers them both.
+	var iv, gamma float64
 	_ = pollUntil(ctx, deadline, func() bool {
 		if v, found := c.GetOptionIV(key); found && v > 0 {
 			iv = v
@@ -212,10 +253,47 @@ func productionLegFetcher(
 		return iv > 0
 	})
 
-	if oi == 0 || iv == 0 {
-		return 0, 0, 0, false, false
+	if oi == 0 {
+		return legResult{}
 	}
-	return oi, iv, gamma, true, false
+	if iv > 0 {
+		return legResult{OI: oi, IV: iv, Gamma: gamma, OK: true}
+	}
+	// Stage 2b: gateway pushed OI but no model tick (typical pre-market).
+	// Back-solve σ from the option's bid/ask mid or prior-session close.
+	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
+	var price float64
+	if hasQuote && bid > 0 && ask > 0 {
+		price = (bid + ask) / 2
+	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
+		price = px
+	}
+	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, strike, right, oi, price)
+}
+
+// bsIVFallback assembles a leg result from Black-Scholes back-solving when
+// the gateway didn't deliver a model-computation tick. Inputs: pre-fetched
+// OI and the best-available option price (bid/ask mid OR prior-session
+// close — the caller selects). Returns an empty legResult on any refusal
+// (degenerate DTE, dead price, solver bounds violation).
+//
+// Extracted from productionLegFetcher so the BS-solve composition can be
+// tested without a live gateway — productionLegFetcher's SubscribeOption +
+// poll path requires a real connection, but bsIVFallback is pure
+// composition: optionPriceForBSIV is the only connector read it depends
+// on, and that's done by the caller. Tests drive bsIVFallback directly
+// with canned (spot, strike, dte, oi, price) tuples.
+func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD string, strike float64, right string, oi int64, price float64) legResult {
+	dte := dteYears(expiryYMD, snapshotAt)
+	if dte <= 0 || price <= 0 {
+		return legResult{}
+	}
+	iv := bsImpliedVolatility(price, snapshotSpot, strike, dte, 0, 0, right == "C")
+	if iv <= 0 {
+		return legResult{}
+	}
+	gamma := bsGamma(snapshotSpot, strike, dte, iv, 0, 0)
+	return legResult{OI: oi, IV: iv, Gamma: gamma, IVDerived: true, OK: true}
 }
 
 // computeGammaZeroSPX runs the full Phase 2 compute. The caller (the
@@ -405,6 +483,7 @@ func computeGammaZeroSPX(
 		mu             sync.Mutex
 		done           atomic.Int32
 		noContract     atomic.Int32
+		derivedIVs     atomic.Int32
 		throttledAbort atomic.Bool
 		earlyAbort     atomic.Bool
 		total          = int32(len(jobs))
@@ -432,12 +511,12 @@ func computeGammaZeroSPX(
 		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
 			return
 		}
-		oi, iv, gamma, ok, throttleSignal := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right)
+		r := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right, spot, spotAt)
 		// Always increment the progress counter — failed legs still
 		// represent work attempted. 10 % is consumed by spot+expiries
 		// stages above; the fan-out scales linearly from 10 → 85.
 		d := done.Add(1)
-		if throttleSignal {
+		if r.Throttle {
 			nc := noContract.Add(1)
 			if throttleDetected(d, nc) {
 				throttledAbort.Store(true)
@@ -446,15 +525,18 @@ func computeGammaZeroSPX(
 		if total > 0 {
 			progress.Store(10 + int32(75*float64(d)/float64(total)))
 		}
-		if !ok {
+		if !r.OK {
 			return
 		}
 		dte := dteYears(j.expiryYMD, spotAt)
-		if dte <= 0 || iv <= 0 {
+		if dte <= 0 || r.IV <= 0 {
 			// Belt-and-suspenders: skip legs whose DTE/IV degenerate
 			// after fetch (in flight expiry rollover, or a partial OI
 			// tick that snuck past the fetcher's gate).
 			return
+		}
+		if r.IVDerived {
+			derivedIVs.Add(1)
 		}
 		mu.Lock()
 		legs = append(legs, legData{
@@ -463,9 +545,9 @@ func computeGammaZeroSPX(
 			strike:          j.strike,
 			right:           j.right,
 			isCall:          j.right == "C",
-			iv:              iv,
-			oi:              oi,
-			gammaAtSnapshot: gamma,
+			iv:              r.IV,
+			oi:              r.OI,
+			gammaAtSnapshot: r.Gamma,
 		})
 		mu.Unlock()
 	})
@@ -476,14 +558,13 @@ func computeGammaZeroSPX(
 	if len(legs) == 0 {
 		switch {
 		case earlyAbort.Load():
-			// Empirically (2026-05-18 wire trace) the most common
-			// cause of "0 legs landing" is pre-market US equities:
-			// the IBKR gateway delivers OPT subscriptions in
-			// market-data type=1 but the model-computation engine
-			// (msg 21) only fires when option order flow is active,
-			// i.e. during regular hours. Frozen mode (type=2) sends
-			// model ticks from the prior session but omits OI.
-			return nil, fmt.Errorf("zero-gamma: no option ticks landed in first %ds. Likely cause: pre-market (option model engine fires only during US regular hours 09:30-16:00 ET). Also check gateway entitlement if this persists during market hours",
+			// Both the model-tick path AND the BS-IV fallback failed
+			// to produce a single usable leg in 30 s. With the v0.26.0
+			// BS-IV fallback the pre-market case is supposed to
+			// recover; if we land here it usually means the gateway
+			// dropped the OI ticks too (entitlement gap, feed-farm
+			// outage, or session-boundary pause).
+			return nil, fmt.Errorf("zero-gamma: no option data landed in first %ds (neither model ticks nor prior-session prices for BS-IV fallback). Check gateway entitlement and farm-connection notices in the daemon log",
 				int(earlyAbortAfter.Seconds()))
 		case throttledAbort.Load():
 			return nil, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
@@ -530,6 +611,14 @@ func computeGammaZeroSPX(
 		warnings = append(warnings, "no_crossing_in_window")
 	}
 
+	derivedCount := int(derivedIVs.Load())
+	if derivedCount > 0 && derivedCount == len(legs) {
+		// All legs used the BS-IV fallback — useful signal for the
+		// renderer, since the resulting flip level reflects prior-
+		// session prices rather than live model ticks.
+		warnings = append(warnings, "all_iv_derived")
+	}
+
 	res := &rpc.GammaZeroComputed{
 		SpotUnderlying: spot,
 		SpotAt:         spotAt,
@@ -541,6 +630,7 @@ func computeGammaZeroSPX(
 		TopStrikes:     topStrikes,
 		Expirations:    pickedExp,
 		LegCount:       len(legs),
+		DerivedIVLegs:  derivedCount,
 		Warnings:       warnings,
 		Params:         params,
 		Source:         "computed from IBKR SPY option chain",

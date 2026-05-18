@@ -328,6 +328,103 @@ func TestIsAcceptableDataType(t *testing.T) {
 	}
 }
 
+// ---------- v0.26.0: BS-IV pre-market fallback path ----------
+
+// TestBSIVFallback_AssemblesLegFromSyntheticPrice drives the bsIVFallback
+// helper end-to-end on a realistic pre-market scenario. SPY 7-DTE strike
+// 735 priced at a known σ via bsCallPrice + put-call parity, then
+// passed through the same helper productionLegFetcher uses when the
+// gateway didn't push a model tick. Asserts the assembled legResult
+// carries IVDerived=true, OK=true, the recovered σ within 5 bps, a
+// physical (positive, finite) gamma, and the OI threaded through
+// unchanged.
+//
+// This is the regression pin the v0.26.0 CHANGELOG's "pre-market gamma
+// lands a real result" claim warrants. If a future refactor breaks
+// Stage 2b (wrong sign branch, wrong parity formula, drops OI, mis-
+// labels the leg) this test fails loudly — even when the strict-mode
+// wire-smoke gate can't observe the fallback firing.
+func TestBSIVFallback_AssemblesLegFromSyntheticPrice(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	const (
+		spot    = 737.0
+		strike  = 735.0
+		sigmaTr = 0.14
+	)
+	// 7-DTE: snapshot today, expiry 7 days out. Expiry settlement is
+	// at 16:00 NY per dteYears.
+	now := time.Date(2026, 5, 18, 9, 30, 0, 0, loc)
+	expiryYMD := now.AddDate(0, 0, 7).Format("20060102")
+
+	cases := []struct {
+		name   string
+		right  string
+		isCall bool
+	}{
+		{"call_7dte_atm", "C", true},
+		{"put_7dte_atm", "P", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dte := dteYears(expiryYMD, now)
+			callPx := bsCallPrice(spot, strike, dte, sigmaTr, 0, 0)
+			price := callPx
+			if !tc.isCall {
+				price = callPx - spot + strike // r=q=0 parity
+			}
+
+			r := bsIVFallback(spot, now, expiryYMD, strike, tc.right, 123, price)
+
+			if !r.OK || !r.IVDerived {
+				t.Fatalf("expected OK=true IVDerived=true, got %+v", r)
+			}
+			if r.OI != 123 {
+				t.Errorf("OI threaded through: got %d, want 123", r.OI)
+			}
+			if math.Abs(r.IV-sigmaTr) > 0.0005 {
+				t.Errorf("σ recovery: got %.5f, want %.5f", r.IV, sigmaTr)
+			}
+			if r.Gamma <= 0 || math.IsNaN(r.Gamma) || math.IsInf(r.Gamma, 0) {
+				t.Errorf("expected positive finite gamma, got %v", r.Gamma)
+			}
+		})
+	}
+}
+
+// TestBSIVFallback_RefusalCases pins the empty-legResult exits — every
+// path where Stage 2b drops a leg rather than poisoning the aggregate
+// with a non-physical σ.
+func TestBSIVFallback_RefusalCases(t *testing.T) {
+	t.Parallel()
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 18, 9, 30, 0, 0, loc)
+	future := now.AddDate(0, 0, 7).Format("20060102")
+	past := now.AddDate(0, 0, -1).Format("20060102")
+
+	cases := []struct {
+		name      string
+		expiryYMD string
+		price     float64
+		why       string
+	}{
+		{"zero_price", future, 0, "no model tick AND no bid/ask AND no prior close"},
+		{"negative_price", future, -1, "garbage price"},
+		{"expired", past, 5.0, "DTE ≤ 0 (rollover during compute)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bsIVFallback(737.0, now, tc.expiryYMD, 735.0, "P", 100, tc.price)
+			if r.OK || r.IVDerived || r.OI != 0 || r.IV != 0 {
+				t.Errorf("%s should return empty legResult, got %+v", tc.why, r)
+			}
+		})
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

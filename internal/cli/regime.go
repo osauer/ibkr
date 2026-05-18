@@ -240,17 +240,18 @@ func renderRow(env *Env, r regimeRow) string {
 // attached Quality is firm-live (the default-case row reads as fresh
 // with no extra ink). Picks the worst-of across attached values:
 //
-//   - any modelled/proxy → "· modelled"  (e.g. gamma's BS-sweep zero-flip)
+//   - any modelled/proxy → "· modelled"  (e.g. gamma's BS-sweep γ-zero)
 //   - any derived/estimate → "· est"     (e.g. SPY 52w-high fallback)
 //   - any firm/frozen → "· frozen"       (gateway-frozen tick)
 //   - otherwise → ""                     (all firm/live)
 //
-// Age suffix ("· est 18s") appends when the worst Quality.AsOf is more
-// than 5 s older than now — surfaces the "this value is from a fetch
-// that finished 18 s before the snapshot timestamp" case the user
-// asked for. Skipped when age ≤ 5 s so the row stays uncluttered.
+// Age suffix appends when the worst Quality.AsOf is older than the
+// per-class threshold. Tick-data (est/frozen) decays over seconds, so
+// any age > 5 s surfaces as "· est 18s". Modelled outputs are stable
+// over the snapshot horizon — a 37 s old BS-sweep result is no more
+// stale than a 1 s old one — so the age suffix only fires past 5 min,
+// as a stale-model warning rather than a freshness clock.
 func qualityTag(now time.Time, qs ...*rpc.Quality) string {
-	worst := ""
 	worstAt := time.Time{}
 	rank := func(q *rpc.Quality) int {
 		if q == nil {
@@ -275,23 +276,27 @@ func qualityTag(now time.Time, qs ...*rpc.Quality) string {
 			worstAt = q.AsOf
 		}
 	}
-	switch worstRank {
-	case 4:
-		worst = "· modelled"
-	case 3:
-		worst = "· est"
-	case 2:
-		worst = "· frozen"
-	default:
+	type tagSpec struct {
+		label     string
+		threshold time.Duration
+		ageFmt    string // %d unit
+		ageUnit   func(time.Duration) int
+	}
+	specs := map[int]tagSpec{
+		4: {"· modelled", 5 * time.Minute, "%s %dm old", func(d time.Duration) int { return int(d.Minutes()) }},
+		3: {"· est", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
+		2: {"· frozen", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
+	}
+	s, ok := specs[worstRank]
+	if !ok {
 		return ""
 	}
 	if !worstAt.IsZero() {
-		age := now.Sub(worstAt)
-		if age > 5*time.Second {
-			return fmt.Sprintf("%s %ds", worst, int(age.Seconds()))
+		if age := now.Sub(worstAt); age > s.threshold {
+			return fmt.Sprintf(s.ageFmt, s.label, s.ageUnit(age))
 		}
 	}
-	return worst
+	return s.label
 }
 
 // glyph picks the row badge from the row's band and status. Ranked rows
@@ -536,33 +541,59 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			row.stateNote = "envelope missing payload"
 			return row
 		}
-		flip := "—"
-		gap := ""
-		if c.ZeroGamma != nil {
-			flip = fmt.Sprintf("%.2f", *c.ZeroGamma)
-			if c.GapPct != nil {
-				sign := "+"
-				if *c.GapPct < 0 {
-					sign = ""
-				}
-				gap = fmt.Sprintf("  %s%.1f%%", sign, *c.GapPct)
-			}
-		}
-		row.value = fmt.Sprintf("spot %.2f → flip %s%s", c.SpotUnderlying, flip, gap)
-		switch {
-		case c.ZeroGamma == nil || c.GapPct == nil:
-			row.band, row.reason = bandUnranked, "no zero-crossing in sweep"
-		case *c.GapPct > gammaGapYellow:
-			row.band, row.reason = bandGreen, "spot >2% above flip"
-		case *c.GapPct >= -gammaGapYellow:
-			row.band, row.reason = bandYellow, "spot within ±2% of flip"
-		default:
-			row.band, row.reason = bandRed, "spot below flip"
-		}
 		// Gamma's two scalars are always modelled (zero_gamma via the
 		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
 		// row will carry "· modelled" regardless of ranking.
 		row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
+		// Three rendering paths:
+		//
+		//  1. A real crossing exists in the swept window → band on the
+		//     gap from spot.
+		//  2. No crossing, but the swept profile is one-signed → band
+		//     on the sign (long-γ across window = stabilizing regime;
+		//     short-γ across window = amplifying regime). The compute
+		//     has already determined this; it's a strong regime
+		//     statement, not "unavailable".
+		//  3. No crossing AND no signal (empty profile) → stay
+		//     unranked; this is the genuine no-data path.
+		if c.ZeroGamma != nil && c.GapPct != nil {
+			sign := "+"
+			if *c.GapPct < 0 {
+				sign = ""
+			}
+			row.value = fmt.Sprintf("spot %.2f → γ-zero %.2f  %s%.1f%%",
+				c.SpotUnderlying, *c.ZeroGamma, sign, *c.GapPct)
+			switch {
+			case *c.GapPct > gammaGapYellow:
+				row.band, row.reason = bandGreen, "spot >2% above γ-zero"
+			case *c.GapPct >= -gammaGapYellow:
+				row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
+			default:
+				row.band, row.reason = bandRed, "spot below γ-zero"
+			}
+			return row
+		}
+		// No crossing. The compute's GammaSign tells us which side of
+		// zero the whole swept profile landed on — that IS the regime
+		// statement the renderer should surface.
+		gabsBn := c.GammaTotalAbs / 1e9
+		switch c.GammaSign {
+		case "positive":
+			row.value = fmt.Sprintf("spot %.2f · long-γ  |Γ|·OI %.1fbn",
+				c.SpotUnderlying, gabsBn)
+			row.band = bandGreen
+			row.reason = "dealer long-γ across ±15% sweep — stabilizing regime, γ-zero is well below spot"
+		case "negative":
+			row.value = fmt.Sprintf("spot %.2f · short-γ  |Γ|·OI %.1fbn",
+				c.SpotUnderlying, gabsBn)
+			row.band = bandRed
+			row.reason = "dealer short-γ across ±15% sweep — amplifying regime, γ-zero is well above spot"
+		default:
+			// "no_data" or empty: genuine no-signal case.
+			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
+			row.band = bandUnranked
+			row.reason = "sweep produced no signed profile"
+		}
 		return row
 	}
 	row.value = "—"
@@ -665,7 +696,20 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf("%-15s %s %s%s%s",
 				qf.name, qf.q.Confidence, qf.q.FreshnessClass, ageStr, src)))
 		}
+		// The gamma row gets two extra surfaces specific to its
+		// modelled-output nature: a BS-IV-derived disclosure when the
+		// fallback fired, and a plain-English read of what γ-zero means.
+		if e.name == "SPY γ-zero" {
+			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
+				fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf(
+					"compute used %d/%d legs with BS-IV from prior-session last price (model engine idle off-hours)",
+					res.DerivedIVLegs, res.LegCount)))
+			}
+		}
 		fmt.Fprintf(out, "  %s\n", env.dim(e.notes))
+		if e.name == "SPY γ-zero" {
+			fmt.Fprintf(out, "  %s\n", env.dim("The γ-zero level is where dealer net gamma crosses zero. Above γ-zero, dealer hedging dampens moves (stabilizing regime). Below, dealer hedging amplifies moves (volatile regime). Within ±2% the regime can flip on a single session. When the sweep shows no crossing inside ±15%, the row bands on the signed profile: long-γ (well above γ-zero, stable) or short-γ (well below, amplifying)."))
+		}
 		if len(e.missing) > 0 {
 			fmt.Fprintf(out, "  %s\n", env.dim("(missing: "+strings.Join(e.missing, ", ")+")"))
 		}
