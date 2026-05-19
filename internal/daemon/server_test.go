@@ -664,6 +664,19 @@ func TestBackgroundTasksRegistry_isBusyAndHandlerAgree(t *testing.T) {
 	if got := srv.handleStatusHealth().BackgroundTasks; len(got) != 0 {
 		t.Errorf("after gamma done: BackgroundTasks=%+v, want []", got)
 	}
+
+	// 4. Flag regime-prewarm in flight. Registry must surface it.
+	srv.regimePrewarming.Store(true)
+	if !srv.isBusy() {
+		t.Error("with regime-prewarm in flight: isBusy() should be true")
+	}
+	if got := srv.handleStatusHealth().BackgroundTasks; len(got) != 1 || got[0].Name != "regime-prewarm" {
+		t.Errorf("with regime-prewarm in flight: BackgroundTasks=%+v, want [regime-prewarm]", got)
+	}
+	srv.regimePrewarming.Store(false)
+	if srv.isBusy() {
+		t.Error("after regime-prewarm flag cleared: isBusy() should be false")
+	}
 }
 
 // closeListener must be idempotent and safe to call when the listener was

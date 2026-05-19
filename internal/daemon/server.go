@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -142,6 +143,15 @@ type Server struct {
 	// per Server lifetime so we don't end up with parallel daily-tick
 	// loops competing on refreshMu.
 	breadthStarted sync.Once
+
+	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
+	// flight. Surfaces via backgroundTasks() so the idle watcher defers
+	// shutdown and `ibkr status` reflects the work — same coherence
+	// guarantee breadth-spx and gamma-zero ride. Up to ~30 s of
+	// gateway-slot pressure during postConnectSetup; if the user
+	// autospawns the daemon and walks away, the idle watcher could
+	// previously fire mid-prewarm.
+	regimePrewarming atomic.Bool
 
 	lock *instanceLock
 
@@ -711,6 +721,13 @@ func (s *Server) prewarmRegimeSymbols() {
 	if c == nil {
 		return
 	}
+	// Surface the fan-out on the registry while it's in flight so the
+	// idle watcher defers shutdown and `ibkr status` reflects the work.
+	// Up to ~30 s of parallel contract-details fetches; without this
+	// flag, the idle watcher could fire mid-prewarm on an autospawned
+	// daemon the user walked away from.
+	s.regimePrewarming.Store(true)
+	defer s.regimePrewarming.Store(false)
 	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "SPX"}
 	for _, sym := range syms {
 		if seed, ok := regimeSymbolSeed[sym]; ok {
@@ -1326,6 +1343,9 @@ func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	}
 	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "gamma-zero"})
+	}
+	if s.regimePrewarming.Load() {
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm"})
 	}
 	return tasks
 }
