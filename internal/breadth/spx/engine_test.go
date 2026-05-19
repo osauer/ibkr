@@ -204,6 +204,51 @@ func TestEngineTolerantOfPerSymbolErrors(t *testing.T) {
 	}
 }
 
+// TestEngineRefreshAllFailDoesNotPersist pins the v0.27.1 fix for the
+// startup-race poison: when every fetch in the fan-out returns an error
+// (gateway not yet connected, or transient outage during the daily
+// tick), Compute produces Coverage=0 and finalise refuses to persist.
+// The cache stays whatever it was — either empty (no Get()) or the
+// last good snapshot from an earlier refresh.
+func TestEngineRefreshAllFailDoesNotPersist(t *testing.T) {
+	now := time.Date(2026, 5, 19, 21, 30, 0, 0, time.UTC)
+	members := []string{"AAA", "BBB", "CCC"}
+	fake := &FakeBarFetcher{
+		Errors: map[string]error{
+			"AAA": errors.New("breadth fetcher: no gateway connector"),
+			"BBB": errors.New("breadth fetcher: no gateway connector"),
+			"CCC": errors.New("breadth fetcher: no gateway connector"),
+		},
+	}
+	dir := t.TempDir()
+	store := NewStore(dir)
+	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
+	e.members = members
+	e.memberAt = now
+
+	if err := e.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, ok := e.Get(); ok {
+		t.Error("Get should return false after an all-fail refresh — degenerate snapshot must not be published")
+	}
+
+	// On-disk cache must be untouched — no snapshot.json, no
+	// history.json. A subsequent daemon restart cold-starts cleanly
+	// rather than reading a poisoned cache.
+	store2 := NewStore(dir)
+	if snap, err := store2.LoadSnapshot(); err != nil {
+		t.Errorf("LoadSnapshot: %v", err)
+	} else if snap != nil {
+		t.Errorf("snapshot persisted despite Coverage==0: %+v", snap)
+	}
+	if hist, err := store2.LoadHistory(); err != nil {
+		t.Errorf("LoadHistory: %v", err)
+	} else if len(hist) > 0 {
+		t.Errorf("history persisted despite Coverage==0: %+v", hist)
+	}
+}
+
 func TestEngineConcurrentRefreshSerialises(t *testing.T) {
 	now := time.Date(2026, 5, 18, 21, 30, 0, 0, time.UTC)
 	members := []string{"AAA", "BBB"}

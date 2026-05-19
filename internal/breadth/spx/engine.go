@@ -307,10 +307,25 @@ dispatch:
 // Persistence failures are logged but not fatal — the in-memory state
 // still updates so subsequent Get() calls see the new value. The
 // on-disk cache will be re-tried on the next refresh.
+//
+// A snapshot with Coverage == 0 is degenerate (no constituent data
+// landed at all — gateway disconnected, fetcher errored, fan-out
+// raced startup) and is NEVER persisted: a true S5FI of zero is
+// unobserved in market history, so the case is always "no data",
+// and persisting it would poison the cache (scheduler sees today's
+// snapshot, skips the next bootstrap, indicator stays dark for 24 h).
+// finalise returns nil in this case — the engine logs the warning,
+// the existing on-disk state is preserved, and the next refresh
+// retries.
 func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow) error {
 	now := e.clock()
 	sessionKey := nySessionKey(now)
 	snap := Compute(members, windows, sessionKey, now)
+
+	if snap.Coverage == 0 {
+		e.warnf("breadth: refresh produced zero coverage (gateway not ready or all fetches failed); not persisting, will retry next tick")
+		return nil
+	}
 
 	// Build the new history series. Lock briefly to read the existing
 	// slice, then release while we shuffle bytes — we don't want to

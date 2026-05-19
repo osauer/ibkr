@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.1 — 2026-05-19 06:34 CEST
+
+Two startup bugs in v0.27.0 that prevented the breadth engine from
+producing a real number on a fresh daemon.
+
+### Fixed
+
+- **Bootstrap race against gateway handshake.** v0.27.0 launched the
+  breadth scheduler from `Server.Start` in parallel with the gateway
+  connect goroutine. The cold-start refresh fired before the connector
+  was ready, every one of the 500 `FetchDaily` calls returned "no
+  gateway connector" instantly, and the fan-out finished in
+  milliseconds with zero data. `breadth.Run` now launches from
+  `postConnectSetup` behind a `sync.Once` — the bootstrap waits for
+  the first successful gateway handshake, and the Once guard means a
+  reconnect-driven second `postConnectSetup` is a no-op rather than
+  spawning a duplicate scheduler loop.
+
+- **`finalise()` no longer persists a degenerate snapshot.** The
+  zero-fetch refresh above wrote `windows.json` with an empty map and
+  `snapshot.json` with all 500 names in `Excluded[reason=no_window]`
+  and `Coverage=0`. On the next daemon start the scheduler saw "we
+  have today's snapshot" and skipped the next bootstrap, so the
+  indicator stayed dark for 24 h. `finalise()` now refuses to persist
+  any snapshot with `Coverage == 0` — a true S5FI of zero is
+  unobserved in market history, so the case is always "no data
+  landed," and the engine logs the warning and retries on the next
+  tick. Regression pinned by
+  `TestEngineRefreshAllFailDoesNotPersist`.
+
+If you ran v0.27.0 against a live daemon (autospawn or
+`ibkr daemon`), clear the poisoned cache before upgrading:
+`rm -rf $XDG_CACHE_HOME/ibkr/breadth-spx/` (defaults to
+`~/.cache/ibkr/breadth-spx/`). v0.27.1 cold-starts cleanly from a
+removed cache or from an unaffected v0.26 install.
+
 ## v0.27.0 — 2026-05-19 06:19 CEST
 
 `ibkr breadth` now actually returns a number on retail IBKR accounts. The

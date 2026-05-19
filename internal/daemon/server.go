@@ -131,9 +131,17 @@ type Server struct {
 
 	// breadth runs the SPX 50-DMA breadth compute. The engine owns
 	// a persisted constituent-close cache, a once-daily scheduler
-	// goroutine started by Start(), and a rolling-history file the
-	// handler reads for sparkline rendering. nil before installEngines.
+	// goroutine launched from postConnectSetup, and a rolling-history
+	// file the handler reads for sparkline rendering. nil before
+	// installBreadthEngine.
 	breadth *spx.Engine
+	// breadthStarted guards breadth.Run() so the scheduler goroutine
+	// only spins up after the gateway completes its first handshake.
+	// postConnectSetup runs once per successful candidate, including
+	// post-reconnect — this Once ensures Run() launches exactly once
+	// per Server lifetime so we don't end up with parallel daily-tick
+	// loops competing on refreshMu.
+	breadthStarted sync.Once
 
 	lock *instanceLock
 
@@ -290,14 +298,12 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		go s.runConnectAttempt(serverCtx, ep)
 	}
-	// Breadth scheduler is gateway-independent — its fetcher returns
-	// "gateway unavailable" until the connect goroutine succeeds, but
-	// the daily cadence ticks regardless. Started here, not from
-	// postConnectSetup, so the engine survives gateway disconnects /
-	// reconnects without spawning duplicate schedulers.
-	if s.breadth != nil {
-		go s.breadth.Run(ctx)
-	}
+	// Breadth scheduler launches from postConnectSetup behind a
+	// sync.Once — the cold-start bootstrap fan-out depends on a live
+	// gateway connector, and launching here would race against the
+	// in-flight connect goroutine. Once Run() is up it survives
+	// subsequent gateway disconnects via the fetcher's connector
+	// thunk.
 	s.runIdleWatcher(ctx)
 
 	s.closeListener()
@@ -637,6 +643,19 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// warm) returned all fields. Pre-warming eliminates the variance
 	// without changing the regime request path.
 	go s.prewarmRegimeSymbols()
+
+	// Launch the breadth scheduler now that the gateway has handshaken.
+	// The cold-start bootstrap inside Run() fan-outs 500 historical-bar
+	// fetches and would fail-and-poison the cache if the connector
+	// weren't ready yet (v0.27.0 regression — see engine.finalise's
+	// Coverage==0 guard). The Once guard means a reconnect-driven
+	// second postConnectSetup is a no-op rather than spawning a
+	// duplicate scheduler loop.
+	if s.breadth != nil && s.serverCtx != nil {
+		s.breadthStarted.Do(func() {
+			go s.breadth.Run(s.serverCtx)
+		})
+	}
 }
 
 // regimeSymbolSeed is the static fallback used by prewarmRegimeSymbols
