@@ -391,6 +391,16 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 
 const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high; red when HYG in clear downtrend (5+ sessions below 50-day) while SPY at/near highs. Daemon returns raw measurements — consumer compares HYG vs hyg_50dma and SPY vs spy_52w_high. Observation window 2-4 weeks; single-day moves are noise."
 
+// HYGLookbackDays is the calendar-day window passed to the HMDS
+// history fetch when computing HYG's 50-day SMA. 50 trading days ≈ 70
+// calendar days when the window has zero holidays; the US market
+// closes 9-10 days per year, so a 70-day window can come up short on
+// the wrong side of Memorial Day / Labor Day / Thanksgiving. 90
+// calendar days gives ~10 days of slack — the IBKR HMDS API only
+// bills the call, not the bar count, so this is free. Widened from
+// 70 to 90 in v0.23.0 (commit 02aba13).
+const HYGLookbackDays = 90
+
 func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDivergence {
 	out := rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes}
 	now := time.Now()
@@ -464,14 +474,10 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		}
 	}
 
-	// 50-day SMA on HYG. 50 trading days ≈ 70 calendar days when
-	// the window has zero holidays; the US market closes 9-10 days
-	// per year, so a 70-day window can come up short on the wrong
-	// side of Memorial Day / Labor Day / Thanksgiving. 90 calendar
-	// days gives ~10 days of slack — the IBKR HMDS API only bills
-	// the call, not the bar count, so this is free.
+	// 50-day SMA on HYG. See HYGLookbackDays for the
+	// calendar-day window's holiday-clipping rationale.
 	hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
-	bars, err := deps.history(hctx, "HYG", 90)
+	bars, err := deps.history(hctx, "HYG", HYGLookbackDays)
 	hcancel()
 	switch {
 	case err != nil:
@@ -509,6 +515,16 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 
 const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier; the row surfaces Status=unavailable when the gateway has no FX ticks (typically: account lacks IDEALPRO market-data subscription, or markets closed with no frozen tick to fall back on)."
 
+// USDJPYLookbackDays is the calendar-day window passed to the HMDS
+// history fetch when computing the 7-trading-day close for USD/JPY.
+// FX trades 24/5 so 7 trading days = 7 weekday FX sessions. 14
+// calendar days covers 7 FX sessions even when a Monday or Friday
+// bank holiday interrupts the count (US: MLK Day, Memorial Day,
+// Labor Day, Thanksgiving, etc. all fall on Mondays and clip one
+// US-tradable FX day). Widened from 12 to 14 in v0.23.0
+// (commit 02aba13).
+const USDJPYLookbackDays = 14
+
 func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	out := rpc.RegimeUSDJPY{
 		Symbol: "USD.JPY",
@@ -532,13 +548,10 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	out.DataType = dt
 
 	// 7-trading-days-ago close. FX history uses MIDPOINT bars
-	// (defaultHistoricalWhat for CASH); FX trades 24/5 so 7 trading
-	// days = 7 weekday FX sessions. 14 calendar days covers 7 FX
-	// sessions even when a Monday or Friday bank holiday interrupts
-	// the count (US: MLK Day, Memorial Day, Labor Day, Thanksgiving,
-	// etc. all fall on Mondays and clip one US-tradable FX day).
+	// (defaultHistoricalWhat for CASH). See USDJPYLookbackDays for
+	// the calendar-day window's holiday-clipping rationale.
 	hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
-	bars, err := deps.history(hctx, "USD.JPY", 14)
+	bars, err := deps.history(hctx, "USD.JPY", USDJPYLookbackDays)
 	hcancel()
 	switch {
 	case err != nil:

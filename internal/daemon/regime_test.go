@@ -24,14 +24,23 @@ import (
 // (history error, insufficient bars). Tests assert against it to
 // verify the operator-visible diagnostic landed; nil here means the
 // fetcher had no failures worth logging.
+//
+// historyCalls records the days argument the production fetcher
+// requested per symbol per call. The plain closures used to silently
+// discard this — meaning a regression that reverted HYG's
+// holiday-clipping widening (90 → 70) or USD.JPY's (14 → 12) would
+// pass every test in the package. The capture pins the production
+// contract so the test fake can't drift away from what the gateway
+// is actually being asked for.
 type fakeDeps struct {
 	snapshots map[string]fakeQuote
 	// rich holds the Week52High value the snapshotWith52WHigh dep
 	// returns for a given symbol. Tests that don't set an entry simulate
 	// the "Misc Stats tick 165 didn't land in the budget" case.
-	rich    map[string]fakeRichQuote
-	bars    map[string]fakeHistory
-	warnLog *[]string
+	rich         map[string]fakeRichQuote
+	bars         map[string]fakeHistory
+	warnLog      *[]string
+	historyCalls map[string][]int
 }
 
 type fakeQuote struct {
@@ -62,7 +71,11 @@ func (f *fakeDeps) build() *regimeDeps {
 			r := f.rich[sym]
 			return r.price, r.prevClose, r.week52High, r.dataType
 		},
-		history: func(_ context.Context, sym string, _ int) ([]ibkrlib.HistoricalBar, error) {
+		history: func(_ context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
+			if f.historyCalls == nil {
+				f.historyCalls = make(map[string][]int)
+			}
+			f.historyCalls[sym] = append(f.historyCalls[sym], days)
 			h := f.bars[sym]
 			return h.bars, h.err
 		},
@@ -477,6 +490,32 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 			t.Errorf("expected warn log for SPY 52w fallback history error, got %v", warns)
 		}
 	})
+
+	// Pins the (days int) the production fetcher hands to deps.history
+	// against HYGLookbackDays. Without this gate the test seam silently
+	// discards the days argument, so a regression that reverts the
+	// v0.23.0 holiday-clipping widening (90 → 70 calendar days, commit
+	// 02aba13) would pass every other test in this file. The 90-day
+	// window absorbs the 9-10 US market holidays per year — without it
+	// the 50-bar HMDS fetch comes up short on holiday weeks and
+	// hyg_50dma silently disappears from the dashboard.
+	t.Run("history_call_pins_HYGLookbackDays", func(t *testing.T) {
+		f := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+			},
+		}
+		_ = fetchRegimeHYGSPY(ctx, f.build())
+		if got := f.historyCalls["HYG"]; len(got) != 1 || got[0] != HYGLookbackDays {
+			t.Errorf("HYG history called with days=%v, want exactly [%d] (HYGLookbackDays)", got, HYGLookbackDays)
+		}
+	})
 }
 
 func TestFetchRegimeUSDJPY(t *testing.T) {
@@ -594,6 +633,34 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 		got := fetchRegimeUSDJPY(ctx, deps)
 		if got.Status != rpc.RegimeStatusStale {
 			t.Errorf("delayed tick: status=%q, want stale", got.Status)
+		}
+	})
+
+	// Pins the (days int) the production fetcher hands to deps.history
+	// against USDJPYLookbackDays. Without this gate the test seam
+	// silently discards the days argument, so a regression that reverts
+	// the v0.23.0 holiday-clipping widening (14 → 12 calendar days,
+	// commit 02aba13) would pass every other test in this file. The
+	// 14-day window absorbs Monday US bank holidays that clip one
+	// US-tradable FX day each — without it the 7-trading-day close
+	// silently disappears the week of MLK Day / Memorial Day / Labor
+	// Day / Thanksgiving and weekly_change_pct goes missing.
+	t.Run("history_call_pins_USDJPYLookbackDays", func(t *testing.T) {
+		bars := make([]ibkrlib.HistoricalBar, 10)
+		for i := range 10 {
+			bars[i] = ibkrlib.HistoricalBar{Close: float64(150 + i)}
+		}
+		f := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"USD.JPY": {price: 160.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"USD.JPY": {bars: bars},
+			},
+		}
+		_ = fetchRegimeUSDJPY(ctx, f.build())
+		if got := f.historyCalls["USD.JPY"]; len(got) != 1 || got[0] != USDJPYLookbackDays {
+			t.Errorf("USD.JPY history called with days=%v, want exactly [%d] (USDJPYLookbackDays)", got, USDJPYLookbackDays)
 		}
 	})
 }
