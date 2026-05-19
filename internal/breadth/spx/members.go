@@ -2,7 +2,6 @@ package spx
 
 import (
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -19,12 +18,4 @@ import (
 func MemberList() (members []string, asOf time.Time) {
 	out := slices.Clone(sp500Members)
 	return out, sp500AsOf
-}
-
-// NormalizeSymbol applies the same upper-casing + whitespace trim the
-// connector applies before any contract request. Centralised here so
-// the refresh script writes a list in the exact form the runtime
-// consumes — avoids a class of "symbol matched but cache missed" bugs.
-func NormalizeSymbol(s string) string {
-	return strings.ToUpper(strings.TrimSpace(s))
 }

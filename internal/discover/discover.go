@@ -194,12 +194,10 @@ func probeAll(ctx context.Context, host string, ports []int, perPortTimeout time
 	results := make([]result, len(ports))
 	var wg sync.WaitGroup
 	for i, p := range ports {
-		wg.Add(1)
-		go func(i, p int) {
-			defer wg.Done()
+		wg.Go(func() {
 			err := Probe(ctx, host, p, perPortTimeout)
 			results[i] = result{idx: i, ok: err == nil}
-		}(i, p)
+		})
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {

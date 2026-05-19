@@ -735,10 +735,8 @@ func (s *Server) prewarmRegimeSymbols() {
 		}
 	}
 	var wg sync.WaitGroup
-	wg.Add(len(syms))
 	for _, sym := range syms {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 30 s budget per symbol. Empirically a healthy
 			// weekday gateway resolves contract details in well
 			// under a second; weekend/frozen state can stretch
@@ -751,7 +749,7 @@ func (s *Server) prewarmRegimeSymbols() {
 			if _, err := c.FetchContractDetails(sym, 30*time.Second); err != nil {
 				s.logger.Warnf("regime pre-warm: %s contract details: %v (using seeded conID)", sym, err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	s.logger.Infof("regime pre-warm: contract cache primed for %v", syms)

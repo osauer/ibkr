@@ -100,14 +100,12 @@ func runBounded[T any](jobs []T, workers int, fn func(T)) {
 	close(ch)
 
 	var wg sync.WaitGroup
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for j := range ch {
 				fn(j)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

@@ -117,15 +117,7 @@ type Entry struct{ prefix string }
 // Component returns a logger entry tagged with the component name.
 func Component(name string) Entry { return Entry{prefix: name} }
 
-func (e Entry) Debugf(format string, args ...any)     { emit(LevelDebug, e.prefix, format, args...) }
-func (e Entry) Infof(format string, args ...any)      { emit(LevelInfo, e.prefix, format, args...) }
-func (e Entry) Highlightf(format string, args ...any) { emit(LevelInfo, e.prefix, format, args...) }
-func (e Entry) Warnf(format string, args ...any)      { emit(LevelWarn, e.prefix, format, args...) }
-func (e Entry) Errorf(format string, args ...any)     { emit(LevelError, e.prefix, format, args...) }
-
-// Package-level helpers for callers that don't carry an Entry.
-func Debugf(format string, args ...any)     { emit(LevelDebug, "", format, args...) }
-func Infof(format string, args ...any)      { emit(LevelInfo, "", format, args...) }
-func Highlightf(format string, args ...any) { emit(LevelInfo, "", format, args...) }
-func Warnf(format string, args ...any)      { emit(LevelWarn, "", format, args...) }
-func Errorf(format string, args ...any)     { emit(LevelError, "", format, args...) }
+func (e Entry) Debugf(format string, args ...any) { emit(LevelDebug, e.prefix, format, args...) }
+func (e Entry) Infof(format string, args ...any)  { emit(LevelInfo, e.prefix, format, args...) }
+func (e Entry) Warnf(format string, args ...any)  { emit(LevelWarn, e.prefix, format, args...) }
+func (e Entry) Errorf(format string, args ...any) { emit(LevelError, e.prefix, format, args...) }

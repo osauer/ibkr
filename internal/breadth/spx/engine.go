@@ -78,7 +78,6 @@ type Engine struct {
 	windows  map[string]ConstituentWindow
 	history  []HistoryPoint
 	members  []string
-	memberAt time.Time
 
 	// refreshMu serialises concurrent Refresh() calls. The second
 	// caller waits behind the first rather than launching a
@@ -102,7 +101,7 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 	if fetcher == nil {
 		panic("spx.New: fetcher is required")
 	}
-	members, asOf := MemberList()
+	members, _ := MemberList()
 	e := &Engine{
 		store:        store,
 		fetcher:      fetcher,
@@ -113,7 +112,6 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 		warmLookback: opts.WarmLookbackDays,
 		windows:      map[string]ConstituentWindow{},
 		members:      members,
-		memberAt:     asOf,
 	}
 	if e.clock == nil {
 		e.clock = time.Now
@@ -424,24 +422,6 @@ func (e *Engine) warnf(format string, args ...any) {
 	if e.logger != nil {
 		e.logger.Warnf(format, args...)
 	}
-}
-
-// Members returns a copy of the engine's working membership list.
-// Exposed for daemon handlers that need to report member count
-// without reaching into private fields.
-func (e *Engine) Members() []string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return slices.Clone(e.members)
-}
-
-// MembershipAsOf returns the timestamp the engine's membership list
-// was last regenerated. Useful for renderers that warn when the
-// release-baked list is approaching staleness.
-func (e *Engine) MembershipAsOf() time.Time {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.memberAt
 }
 
 // History returns up to `limit` trailing history points, oldest first.

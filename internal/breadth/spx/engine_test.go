@@ -39,7 +39,6 @@ func newTestEngine(t *testing.T, fetcher *FakeBarFetcher, clock func() time.Time
 	// universe the test wants. Direct field write is safe before any
 	// Refresh has run — no other goroutine touches e.members yet.
 	e.members = members
-	e.memberAt = clock()
 	return e
 }
 
@@ -126,7 +125,6 @@ func TestEngineWarmRefreshFetchesOnlyToday(t *testing.T) {
 	}
 	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
 	e.members = members
-	e.memberAt = now
 
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -245,7 +243,6 @@ func TestEngineRefreshBelowCoverageThresholdIsNotPersisted(t *testing.T) {
 	store := NewStore(dir)
 	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
 	e.members = members
-	e.memberAt = now
 
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -283,7 +280,6 @@ func TestEngineRefreshAllFailDoesNotPersist(t *testing.T) {
 	store := NewStore(dir)
 	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
 	e.members = members
-	e.memberAt = now
 
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
