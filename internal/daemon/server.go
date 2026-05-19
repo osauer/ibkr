@@ -1159,11 +1159,15 @@ func unaryDeadline(method string) time.Duration {
 	case rpc.MethodHistoryDaily, rpc.MethodPositionsList:
 		return 30 * time.Second
 	case rpc.MethodBreadthSPX:
-		// 20 s = 5 s S5FI snapshot wait + up to 12 s historical-bars
-		// fetch on a cold cache + slack. The headline value usually
-		// arrives in 1-2 s; the budget is sized for the slower
-		// historical leg on the first call of the day.
-		return 20 * time.Second
+		// 2 s — handleBreadthSPX is a pure projection of in-memory
+		// engine state (Get() + History()) since v0.27.0. No gateway
+		// calls happen on this code path; the long-running compute
+		// runs on the engine's scheduler goroutine. The 20 s budget
+		// this method inherited from the pre-v0.27.0 INDEX-feed
+		// implementation papered over a different bug class. A handler
+		// taking >2 s here is a sign of mutex contention or a stuck
+		// scheduler, not legitimate work.
+		return 2 * time.Second
 	case rpc.MethodGammaZeroSPX:
 		// 55 s — under the CLI's 60 s ceiling but generous enough to
 		// support meaningful WaitMs values. The actual compute runs

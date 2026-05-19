@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.3 — 2026-05-19 09:05 CEST
+
+After v0.27.0 → v0.27.1 → v0.27.2 each shipped a different lifecycle
+bug in the breadth engine, an external review surfaced that the root
+cause was missing observability: every consumer had to side-channel
+via `engine.IsRefreshing()` to disambiguate cold-start from
+ready-to-render, which mis-classified the poisoned v0.27.0 cache as
+"ok". This release makes engine state a first-class wire field so the
+bug pattern is structurally impossible.
+
+### Added
+
+- **`BreadthSPXResult.State`** with values `cold | computing | ready
+  | degraded`. The single source of truth for consumers — replaces
+  the side-channel pattern in `fetchRegimeBreadth` that triggered all
+  three v0.27.x bugs. `cold`: engine hasn't computed a snapshot.
+  `computing`: refresh in flight. `ready`: snapshot present and
+  reliable. `degraded`: reserved for a future schema where
+  below-threshold snapshots persist with a warning marker; v0.27.3
+  engine refuses to persist below threshold so this state isn't
+  currently produced.
+
+- **`MinCoverageFraction = 0.80` in `internal/breadth/spx`.** The
+  v0.27.1 `Coverage == 0` persist-guard generalised: a refresh whose
+  coverage falls below 80% of `MemberCount` is "did not converge"
+  and is not persisted. Tolerates ordinary per-name fetch errors
+  (delisted tickers, transient pacing) while rejecting catastrophic
+  fan-outs. Pinned by `TestEngineRefreshBelowCoverageThresholdIsNotPersisted`.
+
+- **`TestStartDoesNotLaunchBreadthBeforePostConnect`** in
+  `internal/daemon/server_test.go`. Asserts that with a blocking
+  fake attempter (modelling "gateway accepted TCP but never
+  handshook"), the breadth fetcher receives zero invocations
+  throughout the test. Directly pins the v0.27.0 bootstrap-race
+  invariant rather than relying on retrospective regression tests
+  written after each shipped bug.
+
+- **`release-verify.sh` step 6: breadth state coherence.** Asserts
+  `state ∈ {cold, computing, ready, degraded}`, `state == "ready"
+  implies value > 0` (the unambiguous v0.27.0 poison-cache
+  fingerprint), and `state == "cold" implies value == 0` (a finalise
+  bug would let value leak without a snapshot). The check completes
+  in seconds against any state of the engine; it doesn't wait for a
+  cold-start bootstrap to finish.
+
+### Changed
+
+- **`fetchRegimeBreadth` reads `result.State` directly** instead of
+  calling `s.breadth.IsRefreshing()` alongside `handleBreadthSPX`.
+  Removes the consumer-side check that mis-classified the v0.27.0
+  poison.
+
+- **`unaryDeadline(MethodBreadthSPX)`: 20s → 2s.** The handler is a
+  pure projection of in-memory engine state (`Get()` +
+  `History()`) since v0.27.0; the 20s budget was inherited from the
+  pre-v0.27.0 live-INDEX-feed implementation. A handler taking
+  more than 2 s here would signal mutex contention or a stuck
+  scheduler, not legitimate work.
+
 ## v0.27.2 — 2026-05-19 08:28 CEST
 
 The third bug in the v0.27 release cycle, plus a correction to my own

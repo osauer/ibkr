@@ -178,11 +178,18 @@ func TestEngineSecondRefreshSameDayIsNoOp(t *testing.T) {
 
 func TestEngineTolerantOfPerSymbolErrors(t *testing.T) {
 	now := time.Date(2026, 5, 18, 21, 30, 0, 0, time.UTC)
-	members := []string{"OK1", "FAIL", "OK2"}
+	// Six-member universe with one failure: 5/6 ≈ 83%, above the 80%
+	// MinCoverageFraction threshold, so the partial refresh still
+	// persists. The "tolerance" being asserted is: per-symbol errors
+	// don't fail the whole call; they show up as Excluded entries.
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "FAIL"}
 	fake := &FakeBarFetcher{
 		Bars: map[string][]Bar{
 			"OK1": makeSeries(100, 1, WindowSize, now),
 			"OK2": makeSeries(50, 1, WindowSize, now),
+			"OK3": makeSeries(75, 1, WindowSize, now),
+			"OK4": makeSeries(60, 1, WindowSize, now),
+			"OK5": makeSeries(80, 1, WindowSize, now),
 		},
 		Errors: map[string]error{
 			"FAIL": errors.New("gateway: pacing"),
@@ -196,11 +203,63 @@ func TestEngineTolerantOfPerSymbolErrors(t *testing.T) {
 	if !ok {
 		t.Fatal("snapshot missing")
 	}
-	if snap.Coverage != 2 {
-		t.Errorf("coverage: want 2, got %d", snap.Coverage)
+	if snap.Coverage != 5 {
+		t.Errorf("coverage: want 5, got %d", snap.Coverage)
 	}
 	if len(snap.Excluded) != 1 || snap.Excluded[0].Symbol != "FAIL" {
 		t.Errorf("excluded: want [FAIL/no_window], got %v", snap.Excluded)
+	}
+}
+
+// TestEngineRefreshBelowCoverageThresholdIsNotPersisted pins the
+// v0.27.3 broadening of the v0.27.1 Coverage==0 guard: any refresh
+// whose coverage falls below MinCoverageFraction × MemberCount is
+// "did not converge" and must not be persisted. The poison-cache
+// failure mode isn't just "zero fetches succeeded" — it's "the
+// snapshot doesn't reflect the underlying market." A 50%-coverage
+// snapshot is just as misleading as a 0%-coverage one, and would
+// poison the scheduler's "today's snapshot exists, skip the next
+// bootstrap" check identically.
+func TestEngineRefreshBelowCoverageThresholdIsNotPersisted(t *testing.T) {
+	now := time.Date(2026, 5, 19, 21, 30, 0, 0, time.UTC)
+	// 10 members, only 5 successful fetches (50% coverage) — well
+	// below the 80% threshold.
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "F1", "F2", "F3", "F4", "F5"}
+	fake := &FakeBarFetcher{
+		Bars: map[string][]Bar{
+			"OK1": makeSeries(100, 1, WindowSize, now),
+			"OK2": makeSeries(50, 1, WindowSize, now),
+			"OK3": makeSeries(75, 1, WindowSize, now),
+			"OK4": makeSeries(60, 1, WindowSize, now),
+			"OK5": makeSeries(80, 1, WindowSize, now),
+		},
+		Errors: map[string]error{
+			"F1": errors.New("gateway: pacing"),
+			"F2": errors.New("gateway: pacing"),
+			"F3": errors.New("gateway: pacing"),
+			"F4": errors.New("gateway: pacing"),
+			"F5": errors.New("gateway: pacing"),
+		},
+	}
+	dir := t.TempDir()
+	store := NewStore(dir)
+	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
+	e.members = members
+	e.memberAt = now
+
+	if err := e.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, ok := e.Get(); ok {
+		t.Error("Get should return false after a below-threshold refresh — 50% coverage must not produce a published snapshot")
+	}
+
+	// On-disk cache must be untouched. A subsequent daemon restart
+	// would cold-start rather than reading a misleading half-snapshot.
+	if snap, err := NewStore(dir).LoadSnapshot(); err != nil {
+		t.Errorf("LoadSnapshot: %v", err)
+	} else if snap != nil {
+		t.Errorf("snapshot persisted despite below-threshold coverage: %+v", snap)
 	}
 }
 

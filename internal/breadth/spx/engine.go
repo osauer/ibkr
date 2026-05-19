@@ -315,22 +315,27 @@ dispatch:
 // still updates so subsequent Get() calls see the new value. The
 // on-disk cache will be re-tried on the next refresh.
 //
-// A snapshot with Coverage == 0 is degenerate (no constituent data
-// landed at all — gateway disconnected, fetcher errored, fan-out
-// raced startup) and is NEVER persisted: a true S5FI of zero is
-// unobserved in market history, so the case is always "no data",
-// and persisting it would poison the cache (scheduler sees today's
-// snapshot, skips the next bootstrap, indicator stays dark for 24 h).
-// finalise returns nil in this case — the engine logs the warning,
-// the existing on-disk state is preserved, and the next refresh
-// retries.
+// A snapshot whose coverage is below MinCoverageFraction × MemberCount
+// is treated as "did not converge" and is NEVER persisted. The
+// degenerate Coverage == 0 case (cold-start race against the gateway
+// connector, a total outage) is the most extreme failure mode, but
+// the same logic must apply to partial fan-outs — a snapshot computed
+// over 200 of 503 names is not representative of the underlying market
+// and would still poison the scheduler's "today's snapshot exists,
+// skip next bootstrap" check. The threshold is 80%: tolerates ordinary
+// per-name fetch errors (delisted tickers, transient pacing) while
+// rejecting catastrophic fan-outs. finalise returns nil on a
+// below-threshold result — the engine logs, the existing on-disk
+// state is preserved, and the next tick retries.
 func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow) error {
 	now := e.clock()
 	sessionKey := nySessionKey(now)
 	snap := Compute(members, windows, sessionKey, now)
 
-	if snap.Coverage == 0 {
-		e.warnf("breadth: refresh produced zero coverage (gateway not ready or all fetches failed); not persisting, will retry next tick")
+	minCoverage := int(MinCoverageFraction * float64(snap.MemberCount))
+	if snap.Coverage < minCoverage {
+		e.warnf("breadth: refresh coverage %d/%d below threshold %d (%.0f%% of %d); not persisting, will retry next tick",
+			snap.Coverage, snap.MemberCount, minCoverage, MinCoverageFraction*100, snap.MemberCount)
 		return nil
 	}
 

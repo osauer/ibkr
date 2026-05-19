@@ -175,7 +175,7 @@ json_field() {
 }
 
 # 1 — version stamp on the binary matches what we're shipping. Offline.
-echo "  [1/5] version stamp..."
+echo "  [1/6] version stamp..."
 version_json="$(run_cli version version --json)"
 actual_version="$(json_field version "$version_json")"
 if [[ "$actual_version" != "$EXPECTED" ]]; then
@@ -186,7 +186,7 @@ fi
 
 # 2 — status: daemon spawned, gateway connected, daemon_version matches.
 # `status` autospawns the daemon at IBKR_SOCKET if one isn't running there.
-echo "  [2/5] status (autospawn daemon at isolated socket)..."
+echo "  [2/6] status (autospawn daemon at isolated socket)..."
 status_json="$(run_cli status status --json)"
 connected="$(json_field connected "$status_json")"
 daemon_version="$(json_field daemon_version "$status_json")"
@@ -204,7 +204,7 @@ fi
 # 3 — account: pins the account-summary handler and the v0.15+ omitempty
 # behaviour on data_type. Account financials are always available
 # regardless of market hours.
-echo "  [3/5] account.summary..."
+echo "  [3/6] account.summary..."
 account_json="$(run_cli account account --json)"
 account_id="$(json_field account_id "$account_json")"
 if [[ -z "$account_id" ]]; then
@@ -222,7 +222,7 @@ fi
 
 # 4 — positions: shape only. Empty positions array is valid; this gates
 # the handler running, not the user holding stock.
-echo "  [4/5] positions.list..."
+echo "  [4/6] positions.list..."
 positions_json="$(run_cli positions positions --json)"
 positions_shape_ok="$(printf '%s' "$positions_json" | python3 -c '
 import json, sys
@@ -246,7 +246,7 @@ fi
 # timeout the snapshot returns empty bid/ask/last AND empty data_type
 # — that's an acceptable degraded state; we only fail on a hard error
 # or a non-canonical data_type value.
-echo "  [5/5] quote SPY..."
+echo "  [5/6] quote SPY..."
 quote_json="$(run_cli quote_SPY quote SPY --json)"
 quote_check="$(printf '%s' "$quote_json" | python3 -c '
 import json, sys
@@ -267,6 +267,49 @@ if [[ "$quote_check" != "ok" ]]; then
     echo "$quote_json" >&2
     exit 1
 fi
+
+# 6 — breadth: pins the v0.27.3 BreadthSPXResult.State contract. Three
+# bugs in the v0.27.x cycle (bootstrap race, poison-cache, idle kill)
+# all manifested as inconsistent state on this surface; a fresh
+# autospawned daemon should reach a coherent state within a few seconds
+# of postConnectSetup. The check asserts:
+#   - state is one of the documented enum values
+#   - if state == "ready", value MUST be > 0 (a successful finalise
+#     against any real market regime puts >0% above their 50DMA;
+#     v0.27.0's poison-cache produced value=0 with what would have been
+#     state=ready — the exact regression this gates against)
+#   - if state == "cold", value MUST be 0 (engine hasn't run; any
+#     value here is a finalise-without-persist bug)
+# We accept "cold" and "computing" as valid initial states because the
+# cold-start fan-out takes ~60 min (IBKR pacing) — release-verify
+# can't wait for "ready" without budgeting an hour, which would make
+# every release a CI ordeal. The invariant we CAN check in seconds
+# is "the wire state is internally consistent."
+echo "  [6/6] breadth.spx state..."
+breadth_json="$(run_cli breadth breadth --json)"
+breadth_check="$(printf '%s' "$breadth_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+state = d.get("state")
+value = d.get("value", 0)
+valid_states = {"cold", "computing", "ready", "degraded"}
+if state not in valid_states:
+    print("state=" + repr(state) + ", want one of " + str(sorted(valid_states)))
+    sys.exit(0)
+if state == "ready" and value <= 0:
+    print("state=ready but value=" + repr(value) + " — successful finalise must produce non-zero S5FI (regression of v0.27.0 poison-cache)")
+    sys.exit(0)
+if state == "cold" and value != 0:
+    print("state=cold but value=" + repr(value) + " — engine that never ran cannot have a value")
+    sys.exit(0)
+print("ok (state=" + state + " value=" + repr(value) + ")")
+')"
+if [[ "$breadth_check" != ok* ]]; then
+    echo "release-verify: FAIL: breadth.spx: $breadth_check" >&2
+    echo "$breadth_json" >&2
+    exit 1
+fi
+echo "    $breadth_check"
 
 echo ""
 echo "release-verify: PASS — $BIN ($EXPECTED) talks to the gateway and ships honest JSON"

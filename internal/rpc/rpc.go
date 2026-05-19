@@ -303,6 +303,41 @@ type BreadthDailyValue struct {
 	Value float64 `json:"value"` // % of SPX constituents above 50-day SMA
 }
 
+// BreadthState classifies the engine's compute-pipeline state at the
+// moment a result envelope was assembled. Distinct from a generic
+// "status" because the consumer's branching logic depends on which
+// state the engine is in, not just whether the value is present:
+//
+//   - cold: no snapshot has ever been computed AND no refresh is in
+//     flight. The engine exists but hasn't been kicked yet. Treat as
+//     "indicator not yet available" — typically only seen during the
+//     ~few-second window between daemon start and postConnectSetup
+//     launching the scheduler.
+//   - computing: a refresh is in flight. The Value/History fields may
+//     reflect a prior snapshot (warm refresh) or be empty (cold-start
+//     bootstrap). Renderers show a loading state.
+//   - ready: a snapshot exists, no refresh in flight. Value/History
+//     are authoritative.
+//   - degraded: a snapshot exists but its coverage is below the
+//     engine's threshold (e.g. partial fan-out completed). Value is
+//     present but should be rendered with a warning — the underlying
+//     constituent coverage is insufficient.
+//
+// Codified on the wire (rather than left as a side-channel via
+// engine.IsRefreshing) so every consumer reads the same state without
+// remembering to call a sibling method. Pre-v0.27.3 this gap caused
+// fetchRegimeBreadth to mis-classify a poisoned Coverage=0 snapshot
+// as "ok" because the side-channel check only fired on (value==0 AND
+// history empty), and the poisoned envelope had history len 1.
+type BreadthState string
+
+const (
+	BreadthStateCold      BreadthState = "cold"
+	BreadthStateComputing BreadthState = "computing"
+	BreadthStateReady     BreadthState = "ready"
+	BreadthStateDegraded  BreadthState = "degraded"
+)
+
 // BreadthSPXResult is the payload for MethodBreadthSPX. The headline
 // Value is the current reading; History is the trailing series in
 // oldest-first order for sparkline rendering. Threshold derivation
@@ -314,11 +349,19 @@ type BreadthDailyValue struct {
 // path so renderers can disclose how the number was derived. Method is
 // a short token; longer methodology disclosure lives in the spec doc.
 type BreadthSPXResult struct {
+	// State classifies the engine pipeline at the moment this envelope
+	// was assembled (cold / computing / ready / degraded). Consumers
+	// should branch on this, not on (value==0 && history==[]) heuristics.
+	// See BreadthState docs for semantics.
+	State BreadthState `json:"state"`
 	// Value is the current S5FI reading: percentage of S&P 500
 	// constituents trading above their own 50-day simple moving
 	// average. 0–100, with 50 the symmetric midpoint. Spec rule of
 	// thumb: > 55 healthy, 40–55 watch, < 40 with SPX at highs is the
-	// classic late-cycle divergence.
+	// classic late-cycle divergence. Zero is meaningful only when
+	// State == "ready" (impossible in practice — every observed market
+	// regime puts at least one name above its 50DMA); a State other
+	// than "ready" can carry value=0 as the "no data yet" sentinel.
 	Value float64 `json:"value"`
 	// History is the trailing daily series, oldest first. Length is
 	// bounded by BreadthSPXParams.HistoryDays.

@@ -321,6 +321,94 @@ socketOK:
 	srv.Stop()
 }
 
+// TestStartDoesNotLaunchBreadthBeforePostConnect pins the v0.27.0
+// regression: the breadth engine's bootstrap fan-out must not start
+// until the gateway handshake completes. Pre-v0.27.1 the engine's
+// Run() was launched from Server.Start() in parallel with the async
+// connector goroutine; every per-name FetchDaily returned "no gateway
+// connector" instantly and the fan-out finalised in milliseconds with
+// Coverage=0, which then poisoned the cache. v0.27.1 moved the launch
+// to postConnectSetup behind a sync.Once. This test asserts the
+// invariant directly: with a handshake that blocks indefinitely, the
+// breadth fetcher must never be invoked.
+func TestStartDoesNotLaunchBreadthBeforePostConnect(t *testing.T) {
+	t.Parallel()
+
+	// Find a closed TCP port so discovery resolves to something
+	// concrete; the fake attempter intercepts the actual handshake.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	addr := probe.Addr().(*net.TCPAddr)
+	_ = probe.Close()
+
+	dir := shortTempDir(t)
+	sockPath := filepath.Join(dir, "ibkrd.sock")
+
+	tlsFalse := false
+	cfg := &config.Resolved{
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(addr.Port), ClientID: new(99), TLS: &tlsFalse},
+	}
+	cfg.Daemon.SetIdleTimeout(2 * time.Second)
+
+	srv := New(Options{
+		Config:     cfg,
+		SocketPath: sockPath,
+		Version:    "test",
+		Logger:     NewLogger(&bytes.Buffer{}, "error"),
+	})
+
+	// Replace the production breadth engine with a test one whose
+	// fetcher records every invocation. If postConnectSetup correctly
+	// gates breadth.Run() behind a successful handshake, this fetcher
+	// stays at zero calls for the entire duration of the test (because
+	// the handshake never completes). Any call here is a regression
+	// of the v0.27.0 bootstrap race.
+	fakeFetcher := &spx.FakeBarFetcher{
+		Bars: map[string][]spx.Bar{},
+	}
+	srv.breadth = spx.New(spx.NewStore(t.TempDir()), fakeFetcher, spx.Options{Workers: 4})
+
+	// Attempter blocks until ctx is cancelled — models the
+	// "TCP accepted but handshake never completes" path the v0.27.0
+	// race hid in. postConnectSetup is reached only after Start
+	// returns true here, so the bootstrap launch must wait.
+	srv.attempterFactory = func(_ discover.Endpoint) connectAttempter {
+		return &fakeAttempter{blockUntilCtxDone: true}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startReturned := make(chan error, 1)
+	go func() {
+		startReturned <- srv.Start(ctx)
+	}()
+
+	// 300 ms is comfortably past the daemon's socket-open + initial
+	// connect-goroutine launch phase, and well inside the
+	// perCandidateConnectBudget (25 s default) — the fake attempter
+	// is still blocking, so postConnectSetup hasn't run.
+	time.Sleep(300 * time.Millisecond)
+
+	if srv.breadth.IsRefreshing() {
+		t.Error("breadth.IsRefreshing() == true before gateway handshake completed (regression of v0.27.0 bootstrap race)")
+	}
+	if n := fakeFetcher.CallCount(); n > 0 {
+		t.Errorf("breadth fetcher invoked %d times before gateway handshake — any invocation is a v0.27.0 regression", n)
+	}
+
+	cancel()
+	select {
+	case <-startReturned:
+		// good
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return within 3s after ctx cancel")
+	}
+	srv.Stop()
+}
+
 // runIdleWatcher must return when the idle timer fires with no active
 // conns. Pre-fix, the idle case closed the listener directly and returned;
 // the surrounding Start() then returned to cmd/ibkrd's main, which blocked

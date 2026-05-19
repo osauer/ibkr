@@ -24,6 +24,20 @@ import "time"
 // rather than rebuilding the string.
 const methodConstituentFanout = "constituent-fanout-50dma"
 
+// MinCoverageFraction is the minimum fraction of MemberCount that a
+// refresh must cover before the engine will persist its result.
+// Refreshes below this threshold are treated as "did not converge"
+// — typical causes: a connector-not-ready race at cold-start (where
+// every fetch returns "no gateway connector"), an outage mid-fan-out,
+// or a pacing-induced abort. Persisting a below-threshold snapshot
+// would mislead any consumer that reads the cached value, and would
+// poison the scheduler's "today's snapshot exists, skip the next
+// bootstrap" check; refusing to persist forces a retry on the next
+// tick instead. The 0.80 threshold tolerates ordinary per-name fetch
+// errors (e.g. a few delisted-but-not-yet-removed tickers) while
+// rejecting catastrophic fan-out failures.
+const MinCoverageFraction = 0.80
+
 // WindowSize is the SMA lookback (S&P DJI's S5FI is the 50-day variant).
 // The window holds the 50 most recent daily closes chronologically; the
 // most recent close is window[len-1]. SMA = mean(window). A name is

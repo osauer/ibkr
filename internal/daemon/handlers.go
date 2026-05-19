@@ -2448,24 +2448,41 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 	}
 
 	snap, ok := s.breadth.Get()
-	if !ok {
-		// Cold start — engine has not finished its first refresh yet.
-		// Return the bare envelope (Value=0, History=[]). The
-		// regime-layer wrapper distinguishes computing from
-		// unavailable by polling IsRefreshing.
-		return res, nil
+	refreshing := s.breadth.IsRefreshing()
+
+	// State is computed from the (snapshot, refreshing) pair. This is
+	// the single source of truth for consumers — fetchRegimeBreadth no
+	// longer needs to side-channel via IsRefreshing(). The four states:
+	//   - ready: a snapshot exists and is not below coverage threshold
+	//   - computing: a refresh is in flight (snapshot may or may not exist)
+	//   - cold: no snapshot AND not refreshing (rare — only seen briefly
+	//     between daemon Start and postConnectSetup launching the engine,
+	//     or after a coverage-threshold-failed refresh)
+	//   - degraded: reserved; v0.27.3 engine refuses to persist below
+	//     threshold so this state isn't currently produced. The wire
+	//     surface defines it so a future schema can adopt it without a
+	//     contract bump.
+	switch {
+	case refreshing:
+		res.State = rpc.BreadthStateComputing
+	case ok:
+		res.State = rpc.BreadthStateReady
+	default:
+		res.State = rpc.BreadthStateCold
 	}
 
-	res.Value = snap.Value
-	res.AsOf = snap.AsOf
+	if ok {
+		res.Value = snap.Value
+		res.AsOf = snap.AsOf
 
-	history := s.breadth.History(historyDays)
-	res.History = make([]rpc.BreadthDailyValue, 0, len(history))
-	for _, h := range history {
-		res.History = append(res.History, rpc.BreadthDailyValue{
-			Date:  h.Date,
-			Value: h.Value,
-		})
+		history := s.breadth.History(historyDays)
+		res.History = make([]rpc.BreadthDailyValue, 0, len(history))
+		for _, h := range history {
+			res.History = append(res.History, rpc.BreadthDailyValue{
+				Date:  h.Date,
+				Value: h.Value,
+			})
+		}
 	}
 	return res, nil
 }
