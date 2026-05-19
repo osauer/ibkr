@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -869,8 +870,11 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
+	contentionMsg := func() string {
+		return "regime fan-out exceeded handler deadline (test)"
+	}
 	start := time.Now()
-	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth)
+	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth, contentionMsg)
 	elapsed := time.Since(start)
 
 	// The whole point of the v0.27.6 fix: the handler returns when its
@@ -908,4 +912,80 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 	if res.Breadth.Status != rpc.RegimeStatusOK {
 		t.Errorf("breadth row Status=%q, want ok", res.Breadth.Status)
 	}
+}
+
+// TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage pins the
+// commit-1 contract: when ctx fires before all rows return, the
+// orchestrator calls contentionMsg() fresh and writes its return
+// string verbatim onto the not-received rows' ErrorMessage. Closure
+// invocation (vs constant message capture) is what lets the message
+// reflect daemon state at deadline time, not handler-entry time.
+func TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+
+	stuckHYG := func(_ context.Context) rpc.RegimeHYGSPYDivergence {
+		<-block
+		return rpc.RegimeHYGSPYDivergence{Status: rpc.RegimeStatusOK}
+	}
+	fastVIX := func(_ context.Context) rpc.RegimeVIXTerm {
+		return rpc.RegimeVIXTerm{Status: rpc.RegimeStatusOK}
+	}
+	fastUSDJPY := func(_ context.Context) rpc.RegimeUSDJPY {
+		return rpc.RegimeUSDJPY{Status: rpc.RegimeStatusOK, Symbol: "USD.JPY"}
+	}
+	fastGamma := func(_ context.Context) rpc.RegimeGammaZero {
+		return rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK}
+	}
+	fastBreadth := func(_ context.Context) rpc.RegimeBreadth {
+		return rpc.RegimeBreadth{Status: rpc.RegimeStatusOK}
+	}
+
+	const fingerprint = "test-contention-fingerprint-Δ" // Δ proves the closure result is written verbatim
+	contentionMsg := func() string {
+		return fingerprint
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth, contentionMsg)
+
+	if res.HYGSPYDivergence.ErrorMessage != fingerprint {
+		t.Errorf("HYG ErrorMessage=%q, want %q (the orchestrator must call contentionMsg() fresh at deadline time and write its return verbatim)", res.HYGSPYDivergence.ErrorMessage, fingerprint)
+	}
+}
+
+// TestRegimeContentionMessage_NamesRunningTasks pins commit-1's
+// expansion side: a Server with breadth-spx and/or gamma-zero in
+// flight produces a contention message that names each running task
+// by its BackgroundTaskStatus name. The empty-list case falls
+// through to a gateway-side hedge so the message is always
+// actionable.
+func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger:    NewLogger(&bytes.Buffer{}, "error"),
+		zeroGamma: newGammaZeroCache(),
+	}
+
+	// 1. No tasks running → gateway-side hedge.
+	msg := srv.regimeContentionMessage()
+	if !strings.Contains(msg, "no daemon-internal contention detected") {
+		t.Errorf("idle daemon: regimeContentionMessage()=%q; want a 'no daemon-internal contention' hedge", msg)
+	}
+
+	// 2. Gamma in flight → message names gamma-zero.
+	srv.zeroGamma.current = &gammaComputation{
+		sessionKey: "2026-05-19",
+		startedAt:  time.Now(),
+		done:       make(chan struct{}),
+	}
+	msg = srv.regimeContentionMessage()
+	if !strings.Contains(msg, "gamma-zero") {
+		t.Errorf("gamma in flight: regimeContentionMessage()=%q; want substring 'gamma-zero'", msg)
+	}
+	if strings.Contains(msg, "breadth-spx") {
+		t.Errorf("gamma in flight, breadth idle: message=%q; should NOT name breadth-spx", msg)
+	}
+	close(srv.zeroGamma.current.done) // tidy up the synthetic computation
 }

@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -48,7 +50,31 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		func(c context.Context) rpc.RegimeUSDJPY { return fetchRegimeUSDJPY(c, deps) },
 		func(c context.Context) rpc.RegimeGammaZero { return fetchRegimeGamma(c, s) },
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
+		s.regimeContentionMessage,
 	), nil
+}
+
+// regimeContentionMessage produces the partial-envelope ErrorMessage
+// for the regime fan-out's deadline-fired branch. Reads
+// s.backgroundTasks() so the message names the daemon-internal task
+// that was running when the deadline fired, rather than the generic
+// v0.27.6 hedge "concurrent breadth/gamma work".
+//
+// Called fresh at deadline-fired time so the names reflect the state
+// at that moment, not a stale snapshot from handler entry. The
+// empty-list case falls through to a gateway-side hedge — the
+// daemon couldn't identify an internal cause, so the contention is
+// somewhere else (rate-limit headroom, market-data farm).
+func (s *Server) regimeContentionMessage() string {
+	tasks := s.backgroundTasks()
+	if len(tasks) == 0 {
+		return "regime fan-out exceeded handler deadline (gateway-side timeout; no daemon-internal contention detected)"
+	}
+	names := make([]string, len(tasks))
+	for i, t := range tasks {
+		names[i] = t.Name
+	}
+	return fmt.Sprintf("regime fan-out exceeded handler deadline (contended with daemon-internal task(s): %s)", strings.Join(names, ", "))
 }
 
 // runRegimeFanout drives the five regime fetchers in parallel and
@@ -72,9 +98,16 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 // on their own derived contexts (productionRegimeDeps uses
 // FetchHistoricalDailyBarsCtx, which respects them).
 //
-// The function is package-private and takes five fetcher closures so
-// tests can drive it without constructing a full Server fixture — see
-// TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope.
+// contentionMsg is called fresh at the deadline-fired branch to
+// produce the partial-envelope ErrorMessage. Production wires it to
+// Server.regimeContentionMessage so the message names the daemon-
+// internal task(s) running at deadline time; tests pass a fixed
+// closure.
+//
+// The function is package-private and takes the closures so tests
+// can drive it without constructing a full Server fixture — see
+// TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope and
+// TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage.
 func runRegimeFanout(
 	ctx context.Context,
 	vix func(context.Context) rpc.RegimeVIXTerm,
@@ -82,6 +115,7 @@ func runRegimeFanout(
 	usdjpy func(context.Context) rpc.RegimeUSDJPY,
 	gamma func(context.Context) rpc.RegimeGammaZero,
 	breadth func(context.Context) rpc.RegimeBreadth,
+	contentionMsg func() string,
 ) *rpc.RegimeSnapshotResult {
 	res := &rpc.RegimeSnapshotResult{
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
@@ -126,7 +160,7 @@ func runRegimeFanout(
 		// practice the laggard is one of vix/hyg/usdjpy — gamma and
 		// breadth read in-memory state and shouldn't be missing here —
 		// but we cover all five defensively.
-		const exceededMsg = "regime fan-out exceeded handler deadline (gateway likely under contention from concurrent breadth/gamma work)"
+		exceededMsg := contentionMsg()
 		if !received["vix"] {
 			res.VIXTermStructure = rpc.RegimeVIXTerm{Notes: vixTermNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
 		}
