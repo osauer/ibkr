@@ -2,6 +2,67 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.6 — 2026-05-19 16:04 CEST
+
+Fixes the production bug behind the v0.27.5 cut: a second `ibkr regime`
+call that arrived while breadth was mid-fan-out hung the daemon's
+handler past its deadline. The CLI then timed out and reported
+`regime: context deadline exceeded` to the user — even though the
+v0.27.5 test suite passed because the tests exercised the wrong layer
+(individual fetcher drops, not the orchestrator's deadline handling).
+
+### Fixed
+
+- **`handleRegimeSnapshot` honours its own deadline.** Pre-fix, the
+  orchestrator used a plain `wg.Wait()` so any single fetcher's
+  goroutine could block the whole handler indefinitely. Replaced with
+  a tagged-result channel + `select` on `ctx.Done()`; when the daemon
+  ctx fires (default 45 s), the handler returns a partial envelope
+  with the not-yet-completed rows surfaced as `Status="error"` and
+  `ErrorMessage="regime fan-out exceeded handler deadline (gateway
+  likely under contention from concurrent breadth/gamma work)"`.
+  Lingering goroutines exit cleanly via a buffered channel; their
+  late values are garbage-collected.
+
+- **`FetchHistoricalDailyBars` gains a ctx-aware variant.**
+  `FetchHistoricalDailyBarsCtx(ctx, sym, days)` propagates the
+  caller's ctx deadline into the underlying gateway timeout, so a
+  cancellation upstream stops the HMDS fetch promptly rather than
+  running to the legacy 20 s internal timer. Regime fetchers switch
+  to this; breadth and gamma keep the legacy `(sym, days, timeout)`
+  call (they run on their own long-lived timelines where the legacy
+  signature is the right fit). Minimal-blast-radius refactor — full
+  ctx propagation into `fetchHistoricalWithContract` is a future move
+  if more callers grow a need.
+
+### Added
+
+- **`TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope`** —
+  hermetic regression test that pins the contract: a stuck fetcher
+  must not hold the orchestrator past its ctx deadline. Drives
+  `runRegimeFanout` directly with one blocking closure and four fast
+  ones, asserts the handler returns within 400 ms (well under the
+  200 ms ctx + slack), and confirms the stuck row surfaces with
+  `Status="error"` plus a populated `Notes` field so the renderer has
+  spec context.
+
+- **`scripts/release-verify.sh` step 7 waits for breadth mid-fan-out
+  before firing the regime-twice diff.** Polls `ibkr status --json`
+  for up to 20 s looking for `breadth-spx` in `background_tasks`;
+  once seen, sleeps 8 s to let the fan-out reach steady-state HMDS
+  pressure, then runs the call-sequence check. This reproduces the
+  production contention that produced the v0.27.5 report — the v0.27.5
+  smoke ran against a quiescent daemon and didn't catch the bug class
+  it was meant to gate.
+
+### Changed
+
+- **`handleRegimeSnapshot` orchestration extracted as
+  `runRegimeFanout`.** The handler is now a thin wrapper that wires
+  the five fetcher closures and delegates. Makes the deadline-handling
+  contract directly testable (see new test above) without spinning
+  up a Server fixture.
+
 ## v0.27.5 — 2026-05-19 15:03 CEST
 
 Pins the contract for what happens when a regime indicator that landed

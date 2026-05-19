@@ -356,6 +356,46 @@ echo "    $breadth_check"
 # usd_jpy, gamma_zero each carry .status; breadth carries .state which is
 # checked above.
 echo "  [7/7] regime call-sequence (call N+1 doesn't lose what call N had)..."
+# Wait for breadth's cold-start fan-out to be in flight before firing
+# regime. The v0.27.5 production bug surfaced precisely under this
+# condition: breadth fan-out + concurrent gamma compute saturated the
+# gateway's HMDS slots, regime's history fetches blocked past the
+# daemon ctx deadline, and the whole handler hung. A freshly-spawned
+# smoke daemon enters this exact state on its own — postConnectSetup
+# launches the bootstrap automatically — so the gate just has to wait
+# for the state, not engineer it.
+#
+# Max 20 s wait; if breadth never enters refreshing (e.g. persisted
+# snapshot is fresh enough to skip the bootstrap), proceed anyway —
+# the call-sequence diff is still informative on a quiescent daemon.
+echo "    waiting up to 20s for breadth mid-fan-out (reproduces v0.27.5 contention)..."
+saw_breadth=""
+for _ in $(seq 1 20); do
+    status_check="$(timeout 5 "$BIN" status --json 2>/dev/null || true)"
+    if printf '%s' "$status_check" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    tasks = d.get("background_tasks") or []
+    for t in tasks:
+        if isinstance(t, dict) and t.get("name") == "breadth-spx":
+            sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null; then
+        saw_breadth="yes"
+        break
+    fi
+    sleep 1
+done
+if [[ -n "$saw_breadth" ]]; then
+    echo "    breadth fan-out detected; letting it warm up for 8s before regime"
+    sleep 8
+else
+    echo "    breadth not refreshing within window (snapshot fresh or bootstrap skipped); proceeding"
+fi
+
 # Regime fans out five fetchers; the slowest leg is a 20 s history budget,
 # so the 15 s default for PER_CMD_TIMEOUT is too tight. Bump it for the
 # two regime calls and restore afterwards.

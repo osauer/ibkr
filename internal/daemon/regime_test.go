@@ -59,7 +59,7 @@ func (f *fakeDeps) build() *regimeDeps {
 			r := f.rich[sym]
 			return r.price, r.week52High, r.dataType
 		},
-		history: func(sym string, _ int, _ time.Duration) ([]ibkrlib.HistoricalBar, error) {
+		history: func(_ context.Context, sym string, _ int) ([]ibkrlib.HistoricalBar, error) {
 			h := f.bars[sym]
 			return h.bars, h.err
 		},
@@ -676,4 +676,82 @@ func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 			t.Errorf("call 2 fields_missing=%v, want spy_52w_high", second.FieldsMissing)
 		}
 	})
+}
+
+// TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope pins the
+// v0.27.6 fix for the regression where a single stuck fetcher hung
+// the whole regime call past the daemon's deadline. The contract:
+// when ctx fires, the fan-out returns within a few milliseconds with
+// a fully-populated envelope where any not-yet-completed row carries
+// Status=error and an explanatory ErrorMessage.
+//
+// This is the gate the v0.27.5 test suite was missing — Rule 12
+// covered "individual indicator drops" but didn't drive the
+// orchestration layer where wg.Wait used to block.
+func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
+	// HYG is the stuck fetcher; it blocks until the test closes the
+	// channel. The other four return immediately so they should land
+	// before the 200 ms deadline.
+	block := make(chan struct{})
+	defer close(block) // unblock the stuck goroutine on test exit so it doesn't leak
+
+	stuckHYG := func(_ context.Context) rpc.RegimeHYGSPYDivergence {
+		<-block
+		return rpc.RegimeHYGSPYDivergence{Status: rpc.RegimeStatusOK}
+	}
+	fastVIX := func(_ context.Context) rpc.RegimeVIXTerm {
+		return rpc.RegimeVIXTerm{Status: rpc.RegimeStatusOK}
+	}
+	fastUSDJPY := func(_ context.Context) rpc.RegimeUSDJPY {
+		return rpc.RegimeUSDJPY{Status: rpc.RegimeStatusOK, Symbol: "USD.JPY"}
+	}
+	fastGamma := func(_ context.Context) rpc.RegimeGammaZero {
+		return rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK}
+	}
+	fastBreadth := func(_ context.Context) rpc.RegimeBreadth {
+		return rpc.RegimeBreadth{Status: rpc.RegimeStatusOK}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth)
+	elapsed := time.Since(start)
+
+	// The whole point of the v0.27.6 fix: the handler returns when its
+	// ctx fires, not when the stuck fetcher unblocks. 400 ms is a
+	// generous ceiling (200 ms ctx + slack); pre-v0.27.6 this would
+	// have blocked indefinitely on wg.Wait.
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("runRegimeFanout returned after %v; want <400ms (must respect ctx deadline, not wait for stuck fetcher)", elapsed)
+	}
+
+	// The stuck row must surface as Status=error with the partial-envelope
+	// message, NOT as a zero-valued struct (which would let the renderer
+	// mistake "stuck" for "no data ever requested").
+	if res.HYGSPYDivergence.Status != rpc.RegimeStatusError {
+		t.Errorf("HYG row Status=%q, want error (stuck fetcher must surface as error after ctx fires)", res.HYGSPYDivergence.Status)
+	}
+	if !strings.Contains(res.HYGSPYDivergence.ErrorMessage, "fan-out exceeded handler deadline") {
+		t.Errorf("HYG row ErrorMessage=%q, want substring 'fan-out exceeded handler deadline'", res.HYGSPYDivergence.ErrorMessage)
+	}
+	if res.HYGSPYDivergence.Notes == "" {
+		t.Errorf("HYG row Notes must be populated even on partial-envelope path so renderer has spec context")
+	}
+
+	// The four fast fetchers landed before the deadline; their status
+	// must come through unchanged.
+	if res.VIXTermStructure.Status != rpc.RegimeStatusOK {
+		t.Errorf("VIX row Status=%q, want ok (fetcher returned before deadline)", res.VIXTermStructure.Status)
+	}
+	if res.USDJPY.Status != rpc.RegimeStatusOK {
+		t.Errorf("USD.JPY row Status=%q, want ok", res.USDJPY.Status)
+	}
+	if res.GammaZero.Status != rpc.RegimeStatusOK {
+		t.Errorf("gamma row Status=%q, want ok", res.GammaZero.Status)
+	}
+	if res.Breadth.Status != rpc.RegimeStatusOK {
+		t.Errorf("breadth row Status=%q, want ok", res.Breadth.Status)
+	}
 }

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -41,25 +40,112 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
+	deps := productionRegimeDeps(c, s.logger.Warnf)
+	return runRegimeFanout(
+		ctx,
+		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
+		func(c context.Context) rpc.RegimeHYGSPYDivergence { return fetchRegimeHYGSPY(c, deps) },
+		func(c context.Context) rpc.RegimeUSDJPY { return fetchRegimeUSDJPY(c, deps) },
+		func(c context.Context) rpc.RegimeGammaZero { return fetchRegimeGamma(c, s) },
+		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
+	), nil
+}
+
+// runRegimeFanout drives the five regime fetchers in parallel and
+// returns a consolidated envelope. The function honours ctx's deadline:
+// any fetcher that hasn't returned by ctx.Done is surfaced as
+// Status=error in the envelope rather than blocking the handler.
+//
+// Why this exists — pre-v0.27.6 the orchestration used a plain
+// wg.Wait() which would hang the handler indefinitely if any one
+// fetcher's goroutine blocked past the ctx deadline (e.g. an HMDS
+// history fetch queued behind breadth's cold-start fan-out, since the
+// legacy FetchHistoricalDailyBars didn't honour parent ctx). The CLI
+// then timed out at its own 60 s budget and the user saw
+// "regime: context deadline exceeded" — the symptom reported on
+// 2026-05-19 that motivated v0.27.6.
+//
+// Lingering goroutines exit cleanly: the buffered results channel
+// (cap 5) accepts late sends without blocking; the late values are
+// garbage-collected once the caller has returned. Gateway slots stay
+// held only as long as the per-call timeouts the fetchers already set
+// on their own derived contexts (productionRegimeDeps uses
+// FetchHistoricalDailyBarsCtx, which respects them).
+//
+// The function is package-private and takes five fetcher closures so
+// tests can drive it without constructing a full Server fixture — see
+// TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope.
+func runRegimeFanout(
+	ctx context.Context,
+	vix func(context.Context) rpc.RegimeVIXTerm,
+	hyg func(context.Context) rpc.RegimeHYGSPYDivergence,
+	usdjpy func(context.Context) rpc.RegimeUSDJPY,
+	gamma func(context.Context) rpc.RegimeGammaZero,
+	breadth func(context.Context) rpc.RegimeBreadth,
+) *rpc.RegimeSnapshotResult {
 	res := &rpc.RegimeSnapshotResult{
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 	}
-	deps := productionRegimeDeps(c, s.logger.Warnf)
 
-	// All five fetches in parallel. The slowest one bounds the wall
-	// clock; on a warm daemon all five complete within a few seconds
-	// (gamma returns from cache after the first call of the day).
-	var wg sync.WaitGroup
-	wg.Add(5)
-	go func() { defer wg.Done(); res.VIXTermStructure = fetchRegimeVIXTerm(ctx, deps) }()
-	go func() { defer wg.Done(); res.HYGSPYDivergence = fetchRegimeHYGSPY(ctx, deps) }()
-	go func() { defer wg.Done(); res.USDJPY = fetchRegimeUSDJPY(ctx, deps) }()
-	go func() { defer wg.Done(); res.GammaZero = fetchRegimeGamma(ctx, s) }()
-	go func() { defer wg.Done(); res.Breadth = fetchRegimeBreadth(ctx, s) }()
-	wg.Wait()
+	type regimeRow struct {
+		kind string
+		v    any
+	}
+	results := make(chan regimeRow, 5)
+	go func() { results <- regimeRow{"vix", vix(ctx)} }()
+	go func() { results <- regimeRow{"hyg", hyg(ctx)} }()
+	go func() { results <- regimeRow{"usdjpy", usdjpy(ctx)} }()
+	go func() { results <- regimeRow{"gamma", gamma(ctx)} }()
+	go func() { results <- regimeRow{"breadth", breadth(ctx)} }()
+
+	received := make(map[string]bool, 5)
+	deadlineFired := false
+	for len(received) < 5 && !deadlineFired {
+		select {
+		case r := <-results:
+			switch r.kind {
+			case "vix":
+				res.VIXTermStructure = r.v.(rpc.RegimeVIXTerm)
+			case "hyg":
+				res.HYGSPYDivergence = r.v.(rpc.RegimeHYGSPYDivergence)
+			case "usdjpy":
+				res.USDJPY = r.v.(rpc.RegimeUSDJPY)
+			case "gamma":
+				res.GammaZero = r.v.(rpc.RegimeGammaZero)
+			case "breadth":
+				res.Breadth = r.v.(rpc.RegimeBreadth)
+			}
+			received[r.kind] = true
+		case <-ctx.Done():
+			deadlineFired = true
+		}
+	}
+	if deadlineFired {
+		// Fill any rows that didn't complete with an honest error
+		// envelope so the wire payload is never half-filled. In
+		// practice the laggard is one of vix/hyg/usdjpy — gamma and
+		// breadth read in-memory state and shouldn't be missing here —
+		// but we cover all five defensively.
+		const exceededMsg = "regime fan-out exceeded handler deadline (gateway likely under contention from concurrent breadth/gamma work)"
+		if !received["vix"] {
+			res.VIXTermStructure = rpc.RegimeVIXTerm{Notes: vixTermNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["hyg"] {
+			res.HYGSPYDivergence = rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["usdjpy"] {
+			res.USDJPY = rpc.RegimeUSDJPY{Symbol: "USD.JPY", Notes: usdJpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["gamma"] {
+			res.GammaZero = rpc.RegimeGammaZero{Notes: gammaNotes, Status: rpc.RegimeStatusError}
+		}
+		if !received["breadth"] {
+			res.Breadth = rpc.RegimeBreadth{Notes: breadthNotes, Status: rpc.RegimeStatusError}
+		}
+	}
 
 	res.AsOf = time.Now()
-	return res, nil
+	return res
 }
 
 // regimeDeps is the dependency surface the three quote-and-history
@@ -91,8 +177,14 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 type regimeDeps struct {
 	snapshot            func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
 	snapshotWith52WHigh func(ctx context.Context, sym string, timeout time.Duration) (price float64, week52High float64, dataType string)
-	history             func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error)
-	logWarnf            func(format string, args ...any)
+	// history takes ctx instead of an explicit timeout so cancellation
+	// from handleRegimeSnapshot's outer deadline propagates into the
+	// HMDS fetch. The fetcher wraps each call in context.WithTimeout
+	// for its own per-call budget; canceling either the parent ctx or
+	// the per-call ctx unblocks the call. See v0.27.6 changelog for
+	// the bug class this guards against.
+	history  func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error)
+	logWarnf func(format string, args ...any)
 }
 
 // productionRegimeDeps wires the deps struct to the live connector.
@@ -106,8 +198,8 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 		snapshotWith52WHigh: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
 			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
 		},
-		history: func(sym string, days int, timeout time.Duration) ([]ibkrlib.HistoricalBar, error) {
-			return c.FetchHistoricalDailyBars(sym, days, timeout)
+		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
+			return c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
 		},
 		logWarnf: logWarnf,
 	}
@@ -218,7 +310,9 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		// 365 calendar days yields ~252 trading bars after weekends and
 		// the 9-10 US holidays per year; FetchHistoricalDailyBars maps
 		// >365 to "1 Y" anyway, so 365 is the exact knee.
-		spyBars, err := deps.history("SPY", 365, 20*time.Second)
+		hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
+		spyBars, err := deps.history(hctx, "SPY", 365)
+		hcancel()
 		switch {
 		case err != nil:
 			warnDeps(deps, "regime: SPY 52w high history fetch failed: %v", err)
@@ -242,7 +336,9 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// side of Memorial Day / Labor Day / Thanksgiving. 90 calendar
 	// days gives ~10 days of slack — the IBKR HMDS API only bills
 	// the call, not the bar count, so this is free.
-	bars, err := deps.history("HYG", 90, 20*time.Second)
+	hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
+	bars, err := deps.history(hctx, "HYG", 90)
+	hcancel()
 	switch {
 	case err != nil:
 		warnDeps(deps, "regime: HYG 50DMA history fetch failed: %v", err)
@@ -307,7 +403,9 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	// sessions even when a Monday or Friday bank holiday interrupts
 	// the count (US: MLK Day, Memorial Day, Labor Day, Thanksgiving,
 	// etc. all fall on Mondays and clip one US-tradable FX day).
-	bars, err := deps.history("USD.JPY", 14, 20*time.Second)
+	hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
+	bars, err := deps.history(hctx, "USD.JPY", 14)
+	hcancel()
 	switch {
 	case err != nil:
 		warnDeps(deps, "regime: USD.JPY history fetch failed: %v", err)

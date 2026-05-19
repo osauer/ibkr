@@ -2825,6 +2825,57 @@ func formatHistoricalDuration(lookbackDays int) string {
 	return fmt.Sprintf("%d Y", years)
 }
 
+// FetchHistoricalDailyBarsCtx is a ctx-aware wrapper around
+// FetchHistoricalDailyBars. When the caller's ctx is cancelled (deadline
+// exceeded, parent cancellation), the wrapper returns ctx.Err() promptly
+// without waiting for the underlying gateway fetch to complete. The
+// in-flight goroutine continues until the inner timeout fires — that's
+// bounded by the ctx deadline (or 45 s default if none), so gateway slots
+// don't leak indefinitely.
+//
+// Use this from any caller that already has a per-request deadline it
+// wants the fetch to honour (most notably handleRegimeSnapshot's per-
+// fetcher budgets, where blocking past the budget was the root cause of
+// the v0.27.5 "regime: context deadline exceeded" report). Callers that
+// don't care about parent-ctx propagation can keep using
+// FetchHistoricalDailyBars.
+//
+// This is a deliberate minimal-blast-radius wrapper rather than a deep
+// refactor of fetchHistoricalWithContract. If more callers grow a need
+// for true ctx propagation into the HMDS layer, the right move is to
+// push ctx down through fetchHistoricalWithContract; until then, the
+// wrapper buys most of the value for one file's worth of code.
+func (c *Connector) FetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int) ([]HistoricalBar, error) {
+	// Derive the inner timeout from ctx so the goroutine doesn't keep
+	// running long after the caller has moved on. Default to the same
+	// 45 s as FetchHistoricalDailyBars when ctx has no deadline.
+	timeout := 45 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d > 0 {
+			timeout = d
+		}
+	}
+
+	type result struct {
+		bars []HistoricalBar
+		err  error
+	}
+	// Buffered cap-1 so the producer goroutine never blocks on send
+	// after the caller has returned via the ctx.Done branch.
+	ch := make(chan result, 1)
+	go func() {
+		bars, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
+		ch <- result{bars: bars, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.bars, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol.
 // It returns an error if the connector is not ready or the request times out.
 func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
