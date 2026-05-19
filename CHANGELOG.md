@@ -2,6 +2,76 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.8 — 2026-05-19 16:58 CEST
+
+Fixes a second-layer regime contention bug observed in production on
+2026-05-19: an `ibkr regime` call that arrived while breadth was
+mid-cold-start fan-out returned three spot rows
+(VIX/HYG/USD.JPY) as `Status="error"` with the v0.27.6 partial-
+envelope ErrorMessage — even though the same daemon state had served
+those rows cleanly two calls earlier. v0.27.6 made the handler
+honest about its deadline; this release makes the per-fetcher
+budget honest about *its* deadline.
+
+Root cause: `Connection.acquireMarketDataSlot` (called by
+`SubscribeMarketData` → `RequestMarketDataWithContract`) uses
+`Connection.ctx` for its semaphore acquire, not the caller's ctx.
+When gamma's option-leg fan-out had saturated the market-data slot
+pool, the regime spot fetchers' `SubscribeMarketData` calls blocked
+at acquire until the orchestrator's 45 s handler ctx fired. The
+per-fetcher 5 s / 8 s `deps.snapshot` budget never reached its
+inner pollUntil to enforce. v0.27.6's partial-envelope safety net
+then assembled the three rows.
+
+### Fixed
+
+- **`regime` spot fetchers honour their per-fetcher budget at the
+  regime layer.** New `boundedSnapshot` / `boundedSnapshotWith52WHigh`
+  helpers in `internal/daemon/regime.go` race `deps.snapshot` against
+  budget + 1 s in a goroutine; on budget firing, zero values are
+  returned (mapped to the row's existing "no spot tick" classified
+  error) and the inner goroutine leaks cleanly (exits when acquire
+  returns or the connection ctx fires). The structural fix — pushing
+  ctx through `SubscribeMarketData` → `acquireMarketDataSlot` in
+  `pkg/ibkr` — is tracked as a follow-up; this release is the
+  minimal-blast-radius fix at the regime layer that addresses the
+  user-visible 45 s wait today.
+
+- **`release-verify.sh` step 7 gates against the orchestrator-deadline
+  fallback.** v0.27.6 added the breadth-mid-fan-out wait that
+  reproduces production contention; this release adds an assertion
+  on the *output shape* under that pressure. Any row whose
+  `error_message` contains `"fan-out exceeded handler deadline"`
+  on either regime call means the per-fetcher fix didn't fire —
+  exactly the 2026-05-19 production bug signature — and the release
+  blocks.
+
+### Changed
+
+- **`isBusy()` and `HealthResult.BackgroundTasks` ride one source of
+  truth.** The two surfaces previously enumerated the set of in-
+  flight daemon tasks via twin switch statements ("Each branch
+  mirrors the isBusy() predicate so the two surfaces stay coherent"
+  — author discipline, not the type system). v0.27.6's release-
+  verify step 7 made the second surface operationally load-bearing
+  (it polls `background_tasks` to detect breadth mid-fan-out); drift
+  between the two would have silently broken the release gate. The
+  new `(s *Server) backgroundTasks()` method is the single registered
+  set; `isBusy()` becomes `len(backgroundTasks()) > 0`,
+  `handleStatusHealth` assigns the slice directly, and the regime
+  partial-envelope ErrorMessage (next bullet) reads it as a third
+  consumer.
+
+- **Regime partial-envelope ErrorMessage names the contending task.**
+  When `runRegimeFanout`'s deadline fires, the ErrorMessage now reads
+  e.g. `"regime fan-out exceeded handler deadline (contended with
+  daemon-internal task(s): breadth-spx)"` instead of v0.27.6's
+  generic hedge `"...gateway likely under contention from concurrent
+  breadth/gamma work"`. The closure runs at deadline time (not
+  handler entry) so the named tasks reflect state at the moment the
+  deadline actually fired. The empty-list case falls through to a
+  gateway-side hedge.
+
 ## v0.27.7 — 2026-05-19 16:28 CEST
 
 Adds a price-context headline to `ibkr regime`. The dashboard now opens
