@@ -3624,8 +3624,20 @@ func (c *Connection) GetNextOrderID() int {
 	return id
 }
 
-// RequestMarketData subscribes to market data for a symbol
-func (c *Connection) RequestMarketData(symbol string) (int, error) {
+// RequestMarketData subscribes to market data for a symbol. ctx bounds the
+// market-data slot-acquire wait when the slot pool is saturated; nil ctx
+// is treated as context.Background() so historical callers that have no
+// per-request deadline see no behaviour change.
+//
+// Pre-F-26 the slot-acquire used Connection.ctx (daemon lifetime), which
+// meant a caller's per-request budget (e.g. the regime fetcher's 5 s
+// boundedSnapshot) was silently ignored at the slot layer and the only
+// deadline that mattered was daemon shutdown. The lineage: v0.27.5 fixed
+// a hard hang in the same path, v0.27.6 stopped the 45 s envelope-level
+// timeout from clobbering one-row errors, v0.27.9 added the
+// boundedSnapshot orchestrator wrapper as defense-in-depth, and F-26
+// closes the underlying structural gap so the inner budget is honoured.
+func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int, error) {
 	secType, exchange, currency, primaryExchange := classifySymbol(symbol)
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
 
@@ -3649,10 +3661,18 @@ func (c *Connection) RequestMarketData(symbol string) (int, error) {
 		contract.PrimaryExch = ""
 	}
 
-	return c.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
+	return c.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
 }
 
-func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
+// RequestMarketDataWithContract issues reqMktData for the given contract.
+// ctx is forwarded to acquireMarketDataSlot so a saturated slot pool
+// honours the caller's deadline instead of Connection.ctx. Nil ctx is
+// treated as context.Background() for historical callers that don't
+// carry one. See RequestMarketData's docstring for F-26 lineage.
+func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -3678,7 +3698,7 @@ func (c *Connection) RequestMarketDataWithContract(contract Contract, genericTic
 	fields := c.buildReqMktDataFields(contractCopy, reqID, genericTicks, snapshot, regulatorySnap)
 	msg := c.encodeMsg(fields...)
 
-	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
+	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 
@@ -3948,7 +3968,12 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 
 // RequestMarketDataWithPrimary subscribes to market data with an explicit primary exchange hint.
 // This helps IBKR route to venues that provide better pre/after-hours coverage.
-func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange string) (int, error) {
+// ctx is forwarded to acquireMarketDataSlot; nil is treated as Background.
+// See RequestMarketData's docstring for F-26 lineage.
+func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol string, primaryExchange string) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -3989,7 +4014,7 @@ func (c *Connection) RequestMarketDataWithPrimary(symbol string, primaryExchange
 
 	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,165,221,233", false, false)...)
 
-	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
+	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 	marketLogger.Infof("Requesting market data for %s (ReqID: %d, SecType: %s, Exch: %s, Primary: %s)",
@@ -4051,7 +4076,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 
 	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,221", false, false)...)
 
-	if err := c.acquireMarketDataSlot(c.ctx, reqID); err != nil {
+	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
 

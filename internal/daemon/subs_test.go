@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,12 +39,19 @@ func newFakeConnector() *fakeConnector {
 	}
 }
 
-func (f *fakeConnector) SubscribeMarketData(symbol string, _ []string) error {
+func (f *fakeConnector) SubscribeMarketData(ctx context.Context, symbol string, _ []string) error {
 	if f.subscribeError != nil {
 		return f.subscribeError
 	}
 	if f.subscribeDelay > 0 {
-		time.Sleep(f.subscribeDelay)
+		// Honour ctx so the F-26 contract test can pin the behaviour: a
+		// 1 s ctx-deadline must unblock a slow subscribe even when the
+		// fake's configured delay is much longer.
+		select {
+		case <-time.After(f.subscribeDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -132,7 +140,7 @@ func TestSubscribeReceivesFrames(t *testing.T) {
 	m := newTestManager(fake)
 	defer m.Close()
 
-	frames, release, err := m.Subscribe("AAPL")
+	frames, release, err := m.Subscribe(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -176,12 +184,12 @@ func TestFanoutSharesIBKRLine(t *testing.T) {
 	m := newTestManager(fake)
 	defer m.Close()
 
-	a, releaseA, err := m.Subscribe("AAPL")
+	a, releaseA, err := m.Subscribe(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Subscribe A: %v", err)
 	}
 	defer releaseA()
-	b, releaseB, err := m.Subscribe("AAPL")
+	b, releaseB, err := m.Subscribe(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Subscribe B: %v", err)
 	}
@@ -210,8 +218,8 @@ func TestRefcountReleasesLastSub(t *testing.T) {
 	m := newTestManager(fake)
 	defer m.Close()
 
-	_, releaseA, _ := m.Subscribe("AAPL")
-	_, releaseB, _ := m.Subscribe("AAPL")
+	_, releaseA, _ := m.Subscribe(context.Background(), "AAPL")
+	_, releaseB, _ := m.Subscribe(context.Background(), "AAPL")
 
 	releaseA()
 	if got := fake.unsubCount("AAPL"); got != 0 {
@@ -235,13 +243,13 @@ func TestHoldAndSubscribeShareLine(t *testing.T) {
 	m := newTestManager(fake)
 	defer m.Close()
 
-	releaseHold, err := m.Hold("AAPL")
+	releaseHold, err := m.Hold(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Hold: %v", err)
 	}
 	defer releaseHold()
 
-	frames, releaseSub, err := m.Subscribe("AAPL")
+	frames, releaseSub, err := m.Subscribe(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -263,7 +271,7 @@ func TestGatewayLostEmitsTerminalFrame(t *testing.T) {
 	m := newTestManager(fake)
 	defer m.Close()
 
-	frames, release, err := m.Subscribe("AAPL")
+	frames, release, err := m.Subscribe(context.Background(), "AAPL")
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -305,9 +313,9 @@ func TestCloseEmitsDaemonShutdown(t *testing.T) {
 	fake := newFakeConnector()
 	m := newTestManager(fake)
 
-	a, releaseA, _ := m.Subscribe("AAPL")
+	a, releaseA, _ := m.Subscribe(context.Background(), "AAPL")
 	defer releaseA()
-	b, releaseB, _ := m.Subscribe("MSFT")
+	b, releaseB, _ := m.Subscribe(context.Background(), "MSFT")
 	defer releaseB()
 
 	m.Close()
@@ -340,7 +348,7 @@ func TestColdSubscribesForDifferentSymbolsDoNotSerialise(t *testing.T) {
 	for _, sym := range []string{"AAA", "BBB"} {
 		go func() {
 			defer wg.Done()
-			_, release, err := m.Subscribe(sym)
+			_, release, err := m.Subscribe(context.Background(), sym)
 			if err != nil {
 				t.Errorf("subscribe %s: %v", sym, err)
 				return
@@ -367,7 +375,7 @@ func TestSubscribeWithGatewayDownReturnsUnavailable(t *testing.T) {
 	m := newTestManager(fake)
 	m.gatewayUp.Store(false)
 
-	_, _, err := m.Subscribe("AAPL")
+	_, _, err := m.Subscribe(context.Background(), "AAPL")
 	if err == nil {
 		t.Fatalf("expected error when gateway unavailable, got nil")
 	}

@@ -1328,7 +1328,17 @@ func (c *Connector) Stop() error {
 // re-subscribing to the same symbol is a no-op (returns nil), so callers
 // that race or run sequentially do not need to coordinate. Unsubscribe is
 // the symmetric tear-down.
-func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
+//
+// ctx bounds the underlying market-data slot-acquire when the slot pool
+// is saturated. A nil ctx is treated as context.Background() — equivalent
+// to the pre-F-26 behaviour where Connection.ctx (daemon lifetime) was
+// the only deadline. Callers with a per-request deadline (regime fetchers,
+// snapshot helpers) should pass that ctx through so the budget is honoured
+// at the slot layer instead of relying on orchestrator-level wrappers.
+func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fields []string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	symbol = strings.ToUpper(symbol)
 	if _, inactive := c.inactiveReason(symbol); inactive {
 		c.logDebug("Skipping SubscribeMarketData for inactive symbol %s", symbol)
@@ -1350,11 +1360,11 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 		var err error
 		switch {
 		case ready:
-			reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
+			reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
 		case contract.PrimaryExch != "":
-			reqID, err = c.conn.RequestMarketDataWithPrimary(symbol, contract.PrimaryExch)
+			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, contract.PrimaryExch)
 		default:
-			reqID, err = c.conn.RequestMarketData(symbol)
+			reqID, err = c.conn.RequestMarketData(ctx, symbol)
 		}
 		if err != nil {
 			c.logWarn("Failed to request market data for %s: %v", symbol, err)
@@ -1400,7 +1410,13 @@ func (c *Connector) SubscribeMarketData(symbol string, fields []string) error {
 // EnsureMarketDataSubscription ensures there is an active, fresh subscription for a symbol.
 // If a subscription exists but appears stale (no ticks in staleAfter), it will request again.
 // Returns true if a request was sent (new or refreshed).
-func (c *Connector) EnsureMarketDataSubscription(symbol string, fields []string, staleAfter time.Duration) (bool, error) {
+//
+// ctx bounds the slot-acquire when the market-data semaphore is
+// saturated. nil ctx is treated as context.Background().
+func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol string, fields []string, staleAfter time.Duration) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
 		if reason == "" {
@@ -1440,7 +1456,7 @@ func (c *Connector) EnsureMarketDataSubscription(symbol string, fields []string,
 			err   error
 		)
 
-		reqID, err = c.conn.RequestMarketDataWithContract(contract, "100,101,104,106,165,221,233", false, false)
+		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
 		if err != nil {
 			return 0, err
 		}
@@ -1747,6 +1763,25 @@ func (c *Connector) isConnected() bool {
 // IsConnected exposes connection status for API/monitoring layers
 func (c *Connector) IsConnected() bool { return c.isConnected() }
 
+// connCtx returns the underlying Connection's lifetime ctx, or
+// context.Background() when no connection is wired up. Used by background
+// recovery paths (subscription refresh after farm reconnect, error-driven
+// re-route) that have no per-request deadline of their own — the slot-
+// acquire should only abort if the daemon itself shuts down.
+//
+// Per-request callers (regime fetcher, snapshot helpers) must pass their
+// own ctx through SubscribeMarketData / Request* so the caller's deadline
+// is what bounds the slot-acquire, not daemon lifetime.
+func (c *Connector) connCtx() context.Context {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil || conn.ctx == nil {
+		return context.Background()
+	}
+	return conn.ctx
+}
+
 // UsingTLS reports the TLS mode the active session negotiated. False when
 // disconnected or when a non-TLS handshake succeeded (possibly via fallback).
 func (c *Connector) UsingTLS() bool {
@@ -1840,7 +1875,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 	// subscriptions[…].IV for per-strike values. We still ask for 106
 	// because it's harmless and the gateway occasionally fills it on
 	// recently-traded contracts, but GetOptionIV is the source of truth.
-	reqID, err := conn.RequestMarketDataWithContract(contract, "100,101,104,106", false, false)
+	reqID, err := conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106", false, false)
 	if err != nil {
 		return "", 0, err
 	}
@@ -2477,7 +2512,10 @@ func (c *Connector) handleIBKRError(fields []string) {
 		}
 		c.subMu.Unlock()
 	case 2119, 2104: // Farm OK/connected
-		// Trigger gentle refresh for all current subs
+		// Trigger gentle refresh for all current subs. Uses the connection's
+		// lifetime ctx because this is a background recovery path with no
+		// per-request deadline — the slot-acquire should only abort if the
+		// daemon itself shuts down.
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			c.subMu.RLock()
@@ -2486,8 +2524,9 @@ func (c *Connector) handleIBKRError(fields []string) {
 				syms = append(syms, s)
 			}
 			c.subMu.RUnlock()
+			ctx := c.connCtx()
 			for _, s := range syms {
-				_, _ = c.EnsureMarketDataSubscription(s, []string{"BID", "ASK", "LAST", "VOLUME"}, 0)
+				_, _ = c.EnsureMarketDataSubscription(ctx, s, []string{"BID", "ASK", "LAST", "VOLUME"}, 0)
 			}
 		}()
 	case 200, 320, 321, 354:
@@ -2534,19 +2573,23 @@ func (c *Connector) refreshSubscription(symbol string) {
 		reqID int
 		err   error
 	)
+	// Background recovery path: use connection lifetime ctx — no
+	// per-request deadline. The slot-acquire should only abort if the
+	// daemon itself shuts down.
+	ctx := c.connCtx()
 	if primary != "" {
 		// First try without primary to avoid repeating the same rejection
-		reqID, err = c.conn.RequestMarketData(symbol)
+		reqID, err = c.conn.RequestMarketData(ctx, symbol)
 		if err != nil {
 			// Fall back to primary if no-primary fails
-			reqID, err = c.conn.RequestMarketDataWithPrimary(symbol, primary)
+			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, primary)
 		}
 	} else {
 		// Try with classified primary if known; otherwise plain SMART
 		if _, exch, _, prim := classifySymbol(symbol); exch == "SMART" && prim != "" {
-			reqID, err = c.conn.RequestMarketDataWithPrimary(symbol, prim)
+			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, prim)
 		} else {
-			reqID, err = c.conn.RequestMarketData(symbol)
+			reqID, err = c.conn.RequestMarketData(ctx, symbol)
 		}
 	}
 	if err != nil {

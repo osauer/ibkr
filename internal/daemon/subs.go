@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,7 +36,7 @@ var defaultGenericTicks = []string{"100", "101", "104", "106", "165"}
 // project's "no mocks for daemon-internal data, but transport seams are
 // fair game" rule.
 type ibkrMarketConnector interface {
-	SubscribeMarketData(symbol string, fields []string) error
+	SubscribeMarketData(ctx context.Context, symbol string, fields []string) error
 	UnsubscribeMarketData(symbol string) error
 	GetMarketData() map[string]*ibkrlib.MarketData
 	GetMarketDataTypeForSymbol(symbol string) int
@@ -124,7 +125,17 @@ func (m *subManager) symInitLock(sym string) *sync.Mutex {
 // acquire is the shared body of Subscribe and Hold. addTap=true attaches a
 // frame channel; addTap=false (Hold) keeps the IBKR line open without
 // receiving frames.
-func (m *subManager) acquire(sym string, addTap bool) (*frameTap, error) {
+//
+// ctx bounds the underlying pkg/ibkr.SubscribeMarketData call. Per-request
+// callers (RPC handlers serving a deadline) should pass their request ctx
+// so a saturated slot pool honours the deadline; long-lived background
+// holders may pass context.Background(). Subsequent references to the
+// same symbol skip the IBKR-side subscribe (refcount bump only), so ctx
+// is effectively a no-op past the first call.
+func (m *subManager) acquire(ctx context.Context, sym string, addTap bool) (*frameTap, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c := m.connector()
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
@@ -143,7 +154,7 @@ func (m *subManager) acquire(sym string, addTap bool) (*frameTap, error) {
 		// any cross-symbol lock. pkg/ibkr's SubscribeMarketData is itself
 		// idempotent, so a duplicate call from a stale prior session
 		// resolves without surfacing an error here.
-		if err := c.SubscribeMarketData(sym, defaultGenericTicks); err != nil {
+		if err := c.SubscribeMarketData(ctx, sym, defaultGenericTicks); err != nil {
 			return nil, fmt.Errorf("subscribe %s: %w", sym, err)
 		}
 		e = &subEntry{
@@ -178,12 +189,14 @@ func (m *subManager) acquire(sym string, addTap bool) (*frameTap, error) {
 // When this is the first reference to sym, an IBKR market-data line is
 // opened and the per-symbol tick loop spins up. Subsequent Subscribe
 // callers attach a new tap onto the existing fan-out.
-func (m *subManager) Subscribe(sym string) (<-chan rpc.Frame, func(), error) {
+//
+// ctx bounds the cold-path slot-acquire on first reference; see acquire.
+func (m *subManager) Subscribe(ctx context.Context, sym string) (<-chan rpc.Frame, func(), error) {
 	sym = strings.ToUpper(strings.TrimSpace(sym))
 	if sym == "" {
 		return nil, func() {}, errors.New("subscribe: symbol required")
 	}
-	tap, err := m.acquire(sym, true)
+	tap, err := m.acquire(ctx, sym, true)
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -202,12 +215,14 @@ func (m *subManager) Subscribe(sym string) (<-chan rpc.Frame, func(), error) {
 // fan-out. Used by the snapshot path: it wants the IBKR line to stay open
 // while it polls the cached tick state via Connector.GetMarketData(), but
 // it doesn't consume per-tick frames.
-func (m *subManager) Hold(sym string) (func(), error) {
+//
+// ctx bounds the cold-path slot-acquire; see acquire.
+func (m *subManager) Hold(ctx context.Context, sym string) (func(), error) {
 	sym = strings.ToUpper(strings.TrimSpace(sym))
 	if sym == "" {
 		return func() {}, errors.New("hold: symbol required")
 	}
-	if _, err := m.acquire(sym, false); err != nil {
+	if _, err := m.acquire(ctx, sym, false); err != nil {
 		return func() {}, err
 	}
 	released := false

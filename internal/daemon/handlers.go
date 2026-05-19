@@ -946,7 +946,7 @@ func briefSnapshotClose(ctx context.Context, c *ibkrlib.Connector, symbol string
 	}
 	// SubscribeMarketData is idempotent — a pre-existing subscription is
 	// not an error here, just fall through and read.
-	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104"})
+	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	var close float64
@@ -1045,7 +1045,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	// an MCP subscriber) shares the same IBKR market-data line via the
 	// refcount. Without this, the snapshot's deferred unsubscribe used
 	// to cancel the watcher's sub mid-stream.
-	releaseSub, err := s.subs.Hold(sym)
+	releaseSub, err := s.subs.Hold(ctx, sym)
 	if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
 		return nil, err
 	}
@@ -1129,7 +1129,7 @@ func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc
 		return
 	}
 
-	frames, release, err := s.subs.Subscribe(p.Contract.Symbol)
+	frames, release, err := s.subs.Subscribe(ctx, p.Contract.Symbol)
 	if err != nil {
 		if errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
 			writeError(enc, req.ID, rpc.CodeGatewayUnavailable, err.Error())
@@ -1879,7 +1879,7 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 	// 165 (Misc Stats) is the only addition over briefSnapshotFull's
 	// list; the others are kept for API consistency with the
 	// established subscribe pattern.
-	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104", "165"})
+	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104", "165"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	var bid, ask, last float64
@@ -1952,7 +1952,7 @@ func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string,
 		return 0, 0, 0, 0, 0, ""
 	}
 	sym := normSym(symbol)
-	_ = c.SubscribeMarketData(sym, []string{"100", "101", "104"})
+	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
@@ -2133,7 +2133,7 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 // even after `last` arrives because IV and 52w typically lag bid/ask/last
 // by 1-2 s, and the row is more useful with them than without.
 func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row *rpc.ScanRow) {
-	releaseSub, err := s.subs.Hold(row.Symbol)
+	releaseSub, err := s.subs.Hold(ctx, row.Symbol)
 	if err != nil {
 		// Hold can only fail with ErrIBKRUnavailable (gateway dropped
 		// mid-scan) or an internal subscribe error. Either way, the

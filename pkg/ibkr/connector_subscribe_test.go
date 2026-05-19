@@ -3,6 +3,7 @@ package ibkr
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,7 +34,7 @@ func (s *safeBuffer) Bytes() []byte {
 func TestEnsureMarketDataSubscription_NoConnection(t *testing.T) {
 	c := NewConnector(nil)
 	// Do not call Start; leave c.conn nil
-	made, err := c.EnsureMarketDataSubscription("SPY", []string{"LAST"}, 0)
+	made, err := c.EnsureMarketDataSubscription(context.Background(), "SPY", []string{"LAST"}, 0)
 	if err == nil {
 		t.Fatalf("expected error when no connection, got nil")
 	}
@@ -46,7 +47,7 @@ func TestEnsureMarketDataSubscription_ReturnsInactiveError(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.markSymbolInactive("HGENQ", "No security definition has been found for the request")
 
-	made, err := c.EnsureMarketDataSubscription("HGENQ", []string{"LAST"}, time.Minute)
+	made, err := c.EnsureMarketDataSubscription(context.Background(), "HGENQ", []string{"LAST"}, time.Minute)
 	if !errors.Is(err, ErrSymbolInactive) {
 		t.Fatalf("expected ErrSymbolInactive, got %v", err)
 	}
@@ -77,7 +78,7 @@ func TestSubscribeMarketDataUsesContractCache(t *testing.T) {
 	}
 	c.contractMu.Unlock()
 
-	if err := c.SubscribeMarketData("SPY", []string{"LAST"}); err != nil {
+	if err := c.SubscribeMarketData(context.Background(), "SPY", []string{"LAST"}); err != nil {
 		t.Fatalf("SubscribeMarketData: %v", err)
 	}
 
@@ -145,7 +146,7 @@ func TestSubscribeMarketData_Idempotent(t *testing.T) {
 	}
 	c.contractMu.Unlock()
 
-	if err := c.SubscribeMarketData("SPY", []string{"LAST"}); err != nil {
+	if err := c.SubscribeMarketData(context.Background(), "SPY", []string{"LAST"}); err != nil {
 		t.Fatalf("first subscribe: %v", err)
 	}
 	c.subMu.RLock()
@@ -157,7 +158,7 @@ func TestSubscribeMarketData_Idempotent(t *testing.T) {
 	firstReqID := first.ReqID
 	bytesAfterFirst := out.Len()
 
-	if err := c.SubscribeMarketData("SPY", []string{"LAST"}); err != nil {
+	if err := c.SubscribeMarketData(context.Background(), "SPY", []string{"LAST"}); err != nil {
 		t.Fatalf("second subscribe must be idempotent (returned nil), got %v", err)
 	}
 	c.subMu.RLock()
@@ -312,7 +313,7 @@ func TestEnsureMarketDataSubscription_RefreshReleasesSlot(t *testing.T) {
 		t.Fatalf("connector not ready for test setup (ready=%v connNil=%v connStatus=%v)", c.ready, c.conn == nil, conn.Status())
 	}
 
-	refreshed, err := c.EnsureMarketDataSubscription("SPY", []string{"LAST"}, time.Millisecond)
+	refreshed, err := c.EnsureMarketDataSubscription(context.Background(), "SPY", []string{"LAST"}, time.Millisecond)
 	if err != nil {
 		t.Fatalf("EnsureMarketDataSubscription: %v", err)
 	}

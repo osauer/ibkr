@@ -117,7 +117,7 @@ func (c *Connector) FetchMarketSnapshot(ctx context.Context, symbol string, time
 	// stays unavailable in snapshot results, consistent with the no-fabrication
 	// invariant. Streaming subscribers (SubscribeMarketData) still get the
 	// generic-tick set since snapshot=false there.
-	reqID, err := c.conn.RequestMarketDataWithContract(contract, "", true, false)
+	reqID, err := c.conn.RequestMarketDataWithContract(ctx, contract, "", true, false)
 	if err != nil {
 		cleanup(0)
 		return nil, fmt.Errorf("request market snapshot: %w", err)

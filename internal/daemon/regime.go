@@ -251,32 +251,33 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 
 // boundedSnapshot bounds the wall time of deps.snapshot to ~budget+1s,
 // regardless of whether deps.snapshot itself honours ctx all the way
-// down. Defends against pkg/ibkr code paths that use the connection's
-// own ctx instead of the caller's — most importantly
-// connection.acquireMarketDataSlot, which blocks on a saturated
-// market-data semaphore (gamma compute fanning out across hundreds of
-// option legs, breadth bootstrap holding HMDS slots) and only honours
-// Connection.ctx, not the regime handler's ctx.
+// down. Kept as defense-in-depth after F-26 closed the structural gap
+// that originally motivated it.
 //
-// Pre-fix, a spot fetcher that hit slot exhaustion would block past
-// its 5s deps.snapshot timeout (the inner pollUntil never ran because
-// SubscribeMarketData never returned) and only bail when the
-// orchestrator's 45s handler ctx fired — at which point the partial-
-// envelope path fired and the user saw "regime fan-out exceeded
-// handler deadline" for three rows that should have errored cleanly
-// at 5s each.
+// History:
 //
-// Post-fix, each fetcher races deps.snapshot against budget+1s in a
-// goroutine. If the goroutine wins, its values are returned. If the
-// timer wins, the goroutine leaks (will exit once acquire returns or
-// the connection ctx fires on daemon shutdown) and zero values are
-// returned; callers map zero to a row-level "no spot tick" status.
+//   - v0.27.5 fixed a hard hang in SubscribeMarketData.
+//   - v0.27.6 stopped a 45s envelope-level deadline from clobbering one-row
+//     errors so a slow leg surfaced cleanly.
+//   - v0.27.9 added this wrapper because the inner pkg/ibkr.acquireMarketDataSlot
+//     used Connection.ctx, not the caller's ctx — a fetcher that hit slot
+//     exhaustion would block past its 5s budget (the inner pollUntil never
+//     ran because SubscribeMarketData never returned) and only bail at the
+//     orchestrator's 45s handler ctx. The wrapper races deps.snapshot in a
+//     goroutine and returns zeros after budget+1s regardless of inner ctx
+//     honouring.
+//   - F-26 (v0.27.11) threaded ctx through SubscribeMarketData →
+//     RequestMarketDataWithContract → acquireMarketDataSlot so the budget
+//     is enforced at the slot-acquire layer. The inner code now honours
+//     ctx end-to-end and this wrapper is no longer load-bearing.
 //
-// The structural fix is to plumb ctx through SubscribeMarketData →
-// RequestMarketDataWithContract → acquireMarketDataSlot in pkg/ibkr
-// so the budget is enforced at the slot-acquire layer. Tracked as a
-// follow-up — this is the minimal-blast-radius fix at the regime
-// layer that addresses the 45s user-visible symptom today.
+// We keep the wrapper anyway: it costs nothing in the happy path (the
+// timer fires only after budget+1s, well past inner completion) and
+// catches future regressions in either the slot path or any other
+// inner code that might block past its declared budget.
+//
+// If the goroutine times out it leaks until it returns naturally;
+// callers map zero values to a row-level "no spot tick" status.
 func boundedSnapshot(ctx context.Context, deps *regimeDeps, sym string, budget time.Duration) (price, prevClose float64, dataType string) {
 	type r struct {
 		price, prevClose float64
