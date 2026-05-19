@@ -2,17 +2,33 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
-## v0.27.9 — 2026-05-19 17:27 CEST
+## v0.27.9 — 2026-05-19 17:45 CEST
 
-Propagates the v0.27.x state-surface lessons from the breadth engine
-to the gamma engine. After v0.27.3 promoted breadth State to the
-typed wire surface and added a coverage-based persist guard, gamma
-remained one regression away from the same patch-storm. This release
-brings gamma's wire shape and persistence guards up to par, and
-extends the v0.27.4 isBusy/BackgroundTasks registry to a third
-caller. No production-bug fix in this release — purely structural
-hardening against the bug class that produced v0.27.0 → v0.27.3 for
-breadth.
+Fixes a second-layer regime contention bug observed in production on
+2026-05-19, then propagates the v0.27.x state-surface lessons from
+the breadth engine to the gamma engine. An `ibkr regime` call that
+arrived while breadth was mid-cold-start fan-out had been returning
+three spot rows (VIX/HYG/USD.JPY) as `Status="error"` with the
+v0.27.6 partial-envelope ErrorMessage — even though the same daemon
+state had served those rows cleanly two calls earlier. v0.27.6 made
+the handler honest about its deadline; this release makes the per-
+fetcher budget honest about *its* deadline.
+
+Root cause of the regime bug: `Connection.acquireMarketDataSlot`
+(called by `SubscribeMarketData` → `RequestMarketDataWithContract`)
+uses `Connection.ctx` for its semaphore acquire, not the caller's
+ctx. When gamma's option-leg fan-out had saturated the market-data
+slot pool, the regime spot fetchers' `SubscribeMarketData` calls
+blocked at acquire until the orchestrator's 45 s handler ctx fired.
+The per-fetcher 5 s / 8 s `deps.snapshot` budget never reached its
+inner pollUntil to enforce. v0.27.6's partial-envelope safety net
+then assembled the three rows.
+
+The second half of the release brings gamma's wire shape and
+persistence guards up to par with v0.27.3's breadth lessons — Cold
+state on the wire, coverage-based persist guard, registry-aware
+idle-shutdown for a third caller — so the v0.27.0 → v0.27.3 patch-
+storm class is structurally impossible for gamma too.
 
 ### Added
 
@@ -53,65 +69,6 @@ breadth.
 
 ### Changed
 
-- **Gamma compute coverage gate refactored** into a unit-testable
-  `checkLegCoverage(landed, total, throttled)` helper. The persist-
-  or-not contract now has a dedicated test
-  (`TestCheckLegCoverage`) independent of the full-compute fixture
-  which requires a live connector. Throttle attribution is folded
-  into the error message so the diagnostic names the likely cause
-  (gateway throttled the fan-out) without the operator combining
-  two signals.
-
-- **`GammaZeroComputed.Warnings` doc updated**: removes the stale
-  `"low_leg_coverage"` reference (now surfaced as an error, not a
-  warning), points readers to the `MinLegCoverageFraction` gate.
-
-## v0.27.8 — 2026-05-19 16:58 CEST
-
-Fixes a second-layer regime contention bug observed in production on
-2026-05-19: an `ibkr regime` call that arrived while breadth was
-mid-cold-start fan-out returned three spot rows
-(VIX/HYG/USD.JPY) as `Status="error"` with the v0.27.6 partial-
-envelope ErrorMessage — even though the same daemon state had served
-those rows cleanly two calls earlier. v0.27.6 made the handler
-honest about its deadline; this release makes the per-fetcher
-budget honest about *its* deadline.
-
-Root cause: `Connection.acquireMarketDataSlot` (called by
-`SubscribeMarketData` → `RequestMarketDataWithContract`) uses
-`Connection.ctx` for its semaphore acquire, not the caller's ctx.
-When gamma's option-leg fan-out had saturated the market-data slot
-pool, the regime spot fetchers' `SubscribeMarketData` calls blocked
-at acquire until the orchestrator's 45 s handler ctx fired. The
-per-fetcher 5 s / 8 s `deps.snapshot` budget never reached its
-inner pollUntil to enforce. v0.27.6's partial-envelope safety net
-then assembled the three rows.
-
-### Fixed
-
-- **`regime` spot fetchers honour their per-fetcher budget at the
-  regime layer.** New `boundedSnapshot` / `boundedSnapshotWith52WHigh`
-  helpers in `internal/daemon/regime.go` race `deps.snapshot` against
-  budget + 1 s in a goroutine; on budget firing, zero values are
-  returned (mapped to the row's existing "no spot tick" classified
-  error) and the inner goroutine leaks cleanly (exits when acquire
-  returns or the connection ctx fires). The structural fix — pushing
-  ctx through `SubscribeMarketData` → `acquireMarketDataSlot` in
-  `pkg/ibkr` — is tracked as a follow-up; this release is the
-  minimal-blast-radius fix at the regime layer that addresses the
-  user-visible 45 s wait today.
-
-- **`release-verify.sh` step 7 gates against the orchestrator-deadline
-  fallback.** v0.27.6 added the breadth-mid-fan-out wait that
-  reproduces production contention; this release adds an assertion
-  on the *output shape* under that pressure. Any row whose
-  `error_message` contains `"fan-out exceeded handler deadline"`
-  on either regime call means the per-fetcher fix didn't fire —
-  exactly the 2026-05-19 production bug signature — and the release
-  blocks.
-
-### Changed
-
 - **`isBusy()` and `HealthResult.BackgroundTasks` ride one source of
   truth.** The two surfaces previously enumerated the set of in-
   flight daemon tasks via twin switch statements ("Each branch
@@ -135,6 +92,42 @@ then assembled the three rows.
   handler entry) so the named tasks reflect state at the moment the
   deadline actually fired. The empty-list case falls through to a
   gateway-side hedge.
+
+- **Gamma compute coverage gate refactored** into a unit-testable
+  `checkLegCoverage(landed, total, throttled)` helper. The persist-
+  or-not contract now has a dedicated test
+  (`TestCheckLegCoverage`) independent of the full-compute fixture
+  which requires a live connector. Throttle attribution is folded
+  into the error message so the diagnostic names the likely cause
+  (gateway throttled the fan-out) without the operator combining
+  two signals.
+
+- **`GammaZeroComputed.Warnings` doc updated**: removes the stale
+  `"low_leg_coverage"` reference (now surfaced as an error, not a
+  warning), points readers to the `MinLegCoverageFraction` gate.
+
+### Fixed
+
+- **`regime` spot fetchers honour their per-fetcher budget at the
+  regime layer.** New `boundedSnapshot` / `boundedSnapshotWith52WHigh`
+  helpers in `internal/daemon/regime.go` race `deps.snapshot` against
+  budget + 1 s in a goroutine; on budget firing, zero values are
+  returned (mapped to the row's existing "no spot tick" classified
+  error) and the inner goroutine leaks cleanly (exits when acquire
+  returns or the connection ctx fires). The structural fix — pushing
+  ctx through `SubscribeMarketData` → `acquireMarketDataSlot` in
+  `pkg/ibkr` — is tracked as a follow-up; this release is the
+  minimal-blast-radius fix at the regime layer that addresses the
+  user-visible 45 s wait today.
+
+- **`release-verify.sh` step 7 gates against the orchestrator-deadline
+  fallback.** v0.27.6 added the breadth-mid-fan-out wait that
+  reproduces production contention; this release adds an assertion
+  on the *output shape* under that pressure. Any row whose
+  `error_message` contains `"fan-out exceeded handler deadline"`
+  on either regime call means the per-fetcher fix didn't fire —
+  exactly the 2026-05-19 production bug signature — and the release
+  blocks.
 
 ## v0.27.7 — 2026-05-19 16:28 CEST
 
