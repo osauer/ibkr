@@ -93,14 +93,33 @@ Logs (macOS, Claude Desktop): `~/Library/Logs/Claude/mcp-server-ibkr.log`.
 
 ### Claude Code
 
-Inside any session:
+Inside a standalone Claude Code session:
 
 ```
 /plugin marketplace add osauer/ibkr
-/plugin install ibkr@osauer-ibkr
+/plugin install ibkr@ibkr
 ```
 
-The plugin loads a skill, a `PreToolUse` hook that hard-blocks trading verbs (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
+Or — for **Claude for Mac**'s embedded Claude Code pane, which doesn't expose `/plugin` slash commands — from a regular terminal:
+
+```sh
+claude plugin marketplace add osauer/ibkr
+claude plugin install ibkr@ibkr
+```
+
+The plugin carries a skill, a `PreToolUse` hook that hard-blocks trading verbs (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
+
+**The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install in two commands](#install-in-two-commands). The two have independent release cadences and independent update paths:
+
+```sh
+# Binary release (new MCP tool descriptions are baked into the binary):
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+
+# Plugin release (new skill commands, settings, hooks):
+claude plugin update ibkr@ibkr
+```
+
+Restart the host (Claude for Mac, standalone Claude Code session, Cursor, …) after either update so it respawns the MCP server subprocess with the new descriptions and reloads the skill at the next session start.
 
 ### The shell
 
