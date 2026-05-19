@@ -2,6 +2,70 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.9 — 2026-05-19 17:27 CEST
+
+Propagates the v0.27.x state-surface lessons from the breadth engine
+to the gamma engine. After v0.27.3 promoted breadth State to the
+typed wire surface and added a coverage-based persist guard, gamma
+remained one regression away from the same patch-storm. This release
+brings gamma's wire shape and persistence guards up to par, and
+extends the v0.27.4 isBusy/BackgroundTasks registry to a third
+caller. No production-bug fix in this release — purely structural
+hardening against the bug class that produced v0.27.0 → v0.27.3 for
+breadth.
+
+### Added
+
+- **`GammaZeroStatusCold = "cold"`** on the wire. `snapshot(nil)` now
+  returns Cold instead of folding the "no compute kicked this
+  session" state into Computing — same side-channel-inference
+  pattern the v0.27.3 breadth State enum retired. In normal flow
+  `handleGammaZeroSPX` auto-kicks on every call so Cold rarely
+  reaches the wire today; the schema is ahead of need so a future
+  change that decouples kick-on-fetch (e.g. moving auto-kick to
+  postConnectSetup like breadth) doesn't require a wire-shape bump.
+  `fetchRegimeGamma` maps Cold → `RegimeStatusUnavailable`, mirroring
+  breadth's Cold mapping.
+
+- **`MinLegCoverageFraction = 0.5`** named constant in
+  `internal/daemon/gamma_zero_compute.go`. Mirror of breadth's
+  `MinCoverageFraction = 0.80` pattern: a fan-out whose successful-
+  leg fraction falls below the threshold is surfaced as an
+  error from the compute, NOT as a warning-flagged result. The cache
+  layer's existing `gammaErrorRetryTTL` machinery (already pinned by
+  `TestGammaZeroCache_RetriesErrorAfterTTL`) then re-attempts on the
+  next call within the same NY trading session — the v0.27.0 poison-
+  cache class is structurally impossible for gamma.
+
+  Threshold of 0.5 (vs breadth's 0.8): the OI-weighted gamma compute
+  concentrates near ATM, so missing far-OTM legs has limited impact
+  on the γ-zero estimate. Below 50% of expected legs the ATM
+  coverage itself is likely partial; a modelled level computed off
+  half the chain is no better than a guess.
+
+- **`backgroundTasks()` now surfaces `regime-prewarm`** while
+  `prewarmRegimeSymbols` is in flight. The fan-out (6 parallel
+  `FetchContractDetails` calls with 30 s budgets each) used to be
+  invisible to the idle watcher — an autospawned daemon left
+  unattended could idle-out mid-prewarm. Same coherence guarantee as
+  `breadth-spx` and `gamma-zero`: a task that defers idle shutdown
+  is exactly a task `ibkr status` reports as running.
+
+### Changed
+
+- **Gamma compute coverage gate refactored** into a unit-testable
+  `checkLegCoverage(landed, total, throttled)` helper. The persist-
+  or-not contract now has a dedicated test
+  (`TestCheckLegCoverage`) independent of the full-compute fixture
+  which requires a live connector. Throttle attribution is folded
+  into the error message so the diagnostic names the likely cause
+  (gateway throttled the fan-out) without the operator combining
+  two signals.
+
+- **`GammaZeroComputed.Warnings` doc updated**: removes the stale
+  `"low_leg_coverage"` reference (now surfaced as an error, not a
+  warning), points readers to the `MinLegCoverageFraction` gate.
+
 ## v0.27.8 — 2026-05-19 16:58 CEST
 
 Fixes a second-layer regime contention bug observed in production on
