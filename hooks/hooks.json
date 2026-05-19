@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v ibkr >/dev/null 2>&1 || printf '\\n[ibkr plugin] The `ibkr` binary is not on your PATH.\\nInstall it with one of:\\n  go install github.com/osauer/ibkr/cmd/ibkr@latest\\n  make install   (from a checkout of github.com/osauer/ibkr)\\nThen restart your Claude Code session.\\n\\n'"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\""
           }
         ]
       }
