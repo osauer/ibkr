@@ -438,8 +438,15 @@ func fixtureRegime() *rpc.RegimeSnapshotResult {
 			Notes: "SPY dealer zero-gamma flip level. Spec thresholds: SPY >2% above zero_gamma (green); within 2% (yellow); below (red). Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
 		},
 		Breadth: rpc.RegimeBreadth{
-			Status: rpc.RegimeStatusUnavailable,
-			Notes:  "% S&P 500 stocks above their 50-day SMA. IBKR doesn't catalogue the S5FI feed on retail subscriptions — treat as a manual-entry slot for v1.",
+			Status: rpc.RegimeStatusOK,
+			Envelope: rpc.BreadthSPXResult{
+				State:  rpc.BreadthStateReady,
+				Value:  61.8,
+				Source: "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
+				Method: "constituent-fanout-50dma",
+				AsOf:   time.Date(2026, 5, 16, 20, 35, 0, 0, time.UTC),
+			},
+			Notes: "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR doesn't redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes (once-daily refresh post-close).",
 		},
 	}
 }

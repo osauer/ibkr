@@ -195,15 +195,16 @@ on the first call of the NY session.
   "hyg_spy_divergence": { "hyg_price": 79.55, "spy_price": 737.34, "status": "stale" },
   "usd_jpy":            { "last": 158.7285, "status": "stale" },
   "gamma_zero":         { "status": "error", "envelope": { "error": "no SPX spot available" } },
-  "breadth":            { "status": "unavailable" }
+  "breadth":            { "status": "ok", "envelope": { "state": "ready", "value": 61.8 } }
 }
 ```
 
 Read this as: weekend hours, gateway in frozen mode. VIX ratio 0.863
 applied against the spec gives **green** (<0.92 is healthy contango).
 Gamma errored because SPX is not delivering any tick over weekend
-nights — expected; rerun during market hours. Breadth is unavailable
-because IBKR doesn't carry the S5FI feed (see Indicator 5 below).
+nights — expected; rerun during market hours. Breadth is served from
+the daemon's persisted cache (last weekday's post-close refresh — see
+Indicator 5 below for how the local engine computes the metric).
 
 ## Daemon methodology — what the IBKR daemon actually computes
 
@@ -216,26 +217,52 @@ FX (added in v0.21.0).
 ### Indicator 5 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 
 **Source.** S&P Dow Jones Indices publishes the `S5FI` index (% of
-S&P 500 constituents above their 50-day SMA). The daemon reads it
-directly from IBKR's `INDEX` exchange — no constituent fan-out, no
-daemon-side SMA recomputation. S&P DJI does the math; we read the
-result.
+S&P 500 constituents above their 50-day SMA). IBKR does not
+redistribute `S5FI` on retail subscriptions (verified via
+`reqContractDetails` — see `pkg/ibkr/symbols.go`), so the daemon
+computes the same number locally from the 500 constituent daily
+closes pulled via IBKR's historical-bar feed (HMDS). Method token:
+`constituent-fanout-50dma`. This reproduces S&P DJI's published S5FI
+value bit-identically when the constituent windows are fully covered.
 
-**Update cadence.** Whatever S&P DJI publishes. On retail entitlements
-this is typically delayed; the daemon surfaces the gateway's feed state
-in `data_type` so renderers can dim the headline when it isn't live.
+**Update cadence.** Once-daily refresh post-close at 16:35 ET. The
+scheduler waits until both the regular session and the S5FI
+publication window have settled, then slides each constituent's
+50-day window forward and persists the result. Readers see a cached
+snapshot, never a multi-minute fan-out on the read path.
+
+**Cold start.** On a fresh cache the first refresh runs the full
+fan-out across ~500 constituent symbols. IBKR's historical-data
+pacing limit (60 requests per 10-min sliding window) caps the
+sustained throughput at ~6 names/min, so a cold start takes **~60
+minutes** of wall-clock — adding workers doesn't help. During this
+window the wire envelope carries `state: "computing"` with
+`value: 0`; consumers should poll at minute-scale, not hammer the
+endpoint. After cold start the cache persists across daemon restarts
+and every subsequent refresh is fast (only the most recent day's
+bars need to be pulled).
 
 **History.** A best-effort fetch of ~30 trailing daily bars for the
 sparkline. The lookback is padded above the requested length to
 compensate for non-trading-day shrinkage.
 
+**Coverage safety.** If a refresh completes with fewer than the
+engine's minimum coverage fraction (currently 0.80 of the
+constituent set), the new snapshot is rejected and the previous
+good value continues to serve under `state: "degraded"`. This
+prevents a partial fan-out from poisoning the headline with a
+non-representative number.
+
 **Limitations.**
 
-- Headline value reflects whatever timezone of update S&P pushes; the
-  daemon doesn't recompute or interpolate.
-- When the gateway's data type isn't live, the headline still
-  surfaces — labelled — rather than failing. Use `data_type` to
-  decide whether to trust an intraday read.
+- Constituent list is snapshotted from the index membership file;
+  S&P additions/removals between updates are not reflected until
+  the next refresh of that file.
+- The 50-day SMA is computed on regular-session closes only — no
+  pre/post-market adjustment.
+- When the gateway's data type on a constituent's bar isn't live,
+  the daemon still includes it; the headline `data_type` reflects
+  the worst-case across the contributing bars.
 
 ### Indicator 4 — Dealer Zero-Gamma (`gamma.zero_spx`, `ibkr_gamma`)
 

@@ -289,15 +289,16 @@ type BreadthSPXParams struct {
 	// HistoryDays bounds the trailing daily series. Default 30 when
 	// zero or negative; capped at 90 to keep the wire payload bounded.
 	HistoryDays int `json:"history_days,omitempty"`
-	// TimeoutMs bounds the wait for the first valid S5FI tick. Default
-	// 5000 ms when zero. The default is generous because the INDEX
-	// exchange feed can be slow to deliver the first tick on a fresh
-	// subscription.
+	// TimeoutMs bounds the wait when the engine has a fresh value but
+	// the wire envelope is still being assembled. Default 5000 ms when
+	// zero. Does not affect the multi-minute cold-start fan-out; that
+	// path returns immediately with State="computing".
 	TimeoutMs int `json:"timeout_ms,omitempty"`
 }
 
-// BreadthDailyValue is one trailing daily close of the S5FI index. The
-// units match the headline Value: percentage points in [0, 100].
+// BreadthDailyValue is one trailing daily breadth reading (the S5FI
+// metric, computed locally from constituent closes). The units match
+// the headline Value: percentage points in [0, 100].
 type BreadthDailyValue struct {
 	Date  string  `json:"date"`  // YYYY-MM-DD
 	Value float64 `json:"value"` // % of SPX constituents above 50-day SMA
@@ -370,7 +371,10 @@ type BreadthSPXResult struct {
 	// Free-form; renderers display verbatim.
 	Source string `json:"source"`
 	// Method is a short token naming the computation path so renderers
-	// can disclose methodology. v1 token: "s5fi-direct".
+	// can disclose methodology. v1 token: "constituent-fanout-50dma"
+	// (IBKR doesn't redistribute the S5FI index on retail subscriptions,
+	// so the daemon computes the same number from constituent daily
+	// closes pulled via the historical-bar feed).
 	Method string `json:"method"`
 	// AsOf is the daemon's wall-clock when the result was assembled.
 	AsOf time.Time `json:"as_of"`
@@ -767,18 +771,21 @@ type RegimeGammaZero struct {
 }
 
 // RegimeBreadth is Indicator 5: the existing breadth.spx envelope
-// embedded inline. In v1 IBKR doesn't carry the S5FI feed under any
-// known ticker; this row currently returns Status="unavailable" with
-// a notes pointer to the disposition decision in the spec doc.
+// embedded inline. The daemon's local 50-DMA engine computes S5FI from
+// constituent daily closes (see BreadthSPXResult.Method). On the first
+// call against a fresh daemon the cold-start fan-out runs (~60 min,
+// IBKR-paced), so this row typically surfaces Status="computing" with
+// a notes pointer; subsequent calls return Status="ok" from the
+// persisted cache.
 type RegimeBreadth struct {
 	Status        string           `json:"status"`
 	Envelope      BreadthSPXResult `json:"envelope"`
 	Notes         string           `json:"notes"`
 	FieldsMissing []string         `json:"fields_missing,omitempty"`
-	// Per-scalar provenance for the breadth percentage. In v1 IBKR
-	// doesn't carry the S5FI feed under any retail subscription, so
-	// this is typically nil (unavailable). When ranked, firm-live or
-	// firm-frozen depending on the envelope's DataType.
+	// Per-scalar provenance for the breadth percentage. firm-live or
+	// firm-frozen when ranked, depending on the envelope's DataType;
+	// nil during cold start or when the engine refused to persist
+	// because constituent coverage fell below the safety threshold.
 	ValueQuality *Quality `json:"value_quality,omitempty"`
 }
 
