@@ -32,7 +32,7 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify version plugin-check parity-check modernize modernize-check refresh-spx-members
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -253,14 +253,37 @@ smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 	@mkdir -p bin
 	go build -o bin/wire-assert ./cmd/wire-assert
 
-smoke: build smoke-build ## Wire-level smoke gate against a live gateway (SKIP cleanly if no gateway)
-	@# Drives the freshly-built bin/ibkr against a live gateway with the
-	@# wire interceptor enabled and asserts per-command protocol-level
-	@# invariants. Catches bugs the unit suite can't see — e.g. the
-	@# v0.24.x productionLegFetcher polled the wrong source for IV.
-	@# SKIPs (exit 0) when no gateway is reachable so `make release`
-	@# works on a laptop without paper-account IBKR access.
-	./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+# Run wire-smoke against the *existing* bin/ibkr without rebuilding it.
+# The release flow uses this so it can exercise the version-stamped
+# binary produced by `make build VERSION=$(RELEASE_VERSION)`, instead
+# of clobbering that stamp with a `git describe` rebuild via the smoke
+# dep chain.
+#
+# Drives bin/ibkr against a live gateway with the wire interceptor
+# enabled and asserts per-command protocol-level invariants — catches
+# bugs the unit suite can't see (e.g. the v0.24.x productionLegFetcher
+# bug where the gateway sent the right ticks but the daemon read the
+# wrong field).
+#
+# SMOKE_STRICT controls the no-gateway posture (forwarded to the script
+# as IBKR_SMOKE_STRICT):
+#   SMOKE_STRICT=0 (default) → SKIP cleanly when no gateway is up; lets
+#                              user-invoked `make smoke` work on a laptop
+#                              without paper-account IBKR access.
+#   SMOKE_STRICT=1 → FAIL when no gateway is up; the release path passes
+#                    this so a vanished gateway can't silently bypass
+#                    the wire gate ("we must exercise TWS — not doing so
+#                    is a failed release").
+SMOKE_STRICT ?= 0
+
+smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild); SMOKE_STRICT=1 makes no-gateway a failure
+	@if [ ! -x bin/ibkr ]; then \
+		echo "smoke-only: bin/ibkr missing — run 'make build' first" >&2; \
+		exit 1; \
+	fi
+	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+
+smoke: build smoke-only ## Wire-level smoke vs. a live gateway (rebuilds bin/ibkr; SKIP if no gateway)
 
 release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -388,7 +411,9 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		git status --short >&2; \
 		exit 1; \
 	fi
-	$(MAKE) check test
+	@# `test` already depends on `check`; make won't re-run a target
+	@# completed in this invocation, so listing both is redundant.
+	$(MAKE) test
 	@# Build the release binary with the target version stamped BEFORE
 	@# tagging — pass VERSION explicitly so the build doesn't fall back
 	@# to `git describe` (which wouldn't see the tag yet). The smoke
@@ -400,12 +425,15 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# running one. A failure here aborts the release BEFORE the tag is
 	@# ever created — no orphan tag to clean up.
 	$(MAKE) release-verify RELEASE_VERSION=$(RELEASE_VERSION)
-	@# Wire-level smoke. release-verify checks the JSON shape; this
-	@# checks the protocol underneath. SKIPs cleanly without a gateway
-	@# (release works on a laptop without IBKR), but binding when the
-	@# gateway is up. Catches wire-level regressions release-verify
-	@# can't see — see scripts/wire-smoke.sh for the invariant catalogue.
-	$(MAKE) smoke
+	@# Wire-level smoke against the *same* version-stamped binary
+	@# release-verify just exercised. We use `smoke-only` (not `smoke`)
+	@# so the smoke dep chain doesn't rebuild bin/ibkr — that rebuild
+	@# would happen without VERSION=$(RELEASE_VERSION) (the tag doesn't
+	@# exist yet, so `git describe` would stamp the *previous* version)
+	@# and would clobber the stamped binary release-verify validated.
+	@# SMOKE_STRICT=1 makes no-gateway a failure: a release MUST run
+	@# wire-smoke against TWS — silent skip is unacceptable here.
+	$(MAKE) smoke-only SMOKE_STRICT=1
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	git push origin $(RELEASE_VERSION)

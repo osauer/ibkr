@@ -29,6 +29,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib-daemon-control.sh"
+
 BIN="${1:?usage: release-verify.sh <bin/ibkr> <expected-version> (e.g. v0.15.1)}"
 EXPECTED="${2:?expected version required, e.g. v0.15.1}"
 
@@ -56,21 +59,7 @@ export IBKR_LOG="$LOG"
 
 cleanup() {
     local code=$?
-    # Best-effort: SIGTERM the daemon that this run spawned. The lock
-    # file holds its PID. Falls back to nothing if the file disappeared.
-    if [[ -r "$LOCK" ]]; then
-        local pid
-        pid="$(tr -d '[:space:]' < "$LOCK" 2>/dev/null || true)"
-        if [[ -n "$pid" && "$pid" -gt 0 ]] 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null || true
-            # Wait up to 3s for graceful exit.
-            for _ in $(seq 1 30); do
-                if ! kill -0 "$pid" 2>/dev/null; then break; fi
-                sleep 0.1
-            done
-            kill -KILL "$pid" 2>/dev/null || true
-        fi
-    fi
+    kill_daemon_from_lockfile "$LOCK"
     # On non-zero exit, surface the daemon log tail so the failure mode
     # is obvious from CI output — otherwise the daemon's reason for
     # refusing connections is hidden in a tmp file the user can't see.
@@ -87,48 +76,10 @@ trap cleanup EXIT INT TERM
 echo "release-verify: smoke matrix against $BIN expecting $EXPECTED"
 echo "release-verify: isolated daemon → $SOCKET"
 
-# Stop any pre-existing `ibkr daemon` process before spawning the smoke
-# daemon. The script isolates the socket + log + lockfile under /tmp but
-# the IBKR gateway only allows one connection per client ID, and both
-# daemons read the same config (defaulting to ID 15). Without this step,
-# the smoke daemon races the user's canonical daemon for the gateway slot
-# and the second one loses with "code 326 / client id already in use" —
-# which aborted the v0.16.0 release on first run. SIGTERM is enough for
-# the canonical daemon to release its slot; SIGKILL handles stragglers.
-# Survivors auto-spawn on the next CLI call, so the cost is one bounce.
-stop_existing_daemons() {
-    local pids
-    pids="$(pgrep -f 'ibkr daemon' 2>/dev/null || true)"
-    if [[ -z "$pids" ]]; then
-        return 0
-    fi
-    echo "release-verify: stopping pre-existing daemon(s) so they don't race the smoke daemon for the gateway client-ID slot:"
-    for pid in $pids; do
-        local cmd
-        cmd="$(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
-        echo "  pid=$pid cmd=$cmd"
-    done
-    for pid in $pids; do
-        kill -TERM "$pid" 2>/dev/null || true
-    done
-    # Wait up to 5s for graceful exit before escalating.
-    for _ in $(seq 1 50); do
-        local remaining=""
-        for pid in $pids; do
-            if kill -0 "$pid" 2>/dev/null; then
-                remaining="$remaining $pid"
-            fi
-        done
-        if [[ -z "$remaining" ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    for pid in $pids; do
-        kill -KILL "$pid" 2>/dev/null || true
-    done
-}
-stop_existing_daemons
+# See scripts/lib-daemon-control.sh for the rationale (client-ID slot
+# race against the user's canonical daemon — aborted the v0.16.0 release
+# before this guard was added).
+stop_existing_daemons release-verify
 
 # Helper: run a CLI command with a deadline; on failure, print the
 # command + output before bubbling up.

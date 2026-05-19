@@ -28,8 +28,12 @@
 #   IBKR_TEST_PORT      — gateway port to probe (default: 7496 TWS live)
 #   IBKR_TEST_HOST      — gateway host (default: 127.0.0.1)
 #   IBKR_SMOKE_TIMEOUT  — per-command wall-clock timeout in seconds (default: 30)
+#   IBKR_SMOKE_STRICT   — 1 = FAIL on no-gateway instead of SKIP (release path)
 #
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib-daemon-control.sh"
 
 BIN="${1:?usage: wire-smoke.sh <bin/ibkr> <bin/wire-assert>}"
 ASSERT="${2:?usage: wire-smoke.sh <bin/ibkr> <bin/wire-assert>}"
@@ -51,11 +55,18 @@ GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
 # gives the legitimate path room without letting a wedged daemon hang.
 PER_CMD_TIMEOUT="${IBKR_SMOKE_TIMEOUT:-60}"
 
-# 1. Gateway-presence probe. Same posture as test/integration: a missing
-# gateway is SKIP (exit 0), not FAIL — `make release` must work for a
-# contributor on a laptop without paper-account IBKR access. The probe
-# uses bash's /dev/tcp to avoid a netcat dependency.
+# 1. Gateway-presence probe. Default posture matches test/integration:
+# a missing gateway is SKIP (exit 0), not FAIL — `make smoke` from a
+# laptop without paper-account IBKR access must still pass. The release
+# path overrides via IBKR_SMOKE_STRICT=1 to FAIL on no-gateway, so a
+# release can't silently bypass the wire gate. The probe uses bash's
+# /dev/tcp to avoid a netcat dependency.
+STRICT="${IBKR_SMOKE_STRICT:-0}"
 if ! timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${GATEWAY_PORT}" 2>/dev/null; then
+    if [[ "$STRICT" == "1" ]]; then
+        echo "wire-smoke: FAIL — no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT} (STRICT mode; release path must exercise TWS)" >&2
+        exit 1
+    fi
     echo "wire-smoke: SKIP — no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT}"
     exit 0
 fi
@@ -80,19 +91,7 @@ export IBKR_WIRE_RING_SIZE=4096
 
 cleanup() {
     local code=$?
-    # SIGTERM the daemon we spawned (PID in the lockfile under SMOKE_DIR).
-    if [[ -r "$LOCK" ]]; then
-        local pid
-        pid="$(tr -d '[:space:]' < "$LOCK" 2>/dev/null || true)"
-        if [[ -n "$pid" && "$pid" -gt 0 ]] 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null || true
-            for _ in $(seq 1 30); do
-                if ! kill -0 "$pid" 2>/dev/null; then break; fi
-                sleep 0.1
-            done
-            kill -KILL "$pid" 2>/dev/null || true
-        fi
-    fi
+    kill_daemon_from_lockfile "$LOCK"
     # On failure, surface the daemon log tail and the last few wire
     # frames — the failure-mode is in the wire data, not in the CLI's
     # exit code, so we need both.
@@ -113,41 +112,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Stop any pre-existing daemons that would race for the client-ID slot.
-# Same logic as release-verify.sh:99 — verbatim because the problem and
-# the fix are identical.
-stop_existing_daemons() {
-    local pids
-    pids="$(pgrep -f 'ibkr daemon' 2>/dev/null || true)"
-    if [[ -z "$pids" ]]; then
-        return 0
-    fi
-    echo "wire-smoke: stopping pre-existing daemon(s):"
-    for pid in $pids; do
-        local cmd
-        cmd="$(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
-        echo "  pid=$pid cmd=$cmd"
-    done
-    for pid in $pids; do
-        kill -TERM "$pid" 2>/dev/null || true
-    done
-    for _ in $(seq 1 50); do
-        local remaining=""
-        for pid in $pids; do
-            if kill -0 "$pid" 2>/dev/null; then
-                remaining="$remaining $pid"
-            fi
-        done
-        if [[ -z "$remaining" ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    for pid in $pids; do
-        kill -KILL "$pid" 2>/dev/null || true
-    done
-}
-stop_existing_daemons
+# See scripts/lib-daemon-control.sh for the client-ID slot rationale.
+stop_existing_daemons wire-smoke
 
 # Run a CLI command with a deadline; on failure, print the command +
 # output. Sets $LAST_CMD_OUTPUT and $LAST_CMD_EXIT for the caller.
