@@ -175,7 +175,7 @@ json_field() {
 }
 
 # 1 — version stamp on the binary matches what we're shipping. Offline.
-echo "  [1/6] version stamp..."
+echo "  [1/7] version stamp..."
 version_json="$(run_cli version version --json)"
 actual_version="$(json_field version "$version_json")"
 if [[ "$actual_version" != "$EXPECTED" ]]; then
@@ -186,7 +186,7 @@ fi
 
 # 2 — status: daemon spawned, gateway connected, daemon_version matches.
 # `status` autospawns the daemon at IBKR_SOCKET if one isn't running there.
-echo "  [2/6] status (autospawn daemon at isolated socket)..."
+echo "  [2/7] status (autospawn daemon at isolated socket)..."
 status_json="$(run_cli status status --json)"
 connected="$(json_field connected "$status_json")"
 daemon_version="$(json_field daemon_version "$status_json")"
@@ -232,7 +232,7 @@ fi
 # 3 — account: pins the account-summary handler and the v0.15+ omitempty
 # behaviour on data_type. Account financials are always available
 # regardless of market hours.
-echo "  [3/6] account.summary..."
+echo "  [3/7] account.summary..."
 account_json="$(run_cli account account --json)"
 account_id="$(json_field account_id "$account_json")"
 if [[ -z "$account_id" ]]; then
@@ -250,7 +250,7 @@ fi
 
 # 4 — positions: shape only. Empty positions array is valid; this gates
 # the handler running, not the user holding stock.
-echo "  [4/6] positions.list..."
+echo "  [4/7] positions.list..."
 positions_json="$(run_cli positions positions --json)"
 positions_shape_ok="$(printf '%s' "$positions_json" | python3 -c '
 import json, sys
@@ -274,7 +274,7 @@ fi
 # timeout the snapshot returns empty bid/ask/last AND empty data_type
 # — that's an acceptable degraded state; we only fail on a hard error
 # or a non-canonical data_type value.
-echo "  [5/6] quote SPY..."
+echo "  [5/7] quote SPY..."
 quote_json="$(run_cli quote_SPY quote SPY --json)"
 quote_check="$(printf '%s' "$quote_json" | python3 -c '
 import json, sys
@@ -313,7 +313,7 @@ fi
 # can't wait for "ready" without budgeting an hour, which would make
 # every release a CI ordeal. The invariant we CAN check in seconds
 # is "the wire state is internally consistent."
-echo "  [6/6] breadth.spx state..."
+echo "  [6/7] breadth.spx state..."
 breadth_json="$(run_cli breadth breadth --json)"
 breadth_check="$(printf '%s' "$breadth_json" | python3 -c '
 import json, sys
@@ -338,6 +338,59 @@ if [[ "$breadth_check" != ok* ]]; then
     exit 1
 fi
 echo "    $breadth_check"
+
+# 7 — regime call-sequence drop check. Pins the user-facing contract that
+# motivated the test plan: a regime row that returned ok/stale on call N
+# must not silently flip to error/unavailable on call N+1. Two calls 30 s
+# apart sample two independent rounds of live ticks against the same
+# gateway. If a row's status downgrades between them, something dropped
+# between fetches and the release blocks.
+#
+# The check is one-directional: error→ok (recovery) and computing→ok
+# (long-running task finishing) are both fine. Off-hours flake patterns
+# (VIX3M, USD.JPY) typically error on BOTH calls and so are not flagged.
+# Breadth has its own state-consistency check at step 6 and is not
+# re-gated here.
+#
+# Status field across regime rows: vix_term_structure, hyg_spy_divergence,
+# usd_jpy, gamma_zero each carry .status; breadth carries .state which is
+# checked above.
+echo "  [7/7] regime call-sequence (call N+1 doesn't lose what call N had)..."
+# Regime fans out five fetchers; the slowest leg is a 20 s history budget,
+# so the 15 s default for PER_CMD_TIMEOUT is too tight. Bump it for the
+# two regime calls and restore afterwards.
+saved_per_cmd_timeout="$PER_CMD_TIMEOUT"
+PER_CMD_TIMEOUT=30
+regime_json_1="$(run_cli regime_1 regime --json)"
+sleep 30
+regime_json_2="$(run_cli regime_2 regime --json)"
+PER_CMD_TIMEOUT="$saved_per_cmd_timeout"
+regime_check="$(python3 -c '
+import json, sys
+a = json.loads(sys.argv[1])
+b = json.loads(sys.argv[2])
+rows = ["vix_term_structure", "hyg_spy_divergence", "usd_jpy", "gamma_zero"]
+drops = []
+for r in rows:
+    s1 = a.get(r, {}).get("status", "")
+    s2 = b.get(r, {}).get("status", "")
+    if s1 in ("ok", "stale") and s2 in ("error", "unavailable"):
+        drops.append(r + ": " + s1 + " -> " + s2)
+if drops:
+    print("DROP " + "; ".join(drops))
+    sys.exit(0)
+print("ok (no rows downgraded between calls)")
+' "$regime_json_1" "$regime_json_2")"
+if [[ "$regime_check" != ok* ]]; then
+    echo "release-verify: FAIL: regime sequence: $regime_check" >&2
+    echo "" >&2
+    echo "call 1:" >&2
+    echo "$regime_json_1" >&2
+    echo "call 2:" >&2
+    echo "$regime_json_2" >&2
+    exit 1
+fi
+echo "    $regime_check"
 
 echo ""
 echo "release-verify: PASS — $BIN ($EXPECTED) talks to the gateway and ships honest JSON"

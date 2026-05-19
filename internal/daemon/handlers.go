@@ -2465,27 +2465,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 
 	snap, ok := s.breadth.Get()
 	refreshing := s.breadth.IsRefreshing()
-
-	// State is computed from the (snapshot, refreshing) pair. This is
-	// the single source of truth for consumers — fetchRegimeBreadth no
-	// longer needs to side-channel via IsRefreshing(). The four states:
-	//   - ready: a snapshot exists and is not below coverage threshold
-	//   - computing: a refresh is in flight (snapshot may or may not exist)
-	//   - cold: no snapshot AND not refreshing (rare — only seen briefly
-	//     between daemon Start and postConnectSetup launching the engine,
-	//     or after a coverage-threshold-failed refresh)
-	//   - degraded: reserved; v0.27.3 engine refuses to persist below
-	//     threshold so this state isn't currently produced. The wire
-	//     surface defines it so a future schema can adopt it without a
-	//     contract bump.
-	switch {
-	case refreshing:
-		res.State = rpc.BreadthStateComputing
-	case ok:
-		res.State = rpc.BreadthStateReady
-	default:
-		res.State = rpc.BreadthStateCold
-	}
+	res.State = classifyBreadthState(ok, refreshing)
 
 	if ok {
 		res.Value = snap.Value
@@ -2501,6 +2481,31 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 		}
 	}
 	return res, nil
+}
+
+// classifyBreadthState projects the engine's (snapshot exists, refresh
+// in flight) pair onto the wire-visible BreadthState. This is the
+// single source of truth — handleBreadthSPX and any future consumer
+// must derive State the same way. The four states:
+//
+//   - ready: snapshot exists and no refresh is in flight
+//   - computing: a refresh is in flight (snapshot may or may not exist)
+//   - cold: no snapshot AND not refreshing — rare; only seen briefly
+//     between daemon Start and postConnectSetup launching the engine,
+//     or after a coverage-threshold-failed refresh
+//   - degraded: reserved; v0.27.3 engine refuses to persist below
+//     threshold so this state isn't currently produced. The enum
+//     defines it so a future schema can adopt it without a contract
+//     bump.
+func classifyBreadthState(snapshotExists, refreshing bool) rpc.BreadthState {
+	switch {
+	case refreshing:
+		return rpc.BreadthStateComputing
+	case snapshotExists:
+		return rpc.BreadthStateReady
+	default:
+		return rpc.BreadthStateCold
+	}
 }
 
 // barDate returns the bar's date as YYYY-MM-DD. IBKR's daily bar dates arrive

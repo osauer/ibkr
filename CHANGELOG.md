@@ -2,6 +2,44 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.5 — 2026-05-19 15:03 CEST
+
+Pins the contract for what happens when a regime indicator that landed
+on one `ibkr regime` call doesn't land on the next. No behaviour change
+— the daemon already reports such drops as `error` or `unavailable`
+rather than serving a stale cache — but the contract is now testable,
+and the release flow refuses to ship a binary that violates it against
+a live gateway.
+
+### Added
+
+- **`scripts/release-verify.sh` step 7** — regime call-sequence drop
+  check. Two `ibkr regime --json` calls 30 s apart against the smoke
+  gateway; if any row's `status` downgrades from `ok`/`stale` to
+  `error`/`unavailable` between them, the release aborts before the
+  tag is created. One-directional (`computing → ok` and recovery are
+  fine), so off-hours flake patterns that error on both calls don't
+  block the release.
+
+- **`TestRegime_CallSequence_HonestUnavailable`** in
+  `internal/daemon/regime_test.go` — pins the call-N → call-N+1
+  honest-unavailable contract for the four live-gateway risk surfaces:
+  VIX3M timeout, USD.JPY FX miss, SPY tick 165 miss (advisory field
+  moves into `fields_missing`), SPY 252d fallback collapse when daily
+  history thins. Hermetic; reuses the existing `regimeDeps` seam.
+
+- **`TestClassifyBreadthState`** in `internal/daemon/handlers_test.go`
+  — pins the breadth handler's `(snapshot, refreshing)` → State enum
+  mapping. The classification was a v0.27.3 fix; this test makes it a
+  contract rather than folklore.
+
+### Changed
+
+- **`handleBreadthSPX`** derives `res.State` via a new
+  `classifyBreadthState` helper. Pure refactor of the existing inline
+  switch — same logic, named. Makes the state-classification contract
+  greppable and testable without invoking the full handler.
+
 ## v0.27.4 — 2026-05-19 09:31 CEST
 
 Applies the pattern from v0.27.3's wire-state fix codebase-wide. The

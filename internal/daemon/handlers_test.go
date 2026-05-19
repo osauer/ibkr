@@ -567,3 +567,38 @@ func assertGatewayUnavailable(t *testing.T, err error) {
 		t.Fatalf("classifyError code = %q, want %q", code, rpc.CodeGatewayUnavailable)
 	}
 }
+
+// TestClassifyBreadthState pins the breadth-handler state-classification
+// contract end-to-end. Three of the four wire states are produced from
+// the (snapshot-exists, refreshing) pair; "degraded" is reserved on the
+// enum but the v0.27.3 engine doesn't emit it (it refuses to persist
+// below the coverage threshold instead), so the table deliberately
+// does not exercise that case.
+//
+// The classification was a v0.27.3 fix: prior versions side-channelled
+// "refreshing" via fetchRegimeBreadth, which was prone to drift between
+// the breadth handler and the regime fetcher. This test pins the single
+// source of truth so any future surface added to the daemon must call
+// the same helper.
+func TestClassifyBreadthState(t *testing.T) {
+	cases := []struct {
+		name       string
+		snap       bool
+		refreshing bool
+		want       rpc.BreadthState
+	}{
+		{"snapshot exists, no refresh in flight -> ready", true, false, rpc.BreadthStateReady},
+		{"snapshot exists, refresh in flight     -> computing", true, true, rpc.BreadthStateComputing},
+		{"no snapshot, refresh in flight         -> computing", false, true, rpc.BreadthStateComputing},
+		{"no snapshot, no refresh                -> cold", false, false, rpc.BreadthStateCold},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyBreadthState(tc.snap, tc.refreshing)
+			if got != tc.want {
+				t.Errorf("classifyBreadthState(snap=%v, refreshing=%v) = %q, want %q",
+					tc.snap, tc.refreshing, got, tc.want)
+			}
+		})
+	}
+}

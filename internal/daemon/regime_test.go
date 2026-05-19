@@ -522,3 +522,158 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 		}
 	})
 }
+
+// TestRegime_CallSequence_HonestUnavailable pins the contract for what
+// happens when a regime fetcher's data lands on call N and then doesn't
+// land on call N+1. The daemon does NOT keep a last-known-good cache;
+// the affected field becomes nil and the row's status honestly reports
+// error or unavailable. A renderer can detect the transition by diffing
+// the wire shape between two calls — exactly what release-verify.sh's
+// regime-twice step does against a live gateway.
+//
+// The four sub-cases cover the live-gateway risk surface called out by
+// the senior verification review: VIX3M timing out (RegimeStatusError),
+// USD.JPY FX tick missing (RegimeStatusUnavailable), SPY tick 165
+// missing (row stays ok, field moves into FieldsMissing), and the
+// SPY 52w-high fallback collapsing when history thins (advisory field
+// stays missing rather than holding the prior bar).
+func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("vix3m_drops_on_call_2_flips_ok_to_error", func(t *testing.T) {
+		deps := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"VIX":   {price: 18.0, dataType: rpc.MarketDataLive},
+				"VIX3M": {price: 21.0, dataType: rpc.MarketDataLive},
+			},
+		}
+		built := deps.build()
+
+		first := fetchRegimeVIXTerm(ctx, built)
+		if first.Status != rpc.RegimeStatusOK {
+			t.Fatalf("call 1 status=%q, want ok (precondition)", first.Status)
+		}
+
+		// VIX3M tick stops arriving on call 2 — simulate the thin-CBOE
+		// off-hours case the daemon already handles inline.
+		delete(deps.snapshots, "VIX3M")
+
+		second := fetchRegimeVIXTerm(ctx, built)
+		if second.Status != rpc.RegimeStatusError {
+			t.Errorf("call 2 status=%q, want error (rule 12: honest report when tick drops, no stale-cache layer)", second.Status)
+		}
+		if second.Ratio != nil {
+			t.Errorf("call 2 ratio=%v, want nil (rule 12: must not carry over the call-1 value)", *second.Ratio)
+		}
+		if second.VIX == nil || *second.VIX != 18.0 {
+			t.Errorf("call 2 VIX=%v, want 18.0 (the surviving leg still surfaces)", second.VIX)
+		}
+	})
+
+	t.Run("usdjpy_drops_on_call_2_flips_ok_to_unavailable", func(t *testing.T) {
+		deps := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"USD.JPY": {price: 149.5, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"USD.JPY": {bars: makeBars(14, 149.0)},
+			},
+		}
+		built := deps.build()
+
+		first := fetchRegimeUSDJPY(ctx, built)
+		if first.Status != rpc.RegimeStatusOK {
+			t.Fatalf("call 1 status=%q, want ok (precondition)", first.Status)
+		}
+
+		// FX tick stops on call 2 — the IDEALPRO entitlement case.
+		delete(deps.snapshots, "USD.JPY")
+
+		second := fetchRegimeUSDJPY(ctx, built)
+		if second.Status != rpc.RegimeStatusUnavailable {
+			t.Errorf("call 2 status=%q, want unavailable (rule 12: FX-tick miss must surface honestly)", second.Status)
+		}
+		if second.Last != nil {
+			t.Errorf("call 2 last=%v, want nil (rule 12: must not carry over)", *second.Last)
+		}
+	})
+
+	t.Run("spy_tick165_drops_on_call_2_field_moves_to_missing", func(t *testing.T) {
+		deps := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+			},
+		}
+		built := deps.build()
+
+		first := fetchRegimeHYGSPY(ctx, built)
+		if first.Status != rpc.RegimeStatusOK || first.SPY52WHigh == nil {
+			t.Fatalf("call 1: want ok with SPY52WHigh populated, got status=%q SPY52WHigh=%v", first.Status, first.SPY52WHigh)
+		}
+
+		// Tick 165 (Misc Stats) stops landing on call 2; price still
+		// lands, but the 52w-high reads zero. With no history fallback
+		// configured, the advisory field stays missing.
+		deps.rich["SPY"] = fakeRichQuote{price: 530.0, dataType: rpc.MarketDataLive}
+
+		second := fetchRegimeHYGSPY(ctx, built)
+		if second.Status != rpc.RegimeStatusOK {
+			t.Errorf("call 2 status=%q, want ok (primary measurements landed; advisory missing doesn't downgrade row)", second.Status)
+		}
+		if second.SPY52WHigh != nil {
+			t.Errorf("call 2 SPY52WHigh=%v, want nil (rule 12: no carry-over from call 1)", *second.SPY52WHigh)
+		}
+		if !slices.Contains(second.FieldsMissing, "spy_52w_high") {
+			t.Errorf("call 2 fields_missing=%v, want to include spy_52w_high", second.FieldsMissing)
+		}
+	})
+
+	t.Run("spy_52w_fallback_collapses_when_history_thins", func(t *testing.T) {
+		// Call 1: tick 165 missing but the daily-bars fallback supplies
+		// the 52w high. Call 2: history returns <50 bars, fallback bails,
+		// the advisory field stays missing rather than echoing call 1.
+		//
+		// The fallback reads HistoricalBar.High (see maxHigh in regime.go);
+		// makeBars sets only Close, so bars are populated by hand here.
+		spyBars := make([]ibkrlib.HistoricalBar, 200)
+		for i := range spyBars {
+			spyBars[i] = ibkrlib.HistoricalBar{Close: 530.0, High: 540.0}
+		}
+		deps := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, dataType: rpc.MarketDataLive}, // tick 165 absent
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {bars: spyBars}, // fallback succeeds
+			},
+		}
+		built := deps.build()
+
+		first := fetchRegimeHYGSPY(ctx, built)
+		if first.SPY52WHigh == nil {
+			t.Fatalf("call 1: SPY 252d max(High) fallback should have populated SPY52WHigh")
+		}
+
+		// History fallback collapses on call 2 (gateway returns a
+		// truncated bar set). Both primary and fallback paths fail.
+		deps.bars["SPY"] = fakeHistory{bars: spyBars[:30]}
+
+		second := fetchRegimeHYGSPY(ctx, built)
+		if second.SPY52WHigh != nil {
+			t.Errorf("call 2 SPY52WHigh=%v, want nil (rule 12: when both primary and fallback drop, the field disappears honestly)", *second.SPY52WHigh)
+		}
+		if !slices.Contains(second.FieldsMissing, "spy_52w_high") {
+			t.Errorf("call 2 fields_missing=%v, want spy_52w_high", second.FieldsMissing)
+		}
+	})
+}
