@@ -76,7 +76,57 @@ const (
 	// ticks the compute needs, and the right thing is to fail fast
 	// with an actionable error instead of grinding for minutes.
 	earlyAbortAfter = 30 * time.Second
+
+	// MinLegCoverageFraction is the persist-or-not threshold: a
+	// compute whose successful-leg fraction falls below this is
+	// surfaced as an error (not a warning-flagged result), so the
+	// existing gammaErrorRetryTTL machinery in gamma_zero_cache
+	// re-attempts on the next call within the same NY trading
+	// session. Mirrors breadth's MinCoverageFraction = 0.80 pattern
+	// at internal/breadth/spx/types.go: "did not converge" runs are
+	// not stored as session truth.
+	//
+	// Why 0.5 (vs breadth's 0.8): the OI-weighted gamma compute
+	// concentrates near ATM, so missing far-OTM legs has small
+	// impact on the zero-gamma estimate. Below 50 % of expected legs,
+	// however, the ATM coverage itself is likely partial — and a
+	// modelled zero-gamma level computed off half the chain is no
+	// better than a guess. Pre-v0.27.9 this same 0.5 inline literal
+	// merely emitted a "low_leg_coverage" warning while persisting
+	// the result for the rest of the session.
+	MinLegCoverageFraction = 0.5
 )
+
+// checkLegCoverage returns nil if the fan-out's leg-landing fraction
+// passes MinLegCoverageFraction; otherwise an error describing the
+// shortfall. Throttle-attribution is folded into the message when the
+// gateway visibly throttled the fan-out, so the diagnostic names the
+// likely cause without the caller having to combine two signals.
+//
+// Extracted so the persistence gate has a unit-testable surface
+// independent of the full compute fixture (which requires a live
+// connector). Pattern mirror of breadth's MinCoverageFraction at
+// internal/breadth/spx/types.go: do not persist runs that did not
+// converge.
+func checkLegCoverage(landed, total int, throttled bool) error {
+	if total == 0 {
+		// Defensive zero-divide guard. The only way to reach here
+		// with total==0 is a misconfigured request (no expirations
+		// × strikes), which normalizeGammaParams already prevents —
+		// but treating "no jobs" as an error rather than letting
+		// coverage = NaN through is the right posture.
+		return fmt.Errorf("low leg coverage: empty jobs list — no chain to compute over")
+	}
+	coverage := float64(landed) / float64(total)
+	if coverage >= MinLegCoverageFraction {
+		return nil
+	}
+	throttledHint := ""
+	if throttled {
+		throttledHint = " (gateway throttled the fan-out)"
+	}
+	return fmt.Errorf("low leg coverage: %d/%d legs landed (%.0f%%), below minimum %.0f%%%s — not persisting; gammaErrorRetryTTL will let the next call re-attempt", landed, total, coverage*100, MinLegCoverageFraction*100, throttledHint)
+}
 
 // legData carries the per-leg inputs the aggregator needs from the
 // fan-out into the sweep. Captured at fetch time; iv stays fixed
@@ -597,15 +647,21 @@ func computeGammaZeroSPX(
 	// 9. Top strikes by magnitude.
 	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK)
 
+	// Coverage gate. A compute whose successful-leg fraction falls
+	// below MinLegCoverageFraction is surfaced as an error so the
+	// existing gammaErrorRetryTTL retry machinery applies — without
+	// this, a single throttled fan-out at NY-session start poisons
+	// the cache for the rest of the day (same shape as the v0.27.0
+	// breadth poison-cache bug, mitigated for breadth at v0.27.3).
+	if err := checkLegCoverage(len(legs), len(jobs), throttledAbort.Load()); err != nil {
+		return nil, err
+	}
+
 	// Warnings. Ordered "throttled" first because it explains why
 	// coverage is low, not the other way around.
 	var warnings []string
 	if throttledAbort.Load() {
 		warnings = append(warnings, "throttled")
-	}
-	coverage := float64(len(legs)) / float64(len(jobs))
-	if coverage < 0.5 {
-		warnings = append(warnings, "low_leg_coverage")
 	}
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")

@@ -550,10 +550,14 @@ type GammaZeroComputed struct {
 	// to a reader who's about to act on the γ-zero level.
 	DerivedIVLegs int `json:"derived_iv_legs,omitempty"`
 	// Warnings is a structured list of non-fatal conditions: e.g.,
-	// "no_crossing_in_window", "spxw_partial_oi", "low_leg_coverage".
-	// Empty when the computation was clean. Renderers surface these
-	// as inline badges; the dashboard generator can fail loud or soft
-	// based on which codes appear.
+	// "no_crossing_in_window", "spxw_partial_oi", "throttled",
+	// "all_iv_derived". Empty when the computation was clean.
+	// Renderers surface these as inline badges; the dashboard
+	// generator can fail loud or soft based on which codes appear.
+	// Runs whose leg coverage falls below the MinLegCoverageFraction
+	// persist threshold are surfaced as Status="error" with no
+	// Result, not as a warning — see gamma_zero_compute's coverage
+	// gate (mirror of breadth's MinCoverageFraction=0.80 pattern).
 	Warnings []string `json:"warnings,omitempty"`
 
 	// Params echoes the v1 calibration window so a renderer can show

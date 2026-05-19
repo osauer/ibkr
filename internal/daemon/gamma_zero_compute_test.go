@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -422,6 +423,60 @@ func TestBSIVFallback_RefusalCases(t *testing.T) {
 				t.Errorf("%s should return empty legResult, got %+v", tc.why, r)
 			}
 		})
+	}
+}
+
+// TestCheckLegCoverage pins the F-21/F-25 persist-or-not gate: a
+// fan-out whose leg-landing fraction falls below
+// MinLegCoverageFraction returns an error so the cache layer's
+// gammaErrorRetryTTL machinery applies, mirroring breadth's
+// MinCoverageFraction guard. Boundary, throttle-attribution, and the
+// defensive empty-jobs guard are all exercised.
+func TestCheckLegCoverage(t *testing.T) {
+	t.Parallel()
+
+	// Above-threshold: clean run.
+	if err := checkLegCoverage(50, 100, false); err != nil {
+		t.Errorf("50%% should pass MinLegCoverageFraction (0.5), got error: %v", err)
+	}
+	if err := checkLegCoverage(900, 1000, true); err != nil {
+		t.Errorf("90%% even with throttle observed should pass: %v", err)
+	}
+
+	// Exactly the threshold passes (boundary is inclusive on the pass
+	// side — coverage >= MinLegCoverageFraction returns nil).
+	if err := checkLegCoverage(500, 1000, false); err != nil {
+		t.Errorf("exactly 50%% should pass the >= boundary, got: %v", err)
+	}
+
+	// Below threshold: error, names the shortfall.
+	err := checkLegCoverage(49, 100, false)
+	if err == nil {
+		t.Fatal("49%% should fail MinLegCoverageFraction")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "49/100") || !strings.Contains(msg, "below minimum") {
+		t.Errorf("error message should name landed/total and 'below minimum': %q", msg)
+	}
+
+	// Throttle attribution: when the gateway throttled, the message
+	// names it so the operator can act on the cause, not the symptom.
+	err = checkLegCoverage(0, 100, true)
+	if err == nil {
+		t.Fatal("0%% should fail")
+	}
+	if !strings.Contains(err.Error(), "gateway throttled") {
+		t.Errorf("throttled-attribution missing from message: %q", err.Error())
+	}
+
+	// Defensive empty-jobs guard: would normally be unreachable
+	// (normalizeGammaParams prevents it) but the helper must not
+	// emit a NaN-laden message.
+	err = checkLegCoverage(0, 0, false)
+	if err == nil {
+		t.Fatal("empty jobs list should defensively error rather than divide by zero")
+	}
+	if strings.Contains(err.Error(), "NaN") {
+		t.Errorf("empty-jobs message should not surface NaN: %q", err.Error())
 	}
 }
 
