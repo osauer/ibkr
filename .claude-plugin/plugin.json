@@ -1,6 +1,6 @@
 {
   "name": "ibkr",
-  "version": "0.27.9",
+  "version": "0.27.10",
   "description": "Read-only Interactive Brokers (IBKR) integration for Claude Code and any MCP client: account, positions, snapshot + streaming quotes (MCP resource subscriptions), option chains, daily history, market scans, fixed-fractional position sizing, and a five-indicator risk-regime dashboard (VIX term, HYG/SPY, USD/JPY, SPY dealer zero-gamma, S&P 500 breadth) via the local ibkr CLI.",
   "author": {
     "name": "osauer",
