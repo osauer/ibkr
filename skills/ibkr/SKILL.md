@@ -2,10 +2,12 @@
 name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
   about their IBKR account, positions, P&L, market quotes, option chains, daily price
-  history, running a market scan, or sizing a planned trade by fixed-fractional risk.
-  Read-only — never attempts to place orders.
+  history, running a market scan, sizing a planned trade by fixed-fractional risk, or
+  checking the market's risk regime (S&P 500 breadth, SPY dealer zero-gamma, the
+  five-indicator regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
+  Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
@@ -14,6 +16,13 @@ allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
 If the user asks about holdings, cash, buying power, P&L, a specific stock or ETF
 quote, an option chain, daily history, or wants to scan the market, run the
 relevant `ibkr` subcommand with `--json` and parse the output.
+
+If the user asks about the *market environment* — "is the market risky today?",
+"what's the regime?", "where's dealer gamma?", "how broad is the rally?" — reach
+for `ibkr regime` (all five indicators in one call), `ibkr breadth` (S&P 500
+stocks-above-50DMA), or `ibkr gamma` (SPY dealer zero-gamma). The threshold
+bands are intentionally not green/yellow/red-coded on the wire; the consumer
+applies the spec's tunable cuts.
 
 If the user asks anything that implies *placing* an order (buy, sell, cancel,
 "close my position"), refuse and explain that `ibkr` is read-only in this
@@ -51,6 +60,9 @@ release. Do not invent or simulate trade execution.
 | `ibkr scan --type SCANCODE --exchange LOCATIONCODE` | Ad-hoc scan without writing a preset to config | [schemas.md#scan](schemas.md#scan) |
 | `ibkr scan params [--instrument STK]` | Dump the gateway's scanCode / locationCode catalog | [schemas.md#scan-params](schemas.md#scan-params) |
 | `ibkr size --symbol SYM --entry F --stop F` | Fixed-fractional position sizing pegged to live NLV | [schemas.md#size](schemas.md#size) |
+| `ibkr breadth` | S&P 500 stocks-above-50DMA reading (the S5FI metric, computed locally) | [schemas.md#breadth](schemas.md#breadth) |
+| `ibkr gamma` | SPY dealer zero-gamma estimate (heavy compute; first call per NY trading day kicks a background job) | [schemas.md#gamma](schemas.md#gamma) |
+| `ibkr regime` | Risk-regime snapshot: all five indicators (VIX term, HYG/SPY, USD/JPY, SPY gamma, SPX breadth) in one call | [schemas.md#regime](schemas.md#regime) |
 | `ibkr version` | Print version, commit, build date, binary path | — |
 
 Add `--json` to any command for parseable output. Flags can come after positional
@@ -73,6 +85,9 @@ symbols — the CLI hoists them automatically.
 - `ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]` — **ad-hoc scan, agent-preferred.** Use this when the user asks for a screen that doesn't match any existing preset (e.g. "show me losers on NASDAQ only", "find unusual put activity"). Avoids writing to the user's `config.toml`. Rows are capped at 50. The two magic strings (`scanCode` and `locationCode`) come from the gateway catalog — call `ibkr scan params` first to discover them rather than guessing. **Non-US exchanges:** each row carries `currency` (e.g. `EUR` for `STK.EU.IBIS`, `HKD` for `STK.HK`); render prices with the row's symbol, not a hardcoded `$`.
 - `ibkr scan params [--instrument STK] [--raw] [--json]` — gateway scanner catalog. Returns three lists: `instruments` (e.g. STK, OPT, ETF.EQ.US), `locations` (e.g. STK.US.MAJOR, STK.NASDAQ, STK.HK), and `scan_types` (every `scanCode` with display name and the instrument types it's valid for). The catalog varies by gateway version and user permissions — never assume a `scanCode` exists without checking. `--instrument STK` narrows to stock scans. `--raw` adds the full XML (~200 KB–2 MB); skip unless you need a field not in the parsed result.
 - `ibkr version [--json]` — print version, commit, build date, binary path; `--json` returns the same data as a structured object (use this when you need to verify the user is running a supported release).
+- `ibkr breadth [--days 30] [--json]` — S&P 500 stocks-above-50DMA reading. The daemon computes the S&P DJI S5FI metric locally from 500 constituent daily closes (IBKR doesn't redistribute the index on retail subscriptions). Returns a headline `value` (0–100), a trailing daily series, and a `state` field — branch on `state`, not on `value == 0`. **Cold start (no cache yet) returns `state: "computing"` with `value: 0` and takes ~60 min** because IBKR's historical-data pacing limit caps the fan-out at ~6 names/min sustained; once the cache is built the result is instant on every subsequent call and persists across daemon restarts. Don't hammer the endpoint waiting for the cold start to finish — poll at minute-scale or fall back to telling the user "the breadth engine is still warming; check back in ~an hour." Spec note: > 55 healthy, 40–55 watch, < 40 with SPX at highs is the classic late-cycle divergence — surface the raw number plus the spec band; never color-code on the wire.
+- `ibkr gamma [--no-wait] [--force] [--json]` — SPY dealer zero-gamma estimate (Perfiliev convention, BS gamma summed across the 6 nearest non-0DTE expirations within ATM ±10%). SPY (the ETF) is used rather than SPX (the index) because it has continuous extended-hours quoting; the regime signal tracks SPX dealer gamma closely, and the absolute level is SPY-scale (~SPX/10). Compute is heavy — multi-minute fan-out across hundreds of legs. The first caller of an NY trading day kicks a background job and gets `status: "computing"` with an `eta_seconds`; subsequent callers within the session receive `status: "ready"` instantly. By default the CLI blocks until ready; pass `--no-wait` for the polling shape. Two complementary signals on every ready result: the *signed* `zero_gamma` (regime hint that can invert near covered-call-ETF flow or autocall barriers) and a sign-agnostic `gamma_total_abs` + `top_strikes` view that's robust to the dealer-positioning assumption. **Treat the number as a regime hint, not a precise level** — surface methodology caveats when the user is about to act on it.
+- `ibkr regime [--explain] [--watch [--rate 5m]] [--json]` — single-call risk-regime dashboard: all five indicators (VIX/VIX3M term structure, HYG vs SPY divergence, USD/JPY weekly move, SPY dealer zero-gamma, SPX breadth) in one JSON envelope. Each row carries raw measurements plus a `notes` field embedding the spec's threshold bands verbatim; green/yellow/red derivation is intentionally on the consumer side. Expect these per-indicator failure modes on the first call against a fresh daemon: Indicator 4 (gamma) returns `status: "computing"` with `eta_seconds` (multi-minute background compute); Indicator 5 (breadth) does the same while the 50-DMA engine bootstraps (~60 min — see breadth bullet). Indicators 1–3 may carry a `fields_missing` array listing advisory sub-fields (e.g. `spy_52w_high`, `hyg_50dma`) that didn't land in the fetch budget — the row's primary measurement still landed, so treat `fields_missing` as a render hint, not an error. Use `--explain` to print the spec's threshold prose alongside each row when the user asks "what does this band mean?". `--watch` re-polls every 5 minutes by default (regime moves on minute-to-hour scales).
 - `ibkr size --symbol SYM --entry F --stop F [--target F] [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]` — fixed-fractional sizing. Reads NLV from `account.summary` so `risk_pct` is pegged to the live account. `--fx` converts the base-currency risk budget into the trade's quote currency (e.g. `--fx 1.085` for a USD trade against an EUR account); default `1.0` is correct for same-currency trades. `--lot` rounds shares down (use `100` for one option contract's worth of stock). `--target` is optional: when set, the response also carries `r` (reward-to-risk multiple = `|target − entry| / |entry − stop|`; the standard "is this trade worth taking" filter, ≥ 2R typical), `reward_quote`, `reward_base`, and `breakeven_win_rate` (= `1 / (1 + R)`). Output `status` is `ok` | `tight_risk` (budget < per-share risk × lot — widen the stop or raise risk-pct) | `exceeds_buying_power`. The CLI never derives entry/stop/target from quotes — those are the user's trade plan; if the user asks "and what about the current price?" run `ibkr quote SYM --json` separately.
 
 ## Errors
@@ -96,6 +111,24 @@ a code prefix when applicable:
 - `trading_disabled` → the user (or you) tried to call an order verb. v1
   cannot trade by design. Acknowledge and suggest using IBKR's TWS/web app
   instead.
+
+For `breadth`, `gamma`, and `regime`, the JSON carries a per-row `state` /
+`status` field rather than an error code — the CLI exits 0 because the
+daemon successfully returned a typed envelope. Don't treat these as errors:
+
+- `state: "computing"` (breadth) / `status: "computing"` (gamma, regime
+  rows) → a background compute is in flight. Tell the user when to check
+  back (gamma: a few minutes; breadth cold start: ~an hour) and don't
+  hammer the endpoint. The result will land on a subsequent call.
+- `state: "ready"` (breadth) / `status: "ready"` (gamma) /
+  `status: "ok"` (regime rows) → the value is real.
+- `state: "cold"` / `status: "unavailable"` → the indicator can't run on
+  this account or this gateway right now. Surface the row's `notes` field
+  verbatim; never substitute a proxy. For regime rows, `error_message`
+  carries the specific reason when set.
+- `state: "degraded"` (breadth only) → the engine refused to persist
+  because constituent coverage fell below the safety threshold. The
+  previous good value still serves; surface the degraded state honestly.
 
 ## Worked examples
 

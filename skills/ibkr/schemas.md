@@ -638,3 +638,222 @@ actionable; surface them only when the user is debugging discovery.
 The CLI never derives entry, stop, or target from market data — they're the
 user's trade plan. The CLI also performs no order action; this is math
 against the live account snapshot.
+
+## breadth
+
+`ibkr breadth --json` — S&P 500 stocks-above-50DMA reading. The daemon
+computes the S&P DJI S5FI metric locally from constituent daily closes
+(IBKR doesn't redistribute the index on retail subscriptions).
+
+```json
+{
+  "state": "ready",
+  "value": 62.4,
+  "history": [
+    {"date": "2026-04-09", "value": 58.2},
+    {"date": "2026-04-10", "value": 59.6}
+  ],
+  "source": "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
+  "method": "constituent-fanout-50dma",
+  "as_of": "2026-05-09T20:35:01Z",
+  "data_type": "live"
+}
+```
+
+Field meanings:
+
+- `state` — `"cold"` | `"computing"` | `"ready"` | `"degraded"`. Branch on
+  this, not on `value == 0`. `cold` means the engine hasn't been kicked
+  yet (rare; brief window at daemon start). `computing` means a refresh
+  is in flight — `value` is `0` and `history` is empty during the
+  first-ever build, which takes ~60 min due to IBKR's historical-data
+  pacing limit. `ready` means the value is real. `degraded` means the
+  engine refused to persist because constituent coverage dropped below
+  the safety threshold (the previous good value still serves).
+- `value` — percentage of S&P 500 constituents trading above their own
+  50-day SMA. Range `[0, 100]`. Zero is meaningful only when `state ==
+  "ready"`, which is impossible in practice — interpret `value: 0` on
+  any other state as "no data yet."
+- `history` — trailing daily series, oldest first. Length capped by
+  `--days` (default 30, max 90). Empty during cold start.
+- `source`, `method` — provenance strings the renderer can display
+  verbatim. Method token: `constituent-fanout-50dma`.
+- `data_type` — gateway feed state (`live` / `delayed` / `frozen` /
+  `delayed-frozen`) when the headline was captured. Omitted when no
+  feed notice has arrived yet.
+
+Spec rule of thumb (apply on the consumer side, not derived on the wire):
+`> 55` healthy participation; `40–55` watch; `< 40` with SPX within 3% of
+its 52-week high is the classic late-cycle divergence.
+
+## gamma
+
+`ibkr gamma --json` — SPY dealer zero-gamma estimate. SPY (the ETF) is
+used rather than SPX (the index) because it has continuous extended-hours
+quoting; the regime signal tracks SPX dealer gamma closely. Compute is
+heavy (multi-minute fan-out across hundreds of legs); the first caller of
+an NY trading day kicks a background job, subsequent callers within the
+session receive the cached result instantly.
+
+Computing (first call of the day):
+
+```json
+{
+  "status": "computing",
+  "started_at": "2026-05-09T13:30:14Z",
+  "eta_seconds": 180,
+  "progress": 22
+}
+```
+
+Ready (subsequent calls; default CLI invocation blocks until this lands):
+
+```json
+{
+  "status": "ready",
+  "started_at": "2026-05-09T13:30:14Z",
+  "result": {
+    "spot_underlying": 583.21,
+    "spot_at": "2026-05-09T14:32:11Z",
+    "zero_gamma": 581.40,
+    "gap_pct": 0.31,
+    "gamma_sign": "",
+    "profile": [{"spot": 495.73, "gex": -8420.5}, "..."],
+    "gamma_total_abs": 1842500.0,
+    "top_strikes": [
+      {"strike": 585.0, "expiry": "2026-05-16", "right": "C",
+       "abs_gex": 412800.0, "open_interest": 18420}
+    ],
+    "expirations": ["2026-05-16", "2026-05-23", "2026-05-30",
+                    "2026-06-06", "2026-06-13", "2026-06-19"],
+    "leg_count": 412,
+    "derived_iv_legs": 0,
+    "warnings": [],
+    "params": {"expiry_count": 6, "strike_width_pct": 0.10,
+               "sweep_range_pct": 0.15, "worker_count": 4},
+    "source": "IBKR SPY option chain (SMART/ARCA)",
+    "method": "perfiliev-bs-sweep-v1",
+    "as_of": "2026-05-09T13:32:54Z",
+    "duration_ms": 158420
+  }
+}
+```
+
+Field meanings:
+
+- `status` — `"cold"` | `"computing"` | `"ready"` | `"error"`. The CLI
+  blocks on the compute by default; pass `--no-wait` for the polling
+  shape. `cold` means no compute has been kicked this NY trading session
+  and none is in flight (first caller will kick); `computing` means a job
+  is in flight (use `eta_seconds` / `progress` for the renderer);
+  `ready` means `result` is populated; `error` means the last compute
+  failed and `error` carries the classified reason.
+- `result.zero_gamma` — the price level where dealer net gamma crosses
+  zero under the Perfiliev convention (dealers long calls, short puts).
+  `null` when no crossing exists in the sweep window; inspect
+  `gamma_sign` to learn which side of zero the whole sweep landed on
+  ("positive" = all long-γ, "negative" = all short-γ).
+- `result.gap_pct` — `(spot_underlying − zero_gamma) / zero_gamma × 100`.
+  Positive = spot above γ-zero (dampening regime); negative = below
+  γ-zero (amplifying regime). `null` when `zero_gamma` is `null`.
+- `result.gamma_total_abs` — sign-agnostic magnitude signal:
+  `Σ |Γ| × OI × 100 × spot² × 0.01`. Larger = market more sensitive to
+  dealer rebalancing. **More robust than `zero_gamma` when the dealer-
+  sign assumption may invert** (covered-call ETF flow, autocall barrier
+  proximity).
+- `result.top_strikes` — top-N strikes by absolute gamma notional. Call
+  this the "call wall / put wall" view; surface alongside `zero_gamma`
+  when the user is about to act on a level.
+- `result.derived_iv_legs` — legs whose IV fell back to the
+  Newton-Raphson BS-inversion path because the gateway never pushed a
+  model-computation tick. Pre-market this is typically equal to
+  `leg_count`; during RTH it should stay at 0. **Surface to the user
+  when non-zero so the prior-session-price anchor is visible.**
+- `result.warnings` — non-fatal conditions: `no_crossing_in_window`,
+  `spxw_partial_oi`, `throttled`, `all_iv_derived`. Render as inline
+  badges. Runs whose leg coverage falls below the safety threshold are
+  surfaced as `status: "error"`, not as warnings.
+
+**Treat the number as a regime hint, not a precise level.** Full
+methodology lives in `docs/specs/risk-regime-dashboard.md`.
+
+## regime
+
+`ibkr regime --json` — single-call risk-regime dashboard: all five
+indicators in one JSON envelope. Each row carries raw measurements plus
+a `notes` field embedding the spec's threshold bands verbatim. The
+daemon does **not** derive green/yellow/red status — the spec calls
+those bands user-tunable.
+
+```json
+{
+  "as_of": "2026-05-09T14:32:09Z",
+  "vix_term_structure": {
+    "status": "ok",
+    "vix": 14.82,
+    "vix3m": 16.41,
+    "ratio": 0.903,
+    "data_type": "live",
+    "notes": "VIX/VIX3M ratio. Sustained > 1.0 over 2-3 sessions = stress regime.",
+    "vix_prev_close": 15.04,
+    "vix_change_pct": -1.46
+  },
+  "hyg_spy_divergence": {
+    "status": "ok",
+    "hyg_price": 78.42,
+    "hyg_50dma": 78.10,
+    "spy_price": 583.21,
+    "spy_52w_high": 605.78,
+    "spy_prev_close": 581.94,
+    "spy_change": 1.27,
+    "spy_change_pct": 0.218,
+    "hyg_data_type": "live",
+    "notes": "HYG vs SPY divergence. HYG below its 50-day SMA while SPY within 3% of 52-week high = late-cycle red flag."
+  },
+  "usd_jpy": {
+    "status": "ok",
+    "symbol": "USD.JPY",
+    "last": 152.41,
+    "close_7d_ago": 154.82,
+    "weekly_change_pct": -1.56,
+    "data_type": "live",
+    "notes": "USD/JPY weekly move. Spec watches > 2% moves as a carry-unwind signal."
+  },
+  "gamma_zero": {
+    "status": "computing",
+    "envelope": { "status": "computing", "eta_seconds": 180, "progress": 22 },
+    "notes": "SPY dealer zero-gamma (Perfiliev). First call of NY trading day kicks a multi-minute compute."
+  },
+  "breadth": {
+    "status": "ok",
+    "envelope": { "state": "ready", "value": 62.4, "...": "see breadth schema" },
+    "notes": "% S&P 500 stocks above their 50-day SMA. Spec thresholds: > 55 green, 40-55 yellow, < 40 with SPX at highs = red."
+  },
+  "spec_doc": "docs/specs/risk-regime-dashboard.md"
+}
+```
+
+Field meanings:
+
+- Each indicator row carries a `status` field:
+  `"ok"` (real fresh measurement) | `"stale"` (gateway labeled it
+  delayed/frozen) | `"computing"` (heavy compute in flight; poll
+  again) | `"unavailable"` (feed not entitled on this account; `notes`
+  explains) | `"error"` (`error_message` carries the reason).
+- Numerical fields are pointer-typed: `null` = "didn't arrive in the
+  fetch budget," never zero-substituted.
+- `fields_missing` (on rows 1–3) lists advisory sub-fields (e.g.
+  `spy_52w_high`, `hyg_50dma`) that didn't land — the row's primary
+  measurement still landed, so dim those sub-cells without
+  re-classifying the whole row as `error`.
+- `notes` on every row embeds the spec's threshold prose verbatim so a
+  consumer can interpret without reading the spec doc. Surface verbatim.
+- `gamma_zero.envelope` and `breadth.envelope` carry the full
+  [gamma](#gamma) / [breadth](#breadth) result shapes; consumers that
+  already know those schemas can re-use the same renderers.
+- `spec_doc` always points at the canonical methodology reference.
+  Surface as a deep link when explaining a band edge to the user.
+
+Use `ibkr regime --explain` to get the spec's per-indicator threshold
+prose printed alongside each row (human-readable view; not on the JSON
+surface).

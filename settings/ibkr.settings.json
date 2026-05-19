@@ -8,6 +8,9 @@
       "Bash(ibkr history*)",
       "Bash(ibkr scan*)",
       "Bash(ibkr size*)",
+      "Bash(ibkr breadth*)",
+      "Bash(ibkr gamma*)",
+      "Bash(ibkr regime*)",
       "Bash(ibkr status*)",
       "Bash(ibkr version*)"
     ],
