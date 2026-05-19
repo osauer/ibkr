@@ -215,6 +215,81 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 // Per-indicator fetchers. Each one returns a fully-populated row even on
 // failure — the regime envelope never carries nil sub-objects.
 
+// boundedSnapshot bounds the wall time of deps.snapshot to ~budget+1s,
+// regardless of whether deps.snapshot itself honours ctx all the way
+// down. Defends against pkg/ibkr code paths that use the connection's
+// own ctx instead of the caller's — most importantly
+// connection.acquireMarketDataSlot, which blocks on a saturated
+// market-data semaphore (gamma compute fanning out across hundreds of
+// option legs, breadth bootstrap holding HMDS slots) and only honours
+// Connection.ctx, not the regime handler's ctx.
+//
+// Pre-fix, a spot fetcher that hit slot exhaustion would block past
+// its 5s deps.snapshot timeout (the inner pollUntil never ran because
+// SubscribeMarketData never returned) and only bail when the
+// orchestrator's 45s handler ctx fired — at which point the partial-
+// envelope path fired and the user saw "regime fan-out exceeded
+// handler deadline" for three rows that should have errored cleanly
+// at 5s each.
+//
+// Post-fix, each fetcher races deps.snapshot against budget+1s in a
+// goroutine. If the goroutine wins, its values are returned. If the
+// timer wins, the goroutine leaks (will exit once acquire returns or
+// the connection ctx fires on daemon shutdown) and zero values are
+// returned; callers map zero to a row-level "no spot tick" status.
+//
+// The structural fix is to plumb ctx through SubscribeMarketData →
+// RequestMarketDataWithContract → acquireMarketDataSlot in pkg/ibkr
+// so the budget is enforced at the slot-acquire layer. Tracked as a
+// follow-up — this is the minimal-blast-radius fix at the regime
+// layer that addresses the 45s user-visible symptom today.
+func boundedSnapshot(ctx context.Context, deps *regimeDeps, sym string, budget time.Duration) (price, prevClose float64, dataType string) {
+	type r struct {
+		price, prevClose float64
+		dt               string
+	}
+	resCh := make(chan r, 1)
+	go func() {
+		p, pc, d := deps.snapshot(ctx, sym, budget)
+		resCh <- r{p, pc, d}
+	}()
+	// One-second slack over budget so deps.snapshot has a chance to
+	// return its own deadline error before we bail. The slack matters
+	// when the inner code DOES honour ctx — without it, we'd race the
+	// inner deadline and lose, returning zeros instead of the inner
+	// path's classified result.
+	select {
+	case got := <-resCh:
+		return got.price, got.prevClose, got.dt
+	case <-time.After(budget + time.Second):
+		return 0, 0, ""
+	case <-ctx.Done():
+		return 0, 0, ""
+	}
+}
+
+// boundedSnapshotWith52WHigh is the boundedSnapshot wrapper for the
+// snapshotWith52WHigh dep variant. Same rationale and structure.
+func boundedSnapshotWith52WHigh(ctx context.Context, deps *regimeDeps, sym string, budget time.Duration) (price, prevClose, week52High float64, dataType string) {
+	type r struct {
+		price, prevClose, week52High float64
+		dt                           string
+	}
+	resCh := make(chan r, 1)
+	go func() {
+		p, pc, w, d := deps.snapshotWith52WHigh(ctx, sym, budget)
+		resCh <- r{p, pc, w, d}
+	}()
+	select {
+	case got := <-resCh:
+		return got.price, got.prevClose, got.week52High, got.dt
+	case <-time.After(budget + time.Second):
+		return 0, 0, 0, ""
+	case <-ctx.Done():
+		return 0, 0, 0, ""
+	}
+}
+
 const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing). Signal requires sustained inversion over 2-3 sessions, not a single Fed-day spike."
 
 func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm {
@@ -228,7 +303,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	// regular-session close (tick 9) so the ratio still ranks. The
 	// data-type field honestly reports "frozen" in that case so the
 	// renderer dims the row instead of pretending it's live.
-	vix, vixPrev, vixDT := deps.snapshot(ctx, "VIX", 5*time.Second)
+	vix, vixPrev, vixDT := boundedSnapshot(ctx, deps, "VIX", 5*time.Second)
 	if vix <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "VIX: no spot tick"
@@ -239,7 +314,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	// the VIX leg to push the close tick, and 5 s reliably lost it on
 	// cold-frozen-mode calls even with a warm contract cache. 8 s
 	// matches the SPY 52w-high budget for the same reason.
-	vix3m, _, vix3mDT := deps.snapshot(ctx, "VIX3M", 8*time.Second)
+	vix3m, _, vix3mDT := boundedSnapshot(ctx, deps, "VIX3M", 8*time.Second)
 	// Populate the VIX day-change anchor as soon as the close lands —
 	// independent of whether VIX3M arrives. The dashboard header is
 	// useful even when the ratio leg fails.
@@ -286,7 +361,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	out := rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes}
 	now := time.Now()
 
-	hyg, _, hygDT := deps.snapshot(ctx, "HYG", 5*time.Second)
+	hyg, _, hygDT := boundedSnapshot(ctx, deps, "HYG", 5*time.Second)
 	if hyg <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "HYG: no spot tick"
@@ -303,7 +378,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// surfaces what it had. 8s budget (vs 5s for plain snapshots)
 	// because the Misc-Stats tick reliably arrives later than the
 	// price triple in observed traces.
-	spy, spyPrev, spy52, spyDT := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
+	spy, spyPrev, spy52, spyDT := boundedSnapshotWith52WHigh(ctx, deps, "SPY", 8*time.Second)
 	if spy > 0 {
 		out.SPYPrice = new(spy)
 		out.SPYQuality = firmTickQuality(now, spyDT, "SPY tick")
@@ -412,7 +487,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	// either the gateway has no FX entitlement for this account or
 	// there's no frozen tick to fall back on; either way, surface as
 	// unavailable rather than faking a value.
-	last, _, dt := deps.snapshot(ctx, "USD.JPY", 5*time.Second)
+	last, _, dt := boundedSnapshot(ctx, deps, "USD.JPY", 5*time.Second)
 	if last <= 0 {
 		out.Status = rpc.RegimeStatusUnavailable
 		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"

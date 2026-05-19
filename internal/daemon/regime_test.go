@@ -757,6 +757,86 @@ func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 // the whole regime call past the daemon's deadline. The contract:
 // when ctx fires, the fan-out returns within a few milliseconds with
 // a fully-populated envelope where any not-yet-completed row carries
+// TestBoundedSnapshot_ReturnsWithinBudgetUnderInnerBlock pins the
+// per-fetcher wall-time bound. Without this, a deps.snapshot that
+// blocks past its declared budget (e.g. inner SubscribeMarketData
+// stalls on a saturated market-data semaphore using Connection.ctx
+// instead of the caller's ctx) hangs the fetcher past the
+// orchestrator's 45 s deadline and the partial-envelope path fires
+// for rows that should have errored cleanly at 5 s. Production
+// signature from 2026-05-19: "regime fan-out exceeded handler
+// deadline" for three rows that historically returned cleanly.
+func TestBoundedSnapshot_ReturnsWithinBudgetUnderInnerBlock(t *testing.T) {
+	t.Parallel()
+
+	// A snapshot dep that blocks forever — simulates the inner code
+	// not honouring ctx. The bounded wrapper must STILL return at
+	// budget + 1 s slack, with zero values.
+	block := make(chan struct{})
+	defer close(block)
+	deps := &regimeDeps{
+		snapshot: func(_ context.Context, _ string, _ time.Duration) (float64, float64, string) {
+			<-block
+			return 99.99, 99.99, rpc.MarketDataLive
+		},
+		snapshotWith52WHigh: func(_ context.Context, _ string, _ time.Duration) (float64, float64, float64, string) {
+			<-block
+			return 99.99, 99.99, 99.99, rpc.MarketDataLive
+		},
+	}
+
+	start := time.Now()
+	price, prev, dt := boundedSnapshot(context.Background(), deps, "VIX", 100*time.Millisecond)
+	elapsed := time.Since(start)
+
+	// budget 100ms + 1s slack = 1.1s; assert <1.5s to leave room for
+	// scheduler jitter without being so loose the test loses its
+	// meaning.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("boundedSnapshot took %v with inner block; want <1.5s (the helper must bound regardless of inner-code behaviour)", elapsed)
+	}
+	// Zero values returned when budget fires before the inner returns.
+	if price != 0 || prev != 0 || dt != "" {
+		t.Errorf("boundedSnapshot returned (%v, %v, %q); want zeros on budget timeout", price, prev, dt)
+	}
+
+	// Same contract for snapshotWith52WHigh.
+	start = time.Now()
+	p2, pc2, w52, dt2 := boundedSnapshotWith52WHigh(context.Background(), deps, "SPY", 100*time.Millisecond)
+	elapsed = time.Since(start)
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("boundedSnapshotWith52WHigh took %v with inner block; want <1.5s", elapsed)
+	}
+	if p2 != 0 || pc2 != 0 || w52 != 0 || dt2 != "" {
+		t.Errorf("boundedSnapshotWith52WHigh returned (%v, %v, %v, %q); want zeros on budget timeout", p2, pc2, w52, dt2)
+	}
+}
+
+// TestBoundedSnapshot_PassesThroughOnFastReturn confirms the helper
+// adds no observable latency or value mutation when the inner snapshot
+// returns inside the budget — guards against accidentally introducing
+// budget-slack lag on the warm path.
+func TestBoundedSnapshot_PassesThroughOnFastReturn(t *testing.T) {
+	t.Parallel()
+	deps := &regimeDeps{
+		snapshot: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
+			if sym == "VIX" {
+				return 18.5, 19.2, rpc.MarketDataLive
+			}
+			return 0, 0, ""
+		},
+	}
+	start := time.Now()
+	price, prev, dt := boundedSnapshot(context.Background(), deps, "VIX", 5*time.Second)
+	elapsed := time.Since(start)
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("fast snapshot took %v; want <100ms (the helper must not introduce slack on the warm path)", elapsed)
+	}
+	if price != 18.5 || prev != 19.2 || dt != rpc.MarketDataLive {
+		t.Errorf("boundedSnapshot returned (%v, %v, %q); want (18.5, 19.2, %q)", price, prev, dt, rpc.MarketDataLive)
+	}
+}
+
 // Status=error and an explanatory ErrorMessage.
 //
 // This is the gate the v0.27.5 test suite was missing — Rule 12
