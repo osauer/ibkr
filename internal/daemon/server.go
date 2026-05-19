@@ -21,6 +21,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
+	"github.com/osauer/ibkr/internal/breadth/spx"
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -128,6 +129,12 @@ type Server struct {
 	// run that other pollers are waiting on.
 	zeroGamma *gammaZeroCache
 
+	// breadth runs the SPX 50-DMA breadth compute. The engine owns
+	// a persisted constituent-close cache, a once-daily scheduler
+	// goroutine started by Start(), and a rolling-history file the
+	// handler reads for sparkline rendering. nil before installEngines.
+	breadth *spx.Engine
+
 	lock *instanceLock
 
 	logger *Logger
@@ -169,7 +176,27 @@ func New(opts Options) *Server {
 	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
+	s.installBreadthEngine()
 	return s
+}
+
+// installBreadthEngine builds the SPX 50-DMA breadth engine and
+// attaches it to s. Construction is best-effort: a failure to resolve
+// the on-disk cache dir is logged but does not block daemon startup —
+// the engine field stays nil and handleBreadthSPX surfaces
+// status="unavailable" with a notes pointer.
+//
+// The fetcher closes over s.gatewayConnector so the engine's daily
+// refresh always reads the live connector — surviving gateway
+// reconnects without re-instantiating the engine.
+func (s *Server) installBreadthEngine() {
+	dir, err := spx.DefaultDir()
+	if err != nil {
+		s.logger.Warnf("breadth: resolve cache dir: %v (engine disabled)", err)
+		return
+	}
+	fetcher := newBreadthFetcher(s.gatewayConnector)
+	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger})
 }
 
 // installSubs wires the per-symbol subscription manager onto s. Called by
@@ -262,6 +289,14 @@ func (s *Server) Start(ctx context.Context) error {
 		s.connectInFlight = true
 		s.mu.Unlock()
 		go s.runConnectAttempt(serverCtx, ep)
+	}
+	// Breadth scheduler is gateway-independent — its fetcher returns
+	// "gateway unavailable" until the connect goroutine succeeds, but
+	// the daily cadence ticks regardless. Started here, not from
+	// postConnectSetup, so the engine survives gateway disconnects /
+	// reconnects without spawning duplicate schedulers.
+	if s.breadth != nil {
+		go s.breadth.Run(ctx)
 	}
 	s.runIdleWatcher(ctx)
 

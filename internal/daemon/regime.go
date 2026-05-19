@@ -392,7 +392,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	return out
 }
 
-const breadthNotes = "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR does not catalogue the S&P-DJI breadth index (S5FI / MMFI / SPXA50R / BPSPX variants) on retail subscriptions — confirmed via reqContractDetails probe against the CBOE US Indexes feed. In v1 this indicator is unavailable: consumers either compute it from the 500 constituent daily bars (~85 min cold refresh) or treat it as a manual-entry slot per the original dashboard spec."
+const breadthNotes = "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR does not redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes — refresh runs once per US trading day post-close (16:35 ET). Method token: constituent-fanout-50dma."
 
 func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	out := rpc.RegimeBreadth{Notes: breadthNotes}
@@ -405,18 +405,30 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 		return out
 	}
 	out.Envelope = *envelope
-	// Today's reality: the IBKR S5FI subscribe returns no ticks and
-	// no historical bars, so envelope.Value is 0 with an empty
-	// History. Surface as unavailable rather than ok-with-zero.
+	// Cold start: engine hasn't finished its first refresh yet. The
+	// envelope carries Value=0 and an empty History — distinguish
+	// "engine working on it" (computing) from "engine never ran"
+	// (unavailable) by asking the engine directly.
 	if envelope.Value == 0 && len(envelope.History) == 0 {
+		if s.breadth != nil && s.breadth.IsRefreshing() {
+			out.Status = rpc.RegimeStatusComputing
+			return out
+		}
 		out.Status = rpc.RegimeStatusUnavailable
 		return out
 	}
+	// The value is computed (not a live gateway tick). derivedQuality
+	// is the right shelf — it tags FreshnessClass=derived,
+	// Confidence=estimate so renderers don't mistake this for a
+	// firm-tick reading.
+	out.ValueQuality = derivedQuality(envelope.AsOf, "constituent-fanout-50dma")
 	out.Status = rpc.RegimeStatusOK
-	if !rpc.IsLiveDataType(envelope.DataType) {
+	// "Stale" only applies once we're a full session past the AsOf
+	// stamp — the engine refreshes daily, so anything more than ~30 h
+	// old is a missed cycle worth flagging.
+	if time.Since(envelope.AsOf) > 30*time.Hour {
 		out.Status = rpc.RegimeStatusStale
 	}
-	out.ValueQuality = firmTickQuality(time.Now(), envelope.DataType, "IBKR S5FI tick")
 	return out
 }
 

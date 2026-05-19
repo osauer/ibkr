@@ -32,7 +32,7 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify version plugin-check parity-check modernize modernize-check
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify version plugin-check parity-check modernize modernize-check refresh-spx-members
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -165,6 +165,15 @@ modernize-check: ## go fix -diff + modernize gate (Go idiom drift vs go.mod's go
 modernize: ## Apply go fix + modernize rewrites in place
 	go fix ./...
 	go tool modernize -fix ./...
+
+# Pull the current S&P-500 membership list from Wikipedia and rewrite
+# internal/breadth/spx/members_data.go. Invoked by `make release` so a
+# freshly-tagged binary always carries a current list; a release that
+# would change the file fails-closed with a "commit and re-run" message
+# so the tag and binary stay coherent (see the refresh-spx-members
+# block inside `release:` for the dirty-tree guard).
+refresh-spx-members: ## Refresh internal/breadth/spx/members_data.go from Wikipedia
+	go run ./scripts/refresh-spx-members
 
 fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
 	@# Same scope as `make check` so `make fmt && make check` is idempotent.
@@ -362,6 +371,21 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	fi
 	@if git ls-remote --tags --exit-code origin $(RELEASE_VERSION) >/dev/null 2>&1; then \
 		echo "release: tag $(RELEASE_VERSION) already exists on origin" >&2; \
+		exit 1; \
+	fi
+	@# Refresh the S&P-500 membership list from Wikipedia. The release
+	@# flow runs this on every cut so every tagged binary carries a
+	@# current list; a same-day refresh that produces no diff is a no-op.
+	@# A real diff fails the release here: the maintainer commits the
+	@# membership update separately and re-runs `make release`, so the
+	@# git tag and the binary's checked-in list stay in lockstep. This
+	@# guard runs AFTER the dirty-tree check above so we can attribute a
+	@# dirty tree to the refresh, not to stray edits.
+	$(MAKE) refresh-spx-members
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "release: refresh-spx-members produced uncommitted changes." >&2; \
+		echo "        commit the S&P-500 membership update and re-run \`make release\`." >&2; \
+		git status --short >&2; \
 		exit 1; \
 	fi
 	$(MAKE) check test

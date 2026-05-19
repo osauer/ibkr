@@ -2397,23 +2397,30 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 }
 
 // handleBreadthSPX returns the current S&P 500 stocks-above-50DMA reading
-// (S&P DJI's S5FI index) plus a trailing daily series for sparkline
-// rendering. The headline number is the percentage of S&P 500 constituents
-// trading above their 50-day SMA, in [0, 100]. The dashboard generator
-// uses this as Indicator 5 of the risk-regime panel.
+// plus a trailing daily series for sparkline rendering. The headline
+// number is the percentage of S&P 500 constituents trading above their
+// own 50-day SMA, in [0, 100]. The dashboard generator uses this as
+// Indicator 5 of the risk-regime panel.
 //
-// Methodology — "s5fi-direct": we read the index directly from S&P DJI's
-// distribution feed (routed via IBKR's INDEX exchange). No constituent
-// fan-out, no daemon-side SMA recomputation; S&P DJI does the math and
-// publishes the result. The tradeoff is honesty: when the index updates
-// (intraday, but lagged on retail feeds) is whatever S&P publishes, and
-// when the gateway feed is delayed we surface that via DataType.
+// Methodology — "constituent-fanout-50dma": we compute S5FI locally
+// from constituent daily closes pulled via IBKR's HMDS feed. IBKR
+// does not redistribute S&P DJI's S5FI index on retail subscriptions
+// (verified via reqContractDetails — see pkg/ibkr/symbols.go), so the
+// daemon reproduces the math from data it already has access to. The
+// engine runs a once-daily refresh post-close (16:35 ET) and serves
+// the cached snapshot to readers.
+//
+// The handler is a thin projection of the engine state onto the wire
+// envelope: the long-running fetch happens off this code path entirely.
+// Cold-start callers receive an empty envelope (Value=0, History=[]);
+// the fetchRegimeBreadth wrapper checks IsRefreshing to map that to
+// status="computing" rather than "unavailable".
 //
 // Threshold derivation (green / yellow / red) is intentionally not on
-// this result. The spec itself flags those bands as user-tunable, so the
-// daemon stays out of policy and the renderer applies whatever cuts the
-// user has configured.
-func (s *Server) handleBreadthSPX(ctx context.Context, req *rpc.Request) (*rpc.BreadthSPXResult, error) {
+// this result. The spec itself flags those bands as user-tunable, so
+// the daemon stays out of policy and the renderer applies whatever
+// cuts the user has configured.
+func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.BreadthSPXResult, error) {
 	var p rpc.BreadthSPXParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
@@ -2425,88 +2432,41 @@ func (s *Server) handleBreadthSPX(ctx context.Context, req *rpc.Request) (*rpc.B
 	if historyDays > 90 {
 		historyDays = 90
 	}
-	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
 
-	c := s.gatewayConnector()
-	if c == nil {
+	if s.breadth == nil {
+		// Engine construction failed at New (e.g. unresolvable cache
+		// dir). Match the pre-engine wire contract: surface as
+		// gateway-unavailable so clients render a consistent "daemon
+		// I/O dependency missing" state.
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
-	const sym = "S5FI"
 	res := &rpc.BreadthSPXResult{
-		Source: "S&P DJI via IBKR (S5FI INDEX)",
-		Method: "s5fi-direct",
+		Source: "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
+		Method: "constituent-fanout-50dma",
 		AsOf:   time.Now(),
 	}
 
-	// Route the headline subscription through the daemon's sub manager
-	// (same as quote.snapshot) so a concurrent watcher or future scheduled
-	// refresh shares the gateway line via refcount.
-	releaseSub, err := s.subs.Hold(sym)
-	if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
-		return nil, err
-	}
-	defer releaseSub()
-
-	var spotObservedAt time.Time
-	pollErr := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
-		// Index series report the headline value as the Last tick. Bid /
-		// Ask are not meaningful for breadth indices — they're computed,
-		// not quoted — so we anchor exclusively on Last and accept the
-		// gateway's Close as a stale fallback when Last hasn't arrived.
-		if d.Last > 0 {
-			res.Value = d.Last
-			res.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
-			spotObservedAt = time.Now()
-			return true
-		}
-		return false
-	})
-	if pollErr != nil && pollErr != context.DeadlineExceeded {
-		return nil, pollErr
-	}
-	// Honest disclosure: if no Last arrived within the budget, fall back
-	// to the gateway's PrevClose (yesterday's daily settlement). Renderers
-	// see DataType="" and an older SpotAt and can dim accordingly.
-	if res.Value == 0 {
-		md := c.GetMarketData()[sym]
-		if md != nil && md.Close > 0 {
-			res.Value = md.Close
-			res.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
-			// Leave SpotAt zero so renderers can distinguish stale-fallback
-			// from a live observation.
-		}
-	}
-	res.SpotAt = spotObservedAt
-
-	// Trailing series. We pad the lookback so weekends / holidays don't
-	// shrink the rendered sparkline below historyDays — the gateway returns
-	// trading days only, and pulling exactly N calendar days routinely
-	// yields N - 8 to N - 12 bars depending on the month.
-	lookback := historyDays + historyDays/3 + 7
-	bars, err := c.FetchHistoricalDailyBars(sym, lookback, 30*time.Second)
-	if err != nil {
-		// History is best-effort: the headline value is what the dashboard
-		// needs in order to render. Surface the partial result rather than
-		// fail the whole call when the historical feed hiccups.
-		s.logger.Warnf("breadth.spx history fetch failed: %v (returning headline only)", err)
-	} else {
-		if len(bars) > historyDays {
-			bars = bars[len(bars)-historyDays:]
-		}
-		res.History = make([]rpc.BreadthDailyValue, 0, len(bars))
-		for _, b := range bars {
-			res.History = append(res.History, rpc.BreadthDailyValue{
-				Date:  barDate(b),
-				Value: b.Close,
-			})
-		}
+	snap, ok := s.breadth.Get()
+	if !ok {
+		// Cold start — engine has not finished its first refresh yet.
+		// Return the bare envelope (Value=0, History=[]). The
+		// regime-layer wrapper distinguishes computing from
+		// unavailable by polling IsRefreshing.
+		return res, nil
 	}
 
-	res.AsOf = time.Now()
+	res.Value = snap.Value
+	res.AsOf = snap.AsOf
+
+	history := s.breadth.History(historyDays)
+	res.History = make([]rpc.BreadthDailyValue, 0, len(history))
+	for _, h := range history {
+		res.History = append(res.History, rpc.BreadthDailyValue{
+			Date:  h.Date,
+			Value: h.Value,
+		})
+	}
 	return res, nil
 }
 

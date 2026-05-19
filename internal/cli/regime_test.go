@@ -148,8 +148,9 @@ func TestRenderRegime_GammaComputingInlinesETA(t *testing.T) {
 }
 
 // TestRenderRegime_BreadthUnavailableReasonInline pins the structurally-
-// missing row: the reason ("S5FI feed not entitled") sits in the dim
-// parenthetical, the value cell shows "unavailable". No fake zero.
+// missing row: the reason (currently "breadth engine offline") sits in
+// the dim parenthetical, the value cell shows "unavailable". No fake
+// zero.
 func TestRenderRegime_BreadthUnavailableReasonInline(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
@@ -159,7 +160,7 @@ func TestRenderRegime_BreadthUnavailableReasonInline(t *testing.T) {
 	if !strings.Contains(out, "unavailable") {
 		t.Errorf("breadth row should surface unavailable in value cell:\n%s", out)
 	}
-	if !strings.Contains(out, "S5FI") {
+	if !strings.Contains(out, "breadth engine offline") {
 		t.Errorf("breadth row should surface the reason inline:\n%s", out)
 	}
 	if strings.Contains(out, "0.0%") {

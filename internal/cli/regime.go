@@ -607,7 +607,10 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 		switch r.Status {
 		case rpc.RegimeStatusUnavailable:
 			row.stateNote = "unavailable"
-			row.reason = "S5FI feed not entitled on retail IBKR"
+			row.reason = "breadth engine offline (no cached snapshot)"
+		case rpc.RegimeStatusComputing:
+			row.stateNote = "computing"
+			row.reason = "first cold-start refresh in flight (~10–15 min)"
 		default:
 			row.stateNote = string(r.Status)
 		}

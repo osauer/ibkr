@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.0 — 2026-05-19 06:19 CEST
+
+`ibkr breadth` now actually returns a number on retail IBKR accounts. The
+daemon computes S5FI locally from constituent daily closes instead of
+asking the gateway for an index feed it isn't entitled to.
+
+### Added
+
+- **Local S5FI compute engine.** A new `internal/breadth/spx` package
+  owns the constituent-fanout-50dma compute: for each of the ~500 S&P
+  500 names it keeps a 50-bar sliding window of daily closes, counts
+  names whose latest close is at or above their window mean, and
+  divides by coverage. Output matches S&P DJI's published `S5FI`
+  bit-identically when the membership list and constituent data are
+  both current. State persists as three small JSON files (snapshot,
+  windows ~250 KB, rolling history ~60 days) under
+  `$XDG_CACHE_HOME/ibkr/breadth-spx/`; temp-rename atomic writes keep
+  the cache coherent across daemon crashes. Method token on every
+  snapshot is `constituent-fanout-50dma`.
+
+- **Daily scheduler with cold-start bootstrap.** The engine runs once
+  per US trading day at 16:35 ET — 35 min after the close, enough for
+  late prints to settle. On startup it checks whether today's window
+  has been missed (daemon down at 16:35, or fresh install) and runs a
+  catch-up refresh immediately; otherwise it sleeps until the next
+  tick. Refresh is serialised via `refreshMu` so concurrent triggers
+  wait behind the first run instead of contending for fetcher slots.
+  Per-symbol fetch failures surface as `Excluded` entries on the
+  snapshot rather than failing the whole compute.
+
+- **`status: "computing"` for the cold-start breadth row.** Before the
+  first refresh lands (~10–15 min on a fresh daemon), `ibkr regime`'s
+  breadth row maps to `computing` instead of `unavailable`, with the
+  reason "first cold-start refresh in flight (~10–15 min)". Once a
+  snapshot is cached the row flips to `ok`; only the rare
+  engine-construction-failed path (unresolvable cache dir) keeps the
+  old `unavailable` rendering.
+
+- **`make refresh-spx-members`.** New developer target that pulls the
+  current S&P-500 list from Wikipedia and rewrites
+  `internal/breadth/spx/members_data.go`. The release flow runs this
+  automatically on every cut, so each tagged binary carries a current
+  list — and a same-tag refresh that would change the file fails the
+  release with "commit and re-run" rather than letting the git tag
+  and the baked-in list drift apart. Sanity bounds (450–520 names)
+  refuse to write if Wikipedia's table structure breaks. Member-list
+  parser has its own unit tests against a checked-in fixture.
+
+### Changed
+
+- **`ibkr breadth` / `breadth.spx` RPC source and method tokens.** The
+  envelope's `source` is now `"Computed from S&P-500 constituent daily
+  bars (IBKR HMDS)"` and `method` is `"constituent-fanout-50dma"`
+  (was `"s5fi-direct"`). Wire shape is otherwise unchanged — `value`,
+  `as_of`, and `history[]` keep the same semantics. JSON consumers
+  that ignore the disclosure strings see no diff.
+
+- **`handleBreadthSPX` is now a thin engine projection.** The handler
+  used to subscribe live to the `S5FI` index and fan out historical
+  bar fetches inline; it now reads `s.breadth.Get()` /
+  `s.breadth.History(n)` and returns. The long-running compute lives
+  on the engine's scheduler goroutine, off the request path. Per-call
+  budget drops from minutes to microseconds.
+
+- **Engine fetcher reads the live connector through a thunk.** The
+  daemon-side adapter (`internal/daemon/breadth_fetcher.go`) doesn't
+  capture the connector pointer at construction; it dereferences
+  `s.gatewayConnector` on each `FetchDaily`. The engine survives
+  gateway disconnects and reconnects without re-instantiation.
+
+- **Breadth-row "unavailable" reason copy.** When the engine has no
+  snapshot AND isn't refreshing, the row's reason now reads `"breadth
+  engine offline (no cached snapshot)"` — accurate for the only
+  remaining trigger (engine construction failed). The old `"S5FI feed
+  not entitled on retail IBKR"` copy was made false by the local
+  compute.
+
+Cold-start path is the only user-visible delay: a fresh daemon that
+has never run the engine sees ~10–15 min of `status: "computing"` on
+the breadth row before the first snapshot lands. After that, the row
+is instant on every call until the next post-close refresh.
+
 ## v0.26.0 — 2026-05-18 18:50 CEST
 
 Pre-market gamma now produces a result instead of timing out; the regime
