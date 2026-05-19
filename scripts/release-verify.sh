@@ -432,5 +432,42 @@ if [[ "$regime_check" != ok* ]]; then
 fi
 echo "    $regime_check"
 
+# Shape-coherence: under the contention reproduced above (breadth
+# fan-out + concurrent gamma compute saturate the gateway's market-
+# data slot pool), no row should carry the orchestrator-deadline
+# fallback ErrorMessage. The per-fetcher boundedSnapshot wrap in
+# regime.go bails at 5 s / 8 s when SubscribeMarketData blocks on a
+# saturated slot semaphore; the partial-envelope assembly at the
+# 45 s orchestrator deadline is the safety net for genuinely-stuck
+# fetchers (a regression of regime.go's wall-time bounding would
+# trigger the safety net instead). A row's ErrorMessage containing
+# "fan-out exceeded handler deadline" on either call means the
+# per-fetcher fix didn't fire — exactly the 2026-05-19 production
+# bug shape, and a release-blocker.
+shape_check="$(python3 -c '
+import json, sys
+findings = []
+for label, payload in (("call 1", sys.argv[1]), ("call 2", sys.argv[2])):
+    d = json.loads(payload)
+    for r in ("vix_term_structure", "hyg_spy_divergence", "usd_jpy"):
+        msg = d.get(r, {}).get("error_message", "") or ""
+        if "fan-out exceeded handler deadline" in msg:
+            findings.append(label + " " + r + ": orchestrator safety net triggered (per-fetcher budget did not bail in time); message=" + repr(msg))
+if findings:
+    print("FALLBACK " + " | ".join(findings))
+    sys.exit(0)
+print("ok (no row hit the orchestrator-deadline fallback on either call)")
+' "$regime_json_1" "$regime_json_2")"
+if [[ "$shape_check" != ok* ]]; then
+    echo "release-verify: FAIL: regime shape: $shape_check" >&2
+    echo "" >&2
+    echo "call 1:" >&2
+    echo "$regime_json_1" >&2
+    echo "call 2:" >&2
+    echo "$regime_json_2" >&2
+    exit 1
+fi
+echo "    $shape_check"
+
 echo ""
 echo "release-verify: PASS — $BIN ($EXPECTED) talks to the gateway and ships honest JSON"
