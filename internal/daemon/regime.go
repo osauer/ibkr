@@ -616,6 +616,14 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 		}
 	case rpc.GammaZeroStatusComputing:
 		out.Status = rpc.RegimeStatusComputing
+	case rpc.GammaZeroStatusCold:
+		// Cold means no compute has ever been kicked this session. In
+		// practice handleGammaZeroSPX auto-kicks on every call so a
+		// regime fetch typically transitions Cold → Computing inside
+		// the same call. Map to Unavailable for the rare interleaving
+		// where the snapshot races a kick — mirrors breadth's Cold →
+		// Unavailable mapping below at fetchRegimeBreadth.
+		out.Status = rpc.RegimeStatusUnavailable
 	case rpc.GammaZeroStatusError:
 		out.Status = rpc.RegimeStatusError
 	default:

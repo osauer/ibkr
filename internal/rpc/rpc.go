@@ -390,10 +390,22 @@ type BreadthSPXResult struct {
 // the wire shape always carries a state — the first caller of the day
 // receives "computing" and a renderer hint; subsequent callers receive
 // "ready" with a cached payload until the next NY trading session.
+//
+// The four states mirror BreadthState's cold/computing/ready/error
+// semantics so consumers can branch on Status uniformly across the two
+// state-machine engines.
 const (
+	// GammaZeroStatusCold — no compute has been kicked this NY trading
+	// session AND none is in flight. The daemon hasn't been asked to
+	// produce a value yet. Distinct from Computing so a consumer can
+	// tell "first caller of the day must kick or wait" from "wait,
+	// this'll resolve on its own." Pre-v0.27.9 the cache conflated
+	// these two states under Computing — same side-channel-inference
+	// pattern the v0.27.3 breadth State enum retired.
+	GammaZeroStatusCold = "cold"
 	// GammaZeroStatusComputing — a background compute is in flight; the
 	// EtaSeconds / Progress fields carry refresh hints. Callers who can
-	// wait may set BreadthSPXParams.WaitMs > 0 on the request to block
+	// wait may set GammaZeroSPXParams.WaitMs > 0 on the request to block
 	// up to that budget for the result.
 	GammaZeroStatusComputing = "computing"
 	// GammaZeroStatusReady — Result is populated and reflects the most

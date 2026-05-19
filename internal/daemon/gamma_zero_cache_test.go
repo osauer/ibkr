@@ -212,8 +212,8 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	}
 }
 
-// TestGammaZeroCache_SnapshotStates exhaustively covers the three
-// envelope states (computing / ready / error) the snapshot helper
+// TestGammaZeroCache_SnapshotStates exhaustively covers the four
+// envelope states (cold / computing / ready / error) the snapshot helper
 // must produce — the dashboard generator branches on Status, so a
 // regression that loses one of these states silently breaks the UI.
 func TestGammaZeroCache_SnapshotStates(t *testing.T) {
@@ -221,11 +221,14 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now.Add(10 * time.Second) }
 
-	// nil job — happens only before the first kickoff. Status is the
-	// computing sentinel so renderers can show "spinning up."
+	// nil job — happens only before the first kickoff this NY trading
+	// session. Status is Cold, distinct from Computing so a consumer
+	// can tell "first caller must kick" from "kick already in flight."
+	// Pre-v0.27.9 these were both Computing; the v0.27.3 breadth
+	// State enum retired the same side-channel-inference pattern.
 	env := c.snapshot(nil, nowFn)
-	if env.Status != rpc.GammaZeroStatusComputing {
-		t.Errorf("nil job snapshot: got %q, want %q", env.Status, rpc.GammaZeroStatusComputing)
+	if env.Status != rpc.GammaZeroStatusCold {
+		t.Errorf("nil job snapshot: got %q, want %q (no compute kicked this session must be Cold, not Computing)", env.Status, rpc.GammaZeroStatusCold)
 	}
 
 	// Computing
