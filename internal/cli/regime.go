@@ -173,6 +173,16 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	fmt.Fprintf(out, "Risk Regime  ·  %s\n", r.AsOf.Format("2006-01-02 15:04 MST"))
 	fmt.Fprintln(out)
 
+	// SPY + VIX headline: the two anchors every other indicator below
+	// is interpreted against. SPY change is colored on sign (green up /
+	// red down); VIX is colored inverted (red on up = vol expanding =
+	// risk-off, green on down). Either half is dropped when its primary
+	// price didn't land — the headline never invents numbers.
+	if line := renderRegimeHeadline(env, r); line != "" {
+		fmt.Fprintf(out, "  %s\n", line)
+		fmt.Fprintln(out)
+	}
+
 	// Composite line: bold verdict + dim count summary. The count
 	// summary names ranked/unranked explicitly so a reader sees that
 	// some indicators were excluded rather than assuming the verdict
@@ -417,6 +427,84 @@ func (c regimeComposite) summary() string {
 		coverage += fmt.Sprintf(" · %d unranked", c.unranked)
 	}
 	return strings.Join(parts, " · ") + "  ·  " + coverage
+}
+
+// renderRegimeHeadline returns the SPY + VIX summary line shown above
+// the indicator rows: spot price + day's dollar / percent change for
+// SPY, spot + percent change for VIX (which has no shares so dollar
+// change is meaningless). Each side renders only when its primary
+// price arrived; either half can be missing without dropping the line.
+// Returns "" when neither half has data.
+//
+// Color convention:
+//   - SPY change green when positive, red when negative — the reader's
+//     account is long SPY-correlated by default.
+//   - VIX change red when positive, green when negative — vol expanding
+//     is risk-off. Inverted on purpose; matches every trading desk's
+//     intuition.
+//
+// The change cells fall back to "—" (dim) when the prev-close anchor
+// didn't arrive, so the reader sees the price even without the delta.
+func renderRegimeHeadline(env *Env, r *rpc.RegimeSnapshotResult) string {
+	var parts []string
+	if cell := spyHeadlineCell(env, r.HYGSPYDivergence); cell != "" {
+		parts = append(parts, cell)
+	}
+	if cell := vixHeadlineCell(env, r.VIXTermStructure); cell != "" {
+		parts = append(parts, cell)
+	}
+	return strings.Join(parts, "    ")
+}
+
+func spyHeadlineCell(env *Env, r rpc.RegimeHYGSPYDivergence) string {
+	if r.SPYPrice == nil {
+		return ""
+	}
+	price := fmt.Sprintf("SPY %.2f", *r.SPYPrice)
+	if r.SPYChange == nil || r.SPYChangePct == nil {
+		return price + "  " + env.dim("(—)")
+	}
+	dollar := signedFloat(*r.SPYChange, 2)
+	pct := signedFloat(*r.SPYChangePct, 2) + "%"
+	color := env.green
+	if *r.SPYChange < 0 {
+		color = env.red
+	}
+	return price + "  " + color(dollar) + "  " + color("("+pct+")")
+}
+
+func vixHeadlineCell(env *Env, r rpc.RegimeVIXTerm) string {
+	if r.VIX == nil {
+		return ""
+	}
+	price := fmt.Sprintf("VIX %.2f", *r.VIX)
+	if r.VIXChangePct == nil {
+		return price + "  " + env.dim("(—)")
+	}
+	pct := signedFloat(*r.VIXChangePct, 2) + "%"
+	// Inverted: vol UP is risk-off (red), vol DOWN is constructive
+	// (green). Flat (== 0) reads as no-change; dim is the honest call.
+	color := env.dim
+	switch {
+	case *r.VIXChangePct > 0:
+		color = env.red
+	case *r.VIXChangePct < 0:
+		color = env.green
+	}
+	return price + "  " + color("("+pct+")")
+}
+
+// signedFloat formats v with a leading sign and N decimals. Used by
+// the headline cells so "+1.20" reads symmetrically with "−1.20".
+// The Unicode minus (U+2212) is intentional — it's the same width as
+// the plus sign, keeping the alignment clean.
+func signedFloat(v float64, decimals int) string {
+	sign := "+"
+	if v < 0 {
+		sign = "−"
+		v = -v
+	}
+	return fmt.Sprintf("%s%.*f", sign, decimals, v)
 }
 
 // ----------------------------------------------------------------------------

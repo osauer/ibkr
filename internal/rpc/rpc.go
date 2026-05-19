@@ -665,6 +665,13 @@ type RegimeVIXTerm struct {
 	Notes         string   `json:"notes"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
+	// VIX previous regular-session close (tick 9) and the day's percent
+	// change. Populated when the same subscribe that delivered VIX also
+	// surfaced tick 9 — pre-open this is typically the only useful daily
+	// anchor since VIX itself doesn't trade. Both fields nil when the
+	// gateway delivered no close tick within the budget.
+	VIXPrevClose *float64 `json:"vix_prev_close,omitempty"`
+	VIXChangePct *float64 `json:"vix_change_pct,omitempty"` // (vix − prev_close) / prev_close × 100
 	// Per-scalar provenance. Each *Quality is nil when the corresponding
 	// value pointer is nil; otherwise the daemon populates it at the
 	// fetch site so renderers can show "firm live", "frozen", or
@@ -681,11 +688,18 @@ type RegimeVIXTerm struct {
 // "hyg_50dma") that didn't land — both are best-effort and don't
 // downgrade the row's primary status.
 type RegimeHYGSPYDivergence struct {
-	Status        string   `json:"status"`
-	HYGPrice      *float64 `json:"hyg_price"`
-	HYG50DMA      *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
-	SPYPrice      *float64 `json:"spy_price"`
-	SPY52WHigh    *float64 `json:"spy_52w_high"`
+	Status     string   `json:"status"`
+	HYGPrice   *float64 `json:"hyg_price"`
+	HYG50DMA   *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
+	SPYPrice   *float64 `json:"spy_price"`
+	SPY52WHigh *float64 `json:"spy_52w_high"`
+	// SPY previous regular-session close (tick 9) plus the day's dollar
+	// and percent change. Populated when the SPY subscribe also surfaced
+	// tick 9 (the gateway emits it automatically alongside the price
+	// triple). All three nil when no close tick landed in the budget.
+	SPYPrevClose  *float64 `json:"spy_prev_close,omitempty"`
+	SPYChange     *float64 `json:"spy_change,omitempty"`     // last − prev_close (dollars)
+	SPYChangePct  *float64 `json:"spy_change_pct,omitempty"` // (last − prev_close) / prev_close × 100
 	HYGDataType   string   `json:"hyg_data_type,omitempty"`
 	Notes         string   `json:"notes"`
 	ErrorMessage  string   `json:"error_message,omitempty"`

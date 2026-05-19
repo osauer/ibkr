@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.7 — 2026-05-19 16:28 CEST
+
+Adds a price-context headline to `ibkr regime`. The dashboard now opens
+with SPY's spot price + day's dollar and percent change, and VIX's
+spot + percent change, both color-coded — so the reader sees the two
+anchors every other indicator is interpreted against before they
+scan the row table.
+
+### Added
+
+- **SPY + VIX headline above the indicator rows.** Format:
+  `SPY 530.42  +1.20  (+0.23%)    VIX 14.50  (−2.10%)`. SPY change is
+  green on up, red on down (long-SPY default). VIX change is colored
+  inverted — red on up (vol expanding = risk-off), green on down. Both
+  halves render independently: a missing prev-close anchor falls back
+  to a dim `(—)` placeholder rather than fabricating zero.
+
+- **`RegimeVIXTerm.VIXPrevClose` + `VIXChangePct`** and
+  **`RegimeHYGSPYDivergence.SPYPrevClose` + `SPYChange` + `SPYChangePct`**
+  on the wire. Populated from tick 9 (previous regular-session close)
+  which the gateway already emits alongside the existing subscribes —
+  no extra round trips. The VIX anchor survives a VIX3M failure so the
+  header is useful even when the term-structure leg drops.
+
+### Changed
+
+- **`briefSnapshotPriceWith52WHigh` now also returns `prevClose`.** One
+  caller (the regime production deps wiring) — signature widened. New
+  helper `briefSnapshotPriceWithClose` for VIX's path. The legacy
+  `briefSnapshotPrice` is unchanged so other callers (chain, scan
+  enrichment) keep their existing shape.
+
+- **`regimeDeps.snapshot` / `snapshotWith52WHigh` carry `prevClose`.**
+  Plumbed through the test fixtures (`fakeQuote.prevClose`,
+  `fakeRichQuote.prevClose`); existing tests don't set the field and
+  continue to pass with `nil` headline anchors.
+
 ## v0.27.6 — 2026-05-19 16:04 CEST
 
 Fixes the production bug behind the v0.27.5 cut: a second `ibkr regime`

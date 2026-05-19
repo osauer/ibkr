@@ -34,12 +34,14 @@ type fakeDeps struct {
 }
 
 type fakeQuote struct {
-	price    float64
-	dataType string
+	price     float64
+	prevClose float64 // tick 9 (previous regular-session close); 0 = "didn't arrive"
+	dataType  string
 }
 
 type fakeRichQuote struct {
 	price      float64
+	prevClose  float64 // tick 9 (previous regular-session close); 0 = "didn't arrive"
 	week52High float64
 	dataType   string
 }
@@ -51,13 +53,13 @@ type fakeHistory struct {
 
 func (f *fakeDeps) build() *regimeDeps {
 	return &regimeDeps{
-		snapshot: func(_ context.Context, sym string, _ time.Duration) (float64, string) {
+		snapshot: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
 			q := f.snapshots[sym]
-			return q.price, q.dataType
+			return q.price, q.prevClose, q.dataType
 		},
-		snapshotWith52WHigh: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
+		snapshotWith52WHigh: func(_ context.Context, sym string, _ time.Duration) (float64, float64, float64, string) {
 			r := f.rich[sym]
-			return r.price, r.week52High, r.dataType
+			return r.price, r.prevClose, r.week52High, r.dataType
 		},
 		history: func(_ context.Context, sym string, _ int) ([]ibkrlib.HistoricalBar, error) {
 			h := f.bars[sym]
@@ -168,6 +170,49 @@ func TestFetchRegimeVIXTerm(t *testing.T) {
 			t.Errorf("data_type=%q, want %q (staler leg wins)", got.DataType, rpc.MarketDataFrozen)
 		}
 	})
+
+	// Day-change anchor: when tick 9 lands alongside VIX, the fetcher
+	// computes VIXChangePct as ((vix - prev) / prev) * 100. Dashboard
+	// header reads this to color-code the VIX cell (red on up, green on
+	// down — vol expanding is risk-off).
+	t.Run("vix_prev_close_populates_change_pct", func(t *testing.T) {
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"VIX":   {price: 18.0, prevClose: 20.0, dataType: rpc.MarketDataLive},
+				"VIX3M": {price: 21.0, dataType: rpc.MarketDataLive},
+			},
+		}).build()
+		got := fetchRegimeVIXTerm(ctx, deps)
+		if got.VIXPrevClose == nil || *got.VIXPrevClose != 20.0 {
+			t.Fatalf("VIXPrevClose=%v, want 20.0", got.VIXPrevClose)
+		}
+		// (18 - 20) / 20 * 100 = -10
+		if got.VIXChangePct == nil || *got.VIXChangePct < -10.01 || *got.VIXChangePct > -9.99 {
+			t.Errorf("VIXChangePct=%v, want ≈-10", got.VIXChangePct)
+		}
+	})
+
+	// The dashboard header is useful even when VIX3M fails — partial
+	// envelope must still surface the VIX day-change anchor so the
+	// reader sees "VIX 18.4 −10.0%" even with no term-structure ratio.
+	t.Run("vix_prev_close_survives_vix3m_failure", func(t *testing.T) {
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"VIX": {price: 18.0, prevClose: 20.0, dataType: rpc.MarketDataLive},
+				// VIX3M absent
+			},
+		}).build()
+		got := fetchRegimeVIXTerm(ctx, deps)
+		if got.Status != rpc.RegimeStatusError {
+			t.Fatalf("status=%q, want error", got.Status)
+		}
+		if got.VIXPrevClose == nil || *got.VIXPrevClose != 20.0 {
+			t.Errorf("VIXPrevClose=%v, want 20.0 (header anchor must survive partial-error row)", got.VIXPrevClose)
+		}
+		if got.VIXChangePct == nil {
+			t.Errorf("VIXChangePct must populate even when ratio leg fails")
+		}
+	})
 }
 
 func TestFetchRegimeHYGSPY(t *testing.T) {
@@ -197,6 +242,35 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		}
 		if len(got.FieldsMissing) != 0 {
 			t.Errorf("fields_missing=%v, want empty", got.FieldsMissing)
+		}
+	})
+
+	// Day-change anchor: when tick 9 lands alongside SPY's price triple,
+	// the fetcher derives both the dollar and percent change. Dashboard
+	// header reads these to render "SPY 530.00 +5.00 (+0.95%)" above the
+	// indicator rows.
+	t.Run("spy_prev_close_populates_change_and_pct", func(t *testing.T) {
+		deps := (&fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, prevClose: 525.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+			},
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPYPrevClose == nil || *got.SPYPrevClose != 525.0 {
+			t.Fatalf("SPYPrevClose=%v, want 525.0", got.SPYPrevClose)
+		}
+		if got.SPYChange == nil || *got.SPYChange < 4.99 || *got.SPYChange > 5.01 {
+			t.Errorf("SPYChange=%v, want 5.00", got.SPYChange)
+		}
+		// (530 - 525) / 525 * 100 ≈ 0.9524
+		if got.SPYChangePct == nil || *got.SPYChangePct < 0.95 || *got.SPYChangePct > 0.96 {
+			t.Errorf("SPYChangePct=%v, want ≈0.95", got.SPYChangePct)
 		}
 	})
 

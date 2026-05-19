@@ -218,6 +218,93 @@ func TestRenderRegime_DefaultOmitsNotesHasHint(t *testing.T) {
 	}
 }
 
+// ----- SPY + VIX headline above the indicator rows -----
+
+// TestRenderRegime_HeadlineShowsSPYAndVIX pins the headline contract:
+// when both SPY and VIX carry their prev-close anchors, the dashboard
+// surfaces "SPY <price> <±$> (<±%>)    VIX <price> (<±%>)" above the
+// verdict line. The line never invents numbers — a missing prev close
+// shows the price with a dim "(—)" placeholder.
+func TestRenderRegime_HeadlineShowsSPYAndVIX(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	spyPrev := 736.14
+	spyChg := *fix.HYGSPYDivergence.SPYPrice - spyPrev
+	spyPct := spyChg / spyPrev * 100
+	fix.HYGSPYDivergence.SPYPrevClose = &spyPrev
+	fix.HYGSPYDivergence.SPYChange = &spyChg
+	fix.HYGSPYDivergence.SPYChangePct = &spyPct
+	vixPrev := 18.85
+	vixPct := (*fix.VIXTermStructure.VIX - vixPrev) / vixPrev * 100
+	fix.VIXTermStructure.VIXPrevClose = &vixPrev
+	fix.VIXTermStructure.VIXChangePct = &vixPct
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeText(env, fix); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	// SPY half: price + signed dollar change + parenthesised signed %.
+	for _, want := range []string{"SPY 737.34", "+1.20", "+0.16%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("headline missing %q:\n%s", want, out)
+		}
+	}
+	// VIX half: price + parenthesised signed %. Unicode minus on a
+	// negative change.
+	for _, want := range []string{"VIX 18.43", "−2.23%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("headline missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderRegime_HeadlineDimsWhenPrevCloseMissing pins the honest-
+// fallback contract: the headline still surfaces the spot price when
+// the prev-close anchor didn't land, but the change cell is dim "(—)"
+// rather than a fabricated zero.
+func TestRenderRegime_HeadlineDimsWhenPrevCloseMissing(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	// Leave SPYPrevClose / SPYChange / SPYChangePct nil; VIXPrevClose /
+	// VIXChangePct nil too. The fixture's SPYPrice + VIX should still
+	// surface.
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderRegimeText(env, fix)
+	out := stdout.String()
+	if !strings.Contains(out, "SPY 737.34") || !strings.Contains(out, "VIX 18.43") {
+		t.Errorf("headline must surface spot even without prev-close:\n%s", out)
+	}
+	// Two dim "(—)" placeholders — one per missing change leg.
+	if got := strings.Count(out, "(—)"); got < 2 {
+		t.Errorf("expected 2+ dim (—) placeholders, got %d:\n%s", got, out)
+	}
+}
+
+// TestSignedFloat pins the signed-formatter helper: positive numbers
+// carry "+", negatives carry the Unicode minus (U+2212) so the visual
+// width matches the plus sign and column alignment stays clean.
+func TestSignedFloat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		v    float64
+		dec  int
+		want string
+	}{
+		{1.20, 2, "+1.20"},
+		{-1.20, 2, "−1.20"},
+		{0, 2, "+0.00"},
+		{-0.01, 2, "−0.01"},
+	}
+	for _, tc := range cases {
+		if got := signedFloat(tc.v, tc.dec); got != tc.want {
+			t.Errorf("signedFloat(%v, %d) = %q, want %q", tc.v, tc.dec, got, tc.want)
+		}
+	}
+}
+
 // ----- composite-table verdict mapping (spec table, lines 109-115) -----
 
 func TestRegimeComposite_VerdictTable(t *testing.T) {

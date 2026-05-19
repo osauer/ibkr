@@ -1815,6 +1815,40 @@ func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string
 	}
 }
 
+// briefSnapshotPriceWithClose wraps briefSnapshotFull and returns the
+// price (last → mid → bid → ask → mark → close), the previous regular-
+// session close (tick 9), and the gateway data-type. Same price-fallback
+// ladder as briefSnapshotPrice — adds the close as a separate return so
+// renderers can show day-over-day change without a second subscribe.
+//
+// Used by the regime VIX fetcher so the dashboard header can carry
+// "VIX 18.4 −1.2%" alongside the term-structure ratio. Distinct from
+// briefSnapshotClose (which returns *only* the close and is the right
+// shape for daily-change consumers that don't need a live price).
+func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose float64, dataType string) {
+	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
+	if dt == "" {
+		dt = "live"
+	}
+	switch {
+	case last > 0:
+		price = last
+	case bid > 0 && ask > 0:
+		price = (bid + ask) / 2
+	case bid > 0:
+		price = bid
+	case ask > 0:
+		price = ask
+	case mark > 0:
+		price = mark
+	case closePx > 0:
+		price = closePx
+	default:
+		return 0, 0, ""
+	}
+	return price, closePx, dt
+}
+
 // briefSnapshotPriceWith52WHigh subscribes to a symbol with generic
 // tick 165 (Misc Stats) and waits for both the price triple AND the
 // Week52High field to land before returning. Either field may still
@@ -1832,11 +1866,14 @@ func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string
 // double the gateway-slot footprint and add a second
 // contract-resolution round-trip; one combined call is cheaper.
 //
-// Returns (price, week52High, dataType). Price uses the same
-// last→mid→bid→ask priority as briefSnapshotPrice.
-func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price float64, week52High float64, dataType string) {
+// Returns (price, prevClose, week52High, dataType). Price uses the same
+// last→mid→bid→ask priority as briefSnapshotPrice. PrevClose carries
+// tick 9 (previous regular-session close) when it lands in the same
+// subscribe window — the regime HYG/SPY indicator uses it to populate
+// the dashboard's SPY day-change header.
+func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose, week52High float64, dataType string) {
 	if c == nil {
-		return 0, 0, ""
+		return 0, 0, 0, ""
 	}
 	sym := normSym(symbol)
 	// 165 (Misc Stats) is the only addition over briefSnapshotFull's
@@ -1855,6 +1892,9 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 		}
 		if d.Last > 0 {
 			last = d.Last
+		}
+		if d.Close > 0 {
+			prevClose = d.Close
 		}
 		if d.Week52High > 0 {
 			week52High = d.Week52High
@@ -1883,7 +1923,7 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 	case ask > 0:
 		price = ask
 	}
-	return price, week52High, dataType
+	return price, prevClose, week52High, dataType
 }
 
 // briefSnapshotFull subscribes to a symbol, polls until a live tick

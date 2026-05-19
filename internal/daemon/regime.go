@@ -175,8 +175,14 @@ func runRegimeFanout(
 // handlers (handleGammaZeroSPX, handleBreadthSPX); they don't need a
 // deps struct because they already have a server-level seam.
 type regimeDeps struct {
-	snapshot            func(ctx context.Context, sym string, timeout time.Duration) (price float64, dataType string)
-	snapshotWith52WHigh func(ctx context.Context, sym string, timeout time.Duration) (price float64, week52High float64, dataType string)
+	// snapshot returns price + previous regular-session close (tick 9) +
+	// gateway data-type. PrevClose is the same anchor tick 9 emits
+	// alongside the price triple — surfacing it here lets the dashboard
+	// header carry day-over-day change for SPY and VIX without a second
+	// subscribe. PrevClose is 0 when the gateway didn't deliver tick 9 in
+	// the budget; callers must distinguish "not arrived" from "zero".
+	snapshot            func(ctx context.Context, sym string, timeout time.Duration) (price, prevClose float64, dataType string)
+	snapshotWith52WHigh func(ctx context.Context, sym string, timeout time.Duration) (price, prevClose, week52High float64, dataType string)
 	// history takes ctx instead of an explicit timeout so cancellation
 	// from handleRegimeSnapshot's outer deadline propagates into the
 	// HMDS fetch. The fetcher wraps each call in context.WithTimeout
@@ -192,10 +198,10 @@ type regimeDeps struct {
 // values instead.
 func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any)) *regimeDeps {
 	return &regimeDeps{
-		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, string) {
-			return briefSnapshotPrice(ctx, c, sym, timeout)
+		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
+			return briefSnapshotPriceWithClose(ctx, c, sym, timeout)
 		},
-		snapshotWith52WHigh: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
+		snapshotWith52WHigh: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, float64, string) {
 			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
 		},
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
@@ -222,7 +228,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	// regular-session close (tick 9) so the ratio still ranks. The
 	// data-type field honestly reports "frozen" in that case so the
 	// renderer dims the row instead of pretending it's live.
-	vix, vixDT := deps.snapshot(ctx, "VIX", 5*time.Second)
+	vix, vixPrev, vixDT := deps.snapshot(ctx, "VIX", 5*time.Second)
 	if vix <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "VIX: no spot tick"
@@ -233,7 +239,15 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	// the VIX leg to push the close tick, and 5 s reliably lost it on
 	// cold-frozen-mode calls even with a warm contract cache. 8 s
 	// matches the SPY 52w-high budget for the same reason.
-	vix3m, vix3mDT := deps.snapshot(ctx, "VIX3M", 8*time.Second)
+	vix3m, _, vix3mDT := deps.snapshot(ctx, "VIX3M", 8*time.Second)
+	// Populate the VIX day-change anchor as soon as the close lands —
+	// independent of whether VIX3M arrives. The dashboard header is
+	// useful even when the ratio leg fails.
+	if vixPrev > 0 {
+		out.VIXPrevClose = new(vixPrev)
+		chg := (vix - vixPrev) / vixPrev * 100
+		out.VIXChangePct = &chg
+	}
 	if vix3m <= 0 {
 		// One arm of the pair is enough to be informative, but the
 		// ratio cannot be computed; surface VIX alone with an
@@ -272,7 +286,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	out := rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes}
 	now := time.Now()
 
-	hyg, hygDT := deps.snapshot(ctx, "HYG", 5*time.Second)
+	hyg, _, hygDT := deps.snapshot(ctx, "HYG", 5*time.Second)
 	if hyg <= 0 {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "HYG: no spot tick"
@@ -289,10 +303,21 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// surfaces what it had. 8s budget (vs 5s for plain snapshots)
 	// because the Misc-Stats tick reliably arrives later than the
 	// price triple in observed traces.
-	spy, spy52, spyDT := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
+	spy, spyPrev, spy52, spyDT := deps.snapshotWith52WHigh(ctx, "SPY", 8*time.Second)
 	if spy > 0 {
 		out.SPYPrice = new(spy)
 		out.SPYQuality = firmTickQuality(now, spyDT, "SPY tick")
+	}
+	// SPY day-change anchor: same tick-9 close the subscribe captures
+	// alongside the price triple. Surfaces to the dashboard header so
+	// the reader sees "SPY 530.42 +1.20 (+0.23%)" at the top without a
+	// separate quote call.
+	if spy > 0 && spyPrev > 0 {
+		out.SPYPrevClose = new(spyPrev)
+		diff := spy - spyPrev
+		out.SPYChange = &diff
+		pct := diff / spyPrev * 100
+		out.SPYChangePct = &pct
 	}
 	if spy52 > 0 {
 		out.SPY52WHigh = new(spy52)
@@ -387,7 +412,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	// either the gateway has no FX entitlement for this account or
 	// there's no frozen tick to fall back on; either way, surface as
 	// unavailable rather than faking a value.
-	last, dt := deps.snapshot(ctx, "USD.JPY", 5*time.Second)
+	last, _, dt := deps.snapshot(ctx, "USD.JPY", 5*time.Second)
 	if last <= 0 {
 		out.Status = rpc.RegimeStatusUnavailable
 		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"
