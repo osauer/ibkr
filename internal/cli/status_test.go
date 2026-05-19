@@ -12,6 +12,59 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
+// TestRenderStatus_BackgroundLine pins the v0.27.4 behaviour: the
+// `Background:` line appears iff `result.BackgroundTasks` is non-empty,
+// and the names render comma-separated. Empty list omits the line
+// entirely so an idle daemon's status display stays compact.
+func TestRenderStatus_BackgroundLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		tasks   []rpc.BackgroundTaskStatus
+		want    string // substring that MUST appear
+		notWant string // substring that MUST NOT appear
+	}{
+		{
+			name:    "idle daemon omits line",
+			tasks:   nil,
+			notWant: "Background:",
+		},
+		{
+			name:  "single task",
+			tasks: []rpc.BackgroundTaskStatus{{Name: "breadth-spx"}},
+			want:  "Background:     breadth-spx",
+		},
+		{
+			name: "multiple tasks render comma-separated",
+			tasks: []rpc.BackgroundTaskStatus{
+				{Name: "breadth-spx"},
+				{Name: "gamma-zero"},
+			},
+			want: "Background:     breadth-spx, gamma-zero",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			res := &rpc.HealthResult{
+				DaemonVersion:   "test",
+				Connected:       true,
+				ServerVersion:   200,
+				BackgroundTasks: tc.tasks,
+			}
+			renderStatusText(env, res)
+			got := stdout.String()
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("status missing expected substring %q:\n%s", tc.want, got)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("status contained unexpected substring %q:\n%s", tc.notWant, got)
+			}
+		})
+	}
+}
+
 func TestIsHandshakeInFlight(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

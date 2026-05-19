@@ -200,6 +200,34 @@ if [[ "$daemon_version" != "$EXPECTED" ]]; then
     echo "(autospawn picked up an unexpected binary — check \$PATH and bin/ibkr)" >&2
     exit 1
 fi
+# v0.27.4 wire contract: background_tasks is always emitted (possibly
+# empty) so consumers can rely on `len() == 0` to mean "daemon idle".
+# Absent or non-list here would break MCP/CLI consumers that read it
+# without nil-checking. Each entry, when present, must have a string
+# name. We don't assert on which tasks are running — that depends on
+# whether the autospawned daemon is past postConnectSetup yet — only
+# on the shape.
+bg_check="$(printf '%s' "$status_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+tasks = d.get("background_tasks", None)
+if tasks is None:
+    print("background_tasks missing — must be emitted (even when empty)")
+    sys.exit(0)
+if not isinstance(tasks, list):
+    print("background_tasks=" + repr(tasks) + ", want list")
+    sys.exit(0)
+for t in tasks:
+    if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+        print("background_tasks entry malformed: " + repr(t))
+        sys.exit(0)
+print("ok (" + str(len(tasks)) + " task(s))")
+')"
+if [[ "$bg_check" != ok* ]]; then
+    echo "release-verify: FAIL: status.background_tasks: $bg_check" >&2
+    echo "$status_json" >&2
+    exit 1
+fi
 
 # 3 — account: pins the account-summary handler and the v0.15+ omitempty
 # behaviour on data_type. Account financials are always available

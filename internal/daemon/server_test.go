@@ -526,6 +526,102 @@ func TestRunIdleWatcherDefersShutdownWhileBreadthRefreshing(t *testing.T) {
 	}
 }
 
+// TestIsBusyIncludesGammaCompute pins v0.27.4: the idle-watcher's busy
+// predicate must observe gamma compute as well as breadth refresh. At
+// v0.27.3 only breadth was checked; gamma is faster than the 5-min
+// idle window in practice so the gap never bit in observable usage,
+// but the architectural hole is the same shape — a long-running
+// daemon-internal task can outlive the CLI invocation that triggered
+// it, and the watcher must defer shutdown for ALL such tasks.
+func TestIsBusyIncludesGammaCompute(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		zeroGamma: newGammaZeroCache(),
+	}
+	if srv.isBusy() {
+		t.Error("isBusy() should be false with no gamma compute in flight")
+	}
+	// Inject a synthetic in-flight computation: open `done` channel
+	// means isDone() returns false, which means IsComputing() returns
+	// true. No real gateway / fan-out needed.
+	srv.zeroGamma.current = &gammaComputation{
+		sessionKey: "2026-05-19",
+		startedAt:  time.Now(),
+		done:       make(chan struct{}),
+	}
+	if !srv.isBusy() {
+		t.Error("isBusy() should be true with gamma compute in flight (regression: gamma was not in isBusy() at v0.27.3)")
+	}
+}
+
+// TestHandleStatusHealthReportsBackgroundTasks pins v0.27.4: the
+// HealthResult.BackgroundTasks list reflects daemon-internal long-
+// running computes and is always emitted (possibly empty) so consumers
+// can rely on `len() == 0` for idle without inferring from absence.
+func TestHandleStatusHealthReportsBackgroundTasks(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger:    NewLogger(&bytes.Buffer{}, "error"),
+		version:   "test",
+		startedAt: time.Now(),
+		zeroGamma: newGammaZeroCache(),
+	}
+
+	// Idle daemon → empty but non-nil list. The non-nil contract
+	// matters because JSON consumers must be able to do
+	// `len(background_tasks) == 0` without dereferencing nil.
+	res := srv.handleStatusHealth()
+	if res.BackgroundTasks == nil {
+		t.Error("BackgroundTasks must be non-nil even when empty")
+	}
+	if len(res.BackgroundTasks) != 0 {
+		t.Errorf("BackgroundTasks should be empty when idle, got %+v", res.BackgroundTasks)
+	}
+
+	// Gamma compute in flight → one entry.
+	srv.zeroGamma.current = &gammaComputation{
+		sessionKey: "2026-05-19",
+		startedAt:  time.Now(),
+		done:       make(chan struct{}),
+	}
+	res = srv.handleStatusHealth()
+	if len(res.BackgroundTasks) != 1 || res.BackgroundTasks[0].Name != "gamma-zero" {
+		t.Errorf("BackgroundTasks should list gamma-zero only, got %+v", res.BackgroundTasks)
+	}
+
+	// Breadth refresh in flight alongside gamma → both listed, in
+	// the documented stable order (breadth first, gamma second).
+	fakeFetcher := &spx.FakeBarFetcher{
+		Bars:    map[string][]spx.Bar{"AAA": {{Date: "2026-05-18", Close: 100}}},
+		Latency: 500 * time.Millisecond,
+	}
+	srv.breadth = spx.New(spx.NewStore(t.TempDir()), fakeFetcher, spx.Options{Workers: 1024})
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		_ = srv.breadth.Refresh(context.Background())
+	}()
+	// Wait for the refresh to be observably in flight before snapping
+	// the health envelope.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !srv.breadth.IsRefreshing() {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !srv.breadth.IsRefreshing() {
+		t.Fatal("breadth refresh never reported IsRefreshing — test setup is broken")
+	}
+
+	res = srv.handleStatusHealth()
+	if len(res.BackgroundTasks) != 2 {
+		t.Fatalf("BackgroundTasks should list both tasks, got %+v", res.BackgroundTasks)
+	}
+	if res.BackgroundTasks[0].Name != "breadth-spx" || res.BackgroundTasks[1].Name != "gamma-zero" {
+		t.Errorf("BackgroundTasks order: want [breadth-spx, gamma-zero], got %+v", res.BackgroundTasks)
+	}
+
+	<-refreshDone
+}
+
 // closeListener must be idempotent and safe to call when the listener was
 // never opened (loser of the lock race) or has already been closed by an
 // idle-shutdown path.

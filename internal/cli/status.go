@@ -113,6 +113,17 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log"))
 	}
+	// Surface daemon-internal long-running work the user can't see
+	// from the CLI otherwise. Empty list → omit the line entirely
+	// (idle is the common case; one line is enough). Names render
+	// comma-separated to keep the status display compact.
+	if len(res.BackgroundTasks) > 0 {
+		names := make([]string, 0, len(res.BackgroundTasks))
+		for _, t := range res.BackgroundTasks {
+			names = append(names, t.Name)
+		}
+		fmt.Fprintf(out, "  Background:     %s\n", strings.Join(names, ", "))
+	}
 	fmt.Fprintln(out)
 }
 

@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.4 — 2026-05-19 09:31 CEST
+
+Applies the pattern from v0.27.3's wire-state fix codebase-wide. The
+v0.27.3 review surfaced that gamma compute had the same shape as the
+breadth idle-timeout issue (a daemon-internal task running while no
+client is connected) — fixed defensively here. Also adds an external
+visibility surface for daemon-internal work, so a user running `ibkr
+status` against an autospawned daemon can see what it's actually
+doing.
+
+### Added
+
+- **`HealthResult.BackgroundTasks`** — typed list of daemon-internal
+  long-running computes that are running RIGHT NOW. Presence in the
+  list is the state ("this task is running"); idle/ready/cold tasks
+  are omitted entirely. Always emitted as a (possibly empty) slice
+  so consumers can rely on `len(background_tasks) == 0` for "idle"
+  without inferring from absence. Current values:
+  - `breadth-spx` — the SPX 50-DMA breadth engine is running a
+    refresh (cold-start bootstrap or daily post-close refresh).
+  - `gamma-zero` — the SPX zero-gamma compute is fanning out across
+    option legs.
+
+- **`ibkr status` shows a `Background:` line** when any task is
+  running, comma-separated by name. Compact (single line, no ETA
+  noise) so an idle daemon's status display is unchanged. Pinned by
+  `TestRenderStatus_BackgroundLine`.
+
+- **`gammaZeroCache.IsComputing()`** — public accessor mirroring
+  `breadth.IsRefreshing()`. Used by both `isBusy()` and the status
+  handler so the two surfaces stay coherent.
+
+### Changed
+
+- **`s.isBusy()` now defers idle shutdown for gamma compute too.**
+  v0.27.2 added the predicate but only checked breadth. Gamma
+  compute is faster than the 5-min idle window in practice (~1–2
+  min), so the gap never bit in observable usage, but the
+  architectural hole is the same shape as breadth's: a long-running
+  daemon-internal task can outlive the CLI invocation that triggered
+  it. Pinned by `TestIsBusyIncludesGammaCompute`. Future long-
+  running tasks add their own clauses here and a matching entry in
+  `handleStatusHealth` — comment in `isBusy()` documents the
+  contract.
+
+- **`scripts/release-verify.sh` step 2** now asserts
+  `status.background_tasks` is always a list with well-formed
+  entries (string `name` per item). This is the v0.27.x pattern from
+  the verification-review skill applied to the new surface: the
+  contract is "always emitted" so consumers can rely on `len() == 0`
+  for idle; absent or non-list shape would break MCP/CLI consumers
+  that read the field without nil-checking.
+
 ## v0.27.3 — 2026-05-19 09:05 CEST
 
 After v0.27.0 → v0.27.1 → v0.27.2 each shipped a different lifecycle

@@ -1240,6 +1240,31 @@ type ScanPresetSummary struct {
 	Limit    int    `json:"limit"`
 }
 
+// BackgroundTaskStatus names a daemon-internal long-running task that
+// is currently executing. Used by `ibkr status` to surface activity
+// that would otherwise be invisible — a fresh autospawned daemon
+// mid-bootstrap looks identical to an idle one from outside. The
+// surface deliberately carries no state enum: presence in the
+// HealthResult.BackgroundTasks list IS the state ("this task is
+// running right now"). Tasks that are idle/ready/cold are omitted
+// entirely, keeping the wire payload bounded and the user-facing
+// rendering compact.
+//
+// Current task names:
+//   - "breadth-spx" — the SPX 50-DMA breadth engine is running a
+//     refresh (cold-start bootstrap or daily post-close refresh).
+//   - "gamma-zero" — the SPX zero-gamma compute is fanning out
+//     across option legs.
+//
+// Renderers should treat unknown names as informational rather than
+// errors; new background tasks added in future versions are
+// forward-compatible by design.
+type BackgroundTaskStatus struct {
+	// Name is a stable token identifying the task. Stable across
+	// daemon versions; one of the documented values above.
+	Name string `json:"name"`
+}
+
 // HealthResult is the response to MethodStatusHealth.
 //
 // PortOrigin / TLSOrigin record how the daemon arrived at the values
@@ -1264,4 +1289,10 @@ type HealthResult struct {
 	DataType      string    `json:"data_type,omitempty"`
 	ServerVersion int       `json:"server_version,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
+	// BackgroundTasks lists daemon-internal long-running computes that
+	// are running RIGHT NOW. Empty when nothing's running. Always
+	// present on the wire (never omitted) so consumers can rely on
+	// `len(result.background_tasks) == 0` to mean "idle" without
+	// inferring from absence.
+	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
 }

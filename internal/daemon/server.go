@@ -1304,15 +1304,22 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 
 // isBusy reports whether the daemon has daemon-internal background work
 // that should defer idle shutdown. Distinct from activeConns: those
-// track open client sockets, but the breadth scheduler runs its
-// cold-start fan-out and post-close refresh without any client
-// connection held open. The bootstrap takes ~60 min against IBKR's
-// historical-data pacing limit (60 reqs/10 min sliding window) —
-// orders of magnitude longer than the default 5-minute idle window,
-// so without this check the daemon shuts down mid-bootstrap and
-// the indicator never lands. Future long-running daemon tasks
-// (e.g. an eventual gamma compute that wants to outlive its
-// triggering request) extend this predicate.
+// track open client sockets, but the engine-style background tasks
+// run without any client connection held open. The bootstrap takes
+// ~60 min against IBKR's historical-data pacing limit (60 reqs/10 min
+// sliding window) and gamma compute runs ~1–2 min — both can outlive
+// a CLI invocation that triggered them.
+//
+// Each branch is gated on a typed accessor on the underlying state
+// holder. New long-running daemon tasks should add their own clause
+// here and a matching entry in handleStatusHealth so the same
+// background work is visible to `ibkr status` consumers.
 func (s *Server) isBusy() bool {
-	return s.breadth != nil && s.breadth.IsRefreshing()
+	if s.breadth != nil && s.breadth.IsRefreshing() {
+		return true
+	}
+	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
+		return true
+	}
+	return false
 }

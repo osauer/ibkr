@@ -2263,6 +2263,22 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
 	}
+
+	// BackgroundTasks lists daemon-internal long-running computes
+	// running RIGHT NOW. Presence-as-state: a task appears here iff
+	// its accessor returns busy; idle/ready/cold tasks are omitted.
+	// Always emitted as a (possibly empty) slice so consumers can
+	// rely on `len() == 0` to mean idle. Each branch mirrors the
+	// isBusy() predicate so the two surfaces stay coherent — a
+	// task that defers idle shutdown is exactly a task that shows
+	// up on status.
+	res.BackgroundTasks = []rpc.BackgroundTaskStatus{}
+	if s.breadth != nil && s.breadth.IsRefreshing() {
+		res.BackgroundTasks = append(res.BackgroundTasks, rpc.BackgroundTaskStatus{Name: "breadth-spx"})
+	}
+	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
+		res.BackgroundTasks = append(res.BackgroundTasks, rpc.BackgroundTaskStatus{Name: "gamma-zero"})
+	}
 	return res
 }
 

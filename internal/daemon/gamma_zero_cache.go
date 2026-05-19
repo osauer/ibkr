@@ -87,6 +87,19 @@ func newGammaZeroCache() *gammaZeroCache {
 	return &gammaZeroCache{}
 }
 
+// IsComputing reports whether a gamma compute is currently in flight.
+// Used by Server.isBusy() so the daemon's idle watcher doesn't shut
+// down while a multi-minute compute is still running (a fresh
+// `ibkr regime` call kicks gamma and returns immediately; the user
+// can walk away and the compute should still complete). Safe for
+// concurrent callers — read under c.mu, follows the same lock
+// discipline as kickOrJoin.
+func (c *gammaZeroCache) IsComputing() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.current != nil && !c.current.isDone()
+}
+
 // nySessionKey returns the NY-tz date string that identifies the
 // trading session a compute belongs to. Computed at every cache
 // lookup so DST transitions and timezone surprises don't poison a
