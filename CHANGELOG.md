@@ -2,6 +2,105 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.10 — 2026-05-19 20:57 CEST
+
+Hygiene release. No binary behaviour changes — this release exists to
+align the Claude Code skill, the MCP server's tool descriptions, the
+plugin manifest, the README, and the canonical risk-regime spec doc
+with the constituent-fanout breadth implementation that's been
+shipping since v0.27.3 and the SPY (not SPX) gamma compute that's
+been shipping since the liquidity-driven switch. The README's stale
+plugin install id (`ibkr@osauer-ibkr` → canonical `ibkr@ibkr`) and
+the previously-undocumented `claude plugin update` path for Claude
+for Mac users round out the user-facing fixes.
+
+The MCP description fixes are the highest-impact item: an LLM
+consuming `ibkr_breadth` or `ibkr_regime` was being told the daemon
+reads S&P DJI's S5FI index directly from IBKR's INDEX exchange. The
+implementation does the opposite — IBKR doesn't redistribute S5FI on
+retail subscriptions, so the daemon computes the same number locally
+from constituent daily closes (method token
+`constituent-fanout-50dma`). A consumer following the old description
+would have given users wrong failure-cause explanations and wrong
+recovery advice.
+
+### Fixed
+
+- **MCP tool descriptions for `ibkr_breadth` and `ibkr_regime`** now
+  match the constituent-fanout reality. The old descriptions claimed
+  "no constituent fan-out, no daemon-side SMA recomputation" and
+  that Indicator 5 returns `"unavailable"` on retail; both
+  contradicted the wire surface the daemon has been producing since
+  v0.27.3.
+
+- **Skill surfaces breadth / gamma / regime.** `skills/ibkr/SKILL.md`
+  command table, "When to use", per-command flags, Errors section
+  (computing / ready / unavailable / degraded semantics), and the
+  `allowed-tools` frontmatter now cover all three. `schemas.md`
+  documents the JSON shapes field-by-field. The three commands were
+  unreachable through the skill path previously — a Claude Code
+  session running the plugin couldn't easily reach risk-regime
+  queries, and permission prompts fired on every call.
+
+- **Plugin manifest + global allowlist** —
+  `settings/ibkr.settings.json` now includes the three
+  `Bash(ibkr breadth*) / gamma* / regime*` patterns;
+  `.claude-plugin/plugin.json` description and keywords list the
+  risk-regime dashboard, gamma, and breadth so marketplace listings
+  display the actual feature set.
+
+- **README** — "SPX dealer zero-gamma" corrected to "SPY dealer
+  zero-gamma" with the extended-hours-quoting rationale inline;
+  matching update on the regime bullet; "tool inventory mirrors the
+  CLI 1:1" softened (the parity test accepts `setup` and `version`
+  as deliberate exclusions); plugin install id corrected from
+  `ibkr@osauer-ibkr` to `ibkr@ibkr` (the marketplace's declared
+  `name` is `ibkr`, so the canonical id is plugin-name@marketplace-name
+  with both segments equal).
+
+- **`docs/specs/risk-regime-dashboard.md` Indicator 5** — rewrote to
+  describe the local 50-DMA engine, the IBKR pacing-limit cold-start
+  budget (~60 min sustained, ~6 names/min), the coverage-safety
+  degraded state, and the once-daily post-close refresh. The weekend
+  example payload now shows breadth `ok`/`ready` served from cache
+  instead of the stale `unavailable`.
+
+- **Internal docstrings (`internal/rpc/rpc.go`)** — v1 Method token
+  corrected (`constituent-fanout-50dma`, not `s5fi-direct`), removed
+  the stale "breadth always returns unavailable on retail" comment
+  on `RegimeBreadth`, clarified `BreadthSPXParams.TimeoutMs`
+  semantics (envelope-assembly budget, not cold-start fan-out).
+
+- **Preview-screenshot fixture (`cmd/_preview/main.go`)** — synthetic
+  regime fixture's breadth row now shows a ready value (61.8) with
+  the current `constituent-fanout-50dma` method token and source
+  string, so social-preview screenshots match what users actually
+  see.
+
+### Changed
+
+- **README "Claude Code" section** documents both update channels
+  separately: `install.sh` for binary releases (new MCP tool
+  descriptions are baked into the binary) and
+  `claude plugin update ibkr@ibkr` for plugin releases (new skill
+  commands, settings, hooks). An equivalent `claude plugin
+  marketplace add` + `claude plugin install` terminal form is
+  documented for Claude for Mac's embedded Claude Code pane, which
+  doesn't expose `/plugin` slash commands at all.
+
+- **`make release` no longer double-compiles `bin/ibkr`**. A new
+  `smoke-only` target runs wire-smoke against the existing binary
+  rather than triggering a rebuild that clobbered the version-
+  stamped artifact `release-verify` had just validated.
+  `SMOKE_STRICT=1` makes a missing TWS gateway a release-blocking
+  failure (silent skip is unacceptable on the release path).
+  Daemon-control helpers (`stop_existing_daemons` /
+  `kill_daemon_from_lockfile`) factored out of
+  `scripts/release-verify.sh` and `scripts/wire-smoke.sh` into a
+  shared `scripts/lib-daemon-control.sh` — the two scripts had ~40
+  lines of verbatim-duplicated daemon-control code that would have
+  drifted independently.
+
 ## v0.27.9 — 2026-05-19 17:45 CEST
 
 Fixes a second-layer regime contention bug observed in production on
