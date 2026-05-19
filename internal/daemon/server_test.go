@@ -622,6 +622,50 @@ func TestHandleStatusHealthReportsBackgroundTasks(t *testing.T) {
 	<-refreshDone
 }
 
+// TestBackgroundTasksRegistry_isBusyAndHandlerAgree pins the invariant
+// that isBusy() and handleStatusHealth.BackgroundTasks never disagree —
+// both derive from s.backgroundTasks(). Drift here was the next likely
+// "v0.27.x lifecycle bug" before the registry consolidated them.
+func TestBackgroundTasksRegistry_isBusyAndHandlerAgree(t *testing.T) {
+	t.Parallel()
+	srv := &Server{
+		logger:    NewLogger(&bytes.Buffer{}, "error"),
+		version:   "test",
+		startedAt: time.Now(),
+		zeroGamma: newGammaZeroCache(),
+	}
+
+	// 1. Idle daemon — both surfaces report idle.
+	if srv.isBusy() {
+		t.Error("idle daemon: isBusy() should be false")
+	}
+	if len(srv.handleStatusHealth().BackgroundTasks) != 0 {
+		t.Error("idle daemon: BackgroundTasks should be empty")
+	}
+
+	// 2. Inject a gamma compute. Both surfaces flip.
+	srv.zeroGamma.current = &gammaComputation{
+		sessionKey: "2026-05-19",
+		startedAt:  time.Now(),
+		done:       make(chan struct{}),
+	}
+	if !srv.isBusy() {
+		t.Error("with gamma in flight: isBusy() should be true")
+	}
+	if got := srv.handleStatusHealth().BackgroundTasks; len(got) != 1 || got[0].Name != "gamma-zero" {
+		t.Errorf("with gamma in flight: BackgroundTasks=%+v, want [gamma-zero]", got)
+	}
+
+	// 3. Mark gamma done. Both surfaces return to idle.
+	close(srv.zeroGamma.current.done)
+	if srv.isBusy() {
+		t.Error("after gamma done: isBusy() should be false")
+	}
+	if got := srv.handleStatusHealth().BackgroundTasks; len(got) != 0 {
+		t.Errorf("after gamma done: BackgroundTasks=%+v, want []", got)
+	}
+}
+
 // closeListener must be idempotent and safe to call when the listener was
 // never opened (loser of the lock race) or has already been closed by an
 // idle-shutdown path.

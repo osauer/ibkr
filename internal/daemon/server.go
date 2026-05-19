@@ -1302,24 +1302,38 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 	}
 }
 
-// isBusy reports whether the daemon has daemon-internal background work
-// that should defer idle shutdown. Distinct from activeConns: those
-// track open client sockets, but the engine-style background tasks
-// run without any client connection held open. The bootstrap takes
-// ~60 min against IBKR's historical-data pacing limit (60 reqs/10 min
-// sliding window) and gamma compute runs ~1–2 min — both can outlive
-// a CLI invocation that triggered them.
+// backgroundTasks returns the set of daemon-internal long-running
+// computes that are running RIGHT NOW. Always returns a non-nil slice
+// (possibly empty) so consumers can rely on len()==0 to mean idle.
 //
-// Each branch is gated on a typed accessor on the underlying state
-// holder. New long-running daemon tasks should add their own clause
-// here and a matching entry in handleStatusHealth so the same
-// background work is visible to `ibkr status` consumers.
-func (s *Server) isBusy() bool {
+// This is the single source of truth for "what background work is in
+// flight." Three callers ride it: isBusy() (idle-watcher gate),
+// handleStatusHealth (wire-emitted BackgroundTasks list), and the
+// regime partial-envelope path (names the contending task in the
+// ErrorMessage). Adding a new long-running task means adding one
+// clause here; the three caller surfaces stay coherent automatically.
+//
+// Distinct from activeConns: those track open client sockets, but the
+// engine-style background tasks run without any client connection held
+// open. The breadth bootstrap takes ~60 min against IBKR's historical-
+// data pacing limit (60 reqs/10 min sliding window) and gamma compute
+// runs ~1–2 min — both can outlive a CLI invocation that triggered
+// them.
+func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
+	tasks := []rpc.BackgroundTaskStatus{}
 	if s.breadth != nil && s.breadth.IsRefreshing() {
-		return true
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "breadth-spx"})
 	}
 	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
-		return true
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "gamma-zero"})
 	}
-	return false
+	return tasks
+}
+
+// isBusy reports whether the daemon has daemon-internal background work
+// that should defer idle shutdown. Derived from backgroundTasks() so
+// the idle watcher and the status surface never disagree about what's
+// running.
+func (s *Server) isBusy() bool {
+	return len(s.backgroundTasks()) > 0
 }
