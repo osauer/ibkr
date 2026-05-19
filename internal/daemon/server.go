@@ -1287,7 +1287,7 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 			s.mu.Lock()
 			active := s.activeConns
 			s.mu.Unlock()
-			if active == 0 {
+			if active == 0 && !s.isBusy() {
 				s.logger.Infof("Idle timeout reached (%s); shutting down", timeout)
 				return
 			}
@@ -1296,4 +1296,19 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 			s.mu.Unlock()
 		}
 	}
+}
+
+// isBusy reports whether the daemon has daemon-internal background work
+// that should defer idle shutdown. Distinct from activeConns: those
+// track open client sockets, but the breadth scheduler runs its
+// cold-start fan-out and post-close refresh without any client
+// connection held open. The bootstrap takes ~60 min against IBKR's
+// historical-data pacing limit (60 reqs/10 min sliding window) —
+// orders of magnitude longer than the default 5-minute idle window,
+// so without this check the daemon shuts down mid-bootstrap and
+// the indicator never lands. Future long-running daemon tasks
+// (e.g. an eventual gamma compute that wants to outlive its
+// triggering request) extend this predicate.
+func (s *Server) isBusy() bool {
+	return s.breadth != nil && s.breadth.IsRefreshing()
 }

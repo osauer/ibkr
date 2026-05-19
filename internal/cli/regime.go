@@ -610,7 +610,12 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 			row.reason = "breadth engine offline (no cached snapshot)"
 		case rpc.RegimeStatusComputing:
 			row.stateNote = "computing"
-			row.reason = "first cold-start refresh in flight (~10–15 min)"
+			// ~60 min is the IBKR-pacing-limited cold-start cost
+			// (60 historical-data requests per 10-min sliding window
+			// × 503 names ≈ 85 min in the worst case; observed ~60).
+			// Mention --foreground so the user knows how to keep the
+			// daemon alive long enough to finish.
+			row.reason = "cold-start refresh (~60 min, IBKR-paced); use 'ibkr daemon --foreground'"
 		default:
 			row.stateNote = string(r.Status)
 		}

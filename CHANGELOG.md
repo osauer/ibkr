@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.2 — 2026-05-19 08:28 CEST
+
+The third bug in the v0.27 release cycle, plus a correction to my own
+cold-start latency claims. v0.27.0 introduced the breadth engine,
+v0.27.1 fixed the cold-start race and the poison-cache; this release
+keeps the daemon alive long enough for the bootstrap to actually
+complete.
+
+### Fixed
+
+- **Idle watcher now defers shutdown while the breadth engine is
+  refreshing.** The daemon's default 5-minute idle timeout was
+  killing the cold-start bootstrap (which takes ~60 min — see the
+  correction below) any time a user autospawned the daemon and
+  walked away. A new `s.isBusy()` predicate consults
+  `breadth.IsRefreshing()`; the idle watcher resets its timer
+  instead of shutting down whenever a background refresh is in
+  flight. Pinned by `TestRunIdleWatcherDefersShutdownWhileBreadthRefreshing`.
+  The predicate is extensible to gamma later if we observe the same
+  pattern there (in practice gamma compute finishes inside the 5 min
+  idle window, so it isn't currently affected).
+
+### Changed
+
+- **Cold-start latency claims corrected from "~10–15 min" to "~60
+  min".** v0.27.0's documentation across README, CHANGELOG entry,
+  the `internal/breadth/spx/engine.go` docstring, and the regime
+  CLI's `computing` row reason all named ~10–15 min for the first
+  bootstrap. The real number is dominated by IBKR's historical-data
+  pacing limit (60 requests per 10-minute sliding window, hard cap
+  per gateway connection), so 503 constituent fetches sustain
+  ~6 names/min after the initial burst — observed cold-start in
+  this release: 8.4 fetches/min, extrapolated full bootstrap ~60 min.
+  Adding workers above the default 6 doesn't help because the
+  gateway throttles us. The regime row's `computing` reason now
+  mentions `ibkr daemon --foreground` so users know how to keep
+  the daemon alive through the bootstrap; README adds the same
+  workaround.
+
 ## v0.27.1 — 2026-05-19 06:34 CEST
 
 Two startup bugs in v0.27.0 that prevented the breadth engine from

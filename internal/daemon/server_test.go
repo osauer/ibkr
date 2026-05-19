@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/breadth/spx"
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -349,6 +350,91 @@ func TestRunIdleWatcherReturnsOnIdleFire(t *testing.T) {
 		// pass — idle watcher returned
 	case <-time.After(2 * time.Second):
 		t.Fatal("runIdleWatcher did not return within 2s of idle timer firing")
+	}
+}
+
+// runIdleWatcher must defer shutdown while s.isBusy() reports true. The
+// breadth engine's cold-start fan-out takes ~60 min (IBKR's pacing limit
+// caps us at 6 historical-data requests per minute sustained); the
+// default 5-minute idle window would otherwise kill the daemon
+// mid-bootstrap and the indicator would never land. Pinned by v0.27.2
+// — v0.27.1 shipped without this check and a fresh autospawned daemon
+// idled out at the 5-minute mark, ~55 minutes before the bootstrap
+// could complete.
+func TestRunIdleWatcherDefersShutdownWhileBreadthRefreshing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Resolved{}
+	cfg.Daemon.SetIdleTimeout(40 * time.Millisecond)
+
+	// Build a real spx.Engine wired to a fake fetcher whose latency
+	// keeps Refresh() in flight long enough to observe the
+	// idle-deferral. 400 ms is comfortably above the watcher's
+	// 40 ms tick period — the test asserts the watcher reset its
+	// timer instead of returning. Workers is set high so the full
+	// 503-name baked-in fan-out completes in one parallel batch
+	// (~400 ms wall time, not 503 × 400 ms / 6).
+	fetcher := &spx.FakeBarFetcher{
+		Bars:    map[string][]spx.Bar{"AAA": {{Date: "2026-05-18", Close: 100}}},
+		Latency: 400 * time.Millisecond,
+	}
+	engine := spx.New(spx.NewStore(t.TempDir()), fetcher, spx.Options{Workers: 1024})
+
+	// Kick Refresh in the background so IsRefreshing() returns true
+	// for ~250 ms while the watcher's idle timer fires.
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		_ = engine.Refresh(context.Background())
+	}()
+	// Give Refresh a moment to acquire refreshMu and set
+	// e.refreshing = true. Without this, the watcher's first tick
+	// could fire before the refresh is observably in flight.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !engine.IsRefreshing() {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !engine.IsRefreshing() {
+		t.Fatal("engine.IsRefreshing() never became true; test setup is broken")
+	}
+
+	srv := &Server{
+		cfg:      cfg,
+		streams:  map[string]context.CancelFunc{},
+		idleStop: make(chan struct{}),
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+		breadth:  engine,
+	}
+	if !srv.isBusy() {
+		t.Fatal("srv.isBusy() should be true while the engine refresh is in flight")
+	}
+
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		srv.runIdleWatcher(context.Background())
+	}()
+
+	// During the busy window (Refresh still running), the watcher
+	// must NOT return. Wait long enough for at least two idle-timer
+	// firings (40 ms × 2 = 80 ms), well inside the 250 ms refresh
+	// latency.
+	select {
+	case <-watcherDone:
+		t.Fatal("runIdleWatcher returned while breadth refresh was in flight")
+	case <-time.After(120 * time.Millisecond):
+		// good — watcher is still ticking, deferring shutdown
+	}
+
+	// Once the refresh finishes (and IsRefreshing flips false), the
+	// next idle-timer tick should observe isBusy()==false and return.
+	<-refreshDone
+	select {
+	case <-watcherDone:
+		// good — watcher returned promptly after the busy condition
+		// cleared
+	case <-time.After(2 * time.Second):
+		t.Fatal("runIdleWatcher did not return within 2 s after the busy condition cleared")
 	}
 }
 
