@@ -10,6 +10,78 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.27.12 — 2026-05-20 10:33 CEST
+
+### What's new
+
+- `ibkr breadth` now populates on the first refresh after a fresh
+  install — previously its on-disk cache could fail to converge,
+  leaving every call cold for the daemon's lifetime. Berkshire B,
+  Brown-Forman B, and Eversource Energy in particular were silently
+  dropped from the S&P 500 breadth compute; they're now included.
+- Daemon restarts no longer pay the full IBKR contract-lookup
+  rate-limit cost: known stocks are loaded from a local cache and
+  re-resolved only when the S&P 500 list itself has changed.
+- Nothing to reinstall or reconfigure. CLI and MCP surfaces are
+  unchanged.
+
+### Added
+
+- Persistent contract cache at `~/.cache/ibkr/contracts.json` — the
+  daemon saves resolved IBKR contract identities on every successful
+  lookup and reloads them at startup. The S&P 500 membership is
+  hashed into the file so a reconstitution between runs prunes stale
+  members at load while keeping the rest of the cache useful.
+- Dedicated bulk-historical IBKR client (configurable via
+  `gateway.breadth_client_id`, defaults to a second client ID) so
+  the breadth refresh's ~500-name fan-out runs against its own
+  rate-limit budget and no longer competes with interactive commands
+  and the gamma compute for the primary connection's slots.
+
+### Changed
+
+- The breadth refresh now persists per-symbol daily-bar windows on
+  every pass, including passes that didn't reach the 80% coverage
+  threshold. Earlier behaviour discarded partial progress; now each
+  refresh builds on the last, and a below-threshold pass schedules
+  a retry within ~12 min instead of waiting until the next 16:35 ET
+  tick. Combined with the cache above, cold-start convergence drops
+  from "never" (under IBKR's per-account contract-lookup cap) to
+  roughly one bootstrap pass + one retry.
+- IBKR symbols with the S&P dual-class dot convention (e.g. `BRK.B`,
+  `BF.B`) are translated to IBKR's wire form (`BRK B`, `BF B`) for
+  every contract request, so the breadth compute includes them
+  instead of failing them as "no security definition". The
+  translation runs on a regex pattern so future dual-class additions
+  to the S&P 500 work without a code change.
+
+### Fixed
+
+- Historical-data requests no longer fail with `request timeout
+  after 30s` when many are in flight at once: the rate limiter's
+  outer timeout is now type-aware so historical requests get a
+  budget consistent with IBKR's documented 60-per-10-minute pacing.
+- Slow historical token waits no longer head-of-line-block unrelated
+  requests (contract-detail lookups, market-data subscribes) queued
+  behind them. Each rate-limited request is now dispatched to its
+  own goroutine; concurrency is bounded by the rate-limit primitives
+  themselves.
+- Ticker `ES` (Eversource Energy) is no longer misclassified as the
+  E-mini S&P futures contract — that case was dead code that broke
+  the Eversource stock for breadth without ever benefiting any
+  futures caller.
+
+### Engineering notes
+
+Closes a long-standing convergence failure in the constituent-fanout
+breadth compute: prior to this release `~/.cache/ibkr/breadth-spx/`
+could remain empty indefinitely because every refresh started cold,
+exhausted IBKR's per-account contract-detail bucket on the first
+~50 names, and never persisted partial progress. Verified live
+against TWS on 2026-05-20: first refresh after the fix landed
+converged at 455/503 coverage (90.5%) and produced a stable
+`ibkr breadth` reading.
+
 ## v0.27.11 — 2026-05-20 05:48 CEST
 
 ### What's new
