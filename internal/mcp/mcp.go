@@ -79,6 +79,15 @@ func (s *Server) SetDialer(d func() (*dial.Conn, error)) {
 // ctx is cancelled. Returns nil on clean shutdown. Active resource
 // subscriptions are cancelled before return so per-sub goroutines unwind
 // and the daemon-side refcount decrements promptly.
+//
+// The scan loop runs in a goroutine because bufScan.Scan() is a blocking
+// read on stdin and on darwin os.Stdin uses a blocking syscall.read (not
+// the runtime poller), so closing the fd from another goroutine doesn't
+// unblock the read. We instead drive the main loop off the scanned-line
+// channel and ctx.Done(), and on cancel we return immediately — the
+// reader goroutine stays parked on the kernel read and is reaped when the
+// process exits. Without this, SIGTERM was a no-op on the MCP server and
+// only SIGKILL terminated it.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.out = bufio.NewWriter(out)
 	s.serveCtx = ctx
@@ -91,23 +100,50 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	bufScan := bufio.NewScanner(reader)
 	bufScan.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
-	for bufScan.Scan() {
-		if ctx.Err() != nil {
+	lines := make(chan []byte)
+	scanErr := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		for bufScan.Scan() {
+			// Copy because bufScan.Bytes() is reused on the next Scan.
+			b := bufScan.Bytes()
+			cp := make([]byte, len(b))
+			copy(cp, b)
+			select {
+			case lines <- cp:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := bufScan.Err(); err != nil {
+			scanErr <- err
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case line, ok := <-lines:
+			if !ok {
+				select {
+				case err := <-scanErr:
+					if !errors.Is(err, io.EOF) {
+						return err
+					}
+				default:
+				}
+				return nil
+			}
+			if len(line) == 0 {
+				continue
+			}
+			// Each request is handled inline. Tools call the daemon, which may
+			// take seconds; that's fine — MCP clients send one request at a
+			// time over stdio and wait for the response.
+			s.handle(ctx, line)
 		}
-		line := bufScan.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		// Each request is handled inline. Tools call the daemon, which may
-		// take seconds; that's fine — MCP clients send one request at a
-		// time over stdio and wait for the response.
-		s.handle(ctx, line)
 	}
-	if err := bufScan.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
 }
 
 // rpcRequest is the JSON-RPC 2.0 envelope MCP layers on top of.

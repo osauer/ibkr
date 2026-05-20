@@ -861,8 +861,24 @@ func (c *Connection) Disconnect() error {
 		c.cancel()
 	}
 
-	// Wait for goroutines to finish
-	c.wg.Wait()
+	// Wait for goroutines to finish, bounded. The readMessages goroutine
+	// only checks stopChan between Read() calls, so a reader parked on a
+	// blocking socket read won't honour the close — it unblocks only when
+	// the TCP socket below is closed. Without this bound, SIGTERM would
+	// propagate through cmd/ibkr/daemon.go → Server.Stop → here and pin
+	// the process forever; user-visible symptom was "Quit doesn't work,
+	// only Force Quit." The leaked reader exits the moment c.conn.Close()
+	// below fires and the OS reaps any straggler at process exit.
+	waitDone := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		connectLogger.Warnf("Disconnect: goroutines still running after 2s; closing socket to unblock (Client ID: %d)", c.config.ClientID)
+	}
 
 	// Close TCP connection - safe now that all writes are complete
 	if c.conn != nil {
