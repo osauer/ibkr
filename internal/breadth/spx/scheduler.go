@@ -123,12 +123,35 @@ func (e *Engine) Run(ctx context.Context) {
 			e.warnf("breadth: %s refresh: %v", reason, err)
 		}
 	}
+	// updateRetryState reads the post-refresh coverage signal and
+	// adjusts the retry counter for the next loop iteration. Called
+	// after every refresh (bootstrap and scheduled) so a below-
+	// threshold result triggers the short retry cadence — otherwise
+	// the bootstrap's below-threshold outcome would sit idle until
+	// the next 16:35 ET tick, defeating the retry mechanism.
+	updateRetryState := func() {
+		cov, mc := e.LastRefreshCoverage()
+		converged := mc > 0 && cov >= int(MinCoverageFraction*float64(mc))
+		switch {
+		case converged:
+			retries = 0
+		case retries < maxBelowThresholdRetries:
+			retries++
+		default:
+			// Burned through the retry budget without converging.
+			// Reset and fall back to the daily cadence — the
+			// operator should investigate (the warnf in finalise
+			// already logged each below-threshold result).
+			retries = 0
+		}
+	}
 
 	if cur, _ := e.Get(); shouldRefreshOnStartup(cur, e.clock()) {
 		doRefresh("bootstrap")
 		if ctx.Err() != nil {
 			return
 		}
+		updateRetryState()
 	}
 
 	for {
@@ -145,21 +168,7 @@ func (e *Engine) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-
-		cov, mc := e.LastRefreshCoverage()
-		converged := mc > 0 && cov >= int(MinCoverageFraction*float64(mc))
-		switch {
-		case converged:
-			retries = 0
-		case retries < maxBelowThresholdRetries:
-			retries++
-		default:
-			// Burned through the retry budget without converging.
-			// Reset and fall back to the daily cadence — the
-			// operator should investigate (the warnf in finalise
-			// already logged each below-threshold result).
-			retries = 0
-		}
+		updateRetryState()
 	}
 }
 

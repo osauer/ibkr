@@ -1,6 +1,8 @@
 package spx
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -103,6 +105,87 @@ func TestShouldRefreshOnStartupMissedYesterday(t *testing.T) {
 	snap := &Snapshot{SessionKey: yesterday}
 	if !shouldRefreshOnStartup(snap, now) {
 		t.Error("evening startup with yesterday's cache should catch up immediately")
+	}
+}
+
+// TestRunBootstrapBelowThresholdSchedulesRetry pins the contract that
+// when Run's bootstrap refresh finishes below MinCoverageFraction, the
+// next wake is the short retry delay — NOT the daily 16:35 ET cadence.
+// Before the fix, Run only consulted LastRefreshCoverage after each
+// scheduled iteration of the main loop, so a below-threshold bootstrap
+// would sleep ~24 hours before retrying. With ~50 contract resolutions
+// per IBKR-bucket cycle and 503 SPX names, that translated to "cache
+// never converges in any reasonable timeframe."
+//
+// The test runs Run in a goroutine with a fake clock pinned just past
+// today's 16:35 ET, so nextRefreshAt resolves to tomorrow's 16:35 —
+// any "we didn't notice the bootstrap signal" bug would manifest as
+// the scheduler sleeping until tomorrow. Cancellation after the bootstrap
+// + a short grace window proves the loop entered the retry phase
+// (belowThresholdRetryDelay) rather than the daily phase.
+func TestRunBootstrapBelowThresholdSchedulesRetry(t *testing.T) {
+	loc := nyLocation()
+	// 17:00 ET — past today's 16:35 ET window — so nextRefreshAt would
+	// resolve to tomorrow's 16:35 if Run mistakenly entered the daily
+	// path.
+	now := time.Date(2026, 5, 18, 17, 0, 0, 0, loc)
+
+	// 10 members, only 5 succeed → 50% coverage, well below threshold.
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "F1", "F2", "F3", "F4", "F5"}
+	fake := &FakeBarFetcher{
+		Bars: map[string][]Bar{
+			"OK1": makeSeries(100, 1, WindowSize, now),
+			"OK2": makeSeries(50, 1, WindowSize, now),
+			"OK3": makeSeries(75, 1, WindowSize, now),
+			"OK4": makeSeries(60, 1, WindowSize, now),
+			"OK5": makeSeries(80, 1, WindowSize, now),
+		},
+		Errors: map[string]error{
+			"F1": errors.New("gateway: pacing"),
+			"F2": errors.New("gateway: pacing"),
+			"F3": errors.New("gateway: pacing"),
+			"F4": errors.New("gateway: pacing"),
+			"F5": errors.New("gateway: pacing"),
+		},
+	}
+	dir := t.TempDir()
+	store := NewStore(dir)
+	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
+	e.members = members
+
+	// Run() in a goroutine, cancel after enough time for bootstrap to
+	// complete and the next-wait timer to be installed. The bootstrap
+	// runs synchronously in Run before the timer; cancelling here
+	// proves either (a) bootstrap completed AND retry-state was
+	// updated, OR (b) bootstrap completed but Run sleeps for ~24h —
+	// the latter is the bug we're pinning against.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.Run(ctx)
+		close(done)
+	}()
+
+	// Wait briefly for bootstrap, then cancel. A second is plenty for
+	// a 10-member fake fetcher with no latency; if Run gets stuck
+	// pre-cancel for longer, the test fails — that's the kind of
+	// regression we want to surface.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not exit within 1s of cancel — likely blocked in nextWait")
+	}
+
+	// Sanity: bootstrap ran and recorded below-threshold coverage.
+	cov, mc := e.LastRefreshCoverage()
+	if cov != 5 || mc != 10 {
+		t.Errorf("bootstrap coverage: want (5, 10), got (%d, %d)", cov, mc)
+	}
+	// Windows persisted (the engine-side accumulation contract).
+	if got := len(e.windows); got != 5 {
+		t.Errorf("in-memory windows after bootstrap: want 5, got %d", got)
 	}
 }
 
