@@ -77,10 +77,15 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
   `perfiliev-bs-sweep-v2-stickymoneyness`. Pure cutover — no
   dual-emit; SpotGamma's Friday posts are the comparator.
 - The `Method` token on `BreadthSPXResult` is now
-  `constituent-fanout-50/200dma-hl`. The breadth refresh now pulls
+  `constituent-fanout-50/200dma+nh-v2`. The breadth refresh now pulls
   ~262 daily bars per constituent at cold-start (was ~60) so all
   three readings — 50-DMA, 200-DMA, and the rolling 252-bar
-  max/min — seed from the same fetch.
+  max/min — seed from the same fetch. `Store.LoadSnapshot` now
+  treats any snapshot whose `Method` differs from the current
+  constant as no-cache, forcing a cold rebuild on methodology bumps.
+  Without this gate, a stale v1 snapshot.json silently decoded into
+  a v2 struct with the new fields zeroed and the engine published
+  the phantom "0% above 50-DMA" reading as if it were real.
 
 ### Removed
 
