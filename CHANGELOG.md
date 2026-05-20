@@ -20,6 +20,10 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 
 - Per-leg poll budget in the dealer γ-zero compute shrunk from 5 s to 1.5 s. The prior 5 s was waste on the pre-market path where the gateway's option-model engine never pushes a tick and every leg burned the full budget before falling through to the BS-IV fallback solve; 1.5 s remains 3× the typical-arrival headroom for live RTH model ticks.
 
+### Fixed
+
+- Option subscriptions that hit a terminal gateway error (200 "no security definition", 320/321/322 update-encoding failures, 354 "not subscribed", 10197 "competing live session") now abort their pollers immediately instead of running out the per-leg deadline. The gamma compute previously wasted up to 5 s per "ghost strike" — chain-dedupe entries that don't exist as listed contracts on every expiry — before the fan-out could move on. Combined with the budget shrink above, pre-market wall-clock on a chain with many ghost strikes drops by an additional margin.
+
 ## v0.28.0 — 2026-05-20 15:46 CEST
 
 ### What's new
