@@ -78,6 +78,13 @@ type Engine struct {
 	windows  map[string]ConstituentWindow
 	history  []HistoryPoint
 	members  []string
+	// lastCoverage / lastMemberCount record the result of the most
+	// recent finalise(). The scheduler reads these to decide whether
+	// to retry sooner than the daily tick when coverage is below
+	// MinCoverageFraction. Both stay at zero until the first refresh
+	// completes — Engine.LastRefreshCoverage() returns these directly.
+	lastCoverage    int
+	lastMemberCount int
 
 	// refreshMu serialises concurrent Refresh() calls. The second
 	// caller waits behind the first rather than launching a
@@ -304,49 +311,64 @@ dispatch:
 }
 
 // finalise computes a snapshot from the (possibly updated) windows
-// and persists everything: windows, snapshot, and rolling history.
+// and persists what's safe to persist for the achieved coverage:
+//
+//   - Windows are persisted unconditionally (in-memory and on-disk).
+//     Per-name daily closes are authoritative even when partial — the
+//     mergeBars step in Refresh never overwrites valid closes with
+//     empty ones — and persisting them lets each refresh attempt
+//     build on the previous one's gains. Without this, a 503-name
+//     cold start that's bottlenecked on IBKR's per-account
+//     reqContractDetails budget (~50 / 10 min, observed) can never
+//     converge: each refresh tick starts from zero and re-attempts
+//     the same names while IBKR's bucket is still draining.
+//
+//   - Snapshot and history are gated at MinCoverageFraction. Those
+//     are the published surface (Get() reads snapshot, History()
+//     reads history); a partial snapshot would mislead any consumer
+//     that reads the cached value and would poison the scheduler's
+//     "today's snapshot exists, skip the next bootstrap" check. The
+//     0.80 threshold tolerates ordinary per-name fetch errors
+//     (delisted tickers, transient pacing) while rejecting
+//     catastrophic fan-out failures.
+//
 // History is appended idempotently — a re-refresh in the same NY
 // session overwrites the existing point rather than duplicating it,
-// matching the SlideWindow same-day semantics.
+// matching the SlideWindow same-day semantics. Persistence failures
+// are logged but not fatal.
 //
-// Persistence failures are logged but not fatal — the in-memory state
-// still updates so subsequent Get() calls see the new value. The
-// on-disk cache will be re-tried on the next refresh.
-//
-// A snapshot whose coverage is below MinCoverageFraction × MemberCount
-// is treated as "did not converge" and is NEVER persisted. The
-// degenerate Coverage == 0 case (cold-start race against the gateway
-// connector, a total outage) is the most extreme failure mode, but
-// the same logic must apply to partial fan-outs — a snapshot computed
-// over 200 of 503 names is not representative of the underlying market
-// and would still poison the scheduler's "today's snapshot exists,
-// skip next bootstrap" check. The threshold is 80%: tolerates ordinary
-// per-name fetch errors (delisted tickers, transient pacing) while
-// rejecting catastrophic fan-outs. finalise returns nil on a
-// below-threshold result — the engine logs, the existing on-disk
-// state is preserved, and the next tick retries.
+// finalise returns nil on a below-threshold result. The scheduler
+// reads e.LastRefreshCoverage to decide whether to retry sooner than
+// the daily cadence, but the contract here is "no error means I
+// finished — whether convergence happened is a separate signal."
 func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow) error {
 	now := e.clock()
 	sessionKey := nySessionKey(now)
 	snap := Compute(members, windows, sessionKey, now)
 
 	minCoverage := int(MinCoverageFraction * float64(snap.MemberCount))
+
+	// Persist windows unconditionally — see docstring above for why.
+	if err := e.store.SaveWindows(windows, now); err != nil {
+		e.warnf("breadth: save windows: %v", err)
+	}
+	e.mu.Lock()
+	e.windows = windows
+	e.lastCoverage = snap.Coverage
+	e.lastMemberCount = snap.MemberCount
+	e.mu.Unlock()
+
 	if snap.Coverage < minCoverage {
-		e.warnf("breadth: refresh coverage %d/%d below threshold %d (%.0f%% of %d); not persisting, will retry next tick",
+		e.warnf("breadth: refresh coverage %d/%d below threshold %d (%.0f%% of %d); windows persisted for next-tick continuation, snapshot withheld until convergence",
 			snap.Coverage, snap.MemberCount, minCoverage, MinCoverageFraction*100, snap.MemberCount)
 		return nil
 	}
 
-	// Build the new history series. Lock briefly to read the existing
-	// slice, then release while we shuffle bytes — we don't want to
-	// hold the lock through three disk writes below.
+	// Convergence — publish the snapshot and history.
 	e.mu.Lock()
 	history := appendHistory(e.history, HistoryPoint{Date: sessionKey, Value: snap.Value})
 	e.mu.Unlock()
 
-	if err := e.store.SaveWindows(windows, now); err != nil {
-		e.warnf("breadth: save windows: %v", err)
-	}
 	if err := e.store.SaveSnapshot(snap); err != nil {
 		e.warnf("breadth: save snapshot: %v", err)
 	}
@@ -355,11 +377,24 @@ func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow
 	}
 
 	e.mu.Lock()
-	e.windows = windows
 	e.snapshot = &snap
 	e.history = history
 	e.mu.Unlock()
 	return nil
+}
+
+// LastRefreshCoverage returns (coverage, memberCount) from the most
+// recent finalise. Zero values indicate "no refresh has completed yet"
+// — distinct from "refresh completed with zero coverage" because the
+// scheduler treats the latter as a signal to retry, not give up.
+//
+// The scheduler reads this to decide whether the previous refresh
+// converged (coverage ≥ MinCoverageFraction × memberCount) or whether
+// to schedule a retry sooner than the daily cadence.
+func (e *Engine) LastRefreshCoverage() (coverage, memberCount int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastCoverage, e.lastMemberCount
 }
 
 // appendHistory adds today's point to the rolling series, collapsing

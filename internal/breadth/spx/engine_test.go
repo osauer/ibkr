@@ -304,6 +304,74 @@ func TestEngineRefreshAllFailDoesNotPersist(t *testing.T) {
 	}
 }
 
+// TestEngineRefreshBelowThresholdPersistsWindowsForAccumulation pins
+// the convergence-across-refreshes contract: when a refresh ends below
+// MinCoverageFraction × MemberCount, the snapshot and history stay
+// withheld (so consumers don't read a misleading partial value), but
+// the per-name windows persist both in-memory AND on-disk. The next
+// refresh — or a daemon restart loading the same dir — starts from the
+// accumulated windows rather than cold, which is how a 503-name cold
+// start with IBKR's per-account reqContractDetails throttling
+// eventually crosses the 80% threshold.
+func TestEngineRefreshBelowThresholdPersistsWindowsForAccumulation(t *testing.T) {
+	now := time.Date(2026, 5, 19, 21, 30, 0, 0, time.UTC)
+	// 10 members, only 5 succeed — 50% coverage, well below the 80%
+	// threshold.
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "F1", "F2", "F3", "F4", "F5"}
+	fake := &FakeBarFetcher{
+		Bars: map[string][]Bar{
+			"OK1": makeSeries(100, 1, WindowSize, now),
+			"OK2": makeSeries(50, 1, WindowSize, now),
+			"OK3": makeSeries(75, 1, WindowSize, now),
+			"OK4": makeSeries(60, 1, WindowSize, now),
+			"OK5": makeSeries(80, 1, WindowSize, now),
+		},
+		Errors: map[string]error{
+			"F1": errors.New("gateway: pacing"),
+			"F2": errors.New("gateway: pacing"),
+			"F3": errors.New("gateway: pacing"),
+			"F4": errors.New("gateway: pacing"),
+			"F5": errors.New("gateway: pacing"),
+		},
+	}
+	dir := t.TempDir()
+	store := NewStore(dir)
+	e := New(store, fake, Options{Clock: frozenClock(now), Workers: 4})
+	e.members = members
+
+	if err := e.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// Snapshot still withheld at below-threshold coverage — the
+	// published surface guarantee from the existing
+	// TestEngineRefreshBelowCoverageThresholdIsNotPersisted test
+	// hasn't changed.
+	if _, ok := e.Get(); ok {
+		t.Error("Get should return false after below-threshold refresh")
+	}
+
+	// Coverage signal is available for the scheduler to read.
+	cov, mc := e.LastRefreshCoverage()
+	if cov != 5 || mc != 10 {
+		t.Errorf("LastRefreshCoverage: want (5, 10), got (%d, %d)", cov, mc)
+	}
+
+	// Windows ARE persisted in-memory for next-tick continuation.
+	if got := len(e.windows); got != 5 {
+		t.Errorf("in-memory windows: want 5 entries, got %d", got)
+	}
+
+	// Windows ARE persisted on-disk for daemon-restart continuation.
+	loaded, err := NewStore(dir).LoadWindows()
+	if err != nil {
+		t.Fatalf("LoadWindows: %v", err)
+	}
+	if got := len(loaded); got != 5 {
+		t.Errorf("on-disk windows: want 5 entries, got %d", got)
+	}
+}
+
 func TestEngineConcurrentRefreshSerialises(t *testing.T) {
 	now := time.Date(2026, 5, 18, 21, 30, 0, 0, time.UTC)
 	members := []string{"AAA", "BBB"}

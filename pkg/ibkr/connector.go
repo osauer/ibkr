@@ -2958,8 +2958,19 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 		}
 	}
 
+	// ensureContractDetails budget: 30 s. A historical-data fan-out
+	// (breadth-spx, 500+ names) puts dozens of reqContractData on the
+	// wire alongside reqHistoricalData; even with the rate limiter's
+	// per-request dispatcher (no HoL blocking) IBKR can take several
+	// seconds to respond per contract under load. The previous 5 s
+	// budget tripped on liquid names (DIS, ACN, ISRG, …) whenever the
+	// gateway was busy and the awaitContractDetail grace window
+	// couldn't recover the late frames in time, surfacing as
+	// "contract details unresolved" with primary='' in the daemon log.
+	// 30 s aligns with the prewarm path (server.go:749) and is bounded
+	// upstream by the breadth fetcher's per-call timeout.
 	var fetchErr error
-	if detail, err := c.ensureContractDetails(symbol, 5*time.Second); err == nil && detail != nil {
+	if detail, err := c.ensureContractDetails(symbol, 30*time.Second); err == nil && detail != nil {
 		c.applyContractDetail(*detail, &baseContract)
 	} else {
 		fetchErr = err

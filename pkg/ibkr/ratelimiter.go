@@ -231,6 +231,30 @@ func (rl *RateLimiter) Submit(reqType RequestType, sendFunc func() error) error 
 	return rl.SubmitWithRetries(reqType, sendFunc, 3)
 }
 
+// submitTimeout caps how long Submit waits for a queued request to
+// complete before giving up. The cap is type-aware: RequestTypeHistorical
+// must accommodate the slow historicalRate bucket (60 tokens, refills at
+// 0.1/sec — IBKR's 60-per-10-min pacing window). When a fan-out empties
+// the bucket — common during the breadth-spx 500-name cold-start — the
+// next refill arrives 10 s later, and with multiple workers competing
+// the back-of-queue wait can approach the bucket's full drain time
+// (~10 min). 12 min gives one minute of headroom past that worst case.
+//
+// The previous unconditional 30 s cap silently rejected most historical
+// requests in any large fan-out: the engine at internal/breadth/spx/engine.go
+// documented a ~60 min cold-start expectation that the 30 s cap made
+// unachievable. General and market-data requests retain the original 30 s
+// budget — those buckets refill fast enough that a longer wait would
+// hide a genuine stall.
+func submitTimeout(reqType RequestType) time.Duration {
+	switch reqType {
+	case RequestTypeHistorical:
+		return 12 * time.Minute
+	default:
+		return 30 * time.Second
+	}
+}
+
 // SubmitWithRetries submits a request with a custom retry count. The queue
 // is strictly FIFO — a higher-priority "queue jump" parameter existed
 // before v0.16.0 but processRequests never read it (no priority queue was
@@ -255,15 +279,16 @@ func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() er
 		return fmt.Errorf("rate limiter stopped")
 	default:
 	}
+	timeout := submitTimeout(reqType)
 	select {
 	case rl.requestQueue <- req:
 		// Wait for result with timeout
 		select {
 		case err := <-req.ResultChan:
 			return err
-		case <-time.After(30 * time.Second):
+		case <-time.After(timeout):
 			rl.incrementRejected()
-			return fmt.Errorf("request timeout after 30s")
+			return fmt.Errorf("request timeout after %s", timeout)
 		case <-rl.ctx.Done():
 			return fmt.Errorf("rate limiter stopped")
 		}
@@ -277,7 +302,21 @@ func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() er
 	}
 }
 
-// processRequests processes queued requests with rate limiting
+// processRequests dispatches each queued request to its own goroutine.
+// Per-request goroutines remove head-of-line blocking: a slow request
+// stuck in WaitForTokens (e.g. a historical-data request waiting on the
+// 0.1/sec refill of historicalRate) no longer blocks unrelated requests
+// behind it in the FIFO. Before this dispatcher change, a 500-name
+// breadth-spx fan-out would jam the queue so badly that contract-detail
+// requests (RequestTypeGeneral, expected to clear in milliseconds) sat
+// behind historical waits and failed their 5 s caller timeouts —
+// surfacing as "contract details unresolved" in the daemon log.
+//
+// Per-request concurrency is bounded by the rate-limit primitives
+// themselves: messageRate (40 tokens/sec) for every type, historicalRate
+// (0.1/sec) and historicalConcurrent (50 slots) for historical, and the
+// queue's own 1000-deep buffer for the dispatcher itself. All three are
+// thread-safe, so spawning is the simplest correct change here.
 func (rl *RateLimiter) processRequests() {
 	defer rl.wg.Done()
 
@@ -286,40 +325,48 @@ func (rl *RateLimiter) processRequests() {
 		case <-rl.ctx.Done():
 			return
 		case req := <-rl.requestQueue:
-			// Process the request with appropriate rate limiting
-			err := rl.executeRequest(req)
-
-			// Handle retries if needed
-			if err != nil && req.Retries < req.MaxRetries {
-				req.Retries++
-				// Re-queue with exponential backoff. Honor rl.ctx so a
-				// shutdown mid-backoff doesn't leak a goroutine sleeping
-				// out the remainder of the delay.
-				rl.wg.Add(1)
-				go func(backoff time.Duration) {
-					defer rl.wg.Done()
-					select {
-					case <-time.After(backoff):
-					case <-rl.ctx.Done():
-						req.ResultChan <- rl.ctx.Err()
-						return
-					}
-					select {
-					case rl.requestQueue <- req:
-						// Re-queued successfully
-					case <-rl.ctx.Done():
-						req.ResultChan <- rl.ctx.Err()
-					default:
-						// Queue full, give up
-						req.ResultChan <- fmt.Errorf("retry failed: queue full")
-					}
-				}(time.Duration(req.Retries) * time.Second)
-			} else {
-				// Send result back
-				req.ResultChan <- err
-			}
+			rl.wg.Add(1)
+			go rl.dispatch(req)
 		}
 	}
+}
+
+// dispatch runs one request's rate-limited execution. Extracted from the
+// processRequests loop body so per-request goroutines have a clean
+// completion-and-retry boundary. Always closes the request out via
+// req.ResultChan unless the request is re-queued for retry.
+func (rl *RateLimiter) dispatch(req *RateLimitedRequest) {
+	defer rl.wg.Done()
+
+	err := rl.executeRequest(req)
+	if err != nil && req.Retries < req.MaxRetries {
+		req.Retries++
+		// Re-queue with exponential backoff. Honor rl.ctx so a
+		// shutdown mid-backoff doesn't leak a goroutine sleeping
+		// out the remainder of the delay.
+		rl.wg.Add(1)
+		go func(backoff time.Duration) {
+			defer rl.wg.Done()
+			select {
+			case <-time.After(backoff):
+			case <-rl.ctx.Done():
+				req.ResultChan <- rl.ctx.Err()
+				return
+			}
+			select {
+			case rl.requestQueue <- req:
+				// Re-queued successfully
+			case <-rl.ctx.Done():
+				req.ResultChan <- rl.ctx.Err()
+			default:
+				// Queue full, give up
+				req.ResultChan <- fmt.Errorf("retry failed: queue full")
+			}
+		}(time.Duration(req.Retries) * time.Second)
+		return
+	}
+	// Send result back
+	req.ResultChan <- err
 }
 
 // executeRequest executes a single request with appropriate rate limiting
