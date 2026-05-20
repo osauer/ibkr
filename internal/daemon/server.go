@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -166,6 +167,32 @@ type Server struct {
 	// across the postConnectSetup re-runs that follow each reconnect.
 	breadthClientStarted sync.Once
 
+	// contractStore persists symbol→conID resolutions across daemon
+	// restarts. IBKR caps reqContractDetails at ~50 per 10 minutes
+	// per ACCOUNT (the per-clientID isolation breadthConnector enables
+	// doesn't help here — the cap is upstream); every restart that
+	// re-resolves the 503 SPX members from scratch pays that bucket
+	// over and over. The store loads at postConnectSetup and seeds
+	// both connectors, saves every minute + on Stop. Reconstitution
+	// is handled via a members-hash field on the file: stale members
+	// get pruned at load when the current member list differs from
+	// the cached one. nil only on the rare path where
+	// DefaultContractStoreDir returns an error (no HOME / XDG_CACHE
+	// set) — the daemon continues without persistence in that case.
+	contractStore *ibkrlib.ContractStore
+	// contractCacheLoaded records what Load() returned so both
+	// connectors can be seeded from the same set without double disk
+	// reads. Written once in postConnectSetup before the primary
+	// connector ready signal, read by startBreadthConnector when the
+	// bulk lane comes up. nil before load, possibly empty map after.
+	contractCacheLoaded map[string]ibkrlib.ContractDetailsLite
+	// contractCacheSaveStarted gates the background save loop to
+	// exactly once per Server lifetime, mirroring breadthStarted /
+	// breadthClientStarted. postConnectSetup re-runs on each
+	// reconnect; without the Once a second postConnectSetup would
+	// spawn a duplicate save goroutine racing the first.
+	contractCacheSaveStarted sync.Once
+
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
 	// shutdown and `ibkr status` reflects the work — same coherence
@@ -217,7 +244,23 @@ func New(opts Options) *Server {
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
 	s.installBreadthEngine()
+	s.installContractStore()
 	return s
+}
+
+// installContractStore constructs the on-disk contract-cache store and
+// attaches it to s. Best-effort: if XDG_CACHE_HOME and HOME are both
+// unset (effectively never on a real OS user account), the field stays
+// nil and the daemon runs without contract-cache persistence — every
+// restart pays the full IBKR rate-limit tax to re-resolve, but the
+// daemon itself starts fine.
+func (s *Server) installContractStore() {
+	dir, err := ibkrlib.DefaultContractStoreDir()
+	if err != nil {
+		s.logger.Warnf("contract cache: resolve dir: %v (persistence disabled)", err)
+		return
+	}
+	s.contractStore = ibkrlib.NewContractStore(dir)
 }
 
 // installBreadthEngine builds the SPX 50-DMA breadth engine and
@@ -316,6 +359,14 @@ func (s *Server) startBreadthConnector(ctx context.Context, primaryEp discover.E
 	s.breadthConnector = attempter
 	s.mu.Unlock()
 	s.logger.Infof("breadth bulk connector ready (cid=%d, separate 40-msg/sec budget from primary)", bulkEp.ClientID)
+
+	// Seed the bulk lane from the same persisted contract cache that
+	// the primary lane was seeded from in postConnectSetup. ConIDs are
+	// globally unique so both lanes get the same wire identity for
+	// every symbol — no contract resolution churn on the bulk side
+	// across daemon restarts. seedFromContractStore is a no-op if the
+	// store wasn't successfully loaded.
+	s.seedConnectorFromCache(attempter)
 }
 
 // stopBreadthConnector tears down the bulk-historical connector if one
@@ -340,6 +391,154 @@ func (s *Server) stopBreadthConnector() {
 // second cid (collision, gateway rejecting client IDs, etc.) doesn't
 // stretch postConnectSetup beyond a sensible boot delay.
 const breadthClientStartBudget = 12 * time.Second
+
+// contractCacheSaveInterval is how often the background loop reads
+// both connectors' contractCache, merges the entries, and writes the
+// result to ContractStore. 60s balances I/O cost against the
+// "how much recent work would we lose on a crash?" risk — at one
+// full file write (~50 KB) per minute the disk cost is invisible,
+// and the worst-case loss is a minute of resolutions which the next
+// daemon restart re-fetches transparently.
+const contractCacheSaveInterval = 60 * time.Second
+
+// seedFromContractStore loads the persisted contract cache from disk
+// and seeds the supplied connector with each non-stale entry. Stale
+// is defined relative to the current SPX members list (entries whose
+// symbol isn't in the current sp500Members AND isn't one of the
+// well-known seeds get pruned at load — they're delisted, renamed,
+// or simply replaced by reconstitution).
+//
+// Also caches the loaded map in s.contractCacheLoaded for
+// startBreadthConnector to seed the bulk lane from without a second
+// disk read. No-op when contractStore is nil (XDG/HOME unresolved at
+// New() time) or when the disk file doesn't exist (cold install).
+func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
+	if s.contractStore == nil || c == nil {
+		return
+	}
+	loaded, savedHash, err := s.contractStore.Load()
+	if err != nil {
+		s.logger.Warnf("contract cache: load: %v (will start cold)", err)
+		return
+	}
+	if loaded == nil {
+		s.logger.Infof("contract cache: no on-disk file yet, starting cold")
+		s.contractCacheLoaded = map[string]ibkrlib.ContractDetailsLite{}
+		return
+	}
+	members, _ := spx.MemberList()
+	currentHash := ibkrlib.MembersHash(members)
+	if savedHash != "" && savedHash != currentHash {
+		// SPX reconstituted since the last save. Prune entries whose
+		// symbol isn't in the current list — keep the well-known
+		// seeds (SPX, VIX, etc.) regardless since they aren't SPX
+		// members but are still useful for regime / gamma paths.
+		loaded = pruneNonMembers(loaded, members)
+		s.logger.Infof("contract cache: SPX members hash changed (%s → %s); pruned to %d current-member entries", savedHash, currentHash, len(loaded))
+	}
+	s.contractCacheLoaded = loaded
+	seeded := 0
+	for sym, detail := range loaded {
+		if c.SeedContractDetails(sym, detail) {
+			seeded++
+		}
+	}
+	s.logger.Infof("contract cache: seeded %d entries from disk", seeded)
+}
+
+// seedConnectorFromCache seeds c from the already-loaded
+// s.contractCacheLoaded map. Called by startBreadthConnector when the
+// bulk lane comes up; avoids a second disk read and guarantees both
+// lanes see the same seed set. No-op if seedFromContractStore hasn't
+// run yet (primary connector failed to come up) or if c is nil.
+func (s *Server) seedConnectorFromCache(c *ibkrlib.Connector) {
+	if c == nil || len(s.contractCacheLoaded) == 0 {
+		return
+	}
+	seeded := 0
+	for sym, detail := range s.contractCacheLoaded {
+		if c.SeedContractDetails(sym, detail) {
+			seeded++
+		}
+	}
+	s.logger.Infof("contract cache: seeded %d entries into bulk connector", seeded)
+}
+
+// contractCacheSaveLoop runs for the daemon's lifetime, periodically
+// snapshotting both connectors' contractCache and saving the merged
+// result to ContractStore. The merge prefers entries from whichever
+// connector has them — they're identical when both lanes have
+// resolved the same symbol (conIDs are globally unique), and the
+// merge picks any one. Returns when ctx is cancelled (daemon shutting
+// down); Stop() runs a final saveContractCache after this to capture
+// the last minute's work.
+func (s *Server) contractCacheSaveLoop(ctx context.Context) {
+	t := time.NewTicker(contractCacheSaveInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.saveContractCache()
+		}
+	}
+}
+
+// saveContractCache snapshots both connectors' contractCaches, merges
+// them, and writes the result. Errors are logged but not propagated —
+// a transient I/O failure shouldn't take the daemon down; the next
+// tick retries. Safe to call when ContractStore is nil or when
+// neither connector is up (no-op).
+func (s *Server) saveContractCache() {
+	if s.contractStore == nil {
+		return
+	}
+	merged := map[string]ibkrlib.ContractDetailsLite{}
+	for _, c := range []*ibkrlib.Connector{s.gatewayConnector(), s.breadthGatewayConnector()} {
+		if c == nil {
+			continue
+		}
+		// Both connectors should resolve to the same ConID for a
+		// given symbol; if they ever diverge (corrupted state on
+		// one lane), the merge picks whichever was iterated last
+		// — a benign tie-break that doesn't poison the file
+		// because both values are valid IBKR contract identities.
+		maps.Copy(merged, c.SnapshotContracts())
+	}
+	if len(merged) == 0 {
+		return
+	}
+	members, _ := spx.MemberList()
+	hash := ibkrlib.MembersHash(members)
+	if err := s.contractStore.Save(merged, hash); err != nil {
+		s.logger.Warnf("contract cache: save: %v", err)
+	}
+}
+
+// pruneNonMembers returns a new map containing only entries whose
+// symbol is in the current SPX members list OR is one of the
+// well-known seeds (SPX, VIX, VIX3M, HYG, SPY, USD.JPY — the regime
+// dashboard symbols). Caller uses this to strip delisted / renamed
+// tickers from the persisted cache when SPX has reconstituted since
+// the last save. The well-known seeds aren't SPX members but are
+// still useful for the regime path, so they survive the prune.
+func pruneNonMembers(loaded map[string]ibkrlib.ContractDetailsLite, members []string) map[string]ibkrlib.ContractDetailsLite {
+	keep := make(map[string]struct{}, len(members)+8)
+	for _, m := range members {
+		keep[m] = struct{}{}
+	}
+	for _, sym := range []string{"SPX", "VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "DXY", "NDX"} {
+		keep[sym] = struct{}{}
+	}
+	out := make(map[string]ibkrlib.ContractDetailsLite, len(loaded))
+	for sym, detail := range loaded {
+		if _, ok := keep[sym]; ok {
+			out[sym] = detail
+		}
+	}
+	return out
+}
 
 // installSubs wires the per-symbol subscription manager onto s. Called by
 // New (production path) and by test helpers that construct *Server directly
@@ -493,6 +692,14 @@ func (s *Server) Stop() {
 		_ = l.Close()
 		_ = os.Remove(s.socketPath)
 	}
+	// Capture the last minute of contract resolutions before tearing
+	// the connectors down. The save loop runs every 60s; without this
+	// final flush, anything resolved in the trailing tick would be
+	// lost across the restart. Best-effort: a save error here just
+	// logs, since shutdown shouldn't fail because a disk write
+	// couldn't complete.
+	s.saveContractCache()
+
 	s.stopConnector()
 	s.stopBreadthConnector()
 	if s.lock != nil {
@@ -769,6 +976,26 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 		if err := a.SubscribeAccountPnL(ep.Account); err != nil {
 			s.logger.Warnf("SubscribeAccountPnL failed (account.summary will lack daily P&L): %v", err)
 		}
+	}
+
+	// Load the persisted contract cache and seed the primary connector
+	// BEFORE prewarm / breadth / gamma fire. Every cache hit here is
+	// an IBKR rate-limit-bucket token saved: without persistence, each
+	// daemon restart re-resolves all 503 SPX members + the 6 regime
+	// seeds, draining IBKR's per-account reqContractDetails bucket
+	// over and over. The members-hash check prunes stale entries when
+	// SPX has reconstituted since the last save — added members fall
+	// through to fresh resolution via the normal path.
+	s.seedFromContractStore(s.connector)
+
+	// Spawn the periodic save loop. Guarded by contractCacheSaveStarted
+	// so reconnect-driven postConnectSetup re-runs don't multiply the
+	// goroutine. The loop runs for the daemon's lifetime, picking up
+	// new resolutions from both connectors every minute.
+	if s.contractStore != nil && s.serverCtx != nil {
+		s.contractCacheSaveStarted.Do(func() {
+			go s.contractCacheSaveLoop(s.serverCtx)
+		})
 	}
 
 	// Pre-warm contract-details cache for the regime-dashboard symbols
