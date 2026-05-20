@@ -10,6 +10,17 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.28.2 — 2026-05-20 18:45 CEST
+
+### What's new
+
+- `Ctrl+C` and the OS "Quit" action now actually terminate the `ibkr daemon` and `ibkr mcp` processes. Previously both ignored SIGTERM/SIGINT and required Force Quit (SIGKILL); now they shut down within a few seconds.
+
+### Fixed
+
+- `ibkr daemon` process now exits on SIGTERM/SIGINT instead of hanging until SIGKILL. `pkill ibkr`, Activity Monitor → Quit, and shell-driven shutdown all work without escalating to Force Quit. Graceful shutdown completes within ~4 s on a connected daemon.
+- `ibkr mcp` process now exits on SIGTERM/SIGINT instead of hanging until SIGKILL. Killing the MCP host (e.g. Claude Desktop quitting and orphaning the MCP child) no longer leaves a zombie process holding the daemon connection open.
+
 ## v0.28.1 — 2026-05-20 18:11 CEST
 
 ### What's new
