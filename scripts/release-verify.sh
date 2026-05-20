@@ -253,12 +253,12 @@ fi
 # autospawned daemon should reach a coherent state within a few seconds
 # of postConnectSetup. The check asserts:
 #   - state is one of the documented enum values
-#   - if state == "ready", value MUST be > 0 (a successful finalise
-#     against any real market regime puts >0% above their 50DMA;
-#     v0.27.0's poison-cache produced value=0 with what would have been
-#     state=ready — the exact regression this gates against)
-#   - if state == "cold", value MUST be 0 (engine hasn't run; any
-#     value here is a finalise-without-persist bug)
+#   - if state == "ready", pct_above_50dma MUST be > 0 (a successful
+#     finalise against any real market regime puts >0% above their
+#     50DMA; v0.27.0's poison-cache produced 0 with what would have
+#     been state=ready — the exact regression this gates against)
+#   - if state == "cold", pct_above_50dma MUST be 0 (engine hasn't run;
+#     any value here is a finalise-without-persist bug)
 # We accept "cold" and "computing" as valid initial states because the
 # cold-start fan-out takes ~60 min (IBKR pacing) — release-verify
 # can't wait for "ready" without budgeting an hour, which would make
@@ -270,18 +270,18 @@ breadth_check="$(printf '%s' "$breadth_json" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 state = d.get("state")
-value = d.get("value", 0)
+value = d.get("pct_above_50dma", 0)
 valid_states = {"cold", "computing", "ready", "degraded"}
 if state not in valid_states:
     print("state=" + repr(state) + ", want one of " + str(sorted(valid_states)))
     sys.exit(0)
 if state == "ready" and value <= 0:
-    print("state=ready but value=" + repr(value) + " — successful finalise must produce non-zero S5FI (regression of v0.27.0 poison-cache)")
+    print("state=ready but pct_above_50dma=" + repr(value) + " — successful finalise must produce non-zero S5FI (regression of v0.27.0 poison-cache)")
     sys.exit(0)
 if state == "cold" and value != 0:
-    print("state=cold but value=" + repr(value) + " — engine that never ran cannot have a value")
+    print("state=cold but pct_above_50dma=" + repr(value) + " — engine that never ran cannot have a value")
     sys.exit(0)
-print("ok (state=" + state + " value=" + repr(value) + ")")
+print("ok (state=" + state + " pct_above_50dma=" + repr(value) + ")")
 ')"
 if [[ "$breadth_check" != ok* ]]; then
     echo "release-verify: FAIL: breadth.spx: $breadth_check" >&2
