@@ -2,435 +2,243 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+Recent entries (v0.27.5 onward, after backfill) tier by audience:
+
+- **`### What's new`** — plain-English TL;DR for CLI/MCP users. Three bullets max. Mark user-action items with `**Action required:**`; mark Go-library-only breakage with `**Breaking (Go library):**`. The GitHub release body's "What's new in vX.Y.Z" section is mechanically derived from this section by `make release-publish`.
+- **`### Added / Changed / Deprecated / Removed / Fixed / Security`** — Keep-a-Changelog bullets for Go importers and power users. One user-visible change per bullet, framed as the consumer-visible effect — what the API caller / CLI user / MCP consumer notices — not the internal mechanism. No internal finding IDs (`F-NN`, lint-enforced); no bare "step N" without naming the workflow and what the step tests; no internal symbol-drops without a reader-value gloss; no relative dates or session-internal references.
+- **`### Engineering notes`** *(optional, omit unless earned)* — short multi-release context, ≤ 15 lines, self-contained. No internal finding IDs without an inline definition, no bare "step N" tokens, no relative dates or session-internal references. If a fact fits a one-line bullet, it belongs in Changed/Fixed instead.
+
+Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
+
 ## v0.27.11 — 2026-05-20 05:48 CEST
 
-Closes the structural gap that motivated v0.27.9's `boundedSnapshot`
-orchestrator-level defense: the market-data slot-acquire wait now
-honours the caller's `context.Context` instead of `Connection.ctx`
-(daemon lifetime). The regime fetcher's per-leg 5 s budget is now
-enforced at the slot layer, so under sustained contention both calls
-of `release-verify` step 7 see the same timing envelope and reach
-the same status — the probabilistic `ok→error/unavailable` downgrade
-that fired on the 2026-05-19 release-verify failure is gone.
+### What's new
 
-### Fixed
-
-- **`acquireMarketDataSlot` honours caller ctx (F-26).** Three sites
-  in `pkg/ibkr/connection.go` —
-  `RequestMarketData`, `RequestMarketDataWithContract`,
-  `RequestMarketDataWithPrimary` — and the previously-ctx-aware
-  `RequestOptionsMarketData` all forwarded `c.ctx` to the slot
-  semaphore. A per-request budget set by the caller (the regime
-  fetcher's 5 s `boundedSnapshot`, the gamma compute's per-leg
-  subscribe, the snapshot helpers) was therefore silently absorbed:
-  the wait blocked on daemon lifetime and only aborted on daemon
-  shutdown. The fix threads `context.Context` from the daemon-side
-  call sites down to `acquireMarketDataSlot`:
-
-  - `Connection.RequestMarketData(ctx, sym)` — ctx added
-  - `Connection.RequestMarketDataWithContract(ctx, contract, …)` — ctx added
-  - `Connection.RequestMarketDataWithPrimary(ctx, sym, primary)` — ctx added
-  - `Connection.RequestOptionsMarketData(ctx, …)` — already had ctx, now uses it
-  - `Connector.SubscribeMarketData(ctx, sym, fields)` — ctx added
-  - `Connector.EnsureMarketDataSubscription(ctx, …)` — ctx added
-  - `subManager.{Subscribe,Hold,acquire}(ctx, …)` — ctx added; daemon
-    `ibkrMarketConnector` interface updated to match.
-
-  Nil ctx is treated as `context.Background()` so callers without a
-  per-request deadline see no behaviour change. Background-recovery
-  paths inside the connector (post-farm-reconnect resubscribe,
-  error-driven re-route) pass a new unexported `Connector.connCtx()`
-  helper that returns the connection's lifetime ctx — the slot-acquire
-  should only abort if the daemon itself shuts down, not on a
-  transient request deadline.
-
-  Bug-class lineage tracked across four releases: v0.27.5 fixed the
-  hard hang at this layer; v0.27.6 stopped a 45 s envelope-level
-  deadline from clobbering one-row errors; v0.27.9 added
-  `boundedSnapshot` / `boundedSnapshotWith52WHigh` as orchestrator-
-  level defense after diagnosing this same root cause, with a note
-  in the CHANGELOG ("structural fix tracked as a follow-up");
-  v0.27.11 lands that structural fix.
-
-  `boundedSnapshot` is kept as defense-in-depth (the timer fires only
-  after `budget+1s`, well past inner completion in the happy path)
-  and catches future regressions in either the slot path or any
-  other inner code that might block past its declared budget. Its
-  docstring is rewritten to reflect that the structural fix has
-  landed.
-
-  Contract pinned by `pkg/ibkr/connection_slot_ctx_test.go`: the
-  100-slot pool is saturated, then
-  `RequestMarketDataWithContract(ctx, …)` is called with a 1 s ctx
-  deadline. Pre-F-26 the call would hang on `Connection.ctx`
-  (Background, no deadline) past the test timeout. Post-F-26 it
-  returns a wrapped `context.DeadlineExceeded` in ~1 s.
-
-  `make release-verify` standalone passes step 7 three times in a
-  row with this fix; the previously-probabilistic gate is now
-  deterministic under daemon-startup contention.
-
-## v0.27.10 — 2026-05-19 20:57 CEST
-
-Hygiene release. No binary behaviour changes — this release exists to
-align the Claude Code skill, the MCP server's tool descriptions, the
-plugin manifest, the README, and the canonical risk-regime spec doc
-with the constituent-fanout breadth implementation that's been
-shipping since v0.27.3 and the SPY (not SPX) gamma compute that's
-been shipping since the liquidity-driven switch. The README's stale
-plugin install id (`ibkr@osauer-ibkr` → canonical `ibkr@ibkr`) and
-the previously-undocumented `claude plugin update` path for Claude
-for Mac users round out the user-facing fixes.
-
-The MCP description fixes are the highest-impact item: an LLM
-consuming `ibkr_breadth` or `ibkr_regime` was being told the daemon
-reads S&P DJI's S5FI index directly from IBKR's INDEX exchange. The
-implementation does the opposite — IBKR doesn't redistribute S5FI on
-retail subscriptions, so the daemon computes the same number locally
-from constituent daily closes (method token
-`constituent-fanout-50dma`). A consumer following the old description
-would have given users wrong failure-cause explanations and wrong
-recovery advice.
-
-### Fixed
-
-- **MCP tool descriptions for `ibkr_breadth` and `ibkr_regime`** now
-  match the constituent-fanout reality. The old descriptions claimed
-  "no constituent fan-out, no daemon-side SMA recomputation" and
-  that Indicator 5 returns `"unavailable"` on retail; both
-  contradicted the wire surface the daemon has been producing since
-  v0.27.3.
-
-- **Skill surfaces breadth / gamma / regime.** `skills/ibkr/SKILL.md`
-  command table, "When to use", per-command flags, Errors section
-  (computing / ready / unavailable / degraded semantics), and the
-  `allowed-tools` frontmatter now cover all three. `schemas.md`
-  documents the JSON shapes field-by-field. The three commands were
-  unreachable through the skill path previously — a Claude Code
-  session running the plugin couldn't easily reach risk-regime
-  queries, and permission prompts fired on every call.
-
-- **Plugin manifest + global allowlist** —
-  `settings/ibkr.settings.json` now includes the three
-  `Bash(ibkr breadth*) / gamma* / regime*` patterns;
-  `.claude-plugin/plugin.json` description and keywords list the
-  risk-regime dashboard, gamma, and breadth so marketplace listings
-  display the actual feature set.
-
-- **README** — "SPX dealer zero-gamma" corrected to "SPY dealer
-  zero-gamma" with the extended-hours-quoting rationale inline;
-  matching update on the regime bullet; "tool inventory mirrors the
-  CLI 1:1" softened (the parity test accepts `setup` and `version`
-  as deliberate exclusions); plugin install id corrected from
-  `ibkr@osauer-ibkr` to `ibkr@ibkr` (the marketplace's declared
-  `name` is `ibkr`, so the canonical id is plugin-name@marketplace-name
-  with both segments equal).
-
-- **`docs/specs/risk-regime-dashboard.md` Indicator 5** — rewrote to
-  describe the local 50-DMA engine, the IBKR pacing-limit cold-start
-  budget (~60 min sustained, ~6 names/min), the coverage-safety
-  degraded state, and the once-daily post-close refresh. The weekend
-  example payload now shows breadth `ok`/`ready` served from cache
-  instead of the stale `unavailable`.
-
-- **Internal docstrings (`internal/rpc/rpc.go`)** — v1 Method token
-  corrected (`constituent-fanout-50dma`, not `s5fi-direct`), removed
-  the stale "breadth always returns unavailable on retail" comment
-  on `RegimeBreadth`, clarified `BreadthSPXParams.TimeoutMs`
-  semantics (envelope-assembly budget, not cold-start fan-out).
-
-- **Preview-screenshot fixture (`cmd/_preview/main.go`)** — synthetic
-  regime fixture's breadth row now shows a ready value (61.8) with
-  the current `constituent-fanout-50dma` method token and source
-  string, so social-preview screenshots match what users actually
-  see.
+- `ibkr regime` and `ibkr breadth` are now reliable right after the daemon
+  starts up — they no longer occasionally return errors under early load.
+- Nothing to reinstall or reconfigure. CLI and MCP surfaces are unchanged.
+- **Breaking (Go library only):** market-data subscription methods on
+  `Connection` and `Connector` now take a leading `context.Context` — see
+  Changed.
 
 ### Changed
 
-- **README "Claude Code" section** documents both update channels
-  separately: `install.sh` for binary releases (new MCP tool
-  descriptions are baked into the binary) and
-  `claude plugin update ibkr@ibkr` for plugin releases (new skill
-  commands, settings, hooks). An equivalent `claude plugin
-  marketplace add` + `claude plugin install` terminal form is
-  documented for Claude for Mac's embedded Claude Code pane, which
-  doesn't expose `/plugin` slash commands at all.
+- **Breaking (Go library):** `Connection.RequestMarketData`,
+  `RequestMarketDataWithContract`, `RequestMarketDataWithPrimary`, and the
+  `Connector.SubscribeMarketData` / `EnsureMarketDataSubscription` helpers
+  now take a leading `ctx context.Context` argument. Pass the caller's
+  per-request ctx; `nil` is treated as `context.Background()` so callers
+  without a deadline see no behaviour change.
 
-- **`make release` no longer double-compiles `bin/ibkr`**. A new
-  `smoke-only` target runs wire-smoke against the existing binary
-  rather than triggering a rebuild that clobbered the version-
-  stamped artifact `release-verify` had just validated.
-  `SMOKE_STRICT=1` makes a missing TWS gateway a release-blocking
-  failure (silent skip is unacceptable on the release path).
-  Daemon-control helpers (`stop_existing_daemons` /
-  `kill_daemon_from_lockfile`) factored out of
-  `scripts/release-verify.sh` and `scripts/wire-smoke.sh` into a
-  shared `scripts/lib-daemon-control.sh` — the two scripts had ~40
-  lines of verbatim-duplicated daemon-control code that would have
-  drifted independently.
+### Fixed
+
+- Per-request `ctx` deadlines on market-data subscribes now fire as
+  intended. Previously the slot-acquire wait blocked on the connection's
+  lifetime ctx, so caller-set timeouts were silently absorbed until the
+  connection itself closed.
+
+### Engineering notes
+
+Lands the structural fix promised in v0.27.9, which had added
+`boundedSnapshot` as an orchestrator-level defense and noted the
+slot-layer fix as a follow-up. The slot semaphore's wait was blocking
+on the connection's lifetime ctx, so caller-set per-request budgets
+were silently absorbed and only released when the connection itself
+closed.
+
+`boundedSnapshot` is kept as defense-in-depth — its budget+1s timer
+catches future regressions in any inner code that blocks past its
+declared budget.
 
 ## v0.27.9 — 2026-05-19 17:45 CEST
 
-Fixes a second-layer regime contention bug observed in production on
-2026-05-19, then propagates the v0.27.x state-surface lessons from
-the breadth engine to the gamma engine. An `ibkr regime` call that
-arrived while breadth was mid-cold-start fan-out had been returning
-three spot rows (VIX/HYG/USD.JPY) as `Status="error"` with the
-v0.27.6 partial-envelope ErrorMessage — even though the same daemon
-state had served those rows cleanly two calls earlier. v0.27.6 made
-the handler honest about its deadline; this release makes the per-
-fetcher budget honest about *its* deadline.
+### What's new
 
-Root cause of the regime bug: `Connection.acquireMarketDataSlot`
-(called by `SubscribeMarketData` → `RequestMarketDataWithContract`)
-uses `Connection.ctx` for its semaphore acquire, not the caller's
-ctx. When gamma's option-leg fan-out had saturated the market-data
-slot pool, the regime spot fetchers' `SubscribeMarketData` calls
-blocked at acquire until the orchestrator's 45 s handler ctx fired.
-The per-fetcher 5 s / 8 s `deps.snapshot` budget never reached its
-inner pollUntil to enforce. v0.27.6's partial-envelope safety net
-then assembled the three rows.
-
-The second half of the release brings gamma's wire shape and
-persistence guards up to par with v0.27.3's breadth lessons — Cold
-state on the wire, coverage-based persist guard, registry-aware
-idle-shutdown for a third caller — so the v0.27.0 → v0.27.3 patch-
-storm class is structurally impossible for gamma too.
+- `ibkr regime` no longer returns spot rows with a "fan-out exceeded
+  handler deadline" error message when called while breadth is mid-cold-
+  start. The per-fetcher 5–8 s budgets are now enforced at the regime
+  layer (defense-in-depth; the structural fix lands in v0.27.11).
+- `ibkr status` now reports `regime-prewarm` during daemon startup pre-
+  warming, alongside the existing `breadth-spx` and `gamma-zero`.
+- **Wire addition (library / MCP consumers):** gamma's snapshot exposes
+  a new `cold` state on the wire (previously folded into `computing`).
+  Treat `Status="cold"` as "no compute has run this session yet" —
+  `fetchRegimeGamma` maps it to `unavailable` in the regime row.
 
 ### Added
 
-- **`GammaZeroStatusCold = "cold"`** on the wire. `snapshot(nil)` now
-  returns Cold instead of folding the "no compute kicked this
-  session" state into Computing — same side-channel-inference
-  pattern the v0.27.3 breadth State enum retired. In normal flow
-  `handleGammaZeroSPX` auto-kicks on every call so Cold rarely
-  reaches the wire today; the schema is ahead of need so a future
-  change that decouples kick-on-fetch (e.g. moving auto-kick to
-  postConnectSetup like breadth) doesn't require a wire-shape bump.
-  `fetchRegimeGamma` maps Cold → `RegimeStatusUnavailable`, mirroring
-  breadth's Cold mapping.
+- Gamma snapshot exposes a `cold` state on the wire
+  (`GammaZeroStatusCold = "cold"`) for "no compute has run this
+  session yet". Previously folded into `computing`. `fetchRegimeGamma`
+  maps `cold` → `unavailable` in the regime row, mirroring breadth's
+  Cold handling. The schema is ahead of need since the gamma compute
+  currently auto-kicks on every call.
 
-- **`MinLegCoverageFraction = 0.5`** named constant in
-  `internal/daemon/gamma_zero_compute.go`. Mirror of breadth's
-  `MinCoverageFraction = 0.80` pattern: a fan-out whose successful-
-  leg fraction falls below the threshold is surfaced as an
-  error from the compute, NOT as a warning-flagged result. The cache
-  layer's existing `gammaErrorRetryTTL` machinery (already pinned by
-  `TestGammaZeroCache_RetriesErrorAfterTTL`) then re-attempts on the
-  next call within the same NY trading session — the v0.27.0 poison-
-  cache class is structurally impossible for gamma.
+- Gamma compute now surfaces an error (not a warning-flagged result)
+  when leg coverage drops below `MinLegCoverageFraction = 0.5`. The
+  cache layer then re-attempts within the same NY trading session via
+  `gammaErrorRetryTTL`, closing the v0.27.0-class poison-cache failure
+  mode for gamma. Threshold is 0.5 (vs breadth's 0.8) because the
+  OI-weighted gamma compute concentrates near ATM, so missing far-OTM
+  legs has limited impact above 50% coverage.
 
-  Threshold of 0.5 (vs breadth's 0.8): the OI-weighted gamma compute
-  concentrates near ATM, so missing far-OTM legs has limited impact
-  on the γ-zero estimate. Below 50% of expected legs the ATM
-  coverage itself is likely partial; a modelled level computed off
-  half the chain is no better than a guess.
-
-- **`backgroundTasks()` now surfaces `regime-prewarm`** while
-  `prewarmRegimeSymbols` is in flight. The fan-out (6 parallel
-  `FetchContractDetails` calls with 30 s budgets each) used to be
-  invisible to the idle watcher — an autospawned daemon left
-  unattended could idle-out mid-prewarm. Same coherence guarantee as
-  `breadth-spx` and `gamma-zero`: a task that defers idle shutdown
-  is exactly a task `ibkr status` reports as running.
+- `ibkr status`'s `background_tasks` list now includes `regime-prewarm`
+  during daemon startup pre-warming. Closes the gap where an autospawned
+  daemon could idle-out mid-prewarm because the task was invisible to
+  the idle watcher.
 
 ### Changed
 
-- **`isBusy()` and `HealthResult.BackgroundTasks` ride one source of
-  truth.** The two surfaces previously enumerated the set of in-
-  flight daemon tasks via twin switch statements ("Each branch
-  mirrors the isBusy() predicate so the two surfaces stay coherent"
-  — author discipline, not the type system). v0.27.6's release-
-  verify step 7 made the second surface operationally load-bearing
-  (it polls `background_tasks` to detect breadth mid-fan-out); drift
-  between the two would have silently broken the release gate. The
-  new `(s *Server) backgroundTasks()` method is the single registered
-  set; `isBusy()` becomes `len(backgroundTasks()) > 0`,
-  `handleStatusHealth` assigns the slice directly, and the regime
-  partial-envelope ErrorMessage (next bullet) reads it as a third
-  consumer.
+- `HealthResult.BackgroundTasks` (the wire field `background_tasks`) and
+  the internal `isBusy()` predicate now ride a single registered set.
+  Previously two parallel switch statements that could silently drift —
+  a real risk after v0.27.6 made the wire field operationally
+  load-bearing for release gating.
 
-- **Regime partial-envelope ErrorMessage names the contending task.**
-  When `runRegimeFanout`'s deadline fires, the ErrorMessage now reads
-  e.g. `"regime fan-out exceeded handler deadline (contended with
-  daemon-internal task(s): breadth-spx)"` instead of v0.27.6's
-  generic hedge `"...gateway likely under contention from concurrent
-  breadth/gamma work"`. The closure runs at deadline time (not
-  handler entry) so the named tasks reflect state at the moment the
-  deadline actually fired. The empty-list case falls through to a
-  gateway-side hedge.
+- Regime fan-out timeout error message now names the contending task.
+  Example: `"regime fan-out exceeded handler deadline (contended with
+  daemon-internal task(s): breadth-spx)"` instead of v0.27.6's generic
+  hedge. The named tasks reflect daemon state at the moment the
+  deadline fired.
 
-- **Gamma compute coverage gate refactored** into a unit-testable
-  `checkLegCoverage(landed, total, throttled)` helper. The persist-
-  or-not contract now has a dedicated test
-  (`TestCheckLegCoverage`) independent of the full-compute fixture
-  which requires a live connector. Throttle attribution is folded
-  into the error message so the diagnostic names the likely cause
-  (gateway throttled the fan-out) without the operator combining
-  two signals.
+- `ibkr gamma`'s leg-coverage gate is now unit-testable via a
+  `checkLegCoverage` helper. The compute's error message includes
+  throttle attribution, so users see e.g. "gateway throttled X of Y
+  legs" directly instead of having to combine two signals.
 
-- **`GammaZeroComputed.Warnings` doc updated**: removes the stale
-  `"low_leg_coverage"` reference (now surfaced as an error, not a
-  warning), points readers to the `MinLegCoverageFraction` gate.
+- `GammaZeroComputed.Warnings` doc no longer references the stale
+  `"low_leg_coverage"` warning (low coverage is now surfaced as an
+  error).
 
 ### Fixed
 
-- **`regime` spot fetchers honour their per-fetcher budget at the
-  regime layer.** New `boundedSnapshot` / `boundedSnapshotWith52WHigh`
-  helpers in `internal/daemon/regime.go` race `deps.snapshot` against
-  budget + 1 s in a goroutine; on budget firing, zero values are
-  returned (mapped to the row's existing "no spot tick" classified
-  error) and the inner goroutine leaks cleanly (exits when acquire
-  returns or the connection ctx fires). The structural fix — pushing
-  ctx through `SubscribeMarketData` → `acquireMarketDataSlot` in
-  `pkg/ibkr` — is tracked as a follow-up; this release is the
-  minimal-blast-radius fix at the regime layer that addresses the
-  user-visible 45 s wait today.
+- Regime spot fetchers (`ibkr regime` fan-out) now respect their per-
+  leg budgets (5–8 s) at the regime layer via a budget-bounded snapshot
+  wrapper. Previously a saturated market-data slot pool absorbed the
+  budgets until the orchestrator's 45 s handler ctx fired, producing
+  the user-visible 45 s wait. Structural fix at the slot layer lands
+  in v0.27.11.
 
-- **`release-verify.sh` step 7 gates against the orchestrator-deadline
-  fallback.** v0.27.6 added the breadth-mid-fan-out wait that
-  reproduces production contention; this release adds an assertion
-  on the *output shape* under that pressure. Any row whose
-  `error_message` contains `"fan-out exceeded handler deadline"`
-  on either regime call means the per-fetcher fix didn't fire —
-  exactly the 2026-05-19 production bug signature — and the release
-  blocks.
+- `release-verify.sh` step 7 (regime call-sequence drop check) also
+  gates output shape under contention. v0.27.6 added the breadth-mid-
+  fan-out wait; this release adds an assertion that any regime row
+  whose `error_message` contains `"fan-out exceeded handler deadline"`
+  blocks the release — that error message is the exact regression
+  signature this release closes.
+
+### Engineering notes
+
+Two-part release. (1) Regime spot fetchers' per-leg budgets were being
+absorbed by `acquireMarketDataSlot` blocking on the connection's
+lifetime ctx rather than the caller's; the minimal-blast-radius defense
+here adds a budget-bounded snapshot wrapper at the regime layer, with
+the structural fix landing in v0.27.11. (2) Brings gamma's wire shape
+(Cold state) and persistence guard (coverage threshold) up to par with
+the breadth engine, closing the same poison-cache-from-partial-fan-out
+class that v0.27.0 → v0.27.3 closed for breadth.
 
 ## v0.27.7 — 2026-05-19 16:28 CEST
 
-Adds a price-context headline to `ibkr regime`. The dashboard now opens
-with SPY's spot price + day's dollar and percent change, and VIX's
-spot + percent change, both color-coded — so the reader sees the two
-anchors every other indicator is interpreted against before they
-scan the row table.
+### What's new
+
+- `ibkr regime` opens with a color-coded headline — SPY spot + day's
+  dollar and percent change, then VIX spot + percent change — before the
+  indicator table. SPY change colors long-default (green up / red down);
+  VIX is inverted (red up = vol expanding = risk-off).
+- Nothing to reinstall. CLI output gains one header line.
+- **Wire addition (library / MCP consumers):** `RegimeVIXTerm` now
+  carries `VIXPrevClose` and `VIXChangePct`; `RegimeHYGSPYDivergence`
+  now carries `SPYPrevClose`, `SPYChange`, and `SPYChangePct`. Consumers
+  that ignore unknown fields are unaffected.
 
 ### Added
 
-- **SPY + VIX headline above the indicator rows.** Format:
-  `SPY 530.42  +1.20  (+0.23%)    VIX 14.50  (−2.10%)`. SPY change is
-  green on up, red on down (long-SPY default). VIX change is colored
-  inverted — red on up (vol expanding = risk-off), green on down. Both
-  halves render independently: a missing prev-close anchor falls back
-  to a dim `(—)` placeholder rather than fabricating zero.
+- SPY + VIX headline above the `ibkr regime` indicator rows. Format
+  `SPY 530.42  +1.20  (+0.23%)    VIX 14.50  (−2.10%)`. SPY change
+  colors long-default (green up / red down); VIX is inverted (red up
+  = vol expanding = risk-off). A missing previous-close anchor falls
+  back to a dim `(—)` placeholder rather than fabricating zero.
 
-- **`RegimeVIXTerm.VIXPrevClose` + `VIXChangePct`** and
-  **`RegimeHYGSPYDivergence.SPYPrevClose` + `SPYChange` + `SPYChangePct`**
-  on the wire. Populated from tick 9 (previous regular-session close)
-  which the gateway already emits alongside the existing subscribes —
-  no extra round trips. The VIX anchor survives a VIX3M failure so the
-  header is useful even when the term-structure leg drops.
-
-### Changed
-
-- **`briefSnapshotPriceWith52WHigh` now also returns `prevClose`.** One
-  caller (the regime production deps wiring) — signature widened. New
-  helper `briefSnapshotPriceWithClose` for VIX's path. The legacy
-  `briefSnapshotPrice` is unchanged so other callers (chain, scan
-  enrichment) keep their existing shape.
-
-- **`regimeDeps.snapshot` / `snapshotWith52WHigh` carry `prevClose`.**
-  Plumbed through the test fixtures (`fakeQuote.prevClose`,
-  `fakeRichQuote.prevClose`); existing tests don't set the field and
-  continue to pass with `nil` headline anchors.
+- Wire fields on `RegimeVIXTerm` (`VIXPrevClose`, `VIXChangePct`) and
+  `RegimeHYGSPYDivergence` (`SPYPrevClose`, `SPYChange`, `SPYChangePct`).
+  Populated from the gateway's previous-close tick that already flows
+  alongside existing subscribes — no extra round trips. The VIX anchor
+  survives a VIX3M failure so the header is useful even when the
+  term-structure leg drops.
 
 ## v0.27.6 — 2026-05-19 16:04 CEST
 
-Fixes the production bug behind the v0.27.5 cut: a second `ibkr regime`
-call that arrived while breadth was mid-fan-out hung the daemon's
-handler past its deadline. The CLI then timed out and reported
-`regime: context deadline exceeded` to the user — even though the
-v0.27.5 test suite passed because the tests exercised the wrong layer
-(individual fetcher drops, not the orchestrator's deadline handling).
+### What's new
+
+- `ibkr regime` no longer hangs and times out with `regime: context
+  deadline exceeded` when a second call arrives while breadth or gamma
+  are running. The handler now returns within its budget; contending
+  rows are surfaced as `Status="error"` with a clear contention message.
+- Nothing to reinstall or reconfigure.
 
 ### Fixed
 
-- **`handleRegimeSnapshot` honours its own deadline.** Pre-fix, the
-  orchestrator used a plain `wg.Wait()` so any single fetcher's
-  goroutine could block the whole handler indefinitely. Replaced with
-  a tagged-result channel + `select` on `ctx.Done()`; when the daemon
-  ctx fires (default 45 s), the handler returns a partial envelope
-  with the not-yet-completed rows surfaced as `Status="error"` and
+- Regime fan-out (`ibkr regime`) now returns within its 45 s ctx
+  deadline even when individual fetchers hang. Rows still completing
+  at the deadline are surfaced as `Status="error"` with
   `ErrorMessage="regime fan-out exceeded handler deadline (gateway
   likely under contention from concurrent breadth/gamma work)"`.
-  Lingering goroutines exit cleanly via a buffered channel; their
-  late values are garbage-collected.
+  Previously a single stuck fetcher could block the whole handler
+  indefinitely.
 
-- **`FetchHistoricalDailyBars` gains a ctx-aware variant.**
-  `FetchHistoricalDailyBarsCtx(ctx, sym, days)` propagates the
-  caller's ctx deadline into the underlying gateway timeout, so a
-  cancellation upstream stops the HMDS fetch promptly rather than
-  running to the legacy 20 s internal timer. Regime fetchers switch
-  to this; breadth and gamma keep the legacy `(sym, days, timeout)`
-  call (they run on their own long-lived timelines where the legacy
-  signature is the right fit). Minimal-blast-radius refactor — full
-  ctx propagation into `fetchHistoricalWithContract` is a future move
-  if more callers grow a need.
+- `pkg/ibkr.FetchHistoricalDailyBars` gains a ctx-aware variant
+  `FetchHistoricalDailyBarsCtx(ctx, sym, days)` that propagates the
+  caller's deadline into the gateway timeout. An upstream cancellation
+  now stops the HMDS fetch promptly rather than running to the legacy
+  20 s internal timer. Regime fetchers switch to the new variant;
+  breadth and gamma keep the legacy `(sym, days, timeout)` call.
 
 ### Added
 
-- **`TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope`** —
-  hermetic regression test that pins the contract: a stuck fetcher
-  must not hold the orchestrator past its ctx deadline. Drives
-  `runRegimeFanout` directly with one blocking closure and four fast
-  ones, asserts the handler returns within 400 ms (well under the
-  200 ms ctx + slack), and confirms the stuck row surfaces with
-  `Status="error"` plus a populated `Notes` field so the renderer has
-  spec context.
+- `release-verify` regime call-sequence check (`scripts/release-verify.sh`
+  step 7) now waits for breadth to enter cold-start fan-out before
+  firing — polls `ibkr status --json` for `breadth-spx` in
+  `background_tasks` (up to 20 s), then sleeps 8 s for the fan-out to
+  reach steady-state HMDS pressure. Reproduces the production
+  contention the v0.27.5 smoke missed against a quiescent daemon.
 
-- **`scripts/release-verify.sh` step 7 waits for breadth mid-fan-out
-  before firing the regime-twice diff.** Polls `ibkr status --json`
-  for up to 20 s looking for `breadth-spx` in `background_tasks`;
-  once seen, sleeps 8 s to let the fan-out reach steady-state HMDS
-  pressure, then runs the call-sequence check. This reproduces the
-  production contention that produced the v0.27.5 report — the v0.27.5
-  smoke ran against a quiescent daemon and didn't catch the bug class
-  it was meant to gate.
+### Engineering notes
 
-### Changed
-
-- **`handleRegimeSnapshot` orchestration extracted as
-  `runRegimeFanout`.** The handler is now a thin wrapper that wires
-  the five fetcher closures and delegates. Makes the deadline-handling
-  contract directly testable (see new test above) without spinning
-  up a Server fixture.
+The v0.27.5 tests exercised the per-fetcher drop layer and missed the
+orchestrator's deadline handling — a second `ibkr regime` arriving
+mid-breadth-fan-out hung the handler. This release gates the
+orchestrator and adds a release-verify check that reproduces the
+contention against a daemon known to be mid-fan-out before asserting
+output shape.
 
 ## v0.27.5 — 2026-05-19 15:03 CEST
 
-Pins the contract for what happens when a regime indicator that landed
-on one `ibkr regime` call doesn't land on the next. No behaviour change
-— the daemon already reports such drops as `error` or `unavailable`
-rather than serving a stale cache — but the contract is now testable,
-and the release flow refuses to ship a binary that violates it against
-a live gateway.
+### What's new
+
+- No user-visible behaviour change. `ibkr regime` continues to report
+  dropped indicators as `error` or `unavailable` rather than serving a
+  stale cache — this release just makes that contract testable and
+  enforced by the release gate.
+- Nothing to reinstall.
 
 ### Added
 
-- **`scripts/release-verify.sh` step 7** — regime call-sequence drop
-  check. Two `ibkr regime --json` calls 30 s apart against the smoke
-  gateway; if any row's `status` downgrades from `ok`/`stale` to
-  `error`/`unavailable` between them, the release aborts before the
-  tag is created. One-directional (`computing → ok` and recovery are
-  fine), so off-hours flake patterns that error on both calls don't
-  block the release.
+- `release-verify` step 7 (regime call-sequence drop check): two `ibkr
+  regime --json` calls 30 s apart against the smoke gateway; if any
+  row's `status` downgrades from `ok`/`stale` to `error`/`unavailable`
+  between them, the release aborts before the tag is created.
+  One-directional (`computing → ok` and recovery are fine), so
+  off-hours flake patterns that error on both calls don't block the
+  release.
 
-- **`TestRegime_CallSequence_HonestUnavailable`** in
-  `internal/daemon/regime_test.go` — pins the call-N → call-N+1
-  honest-unavailable contract for the four live-gateway risk surfaces:
-  VIX3M timeout, USD.JPY FX miss, SPY tick 165 miss (advisory field
-  moves into `fields_missing`), SPY 252d fallback collapse when daily
-  history thins. Hermetic; reuses the existing `regimeDeps` seam.
+- Regression test `TestRegime_CallSequence_HonestUnavailable` pins the
+  honest-unavailable contract for the four live-gateway risk surfaces
+  (VIX3M timeout, USD.JPY FX miss, SPY tick 165 miss, SPY 252d
+  fallback collapse).
 
-- **`TestClassifyBreadthState`** in `internal/daemon/handlers_test.go`
-  — pins the breadth handler's `(snapshot, refreshing)` → State enum
-  mapping. The classification was a v0.27.3 fix; this test makes it a
-  contract rather than folklore.
-
-### Changed
-
-- **`handleBreadthSPX`** derives `res.State` via a new
-  `classifyBreadthState` helper. Pure refactor of the existing inline
-  switch — same logic, named. Makes the state-classification contract
-  greppable and testable without invoking the full handler.
+- Regression test `TestClassifyBreadthState` pins the breadth handler's
+  `(snapshot, refreshing)` → `State` enum mapping (a v0.27.3 fix that
+  was previously folklore).
 
 ## v0.27.4 — 2026-05-19 09:31 CEST
 

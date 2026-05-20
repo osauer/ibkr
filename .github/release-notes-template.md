@@ -2,7 +2,9 @@
 
 `ibkr` is a read-only interface to your Interactive Brokers account, reachable from a Go library, a shell CLI, a stdio MCP server (Claude Desktop, Cursor, Continue, Zed), and a Claude Code plugin. Hand it to an assistant, a cron job, a notebook, or your own service.
 
-<!-- __HIGHLIGHTS__: per-release, one or two bullets on what changed for the reader. -->
+## What's new in __VERSION__
+
+__HIGHLIGHTS__
 
 ## Install in two commands
 

@@ -32,7 +32,7 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -315,10 +315,12 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 	@echo "Built artefacts in $(DIST_DIR)/:"
 	@ls -la $(DIST_DIR)
 
-# Compose the GitHub Release notes by concatenating the install header
-# template (with __VERSION__ substituted) and the matching CHANGELOG.md
-# section, then create the GitHub Release with the dist/ tarballs +
-# SHA256SUMS attached. Marks the new release as latest.
+# Compose the GitHub Release notes by substituting __VERSION__ and
+# __HIGHLIGHTS__ in the install-header template, then appending the
+# matching CHANGELOG.md entry. __HIGHLIGHTS__ is pulled from the entry's
+# `### What's new` section, so the release body's top stanza is mechanically
+# derived from CHANGELOG — no second place to drift. Marks the new release
+# as latest.
 release-publish: ## Create the GitHub Release page (notes + binaries) — RELEASE_VERSION required
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-publish: RELEASE_VERSION is required, e.g. make release-publish RELEASE_VERSION=v0.6.0" >&2; \
@@ -329,12 +331,29 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 		exit 1; \
 	fi
 	@command -v gh >/dev/null 2>&1 || { echo "release-publish: gh CLI not on PATH; brew install gh" >&2; exit 1; }
+	$(MAKE) changelog-lint RELEASE_VERSION=$(RELEASE_VERSION)
 	@notes=$$(mktemp -t ibkr-release-notes.XXXXXX) && \
-	trap 'rm -f $$notes' EXIT && \
-	sed "s/__VERSION__/$(RELEASE_VERSION)/g" .github/release-notes-template.md > $$notes && \
+	highlights=$$(mktemp -t ibkr-release-highlights.XXXXXX) && \
+	trap 'rm -f $$notes $$highlights' EXIT && \
+	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ if(in_ver) exit; in_ver = ($$0 ~ "^## "ver" "); next } in_ver && /^### What.s new$$/{ in_new=1; next } in_ver && in_new && /^###/{ exit } in_new' CHANGELOG.md > $$highlights && \
+	awk -v ver='$(RELEASE_VERSION)' -v hf="$$highlights" '{ gsub(/__VERSION__/, ver) } /__HIGHLIGHTS__/{ while ((getline line < hf) > 0) print line; close(hf); next } { print }' .github/release-notes-template.md > $$notes && \
 	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " ") ; if(in_section){ next } } in_section' CHANGELOG.md >> $$notes && \
 	title="$${MESSAGE:-$(RELEASE_VERSION)}" && \
 	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/SHA256SUMS
+
+changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "changelog-lint: RELEASE_VERSION is required, e.g. make changelog-lint RELEASE_VERSION=v0.27.12" >&2; \
+		exit 1; \
+	fi
+	@RELEASE_VERSION=$(RELEASE_VERSION) ./scripts/check-changelog-entry.sh
+
+changelog-stub: ## Prepend a CHANGELOG.md entry skeleton for RELEASE_VERSION
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "changelog-stub: RELEASE_VERSION is required, e.g. make changelog-stub RELEASE_VERSION=v0.27.12" >&2; \
+		exit 1; \
+	fi
+	@RELEASE_VERSION=$(RELEASE_VERSION) ./scripts/changelog-stub.sh
 
 all: build test ## build + test
 
@@ -396,6 +415,11 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		echo "release: tag $(RELEASE_VERSION) already exists on origin" >&2; \
 		exit 1; \
 	fi
+	@# Validate the CHANGELOG entry shape before any expensive step. A
+	@# malformed entry (wrong version heading, missing ### What's new, or
+	@# no Keep-a-Changelog subsection) fails here, not after refresh-spx /
+	@# test / build / smoke have already run.
+	$(MAKE) changelog-lint RELEASE_VERSION=$(RELEASE_VERSION)
 	@# Refresh the S&P-500 membership list from Wikipedia. The release
 	@# flow runs this on every cut so every tagged binary carries a
 	@# current list; a same-day refresh that produces no diff is a no-op.
