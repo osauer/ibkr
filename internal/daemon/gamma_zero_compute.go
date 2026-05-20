@@ -286,23 +286,34 @@ func productionLegFetcher(
 	// thing — a leg with no OI and no IV is dead.
 	var oi int64
 	deadline := time.Now().Add(5 * time.Second)
-	_ = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
+	err = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
 		if d.OpenInt > 0 {
 			oi = d.OpenInt
 			return true
 		}
 		return false
 	})
+	if IsSubscriptionRejected(err) {
+		// Gateway pushed a terminal error for this reqID (200 "no
+		// security definition", 354 "not subscribed", 10197 "competing
+		// session", …). The subscription will never produce ticks, so
+		// abort the leg immediately — both for OI (already polled) and
+		// for the model tick (would block another 5 s). Throttle: false
+		// because this is the gateway being authoritative, not a sign
+		// the fan-out is overloading the wire.
+		return legResult{}
+	}
 
 	// Stage 2: model-tick gate. handleOptionComputation only commits
 	// optIV[key] and optGreeks[key] once IBKR sends a non-sentinel
 	// model row (see saneGreek), so the presence of either is the
 	// authoritative signal that the contract has been priced.
-	// pollUntil shares the leg's overall deadline — model ticks
-	// usually arrive within the first second once OI lands, but the
-	// budget covers them both.
+	// pollUntilWithReject shares the leg's overall deadline AND the
+	// subscription's reject channel — model ticks usually arrive within
+	// the first second once OI lands, but the budget covers them both,
+	// and a late-arriving terminal error still aborts fast.
 	var iv, gamma float64
-	_ = pollUntil(ctx, deadline, func() bool {
+	_ = pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
 		if v, found := c.GetOptionIV(key); found && v > 0 {
 			iv = v
 		}

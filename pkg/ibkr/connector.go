@@ -150,6 +150,45 @@ type Subscription struct {
 	IV       float64
 	LastTime time.Time
 	Observed bool // true once we receive any tick for this reqID
+	// RejectCh receives a [SubscriptionRejection] when the gateway returns
+	// a terminal error for this reqID (codes 200, 320, 321, 322, 354,
+	// 10197) — "the subscription will never produce ticks" semantics.
+	// Buffered 1; the producer drops on a full buffer so it never blocks
+	// the error-handler goroutine. A nil channel means fast-abort is
+	// disabled (used by test fixtures that bypass the Subscribe path).
+	RejectCh chan SubscriptionRejection
+}
+
+// SubscriptionRejection captures a terminal IBKR error for a market-data
+// subscription. The fast-abort path in the per-leg poller selects on the
+// subscription's [Subscription.RejectCh] so a code-200 ("no security
+// definition") response returns immediately instead of running out the
+// 5 s budget. Callers can inspect Code to distinguish a legitimately
+// missing contract (200) from a temporary entitlement gap (354) or a
+// competing-session forced-delayed switch (10197).
+type SubscriptionRejection struct {
+	Code    int
+	Message string
+}
+
+// terminalSubscriptionErrorCodes is the set of IBKR error codes that
+// guarantee the subscription will never produce ticks. The error handler
+// pushes a [SubscriptionRejection] on these codes so in-flight pollers
+// can abort within milliseconds.
+//
+//   - 200   "No security definition has been found for the request"
+//   - 320   "Server error when reading request" (bad ticker/exchange)
+//   - 321   "Server error when validating request"
+//   - 322   "Error processing request" (duplicate ticker ID)
+//   - 354   "Requested market data is not subscribed" (entitlement gap)
+//   - 10197 "Competing live session blocks live data" — handler also
+//     forces delayed mode, but the original reqID is dead either way.
+func isTerminalSubscriptionError(code int) bool {
+	switch code {
+	case 200, 320, 321, 322, 354, 10197:
+		return true
+	}
+	return false
 }
 
 const (
@@ -1403,6 +1442,7 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 		ReqID:    reqID,
 		Fields:   fields,
 		LastTime: time.Now(),
+		RejectCh: make(chan SubscriptionRejection, 1),
 	}
 	c.subMu.Unlock()
 
@@ -1483,6 +1523,16 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 				// Reset subscription metadata so the new request can cleanly re-register
 				sub.ReqID = 0
 				sub.Observed = false
+				// Drain any stale rejection left by the previous reqID so
+				// the next poller doesn't fast-abort on it.
+				if sub.RejectCh != nil {
+					select {
+					case <-sub.RejectCh:
+					default:
+					}
+				} else {
+					sub.RejectCh = make(chan SubscriptionRejection, 1)
+				}
 			}
 			reqID, err := request()
 			if err != nil {
@@ -1515,6 +1565,7 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 		ReqID:    reqID,
 		Fields:   fields,
 		LastTime: time.Now(),
+		RejectCh: make(chan SubscriptionRejection, 1),
 	}
 	c.subscriptions[symbol] = sub
 	marketDataLogger.Infof("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
@@ -1890,6 +1941,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 		Symbol:   key,
 		ReqID:    reqID,
 		LastTime: time.Now(),
+		RejectCh: make(chan SubscriptionRejection, 1),
 	}
 	c.subMu.Unlock()
 	// Route option-computation ticks (msg 21, tick types 10/11/13) for this
@@ -2407,6 +2459,62 @@ func saneGreek(v, bound float64) bool {
 	return true
 }
 
+// SubscriptionRejectCh returns the rejection channel for a tracked
+// subscription. Consumers (e.g. the gamma compute's per-leg poll) select
+// on this channel alongside their poll ticker so the gateway pushing a
+// terminal error (200/320/321/322/354/10197) aborts the poll in
+// milliseconds instead of running out the full budget.
+//
+// Returns nil if no subscription is tracked for the key OR the
+// subscription was constructed without a channel (test fixtures that
+// bypass the Subscribe path). A nil channel in a `select` blocks
+// forever, so callers can safely use the return value unchecked — they
+// just won't get fast-abort.
+func (c *Connector) SubscriptionRejectCh(key string) <-chan SubscriptionRejection {
+	if key == "" {
+		return nil
+	}
+	c.subMu.RLock()
+	defer c.subMu.RUnlock()
+	sub, ok := c.subscriptions[strings.ToUpper(key)]
+	if !ok || sub == nil {
+		return nil
+	}
+	return sub.RejectCh
+}
+
+// pushSubscriptionRejection signals fast-abort to any in-flight poller
+// watching this reqID's subscription. Non-blocking: the channel is
+// buffered 1 and we drop on a full buffer so the error-handler goroutine
+// never stalls. The drop is benign — the consumer's first read already
+// carries the abort signal, and the specific code/message of subsequent
+// rejections does not matter to the poller (every terminal code means
+// "this subscription will never produce ticks").
+//
+// Looked up via reqIDMap (the same lookup handleIBKRError already does
+// for recovery routing). Subscriptions created without a channel (test
+// fixtures, scaffolding) silently no-op.
+func (c *Connector) pushSubscriptionRejection(reqID, code int, message string) {
+	if reqID <= 0 || !isTerminalSubscriptionError(code) {
+		return
+	}
+	c.subMu.RLock()
+	var ch chan SubscriptionRejection
+	if sym, ok := c.reqIDMap[reqID]; ok {
+		if sub, ok := c.subscriptions[sym]; ok && sub != nil {
+			ch = sub.RejectCh
+		}
+	}
+	c.subMu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- SubscriptionRejection{Code: code, Message: message}:
+	default:
+	}
+}
+
 // handleIBKRError receives raw IBKR error messages for proactive recovery.
 // fields: [msgID=4, version, reqID, errorCode, errorMsg]
 func (c *Connector) handleIBKRError(fields []string) {
@@ -2426,6 +2534,19 @@ func (c *Connector) handleIBKRError(fields []string) {
 			code = v
 		}
 	}
+
+	// Fast-abort signal for in-flight pollers. Sent first so a code-200
+	// rejection on a per-leg market-data subscription unblocks the
+	// consumer before any of the recovery branches below (some of which
+	// take subMu in write mode or kick off background refreshes). The
+	// Connection layer has already released this reqID's market-data
+	// slot in handleErrorMessage; the signal here is the consumer-side
+	// counterpart.
+	rejectionMsg := ""
+	if len(fields) > 4 {
+		rejectionMsg = fields[4]
+	}
+	c.pushSubscriptionRejection(reqID, code, rejectionMsg)
 
 	// Map to symbol if available (subscriptions or historical request)
 	symbol := ""

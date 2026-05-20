@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,28 @@ import (
 // at seven call sites; now changing the cadence is a one-line edit.
 const pollCadence = 75 * time.Millisecond
 
+// SubscriptionRejectedError is returned by pollMarketData (and helpers
+// that thread the subscription's reject channel) when the IBKR gateway
+// pushed a terminal subscription error (codes 200/320/321/322/354/10197)
+// for the reqID being polled. Callers use errors.As to inspect the
+// rejection code so they can distinguish "no such contract" from a
+// budget timeout without waiting out the full deadline.
+type SubscriptionRejectedError struct {
+	Key       string
+	Rejection ibkrlib.SubscriptionRejection
+}
+
+func (e *SubscriptionRejectedError) Error() string {
+	return fmt.Sprintf("subscription %q rejected by gateway: code=%d msg=%s", e.Key, e.Rejection.Code, e.Rejection.Message)
+}
+
+// IsSubscriptionRejected reports whether err is a SubscriptionRejectedError.
+// Convenience for the common "gateway said no" branch in fan-out callers.
+func IsSubscriptionRejected(err error) bool {
+	var rej *SubscriptionRejectedError
+	return errors.As(err, &rej)
+}
+
 // pollUntil drives a polling loop on the standard cadence until fn signals
 // done, the context is cancelled, or the deadline passes. Returns nil iff
 // fn returned true; otherwise the cancellation reason (ctx.Err() or
@@ -23,6 +47,20 @@ const pollCadence = 75 * time.Millisecond
 // helper only owns the loop. Use ptrIfPos to lift the scalar fields the
 // predicate observed.
 func pollUntil(ctx context.Context, deadline time.Time, fn func() (done bool)) error {
+	return pollUntilWithReject(ctx, deadline, nil, "", fn)
+}
+
+// pollUntilWithReject is pollUntil that also selects on a subscription
+// reject channel. When the gateway pushes a terminal error for the
+// subscription, the poll exits with a [SubscriptionRejectedError]
+// carrying the original code/message — typically within a few ms of the
+// error frame arriving on the wire, instead of running out the deadline.
+//
+// Pass rejectCh = nil to fall back to plain pollUntil semantics; a nil
+// channel in a select blocks forever, so the rejection branch is dormant.
+// key is only used to label the returned error so fan-out callers can
+// log which leg was rejected.
+func pollUntilWithReject(ctx context.Context, deadline time.Time, rejectCh <-chan ibkrlib.SubscriptionRejection, key string, fn func() (done bool)) error {
 	if fn() {
 		return nil
 	}
@@ -35,6 +73,8 @@ func pollUntil(ctx context.Context, deadline time.Time, fn func() (done bool)) e
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case rej := <-rejectCh:
+			return &SubscriptionRejectedError{Key: key, Rejection: rej}
 		case <-poll.C:
 		}
 		if fn() {
@@ -46,8 +86,14 @@ func pollUntil(ctx context.Context, deadline time.Time, fn func() (done bool)) e
 // pollMarketData is the common case of pollUntil: poll
 // c.GetMarketData()[key] until predicate returns true. Predicate is invoked
 // only when the cache has an entry for key.
+//
+// Automatically threads the subscription's reject channel
+// ([ibkrlib.Connector.SubscriptionRejectCh]) so a terminal gateway error
+// for this reqID aborts the poll within milliseconds with a
+// [SubscriptionRejectedError]. Callers that need to distinguish "gateway
+// rejected" from "budget timeout" can use [IsSubscriptionRejected].
 func pollMarketData(ctx context.Context, c *ibkrlib.Connector, key string, deadline time.Time, predicate func(*ibkrlib.MarketData) bool) error {
-	return pollUntil(ctx, deadline, func() bool {
+	return pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
 		data, ok := c.GetMarketData()[key]
 		if !ok {
 			return false
