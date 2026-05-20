@@ -454,6 +454,15 @@ known public reference. For the first 4 weeks after enabling
 This is a human ritual, not an automated check — the references it
 compares against are publicly-posted opinions, not API feeds.
 
+**Tooling.** `ibkr regime --log <path>` appends one JSON line to a
+file each time it's invoked: `{timestamp, regime}` with the full
+envelope inline. Run from cron (e.g. weekday 16:40 ET) for the four
+weeks. We suggest filenames like `regime-v1.jsonl` so a future
+schema change can use a new filename rather than break the parser.
+Plain JSONL — `jq` and pandas both read it; analyse the
+`gamma_zero.envelope.result.zero_gamma` field against
+SpotGamma's posted value.
+
 ### Composite-score honesty
 
 The dashboard composite (count of red / yellow indicators) does *not*

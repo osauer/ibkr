@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -67,6 +69,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	explain := fs.Bool("explain", false, "print the spec's per-indicator threshold prose under each row")
 	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
 	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m — regime indicators move on minute-to-hour scales, not sub-minute)")
+	logPath := fs.String("log", "", "Append today's snapshot to a JSONL log file at <path>. The file accumulates one line per call; we suggest filenames like `regime-v1.jsonl` so future schema changes can use a new filename rather than breaking the parser. Plain JSONL — analyse with `jq` or pandas. Useful for the 4-week SpotGamma calibration ritual the spec describes.")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -81,6 +84,16 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 		var res rpc.RegimeSnapshotResult
 		if err := env.Conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &res); err != nil {
 			return fail(env, "regime: %v", err)
+		}
+		// Append to the JSONL log before rendering. If the write fails
+		// the user still sees the snapshot — log persistence is a
+		// side effect, not the primary goal. Stderr-equivalent warning
+		// surfaces via env so a non-TTY consumer can still parse the
+		// regime envelope cleanly.
+		if *logPath != "" {
+			if err := appendRegimeLog(*logPath, res); err != nil {
+				_, _ = fmt.Fprintf(env.Stderr, "regime: log append failed: %v\n", err)
+			}
 		}
 		if *jsonOut {
 			return printJSONTo(env, out, res)
@@ -107,6 +120,45 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	code := fetchAndRender(env.Stdout)
 	stop()
 	return code
+}
+
+// appendRegimeLog writes one JSONL line to path: an object with the
+// current ISO-8601 timestamp and the full regime envelope. Each line
+// stands alone; a partial trailing line on crash is salvageable (drop
+// the malformed line, the rest of the file parses). The wrap object's
+// shape: `{"timestamp": "<RFC 3339>", "regime": {...}}`.
+//
+// File is opened with O_APPEND|O_CREATE|O_WRONLY at 0o644 — no atomic
+// temp+rename needed for an append-only log. Concurrent writers on
+// the same file may interleave lines if each line exceeds PIPE_BUF
+// (typically 4 KB; a regime envelope is small enough in practice but
+// not guaranteed), so don't spawn many parallel calls against the
+// same path. For the daily-cadence ritual the spec recommends, that's
+// not a concern.
+func appendRegimeLog(path string, snap rpc.RegimeSnapshotResult) error {
+	envelope := struct {
+		Timestamp time.Time                `json:"timestamp"`
+		Regime    rpc.RegimeSnapshotResult `json:"regime"`
+	}{
+		Timestamp: time.Now().UTC(),
+		Regime:    snap,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	// One write of <line>\n. POSIX guarantees atomicity up to PIPE_BUF;
+	// a typical regime envelope (~2-4 KB) sits well inside that for the
+	// daily-cadence ritual, so we don't bother with file locking.
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	return nil
 }
 
 // startRegimeSpinner writes a single dim status line to stderr-style

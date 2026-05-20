@@ -33,6 +33,11 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
   bucket (DTE ≤ 7 days) and the term bucket (DTE > 7), alongside the
   combined headline. When the two readings disagree the regime row
   flags it inline.
+- Use `ibkr regime --log <path>` to append today's snapshot as a single
+  JSONL line — one object per invocation, top-level keys
+  `{timestamp, regime}`. Plain append-only file; `jq` and pandas both
+  read it. Useful for the 4-week SpotGamma cross-check the spec
+  describes (run from cron each weekday after close, analyse later).
 
 ### Added
 
@@ -61,6 +66,10 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
   all four numbers per history point so the trailing series renders
   cleanly. `RegimeBreadth` echoes the same fields onto the regime
   row.
+- Add `ibkr regime --log <path>` for the calibration-ritual JSONL
+  append. Each invocation appends one JSON object on its own line.
+  No `--replay` subcommand: ship `--log` first, decide the right
+  extraction shape after the log accumulates real data.
 
 ### Changed
 
