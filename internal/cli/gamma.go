@@ -86,6 +86,16 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		fmt.Fprintf(out, "  (%s)", c.SpotAt.Format("15:04:05 MST"))
 	}
 	fmt.Fprintln(out)
+	// Compute freshness: AsOf is when the daemon finished the GEX
+	// compute (distinct from SpotAt above, which is the gateway's
+	// tick time for the underlying). The daemon refreshes the cached
+	// compute under a soft TTL — agents and humans both want to see
+	// how old this result is, especially after a long-idle daemon
+	// returned a same-session cached value.
+	if !c.AsOf.IsZero() {
+		age := max(time.Since(c.AsOf).Truncate(time.Second), 0)
+		fmt.Fprintf(out, "  Computed    %s · %s ago\n", c.AsOf.Format("15:04:05 MST"), age)
+	}
 
 	if c.ZeroGamma != nil {
 		fmt.Fprintf(out, "  γ-zero      %.2f", *c.ZeroGamma)

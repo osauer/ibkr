@@ -212,6 +212,176 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	}
 }
 
+// TestGammaZeroCache_SoftTTLRefreshesBehindStale proves the
+// refresh-while-stale invariant: when the cached successful compute
+// ages past gammaSoftTTL, the next kickOrJoin returns the stale value
+// IMMEDIATELY and kicks a background refresh. The promotion of that
+// refresh to current happens on the NEXT kickOrJoin — so a single
+// caller doesn't pay for the refresh, the system pays it over the
+// next two calls.
+//
+// Load-bearing: this is what keeps `ibkr regime` fast after a
+// long-idle daemon. Without it, the same-session cache served a
+// 10-min-old answer with no path to freshness until midnight NY.
+func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		// Distinct payload per run so we can tell first vs refresh apart.
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+	}
+
+	// First call: kicks the initial compute.
+	job1, fresh1 := c.kickOrJoin(context.Background(), now, 300, compute)
+	<-job1.done
+	if !fresh1 || job1.result == nil || job1.result.SpotUnderlying != 5001 {
+		t.Fatalf("initial kickoff: fresh=%v result=%+v", fresh1, job1.result)
+	}
+
+	// Within softTTL: same job returned, no refresh kicked.
+	withinTTL := now.Add(gammaSoftTTL - time.Second)
+	job2, fresh2 := c.kickOrJoin(context.Background(), withinTTL, 300, compute)
+	if fresh2 || job2 != job1 {
+		t.Errorf("within softTTL: got fresh=%v job=%p (want fresh=false job=%p)", fresh2, job2, job1)
+	}
+	if got := computeRuns.Load(); got != 1 {
+		t.Errorf("within softTTL: compute ran %d times, want 1 (no refresh expected)", got)
+	}
+
+	// Past softTTL: STILL get the stale value, but a refresh kicks
+	// behind it. The caller doesn't block — they see the cached
+	// SpotUnderlying=5001 immediately.
+	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	job3, fresh3 := c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	if fresh3 || job3 != job1 {
+		t.Errorf("past softTTL: caller should get the stale value: got fresh=%v job=%p (want fresh=false job=%p)", fresh3, job3, job1)
+	}
+	if job3.result == nil || job3.result.SpotUnderlying != 5001 {
+		t.Errorf("past softTTL: caller should see stale result 5001, got %+v", job3.result)
+	}
+
+	// Wait for the refresh to land. We can't reach into c.refresh
+	// directly without exposing internals; instead, poll kickOrJoin
+	// until we see the promoted result. The refresh compute is
+	// synchronous in this test, so this resolves on the next call.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var job4 *gammaComputation
+	for time.Now().Before(deadline) {
+		job4, _ = c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+		if job4 != job1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if job4 == job1 {
+		t.Fatal("refresh never promoted — kickOrJoin kept returning the stale job")
+	}
+	if job4.result == nil || job4.result.SpotUnderlying != 5002 {
+		t.Errorf("refresh promotion: got %+v, want SpotUnderlying=5002 (the refreshed compute)", job4.result)
+	}
+	if got := computeRuns.Load(); got != 2 {
+		t.Errorf("after refresh: compute ran %d times, want exactly 2 (initial + one refresh)", got)
+	}
+}
+
+// TestGammaZeroCache_SoftTTLDoesNotStackRefreshes proves the
+// refresh-while-stale path is itself singleflighted: a second caller
+// arriving while a refresh is in flight does NOT kick a second
+// refresh. Otherwise a burst of post-TTL pollers (e.g. an MCP agent
+// hammering ibkr_regime) would launch parallel compute fan-outs,
+// defeating the gateway-slot-protection that motivates the cache.
+func TestGammaZeroCache_SoftTTLDoesNotStackRefreshes(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+
+	var computeRuns atomic.Int32
+	block := make(chan struct{})
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		if run >= 2 {
+			// Hold the refresh until the test signals — gives the
+			// second caller a window to observe in-flight refresh.
+			<-block
+		}
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+	}
+
+	// Initial kickoff completes immediately.
+	job1, _ := c.kickOrJoin(context.Background(), now, 300, compute)
+	<-job1.done
+
+	// Two callers past softTTL, back-to-back. The first kicks the
+	// refresh; the second sees an in-flight refresh and does NOT
+	// kick another.
+	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+
+	// Give the goroutines time to settle; the second compute
+	// should still be blocked.
+	time.Sleep(20 * time.Millisecond)
+	if got := computeRuns.Load(); got != 2 {
+		t.Errorf("expected exactly 2 computes (initial + one refresh), got %d", got)
+	}
+
+	close(block) // let the refresh finish; drains the goroutine
+}
+
+// TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess proves a
+// failed soft-TTL refresh must NOT poison a known-good cached value.
+// Without this, a transient gateway hiccup during a refresh could
+// overwrite the entire morning's stable γ-zero reading until midnight
+// rolled the session key.
+func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+
+	var computeRuns atomic.Int32
+	bonk := errors.New("transient gateway timeout")
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		if run == 1 {
+			return &rpc.GammaZeroComputed{SpotUnderlying: 5001}, nil
+		}
+		// Subsequent runs (the refresh) fail.
+		return nil, bonk
+	}
+
+	// Establish the cached success.
+	job1, _ := c.kickOrJoin(context.Background(), now, 300, compute)
+	<-job1.done
+	if job1.result == nil || job1.result.SpotUnderlying != 5001 {
+		t.Fatalf("initial kickoff failed: %+v", job1)
+	}
+
+	// Past softTTL: refresh kicks, fails.
+	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+
+	// Wait for the refresh to finish. Then a follow-up call must
+	// STILL return the cached success — the refresh's error gets
+	// dropped, not promoted.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if computeRuns.Load() >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // let the goroutine's defer close(done) land
+
+	job3, _ := c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	if job3.result == nil || job3.result.SpotUnderlying != 5001 {
+		t.Errorf("after failed refresh: should still see cached success 5001, got %+v", job3.result)
+	}
+	if job3.err != nil {
+		t.Errorf("after failed refresh: cached success should not have err, got %v", job3.err)
+	}
+}
+
 // TestGammaZeroCache_SnapshotStates exhaustively covers the four
 // envelope states (cold / computing / ready / error) the snapshot helper
 // must produce — the dashboard generator branches on Status, so a

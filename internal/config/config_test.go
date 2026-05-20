@@ -29,6 +29,9 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Gateway.ClientIDOrDefault() != 15 {
 		t.Errorf("ClientIDOrDefault = %d, want 15", res.Gateway.ClientIDOrDefault())
 	}
+	if res.Gateway.BreadthClientIDOrDefault() != 16 {
+		t.Errorf("BreadthClientIDOrDefault = %d, want 16", res.Gateway.BreadthClientIDOrDefault())
+	}
 	if res.Daemon.IdleTimeout.Std() != 5*time.Minute {
 		t.Errorf("default idle = %v, want 5m", res.Daemon.IdleTimeout.Std())
 	}
@@ -44,11 +47,12 @@ func TestLoad_PinnedFieldsAreBinding(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	body := `[gateway]
-host       = "127.0.0.1"
-port       = 4002
-client_id  = 16
-account    = "DU111"
-tls        = false
+host               = "127.0.0.1"
+port               = 4002
+client_id          = 16
+breadth_client_id  = 17
+account            = "DU111"
+tls                = false
 
 [daemon]
 idle_timeout = "10m"
@@ -79,6 +83,9 @@ timeout  = "30s"
 	}
 	if res.Gateway.ClientIDOrDefault() != 16 {
 		t.Errorf("ClientID = %d, want 16", res.Gateway.ClientIDOrDefault())
+	}
+	if res.Gateway.BreadthClientIDOrDefault() != 17 {
+		t.Errorf("BreadthClientID = %d, want 17 (pinned via TOML)", res.Gateway.BreadthClientIDOrDefault())
 	}
 	if res.Gateway.Account != "DU111" {
 		t.Errorf("Account = %q, want DU111", res.Gateway.Account)

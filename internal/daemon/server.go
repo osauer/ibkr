@@ -129,6 +129,14 @@ type Server struct {
 	// RPC ctx so a client disconnect mid-compute doesn't kill the
 	// run that other pollers are waiting on.
 	zeroGamma *gammaZeroCache
+	// gammaStarted guards the boot-time prewarm so it only fires once
+	// per Server lifetime. postConnectSetup runs once per successful
+	// candidate (including post-reconnect), so without this Once a
+	// reconnect-driven second postConnectSetup would re-kick a fresh
+	// gamma compute on top of the cached one, doubling gateway slot
+	// pressure for no benefit (the soft-TTL refresh in kickOrJoin
+	// already keeps the cache from going stale).
+	gammaStarted sync.Once
 
 	// breadth runs the SPX 50-DMA breadth compute. The engine owns
 	// a persisted constituent-close cache, a once-daily scheduler
@@ -143,6 +151,20 @@ type Server struct {
 	// per Server lifetime so we don't end up with parallel daily-tick
 	// loops competing on refreshMu.
 	breadthStarted sync.Once
+	// breadthConnector is a dedicated IBKR client connection (separate
+	// clientID, separate handshake, separate rate-limit budget) that
+	// backs the breadth refresh's historical-bar fan-out. Carved off
+	// the primary connector so breadth's ~503 historical requests don't
+	// compete with interactive RPCs and the gamma option-leg fan-out
+	// for the primary's 40-msg/sec and 60-historical/10-min budgets.
+	// nil before postConnectSetup completes the bulk handshake (or if
+	// the bulk handshake fails — breadth gracefully reports
+	// "no gateway" for that refresh and retries next tick).
+	breadthConnector *ibkrlib.Connector
+	// breadthClientStarted guards bulk-connector startup the same way
+	// breadthStarted guards Run() — exactly once per Server lifetime
+	// across the postConnectSetup re-runs that follow each reconnect.
+	breadthClientStarted sync.Once
 
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
@@ -204,18 +226,120 @@ func New(opts Options) *Server {
 // the engine field stays nil and handleBreadthSPX surfaces
 // status="unavailable" with a notes pointer.
 //
-// The fetcher closes over s.gatewayConnector so the engine's daily
-// refresh always reads the live connector — surviving gateway
-// reconnects without re-instantiating the engine.
+// The fetcher closes over s.breadthGatewayConnector — the dedicated
+// bulk-historical client — so breadth's ~500-name fan-out runs against
+// its own IBKR clientID, separate from the primary connector that
+// serves interactive RPCs and the gamma compute. Reading the live
+// pointer on every call lets the engine survive a bulk-connector
+// reconnect without re-instantiation, mirroring the primary-thunk
+// pattern.
 func (s *Server) installBreadthEngine() {
 	dir, err := spx.DefaultDir()
 	if err != nil {
 		s.logger.Warnf("breadth: resolve cache dir: %v (engine disabled)", err)
 		return
 	}
-	fetcher := newBreadthFetcher(s.gatewayConnector)
+	fetcher := newBreadthFetcher(s.breadthGatewayConnector)
 	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger})
 }
+
+// breadthGatewayConnector returns the bulk-historical IBKR connector
+// dedicated to the breadth refresh, or nil if it hasn't completed
+// its handshake yet. Snapshot under s.mu mirrors gatewayConnector's
+// read pattern so handlers reading the pointer never see it mid-Stop.
+//
+// Distinct from gatewayConnector: this one does NOT trigger a
+// reconnect on nil. Bulk-connector failure is non-fatal — breadth
+// surfaces "no gateway" for the affected refresh and the next 16:35
+// ET tick retries from scratch. Auto-reconnect machinery for the
+// bulk lane would double the lifecycle surface without changing the
+// observable outcome (breadth still retries).
+func (s *Server) breadthGatewayConnector() *ibkrlib.Connector {
+	s.mu.Lock()
+	c := s.breadthConnector
+	s.mu.Unlock()
+	if c == nil || !c.IsReady() {
+		return nil
+	}
+	return c
+}
+
+// startBreadthConnector launches the bulk-historical IBKR client and
+// blocks until handshake completes or breadthClientStartBudget elapses.
+// Called once per Server lifetime from postConnectSetup — gated by
+// breadthClientStarted so a reconnect-driven second postConnectSetup
+// doesn't spin up a duplicate bulk connection.
+//
+// The handshake is intentionally synchronous: breadth.Run() launches
+// shortly after on a sibling goroutine and would otherwise race a
+// not-yet-ready bulk connector, dropping all 503 fetches against nil
+// on the first refresh. 12 s mirrors the primary's per-candidate
+// budget — long enough for a healthy local gateway, short enough to
+// surface a misconfigured second cid promptly.
+//
+// On failure (collision past MaxClientIDRetries, gateway unreachable,
+// handshake timeout) the function logs and returns without setting
+// s.breadthConnector. Breadth's refresh sees a nil bulk connector
+// and aborts gracefully; the daemon as a whole continues running.
+func (s *Server) startBreadthConnector(ctx context.Context, primaryEp discover.Endpoint) {
+	bulkEp := primaryEp
+	bulkEp.ClientID = s.cfg.Gateway.BreadthClientIDOrDefault()
+
+	attempter := s.newConnector(bulkEp)
+
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		if err := attempter.Start(ctx); err != nil {
+			s.logger.Warnf("breadth bulk connector start: %v", err)
+		}
+	}()
+
+	select {
+	case <-startDone:
+	case <-time.After(breadthClientStartBudget):
+		s.logger.Warnf("breadth bulk connector: handshake timeout after %s (cid=%d); refresh will use 'no gateway' fallback until next tick", breadthClientStartBudget, bulkEp.ClientID)
+		_ = attempter.Stop()
+		return
+	case <-ctx.Done():
+		_ = attempter.Stop()
+		return
+	}
+
+	if !attempter.IsReady() {
+		s.logger.Warnf("breadth bulk connector: not ready after Start (cid=%d); skipping", bulkEp.ClientID)
+		_ = attempter.Stop()
+		return
+	}
+
+	s.mu.Lock()
+	s.breadthConnector = attempter
+	s.mu.Unlock()
+	s.logger.Infof("breadth bulk connector ready (cid=%d, separate 40-msg/sec budget from primary)", bulkEp.ClientID)
+}
+
+// stopBreadthConnector tears down the bulk-historical connector if one
+// was successfully started. Safe to call when nil. Mirror of
+// stopConnector's lifecycle discipline: nil under mu so handlers can't
+// observe a half-stopped pointer.
+func (s *Server) stopBreadthConnector() {
+	s.mu.Lock()
+	c := s.breadthConnector
+	s.breadthConnector = nil
+	s.mu.Unlock()
+	if c == nil {
+		return
+	}
+	if err := c.Stop(); err != nil {
+		s.logger.Warnf("breadth bulk connector Stop: %v", err)
+	}
+}
+
+// breadthClientStartBudget bounds the bulk-historical handshake. Set
+// to match the primary's perCandidateConnectBudget so a misconfigured
+// second cid (collision, gateway rejecting client IDs, etc.) doesn't
+// stretch postConnectSetup beyond a sensible boot delay.
+const breadthClientStartBudget = 12 * time.Second
 
 // installSubs wires the per-symbol subscription manager onto s. Called by
 // New (production path) and by test helpers that construct *Server directly
@@ -281,6 +405,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// candidate endpoint gets its own attempter, and s.connector is set
 	// to whichever one lands Connected first.
 	defer s.stopConnector()
+	defer s.stopBreadthConnector()
 
 	if err := s.openSocket(); err != nil {
 		s.lock.Release()
@@ -369,6 +494,7 @@ func (s *Server) Stop() {
 		_ = os.Remove(s.socketPath)
 	}
 	s.stopConnector()
+	s.stopBreadthConnector()
 	if s.lock != nil {
 		s.lock.Release()
 		s.lock = nil
@@ -654,18 +780,76 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// without changing the regime request path.
 	go s.prewarmRegimeSymbols()
 
+	// Stand up the dedicated bulk-historical IBKR client BEFORE
+	// launching breadth.Run(). The scheduler's cold-start bootstrap
+	// fan-outs 500 historical-bar fetches and would otherwise read
+	// nil from breadthGatewayConnector on every leg until the bulk
+	// handshake lands. Synchronous start (12-s ceiling) blocks
+	// postConnectSetup briefly; in exchange, breadth.Run() launches
+	// with a guaranteed-or-nil view of the bulk connector.
+	if s.breadth != nil && s.serverCtx != nil {
+		s.breadthClientStarted.Do(func() {
+			s.startBreadthConnector(s.serverCtx, ep)
+		})
+	}
+
 	// Launch the breadth scheduler now that the gateway has handshaken.
 	// The cold-start bootstrap inside Run() fan-outs 500 historical-bar
-	// fetches and would fail-and-poison the cache if the connector
-	// weren't ready yet (v0.27.0 regression — see engine.finalise's
-	// Coverage==0 guard). The Once guard means a reconnect-driven
-	// second postConnectSetup is a no-op rather than spawning a
-	// duplicate scheduler loop.
+	// fetches via the bulk connector started above and would fail-and-
+	// poison the cache if either connector weren't ready yet (v0.27.0
+	// regression — see engine.finalise's Coverage==0 guard). The Once
+	// guard means a reconnect-driven second postConnectSetup is a no-op
+	// rather than spawning a duplicate scheduler loop.
 	if s.breadth != nil && s.serverCtx != nil {
 		s.breadthStarted.Do(func() {
 			go s.breadth.Run(s.serverCtx)
 		})
 	}
+
+	// Prewarm dealer zero-gamma so the first `ibkr regime` / `ibkr
+	// gamma` of the day doesn't block on a cold ~4-min compute. Fire
+	// and forget: the cache's goroutine owns the lifetime; the user
+	// sees "computing dealer zero-gamma" in `ibkr status` immediately.
+	// No periodic loop here — kickOrJoin's soft-TTL machinery handles
+	// staleness from RPC handlers thereafter, so we only need the
+	// initial kick. The Once gates against reconnect-driven duplicate
+	// kicks; later staleness is the soft TTL's job.
+	if s.zeroGamma != nil && s.serverCtx != nil {
+		s.gammaStarted.Do(func() {
+			go s.prewarmZeroGamma(s.serverCtx)
+		})
+	}
+}
+
+// prewarmZeroGamma kicks the first dealer zero-gamma compute of a
+// daemon's lifetime so the first `ibkr regime` / `ibkr gamma` call
+// doesn't block on the cold compute. Mirrors handleGammaZeroSPX's
+// compute closure construction (connector + normalized default params
+// + production leg fetcher) so the prewarm result and a subsequent
+// user-triggered compute are interchangeable from the cache's
+// perspective.
+//
+// No sequencing against breadth: with breadth running on a dedicated
+// bulk-historical client (separate clientID, separate rate-limit
+// budget), the two fan-outs no longer share the primary's 40-msg/sec
+// or 60-historical/10-min budgets. Gamma can prewarm concurrently
+// with breadth's cold-start refresh and still finish in its normal
+// ~20 s wall-clock.
+//
+// Returns silently on connector unavailability — postConnectSetup
+// runs after handshake so the connector is normally ready, but a
+// race against immediate disconnect shouldn't crash startup. The
+// next user-triggered kickOrJoin will kick the compute instead.
+func (s *Server) prewarmZeroGamma(ctx context.Context) {
+	c := s.gatewayConnector()
+	if c == nil {
+		return
+	}
+	params := normalizeGammaParams(rpc.GammaZeroParams{})
+	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog)
+	}
+	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)
 }
 
 // regimeSymbolSeed is the static fallback used by prewarmRegimeSymbols

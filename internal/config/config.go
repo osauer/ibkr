@@ -31,8 +31,19 @@ type Gateway struct {
 	Host     string `toml:"host"`
 	Port     *int   `toml:"port"`
 	ClientID *int   `toml:"client_id"`
-	Account  string `toml:"account"`
-	TLS      *bool  `toml:"tls"`
+	// BreadthClientID is the IBKR clientID used by the dedicated
+	// historical-bar connector that backs the SPX breadth refresh.
+	// Default 16 (one above the primary's default 15). Pinned to its
+	// own connection so breadth's 503-name fan-out runs against a
+	// separate 40-msg/sec and 60-historical/10-min rate-limit budget
+	// rather than competing with interactive RPCs and the gamma
+	// option-leg fan-out on the primary client. Collision with the
+	// primary cid is handled by the existing MaxClientIDRetries
+	// fall-through in pkg/ibkr — bulk silently increments to the next
+	// free ID, same as primary does.
+	BreadthClientID *int   `toml:"breadth_client_id"`
+	Account         string `toml:"account"`
+	TLS             *bool  `toml:"tls"`
 }
 
 // PortPinned reports whether the user pinned a port. Discovery skips the
@@ -58,6 +69,19 @@ func (g Gateway) ClientIDOrDefault() int {
 		return 15
 	}
 	return *g.ClientID
+}
+
+// BreadthClientIDOrDefault returns the clientID for the bulk-historical
+// breadth connector. Default 16 — one above the primary default — so a
+// fresh install gets two non-colliding IDs without any config tweak.
+// Collision with the primary cid is non-fatal: the pkg/ibkr handshake's
+// MaxClientIDRetries fall-through walks the bulk attempt to the next
+// free ID.
+func (g Gateway) BreadthClientIDOrDefault() int {
+	if g.BreadthClientID == nil {
+		return 16
+	}
+	return *g.BreadthClientID
 }
 
 // PortOrZero returns Port (dereferenced) or 0 if unset. Callers should

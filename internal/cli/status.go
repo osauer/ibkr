@@ -115,14 +115,16 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	}
 	// Surface daemon-internal long-running work the user can't see
 	// from the CLI otherwise. Empty list → omit the line entirely
-	// (idle is the common case; one line is enough). Names render
-	// comma-separated to keep the status display compact.
+	// (idle is the common case). Stable wire tokens are mapped to
+	// short noun phrases so the row reads as English when one or
+	// more long-running computes (breadth-spx refresh, gamma-zero
+	// compute) are in flight at the same time.
 	if len(res.BackgroundTasks) > 0 {
-		names := make([]string, 0, len(res.BackgroundTasks))
+		phrases := make([]string, 0, len(res.BackgroundTasks))
 		for _, t := range res.BackgroundTasks {
-			names = append(names, t.Name)
+			phrases = append(phrases, backgroundTaskPhrase(t.Name))
 		}
-		fmt.Fprintf(out, "  Background:     %s\n", strings.Join(names, ", "))
+		fmt.Fprintf(out, "  Background:     %s\n", strings.Join(phrases, ", "))
 	}
 	fmt.Fprintln(out)
 }
@@ -132,6 +134,24 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 // handshake goroutine started but hasn't produced a verdict.
 func isHandshakeInFlight(res rpc.HealthResult) bool {
 	return !res.Connected && res.LastError == ""
+}
+
+// backgroundTaskPhrase renders a stable wire token (the one the
+// daemon's backgroundTasks() emits) as a short verb phrase suitable
+// for the status row. Unknown tokens fall through verbatim so a
+// daemon shipping a new task name still appears in `ibkr status`
+// even before the CLI has been updated.
+func backgroundTaskPhrase(token string) string {
+	switch token {
+	case "breadth-spx":
+		return "refreshing rolling SPX breadth"
+	case "gamma-zero":
+		return "computing dealer zero-gamma"
+	case "regime-prewarm":
+		return "warming regime cache"
+	default:
+		return token
+	}
 }
 
 // healthFetcher is the closure waitForHandshake uses to re-poll the

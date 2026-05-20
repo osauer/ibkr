@@ -30,9 +30,19 @@ import (
 // NY. DST is handled by time.LoadLocation; if the zone fails to load
 // the cache falls back to UTC date, which is safe but slightly less
 // useful for international callers.
+//
+// Soft-TTL refresh-while-stale: when a kickOrJoin caller hits a
+// cached successful result older than gammaSoftTTL, the cache serves
+// the stale value immediately AND kicks a refresh in the background.
+// The refresh is stored in `refresh`, distinct from `current`, so
+// further callers during the refresh keep seeing the stable served
+// value rather than blocking on the new in-flight job. On completion
+// the refresh promotes to current; on error it's discarded so a
+// transient compute failure can't poison a known-good cached value.
 type gammaZeroCache struct {
 	mu      sync.Mutex
 	current *gammaComputation // nil until first kickOrJoin
+	refresh *gammaComputation // soft-TTL refresh in flight behind current; nil otherwise
 }
 
 // gammaComputation is one zero-gamma run from kickoff through result
@@ -71,6 +81,24 @@ type gammaComputation struct {
 // user's next normal poll.
 const gammaErrorRetryTTL = 60 * time.Second
 
+// gammaSoftTTL is the age above which a cached successful compute
+// triggers a background refresh on the next kickOrJoin. The served
+// value is still returned immediately; the refresh runs behind it
+// and the next caller picks up the new result.
+//
+// 5 min trades off cost against drift. Dealer positioning shifts
+// slowly intraday (positions reshuffle on the order of hours, not
+// minutes), but the spot the GEX curve is anchored on does move
+// minute-to-minute, and a stale γ-zero relative to current spot is
+// the part users care about. 5 min keeps the cached answer within
+// roughly one ATR-style move for liquid index ETFs without spinning
+// the gateway's option-quote slots continuously.
+//
+// Distinct from gammaErrorRetryTTL (60 s): that one re-attempts a
+// FAILED compute on the next call; this one rolls a SUCCESSFUL
+// compute forward while still serving the prior value.
+const gammaSoftTTL = 5 * time.Minute
+
 // isDone reports whether the compute has finished (success or error).
 // Safe for concurrent readers — the done channel close is the
 // happens-before signal that the result / err fields are stable.
@@ -94,10 +122,21 @@ func newGammaZeroCache() *gammaZeroCache {
 // can walk away and the compute should still complete). Safe for
 // concurrent callers — read under c.mu, follows the same lock
 // discipline as kickOrJoin.
+//
+// A soft-TTL refresh counts as in-flight even when current is done:
+// the user can see "computing dealer zero-gamma" in `ibkr status`
+// whenever any compute is happening, so they understand why the
+// next call may briefly carry a stale AsOf.
 func (c *gammaZeroCache) IsComputing() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.current != nil && !c.current.isDone()
+	if c.current != nil && !c.current.isDone() {
+		return true
+	}
+	if c.refresh != nil && !c.refresh.isDone() {
+		return true
+	}
+	return false
 }
 
 // nySessionKey returns the NY-tz date string that identifies the
@@ -134,11 +173,28 @@ type computeFn func(ctx context.Context, progress *atomic.Int32) (*rpc.GammaZero
 // etaSeconds is the static initial estimate the cache stamps on a
 // fresh kickoff. The compute reports refined progress via its
 // atomic counter.
+//
+// Soft-TTL refresh: when the served result is older than gammaSoftTTL,
+// kickOrJoin kicks a background refresh while still returning the
+// stale value. fresh stays false for the caller (they got the cached
+// envelope, not a new in-flight job). The next caller after the
+// refresh lands sees the new value.
 func (c *gammaZeroCache) kickOrJoin(parent context.Context, now time.Time, etaSeconds int, compute computeFn) (job *gammaComputation, fresh bool) {
 	key := nySessionKey(now)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Promote a landed soft-TTL refresh; discard a failed one. A
+	// failed refresh must NOT poison a known-good cached value —
+	// the existing current stays in place and the next caller can
+	// trigger another refresh attempt past the soft TTL.
+	if c.refresh != nil && c.refresh.isDone() {
+		if c.refresh.err == nil && c.refresh.sessionKey == key {
+			c.current = c.refresh
+		}
+		c.refresh = nil
+	}
 
 	if c.current != nil && c.current.sessionKey == key {
 		// Same session — but a cached error past the retry TTL must NOT
@@ -150,6 +206,13 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, now time.Time, etaSe
 		if c.current.isDone() && c.current.err != nil && now.Sub(c.current.startedAt) >= gammaErrorRetryTTL {
 			job = c.startLocked(parent, key, now, etaSeconds, compute)
 			return job, true
+		}
+		// Soft-TTL: if the served value is stale and no refresh is
+		// already running, kick one behind it. The caller still gets
+		// c.current immediately — refresh is fire-and-forget.
+		if c.current.isDone() && c.current.err == nil && c.refresh == nil &&
+			now.Sub(c.current.startedAt) >= gammaSoftTTL {
+			c.refresh = c.spawnJob(parent, key, now, etaSeconds, compute)
 		}
 		// Same session: serve the in-flight or recently-completed job.
 		// Callers that need to bypass cache (diagnostics) use force().
@@ -166,6 +229,10 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, now time.Time, etaSe
 // discarded; the new job becomes c.current. Use sparingly: this
 // throws away work and competes for the gateway's market-data slots
 // against the cancelled job's last few in-flight subscriptions.
+//
+// Any in-flight soft-TTL refresh is also cancelled and discarded —
+// force always lands as the canonical current, not as a refresh
+// behind a stale value.
 func (c *gammaZeroCache) force(parent context.Context, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
 	key := nySessionKey(now)
 
@@ -181,14 +248,18 @@ func (c *gammaZeroCache) force(parent context.Context, now time.Time, etaSeconds
 		// its own ctx times out. That's the documented force tradeoff.
 		c.current.cancel()
 	}
+	if c.refresh != nil && !c.refresh.isDone() {
+		c.refresh.cancel()
+	}
+	c.refresh = nil
 	return c.startLocked(parent, key, now, etaSeconds, compute)
 }
 
-// startLocked allocates and launches a fresh compute. Caller must
-// hold c.mu. The compute goroutine owns the gammaComputation pointer
-// post-return; callers only read fields after the done channel
-// closes.
-func (c *gammaZeroCache) startLocked(parent context.Context, key string, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
+// spawnJob allocates a fresh computation and launches its background
+// goroutine. Caller must hold c.mu. Does NOT touch c.current — the
+// caller decides whether to assign it as canonical (startLocked) or
+// hold it separately as the soft-TTL refresh.
+func (c *gammaZeroCache) spawnJob(parent context.Context, key string, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
 	// Decouple the compute's lifetime from any single RPC ctx. Use the
 	// daemon's parent context (typically Background) as the upstream
 	// signal so daemon shutdown still cancels the compute, but a
@@ -202,7 +273,6 @@ func (c *gammaZeroCache) startLocked(parent context.Context, key string, now tim
 		cancel:     cancel,
 		etaSeconds: etaSeconds,
 	}
-	c.current = job
 
 	go func() {
 		defer close(job.done)
@@ -223,6 +293,17 @@ func (c *gammaZeroCache) startLocked(parent context.Context, key string, now tim
 		job.result = res
 	}()
 
+	return job
+}
+
+// startLocked allocates and launches a fresh compute, assigning the
+// new job to c.current. Caller must hold c.mu. Thin wrapper over
+// spawnJob — kept distinct because most kick paths want the new job
+// to become the canonical served value, while the soft-TTL refresh
+// path holds the new job in c.refresh until it lands cleanly.
+func (c *gammaZeroCache) startLocked(parent context.Context, key string, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
+	job := c.spawnJob(parent, key, now, etaSeconds, compute)
+	c.current = job
 	return job
 }
 

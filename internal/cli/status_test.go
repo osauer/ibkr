@@ -12,10 +12,11 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-// TestRenderStatus_BackgroundLine pins the v0.27.4 behaviour: the
-// `Background:` line appears iff `result.BackgroundTasks` is non-empty,
-// and the names render comma-separated. Empty list omits the line
-// entirely so an idle daemon's status display stays compact.
+// TestRenderStatus_BackgroundLine pins the rendering contract: the
+// `Background:` line appears iff `result.BackgroundTasks` is non-empty;
+// wire tokens are mapped to short verb phrases (so the row reads as
+// English); phrases are comma-separated when multiple tasks run; an
+// unknown token falls through verbatim. Empty list omits the line.
 func TestRenderStatus_BackgroundLine(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -30,9 +31,9 @@ func TestRenderStatus_BackgroundLine(t *testing.T) {
 			notWant: "Background:",
 		},
 		{
-			name:  "single task",
+			name:  "single task renders as verb phrase",
 			tasks: []rpc.BackgroundTaskStatus{{Name: "breadth-spx"}},
-			want:  "Background:     breadth-spx",
+			want:  "Background:     refreshing rolling SPX breadth",
 		},
 		{
 			name: "multiple tasks render comma-separated",
@@ -40,7 +41,12 @@ func TestRenderStatus_BackgroundLine(t *testing.T) {
 				{Name: "breadth-spx"},
 				{Name: "gamma-zero"},
 			},
-			want: "Background:     breadth-spx, gamma-zero",
+			want: "Background:     refreshing rolling SPX breadth, computing dealer zero-gamma",
+		},
+		{
+			name:  "unknown token falls through verbatim",
+			tasks: []rpc.BackgroundTaskStatus{{Name: "future-task"}},
+			want:  "Background:     future-task",
 		},
 	}
 	for _, tc := range cases {
