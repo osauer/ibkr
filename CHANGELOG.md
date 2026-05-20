@@ -96,29 +96,18 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 
 ### Engineering notes
 
-The skew curve is fitted via Cramer's rule on a 3×3 normal-equation
-solve over (m, σ) samples — microseconds per expiry; the sweep itself
-takes the bulk of the wall clock. Calls and puts are pooled into one
-curve per expiry since put-call parity makes them lie on the same
-surface, doubling the effective sample size for the fit. The near/term
-boundary is hardcoded at 7 DTE; the locked plan keeps it that way
-until 0DTE flow dynamics shift enough to motivate parameterisation.
-Revert criterion for the sticky-moneyness cutover: if 4-week
-sign-agreement vs SpotGamma's Friday recap drops below the v1
-baseline, roll back to the prior recipe. The streak store lives in
-its own JSON file (own version field, atomic temp+rename write) — the
-same pattern as the contract store from `2fbd614`, not merged into it
-because the invalidation rules differ. The breadth engine's
-`WindowSet` and `HistorySet` formats both bump to v2; v1 caches
-trigger a cold rebuild on next refresh. Cold-start cost is unchanged
-because IBKR's historical-data pacing limit is per-request, not
-per-bar — pulling 262 bars per name is no slower than pulling 60.
-50-DMA bands stay at 55/40 for v2: the H3 review finding argues for
-a recalibration but that's a separate decision and not in this
-release. 200-DMA bands at 60/40 per the locked plan (StockCharts'
-70/30 default would have read red routinely in 2024-25 because of
-Mag-7 concentration, exactly the calibration drift the spec warns
-about).
+Skew curve: quadratic in `m = ln(K/S)`, fit per expiry via Cramer's
+rule; calls and puts pool into one fit (put-call parity doubles
+sample size). Near/term boundary hardcoded at 7 DTE. Cutover revert
+criterion: if 4-week sign-agreement vs SpotGamma's Friday recap drops
+below v1, roll back. Streak store is its own JSON file with version
+header and atomic temp+rename, same shape as 2fbd614's contract
+store but separate invalidation. Breadth's `WindowSet` and
+`HistorySet` bump to v2; v1 caches cold-rebuild. Cold-start cost is
+unchanged — IBKR's pacing limit is per-request, not per-bar.
+50-DMA bands stay at 55/40 (recalibration is a separate decision);
+200-DMA bands at 60/40 — StockCharts' 70/30 default would have
+flagged red routinely in 2024-25 from Mag-7 concentration.
 
 ## v0.27.12 — 2026-05-20 10:33 CEST
 
