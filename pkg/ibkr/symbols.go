@@ -1,6 +1,9 @@
 package ibkr
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Symbol classification helpers.
 //
@@ -57,7 +60,15 @@ func FxPair(symbol string) (base, quote string, ok bool) {
 // convention uses a dot ("BRK.B", "BF.B") but IBKR rejects that form
 // with code 200 "No security definition has been found for the request"
 // — the API canonical form uses a space ("BRK B", "BF B"). Returns the
-// input unchanged for any ticker not in the override table.
+// input unchanged for any ticker that doesn't match the convention.
+//
+// The rule matches the well-established US dual-class convention: 1–4
+// uppercase letters (the base ticker) followed by a dot and a single
+// uppercase letter (the share-class suffix, typically A or B). FX pairs
+// don't match because their second leg is 3 letters; index probes like
+// "BPSPX" / "MMFI" don't have a dot. Future-proof: when a new dual-class
+// name joins the S&P 500 (rare but it happens — e.g. a re-class or a
+// spin-off), the translation works without a table update.
 //
 // Why this lives next to classifySymbol: every code path that builds a
 // Contract from a raw symbol — FetchContractDetails, FetchHistoricalDailyBars,
@@ -67,14 +78,18 @@ func FxPair(symbol string) (base, quote string, ok bool) {
 // breadth — a top-10 SPX member by weight whose exclusion materially
 // distorts the S5FI compute.
 func dualClassWireSymbol(input string) string {
-	switch strings.ToUpper(strings.TrimSpace(input)) {
-	case "BRK.B":
-		return "BRK B"
-	case "BF.B":
-		return "BF B"
+	upper := strings.ToUpper(strings.TrimSpace(input))
+	if dualClassPattern.MatchString(upper) {
+		return strings.Replace(upper, ".", " ", 1)
 	}
 	return input
 }
+
+// dualClassPattern matches the US dual-class ticker convention: a 1–4
+// letter base symbol, a dot, and a single-letter share class. Anchored
+// to the full string so partial matches (e.g. embedded substrings) are
+// rejected. Compiled once at init.
+var dualClassPattern = regexp.MustCompile(`^[A-Z]{1,4}\.[A-Z]$`)
 
 // classifySymbol returns (secType, exchange, currency, primaryExchangeHint)
 // for common indices/ETFs/stocks/FX-pairs to keep contract requests and

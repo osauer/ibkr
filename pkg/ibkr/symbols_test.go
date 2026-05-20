@@ -96,20 +96,48 @@ func TestFxPair(t *testing.T) {
 // (BRK B, BF B). Without this mapping the breadth-spx fan-out silently
 // drops Berkshire-B (a top-10 SPX member by weight) and Brown-Forman-B
 // from every refresh.
+//
+// The translator matches the US dual-class convention by pattern (1–4
+// uppercase letters + dot + single class letter), so a future SPX
+// reconstitution that adds a dual-class name converts without a code
+// change — and the test asserts on hypothetical examples (BRK.A,
+// BIO.B, etc.) to lock in that future-proofing.
 func TestDualClassWireSymbol(t *testing.T) {
 	tests := []struct {
 		in   string
 		want string
 	}{
+		// Current SPX members (the live cases).
 		{"BRK.B", "BRK B"},
 		{"BF.B", "BF B"},
-		{"brk.b", "BRK B"},     // case-insensitive
-		{" BRK.B ", "BRK B"},   // whitespace tolerated
-		{"BRK", "BRK"},         // not dual-class, pass through
-		{"AAPL", "AAPL"},       // not dual-class, pass through
-		{"USD.JPY", "USD.JPY"}, // FX pair — handled separately by FxPair
-		{"BRK.A", "BRK.A"},     // BRK.A not in SPX, no override
-		{"", ""},               // empty pass-through
+		// Pattern-match cases not currently in SPX but matching the
+		// dual-class convention — should translate too (future-proof).
+		{"BRK.A", "BRK A"},
+		{"BF.A", "BF A"},
+		{"A.B", "A B"},       // 1-letter base, lower bound of regex
+		{"WXYZ.A", "WXYZ A"}, // 4-letter base, upper bound of regex
+		// Case-insensitive + whitespace tolerant.
+		{"brk.b", "BRK B"},
+		{" BRK.B ", "BRK B"},
+		// Pass through: plain stocks, indices, ETFs.
+		{"BRK", "BRK"},
+		{"AAPL", "AAPL"},
+		{"SPY", "SPY"},
+		// Pass through: FX pairs (3-letter legs don't match the regex;
+		// FxPair handles these separately).
+		{"USD.JPY", "USD.JPY"},
+		{"EUR.USD", "EUR.USD"},
+		// Pass through: index probes with no dot (BPSPX, MMFI etc.).
+		{"BPSPX", "BPSPX"},
+		// Pass through: too long for the regex (5+ letter base).
+		{"AAPLE.A", "AAPLE.A"},
+		// Pass through: multi-character class suffix (not the
+		// convention).
+		{"BRK.BB", "BRK.BB"},
+		// Empty + edge cases.
+		{"", ""},
+		{".", "."},
+		{"BRK.", "BRK."},
 	}
 	for _, tc := range tests {
 		if got := dualClassWireSymbol(tc.in); got != tc.want {
