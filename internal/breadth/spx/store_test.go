@@ -20,7 +20,7 @@ func TestStoreSnapshotRoundTrip(t *testing.T) {
 		Value:       58.7,
 		AsOf:        time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC),
 		SessionKey:  "2026-05-16",
-		Method:      "constituent-fanout-50dma",
+		Method:      methodConstituentFanout,
 		MemberCount: 503,
 		Coverage:    501,
 		Excluded:    []ExcludedMember{{Symbol: "NEW", Reason: "thin_history(3)"}},
@@ -40,6 +40,36 @@ func TestStoreSnapshotRoundTrip(t *testing.T) {
 	}
 	if len(got.Excluded) != 1 || got.Excluded[0].Symbol != "NEW" {
 		t.Errorf("excluded list lost in round-trip: got %+v", got.Excluded)
+	}
+}
+
+// TestLoadSnapshotMethodGate pins the version gate. A snapshot.json
+// written by an older methodology must be treated as no-cache so the
+// next refresh tick rebuilds with the current schema. Without this gate
+// a v1 file (Value-only payload) decoded silently into a v2 struct with
+// the new fields zeroed, and the engine reported state=ready with a
+// phantom "0% above 50-DMA / 0 new highs" reading.
+func TestLoadSnapshotMethodGate(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	stale := Snapshot{
+		Value:       58.7,
+		AsOf:        time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC),
+		SessionKey:  "2026-05-16",
+		Method:      "constituent-fanout-50dma", // the pre-v2 token
+		MemberCount: 503,
+		Coverage:    501,
+	}
+	if err := s.SaveSnapshot(stale); err != nil {
+		t.Fatalf("save stale-method snapshot: %v", err)
+	}
+	got, err := s.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("stale-method snapshot returned non-nil; the version gate failed open. Got: %+v", *got)
 	}
 }
 

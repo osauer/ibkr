@@ -22,7 +22,17 @@ import "time"
 // can disclose provenance without parsing free-form notes. The constant
 // is deliberately unexported — callers should compare against Snapshot.Method
 // rather than rebuilding the string.
-const methodConstituentFanout = "constituent-fanout-50dma"
+//
+// The token bumps whenever the compute methodology or the snapshot's
+// payload shape changes. LoadSnapshot uses it as a version gate: a
+// snapshot whose Method doesn't match the current constant is treated
+// as no-cache and triggers a cold rebuild, which is the right move when
+// the on-disk struct gained fields (v1's Snapshot only carried Value /
+// Coverage; v2 added PctAbove200DMA, NewHighsToday, NewLowsToday,
+// NetNewHighsPct, Coverage200, CoverageHighsLows — a stale v1 file
+// silently decodes into a half-empty v2 struct otherwise, and the
+// engine reports state=ready with zeroed new fields).
+const methodConstituentFanout = "constituent-fanout-50/200dma+nh-v2"
 
 // MinCoverageFraction is the minimum fraction of MemberCount that a
 // refresh must cover before the engine will persist its result.
@@ -38,22 +48,63 @@ const methodConstituentFanout = "constituent-fanout-50dma"
 // rejecting catastrophic fan-out failures.
 const MinCoverageFraction = 0.80
 
-// WindowSize is the SMA lookback (S&P DJI's S5FI is the 50-day variant).
-// The window holds the 50 most recent daily closes chronologically; the
-// most recent close is window[len-1]. SMA = mean(window). A name is
-// "above 50DMA" when window[len-1] >= mean(window). Today's close
-// participates in its own SMA — this matches the convention used by
-// $SPXA50R / StockCharts and S&P DJI's published S5FI methodology.
+// WindowSize is the 50-day SMA lookback (S&P DJI's S5FI is the
+// 50-day variant). The window holds the 50 most recent daily closes
+// chronologically; the most recent close is window[len-1]. SMA =
+// mean(window). A name is "above 50DMA" when window[len-1] >=
+// mean(window). Today's close participates in its own SMA — this
+// matches the convention used by $SPXA50R / StockCharts and S&P
+// DJI's published S5FI methodology.
 const WindowSize = 50
 
-// Snapshot is one S5FI reading: the computed value, when it was
-// computed, which trading session it represents, and provenance for
-// every consumer to read without re-deriving anything. Persisted as
-// snapshot.json in the cache dir; serialised over the wire inside the
-// breadth.spx RPC envelope.
+// WindowSize200 is the 200-day SMA lookback ($SPXA200R). Catches
+// cyclical tops cleanly (1999, 2021) — slower-moving than the 50-day
+// reading but a meaningful complement. Computed in the same pass over
+// each constituent's daily bars, so the cold-start cost is unchanged
+// (IBKR's pacing limit is per-request, not per-bar; pulling 200 days
+// instead of 50 doesn't cost more requests).
+const WindowSize200 = 200
+
+// RollingMaxBars is the lookback for the per-constituent rolling max/min
+// of close used for the new-52-week-highs/lows count. 252 trading bars
+// approximates one calendar year of US sessions (252 = 252 weekday
+// sessions per year, leaving the 9-10 US market holidays out — close
+// enough to "52 weeks" for the reading the renderer wants). A name
+// "makes a new 52-week high today" when today's close strictly exceeds
+// the max of the previous 251 closes.
+const RollingMaxBars = 252
+
+// Snapshot is one breadth reading: the computed values, when they
+// were computed, which trading session they represent, and provenance
+// for every consumer to read without re-deriving anything. Persisted
+// as snapshot.json in the cache dir; serialised over the wire inside
+// the breadth.spx RPC envelope.
 type Snapshot struct {
-	// Value is the S5FI percentage in [0, 100].
+	// Value is the 50-DMA reading: percentage of constituents trading
+	// above their own 50-day SMA. In [0, 100]. Same shape as v1.
 	Value float64 `json:"value"`
+	// PctAbove50DMA is the 50-day reading exposed under the canonical
+	// long-form name (renderer-friendly). Equal to Value; kept
+	// alongside so the wire shape is self-documenting and a future
+	// release can drop Value without churning consumers.
+	PctAbove50DMA float64 `json:"pct_above_50dma"`
+	// PctAbove200DMA is the 200-day reading. Below 40% = red /
+	// 40–60% = yellow / above 60% = green per the locked plan
+	// (calibrated to the post-Mag-7 era; StockCharts' 70/30 default
+	// would have read red far too often through 2024-2025).
+	PctAbove200DMA float64 `json:"pct_above_200dma"`
+	// NewHighsToday is the count of S&P 500 constituents whose latest
+	// close strictly exceeded their rolling 252-bar max (~1 year of
+	// trading sessions ≈ "52-week high"). Coverage-aware: a name with
+	// < RollingMaxBars history is skipped, not counted as either.
+	NewHighsToday int `json:"new_highs_today"`
+	// NewLowsToday is the symmetric count for new 252-bar lows.
+	NewLowsToday int `json:"new_lows_today"`
+	// NetNewHighsPct is (NewHighs - NewLows) / coverage × 100. A
+	// positive number means more names making new highs than new
+	// lows; a deeply-negative one is the textbook divergence pattern
+	// (SPX near highs but few constituents leading it).
+	NetNewHighsPct float64 `json:"net_new_highs_pct"`
 	// AsOf is the wall-clock instant the compute finished. Distinct
 	// from SessionKey: a snapshot may be refreshed multiple times
 	// against the same trading session as late prints settle.
@@ -70,11 +121,21 @@ type Snapshot struct {
 	// compute. Should track the S&P-500 cardinality (~500–505 with
 	// the dual-class names).
 	MemberCount int `json:"member_count"`
-	// Coverage is the count of members that had enough history
-	// (≥ WindowSize closes) to contribute to the compute. The
+	// Coverage is the count of members that had enough 50-DMA history
+	// (≥ WindowSize closes) to contribute to the headline. The
 	// denominator in Value is Coverage, not MemberCount, so a recent
 	// listing with thin history doesn't push the percentage downward.
 	Coverage int `json:"coverage"`
+	// Coverage200 is the analogous denominator for PctAbove200DMA —
+	// names with ≥ WindowSize200 closes. Smaller than Coverage when
+	// some constituents have between 50 and 200 days of history (post-
+	// IPO names, recent index additions).
+	Coverage200 int `json:"coverage_200"`
+	// CoverageHighsLows is the denominator for the new-highs/lows
+	// count — names with ≥ RollingMaxBars closes. Smaller than
+	// Coverage200 when some constituents have between 200 and 252
+	// days of history. Used as the denominator in NetNewHighsPct.
+	CoverageHighsLows int `json:"coverage_highs_lows"`
 	// Excluded lists members dropped from the compute and the reason
 	// — useful when verifying against $SPXA50R divergence. Empty in
 	// the steady state.
@@ -92,36 +153,65 @@ type ExcludedMember struct {
 
 // ConstituentWindow holds the sliding window of daily closes for one
 // S&P-500 name. Closes is chronological (oldest first); when the
-// window is full Len(Closes) == WindowSize. LastBarAt is the date
-// string of the most recent close in YYYY-MM-DD form — used to decide
-// whether the next refresh needs to fetch new bars for this name.
+// window is full len(Closes) == WindowSize200 (in v2). LastBarAt is
+// the date string of the most recent close in YYYY-MM-DD form — used
+// to decide whether the next refresh needs to fetch new bars for this
+// name.
+//
+// In v2 the window holds the trailing 200 closes per constituent
+// (enough to cover the 200-day SMA). The 50-day reading slices the
+// last 50 closes; the 200-day reading uses the full window; the
+// rolling-max/min for new-highs/lows uses a separate field tracked
+// outside the close window because the lookback (252 bars) exceeds
+// what we keep in Closes.
 type ConstituentWindow struct {
 	Symbol    string    `json:"symbol"`
 	Closes    []float64 `json:"closes"`
 	LastBarAt string    `json:"last_bar_at"`
+	// HighWindow is the trailing 252-bar rolling max of close
+	// (~1 year), updated each refresh from the bars merged in. Kept
+	// separately from Closes so the on-disk footprint stays bounded:
+	// we don't need 252 floats per name; the rolling max compressed
+	// into a single value + the count of bars contributing is enough
+	// to detect today's-close-above-prior-252-day-max. RollingMax is
+	// the max of the previous N closes (excluding today); the daemon
+	// compares today's close vs RollingMax to decide whether today is
+	// a new high.
+	HighRollingMax     float64 `json:"high_rolling_max,omitempty"`
+	HighRollingBarsHad int     `json:"high_rolling_bars_had,omitempty"`
+	LowRollingMin      float64 `json:"low_rolling_min,omitempty"`
+	LowRollingBarsHad  int     `json:"low_rolling_bars_had,omitempty"`
 }
 
-// WindowSet is the persistence shape for windows.json. The version
-// field is a migration handle reserved for the day the on-disk format
-// has to change incompatibly. Today it should always be 1.
+// WindowSet is the persistence shape for windows.json. The Version
+// field gates rebuilds: a future incompatible format bumps it and
+// older files on load are treated as no-cache (cold rebuild).
 type WindowSet struct {
 	Version int                          `json:"version"`
 	AsOf    time.Time                    `json:"as_of"`
 	Windows map[string]ConstituentWindow `json:"windows"`
 }
 
-// CurrentWindowSetVersion is the schema version the engine writes. On
-// load, files with an unknown version are treated as no-cache so the
-// engine cold-starts rather than mis-interprets a future format.
-const CurrentWindowSetVersion = 1
+// CurrentWindowSetVersion is the schema version the engine writes.
+// v1 → v2 bump in this release: ConstituentWindow gained HighRollingMax,
+// HighRollingBarsHad, LowRollingMin, LowRollingBarsHad; the close
+// window's maximum length grew from 50 to 200 to support the 200-day
+// SMA. v1 files trigger a cold rebuild because the close windows are
+// too short to seed the 200-day reading honestly.
+const CurrentWindowSetVersion = 2
 
-// HistoryPoint is one day's S5FI reading on the rolling history file.
-// The renderer pulls the trailing N for the dashboard sparkline.
-// Date is the NY-tz session key (YYYY-MM-DD); Value is the S5FI
-// percentage [0, 100] computed for that session.
+// HistoryPoint is one day's breadth reading on the rolling history file.
+// The renderer pulls the trailing N for the dashboard sparkline. Date
+// is the NY-tz session key (YYYY-MM-DD); the four numbers carry the
+// 50-DMA reading, the 200-DMA reading, and the constituent counts for
+// new 52-week highs and lows. v1-format files (single `value` field)
+// trigger a cold rebuild — see CurrentHistorySetVersion.
 type HistoryPoint struct {
-	Date  string  `json:"date"`
-	Value float64 `json:"value"`
+	Date           string  `json:"date"`
+	PctAbove50DMA  float64 `json:"pct_above_50dma"`
+	PctAbove200DMA float64 `json:"pct_above_200dma,omitempty"`
+	NewHighs       int     `json:"new_highs,omitempty"`
+	NewLows        int     `json:"new_lows,omitempty"`
 }
 
 // HistorySet is the persistence shape for history.json. Points are
@@ -133,10 +223,10 @@ type HistorySet struct {
 }
 
 // CurrentHistorySetVersion is the schema version the engine writes.
-// On load, files with an unknown version are treated as no-cache so
-// a future bump triggers a graceful rebuild rather than a parse
-// error.
-const CurrentHistorySetVersion = 1
+// v1 → v2 bump in this release: HistoryPoint gained PctAbove200DMA,
+// NewHighs, NewLows; the single `value` field became `pct_above_50dma`.
+// v1 files trigger a cold rebuild rather than a parse error.
+const CurrentHistorySetVersion = 2
 
 // MaxHistoryPoints caps how many days of S5FI history the engine
 // retains on disk. The dashboard CLI shows ~30 by default; we keep

@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -798,5 +801,68 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing derived-IV disclosure %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestAppendRegimeLog_WritesJSONLEntry pins the JSONL append contract:
+// one object per call, top-level keys {timestamp, regime}, trailing
+// newline, valid JSON in isolation. Concurrent writers aren't in scope
+// for v1 (the spec's calibration ritual is daily-cadence).
+func TestAppendRegimeLog_WritesJSONLEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "regime-v1.jsonl")
+	snap := rpc.RegimeSnapshotResult{
+		AsOf:    time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC),
+		SpecDoc: "docs/specs/risk-regime-dashboard.md",
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusOK,
+		},
+	}
+	if err := appendRegimeLog(path, snap); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if err := appendRegimeLog(path, snap); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("line count: want 2, got %d (raw: %q)", len(lines), string(data))
+	}
+	for i, line := range lines {
+		var got struct {
+			Timestamp time.Time                `json:"timestamp"`
+			Regime    rpc.RegimeSnapshotResult `json:"regime"`
+		}
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Errorf("line %d: invalid JSON: %v\n%s", i, err, line)
+			continue
+		}
+		if got.Regime.SpecDoc != "docs/specs/risk-regime-dashboard.md" {
+			t.Errorf("line %d: regime envelope round-tripped wrong: got SpecDoc=%q",
+				i, got.Regime.SpecDoc)
+		}
+		if got.Timestamp.IsZero() {
+			t.Errorf("line %d: timestamp missing", i)
+		}
+	}
+}
+
+// TestAppendRegimeLog_CreatesFileIfMissing covers the cold-install
+// case: the path doesn't exist yet; the first call creates it.
+func TestAppendRegimeLog_CreatesFileIfMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.jsonl")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("path should not exist before append: %v", err)
+	}
+	if err := appendRegimeLog(path, rpc.RegimeSnapshotResult{}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("path should exist after append: %v", err)
 	}
 }

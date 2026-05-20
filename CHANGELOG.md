@@ -10,6 +10,111 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## [Unreleased]
+
+### What's new
+
+- The dealer γ-zero compute now reprices each leg's implied vol at the
+  scenario-spot's moneyness via a per-expiry skew curve, instead of
+  holding the snapshot IV fixed across the sweep. Expect the headline
+  γ-zero level to shift ~30-80 SPX points and track SpotGamma's free
+  Friday-recap posts materially better. The methodology token bumps
+  from `perfiliev-bs-sweep-v1` to `perfiliev-bs-sweep-v2-stickymoneyness`.
+- `ibkr breadth` now reports the 200-day reading alongside the 50-day
+  reading and counts how many S&P 500 names are at fresh 52-week
+  highs vs lows today. The narrow-rally pattern — SPX at highs with
+  almost nothing making new highs underneath it — is now visible at
+  a glance.
+- `ibkr regime` now shows how many consecutive sessions each indicator
+  has been in its current band — "(yellow · day 3)" reads inline with
+  the row, so a single snapshot tells you whether today's flip is
+  day 1 of a stress event or day 5.
+- `ibkr gamma` now reports separate γ-zero readings for the near
+  bucket (DTE ≤ 7 days) and the term bucket (DTE > 7), alongside the
+  combined headline. When the two readings disagree the regime row
+  flags it inline.
+- Use `ibkr regime --log <path>` to append today's snapshot as a single
+  JSONL line — one object per invocation, top-level keys
+  `{timestamp, regime}`. Plain append-only file; `jq` and pandas both
+  read it. Useful for the 4-week SpotGamma cross-check the spec
+  describes (run from cron each weekday after close, analyse later).
+
+### Added
+
+- Sticky-moneyness skew model on the gamma envelope: fits a quadratic
+  in `m = ln(K/S)` per expiry, clamps evaluations to the observed
+  moneyness range. `SkewModel = "sticky-moneyness-v1"` names the
+  fitted model on the wire; `SkewFitQuality` carries per-expiry
+  `{points, r_squared, range}` diagnostics. Expiries that fail to fit
+  fall back to sticky-IV individually and surface as
+  `skew_fallback:YYYYMMDD` warnings.
+- Near vs term split on the gamma envelope: `ZeroGammaNear`,
+  `ProfileNear`, `GammaSignNear`, `NearLegCount` (DTE ≤ 7); symmetric
+  term fields. The regime gamma row carries a `HorizonAgreement`
+  string (`both_above` / `both_below` / `diverge` / `near_only` /
+  `term_only`) so a consumer can detect the high-information case
+  where near and term γ-zero straddle spot.
+- `StreakInfo` field on every regime row (VIX/VIX3M, HYG/SPY, USD/JPY,
+  gamma, breadth): `{band, sessions, since}` counting consecutive
+  trading sessions in the current band. Persisted across daemon
+  restarts at `$XDG_CACHE_HOME/ibkr/regime-streaks.json`.
+  Computing/unavailable/error states freeze the counter rather than
+  reset it.
+- Add `BreadthSPXResult.PctAbove200DMA` (% above 200-day SMA), plus
+  `NewHighsToday`, `NewLowsToday`, and `NetNewHighsPct` for the
+  rolling 252-bar new-highs/lows count. `BreadthDailyValue` carries
+  all four numbers per history point so the trailing series renders
+  cleanly. `RegimeBreadth` echoes the same fields onto the regime
+  row.
+- Add `ibkr regime --log <path>` for the calibration-ritual JSONL
+  append. Each invocation appends one JSON object on its own line.
+  No `--replay` subcommand: ship `--log` first, decide the right
+  extraction shape after the log accumulates real data.
+
+### Changed
+
+- The `Method` token on `GammaZeroComputed` is now
+  `perfiliev-bs-sweep-v2-stickymoneyness`. Pure cutover — no
+  dual-emit; SpotGamma's Friday posts are the comparator.
+- The `Method` token on `BreadthSPXResult` is now
+  `constituent-fanout-50/200dma-hl`. The breadth refresh now pulls
+  ~262 daily bars per constituent at cold-start (was ~60) so all
+  three readings — 50-DMA, 200-DMA, and the rolling 252-bar
+  max/min — seed from the same fetch.
+
+### Removed
+
+- Drop `BreadthSPXResult.Value` and `BreadthDailyValue.Value`. The
+  field's renamed equivalent `PctAbove50DMA` carries the same number
+  with a more honest name now that the two-window reading needs
+  disambiguation. Consumers reading `Value` must migrate.
+
+### Engineering notes
+
+The skew curve is fitted via Cramer's rule on a 3×3 normal-equation
+solve over (m, σ) samples — microseconds per expiry; the sweep itself
+takes the bulk of the wall clock. Calls and puts are pooled into one
+curve per expiry since put-call parity makes them lie on the same
+surface, doubling the effective sample size for the fit. The near/term
+boundary is hardcoded at 7 DTE; the locked plan keeps it that way
+until 0DTE flow dynamics shift enough to motivate parameterisation.
+Revert criterion for the sticky-moneyness cutover: if 4-week
+sign-agreement vs SpotGamma's Friday recap drops below the v1
+baseline, roll back to the prior recipe. The streak store lives in
+its own JSON file (own version field, atomic temp+rename write) — the
+same pattern as the contract store from `2fbd614`, not merged into it
+because the invalidation rules differ. The breadth engine's
+`WindowSet` and `HistorySet` formats both bump to v2; v1 caches
+trigger a cold rebuild on next refresh. Cold-start cost is unchanged
+because IBKR's historical-data pacing limit is per-request, not
+per-bar — pulling 262 bars per name is no slower than pulling 60.
+50-DMA bands stay at 55/40 for v2: the H3 review finding argues for
+a recalibration but that's a separate decision and not in this
+release. 200-DMA bands at 60/40 per the locked plan (StockCharts'
+70/30 default would have read red routinely in 2024-25 because of
+Mag-7 concentration, exactly the calibration drift the spec warns
+about).
+
 ## v0.27.12 — 2026-05-20 10:33 CEST
 
 ### What's new

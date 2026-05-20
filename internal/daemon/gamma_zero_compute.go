@@ -14,7 +14,7 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
-// Default calibration window for the v1 zero-gamma compute. Tuned for
+// Default calibration window for the zero-gamma compute. Tuned for
 // the trader-side review: 6 expirations beats the SpotGamma 4-expiry
 // default in nominal coverage; ±10 % strike width keeps the leg count
 // reasonable; ±15 % sweep range comfortably brackets the typical zero
@@ -29,6 +29,15 @@ const (
 	defaultStrikeWidthPct = 0.10
 	defaultSweepRangePct  = 0.15
 	defaultWorkerCount    = 4
+
+	// nearDTECutoffYears is the boundary between near and term gamma
+	// buckets — 7 days in fractional years. Picked to capture 0DTE
+	// through end-of-week (the high-velocity flow segment that's now
+	// ~59 % of 2025 SPX volume per Cboe Aug 2025), separating it from
+	// the monthly OPEX dynamics that dominate the term bucket.
+	// Hardcoded rather than parameterised on GammaZeroParams — it's a
+	// regime-meaningful boundary, not a tunable knob.
+	nearDTECutoffYears = 7.0 / 365.0
 
 	// sweepPoints is the number of (spot, GEX) samples in the profile.
 	// 60 points across [0.85, 1.15] × spot ≈ 0.5 % per point, which
@@ -626,7 +635,29 @@ func computeGammaZeroSPX(
 	progress.Store(85)
 
 	// 6-7. Sweep + aggregate.
-	profile := sweepProfile(legs, spot, params.SweepRangePct)
+	//
+	// Build the per-expiry skew curves first — the sweep evaluates σ at
+	// each scenario spot's moneyness rather than holding the snapshot
+	// IV fixed. Curves are fitted on calls AND puts pooled (put-call
+	// parity makes them lie on the same surface). A curve marked !ok
+	// (< 3 IV points, or degenerate solve) falls back to sticky-IV for
+	// that expiry alone — surfaced as "skew_fallback:YYYYMMDD" warning.
+	skewByExpiry, skewFitQuality, skewFallbacks := buildSkewCurves(legs, spot)
+	// Partition legs into near (DTE ≤ 7) and term (DTE > 7) buckets.
+	// The combined sweep stays the headline; the two bucket sweeps run
+	// alongside so the regime row can surface horizon agreement.
+	var nearLegs, termLegs []legData
+	for _, l := range legs {
+		if l.dte <= nearDTECutoffYears {
+			nearLegs = append(nearLegs, l)
+		} else {
+			termLegs = append(termLegs, l)
+		}
+	}
+
+	profile := sweepProfile(legs, spot, params.SweepRangePct, skewByExpiry)
+	profileNear := sweepProfile(nearLegs, spot, params.SweepRangePct, skewByExpiry)
+	profileTerm := sweepProfile(termLegs, spot, params.SweepRangePct, skewByExpiry)
 	// At-spot aggregates: re-use the profile's snapshot bucket OR
 	// compute directly. We compute directly so the headline numbers
 	// don't depend on the sweep grid alignment.
@@ -636,13 +667,15 @@ func computeGammaZeroSPX(
 	}
 	progress.Store(90)
 
-	// 8. Zero crossing.
+	// 8. Zero crossings: combined + near + term.
 	zg, gammaSign := findZeroCrossing(profile)
 	var gapPct *float64
 	if zg != nil {
 		v := (spot - *zg) / *zg * 100
 		gapPct = &v
 	}
+	zgNear, signNear := findZeroCrossing(profileNear)
+	zgTerm, signTerm := findZeroCrossing(profileTerm)
 
 	// 9. Top strikes by magnitude.
 	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK)
@@ -666,6 +699,19 @@ func computeGammaZeroSPX(
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")
 	}
+	if len(nearLegs) == 0 {
+		warnings = append(warnings, "near_no_legs")
+	}
+	if len(termLegs) == 0 {
+		warnings = append(warnings, "term_no_legs")
+	}
+	// Surface per-expiry skew-fit fallbacks so a renderer can show
+	// "skew curve fell back to sticky-IV for 20260620" rather than
+	// silently using the legacy recipe for that expiry. Each fallback
+	// expiry contributes one warning of the form "skew_fallback:YYYYMMDD".
+	for _, expYMD := range skewFallbacks {
+		warnings = append(warnings, "skew_fallback:"+expYMD)
+	}
 
 	derivedCount := int(derivedIVs.Load())
 	if derivedCount > 0 && derivedCount == len(legs) {
@@ -675,6 +721,23 @@ func computeGammaZeroSPX(
 		warnings = append(warnings, "all_iv_derived")
 	}
 
+	// Empty-bucket sign normalisation. findZeroCrossing returns
+	// "no_data" on empty/single-point profiles; surface that as
+	// the explicit "no_data" sign on the row so the consumer can
+	// distinguish "no crossing but the sweep had legs" (positive /
+	// negative) from "no legs to sweep" (no_data).
+	if len(nearLegs) == 0 {
+		signNear = "no_data"
+	}
+	if len(termLegs) == 0 {
+		signTerm = "no_data"
+	}
+
+	skewModel := ""
+	if len(skewFitQuality) > 0 {
+		skewModel = "sticky-moneyness-v1"
+	}
+
 	res := &rpc.GammaZeroComputed{
 		SpotUnderlying: spot,
 		SpotAt:         spotAt,
@@ -682,6 +745,16 @@ func computeGammaZeroSPX(
 		GapPct:         gapPct,
 		GammaSign:      gammaSign,
 		Profile:        profile,
+		ZeroGammaNear:  zgNear,
+		ProfileNear:    profileNear,
+		GammaSignNear:  signNear,
+		NearLegCount:   len(nearLegs),
+		ZeroGammaTerm:  zgTerm,
+		ProfileTerm:    profileTerm,
+		GammaSignTerm:  signTerm,
+		TermLegCount:   len(termLegs),
+		SkewModel:      skewModel,
+		SkewFitQuality: skewFitQuality,
 		GammaTotalAbs:  gammaTotalAbs,
 		TopStrikes:     topStrikes,
 		Expirations:    pickedExp,
@@ -690,12 +763,54 @@ func computeGammaZeroSPX(
 		Warnings:       warnings,
 		Params:         params,
 		Source:         "computed from IBKR SPY option chain",
-		Method:         "perfiliev-bs-sweep-v1",
+		Method:         "perfiliev-bs-sweep-v2-stickymoneyness",
 		AsOf:           now(),
 		DurationMS:     now().Sub(startWall).Milliseconds(),
 	}
 	progress.Store(100)
 	return res, nil
+}
+
+// buildSkewCurves groups legs by expiry, fits a quadratic
+// log-moneyness curve per expiry, and returns the three things the
+// caller needs:
+//
+//   - skewByExpiry: per-expiryYMD curve, including unfit ones (the
+//     sweep checks curve.ok before using a curve)
+//   - skewFitQuality: per-expiryYMD diagnostics (points, R², fitted
+//     range) for the result envelope — only fitted expiries appear here
+//   - skewFallbacks: list of expiryYMDs that failed to fit and fell back
+//     to sticky-IV; surfaced as warnings on the result
+func buildSkewCurves(legs []legData, snapshotSpot float64) (map[string]SkewCurve, map[string]rpc.SkewFitInfo, []string) {
+	byExpiry := map[string][]legData{}
+	for _, l := range legs {
+		byExpiry[l.expiryYMD] = append(byExpiry[l.expiryYMD], l)
+	}
+	curves := make(map[string]SkewCurve, len(byExpiry))
+	quality := make(map[string]rpc.SkewFitInfo, len(byExpiry))
+	var fallbacks []string
+	// Stable iteration order so the warnings list is deterministic for
+	// regression tests.
+	expiryOrder := make([]string, 0, len(byExpiry))
+	for k := range byExpiry {
+		expiryOrder = append(expiryOrder, k)
+	}
+	sort.Strings(expiryOrder)
+	for _, expYMD := range expiryOrder {
+		expLegs := byExpiry[expYMD]
+		curve := fitSkewCurve(expLegs, snapshotSpot)
+		curves[expYMD] = curve
+		if !curve.ok {
+			fallbacks = append(fallbacks, expYMD)
+			continue
+		}
+		quality[expYMD] = rpc.SkewFitInfo{
+			Points:   curve.nPoints,
+			RSquared: skewFitRSquared(curve, expLegs, snapshotSpot),
+			Range:    [2]float64{curve.mLo, curve.mHi},
+		}
+	}
+	return curves, quality, fallbacks
 }
 
 // normalizeGammaParams fills in defaults for unset fields. Mirrors the
@@ -910,9 +1025,17 @@ func dteYears(expiryYMD string, now time.Time) float64 {
 
 // sweepProfile builds the (spot, signed_gex) sweep over [1−range,
 // 1+range] × snapshotSpot in sweepPoints steps. Each scenario spot
-// recomputes per-leg Γ via Black-Scholes with the leg's captured IV
-// and DTE (fixed IV across sweep — v1 limitation).
-func sweepProfile(legs []legData, snapshotSpot, sweepRangePct float64) []rpc.GammaProfilePoint {
+// recomputes per-leg Γ via Black-Scholes.
+//
+// skewByExpiry maps each leg's expiryYMD to a fitted skew curve. For
+// each leg in the inner loop the IV is looked up at the
+// scenario-spot's moneyness (σ = curve.IVAtMoneyness(ln(K/S_scenario))),
+// implementing the sticky-moneyness convention. When the curve for an
+// expiry is unfit (fewer than 3 points or degenerate solve), the leg
+// falls back to its captured IV — the v1 sticky-IV behaviour for that
+// expiry only. Pass nil to disable skew lookups entirely (used by the
+// fallback test path).
+func sweepProfile(legs []legData, snapshotSpot, sweepRangePct float64, skewByExpiry map[string]SkewCurve) []rpc.GammaProfilePoint {
 	if snapshotSpot <= 0 || sweepRangePct <= 0 || sweepPoints < 2 {
 		return nil
 	}
@@ -925,7 +1048,17 @@ func sweepProfile(legs []legData, snapshotSpot, sweepRangePct float64) []rpc.Gam
 		scenarioSpot := loSpot + float64(i)*step
 		gex := 0.0
 		for _, l := range legs {
-			γ := bsGamma(scenarioSpot, l.strike, l.dte, l.iv, 0, 0)
+			σ := l.iv
+			if skewByExpiry != nil {
+				curve, ok := skewByExpiry[l.expiryYMD]
+				if ok && curve.ok {
+					m := math.Log(l.strike / scenarioSpot)
+					if v := curve.IVAtMoneyness(m); v > 0 {
+						σ = v
+					}
+				}
+			}
+			γ := bsGamma(scenarioSpot, l.strike, l.dte, σ, 0, 0)
 			gex += dealerGEX(γ, float64(l.oi), 100, scenarioSpot, l.isCall)
 		}
 		out[i] = rpc.GammaProfilePoint{Spot: scenarioSpot, GEX: gex}

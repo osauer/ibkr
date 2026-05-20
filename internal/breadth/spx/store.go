@@ -37,6 +37,15 @@ func NewStore(dir string) *Store {
 // file exists yet (cold start). Returns an error only for actual I/O
 // problems or JSON corruption — neither should happen in steady state
 // but both must surface clearly when they do.
+//
+// Method-token gate: a snapshot whose Method doesn't match the current
+// methodConstituentFanout is treated as no-cache — the on-disk struct
+// is presumed to come from an older methodology whose payload shape
+// might not match what the engine now expects. Without this gate a v1
+// snapshot.json (Value-only) silently decodes into a v2 struct with the
+// new fields zeroed, the engine reports state=ready, and the renderer
+// publishes 0% breadth + 0 new highs as if they were real readings.
+// Cold-rebuilding instead is the honest move on a methodology bump.
 func (s *Store) LoadSnapshot() (*Snapshot, error) {
 	path := filepath.Join(s.dir, "snapshot.json")
 	data, err := os.ReadFile(path)
@@ -49,6 +58,11 @@ func (s *Store) LoadSnapshot() (*Snapshot, error) {
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("decode snapshot: %w", err)
+	}
+	if snap.Method != methodConstituentFanout {
+		// Methodology mismatch: treat as no-cache. The next refresh tick
+		// rebuilds from scratch with the current methodology.
+		return nil, nil
 	}
 	return &snap, nil
 }

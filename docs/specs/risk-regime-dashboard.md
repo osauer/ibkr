@@ -216,53 +216,74 @@ FX (added in v0.21.0).
 
 ### Indicator 5 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 
-**Source.** S&P Dow Jones Indices publishes the `S5FI` index (% of
-S&P 500 constituents above their 50-day SMA). IBKR does not
-redistribute `S5FI` on retail subscriptions (verified via
-`reqContractDetails` — see `pkg/ibkr/symbols.go`), so the daemon
-computes the same number locally from the 500 constituent daily
-closes pulled via IBKR's historical-bar feed (HMDS). Method token:
-`constituent-fanout-50dma`. This reproduces S&P DJI's published S5FI
-value bit-identically when the constituent windows are fully covered.
+**Source.** S&P Dow Jones Indices publishes the `S5FI` (% above
+50-day SMA) and `S5TH` (% above 200-day SMA) index family plus the
+new-52w-highs/lows count. IBKR does not redistribute these on retail
+subscriptions (verified via `reqContractDetails` — see
+`pkg/ibkr/symbols.go`), so the daemon computes the equivalents
+locally from the 500 constituent daily closes pulled via IBKR's
+historical-bar feed (HMDS). Method token: `constituent-fanout-50/200dma-hl`.
+
+**Three readings, one refresh.** The compute walks each constituent's
+daily bars once and returns:
+
+- `pct_above_50dma` — the tactical signal. Spec bands: >55 green /
+  40-55 yellow / <40 with SPX within 3% of 52-week high red.
+- `pct_above_200dma` — the slow companion that catches cyclical
+  tops cleanly. Locked-plan bands: >60 green / 40-60 yellow / <40
+  red (calibrated to the post-Mag-7 era; the StockCharts 70/30
+  default fires red far too often in this concentration regime).
+- `new_highs_today` / `new_lows_today` — constituent counts of names
+  making fresh 252-bar highs/lows (≈ "52 weeks"). The derived
+  `net_new_highs_pct = (highs − lows) / coverage × 100`. The
+  narrow-rally pattern is SPX at/near highs with
+  `net_new_highs_pct` near zero or negative — a small set of mega-
+  caps carrying the index while the median name rolls over.
+  September 2025 was a textbook example: SPX at ATH with only 4.6%
+  of names at 52-week highs.
 
 **Update cadence.** Once-daily refresh post-close at 16:35 ET. The
-scheduler waits until both the regular session and the S5FI
+scheduler waits until both the regular session and the S&P DJI
 publication window have settled, then slides each constituent's
-50-day window forward and persists the result. Readers see a cached
-snapshot, never a multi-minute fan-out on the read path.
+200-bar window forward and updates the 252-bar rolling max/min
+trackers. Readers see a cached snapshot, never a multi-minute
+fan-out on the read path.
 
-**Cold start.** On a fresh cache the first refresh runs the full
-fan-out across ~500 constituent symbols. IBKR's historical-data
-pacing limit (60 requests per 10-min sliding window) caps the
-sustained throughput at ~6 names/min, so a cold start takes **~60
-minutes** of wall-clock — adding workers doesn't help. During this
-window the wire envelope carries `state: "computing"` with
-`value: 0`; consumers should poll at minute-scale, not hammer the
-endpoint. After cold start the cache persists across daemon restarts
-and every subsequent refresh is fast (only the most recent day's
-bars need to be pulled).
+**Cold start.** ~60 minutes of wall-clock — unchanged from v1.
+IBKR's historical-data pacing limit is per-request, not per-bar, so
+pulling 200 bars per constituent instead of 50 doesn't cost more
+requests. The cap at 60 requests per 10-min sliding window means
+sustained throughput ≈ 6 names/min for the ~500-name fan-out. The
+v2 cap on the per-constituent close window grew from 50 to 200
+entries; v1 on-disk caches trigger a graceful rebuild because their
+windows are too short to seed the 200-day reading honestly.
 
-**History.** A best-effort fetch of ~30 trailing daily bars for the
-sparkline. The lookback is padded above the requested length to
-compensate for non-trading-day shrinkage.
+**History.** A best-effort fetch of trailing daily points carrying
+all three readings — the renderer charts each as its own sparkline.
 
 **Coverage safety.** If a refresh completes with fewer than the
-engine's minimum coverage fraction (currently 0.80 of the
-constituent set), the new snapshot is rejected and the previous
-good value continues to serve under `state: "degraded"`. This
-prevents a partial fan-out from poisoning the headline with a
-non-representative number.
+engine's minimum coverage fraction (0.80 of the constituent set on
+the 50-day reading), the new snapshot is rejected and the previous
+good value continues to serve under `state: "degraded"`. The
+200-day and new-highs/lows readings carry their own coverage
+denominators (smaller, because more names need to clear the higher
+history bar); a recent IPO contributes to the 50-DMA reading but
+not yet to the 200-DMA or new-52w-highs count.
 
 **Limitations.**
 
 - Constituent list is snapshotted from the index membership file;
   S&P additions/removals between updates are not reflected until
   the next refresh of that file.
-- The 50-day SMA is computed on regular-session closes only — no
+- SMA windows are computed on regular-session closes only — no
   pre/post-market adjustment.
 - When the gateway's data type on a constituent's bar isn't live,
   the daemon still includes it; the headline `data_type` reflects
   the worst-case across the contributing bars.
+- The rolling 252-bar max/min is exact once the engine has observed
+  a full year of bars per constituent; before that, the count
+  surfaces under `coverage_highs_lows` so a renderer can flag
+  under-covered days.
 
 ### Indicator 4 — Dealer Zero-Gamma (`gamma.zero_spx`, `ibkr_gamma`)
 
@@ -271,7 +292,10 @@ market-maker gamma exposure crosses zero. Above the level dealer
 hedging is mean-reverting (dampens vol); below it, momentum-following
 (amplifies vol). **Treat this as a regime hint, not a precise level.**
 
-**Methodology token: `perfiliev-bs-sweep-v1`**
+**Methodology token: `perfiliev-bs-sweep-v2-stickymoneyness`**
+
+(Renamed from `perfiliev-bs-sweep-v1` — see the "Methodology v2 additions"
+subsection at the end of this section for the changes.)
 
 The compute follows the [Perfiliev recipe](https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/),
 endorsed by Harel Jacobson (BNP options) and the basis for several
@@ -356,6 +380,54 @@ the dashboard's footer or tooltip:
   The compute's effective precision (after the limitations above)
   is ≈ ±25 SPX points.
 
+#### Methodology v2 additions (2026-05-20)
+
+The v1 → v2 cutover replaces the sticky-IV recipe with sticky-moneyness
+and adds two complementary outputs that broaden the regime view without
+changing the headline contract.
+
+- **Sticky-moneyness sweep.** The sweep now fits a quadratic skew
+  curve in log-moneyness per expiry at snapshot time
+  (`σ(m) = A + B·m + C·m²`, with `m = ln(K/S)`) and looks up σ at each
+  scenario-spot's moneyness during the sweep instead of holding the
+  captured snapshot IV fixed. Calls and puts are pooled (put-call
+  parity makes them lie on the same surface). The fit clamps
+  evaluations to the observed moneyness range — extrapolating a
+  parabola outside the fitted window would imply IVs the data doesn't
+  support. Curves that fail to fit (< 3 IV samples, degenerate solve)
+  fall back to sticky-IV for that expiry only; surface as
+  `skew_fallback:YYYYMMDD` warnings on the envelope. The expected
+  effect: `zero_gamma` shifts ~30-80 SPX points relative to v1 and
+  tracks SpotGamma's posted numbers materially better. **Revert
+  criterion:** if four-week sign-agreement vs SpotGamma's Friday
+  recap drops below the v1 baseline, revert to the prior recipe.
+
+- **Near vs term split.** The sweep now produces three γ-zero
+  readings: the combined headline plus separate near (`DTE ≤ 7`) and
+  term (`DTE > 7`) buckets. 0DTE through end-of-week vs monthly-OPEX
+  dynamics behave very differently; aggregating them hides the
+  highest-information case where the two readings disagree. The
+  regime row's `horizon_agreement` field names the relation
+  (`both_above` / `both_below` / `diverge` / `near_only` / `term_only`);
+  the renderer annotates the row when the two horizons would otherwise
+  mask each other. Wire fields: `zero_gamma_near`, `profile_near`,
+  `gamma_sign_near`, `near_leg_count`, plus the symmetric term
+  fields. Buckets with zero legs surface as nil + a `near_no_legs` /
+  `term_no_legs` warning.
+
+- **Per-indicator streak counter.** Every regime row now carries a
+  `streak: {band, sessions, since}` field counting how many
+  consecutive NY trading sessions the indicator has been in its
+  current band. Daemon-classified using the spec's default thresholds
+  for streak purposes — a slight violation of the "daemon doesn't
+  derive bands" posture, accepted because streak persistence requires
+  a stable daemon-side classification. Renderers with custom
+  thresholds read the raw value cell and ignore the streak's
+  classification. Persisted at
+  `$XDG_CACHE_HOME/ibkr/regime-streaks.json` across daemon restarts;
+  computing/unavailable/error states freeze the counter rather than
+  reset it (a stale data point shouldn't end a streak).
+
 ### Calibration ritual (first 4 weeks after launch)
 
 The methodology has known biases. The only honest way to know whether
@@ -381,6 +453,15 @@ known public reference. For the first 4 weeks after enabling
 
 This is a human ritual, not an automated check — the references it
 compares against are publicly-posted opinions, not API feeds.
+
+**Tooling.** `ibkr regime --log <path>` appends one JSON line to a
+file each time it's invoked: `{timestamp, regime}` with the full
+envelope inline. Run from cron (e.g. weekday 16:40 ET) for the four
+weeks. We suggest filenames like `regime-v1.jsonl` so a future
+schema change can use a new filename rather than break the parser.
+Plain JSONL — `jq` and pandas both read it; analyse the
+`gamma_zero.envelope.result.zero_gamma` field against
+SpotGamma's posted value.
 
 ### Composite-score honesty
 

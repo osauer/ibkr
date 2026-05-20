@@ -123,8 +123,35 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		}
 	}
 
+	// Near vs term breakdown. The combined headline above hides the
+	// 0DTE/end-of-week vs monthly-OPEX contrast that's the most
+	// information-dense aspect of dealer gamma — surface it when both
+	// buckets have data.
+	if c.NearLegCount > 0 || c.TermLegCount > 0 {
+		fmt.Fprintf(out, "  γ-zero near %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
+		fmt.Fprintf(out, "  γ-zero term %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
+	}
+
 	fmt.Fprintf(out, "  |Γ|·OI sum  %.3e (sign-agnostic magnitude)\n", c.GammaTotalAbs)
 	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
+	if c.SkewModel != "" {
+		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
+		if n := len(c.SkewFitQuality); n > 0 {
+			// Pick the median R² to show fit quality across expiries
+			// without overwhelming the default view; full per-expiry
+			// detail lives in the JSON envelope.
+			var rs []float64
+			for _, info := range c.SkewFitQuality {
+				rs = append(rs, info.RSquared)
+			}
+			if len(rs) > 0 {
+				// Quick sort + median.
+				medianR := computeMedian(rs)
+				fmt.Fprintf(out, "  (%d expiries fit, median R² %.2f)", n, medianR)
+			}
+		}
+		fmt.Fprintln(out)
+	}
 	if c.DerivedIVLegs > 0 {
 		fmt.Fprintf(out, "  Derived IV  %d/%d legs back-solved via Black-Scholes from prior-session prices\n",
 			c.DerivedIVLegs, c.LegCount)
@@ -171,4 +198,51 @@ func formatDuration(seconds int) string {
 	}
 	d := time.Duration(seconds) * time.Second
 	return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// formatHorizonGammaLine builds one row of the near/term breakdown
+// — either "γ-zero NNN.NN (+M.N% · X legs · DTE ≤ 7)" or the
+// no-crossing/no-data variants. The renderer wants a compact one-line
+// summary per bucket; this helper keeps both lines symmetric.
+func formatHorizonGammaLine(zg *float64, sign string, spot float64, legCount int, dteHint string) string {
+	if legCount == 0 {
+		return fmt.Sprintf("—  (no legs · %s)", dteHint)
+	}
+	if zg != nil {
+		gap := (spot - *zg) / *zg * 100
+		s := "+"
+		if gap < 0 {
+			s = ""
+		}
+		return fmt.Sprintf("%.2f  (spot %s%.2f %% · %d legs · %s)", *zg, s, gap, legCount, dteHint)
+	}
+	switch sign {
+	case "positive":
+		return fmt.Sprintf("no crossing — dealer long-γ (%d legs · %s)", legCount, dteHint)
+	case "negative":
+		return fmt.Sprintf("no crossing — dealer short-γ (%d legs · %s)", legCount, dteHint)
+	}
+	return fmt.Sprintf("no crossing (%d legs · %s)", legCount, dteHint)
+}
+
+// computeMedian returns the median of a small slice. Sorts in place.
+// Used only by the gamma renderer's median-R² display; if performance
+// ever matters we can pick from "math.Floor((n-1)/2)" without a full
+// sort.
+func computeMedian(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sortedCopy := append([]float64(nil), xs...)
+	// Simple insertion sort — n is the expiry count (≤ 8 in practice).
+	for i := 1; i < len(sortedCopy); i++ {
+		for j := i; j > 0 && sortedCopy[j-1] > sortedCopy[j]; j-- {
+			sortedCopy[j-1], sortedCopy[j] = sortedCopy[j], sortedCopy[j-1]
+		}
+	}
+	mid := len(sortedCopy) / 2
+	if len(sortedCopy)%2 == 1 {
+		return sortedCopy[mid]
+	}
+	return (sortedCopy[mid-1] + sortedCopy[mid]) / 2
 }
