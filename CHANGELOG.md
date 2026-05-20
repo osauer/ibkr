@@ -10,7 +10,7 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
-## [Unreleased]
+## v0.28.0 — 2026-05-20 15:46 CEST
 
 ### What's new
 
