@@ -271,7 +271,10 @@ market-maker gamma exposure crosses zero. Above the level dealer
 hedging is mean-reverting (dampens vol); below it, momentum-following
 (amplifies vol). **Treat this as a regime hint, not a precise level.**
 
-**Methodology token: `perfiliev-bs-sweep-v1`**
+**Methodology token: `perfiliev-bs-sweep-v2-stickymoneyness`**
+
+(Renamed from `perfiliev-bs-sweep-v1` — see the "Methodology v2 additions"
+subsection at the end of this section for the changes.)
 
 The compute follows the [Perfiliev recipe](https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/),
 endorsed by Harel Jacobson (BNP options) and the basis for several
@@ -355,6 +358,54 @@ the dashboard's footer or tooltip:
   places on the wire so the renderer can choose its own rounding.
   The compute's effective precision (after the limitations above)
   is ≈ ±25 SPX points.
+
+#### Methodology v2 additions (2026-05-20)
+
+The v1 → v2 cutover replaces the sticky-IV recipe with sticky-moneyness
+and adds two complementary outputs that broaden the regime view without
+changing the headline contract.
+
+- **Sticky-moneyness sweep.** The sweep now fits a quadratic skew
+  curve in log-moneyness per expiry at snapshot time
+  (`σ(m) = A + B·m + C·m²`, with `m = ln(K/S)`) and looks up σ at each
+  scenario-spot's moneyness during the sweep instead of holding the
+  captured snapshot IV fixed. Calls and puts are pooled (put-call
+  parity makes them lie on the same surface). The fit clamps
+  evaluations to the observed moneyness range — extrapolating a
+  parabola outside the fitted window would imply IVs the data doesn't
+  support. Curves that fail to fit (< 3 IV samples, degenerate solve)
+  fall back to sticky-IV for that expiry only; surface as
+  `skew_fallback:YYYYMMDD` warnings on the envelope. The expected
+  effect: `zero_gamma` shifts ~30-80 SPX points relative to v1 and
+  tracks SpotGamma's posted numbers materially better. **Revert
+  criterion:** if four-week sign-agreement vs SpotGamma's Friday
+  recap drops below the v1 baseline, revert to the prior recipe.
+
+- **Near vs term split.** The sweep now produces three γ-zero
+  readings: the combined headline plus separate near (`DTE ≤ 7`) and
+  term (`DTE > 7`) buckets. 0DTE through end-of-week vs monthly-OPEX
+  dynamics behave very differently; aggregating them hides the
+  highest-information case where the two readings disagree. The
+  regime row's `horizon_agreement` field names the relation
+  (`both_above` / `both_below` / `diverge` / `near_only` / `term_only`);
+  the renderer annotates the row when the two horizons would otherwise
+  mask each other. Wire fields: `zero_gamma_near`, `profile_near`,
+  `gamma_sign_near`, `near_leg_count`, plus the symmetric term
+  fields. Buckets with zero legs surface as nil + a `near_no_legs` /
+  `term_no_legs` warning.
+
+- **Per-indicator streak counter.** Every regime row now carries a
+  `streak: {band, sessions, since}` field counting how many
+  consecutive NY trading sessions the indicator has been in its
+  current band. Daemon-classified using the spec's default thresholds
+  for streak purposes — a slight violation of the "daemon doesn't
+  derive bands" posture, accepted because streak persistence requires
+  a stable daemon-side classification. Renderers with custom
+  thresholds read the raw value cell and ignore the streak's
+  classification. Persisted at
+  `$XDG_CACHE_HOME/ibkr/regime-streaks.json` across daemon restarts;
+  computing/unavailable/error states freeze the counter rather than
+  reset it (a stale data point shouldn't end a streak).
 
 ### Calibration ritual (first 4 weeks after launch)
 

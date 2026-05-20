@@ -53,6 +53,12 @@ type regimeRow struct {
 	// rendering uncluttered. Each row builder computes this from the
 	// rpc.Quality pointers attached to the values it consumed.
 	quality string
+	// streak summarises the consecutive-sessions-in-band counter on a
+	// short inline marker like "day 3" — appended next to the band word
+	// so a reader sees "yellow · day 3" without scanning sideways. The
+	// streak counter is daemon-classified using the spec defaults; a
+	// renderer with custom thresholds reads the raw value cell instead.
+	streak string
 }
 
 func runRegime(ctx context.Context, env *Env, args []string) int {
@@ -207,9 +213,9 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 // renderRow lays out one indicator line: 2-space indent, glyph, indicator
 // name (left-padded to 12), value cell (left-padded to 26), band word
 // (color, padded to 7 visible cells), reason (dim parenthetical), optional
-// stale suffix. The band-word color is applied AFTER padding so column
-// alignment stays correct under ANSI escapes — same trick as the account
-// renderer's padLeftVisible.
+// streak marker ("day 3"), optional quality/stale suffix. The band-word
+// color is applied AFTER padding so column alignment stays correct under
+// ANSI escapes — same trick as the account renderer's padLeftVisible.
 func renderRow(env *Env, r regimeRow) string {
 	const (
 		nameW  = 12
@@ -227,7 +233,14 @@ func renderRow(env *Env, r regimeRow) string {
 	}
 	reason := ""
 	if r.reason != "" {
-		reason = env.dim("(" + r.reason + ")")
+		reason = " " + env.dim("("+r.reason+")")
+	}
+	// Streak marker rides next to the band word so "yellow · day 3"
+	// reads as one chunk. Only ranked rows have streaks worth showing —
+	// unranked (computing/unavailable/error) rows skip the marker.
+	streak := ""
+	if r.streak != "" && r.band != bandUnranked {
+		streak = " " + env.dim("· "+r.streak)
 	}
 	// Compose the suffix: quality tag (from Quality envelopes) takes
 	// precedence over the legacy "· stale tick" indicator. The two
@@ -241,8 +254,19 @@ func renderRow(env *Env, r regimeRow) string {
 	case r.status == rpc.RegimeStatusStale:
 		suffix = "  " + env.dim("· stale tick")
 	}
-	return fmt.Sprintf("  %s  %s  %s  %s%s%s",
-		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, reason, suffix)
+	return fmt.Sprintf("  %s  %s  %s  %s%s%s%s",
+		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, streak, reason, suffix)
+}
+
+// streakMarker formats a *rpc.StreakInfo into the compact "day N"
+// marker used inline with each row. Returns "" when the info is nil
+// (computing/unavailable/etc.) so the renderer never paints a stale
+// streak on a row that just lost its band.
+func streakMarker(s *rpc.StreakInfo) string {
+	if s == nil || s.Sessions <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("day %d", s.Sessions)
 }
 
 // qualityTag compresses a set of *rpc.Quality pointers into a short
@@ -514,7 +538,7 @@ func signedFloat(v float64, decimals int) string {
 // from the top of the file.
 
 func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
-	row := regimeRow{name: "VIX/VIX3M", status: r.Status}
+	row := regimeRow{name: "VIX/VIX3M", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Ratio == nil {
 		row.value = "—"
 		row.stateNote = ifNonEmpty(r.ErrorMessage, "ratio unavailable")
@@ -534,7 +558,7 @@ func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 }
 
 func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
-	row := regimeRow{name: "HYG vs SPY", status: r.Status}
+	row := regimeRow{name: "HYG vs SPY", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError {
 		row.value = "—"
 		row.stateNote = ifNonEmpty(r.ErrorMessage, "HYG/SPY unavailable")
@@ -570,7 +594,7 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 }
 
 func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
-	row := regimeRow{name: "USD/JPY", status: r.Status}
+	row := regimeRow{name: "USD/JPY", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
 		row.value = "—"
 		row.stateNote = ifNonEmpty(r.ErrorMessage, "no FX tick")
@@ -605,7 +629,7 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 }
 
 func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
-	row := regimeRow{name: "SPY γ-zero", status: r.Status}
+	row := regimeRow{name: "SPY γ-zero", status: r.Status, streak: streakMarker(r.Streak)}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
@@ -651,6 +675,13 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			}
 			row.value = fmt.Sprintf("spot %.2f → γ-zero %.2f  %s%.1f%%",
 				c.SpotUnderlying, *c.ZeroGamma, sign, *c.GapPct)
+			// Annotate horizon disagreement when the renderer would
+			// otherwise mask it. "diverge" is the high-information
+			// case: near vs term γ-zero straddle spot, meaning the
+			// combined headline number cancels the real signal.
+			if note := horizonAgreementNote(r.HorizonAgreement, c); note != "" {
+				row.value += "  " + note
+			}
 			switch {
 			case *c.GapPct > gammaGapYellow:
 				row.band, row.reason = bandGreen, "spot >2% above γ-zero"
@@ -690,7 +721,7 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 }
 
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
-	row := regimeRow{name: "SPX breadth", status: r.Status}
+	row := regimeRow{name: "SPX breadth", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		switch r.Status {
 		case rpc.RegimeStatusUnavailable:
@@ -829,4 +860,40 @@ func ifNonEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// horizonAgreementNote returns a short parenthetical for the gamma row
+// when near and term γ-zero disagree with the combined headline. The
+// "both_above" / "both_below" cases agree with the combined reading and
+// don't need a note; the renderer stays silent. "diverge" is the case
+// that matters most — near and term γ-zero land on opposite sides of
+// spot, which the combined headline averages over.
+func horizonAgreementNote(agreement string, c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	switch agreement {
+	case "diverge":
+		var n, tm string
+		if c.ZeroGammaNear != nil {
+			n = fmt.Sprintf("%.0f", *c.ZeroGammaNear)
+		} else {
+			n = "—"
+		}
+		if c.ZeroGammaTerm != nil {
+			tm = fmt.Sprintf("%.0f", *c.ZeroGammaTerm)
+		} else {
+			tm = "—"
+		}
+		return fmt.Sprintf("(near %s · term %s · diverge)", n, tm)
+	case "near_only":
+		if c.ZeroGammaNear != nil {
+			return fmt.Sprintf("(near %.0f only · no term crossing)", *c.ZeroGammaNear)
+		}
+	case "term_only":
+		if c.ZeroGammaTerm != nil {
+			return fmt.Sprintf("(term %.0f only · no near crossing)", *c.ZeroGammaTerm)
+		}
+	}
+	return ""
 }

@@ -193,6 +193,17 @@ type Server struct {
 	// spawn a duplicate save goroutine racing the first.
 	contractCacheSaveStarted sync.Once
 
+	// streaks persists each regime indicator's consecutive-sessions-in-
+	// band tally across daemon restarts. Loaded lazily on first Tick;
+	// written atomically (temp+rename) on every band change. Same shape
+	// as contractStore — own persistence file at
+	// $XDG_CACHE_HOME/ibkr/regime-streaks.json, own version field, own
+	// invalidation rules (entries persist across days; counters change
+	// only on band transitions). Nil only on the rare XDG/HOME-unset
+	// path; the daemon then runs without streak persistence (every
+	// restart resets the counters).
+	streaks *StreakStore
+
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
 	// shutdown and `ibkr status` reflects the work — same coherence
@@ -245,7 +256,22 @@ func New(opts Options) *Server {
 	s.installSubs()
 	s.installBreadthEngine()
 	s.installContractStore()
+	s.installStreakStore()
 	return s
+}
+
+// installStreakStore constructs the regime-streak persistence layer.
+// Best-effort: a missing XDG_CACHE_HOME / HOME pair leaves streaks
+// nil and the daemon runs without persistence (every restart resets
+// the counters). The regime-snapshot path nil-guards before calling
+// Tick so the rest of the row population continues unaffected.
+func (s *Server) installStreakStore() {
+	dir, err := DefaultStreakStoreDir()
+	if err != nil {
+		s.logger.Warnf("regime streaks: resolve cache dir: %v (counters disabled)", err)
+		return
+	}
+	s.streaks = NewStreakStore(dir)
 }
 
 // installContractStore constructs the on-disk contract-cache store and

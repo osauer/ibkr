@@ -198,7 +198,7 @@ func TestSweepProfile(t *testing.T) {
 			gammaAtSnapshot: 0.001,
 		},
 	}
-	profile := sweepProfile(legs, 5000, 0.15)
+	profile := sweepProfile(legs, 5000, 0.15, nil)
 	if len(profile) != sweepPoints {
 		t.Fatalf("sweep len = %d, want %d", len(profile), sweepPoints)
 	}
@@ -227,7 +227,7 @@ func TestSweepProfile(t *testing.T) {
 	// Documenting this rather than guarding because the compute
 	// itself returns an error before reaching sweepProfile when no
 	// legs are usable, so this is only a defensive shape pin.
-	empty := sweepProfile(nil, 5000, 0.15)
+	empty := sweepProfile(nil, 5000, 0.15, nil)
 	if len(empty) != sweepPoints {
 		t.Errorf("empty legs len = %d, want %d", len(empty), sweepPoints)
 	}
@@ -237,7 +237,7 @@ func TestSweepProfile(t *testing.T) {
 			break
 		}
 	}
-	if got := sweepProfile(legs, 0, 0.15); got != nil {
+	if got := sweepProfile(legs, 0, 0.15, nil); got != nil {
 		t.Errorf("zero spot: got %v, want nil", got)
 	}
 }

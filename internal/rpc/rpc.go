@@ -481,6 +481,22 @@ type StrikeConcentration struct {
 	OI     int64   `json:"open_interest"`
 }
 
+// SkewFitInfo is the per-expiry diagnostic for the sticky-moneyness
+// skew curve fitted at snapshot time. Populated only when SkewModel
+// reports a fitted model (e.g. "sticky-moneyness-v1"); a renderer can
+// surface it as "skew fit: 12 pts · R² 0.94 · m ∈ [-0.12, +0.09]" so
+// the reader can audit how well the curve actually fit the observed
+// IVs before acting on the zero-gamma level it implies.
+//
+// Range is the moneyness window m = ln(K/S) the curve was fitted over;
+// scenario spots that push a leg's moneyness outside the window are
+// clamped to the boundary during the sweep.
+type SkewFitInfo struct {
+	Points   int        `json:"points"`
+	RSquared float64    `json:"r_squared"`
+	Range    [2]float64 `json:"range"`
+}
+
 // GammaZeroComputed is the actual zero-gamma payload — populated when
 // GammaZeroSPXResult.Status is GammaZeroStatusReady. Kept as a separate
 // struct so the envelope (Status / Eta / Progress / Result pointer)
@@ -564,14 +580,56 @@ type GammaZeroComputed struct {
 	// gate (mirror of breadth's MinCoverageFraction=0.80 pattern).
 	Warnings []string `json:"warnings,omitempty"`
 
+	// ZeroGammaNear / ProfileNear / GammaSignNear / NearLegCount are the
+	// same headline triple computed over legs with DTE ≤ 7 days only
+	// (0DTE through end-of-week). Captures the dynamics dominated by
+	// short-dated SPX flow (0DTE ≈ 59 % of 2025 SPX volume). When near
+	// and term disagree, the disagreement IS the signal — the renderer
+	// surfaces it via HorizonAgreement on the regime row.
+	//
+	// Nil when no legs fell in the bucket (e.g. mid-Friday after the
+	// weekly expired and the 6 nearest expirations are all > 7 DTE);
+	// GammaSignNear="no_data" + a "near_no_legs" warning communicate
+	// the empty-bucket case.
+	ZeroGammaNear *float64            `json:"zero_gamma_near,omitempty"`
+	ProfileNear   []GammaProfilePoint `json:"profile_near,omitempty"`
+	GammaSignNear string              `json:"gamma_sign_near,omitempty"`
+	NearLegCount  int                 `json:"near_leg_count,omitempty"`
+
+	// ZeroGammaTerm / ProfileTerm / GammaSignTerm / TermLegCount are the
+	// matching triple for legs with DTE > 7 days. Slower-moving than the
+	// near bucket; closer to the canonical "monthly OPEX" gamma
+	// positioning. Symmetric handling to the near fields.
+	ZeroGammaTerm *float64            `json:"zero_gamma_term,omitempty"`
+	ProfileTerm   []GammaProfilePoint `json:"profile_term,omitempty"`
+	GammaSignTerm string              `json:"gamma_sign_term,omitempty"`
+	TermLegCount  int                 `json:"term_leg_count,omitempty"`
+
+	// SkewModel names the IV model used during the sweep. v2 cutover:
+	// "sticky-moneyness-v1" means a quadratic skew curve in
+	// log-moneyness was fitted per expiry and σ was looked up at each
+	// (scenario spot, strike) pair. Empty when the curve fell back to
+	// sticky-IV everywhere (degenerate fits across every expiry); a
+	// per-expiry fallback shows up in Warnings as "skew_fallback:YYYYMMDD".
+	SkewModel string `json:"skew_model,omitempty"`
+	// SkewFitQuality is one SkewFitInfo per expiry that fitted a curve
+	// successfully. Keyed by compact YYYYMMDD. Renderers can show fit
+	// quality alongside the headline so the reader can audit how
+	// confident the underlying skew curve is.
+	SkewFitQuality map[string]SkewFitInfo `json:"skew_fit_quality,omitempty"`
+
 	// Params echoes the v1 calibration window so a renderer can show
 	// "computed over 6 expirations within ATM ± 10%" without consulting
 	// out-of-band documentation.
 	Params GammaZeroParams `json:"params"`
 	// Source identifies the data provenance for the headline numbers.
 	Source string `json:"source"`
-	// Method is a short stable token for the computation path. v1:
-	// "perfiliev-bs-sweep-v1". Full methodology disclosure lives in
+	// Method is a short stable token for the computation path. v2:
+	// "perfiliev-bs-sweep-v2-stickymoneyness". The method bump signals
+	// to consumers that the dealer-gamma number is now sticky-moneyness-
+	// derived (a per-expiry quadratic skew curve fitted at snapshot time,
+	// evaluated at each scenario-spot moneyness during the sweep) rather
+	// than the v1 sticky-IV recipe. Full methodology disclosure lives in
 	// docs/specs/risk-regime-dashboard.md so renderers can deep-link.
 	Method string `json:"method"`
 	// AsOf is the daemon's wall-clock when the compute finished.
@@ -668,6 +726,30 @@ const (
 	ConfidenceProxy    = "proxy"
 )
 
+// StreakInfo tells a consumer how many consecutive trading sessions
+// an indicator has been in its current band. Closes the wire-shape
+// gap with the spec's repeated "sustained 2-3 days, not single
+// spikes" language — a single snapshot can't distinguish day 1 of a
+// stress regime from day 5, but the streak counter makes that
+// difference visible inline ("yellow · day 3").
+//
+// Band classification IS done daemon-side for streak purposes (a small
+// violation of the "daemon doesn't derive bands" principle the spec
+// states for the wire surface — but necessary for streak persistence).
+// The bands used here mirror the spec's default cutoffs verbatim; a
+// renderer that wants to apply a different threshold can still ignore
+// Band and compute its own coloring from the row's raw measurement.
+//
+// Since is the YYYY-MM-DD NY-tz session key for when the current
+// streak began. Sessions ≥ 1; the first session in a band is day 1.
+// Indicator unavailable/computing/error states freeze the counter
+// rather than reset it — a stale data point shouldn't end a streak.
+type StreakInfo struct {
+	Band     string `json:"band"`
+	Sessions int    `json:"sessions"`
+	Since    string `json:"since"`
+}
+
 // RegimeVIXTerm is Indicator 1: VIX/VIX3M ratio. Watch for sustained
 // inversion (ratio > 1.0) over 2-3 sessions, not a single spike.
 //
@@ -698,6 +780,12 @@ type RegimeVIXTerm struct {
 	// "estimate · 18s" without re-deriving from DataType.
 	VIXQuality   *Quality `json:"vix_quality,omitempty"`
 	VIX3MQuality *Quality `json:"vix3m_quality,omitempty"`
+	// Streak counts how many consecutive sessions this row's value has
+	// been in its current band. Persisted across daemon restarts in
+	// $XDG_CACHE_HOME/ibkr/regime-streaks.json. Nil when the band can't
+	// be determined (computing / unavailable / error) — the streak
+	// freezes rather than resets.
+	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
 // RegimeHYGSPYDivergence is Indicator 2: HYG vs SPY context. The
@@ -731,6 +819,9 @@ type RegimeHYGSPYDivergence struct {
 	HYG50DMAQuality   *Quality `json:"hyg_50dma_quality,omitempty"`
 	SPYQuality        *Quality `json:"spy_quality,omitempty"`
 	SPY52WHighQuality *Quality `json:"spy_52w_high_quality,omitempty"`
+	// Streak counts consecutive sessions in the current band. See
+	// RegimeVIXTerm.Streak for the semantics.
+	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
 // RegimeUSDJPY is Indicator 3: USD/JPY exchange rate. Spec measures
@@ -751,6 +842,9 @@ type RegimeUSDJPY struct {
 	// Close7DAgo is always estimate-derived (MIDPOINT historical bar).
 	LastQuality       *Quality `json:"last_quality,omitempty"`
 	Close7DAgoQuality *Quality `json:"close_7d_ago_quality,omitempty"`
+	// Streak counts consecutive sessions in the current band. See
+	// RegimeVIXTerm.Streak for the semantics.
+	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
 // RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
@@ -763,11 +857,29 @@ type RegimeGammaZero struct {
 	Notes         string             `json:"notes"`
 	FieldsMissing []string           `json:"fields_missing,omitempty"`
 	// Per-scalar provenance for the two values the renderer prints:
-	// ZeroGamma is proxy-modelled (carries the perfiliev-bs-sweep-v1
+	// ZeroGamma is proxy-modelled (carries the perfiliev-bs-sweep
 	// methodology); GammaTotalAbs is estimate-derived (sign-agnostic
 	// notional summed over observed OI+IV).
 	ZeroGammaQuality     *Quality `json:"zero_gamma_quality,omitempty"`
 	GammaTotalAbsQuality *Quality `json:"gamma_total_abs_quality,omitempty"`
+	// HorizonAgreement names how the near (DTE ≤ 7) and term (DTE > 7)
+	// zero-gamma readings relate. One of:
+	//
+	//   - "both_above"  — spot above both near and term γ-zero
+	//   - "both_below"  — spot below both
+	//   - "diverge"     — spot on opposite sides of the two readings
+	//                     (high-information case worth surfacing)
+	//   - "near_only"   — only the near bucket has a crossing
+	//   - "term_only"   — only the term bucket has a crossing
+	//   - ""            — both buckets are no-crossing or no-data
+	//
+	// The renderer annotates the row when the value is "diverge",
+	// "near_only", or "term_only" — those are the cases where the
+	// combined headline doesn't tell the full story.
+	HorizonAgreement string `json:"horizon_agreement,omitempty"`
+	// Streak counts consecutive sessions in the current band. See
+	// RegimeVIXTerm.Streak for the semantics.
+	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
 // RegimeBreadth is Indicator 5: the existing breadth.spx envelope
@@ -787,6 +899,9 @@ type RegimeBreadth struct {
 	// nil during cold start or when the engine refused to persist
 	// because constituent coverage fell below the safety threshold.
 	ValueQuality *Quality `json:"value_quality,omitempty"`
+	// Streak counts consecutive sessions in the current band. See
+	// RegimeVIXTerm.Streak for the semantics.
+	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
 // RegimeSnapshotParams is the input for MethodRegimeSnapshot. Empty

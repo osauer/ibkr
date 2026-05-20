@@ -1,0 +1,397 @@
+package daemon
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+// StreakEntry is one indicator's persisted band history. LastBand is
+// the band classification observed on the most recent successful tick;
+// LastSession is the NY-tz session key (YYYY-MM-DD) the tick happened
+// in. Sessions counts how many NY sessions in a row the indicator has
+// reported LastBand. LastValue is the raw measurement at LastSession
+// — kept for diagnostics so a human inspecting the file can verify the
+// classification.
+type StreakEntry struct {
+	LastBand    string  `json:"last_band"`
+	SinceDate   string  `json:"since_date"`
+	LastSession string  `json:"last_session"`
+	Sessions    int     `json:"sessions"`
+	LastValue   float64 `json:"last_value"`
+}
+
+// streakStoreFile is the on-disk shape. Version field for future
+// migrations; Notes documents the daemon-side band classification
+// choice so a human reading the file knows it's spec-default bands
+// (a slight violation of the daemon's "no derived bands on the wire"
+// posture, accepted because streak persistence requires a stable
+// daemon-side classification).
+type streakStoreFile struct {
+	Version int                    `json:"version"`
+	AsOf    time.Time              `json:"as_of"`
+	Notes   string                 `json:"notes"`
+	Entries map[string]StreakEntry `json:"entries"`
+}
+
+const (
+	streakStoreVersion = 1
+	streakStoreFileN   = "regime-streaks.json"
+	streakStoreNotes   = "Per-indicator consecutive-sessions-in-band tally. The daemon classifies bands using the spec's default thresholds (see docs/specs/risk-regime-dashboard.md) — slightly violating the wire-shape posture that derived bands belong in the renderer, accepted because streak persistence requires a stable daemon-side classification. Breadth bands are simplified to value-only (<40=red, 40-55=yellow, >55=green) for streak purposes; the renderer can still apply the spec's 'SPX near highs' modifier for display colour."
+)
+
+// StreakStore persists the streak counters across daemon restarts.
+// Storage shape matches the contract-store convention from 2fbd614:
+// a single JSON file with a version field, atomic temp+rename writes,
+// per-indicator entries keyed on a stable token.
+//
+// The store is its own persistence domain — distinct from the contract
+// store, gamma cache, and breadth windows — because the invalidation
+// rules differ. Streak entries don't expire on calendar tickover;
+// they persist across days and only change band on a band transition
+// or reset on a long gap (which the Tick logic handles via session
+// counting).
+type StreakStore struct {
+	dir string
+
+	mu      sync.Mutex
+	entries map[string]StreakEntry
+	loaded  bool
+}
+
+// NewStreakStore returns a store rooted at dir. Construction is lazy
+// — the on-disk file is read on the first Tick or Get call, not at
+// construction time, so a daemon that constructs the store before
+// touching disk doesn't pay the read cost upfront.
+func NewStreakStore(dir string) *StreakStore {
+	return &StreakStore{
+		dir:     dir,
+		entries: map[string]StreakEntry{},
+	}
+}
+
+// load reads the on-disk file into s.entries. Idempotent — subsequent
+// calls after the first are no-ops. Caller MUST hold s.mu.
+//
+// Cold-start (file missing) is non-error: every counter begins at zero
+// on a fresh install. Unknown versions are treated as no-cache so a
+// future format bump triggers a graceful rebuild rather than corrupting
+// the counters.
+func (s *StreakStore) loadLocked() {
+	if s.loaded {
+		return
+	}
+	s.loaded = true // mark loaded even on parse failure, so we don't retry every call
+	path := filepath.Join(s.dir, streakStoreFileN)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Surface I/O errors via a logger if one is wired; for now
+			// the entries map stays empty and counters bootstrap fresh.
+			_ = err
+		}
+		return
+	}
+	var f streakStoreFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return
+	}
+	if f.Version != streakStoreVersion {
+		return
+	}
+	if f.Entries != nil {
+		s.entries = f.Entries
+	}
+}
+
+// saveLocked writes the entries map atomically. Caller MUST hold s.mu.
+// Best-effort: I/O errors are returned but the in-memory state stays
+// authoritative — a failed write just means the next daemon restart
+// loses the streak counters and they bootstrap fresh.
+func (s *StreakStore) saveLocked() error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", s.dir, err)
+	}
+	target := filepath.Join(s.dir, streakStoreFileN)
+	tmp, err := os.CreateTemp(s.dir, streakStoreFileN+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if tmp != nil {
+			_ = tmp.Close()
+		}
+		_ = os.Remove(tmpPath)
+	}()
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(streakStoreFile{
+		Version: streakStoreVersion,
+		AsOf:    time.Now().UTC(),
+		Notes:   streakStoreNotes,
+		Entries: s.entries,
+	}); err != nil {
+		return fmt.Errorf("encode streaks: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	tmp = nil
+	if err := os.Rename(tmpPath, target); err != nil {
+		return fmt.Errorf("rename streaks: %w", err)
+	}
+	return nil
+}
+
+// Tick advances the streak counter for indicatorKey using the supplied
+// (value, band) observation, returns a *StreakInfo representing the
+// updated state, and persists the file. Empty band freezes the counter
+// — pass band="" for computing/unavailable/error states so a stale tick
+// doesn't reset a real streak.
+//
+// nowNY is the wall-clock-now interpreted in America/New_York; the
+// session key is derived from its date portion. Injected for tests.
+//
+// Logic:
+//   - First call ever for this key: insert {band, today, sessions: 1,
+//     value} → return Sessions: 1.
+//   - Same band as last call AND last call was on a previous trading
+//     day: increment sessions.
+//   - Same band as last call AND last call was today: leave alone
+//     (multiple calls on the same day = same streak, no double-counting).
+//   - Different band: reset to {band: newBand, since: today, sessions:
+//     1, value: newValue}.
+//   - Empty band (indicator computing / unavailable / error): freeze
+//     the counter — return the existing entry unchanged. The renderer
+//     still sees the previous band's streak; a stale tick shouldn't
+//     end a streak.
+func (s *StreakStore) Tick(indicatorKey string, value float64, band string, nowNY time.Time) *StreakInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+
+	today := nowNY.Format("2006-01-02")
+
+	// Empty band = freeze: return whatever's already there without
+	// mutating. nil if we've never seen a band for this indicator.
+	if band == "" {
+		entry, ok := s.entries[indicatorKey]
+		if !ok {
+			return nil
+		}
+		return entryToInfo(entry)
+	}
+
+	entry, exists := s.entries[indicatorKey]
+	switch {
+	case !exists:
+		// First-ever observation for this indicator. Start at 1.
+		entry = StreakEntry{
+			LastBand:    band,
+			SinceDate:   today,
+			LastSession: today,
+			Sessions:    1,
+			LastValue:   value,
+		}
+	case entry.LastBand == band && entry.LastSession == today:
+		// Same band, same session — no-op. Multiple calls within one
+		// NY session shouldn't inflate the counter.
+		entry.LastValue = value
+	case entry.LastBand == band:
+		// Same band, new session — increment.
+		entry.LastSession = today
+		entry.Sessions++
+		entry.LastValue = value
+	default:
+		// Band change — reset to day 1 of the new band.
+		entry = StreakEntry{
+			LastBand:    band,
+			SinceDate:   today,
+			LastSession: today,
+			Sessions:    1,
+			LastValue:   value,
+		}
+	}
+	s.entries[indicatorKey] = entry
+	// Best-effort persist. A failed write doesn't affect the in-memory
+	// authoritative state for the rest of the daemon's lifetime; only
+	// the next-restart bootstrap suffers.
+	_ = s.saveLocked()
+	return entryToInfo(entry)
+}
+
+// Get returns the current StreakInfo for an indicator without
+// modifying it. Used by tests and diagnostics; the production fetch
+// path goes through Tick.
+func (s *StreakStore) Get(indicatorKey string) *StreakInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	entry, ok := s.entries[indicatorKey]
+	if !ok {
+		return nil
+	}
+	return entryToInfo(entry)
+}
+
+func entryToInfo(e StreakEntry) *rpc.StreakInfo {
+	return &rpc.StreakInfo{
+		Band:     e.LastBand,
+		Sessions: e.Sessions,
+		Since:    e.SinceDate,
+	}
+}
+
+// StreakInfo is the in-package alias for rpc.StreakInfo so callers in
+// the daemon package can avoid importing the rpc package solely for
+// the type name.
+type StreakInfo = rpc.StreakInfo
+
+// Indicator keys for the streak store. Stable strings; each maps to
+// one regime row. Constants here so a typo at a call site fails at
+// compile time rather than silently writing to a misnamed key.
+const (
+	StreakKeyVIXTerm   = "vix_term"
+	StreakKeyHYGSPY    = "hyg_spy"
+	StreakKeyUSDJPY    = "usdjpy"
+	StreakKeyGammaZero = "gamma_zero"
+	StreakKeyBreadth   = "breadth"
+)
+
+// classifyVIXTermBand maps a VIX/VIX3M ratio to its band per the spec's
+// default thresholds (docs/specs/risk-regime-dashboard.md §1). Empty
+// string when the ratio is nil — caller passes that case through as
+// "freeze the counter".
+func classifyVIXTermBand(ratio *float64) string {
+	if ratio == nil {
+		return ""
+	}
+	switch {
+	case *ratio < 0.92:
+		return "green"
+	case *ratio < 1.00:
+		return "yellow"
+	default:
+		return "red"
+	}
+}
+
+// classifyHYGSPYBand maps the HYG/50DMA + SPY/52w-high pair to its
+// band per the spec's §2 thresholds. Daemon-side simplification: the
+// "5+ sessions below" red trigger requires session history we don't
+// track separately, so the daemon classifies on the same-day signal
+// (HYG vs 50dma + SPY proximity to 52w high) and the consecutive-
+// sessions count emerges naturally from the streak counter itself —
+// "red · day 5" reads the same as the spec's "5+ sessions" requirement.
+func classifyHYGSPYBand(r rpc.RegimeHYGSPYDivergence) string {
+	if r.HYGPrice == nil || r.HYG50DMA == nil {
+		return ""
+	}
+	if *r.HYGPrice >= *r.HYG50DMA {
+		return "green"
+	}
+	// HYG below 50dma. Yellow vs red depends on SPY proximity to highs.
+	if r.SPY52WHigh == nil || r.SPYPrice == nil {
+		// Can't classify without the SPY anchor — freeze.
+		return ""
+	}
+	const nearHigh = 0.97 // SPY ≥ 0.97 × 52w high = "near highs"
+	if *r.SPYPrice >= nearHigh**r.SPY52WHigh {
+		return "red"
+	}
+	return "yellow"
+}
+
+// classifyUSDJPYBand maps the weekly USD/JPY change to its band per
+// the spec's §3 thresholds. Convention: WeeklyChange negative = yen
+// strengthening = the stress signal.
+func classifyUSDJPYBand(weeklyChange *float64) string {
+	if weeklyChange == nil {
+		return ""
+	}
+	yenMove := -*weeklyChange // positive when yen strengthening
+	switch {
+	case yenMove < 1.0:
+		return "green"
+	case yenMove < 2.0:
+		return "yellow"
+	default:
+		return "red"
+	}
+}
+
+// classifyGammaBand maps a (gap_pct, sign) pair to its band per the
+// spec's §4 thresholds. Three paths matching the renderer's gamma-row
+// logic: a real crossing reads on gap distance; no-crossing reads on
+// the signed-profile sign.
+func classifyGammaBand(gapPct *float64, gammaSign string) string {
+	if gapPct != nil {
+		const yellowGap = 2.0 // ±2% of zero-gamma
+		switch {
+		case *gapPct > yellowGap:
+			return "green"
+		case *gapPct >= -yellowGap:
+			return "yellow"
+		default:
+			return "red"
+		}
+	}
+	// No crossing — band on the signed-profile direction.
+	switch gammaSign {
+	case "positive":
+		return "green" // dealer long-γ across sweep = stabilising regime
+	case "negative":
+		return "red" // dealer short-γ across sweep = amplifying regime
+	}
+	return ""
+}
+
+// classifyBreadthBand maps the % above 50-DMA reading to its band.
+// Simplified value-only classification for streak purposes — the
+// spec's "SPX near highs" modifier (red trigger requires breadth < 40
+// AND SPX within 3% of 52w high) is left to the renderer for display
+// colour. The streak counter just tracks raw-breadth-band transitions.
+func classifyBreadthBand(value float64) string {
+	switch {
+	case value < 40:
+		return "red"
+	case value <= 55:
+		return "yellow"
+	default:
+		return "green"
+	}
+}
+
+// DefaultStreakStoreDir returns the on-disk cache root for the streak
+// store. Matches the layout used by the contract store and breadth
+// engine ($XDG_CACHE_HOME/ibkr/) so all daemon caches live together.
+func DefaultStreakStoreDir() (string, error) {
+	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		return filepath.Join(v, "ibkr"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, ".cache", "ibkr"), nil
+}
+
+// nyDateNow returns time.Now() interpreted in NY local time. Mirrors
+// the breadth engine's nySessionKey helper but returns the full time
+// value so callers can ask for both the session key (date portion) and
+// other date arithmetic from the same source.
+func nyDateNow() time.Time {
+	now := time.Now()
+	if loc, err := time.LoadLocation("America/New_York"); err == nil {
+		return now.In(loc)
+	}
+	return now.UTC()
+}

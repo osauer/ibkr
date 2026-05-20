@@ -43,7 +43,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	}
 
 	deps := productionRegimeDeps(c, s.logger.Warnf)
-	return runRegimeFanout(
+	res := runRegimeFanout(
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
 		func(c context.Context) rpc.RegimeHYGSPYDivergence { return fetchRegimeHYGSPY(c, deps) },
@@ -51,7 +51,86 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		func(c context.Context) rpc.RegimeGammaZero { return fetchRegimeGamma(c, s) },
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
 		s.regimeContentionMessage,
-	), nil
+	)
+	// Tick the streak counters after the fan-out completes. The store
+	// classifies each indicator's band using the spec's default
+	// thresholds (a slight violation of the wire-shape posture, accepted
+	// because streak persistence requires a stable daemon-side
+	// classification — see regime_streaks.go for the rationale). Each
+	// indicator's StreakInfo is attached to its row before returning.
+	s.populateStreaks(res)
+	return res, nil
+}
+
+// populateStreaks ticks the streak counter for each regime row and
+// attaches the resulting *rpc.StreakInfo. Nil-safe on the store side
+// (the field stays nil when streaks aren't persisted), and nil-safe on
+// the band side (Tick freezes the counter when band="").
+func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) {
+	if s.streaks == nil || res == nil {
+		return
+	}
+	now := nyDateNow()
+	// VIX/VIX3M ratio band.
+	{
+		band := ""
+		var value float64
+		if res.VIXTermStructure.Status == rpc.RegimeStatusOK || res.VIXTermStructure.Status == rpc.RegimeStatusStale {
+			band = classifyVIXTermBand(res.VIXTermStructure.Ratio)
+			if res.VIXTermStructure.Ratio != nil {
+				value = *res.VIXTermStructure.Ratio
+			}
+		}
+		res.VIXTermStructure.Streak = s.streaks.Tick(StreakKeyVIXTerm, value, band, now)
+	}
+	// HYG vs SPY band.
+	{
+		band := ""
+		var value float64
+		if res.HYGSPYDivergence.Status == rpc.RegimeStatusOK || res.HYGSPYDivergence.Status == rpc.RegimeStatusStale {
+			band = classifyHYGSPYBand(res.HYGSPYDivergence)
+			if res.HYGSPYDivergence.HYGPrice != nil {
+				value = *res.HYGSPYDivergence.HYGPrice
+			}
+		}
+		res.HYGSPYDivergence.Streak = s.streaks.Tick(StreakKeyHYGSPY, value, band, now)
+	}
+	// USD/JPY weekly-change band.
+	{
+		band := ""
+		var value float64
+		if res.USDJPY.Status == rpc.RegimeStatusOK || res.USDJPY.Status == rpc.RegimeStatusStale {
+			band = classifyUSDJPYBand(res.USDJPY.WeeklyChange)
+			if res.USDJPY.WeeklyChange != nil {
+				value = *res.USDJPY.WeeklyChange
+			}
+		}
+		res.USDJPY.Streak = s.streaks.Tick(StreakKeyUSDJPY, value, band, now)
+	}
+	// Gamma band (only when the envelope landed a ready result).
+	{
+		band := ""
+		var value float64
+		if res.GammaZero.Status == rpc.RegimeStatusOK && res.GammaZero.Envelope.Result != nil {
+			c := res.GammaZero.Envelope.Result
+			band = classifyGammaBand(c.GapPct, c.GammaSign)
+			if c.GapPct != nil {
+				value = *c.GapPct
+			}
+		}
+		res.GammaZero.Streak = s.streaks.Tick(StreakKeyGammaZero, value, band, now)
+	}
+	// Breadth band (simplified value-only classification for streak
+	// purposes — see regime_streaks.go for the rationale).
+	{
+		band := ""
+		var value float64
+		if (res.Breadth.Status == rpc.RegimeStatusOK || res.Breadth.Status == rpc.RegimeStatusStale) && res.Breadth.Envelope.State == rpc.BreadthStateReady {
+			value = res.Breadth.Envelope.Value
+			band = classifyBreadthBand(value)
+		}
+		res.Breadth.Streak = s.streaks.Tick(StreakKeyBreadth, value, band, now)
+	}
 }
 
 // regimeContentionMessage produces the partial-envelope ErrorMessage
@@ -588,7 +667,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "SPY dealer γ-zero level (the spot where dealer net gamma crosses zero). Spec thresholds: SPY >2% above γ-zero (green, stabilizing); within 2% (yellow, regime can flip on a single session); below (red, amplifying). The crossing itself is the regime event — no waiting period. Underlying is SPY (the S&P 500 ETF) rather than SPX (the index) so the compute is robust off-hours: SPY trades extended hours with continuous market-maker quotes and a single trading class, which keeps option IV ticks flowing and the chain enumeration clean; SPX has no spot trading outside RTH and IBKR's model-computation engine doesn't push IV ticks for SPX options pre-market. The regime signal is unchanged — SPY dealer gamma tracks SPX dealer gamma closely — but the absolute level is SPY-scale (~SPX/10). Methodology: Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes; sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs, autocallables, sticky IV). Pre-market: when the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs and surfaced in the row's source disclosure. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed γ-zero level when positioning is unusual."
+const gammaNotes = "SPY dealer γ-zero level (the spot where dealer net gamma crosses zero). Spec thresholds: SPY >2% above γ-zero (green, stabilizing); within 2% (yellow, regime can flip on a single session); below (red, amplifying). The crossing itself is the regime event — no waiting period. Underlying is SPY (the S&P 500 ETF) rather than SPX (the index) so the compute is robust off-hours: SPY trades extended hours with continuous market-maker quotes and a single trading class, which keeps option IV ticks flowing and the chain enumeration clean. The regime signal tracks SPX dealer gamma closely; absolute level is SPY-scale (~SPX/10). Methodology v2 (`perfiliev-bs-sweep-v2-stickymoneyness`): Perfiliev BS-sweep over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes. The sweep now reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV — so the zero-gamma estimate shifts ~30-80 SPX points relative to the v1 recipe and tracks SpotGamma's posted numbers materially better. Curves that fail to fit (fewer than 3 IV samples or degenerate solve) fall back to sticky-IV for that expiry only; surface as `skew_fallback:YYYYMMDD` warnings. The envelope also carries separate γ-zero readings for the near bucket (DTE ≤ 7 days; ~59% of 2025 SPX volume is 0DTE) and the term bucket (DTE > 7); the `horizon_agreement` field flags `diverge` when the two readings land on opposite sides of spot — the high-information case. Sign convention assumes 2018-era dealers-long-calls-short-puts (regime hint, not precise level; documented caveats around covered-call ETFs and autocallable hedging). Pre-market: when the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal which is more robust than the signed γ-zero level when positioning is unusual."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
@@ -627,6 +706,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 			}
 			out.ZeroGammaQuality = modelledQuality(envelope.Result.AsOf, source)
 			out.GammaTotalAbsQuality = derivedQuality(envelope.Result.AsOf, "BS-sweep |Γ|·OI·spot²")
+			out.HorizonAgreement = classifyHorizonAgreement(envelope.Result)
 		}
 	case rpc.GammaZeroStatusComputing:
 		out.Status = rpc.RegimeStatusComputing
@@ -786,4 +866,36 @@ func maxHigh(bars []ibkrlib.HistoricalBar, n int) float64 {
 		}
 	}
 	return hi
+}
+
+// classifyHorizonAgreement compares the gamma compute's near (DTE ≤ 7)
+// and term (DTE > 7) zero-gamma readings and names how they relate.
+// Returns one of the documented HorizonAgreement strings — see
+// rpc.RegimeGammaZero.HorizonAgreement for the meanings. Empty string
+// when both buckets are no-crossing or no-data (the headline already
+// carries that case).
+func classifyHorizonAgreement(c *rpc.GammaZeroComputed) string {
+	if c == nil || c.SpotUnderlying <= 0 {
+		return ""
+	}
+	nearAvail := c.ZeroGammaNear != nil
+	termAvail := c.ZeroGammaTerm != nil
+	switch {
+	case nearAvail && termAvail:
+		spotAboveNear := c.SpotUnderlying > *c.ZeroGammaNear
+		spotAboveTerm := c.SpotUnderlying > *c.ZeroGammaTerm
+		switch {
+		case spotAboveNear && spotAboveTerm:
+			return "both_above"
+		case !spotAboveNear && !spotAboveTerm:
+			return "both_below"
+		default:
+			return "diverge"
+		}
+	case nearAvail:
+		return "near_only"
+	case termAvail:
+		return "term_only"
+	}
+	return ""
 }
