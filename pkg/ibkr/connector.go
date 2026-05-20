@@ -783,8 +783,10 @@ func (c *Connector) prepareContract(symbol string, fetchTimeout time.Duration, a
 
 	// FX pairs split the user-supplied "USD.JPY" into Symbol=USD,
 	// Currency=JPY on the wire; the dotted/slash string itself is not a
-	// valid IBKR symbol field.
-	wireSymbol := upper
+	// valid IBKR symbol field. Dual-class shares (BRK.B, BF.B) get
+	// translated to IBKR's space-form for the same reason — see
+	// dualClassWireSymbol.
+	wireSymbol := dualClassWireSymbol(upper)
 	if base, _, ok := FxPair(upper); ok {
 		wireSymbol = base
 	}
@@ -935,9 +937,11 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 	if !c.isConnected() {
 		return nil, fmt.Errorf("IBKR connection not available")
 	}
-	// Prepare contract using the same classification as market data
+	// Prepare contract using the same classification as market data.
+	// Dual-class shares (BRK.B, BF.B) translate to IBKR's space-form
+	// before going on the wire — see dualClassWireSymbol.
 	secType, exchange, currency, primary := classifySymbol(symbol)
-	wireSymbol := symbol
+	wireSymbol := dualClassWireSymbol(symbol)
 	if base, _, ok := FxPair(symbol); ok {
 		wireSymbol = base
 	}
@@ -2939,7 +2943,12 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 	}
 
 	secType, exchange, currency, primary := classifySymbol(symbol)
-	wireSymbol := symbol
+	// Dual-class shares (BRK.B, BF.B) translate to IBKR's space-form
+	// before going on the wire — see dualClassWireSymbol. Without this
+	// translation IBKR returns code 200 "No security definition has been
+	// found for the request" and the breadth fan-out silently drops
+	// Berkshire-B (a top-10 SPX member by weight).
+	wireSymbol := dualClassWireSymbol(symbol)
 	if base, _, ok := FxPair(symbol); ok {
 		wireSymbol = base
 	}

@@ -3641,7 +3641,9 @@ func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int,
 	secType, exchange, currency, primaryExchange := classifySymbol(symbol)
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
 
-	wireSymbol := symbol
+	// Dual-class shares (BRK.B, BF.B) translate to IBKR's space-form
+	// before going on the wire — see dualClassWireSymbol.
+	wireSymbol := dualClassWireSymbol(symbol)
 	if base, _, ok := FxPair(symbol); ok {
 		wireSymbol = base
 	}
@@ -3997,7 +3999,9 @@ func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol st
 
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
 
-	wireSymbol := symbol
+	// Dual-class shares (BRK.B, BF.B) translate to IBKR's space-form
+	// before going on the wire — see dualClassWireSymbol.
+	wireSymbol := dualClassWireSymbol(symbol)
 	if base, _, ok := FxPair(symbol); ok {
 		wireSymbol = base
 	}

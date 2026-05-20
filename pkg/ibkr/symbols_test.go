@@ -23,7 +23,15 @@ func TestClassifySymbol_Table(t *testing.T) {
 		// overruns the regime fetcher's budget, leaving hyg_50dma
 		// null on every cold-start call.
 		{"HYG", "STK", "SMART", "USD", "ARCA"},
-		{"ES", "FUT", "GLOBEX", "USD", ""},
+		// "ES" is Eversource Energy (S&P 500 utility), classified as
+		// STK on SMART. A previous classifySymbol case mapped "ES" to
+		// FUT/GLOBEX for the E-mini S&P futures, but no caller ever
+		// used that path and it collided with the Eversource stock —
+		// breadth's reqContractData returned code 200 "No security
+		// definition has been found" for "ES" because the wire fields
+		// said FUT but IBKR has no FUT with that bare symbol. Removed
+		// in the breadth-spx convergence fix.
+		{"ES", "STK", "SMART", "USD", ""},
 		{"NDX", "IND", "NASDAQ", "USD", "NASDAQ"},
 		{"AAPL", "STK", "SMART", "USD", ""},
 		// FX pairs route to IDEALPRO with the quote currency on
@@ -81,6 +89,35 @@ func TestFxPair(t *testing.T) {
 	}
 }
 
+// TestDualClassWireSymbol pins the S&P-ticker → IBKR-wire translation
+// for dual-class shares. The S&P convention is dotted (BRK.B, BF.B)
+// but IBKR's TWS API rejects that form with code 200 "No security
+// definition has been found"; the canonical IBKR Symbol uses a space
+// (BRK B, BF B). Without this mapping the breadth-spx fan-out silently
+// drops Berkshire-B (a top-10 SPX member by weight) and Brown-Forman-B
+// from every refresh.
+func TestDualClassWireSymbol(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"BRK.B", "BRK B"},
+		{"BF.B", "BF B"},
+		{"brk.b", "BRK B"},     // case-insensitive
+		{" BRK.B ", "BRK B"},   // whitespace tolerated
+		{"BRK", "BRK"},         // not dual-class, pass through
+		{"AAPL", "AAPL"},       // not dual-class, pass through
+		{"USD.JPY", "USD.JPY"}, // FX pair — handled separately by FxPair
+		{"BRK.A", "BRK.A"},     // BRK.A not in SPX, no override
+		{"", ""},               // empty pass-through
+	}
+	for _, tc := range tests {
+		if got := dualClassWireSymbol(tc.in); got != tc.want {
+			t.Errorf("dualClassWireSymbol(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDefaultHistoricalWhat_FXIsMidpoint(t *testing.T) {
 	// FX has no consolidated trade tape — reqHistoricalData on CASH
 	// requires MIDPOINT. Pin this so a future refactor of
@@ -100,7 +137,7 @@ func TestContractDisplayHints(t *testing.T) {
 		{"SPY", "STK", "", ""},
 		{"VIX", "IND", "VIX", "VIX"},
 		{"DXY", "IND", "DXY", "DXY"},
-		{"ES", "FUT", "", ""},
+		{"ES", "STK", "", ""},
 	}
 
 	for _, tc := range tests {

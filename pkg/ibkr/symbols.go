@@ -52,6 +52,30 @@ func FxPair(symbol string) (base, quote string, ok bool) {
 	return left, right, true
 }
 
+// dualClassWireSymbol translates an S&P ticker for a dual-class share
+// into the wire-format symbol IBKR's TWS API expects. The S&P / index
+// convention uses a dot ("BRK.B", "BF.B") but IBKR rejects that form
+// with code 200 "No security definition has been found for the request"
+// — the API canonical form uses a space ("BRK B", "BF B"). Returns the
+// input unchanged for any ticker not in the override table.
+//
+// Why this lives next to classifySymbol: every code path that builds a
+// Contract from a raw symbol — FetchContractDetails, FetchHistoricalDailyBars,
+// prepareContract — needs the same translation to resolve dual-class
+// names. Centralising the override prevents subtle drift between paths,
+// which would silently exclude BRK.B (Berkshire Hathaway Class B) from
+// breadth — a top-10 SPX member by weight whose exclusion materially
+// distorts the S5FI compute.
+func dualClassWireSymbol(input string) string {
+	switch strings.ToUpper(strings.TrimSpace(input)) {
+	case "BRK.B":
+		return "BRK B"
+	case "BF.B":
+		return "BF B"
+	}
+	return input
+}
+
 // classifySymbol returns (secType, exchange, currency, primaryExchangeHint)
 // for common indices/ETFs/stocks/FX-pairs to keep contract requests and
 // market data routing consistent across the codebase.
@@ -120,10 +144,14 @@ func classifySymbol(symbol string) (string, string, string, string) {
 		exchange = "ICEUS"
 		primary = "ICEUS"
 
-	// Common futures (base symbol hints only; contract month handled elsewhere)
-	case "ES":
-		secType = "FUT"
-		exchange = "GLOBEX" // CME Globex for E-mini S&P
+	// "ES" historically mapped here to FUT/GLOBEX for the E-mini S&P
+	// futures contract, but no caller ever requested ES via classifySymbol
+	// — the FUT override was dead code, and worse, it collided with
+	// Eversource Energy (ticker ES), an S&P 500 stock whose breadth
+	// fetcher needs STK/SMART. The futures override was removed in the
+	// breadth-spx convergence fix; callers that want E-mini futures
+	// must build a Contract with SecType=FUT explicitly rather than
+	// rely on a symbol-string lookup.
 
 	default:
 		// leave defaults
