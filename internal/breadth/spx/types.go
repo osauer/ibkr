@@ -22,7 +22,17 @@ import "time"
 // can disclose provenance without parsing free-form notes. The constant
 // is deliberately unexported — callers should compare against Snapshot.Method
 // rather than rebuilding the string.
-const methodConstituentFanout = "constituent-fanout-50dma"
+//
+// The token bumps whenever the compute methodology or the snapshot's
+// payload shape changes. LoadSnapshot uses it as a version gate: a
+// snapshot whose Method doesn't match the current constant is treated
+// as no-cache and triggers a cold rebuild, which is the right move when
+// the on-disk struct gained fields (v1's Snapshot only carried Value /
+// Coverage; v2 added PctAbove200DMA, NewHighsToday, NewLowsToday,
+// NetNewHighsPct, Coverage200, CoverageHighsLows — a stale v1 file
+// silently decodes into a half-empty v2 struct otherwise, and the
+// engine reports state=ready with zeroed new fields).
+const methodConstituentFanout = "constituent-fanout-50/200dma+nh-v2"
 
 // MinCoverageFraction is the minimum fraction of MemberCount that a
 // refresh must cover before the engine will persist its result.

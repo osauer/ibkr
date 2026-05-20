@@ -149,8 +149,8 @@ func TestComputeThinHistory(t *testing.T) {
 func TestComputeStampsMethodAndKeys(t *testing.T) {
 	asOf := time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC)
 	snap := Compute([]string{"A"}, map[string]ConstituentWindow{"A": risingWindow("A", 100, 1)}, "2026-05-16", asOf)
-	if snap.Method != "constituent-fanout-50dma" {
-		t.Errorf("method: want constituent-fanout-50dma, got %q", snap.Method)
+	if snap.Method != methodConstituentFanout {
+		t.Errorf("method: want %q, got %q", methodConstituentFanout, snap.Method)
 	}
 	if snap.SessionKey != "2026-05-16" {
 		t.Errorf("session key: want 2026-05-16, got %q", snap.SessionKey)
