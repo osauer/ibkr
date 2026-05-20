@@ -37,6 +37,7 @@ stop_existing_daemons() {
         kill -TERM "$pid" 2>/dev/null || true
     done
     # Wait up to 5s for graceful exit before escalating.
+    local exited=""
     for _ in $(seq 1 50); do
         local remaining=""
         for pid in $pids; do
@@ -45,13 +46,26 @@ stop_existing_daemons() {
             fi
         done
         if [[ -z "$remaining" ]]; then
-            return 0
+            exited=1
+            break
         fi
         sleep 0.1
     done
-    for pid in $pids; do
-        kill -KILL "$pid" 2>/dev/null || true
-    done
+    if [[ -z "$exited" ]]; then
+        for pid in $pids; do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+    fi
+    # TWS-side cool-down. Killing the daemon closes the TCP connection,
+    # but TWS retains the client-ID slot for ~1-3s after the FIN before
+    # accepting a new connection with the same ID — without this pause
+    # the smoke daemon races TWS and hits code=326 "client id already
+    # in use" on the very next handshake. Observed on the v0.27.12
+    # release-verify attempt. The CLI's autospawn behaviour (an MCP
+    # request can respawn the daemon mid-kill) makes this race common
+    # rather than rare; 5s is conservative — TWS typically clears in
+    # 1-2s but a busy gateway can stretch it.
+    sleep 5
 }
 
 kill_daemon_from_lockfile() {
