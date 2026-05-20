@@ -219,7 +219,7 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 func renderRow(env *Env, r regimeRow) string {
 	const (
 		nameW  = 12
-		valueW = 26
+		valueW = 30
 		bandW  = 7
 	)
 	value := r.value
@@ -740,22 +740,30 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 		}
 		return row
 	}
-	v := r.Envelope.Value
-	row.value = fmt.Sprintf("%.1f%% above 50-DMA", v)
+	v50 := r.Envelope.PctAbove50DMA
+	v200 := r.Envelope.PctAbove200DMA
+	// Compact two-number value cell: "47%50d · 62%200d  +1.4% nh".
+	// "nh" stands for "net new highs". The annotation reads cramped at
+	// first glance but matches the rest of the rows' single-row layout
+	// — fuller breakdown lives in `ibkr breadth`.
+	row.value = fmt.Sprintf("%.0f%%50d · %.0f%%200d", v50, v200)
+	if r.NewHighsToday > 0 || r.NewLowsToday > 0 {
+		row.value += fmt.Sprintf("  %+.1f%% nh", r.NetNewHighsPct)
+	}
 	row.quality = qualityTag(now, r.ValueQuality)
 	// Renderer caveat: spec red band also requires "SPX within 3% of
 	// 52w high" but we don't have SPX 52w-high context inside this row.
-	// Conservative call: report red on raw breadth only; do not
+	// Conservative call: report red on raw 50-DMA breadth only; do not
 	// downgrade to yellow. The spec is most concerned about the
 	// breadth collapse itself; the SPX-at-highs modifier sharpens the
 	// signal but doesn't invent it.
 	switch {
-	case v >= breadthGreen:
-		row.band, row.reason = bandGreen, ">55%"
-	case v >= breadthRed:
-		row.band, row.reason = bandYellow, "40–55%"
+	case v50 >= breadthGreen:
+		row.band, row.reason = bandGreen, ">55% (50d)"
+	case v50 >= breadthRed:
+		row.band, row.reason = bandYellow, "40–55% (50d)"
 	default:
-		row.band, row.reason = bandRed, "<40%"
+		row.band, row.reason = bandRed, "<40% (50d)"
 	}
 	return row
 }

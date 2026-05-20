@@ -2492,7 +2492,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 
 	res := &rpc.BreadthSPXResult{
 		Source: "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
-		Method: "constituent-fanout-50dma",
+		Method: "constituent-fanout-50/200dma-hl",
 		AsOf:   time.Now(),
 	}
 
@@ -2501,15 +2501,22 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 	res.State = classifyBreadthState(ok, refreshing)
 
 	if ok {
-		res.Value = snap.Value
+		res.PctAbove50DMA = snap.PctAbove50DMA
+		res.PctAbove200DMA = snap.PctAbove200DMA
+		res.NewHighsToday = snap.NewHighsToday
+		res.NewLowsToday = snap.NewLowsToday
+		res.NetNewHighsPct = snap.NetNewHighsPct
 		res.AsOf = snap.AsOf
 
 		history := s.breadth.History(historyDays)
 		res.History = make([]rpc.BreadthDailyValue, 0, len(history))
 		for _, h := range history {
 			res.History = append(res.History, rpc.BreadthDailyValue{
-				Date:  h.Date,
-				Value: h.Value,
+				Date:           h.Date,
+				PctAbove50DMA:  h.PctAbove50DMA,
+				PctAbove200DMA: h.PctAbove200DMA,
+				NewHighs:       h.NewHighs,
+				NewLows:        h.NewLows,
 			})
 		}
 	}

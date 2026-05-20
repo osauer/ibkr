@@ -20,6 +20,11 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
   γ-zero level to shift ~30-80 SPX points and track SpotGamma's free
   Friday-recap posts materially better. The methodology token bumps
   from `perfiliev-bs-sweep-v1` to `perfiliev-bs-sweep-v2-stickymoneyness`.
+- `ibkr breadth` now reports the 200-day reading alongside the 50-day
+  reading and counts how many S&P 500 names are at fresh 52-week
+  highs vs lows today. The narrow-rally pattern — SPX at highs with
+  almost nothing making new highs underneath it — is now visible at
+  a glance.
 - `ibkr regime` now shows how many consecutive sessions each indicator
   has been in its current band — "(yellow · day 3)" reads inline with
   the row, so a single snapshot tells you whether today's flip is
@@ -50,12 +55,30 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
   restarts at `$XDG_CACHE_HOME/ibkr/regime-streaks.json`.
   Computing/unavailable/error states freeze the counter rather than
   reset it.
+- Add `BreadthSPXResult.PctAbove200DMA` (% above 200-day SMA), plus
+  `NewHighsToday`, `NewLowsToday`, and `NetNewHighsPct` for the
+  rolling 252-bar new-highs/lows count. `BreadthDailyValue` carries
+  all four numbers per history point so the trailing series renders
+  cleanly. `RegimeBreadth` echoes the same fields onto the regime
+  row.
 
 ### Changed
 
 - The `Method` token on `GammaZeroComputed` is now
   `perfiliev-bs-sweep-v2-stickymoneyness`. Pure cutover — no
   dual-emit; SpotGamma's Friday posts are the comparator.
+- The `Method` token on `BreadthSPXResult` is now
+  `constituent-fanout-50/200dma-hl`. The breadth refresh now pulls
+  ~262 daily bars per constituent at cold-start (was ~60) so all
+  three readings — 50-DMA, 200-DMA, and the rolling 252-bar
+  max/min — seed from the same fetch.
+
+### Removed
+
+- Drop `BreadthSPXResult.Value` and `BreadthDailyValue.Value`. The
+  field's renamed equivalent `PctAbove50DMA` carries the same number
+  with a more honest name now that the two-window reading needs
+  disambiguation. Consumers reading `Value` must migrate.
 
 ### Engineering notes
 
@@ -71,7 +94,17 @@ sign-agreement vs SpotGamma's Friday recap drops below the v1
 baseline, roll back to the prior recipe. The streak store lives in
 its own JSON file (own version field, atomic temp+rename write) — the
 same pattern as the contract store from `2fbd614`, not merged into it
-because the invalidation rules differ.
+because the invalidation rules differ. The breadth engine's
+`WindowSet` and `HistorySet` formats both bump to v2; v1 caches
+trigger a cold rebuild on next refresh. Cold-start cost is unchanged
+because IBKR's historical-data pacing limit is per-request, not
+per-bar — pulling 262 bars per name is no slower than pulling 60.
+50-DMA bands stay at 55/40 for v2: the H3 review finding argues for
+a recalibration but that's a separate decision and not in this
+release. 200-DMA bands at 60/40 per the locked plan (StockCharts'
+70/30 default would have read red routinely in 2024-25 because of
+Mag-7 concentration, exactly the calibration drift the spec warns
+about).
 
 ## v0.27.12 — 2026-05-20 10:33 CEST
 

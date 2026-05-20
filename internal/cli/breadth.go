@@ -32,14 +32,22 @@ func runBreadth(ctx context.Context, env *Env, args []string) int {
 func renderBreadthText(env *Env, r *rpc.BreadthSPXResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "S&P 500 Breadth  ·  %% above 50-day SMA%s\n", env.suffixBadge(r.DataType))
+	fmt.Fprintf(out, "S&P 500 Breadth%s\n", env.suffixBadge(r.DataType))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Headline    %.1f %%\n", r.Value)
+	fmt.Fprintf(out, "  Above 50-DMA   %.1f %%\n", r.PctAbove50DMA)
+	fmt.Fprintf(out, "  Above 200-DMA  %.1f %%\n", r.PctAbove200DMA)
+	// New-highs/lows on the sub-line: raw counts plus the net
+	// percentage. "Net" is signed; positive means more names making
+	// new highs than new lows, which is what you want when SPX is
+	// at highs. The narrow-rally pattern reads as SPX near highs +
+	// NetNewHighsPct ≈ 0 (or negative).
+	fmt.Fprintf(out, "  52w highs/lows %d / %d  (net %+.1f %%)\n",
+		r.NewHighsToday, r.NewLowsToday, r.NetNewHighsPct)
 	if !r.SpotAt.IsZero() {
-		fmt.Fprintf(out, "  Observed    %s\n", r.SpotAt.Format("2006-01-02 15:04 MST"))
+		fmt.Fprintf(out, "  Observed       %s\n", r.SpotAt.Format("2006-01-02 15:04 MST"))
 	}
-	fmt.Fprintf(out, "  Source      %s\n", r.Source)
-	fmt.Fprintf(out, "  Method      %s\n", r.Method)
+	fmt.Fprintf(out, "  Source         %s\n", r.Source)
+	fmt.Fprintf(out, "  Method         %s\n", r.Method)
 
 	if len(r.History) == 0 {
 		fmt.Fprintln(out)
@@ -49,23 +57,35 @@ func renderBreadthText(env *Env, r *rpc.BreadthSPXResult) int {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Sparkline   %s\n", breadthSparkline(r.History))
+	fmt.Fprintf(out, "  50-DMA  %s\n", breadthSparkline(r.History, breadthFieldPct50))
+	fmt.Fprintf(out, "  200-DMA %s\n", breadthSparkline(r.History, breadthFieldPct200))
 	fmt.Fprintln(out)
 
-	header := fmt.Sprintf("  %-12s  %8s", "DATE", "VALUE")
+	header := fmt.Sprintf("  %-12s  %8s  %8s  %5s  %5s", "DATE", "%50D", "%200D", "HIGH", "LOW")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, h := range r.History {
-		fmt.Fprintf(out, "  %-12s  %7.1f%%\n", h.Date, h.Value)
+		fmt.Fprintf(out, "  %-12s  %7.1f%%  %7.1f%%  %5d  %5d\n",
+			h.Date, h.PctAbove50DMA, h.PctAbove200DMA, h.NewHighs, h.NewLows)
 	}
 	fmt.Fprintln(out)
 	return 0
 }
 
+// breadthField selects which series breadthSparkline draws from a
+// history point. Keeps the renderer one function instead of two,
+// since the sparkline math is identical across the two SMA readings.
+type breadthField int
+
+const (
+	breadthFieldPct50 breadthField = iota
+	breadthFieldPct200
+)
+
 // breadthSparkline renders the trailing series as Unicode block glyphs.
 // Eight-step granularity matches the typical 0-100 % breadth range
 // without inventing precision the data doesn't have.
-func breadthSparkline(h []rpc.BreadthDailyValue) string {
+func breadthSparkline(h []rpc.BreadthDailyValue, field breadthField) string {
 	if len(h) == 0 {
 		return ""
 	}
@@ -76,7 +96,13 @@ func breadthSparkline(h []rpc.BreadthDailyValue) string {
 	var b strings.Builder
 	b.Grow(len(h) * 3)
 	for _, v := range h {
-		x := v.Value
+		var x float64
+		switch field {
+		case breadthFieldPct200:
+			x = v.PctAbove200DMA
+		default:
+			x = v.PctAbove50DMA
+		}
 		if x < 0 {
 			x = 0
 		}

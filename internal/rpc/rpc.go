@@ -296,12 +296,17 @@ type BreadthSPXParams struct {
 	TimeoutMs int `json:"timeout_ms,omitempty"`
 }
 
-// BreadthDailyValue is one trailing daily breadth reading (the S5FI
-// metric, computed locally from constituent closes). The units match
-// the headline Value: percentage points in [0, 100].
+// BreadthDailyValue is one trailing daily breadth reading. The two
+// SMA readings (50-day and 200-day) plus the constituent counts for
+// new 52-week highs/lows are carried per session so a renderer can
+// chart all four series in one history call. Units: percentages in
+// [0, 100] for the SMA readings; raw counts for the highs/lows.
 type BreadthDailyValue struct {
-	Date  string  `json:"date"`  // YYYY-MM-DD
-	Value float64 `json:"value"` // % of SPX constituents above 50-day SMA
+	Date           string  `json:"date"` // YYYY-MM-DD
+	PctAbove50DMA  float64 `json:"pct_above_50dma"`
+	PctAbove200DMA float64 `json:"pct_above_200dma,omitempty"`
+	NewHighs       int     `json:"new_highs,omitempty"`
+	NewLows        int     `json:"new_lows,omitempty"`
 }
 
 // BreadthState classifies the engine's compute-pipeline state at the
@@ -339,51 +344,75 @@ const (
 	BreadthStateDegraded  BreadthState = "degraded"
 )
 
-// BreadthSPXResult is the payload for MethodBreadthSPX. The headline
-// Value is the current reading; History is the trailing series in
-// oldest-first order for sparkline rendering. Threshold derivation
-// (green/yellow/red) is intentionally left to the renderer — the spec
-// itself says thresholds should be tunable, so the daemon stays out of
-// that policy choice.
+// BreadthSPXResult is the payload for MethodBreadthSPX. The two
+// SMA percentages plus the new-highs/lows count are surfaced as
+// separate fields so consumers can read each independently;
+// History carries the trailing daily series for sparkline
+// rendering. Threshold derivation (green / yellow / red) is left to
+// the renderer — the spec itself says thresholds should be tunable,
+// so the daemon stays out of that policy choice.
 //
-// The Source / Method strings name the data provenance and computation
-// path so renderers can disclose how the number was derived. Method is
-// a short token; longer methodology disclosure lives in the spec doc.
+// The Source / Method strings name the data provenance and
+// computation path so renderers can disclose how the number was
+// derived. Method is a short token; longer methodology disclosure
+// lives in the spec doc.
 type BreadthSPXResult struct {
 	// State classifies the engine pipeline at the moment this envelope
 	// was assembled (cold / computing / ready / degraded). Consumers
 	// should branch on this, not on (value==0 && history==[]) heuristics.
 	// See BreadthState docs for semantics.
 	State BreadthState `json:"state"`
-	// Value is the current S5FI reading: percentage of S&P 500
-	// constituents trading above their own 50-day simple moving
-	// average. 0–100, with 50 the symmetric midpoint. Spec rule of
-	// thumb: > 55 healthy, 40–55 watch, < 40 with SPX at highs is the
-	// classic late-cycle divergence. Zero is meaningful only when
-	// State == "ready" (impossible in practice — every observed market
-	// regime puts at least one name above its 50DMA); a State other
-	// than "ready" can carry value=0 as the "no data yet" sentinel.
-	Value float64 `json:"value"`
+	// PctAbove50DMA is the current fast-window reading: percentage of
+	// S&P 500 constituents trading above their own 50-day SMA. 0-100;
+	// 50 is the symmetric midpoint. Spec rule of thumb: > 55 healthy,
+	// 40-55 watch, < 40 with SPX at highs is the classic late-cycle
+	// divergence. Zero is meaningful only when State == "ready" (a
+	// State other than "ready" can carry the field at 0 as the "no
+	// data yet" sentinel).
+	PctAbove50DMA float64 `json:"pct_above_50dma"`
+	// PctAbove200DMA is the slow-window reading: percentage above the
+	// 200-day SMA. Caught the 1999 and 2021 cyclical tops cleanly.
+	// Bands per locked plan: below 40% = red / 40-60% = yellow / above
+	// 60% = green (calibrated to the post-Mag-7 era).
+	PctAbove200DMA float64 `json:"pct_above_200dma"`
+	// NewHighsToday is the count of constituents whose latest close
+	// strictly exceeded their trailing 252-bar max (~1 year of
+	// trading sessions ≈ "52-week high"). Names with < 252 sessions
+	// of cached history are skipped.
+	NewHighsToday int `json:"new_highs_today"`
+	// NewLowsToday is the symmetric count for new 252-bar lows.
+	NewLowsToday int `json:"new_lows_today"`
+	// NetNewHighsPct is (NewHighsToday - NewLowsToday) / coverage × 100
+	// where coverage is the count of names with enough history to
+	// contribute. The classic "narrow rally" pattern is SPX near
+	// highs with NetNewHighsPct near zero or negative — a small
+	// number of mega-caps carrying the index while the median name
+	// is rolling over.
+	NetNewHighsPct float64 `json:"net_new_highs_pct"`
 	// History is the trailing daily series, oldest first. Length is
-	// bounded by BreadthSPXParams.HistoryDays.
+	// bounded by BreadthSPXParams.HistoryDays. Each point carries
+	// both SMA readings plus the new-highs/lows counts.
 	History []BreadthDailyValue `json:"history"`
 	// Source identifies the data provenance for the headline value.
 	// Free-form; renderers display verbatim.
 	Source string `json:"source"`
 	// Method is a short token naming the computation path so renderers
-	// can disclose methodology. v1 token: "constituent-fanout-50dma"
-	// (IBKR doesn't redistribute the S5FI index on retail subscriptions,
-	// so the daemon computes the same number from constituent daily
-	// closes pulled via the historical-bar feed).
+	// can disclose methodology. v2 token: "constituent-fanout-50/200dma-hl"
+	// (50-DMA + 200-DMA + new highs/lows over 252-bar rolling
+	// max/min — all computed locally from constituent daily closes
+	// pulled via IBKR's historical-bar feed, since IBKR doesn't
+	// redistribute the underlying S&P DJI / NYSE breadth indices on
+	// retail subscriptions).
 	Method string `json:"method"`
 	// AsOf is the daemon's wall-clock when the result was assembled.
 	AsOf time.Time `json:"as_of"`
-	// SpotAt is the gateway-observation timestamp for the headline
-	// Value, distinct from AsOf which covers history + headline.
+	// SpotAt is the gateway-observation timestamp for the headline,
+	// distinct from AsOf which covers history + headline.
 	SpotAt time.Time `json:"spot_at"`
-	// DataType reflects the gateway's feed state when Value was captured
-	// — "live", "delayed", "frozen", "delayed-frozen", or "" when no
-	// notice has arrived yet. Renderers use this to dim the headline.
+	// DataType reflects the gateway's feed state when the headline
+	// was captured — "live", "delayed", "frozen", "delayed-frozen",
+	// or "" when no notice has arrived yet. Renderers use this to
+	// dim the headline.
 	DataType string `json:"data_type,omitempty"`
 }
 
@@ -894,6 +923,16 @@ type RegimeBreadth struct {
 	Envelope      BreadthSPXResult `json:"envelope"`
 	Notes         string           `json:"notes"`
 	FieldsMissing []string         `json:"fields_missing,omitempty"`
+	// PctAbove50DMA / PctAbove200DMA / NewHighsToday / NewLowsToday /
+	// NetNewHighsPct are surfaced directly on the regime row so a
+	// consumer doesn't have to dig into Envelope for the four-number
+	// breadth view that informs the band. Echoed from Envelope; same
+	// values, same units.
+	PctAbove50DMA  float64 `json:"pct_above_50dma,omitempty"`
+	PctAbove200DMA float64 `json:"pct_above_200dma,omitempty"`
+	NewHighsToday  int     `json:"new_highs_today,omitempty"`
+	NewLowsToday   int     `json:"new_lows_today,omitempty"`
+	NetNewHighsPct float64 `json:"net_new_highs_pct,omitempty"`
 	// Per-scalar provenance for the breadth percentage. firm-live or
 	// firm-frozen when ranked, depending on the envelope's DataType;
 	// nil during cold start or when the engine refused to persist

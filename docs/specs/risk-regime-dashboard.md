@@ -216,53 +216,74 @@ FX (added in v0.21.0).
 
 ### Indicator 5 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 
-**Source.** S&P Dow Jones Indices publishes the `S5FI` index (% of
-S&P 500 constituents above their 50-day SMA). IBKR does not
-redistribute `S5FI` on retail subscriptions (verified via
-`reqContractDetails` — see `pkg/ibkr/symbols.go`), so the daemon
-computes the same number locally from the 500 constituent daily
-closes pulled via IBKR's historical-bar feed (HMDS). Method token:
-`constituent-fanout-50dma`. This reproduces S&P DJI's published S5FI
-value bit-identically when the constituent windows are fully covered.
+**Source.** S&P Dow Jones Indices publishes the `S5FI` (% above
+50-day SMA) and `S5TH` (% above 200-day SMA) index family plus the
+new-52w-highs/lows count. IBKR does not redistribute these on retail
+subscriptions (verified via `reqContractDetails` — see
+`pkg/ibkr/symbols.go`), so the daemon computes the equivalents
+locally from the 500 constituent daily closes pulled via IBKR's
+historical-bar feed (HMDS). Method token: `constituent-fanout-50/200dma-hl`.
+
+**Three readings, one refresh.** The compute walks each constituent's
+daily bars once and returns:
+
+- `pct_above_50dma` — the tactical signal. Spec bands: >55 green /
+  40-55 yellow / <40 with SPX within 3% of 52-week high red.
+- `pct_above_200dma` — the slow companion that catches cyclical
+  tops cleanly. Locked-plan bands: >60 green / 40-60 yellow / <40
+  red (calibrated to the post-Mag-7 era; the StockCharts 70/30
+  default fires red far too often in this concentration regime).
+- `new_highs_today` / `new_lows_today` — constituent counts of names
+  making fresh 252-bar highs/lows (≈ "52 weeks"). The derived
+  `net_new_highs_pct = (highs − lows) / coverage × 100`. The
+  narrow-rally pattern is SPX at/near highs with
+  `net_new_highs_pct` near zero or negative — a small set of mega-
+  caps carrying the index while the median name rolls over.
+  September 2025 was a textbook example: SPX at ATH with only 4.6%
+  of names at 52-week highs.
 
 **Update cadence.** Once-daily refresh post-close at 16:35 ET. The
-scheduler waits until both the regular session and the S5FI
+scheduler waits until both the regular session and the S&P DJI
 publication window have settled, then slides each constituent's
-50-day window forward and persists the result. Readers see a cached
-snapshot, never a multi-minute fan-out on the read path.
+200-bar window forward and updates the 252-bar rolling max/min
+trackers. Readers see a cached snapshot, never a multi-minute
+fan-out on the read path.
 
-**Cold start.** On a fresh cache the first refresh runs the full
-fan-out across ~500 constituent symbols. IBKR's historical-data
-pacing limit (60 requests per 10-min sliding window) caps the
-sustained throughput at ~6 names/min, so a cold start takes **~60
-minutes** of wall-clock — adding workers doesn't help. During this
-window the wire envelope carries `state: "computing"` with
-`value: 0`; consumers should poll at minute-scale, not hammer the
-endpoint. After cold start the cache persists across daemon restarts
-and every subsequent refresh is fast (only the most recent day's
-bars need to be pulled).
+**Cold start.** ~60 minutes of wall-clock — unchanged from v1.
+IBKR's historical-data pacing limit is per-request, not per-bar, so
+pulling 200 bars per constituent instead of 50 doesn't cost more
+requests. The cap at 60 requests per 10-min sliding window means
+sustained throughput ≈ 6 names/min for the ~500-name fan-out. The
+v2 cap on the per-constituent close window grew from 50 to 200
+entries; v1 on-disk caches trigger a graceful rebuild because their
+windows are too short to seed the 200-day reading honestly.
 
-**History.** A best-effort fetch of ~30 trailing daily bars for the
-sparkline. The lookback is padded above the requested length to
-compensate for non-trading-day shrinkage.
+**History.** A best-effort fetch of trailing daily points carrying
+all three readings — the renderer charts each as its own sparkline.
 
 **Coverage safety.** If a refresh completes with fewer than the
-engine's minimum coverage fraction (currently 0.80 of the
-constituent set), the new snapshot is rejected and the previous
-good value continues to serve under `state: "degraded"`. This
-prevents a partial fan-out from poisoning the headline with a
-non-representative number.
+engine's minimum coverage fraction (0.80 of the constituent set on
+the 50-day reading), the new snapshot is rejected and the previous
+good value continues to serve under `state: "degraded"`. The
+200-day and new-highs/lows readings carry their own coverage
+denominators (smaller, because more names need to clear the higher
+history bar); a recent IPO contributes to the 50-DMA reading but
+not yet to the 200-DMA or new-52w-highs count.
 
 **Limitations.**
 
 - Constituent list is snapshotted from the index membership file;
   S&P additions/removals between updates are not reflected until
   the next refresh of that file.
-- The 50-day SMA is computed on regular-session closes only — no
+- SMA windows are computed on regular-session closes only — no
   pre/post-market adjustment.
 - When the gateway's data type on a constituent's bar isn't live,
   the daemon still includes it; the headline `data_type` reflects
   the worst-case across the contributing bars.
+- The rolling 252-bar max/min is exact once the engine has observed
+  a full year of bars per constituent; before that, the count
+  surfaces under `coverage_highs_lows` so a renderer can flag
+  under-covered days.
 
 ### Indicator 4 — Dealer Zero-Gamma (`gamma.zero_spx`, `ibkr_gamma`)
 

@@ -194,27 +194,27 @@ func TestRunBootstrapBelowThresholdSchedulesRetry(t *testing.T) {
 // history series — the second point overwrites the first.
 func TestAppendHistorySameSessionOverwrites(t *testing.T) {
 	existing := []HistoryPoint{
-		{Date: "2026-05-17", Value: 58.4},
-		{Date: "2026-05-18", Value: 60.1},
+		{Date: "2026-05-17", PctAbove50DMA: 58.4},
+		{Date: "2026-05-18", PctAbove50DMA: 60.1},
 	}
-	got := appendHistory(existing, HistoryPoint{Date: "2026-05-18", Value: 61.2})
+	got := appendHistory(existing, HistoryPoint{Date: "2026-05-18", PctAbove50DMA: 61.2})
 	if len(got) != 2 {
 		t.Errorf("length: want 2, got %d", len(got))
 	}
-	if got[1].Value != 61.2 {
-		t.Errorf("tail value: want 61.2, got %v", got[1].Value)
+	if got[1].PctAbove50DMA != 61.2 {
+		t.Errorf("tail value: want 61.2, got %v", got[1].PctAbove50DMA)
 	}
 }
 
 // TestAppendHistoryNewSessionAppends covers the steady-state daily
 // case: a new date appends.
 func TestAppendHistoryNewSessionAppends(t *testing.T) {
-	existing := []HistoryPoint{{Date: "2026-05-17", Value: 58.4}}
-	got := appendHistory(existing, HistoryPoint{Date: "2026-05-18", Value: 60.1})
+	existing := []HistoryPoint{{Date: "2026-05-17", PctAbove50DMA: 58.4}}
+	got := appendHistory(existing, HistoryPoint{Date: "2026-05-18", PctAbove50DMA: 60.1})
 	if len(got) != 2 {
 		t.Errorf("length: want 2, got %d", len(got))
 	}
-	if got[1].Date != "2026-05-18" || got[1].Value != 60.1 {
+	if got[1].Date != "2026-05-18" || got[1].PctAbove50DMA != 60.1 {
 		t.Errorf("appended point: got %+v", got[1])
 	}
 }
@@ -225,11 +225,11 @@ func TestAppendHistoryTrimsAtMax(t *testing.T) {
 	existing := make([]HistoryPoint, MaxHistoryPoints)
 	for i := range existing {
 		existing[i] = HistoryPoint{
-			Date:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02"),
-			Value: float64(i),
+			Date:          time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02"),
+			PctAbove50DMA: float64(i),
 		}
 	}
-	got := appendHistory(existing, HistoryPoint{Date: "2026-12-01", Value: 99.9})
+	got := appendHistory(existing, HistoryPoint{Date: "2026-12-01", PctAbove50DMA: 99.9})
 	if len(got) != MaxHistoryPoints {
 		t.Errorf("trim: want length %d, got %d", MaxHistoryPoints, len(got))
 	}

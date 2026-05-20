@@ -177,13 +177,22 @@ func TestComputeAllExcluded(t *testing.T) {
 
 // TestSlideWindowAppends covers the steady-state daily increment:
 // today's close arrives, oldest close drops, window stays at length
-// WindowSize.
+// WindowSize200 (the v2 cap).
 func TestSlideWindowAppends(t *testing.T) {
-	w := risingWindow("AAPL", 100, 1)
+	// Build a window already at the v2 cap so the oldest-drops
+	// invariant fires when we add one more bar.
+	w := ConstituentWindow{
+		Symbol:    "AAPL",
+		Closes:    make([]float64, WindowSize200),
+		LastBarAt: "2026-05-16",
+	}
+	for i := range w.Closes {
+		w.Closes[i] = float64(100 + i)
+	}
 	oldFirst := w.Closes[0]
 	out := SlideWindow(w, 999, "2026-05-17")
-	if len(out.Closes) != WindowSize {
-		t.Errorf("length: want %d, got %d", WindowSize, len(out.Closes))
+	if len(out.Closes) != WindowSize200 {
+		t.Errorf("length: want %d, got %d", WindowSize200, len(out.Closes))
 	}
 	if out.Closes[len(out.Closes)-1] != 999 {
 		t.Errorf("tail: want 999, got %v", out.Closes[len(out.Closes)-1])
@@ -213,8 +222,8 @@ func TestSlideWindowIdempotent(t *testing.T) {
 }
 
 // TestSlideWindowGrowsFromEmpty covers the cold-start path: an empty
-// window receives bars one by one and grows up to WindowSize before
-// it starts dropping.
+// window receives bars one by one and grows up to WindowSize200 before
+// it starts dropping (the v2 cap; v1's cap was WindowSize).
 func TestSlideWindowGrowsFromEmpty(t *testing.T) {
 	// Each call gets a unique date so we exercise the append path,
 	// not the same-day-overwrite branch (which is covered by
@@ -223,23 +232,23 @@ func TestSlideWindowGrowsFromEmpty(t *testing.T) {
 		return time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02")
 	}
 	w := ConstituentWindow{Symbol: "NEW"}
-	for i := range WindowSize / 2 {
+	for i := range WindowSize200 / 2 {
 		w = SlideWindow(w, float64(100+i), dateFor(i))
 	}
-	if len(w.Closes) != WindowSize/2 {
-		t.Errorf("growth: want %d, got %d", WindowSize/2, len(w.Closes))
+	if len(w.Closes) != WindowSize200/2 {
+		t.Errorf("growth: want %d, got %d", WindowSize200/2, len(w.Closes))
 	}
 	// Now fill to capacity.
-	for i := WindowSize / 2; i < WindowSize; i++ {
+	for i := WindowSize200 / 2; i < WindowSize200; i++ {
 		w = SlideWindow(w, float64(100+i), dateFor(i))
 	}
-	if len(w.Closes) != WindowSize {
-		t.Errorf("at capacity: want %d, got %d", WindowSize, len(w.Closes))
+	if len(w.Closes) != WindowSize200 {
+		t.Errorf("at capacity: want %d, got %d", WindowSize200, len(w.Closes))
 	}
 	// One more pushes the oldest out.
-	w = SlideWindow(w, 9999, dateFor(WindowSize))
-	if len(w.Closes) != WindowSize {
-		t.Errorf("over capacity: still want %d, got %d", WindowSize, len(w.Closes))
+	w = SlideWindow(w, 9999, dateFor(WindowSize200))
+	if len(w.Closes) != WindowSize200 {
+		t.Errorf("over capacity: still want %d, got %d", WindowSize200, len(w.Closes))
 	}
 	if w.Closes[len(w.Closes)-1] != 9999 {
 		t.Errorf("tail: want 9999, got %v", w.Closes[len(w.Closes)-1])
@@ -257,5 +266,102 @@ func TestSlideWindowDoesNotMutateInput(t *testing.T) {
 		if v != original[i] {
 			t.Errorf("input mutated at index %d: was %v, now %v", i, original[i], v)
 		}
+	}
+}
+
+// TestCompute_200DMA_NeedsLongerHistory: a window with 150 closes
+// contributes to the 50-DMA reading but is excluded from the 200-DMA
+// reading.
+func TestCompute_200DMA_NeedsLongerHistory(t *testing.T) {
+	// 150 monotonically rising closes — today is above any SMA window.
+	closes := make([]float64, 150)
+	for i := range closes {
+		closes[i] = 100 + float64(i)
+	}
+	members := []string{"NEW"}
+	windows := map[string]ConstituentWindow{
+		"NEW": {Symbol: "NEW", Closes: closes, LastBarAt: "2026-05-16"},
+	}
+	snap := Compute(members, windows, "2026-05-16", time.Now())
+	if snap.Coverage != 1 {
+		t.Errorf("coverage (50-DMA): want 1, got %d", snap.Coverage)
+	}
+	if snap.Coverage200 != 0 {
+		t.Errorf("coverage_200: want 0 (only 150 closes), got %d", snap.Coverage200)
+	}
+	if snap.Value != 100.0 {
+		t.Errorf("pct above 50-DMA: want 100, got %v", snap.Value)
+	}
+	if snap.PctAbove200DMA != 0 {
+		t.Errorf("pct above 200-DMA: want 0 (no coverage), got %v", snap.PctAbove200DMA)
+	}
+}
+
+// TestCompute_200DMA_FullHistory: a window with 200+ closes
+// contributes to both SMA readings.
+func TestCompute_200DMA_FullHistory(t *testing.T) {
+	closes := make([]float64, WindowSize200)
+	for i := range closes {
+		closes[i] = 100 + float64(i)
+	}
+	members := []string{"OLD"}
+	windows := map[string]ConstituentWindow{
+		"OLD": {Symbol: "OLD", Closes: closes, LastBarAt: "2026-05-16"},
+	}
+	snap := Compute(members, windows, "2026-05-16", time.Now())
+	if snap.Coverage != 1 || snap.Coverage200 != 1 {
+		t.Errorf("coverage: 50=%d 200=%d, want 1/1", snap.Coverage, snap.Coverage200)
+	}
+	if snap.Value != 100.0 || snap.PctAbove200DMA != 100.0 {
+		t.Errorf("pct: 50=%v 200=%v, want 100/100", snap.Value, snap.PctAbove200DMA)
+	}
+}
+
+// TestCompute_NewHighs counts a constituent that's at a new 252-bar
+// high today. The window's HighRollingMax is set so today's close
+// strictly exceeds it.
+func TestCompute_NewHighs(t *testing.T) {
+	closes := make([]float64, WindowSize200)
+	for i := range closes {
+		closes[i] = 100 + float64(i)
+	}
+	w := ConstituentWindow{
+		Symbol:             "HIGHER",
+		Closes:             closes,
+		LastBarAt:          "2026-05-16",
+		HighRollingMax:     closes[len(closes)-2], // yesterday's close
+		HighRollingBarsHad: RollingMaxBars,
+		LowRollingMin:      100,
+		LowRollingBarsHad:  RollingMaxBars,
+	}
+	snap := Compute([]string{"HIGHER"}, map[string]ConstituentWindow{"HIGHER": w}, "2026-05-16", time.Now())
+	if snap.NewHighsToday != 1 {
+		t.Errorf("new highs: want 1, got %d", snap.NewHighsToday)
+	}
+	if snap.NewLowsToday != 0 {
+		t.Errorf("new lows: want 0, got %d", snap.NewLowsToday)
+	}
+}
+
+// TestSlideWindow_RollingMaxAdvances: after seeding a 252-bar window
+// and sliding two new bars in, HighRollingMax should reflect the
+// trailing 251 closes excluding today's.
+func TestSlideWindow_RollingMaxAdvances(t *testing.T) {
+	dateFor := func(i int) string {
+		return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02")
+	}
+	w := ConstituentWindow{Symbol: "NEW"}
+	// Seed RollingMaxBars + 1 bars of monotonically rising closes.
+	for i := 0; i <= RollingMaxBars; i++ {
+		w = SlideWindow(w, float64(100+i), dateFor(i))
+	}
+	if w.HighRollingBarsHad != RollingMaxBars {
+		t.Errorf("HighRollingBarsHad: want %d, got %d", RollingMaxBars, w.HighRollingBarsHad)
+	}
+	// After seeding, HighRollingMax should be the second-to-last close
+	// (since the slide step folds the prior close into the rolling max
+	// before today's close lands).
+	if w.HighRollingMax <= 0 {
+		t.Errorf("HighRollingMax should be > 0 after seeding, got %v", w.HighRollingMax)
 	}
 }

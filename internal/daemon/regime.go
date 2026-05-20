@@ -126,7 +126,7 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) {
 		band := ""
 		var value float64
 		if (res.Breadth.Status == rpc.RegimeStatusOK || res.Breadth.Status == rpc.RegimeStatusStale) && res.Breadth.Envelope.State == rpc.BreadthStateReady {
-			value = res.Breadth.Envelope.Value
+			value = res.Breadth.Envelope.PctAbove50DMA
 			band = classifyBreadthBand(value)
 		}
 		res.Breadth.Streak = s.streaks.Tick(StreakKeyBreadth, value, band, now)
@@ -726,7 +726,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	return out
 }
 
-const breadthNotes = "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR does not redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes — refresh runs once per US trading day post-close (16:35 ET). Method token: constituent-fanout-50dma."
+const breadthNotes = "S&P 500 breadth — the daemon computes two SMA readings and the new-52-week-highs/lows count locally from the 500 constituent daily closes (IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions). Refresh runs once per US trading day post-close (16:35 ET). Method token: constituent-fanout-50/200dma-hl. The 50-day reading (`pct_above_50dma`) keeps the spec's bands: >55 green / 40-55 yellow / <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). The 200-day reading (`pct_above_200dma`) uses 60/40 bands calibrated to the post-Mag-7 era: >60 green / 40-60 yellow / <40 red (the StockCharts 70/30 default fires red far too often in this regime). New-highs/lows surface as a sub-signal: when SPX is near highs and `net_new_highs_pct` is near zero or negative, that's the classic narrow-rally pattern — a small set of mega-caps carrying the index while the median name is rolling over."
 
 func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	out := rpc.RegimeBreadth{Notes: breadthNotes}
@@ -761,7 +761,15 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	// is the right shelf — it tags FreshnessClass=derived,
 	// Confidence=estimate so renderers don't mistake this for a
 	// firm-tick reading.
-	out.ValueQuality = derivedQuality(envelope.AsOf, "constituent-fanout-50dma")
+	out.ValueQuality = derivedQuality(envelope.AsOf, envelope.Method)
+	// Echo the four sub-fields onto the regime row so a consumer
+	// doesn't have to dig into the nested envelope for the standard
+	// breadth view that informs the band.
+	out.PctAbove50DMA = envelope.PctAbove50DMA
+	out.PctAbove200DMA = envelope.PctAbove200DMA
+	out.NewHighsToday = envelope.NewHighsToday
+	out.NewLowsToday = envelope.NewLowsToday
+	out.NetNewHighsPct = envelope.NetNewHighsPct
 	out.Status = rpc.RegimeStatusOK
 	// "Stale" only applies once we're a full session past the AsOf
 	// stamp — the engine refreshes daily, so anything more than ~30 h

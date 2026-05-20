@@ -127,9 +127,16 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 		e.workers = 6
 	}
 	if e.coldLookback <= 0 {
-		// 50 + 10 trading-day pad covers the ~9 US market holidays
-		// per year so we land WindowSize closes from a single fetch.
-		e.coldLookback = WindowSize + 10
+		// RollingMaxBars + 10 trading-day pad. Pulling 262 bars in one
+		// fetch costs the same per-IBKR-request as pulling 60 (the
+		// pacing limit is 60 historical requests per 10-minute window,
+		// independent of the bar count), so v2 fetches enough history
+		// to seed all three reads — 50-DMA, 200-DMA, and the rolling
+		// 252-bar max/min — from a single per-constituent fetch. Names
+		// with thinner real-world history (recent IPOs, recent index
+		// adds) come back short and are skipped from the appropriate
+		// numerator-denominator pairs in Compute.
+		e.coldLookback = RollingMaxBars + 10
 	}
 	if e.warmLookback <= 0 {
 		e.warmLookback = 2
@@ -366,7 +373,13 @@ func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow
 
 	// Convergence — publish the snapshot and history.
 	e.mu.Lock()
-	history := appendHistory(e.history, HistoryPoint{Date: sessionKey, Value: snap.Value})
+	history := appendHistory(e.history, HistoryPoint{
+		Date:           sessionKey,
+		PctAbove50DMA:  snap.PctAbove50DMA,
+		PctAbove200DMA: snap.PctAbove200DMA,
+		NewHighs:       snap.NewHighsToday,
+		NewLows:        snap.NewLowsToday,
+	})
 	e.mu.Unlock()
 
 	if err := e.store.SaveSnapshot(snap); err != nil {
