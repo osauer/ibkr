@@ -2,6 +2,74 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
 
+## v0.27.11 — 2026-05-20 05:48 CEST
+
+Closes the structural gap that motivated v0.27.9's `boundedSnapshot`
+orchestrator-level defense: the market-data slot-acquire wait now
+honours the caller's `context.Context` instead of `Connection.ctx`
+(daemon lifetime). The regime fetcher's per-leg 5 s budget is now
+enforced at the slot layer, so under sustained contention both calls
+of `release-verify` step 7 see the same timing envelope and reach
+the same status — the probabilistic `ok→error/unavailable` downgrade
+that fired on the 2026-05-19 release-verify failure is gone.
+
+### Fixed
+
+- **`acquireMarketDataSlot` honours caller ctx (F-26).** Three sites
+  in `pkg/ibkr/connection.go` —
+  `RequestMarketData`, `RequestMarketDataWithContract`,
+  `RequestMarketDataWithPrimary` — and the previously-ctx-aware
+  `RequestOptionsMarketData` all forwarded `c.ctx` to the slot
+  semaphore. A per-request budget set by the caller (the regime
+  fetcher's 5 s `boundedSnapshot`, the gamma compute's per-leg
+  subscribe, the snapshot helpers) was therefore silently absorbed:
+  the wait blocked on daemon lifetime and only aborted on daemon
+  shutdown. The fix threads `context.Context` from the daemon-side
+  call sites down to `acquireMarketDataSlot`:
+
+  - `Connection.RequestMarketData(ctx, sym)` — ctx added
+  - `Connection.RequestMarketDataWithContract(ctx, contract, …)` — ctx added
+  - `Connection.RequestMarketDataWithPrimary(ctx, sym, primary)` — ctx added
+  - `Connection.RequestOptionsMarketData(ctx, …)` — already had ctx, now uses it
+  - `Connector.SubscribeMarketData(ctx, sym, fields)` — ctx added
+  - `Connector.EnsureMarketDataSubscription(ctx, …)` — ctx added
+  - `subManager.{Subscribe,Hold,acquire}(ctx, …)` — ctx added; daemon
+    `ibkrMarketConnector` interface updated to match.
+
+  Nil ctx is treated as `context.Background()` so callers without a
+  per-request deadline see no behaviour change. Background-recovery
+  paths inside the connector (post-farm-reconnect resubscribe,
+  error-driven re-route) pass a new unexported `Connector.connCtx()`
+  helper that returns the connection's lifetime ctx — the slot-acquire
+  should only abort if the daemon itself shuts down, not on a
+  transient request deadline.
+
+  Bug-class lineage tracked across four releases: v0.27.5 fixed the
+  hard hang at this layer; v0.27.6 stopped a 45 s envelope-level
+  deadline from clobbering one-row errors; v0.27.9 added
+  `boundedSnapshot` / `boundedSnapshotWith52WHigh` as orchestrator-
+  level defense after diagnosing this same root cause, with a note
+  in the CHANGELOG ("structural fix tracked as a follow-up");
+  v0.27.11 lands that structural fix.
+
+  `boundedSnapshot` is kept as defense-in-depth (the timer fires only
+  after `budget+1s`, well past inner completion in the happy path)
+  and catches future regressions in either the slot path or any
+  other inner code that might block past its declared budget. Its
+  docstring is rewritten to reflect that the structural fix has
+  landed.
+
+  Contract pinned by `pkg/ibkr/connection_slot_ctx_test.go`: the
+  100-slot pool is saturated, then
+  `RequestMarketDataWithContract(ctx, …)` is called with a 1 s ctx
+  deadline. Pre-F-26 the call would hang on `Connection.ctx`
+  (Background, no deadline) past the test timeout. Post-F-26 it
+  returns a wrapped `context.DeadlineExceeded` in ~1 s.
+
+  `make release-verify` standalone passes step 7 three times in a
+  row with this fix; the previously-probabilistic gate is now
+  deterministic under daemon-startup contention.
+
 ## v0.27.10 — 2026-05-19 20:57 CEST
 
 Hygiene release. No binary behaviour changes — this release exists to
