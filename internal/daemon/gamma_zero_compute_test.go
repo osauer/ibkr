@@ -437,7 +437,7 @@ func TestCheckLegCoverage(t *testing.T) {
 
 	// Above-threshold: clean run.
 	if err := checkLegCoverage(50, 100, false); err != nil {
-		t.Errorf("50%% should pass MinLegCoverageFraction (0.5), got error: %v", err)
+		t.Errorf("50%% should pass MinLegCoverageFraction (0.2), got error: %v", err)
 	}
 	if err := checkLegCoverage(900, 1000, true); err != nil {
 		t.Errorf("90%% even with throttle observed should pass: %v", err)
@@ -445,16 +445,16 @@ func TestCheckLegCoverage(t *testing.T) {
 
 	// Exactly the threshold passes (boundary is inclusive on the pass
 	// side — coverage >= MinLegCoverageFraction returns nil).
-	if err := checkLegCoverage(500, 1000, false); err != nil {
-		t.Errorf("exactly 50%% should pass the >= boundary, got: %v", err)
+	if err := checkLegCoverage(200, 1000, false); err != nil {
+		t.Errorf("exactly 20%% should pass the >= boundary, got: %v", err)
 	}
 
 	// Below threshold: error, names the shortfall.
-	err := checkLegCoverage(49, 100, false)
+	err := checkLegCoverage(19, 100, false)
 	if err == nil {
-		t.Fatal("49%% should fail MinLegCoverageFraction")
+		t.Fatal("19%% should fail MinLegCoverageFraction")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "49/100") || !strings.Contains(msg, "below minimum") {
+	if msg := err.Error(); !strings.Contains(msg, "19/100") || !strings.Contains(msg, "below minimum") {
 		t.Errorf("error message should name landed/total and 'below minimum': %q", msg)
 	}
 

@@ -28,11 +28,13 @@ import (
 // reconstitution detection, and the symbol→details map. Atomic writes
 // via temp+rename so a daemon crash mid-write can't corrupt the file.
 //
-// Filtered persistence: only contracts with SecType ∈ {STK, IND, CASH}
-// AND ConID != 0 are written. Options and futures expire (their
-// in-memory entries are short-lived and would just bloat the file
-// without saving any real work); ConID==0 entries are pending or
-// failed resolutions not worth persisting.
+// Stock + index + cash entries (long-lived, ConID stable across years)
+// live under the top-level "contracts" key. Option entries live under
+// "options" — same ContractDetailsLite shape but keyed by the OPRA-style
+// optionContractKey (symbol|expiry|strike|right). Options are garbage-
+// collected on save: any entry whose Expiry has passed is dropped, so
+// the file stabilises around ~1-3K live entries even though gamma
+// computes touch ~1600 strikes per session.
 type ContractStore struct {
 	dir string
 
@@ -47,11 +49,16 @@ func NewContractStore(dir string) *ContractStore {
 }
 
 // contractStoreVersion is the on-disk schema version. A future
-// incompatible format bump increments this; Load returns (nil, "", nil)
+// incompatible format bump increments this; Load returns a cold result
 // for files at any other version so the daemon cold-starts cleanly
 // rather than mis-interpreting an unknown schema. Matches the pattern
 // used by internal/breadth/spx.WindowSet.
-const contractStoreVersion = 1
+//
+// v1 → v2 added the top-level "options" map, keyed by optionContractKey,
+// for bulk-prewarmed option contracts. v1 files are read transparently:
+// the options map appears as nil and the daemon refills it from the
+// next prewarm. New writes always go out at v2.
+const contractStoreVersion = 2
 
 // contractStoreFile is the filename inside ContractStore.dir.
 const contractStoreFile = "contracts.json"
@@ -63,6 +70,7 @@ type contractCacheFile struct {
 	AsOf        time.Time                      `json:"as_of"`
 	MembersHash string                         `json:"members_hash,omitempty"`
 	Contracts   map[string]ContractDetailsLite `json:"contracts"`
+	Options     map[string]ContractDetailsLite `json:"options,omitempty"`
 }
 
 // Load returns the persisted (symbol → details) map and the
@@ -90,21 +98,73 @@ func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, "", fmt.Errorf("decode contracts: %w", err)
 	}
-	if f.Version != contractStoreVersion {
-		// Unknown-version file: treat as no-cache, don't error.
+	// Accept any version ≤ contractStoreVersion. v1 files have no
+	// "options" key; they load cleanly because the field is optional.
+	// Newer-version files (forward compatibility, hypothetical) trigger
+	// a cold rebuild — the daemon doesn't try to interpret a schema
+	// it doesn't know.
+	if f.Version > contractStoreVersion {
 		return nil, "", nil
 	}
 	return f.Contracts, f.MembersHash, nil
 }
 
+// LoadOptions returns the persisted (optionContractKey → details) map.
+// Expired entries are pruned in-place: any entry whose Expiry has
+// passed in NY time is dropped silently. The returned map can be empty
+// (cold install or all entries expired) but never nil.
+//
+// Same return convention as Load: missing file or version mismatch
+// yields an empty map without error.
+func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
+	path := filepath.Join(s.dir, contractStoreFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]ContractDetailsLite{}, nil
+		}
+		return nil, fmt.Errorf("read contracts: %w", err)
+	}
+	var f contractCacheFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("decode contracts: %w", err)
+	}
+	if f.Version > contractStoreVersion {
+		return map[string]ContractDetailsLite{}, nil
+	}
+	out := make(map[string]ContractDetailsLite, len(f.Options))
+	today := nyDateString(time.Now())
+	for k, v := range f.Options {
+		if v.Expiry != "" && v.Expiry < today {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// nyDateString returns the New York trading-session date as YYYYMMDD.
+// Used to compare option Expiry strings (also YYYYMMDD) for GC.
+// Falls back to UTC date if the zone fails to load — keeps the GC
+// pass conservative (might keep a freshly-expired entry one extra
+// day, but won't drop a still-live one).
+func nyDateString(now time.Time) string {
+	if loc, err := time.LoadLocation("America/New_York"); err == nil {
+		return now.In(loc).Format("20060102")
+	}
+	return now.UTC().Format("20060102")
+}
+
 // Save filters and writes contracts atomically. Only entries that pass
-// shouldPersistContract (STK/IND/CASH + ConID != 0) are included.
-// membersHash is stored alongside so a future Load can detect SPX
-// reconstitution; pass "" if the caller doesn't track membership.
+// shouldPersistContract are included. options is the parallel OPT
+// entry map (keyed by optionContractKey); entries whose Expiry has
+// passed are dropped in the GC pass. membersHash is stored alongside
+// so a future Load can detect SPX reconstitution; pass "" if the
+// caller doesn't track membership.
 //
 // Concurrent Save calls serialise on the store's mutex; the disk write
 // is single-flight per store instance.
-func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, membersHash string) error {
+func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, options map[string]ContractDetailsLite, membersHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -113,6 +173,22 @@ func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, membersHa
 		if shouldPersistContract(detail) {
 			filtered[sym] = detail
 		}
+	}
+
+	// Option GC: drop entries whose Expiry has already passed in NY
+	// time. Keeps the file size bounded — a session's worth of
+	// strikes (~1700) replaces yesterday's strikes rather than
+	// accumulating forever.
+	filteredOptions := make(map[string]ContractDetailsLite, len(options))
+	today := nyDateString(time.Now())
+	for k, detail := range options {
+		if detail.ConID == 0 {
+			continue
+		}
+		if detail.Expiry != "" && detail.Expiry < today {
+			continue
+		}
+		filteredOptions[k] = detail
 	}
 
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -141,6 +217,7 @@ func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, membersHa
 		AsOf:        time.Now().UTC(),
 		MembersHash: membersHash,
 		Contracts:   filtered,
+		Options:     filteredOptions,
 	}); err != nil {
 		return fmt.Errorf("encode contracts: %w", err)
 	}
@@ -241,4 +318,74 @@ func (c *Connector) SnapshotContracts() map[string]ContractDetailsLite {
 		}
 	}
 	return out
+}
+
+// SnapshotOptionContracts returns a defensive copy of the connection's
+// in-memory optionContractCache (keyed by optionContractKey), filtered
+// to entries with ConID != 0. Used by the daemon's periodic save tick
+// to persist resolved option contracts to disk so a daemon restart
+// within the same trading session skips the prewarm cost.
+func (c *Connector) SnapshotOptionContracts() map[string]ContractDetailsLite {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return nil
+	}
+	conn.optionContractMu.RLock()
+	defer conn.optionContractMu.RUnlock()
+	out := make(map[string]ContractDetailsLite, len(conn.optionContractCache))
+	for key, detail := range conn.optionContractCache {
+		if detail.ConID != 0 {
+			out[key] = detail
+		}
+	}
+	return out
+}
+
+// IsOptionContractCached reports whether the connection's option contract
+// cache has a resolved entry for (symbol, expiry, strike, right). Used
+// by the gamma compute to filter its enumerated job list to strikes that
+// actually exist as listed contracts — secDefOptParams returns a superset
+// across exchanges, and asking reqMktData for a non-listed (Strike, Right)
+// just burns time and trips the throttle detector.
+func (c *Connector) IsOptionContractCached(symbol, expiry string, strike float64, right string) bool {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return false
+	}
+	key := optionContractKey(symbol, expiry, strike, right)
+	conn.optionContractMu.RLock()
+	defer conn.optionContractMu.RUnlock()
+	entry, ok := conn.optionContractCache[key]
+	return ok && entry.ConID != 0
+}
+
+// SeedOptionContracts pre-populates the connection's optionContractCache
+// from the persisted store. Called once on daemon startup before any
+// gamma compute kicks. Entries already in the cache (from in-flight
+// resolution races) are preserved; only empty slots get seeded.
+func (c *Connector) SeedOptionContracts(options map[string]ContractDetailsLite) int {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil || len(options) == 0 {
+		return 0
+	}
+	conn.optionContractMu.Lock()
+	defer conn.optionContractMu.Unlock()
+	seeded := 0
+	for key, detail := range options {
+		if detail.ConID == 0 {
+			continue
+		}
+		if existing, ok := conn.optionContractCache[key]; ok && existing.ConID != 0 {
+			continue
+		}
+		conn.optionContractCache[key] = detail
+		seeded++
+	}
+	return seeded
 }

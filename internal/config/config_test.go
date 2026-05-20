@@ -32,8 +32,8 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Gateway.BreadthClientIDOrDefault() != 16 {
 		t.Errorf("BreadthClientIDOrDefault = %d, want 16", res.Gateway.BreadthClientIDOrDefault())
 	}
-	if res.Daemon.IdleTimeout.Std() != 5*time.Minute {
-		t.Errorf("default idle = %v, want 5m", res.Daemon.IdleTimeout.Std())
+	if res.Daemon.IdleTimeout.Std() != 15*time.Minute {
+		t.Errorf("default idle = %v, want 15m", res.Daemon.IdleTimeout.Std())
 	}
 	if res.Daemon.LogLevel != "info" {
 		t.Errorf("default log_level = %q, want info", res.Daemon.LogLevel)

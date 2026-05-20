@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,15 @@ type gammaZeroCache struct {
 	mu      sync.Mutex
 	current *gammaComputation // nil until first kickOrJoin
 	refresh *gammaComputation // soft-TTL refresh in flight behind current; nil otherwise
+	// lastErr / lastErrAt / lastErrSummary retain the prior failure
+	// context across the gammaErrorRetryTTL boundary. Without this, a
+	// caller polling during a retry window sees Status=Computing with
+	// no indication that the previous compute failed — the error was
+	// silently discarded the moment kickOrJoin kicked a fresh attempt.
+	// Cleared on a successful compute landing.
+	lastErr        error
+	lastErrAt      time.Time
+	lastErrSummary string // shortened single-line summary for rendering
 }
 
 // gammaComputation is one zero-gamma run from kickoff through result
@@ -204,6 +214,12 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, now time.Time, etaSe
 		// always pass through to the shared singleflight regardless of
 		// age; success results stay sticky for the whole session.
 		if c.current.isDone() && c.current.err != nil && now.Sub(c.current.startedAt) >= gammaErrorRetryTTL {
+			// Retain the failure context so the next render of the
+			// "computing" row can surface "retry of <error> at HH:MM:SS"
+			// instead of silently switching to a clean Computing state.
+			c.lastErr = c.current.err
+			c.lastErrAt = c.current.startedAt
+			c.lastErrSummary = summarizeGammaErr(c.current.err)
 			job = c.startLocked(parent, key, now, etaSeconds, compute)
 			return job, true
 		}
@@ -333,13 +349,54 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 		}
 		env.Status = rpc.GammaZeroStatusReady
 		env.Result = g.result
+		// Clear stale prior-error context — a successful compute means
+		// the previous failure is no longer informative.
+		c.mu.Lock()
+		c.lastErr = nil
+		c.lastErrSummary = ""
+		c.mu.Unlock()
 		return env
 	}
 	progress := g.progress.Load()
 	env.Status = rpc.GammaZeroStatusComputing
 	env.EtaSeconds = remainingEta(g, nowFn(), progress)
 	env.Progress = int(progress)
+	// Attach prior-failure context if the current in-flight compute is
+	// a retry of a recent failure. The renderer uses this to display
+	// "computing · retry of <summary> at HH:MM:SS" instead of dropping
+	// the prior error silently.
+	c.mu.Lock()
+	if c.lastErr != nil {
+		retryAt := c.lastErrAt
+		env.RetryOfErrorAt = &retryAt
+		env.RetryOfErrorSummary = c.lastErrSummary
+	}
+	c.mu.Unlock()
 	return env
+}
+
+// summarizeGammaErr compresses a compute error to a single-line summary
+// suitable for rendering inline with "computing · retry of <summary>".
+// Strips the long-tail context ("not persisting; gammaErrorRetryTTL ...")
+// that's useful in logs but not in the dashboard. Returns the original
+// string when it's already short enough.
+func summarizeGammaErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if i := strings.Index(msg, " — "); i > 0 {
+		msg = msg[:i]
+	}
+	if i := strings.Index(msg, ". "); i > 0 {
+		msg = msg[:i]
+	}
+	// "zero-gamma: " prefix is daemon-internal jargon; trim it.
+	msg = strings.TrimPrefix(msg, "zero-gamma: ")
+	if len(msg) > 80 {
+		msg = msg[:77] + "..."
+	}
+	return msg
 }
 
 // remainingEta returns a refined ETA in seconds. Once enough work has

@@ -208,7 +208,11 @@ func Load(path string) (*Config, error) {
 func (c *Config) Resolve() (*Resolved, error) {
 	dae := c.Daemon
 	if dae.IdleTimeout == 0 {
-		dae.IdleTimeout = duration(5 * time.Minute)
+		// 15 min default (was 5 min). Combined with the persistent option
+		// contract cache (PrewarmOptionChain) and the soft-TTL gamma
+		// refresh, the cost of a daemon restart is now multi-minute
+		// recompute — short idle windows cost more than they save.
+		dae.IdleTimeout = duration(15 * time.Minute)
 	}
 	if dae.LogLevel == "" {
 		dae.LogLevel = "info"

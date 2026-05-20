@@ -690,6 +690,15 @@ type GammaZeroSPXResult struct {
 	Result *GammaZeroComputed `json:"result,omitempty"`
 	// Error is populated when Status == "error".
 	Error string `json:"error,omitempty"`
+	// RetryOfErrorAt + RetryOfErrorSummary are non-nil/non-empty only
+	// when Status == "computing" AND the in-flight compute was kicked
+	// because the previous attempt failed past gammaErrorRetryTTL. The
+	// renderer surfaces them as "computing · retry of <summary> at
+	// HH:MM:SS" so the user sees the prior failure context — without
+	// this, the dashboard silently switched from "error" to "computing"
+	// and the user had to grep the daemon log to understand why.
+	RetryOfErrorAt      *time.Time `json:"retry_of_error_at,omitempty"`
+	RetryOfErrorSummary string     `json:"retry_of_error_summary,omitempty"`
 }
 
 // RegimeIndicatorStatus is the high-level availability/freshness state

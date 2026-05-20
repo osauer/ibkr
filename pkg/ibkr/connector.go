@@ -683,10 +683,19 @@ func (c *Connector) GetMarketDataTypeForSymbol(symbol string) int {
 	return conn.GetMarketDataType(sub.ReqID)
 }
 
-// ContractDetailsLite contains the subset of details needed for calendar building
+// ContractDetailsLite contains the subset of details needed for calendar building.
+//
+// Option-specific fields (SecType, Expiry, Strike, Right) are populated only
+// when the underlying contractData frame describes an OPT contract — used by
+// PrewarmOptionChain to key bulk-resolved option entries by their (symbol,
+// expiry, strike, right) tuple. They stay zero/empty for stocks.
 type ContractDetailsLite struct {
 	ReqID        int
 	Symbol       string
+	SecType      string
+	Expiry       string
+	Strike       float64
+	Right        string
 	Exchange     string
 	PrimaryExch  string
 	ConID        int
@@ -1232,22 +1241,25 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 
 	symbol := strings.TrimSpace(safeGet(fields, idx))
 	idx++
-	secType := safeGet(fields, idx)
+	secType := strings.TrimSpace(safeGet(fields, idx))
 	idx++
-	_ = secType
 
-	// Last trade date / contract month
-	_ = safeGet(fields, idx)
+	// Last trade date / contract month — for OPT this is the expiry YYYYMMDD.
+	expiry := strings.TrimSpace(safeGet(fields, idx))
 	idx++
 	if serverVersion >= minServerVerLastTradeDate {
 		idx++
 	}
 
-	// Strike and right
-	_ = safeGet(fields, idx)
+	// Strike and right.
+	strikeStr := safeGet(fields, idx)
 	idx++
-	_ = safeGet(fields, idx)
+	right := strings.TrimSpace(safeGet(fields, idx))
 	idx++
+	strike := 0.0
+	if v, err := strconv.ParseFloat(strikeStr, 64); err == nil {
+		strike = v
+	}
 
 	exchange := strings.TrimSpace(safeGet(fields, idx))
 	idx++
@@ -1307,6 +1319,10 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 	return &ContractDetailsLite{
 		ReqID:        reqID,
 		Symbol:       symbol,
+		SecType:      secType,
+		Expiry:       expiry,
+		Strike:       strike,
+		Right:        right,
 		Exchange:     exchange,
 		PrimaryExch:  primaryExch,
 		ConID:        conID,
@@ -1952,6 +1968,35 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 	c.optReqIDs[reqID] = key
 	c.optMu.Unlock()
 	return key, reqID, nil
+}
+
+// PrewarmOptionChain bulk-resolves an option chain for (symbol, tradingClass)
+// across the given expirations. Returns one result per expiration with
+// per-expiry cache-fill counts, durations, and errors. The resolved
+// (Strike, Right) → ConID entries are written into the connector's option
+// contract cache so subsequent SubscribeOption calls hit it instantly and
+// skip the per-leg reqContractDetails round-trip.
+//
+// This is the bulk-resolution primitive that TWS uses internally and the
+// per-leg fan-out path emulates one leg at a time. Use it before any
+// large-chain fan-out (gamma compute, chain renderer with many strikes).
+func (c *Connector) PrewarmOptionChain(
+	ctx context.Context,
+	symbol string,
+	expiries []string,
+	tradingClass string,
+	timeout time.Duration,
+) []PrewarmOptionChainResult {
+	if !c.isConnected() {
+		return nil
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.PrewarmOptionChain(ctx, symbol, expiries, tradingClass, timeout)
 }
 
 // RequestAccountUpdates subscribes to streaming account + portfolio updates.

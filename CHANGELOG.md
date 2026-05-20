@@ -10,6 +10,34 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.29.0 — 2026-05-20 23:00 CEST
+
+### What's new
+
+- `ibkr regime` gamma no longer aborts at "23 of 1632 legs" during US market hours. The daemon now bulk-resolves the option chain via a partial-contract `reqContractDetails` per expiration (6 round-trips instead of ~1600), persists option ConIDs across restarts, and filters out non-listed strikes before fan-out.
+- `ibkr regime` default layout drops `day N` streaks, `est NNNs` clocks, and parenthetical reason restatements for a cleaner scan. A column header row keys the five columns (state · indicator · value · band · note). Pass `--explain` for the full provenance + methodology view.
+- Daemon idle timeout extended from 5 min to 15 min so a pause between calls no longer discards the in-memory gamma + option-contract caches. Override via `[daemon] idle_timeout = "30m"` in `~/.config/ibkr/config.toml`.
+
+### Added
+
+- `Connector.PrewarmOptionChain` bulk-resolves an option chain by issuing one partial-Contract `reqContractDetails` per expiration (no Strike/Right). The gateway streams every listed (Strike, Right) combination back in one burst; the resolved ConIDs populate the in-memory option contract cache. Used internally by the gamma compute before the worker fan-out; callers fanning out many option subscribes can invoke directly to skip the per-leg resolution tax.
+- INFO logging across the gamma compute path: `gamma.kickoff`, `gamma.jobs`, `gamma.prewarm` (per-expiry + summary), `gamma.filter`, `gamma.fanout.done`, `gamma.done`, and `gamma.abort` with reason attribution. Makes failure diagnosis self-contained from `daemon.log`.
+- Option contract persistence in `~/.cache/ibkr/contracts.json` (file schema bumped to v2 with an `options` map alongside the existing `contracts`). Entries are GC'd at save time once their `Expiry` is in the past, so the file stabilises at a few thousand live-contract rows.
+- `RetryOfErrorAt` / `RetryOfErrorSummary` on the gamma RPC envelope. When the in-flight compute is a retry of a recently-failed run (within `gammaErrorRetryTTL`), the renderer surfaces `computing · retry of <summary> at HH:MM:SS` instead of silently dropping the prior error context across the 60-second cooldown boundary.
+- `Connector.SnapshotOptionContracts`, `Connector.SeedOptionContracts`, `Connector.IsOptionContractCached` for daemons and callers that need to drive the option-contract cache directly.
+- `ContractDetailsLite` now carries `SecType`, `Expiry`, `Strike`, `Right` (omit-empty for non-OPT entries). Required to key bulk-resolved option entries by their OPRA-style tuple.
+
+### Changed
+
+- Daemon default `idle_timeout`: `5m` → `15m`. Combines with the new disk-persisted option contract cache to make brief pauses essentially free.
+- Gamma `MinLegCoverageFraction`: `0.5` → `0.2`. The IBKR gateway's OPT model-tick delivery during RTH is bursty; 20-40% leg coverage is typical, not a degraded run. The previous 50% threshold discarded usable results and forced the 60-second retry cooldown to fire repeatedly, leaving the dashboard "computing" for 5-10 minutes per session.
+- `ibkr regime` default rows trimmed: header row added; per-row `day N` streak markers, `est NNNs` clock suffixes, and parenthetical reason restatements removed. All four are still surfaced under `--explain`.
+- Help text for `ibkr regime` tightened: the `--log` description collapsed from a 300-character paragraph to a one-liner; methodology prose moved into `--explain`.
+
+### Engineering notes
+
+The 23/1632 abort pattern had three compounding causes: (a) per-leg `reqContractDetails` ran into IBKR's per-account rate limit under burst, (b) the 5-min idle timeout discarded the in-memory option contract cache between user sessions, and (c) the compute path had zero observability so even the diagnosis was hard. v0.29.0 addresses all three: bulk resolution sidesteps the rate limit, disk persistence survives restarts, and INFO logs at `gamma.*` make diagnosis trivial. The `MinLegCoverageFraction` drop to 0.2 is the only behavior change that affects ranking — runs that previously failed are now persisted, giving the dashboard a real γ-zero number instead of repeated "computing" placeholders.
+
 ## v0.28.2 — 2026-05-20 18:45 CEST
 
 ### What's new

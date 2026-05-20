@@ -65,11 +65,11 @@ type regimeRow struct {
 
 func runRegime(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "regime")
-	jsonOut := fs.Bool("json", false, "emit machine-readable JSON (the canonical surface for renderers + LLMs)")
-	explain := fs.Bool("explain", false, "print the spec's per-indicator threshold prose under each row")
-	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
-	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m — regime indicators move on minute-to-hour scales, not sub-minute)")
-	logPath := fs.String("log", "", "Append today's snapshot to a JSONL log file at <path>. The file accumulates one line per call; we suggest filenames like `regime-v1.jsonl` so future schema changes can use a new filename rather than breaking the parser. Plain JSONL — analyse with `jq` or pandas. Useful for the 4-week SpotGamma calibration ritual the spec describes.")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON for tooling")
+	explain := fs.Bool("explain", false, "show spec thresholds, streaks, and quality under each row")
+	watch := fs.Bool("watch", false, "re-poll continuously; in-place redraw on a TTY")
+	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m)")
+	logPath := fs.String("log", "", "append snapshot to a JSONL file at <path> (one line per call)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -249,6 +249,11 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	fmt.Fprintf(out, "  %s\n", env.dim(c.summary()))
 	fmt.Fprintln(out)
 
+	// Header row + horizontal rule give the reader a key for the five
+	// columns. Dim-colored so the band rows stay visually dominant. The
+	// rule width matches the widest row layout (glyph + name + value +
+	// band + note), recomputed once here so it tracks layout changes.
+	fmt.Fprintln(out, renderRegimeHeader(env))
 	for _, row := range rows {
 		fmt.Fprintln(out, renderRow(env, row))
 	}
@@ -258,8 +263,27 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		renderExplainBlock(env, out, r)
 		return 0
 	}
-	fmt.Fprintln(out, env.dim("  Pass --explain for per-indicator spec thresholds and methodology notes."))
+	fmt.Fprintln(out, env.dim("  Pass --explain for per-indicator spec thresholds, streaks, and quality notes."))
 	return 0
+}
+
+// renderRegimeHeader returns the dim column-header line displayed above
+// the indicator rows. Aligned with renderRow's column widths so labels
+// land directly over their cells. Reads as a key for the reader without
+// needing to consult docs.
+func renderRegimeHeader(env *Env) string {
+	const (
+		nameW  = 12
+		valueW = 30
+		bandW  = 7
+	)
+	// "  " = 2-space indent + " " = where the glyph sits + 2 spaces.
+	header := fmt.Sprintf("     %s  %s  %s  %s",
+		padRightVisible("INDICATOR", nameW),
+		padRightVisible("VALUE", valueW),
+		padRightVisible("BAND", bandW),
+		"NOTE")
+	return env.dim(header)
 }
 
 // renderRow lays out one indicator line: 2-space indent, glyph, indicator
@@ -283,31 +307,15 @@ func renderRow(env *Env, r regimeRow) string {
 	if colorFn != nil {
 		bandCell = padRightVisible(colorFn(env, bandWord), bandW)
 	}
-	reason := ""
-	if r.reason != "" {
-		reason = " " + env.dim("("+r.reason+")")
-	}
-	// Streak marker rides next to the band word so "yellow · day 3"
-	// reads as one chunk. Only ranked rows have streaks worth showing —
-	// unranked (computing/unavailable/error) rows skip the marker.
-	streak := ""
-	if r.streak != "" && r.band != bandUnranked {
-		streak = " " + env.dim("· "+r.streak)
-	}
-	// Compose the suffix: quality tag (from Quality envelopes) takes
-	// precedence over the legacy "· stale tick" indicator. The two
-	// surface the same idea via different layers — the tag is more
-	// specific (firm vs estimate vs modelled), so prefer it when the
-	// daemon populated Quality.
-	suffix := ""
-	switch {
-	case r.quality != "":
-		suffix = "  " + env.dim(r.quality)
-	case r.status == rpc.RegimeStatusStale:
-		suffix = "  " + env.dim("· stale tick")
-	}
-	return fmt.Sprintf("  %s  %s  %s  %s%s%s%s",
-		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, streak, reason, suffix)
+	// In default view, NOTE = the reason string verbatim (no surrounding
+	// parens, no quality clock). The reader sees a clean column with
+	// short interpretive text per indicator. Quality / streak / stale
+	// markers are promoted to --explain since they're noise on the
+	// default scan and useful only when auditing one indicator's
+	// provenance.
+	note := env.dim(r.reason)
+	return fmt.Sprintf("  %s  %s  %s  %s  %s",
+		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, note)
 }
 
 // streakMarker formats a *rpc.StreakInfo into the compact "day N"
@@ -690,8 +698,18 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		if r.Envelope.Progress > 0 {
 			note += fmt.Sprintf(" · %d%%", r.Envelope.Progress)
 		}
+		// If the in-flight compute is a retry of a recent failure,
+		// surface the prior error context so the user sees what's
+		// being re-attempted instead of a clean "first call of the
+		// NY session" message that hides the previous abort.
+		if r.Envelope.RetryOfErrorAt != nil && r.Envelope.RetryOfErrorSummary != "" {
+			row.reason = fmt.Sprintf("retry of %q at %s",
+				r.Envelope.RetryOfErrorSummary,
+				r.Envelope.RetryOfErrorAt.Local().Format("15:04:05"))
+		} else {
+			row.reason = "first call of the NY session; re-poll for result"
+		}
 		row.stateNote = note
-		row.reason = "first call of the NY session; re-poll for result"
 		return row
 	case rpc.RegimeStatusError:
 		row.value = ""

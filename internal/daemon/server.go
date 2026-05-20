@@ -470,6 +470,17 @@ func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
 		}
 	}
 	s.logger.Infof("contract cache: seeded %d entries from disk", seeded)
+
+	// Option contracts (added in store v2). Expired entries are GC'd
+	// at the store layer; whatever remains is still valid for at least
+	// today's NY session. Pre-seeds the connector's optionContractCache
+	// so the next gamma prewarm finds most strikes already resolved
+	// and avoids the 40s-per-fan-out round-trip cost on warm restarts.
+	if opts, err := s.contractStore.LoadOptions(); err != nil {
+		s.logger.Warnf("contract cache: load options: %v", err)
+	} else if seededOpts := c.SeedOptionContracts(opts); seededOpts > 0 {
+		s.logger.Infof("contract cache: seeded %d option entries from disk", seededOpts)
+	}
 }
 
 // seedConnectorFromCache seeds c from the already-loaded
@@ -532,12 +543,20 @@ func (s *Server) saveContractCache() {
 		// because both values are valid IBKR contract identities.
 		maps.Copy(merged, c.SnapshotContracts())
 	}
-	if len(merged) == 0 {
+	// Option contracts come from the primary connector only (gamma's
+	// bulk prewarm runs against the primary's option cache). Empty when
+	// no prewarm has fired this session — that's fine, an empty options
+	// map persists as an empty JSON object.
+	options := map[string]ibkrlib.ContractDetailsLite{}
+	if primary := s.gatewayConnector(); primary != nil {
+		options = primary.SnapshotOptionContracts()
+	}
+	if len(merged) == 0 && len(options) == 0 {
 		return
 	}
 	members, _ := spx.MemberList()
 	hash := ibkrlib.MembersHash(members)
-	if err := s.contractStore.Save(merged, hash); err != nil {
+	if err := s.contractStore.Save(merged, options, hash); err != nil {
 		s.logger.Warnf("contract cache: save: %v", err)
 	}
 }
@@ -1096,11 +1115,13 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 func (s *Server) prewarmZeroGamma(ctx context.Context) {
 	c := s.gatewayConnector()
 	if c == nil {
+		s.logger.Warnf("gamma prewarm: gateway connector unavailable, skipping initial compute")
 		return
 	}
+	s.logger.Infof("gamma prewarm: kicking initial compute (caller=startup)")
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog)
+		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)
 }

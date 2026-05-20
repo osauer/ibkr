@@ -95,15 +95,22 @@ const (
 	// at internal/breadth/spx/types.go: "did not converge" runs are
 	// not stored as session truth.
 	//
-	// Why 0.5 (vs breadth's 0.8): the OI-weighted gamma compute
+	// Why 0.2 (vs breadth's 0.8): the OI-weighted gamma compute
 	// concentrates near ATM, so missing far-OTM legs has small
-	// impact on the zero-gamma estimate. Below 50 % of expected legs,
-	// however, the ATM coverage itself is likely partial — and a
-	// modelled zero-gamma level computed off half the chain is no
-	// better than a guess. Pre-v0.27.9 this same 0.5 inline literal
-	// merely emitted a "low_leg_coverage" warning while persisting
-	// the result for the rest of the session.
-	MinLegCoverageFraction = 0.5
+	// impact on the zero-gamma estimate. ATM strikes are the most
+	// liquid and resolve first; 20% coverage typically captures the
+	// ATM ±5% band that dominates the gamma profile. Below 20% the
+	// signal is too thin to band reliably.
+	//
+	// Lowered from 0.5 (v0.28.x) to 0.2 (v0.29.0): empirically the
+	// IBKR gateway's OPT model-tick delivery is bursty during RTH —
+	// landing 20-40% of legs within the per-leg budget is typical,
+	// not a degraded run. The previous 0.5 threshold was discarding
+	// usable results and forcing a 60s retry cooldown that left the
+	// dashboard "computing" for 5-10 minutes. 0.2 is more honest
+	// about what the gateway will deliver while still gating on
+	// enough signal to compute a meaningful γ-zero.
+	MinLegCoverageFraction = 0.2
 )
 
 // checkLegCoverage returns nil if the fan-out's leg-landing fraction
@@ -184,6 +191,31 @@ type legResult struct {
 	IVDerived bool
 	OK        bool
 	Throttle  bool
+}
+
+// gammaLogger is the minimal logging surface computeGammaZeroSPX uses to
+// emit kickoff / progress / abort lines. Defined as an interface so tests
+// can drive the compute with a no-op recorder; production passes the
+// daemon's *Logger. Nil is accepted and treated as no-op.
+type gammaLogger interface {
+	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
+}
+
+// gammaLogfWrap returns a struct that turns nil-safe Infof/Warnf into
+// no-ops. Lets every log call site stay free of nil checks without
+// repeating boilerplate.
+type gammaLogf struct{ inner gammaLogger }
+
+func (g gammaLogf) Infof(format string, args ...any) {
+	if g.inner != nil {
+		g.inner.Infof(format, args...)
+	}
+}
+func (g gammaLogf) Warnf(format string, args ...any) {
+	if g.inner != nil {
+		g.inner.Warnf(format, args...)
+	}
 }
 
 // legFetcher abstracts the per-leg subscribe-collect-unsubscribe so
@@ -442,6 +474,7 @@ func computeGammaZeroSPX(
 	fetch legFetcher,
 	now func() time.Time,
 	progress *atomic.Int32,
+	logger gammaLogger,
 ) (*rpc.GammaZeroComputed, error) {
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
@@ -452,8 +485,11 @@ func computeGammaZeroSPX(
 	if now == nil {
 		now = time.Now
 	}
+	log := gammaLogf{inner: logger}
 	params = normalizeGammaParams(params)
 	startWall := now()
+	log.Infof("gamma.kickoff workers=%d expiry_count=%d strike_width_pct=%.2f sweep_range_pct=%.2f",
+		params.WorkerCount, params.ExpiryCount, params.StrikeWidthPct, params.SweepRangePct)
 
 	// 1. SPY spot snapshot.
 	progress.Store(2)
@@ -523,6 +559,77 @@ func computeGammaZeroSPX(
 	if len(jobs) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no %s strikes within ±%.0f%% of spot %.2f",
 			sym, params.StrikeWidthPct*100, spot)
+	}
+	log.Infof("gamma.jobs total=%d expiries=%d spot=%.2f", len(jobs), len(pickedExp), spot)
+
+	// Bulk-prewarm option contracts before the worker fan-out. This is the
+	// load-bearing optimization: without it, each of the ~1600 legs would
+	// independently pay a reqContractDetails round-trip with up-to-4-exchange
+	// retry loop, which the IBKR per-account throttle caps at ~50 attempts
+	// before aborting the whole fan-out. The bulk prewarm issues one
+	// partial-Contract reqContractDetails per expiration (no Strike, no
+	// Right) and the gateway streams every listed strike × C/P back in one
+	// burst — same primitive TWS uses internally to populate a chain
+	// instantly. Round-trip count drops from ~1600 to len(pickedExp) (~6).
+	//
+	// TradingClass="SPY" is load-bearing: omitting it interleaves SPYW
+	// weeklies (different trading class) and cache entries can shadow each
+	// other; SPY+weeklies share the SPY class, so passing "SPY" is the right
+	// scope. For SPX the equivalent would be running this twice with
+	// "SPX" and "SPXW" trading classes.
+	//
+	// Errors per expiry are localised — one timed-out expiry doesn't fail
+	// the others, and the per-leg fetcher still has its own
+	// resolveOptionContract fallback for cache misses. The prewarm is a
+	// fast path, not a hard dependency.
+	pickedExpYMD := make([]string, 0, len(pickedExp))
+	for _, expDate := range pickedExp {
+		pickedExpYMD = append(pickedExpYMD, compactExpiry(expDate))
+	}
+	prewarmStart := now()
+	prewarmResults := c.PrewarmOptionChain(ctx, sym, pickedExpYMD, sym, 30*time.Second)
+	prewarmTotal := 0
+	for _, r := range prewarmResults {
+		if r.Err != nil {
+			log.Warnf("gamma.prewarm expiry=%s cached=%d elapsed=%s err=%v",
+				r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond), r.Err)
+			continue
+		}
+		log.Infof("gamma.prewarm expiry=%s cached=%d elapsed=%s",
+			r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond))
+		prewarmTotal += r.Cached
+	}
+	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
+		prewarmTotal, time.Since(prewarmStart).Round(time.Millisecond))
+
+	// Filter jobs to only those whose (symbol, expiry, strike, right)
+	// is cached. secDefOptParams returns a SUPERSET of strikes across
+	// exchanges, so the original enumeration includes strikes that
+	// don't exist as listed contracts on every expiry. Those cache
+	// misses would force the per-leg fetcher to call
+	// resolveOptionContract → fetchOptionContractDetail, which under
+	// burst load times out at 5s × 4-exchange-attempts and counts as
+	// Throttle=true. Even 5% of such failures trip the throttle-abort
+	// detector and kill the fan-out before legitimate legs complete.
+	//
+	// The prewarm response IS the gateway's authoritative list of
+	// listed contracts; if a strike isn't in the cache after prewarm,
+	// no contract exists for it on this expiry. Skip those jobs.
+	beforeFilter := len(jobs)
+	filteredJobs := jobs[:0]
+	for _, j := range jobs {
+		if c.IsOptionContractCached(sym, j.expiryYMD, j.strike, j.right) {
+			filteredJobs = append(filteredJobs, j)
+		}
+	}
+	jobs = filteredJobs
+	if len(jobs) < beforeFilter {
+		log.Infof("gamma.filter dropped=%d from=%d to=%d (strikes not in prewarm cache)",
+			beforeFilter-len(jobs), beforeFilter, len(jobs))
+	}
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("zero-gamma: no cached option contracts after prewarm (prewarm landed %d total)",
+			prewarmTotal)
 	}
 
 	// Switch the connection's MarketDataType to 1 (live) for the fan-out.
@@ -625,12 +732,17 @@ func computeGammaZeroSPX(
 		mu.Unlock()
 	})
 
+	fanoutElapsed := time.Since(startWall).Round(time.Millisecond)
 	if ctx.Err() != nil {
+		log.Warnf("gamma.abort reason=ctx_cancelled landed=%d/%d elapsed=%s err=%v",
+			len(legs), len(jobs), fanoutElapsed, ctx.Err())
 		return nil, ctx.Err()
 	}
 	if len(legs) == 0 {
 		switch {
 		case earlyAbort.Load():
+			log.Warnf("gamma.abort reason=early_abort landed=%d/%d elapsed=%s no_contract=%d",
+				len(legs), len(jobs), fanoutElapsed, noContract.Load())
 			// Both the model-tick path AND the BS-IV fallback failed
 			// to produce a single usable leg in 30 s. With the v0.26.0
 			// BS-IV fallback the pre-market case is supposed to
@@ -640,12 +752,18 @@ func computeGammaZeroSPX(
 			return nil, fmt.Errorf("zero-gamma: no option data landed in first %ds (neither model ticks nor prior-session prices for BS-IV fallback). Check gateway entitlement and farm-connection notices in the daemon log",
 				int(earlyAbortAfter.Seconds()))
 		case throttledAbort.Load():
+			log.Warnf("gamma.abort reason=throttled landed=%d/%d elapsed=%s no_contract=%d",
+				len(legs), len(jobs), fanoutElapsed, noContract.Load())
 			return nil, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
 				noContract.Load(), done.Load())
 		default:
+			log.Warnf("gamma.abort reason=no_legs landed=%d/%d elapsed=%s",
+				len(legs), len(jobs), fanoutElapsed)
 			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return OI+IV", len(jobs))
 		}
 	}
+	log.Infof("gamma.fanout.done landed=%d/%d derived_iv=%d elapsed=%s",
+		len(legs), len(jobs), derivedIVs.Load(), fanoutElapsed)
 	progress.Store(85)
 
 	// 6-7. Sweep + aggregate.
@@ -701,6 +819,8 @@ func computeGammaZeroSPX(
 	// the cache for the rest of the day (same shape as the v0.27.0
 	// breadth poison-cache bug, mitigated for breadth at v0.27.3).
 	if err := checkLegCoverage(len(legs), len(jobs), throttledAbort.Load()); err != nil {
+		log.Warnf("gamma.abort reason=low_coverage landed=%d/%d elapsed=%s err=%v",
+			len(legs), len(jobs), time.Since(startWall).Round(time.Millisecond), err)
 		return nil, err
 	}
 
@@ -782,6 +902,13 @@ func computeGammaZeroSPX(
 		DurationMS:     now().Sub(startWall).Milliseconds(),
 	}
 	progress.Store(100)
+	zeroGammaStr := "—"
+	if zg != nil {
+		zeroGammaStr = fmt.Sprintf("%.2f", *zg)
+	}
+	log.Infof("gamma.done legs=%d/%d derived_iv=%d spot=%.2f zero_gamma=%s sign=%s elapsed=%s",
+		len(legs), len(jobs), derivedCount, spot, zeroGammaStr, gammaSign,
+		time.Since(startWall).Round(time.Millisecond))
 	return res, nil
 }
 

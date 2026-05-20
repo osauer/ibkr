@@ -4296,6 +4296,199 @@ func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Con
 	}
 }
 
+// PrewarmOptionChainResult reports per-expiry outcome of a bulk prewarm:
+// the number of contracts cached and the round-trip duration. Useful for
+// the daemon-side caller to surface in logs.
+type PrewarmOptionChainResult struct {
+	Expiry  string
+	Cached  int
+	Elapsed time.Duration
+	Err     error
+}
+
+// PrewarmOptionChain bulk-resolves an option chain by issuing one partial-
+// Contract reqContractDetails per expiration — no Strike, no Right — and
+// streaming the returned contractData frames into optionContractCache. This
+// is the technique TWS uses internally to populate a chain instantly:
+// IBKR's reqContractDetails returns every listed strike × C/P for a given
+// (Symbol, SecType=OPT, Expiry, TradingClass) tuple in one burst.
+//
+// Compared to per-leg resolution (the cold path each leg-fetcher takes via
+// resolveOptionContract), this drops the gateway round-trip count from
+// 2×strikes×expirations (typical: ~1600) to len(expiries) (typical: 6),
+// and sidesteps the IBKR per-account reqContractDetails throttle that
+// otherwise aborts the gamma fan-out at the first ~50 attempts.
+//
+// Fan-out: each expiry runs in its own goroutine, gated by a small
+// semaphore (4) to avoid bursting the gateway. Failures are localised —
+// one timed-out expiry doesn't fail the others. tradingClass is
+// load-bearing for SPY/SPX (separates SPY from SPYW weeklies); the caller
+// is expected to know it (e.g. via the secDefOptParams response).
+//
+// Returns one result per expiry (Cached count + Elapsed + per-expiry Err).
+// The caller decides whether partial success is acceptable.
+func (c *Connection) PrewarmOptionChain(
+	ctx context.Context,
+	symbol string,
+	expiries []string,
+	tradingClass string,
+	timeout time.Duration,
+) []PrewarmOptionChainResult {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	results := make([]PrewarmOptionChainResult, len(expiries))
+	if len(expiries) == 0 {
+		return results
+	}
+
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i, exp := range expiries {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			start := time.Now()
+			cached, err := c.prewarmOneExpiry(ctx, symbol, exp, tradingClass, timeout)
+			results[i] = PrewarmOptionChainResult{
+				Expiry:  exp,
+				Cached:  cached,
+				Elapsed: time.Since(start),
+				Err:     err,
+			}
+		})
+	}
+	wg.Wait()
+	return results
+}
+
+// prewarmOneExpiry issues one partial-Contract reqContractDetails for
+// (symbol, expiry, tradingClass) and writes every returned ConID into
+// optionContractCache under its (Strike, Right) tuple. Returns the number
+// of cache entries populated.
+//
+// Wire shape: Strike and Right left empty in the outgoing contract; the
+// gateway streams every listed (Strike, Right) combination back as
+// separate contractData frames. parseContractDetailsLite extracts those
+// fields from each frame so we can key the cache correctly.
+//
+// Per-expiry timeout bounds the total wait. The gateway typically returns
+// the full grid (~200-600 frames) in well under 1 s during RTH.
+func (c *Connection) prewarmOneExpiry(
+	ctx context.Context,
+	symbol, expiry, tradingClass string,
+	timeout time.Duration,
+) (int, error) {
+	contract := Contract{
+		Symbol:       symbol,
+		SecType:      "OPT",
+		Expiry:       expiry,
+		Exchange:     "SMART",
+		Currency:     "USD",
+		Multiplier:   100,
+		TradingClass: tradingClass,
+	}
+
+	detailsCh := make(chan ContractDetailsLite, 1024)
+	doneCh := make(chan struct{})
+	serverVersion := c.serverVersion
+	reqID := c.GetNextRequestID()
+
+	dataHandlerID := c.RegisterHandler(msgContractData, func(fields []string) {
+		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
+			select {
+			case detailsCh <- *lite:
+			default:
+			}
+		}
+	})
+	endHandlerID := c.RegisterHandler(msgContractDataEnd, func(fields []string) {
+		if len(fields) < 3 {
+			return
+		}
+		if id, err := strconv.Atoi(fields[2]); err == nil && id == reqID {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer c.UnregisterHandler(msgContractData, dataHandlerID)
+	defer c.UnregisterHandler(msgContractDataEnd, endHandlerID)
+
+	if err := c.sendContractDetailsRequest(contract, reqID); err != nil {
+		return 0, fmt.Errorf("send reqContractDetails: %w", err)
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	cached := 0
+	flush := func(d ContractDetailsLite) {
+		// Only OPT frames with a real ConID and a usable (strike, right)
+		// tuple. The bulk response can include malformed frames in rare
+		// gateway states — drop them silently rather than poisoning
+		// the cache.
+		if d.ConID == 0 || d.Strike <= 0 || d.Right == "" {
+			return
+		}
+		if d.SecType != "" && d.SecType != "OPT" {
+			return
+		}
+		// Store the gateway-returned Exchange verbatim. OPT contractData
+		// frames are tagged with the actual listing venue (CBOE / ISE /
+		// AMEX / BOX / ...), and the ConID is venue-specific — a CBOE
+		// ConID for a 700C strike is NOT interchangeable with the same
+		// strike's ISE ConID. The next subscriber must send reqMktData
+		// with Exchange equal to the venue the cached ConID came from,
+		// otherwise the gateway returns Error 200 ("No security
+		// definition has been found for the request"). This was the
+		// 1332-rejection failure mode observed during the v0.29.0 dev
+		// cycle when we stripped Exchange="" following the portfolio-
+		// seed convention — that convention works for held positions
+		// (the gateway already has a streaming subscription bound to
+		// the SMART-routed ConID for those) but does NOT work for
+		// fresh OPT subscribes off the bulk-resolved cache.
+		key := optionContractKey(symbol, expiry, d.Strike, d.Right)
+		c.optionContractMu.Lock()
+		if existing, ok := c.optionContractCache[key]; ok && existing.ConID != 0 {
+			// Don't overwrite a previously-resolved entry — keeps any
+			// exchange-routing already determined.
+			c.optionContractMu.Unlock()
+			return
+		}
+		c.optionContractCache[key] = d
+		c.optionContractMu.Unlock()
+		cached++
+	}
+
+	for {
+		select {
+		case d := <-detailsCh:
+			flush(d)
+		case <-doneCh:
+			// Drain any late frames that arrived just before contractDataEnd
+			// so we don't lose the last few strikes to channel scheduling.
+			for {
+				select {
+				case d := <-detailsCh:
+					flush(d)
+				default:
+					return cached, nil
+				}
+			}
+		case <-timer.C:
+			return cached, fmt.Errorf("prewarm timeout after %s (cached %d so far)", timeout, cached)
+		case <-ctx.Done():
+			return cached, ctx.Err()
+		}
+	}
+}
+
 // CancelMarketData cancels market data subscription
 func (c *Connection) CancelMarketData(reqID int) error {
 	if !c.IsConnected() {

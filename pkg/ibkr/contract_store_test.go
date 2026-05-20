@@ -21,7 +21,7 @@ func TestContractStoreRoundTrip(t *testing.T) {
 	}
 	hash := "deadbeef12345678"
 
-	if err := store.Save(in, hash); err != nil {
+	if err := store.Save(in, nil, hash); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestContractStoreFiltersZeroConID(t *testing.T) {
 		"OTHER":    {Symbol: "OTHER", ConID: 67890, Exchange: "SMART"},
 		"BLANKBOT": {Symbol: "BLANKBOT", ConID: 0},
 	}
-	if err := store.Save(in, ""); err != nil {
+	if err := store.Save(in, nil, ""); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	got, _, err := store.Load()

@@ -2409,7 +2409,7 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	// connector + params.
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog)
+		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 
 	var job *gammaComputation

@@ -573,27 +573,21 @@ func TestRenderRegime_ExplainIncludesQualityBlocks(t *testing.T) {
 	}
 }
 
-// TestRenderRegime_NilQualityFallsBackToStaleTick pins back-compat:
-// rows with nil Quality (e.g. legacy daemons, or paths that never
-// populated provenance) fall back to the pre-Quality renderer behaviour
-// — Status==Stale surfaces "· stale tick" exactly as before. Nothing
-// should panic, and the JSON-shape consumers see no regression.
-func TestRenderRegime_NilQualityFallsBackToStaleTick(t *testing.T) {
+// TestRenderRegime_NilQualityNoQualitySuffix pins the v0.29.0 UX
+// rework: quality / stale-tick suffixes are no longer rendered on
+// default rows (promoted to --explain instead). Nil-Quality rows still
+// must not panic and must not invent quality tags out of thin air.
+func TestRenderRegime_NilQualityNoQualitySuffix(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	// regimeFixture has all Quality pointers nil and HYGSPYDivergence at
-	// Status=Stale — the legacy path should produce "· stale tick".
 	if code := renderRegimeText(env, regimeFixture()); code != 0 {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "stale tick") {
-		t.Errorf("nil-Quality stale row should show '· stale tick' suffix:\n%s", out)
-	}
-	for _, fresh := range []string{"· est", "· modelled", "· frozen"} {
+	for _, fresh := range []string{"· est", "· modelled", "· frozen", "stale tick"} {
 		if strings.Contains(out, fresh) {
-			t.Errorf("nil-Quality render should not invent quality tag %q:\n%s", fresh, out)
+			t.Errorf("default render should not show quality tag %q (promoted to --explain):\n%s", fresh, out)
 		}
 	}
 }
