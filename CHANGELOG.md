@@ -10,6 +10,16 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.28.1 — 2026-05-20 18:11 CEST
+
+### What's new
+
+- Pre-market and weekend `ibkr gamma` finishes roughly 3× faster — wall-clock drops from ~20 min to ~6 min on a typical SPY chain. RTH timing is unchanged. The γ-zero level, methodology, and result envelope are unchanged.
+
+### Changed
+
+- Per-leg poll budget in the dealer γ-zero compute shrunk from 5 s to 1.5 s. The prior 5 s was waste on the pre-market path where the gateway's option-model engine never pushes a tick and every leg burned the full budget before falling through to the BS-IV fallback solve; 1.5 s remains 3× the typical-arrival headroom for live RTH model ticks.
+
 ## v0.28.0 — 2026-05-20 15:46 CEST
 
 ### What's new

@@ -231,12 +231,15 @@ type legFetcher func(
 // anchored on yesterday's close prices; the result envelope's
 // Quality.Source disclosure makes the use-of-prior-prices honest.
 //
-// Per-leg budget is 5 s. Model ticks for actively-quoted strikes
-// typically arrive within ~500 ms; deep-OTM strikes whose model the
-// gateway hasn't priced yet are dropped quickly rather than blocking
-// the worker pool for 15 s each. This keeps a cold-cache fan-out
-// against ~900 legs landing in ~3-5 min on 4 workers, well under the
-// per-method RPC deadline.
+// Per-leg budget is 1.5 s, shared by Stage 1 (OI gate) AND Stage 2
+// (model-tick gate). Model ticks for actively-quoted strikes arrive
+// within ~500 ms during RTH, so 1.5 s is 3× the typical-arrival
+// headroom and dead deep-OTM strikes drop without holding a worker.
+// Pre-market the model tick never arrives at all and the budget is
+// pure wait before Stage 2b's BS-IV fallback solves from the option's
+// prior close — shrinking from the prior 5 s collapses pre-market
+// wall-clock from ~20 min to ~6 min on 4 workers (960 legs × 1.5 s /
+// 4).
 func productionLegFetcher(
 	ctx context.Context,
 	c *ibkrlib.Connector,
@@ -285,7 +288,7 @@ func productionLegFetcher(
 	// reports the leg as failed if neither arrives, which is the right
 	// thing — a leg with no OI and no IV is dead.
 	var oi int64
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(1500 * time.Millisecond)
 	err = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
 		if d.OpenInt > 0 {
 			oi = d.OpenInt
