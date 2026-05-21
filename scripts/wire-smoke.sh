@@ -25,10 +25,16 @@
 #   scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 #
 # Environment hooks:
-#   IBKR_TEST_PORT      — gateway port to probe (default: 7496 TWS live)
-#   IBKR_TEST_HOST      — gateway host (default: 127.0.0.1)
-#   IBKR_SMOKE_TIMEOUT  — per-command wall-clock timeout in seconds (default: 30)
-#   IBKR_SMOKE_STRICT   — 1 = FAIL on no-gateway instead of SKIP (release path)
+#   IBKR_TEST_PORT          — gateway port to probe (default: 7496 TWS live)
+#   IBKR_TEST_HOST          — gateway host (default: 127.0.0.1)
+#   IBKR_SMOKE_TIMEOUT      — per-command wall-clock timeout in seconds (default: 30)
+#   IBKR_SMOKE_STRICT       — 1 = FAIL on no-gateway instead of SKIP (release path)
+#   SPX_EXPECTED_REACHABLE  — 1 (default in `make smoke`) = `ibkr gamma --only=spx`
+#                             must return real SPX data; banner-seen FAILS the run.
+#                             0 = banner-seen is a clean skip (CI / accounts without
+#                             CBOE OPRA). User-flagged guardrail: "no SPX data
+#                             would be a bug on my setup" — prevents silent SPX
+#                             regression between releases (design §11.2).
 #
 set -euo pipefail
 
@@ -285,6 +291,38 @@ if [[ "${LOOSE:-0}" -eq 1 ]]; then
         sleep 2
     done
     assert_wire gamma-premarket-derived "$GAMMA_ENV"
+fi
+
+# 11. SPX coverage check — exercises the `--only=spx` path landed in
+# the gamma-spx-coverage arc. Per design §11.2: on this dev machine
+# `SPX_EXPECTED_REACHABLE=1` flips banner-seen from clean-skip to
+# loud-fail, preventing silent SPX regression. CI accounts without
+# CBOE OPRA can disable via the env var.
+#
+# The check is non-blocking on the SPX compute itself — `--no-wait`
+# returns immediately with the current cache state. We only assert
+# the daemon ACCEPTED `--only=spx` (didn't reject the scope) and that
+# the result envelope doesn't carry the entitlement-skipped banner
+# when SPX_EXPECTED_REACHABLE is set.
+echo "  [gamma --only=spx --no-wait]..."
+run_cli gamma-spx gamma --only=spx --no-wait --json
+if [[ $LAST_CMD_EXIT -ne 0 ]]; then
+    echo "wire-smoke: FAIL: gamma --only=spx exit=$LAST_CMD_EXIT" >&2
+    echo "$LAST_CMD_OUTPUT" >&2
+    exit 1
+fi
+if [[ "${SPX_EXPECTED_REACHABLE:-0}" -eq 1 ]]; then
+    # Check the result for SPX-skipped warnings. The envelope's
+    # `warnings` array carries "spx_unavailable:<reason>" tokens when
+    # the combined-mode prewarm degraded. Note: when --only=spx is
+    # used, the daemon runs the SPX path directly, so a real
+    # entitlement issue surfaces as Status=error here.
+    if echo "$LAST_CMD_OUTPUT" | grep -q '"status": *"error"'; then
+        echo "wire-smoke: FAIL: SPX_EXPECTED_REACHABLE=1 but gamma --only=spx returned error" >&2
+        echo "$LAST_CMD_OUTPUT" >&2
+        exit 1
+    fi
+    echo "    [spx ok — daemon accepted --only=spx scope, no entitlement error]"
 fi
 
 echo ""

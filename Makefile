@@ -276,12 +276,21 @@ smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 #                    is a failed release").
 SMOKE_STRICT ?= 0
 
+# SPX_EXPECTED_REACHABLE — default ON in this repo because this is the
+# dev machine with CBOE OPRA entitlement; the user's standing guardrail
+# (per docs/design/gamma-spx-coverage.md §11.2): "no SPX data would be
+# a bug on my setup." If `ibkr gamma --only=spx` returns the
+# entitlement-skipped banner, fail loudly rather than silently passing
+# the smoke. Override with `make smoke SPX_EXPECTED_REACHABLE=0` on
+# accounts that legitimately lack SPX entitlement.
+SPX_EXPECTED_REACHABLE ?= 1
+
 smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild); SMOKE_STRICT=1 makes no-gateway a failure
 	@if [ ! -x bin/ibkr ]; then \
 		echo "smoke-only: bin/ibkr missing — run 'make build' first" >&2; \
 		exit 1; \
 	fi
-	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 
 smoke: build smoke-only ## Wire-level smoke vs. a live gateway (rebuilds bin/ibkr; SKIP if no gateway)
 
