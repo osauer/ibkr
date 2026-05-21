@@ -1120,7 +1120,17 @@ func (s *Server) prewarmZeroGamma(ctx context.Context) {
 	}
 	s.logger.Infof("gamma prewarm: kicking initial compute (caller=startup)")
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
+	// Hold the SPY underlying for the compute lifetime. See
+	// handleGammaZeroSPX for the protocol rationale (IBKR requires the
+	// underlying subscribed for OPTION_COMPUTATION ticks to flow on
+	// OPT subscriptions). Refcounted via subManager so a concurrent
+	// regime SPY snapshot doesn't double-subscribe or tear this down.
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		release, err := s.subs.Hold(bgCtx, "SPY")
+		if err != nil {
+			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
+		}
+		defer release()
 		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)

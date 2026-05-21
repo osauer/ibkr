@@ -2407,8 +2407,23 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	// Build the compute closure. The cache layer owns goroutine
 	// lifecycle; we hand it a function that closes over the gateway
 	// connector + params.
+	//
+	// The closure acquires a refcounted Hold on the SPY underlying for
+	// the entire lifetime of the compute. IBKR's TWS API requires a
+	// market-data subscription on the option's underlying to push
+	// OPTION_COMPUTATION (msg 21) ticks for OPT subscriptions; without
+	// it the model engine has no live spot anchor and the per-leg fan-
+	// out lands ~0% IV/greeks (observed: 12/1256 legs at 1% coverage
+	// pre-market). subManager.Hold is refcounted, so a concurrent
+	// regime SPY snapshot via the same line is safe — the line stays
+	// open until the compute releases.
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		release, err := s.subs.Hold(bgCtx, "SPY")
+		if err != nil {
+			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
+		}
+		defer release()
 		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 

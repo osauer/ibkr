@@ -973,17 +973,35 @@ func normalizeGammaParams(p rpc.GammaZeroParams) rpc.GammaZeroParams {
 	return p
 }
 
-// snapshotUnderlyingForGamma wraps briefSnapshotFull with the gamma
-// compute's spot-resolution policy. Returns (spot, bid, ask, last,
-// dataType) — spot picks last → mid → bid → ask → mark → close,
-// matching the briefSnapshotPrice convention. Mark (tick 37) covers
-// most off-hours frozen states; close (tick 9) is the last-resort
-// anchor for the rare case where the gateway hasn't even pushed a
-// mark yet (cold post-restart). Without these the compute could not
-// anchor a spot. Caller passes the underlying symbol (currently SPY).
+// snapshotUnderlyingForGamma polls the connector's market-data cache for
+// the underlying spot. Returns (spot, bid, ask, last, dataType) — spot
+// picks last → mid → bid → ask → mark → close, matching the
+// briefSnapshotPrice convention. Mark (tick 37) covers most off-hours
+// frozen states; close (tick 9) is the last-resort anchor for the rare
+// case where the gateway hasn't even pushed a mark yet.
+//
+// Caller MUST hold an active market-data subscription for sym for the
+// duration of this call AND for the lifetime of the option fan-out that
+// follows. IBKR requires the underlying to be subscribed for the model
+// engine to push OPTION_COMPUTATION (msg 21) ticks on the OPT
+// subscriptions — without a held underlying the gateway suppresses the
+// IV/Greeks tick stream and the leg fan-out lands ~0% useful data.
+// Acquire via subManager.Hold at the call site so refcounting is honest
+// and the briefSnapshotFull subscribe/unsubscribe race that previously
+// tore the line down mid-fan-out is structurally excluded.
 func snapshotUnderlyingForGamma(ctx context.Context, c *ibkrlib.Connector, sym string, timeout time.Duration) (spot, bid, ask, last float64, dataType string) {
+	if c == nil {
+		return 0, 0, 0, 0, ""
+	}
+	sym = normSym(sym)
 	var mark, closePx float64
-	bid, ask, last, mark, closePx, dataType = briefSnapshotFull(ctx, c, sym, timeout)
+	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		bid, ask, last, mark, closePx = d.Bid, d.Ask, d.Last, d.MarkPrice, d.Close
+		if dataType == "" && (bid > 0 || ask > 0 || last > 0 || mark > 0 || closePx > 0) {
+			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+		}
+		return bid > 0 || ask > 0 || last > 0 || mark > 0
+	})
 	switch {
 	case last > 0:
 		spot = last
