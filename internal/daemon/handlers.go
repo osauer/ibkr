@@ -669,7 +669,7 @@ func captureOptionGreeks(ctx context.Context, c *ibkrlib.Connector, under, expir
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
-	_ = pollUntil(ctx, time.Now().Add(budget), func() bool {
+	_ = pollUntilWithReject(ctx, time.Now().Add(budget), c.SubscriptionRejectCh(key), key, func() bool {
 		g, ok := c.GetOptionGreeks(key)
 		if !ok {
 			return false
