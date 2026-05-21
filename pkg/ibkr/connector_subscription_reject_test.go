@@ -45,7 +45,7 @@ func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connectio
 		Right:      "C",
 		Multiplier: 100,
 	}
-	cacheKey := optionContractKey(contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+	cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 	conn.optionContractMu.Lock()
 	conn.optionContractCache[cacheKey] = ContractDetailsLite{
 		ConID:        99999,

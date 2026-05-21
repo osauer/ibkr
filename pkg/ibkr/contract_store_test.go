@@ -182,3 +182,139 @@ func TestMembersHashDifferentSetsDiffer(t *testing.T) {
 		t.Error("hash should change on substitute")
 	}
 }
+
+// TestContractStoreOptionsRoundTripSPXvsSPXW pins the v3 cache-key shape:
+// SPX and SPXW share a third-Friday date and strike but are two distinct
+// listed contracts with two distinct ConIDs. The key must keep them
+// separated so the gamma compute prices each leg under the correct
+// AM-vs-PM settlement instant. Pre-v3 keys (symbol|expiry|strike|right)
+// would collide here.
+func TestContractStoreOptionsRoundTripSPXvsSPXW(t *testing.T) {
+	dir := t.TempDir()
+	store := NewContractStore(dir)
+
+	// Two distinct contracts: same date, same strike, same right.
+	// Trading class is the discriminator. ConIDs are fictional but
+	// represent the real-world AM/PM-settled pair on third-Friday.
+	spxAM := ContractDetailsLite{
+		Symbol: "SPX", TradingClass: "SPX", Expiry: "20260619",
+		Strike: 5400, Right: "C", ConID: 700000001, Exchange: "CBOE",
+	}
+	spxwPM := ContractDetailsLite{
+		Symbol: "SPX", TradingClass: "SPXW", Expiry: "20260619",
+		Strike: 5400, Right: "C", ConID: 700000002, Exchange: "CBOE",
+	}
+
+	options := map[string]ContractDetailsLite{
+		optionContractKey(spxAM.Symbol, spxAM.TradingClass, spxAM.Expiry, spxAM.Strike, spxAM.Right):      spxAM,
+		optionContractKey(spxwPM.Symbol, spxwPM.TradingClass, spxwPM.Expiry, spxwPM.Strike, spxwPM.Right): spxwPM,
+	}
+	if len(options) != 2 {
+		t.Fatalf("v3 key collision: SPX and SPXW collapsed to %d entries (want 2): %v",
+			len(options), options)
+	}
+
+	if err := store.Save(map[string]ContractDetailsLite{}, options, ""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.LoadOptions()
+	if err != nil {
+		t.Fatalf("LoadOptions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LoadOptions returned %d entries, want 2: %v", len(got), got)
+	}
+	spxKey := optionContractKey("SPX", "SPX", "20260619", 5400, "C")
+	spxwKey := optionContractKey("SPX", "SPXW", "20260619", 5400, "C")
+	if got[spxKey].ConID != 700000001 {
+		t.Errorf("SPX-class ConID after round-trip: got %d, want 700000001", got[spxKey].ConID)
+	}
+	if got[spxwKey].ConID != 700000002 {
+		t.Errorf("SPXW-class ConID after round-trip: got %d, want 700000002", got[spxwKey].ConID)
+	}
+}
+
+// TestContractStoreOptionsMigratesV2KeysToEmptyClass pins the v2 → v3
+// migration: a v2 file (no trading class in keys) loads cleanly and the
+// keys are normalised to the v3 empty-class shape so the connector's
+// in-memory cache can read them. The next prewarm overwrites those
+// empty-class entries with class-qualified ones; the migration is a
+// one-shot bridge across the schema bump.
+func TestContractStoreOptionsMigratesV2KeysToEmptyClass(t *testing.T) {
+	dir := t.TempDir()
+	// Hand-write a v2-shaped file. v2 keys are symbol|expiry|strike|right
+	// (three pipes). v2 didn't carry the class in the cache file.
+	v2 := `{
+		"version": 2,
+		"as_of": "2026-05-21T00:00:00Z",
+		"contracts": {},
+		"options": {
+			"SPY|20260620|500.000000|C": {
+				"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20260620",
+				"Strike": 500, "Right": "C", "ConID": 600000001
+			},
+			"SPY|20260620|500.000000|P": {
+				"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20260620",
+				"Strike": 500, "Right": "P", "ConID": 600000002
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, contractStoreFile), []byte(v2), 0o644); err != nil {
+		t.Fatalf("seed v2 file: %v", err)
+	}
+	store := NewContractStore(dir)
+	got, err := store.LoadOptions()
+	if err != nil {
+		t.Fatalf("LoadOptions (v2 migration): %v", err)
+	}
+	// Keys must be normalised to v3 empty-class shape: "SPY||20260620|500.000000|C".
+	want := map[string]int{
+		"SPY||20260620|500.000000|C": 600000001,
+		"SPY||20260620|500.000000|P": 600000002,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries after migration, want %d: %v", len(got), len(want), got)
+	}
+	for k, wantConID := range want {
+		entry, ok := got[k]
+		if !ok {
+			t.Errorf("missing migrated key %q in %v", k, got)
+			continue
+		}
+		if entry.ConID != wantConID {
+			t.Errorf("ConID for %q: got %d, want %d", k, entry.ConID, wantConID)
+		}
+	}
+}
+
+// TestContractStoreV2ExpiredOptionStillPruned pins that the v2-migration
+// path doesn't accidentally resurrect entries whose Expiry has passed in
+// NY time — the GC at the head of LoadOptions runs BEFORE the key
+// migration, so an expired v2 entry never gets normalised.
+func TestContractStoreV2ExpiredOptionStillPruned(t *testing.T) {
+	dir := t.TempDir()
+	// Expiry 2020-01-01 is comfortably in the past relative to any test
+	// clock; the GC must drop it without inspecting the key shape.
+	v2 := `{
+		"version": 2,
+		"as_of": "2026-05-21T00:00:00Z",
+		"contracts": {},
+		"options": {
+			"SPY|20200101|300.000000|C": {
+				"Symbol": "SPY", "Expiry": "20200101", "Strike": 300, "Right": "C", "ConID": 1
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, contractStoreFile), []byte(v2), 0o644); err != nil {
+		t.Fatalf("seed v2 file: %v", err)
+	}
+	store := NewContractStore(dir)
+	got, err := store.LoadOptions()
+	if err != nil {
+		t.Fatalf("LoadOptions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expired v2 entry leaked through migration: %v", got)
+	}
+}

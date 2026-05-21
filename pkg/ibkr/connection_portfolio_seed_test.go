@@ -54,7 +54,8 @@ func TestHandlePortfolioValueSeedsOptionContractCache(t *testing.T) {
 
 	// The OPRA-style cache key is built by optionContractKey from the
 	// parsed Contract fields. SubscribeOption uses the same key shape.
-	cacheKey := optionContractKey("AMZN", "20260618", 305, "C")
+	// TradingClass="AMZN" matches the test fixture field 12.
+	cacheKey := optionContractKey("AMZN", "AMZN", "20260618", 305, "C")
 	conn.optionContractMu.RLock()
 	detail, ok := conn.optionContractCache[cacheKey]
 	conn.optionContractMu.RUnlock()

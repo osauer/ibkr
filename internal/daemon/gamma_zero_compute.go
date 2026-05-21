@@ -609,7 +609,12 @@ func computeGammaZeroFor(
 	beforeFilter := len(jobs)
 	filteredJobs := jobs[:0]
 	for _, j := range jobs {
-		if c.IsOptionContractCached(sym, j.expiryYMD, j.strike, j.right) {
+		// Trading class == symbol for single-class underlyings (SPY,
+		// equities). Step 3 of the SPX coverage arc plumbs a per-leg
+		// trading class through legSpec; until then this matches the
+		// TradingClass IBKR fills in for SPY (== "SPY") and keeps the
+		// SPY path bit-for-bit identical post-cache-key bump.
+		if c.IsOptionContractCached(sym, sym, j.expiryYMD, j.strike, j.right) {
 			filteredJobs = append(filteredJobs, j)
 		}
 	}

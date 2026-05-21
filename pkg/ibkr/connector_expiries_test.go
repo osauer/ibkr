@@ -378,6 +378,112 @@ func TestFetchOptionExpiriesReturnsPartialOnLateTimeout(t *testing.T) {
 }
 
 // TestNormaliseExpiry8 covers the small parser used by snapshot().
+// TestFetchOptionExpiryStrikesClassedKeepsSPXandSPXWSeparate pins the new
+// class-aware fetch path used by the gamma compute's SPX coverage. The
+// gateway lists a third-Friday twice — once under tradingClass="SPX"
+// (AM-settled monthly) and once under "SPXW" (PM-settled weekly). They
+// are economically distinct contracts (different ConIDs, different
+// settlement instants); the gamma compute must keep them separated so
+// it can apply the right AM-vs-PM time-to-expiry instant and so the
+// option-contract cache key doesn't collide.
+//
+// Regression target: legacy `FetchOptionExpiryStrikes` (verified by the
+// SPX/SPXW merge test above) silently merges classes into one strike
+// grid per date. `FetchOptionExpiryStrikesClassed` must NOT do that.
+func TestFetchOptionExpiryStrikesClassedKeepsSPXandSPXWSeparate(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	conn.writer = bufio.NewWriter(&bytes.Buffer{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.contractCache["SPX"] = ContractDetailsLite{
+		ConID:        416904,
+		LocalSymbol:  "SPX",
+		TradingClass: "SPX",
+		Exchange:     "CBOE",
+		PrimaryExch:  "CBOE",
+	}
+
+	go func() {
+		var reqID int
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			conn.handlersMu.RLock()
+			n := len(conn.msgHandlers[msgSecurityDefinitionOptionalParameter])
+			conn.handlersMu.RUnlock()
+			if n > 0 {
+				conn.reqIDMu.Lock()
+				reqID = conn.reqIDSeq - 1
+				conn.reqIDMu.Unlock()
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		// SPX-class frame: only the third-Friday monthly, $5-spaced.
+		spx := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameter),
+			strconv.Itoa(reqID),
+			"CBOE", "416904", "SPX", "100",
+			"1", "20260619",
+			"3", "4500", "5000", "5500",
+		}
+		// SPXW-class frame: same date, narrower around-ATM grid (the
+		// economically-different contract).
+		spxw := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameter),
+			strconv.Itoa(reqID),
+			"CBOE", "416904", "SPXW", "100",
+			"1", "20260619",
+			"3", "4990", "5000", "5010",
+		}
+		end := []string{
+			strconv.Itoa(msgSecurityDefinitionOptionalParameterEnd),
+			strconv.Itoa(reqID),
+		}
+		for _, h := range conn.snapshotHandlers(msgSecurityDefinitionOptionalParameter) {
+			h(spx)
+			h(spxw)
+		}
+		for _, h := range conn.snapshotHandlers(msgSecurityDefinitionOptionalParameterEnd) {
+			h(end)
+		}
+	}()
+
+	classed, err := c.FetchOptionExpiryStrikesClassed("SPX", time.Second)
+	if err != nil {
+		t.Fatalf("FetchOptionExpiryStrikesClassed: %v", err)
+	}
+
+	entries := classed["2026-06-19"]
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 trading-class entries on 2026-06-19, got %d: %+v", len(entries), entries)
+	}
+	// Stable order (snapshot sorts class names ascending): SPX first.
+	if entries[0].TradingClass != "SPX" {
+		t.Errorf("entries[0].TradingClass = %q, want SPX", entries[0].TradingClass)
+	}
+	if entries[1].TradingClass != "SPXW" {
+		t.Errorf("entries[1].TradingClass = %q, want SPXW", entries[1].TradingClass)
+	}
+	wantSPX := []float64{4500, 5000, 5500}
+	if !reflect.DeepEqual(entries[0].Strikes, wantSPX) {
+		t.Errorf("SPX strikes = %v, want %v", entries[0].Strikes, wantSPX)
+	}
+	wantSPXW := []float64{4990, 5000, 5010}
+	if !reflect.DeepEqual(entries[1].Strikes, wantSPXW) {
+		t.Errorf("SPXW strikes = %v, want %v", entries[1].Strikes, wantSPXW)
+	}
+	// Legacy FetchOptionExpiryStrikes back-compat (merged across classes)
+	// is covered by TestFetchOptionExpiriesMergesAcrossTradingClasses
+	// above — each test drives its own round of msg-75 frames, so we
+	// don't double-fetch here.
+}
+
 func TestNormaliseExpiry8(t *testing.T) {
 	cases := []struct {
 		in   string

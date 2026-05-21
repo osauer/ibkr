@@ -57,8 +57,20 @@ func NewContractStore(dir string) *ContractStore {
 // v1 → v2 added the top-level "options" map, keyed by optionContractKey,
 // for bulk-prewarmed option contracts. v1 files are read transparently:
 // the options map appears as nil and the daemon refills it from the
-// next prewarm. New writes always go out at v2.
-const contractStoreVersion = 2
+// next prewarm.
+//
+// v2 → v3 widened optionContractKey to include the trading class
+// (`symbol|class|expiry|strike|right` instead of `symbol|expiry|strike|right`).
+// Required for SPX/SPXW disambiguation — see
+// docs/design/gamma-spx-coverage.md §4.4. v2 keys are migrated forward
+// on read: each `S|E|K|R` becomes `S||E|K|R` (empty class slot). Empty
+// class never collides with a real entry because the connector always
+// fills TradingClass for OPT contracts; only the v2-read migration
+// produces empty-class entries, and the next prewarm overwrites them
+// with class-qualified keys.
+//
+// New writes always go out at v3.
+const contractStoreVersion = 3
 
 // contractStoreFile is the filename inside ContractStore.dir.
 const contractStoreFile = "contracts.json"
@@ -114,8 +126,15 @@ func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
 // passed in NY time is dropped silently. The returned map can be empty
 // (cold install or all entries expired) but never nil.
 //
-// Same return convention as Load: missing file or version mismatch
-// yields an empty map without error.
+// v2 → v3 key-format migration runs here: v2 files keyed entries as
+// `symbol|expiry|strike|right` (4 fields, 3 pipes); v3 added trading
+// class as a second field (5 fields, 4 pipes). v2 keys are rewritten
+// on the fly to `symbol||expiry|strike|right` (empty class slot) so
+// the daemon picks up the persisted entries; the next prewarm
+// overwrites them with class-qualified keys.
+//
+// Same return convention as Load: missing file or future-version
+// mismatch yields an empty map without error.
 func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
 	path := filepath.Join(s.dir, contractStoreFile)
 	data, err := os.ReadFile(path)
@@ -136,6 +155,19 @@ func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
 	today := nyDateString(time.Now())
 	for k, v := range f.Options {
 		if v.Expiry != "" && v.Expiry < today {
+			continue
+		}
+		// v2 → v3 key migration. A v2 key has 3 pipes (symbol|expiry|
+		// strike|right); v3 has 4 (symbol|class|expiry|strike|right).
+		// Anything else is malformed and skipped (defensive — the
+		// file came from our own writer, so this branch fires only
+		// on hand-edited / corrupted files).
+		if pipes := strings.Count(k, "|"); pipes == 3 {
+			parts := strings.SplitN(k, "|", 2)
+			if len(parts) == 2 {
+				k = parts[0] + "||" + parts[1]
+			}
+		} else if pipes != 4 {
 			continue
 		}
 		out[k] = v
@@ -344,19 +376,25 @@ func (c *Connector) SnapshotOptionContracts() map[string]ContractDetailsLite {
 }
 
 // IsOptionContractCached reports whether the connection's option contract
-// cache has a resolved entry for (symbol, expiry, strike, right). Used
-// by the gamma compute to filter its enumerated job list to strikes that
-// actually exist as listed contracts — secDefOptParams returns a superset
-// across exchanges, and asking reqMktData for a non-listed (Strike, Right)
-// just burns time and trips the throttle detector.
-func (c *Connector) IsOptionContractCached(symbol, expiry string, strike float64, right string) bool {
+// cache has a resolved entry for (symbol, tradingClass, expiry, strike,
+// right). Used by the gamma compute to filter its enumerated job list to
+// strikes that actually exist as listed contracts — secDefOptParams
+// returns a superset across exchanges, and asking reqMktData for a
+// non-listed (Strike, Right) just burns time and trips the throttle
+// detector.
+//
+// tradingClass is required for SPX-style multi-class underlyings (SPX vs
+// SPXW share expiry+strike on third-Fridays). For single-class
+// underlyings (SPY, equities) callers pass the symbol — that matches the
+// TradingClass IBKR fills in for those contracts.
+func (c *Connector) IsOptionContractCached(symbol, tradingClass, expiry string, strike float64, right string) bool {
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
 	if conn == nil {
 		return false
 	}
-	key := optionContractKey(symbol, expiry, strike, right)
+	key := optionContractKey(symbol, tradingClass, expiry, strike, right)
 	conn.optionContractMu.RLock()
 	defer conn.optionContractMu.RUnlock()
 	entry, ok := conn.optionContractCache[key]

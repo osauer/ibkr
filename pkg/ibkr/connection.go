@@ -2383,7 +2383,7 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 	// has a non-empty value, so leaving Exchange="" preserves the SMART
 	// default the gateway expects for option market-data subscriptions.
 	if contract.SecType == "OPT" && conID != 0 {
-		cacheKey := optionContractKey(contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+		cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 		detail := ContractDetailsLite{
 			Symbol:       contract.Symbol,
 			Exchange:     "",
@@ -3788,9 +3788,29 @@ func (c *Connection) buildReqMktDataFields(contract Contract, reqID int, generic
 	return fields
 }
 
-func optionContractKey(symbol, expiry string, strike float64, right string) string {
-	key := strings.ToUpper(strings.TrimSpace(symbol)) + "|" + strings.TrimSpace(expiry) + "|" + strconv.FormatFloat(strike, 'f', 6, 64) + "|" + strings.ToUpper(strings.TrimSpace(right))
-	return key
+// optionContractKey is the canonical OPRA-style identifier for an OPT
+// contract inside the in-memory cache AND the persisted contracts.json.
+// The five-field shape (symbol | trading class | expiry | strike | right)
+// is load-bearing for SPX/SPXW: a third-Friday SPX-class AM-settled
+// contract and the third-Friday SPXW-class PM-settled contract share
+// expiry, strike, and right but are different ConIDs with different
+// settlement times. Without the trading-class qualifier they collide
+// in the cache and the gamma compute mis-prices half a day of TTE on
+// the losing leg.
+//
+// Trading class is uppercased and trimmed for parity with the symbol /
+// right handling. Empty class renders as a literal empty segment
+// (`SPY||20260521|500.000000|C`), which is the v3-on-disk shape for
+// entries migrated forward from v2 files (v2 didn't carry the class).
+// Distinct from an explicit `SPY|SPY|...` because the connector always
+// fills in TradingClass for OPT contracts, so the empty-class slot is
+// only ever populated by the v2-read migration.
+func optionContractKey(symbol, tradingClass, expiry string, strike float64, right string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" +
+		strings.ToUpper(strings.TrimSpace(tradingClass)) + "|" +
+		strings.TrimSpace(expiry) + "|" +
+		strconv.FormatFloat(strike, 'f', 6, 64) + "|" +
+		strings.ToUpper(strings.TrimSpace(right))
 }
 
 func applyContractDetailLite(detail ContractDetailsLite, contract *Contract) {
@@ -4125,7 +4145,7 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 		ctx = context.Background()
 	}
 
-	key := optionContractKey(contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+	key := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 
 	c.optionContractMu.RLock()
 	if cached, ok := c.optionContractCache[key]; ok && cached.ConID != 0 {
@@ -4453,7 +4473,7 @@ func (c *Connection) prewarmOneExpiry(
 		// (the gateway already has a streaming subscription bound to
 		// the SMART-routed ConID for those) but does NOT work for
 		// fresh OPT subscribes off the bulk-resolved cache.
-		key := optionContractKey(symbol, expiry, d.Strike, d.Right)
+		key := optionContractKey(symbol, d.TradingClass, expiry, d.Strike, d.Right)
 		c.optionContractMu.Lock()
 		if existing, ok := c.optionContractCache[key]; ok && existing.ConID != 0 {
 			// Don't overwrite a previously-resolved entry — keeps any
