@@ -166,9 +166,11 @@ type legData struct {
 // a struct because adding the BS-IV-derived flag pushed the original
 // 5-tuple into "what do these positional booleans mean" territory.
 //
-// OK reports whether OI + IV both landed (whether from the gateway's
-// model tick or the BS-IV fallback) within budget — the aggregator
-// only counts a leg when OK is true.
+// OK reports whether IV landed (from the gateway's model tick or the
+// BS-IV fallback) within budget — the aggregator only counts a leg when
+// OK is true. OI is opportunistic (may be 0 for inactive strikes off-
+// hours) and does not gate OK; a leg with γ but no OI contributes 0 to
+// dealer GEX and still enriches the IV surface for skew fitting.
 //
 // Throttle reports a contract-resolve failure on a strike that came
 // from the gateway's own enumeration. The aggregator counts these in
@@ -242,36 +244,27 @@ type legFetcher func(
 // open-interest tick to land in the MarketData cache, then read the
 // per-strike IV from GetOptionIV and the Greeks from GetOptionGreeks.
 //
-// Three-stage data collection:
+// Two-stage data collection:
 //
-//	Stage 1  — OI gate. Tick 27 (callOpenInterest) / 28
-//	           (putOpenInterest), per-subscription cache.
-//	Stage 2  — gateway model tick. Tick 21 (OPTION_COMPUTATION,
+//	Stage 1  — gateway model tick. Tick 21 (OPTION_COMPUTATION,
 //	           tickType=13) routes into optIV[key] / optGreeks[key];
-//	           fastest path with the gateway's own σ.
-//	Stage 2b — BS-IV fallback. When the gateway never pushed a model
-//	           tick (typical pre-market: the IBKR model-computation
-//	           engine only fires when option order flow is active),
-//	           solve for σ via Newton-Raphson against the option's
-//	           prior-session close (tick 9, always pushed on subscribe
-//	           regardless of trading state). The leg's gamma is then
+//	           fastest path with the gateway's own σ. Verified to fire
+//	           off-hours under the daemon's default MarketDataType=2 —
+//	           same path `ibkr chain SPY` relies on for ATM IV.
+//	Stage 2  — BS-IV fallback. When the gateway never pushed a model
+//	           tick, solve for σ via Newton-Raphson against the option's
+//	           bid/ask mid or prior-session close (tick 9, always pushed
+//	           on subscribe regardless of trading state). Gamma is then
 //	           computed via bsGamma using the derived σ.
 //
-// Without Stage 2b, the pre-market compute aborts because zero legs
-// land IV — exactly the behaviour the v0.25.0 release notes call out as
-// a known limitation. With Stage 2b, the compute produces a result
-// anchored on yesterday's close prices; the result envelope's
-// Quality.Source disclosure makes the use-of-prior-prices honest.
+// Open interest (ticks 27/28) is read opportunistically from the per-
+// subscription cache at the end — never as a gate. Per-strike OI is
+// genuinely sparse off-hours (verified in TWS UI: most rows show no
+// OI value); gating on OI hard-drops legs that have real IV signal.
 //
-// Per-leg budget is 1.5 s, shared by Stage 1 (OI gate) AND Stage 2
-// (model-tick gate). Model ticks for actively-quoted strikes arrive
-// within ~500 ms during RTH, so 1.5 s is 3× the typical-arrival
-// headroom and dead deep-OTM strikes drop without holding a worker.
-// Pre-market the model tick never arrives at all and the budget is
-// pure wait before Stage 2b's BS-IV fallback solves from the option's
-// prior close — shrinking from the prior 5 s collapses pre-market
-// wall-clock from ~20 min to ~6 min on 4 workers (960 legs × 1.5 s /
-// 4).
+// Per-leg budget is 1.5 s for the model-tick poll. Active strikes
+// produce a model tick within ~500 ms; dead deep-OTM strikes time out
+// and fall through to Stage 2 which back-solves σ from cached prices.
 func productionLegFetcher(
 	ctx context.Context,
 	c *ibkrlib.Connector,
@@ -305,50 +298,27 @@ func productionLegFetcher(
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
-	// Stage 1: open-interest gate. OI ticks (27 callOpenInterest,
-	// 28 putOpenInterest) arrive via the standard tick-size handler
-	// in handleTickSize and write to subscriptions[key].OpenInt; the
-	// MarketData cache read is the right surface here because OI is
-	// per-subscription, not per-OPRA-key.
+	// Stage 1: model-tick poll. handleOptionComputation commits
+	// optIV[key] / optGreeks[key] once IBKR sends a non-sentinel model
+	// row (see saneGreek); their presence is the authoritative signal
+	// that the gateway priced the contract. Empirically (see `ibkr chain
+	// SPY` working off-hours via the same handleOptionComputation path),
+	// model ticks DO arrive for OPT contracts under the daemon's default
+	// MarketDataType=2 — the prior v0.28 release switched the connection
+	// to type=1 to chase OI ticks but suppressed model ticks system-wide
+	// for the duration of the fan-out, regressing landing rate to ~1%.
 	//
-	// Genuine zero-OI strikes do exist (newly listed lines on far-OTM
-	// rungs) and shouldn't block the leg fetch indefinitely — but they
-	// contribute exactly zero to dealer GEX in either the at-spot
-	// aggregate or the sweep, so the upstream caller already drops
-	// them on `if !OK`. The wait predicate therefore short-circuits on
-	// OI > 0 only; OI == 0 falls through to the model-tick poll and
-	// reports the leg as failed if neither arrives, which is the right
-	// thing — a leg with no OI and no IV is dead.
-	var oi int64
+	// OI (ticks 27/28) is intentionally NOT gated. Per-strike OI is
+	// genuinely sparse off-hours — even TWS's own option-chain widget
+	// shows OI only on actively-traded strikes (verified in TWS UI
+	// 2026-05-21). A leg with model-tick IV but no OI still contributes
+	// the right thing to dealer GEX (γ × 0 = 0) and enriches the IV
+	// surface for skew fitting; dropping it on missing OI throws away
+	// real signal. OI is read opportunistically from the per-
+	// subscription cache after the model-tick poll.
 	deadline := time.Now().Add(1500 * time.Millisecond)
-	err = pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
-		if d.OpenInt > 0 {
-			oi = d.OpenInt
-			return true
-		}
-		return false
-	})
-	if IsSubscriptionRejected(err) {
-		// Gateway pushed a terminal error for this reqID (200 "no
-		// security definition", 354 "not subscribed", 10197 "competing
-		// session", …). The subscription will never produce ticks, so
-		// abort the leg immediately — both for OI (already polled) and
-		// for the model tick (would block another 5 s). Throttle: false
-		// because this is the gateway being authoritative, not a sign
-		// the fan-out is overloading the wire.
-		return legResult{}
-	}
-
-	// Stage 2: model-tick gate. handleOptionComputation only commits
-	// optIV[key] and optGreeks[key] once IBKR sends a non-sentinel
-	// model row (see saneGreek), so the presence of either is the
-	// authoritative signal that the contract has been priced.
-	// pollUntilWithReject shares the leg's overall deadline AND the
-	// subscription's reject channel — model ticks usually arrive within
-	// the first second once OI lands, but the budget covers them both,
-	// and a late-arriving terminal error still aborts fast.
 	var iv, gamma float64
-	_ = pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
+	err = pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
 		if v, found := c.GetOptionIV(key); found && v > 0 {
 			iv = v
 		}
@@ -357,14 +327,26 @@ func productionLegFetcher(
 		}
 		return iv > 0
 	})
-
-	if oi == 0 {
+	if IsSubscriptionRejected(err) {
+		// Gateway pushed a terminal error for this reqID (200 "no
+		// security definition", 354 "not subscribed", 10197 "competing
+		// session", …). The subscription will never produce ticks.
+		// Throttle: false — gateway is being authoritative, not a sign
+		// the fan-out is overloading the wire.
 		return legResult{}
 	}
+
+	// Opportunistic OI read. May be 0 for strikes the gateway never
+	// pushed a 27/28 tick for — that's fine, the leg still lands.
+	var oi int64
+	if d, ok := c.GetMarketData()[key]; ok {
+		oi = d.OpenInt
+	}
+
 	if iv > 0 {
 		return legResult{OI: oi, IV: iv, Gamma: gamma, OK: true}
 	}
-	// Stage 2b: gateway pushed OI but no model tick (typical pre-market).
+	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
 	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
 	var price float64
@@ -632,28 +614,17 @@ func computeGammaZeroSPX(
 			prewarmTotal)
 	}
 
-	// Switch the connection's MarketDataType to 1 (live) for the fan-out.
-	// Empirical (wire-interceptor) finding 2026-05-18: with the daemon
-	// default of type=2 (frozen-aware), the IBKR gateway delivers
-	// OPTION_COMPUTATION model ticks (msg 21, with IV/greeks) for OPT
-	// contracts but does NOT deliver tick types 27/28 (callOpenInterest /
-	// putOpenInterest). In type=1 it delivers OI but not the model ticks
-	// pre-market. The gamma compute needs both. Switching to type=1 for
-	// the fan-out gets us OI; the legFetcher tolerates missing
-	// model-tick IV by falling back to GetOptionIV which is also
-	// populated from the connector-level snapshot path.
+	// Keep the connection's default MarketDataType (type=2, frozen-aware).
+	// Verified 2026-05-21: `ibkr chain SPY` works off-hours via the same
+	// handleOptionComputation routing the gamma fan-out depends on — both
+	// run under type=2 and chain reliably gets model ticks per leg.
 	//
-	// The defer restores type=2 even on panic/error. Type changes apply
-	// only to *future* reqMktData calls on the same connection, so
-	// concurrently-running regime/chain subscriptions made before this
-	// point keep their original type. Subscriptions made by this fan-out
-	// will all be type=1.
-	if err := c.SetMarketDataType(1); err != nil {
-		return nil, fmt.Errorf("zero-gamma: switch to live data type: %w", err)
-	}
-	defer func() {
-		_ = c.SetMarketDataType(2)
-	}()
+	// The prior v0.28 switch to type=1 was meant to chase OI ticks
+	// (27/28) which type=2 doesn't push, but empirically type=1 also
+	// fails to deliver OI off-hours (10/1260 in the last failed run) AND
+	// suppresses the model ticks the IV path depends on. The legFetcher
+	// now treats OI as opportunistic — see the productionLegFetcher
+	// comment — so this trade-off goes away.
 
 	// 5. Fan-out. Mutex around shared aggregation slice; the contention
 	// is bounded at one append per completed leg (cheap relative to the

@@ -10,6 +10,30 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.30.0 — 2026-05-21 11:29 CEST
+
+### What's new
+
+- `ibkr gamma` now lands a real result off-hours. The pre-market dealer zero-gamma compute previously aborted with `low_coverage` (≈1% legs landed); after this release the typical pre-market run lands 85–90% of legs and produces a usable γ-zero signal. Methodology and result envelope are unchanged. RTH behavior is unchanged.
+- `ibkr chain SYM` and `ibkr chain SYM --expiry YYYY-MM-DD` now print a one-line yellow disclosure when the U.S. equity-option session is closed: "Options markets closed · IV is model-computed by IBKR from prior-session prices; bid/ask resume 09:30 ET". Suppressed during RTH; the existing dim "IV is delivered as a model-computation tick" caption stays put either way.
+
+### Changed
+
+- Dealer γ-zero compute now runs the worker fan-out under the daemon's default `MarketDataType` (frozen-aware). The v0.28-era switch to `MarketDataType=1` (live) was suppressing the OPTION_COMPUTATION model ticks pre-market and is reverted.
+- Dealer γ-zero leg fetcher no longer gates leg acceptance on open-interest delivery. Per-strike OI is genuinely sparse off-hours — even IBKR's own TWS UI shows OI only on actively-traded strikes — and the prior hard gate dropped legs that had real model-tick IV but no OI tick. OI is now read opportunistically and a missing tick yields `oi=0` on that leg (contribution to dealer GEX is zero either way; the strike still enriches the IV surface for skew fitting).
+
+### Added
+
+- `rpc.IsOptionRTH(now time.Time) bool` — clock-based helper (weekdays 09:30–16:00 ET, fail-open if `America/New_York` is unavailable). Used by `ibkr chain` renderers to gate the off-hours disclosure; preferred over `rpc.IsLiveDataType` for option-context surfaces because the SPY-style ETF can stay `data_type=live` via extended-hours ARCA quoting while CBOE options are closed.
+
+### Fixed
+
+- `Connector.UnsubscribeMarketData` now releases the rate-limiter's market-data slot for every subscribed reqID regardless of whether a price/size tick was ever observed. The prior `&& sub.Observed` guard skipped `CancelMarketData` (and therefore `releaseMarketDataSlot`) for OPT subscriptions that received only OPTION_COMPUTATION (msg 21) model ticks — `Observed` is set by `handleTickPrice` / `handleTickSize` but not by `handleOptionComputation`. Off-hours, every option-chain fan-out leg leaked one slot in `rateLimiter.marketDataSubs`; the 100-slot semaphore filled in ~2 min, the rate limiter recorded 5 consecutive errors, the circuit breaker opened, and the dealer γ-zero compute aborted with `low_coverage`. With the guard removed the cancel fires unconditionally on a connected wire, slots are recycled, and the fan-out can complete.
+
+### Engineering notes
+
+This release closes the off-hours dealer-γ regression that had survived several rounds of fixes through v0.28 and v0.29. The previous attempts (lower coverage threshold, longer per-leg budget, bulk prewarm, hold-underlying lifetime, BS-IV fallback solver) all addressed real adjacent issues but didn't reach the slot-leak root cause — the rate-limiter side never showed up in `gamma.abort` logs because the cascade surfaced as `throttled` or `low_coverage` downstream. Diagnostic instrumentation in this cycle's debugging branch printed the failing rate-limit path (`mdsubs_cap_100`) and the slot count at trip time (`100/100`), which immediately pointed at the `sub.Observed` guard. The clock-based off-hours banner is a side-effect of the same investigation: `rpc.IsLiveDataType` was not a sufficient signal for option-market-closed because SPY's underlying stays `live` on ARCA extended hours.
+
 ## v0.29.0 — 2026-05-20 23:00 CEST
 
 ### What's new

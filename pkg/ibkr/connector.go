@@ -1607,8 +1607,25 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 
 	delete(c.subscriptions, symbol)
 
-	// Best-effort cancel with IBKR if we have a reqID and the subscription was observed (to avoid 300 spam on shutdown)
-	if c.conn != nil && c.conn.IsConnected() && sub.ReqID != 0 && sub.Observed {
+	// Cancel on the wire and release the rate-limiter slot, regardless of
+	// whether we ever saw a tick.
+	//
+	// The prior `&& sub.Observed` guard was there to avoid IBKR errorCode 300
+	// ("Can't find EId with tickerId") on shutdown, where the gateway has
+	// already torn down subscriptions. But Observed is only set by
+	// handleTickPrice / handleTickSize, NOT by handleOptionComputation —
+	// so OPT subscriptions that receive ONLY model-computation ticks (msg 21)
+	// stay Observed=false and were being unsubscribed locally without
+	// CancelMarketData firing. CancelMarketData is what calls
+	// releaseMarketDataSlot, so every such leg leaked one slot in
+	// rateLimiter.marketDataSubs. Off-hours gamma fan-outs hit the 100-slot
+	// cap within ~120s, tripping the breaker and aborting the compute.
+	//
+	// Shutdown is still handled correctly: IsConnected returns false
+	// post-disconnect, so the cancel still skips. The only remaining
+	// downside is occasional 300 warnings when canceling a sub the gateway
+	// never accepted — strictly cosmetic, vs slot-leak which is functional.
+	if c.conn != nil && c.conn.IsConnected() && sub.ReqID != 0 {
 		if err := c.conn.CancelMarketData(sub.ReqID); err != nil {
 			marketDataLogger.Warnf("%s: Failed to cancel market data %s (ReqID: %d): %v", c.name, symbol, sub.ReqID, err)
 		}

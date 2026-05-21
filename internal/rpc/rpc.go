@@ -72,6 +72,39 @@ func IsLiveDataType(dt string) bool {
 	return dt == "" || dt == MarketDataLive
 }
 
+// IsOptionRTH reports whether the given instant falls within U.S. listed-
+// equity-option regular trading hours: weekdays 09:30–16:00 ET.
+//
+// Used in preference to IsLiveDataType for option-context renderers (chain,
+// option quotes) because the underlying ETF can stay "live" via extended-
+// hours quoting on SMART/ARCA while the option markets themselves are
+// closed — IsLiveDataType won't fire in that window, but the chain has
+// no bid/ask and IVs come from IBKR's model-computation engine off
+// prior-session prices. The clock-gated check captures that state.
+//
+// Holidays are NOT modeled. The fall-through is "open" on those days; the
+// existing model-tick → BS-IV fallback chain keeps results usable, and a
+// missed disclosure on a holiday is preferable to mis-flagging a regular
+// session. If holiday accuracy becomes load-bearing, route the gateway's
+// TradingHours field through and check against it instead.
+//
+// Fail-open: if the America/New_York zone can't be loaded (e.g. tzdata
+// missing in a minimal container), returns true so the banner stays
+// suppressed rather than firing during RTH.
+func IsOptionRTH(now time.Time) bool {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return true
+	}
+	t := now.In(ny)
+	if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
+		return false
+	}
+	open := time.Date(t.Year(), t.Month(), t.Day(), 9, 30, 0, 0, ny)
+	closeT := time.Date(t.Year(), t.Month(), t.Day(), 16, 0, 0, 0, ny)
+	return !t.Before(open) && t.Before(closeT)
+}
+
 // Frame-level error codes used in FrameError.Code. These are terminal: a
 // frame carrying any of these is the last frame the consumer will receive
 // on its subscription. Distinct from the request-envelope error codes

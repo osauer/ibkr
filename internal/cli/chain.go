@@ -4,9 +4,18 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
+
+// optionOffHoursBanner is the one-line disclosure shown by chain renderers
+// when rpc.IsOptionRTH(now) reports the U.S. equity-option session is
+// closed. Phrasing names the actual state, the signal source (IBKR's model-
+// computation engine), what the user sees missing (bid/ask), and when the
+// session resumes — mirrors the gamma command's "X/Y legs back-solved via
+// Black-Scholes from prior-session prices" disclosure tone.
+const optionOffHoursBanner = "Options markets closed · IV is model-computed by IBKR from prior-session prices; bid/ask resume 09:30 ET"
 
 func runChain(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "chain")
@@ -114,6 +123,9 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 	// can be unavailable); Bid/Ask/Last are exchange ticks and a missing
 	// value there means an illiquid leg with no quotes, not "unavailable".
 	fmt.Fprintln(out, env.dim("  IV is delivered as a model-computation tick. Empty cells = unavailable, never derived."))
+	if !rpc.IsOptionRTH(time.Now()) {
+		fmt.Fprintln(out, env.yellow("  "+optionOffHoursBanner))
+	}
 	return 0
 }
 
@@ -167,6 +179,9 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 		fmt.Fprintf(out, "  IV fetched for the nearest %d expiries; pass `--all-expiries` to fetch IV for the rest.\n", cappedAt)
 	}
 	fmt.Fprintf(out, "  Pick one with `ibkr chain %s --expiry YYYY-MM-DD`.\n", r.Symbol)
+	if withIV && !rpc.IsOptionRTH(time.Now()) {
+		fmt.Fprintln(out, env.yellow("  "+optionOffHoursBanner))
+	}
 	return 0
 }
 
