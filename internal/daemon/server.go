@@ -1167,20 +1167,18 @@ func (s *Server) prewarmZeroGamma(ctx context.Context) {
 		s.logger.Warnf("gamma prewarm: gateway connector unavailable, skipping initial compute")
 		return
 	}
-	s.logger.Infof("gamma prewarm: kicking initial compute (caller=startup)")
+	s.logger.Infof("gamma prewarm: kicking initial compute (caller=startup, scope=combined)")
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
-	// Hold the SPY underlying for the compute lifetime. See
-	// handleGammaZeroSPX for the protocol rationale (IBKR requires the
-	// underlying subscribed for OPTION_COMPUTATION ticks to flow on
-	// OPT subscriptions). Refcounted via subManager so a concurrent
-	// regime SPY snapshot doesn't double-subscribe or tear this down.
+	// Startup prewarm builds the canonical combined cache so the first
+	// user-driven `ibkr gamma` (default scope) hits ready instead of
+	// kicking another 7-minute fan-out. computeGammaCombined holds
+	// SPY then SPX serially via runUnderlyingPhase, and degrades to
+	// SPY-only with a structured warning when SPX is unreachable —
+	// the same path the handler uses for scope="spy+spx". Refcounted
+	// Holds via subManager so a concurrent regime snapshot on either
+	// symbol is safe.
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		release, err := s.subs.Hold(bgCtx, "SPY")
-		if err != nil {
-			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
-		}
-		defer release()
-		return computeGammaZeroFor(bgCtx, c, "SPY", params, productionLegFetcher, time.Now, prog, s.logger)
+		return computeGammaCombined(bgCtx, s, c, params, prog)
 	}
 	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -64,6 +65,15 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	fmt.Fprintln(out, gammaHeaderForScope(r))
 	fmt.Fprintln(out)
 
+	// Top-of-output banner for entitlement-degraded states. Surfaces
+	// the SPX-skipped fallback per design §8.2 above the headline
+	// numbers so the reader catches it before acting on the SPY-only
+	// view. Pre-status-check so even an in-flight "computing" envelope
+	// can carry the banner from the prior session's warning list.
+	if r.Result != nil {
+		renderGammaSkippedBanner(env, r.Result)
+	}
+
 	switch r.Status {
 	case rpc.GammaZeroStatusComputing:
 		fmt.Fprintf(out, "  Status      computing\n")
@@ -114,7 +124,15 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		fmt.Fprintf(out, "  Computed    %s · %s ago\n", c.AsOf.Format("15:04:05 MST"), age)
 	}
 
-	if c.ZeroGamma != nil {
+	// Combined-mode renderer: when both SPY and SPX are present,
+	// surface the combined γ-zero gap-percent and the per-index
+	// breakdown instead of the SPY-shaped single γ-zero line. The
+	// combined path returns true; the single-underlying path falls
+	// through.
+	if renderCombinedHeadline(env, c) {
+		// Combined block prints its own γ-zero + per-index detail;
+		// skip the single-line γ-zero rendering below.
+	} else if c.ZeroGamma != nil {
 		// Distance is signed from spot to γ-zero: negative when γ-zero
 		// is below spot, positive when above. Flipped from the wire's
 		// GapPct (which is signed the other way around — spot relative
@@ -146,11 +164,10 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		}
 	}
 
-	// Near vs term breakdown. The combined headline above hides the
-	// 0DTE/end-of-week vs monthly-OPEX contrast that's the most
-	// information-dense aspect of dealer gamma — surface it when both
-	// buckets have data.
-	if c.NearLegCount > 0 || c.TermLegCount > 0 {
+	// Near vs term breakdown. The combined renderer above already
+	// emits per-index near/term rows; skip this single-line shape in
+	// combined mode to avoid duplicate output.
+	if c.Scope != rpc.GammaZeroScopeCombined && (c.NearLegCount > 0 || c.TermLegCount > 0) {
 		fmt.Fprintf(out, "  γ-zero near %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
 		fmt.Fprintf(out, "  γ-zero term %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
 	}
@@ -334,6 +351,142 @@ func computeMedian(xs []float64) float64 {
 		return sortedCopy[mid]
 	}
 	return (sortedCopy[mid-1] + sortedCopy[mid]) / 2
+}
+
+// renderGammaSkippedBanner surfaces an entitlement-degraded banner at
+// the top of the output when the daemon's combined-mode compute
+// degraded to SPY-only (SPX 354 / 200 / timeout / etc). The banner
+// is read from the result's Warnings list, which carries
+// "spx_unavailable:<reason>" tokens emitted by computeGammaCombined.
+//
+// Cases (per design §8.2):
+//   - spx_unavailable:354     — entitlement gap, most common
+//   - spx_unavailable:200     — contract not found / SPX chain restricted
+//   - spx_unavailable:no_data — fan-out landed 0 legs in 30s
+//   - spx_unavailable:<short> — other (timeout, gateway error)
+//
+// No banner when warnings list is empty or contains only non-skip
+// codes. The "decoupled" warning is surfaced separately via the
+// headline badge — kept distinct from entitlement-degraded states.
+func renderGammaSkippedBanner(env *Env, c *rpc.GammaZeroComputed) {
+	out := env.Stdout
+	for _, w := range c.Warnings {
+		if !strings.HasPrefix(w, "spx_unavailable:") {
+			continue
+		}
+		reason := strings.TrimPrefix(w, "spx_unavailable:")
+		var detail string
+		switch reason {
+		case "354":
+			detail = "entitlement missing (IBKR error 354)"
+		case "200":
+			detail = "SPX option contract resolution rejected (IBKR error 200)"
+		case "no_data":
+			detail = "no option data landed within the 30s window"
+		case "throttled":
+			detail = "gateway throttled the SPX fan-out"
+		default:
+			detail = reason
+		}
+		fmt.Fprintf(out, "  ⚠ SPX skipped — %s. Showing SPY only.\n", detail)
+		fmt.Fprintln(out, env.dim("    Re-run with --only=spy to suppress this banner, or check your"))
+		fmt.Fprintln(out, env.dim("    CBOE OPRA subscription in IBKR's Market Data Subscriptions."))
+		fmt.Fprintln(out)
+		return
+	}
+}
+
+// renderCombinedHeadline prints the SPY+SPX combined headline block —
+// the combined γ-zero gap with decoupled-badge handling, plus the
+// per-index detail rows (SPY then SPX) with their own near/term
+// breakdowns. Returns true when the combined path was used; the
+// caller falls back to the single-underlying renderer otherwise.
+//
+// Mirrors design §9.1's mockup. The combined number is rendered as a
+// spot-percent (CombinedGapPct), not a price, because SPY and SPX
+// have different absolute spot levels — a single price would be
+// nonsensical. Per-index rows use their own anchored spots.
+func renderCombinedHeadline(env *Env, c *rpc.GammaZeroComputed) bool {
+	if c == nil || c.Scope != rpc.GammaZeroScopeCombined {
+		return false
+	}
+	out := env.Stdout
+
+	// Headline: combined γ-zero gap. Regime label off the SPY-half
+	// sign — both halves track the same dealer-positioning regime in
+	// the ≥ 0.90 correlation window (where we trust the combined
+	// view); for decoupled regimes the badge tells the reader to use
+	// per-index instead.
+	decoupled := slices.Contains(c.Warnings, "decoupled")
+	if c.CombinedGapPct != nil {
+		sign := "+"
+		if *c.CombinedGapPct < 0 {
+			sign = ""
+		}
+		regime := gammaCombinedRegimeLabel(c)
+		fmt.Fprintf(out, "  Combined γ-zero  spot %s%.2f %% %s\n", sign, *c.CombinedGapPct, regime)
+	} else {
+		fmt.Fprintf(out, "  Combined γ-zero  no crossing — %s\n", gammaCombinedRegimeLabel(c))
+	}
+	if decoupled && c.DecoupledCorr != nil {
+		fmt.Fprintln(out, env.dim(fmt.Sprintf("    ⚠ SPY/SPX 20d corr %.2f < 0.90 — combined number unreliable; treat per-index below as primary.", *c.DecoupledCorr)))
+	}
+
+	// Per-index detail.
+	spy := c.PerIndex["SPY"]
+	spx := c.PerIndex["SPX"]
+	fmt.Fprintln(out, "  Per-index:")
+	if spy != nil {
+		renderPerIndexRow(env, "SPY", spy)
+	}
+	if spx != nil {
+		renderPerIndexRow(env, "SPX", spx)
+	}
+	return true
+}
+
+// renderPerIndexRow prints one per-underlying detail block inside the
+// combined headline. Indented two levels so it nests visually under
+// the "Per-index:" header. Near/term sub-rows mirror the SPY-only
+// renderer's existing breakdown.
+func renderPerIndexRow(env *Env, label string, c *rpc.GammaZeroComputed) {
+	out := env.Stdout
+	if c.ZeroGamma != nil {
+		gap := "+"
+		if c.SpotUnderlying > 0 {
+			dist := (*c.ZeroGamma - c.SpotUnderlying) / c.SpotUnderlying * 100
+			if dist < 0 {
+				gap = ""
+			}
+			fmt.Fprintf(out, "    %s γ-zero       %s  (spot %s%.2f %%)\n",
+				label, formatSpotPrice(*c.ZeroGamma), gap, dist)
+		} else {
+			fmt.Fprintf(out, "    %s γ-zero       %s\n", label, formatSpotPrice(*c.ZeroGamma))
+		}
+	} else {
+		fmt.Fprintf(out, "    %s γ-zero       no crossing (%s)\n", label, c.GammaSign)
+	}
+	if c.NearLegCount > 0 || c.TermLegCount > 0 {
+		fmt.Fprintf(out, "      near         %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
+		fmt.Fprintf(out, "      term         %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
+	}
+}
+
+// gammaCombinedRegimeLabel infers the regime label for the combined
+// headline by looking at the combined sweep's sign profile. Returns
+// "(regime: long-γ, stabilizing)" or similar — matches the design §9.1
+// mockup. Empty when no sign info is available.
+func gammaCombinedRegimeLabel(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	switch c.GammaSign {
+	case "positive":
+		return "(regime: long-γ, stabilizing)"
+	case "negative":
+		return "(regime: short-γ, amplifying)"
+	}
+	return ""
 }
 
 // gammaHeaderForScope returns the renderer's section header — varies

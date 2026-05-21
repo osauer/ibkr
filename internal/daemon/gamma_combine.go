@@ -272,12 +272,22 @@ func computeGammaCombined(
 		return nil, fmt.Errorf("zero-gamma: SPY phase: %w", err)
 	}
 
-	// Phase 2: SPX. Failures here surface as warning + SPY-only
-	// degradation in step 8; for step 7 we keep the strict shape and
-	// propagate the error.
-	spxRes, err := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
-	if err != nil {
-		return nil, fmt.Errorf("zero-gamma: SPX phase: %w", err)
+	// Phase 2: SPX. Entitlement-graceful degradation per design §8.2:
+	// if SPX errors (most commonly 354 "not subscribed"; or 30s
+	// early-abort with no legs), we DON'T fail the combined run.
+	// Instead, we degrade to SPY-only with a structured warning and
+	// flip the result's Scope back to "spy" so the renderer surfaces
+	// the SPX-skipped banner at the top of the output. SPY-only users
+	// must not be regressed by the SPX path.
+	spxRes, spxErr := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
+	if spxErr != nil {
+		if s != nil && s.logger != nil {
+			s.logger.Warnf("gamma.combine.spx_unavailable err=%v (degrading to SPY-only)", spxErr)
+		}
+		spyRes.Warnings = append(spyRes.Warnings, "spx_unavailable:"+summarizeSPXFailure(spxErr))
+		// Keep Scope as the single-underlying "spy" — the combined
+		// envelope hasn't been built. SPY headline numbers stand.
+		return spyRes, nil
 	}
 
 	// Correlation gate. Failure to compute is non-fatal (nil corr +
@@ -285,7 +295,6 @@ func computeGammaCombined(
 	// doesn't block the headline).
 	corr, corrErr := compute20DaySPYSPXCorrelation(c)
 	if corrErr != nil {
-		// Warning surface but don't block the combine.
 		if s != nil && s.logger != nil {
 			s.logger.Warnf("gamma.combine.corr_fetch_failed err=%v (proceeding without decoupled gate)", corrErr)
 		}
@@ -297,6 +306,43 @@ func computeGammaCombined(
 		return nil, fmt.Errorf("zero-gamma: combine produced nil result")
 	}
 	return combined, nil
+}
+
+// summarizeSPXFailure turns an SPX-phase error into the short token
+// the warning-list embeds. Strips the verbose context that's helpful
+// in logs but noisy in the renderer banner. Looks for the canonical
+// IBKR error code in the message; falls back to "unavailable" for
+// non-IBKR errors (gateway disconnect, ctx cancel).
+//
+// Token formats:
+//
+//	354       → entitlement gap (most common)
+//	200       → contract not found / SPX chain restricted
+//	timeout   → 30s early-abort with no legs
+//	<other>   → truncated error message, ≤ 60 chars
+func summarizeSPXFailure(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "354"):
+		return "354"
+	case strings.Contains(msg, " 200 ") || strings.Contains(msg, "no security definition"):
+		return "200"
+	case strings.Contains(msg, "no option data landed"):
+		return "no_data"
+	case strings.Contains(msg, "throttled"):
+		return "throttled"
+	}
+	// Trim leading "zero-gamma: " jargon and cap length.
+	msg = strings.TrimPrefix(msg, "zero-gamma: ")
+	if len(msg) > 60 {
+		msg = msg[:57] + "..."
+	}
+	// Replace any embedded colon to keep the warning token parseable.
+	msg = strings.ReplaceAll(msg, ":", "·")
+	return msg
 }
 
 // runUnderlyingPhase wraps one (Hold underlying → computeGammaZeroFor →
