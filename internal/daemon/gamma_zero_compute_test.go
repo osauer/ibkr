@@ -79,7 +79,7 @@ func TestSelectExpirations(t *testing.T) {
 
 	t.Run("morning_today_included", func(t *testing.T) {
 		now := time.Date(2026, 5, 16, 10, 0, 0, 0, loc)
-		got := selectExpirations(chain, now, 4)
+		got := selectExpirations(chain, "", now, 4)
 		want := []string{"2026-05-16", "2026-05-17", "2026-05-19", "2026-05-26"}
 		if !equalSlice(got, want) {
 			t.Errorf("morning: got %v, want %v", got, want)
@@ -88,7 +88,7 @@ func TestSelectExpirations(t *testing.T) {
 
 	t.Run("post_settlement_today_excluded", func(t *testing.T) {
 		now := time.Date(2026, 5, 16, 17, 0, 0, 0, loc) // 17:00 ET, past 16:15
-		got := selectExpirations(chain, now, 4)
+		got := selectExpirations(chain, "", now, 4)
 		want := []string{"2026-05-17", "2026-05-19", "2026-05-26", "2026-06-19"}
 		if !equalSlice(got, want) {
 			t.Errorf("post-settlement: got %v, want %v", got, want)
@@ -97,7 +97,7 @@ func TestSelectExpirations(t *testing.T) {
 
 	t.Run("yesterday_always_excluded", func(t *testing.T) {
 		now := time.Date(2026, 5, 16, 10, 0, 0, 0, loc)
-		got := selectExpirations(chain, now, 10)
+		got := selectExpirations(chain, "", now, 10)
 		for _, d := range got {
 			if d == "2026-05-15" {
 				t.Errorf("selectExpirations included expired date 2026-05-15: got %v", got)
@@ -107,11 +107,92 @@ func TestSelectExpirations(t *testing.T) {
 
 	t.Run("count_caps_result", func(t *testing.T) {
 		now := time.Date(2026, 5, 16, 10, 0, 0, 0, loc)
-		got := selectExpirations(chain, now, 2)
+		got := selectExpirations(chain, "", now, 2)
 		if len(got) != 2 {
 			t.Errorf("count cap not honored: got %d entries, want 2", len(got))
 		}
 	})
+
+	// SPX-class third-Friday is AM-settled (09:30 ET cash-settle). At
+	// 10:00 ET on the third Friday the SPX-class listing is already
+	// past its settlement window (09:30 + 15-min buffer = 09:45), so
+	// the SPX-class filter must exclude it. The SPXW-class filter on
+	// the same date+time keeps the listing (PM-settle 16:00, still
+	// hours away).
+	//
+	// Without the trading-class qualifier on selectExpirations, both
+	// classes' third-Friday listings would inherit the same 16:15
+	// cutoff and the SPX-AM book would be priced with ~6 hours of
+	// nonexistent time-to-expiry.
+	thirdFridayChain := map[string][]float64{
+		"2026-06-19": {5400}, // third Friday — listed under both SPX (AM) and SPXW (PM)
+		"2026-06-20": {5400}, // Saturday — synthetic; included to confirm count truncation works
+		"2026-06-26": {5400}, // next week
+	}
+	t.Run("spx_class_third_friday_post_AM_settle_excluded", func(t *testing.T) {
+		now := time.Date(2026, 6, 19, 10, 0, 0, 0, loc) // 10:00 ET — past 09:45 AM-settle buffer
+		got := selectExpirations(thirdFridayChain, "SPX", now, 4)
+		for _, d := range got {
+			if d == "2026-06-19" {
+				t.Errorf("SPX-class selectExpirations included AM-settled third Friday post-09:45: got %v", got)
+			}
+		}
+	})
+	t.Run("spxw_class_third_friday_pre_PM_settle_included", func(t *testing.T) {
+		now := time.Date(2026, 6, 19, 10, 0, 0, 0, loc) // 10:00 ET — well before 16:15 PM-settle buffer
+		got := selectExpirations(thirdFridayChain, "SPXW", now, 4)
+		found := false
+		for _, d := range got {
+			if d == "2026-06-19" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("SPXW-class selectExpirations dropped PM-settled third Friday pre-16:00: got %v", got)
+		}
+	})
+	t.Run("spx_class_pre_AM_settle_morning_included", func(t *testing.T) {
+		now := time.Date(2026, 6, 19, 8, 30, 0, 0, loc) // 08:30 ET — before 09:30 AM-settle
+		got := selectExpirations(thirdFridayChain, "SPX", now, 4)
+		found := false
+		for _, d := range got {
+			if d == "2026-06-19" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("SPX-class selectExpirations dropped pre-AM-settle morning listing: got %v", got)
+		}
+	})
+}
+
+// TestDTEYearsSPXClassUsesAMInstant pins the trading-class branch on
+// dteYears. SPX-class third-Friday options settle at 09:30 ET; at 10:00
+// ET on expiry day they are PAST settlement (dte=0), not 6 hours away
+// (which the legacy 16:00 PM-settle instant would say). The aggregate
+// gamma error from a 6-hour TTE mis-attribution on third-Friday SPX is
+// dollar-significant — SPX dealer gamma concentrates on expiring books.
+func TestDTEYearsSPXClassUsesAMInstant(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	// 10:00 ET on the third Friday — past 09:30 SPX-class settle.
+	now := time.Date(2026, 6, 19, 10, 0, 0, 0, loc)
+
+	// SPX class → AM-settle → already expired.
+	if y := dteYears("20260619", "SPX", now); y != 0 {
+		t.Errorf("SPX-class dteYears post-AM-settle: got %v years, want 0 (already cash-settled at 09:30)", y)
+	}
+	// SPXW class → PM-settle → still ~6 hours of TTE.
+	y := dteYears("20260619", "SPXW", now)
+	if y <= 0 || y > 0.001 {
+		t.Errorf("SPXW-class dteYears pre-PM-settle: got %v years, want 0 < y < 0.001 (~6h)", y)
+	}
+	// Empty class falls back to PM-settle convention (today's SPY behaviour).
+	if dteYears("20260619", "", now) <= 0 {
+		t.Errorf("empty-class dteYears must match SPXW (PM-settle) for back-compat")
+	}
 }
 
 // TestFilterStrikesAroundSpot pins the ±widthPct window logic and the
@@ -165,20 +246,20 @@ func TestDTEYears(t *testing.T) {
 	loc, _ := time.LoadLocation("America/New_York")
 	now := time.Date(2026, 5, 16, 14, 0, 0, 0, loc)
 
-	if y := dteYears("20260516", now); y <= 0 || y > 0.01 {
+	if y := dteYears("20260516", "", now); y <= 0 || y > 0.01 {
 		// 2h to 16:00 ≈ 2 / (24·365) ≈ 0.000228; window [0, 0.01]
 		t.Errorf("2h to expiry: got %v, want in (0, 0.01)", y)
 	}
 	// Roughly 33 days × 24h / (24·365) ≈ 0.0904 years
-	y := dteYears("20260619", now)
+	y := dteYears("20260619", "", now)
 	if y < 0.080 || y > 0.105 {
 		t.Errorf("~33 days: got %v, want [0.080, 0.105]", y)
 	}
 
-	if y := dteYears("20260515", now); y != 0 {
+	if y := dteYears("20260515", "", now); y != 0 {
 		t.Errorf("past date: got %v, want 0", y)
 	}
-	if y := dteYears("bogus", now); y != 0 {
+	if y := dteYears("bogus", "", now); y != 0 {
 		t.Errorf("bogus input: got %v, want 0", y)
 	}
 }
@@ -371,14 +452,14 @@ func TestBSIVFallback_AssemblesLegFromSyntheticPrice(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dte := dteYears(expiryYMD, now)
+			dte := dteYears(expiryYMD, "", now)
 			callPx := bsCallPrice(spot, strike, dte, sigmaTr, 0, 0)
 			price := callPx
 			if !tc.isCall {
 				price = callPx - spot + strike // r=q=0 parity
 			}
 
-			r := bsIVFallback(spot, now, expiryYMD, strike, tc.right, 123, price)
+			r := bsIVFallback(spot, now, expiryYMD, "", strike, tc.right, 123, price)
 
 			if !r.OK || !r.IVDerived {
 				t.Fatalf("expected OK=true IVDerived=true, got %+v", r)
@@ -418,7 +499,7 @@ func TestBSIVFallback_RefusalCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := bsIVFallback(737.0, now, tc.expiryYMD, 735.0, "P", 100, tc.price)
+			r := bsIVFallback(737.0, now, tc.expiryYMD, "", 735.0, "P", 100, tc.price)
 			if r.OK || r.IVDerived || r.OI != 0 || r.IV != 0 {
 				t.Errorf("%s should return empty legResult, got %+v", tc.why, r)
 			}

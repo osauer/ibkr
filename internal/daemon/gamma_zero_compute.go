@@ -368,7 +368,7 @@ func productionLegFetcher(
 	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
 		price = px
 	}
-	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, strike, right, oi, price)
+	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, price)
 }
 
 // bsIVFallback assembles a leg result from Black-Scholes back-solving when
@@ -383,8 +383,14 @@ func productionLegFetcher(
 // composition: optionPriceForBSIV is the only connector read it depends
 // on, and that's done by the caller. Tests drive bsIVFallback directly
 // with canned (spot, strike, dte, oi, price) tuples.
-func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD string, strike float64, right string, oi int64, price float64) legResult {
-	dte := dteYears(expiryYMD, snapshotAt)
+//
+// tradingClass plumbs through so the BS-IV fallback uses the same
+// settlement instant as the live-tick path — an SPX-class AM-monthly
+// solving from yesterday's close at 14:00 ET on expiry day must use
+// the 09:30 ET instant (already past) and yield dte=0, not over-state
+// gamma against a 16:00 instant that doesn't apply to this class.
+func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, tradingClass string, strike float64, right string, oi int64, price float64) legResult {
+	dte := dteYears(expiryYMD, tradingClass, snapshotAt)
 	if dte <= 0 || price <= 0 {
 		return legResult{}
 	}
@@ -525,7 +531,12 @@ func computeGammaZeroFor(
 	}
 
 	// 3. Select expirations.
-	pickedExp := selectExpirations(allStrikes, spotAt, params.ExpiryCount)
+	// Empty trading-class — SPY-only enumeration uses a single class so
+	// the 16:15 ET cutoff (today's behaviour) is preserved bit-for-bit.
+	// Step 6 (SPX classed enumeration) calls selectExpirations once per
+	// class with "SPX" / "SPXW" so AM-settled monthlies get the 09:45 ET
+	// cutoff and PM-settled weeklies stay on 16:15 ET.
+	pickedExp := selectExpirations(allStrikes, "", spotAt, params.ExpiryCount)
 	if len(pickedExp) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no usable %s expirations after 0DTE filtering", sym)
 	}
@@ -705,7 +716,7 @@ func computeGammaZeroFor(
 		if !r.OK {
 			return
 		}
-		dte := dteYears(j.expiryYMD, spotAt)
+		dte := dteYears(j.expiryYMD, j.tradingClass, spotAt)
 		if dte <= 0 || r.IV <= 0 {
 			// Belt-and-suspenders: skip legs whose DTE/IV degenerate
 			// after fetch (in flight expiry rollover, or a partial OI
@@ -1079,26 +1090,50 @@ func isAcceptableDataType(dt string) bool {
 	}
 }
 
-// selectExpirations picks the nearest N expirations that are NOT
-// already past their settlement window in NY time. Same-day expiries
-// before settlement count; same-day expiries after settlement (16:15
-// NY for SPXW, conservatively applied to all classes since we don't
-// differentiate by tradingClass here) are dropped.
+// classSettlementInstant returns the NY-time settlement instant for an
+// option of the given trading class on the supplied day. SPX-class
+// monthlies are AM-settled at 09:30 ET (cash-settled against the SET
+// special opening quotation); SPXW weeklies and everything else are
+// PM-settled at 16:00 ET. Empty class is treated as the PM default for
+// back-compat with single-class callers (SPY, equities).
+//
+// Used by dteYears to compute time-to-expiry under the correct
+// settlement convention, and by selectExpirations to decide whether a
+// same-day listing is already past its cash-settlement window.
+func classSettlementInstant(tradingClass string, year int, month time.Month, day int, loc *time.Location) time.Time {
+	if strings.EqualFold(strings.TrimSpace(tradingClass), "SPX") {
+		return time.Date(year, month, day, 9, 30, 0, 0, loc)
+	}
+	return time.Date(year, month, day, 16, 0, 0, 0, loc)
+}
+
+// classSettlementBuffer is the post-settlement grace window the
+// expiry-filter uses before tagging a same-day listing as "expired."
+// Mirrors the original 15-minute buffer on the unified 16:15 cutoff;
+// applied symmetrically to AM-settled and PM-settled classes so the
+// boundary semantics stay consistent across the SPX/SPXW split.
+const classSettlementBuffer = 15 * time.Minute
+
+// selectExpirations picks the nearest N expirations that are NOT already
+// past their settlement window in NY time. Same-day expiries before
+// settlement count; same-day expiries after settlement are dropped.
+//
+// tradingClass is the option class whose settlement instant defines the
+// cutoff. "SPX" cuts off at 09:45 ET (09:30 AM-settle + 15-min buffer);
+// "SPXW", "SPY", and empty default to 16:15 ET (16:00 PM-settle + 15-min
+// buffer). Empty class preserves the SPY-only path's bit-for-bit
+// behaviour from before the SPX coverage arc.
 //
 // Input map keys are YYYY-MM-DD; output is the picked subset in the
 // same date format, ascending.
-func selectExpirations(strikes map[string][]float64, now time.Time, count int) []string {
+func selectExpirations(strikes map[string][]float64, tradingClass string, now time.Time, count int) []string {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		loc = time.UTC
 	}
 	nyNow := now.In(loc)
 	today := nyNow.Format("2006-01-02")
-	// 16:15 ET is the conservative "all SPX classes settled" cutoff:
-	// SPX (AM-settled) settles at 09:30 on expiry; SPXW (PM) settles
-	// at 16:00; tagging the same-day expiry as "past" only after
-	// 16:15 covers both without needing tradingClass at this layer.
-	settlementCutoff := time.Date(nyNow.Year(), nyNow.Month(), nyNow.Day(), 16, 15, 0, 0, loc)
+	settlementCutoff := classSettlementInstant(tradingClass, nyNow.Year(), nyNow.Month(), nyNow.Day(), loc).Add(classSettlementBuffer)
 	pastCutoff := nyNow.After(settlementCutoff)
 
 	var candidates []string
@@ -1170,11 +1205,21 @@ func compactExpiry(date string) string {
 }
 
 // dteYears computes years-to-expiry from an option's YYYYMMDD expiry
-// string. Uses 4 PM ET on expiration day as the conservative
-// settlement reference (matches selectExpirations' cutoff). Zero on
-// parse failure or non-positive deltas — the compute's per-leg gate
-// filters those out.
-func dteYears(expiryYMD string, now time.Time) float64 {
+// string under the correct settlement-instant for the option's trading
+// class. SPX-class monthlies expire at 09:30 ET (AM SET); SPXW
+// weeklies, SPY, and equities expire at 16:00 ET (PM close). Empty
+// tradingClass falls back to 16:00 ET — back-compat for the SPY-only
+// path before the SPX coverage arc.
+//
+// Zero on parse failure or non-positive deltas — the compute's per-leg
+// gate filters those out.
+//
+// Why this matters: an SPX-class third-Friday option at 10:00 ET on
+// expiry day has already settled at 09:30; pricing it with 6.5 extra
+// hours of TTE under the legacy 16:00 instant would over-state its
+// gamma. The aggregate is dollar-significant — third-Friday SPX gamma
+// dominates the day-of-expiry book.
+func dteYears(expiryYMD, tradingClass string, now time.Time) float64 {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		loc = time.UTC
@@ -1183,7 +1228,7 @@ func dteYears(expiryYMD string, now time.Time) float64 {
 	if err != nil {
 		return 0
 	}
-	expWall := time.Date(day.Year(), day.Month(), day.Day(), 16, 0, 0, 0, loc)
+	expWall := classSettlementInstant(tradingClass, day.Year(), day.Month(), day.Day(), loc)
 	delta := expWall.Sub(now.In(loc))
 	if delta <= 0 {
 		return 0
