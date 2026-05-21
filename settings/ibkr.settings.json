@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v jq >/dev/null 2>&1 || { echo 'ibkr settings: jq missing on PATH; failing closed on trading verbs' >&2; exit 2; }; jq -e '.tool_input.command | test(\"(^|[/\\\\s])ibkr\\\\s+(order|trade|cancel)\\\\b\")' >/dev/null && exit 2 || exit 0"
+            "command": "command -v jq >/dev/null 2>&1 || { echo 'ibkr settings: jq missing on PATH; failing closed on trading verbs' >&2; exit 2; }; jq -e '.tool_input.command | test(\"(^|[/\\\\s])ibkr\\\\s+(order|trade|cancel|submit|place)\\\\b\")' >/dev/null && exit 2 || exit 0"
           }
         ]
       }
