@@ -35,6 +35,23 @@ const belowThresholdRetryDelay = 12 * time.Minute
 // wake-up and the operator can investigate.
 const maxBelowThresholdRetries = 15
 
+// errorRetryDelay is the back-off applied when Refresh returns an
+// error — distinct from belowThresholdRetryDelay (which assumes a
+// completed-but-partial fan-out limited by IBKR's reqContractDetails
+// bucket). Refresh errors are transport-level failures (gateway down,
+// bulk-connector not yet ready, ctx cancellation upstream); they
+// resolve in seconds, not minutes, so a short fixed back-off is
+// right. 30 s is long enough not to retry-storm a recovering gateway
+// and short enough that a one-shot blip clears within one user-visible
+// poll cycle.
+//
+// Before this distinction existed (≤v0.30.0) an errored Refresh
+// incremented `retries` the same as a below-threshold result, so a
+// startup-time gateway hiccup put the scheduler in a 12-min back-off
+// loop for up to 3 hours (15 × 12 min) before falling through to the
+// daily cadence — silent and surprising.
+const errorRetryDelay = 30 * time.Second
+
 // nyLocation returns the America/New_York time.Location, falling back
 // to UTC if the zoneinfo database isn't available on this host. The
 // fallback degrades cadence (a daemon on a UTC-only container would
@@ -71,13 +88,27 @@ func nextRefreshAt(now time.Time) time.Time {
 // daily cadence. The conditions are:
 //
 //  1. No snapshot has ever been computed (cold install). Always run.
-//  2. The cached snapshot is for an older NY session AND today's
+//  2. The cached snapshot's AsOf wall-clock predates the most recent
+//     past 16:35 ET weekday tick. Catches the case where the daemon
+//     was down across yesterday's scheduled tick AND the cached
+//     snapshot was a mid-session refresh from before yesterday's
+//     close (SessionKey matches yesterday but data is pre-close
+//     partial). Without this clause the scheduler would sit on the
+//     stale partial-day snapshot until today's 16:35 ET.
+//  3. The cached snapshot is for an older NY session AND today's
 //     16:35 ET refresh window has already passed. We missed today's
 //     scheduled wake-up (daemon was down or just installed) — run
 //     now rather than wait until tomorrow.
 //
-// When neither condition holds, the scheduler sleeps until the next
-// 16:35 ET tick.
+// When none of these hold, the scheduler sleeps until the next 16:35
+// ET tick.
+//
+// Weekends and US market holidays: lastTick rolls back over Sat/Sun
+// so a Friday-close snapshot examined on Monday morning satisfies
+// "AsOf ≥ last weekday tick" and does not force a refresh. Holidays
+// aren't enumerated here — the engine's planner detects a no-new-bars
+// session and the refresh is a cheap no-op anyway (per the file
+// header at the refreshHourET constant).
 func shouldRefreshOnStartup(snap *Snapshot, now time.Time) bool {
 	if snap == nil {
 		return true
@@ -88,9 +119,24 @@ func shouldRefreshOnStartup(snap *Snapshot, now time.Time) bool {
 		localNow.Year(), localNow.Month(), localNow.Day(),
 		refreshHourET, refreshMinuteET, 0, 0, loc,
 	)
+
+	// Most recent past weekday 16:35 ET tick. Today's window if already
+	// passed; otherwise yesterday's, rolling back across weekends.
+	lastTick := todays
+	if !lastTick.Before(localNow) {
+		lastTick = lastTick.AddDate(0, 0, -1)
+	}
+	for lastTick.Weekday() == time.Saturday || lastTick.Weekday() == time.Sunday {
+		lastTick = lastTick.AddDate(0, 0, -1)
+	}
+	if snap.AsOf.Before(lastTick) {
+		return true
+	}
+
 	if localNow.Before(todays) {
 		// We haven't reached today's window yet — yesterday's data is
-		// still authoritative. No catch-up needed.
+		// still authoritative (and the AsOf check above confirmed it
+		// post-dates the last weekday tick). No catch-up needed.
 		return false
 	}
 	return snap.SessionKey != nySessionKey(now)
@@ -118,17 +164,21 @@ func shouldRefreshOnStartup(snap *Snapshot, now time.Time) bool {
 // shouldn't take the daily cadence offline.
 func (e *Engine) Run(ctx context.Context) {
 	retries := 0
-	doRefresh := func(reason string) {
-		if err := e.Refresh(ctx); err != nil {
+	lastErrored := false
+	doRefresh := func(reason string) error {
+		err := e.Refresh(ctx)
+		if err != nil {
 			e.warnf("breadth: %s refresh: %v", reason, err)
 		}
+		return err
 	}
 	// updateRetryState reads the post-refresh coverage signal and
 	// adjusts the retry counter for the next loop iteration. Called
-	// after every refresh (bootstrap and scheduled) so a below-
-	// threshold result triggers the short retry cadence — otherwise
-	// the bootstrap's below-threshold outcome would sit idle until
-	// the next 16:35 ET tick, defeating the retry mechanism.
+	// only after refreshes that COMPLETED (no transport error) so a
+	// below-threshold result triggers the short retry cadence —
+	// otherwise the bootstrap's below-threshold outcome would sit idle
+	// until the next 16:35 ET tick, defeating the retry mechanism.
+	// Refresh errors take the errorRetryDelay path instead.
 	updateRetryState := func() {
 		cov, mc := e.LastRefreshCoverage()
 		converged := mc > 0 && cov >= int(MinCoverageFraction*float64(mc))
@@ -147,15 +197,17 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 
 	if cur, _ := e.Get(); shouldRefreshOnStartup(cur, e.clock()) {
-		doRefresh("bootstrap")
+		lastErrored = doRefresh("bootstrap") != nil
 		if ctx.Err() != nil {
 			return
 		}
-		updateRetryState()
+		if !lastErrored {
+			updateRetryState()
+		}
 	}
 
 	for {
-		wait := e.nextWait(retries)
+		wait := e.nextWait(retries, lastErrored)
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -164,20 +216,31 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 
-		doRefresh("scheduled")
+		lastErrored = doRefresh("scheduled") != nil
 		if ctx.Err() != nil {
 			return
 		}
-		updateRetryState()
+		if !lastErrored {
+			updateRetryState()
+		}
 	}
 }
 
 // nextWait returns how long Run should sleep before the next refresh.
-// retries > 0 means the previous refresh was below threshold and we're
-// in the retry phase; the wait is belowThresholdRetryDelay so IBKR's
-// per-account contract-details bucket has time to refill. Otherwise
-// we're in the steady-state daily cadence and wait until 16:35 ET.
-func (e *Engine) nextWait(retries int) time.Duration {
+// Priority: a transport error gets the short errorRetryDelay (a
+// recovering gateway clears in seconds). Below-threshold coverage
+// (refresh completed but partial) gets belowThresholdRetryDelay so
+// IBKR's per-account contract-details bucket has time to refill.
+// Otherwise we're in the steady-state daily cadence and wait until
+// 16:35 ET.
+//
+// The error path and coverage path are deliberately distinct: a
+// startup-time gateway hiccup must not steal 12-min budget from the
+// coverage retry mechanism (Bug 3 fix, v0.30.1).
+func (e *Engine) nextWait(retries int, lastErrored bool) time.Duration {
+	if lastErrored {
+		return errorRetryDelay
+	}
 	if retries > 0 {
 		return belowThresholdRetryDelay
 	}

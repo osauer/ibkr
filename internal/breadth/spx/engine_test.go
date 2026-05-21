@@ -498,6 +498,69 @@ func TestEngineGetReturnsDefensiveCopy(t *testing.T) {
 	}
 }
 
+// TestEngineMarkPendingBootstrapSetsRefreshingWhenStale pins the
+// v0.30.1 Bug 1c fix: when shouldRefreshOnStartup would fire on
+// Run() entry, MarkPendingBootstrap pre-sets refreshing=true so
+// `ibkr status` reflects the imminent breadth-spx work even before
+// the goroutine has been scheduled. Without this, the first status
+// call after daemon restart shows Connected=true but no background
+// task — the symptom the user reported on 2026-05-21.
+func TestEngineMarkPendingBootstrapSetsRefreshingWhenStale(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 21, 6, 0, 0, 0, loc) // Thu 06:00 ET
+	store := NewStore(t.TempDir())
+	// Persist a pre-close partial snapshot: SessionKey matches Wed but
+	// AsOf is mid-session, so shouldRefreshOnStartup will fire.
+	stale := &Snapshot{
+		SessionKey: "2026-05-20",
+		AsOf:       time.Date(2026, 5, 20, 15, 27, 0, 0, loc),
+		Method:     methodConstituentFanout,
+	}
+	if err := store.SaveSnapshot(*stale); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	fake := &FakeBarFetcher{}
+	e := New(store, fake, Options{Clock: frozenClock(now)})
+
+	if e.IsRefreshing() {
+		t.Fatal("engine should not be refreshing pre-MarkPendingBootstrap")
+	}
+	e.MarkPendingBootstrap()
+	if !e.IsRefreshing() {
+		t.Error("MarkPendingBootstrap should set refreshing=true when a bootstrap is needed")
+	}
+}
+
+// TestEngineMarkPendingBootstrapNoOpWhenFresh pins the no-stuck-flag
+// invariant: if shouldRefreshOnStartup would skip the bootstrap (the
+// cached snapshot is already authoritative), MarkPendingBootstrap
+// must NOT set refreshing=true — otherwise the flag would stay true
+// forever once the caller spawns Run().
+func TestEngineMarkPendingBootstrapNoOpWhenFresh(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 21, 9, 0, 0, 0, loc) // Thu 09:00 ET, before today's tick
+	store := NewStore(t.TempDir())
+	// Yesterday's snapshot with a post-close AsOf — fully authoritative
+	// until today's 16:35 ET tick. shouldRefreshOnStartup returns false.
+	fresh := &Snapshot{
+		SessionKey: "2026-05-20",
+		AsOf:       time.Date(2026, 5, 20, 17, 0, 0, 0, loc),
+		Method:     methodConstituentFanout,
+	}
+	if err := store.SaveSnapshot(*fresh); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	fake := &FakeBarFetcher{}
+	e := New(store, fake, Options{Clock: frozenClock(now)})
+
+	e.MarkPendingBootstrap()
+	if e.IsRefreshing() {
+		t.Error("MarkPendingBootstrap on fresh snapshot must not set refreshing=true")
+	}
+}
+
 // seedCloses returns a synthetic series of n closes, used to seed
 // pre-existing windows in the warm-refresh tests.
 func seedCloses(n int, start, step float64) []float64 {

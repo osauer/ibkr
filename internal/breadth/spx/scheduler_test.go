@@ -72,39 +72,87 @@ func TestShouldRefreshOnStartupNoSnapshot(t *testing.T) {
 }
 
 // TestShouldRefreshOnStartupAlreadyToday covers the no-op startup
-// case: cache already covers today's session.
+// case: cache already covers today's session with a post-tick AsOf.
 func TestShouldRefreshOnStartupAlreadyToday(t *testing.T) {
 	loc := nyLocation()
-	now := time.Date(2026, 5, 18, 22, 0, 0, 0, loc)
-	snap := &Snapshot{SessionKey: nySessionKey(now)}
+	now := time.Date(2026, 5, 18, 22, 0, 0, 0, loc) // Mon 22:00 ET
+	snap := &Snapshot{
+		SessionKey: nySessionKey(now),
+		AsOf:       time.Date(2026, 5, 18, 17, 0, 0, 0, loc),
+	}
 	if shouldRefreshOnStartup(snap, now) {
-		t.Error("cache for today's session should not trigger startup refresh")
+		t.Error("cache for today's session, post-tick AsOf, should not trigger startup refresh")
 	}
 }
 
 // TestShouldRefreshOnStartupCaughtBeforeWindow covers the morning-
-// startup case: yesterday's cache, but today's 16:35 hasn't arrived
-// yet — yesterday's data remains authoritative, no catch-up.
+// startup case: a complete previous-weekday snapshot, today's 16:35
+// hasn't arrived yet — yesterday's data remains authoritative, no
+// catch-up. Uses an explicit Mon morning + Fri-close pair so the
+// weekend roll-back path is exercised together with the post-tick
+// AsOf check.
 func TestShouldRefreshOnStartupCaughtBeforeWindow(t *testing.T) {
 	loc := nyLocation()
-	now := time.Date(2026, 5, 18, 9, 0, 0, 0, loc) // 09:00 ET
-	yesterday := nySessionKey(now.AddDate(0, 0, -1))
-	snap := &Snapshot{SessionKey: yesterday}
+	now := time.Date(2026, 5, 18, 9, 0, 0, 0, loc) // Mon 09:00 ET
+	snap := &Snapshot{
+		SessionKey: "2026-05-15",                             // Fri
+		AsOf:       time.Date(2026, 5, 15, 17, 0, 0, 0, loc), // post-Fri-tick
+	}
 	if shouldRefreshOnStartup(snap, now) {
-		t.Error("morning startup with yesterday's cache should wait for 16:35, not refresh now")
+		t.Error("Mon morning startup with post-tick Fri snapshot should wait, not refresh")
 	}
 }
 
 // TestShouldRefreshOnStartupMissedYesterday covers the catch-up case:
-// yesterday's cache, daemon comes up after 16:35 — we missed the
-// window, run a refresh immediately rather than wait until tomorrow.
+// the cached snapshot is from a prior weekday past its tick, but
+// localNow is past today's 16:35 — we want to compute today's session
+// rather than wait until tomorrow.
 func TestShouldRefreshOnStartupMissedYesterday(t *testing.T) {
 	loc := nyLocation()
-	now := time.Date(2026, 5, 18, 17, 0, 0, 0, loc) // 17:00 ET, past window
-	yesterday := nySessionKey(now.AddDate(0, 0, -1))
-	snap := &Snapshot{SessionKey: yesterday}
+	now := time.Date(2026, 5, 22, 17, 0, 0, 0, loc) // Fri 17:00 ET (past today's tick)
+	snap := &Snapshot{
+		SessionKey: "2026-05-21",                             // Thu
+		AsOf:       time.Date(2026, 5, 21, 17, 0, 0, 0, loc), // post-Thu-tick
+	}
 	if !shouldRefreshOnStartup(snap, now) {
-		t.Error("evening startup with yesterday's cache should catch up immediately")
+		t.Error("evening startup with prior-weekday cache should catch up immediately")
+	}
+}
+
+// TestShouldRefreshOnStartupStaleAsOfPreCloseSnapshot covers the
+// v0.30.1 missed-tick + partial-snapshot bug: yesterday's snapshot
+// has SessionKey matching yesterday but AsOf BEFORE yesterday's 16:35
+// ET close (e.g., a bootstrap refresh ran mid-session and yesterday's
+// scheduled tick was missed because the daemon was restarting). Before
+// the fix, shouldRefreshOnStartup looked only at SessionKey and the
+// morning-window early-return, sitting on the partial snapshot until
+// today's 16:35 ET — up to ~10 hours of stale data on a normal
+// weekday morning startup.
+func TestShouldRefreshOnStartupStaleAsOfPreCloseSnapshot(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 21, 6, 0, 0, 0, loc) // Thu 06:00 ET
+	snap := &Snapshot{
+		SessionKey: "2026-05-20",                              // Wed (yesterday)
+		AsOf:       time.Date(2026, 5, 20, 15, 27, 0, 0, loc), // Wed 15:27 ET (pre-close)
+	}
+	if !shouldRefreshOnStartup(snap, now) {
+		t.Error("yesterday's pre-close partial snapshot should trigger morning catch-up")
+	}
+}
+
+// TestShouldRefreshOnStartupAcrossMultiDayGap pins the "daemon down
+// for days" path: a stale Friday-close snapshot examined on the
+// following Tuesday morning is older than Monday's 16:35 tick, so
+// the AsOf clause forces an immediate refresh.
+func TestShouldRefreshOnStartupAcrossMultiDayGap(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 19, 9, 0, 0, 0, loc) // Tue 09:00 ET
+	snap := &Snapshot{
+		SessionKey: "2026-05-15",                             // prior Fri
+		AsOf:       time.Date(2026, 5, 15, 17, 0, 0, 0, loc), // Fri 17:00 ET
+	}
+	if !shouldRefreshOnStartup(snap, now) {
+		t.Error("Tue morning with Fri snapshot — Mon's tick was missed — should refresh")
 	}
 }
 
@@ -186,6 +234,47 @@ func TestRunBootstrapBelowThresholdSchedulesRetry(t *testing.T) {
 	// Windows persisted (the engine-side accumulation contract).
 	if got := len(e.windows); got != 5 {
 		t.Errorf("in-memory windows after bootstrap: want 5, got %d", got)
+	}
+}
+
+// TestNextWaitErroredOverridesRetries pins the v0.30.1 Bug 3 fix: a
+// transport error from Refresh must take precedence over the
+// below-threshold retry state. Otherwise a startup-time gateway
+// hiccup steals the 12-min coverage retry budget for up to 3 hours
+// of silent retry storms (15 × 12 min).
+func TestNextWaitErroredOverridesRetries(t *testing.T) {
+	e := &Engine{clock: time.Now}
+	got := e.nextWait(5, true)
+	if got != errorRetryDelay {
+		t.Errorf("errored + retries=5: want %v, got %v", errorRetryDelay, got)
+	}
+	// Errored takes precedence even with retries=0.
+	if got := e.nextWait(0, true); got != errorRetryDelay {
+		t.Errorf("errored + retries=0: want %v, got %v", errorRetryDelay, got)
+	}
+}
+
+// TestNextWaitBelowThresholdRetries pins the coverage-retry path: no
+// transport error but coverage was below threshold, so the next wait
+// is the 12-min IBKR-bucket refill delay.
+func TestNextWaitBelowThresholdRetries(t *testing.T) {
+	e := &Engine{clock: time.Now}
+	got := e.nextWait(1, false)
+	if got != belowThresholdRetryDelay {
+		t.Errorf("retries=1, no error: want %v, got %v", belowThresholdRetryDelay, got)
+	}
+}
+
+// TestNextWaitDailyCadence pins the steady-state path: no error, no
+// pending retry — wait until today's 16:35 ET tick.
+func TestNextWaitDailyCadence(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 18, 10, 0, 0, 0, loc) // Mon 10:00 ET
+	e := &Engine{clock: frozenClock(now)}
+	got := e.nextWait(0, false)
+	want := time.Date(2026, 5, 18, refreshHourET, refreshMinuteET, 0, 0, loc).Sub(now)
+	if got != want {
+		t.Errorf("daily cadence: want %v, got %v", want, got)
 	}
 }
 

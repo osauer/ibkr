@@ -2299,7 +2299,20 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		// hiccups, market-data farm reconnects). triggerReconnect (above)
 		// already fired by the time we're here, so the next call sees the
 		// recovered state.
-		res.Connected = c.IsReady()
+		//
+		// AND gated on postConnectSetupDone: c.ready is flipped by the
+		// connection read-loop goroutine in pkg/ibkr independently of
+		// postConnectSetup's synchronous prewarm sentinel-setting. A
+		// status RPC landing in the brief window between c.ready=true
+		// and postConnectSetup's tail would otherwise see Connected=true
+		// with an empty BackgroundTasks list — the symptom the user
+		// reported on 2026-05-21 (gamma + regime missing on the first
+		// status, present on the second). The latch is one-way: once
+		// postConnectSetup completes once, the daemon never re-enters
+		// "starting up" state from the user's point of view, even
+		// across reconnects (the prewarm Once guards mean reconnect
+		// doesn't re-fire them anyway).
+		res.Connected = c.IsReady() && s.postConnectSetupDone.Load()
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
 	}

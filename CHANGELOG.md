@@ -10,6 +10,31 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.30.1 — 2026-05-21 12:30 CEST
+
+### What's new
+
+- `ibkr status` now surfaces the daemon's startup pre-warms on the FIRST call after a restart. Previously a status call landing in the brief window between gateway handshake and the prewarm goroutines being scheduled returned `Connected: true` with no `Background:` row, even though gamma-zero, regime-prewarm, and (when needed) breadth-spx work was about to start a few milliseconds later. The second status call seconds later showed them. The race window is closed; one call is enough.
+- Breadth (SPX 50-DMA / 200-DMA / new highs–lows) now catches up on morning startup when the cached snapshot was taken before yesterday's 16:00 ET close. Previously a daemon restart cluster across yesterday's 16:35 ET tick would leave a partial pre-close snapshot in cache; the scheduler then sat on it until today's 16:35 ET because it compared only the snapshot's NY session-key (which matched yesterday) without checking whether the snapshot was actually from before yesterday's close. Worst case was ~10 hours of stale partial-day data on a normal weekday morning startup. Weekends roll back correctly: a Friday-close snapshot examined Monday morning still does not trigger a spurious refresh.
+
+### Changed
+
+- `ibkr status` reports `Connected: true` once the daemon's post-connect initialization completes, not at the instant of TWS handshake. The shift is normally ~50–100 ms — invisible during a healthy startup — but the new semantic guarantees that any `Connected: true` response also carries the full set of in-flight background tasks. Previously, a status call landing in the gap between the connection read-loop flipping `c.ready=true` and `postConnectSetup` finishing its synchronous sentinel-setting reported `Connected: true` with an empty `Background:` row.
+
+### Fixed
+
+- `ibkr status` BackgroundTasks list is now coherent with the daemon's connect-complete edge: `regime-prewarm`, `gamma-zero`, and `breadth-spx` (when a bootstrap refresh will fire) all appear before the first status call returns `Connected: true`. The sentinels are now set on the launching goroutine (not inside the spawned worker) and a `postConnectSetupDone` barrier gates the `Connected` field so a status poll arriving within the connection-establish window waits for full initialization rather than reading partial state.
+- Breadth scheduler's startup catch-up now triggers when `snap.AsOf` predates the most recent past weekday 16:35 ET tick, regardless of whether the snapshot's NY session-key matches "yesterday." Closes the partial-snapshot stale window described above.
+- Breadth scheduler distinguishes transport errors from below-threshold coverage in its retry policy. A `Refresh` that errors (gateway down, bulk-connector not yet ready, ctx-cancel upstream) now backs off 30 s and retries, instead of incrementing the below-threshold counter and waiting 12 min between attempts. Worst-case prior behavior was 15 × 12 min = 3 hours of silent retry storms after a startup-time hiccup before falling through to the daily cadence.
+
+### Added
+
+- `Engine.MarkPendingBootstrap()` in `internal/breadth/spx`: pre-sets the breadth engine's in-flight flag iff `shouldRefreshOnStartup` would fire against the current snapshot + clock. Called from `postConnectSetup` immediately before `go e.Run(ctx)` so `ibkr status` reflects an imminent bootstrap refresh without waiting for the goroutine to be scheduled. No-op when no bootstrap will fire, so the flag never sticks.
+
+### Engineering notes
+
+All three bugs trace back to the same shape: a sentinel or observable that the launching goroutine sets only after the spawned worker has executed its first lines. The daemon's `postConnectSetup` flips the connector's `IsReady` true at the start of the function, but `regimePrewarming.Store(true)` was inside `prewarmRegimeSymbols`, `c.current` was assigned inside the prewarmZeroGamma goroutine's `kickOrJoin` call, and `engine.refreshing` was set inside `Refresh`. The fix in each case is to set the observable state synchronously on the launching goroutine — for gamma, the existing `spawnJob`/`startLocked` split in `gamma_zero_cache.go` already separates "create the placeholder under cache mutex" from "run the compute on a fresh goroutine," so a straight synchronous `kickOrJoin` call works without changing the compute's lifetime. Breadth needs the new `MarkPendingBootstrap` helper because the bootstrap decision lives entirely inside the scheduler's `Run` loop and we have to mirror the predicate from the launcher. The third bug (scheduler retry conflation) was found by the reviewer during the design pass; it has the same conceptual shape as Bug 1 ("startup-time transient state is misclassified") but a different consequence (12-min back-off storm instead of UI gap).
+
 ## v0.30.0 — 2026-05-21 11:29 CEST
 
 ### What's new

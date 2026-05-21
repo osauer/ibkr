@@ -212,6 +212,25 @@ type Server struct {
 	// autospawns the daemon and walks away, the idle watcher could
 	// previously fire mid-prewarm.
 	regimePrewarming atomic.Bool
+	// postConnectSetupDone latches true at the end of the first
+	// successful postConnectSetup. Gates the Connected field of
+	// handleStatusHealth so an `ibkr status` that lands between
+	// `c.ready=true` (set asynchronously by the connection read loop
+	// in pkg/ibkr) and postConnectSetup finishing its synchronous
+	// prewarm sentinel-setting reports Connected=false (the CLI keeps
+	// polling) rather than Connected=true with empty BackgroundTasks.
+	// Without this latch, the FIRST status after restart could miss
+	// the imminent gamma-zero / breadth-spx / regime-prewarm work —
+	// the daemon is technically handshaken but not yet ready to
+	// publish its full background-task surface.
+	//
+	// Latched true once and not reset on reconnect: subsequent
+	// reconnects reuse the same prewarm machinery (Once-guarded), so
+	// the daemon never re-enters a "starting up" state from the
+	// user's point of view. A daemon panic during postConnectSetup
+	// crashes the process (no recover at that level), so the flag
+	// never stays false forever in practice.
+	postConnectSetupDone atomic.Bool
 
 	lock *instanceLock
 
@@ -1050,6 +1069,13 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// hyg_50dma and weekly_change_pct missing; second call (caches
 	// warm) returned all fields. Pre-warming eliminates the variance
 	// without changing the regime request path.
+	//
+	// Sentinel set HERE (before `go`), not inside the goroutine: a
+	// status RPC arriving in the brief window between this function
+	// returning and the goroutine being scheduled would otherwise see
+	// Connected=true but no background tasks. The goroutine's deferred
+	// Store(false) is the load-bearing clear.
+	s.regimePrewarming.Store(true)
 	go s.prewarmRegimeSymbols()
 
 	// Stand up the dedicated bulk-historical IBKR client BEFORE
@@ -1072,25 +1098,48 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// regression — see engine.finalise's Coverage==0 guard). The Once
 	// guard means a reconnect-driven second postConnectSetup is a no-op
 	// rather than spawning a duplicate scheduler loop.
+	//
+	// MarkPendingBootstrap is called BEFORE `go` so a status RPC arriving
+	// in the goroutine-spawn window sees breadth-spx in BackgroundTasks
+	// when a bootstrap Refresh is about to fire. No-op when the cached
+	// snapshot is fresh enough that Run() would skip straight to the
+	// daily-tick wait — so the flag never sticks.
 	if s.breadth != nil && s.serverCtx != nil {
 		s.breadthStarted.Do(func() {
+			s.breadth.MarkPendingBootstrap()
 			go s.breadth.Run(s.serverCtx)
 		})
 	}
 
 	// Prewarm dealer zero-gamma so the first `ibkr regime` / `ibkr
-	// gamma` of the day doesn't block on a cold ~4-min compute. Fire
-	// and forget: the cache's goroutine owns the lifetime; the user
-	// sees "computing dealer zero-gamma" in `ibkr status` immediately.
-	// No periodic loop here — kickOrJoin's soft-TTL machinery handles
-	// staleness from RPC handlers thereafter, so we only need the
-	// initial kick. The Once gates against reconnect-driven duplicate
-	// kicks; later staleness is the soft TTL's job.
+	// gamma` of the day doesn't block on a cold ~4-min compute. The
+	// user sees "computing dealer zero-gamma" in `ibkr status`
+	// immediately. No periodic loop here — kickOrJoin's soft-TTL
+	// machinery handles staleness from RPC handlers thereafter, so we
+	// only need the initial kick. The Once gates against
+	// reconnect-driven duplicate kicks; later staleness is the soft
+	// TTL's job.
+	//
+	// Called synchronously (no `go`): kickOrJoin only acquires the
+	// cache mutex and assigns c.current under it; the multi-minute
+	// fan-out runs on the goroutine spawnJob spawns internally. By the
+	// time postConnectSetup returns, IsComputing() reflects the
+	// in-flight compute — closing the race where the first `ibkr
+	// status` after restart would see Connected=true but no background
+	// tasks.
 	if s.zeroGamma != nil && s.serverCtx != nil {
 		s.gammaStarted.Do(func() {
-			go s.prewarmZeroGamma(s.serverCtx)
+			s.prewarmZeroGamma(s.serverCtx)
 		})
 	}
+
+	// Latch the postConnectSetup-done barrier. handleStatusHealth gates
+	// its Connected field on this so a status RPC arriving in the brief
+	// window between c.ready flipping true (set by the connection read
+	// loop in pkg/ibkr) and the synchronous sentinel-setting above
+	// finishing reports Connected=false — the CLI keeps polling and the
+	// first user-visible response shows the full background-task list.
+	s.postConnectSetupDone.Store(true)
 }
 
 // prewarmZeroGamma kicks the first dealer zero-gamma compute of a
@@ -1185,17 +1234,15 @@ var regimeSymbolSeed = map[string]ibkrlib.ContractDetailsLite{
 // classifySymbol path the regime USD/JPY fetcher uses; the seed entry
 // is keyed on the dotted-pair form so the look-up matches.
 func (s *Server) prewarmRegimeSymbols() {
+	// Clear the sentinel on every exit path. The matching Set is in the
+	// caller (postConnectSetup) BEFORE the `go` so a status RPC arriving
+	// during the goroutine-spawn window sees the in-flight prewarm.
+	// The connector nil-return below depends on this defer running.
+	defer s.regimePrewarming.Store(false)
 	c := s.gatewayConnector()
 	if c == nil {
 		return
 	}
-	// Surface the fan-out on the registry while it's in flight so the
-	// idle watcher defers shutdown and `ibkr status` reflects the work.
-	// Up to ~30 s of parallel contract-details fetches; without this
-	// flag, the idle watcher could fire mid-prewarm on an autospawned
-	// daemon the user walked away from.
-	s.regimePrewarming.Store(true)
-	defer s.regimePrewarming.Store(false)
 	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "SPX"}
 	for _, sym := range syms {
 		if seed, ok := regimeSymbolSeed[sym]; ok {

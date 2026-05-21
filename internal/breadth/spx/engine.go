@@ -190,6 +190,31 @@ func (e *Engine) IsRefreshing() bool {
 	return e.refreshing
 }
 
+// MarkPendingBootstrap pre-sets refreshing=true if Run() would fire a
+// bootstrap refresh on entry — i.e. iff shouldRefreshOnStartup is true
+// against the current snapshot and clock. The caller MUST spawn Run()
+// immediately after; otherwise the flag stays true forever.
+//
+// The point is to close the race in postConnectSetup where the daemon
+// reports Connected=true (handshake done) before `go e.Run()` has
+// scheduled and called Refresh — a status RPC in that window would
+// otherwise see Connected=true but no breadth-spx background task,
+// even though one is about to fire. Refresh() itself sets refreshing
+// to true again under e.mu (idempotent) and clears it via defer, so
+// the canonical lifetime tracking inside Refresh stays unchanged.
+//
+// No-op when no bootstrap would fire (snapshot is fresh) — that's
+// also the correctness guard against a stuck flag.
+func (e *Engine) MarkPendingBootstrap() {
+	cur, _ := e.Get()
+	if !shouldRefreshOnStartup(cur, e.clock()) {
+		return
+	}
+	e.mu.Lock()
+	e.refreshing = true
+	e.mu.Unlock()
+}
+
 // Refresh runs one pass of the constituent-fanout compute: decide
 // which names need new bars, fetch them in parallel, slide each
 // window forward, recompute S5FI, persist.
