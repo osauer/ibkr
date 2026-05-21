@@ -65,71 +65,16 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 // populateStreaks ticks the streak counter for each regime row and
 // attaches the resulting *rpc.StreakInfo. Nil-safe on the store side
 // (the field stays nil when streaks aren't persisted), and nil-safe on
-// the band side (Tick freezes the counter when band="").
+// the band side (Tick freezes the counter when band=""). Per-indicator
+// logic lives in regime_indicators.go.
 func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) {
 	if s.streaks == nil || res == nil {
 		return
 	}
 	now := nyDateNow()
-	// VIX/VIX3M ratio band.
-	{
-		band := ""
-		var value float64
-		if res.VIXTermStructure.Status == rpc.RegimeStatusOK || res.VIXTermStructure.Status == rpc.RegimeStatusStale {
-			band = classifyVIXTermBand(res.VIXTermStructure.Ratio)
-			if res.VIXTermStructure.Ratio != nil {
-				value = *res.VIXTermStructure.Ratio
-			}
-		}
-		res.VIXTermStructure.Streak = s.streaks.Tick(StreakKeyVIXTerm, value, band, now)
-	}
-	// HYG vs SPY band.
-	{
-		band := ""
-		var value float64
-		if res.HYGSPYDivergence.Status == rpc.RegimeStatusOK || res.HYGSPYDivergence.Status == rpc.RegimeStatusStale {
-			band = classifyHYGSPYBand(res.HYGSPYDivergence)
-			if res.HYGSPYDivergence.HYGPrice != nil {
-				value = *res.HYGSPYDivergence.HYGPrice
-			}
-		}
-		res.HYGSPYDivergence.Streak = s.streaks.Tick(StreakKeyHYGSPY, value, band, now)
-	}
-	// USD/JPY weekly-change band.
-	{
-		band := ""
-		var value float64
-		if res.USDJPY.Status == rpc.RegimeStatusOK || res.USDJPY.Status == rpc.RegimeStatusStale {
-			band = classifyUSDJPYBand(res.USDJPY.WeeklyChange)
-			if res.USDJPY.WeeklyChange != nil {
-				value = *res.USDJPY.WeeklyChange
-			}
-		}
-		res.USDJPY.Streak = s.streaks.Tick(StreakKeyUSDJPY, value, band, now)
-	}
-	// Gamma band (only when the envelope landed a ready result).
-	{
-		band := ""
-		var value float64
-		if res.GammaZero.Status == rpc.RegimeStatusOK && res.GammaZero.Envelope.Result != nil {
-			c := res.GammaZero.Envelope.Result
-			band = classifyGammaBand(c.GapPct, c.GammaSign)
-			if c.GapPct != nil {
-				value = *c.GapPct
-			}
-		}
-		res.GammaZero.Streak = s.streaks.Tick(StreakKeyGammaZero, value, band, now)
-	}
-	// Breadth band (simplified value-only classification for streak
-	// purposes — see regime_streaks.go for the rationale).
-	{
-		band := ""
-		var value float64
-		if (res.Breadth.Status == rpc.RegimeStatusOK || res.Breadth.Status == rpc.RegimeStatusStale) && res.Breadth.Envelope.State == rpc.BreadthStateReady {
-			value = res.Breadth.Envelope.PctAbove50DMA
-			band = classifyBreadthBand(value)
-		}
-		res.Breadth.Streak = s.streaks.Tick(StreakKeyBreadth, value, band, now)
+	for _, ind := range streakIndicators {
+		band, value := ind.bandAndValue(res)
+		ind.attachStreak(res, s.streaks.Tick(ind.key(), value, band, now))
 	}
 }
 
