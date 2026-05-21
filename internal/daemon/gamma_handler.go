@@ -45,22 +45,13 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
-	// Scope: which underlying(s) to compute. Empty falls back to "spy"
-	// until step 7 of the SPX coverage arc lands the combined
-	// orchestration; --only=spx enables the SPX-only path here.
-	underlying := "SPY"
-	switch p.Scope {
-	case rpc.GammaZeroScopeSPX:
-		underlying = "SPX"
-	case "", rpc.GammaZeroScopeSPY:
-		underlying = "SPY"
-	case rpc.GammaZeroScopeCombined:
-		// Combined-scope orchestration arrives in step 7. For now,
-		// degrade to SPY-only so the wire shape stays usable while
-		// the combined path is built up.
-		underlying = "SPY"
-	default:
-		return nil, fmt.Errorf("zero-gamma: unknown scope %q (want spy|spx|spy+spx)", p.Scope)
+	// Scope: which underlying(s) to compute. Empty defaults to combined
+	// (the new canonical headline post-step-7). Single-underlying paths
+	// (--only=spy / --only=spx) bypass the canonical cache via force()
+	// since they're diagnostic shapes.
+	scope, scopeErr := gammaScopeForRequest(p.Scope)
+	if scopeErr != nil {
+		return nil, fmt.Errorf("zero-gamma: %w", scopeErr)
 	}
 
 	// Background ctx for the compute goroutine — independent of the
@@ -87,14 +78,22 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	// pre-market). subManager.Hold is refcounted, so a concurrent
 	// regime snapshot on the same symbol is safe — the line stays
 	// open until the compute releases.
+	//
+	// Per-scope compute selection:
+	//   combined  → SPY phase then SPX phase, with separate Holds
+	//               (computeGammaCombined enforces the underlying-hold
+	//               transition audit checklist item from design §7.1).
+	//   spy / spx → single-underlying phase under one Hold.
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		release, err := s.subs.Hold(bgCtx, underlying)
-		if err != nil {
-			return nil, fmt.Errorf("zero-gamma: hold %s underlying: %w", underlying, err)
+		switch scope {
+		case rpc.GammaZeroScopeCombined:
+			return computeGammaCombined(bgCtx, s, c, params, prog)
+		case rpc.GammaZeroScopeSPX:
+			return runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 0)
+		default: // GammaZeroScopeSPY
+			return runUnderlyingPhase(bgCtx, s, c, "SPY", params, prog, 0)
 		}
-		defer release()
-		return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 
 	var job *gammaComputation

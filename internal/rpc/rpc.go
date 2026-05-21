@@ -553,11 +553,24 @@ type GammaProfilePoint struct {
 // renderer can present it alongside ZeroGamma as a "call wall / put
 // wall" view that's methodology-agnostic.
 type StrikeConcentration struct {
-	Strike float64 `json:"strike"`
-	Expiry string  `json:"expiry"` // YYYY-MM-DD
-	Right  string  `json:"right"`  // "C" | "P"
-	AbsGEX float64 `json:"abs_gex"`
-	OI     int64   `json:"open_interest"`
+	// Underlying identifies which index this strike belongs to —
+	// "SPY" or "SPX" today. Populated by single-underlying computes
+	// with that compute's sym, and carried through the combined-scope
+	// merge so the renderer can label per-row in the top-strikes
+	// table without re-deriving from the trading class. Empty for
+	// pre-v0.31 result envelopes; renderers should treat empty as
+	// "the only underlying in scope" for back-compat.
+	Underlying string `json:"underlying,omitempty"`
+	// TradingClass is the listed class on the contract — "SPY",
+	// "SPX" (AM-settled monthly), "SPXW" (PM-settled weekly).
+	// Distinct from Underlying for SPX which lists both classes.
+	// Empty in single-class results that don't need disambiguation.
+	TradingClass string  `json:"trading_class,omitempty"`
+	Strike       float64 `json:"strike"`
+	Expiry       string  `json:"expiry"` // YYYY-MM-DD
+	Right        string  `json:"right"`  // "C" | "P"
+	AbsGEX       float64 `json:"abs_gex"`
+	OI           int64   `json:"open_interest"`
 }
 
 // SkewFitInfo is the per-expiry diagnostic for the sticky-moneyness

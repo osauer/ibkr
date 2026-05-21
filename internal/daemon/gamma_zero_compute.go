@@ -812,7 +812,7 @@ func computeGammaZeroFor(
 	zgTerm, signTerm := findZeroCrossing(profileTerm)
 
 	// 9. Top strikes by magnitude.
-	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK)
+	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK, sym)
 
 	// Coverage gate. A compute whose successful-leg fraction falls
 	// below MinLegCoverageFraction is surfaced as an error so the
@@ -1277,7 +1277,12 @@ func sweepProfile(legs []legData, snapshotSpot, sweepRangePct float64, skewByExp
 // dollar gamma at the snapshot spot. Used by the renderer as the
 // methodology-robust positioning view (independent of the Perfiliev
 // sign assumption). The slice is sorted by AbsGEX descending.
-func rankTopStrikesByAbsGEX(legs []legData, spot float64, k int) []rpc.StrikeConcentration {
+//
+// underlying is stamped onto each row's StrikeConcentration so the
+// combined-scope merge (step 7) can keep SPY vs SPX rows
+// distinguishable in the merged top-K table without re-deriving the
+// information from the leg's tradingClass.
+func rankTopStrikesByAbsGEX(legs []legData, spot float64, k int, underlying string) []rpc.StrikeConcentration {
 	if k <= 0 || len(legs) == 0 {
 		return nil
 	}
@@ -1296,11 +1301,13 @@ func rankTopStrikesByAbsGEX(legs []legData, spot float64, k int) []rpc.StrikeCon
 		}
 		rows = append(rows, ranked{
 			row: rpc.StrikeConcentration{
-				Strike: l.strike,
-				Expiry: l.expiryYMD[:4] + "-" + l.expiryYMD[4:6] + "-" + l.expiryYMD[6:8],
-				Right:  l.right,
-				AbsGEX: v,
-				OI:     l.oi,
+				Underlying:   underlying,
+				TradingClass: l.tradingClass,
+				Strike:       l.strike,
+				Expiry:       l.expiryYMD[:4] + "-" + l.expiryYMD[4:6] + "-" + l.expiryYMD[6:8],
+				Right:        l.right,
+				AbsGEX:       v,
+				OI:           l.oi,
 			},
 			absGEX: v,
 		})

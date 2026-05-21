@@ -333,7 +333,7 @@ func TestRankTopStrikesByAbsGEX(t *testing.T) {
 		{expiryYMD: "20260619", strike: 4950, right: "C", oi: 0, gammaAtSnapshot: 0.001},  // dropped: OI=0
 		{expiryYMD: "20260619", strike: 4900, right: "P", oi: 10_000, gammaAtSnapshot: 0}, // dropped: γ=0
 	}
-	top := rankTopStrikesByAbsGEX(legs, 5000, 5)
+	top := rankTopStrikesByAbsGEX(legs, 5000, 5, "TEST")
 
 	if len(top) != 3 {
 		t.Fatalf("got %d rows, want 3 (two filtered): %+v", len(top), top)
@@ -356,7 +356,7 @@ func TestRankTopStrikesByAbsGEX(t *testing.T) {
 	}
 
 	// k=0 disables ranking
-	if got := rankTopStrikesByAbsGEX(legs, 5000, 0); got != nil {
+	if got := rankTopStrikesByAbsGEX(legs, 5000, 0, "TEST"); got != nil {
 		t.Errorf("k=0: got %v, want nil", got)
 	}
 }
