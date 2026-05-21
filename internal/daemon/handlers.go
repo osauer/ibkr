@@ -662,7 +662,9 @@ func captureOptionGreeks(ctx context.Context, c *ibkrlib.Connector, under, expir
 	if under == "" || expiryYMD == "" || strike <= 0 || right == "" {
 		return out
 	}
-	key, _, err := c.SubscribeOption(ctx, under, expiryYMD, strike, right)
+	// Single-class default — captureOptionGreeks is called from the
+	// chain-prewarm path which doesn't disambiguate SPX vs SPXW today.
+	key, _, err := c.SubscribeOption(ctx, under, under, expiryYMD, strike, right)
 	if err != nil {
 		return out
 	}

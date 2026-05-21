@@ -1902,19 +1902,32 @@ func (c *Connector) ServerVersion() int {
 }
 
 // SubscribeOption issues a streaming market-data subscription for a fully
-// specified option contract (symbol + YYYYMMDD expiry + strike + C/P right).
-// The result is keyed by an OPRA-style identifier so chain consumers can
-// look up the cached quote in GetMarketData. ctx cancellation aborts the
-// underlying contract-resolution round trip; callers that already have a
-// per-request deadline should pass that ctx through.
-func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD string, strike float64, right string) (string, int, error) {
+// specified option contract (symbol + YYYYMMDD expiry + strike + C/P right
+// + tradingClass). The result is keyed by an OPRA-style identifier so chain
+// consumers can look up the cached quote in GetMarketData. ctx cancellation
+// aborts the underlying contract-resolution round trip; callers that already
+// have a per-request deadline should pass that ctx through.
+//
+// tradingClass is required because the option-contract cache is keyed by
+// (symbol, class, expiry, strike, right) — SPX vs SPXW collide on
+// third-Friday dates without the class qualifier. For single-class
+// underlyings (SPY, equities) the symbol-as-class default is the right
+// hint, so an empty tradingClass argument is normalised to underlying.
+// Multi-class callers (SPX gamma compute) MUST pass the explicit class
+// they enumerated from secDefOptParams.
+func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClass, expiryYMD string, strike float64, right string) (string, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if !c.isConnected() {
 		return "", 0, ErrIBKRUnavailable
 	}
-	key := fmt.Sprintf("%s_%s%s%.0f", strings.ToUpper(underlying), expiryYMD[2:], strings.ToUpper(right), strike)
+	upperUnderlying := strings.ToUpper(underlying)
+	upperClass := strings.ToUpper(strings.TrimSpace(tradingClass))
+	if upperClass == "" {
+		upperClass = upperUnderlying
+	}
+	key := fmt.Sprintf("%s_%s%s%.0f", upperUnderlying, expiryYMD[2:], strings.ToUpper(right), strike)
 
 	c.subMu.RLock()
 	if existing, ok := c.subscriptions[key]; ok {
@@ -1924,14 +1937,15 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, expiryYMD s
 	c.subMu.RUnlock()
 
 	contract := Contract{
-		Symbol:     strings.ToUpper(underlying),
-		SecType:    "OPT",
-		Exchange:   "SMART",
-		Currency:   "USD",
-		Expiry:     expiryYMD,
-		Strike:     strike,
-		Right:      strings.ToUpper(right),
-		Multiplier: 100,
+		Symbol:       upperUnderlying,
+		SecType:      "OPT",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		Expiry:       expiryYMD,
+		Strike:       strike,
+		Right:        strings.ToUpper(right),
+		Multiplier:   100,
+		TradingClass: upperClass,
 	}
 
 	c.mu.RLock()

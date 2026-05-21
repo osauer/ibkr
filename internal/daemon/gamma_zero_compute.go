@@ -148,14 +148,20 @@ func checkLegCoverage(landed, total int, throttled bool) error {
 // fan-out into the sweep. Captured at fetch time; iv stays fixed
 // during the spot sweep (a documented v1 limitation — sticky-strike
 // skew is on the deferred backlog).
+//
+// tradingClass disambiguates SPX-class AM-monthlies from SPXW-class
+// PM-weeklies on shared third-Friday dates. For single-class
+// underlyings (SPY) the field equals the symbol. The settlement
+// instant in dteYears branches on it.
 type legData struct {
-	expiryYMD string
-	dte       float64 // years; positive
-	strike    float64
-	right     string // "C" | "P"
-	isCall    bool
-	iv        float64
-	oi        int64
+	expiryYMD    string
+	dte          float64 // years; positive
+	strike       float64
+	right        string // "C" | "P"
+	tradingClass string // "SPY" | "SPX" | "SPXW" | …
+	isCall       bool
+	iv           float64
+	oi           int64
 	// gamma is the gateway-supplied model-computation gamma at the
 	// snapshot spot; used for the at-spot aggregate. The sweep
 	// recomputes gamma via Black-Scholes for each scenario spot.
@@ -228,10 +234,17 @@ func (g gammaLogf) Warnf(format string, args ...any) {
 // back-solve when the gateway doesn't deliver a model tick (the typical
 // pre-market state). Both are captured by computeGammaZeroFor before
 // the fan-out begins; the fetcher does NOT take its own spot snapshot.
+//
+// tradingClass is the option's listed class — load-bearing for SPX
+// because the SPX-class AM-settled and SPXW-class PM-settled contracts
+// share (expiry, strike, right) on third-Fridays. The fetcher passes it
+// through to SubscribeOption so the cache lookup hits the right
+// pre-warmed entry. For SPY-class single-class underlyings the field is
+// just the symbol; empty falls back to underlying.
 type legFetcher func(
 	ctx context.Context,
 	c *ibkrlib.Connector,
-	underlying, expiryYMD string,
+	underlying, tradingClass, expiryYMD string,
 	strike float64,
 	right string,
 	snapshotSpot float64,
@@ -268,7 +281,7 @@ type legFetcher func(
 func productionLegFetcher(
 	ctx context.Context,
 	c *ibkrlib.Connector,
-	underlying, expiryYMD string,
+	underlying, tradingClass, expiryYMD string,
 	strike float64,
 	right string,
 	snapshotSpot float64,
@@ -277,7 +290,7 @@ func productionLegFetcher(
 	if c == nil {
 		return legResult{Throttle: true}
 	}
-	key, _, err := c.SubscribeOption(ctx, underlying, expiryYMD, strike, right)
+	key, _, err := c.SubscribeOption(ctx, underlying, tradingClass, expiryYMD, strike, right)
 	if err != nil {
 		// SubscribeOption's error path has two distinct shapes:
 		//
@@ -533,9 +546,10 @@ func computeGammaZeroFor(
 	// avoids a worst-case where the first 50 attempts are all far-OTM
 	// failures and the compute aborts before ever reaching ATM.
 	type legSpec struct {
-		expiryYMD string
-		strike    float64
-		right     string
+		expiryYMD    string
+		strike       float64
+		right        string
+		tradingClass string // "SPY" today; SPX path (step 6) tags per-leg from the classed enumeration
 	}
 	var jobs []legSpec
 	for _, expDate := range pickedExp {
@@ -543,8 +557,11 @@ func computeGammaZeroFor(
 		ordered := sortStrikesATMOutward(strikes, spot)
 		expYMD := compactExpiry(expDate)
 		for _, k := range ordered {
-			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "C"})
-			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "P"})
+			// For single-class underlyings (SPY, equities) the trading
+			// class equals the symbol. SPX's classed enumeration arrives
+			// in step 6 and overrides this on a per-strike basis.
+			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "C", tradingClass: sym})
+			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "P", tradingClass: sym})
 		}
 	}
 	if len(jobs) == 0 {
@@ -609,12 +626,7 @@ func computeGammaZeroFor(
 	beforeFilter := len(jobs)
 	filteredJobs := jobs[:0]
 	for _, j := range jobs {
-		// Trading class == symbol for single-class underlyings (SPY,
-		// equities). Step 3 of the SPX coverage arc plumbs a per-leg
-		// trading class through legSpec; until then this matches the
-		// TradingClass IBKR fills in for SPY (== "SPY") and keeps the
-		// SPY path bit-for-bit identical post-cache-key bump.
-		if c.IsOptionContractCached(sym, sym, j.expiryYMD, j.strike, j.right) {
+		if c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right) {
 			filteredJobs = append(filteredJobs, j)
 		}
 	}
@@ -676,7 +688,7 @@ func computeGammaZeroFor(
 		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
 			return
 		}
-		r := fetch(ctx, c, sym, j.expiryYMD, j.strike, j.right, spot, spotAt)
+		r := fetch(ctx, c, sym, j.tradingClass, j.expiryYMD, j.strike, j.right, spot, spotAt)
 		// Always increment the progress counter — failed legs still
 		// represent work attempted. 10 % is consumed by spot+expiries
 		// stages above; the fan-out scales linearly from 10 → 85.
@@ -709,6 +721,7 @@ func computeGammaZeroFor(
 			dte:             dte,
 			strike:          j.strike,
 			right:           j.right,
+			tradingClass:    j.tradingClass,
 			isCall:          j.right == "C",
 			iv:              r.IV,
 			oi:              r.OI,

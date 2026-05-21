@@ -472,7 +472,12 @@ func mergeStrikeSide(dst, src *rpc.ChainStrike, right string) {
 }
 
 func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStrike, symbol, expiryYMD string, strike float64, right string) {
-	key, _, err := c.SubscribeOption(ctx, symbol, expiryYMD, strike, right)
+	// Trading class defaults to the symbol for single-class chain
+	// callers (chain.go fetches one underlying at a time and doesn't
+	// today distinguish SPX vs SPXW; SubscribeOption's empty-class
+	// normalisation matches the SPY pattern). SPX classed enumeration
+	// would extend this in step 6 of the gamma SPX coverage arc.
+	key, _, err := c.SubscribeOption(ctx, symbol, symbol, expiryYMD, strike, right)
 	if err != nil {
 		return
 	}

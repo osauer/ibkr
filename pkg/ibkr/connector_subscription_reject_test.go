@@ -36,14 +36,15 @@ func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connectio
 	c.ready = true
 
 	contract := Contract{
-		Symbol:     "SPY",
-		SecType:    "OPT",
-		Exchange:   "SMART",
-		Currency:   "USD",
-		Expiry:     "20250620",
-		Strike:     500,
-		Right:      "C",
-		Multiplier: 100,
+		Symbol:       "SPY",
+		SecType:      "OPT",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		Expiry:       "20250620",
+		Strike:       500,
+		Right:        "C",
+		Multiplier:   100,
+		TradingClass: "SPY", // matches the SubscribeOption call below so the v3 cache lookup hits
 	}
 	cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 	conn.optionContractMu.Lock()
@@ -58,7 +59,7 @@ func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connectio
 	conn.optionContractMu.Unlock()
 
 	var err error
-	subKey, reqID, err = c.SubscribeOption(context.Background(), "SPY", "20250620", 500, "C")
+	subKey, reqID, err = c.SubscribeOption(context.Background(), "SPY", "SPY", "20250620", 500, "C")
 	if err != nil {
 		t.Fatalf("SubscribeOption: %v", err)
 	}
