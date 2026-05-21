@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 	"time"
 
@@ -416,43 +415,29 @@ func renderGammaSkippedBanner(env *Env, c *rpc.GammaZeroComputed) {
 	}
 }
 
-// renderCombinedHeadline prints the SPY+SPX combined headline block —
-// the combined γ-zero gap with decoupled-badge handling, plus the
-// per-index detail rows (SPY then SPX) with their own near/term
-// breakdowns. Returns true when the combined path was used; the
-// caller falls back to the single-underlying renderer otherwise.
+// renderCombinedHeadline prints the SPY+SPX combined headline block.
+// The headline is a Regime row that classifies SPY/SPX agreement (or
+// disagreement) directly from per-index sweep outcomes, followed by
+// per-index detail rows.
 //
-// Mirrors design §9.1's mockup. The combined number is rendered as a
-// spot-percent (CombinedGapPct), not a price, because SPY and SPX
-// have different absolute spot levels — a single price would be
-// nonsensical. Per-index rows use their own anchored spots.
+// Why no "Combined γ-zero spot X%" line (dropped in step 10): SPX
+// dominates the dollar sum by ~100× per contract via the spot²
+// scaling. At real OI mixes the SPX share runs 60-70% of the combined
+// magnitude, so a combined γ-zero gap was structurally pinned to
+// SPX's flip with epsilon SPY noise — indistinguishable from SPX-only
+// for regime-call use. The actionable signal is regime agreement vs
+// disagreement, surfaced explicitly via the RegimeAgreement classifier.
+//
+// Returns true when the combined path was used; the caller falls back
+// to the single-underlying renderer otherwise.
 func renderCombinedHeadline(env *Env, c *rpc.GammaZeroComputed) bool {
 	if c == nil || c.Scope != rpc.GammaZeroScopeCombined {
 		return false
 	}
 	out := env.Stdout
 
-	// Headline: combined γ-zero gap. Regime label off the SPY-half
-	// sign — both halves track the same dealer-positioning regime in
-	// the ≥ 0.90 correlation window (where we trust the combined
-	// view); for decoupled regimes the badge tells the reader to use
-	// per-index instead.
-	decoupled := slices.Contains(c.Warnings, "decoupled")
-	if c.CombinedGapPct != nil {
-		sign := "+"
-		if *c.CombinedGapPct < 0 {
-			sign = ""
-		}
-		regime := gammaCombinedRegimeLabel(c)
-		fmt.Fprintf(out, "  Combined γ-zero  spot %s%.2f %% %s\n", sign, *c.CombinedGapPct, regime)
-	} else {
-		fmt.Fprintf(out, "  Combined γ-zero  no crossing — %s\n", gammaCombinedRegimeLabel(c))
-	}
-	if decoupled && c.DecoupledCorr != nil {
-		fmt.Fprintln(out, env.dim(fmt.Sprintf("    ⚠ SPY/SPX 20d corr %.2f < 0.90 — combined number unreliable; treat per-index below as primary.", *c.DecoupledCorr)))
-	}
+	fmt.Fprintf(out, "  Regime      %s\n", formatRegimeAgreement(c))
 
-	// Per-index detail.
 	spy := c.PerIndex["SPY"]
 	spx := c.PerIndex["SPX"]
 	fmt.Fprintln(out, "  Per-index:")
@@ -463,6 +448,62 @@ func renderCombinedHeadline(env *Env, c *rpc.GammaZeroComputed) bool {
 		renderPerIndexRow(env, "SPX", spx)
 	}
 	return true
+}
+
+// formatRegimeAgreement renders the RegimeAgreement classifier into a
+// one-line summary. The disagree case is the actionable signal —
+// flagged loudly so the reader doesn't skim past institutional/retail
+// positioning divergence.
+func formatRegimeAgreement(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "—"
+	}
+	switch c.RegimeAgreement {
+	case "agree:long-gamma":
+		return "SPY and SPX both long-γ (stabilizing regime · agreement)"
+	case "agree:short-gamma":
+		return "SPY and SPX both short-γ (amplifying regime · agreement)"
+	case "agree:flipping":
+		spy := c.PerIndex["SPY"]
+		spx := c.PerIndex["SPX"]
+		if spy != nil && spy.ZeroGamma != nil && spx != nil && spx.ZeroGamma != nil {
+			return fmt.Sprintf("SPY γ-zero %s · SPX γ-zero %s (both flipping · agreement)",
+				formatSpotPrice(*spy.ZeroGamma), formatSpotPrice(*spx.ZeroGamma))
+		}
+		return "SPY and SPX both flipping (agreement)"
+	case "disagree":
+		return formatRegimeDisagreement(c)
+	}
+	return "indeterminate (insufficient per-index data)"
+}
+
+// formatRegimeDisagreement renders the actionable case — one index
+// stabilising while the other is amplifying. Names both sides so the
+// reader knows which book sits where.
+func formatRegimeDisagreement(c *rpc.GammaZeroComputed) string {
+	spy := perIndexRegimeWord(c.PerIndex["SPY"])
+	spx := perIndexRegimeWord(c.PerIndex["SPX"])
+	return fmt.Sprintf("SPY %s · SPX %s (DISAGREEMENT — institutional/retail divergence; use per-index below as primary)",
+		spy, spx)
+}
+
+// perIndexRegimeWord turns a per-index result into a short label
+// for the disagreement summary. Mirrors the RegimeAgreement classifier
+// on the daemon side.
+func perIndexRegimeWord(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "—"
+	}
+	if c.ZeroGamma != nil {
+		return fmt.Sprintf("flipping @ %s", formatSpotPrice(*c.ZeroGamma))
+	}
+	switch c.GammaSign {
+	case "positive":
+		return "long-γ"
+	case "negative":
+		return "short-γ"
+	}
+	return "—"
 }
 
 // renderPerIndexRow prints one per-underlying detail block inside the
@@ -490,23 +531,6 @@ func renderPerIndexRow(env *Env, label string, c *rpc.GammaZeroComputed) {
 		fmt.Fprintf(out, "      near         %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
 		fmt.Fprintf(out, "      term         %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
 	}
-}
-
-// gammaCombinedRegimeLabel infers the regime label for the combined
-// headline by looking at the combined sweep's sign profile. Returns
-// "(regime: long-γ, stabilizing)" or similar — matches the design §9.1
-// mockup. Empty when no sign info is available.
-func gammaCombinedRegimeLabel(c *rpc.GammaZeroComputed) string {
-	if c == nil {
-		return ""
-	}
-	switch c.GammaSign {
-	case "positive":
-		return "(regime: long-γ, stabilizing)"
-	case "negative":
-		return "(regime: short-γ, amplifying)"
-	}
-	return ""
 }
 
 // gammaHeaderForScope returns the renderer's section header — varies

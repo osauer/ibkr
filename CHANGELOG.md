@@ -10,6 +10,41 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.31.0 — 2026-05-21 22:12 CEST
+
+### What's new
+
+- `ibkr gamma` now covers SPY **and** SPX by default. The headline is a `Regime` line classifying whether the two indices agree (both long-γ / both short-γ / both flipping) or `DISAGREEMENT` — the actionable case where one book is stabilising while the other amplifies (institutional/retail divergence). The per-index breakdown (SPY γ-zero · SPX γ-zero, each with near/term sub-rows) is the primary decision surface. The top-strikes table gains an `INDEX` column in combined scope.
+- **Entitlement-graceful fallback:** accounts without CBOE OPRA see the same combined command degrade cleanly to SPY-only with a one-line `⚠ SPX skipped — entitlement missing (IBKR error 354). Showing SPY only.` banner above the headline (exit 0). Partial cases — one SPX trading class lands, the other 354s — surface in the JSON envelope's `partial_classes` map. No reconfigure needed.
+- New `--only=spy` (bit-for-bit pre-coverage-arc SPY-only output, fast path) and `--only=spx` (SPX-only; errors out if SPX is unreachable rather than degrading). MCP `ibkr_gamma` tool gains the same `scope` argument. `ibkr gamma` with no flag defaults to combined.
+
+### Changed
+
+- `ibkr gamma`: default scope is now combined SPY+SPX; the renderer header reads `Dealer Zero-Gamma (SPY + SPX)`, the headline is a `Regime` row, and per-index detail prints under `Per-index:`. SPY-only consumers wanting the pre-coverage-arc layout pass `--only=spy`.
+- `ibkr gamma`: `Source` row now reads `computed from IBKR SPY+SPX option chains` in combined scope; single-underlying scopes interpolate the actual symbol.
+- `ibkr regime`: indicator 4 (dealer zero-gamma) is now sourced from the combined compute; the regime row's headline figures still reflect the SPY-anchored view for back-compat, but the per-index detail is reachable via `ibkr gamma --json`.
+- MCP `ibkr_gamma`: tool description rewritten to cover combined scope, per-index breakdown, scope flag, entitlement-graceful fallback, partial-class state, and the regime-agreement classifier. Argument list gains `scope` (one of `spy` / `spx` / `spy+spx`).
+- AM-settled SPX-class monthlies now respect their 09:30 ET settlement instant in DTE filtering; previously the unified 16:00 ET cutoff over-stated their time-to-expiry by ~6.5 hours on the third Friday morning, inflating their gamma contribution.
+
+### Added
+
+- `rpc.GammaZeroSPXParams` gains a `scope` string field (`"spy"` / `"spx"` / `"spy+spx"` / empty → combined default).
+- `rpc.GammaZeroComputed` gains `scope`, `per_index` (map keyed by underlying), `partial_classes` (per-class entitlement gaps), and `regime_agreement` fields. All `omitempty`. The single-underlying `per_index` entries are fully-formed `GammaZeroComputed` payloads so consumers can recurse using the same schema.
+- `rpc.StrikeConcentration` gains `underlying` and `trading_class` fields so combined-scope `top_strikes` rows are self-describing.
+- New `Connector.FetchOptionExpiryStrikesClassed(symbol, timeout)` Go method returning `map[string][]ExpiryClassedStrikes` — the per-(date, trading-class) strike grid, used by the SPX-aware enumeration to keep SPX-class AM monthlies and SPXW-class PM weeklies separated on third-Friday dates.
+- **Breaking (Go library):** `optionContractKey` (the on-disk and in-memory option-cache key) now includes the trading class as a second field: `symbol|class|expiry|strike|right`. `IsOptionContractCached` and `SubscribeOption` gain a `tradingClass` argument; empty normalises to `symbol` so SPY-shaped callers pass through unchanged.
+- On-disk option-contract cache schema bumped to v3. v2 files (no trading class in keys) are read transparently: keys are migrated to the v3 empty-class shape (`SYMBOL||EXPIRY|STRIKE|RIGHT`) on load; the next prewarm overwrites them with class-qualified keys.
+- `make smoke` honours `SPX_EXPECTED_REACHABLE` (default `1` in this repo): when set, an SPX-skipped banner during the new `--only=spx` smoke step fails the run rather than passing silently — guards against unnoticed SPX regression on accounts that legitimately have CBOE OPRA entitlement.
+
+### Fixed
+
+- SPX vs SPXW collision in the option-contract cache: a third-Friday SPX-class AM contract and the SPXW-class PM contract at the same strike share `(symbol, expiry, strike, right)`. The pre-v3 key shape silently overwrote one with the other in the in-memory cache and persisted file; v3 keys include trading class so both contracts round-trip without collision. Affects SPX gamma compute correctness on third-Friday dates.
+- `dteYears` (option time-to-expiry helper) used 16:00 ET as the unified expiration instant. SPX-class monthlies cash-settle at 09:30 ET; the helper now branches on trading class and uses the correct settlement instant per class, eliminating a ~6.5-hour TTE over-statement on third-Friday morning runs.
+
+### Engineering notes
+
+The combined sweep aggregation prototyped during the coverage arc was dropped before release. The spot² scaling (SPX/SPY per-contract dollar gamma ≈ 100×) makes SPX 75-80% of the combined dollar magnitude in normal regimes, so a fused "combined γ-zero spot X%" was indistinguishable from SPX-only with epsilon SPY noise. The release exposes the `regime_agreement` classifier instead — derived from per-index sweep signs, surfacing the decoupling case directly. The 20-day SPY/SPX price-correlation gate prototyped alongside was also cut: prices stay > 0.99 correlated essentially always while gamma regimes can decouple, so the gate would never fire on the case it was meant to catch.
+
 ## v0.30.3 — 2026-05-21 18:24 CEST
 
 ### What's new

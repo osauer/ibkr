@@ -779,27 +779,30 @@ type GammaZeroComputed struct {
 	// lands (the latter surfaces as Status="error" upstream).
 	PartialClasses map[string]string `json:"partial_classes,omitempty"`
 
-	// DecoupledCorr is the 20-day daily-close Pearson correlation of
-	// SPY and SPX. Computed only on Scope="spy+spx" runs; nil for
-	// single-underlying scopes (where the field has no meaning). When
-	// correlation drops below 0.90, renderers promote the per-index
-	// headlines to primary and badge the combined γ-zero as
-	// "decoupled" — the assumption that SPY and SPX move together
-	// breaks during single-print SPX prints, basis dislocations, and
-	// futures-led tapes. See gamma-spx-coverage.md §5.3.1.
-	DecoupledCorr *float64 `json:"decoupled_corr,omitempty"`
-
-	// CombinedGapPct is the spot-percent headline for combined-scope
-	// runs: the % move at which the sum of SPY and SPX dealer GEX
-	// crosses zero, expressed in units of "% of current spot" because
-	// SPY and SPX have different price levels. Nil when no crossing
-	// exists within the swept window (GammaSign communicates the
-	// regime in that case) or when Scope is single-underlying.
+	// RegimeAgreement classifies whether the SPY and SPX dealer-gamma
+	// regimes agree, populated only on Scope="spy+spx" runs. One of:
 	//
-	// Distinct from GapPct, which is the SPY-anchored gap for the
-	// SPY half of a combined run (preserves typing for JSON consumers
-	// reading top-level GapPct under either scope).
-	CombinedGapPct *float64 `json:"combined_gap_pct,omitempty"`
+	//   "agree:long-gamma"  — both indices' sweeps stay positive (dealer
+	//                         long-γ across the ±15% window, stabilizing).
+	//   "agree:short-gamma" — both stay negative (short-γ, amplifying).
+	//   "agree:flipping"    — both have a γ-zero crossing inside the
+	//                         window. The per-index ZeroGamma levels carry
+	//                         the precise prices.
+	//   "disagree"          — one index is long-γ, the other short-γ
+	//                         (or one's flipping while the other isn't).
+	//                         The actionable signal: institutional SPX
+	//                         book and retail/ETF SPY book are positioned
+	//                         opposite, which the regime-call use case
+	//                         cares about more than any combined number.
+	//   ""                  — at least one bucket has no data; can't
+	//                         classify. Renderers fall back to per-index.
+	//
+	// Replaces the earlier DecoupledCorr field, which gated on 20-day
+	// price correlation. Price correlation stays > 0.99 essentially
+	// always; that gate never fired and missed the actual case worth
+	// flagging — gamma regimes that decouple while prices stay tightly
+	// correlated.
+	RegimeAgreement string `json:"regime_agreement,omitempty"`
 }
 
 // GammaZeroSPXResult is the envelope returned by MethodGammaZeroSPX.

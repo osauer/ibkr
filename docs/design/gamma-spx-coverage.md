@@ -7,6 +7,75 @@
 - Reviewers: senior-reviewer agent (round 1, done), user (interview after this draft)
 - Code touchpoints anchored on commit `6651e5b` (v0.30.1)
 
+### v3 change log (post-implementation revision, 2026-05-21 21:30 CEST)
+
+After landing steps 1–9, a live combined run on a healthy gateway
+exposed a load-bearing problem the senior reviewer (round 1) didn't
+catch and the user flagged directly: **the spot² scaling makes
+"combined" structurally mean "SPX with epsilon SPY noise"**. From the
+v0.30.3 live output: SPX gamma was 78 % of the combined dollar
+total, so the "Combined γ-zero spot X%" headline was indistinguishable
+from SPX-only's gap with the SPY half barely moving the needle.
+
+Step 10 ripped the misleading machinery and replaced it with what
+the per-index breakdown was already implying:
+
+- **§5.3 combined-sweep aggregation: REMOVED.** The
+  `buildCombinedSweep` helper, `CombinedGapPct` wire field, and
+  `Combined γ-zero spot X %` renderer line are gone. JSON consumers
+  reading top-level `zero_gamma` still see the SPY-anchored value;
+  they're explicit that combined-headline derivation moves to the
+  caller via `per_index` if they want it.
+
+- **§5.3.1 decorrelation gate: REPLACED.** The 20-day daily-close
+  price-correlation gate (Pearson r threshold 0.90) was the wrong
+  measurement. SPY/SPX daily-close prices stay > 0.99 correlated
+  essentially always; the gate would never have fired. The case
+  worth flagging is **regime decoupling while prices stay
+  correlated** — institutional SPX book amplifying while retail/ETF
+  SPY book is stabilising (or vice-versa).
+
+  Replaced with a `RegimeAgreement` classifier derived directly
+  from per-index sweep outcomes:
+
+  ```
+  agree:long-gamma   — both indices' sweeps stay positive (stabilising)
+  agree:short-gamma  — both stay negative (amplifying)
+  agree:flipping     — both have a γ-zero crossing inside the window
+  disagree           — one stabilising, one amplifying (ACTIONABLE)
+  ""                 — at least one bucket has no_data
+  ```
+
+  Removed: `compute20DaySPYSPXCorrelation`, `pearsonR`, `barCloses`,
+  `DecoupledCorr` wire field. Added: `RegimeAgreement` field +
+  `classifyRegimeAgreement` + `perIndexRegime` helpers.
+
+- **§9.1 renderer mockup: REVISED.** The "Combined γ-zero spot X %"
+  line is replaced by:
+
+  ```
+  Regime      SPY and SPX both short-γ (amplifying regime · agreement)
+  ```
+
+  And the actionable disagreement case renders as:
+
+  ```
+  Regime      SPY long-γ · SPX short-γ (DISAGREEMENT — institutional/
+              retail divergence; use per-index below as primary)
+  ```
+
+  The per-index detail (SPY γ-zero, SPX γ-zero, near/term sub-rows)
+  remains as the primary decision surface.
+
+**Senior-reviewer miss (round 1):** the reviewer correctly flagged
+that the decorrelation-gate threshold was speculative tuning but
+didn't push back on the underlying *premise* of a combined sweep.
+The combined sum is arithmetically correct (dollars add); it's just
+not informative for the regime-call use case once you know the
+weighting is 78/22. Worth noting for future design reviews — the
+right question wasn't "what threshold?" but "what signal does this
+add over per-index?".
+
 ### v2.1 change log (post-user-question, 2026-05-21 17:35 CEST)
 
 User asked to verify contract-ID persistence and rolling daily refresh
