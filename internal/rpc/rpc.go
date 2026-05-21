@@ -482,6 +482,17 @@ const (
 	GammaZeroStatusError = "error"
 )
 
+// Scope values for GammaZeroSPXParams.Scope. Discriminator for the
+// SPY+SPX coverage arc: today's SPY-only path is "spy"; SPX-only and
+// combined arrive in the same coverage arc. Empty Scope defaults to
+// "spy+spx" (combined when both reachable, SPY-only otherwise) once
+// step 7+8 land; until then it falls back to "spy".
+const (
+	GammaZeroScopeSPY      = "spy"
+	GammaZeroScopeSPX      = "spx"
+	GammaZeroScopeCombined = "spy+spx"
+)
+
 // GammaZeroSPXParams is the input for MethodGammaZeroSPX. All fields are
 // optional; defaults match the v1 calibration window documented in
 // docs/specs/risk-regime-dashboard.md.
@@ -497,6 +508,12 @@ type GammaZeroSPXParams struct {
 	// generator should leave this off and let the daily cache handle
 	// freshness.
 	Force bool `json:"force,omitempty"`
+	// Scope selects which underlying(s) to compute. One of GammaZeroScopeSPY
+	// ("spy"), GammaZeroScopeSPX ("spx"), or GammaZeroScopeCombined ("spy+spx").
+	// Empty defaults to "spy" for back-compat until step 7 of the SPX
+	// coverage arc lands the combined orchestration; that step will switch
+	// the empty-Scope default to "spy+spx" with SPX-skipped fallback.
+	Scope string `json:"scope,omitempty"`
 }
 
 // GammaZeroParams echoes the v1 calibration window back to the caller so

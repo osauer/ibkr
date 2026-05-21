@@ -521,23 +521,19 @@ func computeGammaZeroFor(
 	// budget the existing handleChainExpiries handler runs with for
 	// the same call (server.go's unaryDeadline for MethodChainExpiries
 	// is 50 s).
+	//
+	// Branch on underlying: SPX is multi-class (SPX-AM monthlies +
+	// SPXW-PM weeklies share third-Friday dates as distinct contracts),
+	// so it pulls the classed strike grid and applies a per-class
+	// settlement cutoff. SPY-style single-class underlyings keep the
+	// existing merged-across-classes path; tradingClass on each leg is
+	// just the symbol.
 	progress.Store(5)
-	allStrikes, err := c.FetchOptionExpiryStrikes(sym, 30*time.Second)
+	picked, err := buildPickedExpirations(c, sym, spotAt, params.ExpiryCount)
 	if err != nil {
 		return nil, fmt.Errorf("zero-gamma: fetch %s expiries: %w", sym, err)
 	}
-	if len(allStrikes) == 0 {
-		return nil, fmt.Errorf("zero-gamma: gateway returned no %s expirations", sym)
-	}
-
-	// 3. Select expirations.
-	// Empty trading-class — SPY-only enumeration uses a single class so
-	// the 16:15 ET cutoff (today's behaviour) is preserved bit-for-bit.
-	// Step 6 (SPX classed enumeration) calls selectExpirations once per
-	// class with "SPX" / "SPXW" so AM-settled monthlies get the 09:45 ET
-	// cutoff and PM-settled weeklies stay on 16:15 ET.
-	pickedExp := selectExpirations(allStrikes, "", spotAt, params.ExpiryCount)
-	if len(pickedExp) == 0 {
+	if len(picked) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no usable %s expirations after 0DTE filtering", sym)
 	}
 	progress.Store(10)
@@ -560,26 +556,22 @@ func computeGammaZeroFor(
 		expiryYMD    string
 		strike       float64
 		right        string
-		tradingClass string // "SPY" today; SPX path (step 6) tags per-leg from the classed enumeration
+		tradingClass string // SPY for single-class; "SPX" / "SPXW" on the SPX classed path
 	}
 	var jobs []legSpec
-	for _, expDate := range pickedExp {
-		strikes := filterStrikesAroundSpot(allStrikes[expDate], spot, params.StrikeWidthPct)
+	for _, p := range picked {
+		strikes := filterStrikesAroundSpot(p.strikes, spot, params.StrikeWidthPct)
 		ordered := sortStrikesATMOutward(strikes, spot)
-		expYMD := compactExpiry(expDate)
 		for _, k := range ordered {
-			// For single-class underlyings (SPY, equities) the trading
-			// class equals the symbol. SPX's classed enumeration arrives
-			// in step 6 and overrides this on a per-strike basis.
-			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "C", tradingClass: sym})
-			jobs = append(jobs, legSpec{expiryYMD: expYMD, strike: k, right: "P", tradingClass: sym})
+			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "C", tradingClass: p.tradingClass})
+			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "P", tradingClass: p.tradingClass})
 		}
 	}
 	if len(jobs) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no %s strikes within ±%.0f%% of spot %.2f",
 			sym, params.StrikeWidthPct*100, spot)
 	}
-	log.Infof("gamma.jobs total=%d expiries=%d spot=%.2f", len(jobs), len(pickedExp), spot)
+	log.Infof("gamma.jobs total=%d picked=%d spot=%.2f", len(jobs), len(picked), spot)
 
 	// Bulk-prewarm option contracts before the worker fan-out. This is the
 	// load-bearing optimization: without it, each of the ~1600 legs would
@@ -589,34 +581,35 @@ func computeGammaZeroFor(
 	// partial-Contract reqContractDetails per expiration (no Strike, no
 	// Right) and the gateway streams every listed strike × C/P back in one
 	// burst — same primitive TWS uses internally to populate a chain
-	// instantly. Round-trip count drops from ~1600 to len(pickedExp) (~6).
+	// instantly. Round-trip count drops from ~1600 to len(picked) (~6).
 	//
-	// TradingClass="SPY" is load-bearing: omitting it interleaves SPYW
-	// weeklies (different trading class) and cache entries can shadow each
-	// other; SPY+weeklies share the SPY class, so passing "SPY" is the right
-	// scope. For SPX the equivalent would be running this twice with
-	// "SPX" and "SPXW" trading classes.
+	// TradingClass is load-bearing: omitting it interleaves multi-class
+	// listings (SPY+SPYW, SPX+SPXW) and cache entries shadow each other.
+	// SPY+weeklies all share class "SPY"; SPX has two distinct classes
+	// (SPX-AM + SPXW-PM) which require independent prewarm passes.
 	//
 	// Errors per expiry are localised — one timed-out expiry doesn't fail
 	// the others, and the per-leg fetcher still has its own
 	// resolveOptionContract fallback for cache misses. The prewarm is a
 	// fast path, not a hard dependency.
-	pickedExpYMD := make([]string, 0, len(pickedExp))
-	for _, expDate := range pickedExp {
-		pickedExpYMD = append(pickedExpYMD, compactExpiry(expDate))
+	expsByClass := map[string][]string{}
+	for _, p := range picked {
+		expsByClass[p.tradingClass] = append(expsByClass[p.tradingClass], p.expiryYMD)
 	}
 	prewarmStart := now()
-	prewarmResults := c.PrewarmOptionChain(ctx, sym, pickedExpYMD, sym, 30*time.Second)
 	prewarmTotal := 0
-	for _, r := range prewarmResults {
-		if r.Err != nil {
-			log.Warnf("gamma.prewarm expiry=%s cached=%d elapsed=%s err=%v",
-				r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond), r.Err)
-			continue
+	for class, ymds := range expsByClass {
+		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
+		for _, r := range prewarmResults {
+			if r.Err != nil {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d elapsed=%s err=%v",
+					class, r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond), r.Err)
+				continue
+			}
+			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d elapsed=%s",
+				class, r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond))
+			prewarmTotal += r.Cached
 		}
-		log.Infof("gamma.prewarm expiry=%s cached=%d elapsed=%s",
-			r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond))
-		prewarmTotal += r.Cached
 	}
 	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
 		prewarmTotal, time.Since(prewarmStart).Round(time.Millisecond))
@@ -911,7 +904,7 @@ func computeGammaZeroFor(
 		TopConcentrationPct: topConcentrationPct,
 		SweepLowAbs:         spot * (1 - params.SweepRangePct),
 		SweepHighAbs:        spot * (1 + params.SweepRangePct),
-		Expirations:         pickedExp,
+		Expirations:         pickedDatesFromPicked(picked),
 		LegCount:            len(legs),
 		DerivedIVLegs:       derivedCount,
 		Warnings:            warnings,

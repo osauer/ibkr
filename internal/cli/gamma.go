@@ -15,6 +15,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	noWait := fs.Bool("no-wait", false, "return immediately with current status; don't block on the compute")
 	force := fs.Bool("force", false, "ignore the cached result and start a fresh compute (diagnostics)")
+	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable, see docs/design/gamma-spx-coverage.md)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -30,7 +31,22 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	if *noWait {
 		waitMs = 0
 	}
-	params := rpc.GammaZeroSPXParams{WaitMs: waitMs, Force: *force}
+	// Map --only to the RPC scope. Empty (no flag) falls through to
+	// the daemon's empty-Scope default — today: SPY-only; step 7 of
+	// the SPX coverage arc switches it to combined with SPX-skipped
+	// fallback.
+	scope := ""
+	switch strings.ToLower(strings.TrimSpace(*only)) {
+	case "":
+		// pass through
+	case "spy":
+		scope = rpc.GammaZeroScopeSPY
+	case "spx":
+		scope = rpc.GammaZeroScopeSPX
+	default:
+		return fail(env, "gamma: --only must be 'spy' or 'spx' (got %q)", *only)
+	}
+	params := rpc.GammaZeroSPXParams{WaitMs: waitMs, Force: *force, Scope: scope}
 
 	var res rpc.GammaZeroSPXResult
 	if err := env.Conn.Call(ctx, rpc.MethodGammaZeroSPX, params, &res); err != nil {

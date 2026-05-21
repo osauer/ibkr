@@ -1,0 +1,131 @@
+package daemon
+
+import (
+	"reflect"
+	"testing"
+	"time"
+
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+)
+
+// TestSelectSPXExpirationsClassedKeepsSPXandSPXWSeparate pins the
+// per-class settlement-cutoff branch. On a third-Friday at 10:00 ET,
+// the SPX-class AM-settled monthly is past its 09:30 settle and must
+// be dropped, while the SPXW-class PM-settled weekly listed on the
+// same date is still hours from settlement and must be kept.
+func TestSelectSPXExpirationsClassedKeepsSPXandSPXWSeparate(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		// Third Friday — listed under both classes.
+		"2026-06-19": {
+			{TradingClass: "SPX", Strikes: []float64{5400, 5500}},
+			{TradingClass: "SPXW", Strikes: []float64{5390, 5400, 5410}},
+		},
+		// SPXW-only Monday weekly.
+		"2026-06-22": {
+			{TradingClass: "SPXW", Strikes: []float64{5400}},
+		},
+	}
+
+	// 10:00 ET on the third Friday — past 09:30 SPX-class settle, still
+	// ~6 hours before 16:00 SPXW-class settle.
+	now := time.Date(2026, 6, 19, 10, 0, 0, 0, loc)
+
+	picked := selectSPXExpirationsClassed(classed, now, 6)
+
+	// Expect 2 entries: the third-Friday SPXW-only entry (SPX-AM dropped),
+	// plus the Monday weekly. Date ascending; SPXW class.
+	if len(picked) != 2 {
+		t.Fatalf("expected 2 picked entries, got %d: %+v", len(picked), picked)
+	}
+	want := []spxExpirySpec{
+		{Date: "2026-06-19", TradingClass: "SPXW", Strikes: []float64{5390, 5400, 5410}},
+		{Date: "2026-06-22", TradingClass: "SPXW", Strikes: []float64{5400}},
+	}
+	if !reflect.DeepEqual(picked, want) {
+		t.Errorf("picked:\ngot  %+v\nwant %+v", picked, want)
+	}
+}
+
+// TestSelectSPXExpirationsClassedKeepsBothPreSettle pins that an
+// early-morning run BEFORE the AM-settle window keeps both classes
+// on a third-Friday, treating each as a distinct expiration.
+func TestSelectSPXExpirationsClassedKeepsBothPreSettle(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		"2026-06-19": {
+			{TradingClass: "SPX", Strikes: []float64{5400}},
+			{TradingClass: "SPXW", Strikes: []float64{5400}},
+		},
+	}
+
+	// 08:30 ET — before both settlement cutoffs.
+	now := time.Date(2026, 6, 19, 8, 30, 0, 0, loc)
+	picked := selectSPXExpirationsClassed(classed, now, 6)
+	if len(picked) != 2 {
+		t.Fatalf("expected both classes pre-AM-settle, got %d entries: %+v", len(picked), picked)
+	}
+	// Sort tiebreak: SPX before SPXW.
+	if picked[0].TradingClass != "SPX" || picked[1].TradingClass != "SPXW" {
+		t.Errorf("class order: got [%s, %s], want [SPX, SPXW]",
+			picked[0].TradingClass, picked[1].TradingClass)
+	}
+}
+
+// TestSelectSPXExpirationsClassedRespectsCount pins the 6-cap budget
+// across classes. With 8 candidate (date, class) entries and count=6,
+// we pick the first 6 in date-ascending / class-ascending order.
+func TestSelectSPXExpirationsClassedRespectsCount(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		"2026-06-22": {{TradingClass: "SPXW", Strikes: []float64{5400}}},
+		"2026-06-23": {{TradingClass: "SPXW", Strikes: []float64{5400}}},
+		"2026-06-24": {{TradingClass: "SPXW", Strikes: []float64{5400}}},
+		"2026-06-25": {{TradingClass: "SPXW", Strikes: []float64{5400}}},
+		"2026-06-26": {{TradingClass: "SPXW", Strikes: []float64{5400}}},
+		"2026-07-17": {
+			{TradingClass: "SPX", Strikes: []float64{5400}},
+			{TradingClass: "SPXW", Strikes: []float64{5400}},
+		},
+		"2026-08-21": {{TradingClass: "SPX", Strikes: []float64{5400}}},
+	}
+	now := time.Date(2026, 6, 22, 8, 30, 0, 0, loc)
+	picked := selectSPXExpirationsClassed(classed, now, 6)
+	if len(picked) != 6 {
+		t.Fatalf("count cap not honored: got %d, want 6: %+v", len(picked), picked)
+	}
+	// Sanity-check sort order: dates ascending.
+	for i := 1; i < len(picked); i++ {
+		if picked[i].Date < picked[i-1].Date {
+			t.Errorf("sort order broken at index %d: %+v", i, picked)
+		}
+	}
+}
+
+// TestPickedDatesFromPickedDedupes pins that the result envelope's
+// Expirations field carries unique dates only — SPX third-Friday with
+// both classes shows once, not twice.
+func TestPickedDatesFromPickedDedupes(t *testing.T) {
+	picked := []pickedExpiration{
+		{date: "2026-06-19", tradingClass: "SPX"},
+		{date: "2026-06-19", tradingClass: "SPXW"}, // same date, different class
+		{date: "2026-06-22", tradingClass: "SPXW"},
+	}
+	got := pickedDatesFromPicked(picked)
+	want := []string{"2026-06-19", "2026-06-22"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dedupe broken: got %v, want %v", got, want)
+	}
+}

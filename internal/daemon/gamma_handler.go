@@ -45,6 +45,24 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
+	// Scope: which underlying(s) to compute. Empty falls back to "spy"
+	// until step 7 of the SPX coverage arc lands the combined
+	// orchestration; --only=spx enables the SPX-only path here.
+	underlying := "SPY"
+	switch p.Scope {
+	case rpc.GammaZeroScopeSPX:
+		underlying = "SPX"
+	case "", rpc.GammaZeroScopeSPY:
+		underlying = "SPY"
+	case rpc.GammaZeroScopeCombined:
+		// Combined-scope orchestration arrives in step 7. For now,
+		// degrade to SPY-only so the wire shape stays usable while
+		// the combined path is built up.
+		underlying = "SPY"
+	default:
+		return nil, fmt.Errorf("zero-gamma: unknown scope %q (want spy|spx|spy+spx)", p.Scope)
+	}
+
 	// Background ctx for the compute goroutine — independent of the
 	// per-RPC ctx because the compute outlives any single client call.
 	// serverCtx is set on Start and matches the daemon's lifetime, so
@@ -60,23 +78,23 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	// lifecycle; we hand it a function that closes over the gateway
 	// connector + params.
 	//
-	// The closure acquires a refcounted Hold on the SPY underlying for
+	// The closure acquires a refcounted Hold on the underlying for
 	// the entire lifetime of the compute. IBKR's TWS API requires a
 	// market-data subscription on the option's underlying to push
 	// OPTION_COMPUTATION (msg 21) ticks for OPT subscriptions; without
 	// it the model engine has no live spot anchor and the per-leg fan-
 	// out lands ~0% IV/greeks (observed: 12/1256 legs at 1% coverage
 	// pre-market). subManager.Hold is refcounted, so a concurrent
-	// regime SPY snapshot via the same line is safe — the line stays
+	// regime snapshot on the same symbol is safe — the line stays
 	// open until the compute releases.
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		release, err := s.subs.Hold(bgCtx, "SPY")
+		release, err := s.subs.Hold(bgCtx, underlying)
 		if err != nil {
-			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
+			return nil, fmt.Errorf("zero-gamma: hold %s underlying: %w", underlying, err)
 		}
 		defer release()
-		return computeGammaZeroFor(bgCtx, c, "SPY", params, productionLegFetcher, time.Now, prog, s.logger)
+		return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 
 	var job *gammaComputation
