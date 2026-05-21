@@ -10,6 +10,24 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.30.3 — 2026-05-21 18:24 CEST
+
+### What's new
+
+- `ibkr gamma` text output is easier to read. Dollar gamma values now render as `$9.65B` / `$547.37M` / `$640k` instead of scientific notation (`9.65e+09`). The top-strikes table gains a `NOTIONAL` column (`OI × strike × 100`) between `|GEX|` and `OI`. A `Top strike` line names what share of total |Γ|·OI is parked at the single largest strike, and a `Scope` line spells out the underlying / strike width / expiration count so the absolute magnitudes can't be misread against an SPX-inclusive vendor number. When the swept profile produces no γ-zero crossing the absolute window (e.g. `$627.74–$849.30`) is printed instead of the vaguer "well above/below spot." On the third Friday of the month a one-line `Calendar` row notes that monthly OPEX is today.
+- `ibkr gamma --json` gains three additive fields: `top_concentration_pct`, `sweep_low_abs`, `sweep_high_abs`. Existing JSON consumers see no breakage — all three are `omitempty`, the wire schema and methodology token (`perfiliev-bs-sweep-v2-stickymoneyness`) are unchanged.
+
+### Changed
+
+- `ibkr gamma`: dealer GEX magnitudes (`|Γ|·OI sum` and the per-strike `|GEX|` column) render in `$X.XXB` / `$X.XXM` / `$XXXk` form with an explicit `per 1% move` unit, replacing scientific notation. Per-strike notionals (`OI × strike × 100`) appear in a new `NOTIONAL` column.
+- `ibkr gamma`: γ-zero distance from spot is now signed from the perspective of γ-zero (`γ-zero $720.50 (−2.9% from spot)`) rather than from the perspective of spot (`spot +2.9%`). Same magnitude, sign flipped to match how the row reads aloud.
+- `ibkr gamma`: the no-crossing line names the absolute sweep window (`γ-zero outside swept range $627.74–$849.30`) instead of the qualitative "γ-zero well above/below spot." The `±N% sweep` figure is now derived from the actual `Params.SweepRangePct` rather than hardcoded.
+- `ibkr gamma`: new one-line rows — `Top strike  N% of total |GEX| (724P 2026-05-22)` and `Scope       SPY only · ±10% strikes · 6 expirations`. On the third Friday of the month a `Calendar  monthly OPEX today — front-week reading is distorted by expiring contracts` row prints above the warnings block.
+
+### Added
+
+- `rpc.GammaZeroComputed` gains three additive JSON fields (all `omitempty`): `top_concentration_pct` (top strike's share of total |Γ|·OI), `sweep_low_abs`, `sweep_high_abs` (absolute spot bounds of the sweep window in dollars). Surfaced so renderers and downstream consumers don't have to re-derive `spot × (1 ± SweepRangePct)` or `TopStrikes[0].AbsGEX / GammaTotalAbs`.
+
 ## v0.30.2 — 2026-05-21 15:03 CEST
 
 ### What's new

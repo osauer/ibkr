@@ -843,34 +843,45 @@ func computeGammaZeroSPX(
 		skewModel = "sticky-moneyness-v1"
 	}
 
+	// Concentration ratio: share of the sign-agnostic |Γ|·OI sum parked
+	// at the single largest strike. Zero-guard for the empty-table case
+	// (every leg failed) and for a degenerate sum-of-zeros.
+	var topConcentrationPct float64
+	if len(topStrikes) > 0 && gammaTotalAbs > 0 {
+		topConcentrationPct = topStrikes[0].AbsGEX / gammaTotalAbs * 100
+	}
+
 	res := &rpc.GammaZeroComputed{
-		SpotUnderlying: spot,
-		SpotAt:         spotAt,
-		ZeroGamma:      zg,
-		GapPct:         gapPct,
-		GammaSign:      gammaSign,
-		Profile:        profile,
-		ZeroGammaNear:  zgNear,
-		ProfileNear:    profileNear,
-		GammaSignNear:  signNear,
-		NearLegCount:   len(nearLegs),
-		ZeroGammaTerm:  zgTerm,
-		ProfileTerm:    profileTerm,
-		GammaSignTerm:  signTerm,
-		TermLegCount:   len(termLegs),
-		SkewModel:      skewModel,
-		SkewFitQuality: skewFitQuality,
-		GammaTotalAbs:  gammaTotalAbs,
-		TopStrikes:     topStrikes,
-		Expirations:    pickedExp,
-		LegCount:       len(legs),
-		DerivedIVLegs:  derivedCount,
-		Warnings:       warnings,
-		Params:         params,
-		Source:         "computed from IBKR SPY option chain",
-		Method:         "perfiliev-bs-sweep-v2-stickymoneyness",
-		AsOf:           now(),
-		DurationMS:     now().Sub(startWall).Milliseconds(),
+		SpotUnderlying:      spot,
+		SpotAt:              spotAt,
+		ZeroGamma:           zg,
+		GapPct:              gapPct,
+		GammaSign:           gammaSign,
+		Profile:             profile,
+		ZeroGammaNear:       zgNear,
+		ProfileNear:         profileNear,
+		GammaSignNear:       signNear,
+		NearLegCount:        len(nearLegs),
+		ZeroGammaTerm:       zgTerm,
+		ProfileTerm:         profileTerm,
+		GammaSignTerm:       signTerm,
+		TermLegCount:        len(termLegs),
+		SkewModel:           skewModel,
+		SkewFitQuality:      skewFitQuality,
+		GammaTotalAbs:       gammaTotalAbs,
+		TopStrikes:          topStrikes,
+		TopConcentrationPct: topConcentrationPct,
+		SweepLowAbs:         spot * (1 - params.SweepRangePct),
+		SweepHighAbs:        spot * (1 + params.SweepRangePct),
+		Expirations:         pickedExp,
+		LegCount:            len(legs),
+		DerivedIVLegs:       derivedCount,
+		Warnings:            warnings,
+		Params:              params,
+		Source:              "computed from IBKR SPY option chain",
+		Method:              "perfiliev-bs-sweep-v2-stickymoneyness",
+		AsOf:                now(),
+		DurationMS:          now().Sub(startWall).Milliseconds(),
 	}
 	progress.Store(100)
 	zeroGammaStr := "—"

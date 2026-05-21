@@ -612,6 +612,19 @@ type GammaZeroComputed struct {
 	// Concentration here is more reliable than the signed ZeroGamma in
 	// regimes where the dealer-sign assumption may invert.
 	TopStrikes []StrikeConcentration `json:"top_strikes"`
+	// TopConcentrationPct is TopStrikes[0].AbsGEX / GammaTotalAbs × 100 —
+	// what share of the sign-agnostic |Γ|·OI sum is parked at the single
+	// largest strike. Renderers surface it as a one-line "this strike
+	// dominates" cue alongside the table. Zero when TopStrikes is empty
+	// or GammaTotalAbs is zero.
+	TopConcentrationPct float64 `json:"top_concentration_pct,omitempty"`
+
+	// SweepLowAbs / SweepHighAbs are the absolute spot bounds of the
+	// sweep window in dollars: SpotUnderlying × (1 ± Params.SweepRangePct).
+	// Surfaced for renderers that want to print "γ-zero outside swept
+	// range $A.AA–$B.BB" without re-deriving the multiplication.
+	SweepLowAbs  float64 `json:"sweep_low_abs,omitempty"`
+	SweepHighAbs float64 `json:"sweep_high_abs,omitempty"`
 
 	// Expirations is the YYYY-MM-DD list of expirations actually
 	// included in the aggregation (after 0DTE-post-settlement filtering

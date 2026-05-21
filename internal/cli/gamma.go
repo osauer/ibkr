@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -98,26 +99,32 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 
 	if c.ZeroGamma != nil {
-		fmt.Fprintf(out, "  γ-zero      %.2f", *c.ZeroGamma)
-		if c.GapPct != nil {
-			gap := *c.GapPct
-			sign := "+"
-			if gap < 0 {
-				sign = ""
-			}
-			fmt.Fprintf(out, "  (spot %s%.2f %%)", sign, gap)
+		// Distance is signed from spot to γ-zero: negative when γ-zero
+		// is below spot, positive when above. Flipped from the wire's
+		// GapPct (which is signed the other way around — spot relative
+		// to γ-zero) so the value reads as "γ-zero is X% from spot."
+		fmt.Fprintf(out, "  γ-zero      $%.2f", *c.ZeroGamma)
+		if c.SpotUnderlying > 0 {
+			dist := (*c.ZeroGamma - c.SpotUnderlying) / c.SpotUnderlying * 100
+			fmt.Fprintf(out, " (%+.1f%% from spot)", dist)
 		}
 		fmt.Fprintln(out)
 	} else {
 		// No crossing in the swept window. The signed profile is
 		// one-sided; surface that as a regime statement rather than
 		// "all <raw enum> gamma" which produces "all no_data gamma"
-		// for the degenerate case.
+		// for the degenerate case. Render the absolute sweep bounds
+		// in dollars rather than "well above/below spot" — readers
+		// can immediately see whether γ-zero is plausibly close to
+		// the window edge.
+		sweepRange := fmt.Sprintf("γ-zero outside swept range %s–%s",
+			formatSpotPrice(c.SweepLowAbs), formatSpotPrice(c.SweepHighAbs))
+		sweepPct := c.Params.SweepRangePct * 100
 		switch c.GammaSign {
 		case "positive":
-			fmt.Fprintln(out, "  γ-zero      no crossing — dealer long-γ across ±15% sweep (stabilizing regime, γ-zero well below spot)")
+			fmt.Fprintf(out, "  γ-zero      no crossing — dealer long-γ across ±%.0f%% sweep (stabilizing regime, %s)\n", sweepPct, sweepRange)
 		case "negative":
-			fmt.Fprintln(out, "  γ-zero      no crossing — dealer short-γ across ±15% sweep (amplifying regime, γ-zero well above spot)")
+			fmt.Fprintf(out, "  γ-zero      no crossing — dealer short-γ across ±%.0f%% sweep (amplifying regime, %s)\n", sweepPct, sweepRange)
 		default:
 			fmt.Fprintln(out, "  γ-zero      no crossing — sweep produced no signed profile")
 		}
@@ -132,8 +139,17 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		fmt.Fprintf(out, "  γ-zero term %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
 	}
 
-	fmt.Fprintf(out, "  |Γ|·OI sum  %.3e (sign-agnostic magnitude)\n", c.GammaTotalAbs)
+	fmt.Fprintf(out, "  |Γ|·OI sum  %s per 1%% move (sign-agnostic magnitude)\n", formatGEX(c.GammaTotalAbs))
+	if c.TopConcentrationPct > 0 && len(c.TopStrikes) > 0 {
+		top := c.TopStrikes[0]
+		fmt.Fprintf(out, "  Top strike  %.0f%% of total |GEX| (%.0f%s %s)\n",
+			c.TopConcentrationPct, top.Strike, top.Right, top.Expiry)
+	}
 	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
+	if c.Params.StrikeWidthPct > 0 {
+		fmt.Fprintf(out, "  Scope       SPY only · ±%.0f%% strikes · %d expirations\n",
+			c.Params.StrikeWidthPct*100, len(c.Expirations))
+	}
 	if c.SkewModel != "" {
 		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
 		if n := len(c.SkewFitQuality); n > 0 {
@@ -162,6 +178,15 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		fmt.Fprintf(out, "  Compute     %s\n", formatDuration(int(c.DurationMS/1000)))
 	}
 
+	// Monthly OPEX is the third Friday of the month in NY time. Surfaced
+	// as a factual calendar line so a reader can spot it without separately
+	// reaching for a calendar; the front-week γ-zero/concentration figures
+	// move quickly as expiring contracts unwind on the morning of OPEX.
+	if isMonthlyOPEXNow() {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  Calendar    monthly OPEX today — front-week reading is distorted by expiring contracts")
+	}
+
 	if len(c.Warnings) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  Warnings:"))
@@ -173,13 +198,14 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	if len(c.TopStrikes) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  Top strikes by |Γ|·OI (regime-robust positioning signal):"))
-		header := fmt.Sprintf("    %-12s  %8s  %5s  %12s  %10s",
-			"EXPIRY", "STRIKE", "RIGHT", "|GEX|", "OI")
+		header := fmt.Sprintf("    %-12s  %8s  %5s  %12s  %12s  %10s",
+			"EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
 		fmt.Fprintln(out, env.dim(header))
 		fmt.Fprintln(out, env.dim("    "+strings.Repeat("─", visibleLen(header)-4)))
 		for _, ts := range c.TopStrikes {
-			fmt.Fprintf(out, "    %-12s  %8.0f  %5s  %12.3e  %10d\n",
-				ts.Expiry, ts.Strike, ts.Right, ts.AbsGEX, ts.OI)
+			notional := float64(ts.OI) * ts.Strike * 100
+			fmt.Fprintf(out, "    %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
+				ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
 		}
 	}
 
@@ -201,7 +227,7 @@ func formatDuration(seconds int) string {
 }
 
 // formatHorizonGammaLine builds one row of the near/term breakdown
-// — either "γ-zero NNN.NN (+M.N% · X legs · DTE ≤ 7)" or the
+// — either "γ-zero $NNN.NN (+M.N% from spot · X legs · DTE ≤ 7)" or the
 // no-crossing/no-data variants. The renderer wants a compact one-line
 // summary per bucket; this helper keeps both lines symmetric.
 func formatHorizonGammaLine(zg *float64, sign string, spot float64, legCount int, dteHint string) string {
@@ -209,12 +235,14 @@ func formatHorizonGammaLine(zg *float64, sign string, spot float64, legCount int
 		return fmt.Sprintf("—  (no legs · %s)", dteHint)
 	}
 	if zg != nil {
-		gap := (spot - *zg) / *zg * 100
-		s := "+"
-		if gap < 0 {
-			s = ""
+		// Match the headline γ-zero sign convention: γ-zero distance
+		// from spot (negative when below). Avoids the cognitive flip
+		// between the headline row and the bucket rows.
+		dist := 0.0
+		if spot > 0 {
+			dist = (*zg - spot) / spot * 100
 		}
-		return fmt.Sprintf("%.2f  (spot %s%.2f %% · %d legs · %s)", *zg, s, gap, legCount, dteHint)
+		return fmt.Sprintf("$%.2f  (%+.1f%% from spot · %d legs · %s)", *zg, dist, legCount, dteHint)
 	}
 	switch sign {
 	case "positive":
@@ -223,6 +251,51 @@ func formatHorizonGammaLine(zg *float64, sign string, spot float64, legCount int
 		return fmt.Sprintf("no crossing — dealer short-γ (%d legs · %s)", legCount, dteHint)
 	}
 	return fmt.Sprintf("no crossing (%d legs · %s)", legCount, dteHint)
+}
+
+// formatGEX renders a dollar gamma value in human-readable form: $X.XXB
+// for ≥1B, $X.XXM for ≥1M, $XXXk for ≥1k, else $X. Used for |Γ|·OI sums
+// and per-strike notionals, where SPY chain magnitudes span k → high-B
+// across the sum vs. tail-strike axis and a unit suffix reads more
+// cleanly than scientific notation. Negative values get a leading minus
+// from %f.
+func formatGEX(v float64) string {
+	abs := math.Abs(v)
+	switch {
+	case abs >= 1e9:
+		return fmt.Sprintf("$%.2fB", v/1e9)
+	case abs >= 1e6:
+		return fmt.Sprintf("$%.2fM", v/1e6)
+	case abs >= 1e3:
+		return fmt.Sprintf("$%.0fk", v/1e3)
+	default:
+		return fmt.Sprintf("$%.0f", v)
+	}
+}
+
+// formatSpotPrice renders a per-share dollar price with 2 decimals. Reserved
+// for spot levels, γ-zero, and the absolute sweep window — values that
+// live in the $10–$10000 range and read cleanly with two decimals.
+func formatSpotPrice(v float64) string {
+	return fmt.Sprintf("$%.2f", v)
+}
+
+// isMonthlyOPEXNow reports whether the current NY-local date falls on the
+// third Friday of the month — the canonical monthly OPEX day for U.S.
+// listed options. The third Friday is the unique Friday with day-of-month
+// in [15, 21]: the first Friday is in [1, 7] and the third Friday is
+// exactly two weeks later.
+func isMonthlyOPEXNow() bool {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.UTC
+	}
+	t := time.Now().In(loc)
+	if t.Weekday() != time.Friday {
+		return false
+	}
+	day := t.Day()
+	return day >= 15 && day <= 21
 }
 
 // computeMedian returns the median of a small slice. Sorts in place.
