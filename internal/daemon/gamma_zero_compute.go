@@ -195,7 +195,7 @@ type legResult struct {
 	Throttle  bool
 }
 
-// gammaLogger is the minimal logging surface computeGammaZeroSPX uses to
+// gammaLogger is the minimal logging surface computeGammaZeroFor uses to
 // emit kickoff / progress / abort lines. Defined as an interface so tests
 // can drive the compute with a no-op recorder; production passes the
 // daemon's *Logger. Nil is accepted and treated as no-op.
@@ -221,12 +221,12 @@ func (g gammaLogf) Warnf(format string, args ...any) {
 }
 
 // legFetcher abstracts the per-leg subscribe-collect-unsubscribe so
-// tests can drive computeGammaZeroSPX with a fake. The fetcher is
+// tests can drive computeGammaZeroFor with a fake. The fetcher is
 // expected to block for at most the budget the caller passes via ctx.
 //
 // snapshotSpot + snapshotAt are passed so the fetcher can compute a BS
 // back-solve when the gateway doesn't deliver a model tick (the typical
-// pre-market state). Both are captured by computeGammaZeroSPX before
+// pre-market state). Both are captured by computeGammaZeroFor before
 // the fan-out begins; the fetcher does NOT take its own spot snapshot.
 type legFetcher func(
 	ctx context.Context,
@@ -383,25 +383,30 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD string, 
 	return legResult{OI: oi, IV: iv, Gamma: gamma, IVDerived: true, OK: true}
 }
 
-// computeGammaZeroSPX runs the full Phase 2 compute. The caller (the
-// cache's background goroutine) supplies a ctx bounded only by daemon
-// shutdown — not RPC deadlines — and an atomic progress counter the
-// fan-out updates as it advances. Returns a populated result on
-// success or a classified error on failure (stale spot, no usable
-// legs, gateway disconnect).
+// computeGammaZeroFor runs the full Phase 2 compute for one underlying.
+// The caller (the cache's background goroutine) supplies a ctx bounded
+// only by daemon shutdown — not RPC deadlines — and an atomic progress
+// counter the fan-out updates as it advances. Returns a populated
+// result on success or a classified error on failure (stale spot, no
+// usable legs, gateway disconnect).
 //
-// Underlying: SPY (the S&P 500 ETF), not SPX. SPY has continuous
-// extended-hours quoting on SMART/ARCA, a single trading class (so the
-// secDefOptParams response is a clean per-expiry strike grid rather
-// than a multi-class superset that triggers spurious "no security
-// definition" errors), and active dealer hedging flow that produces
-// real IV ticks pre-market. SPX (the index) by contrast has no spot
-// trading outside RTH, so IBKR's model-computation engine doesn't push
-// IV ticks for SPX options off-hours, and the compute consistently
-// failed to land a single leg. The regime signal is unchanged — SPY
-// dealer gamma tracks SPX dealer gamma closely (both are dominated by
-// the same dealer-positioning regime) — but the underlying number is
-// SPY-scale (~SPX/10).
+// `underlying` is the symbol whose option chain drives the compute —
+// "SPY" today; "SPX" support arrives in a later step of the
+// gamma-spx-coverage design. The function is structurally
+// single-underlying: callers that want SPY+SPX run it twice (serially)
+// and aggregate at a higher layer.
+//
+// Underlying choice notes (carried forward from the SPY-only era):
+// SPY has continuous extended-hours quoting on SMART/ARCA, a single
+// trading class (so the secDefOptParams response is a clean per-expiry
+// strike grid rather than a multi-class superset that triggers spurious
+// "no security definition" errors), and active dealer hedging flow
+// that produces real IV ticks pre-market. SPX (the index) by contrast
+// has no spot trading outside RTH, so IBKR's model-computation engine
+// doesn't push IV ticks for SPX options off-hours, and an SPX-only
+// off-hours compute will land few legs — the BS-IV fallback and a
+// permissive MinLegCoverageFractionSPX (~0.05) are the off-hours
+// posture; see docs/design/gamma-spx-coverage.md §12.2.
 //
 // Methodology (perfiliev-bs-sweep-v1):
 //
@@ -449,9 +454,10 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD string, 
 // On any step's failure the function returns a classified error;
 // step-internal partial failures (e.g., 50/960 legs dropped) attach a
 // structured warning instead and continue.
-func computeGammaZeroSPX(
+func computeGammaZeroFor(
 	ctx context.Context,
 	c *ibkrlib.Connector,
+	underlying string,
 	params rpc.GammaZeroParams,
 	fetch legFetcher,
 	now func() time.Time,
@@ -467,15 +473,18 @@ func computeGammaZeroSPX(
 	if now == nil {
 		now = time.Now
 	}
+	sym := strings.TrimSpace(strings.ToUpper(underlying))
+	if sym == "" {
+		return nil, fmt.Errorf("zero-gamma: empty underlying symbol")
+	}
 	log := gammaLogf{inner: logger}
 	params = normalizeGammaParams(params)
 	startWall := now()
-	log.Infof("gamma.kickoff workers=%d expiry_count=%d strike_width_pct=%.2f sweep_range_pct=%.2f",
-		params.WorkerCount, params.ExpiryCount, params.StrikeWidthPct, params.SweepRangePct)
+	log.Infof("gamma.kickoff underlying=%s workers=%d expiry_count=%d strike_width_pct=%.2f sweep_range_pct=%.2f",
+		sym, params.WorkerCount, params.ExpiryCount, params.StrikeWidthPct, params.SweepRangePct)
 
-	// 1. SPY spot snapshot.
+	// 1. Underlying spot snapshot.
 	progress.Store(2)
-	const sym = "SPY"
 	spot, bid, ask, last, dataType := snapshotUnderlyingForGamma(ctx, c, sym, 5*time.Second)
 	if spot <= 0 {
 		return nil, fmt.Errorf("zero-gamma: no %s spot available (gateway returned no live tick)", sym)
@@ -878,7 +887,7 @@ func computeGammaZeroSPX(
 		DerivedIVLegs:       derivedCount,
 		Warnings:            warnings,
 		Params:              params,
-		Source:              "computed from IBKR SPY option chain",
+		Source:              fmt.Sprintf("computed from IBKR %s option chain", sym),
 		Method:              "perfiliev-bs-sweep-v2-stickymoneyness",
 		AsOf:                now(),
 		DurationMS:          now().Sub(startWall).Milliseconds(),

@@ -1180,7 +1180,7 @@ func (s *Server) prewarmZeroGamma(ctx context.Context) {
 			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
 		}
 		defer release()
-		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
+		return computeGammaZeroFor(bgCtx, c, "SPY", params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)
 }

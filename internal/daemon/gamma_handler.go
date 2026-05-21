@@ -76,7 +76,7 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 			return nil, fmt.Errorf("zero-gamma: hold SPY underlying: %w", err)
 		}
 		defer release()
-		return computeGammaZeroSPX(bgCtx, c, params, productionLegFetcher, time.Now, prog, s.logger)
+		return computeGammaZeroFor(bgCtx, c, "SPY", params, productionLegFetcher, time.Now, prog, s.logger)
 	}
 
 	var job *gammaComputation
