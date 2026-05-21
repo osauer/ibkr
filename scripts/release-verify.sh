@@ -137,12 +137,29 @@ fi
 
 # 2 — status: daemon spawned, gateway connected, daemon_version matches.
 # `status` autospawns the daemon at IBKR_SOCKET if one isn't running there.
+#
+# Poll for connected=true because the daemon's postConnectSetupDone
+# barrier (v0.30.1) makes Connected briefly false between c.ready=true
+# and the synchronous prewarm sentinel-setting completing. The human
+# CLI's waitForHandshake handles this naturally; the --json path
+# intentionally returns immediately for scripts, so we mirror the
+# poll here. ~5 s budget is generous: postConnectSetup completes in
+# well under a second on a healthy gateway.
 echo "  [2/7] status (autospawn daemon at isolated socket)..."
-status_json="$(run_cli status status --json)"
-connected="$(json_field connected "$status_json")"
-daemon_version="$(json_field daemon_version "$status_json")"
+status_json=""
+connected=""
+daemon_version=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    status_json="$(run_cli status status --json)"
+    connected="$(json_field connected "$status_json")"
+    daemon_version="$(json_field daemon_version "$status_json")"
+    if [[ "$connected" == "True" ]]; then
+        break
+    fi
+    sleep 0.5
+done
 if [[ "$connected" != "True" ]]; then
-    echo "release-verify: FAIL: gateway not reachable (status.connected=$connected)" >&2
+    echo "release-verify: FAIL: gateway not reachable after 5s of polling (status.connected=$connected)" >&2
     echo "$status_json" >&2
     exit 1
 fi
