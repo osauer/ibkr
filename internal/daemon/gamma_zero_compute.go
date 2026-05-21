@@ -916,6 +916,7 @@ func computeGammaZeroFor(
 		DerivedIVLegs:       derivedCount,
 		Warnings:            warnings,
 		Params:              params,
+		Scope:               strings.ToLower(sym),
 		Source:              fmt.Sprintf("computed from IBKR %s option chain", sym),
 		Method:              "perfiliev-bs-sweep-v2-stickymoneyness",
 		AsOf:                now(),

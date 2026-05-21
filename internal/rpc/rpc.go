@@ -712,6 +712,64 @@ type GammaZeroComputed struct {
 	// DurationMS is honest about how long the compute took on the wall
 	// clock; useful for tuning ExpiryCount / StrikeWidthPct.
 	DurationMS int64 `json:"duration_ms"`
+
+	// === SPY+SPX combined-view fields (added v0.31.x per design
+	// docs/design/gamma-spx-coverage.md §12.1) ===
+	//
+	// Scope is the discriminator for combined-vs-single-underlying
+	// payloads:
+	//   "spy"     — SPY-only (today's bit-for-bit behaviour and the
+	//               --only=spy regression target); PerIndex is nil
+	//   "spx"     — SPX-only (--only=spx); PerIndex is nil
+	//   "spy+spx" — combined; the top-level headline fields
+	//               (SpotUnderlying, ZeroGamma, Profile, etc.) carry
+	//               the SPY-anchored view; PerIndex["SPY"] and
+	//               PerIndex["SPX"] each carry a fully-formed single-
+	//               underlying GammaZeroComputed for per-index detail.
+	// Empty when produced by a daemon that pre-dates this field — older
+	// payloads are equivalent to Scope="spy".
+	Scope string `json:"scope,omitempty"`
+
+	// PerIndex carries the per-underlying detail when Scope="spy+spx".
+	// Nil for single-underlying scopes. Keys are uppercased symbols
+	// ("SPY", "SPX"). Each entry is a self-contained GammaZeroComputed
+	// with its own Scope ("spy" or "spx"), so a renderer can recurse on
+	// the per-index slice and reuse the single-underlying formatting.
+	//
+	// Pointer values rather than struct values so the field can be
+	// nil-checked rather than length-tested in renderers, and so the
+	// recursive type doesn't bloat the SPY-only path's payload.
+	PerIndex map[string]*GammaZeroComputed `json:"per_index,omitempty"`
+
+	// PartialClasses surfaces per-trading-class entitlement gaps when
+	// one class of an underlying lands but the other 354s. Keyed by
+	// the unreachable trading class (e.g. {"SPX": "354"} when SPX-class
+	// AM-monthlies return "not subscribed" but SPXW-class weeklies
+	// land). Empty when both classes land cleanly OR when neither
+	// lands (the latter surfaces as Status="error" upstream).
+	PartialClasses map[string]string `json:"partial_classes,omitempty"`
+
+	// DecoupledCorr is the 20-day daily-close Pearson correlation of
+	// SPY and SPX. Computed only on Scope="spy+spx" runs; nil for
+	// single-underlying scopes (where the field has no meaning). When
+	// correlation drops below 0.90, renderers promote the per-index
+	// headlines to primary and badge the combined γ-zero as
+	// "decoupled" — the assumption that SPY and SPX move together
+	// breaks during single-print SPX prints, basis dislocations, and
+	// futures-led tapes. See gamma-spx-coverage.md §5.3.1.
+	DecoupledCorr *float64 `json:"decoupled_corr,omitempty"`
+
+	// CombinedGapPct is the spot-percent headline for combined-scope
+	// runs: the % move at which the sum of SPY and SPX dealer GEX
+	// crosses zero, expressed in units of "% of current spot" because
+	// SPY and SPX have different price levels. Nil when no crossing
+	// exists within the swept window (GammaSign communicates the
+	// regime in that case) or when Scope is single-underlying.
+	//
+	// Distinct from GapPct, which is the SPY-anchored gap for the
+	// SPY half of a combined run (preserves typing for JSON consumers
+	// reading top-level GapPct under either scope).
+	CombinedGapPct *float64 `json:"combined_gap_pct,omitempty"`
 }
 
 // GammaZeroSPXResult is the envelope returned by MethodGammaZeroSPX.
