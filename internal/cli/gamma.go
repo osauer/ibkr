@@ -231,14 +231,34 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	if len(c.TopStrikes) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  Top strikes by |Γ|·OI (regime-robust positioning signal):"))
-		header := fmt.Sprintf("    %-12s  %8s  %5s  %12s  %12s  %10s",
-			"EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
+		// Combined-scope renders an INDEX column per the user-interview
+		// choice (single sorted list with the underlying labelled per
+		// row); single-underlying mode keeps the original shape so
+		// today's SPY-only output is unchanged.
+		showIndex := c.Scope == rpc.GammaZeroScopeCombined
+		var header string
+		if showIndex {
+			header = fmt.Sprintf("    %-5s  %-12s  %8s  %5s  %12s  %12s  %10s",
+				"INDEX", "EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
+		} else {
+			header = fmt.Sprintf("    %-12s  %8s  %5s  %12s  %12s  %10s",
+				"EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
+		}
 		fmt.Fprintln(out, env.dim(header))
 		fmt.Fprintln(out, env.dim("    "+strings.Repeat("─", visibleLen(header)-4)))
 		for _, ts := range c.TopStrikes {
 			notional := float64(ts.OI) * ts.Strike * 100
-			fmt.Fprintf(out, "    %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
-				ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+			if showIndex {
+				idx := ts.Underlying
+				if idx == "" {
+					idx = "—"
+				}
+				fmt.Fprintf(out, "    %-5s  %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
+					idx, ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+			} else {
+				fmt.Fprintf(out, "    %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
+					ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+			}
 		}
 	}
 
