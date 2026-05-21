@@ -61,7 +61,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "SPY Dealer Zero-Gamma")
+	fmt.Fprintln(out, gammaHeaderForScope(r))
 	fmt.Fprintln(out)
 
 	switch r.Status {
@@ -98,7 +98,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 
 	c := r.Result
-	fmt.Fprintf(out, "  SPY spot    %.2f", c.SpotUnderlying)
+	fmt.Fprintf(out, "  %s spot    %.2f", gammaSpotLabelForScope(c), c.SpotUnderlying)
 	if !c.SpotAt.IsZero() {
 		fmt.Fprintf(out, "  (%s)", c.SpotAt.Format("15:04:05 MST"))
 	}
@@ -163,8 +163,8 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
 	if c.Params.StrikeWidthPct > 0 {
-		fmt.Fprintf(out, "  Scope       SPY only · ±%.0f%% strikes · %d expirations\n",
-			c.Params.StrikeWidthPct*100, len(c.Expirations))
+		fmt.Fprintf(out, "  Scope       %s · ±%.0f%% strikes · %d expirations\n",
+			gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations))
 	}
 	if c.SkewModel != "" {
 		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
@@ -334,4 +334,54 @@ func computeMedian(xs []float64) float64 {
 		return sortedCopy[mid]
 	}
 	return (sortedCopy[mid-1] + sortedCopy[mid]) / 2
+}
+
+// gammaHeaderForScope returns the renderer's section header — varies
+// with Result.Scope so SPX-only and combined runs don't claim to be
+// SPY. Falls back to the SPY title for empty Scope (pre-step-5 result
+// envelopes) so old daemon → new CLI mixes render unchanged.
+func gammaHeaderForScope(r *rpc.GammaZeroSPXResult) string {
+	if r == nil || r.Result == nil {
+		return "Dealer Zero-Gamma"
+	}
+	switch r.Result.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX Dealer Zero-Gamma"
+	case rpc.GammaZeroScopeCombined:
+		return "Dealer Zero-Gamma (SPY + SPX)"
+	default:
+		return "SPY Dealer Zero-Gamma"
+	}
+}
+
+// gammaSpotLabelForScope returns the underlying symbol to print next
+// to the headline spot. Uses Result.Scope; combined runs anchor on
+// SPY for the headline spot label (per design §12.1).
+func gammaSpotLabelForScope(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "SPY"
+	}
+	switch c.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX"
+	default:
+		return "SPY"
+	}
+}
+
+// gammaScopeLabel returns the "Scope" row's left-hand label. Mirrors
+// the design §9.x mockups for the various single-underlying and
+// combined cases.
+func gammaScopeLabel(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "SPY only"
+	}
+	switch c.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX only"
+	case rpc.GammaZeroScopeCombined:
+		return "SPY + SPX"
+	default:
+		return "SPY only"
+	}
 }
