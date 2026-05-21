@@ -10,6 +10,21 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.30.2 — 2026-05-21 15:03 CEST
+
+### What's new
+
+- Internals-only refactor release. No CLI, MCP, or wire-format changes; `ibkr regime`, `ibkr chain`, `ibkr gamma`, and every other command render identical output to v0.30.1. Skippable for CLI/MCP users; relevant only for anyone importing `internal/daemon` or reading the source.
+
+### Changed
+
+- `internal/daemon` source layout reorganized — no API, no behaviour change. The 2,644-LOC `handlers.go` is now split into `handlers.go` (account / positions / quote / scan / status / breadth), `chain.go` (chain expiries + fetch), `gamma_handler.go` (gamma-zero RPC wrapper), and `snapshot.go` (shared brief-snapshot helpers); `regime.go`'s `populateStreaks` is replaced by a registry loop over per-indicator structs in the new `regime_indicators.go`. Affects readers of the source tree only — the daemon is `internal/`, so no Go importer outside this module is impacted.
+
+### Engineering notes
+
+- `internal/daemon/handlers.go` split from 2,644 LOC into focused files: `chain.go` (~568 LOC — `handleChainExpiries`, `handleChainFetch`, and the expiry/strike/IV helpers only they use), `gamma_handler.go` (~113 LOC — the `handleGammaZeroSPX` RPC wrapper; the compute layer in `gamma_zero_compute.go` et al. is untouched), and `snapshot.go` (~241 LOC — shared `briefSnapshot*` helpers used by chain, gamma compute, regime, and positions). `handlers.go` is now ~1,757 LOC carrying account, positions, quote streaming, scan, status/history, and breadth. `classifyBreadthState`, `normalizeExpiry`, and `daysUntil` stay in `handlers.go` (they have callers outside the moved clusters). Pure code motion.
+- `populateStreaks` in `internal/daemon/regime.go` (909 → 854 LOC) replaced with a `streakIndicator`-registry loop over 5 zero-state structs (one per indicator) implementing `key()` / `bandAndValue()` / `attachStreak()`, registered in the new `regime_indicators.go` (~130 LOC). Gate conditions preserved byte-for-byte — `vix_term`, `hyg_spy`, `usdjpy` accept `OK || Stale`; `gamma_zero` requires `Status == OK && Envelope.Result != nil` (Stale not accepted); `breadth` requires `(OK || Stale) && Envelope.State == Ready`. Classifiers (`classifyVIXTermBand` and friends in `regime_streaks.go`), the streak-key constants, the fetchers, `runRegimeFanout`, `handleRegimeSnapshot`, and the CLI renderer are all untouched.
+
 ## v0.30.1 — 2026-05-21 12:30 CEST
 
 ### What's new
