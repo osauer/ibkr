@@ -10,6 +10,29 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v0.32.0 — 2026-05-22 11:11 CEST
+
+### What's new
+
+- `ibkr gamma` calls feel responsive again. The default blocking wait dropped from 50 s to 3 s, so an in-flight compute returns a `computing N%` progress envelope within seconds instead of stalling for nearly a minute. Cached runs still return immediately. `--no-wait` is unchanged for callers that want zero blocking.
+- Dealer term-gamma now reflects the horizons that actually matter. The expiry picker reaches past the next ~2 weeks of weeklies to anchor the term basket on the next monthly OPEX and next quarterly expiration, so `DTE > 7` gamma is no longer near-empty for SPY-anchored views. The `Top strikes` table picks up institutional hedges that the prior weeklies-only basket missed entirely.
+- Dealer gamma now survives daemon restarts and tunes its refresh cadence to the trading-session phase. A `pkill && relaunch` cycle warm-starts from the on-disk snapshot instead of paying a 5-min cold recompute; overnight and on weekends the daemon stops kicking doomed refreshes against a closed market.
+
+### Changed
+
+- `ibkr gamma`: default `--wait_ms` is now 3 s (down from 50 s). Cached runs return immediately. In-flight runs come back with a `computing N%` envelope the renderer turns into a progress row, so polling sees fresh state on every call rather than burning a full wait window per iteration. `--no-wait` (`wait_ms=0`) is unchanged.
+- `ibkr gamma`: per-compute expiry basket follows a fixed slot policy — front-week, front-week+1, end-of-week, next monthly OPEX, next quarterly expiration, plus a fill. Output ordering and the `YYYY-MM-DD` wire shape are unchanged; the `Leg count`, top-strikes table, and `DTE > 7` (`term`) sub-row now carry hundreds of legs in regimes where they previously carried near-zero. Single-class equity path (`selectExpirations`) only; the SPX multi-class path is unchanged.
+- `ibkr gamma`: cache soft refresh is now session-aware. During RTH (09:30–16:00 ET weekdays) a cached compute refreshes ~60 min after it landed; during pre-market and post-market (04:00–09:30 ET, 16:00–20:00 ET weekdays) it refreshes ~30 min; outside those windows (overnight + weekends) it does not refresh at all and continues to serve the last successful snapshot until the NY-midnight session-key boundary rolls. Crossing a session boundary (e.g. pre-market → RTH at 09:30 ET) ages out the cached value on the next call so callers right after the open see a fresh RTH read rather than the pre-market profile carried into the new window.
+
+### Added
+
+- Gamma cache persists across daemon restarts. The most recent successful compute for each scope (`spy+spx`, `spy`, `spx`) is written to `~/.cache/ibkr/gamma-zero/gamma-zero-<scope>.json` (atomic temp + rename, pretty JSON) on success and reloaded on daemon startup. Cold-cache gates check schema version, NY session key, scope name, and methodology token independently — a mismatch on any gate falls back to a fresh compute rather than serving stale state across schema or session boundaries. The three scope files are written and gated independently; no cross-scope poisoning.
+- `rpc.ClassifySession(now time.Time) rpc.SessionClass` — four-way classifier returning `SessionClosed` / `SessionPre` / `SessionRTH` / `SessionPost`, source of truth for the new session-aware cache cadence and reusable by other components that need to branch on the U.S. equity-options session phase. Fail-open to `SessionRTH` under missing tzdata, mirroring `IsOptionRTH`.
+
+### Engineering notes
+
+The pre-this-release single-slot cache keyed only by NY session date would, once persistence landed, have surfaced a `--only=spy` result to a combined caller — fixed by carrying one slot per scope from day one of persistence; `gamma-zero-spy+spx.json` / `-spy.json` / `-spx.json` are written and gated independently. The session-aware soft TTL replaces a constant 5-min window that was both noisy intraday (refreshing more often than dealer positioning actually shifts) and wasteful overnight (kicking 5-min recomputes against a market that won't produce fresh quotes). The expiry-picker change is scoped to the equity single-class path (`selectExpirations`); the SPX multi-class path (`selectSPXExpirationsClassed`) is covered separately by the `gamma-adaptive-strike-window` roadmap, and strike-window / skew-weighting / multi-cross detection / cache-key refactor remain explicitly out of scope here, gated on live measurement of this release's basket.
+
 ## v0.31.0 — 2026-05-21 22:12 CEST
 
 ### What's new
