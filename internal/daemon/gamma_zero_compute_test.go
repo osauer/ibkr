@@ -57,10 +57,15 @@ func TestNormalizeGammaParams(t *testing.T) {
 	}
 }
 
-// TestSelectExpirations pins the 0DTE-post-settlement filter at the NY
-// 16:15 cutoff, and confirms that pre-cutoff same-day expiries are
-// kept. The cutoff is intentionally conservative for v1 (one rule
-// across SPX AM-settled + SPXW PM-settled) per the methodology doc.
+// TestSelectExpirations pins the 0DTE-post-settlement filter at the
+// per-trading-class NY-time cutoff plus the slot-anchored picker:
+//
+//	[front-week-1, front-week-2, EOW, next-monthly, next-quarterly, fill]
+//
+// Together they make sure (a) past-settlement same-day expiries fall
+// out and (b) the basket reaches monthly + quarterly horizons rather
+// than picking only weeklies inside ~2 weeks (which the lexicographic-N
+// predecessor did — see docs/design/gamma-adaptive-strike-window.md).
 func TestSelectExpirations(t *testing.T) {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
@@ -68,28 +73,39 @@ func TestSelectExpirations(t *testing.T) {
 	}
 	chain := map[string][]float64{
 		"2026-05-15": {5000}, // yesterday
-		"2026-05-16": {5000}, // today
-		"2026-05-17": {5000}, // tomorrow
-		"2026-05-19": {5000}, // next week
-		"2026-05-26": {5000},
-		"2026-06-19": {5000}, // monthly
-		"2026-09-18": {5000}, // quarterly
-		"2026-12-18": {5000},
+		"2026-05-16": {5000}, // today (Sat — synthetic)
+		"2026-05-17": {5000}, // tomorrow (Sun)
+		"2026-05-19": {5000}, // Tue next week
+		"2026-05-26": {5000}, // Tue week+1
+		"2026-06-19": {5000}, // 3rd Friday of June — monthly
+		"2026-09-18": {5000}, // 3rd Friday of September — quarterly
+		"2026-12-18": {5000}, // 3rd Friday of December — quarterly
 	}
 
-	t.Run("morning_today_included", func(t *testing.T) {
+	t.Run("morning_today_included_with_monthly_anchor", func(t *testing.T) {
+		// Sat 2026-05-16 10:00 ET → this week's Friday = 05-22 (NOT in
+		// chain). EOW anchor falls through; monthly anchor lands on
+		// 06-19 and quarterly on 09-18, leaving room for two front-week
+		// slots.
 		now := time.Date(2026, 5, 16, 10, 0, 0, 0, loc)
 		got := selectExpirations(chain, "", now, 4)
-		want := []string{"2026-05-16", "2026-05-17", "2026-05-19", "2026-05-26"}
+		// Slot 1 = 05-16, Slot 2 = 05-17, Slot 4 (monthly) = 06-19,
+		// Slot 5 (quarterly) = 09-18.
+		want := []string{"2026-05-16", "2026-05-17", "2026-06-19", "2026-09-18"}
 		if !equalSlice(got, want) {
-			t.Errorf("morning: got %v, want %v", got, want)
+			t.Errorf("morning slot basket: got %v, want %v", got, want)
 		}
 	})
 
 	t.Run("post_settlement_today_excluded", func(t *testing.T) {
-		now := time.Date(2026, 5, 16, 17, 0, 0, 0, loc) // 17:00 ET, past 16:15
+		// 17:00 ET on 2026-05-16 → today (Sat) excluded by the past-cutoff
+		// rule even though it's pre-PM-settle for a Saturday listing
+		// (16:15 ET buffer applied uniformly).
+		now := time.Date(2026, 5, 16, 17, 0, 0, 0, loc)
 		got := selectExpirations(chain, "", now, 4)
-		want := []string{"2026-05-17", "2026-05-19", "2026-05-26", "2026-06-19"}
+		// Slot 1 = 05-17, Slot 2 = 05-19, Slot 4 monthly = 06-19,
+		// Slot 5 quarterly = 09-18.
+		want := []string{"2026-05-17", "2026-05-19", "2026-06-19", "2026-09-18"}
 		if !equalSlice(got, want) {
 			t.Errorf("post-settlement: got %v, want %v", got, want)
 		}
@@ -106,10 +122,13 @@ func TestSelectExpirations(t *testing.T) {
 	})
 
 	t.Run("count_caps_result", func(t *testing.T) {
+		// Count=2 only fills slots 1 + 2 (front-week-1, front-week-2);
+		// every later slot is skipped.
 		now := time.Date(2026, 5, 16, 10, 0, 0, 0, loc)
 		got := selectExpirations(chain, "", now, 2)
-		if len(got) != 2 {
-			t.Errorf("count cap not honored: got %d entries, want 2", len(got))
+		want := []string{"2026-05-16", "2026-05-17"}
+		if !equalSlice(got, want) {
+			t.Errorf("count=2: got %v, want %v", got, want)
 		}
 	})
 
@@ -164,6 +183,280 @@ func TestSelectExpirations(t *testing.T) {
 			t.Errorf("SPX-class selectExpirations dropped pre-AM-settle morning listing: got %v", got)
 		}
 	})
+}
+
+// TestPickExpirationSlots pins the slot-anchored picker against
+// realistic SPY-like chains. The slot rule is:
+//
+//	[front-week-1, front-week-2, EOW, next-monthly, next-quarterly, fill]
+//
+// where unfilled anchored slots (e.g. quarterly listing not on chain)
+// roll forward to the fill rule. Goals of this block:
+//
+//   - Confirm the basket reaches into the monthly and quarterly
+//     horizons rather than staying inside ~2 weeks (the bug this PR
+//     fixes).
+//   - Lock the EOW collision behaviour (today is a Friday → EOW
+//     candidate is "today", already picked as front-week-1, so the
+//     slot rolls to fill).
+//   - Confirm anchors degrade gracefully on chains missing a quarterly
+//     listing.
+func TestPickExpirationSlots(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+
+	// A realistic SPY-style chain on 2026-05-22 (Friday): daily M/W/F
+	// weeklies, the next monthly 3rd-Friday (Jun 19), and the next two
+	// quarterly 3rd-Fridays (Sep 18, Dec 18).
+	spyChain := []string{
+		"2026-05-22", // Fri (today)
+		"2026-05-25", // Mon
+		"2026-05-27", // Wed
+		"2026-05-29", // Fri
+		"2026-06-01", // Mon
+		"2026-06-03", // Wed
+		"2026-06-05", // Fri
+		"2026-06-08", // Mon
+		"2026-06-10", // Wed
+		"2026-06-12", // Fri
+		"2026-06-15", // Mon
+		"2026-06-17", // Wed
+		"2026-06-19", // 3rd Friday Jun — monthly
+		"2026-06-22", // Mon (post-OPEX)
+		"2026-06-24", // Wed
+		"2026-06-26", // Fri
+		"2026-07-17", // 3rd Friday Jul — monthly
+		"2026-08-21", // 3rd Friday Aug — monthly
+		"2026-09-18", // 3rd Friday Sep — quarterly
+		"2026-12-18", // 3rd Friday Dec — quarterly
+	}
+
+	t.Run("friday_today_anchors_to_monthly_and_quarterly", func(t *testing.T) {
+		// 09:30 ET, 2026-05-22 — markets open, today's expiry still
+		// pre-settle. Verifies the documented basket on a Friday: EOW
+		// rolls to fill because today is its own EOW.
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc)
+		got := pickExpirationSlots(spyChain, now, 6)
+		want := []string{
+			"2026-05-22", // front-week-1 (today)
+			"2026-05-25", // front-week-2
+			"2026-05-27", // fill (EOW collided with front-week-1)
+			"2026-05-29", // fill
+			"2026-06-19", // monthly
+			"2026-09-18", // quarterly
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("Fri 2026-05-22 basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("wednesday_today_eow_fills_to_this_weeks_friday", func(t *testing.T) {
+		// Cut the chain to a 2026-05-27 (Wed) view — today's expiry
+		// (Wed) is front-week-1, next nearest is Fri 05-29, and the
+		// EOW anchor is also Fri 05-29, so EOW collides with
+		// front-week-2 and rolls to fill.
+		now := time.Date(2026, 5, 27, 9, 30, 0, 0, loc)
+		candidates := []string{
+			"2026-05-27", "2026-05-29", "2026-06-01", "2026-06-03",
+			"2026-06-05", "2026-06-19", "2026-09-18", "2026-12-18",
+		}
+		got := pickExpirationSlots(candidates, now, 6)
+		want := []string{
+			"2026-05-27", // front-week-1
+			"2026-05-29", // front-week-2 (also EOW collision target)
+			"2026-06-01", // fill (EOW rolled)
+			"2026-06-03", // fill
+			"2026-06-19", // monthly
+			"2026-09-18", // quarterly
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("Wed 2026-05-27 basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("tuesday_today_eow_picks_this_weeks_friday", func(t *testing.T) {
+		// On a Tuesday this week's Friday is not picked as front-week,
+		// so the EOW anchor lands on it cleanly.
+		now := time.Date(2026, 5, 26, 9, 30, 0, 0, loc) // Tue
+		candidates := []string{
+			"2026-05-26", "2026-05-27", "2026-05-29", "2026-06-01",
+			"2026-06-03", "2026-06-19", "2026-09-18", "2026-12-18",
+		}
+		got := pickExpirationSlots(candidates, now, 6)
+		want := []string{
+			"2026-05-26", // front-week-1 (today)
+			"2026-05-27", // front-week-2
+			"2026-05-29", // EOW (this Friday)
+			"2026-06-01", // fill
+			"2026-06-19", // monthly
+			"2026-09-18", // quarterly
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("Tue 2026-05-26 basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("monthly_and_quarterly_same_date_picks_distinct_quarter", func(t *testing.T) {
+		// When today is itself a 3rd Friday of a quarterly month
+		// (09-18 = quarterly), it's picked as front-week-1. The
+		// monthly slot then rolls to the next 3rd Friday (10-16) and
+		// the quarterly slot to Dec 18. EOW collides with today and
+		// rolls to fill.
+		now := time.Date(2026, 9, 18, 9, 30, 0, 0, loc)
+		candidates := []string{
+			"2026-09-18", // today (Fri, 3rd Fri Sep, quarterly)
+			"2026-09-21", // Mon
+			"2026-09-23", // Wed
+			"2026-09-25", // Fri
+			"2026-10-16", // 3rd Fri Oct (monthly)
+			"2026-11-20", // 3rd Fri Nov (monthly)
+			"2026-12-18", // 3rd Fri Dec (quarterly)
+		}
+		got := pickExpirationSlots(candidates, now, 6)
+		// Output is sorted ascending. Picked: 09-18 (slot1), 09-21
+		// (slot2), 10-16 (slot4 monthly), 12-18 (slot5 quarterly),
+		// 09-23 + 09-25 (fills since EOW collided with today).
+		want := []string{
+			"2026-09-18", "2026-09-21", "2026-09-23", "2026-09-25",
+			"2026-10-16", "2026-12-18",
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("Fri-quarterly basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("missing_quarterly_rolls_to_fill", func(t *testing.T) {
+		// Chain has weeklies + a monthly but no quarterly listing.
+		// Quarterly slot rolls to fill so the basket still produces N
+		// dates rather than 5.
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc) // Fri
+		candidates := []string{
+			"2026-05-22", "2026-05-25", "2026-05-27", "2026-05-29",
+			"2026-06-01", "2026-06-19", // monthly only
+		}
+		got := pickExpirationSlots(candidates, now, 6)
+		want := []string{
+			"2026-05-22", "2026-05-25", "2026-05-27", "2026-05-29",
+			"2026-06-01", "2026-06-19",
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("missing-quarterly basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("count_2_only_front_weeks", func(t *testing.T) {
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc)
+		got := pickExpirationSlots(spyChain, now, 2)
+		want := []string{"2026-05-22", "2026-05-25"}
+		if !equalSlice(got, want) {
+			t.Errorf("count=2: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("count_4_prefers_anchored_slots_over_fill", func(t *testing.T) {
+		// Count=4. The anchored slots (front-week-1, front-week-2,
+		// monthly, quarterly) consume the full budget; EOW collides
+		// with today (Friday) and rolls but the count is already met
+		// by the monthly + quarterly anchors. No nearby weeklies make
+		// the basket — that's the intent: at small N, prefer horizon
+		// coverage over weeklies density.
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc)
+		got := pickExpirationSlots(spyChain, now, 4)
+		want := []string{
+			"2026-05-22", // front-week-1
+			"2026-05-25", // front-week-2
+			"2026-06-19", // monthly
+			"2026-09-18", // quarterly
+		}
+		if !equalSlice(got, want) {
+			t.Errorf("count=4 basket: got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("empty_candidates_returns_nil", func(t *testing.T) {
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc)
+		got := pickExpirationSlots(nil, now, 6)
+		if got != nil {
+			t.Errorf("nil candidates: got %v, want nil", got)
+		}
+	})
+
+	t.Run("count_zero_returns_nil", func(t *testing.T) {
+		now := time.Date(2026, 5, 22, 9, 30, 0, 0, loc)
+		got := pickExpirationSlots(spyChain, now, 0)
+		if got != nil {
+			t.Errorf("count=0: got %v, want nil", got)
+		}
+	})
+}
+
+// TestThisWeekFriday pins the EOW-anchor helper: for any weekday, it
+// returns the YYYY-MM-DD of the calendar Friday >= today.
+func TestThisWeekFriday(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cases := []struct {
+		name string
+		now  time.Time
+		want string
+	}{
+		// 2026-05-22 is Friday. Walk the surrounding week.
+		{"sun", time.Date(2026, 5, 17, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"mon", time.Date(2026, 5, 18, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"tue", time.Date(2026, 5, 19, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"wed", time.Date(2026, 5, 20, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"thu", time.Date(2026, 5, 21, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"fri", time.Date(2026, 5, 22, 12, 0, 0, 0, loc), "2026-05-22"},
+		{"sat", time.Date(2026, 5, 23, 12, 0, 0, 0, loc), "2026-05-29"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := thisWeekFriday(tc.now); got != tc.want {
+				t.Errorf("thisWeekFriday(%s): got %q, want %q", tc.now.Format("Mon"), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsThirdFridayDate / TestIsQuarterlyThirdFridayDate pin the two
+// predicates used by the monthly / quarterly slot anchors. 3rd Fridays
+// fall on days 15-21 (the unique Friday in that span each month);
+// quarterlies are 3rd Fridays of Mar / Jun / Sep / Dec.
+func TestIsThirdFridayDate(t *testing.T) {
+	cases := map[string]bool{
+		"2026-05-22": false, // Friday but day 22, not 3rd Friday of May (3rd Fri = May 15)
+		"2026-05-15": true,  // Fri, day 15 — 3rd Friday of May
+		"2026-06-19": true,  // Fri, day 19 — 3rd Friday of June
+		"2026-06-26": false, // Fri, day 26 — 4th Friday
+		"2026-09-18": true,  // Fri, day 18 — 3rd Friday of Sep
+		"2026-09-21": false, // Mon
+		"":           false,
+		"bogus":      false,
+	}
+	for in, want := range cases {
+		if got := isThirdFridayDate(in); got != want {
+			t.Errorf("isThirdFridayDate(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestIsQuarterlyThirdFridayDate(t *testing.T) {
+	cases := map[string]bool{
+		"2026-03-20": true,  // 3rd Fri Mar
+		"2026-06-19": true,  // 3rd Fri Jun
+		"2026-09-18": true,  // 3rd Fri Sep
+		"2026-12-18": true,  // 3rd Fri Dec
+		"2026-05-15": false, // 3rd Fri May (not quarterly)
+		"2026-07-17": false, // 3rd Fri Jul (not quarterly)
+		"2026-06-26": false, // 4th Fri Jun
+		"2026-06-22": false, // Mon
+	}
+	for in, want := range cases {
+		if got := isQuarterlyThirdFridayDate(in); got != want {
+			t.Errorf("isQuarterlyThirdFridayDate(%q) = %v, want %v", in, got, want)
+		}
+	}
 }
 
 // TestDTEYearsSPXClassUsesAMInstant pins the trading-class branch on

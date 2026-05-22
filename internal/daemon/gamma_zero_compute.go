@@ -1108,19 +1108,42 @@ func classSettlementInstant(tradingClass string, year int, month time.Month, day
 // boundary semantics stay consistent across the SPX/SPXW split.
 const classSettlementBuffer = 15 * time.Minute
 
-// selectExpirations picks the nearest N expirations that are NOT already
-// past their settlement window in NY time. Same-day expiries before
-// settlement count; same-day expiries after settlement are dropped.
+// selectExpirations picks up to N expirations using a slot-anchored
+// policy. Same-day expiries before their class's settlement cutoff
+// count; same-day expiries after settlement are dropped (see
+// classSettlementInstant + classSettlementBuffer).
 //
-// tradingClass is the option class whose settlement instant defines the
-// cutoff. "SPX" cuts off at 09:45 ET (09:30 AM-settle + 15-min buffer);
-// "SPXW", "SPY", and empty default to 16:15 ET (16:00 PM-settle + 15-min
-// buffer). Empty class preserves the SPY-only path's bit-for-bit
-// behaviour from before the SPX coverage arc.
+// The slot policy is fixed:
+//
+//	1  front-week-1    nearest unused candidate
+//	2  front-week-2    next nearest unused candidate
+//	3  EOW             this calendar week's Friday (rolls to fill if already used)
+//	4  next-monthly    next 3rd-Friday (any month)
+//	5  next-quarterly  next 3rd-Friday of Mar/Jun/Sep/Dec
+//	6+ fill            nearest unused candidate, until count is reached
+//
+// Each anchored slot (3–5) is allowed to find no candidate, in which
+// case the slot is skipped and the fill rule covers the remaining
+// count. The output is sorted ascending for stable downstream
+// iteration.
+//
+// Why the slot policy: lexicographic-N picked only weeklies inside
+// ~2 weeks on the SPY chain (max DTE = 13), so the term gamma bucket
+// (DTE > 7) was computed over almost-weeklies. Anchoring monthly +
+// quarterly slots guarantees the basket reaches the OPEX and
+// institutional-collar horizons that dominate dealer term-gamma.
+//
+// tradingClass is the option class whose settlement instant defines
+// the today-cutoff (same semantics as before this refactor): "SPX"
+// cuts off at 09:45 ET (AM-settle + 15-min buffer); "SPXW", "SPY",
+// and empty default to 16:15 ET (PM-settle + 15-min buffer).
 //
 // Input map keys are YYYY-MM-DD; output is the picked subset in the
-// same date format, ascending.
+// same date format, sorted ascending.
 func selectExpirations(strikes map[string][]float64, tradingClass string, now time.Time, count int) []string {
+	if count <= 0 {
+		return nil
+	}
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		loc = time.UTC
@@ -1141,10 +1164,123 @@ func selectExpirations(strikes map[string][]float64, tradingClass string, now ti
 		candidates = append(candidates, date)
 	}
 	sort.Strings(candidates)
-	if len(candidates) > count {
-		candidates = candidates[:count]
+	return pickExpirationSlots(candidates, nyNow, count)
+}
+
+// pickExpirationSlots applies the slot policy documented on
+// selectExpirations to an already-filtered, ascending-sorted candidate
+// list. Exposed at package scope (lowercase but distinct from
+// selectExpirations) so tests can drive the picker independently of
+// the trading-class settlement-filter logic.
+//
+// candidates: sorted ascending, must already be non-expired.
+// nyNow:      NY-localised wall-clock; used by the EOW anchor.
+// count:      maximum slots to fill (typical 6).
+func pickExpirationSlots(candidates []string, nyNow time.Time, count int) []string {
+	if count <= 0 || len(candidates) == 0 {
+		return nil
 	}
-	return candidates
+	used := make(map[string]struct{}, count)
+	picks := make([]string, 0, count)
+
+	// attempt tries to add the first candidate matching predicate that
+	// hasn't been used yet. Returns true when the slot was filled.
+	attempt := func(predicate func(string) bool) bool {
+		if len(picks) >= count {
+			return false
+		}
+		for _, d := range candidates {
+			if _, ok := used[d]; ok {
+				continue
+			}
+			if predicate(d) {
+				used[d] = struct{}{}
+				picks = append(picks, d)
+				return true
+			}
+		}
+		return false
+	}
+
+	always := func(string) bool { return true }
+
+	// Slots 1-2: front-week-1, front-week-2 — nearest two unused.
+	attempt(always)
+	attempt(always)
+
+	// Slot 3: EOW — this calendar week's Friday from nyNow (>= today).
+	// Falls through silently when that Friday isn't in candidates or
+	// has already been picked as a front-week slot.
+	thisFri := thisWeekFriday(nyNow)
+	attempt(func(d string) bool { return d == thisFri })
+
+	// Slot 4: next-monthly — next 3rd-Friday in candidates.
+	attempt(isThirdFridayDate)
+
+	// Slot 5: next-quarterly — next 3rd-Friday of Mar/Jun/Sep/Dec.
+	// Always runs even if the monthly slot already picked the quarter's
+	// 3rd-Friday; the predicate skips used candidates so the quarterly
+	// slot lands on the NEXT quarter, not the same one.
+	attempt(isQuarterlyThirdFridayDate)
+
+	// Fill: nearest unused until count is reached.
+	for _, d := range candidates {
+		if len(picks) >= count {
+			break
+		}
+		if _, ok := used[d]; ok {
+			continue
+		}
+		used[d] = struct{}{}
+		picks = append(picks, d)
+	}
+
+	sort.Strings(picks)
+	return picks
+}
+
+// thisWeekFriday returns the YYYY-MM-DD of the calendar Friday >= nyNow's
+// date. When nyNow falls on a Friday the date returned is nyNow's own
+// date; on Saturday/Sunday it rolls forward to the upcoming Friday.
+//
+// Used by the EOW anchor in pickExpirationSlots. Pure helper, no
+// dependency on the strike map — that way the slot rule's "end of
+// this week" semantics are independent of which specific Fridays the
+// chain happens to list.
+func thisWeekFriday(nyNow time.Time) string {
+	daysToFri := (int(time.Friday) - int(nyNow.Weekday()) + 7) % 7
+	fri := time.Date(nyNow.Year(), nyNow.Month(), nyNow.Day()+daysToFri, 0, 0, 0, 0, nyNow.Location())
+	return fri.Format("2006-01-02")
+}
+
+// isThirdFridayDate reports whether a YYYY-MM-DD string is the 3rd
+// Friday of its month. 3rd Fridays fall on days 15-21 — the only
+// Friday in that span each month. Used by the monthly anchor.
+func isThirdFridayDate(yyyyMMdd string) bool {
+	t, err := time.Parse("2006-01-02", yyyyMMdd)
+	if err != nil {
+		return false
+	}
+	if t.Weekday() != time.Friday {
+		return false
+	}
+	d := t.Day()
+	return d >= 15 && d <= 21
+}
+
+// isQuarterlyThirdFridayDate reports whether a YYYY-MM-DD is the 3rd
+// Friday of a quarterly month (Mar / Jun / Sep / Dec). Used by the
+// quarterly anchor.
+func isQuarterlyThirdFridayDate(yyyyMMdd string) bool {
+	if !isThirdFridayDate(yyyyMMdd) {
+		return false
+	}
+	t, _ := time.Parse("2006-01-02", yyyyMMdd)
+	switch t.Month() {
+	case time.March, time.June, time.September, time.December:
+		return true
+	}
+	return false
 }
 
 // sortStrikesATMOutward returns the input strike list reordered by
