@@ -1041,11 +1041,17 @@ func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
 		t.Errorf("idle daemon: regimeContentionMessage()=%q; want a 'no daemon-internal contention' hedge", msg)
 	}
 
-	// 2. Gamma in flight → message names gamma-zero.
-	srv.zeroGamma.current = &gammaComputation{
+	// 2. Gamma in flight → message names gamma-zero. Synthetic job
+	// injected via the combined slot (the canonical cache cell for
+	// dashboard / regime callers).
+	fakeJob := &gammaComputation{
 		sessionKey: "2026-05-19",
+		scope:      rpc.GammaZeroScopeCombined,
 		startedAt:  time.Now(),
 		done:       make(chan struct{}),
+	}
+	srv.zeroGamma.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: fakeJob},
 	}
 	msg = srv.regimeContentionMessage()
 	if !strings.Contains(msg, "gamma-zero") {
@@ -1054,5 +1060,5 @@ func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
 	if strings.Contains(msg, "breadth-spx") {
 		t.Errorf("gamma in flight, breadth idle: message=%q; should NOT name breadth-spx", msg)
 	}
-	close(srv.zeroGamma.current.done) // tidy up the synthetic computation
+	close(fakeJob.done) // tidy up the synthetic computation
 }

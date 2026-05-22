@@ -543,11 +543,14 @@ func TestIsBusyIncludesGammaCompute(t *testing.T) {
 	}
 	// Inject a synthetic in-flight computation: open `done` channel
 	// means isDone() returns false, which means IsComputing() returns
-	// true. No real gateway / fan-out needed.
-	srv.zeroGamma.current = &gammaComputation{
-		sessionKey: "2026-05-19",
-		startedAt:  time.Now(),
-		done:       make(chan struct{}),
+	// true. Slot-keyed cache: any in-flight job in any slot counts.
+	srv.zeroGamma.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: &gammaComputation{
+			sessionKey: "2026-05-19",
+			scope:      rpc.GammaZeroScopeCombined,
+			startedAt:  time.Now(),
+			done:       make(chan struct{}),
+		}},
 	}
 	if !srv.isBusy() {
 		t.Error("isBusy() should be true with gamma compute in flight (regression: gamma was not in isBusy() at v0.27.3)")
@@ -578,11 +581,15 @@ func TestHandleStatusHealthReportsBackgroundTasks(t *testing.T) {
 		t.Errorf("BackgroundTasks should be empty when idle, got %+v", res.BackgroundTasks)
 	}
 
-	// Gamma compute in flight → one entry.
-	srv.zeroGamma.current = &gammaComputation{
-		sessionKey: "2026-05-19",
-		startedAt:  time.Now(),
-		done:       make(chan struct{}),
+	// Gamma compute in flight → one entry. Synthetic job injected into
+	// the combined slot (the canonical cache cell for dashboard callers).
+	srv.zeroGamma.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: &gammaComputation{
+			sessionKey: "2026-05-19",
+			scope:      rpc.GammaZeroScopeCombined,
+			startedAt:  time.Now(),
+			done:       make(chan struct{}),
+		}},
 	}
 	res = srv.handleStatusHealth()
 	if len(res.BackgroundTasks) != 1 || res.BackgroundTasks[0].Name != "gamma-zero" {
@@ -643,11 +650,17 @@ func TestBackgroundTasksRegistry_isBusyAndHandlerAgree(t *testing.T) {
 		t.Error("idle daemon: BackgroundTasks should be empty")
 	}
 
-	// 2. Inject a gamma compute. Both surfaces flip.
-	srv.zeroGamma.current = &gammaComputation{
+	// 2. Inject a gamma compute. Both surfaces flip. The synthetic job
+	// lives in the combined slot — IsComputing iterates all slots, so
+	// "any scope busy = cache busy" is the invariant under test.
+	fakeJob := &gammaComputation{
 		sessionKey: "2026-05-19",
+		scope:      rpc.GammaZeroScopeCombined,
 		startedAt:  time.Now(),
 		done:       make(chan struct{}),
+	}
+	srv.zeroGamma.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: fakeJob},
 	}
 	if !srv.isBusy() {
 		t.Error("with gamma in flight: isBusy() should be true")
@@ -657,7 +670,7 @@ func TestBackgroundTasksRegistry_isBusyAndHandlerAgree(t *testing.T) {
 	}
 
 	// 3. Mark gamma done. Both surfaces return to idle.
-	close(srv.zeroGamma.current.done)
+	close(fakeJob.done)
 	if srv.isBusy() {
 		t.Error("after gamma done: isBusy() should be false")
 	}

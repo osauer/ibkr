@@ -276,7 +276,27 @@ func New(opts Options) *Server {
 	s.installBreadthEngine()
 	s.installContractStore()
 	s.installStreakStore()
+	s.installGammaZeroCache()
 	return s
+}
+
+// installGammaZeroCache replaces the bootstrap in-memory gamma cache
+// with a store-backed one. Best-effort: a missing XDG_CACHE_HOME /
+// HOME pair leaves the in-memory cache in place — every restart pays
+// the full ~5 min compute, but the daemon itself starts fine.
+//
+// When the store is attached, any persisted result from today's NY
+// session is loaded and installed as `current`, so the first caller
+// after restart skips the compute. See
+// docs/design/gamma-zero-cache-persistence.md for the cost/benefit
+// rationale (compute time crossed the 5-min threshold post-PR-#1).
+func (s *Server) installGammaZeroCache() {
+	dir, err := gammaZeroStoreDefaultDir()
+	if err != nil {
+		s.logger.Warnf("gamma cache: resolve dir: %v (persistence disabled)", err)
+		return
+	}
+	s.zeroGamma = newGammaZeroCacheWithStore(newGammaZeroStore(dir), time.Now(), s.logger)
 }
 
 // installStreakStore constructs the regime-streak persistence layer.
@@ -1180,7 +1200,7 @@ func (s *Server) prewarmZeroGamma(ctx context.Context) {
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		return computeGammaCombined(bgCtx, s, c, params, prog)
 	}
-	s.zeroGamma.kickOrJoin(ctx, time.Now(), computeETA, compute)
+	s.zeroGamma.kickOrJoin(ctx, rpc.GammaZeroScopeCombined, time.Now(), computeETA, compute)
 }
 
 // regimeSymbolSeed is the static fallback used by prewarmRegimeSymbols

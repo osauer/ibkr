@@ -37,14 +37,14 @@ func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		first, firstFresh = c.kickOrJoin(context.Background(), now, 300, compute)
+		first, firstFresh = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
 	}()
 	// Brief gap to make sure the first caller has acquired the mutex
 	// and registered c.current before the second hits.
 	time.Sleep(20 * time.Millisecond)
 	go func() {
 		defer wg.Done()
-		second, secondFresh = c.kickOrJoin(context.Background(), now, 300, compute)
+		second, secondFresh = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
 	}()
 	// Let the second caller observe in-flight state, then unblock.
 	time.Sleep(20 * time.Millisecond)
@@ -84,9 +84,9 @@ func TestGammaZeroCache_SessionRollover(t *testing.T) {
 		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 	}
 
-	job1, fresh1 := c.kickOrJoin(context.Background(), day1, 300, compute)
+	job1, fresh1 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, day1, 300, compute)
 	<-job1.done
-	job2, fresh2 := c.kickOrJoin(context.Background(), day2, 300, compute)
+	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, day2, 300, compute)
 	<-job2.done // wait for the second compute to record its run
 
 	if job1 == job2 {
@@ -124,10 +124,10 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 		return &rpc.GammaZeroComputed{SpotUnderlying: 5050}, nil
 	}
 
-	job1, _ := c.kickOrJoin(context.Background(), now, 300, slowCompute)
+	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, slowCompute)
 	time.Sleep(30 * time.Millisecond) // let slowCompute enter its select
 
-	job2 := c.force(context.Background(), now, 300, fastCompute)
+	job2 := c.force(context.Background(), rpc.GammaZeroScopeCombined, now, 300, fastCompute)
 
 	if job1 == job2 {
 		t.Fatal("force should produce a new job distinct from the superseded one")
@@ -167,7 +167,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 		return nil, bonk
 	}
 
-	job1, fresh1 := c.kickOrJoin(context.Background(), now, 300, errCompute)
+	job1, fresh1 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, errCompute)
 	<-job1.done
 	if !fresh1 || job1.err == nil {
 		t.Fatalf("first kickoff: fresh=%v err=%v, want fresh=true err!=nil", fresh1, job1.err)
@@ -176,7 +176,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	// Same instant: same-session caller must see the cached error,
 	// not trigger a new compute. This is the dampener against retry
 	// storms while a gateway is genuinely flapping.
-	job2, fresh2 := c.kickOrJoin(context.Background(), now, 300, errCompute)
+	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, errCompute)
 	if fresh2 || job2 != job1 {
 		t.Errorf("within TTL: got fresh=%v job=%p (want fresh=false job=%p)", fresh2, job2, job1)
 	}
@@ -191,7 +191,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 		computeRuns.Add(1)
 		return &rpc.GammaZeroComputed{SpotUnderlying: 5050}, nil
 	}
-	job3, fresh3 := c.kickOrJoin(context.Background(), past, 300, successCompute)
+	job3, fresh3 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, past, 300, successCompute)
 	if !fresh3 || job3 == job1 {
 		t.Errorf("past TTL: got fresh=%v job=%p (want fresh=true new job)", fresh3, job3)
 	}
@@ -206,7 +206,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	// Past the TTL again, but now the cache holds a SUCCESS — the
 	// retry path must not fire on healthy state.
 	future := past.Add(2 * gammaErrorRetryTTL)
-	job4, fresh4 := c.kickOrJoin(context.Background(), future, 300, errCompute)
+	job4, fresh4 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, future, 300, errCompute)
 	if fresh4 || job4 != job3 {
 		t.Errorf("success cache must stay sticky regardless of age: fresh=%v job=%p want job=%p", fresh4, job4, job3)
 	}
@@ -235,7 +235,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	}
 
 	// First call: kicks the initial compute.
-	job1, fresh1 := c.kickOrJoin(context.Background(), now, 300, compute)
+	job1, fresh1 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
 	<-job1.done
 	if !fresh1 || job1.result == nil || job1.result.SpotUnderlying != 5001 {
 		t.Fatalf("initial kickoff: fresh=%v result=%+v", fresh1, job1.result)
@@ -243,7 +243,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 
 	// Within softTTL: same job returned, no refresh kicked.
 	withinTTL := now.Add(gammaSoftTTL - time.Second)
-	job2, fresh2 := c.kickOrJoin(context.Background(), withinTTL, 300, compute)
+	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, withinTTL, 300, compute)
 	if fresh2 || job2 != job1 {
 		t.Errorf("within softTTL: got fresh=%v job=%p (want fresh=false job=%p)", fresh2, job2, job1)
 	}
@@ -255,7 +255,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	// behind it. The caller doesn't block — they see the cached
 	// SpotUnderlying=5001 immediately.
 	pastTTL := now.Add(gammaSoftTTL + time.Second)
-	job3, fresh3 := c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	job3, fresh3 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 	if fresh3 || job3 != job1 {
 		t.Errorf("past softTTL: caller should get the stale value: got fresh=%v job=%p (want fresh=false job=%p)", fresh3, job3, job1)
 	}
@@ -270,7 +270,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	deadline := time.Now().Add(500 * time.Millisecond)
 	var job4 *gammaComputation
 	for time.Now().Before(deadline) {
-		job4, _ = c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+		job4, _ = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 		if job4 != job1 {
 			break
 		}
@@ -310,15 +310,15 @@ func TestGammaZeroCache_SoftTTLDoesNotStackRefreshes(t *testing.T) {
 	}
 
 	// Initial kickoff completes immediately.
-	job1, _ := c.kickOrJoin(context.Background(), now, 300, compute)
+	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
 	<-job1.done
 
 	// Two callers past softTTL, back-to-back. The first kicks the
 	// refresh; the second sees an in-flight refresh and does NOT
 	// kick another.
 	pastTTL := now.Add(gammaSoftTTL + time.Second)
-	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
-	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
+	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 
 	// Give the goroutines time to settle; the second compute
 	// should still be blocked.
@@ -351,7 +351,7 @@ func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 	}
 
 	// Establish the cached success.
-	job1, _ := c.kickOrJoin(context.Background(), now, 300, compute)
+	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
 	<-job1.done
 	if job1.result == nil || job1.result.SpotUnderlying != 5001 {
 		t.Fatalf("initial kickoff failed: %+v", job1)
@@ -359,7 +359,7 @@ func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 
 	// Past softTTL: refresh kicks, fails.
 	pastTTL := now.Add(gammaSoftTTL + time.Second)
-	c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 
 	// Wait for the refresh to finish. Then a follow-up call must
 	// STILL return the cached success — the refresh's error gets
@@ -373,7 +373,7 @@ func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 	}
 	time.Sleep(20 * time.Millisecond) // let the goroutine's defer close(done) land
 
-	job3, _ := c.kickOrJoin(context.Background(), pastTTL, 300, compute)
+	job3, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 	if job3.result == nil || job3.result.SpotUnderlying != 5001 {
 		t.Errorf("after failed refresh: should still see cached success 5001, got %+v", job3.result)
 	}
@@ -408,7 +408,7 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 		<-block
 		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
 	}
-	job, _ := c.kickOrJoin(context.Background(), now, 300, computingCompute)
+	job, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, computingCompute)
 	time.Sleep(20 * time.Millisecond)
 	env = c.snapshot(job, nowFn)
 	if env.Status != rpc.GammaZeroStatusComputing {
@@ -438,7 +438,7 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	errCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		return nil, bonk
 	}
-	errJob, _ := c2.kickOrJoin(context.Background(), now, 300, errCompute)
+	errJob, _ := c2.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, errCompute)
 	<-errJob.done
 	env = c2.snapshot(errJob, nowFn)
 	if env.Status != rpc.GammaZeroStatusError {

@@ -98,9 +98,9 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 
 	var job *gammaComputation
 	if p.Force {
-		job = s.zeroGamma.force(parent, time.Now(), computeETA, compute)
+		job = s.zeroGamma.force(parent, scope, time.Now(), computeETA, compute)
 	} else {
-		job, _ = s.zeroGamma.kickOrJoin(parent, time.Now(), computeETA, compute)
+		job, _ = s.zeroGamma.kickOrJoin(parent, scope, time.Now(), computeETA, compute)
 	}
 
 	// Optional wait: bounded by both the caller's WaitMs and the per-
