@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,14 +43,16 @@ import (
 // useful for international callers.
 //
 // Soft-TTL refresh-while-stale: when a kickOrJoin caller hits a
-// cached successful result older than gammaSoftTTL, the cache serves
-// the stale value immediately AND kicks a refresh in the background.
-// The refresh is stored in the slot's `refresh` field, distinct from
-// `current`, so further callers during the refresh keep seeing the
-// stable served value rather than blocking on the new in-flight job.
-// On completion the refresh promotes to current; on error it's
-// discarded so a transient compute failure can't poison a known-good
-// cached value.
+// cached successful result that's either older than the current
+// session class's softTTL (60 min RTH, 30 min pre/post, ∞ closed)
+// OR was computed in a different active session class than now,
+// the cache serves the stale value immediately AND kicks a refresh
+// in the background. The refresh is stored in the slot's `refresh`
+// field, distinct from `current`, so further callers during the
+// refresh keep seeing the stable served value rather than blocking
+// on the new in-flight job. On completion the refresh promotes to
+// current; on error it's discarded so a transient compute failure
+// can't poison a known-good cached value.
 type gammaZeroCache struct {
 	mu sync.Mutex
 	// slots holds one entry per scope. Key is the scope string
@@ -143,23 +146,54 @@ type gammaComputation struct {
 // user's next normal poll.
 const gammaErrorRetryTTL = 60 * time.Second
 
-// gammaSoftTTL is the age above which a cached successful compute
-// triggers a background refresh on the next kickOrJoin. The served
-// value is still returned immediately; the refresh runs behind it
-// and the next caller picks up the new result.
+// Session-aware soft TTL: the age at which a cached successful
+// compute triggers a background refresh. The served value is still
+// returned immediately; the refresh runs behind it and the next
+// caller picks up the new result.
 //
-// 5 min trades off cost against drift. Dealer positioning shifts
-// slowly intraday (positions reshuffle on the order of hours, not
-// minutes), but the spot the GEX curve is anchored on does move
-// minute-to-minute, and a stale γ-zero relative to current spot is
-// the part users care about. 5 min keeps the cached answer within
-// roughly one ATR-style move for liquid index ETFs without spinning
-// the gateway's option-quote slots continuously.
+// Per-class values:
+//   - softTTLRTH (60 min): RTH dealer positioning shifts on the order
+//     of hours; once per hour balances freshness against IBKR slot
+//     pressure during peak load.
+//   - softTTLPrePost (30 min): pre / post-market sees thinner flow
+//     but real price moves around news and overnight events. Refresh
+//     more often than RTH so users querying around the open/close
+//     don't see a stale snapshot, but not so aggressively that we
+//     burn slots on a thin tape.
+//   - softTTLClosed (math.MaxInt64): no live price input → no point
+//     refreshing. The persisted snapshot stays canonical until the
+//     NY-midnight session-key boundary rolls. Effectively infinite
+//     (math.MaxInt64 ≈ 292 years as a time.Duration).
+//
+// Class transitions trigger an additional refresh path in kickOrJoin:
+// a snapshot computed in a different active class than `now` is
+// treated as stale even if its absolute age is below softTTL — see
+// the boundary-refresh block.
 //
 // Distinct from gammaErrorRetryTTL (60 s): that one re-attempts a
-// FAILED compute on the next call; this one rolls a SUCCESSFUL
+// FAILED compute on the next call; soft-TTL rolls a SUCCESSFUL
 // compute forward while still serving the prior value.
-const gammaSoftTTL = 5 * time.Minute
+const (
+	softTTLRTH     = 60 * time.Minute
+	softTTLPrePost = 30 * time.Minute
+	softTTLClosed  = time.Duration(math.MaxInt64)
+)
+
+// softTTL returns the soft-TTL appropriate for the U.S. equity-options
+// session class containing now. Caller passes the same now used for
+// the age comparison so a single instant drives both the TTL choice
+// and the age check, avoiding boundary-flap when the two sample times
+// straddle a session edge.
+func softTTL(now time.Time) time.Duration {
+	switch rpc.ClassifySession(now) {
+	case rpc.SessionClosed:
+		return softTTLClosed
+	case rpc.SessionPre, rpc.SessionPost:
+		return softTTLPrePost
+	default:
+		return softTTLRTH
+	}
+}
 
 // isDone reports whether the compute has finished (success or error).
 // Safe for concurrent readers — the done channel close is the
@@ -239,9 +273,12 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 // it again.
 //
 // startedAt is the persisted AsOf so the soft-TTL refresh trigger
-// fires on the correct elapsed window — a result persisted 4 min
-// ago should be refreshed in another ~1 min, not start the
-// gammaSoftTTL countdown from boot time.
+// fires on the correct elapsed window — a result persisted 40 min
+// ago should be refreshed in another ~20 min under the RTH TTL,
+// not start a fresh countdown from boot time. Also lets the
+// boundary-refresh path detect cached snapshots whose AsOf belongs
+// to a different session class than the current one (e.g. a
+// persisted pre-market value reloaded at 10:00 ET).
 func newPersistedComputation(r *rpc.GammaZeroComputed, scope string, now time.Time) *gammaComputation {
 	job := &gammaComputation{
 		sessionKey: nySessionKey(now),
@@ -315,11 +352,14 @@ type computeFn func(ctx context.Context, progress *atomic.Int32) (*rpc.GammaZero
 // fresh kickoff. The compute reports refined progress via its
 // atomic counter.
 //
-// Soft-TTL refresh: when the served result is older than gammaSoftTTL,
-// kickOrJoin kicks a background refresh while still returning the
-// stale value. fresh stays false for the caller (they got the cached
-// envelope, not a new in-flight job). The next caller after the
-// refresh lands sees the new value.
+// Soft-TTL refresh: when the served result is past the current
+// session class's softTTL or was computed in a different active
+// class (e.g. pre-market value served during RTH), kickOrJoin kicks
+// a background refresh while still returning the stale value. fresh
+// stays false for the caller (they got the cached envelope, not a
+// new in-flight job). The next caller after the refresh lands sees
+// the new value. Closed sessions never trigger refresh — see the
+// kickOrJoin body comment for the gating logic.
 func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now time.Time, etaSeconds int, compute computeFn) (job *gammaComputation, fresh bool) {
 	key := nySessionKey(now)
 
@@ -359,9 +399,34 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		// Soft-TTL: if the served value is stale and no refresh is
 		// already running, kick one behind it. The caller still gets
 		// slot.current immediately — refresh is fire-and-forget.
-		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil &&
-			now.Sub(slot.current.startedAt) >= gammaSoftTTL {
-			slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
+		//
+		// Two triggers, both gated on the cached value being a clean
+		// success with no refresh already in flight:
+		//
+		//  1. Boundary refresh: cached value was computed in a
+		//     different active session class than `now`. E.g. a
+		//     pre-market snapshot served at 09:31 ET would otherwise
+		//     survive the entire first hour of RTH under the 60-min
+		//     RTH TTL — users expect fresh data at the open.
+		//
+		//  2. Age refresh: absolute age exceeds the per-class
+		//     softTTL — 60 min in RTH, 30 min in pre/post.
+		//
+		// Both triggers are skipped when the current class is
+		// SessionClosed: no price input, no point refreshing. softTTL
+		// returns math.MaxInt64 for Closed so the age check can never
+		// fire there, and the explicit currentClass check below
+		// skips the boundary path so a Post→Closed transition (e.g.
+		// 20:01 ET) doesn't trigger a doomed refresh.
+		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil {
+			currentClass := rpc.ClassifySession(now)
+			if currentClass != rpc.SessionClosed {
+				cachedClass := rpc.ClassifySession(slot.current.startedAt)
+				classChanged := cachedClass != currentClass
+				if classChanged || now.Sub(slot.current.startedAt) >= softTTL(now) {
+					slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
+				}
+			}
 		}
 		// Same session: serve the in-flight or recently-completed job.
 		// Callers that need to bypass cache (diagnostics) use force().

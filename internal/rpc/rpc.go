@@ -105,6 +105,75 @@ func IsOptionRTH(now time.Time) bool {
 	return !t.Before(open) && t.Before(closeT)
 }
 
+// SessionClass classifies an instant by its U.S. equity-options session
+// phase. Callers that need different cadence in pre vs RTH vs post vs
+// closed (most prominently the gamma cache's session-aware soft-TTL)
+// branch on this rather than re-deriving the boundaries themselves.
+//
+// Boundaries (America/New_York):
+//   - Pre   : weekdays 04:00–09:30
+//   - RTH   : weekdays 09:30–16:00
+//   - Post  : weekdays 16:00–20:00
+//   - Closed: everything else (overnight + weekends)
+//
+// Holidays are NOT modeled — same fall-through policy as IsOptionRTH.
+type SessionClass int
+
+const (
+	SessionClosed SessionClass = iota
+	SessionPre
+	SessionRTH
+	SessionPost
+)
+
+// String renders the session class for log lines and debug output.
+// Not load-bearing on the wire (the gamma cache holds the enum value
+// directly), but used in test failure messages and warning logs.
+func (c SessionClass) String() string {
+	switch c {
+	case SessionPre:
+		return "pre"
+	case SessionRTH:
+		return "rth"
+	case SessionPost:
+		return "post"
+	default:
+		return "closed"
+	}
+}
+
+// ClassifySession returns the SessionClass containing now. Fail-safe:
+// if America/New_York can't be loaded (minimal container, missing
+// tzdata), returns SessionRTH — the broadest "treat as active" answer
+// so refresh cadence isn't accidentally disabled under degraded zone
+// data. Mirrors IsOptionRTH's fail-open policy.
+func ClassifySession(now time.Time) SessionClass {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return SessionRTH
+	}
+	t := now.In(ny)
+	if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
+		return SessionClosed
+	}
+	pre := time.Date(t.Year(), t.Month(), t.Day(), 4, 0, 0, 0, ny)
+	open := time.Date(t.Year(), t.Month(), t.Day(), 9, 30, 0, 0, ny)
+	closeT := time.Date(t.Year(), t.Month(), t.Day(), 16, 0, 0, 0, ny)
+	post := time.Date(t.Year(), t.Month(), t.Day(), 20, 0, 0, 0, ny)
+	switch {
+	case t.Before(pre):
+		return SessionClosed
+	case t.Before(open):
+		return SessionPre
+	case t.Before(closeT):
+		return SessionRTH
+	case t.Before(post):
+		return SessionPost
+	default:
+		return SessionClosed
+	}
+}
+
 // Frame-level error codes used in FrameError.Code. These are terminal: a
 // frame carrying any of these is the last frame the consumer will receive
 // on its subscription. Distinct from the request-envelope error codes

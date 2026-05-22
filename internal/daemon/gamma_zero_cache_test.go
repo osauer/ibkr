@@ -20,7 +20,7 @@ import (
 // fan-outs and double the gateway market-data slot pressure.
 func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	var computeRuns atomic.Int32
 	block := make(chan struct{}) // hold the compute until both callers have joined
@@ -75,7 +75,7 @@ func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 // not satisfy today's caller.
 func TestGammaZeroCache_SessionRollover(t *testing.T) {
 	c := newGammaZeroCache()
-	day1 := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	day1 := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 	day2 := day1.Add(24 * time.Hour)
 
 	var computeRuns atomic.Int32
@@ -108,7 +108,7 @@ func TestGammaZeroCache_SessionRollover(t *testing.T) {
 // that were waiting on it are responsible for their own timeouts.
 func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	cancelled := make(chan struct{})
 	slowCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
@@ -158,7 +158,7 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 // In-flight jobs and successful results stay sticky in both cases.
 func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	var computeRuns atomic.Int32
 	bonk := errors.New("gateway timeout")
@@ -214,7 +214,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 
 // TestGammaZeroCache_SoftTTLRefreshesBehindStale proves the
 // refresh-while-stale invariant: when the cached successful compute
-// ages past gammaSoftTTL, the next kickOrJoin returns the stale value
+// ages past softTTLRTH, the next kickOrJoin returns the stale value
 // IMMEDIATELY and kicks a background refresh. The promotion of that
 // refresh to current happens on the NEXT kickOrJoin — so a single
 // caller doesn't pay for the refresh, the system pays it over the
@@ -225,7 +225,7 @@ func TestGammaZeroCache_RetriesErrorAfterTTL(t *testing.T) {
 // 10-min-old answer with no path to freshness until midnight NY.
 func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	var computeRuns atomic.Int32
 	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
@@ -242,7 +242,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	}
 
 	// Within softTTL: same job returned, no refresh kicked.
-	withinTTL := now.Add(gammaSoftTTL - time.Second)
+	withinTTL := now.Add(softTTLRTH - time.Second)
 	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, withinTTL, 300, compute)
 	if fresh2 || job2 != job1 {
 		t.Errorf("within softTTL: got fresh=%v job=%p (want fresh=false job=%p)", fresh2, job2, job1)
@@ -254,7 +254,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	// Past softTTL: STILL get the stale value, but a refresh kicks
 	// behind it. The caller doesn't block — they see the cached
 	// SpotUnderlying=5001 immediately.
-	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	pastTTL := now.Add(softTTLRTH + time.Second)
 	job3, fresh3 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 	if fresh3 || job3 != job1 {
 		t.Errorf("past softTTL: caller should get the stale value: got fresh=%v job=%p (want fresh=false job=%p)", fresh3, job3, job1)
@@ -295,7 +295,7 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 // defeating the gateway-slot-protection that motivates the cache.
 func TestGammaZeroCache_SoftTTLDoesNotStackRefreshes(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	var computeRuns atomic.Int32
 	block := make(chan struct{})
@@ -316,7 +316,7 @@ func TestGammaZeroCache_SoftTTLDoesNotStackRefreshes(t *testing.T) {
 	// Two callers past softTTL, back-to-back. The first kicks the
 	// refresh; the second sees an in-flight refresh and does NOT
 	// kick another.
-	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	pastTTL := now.Add(softTTLRTH + time.Second)
 	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 
@@ -337,7 +337,7 @@ func TestGammaZeroCache_SoftTTLDoesNotStackRefreshes(t *testing.T) {
 // rolled the session key.
 func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 
 	var computeRuns atomic.Int32
 	bonk := errors.New("transient gateway timeout")
@@ -358,7 +358,7 @@ func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 	}
 
 	// Past softTTL: refresh kicks, fails.
-	pastTTL := now.Add(gammaSoftTTL + time.Second)
+	pastTTL := now.Add(softTTLRTH + time.Second)
 	c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, pastTTL, 300, compute)
 
 	// Wait for the refresh to finish. Then a follow-up call must
@@ -388,7 +388,7 @@ func TestGammaZeroCache_SoftTTLFailedRefreshKeepsCachedSuccess(t *testing.T) {
 // regression that loses one of these states silently breaks the UI.
 func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	c := newGammaZeroCache()
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now.Add(10 * time.Second) }
 
 	// nil job — happens only before the first kickoff this NY trading
@@ -540,7 +540,7 @@ func TestFindZeroCrossing(t *testing.T) {
 // threshold the formula projects from elapsed × (100-p)/p. Floor at
 // 5s, ceiling at 4× the static initial estimate.
 func TestRemainingEta(t *testing.T) {
-	now := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
 	job := &gammaComputation{startedAt: now, etaSeconds: 300}
 
 	// progress=0 early — fallback to initial - elapsed
@@ -598,5 +598,148 @@ func TestNYSessionKey(t *testing.T) {
 	}
 	if k2 != "2026-05-17" {
 		t.Errorf("early-NY May 17 should map to 2026-05-17, got %s", k2)
+	}
+}
+
+// TestGammaZeroCache_ClosedSessionNeverRefreshes proves the closed-
+// session ∞ TTL rule: outside U.S. equity-options trading hours
+// (overnight + weekends) a cached successful compute is served
+// indefinitely with no background refresh, regardless of how long
+// it's been since the value was computed.
+//
+// Load-bearing: under the pre-session-aware constant TTL (5 min), a
+// daemon idling overnight Saturday would re-kick a multi-minute
+// option fan-out every 5 min — burning gateway slots on a market
+// that won't produce fresh quotes anyway. The session-aware
+// softTTLClosed = math.MaxInt64 cuts that to zero.
+func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
+	c := newGammaZeroCache()
+	// Saturday 2026-05-23 10:00 EDT — weekend, SessionClosed.
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed for Saturday, got %v", cls)
+	}
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+	}
+
+	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	<-job1.done
+
+	// 8 hours later — well past every active-session softTTL but
+	// still SessionClosed and still the same NY trading date.
+	later := now.Add(8 * time.Hour)
+	if cls := rpc.ClassifySession(later); cls != rpc.SessionClosed {
+		t.Fatalf("later instant should still be SessionClosed (Sat 18:00 EDT), got %v", cls)
+	}
+	if nySessionKey(later) != nySessionKey(now) {
+		t.Fatalf("later instant rolled the session key; pick a smaller offset (got %s vs %s)",
+			nySessionKey(later), nySessionKey(now))
+	}
+	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, later, 300, compute)
+	if fresh2 || job2 != job1 {
+		t.Errorf("closed session: should serve cached job1 with no refresh, got fresh=%v job=%p (want job=%p)", fresh2, job2, job1)
+	}
+	if got := computeRuns.Load(); got != 1 {
+		t.Errorf("closed session: compute ran %d times, want 1 (no refresh expected, ever)", got)
+	}
+}
+
+// TestGammaZeroCache_BoundaryRefreshOnClassTransition proves the
+// session-class transition trigger: a cached value computed in one
+// active session class is treated as stale on the first kickOrJoin
+// in a different active class, even when its absolute age is below
+// the per-class softTTL. Without this, a pre-market snapshot served
+// at 09:31 ET would survive the entire first hour of RTH under the
+// 60-min RTH TTL — but pre-market γ-zero is qualitatively
+// different from an RTH one (thin volume, muted dealer flow), and
+// users querying right after the open expect a fresh read.
+func TestGammaZeroCache_BoundaryRefreshOnClassTransition(t *testing.T) {
+	c := newGammaZeroCache()
+	// 09:25 ET Tuesday — five minutes before the open, SessionPre.
+	preMarket := time.Date(2026, 5, 19, 13, 25, 0, 0, time.UTC)
+	if cls := rpc.ClassifySession(preMarket); cls != rpc.SessionPre {
+		t.Fatalf("test fixture sanity check: expected SessionPre at 09:25 ET, got %v", cls)
+	}
+	// 09:35 ET same Tuesday — five minutes into RTH, SessionRTH.
+	rth := time.Date(2026, 5, 19, 13, 35, 0, 0, time.UTC)
+	if cls := rpc.ClassifySession(rth); cls != rpc.SessionRTH {
+		t.Fatalf("test fixture sanity check: expected SessionRTH at 09:35 ET, got %v", cls)
+	}
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+	}
+
+	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, preMarket, 300, compute)
+	<-job1.done
+	if job1.result == nil || job1.result.SpotUnderlying != 5001 {
+		t.Fatalf("initial pre-market compute: %+v", job1.result)
+	}
+
+	// Cross the open. Age is 10 min — well below both softTTLPrePost
+	// (30 min) and softTTLRTH (60 min). Without the boundary path,
+	// the cached value would survive. With it, a refresh kicks
+	// behind the served stale value.
+	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, rth, 300, compute)
+	if fresh2 || job2 != job1 {
+		t.Errorf("class transition: caller should still see the stale pre-market value, got fresh=%v job=%p (want job=%p)", fresh2, job2, job1)
+	}
+
+	// Poll until the refresh promotes — same idiom as the soft-TTL
+	// refresh test. The refresh compute is synchronous here, so it
+	// resolves on the next call.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var job3 *gammaComputation
+	for time.Now().Before(deadline) {
+		job3, _ = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, rth, 300, compute)
+		if job3 != job1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if job3 == job1 {
+		t.Fatal("boundary refresh never promoted — kickOrJoin kept returning the pre-market job")
+	}
+	if job3.result == nil || job3.result.SpotUnderlying != 5002 {
+		t.Errorf("boundary refresh: got %+v, want SpotUnderlying=5002 (the refreshed RTH compute)", job3.result)
+	}
+	if got := computeRuns.Load(); got != 2 {
+		t.Errorf("after boundary refresh: compute ran %d times, want 2 (initial pre + boundary RTH)", got)
+	}
+}
+
+// TestClassifySession exercises the four-way classifier on
+// representative instants spanning the daily and weekly boundaries.
+// Kept here rather than rpc/rpc_test.go because the cache is the
+// only caller today and its tests are where any regression would
+// show up first.
+func TestClassifySession(t *testing.T) {
+	// Tuesday 2026-05-19.
+	tests := []struct {
+		name string
+		t    time.Time
+		want rpc.SessionClass
+	}{
+		{"weekday 03:59 ET → closed (before pre open)", time.Date(2026, 5, 19, 7, 59, 0, 0, time.UTC), rpc.SessionClosed},
+		{"weekday 04:00 ET → pre", time.Date(2026, 5, 19, 8, 0, 0, 0, time.UTC), rpc.SessionPre},
+		{"weekday 09:29 ET → pre", time.Date(2026, 5, 19, 13, 29, 0, 0, time.UTC), rpc.SessionPre},
+		{"weekday 09:30 ET → rth", time.Date(2026, 5, 19, 13, 30, 0, 0, time.UTC), rpc.SessionRTH},
+		{"weekday 15:59 ET → rth", time.Date(2026, 5, 19, 19, 59, 0, 0, time.UTC), rpc.SessionRTH},
+		{"weekday 16:00 ET → post", time.Date(2026, 5, 19, 20, 0, 0, 0, time.UTC), rpc.SessionPost},
+		{"weekday 19:59 ET → post", time.Date(2026, 5, 19, 23, 59, 0, 0, time.UTC), rpc.SessionPost},
+		{"weekday 20:00 ET → closed", time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC), rpc.SessionClosed},
+		{"saturday 10:00 ET → closed", time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC), rpc.SessionClosed},
+		{"sunday 10:00 ET → closed", time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC), rpc.SessionClosed},
+	}
+	for _, tc := range tests {
+		if got := rpc.ClassifySession(tc.t); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
