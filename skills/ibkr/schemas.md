@@ -696,12 +696,21 @@ its 52-week high is the classic late-cycle divergence.
 
 ## gamma
 
-`ibkr gamma --json` — SPY dealer zero-gamma estimate. SPY (the ETF) is
-used rather than SPX (the index) because it has continuous extended-hours
-quoting; the regime signal tracks SPX dealer gamma closely. Compute is
-heavy (multi-minute fan-out across hundreds of legs); the first caller of
-an NY trading day kicks a background job, subsequent callers within the
-session receive the cached result instantly.
+`ibkr gamma --json` — combined SPY+SPX dealer zero-gamma estimate (default
+scope; `--only=spy` or `--only=spx` for single-underlying paths). The
+result is heavy (multi-minute fan-out across hundreds of legs); the first
+caller of an NY trading day kicks a background job, subsequent callers
+within the session receive the cached result instantly.
+
+**MCP params** (`ibkr_gamma`):
+- `scope` — `"spy" | "spx" | "spy+spx"`. Default `"spy+spx"`. CLI alias is `--only`.
+- `wait_ms` — integer ms to block on an in-flight compute. Default 0.
+- `force` — boolean; diagnostics-only — ignore cached result. Default false.
+
+**CLI-only flags** (no MCP equivalent — text-mode rendering controls):
+- `--explain` — extra methodology, per-bucket horizon breakdown, scaling caveat. JSON unchanged.
+- `--no-wait` — CLI sugar for `wait_ms: 0`.
+- `--json` — switch the CLI from text to JSON output.
 
 Computing (first call of the day):
 
@@ -714,33 +723,50 @@ Computing (first call of the day):
 }
 ```
 
-Ready (subsequent calls; default CLI invocation blocks until this lands):
+Ready (combined scope, subsequent calls):
 
 ```json
 {
   "status": "ready",
   "started_at": "2026-05-09T13:30:14Z",
   "result": {
+    "scope": "spy+spx",
+    "spot_anchor": "SPY",
     "spot_underlying": 583.21,
     "spot_at": "2026-05-09T14:32:11Z",
     "zero_gamma": 581.40,
     "gap_pct": 0.31,
     "gamma_sign": "",
     "profile": [{"spot": 495.73, "gex": -8420.5}, "..."],
-    "gamma_total_abs": 1842500.0,
+    "gamma_total_abs": 6.0e9,
+    "gamma_total_abs_convention": "sign-agnostic",
+    "regime_agreement": "agree:long-gamma",
+    "horizon_agreement": "all_above",
     "top_strikes": [
-      {"strike": 585.0, "expiry": "2026-05-16", "right": "C",
-       "abs_gex": 412800.0, "open_interest": 18420}
+      {"underlying": "SPX", "trading_class": "SPXW", "strike": 5400.0,
+       "expiry": "2026-06-19", "right": "C",
+       "abs_gex": 7.0e9, "open_interest": 12450}
     ],
+    "per_index": {
+      "SPY": {"scope": "spy", "spot_underlying": 583.21, "zero_gamma": 581.40, "...": "..."},
+      "SPX": {"scope": "spx", "spot_underlying": 5430.0, "gamma_sign": "positive", "...": "..."}
+    },
     "expirations": ["2026-05-16", "2026-05-23", "2026-05-30",
                     "2026-06-06", "2026-06-13", "2026-06-19"],
-    "leg_count": 412,
+    "leg_count": 3202,
+    "leg_count_0dte": 1208,
+    "leg_count_1to7": 612,
+    "leg_count_term": 1382,
     "derived_iv_legs": 0,
     "warnings": [],
+    "methodology_citations": [
+      "Perfiliev (2022) — BS-sweep baseline",
+      "Derman / Daglish-Hull-Suo — sticky-moneyness skew dynamics"
+    ],
     "params": {"expiry_count": 6, "strike_width_pct": 0.10,
                "sweep_range_pct": 0.15, "worker_count": 4},
-    "source": "IBKR SPY option chain (SMART/ARCA)",
-    "method": "perfiliev-bs-sweep-v1",
+    "source": "computed from IBKR SPY+SPX option chains",
+    "method": "bs-gamma-profile-v3-stickymoneyness-0dte-split",
     "as_of": "2026-05-09T13:32:54Z",
     "duration_ms": 158420
   }
@@ -756,6 +782,21 @@ Field meanings:
   is in flight (use `eta_seconds` / `progress` for the renderer);
   `ready` means `result` is populated; `error` means the last compute
   failed and `error` carries the classified reason.
+- `result.scope` — `"spy"` | `"spx"` | `"spy+spx"`. Discriminator for
+  combined vs single-underlying envelopes.
+- `result.spot_anchor` — `"SPY"` on combined-scope envelopes (signals
+  that `spot_underlying`, `zero_gamma`, `gamma_sign`, `profile`, and the
+  per-bucket triples — `zero_gamma_0dte`/`_1to7`/`_term`,
+  `profile_0dte`/`_1to7`/`_term`, `gamma_sign_0dte`/`_1to7`/`_term` —
+  are SPY-anchored shallow copies; read `per_index["SPX"]` for SPX
+  values). Empty / omitted on single-underlying scopes — top-level
+  scalars are authoritative there. **Combined-and-correct fields** (safe
+  to consume off the top level on every scope): `scope`, `spot_anchor`,
+  `regime_agreement`, `horizon_agreement`, `gamma_total_abs`,
+  `gamma_total_abs_convention`, `leg_count`,
+  `leg_count_0dte`/`_1to7`/`_term`, `warnings`, `method`,
+  `methodology_citations`, `per_index`, `partial_classes`, `source`,
+  `duration_ms`, `as_of`, `top_strikes`, `expirations`, `derived_iv_legs`.
 - `result.zero_gamma` — the price level where dealer net gamma crosses
   zero under the Perfiliev convention (dealers long calls, short puts).
   `null` when no crossing exists in the sweep window; inspect
@@ -765,22 +806,50 @@ Field meanings:
   Positive = spot above γ-zero (dampening regime); negative = below
   γ-zero (amplifying regime). `null` when `zero_gamma` is `null`.
 - `result.gamma_total_abs` — sign-agnostic magnitude signal:
-  `Σ |Γ| × OI × 100 × spot² × 0.01`. Larger = market more sensitive to
-  dealer rebalancing. **More robust than `zero_gamma` when the dealer-
-  sign assumption may invert** (covered-call ETF flow, autocall barrier
-  proximity).
-- `result.top_strikes` — top-N strikes by absolute gamma notional. Call
-  this the "call wall / put wall" view; surface alongside `zero_gamma`
-  when the user is about to act on a level.
+  `Σ |Γ| × OI × 100 × spot² × 0.01`, summed across both indices on
+  combined scope. SPX dominates ~75–80% of the sum because of the S²
+  scaling. **More robust than `zero_gamma` when the dealer-sign
+  assumption may invert** (covered-call ETF flow, autocall barrier
+  proximity). `gamma_total_abs_convention` names the sign-handling
+  ("sign-agnostic" today).
+- `result.regime_agreement` — on combined scope, one of
+  `"agree:long-gamma"` / `"agree:short-gamma"` / `"agree:flipping"` /
+  `"disagree"` / `""` (no data). The `"disagree"` case is the
+  actionable signal — institutional SPX book and retail/ETF SPY book
+  are positioned opposite.
+- `result.horizon_agreement` — 8-value enum naming how the three
+  horizon-bucketed γ-zero readings (0DTE, 1-7, term) relate. One of
+  `"all_above"` / `"all_below"` / `"diverge:0dte_vs_term"` /
+  `"diverge:partial"` / `"0dte_only"` / `"1to7_only"` / `"term_only"` /
+  `""`. The `"diverge:0dte_vs_term"` case is highest-information:
+  short-fuse flow disagrees with monthly positioning.
+- `result.per_index` — populated only on combined scope. Each entry
+  (`"SPY"`, `"SPX"`) is a fully-formed single-underlying
+  `GammaZeroComputed` so renderers can recurse for per-underlying
+  detail. **Always consume this for per-index spot / zero-gamma /
+  profile values when scope is combined** — the top-level fields are
+  SPY-anchored shallow copies per `spot_anchor`.
+- `result.top_strikes` — top-N strikes by absolute gamma notional,
+  merged across both indices on combined scope (sorted by `abs_gex`
+  descending; SPX rows dominate by structure). Each row carries
+  `underlying` (`"SPY"`/`"SPX"`) so the renderer can label per-row.
 - `result.derived_iv_legs` — legs whose IV fell back to the
   Newton-Raphson BS-inversion path because the gateway never pushed a
   model-computation tick. Pre-market this is typically equal to
   `leg_count`; during RTH it should stay at 0. **Surface to the user
   when non-zero so the prior-session-price anchor is visible.**
 - `result.warnings` — non-fatal conditions: `no_crossing_in_window`,
-  `spxw_partial_oi`, `throttled`, `all_iv_derived`. Render as inline
-  badges. Runs whose leg coverage falls below the safety threshold are
-  surfaced as `status: "error"`, not as warnings.
+  `spxw_partial_oi`, `throttled`, `all_iv_derived`,
+  `spx_unavailable:<reason>` (combined→SPY-only fallback),
+  `combined_profile_grid_mismatch`. Render as inline badges. Runs whose
+  leg coverage falls below the safety threshold are surfaced as
+  `status: "error"`, not as warnings.
+- `result.methodology_citations` — short bibliography backing the
+  methodology disclosure. Surface verbatim in `--explain`.
+
+**Scaling caveat:** SPY contributes ~1/100 of SPX dollar-gamma per
+equivalent leg (S² scaling). The combined headline level uses SPY-scale
+(see `spot_anchor`); read `per_index` entries for per-underlying levels.
 
 **Treat the number as a regime hint, not a precise level.** Full
 methodology lives in `docs/specs/risk-regime-dashboard.md`.
@@ -790,8 +859,19 @@ methodology lives in `docs/specs/risk-regime-dashboard.md`.
 `ibkr regime --json` — single-call risk-regime dashboard: all five
 indicators in one JSON envelope. Each row carries raw measurements plus
 a `notes` field embedding the spec's threshold bands verbatim. The
-daemon does **not** derive green/yellow/red status — the spec calls
-those bands user-tunable.
+daemon does **not** derive green/yellow/red status for the per-row
+surface — the spec calls those bands user-tunable — but it DOES
+publish a `composite` rollup that mirrors what the CLI prints above
+the indicator table, so consumers can show the same headline verdict
+without re-implementing the band logic.
+
+**MCP params** (`ibkr_regime`): none — the envelope always carries
+all five indicators.
+
+**CLI-only flags** (text-mode rendering controls; JSON unchanged):
+- `--explain` — show per-row streak markers, quality blocks, methodology disclosures.
+- `--watch` / `--rate` — auto-poll in place.
+- `--log PATH` — append each snapshot to a JSONL trace file.
 
 ```json
 {
@@ -804,7 +884,12 @@ those bands user-tunable.
     "data_type": "live",
     "notes": "VIX/VIX3M ratio. Sustained > 1.0 over 2-3 sessions = stress regime.",
     "vix_prev_close": 15.04,
-    "vix_change_pct": -1.46
+    "vix_change_pct": -1.46,
+    "vix_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
+                    "confidence": "firm", "source": "VIX tick"},
+    "vix3m_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "frozen",
+                      "confidence": "firm", "source": "VIX3M tick (thin CBOE; off-hours typically frozen)"},
+    "streak": {"band": "green", "sessions": 4, "since": "2026-05-06"}
   },
   "hyg_spy_divergence": {
     "status": "ok",
@@ -816,7 +901,10 @@ those bands user-tunable.
     "spy_change": 1.27,
     "spy_change_pct": 0.218,
     "hyg_data_type": "live",
-    "notes": "HYG vs SPY divergence. HYG below its 50-day SMA while SPY within 3% of 52-week high = late-cycle red flag."
+    "notes": "HYG vs SPY divergence. HYG below its 50-day SMA while SPY within 3% of 52-week high = late-cycle red flag.",
+    "hyg_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
+                    "confidence": "firm", "source": "HYG tick (ARCA)"},
+    "streak": {"band": "green", "sessions": 12, "since": "2026-04-28"}
   },
   "usd_jpy": {
     "status": "ok",
@@ -825,17 +913,40 @@ those bands user-tunable.
     "close_7d_ago": 154.82,
     "weekly_change_pct": -1.56,
     "data_type": "live",
-    "notes": "USD/JPY weekly move. Spec watches > 2% moves as a carry-unwind signal."
+    "notes": "USD/JPY weekly move. Spec watches > 2% moves as a carry-unwind signal.",
+    "last_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
+                     "confidence": "firm", "source": "USD.JPY CASH tick (IDEALPRO)"},
+    "close_7d_ago_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "derived",
+                             "confidence": "estimate", "source": "USD.JPY MIDPOINT bar t-7"},
+    "streak": {"band": "yellow", "sessions": 2, "since": "2026-05-08"}
   },
   "gamma_zero": {
-    "status": "computing",
-    "envelope": { "status": "computing", "eta_seconds": 180, "progress": 22 },
-    "notes": "SPY dealer zero-gamma (Perfiliev). First call of NY trading day kicks a multi-minute compute."
+    "status": "ok",
+    "envelope": {"status": "ready", "result": {"...": "see gamma schema"}},
+    "notes": "...",
+    "horizon_agreement": "diverge:0dte_vs_term",
+    "zero_gamma_quality": {"as_of": "2026-05-09T13:32:54Z", "freshness_class": "modelled",
+                           "confidence": "proxy",
+                           "source": "bs-gamma-profile-v3-stickymoneyness-0dte-split"},
+    "streak": {"band": "green", "sessions": 7, "since": "2026-04-30"}
   },
   "breadth": {
     "status": "ok",
-    "envelope": { "state": "ready", "value": 62.4, "...": "see breadth schema" },
-    "notes": "% S&P 500 stocks above their 50-day SMA. Spec thresholds: > 55 green, 40-55 yellow, < 40 with SPX at highs = red."
+    "envelope": {"state": "ready", "pct_above_50dma": 62.4, "...": "see breadth schema"},
+    "pct_above_50dma": 62.4,
+    "pct_above_200dma": 71.0,
+    "notes": "% S&P 500 stocks above their 50-day SMA...",
+    "value_quality": {"as_of": "2026-05-09T13:00:00Z", "freshness_class": "derived",
+                      "confidence": "estimate", "source": "constituent-fanout-50/200dma-hl"},
+    "streak": {"band": "green", "sessions": 31, "since": "2026-04-08"}
+  },
+  "composite": {
+    "verdict": "Normal regime",
+    "green_count": 4,
+    "yellow_count": 1,
+    "red_count": 0,
+    "ranked_count": 5,
+    "unranked_count": 0
   },
   "spec_doc": "docs/specs/risk-regime-dashboard.md"
 }
@@ -856,6 +967,26 @@ Field meanings:
   re-classifying the whole row as `error`.
 - `notes` on every row embeds the spec's threshold prose verbatim so a
   consumer can interpret without reading the spec doc. Surface verbatim.
+- `composite` is the daemon-side rollup `{verdict, green_count,
+  yellow_count, red_count, ranked_count, unranked_count}` matching what
+  the CLI prints above its indicator table. `verdict` is one of
+  "Normal regime", "Elevated alert — review positioning", "Watch
+  closely, prep defensive moves", "Regime shift likely — execute
+  pre-committed plan", "Full risk-off conditions", "Insufficient
+  signal — too few indicators ranked", "No ranked indicators — see
+  rows below for state". Renderers showing their own band coloring
+  can ignore this and re-tally from per-row `status` + measurements.
+- Each row's `streak: {band, sessions, since}` counts consecutive NY
+  trading sessions in the current band. Nil on computing / unavailable /
+  error rows (streak freezes rather than resets). The CLI surfaces
+  this inline ("yellow · day 3"); MCP consumers can render the same.
+- Each row's `*_quality` objects (`vix_quality`, `hyg_quality`,
+  `last_quality`, `zero_gamma_quality`, `value_quality`, etc.) carry
+  per-scalar provenance: `freshness_class` (`live` / `frozen` /
+  `derived` / `modelled`), `confidence` (`firm` / `estimate` / `proxy`),
+  `as_of`, and a `source` description (e.g. `"VIX tick"`, `"SPY 252d
+  max(High) fallback"`, `"perfiliev-bs-sweep-v1"`). The CLI's
+  `--explain` view consumes these directly.
 - `gamma_zero.envelope` and `breadth.envelope` carry the full
   [gamma](#gamma) / [breadth](#breadth) result shapes; consumers that
   already know those schemas can re-use the same renderers.

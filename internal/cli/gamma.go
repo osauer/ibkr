@@ -449,6 +449,16 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 		}
 	}
 
+	// Scaling caveat — printed on every --explain run so a reader of
+	// the combined view doesn't anchor on the SPY-scale headline level
+	// and miss that SPX dominates the dollar-gamma sum. Two short
+	// lines; the spot_anchor field on the wire is the machine-readable
+	// counterpart.
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, env.dim("  Scaling     SPY contributes ~1/100 of SPX dollar-gamma per equivalent leg (S² scaling);"))
+	fmt.Fprintln(out, env.dim("              combined |Γ|·OI sum is dominated by SPX. Combined headline level uses SPY-scale"))
+	fmt.Fprintln(out, env.dim("              (see spot_anchor field); read per_index entries for per-underlying levels."))
+
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  Disclosure: the signed γ-zero assumes the 2018 \"dealers long calls,"))
 	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))

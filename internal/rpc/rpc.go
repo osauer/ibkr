@@ -670,6 +670,34 @@ type SkewFitInfo struct {
 // hint, not a precise level; consult TopStrikes (sign-agnostic) for
 // the more robust positioning view. See docs/specs/risk-regime-dashboard.md
 // for the full methodology disclosure.
+//
+// Combined-scope semantics (read before consuming top-level scalars):
+//
+// When Scope == "spy+spx" the envelope shallow-copies its SPY half for
+// the SPY-anchored fields below. Consumers MUST disambiguate the
+// per-underlying view from PerIndex["SPY"] / PerIndex["SPX"] rather
+// than reading the top-level scalars as "combined". SpotAnchor codifies
+// this on the wire ("SPY" when the shallow-copy is in effect; "" for
+// single-underlying envelopes where the top-level scalars ARE
+// authoritative). Post-1.0 a CombinedGammaZeroComputed type will hide
+// the SPY-anchored fields entirely.
+//
+//   - Combined-and-correct (safe to consume off the top level on every
+//     scope, including spy+spx): Scope, SpotAnchor, RegimeAgreement,
+//     HorizonAgreement, GammaTotalAbs, GammaTotalAbsConvention,
+//     LegCount, LegCount0DTE / LegCount1to7 / LegCountTerm,
+//     NearLegCount / TermLegCount, Warnings, Method,
+//     MethodologyCitations, PerIndex, PartialClasses, Source,
+//     DurationMS, AsOf, TopStrikes, TopConcentrationPct, Expirations,
+//     DerivedIVLegs.
+//   - SPY-anchored when Scope == "spy+spx" (shallow-copied — read
+//     per_index["SPY"] / per_index["SPX"] for per-underlying values):
+//     SpotUnderlying, SpotAt, ZeroGamma, GapPct, GammaSign, Profile,
+//     ZeroGamma0DTE / Profile0DTE / GammaSign0DTE,
+//     ZeroGamma1to7 / Profile1to7 / GammaSign1to7,
+//     ZeroGammaTerm / ProfileTerm / GammaSignTerm,
+//     ZeroGammaNear / ProfileNear / GammaSignNear (v2-compat aliases),
+//     SweepLowAbs, SweepHighAbs, SkewModel, SkewFitQuality, Params.
 type GammaZeroComputed struct {
 	// SpotUnderlying is the price of the underlying instrument
 	// (currently SPY — see Source) at which the aggregation was
@@ -878,6 +906,22 @@ type GammaZeroComputed struct {
 	// Empty when produced by a daemon that pre-dates this field — older
 	// payloads are equivalent to Scope="spy".
 	Scope string `json:"scope,omitempty"`
+
+	// SpotAnchor names the underlying whose price/profile fields the
+	// top-level scalars carry under a combined-scope shallow copy. One of:
+	//
+	//	"SPY" — Scope == "spy+spx"; top-level SpotUnderlying / ZeroGamma /
+	//	        GammaSign / Profile and the per-bucket triples are the
+	//	        SPY-anchored half. Read PerIndex["SPY"] / PerIndex["SPX"]
+	//	        for per-underlying values when consumers need both books.
+	//	""    — Scope is single-underlying (spy-only or spx-only); the
+	//	        top-level scalars are authoritative.
+	//
+	// Added so wire consumers can detect the shallow-copy without
+	// having to remember the per-field intent map in combineGammaResults.
+	// See the doc-comment block above the struct for the full
+	// combined-and-correct vs SPY-anchored field split.
+	SpotAnchor string `json:"spot_anchor,omitempty"`
 
 	// PerIndex carries the per-underlying detail when Scope="spy+spx".
 	// Nil for single-underlying scopes. Keys are uppercased symbols
@@ -1241,10 +1285,34 @@ type RegimeSnapshotResult struct {
 	USDJPY           RegimeUSDJPY           `json:"usd_jpy"`
 	GammaZero        RegimeGammaZero        `json:"gamma_zero"`
 	Breadth          RegimeBreadth          `json:"breadth"`
+	// Composite carries the daemon-side rollup the CLI shows above the
+	// indicator rows (verdict + ranked/unranked counts), so MCP consumers
+	// don't have to recompute it from per-row Status fields. Populated on
+	// every response.
+	Composite RegimeComposite `json:"composite"`
 	// SpecDoc points consumers (especially LLM-driven ones) at the
 	// canonical methodology + threshold reference so they don't
 	// hallucinate band edges. Same path on every response.
 	SpecDoc string `json:"spec_doc"`
+}
+
+// RegimeComposite is the daemon-side rollup of the five indicator rows.
+// Verdict mirrors the CLI's text rendering verbatim ("Normal regime",
+// "Watch closely, prep defensive moves", etc.) so consumers can show the
+// same headline without re-implementing the band logic. Each band's
+// constituent count is exposed so a renderer that wants its own verdict
+// can read the raw tally without re-deriving from per-row status.
+//
+// RankedCount + UnrankedCount sum to 5 (the indicator count); ranked are
+// rows in a real band (green/yellow/red), unranked are computing /
+// unavailable / error / no-data.
+type RegimeComposite struct {
+	Verdict       string `json:"verdict"`
+	GreenCount    int    `json:"green_count"`
+	YellowCount   int    `json:"yellow_count"`
+	RedCount      int    `json:"red_count"`
+	RankedCount   int    `json:"ranked_count"`
+	UnrankedCount int    `json:"unranked_count"`
 }
 
 // Quote is the daemon's snapshot result.

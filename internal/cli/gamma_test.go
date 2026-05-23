@@ -260,3 +260,30 @@ func TestGammaHeroSummary_SingleAndCombined(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderGamma_ExplainCarriesScalingCaveat pins C4: the
+// --explain block always carries a short scaling caveat naming the
+// S² scaling that makes SPX dominate the combined |Γ|·OI sum, plus a
+// pointer at the spot_anchor field so a reader of the JSON wire can
+// machine-read the same disclaimer. Two lines, no jargon explosion —
+// the goal is "user reading --explain understands what 'combined' means".
+func TestRenderGamma_ExplainCarriesScalingCaveat(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, gammaReadyFixture(), true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Scaling",
+		"S² scaling",
+		"dominated by SPX",
+		"spot_anchor",
+		"per_index",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain missing scaling-caveat marker %q:\n%s", want, out)
+		}
+	}
+}

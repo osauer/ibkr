@@ -107,6 +107,12 @@ func TestCombineGammaResultsMergesTopStrikes(t *testing.T) {
 	if combined.Scope != rpc.GammaZeroScopeCombined {
 		t.Errorf("Scope = %q, want %q", combined.Scope, rpc.GammaZeroScopeCombined)
 	}
+	// SpotAnchor codifies the shallow-copy: top-level Spot/ZeroGamma/etc.
+	// reflect the SPY half. Consumers branch on this to decide whether
+	// the top-level scalars are "combined" or "anchored on one underlying".
+	if combined.SpotAnchor != "SPY" {
+		t.Errorf("SpotAnchor = %q, want %q (combined envelope shallow-copies SPY)", combined.SpotAnchor, "SPY")
+	}
 	if combined.PerIndex["SPY"] != spy || combined.PerIndex["SPX"] != spx {
 		t.Errorf("PerIndex pointers don't match the inputs")
 	}

@@ -111,6 +111,12 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 	// the envelope.
 	out := *spy
 	out.Scope = rpc.GammaZeroScopeCombined
+	// Mark the shallow-copy on the wire so consumers can detect that
+	// SpotUnderlying / ZeroGamma / GammaSign / Profile / the per-bucket
+	// triples are SPY-anchored rather than truly combined. See
+	// rpc.GammaZeroComputed doc-comment for the full field-by-field map
+	// and consumer guidance.
+	out.SpotAnchor = "SPY"
 	out.GammaTotalAbs = combinedAbs
 	out.TopStrikes = allTop
 	out.TopConcentrationPct = topConcPct

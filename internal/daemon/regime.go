@@ -59,6 +59,13 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	// classification — see regime_streaks.go for the rationale). Each
 	// indicator's StreakInfo is attached to its row before returning.
 	s.populateStreaks(res)
+	// Roll up the per-row bands into the composite verdict + counts
+	// the CLI shows above the indicator rows. Reading off the same
+	// daemon-side classifiers used for streak persistence keeps the
+	// wire surface internally consistent. CLI continues to compute its
+	// own renderer-local tally for layout reasons, but both paths
+	// share the verdict words via the helper.
+	res.Composite = buildRegimeComposite(res)
 	return res, nil
 }
 

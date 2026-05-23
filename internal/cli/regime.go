@@ -790,18 +790,37 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		if c.GammaTotalAbs > 0 {
 			mag = fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
 		}
+		// Combined-scope envelopes carry a SPY-anchored shallow copy
+		// of SpotUnderlying — the same SPY price the header line above
+		// the table already shows. Dropping the redundant "spot X.XX"
+		// prefix on combined avoids the drift where the row label
+		// reads "γ-zero (SPY+SPX)" but the value cell prints a
+		// SPY-only spot. Single-underlying envelopes keep the prefix
+		// because the spot there IS the regime's anchor and the
+		// header line shows SPY for SPX-only too.
+		spotPrefix := fmt.Sprintf("spot %.2f · ", c.SpotUnderlying)
+		if c.SpotAnchor == "SPY" {
+			spotPrefix = ""
+		}
 		switch c.GammaSign {
 		case "positive":
-			row.value = fmt.Sprintf("spot %.2f · long-γ%s", c.SpotUnderlying, mag)
+			row.value = fmt.Sprintf("%slong-γ%s", spotPrefix, mag)
 			row.band = bandGreen
 			row.reason = "dealer long-γ · stabilizing"
 		case "negative":
-			row.value = fmt.Sprintf("spot %.2f · short-γ%s", c.SpotUnderlying, mag)
+			row.value = fmt.Sprintf("%sshort-γ%s", spotPrefix, mag)
 			row.band = bandRed
 			row.reason = "dealer short-γ · amplifying"
 		default:
-			// "no_data" or empty: genuine no-signal case.
-			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
+			// "no_data" or empty: genuine no-signal case. On combined
+			// scope the value cell has nothing useful to say (the
+			// SPY-anchored spot is in the header line); fall back to
+			// an em-dash.
+			if c.SpotAnchor == "SPY" {
+				row.value = "—"
+			} else {
+				row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
+			}
 			row.band = bandUnranked
 			row.reason = "sweep produced no signed profile"
 		}

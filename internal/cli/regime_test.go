@@ -1004,3 +1004,65 @@ func TestRowGamma_ShortReason(t *testing.T) {
 		}
 	}
 }
+
+// TestRegimeRow_GammaCombinedDropsRedundantSpotPrefix pins the C3
+// fix: combined-scope envelopes carry a SPY-anchored shallow copy of
+// SpotUnderlying. The SPY+VIX line above the table already shows
+// SPY's spot — repeating "spot 743.73" in a row labelled "γ-zero
+// (SPY+SPX)" creates drift between the label and the value. When
+// SpotAnchor=="SPY" the renderer drops the prefix and lets the value
+// cell focus on the regime statement.
+func TestRegimeRow_GammaCombinedDropsRedundantSpotPrefix(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				Scope:          rpc.GammaZeroScopeCombined,
+				SpotAnchor:     "SPY",
+				SpotUnderlying: 743.73,
+				GammaSign:      "positive",
+				GammaTotalAbs:  1.8e9,
+			},
+		},
+	})
+	if strings.Contains(row.value, "spot 743.73") {
+		t.Errorf("combined-scope row must not repeat SPY spot in value cell: %q", row.value)
+	}
+	if !strings.Contains(row.value, "long-γ") {
+		t.Errorf("combined-scope row should still surface the regime word: %q", row.value)
+	}
+	if !strings.Contains(row.value, "|Γ|·OI") {
+		t.Errorf("combined-scope row should still surface magnitude when non-zero: %q", row.value)
+	}
+}
+
+// TestRegimeRow_GammaSingleScopeKeepsSpotPrefix pins the matching
+// invariant: single-underlying envelopes (SPY-only or SPX-only) keep
+// the "spot X.XX" prefix because the row's spot IS the regime anchor
+// — the header line may show SPY for SPX-only and the reader needs
+// the explicit anchor to interpret the band.
+func TestRegimeRow_GammaSingleScopeKeepsSpotPrefix(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	for _, scope := range []string{rpc.GammaZeroScopeSPY, rpc.GammaZeroScopeSPX, ""} {
+		row := rowGamma(now, rpc.RegimeGammaZero{
+			Status: rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+				Result: &rpc.GammaZeroComputed{
+					Scope:          scope,
+					SpotAnchor:     "", // single-underlying scopes leave this empty
+					SpotUnderlying: 5430.0,
+					GammaSign:      "positive",
+					GammaTotalAbs:  4.2e9,
+				},
+			},
+		})
+		if !strings.Contains(row.value, "spot 5430.00") {
+			t.Errorf("scope=%q value cell should keep the spot prefix: %q", scope, row.value)
+		}
+	}
+}

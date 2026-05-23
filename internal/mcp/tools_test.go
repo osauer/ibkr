@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // TestParity is the binding drift gate: every CLI subcommand from
@@ -186,5 +188,123 @@ func TestUnknownToolReturnsMethodNotFound(t *testing.T) {
 	}
 	if resp.Error.Code != codeMethodNotFound {
 		t.Errorf("code: got %d want %d", resp.Error.Code, codeMethodNotFound)
+	}
+}
+
+// TestIbkrGammaSchemaHasScopeParam pins the P1 wire-parity gate: the
+// ibkr_gamma tool's input schema must declare a `scope` property whose
+// enum carries the three CLI-equivalent values ("spy", "spx",
+// "spy+spx"). Drops the param without updating the schema and this
+// test fails — clients reading tools/list never see the new arg.
+func TestIbkrGammaSchemaHasScopeParam(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_gamma")
+	if !ok {
+		t.Fatalf("ibkr_gamma tool not registered")
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string   `json:"type"`
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.JSONSchema, &schema); err != nil {
+		t.Fatalf("decode ibkr_gamma schema: %v", err)
+	}
+	scope, ok := schema.Properties["scope"]
+	if !ok {
+		t.Fatalf("ibkr_gamma schema missing 'scope' property")
+	}
+	if scope.Type != "string" {
+		t.Errorf("scope.type: got %q want %q", scope.Type, "string")
+	}
+	want := map[string]bool{"spy": true, "spx": true, "spy+spx": true}
+	for _, v := range scope.Enum {
+		delete(want, v)
+	}
+	if len(want) > 0 {
+		t.Errorf("scope.enum missing values: %v (got %v)", want, scope.Enum)
+	}
+}
+
+// TestIbkrGammaRejectsUnknownScope pins the validation edge: a bogus
+// scope value surfaces as a tool error (isError=true) rather than
+// hitting the daemon with garbage and getting a generic wire error.
+// MCP-side normalisation keeps the contract close to the CLI's
+// behaviour for --only.
+func TestIbkrGammaRejectsUnknownScope(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_gamma")
+	if !ok {
+		t.Fatalf("ibkr_gamma tool not registered")
+	}
+	_, err := tool.Handler(context.Background(), nil, json.RawMessage(`{"scope":"nope"}`))
+	if err == nil {
+		t.Fatalf("expected error on unknown scope, got nil")
+	}
+	if !strings.Contains(err.Error(), "scope") {
+		t.Errorf("error should mention 'scope', got: %v", err)
+	}
+}
+
+// TestIbkrRegimeResponseHasCompositeStreaksQuality is the P2 wire-
+// parity gate: every RegimeSnapshotResult field the CLI consumes must
+// be reachable via the MCP envelope so an MCP-only client sees the
+// same surface. Marshals the rpc shape with all the new optional
+// fields populated, then re-decodes and checks each load-bearing
+// JSON key landed.
+func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	ratio := 0.91
+	vix := 14.5
+	res := rpc.RegimeSnapshotResult{
+		AsOf: now,
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusOK,
+			VIX:    &vix,
+			Ratio:  &ratio,
+			VIXQuality: &rpc.Quality{
+				AsOf: now, FreshnessClass: rpc.FreshnessLive,
+				Confidence: rpc.ConfidenceFirm, Source: "VIX tick",
+			},
+			Streak: &rpc.StreakInfo{Band: "green", Sessions: 3, Since: "2026-05-20"},
+		},
+		Composite: rpc.RegimeComposite{
+			Verdict:     "Normal regime",
+			GreenCount:  3,
+			YellowCount: 0,
+			RedCount:    0,
+			RankedCount: 3,
+		},
+		SpecDoc: "docs/specs/risk-regime-dashboard.md",
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	// Top-level composite key + nested verdict — agents read this
+	// path to display the headline.
+	comp, ok := wire["composite"].(map[string]any)
+	if !ok {
+		t.Fatalf("composite missing from envelope: %s", b)
+	}
+	if comp["verdict"] != "Normal regime" {
+		t.Errorf("composite.verdict: got %v want %q", comp["verdict"], "Normal regime")
+	}
+	// Streak + Quality nested under each indicator row.
+	vixRow, ok := wire["vix_term_structure"].(map[string]any)
+	if !ok {
+		t.Fatalf("vix_term_structure missing")
+	}
+	if _, ok := vixRow["streak"]; !ok {
+		t.Errorf("vix_term_structure.streak missing (CLI --explain shows it)")
+	}
+	if _, ok := vixRow["vix_quality"]; !ok {
+		t.Errorf("vix_term_structure.vix_quality missing (CLI --explain shows it)")
 	}
 }

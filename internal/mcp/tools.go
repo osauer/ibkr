@@ -249,12 +249,21 @@ var Tools = []Tool{
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"wait_ms": json.RawMessage(`{"type":"integer","minimum":0,"description":"block up to this many ms for the result; 0 (default) returns the current status immediately"}`),
 			"force":   json.RawMessage(`{"type":"boolean","description":"diagnostics-only: ignore the cached result and start a fresh compute; default false"}`),
-			"scope":   json.RawMessage(`{"type":"string","enum":["spy","spx","spy+spx"],"description":"which underlying(s) to compute: 'spy+spx' (combined, the default — falls back to SPY-only on SPX entitlement gap); 'spy' (SPY-only fast path, bit-for-bit pre-coverage-arc behaviour); 'spx' (SPX-only, errors out if SPX unreachable). Omit for the default combined view."}`),
+			"scope":   json.RawMessage(`{"type":"string","enum":["spy","spx","spy+spx"],"description":"which underlying(s) to compute: 'spy+spx' (combined, the default — falls back to SPY-only on SPX entitlement gap); 'spy' (SPY-only fast path, bit-for-bit pre-coverage-arc behaviour); 'spx' (SPX-only, errors out if SPX unreachable). Omit for the default combined view. Mirrors the CLI's --only flag."}`),
 		}, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in rpc.GammaZeroSPXParams
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
+			}
+			// Normalise/validate scope at the MCP edge so a bad value
+			// surfaces as a tool error rather than the daemon's wire
+			// error envelope — clients distinguish the two.
+			switch strings.ToLower(strings.TrimSpace(in.Scope)) {
+			case "", rpc.GammaZeroScopeSPY, rpc.GammaZeroScopeSPX, rpc.GammaZeroScopeCombined:
+				in.Scope = strings.ToLower(strings.TrimSpace(in.Scope))
+			default:
+				return nil, fmt.Errorf("scope must be one of 'spy', 'spx', 'spy+spx' (got %q)", in.Scope)
 			}
 			var res rpc.GammaZeroSPXResult
 			if err := conn.Call(ctx, rpc.MethodGammaZeroSPX, in, &res); err != nil {
