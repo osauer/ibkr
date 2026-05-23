@@ -860,3 +860,147 @@ func TestAppendRegimeLog_CreatesFileIfMissing(t *testing.T) {
 		t.Fatalf("path should exist after append: %v", err)
 	}
 }
+
+// ----- B3: scope-aware gamma row label -----
+
+// TestGammaRowLabel_ScopeAware pins the name column for the gamma row:
+// SPY-only / SPX-only / combined runs each get their own label so a
+// reader doesn't mis-read a combined run as SPY. Empty Result falls
+// back to the legacy "SPY γ-zero" so older daemons stay rendered.
+func TestGammaRowLabel_ScopeAware(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		scope  string
+		want   string
+		hasRes bool
+	}{
+		{"spy", rpc.GammaZeroScopeSPY, "SPY γ-zero", true},
+		{"spx", rpc.GammaZeroScopeSPX, "SPX γ-zero", true},
+		{"combined", rpc.GammaZeroScopeCombined, "γ-zero (SPY+SPX)", true},
+		{"empty_scope_legacy", "", "SPY γ-zero", true},
+		{"nil_result_legacy", "", "SPY γ-zero", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := rpc.RegimeGammaZero{}
+			if tc.hasRes {
+				r.Envelope.Result = &rpc.GammaZeroComputed{Scope: tc.scope}
+			}
+			if got := gammaRowLabel(r); got != tc.want {
+				t.Errorf("scope=%q hasRes=%v label=%q want %q", tc.scope, tc.hasRes, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRowGamma_UsesScopeAwareLabel pins the integration: rowGamma reads
+// the Scope from the envelope and threads it into the row's name field
+// via gammaRowLabel.
+func TestRowGamma_UsesScopeAwareLabel(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				Scope:          rpc.GammaZeroScopeCombined,
+				SpotUnderlying: 737.0,
+				GammaSign:      "positive",
+				GammaTotalAbs:  2.7e9,
+			},
+		},
+	})
+	if row.name != "γ-zero (SPY+SPX)" {
+		t.Errorf("combined-scope row name=%q want %q", row.name, "γ-zero (SPY+SPX)")
+	}
+}
+
+// ----- B4: conditional |Γ|·OI rendering in the regime row -----
+
+// TestRowGamma_OmitsMagnitudeWhenZero pins the conditional rendering:
+// when GammaTotalAbs is zero (no-crossing degenerate case or v2 daemon
+// without the aggregator), the row value omits the "|Γ|·OI X.Xbn"
+// segment entirely rather than painting a misleading "$0.0bn".
+func TestRowGamma_OmitsMagnitudeWhenZero(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				GammaSign:      "positive",
+				GammaTotalAbs:  0, // explicit zero
+			},
+		},
+	})
+	if strings.Contains(row.value, "|Γ|·OI") {
+		t.Errorf("zero magnitude should omit |Γ|·OI segment, got value=%q", row.value)
+	}
+	if !strings.Contains(row.value, "long-γ") {
+		t.Errorf("regime classification should still surface, got value=%q", row.value)
+	}
+}
+
+// TestRowGamma_KeepsMagnitudeWhenNonZero pins the positive path:
+// non-zero GammaTotalAbs renders inline alongside the signed call so
+// the magnitude co-primary stays visible in the regime row.
+func TestRowGamma_KeepsMagnitudeWhenNonZero(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				SpotUnderlying: 737.0,
+				GammaSign:      "positive",
+				GammaTotalAbs:  2.7e9,
+			},
+		},
+	})
+	if !strings.Contains(row.value, "|Γ|·OI 2.7bn") {
+		t.Errorf("non-zero magnitude should render inline, got value=%q", row.value)
+	}
+}
+
+// ----- U3: shortened gamma-row reason -----
+
+// TestRowGamma_ShortReason pins the compressed reason strings: the
+// long-form spec disclosure ("stabilizing regime, γ-zero is well below
+// spot") has moved to --explain; the row carries the compact form
+// "dealer long-γ · stabilizing" / "dealer short-γ · amplifying".
+func TestRowGamma_ShortReason(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	cases := []struct {
+		sign string
+		want string
+	}{
+		{"positive", "dealer long-γ · stabilizing"},
+		{"negative", "dealer short-γ · amplifying"},
+	}
+	for _, tc := range cases {
+		row := rowGamma(now, rpc.RegimeGammaZero{
+			Status: rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+				Result: &rpc.GammaZeroComputed{
+					SpotUnderlying: 737.0,
+					GammaSign:      tc.sign,
+					GammaTotalAbs:  2.7e9,
+				},
+			},
+		})
+		if row.reason != tc.want {
+			t.Errorf("sign=%q reason=%q want %q", tc.sign, row.reason, tc.want)
+		}
+		// The long-form disclosure must NOT leak into the row reason.
+		if strings.Contains(row.reason, "well below spot") || strings.Contains(row.reason, "well above spot") {
+			t.Errorf("long-form spec text should live under --explain, not the row reason: %q", row.reason)
+		}
+	}
+}

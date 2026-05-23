@@ -16,6 +16,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	noWait := fs.Bool("no-wait", false, "return immediately with current status; don't block on the compute")
 	force := fs.Bool("force", false, "ignore the cached result and start a fresh compute (diagnostics)")
 	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable, see docs/design/gamma-spx-coverage.md)")
+	explain := fs.Bool("explain", false, "show methodology, citations, skew/source/compute metadata, per-bucket breakdown")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -67,14 +68,19 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	if *jsonOut {
 		return printJSON(env, res)
 	}
-	return renderGammaText(env, &res)
+	return renderGammaText(env, &res, *explain)
 }
 
-func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
+func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 	out := env.Stdout
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, gammaHeaderForScope(r))
-	fmt.Fprintln(out)
+
+	// Hero. For Computing/Error states we still need a header but skip
+	// the spot anchor (no Result payload yet).
+	title := gammaHeaderForScope(r)
+	timestamp := gammaHeroTimestamp(r)
+	anchor := gammaHeroAnchor(r)
+	summary := gammaHeroSummary(r)
+	renderCommandHero(out, title, timestamp, anchor, summary)
 
 	// Top-of-output banner for entitlement-degraded states. Surfaces
 	// the SPX-skipped fallback per design §8.2 above the headline
@@ -119,107 +125,22 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 	}
 
 	c := r.Result
-	fmt.Fprintf(out, "  %s spot    %.2f", gammaSpotLabelForScope(c), c.SpotUnderlying)
-	if !c.SpotAt.IsZero() {
-		fmt.Fprintf(out, "  (%s)", c.SpotAt.Format("15:04:05 MST"))
-	}
-	fmt.Fprintln(out)
-	// Compute freshness: AsOf is when the daemon finished the GEX
-	// compute (distinct from SpotAt above, which is the gateway's
-	// tick time for the underlying). The daemon refreshes the cached
-	// compute under a soft TTL — agents and humans both want to see
-	// how old this result is, especially after a long-idle daemon
-	// returned a same-session cached value.
-	if !c.AsOf.IsZero() {
-		age := max(time.Since(c.AsOf).Truncate(time.Second), 0)
-		fmt.Fprintf(out, "  Computed    %s · %s ago\n", c.AsOf.Format("15:04:05 MST"), age)
-	}
 
-	// Combined-mode renderer: when both SPY and SPX are present,
-	// surface the combined γ-zero gap-percent and the per-index
-	// breakdown instead of the SPY-shaped single γ-zero line. The
-	// combined path returns true; the single-underlying path falls
-	// through.
-	if renderCombinedHeadline(env, c) {
-		// Combined block prints its own γ-zero + per-index detail;
-		// skip the single-line γ-zero rendering below.
-	} else if c.ZeroGamma != nil {
-		// Distance is signed from spot to γ-zero: negative when γ-zero
-		// is below spot, positive when above. Flipped from the wire's
-		// GapPct (which is signed the other way around — spot relative
-		// to γ-zero) so the value reads as "γ-zero is X% from spot."
-		fmt.Fprintf(out, "  γ-zero      $%.2f", *c.ZeroGamma)
-		if c.SpotUnderlying > 0 {
-			dist := (*c.ZeroGamma - c.SpotUnderlying) / c.SpotUnderlying * 100
-			fmt.Fprintf(out, " (%+.1f%% from spot)", dist)
-		}
-		fmt.Fprintln(out)
-	} else {
-		// No crossing in the swept window. The signed profile is
-		// one-sided; surface that as a regime statement rather than
-		// "all <raw enum> gamma" which produces "all no_data gamma"
-		// for the degenerate case. Render the absolute sweep bounds
-		// in dollars rather than "well above/below spot" — readers
-		// can immediately see whether γ-zero is plausibly close to
-		// the window edge.
-		sweepRange := fmt.Sprintf("γ-zero outside swept range %s–%s",
-			formatSpotPrice(c.SweepLowAbs), formatSpotPrice(c.SweepHighAbs))
-		sweepPct := c.Params.SweepRangePct * 100
-		switch c.GammaSign {
-		case "positive":
-			fmt.Fprintf(out, "  γ-zero      no crossing — dealer long-γ across ±%.0f%% sweep (stabilizing regime, %s)\n", sweepPct, sweepRange)
-		case "negative":
-			fmt.Fprintf(out, "  γ-zero      no crossing — dealer short-γ across ±%.0f%% sweep (amplifying regime, %s)\n", sweepPct, sweepRange)
-		default:
-			fmt.Fprintln(out, "  γ-zero      no crossing — sweep produced no signed profile")
-		}
-	}
+	// Compact per-index lines. In combined mode, one line per index;
+	// in single-underlying mode, one line for that index. The line
+	// either reports the γ-zero crossing or the no-crossing regime
+	// statement plus the leg count.
+	renderGammaPerIndexLines(env, c)
 
-	// Near vs term breakdown. The combined renderer above already
-	// emits per-index near/term rows; skip this single-line shape in
-	// combined mode to avoid duplicate output.
-	if c.Scope != rpc.GammaZeroScopeCombined && (c.NearLegCount > 0 || c.TermLegCount > 0) {
-		fmt.Fprintf(out, "  γ-zero near %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
-		fmt.Fprintf(out, "  γ-zero term %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
-	}
-
-	fmt.Fprintf(out, "  |Γ|·OI sum  %s per 1%% move (sign-agnostic magnitude)\n", formatGEX(c.GammaTotalAbs))
-	if c.TopConcentrationPct > 0 && len(c.TopStrikes) > 0 {
-		top := c.TopStrikes[0]
-		fmt.Fprintf(out, "  Top strike  %.0f%% of total |GEX| (%.0f%s %s)\n",
-			c.TopConcentrationPct, top.Strike, top.Right, top.Expiry)
-	}
-	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
-	if c.Params.StrikeWidthPct > 0 {
-		fmt.Fprintf(out, "  Scope       %s · ±%.0f%% strikes · %d expirations\n",
-			gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations))
-	}
-	if c.SkewModel != "" {
-		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
-		if n := len(c.SkewFitQuality); n > 0 {
-			// Pick the median R² to show fit quality across expiries
-			// without overwhelming the default view; full per-expiry
-			// detail lives in the JSON envelope.
-			var rs []float64
-			for _, info := range c.SkewFitQuality {
-				rs = append(rs, info.RSquared)
-			}
-			if len(rs) > 0 {
-				// Quick sort + median.
-				medianR := computeMedian(rs)
-				fmt.Fprintf(out, "  (%d expiries fit, median R² %.2f)", n, medianR)
-			}
+	// Magnitude co-primary — surfaced as a peer line rather than
+	// buried under "Method" metadata. Convention label comes from the
+	// wire so the renderer doesn't re-derive methodology.
+	if c.GammaTotalAbs > 0 {
+		conv := c.GammaTotalAbsConvention
+		if conv == "" {
+			conv = "sign-agnostic"
 		}
-		fmt.Fprintln(out)
-	}
-	if c.DerivedIVLegs > 0 {
-		fmt.Fprintf(out, "  Derived IV  %d/%d legs back-solved via Black-Scholes from prior-session prices\n",
-			c.DerivedIVLegs, c.LegCount)
-	}
-	fmt.Fprintf(out, "  Method      %s\n", c.Method)
-	fmt.Fprintf(out, "  Source      %s\n", c.Source)
-	if c.DurationMS > 0 {
-		fmt.Fprintf(out, "  Compute     %s\n", formatDuration(int(c.DurationMS/1000)))
+		fmt.Fprintf(out, "  Magnitude   %s per 1%% move  (%s)\n", formatGEX(c.GammaTotalAbs), conv)
 	}
 
 	// Monthly OPEX is the third Friday of the month in NY time. Surfaced
@@ -273,13 +194,266 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult) int {
 		}
 	}
 
+	if explain {
+		renderGammaExplain(env, c)
+	}
+
+	fmt.Fprintln(out)
+	return 0
+}
+
+// gammaHeroTimestamp returns the formatted local-time stamp for the
+// hero, sourced from Result.AsOf (compute finish). Empty when no
+// payload exists yet (Computing / Error / pre-Result states).
+func gammaHeroTimestamp(r *rpc.GammaZeroSPXResult) string {
+	if r == nil || r.Result == nil || r.Result.AsOf.IsZero() {
+		return ""
+	}
+	return r.Result.AsOf.Local().Format("15:04 MST")
+}
+
+// gammaHeroAnchor returns the one-line market anchor for the gamma
+// hero: spot price + compute freshness. Gamma doesn't pull VIX, so the
+// anchor stays focused on the underlying's spot and the result age.
+// Empty for Computing/Error states with no Result payload.
+func gammaHeroAnchor(r *rpc.GammaZeroSPXResult) string {
+	if r == nil || r.Result == nil {
+		return ""
+	}
+	c := r.Result
+	parts := []string{fmt.Sprintf("%s %.2f", gammaSpotLabelForScope(c), c.SpotUnderlying)}
+	if !c.AsOf.IsZero() {
+		age := max(time.Since(c.AsOf).Truncate(time.Second), 0)
+		parts = append(parts,
+			fmt.Sprintf("computed %s · %s ago", c.AsOf.Local().Format("15:04 MST"), age))
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+// gammaHeroSummary returns the one-line regime statement for the hero.
+// Combined mode uses formatRegimeAgreement; single-underlying mode
+// names the single index's regime in the same compact shape. Empty
+// when no Result is available.
+func gammaHeroSummary(r *rpc.GammaZeroSPXResult) string {
+	if r == nil || r.Result == nil {
+		return ""
+	}
+	c := r.Result
+	if c.Scope == rpc.GammaZeroScopeCombined {
+		return formatRegimeAgreement(c)
+	}
+	label := gammaSpotLabelForScope(c)
+	switch {
+	case c.ZeroGamma != nil:
+		return fmt.Sprintf("%s γ-zero at %s (flipping regime)", label, formatSpotPrice(*c.ZeroGamma))
+	case c.GammaSign == "positive":
+		return fmt.Sprintf("%s long-γ (stabilizing)", label)
+	case c.GammaSign == "negative":
+		return fmt.Sprintf("%s short-γ (amplifying)", label)
+	}
+	return ""
+}
+
+// renderGammaPerIndexLines emits the compact per-index summary lines.
+// Combined mode iterates SPY then SPX; single-underlying mode emits one
+// line for that index. When the result's HorizonAgreement carries
+// "diverge", the line expands to a per-bucket near/0DTE/1-7/term
+// breakdown so the disagreement isn't hidden behind a one-line summary.
+//
+// Per-index format examples:
+//
+//	SPY  no crossing · long-γ · 1052 legs
+//	SPY  γ-zero $735.00 (+0.5% from spot) · 1052 legs
+func renderGammaPerIndexLines(env *Env, c *rpc.GammaZeroComputed) {
+	out := env.Stdout
+	if c.Scope == rpc.GammaZeroScopeCombined {
+		for _, key := range []string{"SPY", "SPX"} {
+			if sub := c.PerIndex[key]; sub != nil {
+				fmt.Fprintf(out, "  %-5s %s\n", key, formatGammaPerIndexCompact(sub))
+				if shouldShowDivergedBuckets(sub) {
+					renderGammaBucketBreakdown(env, "    ", sub)
+				}
+			}
+		}
+		return
+	}
+	label := gammaSpotLabelForScope(c)
+	fmt.Fprintf(out, "  %-5s %s\n", label, formatGammaPerIndexCompact(c))
+	if shouldShowDivergedBuckets(c) {
+		renderGammaBucketBreakdown(env, "    ", c)
+	}
+}
+
+// formatGammaPerIndexCompact returns the per-index single-line summary:
+// either the γ-zero crossing + signed distance, or a no-crossing regime
+// label, followed by " · N legs".
+func formatGammaPerIndexCompact(c *rpc.GammaZeroComputed) string {
+	legCount := c.LegCount
+	if c.ZeroGamma != nil {
+		dist := ""
+		if c.SpotUnderlying > 0 {
+			dist = fmt.Sprintf(" (%+.1f%% from spot)", (*c.ZeroGamma-c.SpotUnderlying)/c.SpotUnderlying*100)
+		}
+		return fmt.Sprintf("γ-zero %s%s · %d legs", formatSpotPrice(*c.ZeroGamma), dist, legCount)
+	}
+	regime := "no signed profile"
+	switch c.GammaSign {
+	case "positive":
+		regime = "long-γ"
+	case "negative":
+		regime = "short-γ"
+	}
+	return fmt.Sprintf("no crossing · %s · %d legs", regime, legCount)
+}
+
+// shouldShowDivergedBuckets reports whether the per-index summary
+// should expand to a per-bucket breakdown. We expand whenever the
+// HorizonAgreement (re-classified locally from the same wire fields
+// the daemon uses) carries a "diverge" prefix.
+func shouldShowDivergedBuckets(c *rpc.GammaZeroComputed) bool {
+	return strings.HasPrefix(localHorizonAgreement(c), "diverge")
+}
+
+// localHorizonAgreement mirrors the daemon's classifyHorizonAgreement
+// on a per-index slice so the CLI can detect diverge cases without a
+// round trip. The wire's top-level HorizonAgreement is regime-row only
+// (gates on RegimeGammaZero) — per-index slices in combined mode don't
+// carry it.
+func localHorizonAgreement(c *rpc.GammaZeroComputed) string {
+	if c == nil || c.SpotUnderlying <= 0 {
+		return ""
+	}
+	zeroAvail := c.ZeroGamma0DTE != nil
+	oneToSevenAvail := c.ZeroGamma1to7 != nil
+	termAvail := c.ZeroGammaTerm != nil
+	avail := 0
+	for _, v := range []bool{zeroAvail, oneToSevenAvail, termAvail} {
+		if v {
+			avail++
+		}
+	}
+	switch avail {
+	case 0:
+		return ""
+	case 1:
+		switch {
+		case zeroAvail:
+			return "0dte_only"
+		case oneToSevenAvail:
+			return "1to7_only"
+		default:
+			return "term_only"
+		}
+	}
+	var sides []bool
+	if zeroAvail {
+		sides = append(sides, c.SpotUnderlying > *c.ZeroGamma0DTE)
+	}
+	if oneToSevenAvail {
+		sides = append(sides, c.SpotUnderlying > *c.ZeroGamma1to7)
+	}
+	if termAvail {
+		sides = append(sides, c.SpotUnderlying > *c.ZeroGammaTerm)
+	}
+	allAbove, allBelow := true, true
+	for _, above := range sides {
+		if !above {
+			allAbove = false
+		}
+		if above {
+			allBelow = false
+		}
+	}
+	if avail == 3 && allAbove {
+		return "all_above"
+	}
+	if avail == 3 && allBelow {
+		return "all_below"
+	}
+	if zeroAvail && termAvail {
+		spotAbove0 := c.SpotUnderlying > *c.ZeroGamma0DTE
+		spotAboveT := c.SpotUnderlying > *c.ZeroGammaTerm
+		if spotAbove0 != spotAboveT {
+			return "diverge:0dte_vs_term"
+		}
+	}
+	return "diverge:partial"
+}
+
+// renderGammaBucketBreakdown emits the per-bucket 0DTE / 1-7 / term
+// rows used both in the default-mode diverge expansion and the
+// --explain mode's full disclosure. Indent is the leading whitespace
+// applied to each row so the same helper can sit under both a per-index
+// summary ("    ") and the --explain block ("  ").
+func renderGammaBucketBreakdown(env *Env, indent string, c *rpc.GammaZeroComputed) {
+	out := env.Stdout
+	fmt.Fprintf(out, "%sγ-zero 0DTE %s\n", indent,
+		formatHorizonGammaLine(c.ZeroGamma0DTE, c.GammaSign0DTE, c.SpotUnderlying, c.LegCount0DTE, "DTE = 0"))
+	fmt.Fprintf(out, "%sγ-zero 1-7  %s\n", indent,
+		formatHorizonGammaLine(c.ZeroGamma1to7, c.GammaSign1to7, c.SpotUnderlying, c.LegCount1to7, "0 < DTE ≤ 7"))
+	fmt.Fprintf(out, "%sγ-zero term %s\n", indent,
+		formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.LegCountTerm, "DTE > 7"))
+}
+
+// renderGammaExplain writes the --explain disclosure: per-bucket
+// breakdown, methodology/source/compute metadata block, citations, and
+// the sign-convention disclosure. Sequenced so a reader scans from the
+// most-actionable (per-bucket detail) down to the methodology footer.
+func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, env.dim("  Per-bucket γ-zero (horizon split):"))
+	if c.Scope == rpc.GammaZeroScopeCombined {
+		for _, key := range []string{"SPY", "SPX"} {
+			if sub := c.PerIndex[key]; sub != nil {
+				fmt.Fprintf(out, "    %s\n", key)
+				renderGammaBucketBreakdown(env, "      ", sub)
+			}
+		}
+	} else {
+		renderGammaBucketBreakdown(env, "    ", c)
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  Scope       %s · ±%.0f%% strikes · %d expirations\n",
+		gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations))
+	fmt.Fprintf(out, "  Leg count   %d across %d expirations\n", c.LegCount, len(c.Expirations))
+	if c.SkewModel != "" {
+		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
+		if n := len(c.SkewFitQuality); n > 0 {
+			var rs []float64
+			for _, info := range c.SkewFitQuality {
+				rs = append(rs, info.RSquared)
+			}
+			if len(rs) > 0 {
+				fmt.Fprintf(out, "  (%d expiries fit, median R² %.2f)", n, computeMedian(rs))
+			}
+		}
+		fmt.Fprintln(out)
+	}
+	if c.DerivedIVLegs > 0 {
+		fmt.Fprintf(out, "  Derived IV  %d/%d legs back-solved via Black-Scholes from prior-session prices\n",
+			c.DerivedIVLegs, c.LegCount)
+	}
+	fmt.Fprintf(out, "  Method      %s\n", c.Method)
+	fmt.Fprintf(out, "  Source      %s\n", c.Source)
+	if c.DurationMS > 0 {
+		fmt.Fprintf(out, "  Compute     %s\n", formatDuration(int(c.DurationMS/1000)))
+	}
+
+	if len(c.MethodologyCitations) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  Citations")
+		for _, ref := range c.MethodologyCitations {
+			fmt.Fprintf(out, "    · %s\n", ref)
+		}
+	}
+
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  Disclosure: the signed γ-zero assumes the 2018 \"dealers long calls,"))
 	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))
 	fmt.Fprintln(out, env.dim("  autocall hedging the sign can invert; treat as a regime hint, not a"))
 	fmt.Fprintln(out, env.dim("  level. The magnitude signal above is methodology-agnostic."))
-	fmt.Fprintln(out)
-	return 0
 }
 
 func formatDuration(seconds int) string {
@@ -427,41 +601,6 @@ func renderGammaSkippedBanner(env *Env, c *rpc.GammaZeroComputed) {
 	}
 }
 
-// renderCombinedHeadline prints the SPY+SPX combined headline block.
-// The headline is a Regime row that classifies SPY/SPX agreement (or
-// disagreement) directly from per-index sweep outcomes, followed by
-// per-index detail rows.
-//
-// Why no "Combined γ-zero spot X%" line (dropped in step 10): SPX
-// dominates the dollar sum by ~100× per contract via the spot²
-// scaling. At real OI mixes the SPX share runs 60-70% of the combined
-// magnitude, so a combined γ-zero gap was structurally pinned to
-// SPX's flip with epsilon SPY noise — indistinguishable from SPX-only
-// for regime-call use. The actionable signal is regime agreement vs
-// disagreement, surfaced explicitly via the RegimeAgreement classifier.
-//
-// Returns true when the combined path was used; the caller falls back
-// to the single-underlying renderer otherwise.
-func renderCombinedHeadline(env *Env, c *rpc.GammaZeroComputed) bool {
-	if c == nil || c.Scope != rpc.GammaZeroScopeCombined {
-		return false
-	}
-	out := env.Stdout
-
-	fmt.Fprintf(out, "  Regime      %s\n", formatRegimeAgreement(c))
-
-	spy := c.PerIndex["SPY"]
-	spx := c.PerIndex["SPX"]
-	fmt.Fprintln(out, "  Per-index:")
-	if spy != nil {
-		renderPerIndexRow(env, "SPY", spy)
-	}
-	if spx != nil {
-		renderPerIndexRow(env, "SPX", spx)
-	}
-	return true
-}
-
 // formatRegimeAgreement renders the RegimeAgreement classifier into a
 // one-line summary. The disagree case is the actionable signal —
 // flagged loudly so the reader doesn't skim past institutional/retail
@@ -518,48 +657,21 @@ func perIndexRegimeWord(c *rpc.GammaZeroComputed) string {
 	return "—"
 }
 
-// renderPerIndexRow prints one per-underlying detail block inside the
-// combined headline. Indented two levels so it nests visually under
-// the "Per-index:" header. Near/term sub-rows mirror the SPY-only
-// renderer's existing breakdown.
-func renderPerIndexRow(env *Env, label string, c *rpc.GammaZeroComputed) {
-	out := env.Stdout
-	if c.ZeroGamma != nil {
-		gap := "+"
-		if c.SpotUnderlying > 0 {
-			dist := (*c.ZeroGamma - c.SpotUnderlying) / c.SpotUnderlying * 100
-			if dist < 0 {
-				gap = ""
-			}
-			fmt.Fprintf(out, "    %s γ-zero       %s  (spot %s%.2f %%)\n",
-				label, formatSpotPrice(*c.ZeroGamma), gap, dist)
-		} else {
-			fmt.Fprintf(out, "    %s γ-zero       %s\n", label, formatSpotPrice(*c.ZeroGamma))
-		}
-	} else {
-		fmt.Fprintf(out, "    %s γ-zero       no crossing (%s)\n", label, c.GammaSign)
-	}
-	if c.NearLegCount > 0 || c.TermLegCount > 0 {
-		fmt.Fprintf(out, "      near         %s\n", formatHorizonGammaLine(c.ZeroGammaNear, c.GammaSignNear, c.SpotUnderlying, c.NearLegCount, "DTE ≤ 7"))
-		fmt.Fprintf(out, "      term         %s\n", formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.TermLegCount, "DTE > 7"))
-	}
-}
-
 // gammaHeaderForScope returns the renderer's section header — varies
 // with Result.Scope so SPX-only and combined runs don't claim to be
 // SPY. Falls back to the SPY title for empty Scope (pre-step-5 result
 // envelopes) so old daemon → new CLI mixes render unchanged.
 func gammaHeaderForScope(r *rpc.GammaZeroSPXResult) string {
 	if r == nil || r.Result == nil {
-		return "Dealer Zero-Gamma"
+		return "Dealer γ-zero"
 	}
 	switch r.Result.Scope {
 	case rpc.GammaZeroScopeSPX:
-		return "SPX Dealer Zero-Gamma"
+		return "Dealer γ-zero · SPX"
 	case rpc.GammaZeroScopeCombined:
-		return "Dealer Zero-Gamma (SPY + SPX)"
+		return "Dealer γ-zero · SPY+SPX"
 	default:
-		return "SPY Dealer Zero-Gamma"
+		return "Dealer γ-zero · SPY"
 	}
 }
 

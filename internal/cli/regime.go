@@ -227,19 +227,15 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	}
 	c := tallyComposite(rows)
 
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Risk Regime  ·  %s\n", r.AsOf.Format("2006-01-02 15:04 MST"))
-	fmt.Fprintln(out)
-
-	// SPY + VIX headline: the two anchors every other indicator below
-	// is interpreted against. SPY change is colored on sign (green up /
-	// red down); VIX is colored inverted (red on up = vol expanding =
-	// risk-off, green on down). Either half is dropped when its primary
-	// price didn't land — the headline never invents numbers.
-	if line := renderRegimeHeadline(env, r); line != "" {
-		fmt.Fprintf(out, "  %s\n", line)
-		fmt.Fprintln(out)
-	}
+	// Shared hero: title + timestamp share one line; SPY+VIX anchor
+	// sits below indented; the regime summary line is optional (empty
+	// when no ranked indicators have landed, but the verdict + count
+	// summary below still surface).
+	renderCommandHero(out,
+		"Risk Regime",
+		r.AsOf.Format("2006-01-02 15:04 MST"),
+		renderRegimeHeadline(env, r),
+		"")
 
 	// Composite line: bold verdict + dim count summary. The count
 	// summary names ranked/unranked explicitly so a reader sees that
@@ -273,7 +269,7 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 // needing to consult docs.
 func renderRegimeHeader(env *Env) string {
 	const (
-		nameW  = 12
+		nameW  = 17
 		valueW = 30
 		bandW  = 7
 	)
@@ -287,14 +283,15 @@ func renderRegimeHeader(env *Env) string {
 }
 
 // renderRow lays out one indicator line: 2-space indent, glyph, indicator
-// name (left-padded to 12), value cell (left-padded to 26), band word
-// (color, padded to 7 visible cells), reason (dim parenthetical), optional
-// streak marker ("day 3"), optional quality/stale suffix. The band-word
-// color is applied AFTER padding so column alignment stays correct under
-// ANSI escapes — same trick as the account renderer's padLeftVisible.
+// name (left-padded to 17 — fits the combined-scope "γ-zero (SPY+SPX)"
+// label), value cell (left-padded to 30), band word (color, padded to 7
+// visible cells), reason (dim parenthetical), optional streak marker
+// ("day 3"), optional quality/stale suffix. The band-word color is
+// applied AFTER padding so column alignment stays correct under ANSI
+// escapes — same trick as the account renderer's padLeftVisible.
 func renderRow(env *Env, r regimeRow) string {
 	const (
-		nameW  = 12
+		nameW  = 17
 		valueW = 30
 		bandW  = 7
 	)
@@ -688,8 +685,28 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 	return row
 }
 
+// gammaRowLabel returns the regime row's indicator name, varying with
+// the underlying gamma envelope's Scope so combined runs don't claim
+// to be SPY. Falls back to "SPY γ-zero" for envelopes without a Scope
+// (legacy daemons / pre-step-5 fixtures) or when no Result has landed
+// yet — the legacy label keeps existing tests and dashboards stable.
+func gammaRowLabel(r rpc.RegimeGammaZero) string {
+	res := r.Envelope.Result
+	if res == nil {
+		return "SPY γ-zero"
+	}
+	switch res.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX γ-zero"
+	case rpc.GammaZeroScopeCombined:
+		return "γ-zero (SPY+SPX)"
+	default:
+		return "SPY γ-zero"
+	}
+}
+
 func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
-	row := regimeRow{name: "SPY γ-zero", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: gammaRowLabel(r), status: r.Status, streak: streakMarker(r.Streak)}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
@@ -764,19 +781,24 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		}
 		// No crossing. The compute's GammaSign tells us which side of
 		// zero the whole swept profile landed on — that IS the regime
-		// statement the renderer should surface.
-		gabsBn := c.GammaTotalAbs / 1e9
+		// statement the renderer should surface. Magnitude (|Γ|·OI) is
+		// the convention-free co-primary; rendered inline only when it
+		// landed non-zero so the no-aggregator-data case (zero from
+		// either an empty profile or a v2 daemon) doesn't paint a
+		// misleading "$0.0bn" in the value cell.
+		mag := ""
+		if c.GammaTotalAbs > 0 {
+			mag = fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
+		}
 		switch c.GammaSign {
 		case "positive":
-			row.value = fmt.Sprintf("spot %.2f · long-γ  |Γ|·OI %.1fbn",
-				c.SpotUnderlying, gabsBn)
+			row.value = fmt.Sprintf("spot %.2f · long-γ%s", c.SpotUnderlying, mag)
 			row.band = bandGreen
-			row.reason = "dealer long-γ across ±15% sweep — stabilizing regime, γ-zero is well below spot"
+			row.reason = "dealer long-γ · stabilizing"
 		case "negative":
-			row.value = fmt.Sprintf("spot %.2f · short-γ  |Γ|·OI %.1fbn",
-				c.SpotUnderlying, gabsBn)
+			row.value = fmt.Sprintf("spot %.2f · short-γ%s", c.SpotUnderlying, mag)
 			row.band = bandRed
-			row.reason = "dealer short-γ across ±15% sweep — amplifying regime, γ-zero is well above spot"
+			row.reason = "dealer short-γ · amplifying"
 		default:
 			// "no_data" or empty: genuine no-signal case.
 			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
@@ -869,7 +891,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			{"Last", r.USDJPY.LastQuality},
 			{"Close_7d_ago", r.USDJPY.Close7DAgoQuality},
 		}},
-		{"SPY γ-zero", r.GammaZero.Notes, r.GammaZero.FieldsMissing, []qField{
+		{gammaRowLabel(r.GammaZero), r.GammaZero.Notes, r.GammaZero.FieldsMissing, []qField{
 			{"Zero_gamma", r.GammaZero.ZeroGammaQuality},
 			{"|Gamma|.OI_sum", r.GammaZero.GammaTotalAbsQuality},
 		}},
@@ -904,7 +926,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		// The gamma row gets two extra surfaces specific to its
 		// modelled-output nature: a BS-IV-derived disclosure when the
 		// fallback fired, and a plain-English read of what γ-zero means.
-		if e.name == "SPY γ-zero" {
+		if e.name == gammaRowLabel(r.GammaZero) {
 			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
 				fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf(
 					"compute used %d/%d legs with BS-IV from prior-session last price (model engine idle off-hours)",
@@ -912,7 +934,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			}
 		}
 		fmt.Fprintf(out, "  %s\n", env.dim(e.notes))
-		if e.name == "SPY γ-zero" {
+		if e.name == gammaRowLabel(r.GammaZero) {
 			fmt.Fprintf(out, "  %s\n", env.dim("The γ-zero level is where dealer net gamma crosses zero. Above γ-zero, dealer hedging dampens moves (stabilizing regime). Below, dealer hedging amplifies moves (volatile regime). Within ±2% the regime can flip on a single session. When the sweep shows no crossing inside ±15%, the row bands on the signed profile: long-γ (well above γ-zero, stable) or short-γ (well below, amplifying)."))
 		}
 		if len(e.missing) > 0 {
@@ -941,32 +963,36 @@ func ifNonEmpty(s, fallback string) string {
 }
 
 // horizonAgreementNote returns a short parenthetical for the gamma row
-// when near and term γ-zero disagree with the combined headline. The
-// "both_above" / "both_below" cases agree with the combined reading and
-// don't need a note; the renderer stays silent. "diverge" is the case
-// that matters most — near and term γ-zero land on opposite sides of
-// spot, which the combined headline averages over.
+// when the horizon-bucketed γ-zero readings disagree with the combined
+// headline. v3 enum (8 values): "all_above" / "all_below" agree with
+// the combined reading and don't need a note; the renderer stays
+// silent. "diverge:0dte_vs_term" is the high-information case — 0DTE
+// and term γ-zeros sit on opposite sides of spot, which the combined
+// headline averages over.
 func horizonAgreementNote(agreement string, c *rpc.GammaZeroComputed) string {
 	if c == nil {
 		return ""
 	}
+	fmt0 := func(p *float64) string {
+		if p == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%.0f", *p)
+	}
 	switch agreement {
-	case "diverge":
-		var n, tm string
-		if c.ZeroGammaNear != nil {
-			n = fmt.Sprintf("%.0f", *c.ZeroGammaNear)
-		} else {
-			n = "—"
+	case "diverge:0dte_vs_term":
+		return fmt.Sprintf("(0DTE %s · term %s · diverge)",
+			fmt0(c.ZeroGamma0DTE), fmt0(c.ZeroGammaTerm))
+	case "diverge:partial":
+		return fmt.Sprintf("(0DTE %s · 1-7 %s · term %s · diverge)",
+			fmt0(c.ZeroGamma0DTE), fmt0(c.ZeroGamma1to7), fmt0(c.ZeroGammaTerm))
+	case "0dte_only":
+		if c.ZeroGamma0DTE != nil {
+			return fmt.Sprintf("(0DTE %.0f only · no 1-7 or term crossing)", *c.ZeroGamma0DTE)
 		}
-		if c.ZeroGammaTerm != nil {
-			tm = fmt.Sprintf("%.0f", *c.ZeroGammaTerm)
-		} else {
-			tm = "—"
-		}
-		return fmt.Sprintf("(near %s · term %s · diverge)", n, tm)
-	case "near_only":
-		if c.ZeroGammaNear != nil {
-			return fmt.Sprintf("(near %.0f only · no term crossing)", *c.ZeroGammaNear)
+	case "1to7_only":
+		if c.ZeroGamma1to7 != nil {
+			return fmt.Sprintf("(1-7 %.0f only · no 0DTE or term crossing)", *c.ZeroGamma1to7)
 		}
 	case "term_only":
 		if c.ZeroGammaTerm != nil {
