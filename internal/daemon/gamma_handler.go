@@ -103,11 +103,11 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 		job, _ = s.zeroGamma.kickOrJoin(parent, scope, time.Now(), computeETA, compute)
 	}
 
-	// Optional wait: bounded by both the caller's WaitMs and the per-
-	// method deadline (which itself sits under the CLI's 60 s ceiling
-	// — see unaryDeadline). The RPC ctx provides the upper bound; we
-	// don't need a separate timer.
-	if p.WaitMs > 0 {
+	// kickOrJoin returns (nil, false) when the session is closed and no
+	// persisted result is available — the off-hours "never compute"
+	// contract from gamma_zero_cache.go. There's no job to wait on; go
+	// straight to snapshot, which will report Cold.
+	if job != nil && p.WaitMs > 0 {
 		// Cap the wait at the RPC deadline so we always return before
 		// the dispatcher times us out. The per-method deadline for
 		// GammaZeroSPX is intentionally long enough to make WaitMs
