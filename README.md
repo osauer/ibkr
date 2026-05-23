@@ -225,7 +225,9 @@ limit    = 20
 
 **TLS semantics.** A pinned `tls` value (true or false) is strict. An omitted `tls` means "auto": plain first, TLS on no-handshake-data.
 
-**Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[scans.<name>]`.
+**Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[spx]`, `[scans.<name>]`.
+
+The full per-field reference (TOML sections + `IBKR_*` env vars) is auto-generated at [docs/reference/config.md](docs/reference/config.md). Concept and mental-model docs for the indicators live at [docs/concepts.md](docs/concepts.md); the agentic (Claude / MCP) walkthrough is at [docs/guides/agentic-use.md](docs/guides/agentic-use.md).
 
 ### Adding scanners
 
@@ -277,6 +279,7 @@ Per [semver](https://semver.org/#spec-item-4), 0.x releases may break compatibil
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify against the bundled `SHA256SUMS`.
 - **Local build**: `git clone … && make install`.
 - **Reproducible builds**: release tarballs are built with `-trimpath -buildvcs=false` and stamp the version/commit/date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) produces byte-identical binaries — bring your own checksum and verify against the published `SHA256SUMS`.
+- **Upgrading from v1.0.0+**: `ibkr update` fetches the next stable release, SHA-verifies it, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.
 
