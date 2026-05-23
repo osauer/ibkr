@@ -409,9 +409,21 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	//
 	// No usable cache + closed gateway → return (nil, false) and
 	// snapshot reports Cold rather than starting a doomed compute.
+	//
+	// Exception: a force()-kicked compute can be in flight even on a
+	// closed session (force bypasses this gate by design — see force()).
+	// Subsequent non-force callers must be able to join the existing job
+	// instead of being told Cold while the compute runs, so an in-flight
+	// slot.current is returned regardless of session class. Only fully
+	// idle + no successful cache returns (nil, false).
 	if rpc.ClassifySession(now) == rpc.SessionClosed {
-		if slot.current != nil && slot.current.isDone() && slot.current.err == nil && slot.current.result != nil {
-			return slot.current, false
+		if slot.current != nil {
+			if !slot.current.isDone() {
+				return slot.current, false
+			}
+			if slot.current.err == nil && slot.current.result != nil {
+				return slot.current, false
+			}
 		}
 		return nil, false
 	}

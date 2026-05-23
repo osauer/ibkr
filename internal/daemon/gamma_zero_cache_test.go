@@ -852,6 +852,40 @@ func TestGammaZeroCache_OffHoursStaleCacheGetsWarning(t *testing.T) {
 	}
 }
 
+// TestGammaZeroCache_OffHoursForceAllowsPollToJoin proves that once
+// force() kicks an in-flight compute on a closed session, a follow-up
+// non-force kickOrJoin returns the same job rather than reporting Cold.
+// Without this, a user running `ibkr gamma --force` off-hours and then
+// polling with `ibkr gamma` would see a fresh Cold message between
+// progress updates — confusing and wrong, since the compute IS running.
+func TestGammaZeroCache_OffHoursForceAllowsPollToJoin(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
+
+	block := make(chan struct{})
+	defer close(block)
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		<-block
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
+	}
+
+	forced := c.force(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	if forced == nil {
+		t.Fatal("force() returned nil on closed session")
+	}
+
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	if job == nil {
+		t.Fatal("off-hours poll after force: expected to join in-flight job, got nil")
+	}
+	if job != forced {
+		t.Errorf("off-hours poll after force: returned a different job (%p) than the in-flight one (%p)", job, forced)
+	}
+	if fresh {
+		t.Errorf("off-hours poll after force: fresh must be false (join, not kick), got true")
+	}
+}
+
 // TestGammaZeroCache_OffHoursColdReturnsEmpty proves the
 // SessionClosed-no-cache branch: with no usable persisted result on
 // hand, kickOrJoin must return (nil, false) and snapshot must report
