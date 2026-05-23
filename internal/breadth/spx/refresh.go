@@ -2,7 +2,6 @@ package spx
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -49,8 +48,8 @@ func (s RefreshState) IsDisabled() bool {
 
 // FetchFunc abstracts the Wikipedia round-trip so tests can inject a
 // canned response without standing up an httptest server. Production
-// production passes a closure around FetchAndParse with the daemon's
-// version stamp.
+// passes a closure around FetchAndParse with the daemon's version
+// stamp.
 type FetchFunc func(ctx context.Context) ([]string, time.Time, error)
 
 // Refresher manages the daemon's runtime membership refresh: three
@@ -359,9 +358,3 @@ func (r *Refresher) warnf(format string, args ...any) {
 		r.logger.Warnf(format, args...)
 	}
 }
-
-// ErrRefreshDisabled is returned by sync helpers when called against
-// a pinned refresher. Currently unused (the public methods no-op on
-// disabled), but reserved so a future "force a fetch even when
-// disabled" path can return a meaningful error.
-var ErrRefreshDisabled = errors.New("members refresh disabled")
