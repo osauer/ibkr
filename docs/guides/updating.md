@@ -1,0 +1,95 @@
+# Updating
+
+Two things stay current automatically or on-demand: the **binary** (`ibkr` itself) and the **S&P 500 constituent list** the breadth indicator uses. They update independently — different sources, different cadences.
+
+## Updating the binary — `ibkr update`
+
+Once you're on v1.0.0 or later, the next upgrade is one command:
+
+```sh
+ibkr update            # fetch latest, prompt to restart daemon
+```
+
+The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, SHA-verifies the download, and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
+
+A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.
+
+### Headless / scripted use
+
+In non-interactive contexts (cron, systemd timers, CI, stdin-redirected shells) the `[Y/n]` prompt would block. Pass an explicit restart decision:
+
+```sh
+ibkr update --restart        # auto-restart daemon
+ibkr update --no-restart     # don't restart; print "restart pending" hint
+```
+
+Running `ibkr update` from a non-TTY *without* either flag exits non-zero with `ambiguous in non-interactive mode` and does not install. This is deliberate — silent default-to-N would be a footgun for systemd timers expecting auto-restart.
+
+### Other flags
+
+```sh
+ibkr update --check          # dry-run: print "would install vX.Y.Z", exit 0
+ibkr update --force          # re-install latest even if same version (corrupt-binary recovery)
+```
+
+`--check` exits 0 whether or not an update is available — only fetch failures exit non-zero. So `ibkr update --check && ibkr update` is the idiomatic confirm-then-install pattern.
+
+### Pre-v1.0.0 binaries
+
+`ibkr update` only exists from v1.0.0 onward. Earlier installs upgrade once manually (download the tarball from [releases](https://github.com/osauer/ibkr/releases), extract, run `make install`), then carry forward with `ibkr update`.
+
+## Updating the S&P 500 list — automatic
+
+The daemon refreshes the constituent list from [Wikipedia's "List of S&P 500 companies"](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies) on three triggers, all converging on one singleflighted fetch:
+
+- **Daily at 02:30 ET** — between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.
+- **On daemon startup** if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).
+- **On the first breadth call after midnight ET rollover** if neither of the above fired (network outage during the ticker, etc.).
+
+On success the new list is written to `~/.cache/ibkr/spx-members/sp500-members.json` and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded — breadth never goes silent.
+
+### Pinning the list (regulated traders, reproducibility audits, air-gapped)
+
+Some users need a frozen membership list. Two override layers, with symmetric semantics:
+
+**Persistent (TOML config):**
+
+```toml
+[spx]
+members_auto_refresh = false
+```
+
+**Ad-hoc (env var, overrides TOML):**
+
+```sh
+IBKR_SPX_MEMBERS_AUTO_REFRESH=0 ibkr daemon   # force off
+IBKR_SPX_MEMBERS_AUTO_REFRESH=1 ibkr daemon   # force on (even if TOML says off)
+```
+
+When pinned, `ibkr status` surfaces the reason — `refresh:disabled (env)` vs `refresh:disabled (config)` — so a confused user knows which knob to flip.
+
+### Status row
+
+`ibkr status` always carries a one-line summary of the members source and refresh health:
+
+```
+Members  cache:2026-05-22  count:503                            # healthy
+Members  embedded:2026-05-22  count:503  refresh:parse_failed   # silent rot (Wikipedia changed HTML)
+Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS down
+```
+
+The `cache:DATE` vs `embedded:DATE` source token tells you whether the in-process list is from the auto-refresh path or the binary's compiled-in fallback. The bracketed `refresh:<state>` suffix appears only when something needs attention.
+
+## Where state lives
+
+- `~/.local/bin/ibkr` — installed binary; `.bak` carries the immediately-prior version.
+- `~/.cache/ibkr/spx-members/sp500-members.json` — runtime-refreshed members file.
+- `~/.cache/ibkr/update/` — install-time scratch space (downloaded tarball, lock file).
+- `~/.config/ibkr/config.toml` — optional persistent config (see [config reference](../reference/config.md)).
+
+All under `$XDG_CACHE_HOME` / `$XDG_CONFIG_HOME` when set; the paths above are the fallback.
+
+## Reference
+
+- [Configuration reference](../reference/config.md) — every TOML field and `IBKR_*` env var.
+- [Design rationale](../design/ibkr-update-and-members-refresh.md) — why the env var is symmetric, why the cache file is in `~/.cache/`, why `.bak` is one step back.
