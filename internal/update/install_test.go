@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -321,18 +322,18 @@ func TestAcquireLock_ConcurrentGoroutines(t *testing.T) {
 	defer holder.Release()
 
 	var wg sync.WaitGroup
-	var contended int32
+	var contended atomic.Int32
 	for range 4 {
 		wg.Go(func() {
 			_, err := AcquireLock(dir)
 			if errors.Is(err, ErrInstallInProgress) {
-				contended++
+				contended.Add(1)
 			}
 		})
 	}
 	wg.Wait()
-	if contended != 4 {
-		t.Fatalf("contention count = %d, want 4", contended)
+	if got := contended.Load(); got != 4 {
+		t.Fatalf("contention count = %d, want 4", got)
 	}
 }
 
