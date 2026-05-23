@@ -376,19 +376,26 @@ func TestCleanupOnSignal_SignalExits(t *testing.T) {
 }
 
 // TestRunInstall_EndToEnd exercises the full pipeline against a fake
-// GitHub release server. Verifies that download + verify + extract +
-// install all chain together and produce a binary at DestPath.
+// GitHub release server. Verifies that download + verify-sig + verify
+// + extract + install all chain together and produce a binary at
+// DestPath. SHA256SUMS is signed with a throwaway test key swapped
+// in for the maintainer's embedded key.
 func TestRunInstall_EndToEnd(t *testing.T) {
 	// Sequential — t.Setenv below requires non-parallel.
+	signer := newTestSigner(t)
+	useTestKey(t, signer)
 
 	// Build a synthetic release: one valid tarball, one SHA256SUMS
-	// listing its hash.
+	// listing its hash, one detached signature over SHA256SUMS.
 	tarball := buildTarball(t, elfHeader)
 	assetName := "ibkr-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + ".tar.gz"
 	sums := hashHex(tarball) + "  " + assetName + "\n"
+	sumsSig := signer.SignDetachedArmored(t, []byte(sums))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.asc"):
+			_, _ = w.Write(sumsSig)
 		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
 			_, _ = w.Write([]byte(sums))
 		case strings.HasSuffix(r.URL.Path, assetName):
@@ -408,6 +415,7 @@ func TestRunInstall_EndToEnd(t *testing.T) {
 		TagName: "v9.9.9",
 		Assets: []Asset{
 			{Name: "SHA256SUMS", URL: srv.URL + "/SHA256SUMS"},
+			{Name: "SHA256SUMS.asc", URL: srv.URL + "/SHA256SUMS.asc"},
 			{Name: assetName, URL: srv.URL + "/" + assetName},
 		},
 	}
@@ -437,16 +445,24 @@ func TestRunInstall_EndToEnd(t *testing.T) {
 // TestRunInstall_ShaMismatchLeavesPriorIntact verifies the design's
 // "prior binary intact on failure" invariant: when the SHA mismatch
 // fires, the install bails BEFORE the rename so any existing binary
-// at DestPath stays untouched.
+// at DestPath stays untouched. The wrong-SHA SHA256SUMS is still
+// validly signed — this exercises "downloaded the wrong tarball"
+// rather than "tampered SHA256SUMS" (which is the signature-fail
+// path covered separately).
 func TestRunInstall_ShaMismatchLeavesPriorIntact(t *testing.T) {
 	// Sequential — t.Setenv below requires non-parallel.
+	signer := newTestSigner(t)
+	useTestKey(t, signer)
 
 	tarball := buildTarball(t, elfHeader)
 	assetName := "ibkr-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + ".tar.gz"
 	wrongSums := strings.Repeat("00", 32) + "  " + assetName + "\n"
+	wrongSumsSig := signer.SignDetachedArmored(t, []byte(wrongSums))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.asc"):
+			_, _ = w.Write(wrongSumsSig)
 		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
 			_, _ = w.Write([]byte(wrongSums))
 		case strings.HasSuffix(r.URL.Path, assetName):
@@ -469,12 +485,16 @@ func TestRunInstall_ShaMismatchLeavesPriorIntact(t *testing.T) {
 		TagName: "v9.9.9",
 		Assets: []Asset{
 			{Name: "SHA256SUMS", URL: srv.URL + "/SHA256SUMS"},
+			{Name: "SHA256SUMS.asc", URL: srv.URL + "/SHA256SUMS.asc"},
 			{Name: assetName, URL: srv.URL + "/" + assetName},
 		},
 	}
-	plan, _ := PlanFor(rel)
+	plan, err := PlanFor(rel)
+	if err != nil {
+		t.Fatalf("PlanFor: %v", err)
+	}
 
-	err := RunInstall(context.Background(), plan)
+	err = RunInstall(context.Background(), plan)
 	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("RunInstall err = %v, want 'checksum mismatch'", err)
 	}
@@ -485,6 +505,96 @@ func TestRunInstall_ShaMismatchLeavesPriorIntact(t *testing.T) {
 	}
 	if string(got) != "PRIOR" {
 		t.Fatalf("prior contents = %q, want 'PRIOR'", got)
+	}
+}
+
+// TestRunInstall_TamperedSumsRejected verifies the signing layer's
+// core promise: if SHA256SUMS is modified after signing — even if the
+// tarball's SHA in the modified file matches the served tarball — the
+// signature check fails and the install bails with the prior binary
+// intact.
+func TestRunInstall_TamperedSumsRejected(t *testing.T) {
+	signer := newTestSigner(t)
+	useTestKey(t, signer)
+
+	tarball := buildTarball(t, elfHeader)
+	assetName := "ibkr-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + ".tar.gz"
+	// Original SHA256SUMS the maintainer would sign.
+	realSums := []byte(hashHex(tarball) + "  " + assetName + "\n")
+	sig := signer.SignDetachedArmored(t, realSums)
+	// Tampered SHA256SUMS served to the client — signature was made
+	// over realSums, so verification against tamperedSums must fail.
+	tamperedSums := []byte(strings.ReplaceAll(string(realSums), assetName, "evil-"+assetName))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.asc"):
+			_, _ = w.Write(sig)
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
+			_, _ = w.Write(tamperedSums)
+		case strings.HasSuffix(r.URL.Path, assetName):
+			_, _ = w.Write(tarball)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cacheDir := t.TempDir()
+	installDir := t.TempDir()
+	t.Setenv("IBKR_INSTALL_DIR", installDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	priorPath := filepath.Join(installDir, "ibkr")
+	writeFile(t, priorPath, []byte("PRIOR"))
+
+	rel := &Release{
+		TagName: "v9.9.9",
+		Assets: []Asset{
+			{Name: "SHA256SUMS", URL: srv.URL + "/SHA256SUMS"},
+			{Name: "SHA256SUMS.asc", URL: srv.URL + "/SHA256SUMS.asc"},
+			{Name: assetName, URL: srv.URL + "/" + assetName},
+		},
+	}
+	plan, err := PlanFor(rel)
+	if err != nil {
+		t.Fatalf("PlanFor: %v", err)
+	}
+	err = RunInstall(context.Background(), plan)
+	if err == nil {
+		t.Fatalf("RunInstall accepted tampered SHA256SUMS")
+	}
+	if !errors.Is(err, ErrSignatureInvalid) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrSignatureInvalid)", err)
+	}
+	// Prior binary must be untouched.
+	got, err := os.ReadFile(priorPath)
+	if err != nil {
+		t.Fatalf("read prior: %v", err)
+	}
+	if string(got) != "PRIOR" {
+		t.Fatalf("prior contents = %q, want 'PRIOR' (sig-fail must not touch prior binary)", got)
+	}
+}
+
+// TestPlanFor_MissingSignatureRejected covers the upstream guard: a
+// release that doesn't publish SHA256SUMS.asc must be refused at
+// plan-build time, before any download.
+func TestPlanFor_MissingSignatureRejected(t *testing.T) {
+	assetName := "ibkr-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + ".tar.gz"
+	rel := &Release{
+		TagName: "v9.9.9",
+		Assets: []Asset{
+			{Name: "SHA256SUMS", URL: "http://example.invalid/SHA256SUMS"},
+			{Name: assetName, URL: "http://example.invalid/" + assetName},
+		},
+	}
+	_, err := PlanFor(rel)
+	if err == nil {
+		t.Fatalf("PlanFor accepted release without SHA256SUMS.asc")
+	}
+	if !errors.Is(err, ErrSignatureMissing) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrSignatureMissing)", err)
 	}
 }
 

@@ -19,6 +19,7 @@ func fakeFetch(tag string) fetchFunc {
 			TagName: tag,
 			Assets: []update.Asset{
 				{Name: "SHA256SUMS", URL: "https://example/SHA256SUMS"},
+				{Name: "SHA256SUMS.asc", URL: "https://example/SHA256SUMS.asc"},
 				{Name: "ibkr-" + tag + "-darwin-arm64.tar.gz", URL: "https://example/darwin-arm64"},
 				{Name: "ibkr-" + tag + "-darwin-amd64.tar.gz", URL: "https://example/darwin-amd64"},
 				{Name: "ibkr-" + tag + "-linux-amd64.tar.gz", URL: "https://example/linux-amd64"},

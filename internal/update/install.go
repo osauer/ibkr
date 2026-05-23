@@ -79,6 +79,29 @@ func AcquireLock(cacheDir string) (*xdgcache.Lock, error) {
 	return lock, nil
 }
 
+// VerifySignature verifies that sumsSigPath is a valid PGP detached
+// signature over sumsPath, produced by the embedded release-signing key.
+// Returns nil on success; ErrSignatureInvalid (wrapped with the openpgp
+// failure reason) on any mismatch.
+//
+// MUST run BEFORE VerifyChecksum: without this, a same-release attacker
+// could swap both SHA256SUMS and the tarball and the SHA check alone
+// would still pass. Signing SHA256SUMS is what binds the published hash
+// list to a key the attacker doesn't have.
+func VerifySignature(sumsPath, sumsSigPath string) error {
+	signed, err := os.Open(sumsPath)
+	if err != nil {
+		return fmt.Errorf("open SHA256SUMS: %w", err)
+	}
+	defer signed.Close()
+	sig, err := os.Open(sumsSigPath)
+	if err != nil {
+		return fmt.Errorf("open SHA256SUMS.asc: %w", err)
+	}
+	defer sig.Close()
+	return VerifyDetachedSignature(signed, sig)
+}
+
 // VerifyChecksum reads SHA256SUMS (one `<sha>  <filename>` line per
 // asset), looks up assetName, and compares against the SHA256 of the
 // file at tarballPath. Returns nil on match.
@@ -383,17 +406,25 @@ type Plan struct {
 	CacheDir    string // ~/.cache/ibkr/update/
 	TarballPath string // CacheDir/<asset>.tar.gz
 	SumsPath    string // CacheDir/SHA256SUMS
+	SumsSigPath string // CacheDir/SHA256SUMS.asc (PGP detached signature)
 	ExtractDir  string // CacheDir/extract/
 	InstallDir  string // $IBKR_INSTALL_DIR or ~/.local/bin
 	DestPath    string // InstallDir/ibkr
 	AssetName   string // <asset>.tar.gz (used for SHA lookup)
 	AssetURL    string // GitHub asset URL
 	SumsURL     string // SHA256SUMS asset URL
+	SumsSigURL  string // SHA256SUMS.asc asset URL
 }
 
 // PlanFor builds a Plan for the given release on the current host. The
 // caller has already confirmed the release has an asset for this host;
 // this is structure-only, no I/O.
+//
+// SHA256SUMS.asc is required: a release without a PGP signature is
+// refused, full stop. The trust model is "every shipped binary verifies
+// the next release via the embedded maintainer key" — relaxing this to
+// "skip when missing" would silently downgrade trust on every install
+// that happened to land between a signing breakage and its fix.
 func PlanFor(rel *Release) (*Plan, error) {
 	assetName, assetURL, ok := rel.AssetForHost()
 	if !ok {
@@ -404,6 +435,11 @@ func PlanFor(rel *Release) (*Plan, error) {
 		return nil, errors.New("release is missing SHA256SUMS asset")
 	}
 	_ = sumsName
+	sigName, sigURL, ok := rel.SHA256SUMSSigAsset()
+	if !ok {
+		return nil, fmt.Errorf("%w (release predates signing or signing step failed in the release pipeline)", ErrSignatureMissing)
+	}
+	_ = sigName
 	cacheDir, err := CacheDir()
 	if err != nil {
 		return nil, err
@@ -416,12 +452,14 @@ func PlanFor(rel *Release) (*Plan, error) {
 		CacheDir:    cacheDir,
 		TarballPath: filepath.Join(cacheDir, assetName),
 		SumsPath:    filepath.Join(cacheDir, "SHA256SUMS"),
+		SumsSigPath: filepath.Join(cacheDir, "SHA256SUMS.asc"),
 		ExtractDir:  filepath.Join(cacheDir, "extract"),
 		InstallDir:  installDir,
 		DestPath:    filepath.Join(installDir, "ibkr"),
 		AssetName:   assetName,
 		AssetURL:    assetURL,
 		SumsURL:     sumsURL,
+		SumsSigURL:  sigURL,
 	}, nil
 }
 
@@ -447,11 +485,20 @@ func RunInstall(ctx context.Context, plan *Plan) error {
 	// Signal-handler cleanup. Tempfiles get removed on Ctrl-C, on
 	// SIGTERM (e.g. systemd timer killing the process), and on the
 	// happy-path defer below.
-	cleanup := CleanupOnSignal(plan.TarballPath, plan.SumsPath, plan.ExtractDir)
+	cleanup := CleanupOnSignal(plan.TarballPath, plan.SumsPath, plan.SumsSigPath, plan.ExtractDir)
 	defer cleanup()
 
 	if err := DownloadAsset(ctx, plan.SumsURL, plan.SumsPath); err != nil {
 		return fmt.Errorf("download SHA256SUMS: %w", err)
+	}
+	if err := DownloadAsset(ctx, plan.SumsSigURL, plan.SumsSigPath); err != nil {
+		return fmt.Errorf("download SHA256SUMS.asc: %w", err)
+	}
+	// Signature MUST verify before we trust SHA256SUMS — without this
+	// step, an attacker who could swap both files past the same
+	// HTTPS endpoint would still pass the SHA check.
+	if err := VerifySignature(plan.SumsPath, plan.SumsSigPath); err != nil {
+		return err
 	}
 	if err := DownloadAsset(ctx, plan.AssetURL, plan.TarballPath); err != nil {
 		return fmt.Errorf("download tarball: %w", err)

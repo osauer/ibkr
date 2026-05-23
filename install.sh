@@ -95,9 +95,46 @@ SUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"
 tmp=$(mktemp -d -t ibkr-install.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
+SIG_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS.asc"
+EXPECTED_FP="D98426D48FED85EFA33904694D922A4F922B7D7D"
+
 step "Downloading $TARBALL..."
 curl -fSL --progress-bar -o "$tmp/$TARBALL" "$TARBALL_URL"
 curl -fsSL -o "$tmp/SHA256SUMS" "$SUMS_URL"
+# .asc is best-effort during bootstrap — releases from v1.0.0 onward
+# publish it, earlier ones don't. We don't fail when missing; subsequent
+# `ibkr update` calls run against the binary's embedded key and DO fail
+# closed on missing signature.
+curl -fsSL -o "$tmp/SHA256SUMS.asc" "$SIG_URL" 2>/dev/null || true
+
+# --- verify PGP signature (best-effort during bootstrap) --------------------
+# The bootstrap installer can't carry the maintainer's pubkey embedded
+# (you're downloading the binary that *would* carry it), so this leg is
+# advisory: when both gpg and SHA256SUMS.asc are available, verify; on
+# success print a strong banner so paranoid users can see it; on failure
+# abort. When either is missing, fall through to TLS-only trust.
+if [ -s "$tmp/SHA256SUMS.asc" ] && command -v gpg >/dev/null 2>&1; then
+	step "Verifying PGP signature on SHA256SUMS..."
+	# Fetch the key from github.com (HTTPS-rooted trust during bootstrap).
+	# A keyring lives in $tmp/gnupg so we don't pollute the user's keystore.
+	mkdir -p "$tmp/gnupg" && chmod 700 "$tmp/gnupg"
+	if curl -fsSL "https://github.com/osauer.gpg" | GNUPGHOME="$tmp/gnupg" gpg --batch --quiet --import 2>/dev/null; then
+		got_fp=$(GNUPGHOME="$tmp/gnupg" gpg --batch --with-colons --fingerprint 2>/dev/null \
+			| awk -F: '/^fpr:/{print $10; exit}')
+		if [ "$got_fp" != "$EXPECTED_FP" ]; then
+			fail "GitHub-served maintainer key fingerprint $got_fp != expected $EXPECTED_FP — aborting (SECURITY.md has the canonical fingerprint)"
+		fi
+		if GNUPGHOME="$tmp/gnupg" gpg --batch --verify "$tmp/SHA256SUMS.asc" "$tmp/SHA256SUMS" 2>/dev/null; then
+			info "PGP signature OK (maintainer key $EXPECTED_FP)"
+		else
+			fail "PGP signature on SHA256SUMS did not verify — aborting (tarball may be tampered)"
+		fi
+	else
+		warn "Couldn't fetch maintainer key from GitHub; falling through to TLS-only trust"
+	fi
+elif command -v gpg >/dev/null 2>&1; then
+	warn "Release predates SHA256SUMS.asc (pre-v1.0.0) — skipping PGP verification; future \`ibkr update\` calls will verify"
+fi
 
 # --- verify checksum ---------------------------------------------------------
 step "Verifying SHA-256 checksum..."

@@ -133,6 +133,19 @@ func (r *Release) SHA256SUMSAsset() (name, url string, ok bool) {
 	return "", "", false
 }
 
+// SHA256SUMSSigAsset returns the ASCII-armored PGP detached signature
+// (`SHA256SUMS.asc`) the release pipeline publishes alongside
+// SHA256SUMS. Required from v1.0.0 forward — a release without it is
+// refused by the install path (see PlanFor's doc).
+func (r *Release) SHA256SUMSSigAsset() (name, url string, ok bool) {
+	for _, a := range r.Assets {
+		if a.Name == "SHA256SUMS.asc" {
+			return a.Name, a.URL, true
+		}
+	}
+	return "", "", false
+}
+
 // DownloadAsset streams an HTTP GET to dest via xdgcache.WriteAtomic
 // — the bytes land in the destination's directory under a temp name
 // and are renamed into place only on a clean read. A failed read

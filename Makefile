@@ -353,6 +353,21 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 		rm -rf $$stage; \
 	done
 	@( cd $(DIST_DIR) && shasum -a 256 *.tar.gz > SHA256SUMS )
+	@command -v gpg >/dev/null 2>&1 || { \
+		echo "release-binaries: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
+		exit 1; \
+	}
+	@expected_fp=$$(awk '/ReleaseSigningKeyFingerprint =/{ gsub(/.*"|"/, ""); print; exit }' internal/update/keyring.go); \
+	gpg --list-secret-keys --with-colons "$$expected_fp" >/dev/null 2>&1 || { \
+		echo "release-binaries: signing key $$expected_fp is not in the local gpg keyring — see SECURITY.md for setup" >&2; \
+		exit 1; \
+	}; \
+	echo "==> signing SHA256SUMS with $$expected_fp"; \
+	( cd $(DIST_DIR) && gpg --batch --yes --local-user "$$expected_fp" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS ) || exit 1; \
+	( cd $(DIST_DIR) && gpg --verify SHA256SUMS.asc SHA256SUMS ) >/dev/null 2>&1 || { \
+		echo "release-binaries: produced SHA256SUMS.asc but it failed self-verify — aborting" >&2; \
+		exit 1; \
+	}
 	@echo
 	@echo "Built artefacts in $(DIST_DIR)/:"
 	@ls -la $(DIST_DIR)
@@ -372,6 +387,10 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 		echo "release-publish: $(DIST_DIR)/ missing or empty; run \`make release-binaries RELEASE_VERSION=$(RELEASE_VERSION)\` first" >&2; \
 		exit 1; \
 	fi
+	@if [ ! -f "$(DIST_DIR)/SHA256SUMS.asc" ]; then \
+		echo "release-publish: $(DIST_DIR)/SHA256SUMS.asc missing — `ibkr update` from v1.0+ requires the signature; re-run release-binaries" >&2; \
+		exit 1; \
+	fi
 	@command -v gh >/dev/null 2>&1 || { echo "release-publish: gh CLI not on PATH; brew install gh" >&2; exit 1; }
 	$(MAKE) changelog-lint RELEASE_VERSION=$(RELEASE_VERSION)
 	@notes=$$(mktemp -t ibkr-release-notes.XXXXXX) && \
@@ -381,7 +400,7 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 	awk -v ver='$(RELEASE_VERSION)' -v hf="$$highlights" '{ gsub(/__VERSION__/, ver) } /__HIGHLIGHTS__/{ while ((getline line < hf) > 0) print line; close(hf); next } { print }' .github/release-notes-template.md > $$notes && \
 	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " ") ; if(in_section){ next } } in_section' CHANGELOG.md >> $$notes && \
 	title="$${MESSAGE:-$(RELEASE_VERSION)}" && \
-	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/SHA256SUMS
+	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 
 changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
