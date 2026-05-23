@@ -83,22 +83,22 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 	fmt.Fprintf(out, "%s  spot %s  ·  expiry %s  ·  %d DTE%s\n",
 		c.Symbol, formatMoney(c.Spot), c.Expiry, c.DTE, env.suffixBadge(c.DataType))
 	fmt.Fprintln(out)
-	// Two-line header: line 1 spans CALLS over the four call columns and
-	// PUTS over the four put columns; line 2 right-aligns each label over
+	// Two-line header: line 1 spans CALLS over the five call columns and
+	// PUTS over the five put columns; line 2 right-aligns each label over
 	// its right-aligned data column. Both lines built from the same field
 	// widths as the data row so labels stay glued to the columns.
 	//
-	// The 27-char span covers 4 × 6-wide fields plus 3 single-space
-	// separators (6+1+6+1+6+1+6 = 27); CALLS/PUTS are right-padded inside
-	// that span so they sit roughly above the call/put leg blocks.
-	const groupSpan = 27
+	// The 34-char span covers 5 × 6-wide fields plus 4 single-space
+	// separators (6+1+6+1+6+1+6+1+6 = 34); CALLS/PUTS are right-padded
+	// inside that span so they sit roughly above the call/put leg blocks.
+	const groupSpan = 34
 	groupHeader := func(label string) string {
 		pad := (groupSpan - len(label)) / 2
 		return strings.Repeat(" ", pad) + label + strings.Repeat(" ", groupSpan-len(label)-pad)
 	}
 	groupLine := fmt.Sprintf("  %s   %s   %s", groupHeader("CALLS"), strings.Repeat(" ", 8), groupHeader("PUTS"))
-	colLine := fmt.Sprintf("  %6s %6s %6s %6s   %8s   %6s %6s %6s %6s",
-		"BID", "ASK", "LAST", "IV", "STRIKE", "BID", "ASK", "LAST", "IV")
+	colLine := fmt.Sprintf("  %6s %6s %6s %6s %6s   %8s   %6s %6s %6s %6s %6s",
+		"BID", "ASK", "LAST", "IV", "OI", "STRIKE", "BID", "ASK", "LAST", "IV", "OI")
 	fmt.Fprintln(out, env.dim(groupLine))
 	fmt.Fprintln(out, env.dim(colLine))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(colLine))))
@@ -112,10 +112,10 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 			strike = env.bold(strike)
 			marker = " ← ATM"
 		}
-		fmt.Fprintf(out, "  %s %s %s %s   %s   %s %s %s %s%s\n",
-			fmt2(s.CallBid), fmt2(s.CallAsk), fmt2(s.CallLast), fmtPct(s.CallIV),
+		fmt.Fprintf(out, "  %s %s %s %s %s   %s   %s %s %s %s %s%s\n",
+			fmt2(s.CallBid), fmt2(s.CallAsk), fmt2(s.CallLast), fmtPct(s.CallIV), fmtOICell(s.CallOI),
 			strike,
-			fmt2(s.PutBid), fmt2(s.PutAsk), fmt2(s.PutLast), fmtPct(s.PutIV),
+			fmt2(s.PutBid), fmt2(s.PutAsk), fmt2(s.PutLast), fmtPct(s.PutIV), fmtOICell(s.PutOI),
 			marker)
 	}
 	fmt.Fprintln(out)
@@ -247,6 +247,41 @@ func fmtPct(p *float64) string {
 // em-dash, because 0 carries information.
 func fmtDTE(dte int) string {
 	return fmt.Sprintf("%4d", dte)
+}
+
+// fmtOI renders an open-interest count compactly: small numbers as-is,
+// thousands as "1.2K"/"45K", millions as "1.2M"/"12M". 0 (and negatives,
+// which should never happen but are treated as "no data") render as an
+// em-dash so empty cells match how zero bid/ask render in the same table.
+// IBKR delivers OI via tick types 27/28 best-effort — off-hours or
+// illiquid strikes commonly arrive as 0, and the renderer treats that
+// identically to "never delivered".
+func fmtOI(oi int64) string {
+	if oi <= 0 {
+		return "—"
+	}
+	switch {
+	case oi < 1000:
+		return fmt.Sprintf("%d", oi)
+	case oi < 10_000:
+		return fmt.Sprintf("%.1fK", float64(oi)/1000)
+	case oi < 1_000_000:
+		return fmt.Sprintf("%dK", oi/1000)
+	case oi < 10_000_000:
+		return fmt.Sprintf("%.1fM", float64(oi)/1_000_000)
+	default:
+		return fmt.Sprintf("%dM", oi/1_000_000)
+	}
+}
+
+// fmtOICell wraps fmtOI for the chain table cell: 6-col right-aligned,
+// em-dash placeholder when nil. Mirrors fmt2/fmtPct's pointer-aware
+// pattern so the renderer call site stays symmetric.
+func fmtOICell(oi *int64) string {
+	if oi == nil || *oi <= 0 {
+		return padDash(6)
+	}
+	return fmt.Sprintf("%6s", fmtOI(*oi))
 }
 
 // fmtImpliedMove renders the 1-σ expected dollar move and its percent of

@@ -462,6 +462,7 @@ func mergeStrikeSide(dst, src *rpc.ChainStrike, right string) {
 		dst.CallLast = src.CallLast
 		dst.CallIV = src.CallIV
 		dst.CallDelta = src.CallDelta
+		dst.CallOI = src.CallOI
 		return
 	}
 	dst.PutBid = src.PutBid
@@ -469,6 +470,7 @@ func mergeStrikeSide(dst, src *rpc.ChainStrike, right string) {
 	dst.PutLast = src.PutLast
 	dst.PutIV = src.PutIV
 	dst.PutDelta = src.PutDelta
+	dst.PutOI = src.PutOI
 }
 
 func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStrike, symbol, expiryYMD string, strike float64, right string) {
@@ -533,6 +535,18 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		d := g.Delta
 		delta = &d
 	}
+	// Opportunistic OI read off the same subscription. Tick types 27
+	// (callOpenInterest) and 28 (putOpenInterest) land on the cached
+	// MarketData.OpenInt — same pattern gamma uses
+	// (internal/daemon/gamma_zero_compute.go:352-357). May be zero off-
+	// hours or for illiquid strikes; nil-vs-zero distinction stays on
+	// the wire so renderers can differentiate "not delivered" from
+	// "genuinely no open interest".
+	var oi *int64
+	if d, ok := c.GetMarketData()[key]; ok && d.OpenInt > 0 {
+		v := d.OpenInt
+		oi = &v
+	}
 	if right == "C" {
 		if bid > 0 {
 			v := bid
@@ -551,6 +565,7 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 			row.CallIV = &v
 		}
 		row.CallDelta = delta
+		row.CallOI = oi
 		return
 	}
 	if bid > 0 {
@@ -570,4 +585,5 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		row.PutIV = &v
 	}
 	row.PutDelta = delta
+	row.PutOI = oi
 }

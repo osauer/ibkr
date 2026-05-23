@@ -347,8 +347,8 @@ goes away.
     {
       "strike": 200.0,
       "is_atm": false,
-      "call_bid": 12.80, "call_ask": 13.05, "call_last": 12.90, "call_iv": null,
-      "put_bid": 1.85, "put_ask": 1.92, "put_last": 1.88, "put_iv": null
+      "call_bid": 12.80, "call_ask": 13.05, "call_last": 12.90, "call_iv": null, "call_oi": 18420,
+      "put_bid": 1.85, "put_ask": 1.92, "put_last": 1.88, "put_iv": null, "put_oi": 9215
     }
   ]
 }
@@ -357,6 +357,14 @@ goes away.
 The `is_atm: true` row is the strike closest to spot. Greeks are populated
 only when IBKR delivers them; per-leg quotes may be `null` when the option
 contract cannot be resolved without conID hydration.
+
+Per-leg fields:
+
+- `call_oi`, `put_oi` — option open interest (int64), best-effort from
+  tick types 27 (`callOpenInterest`) and 28 (`putOpenInterest`) on the
+  same per-leg subscription that drives bid/ask/IV. `null` when the
+  gateway didn't deliver the tick within the chain fill budget — common
+  off-hours or for illiquid wing strikes. Never zero-substituted.
 
 ## chain-expiries
 
