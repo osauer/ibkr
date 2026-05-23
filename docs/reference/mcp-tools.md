@@ -8,19 +8,19 @@ These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-deskt
 
 ## `ibkr_status`
 
-Daemon + gateway health snapshot: connection state, account, market-data type, server version. Run this first when troubleshooting.
+Daemon + gateway health snapshot: connection state, account, market-data type (live/frozen/delayed), server version, members-list source, last-error. Run this first when troubleshooting connectivity ("why is data missing / stale / wrong-account?"). NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own.
 
 *No parameters.*
 
 ## `ibkr_account`
 
-Account summary: net liquidation, buying power, cash, margin — all in base currency. Includes daily_pnl (start-of-trading-day to now), with daily_pnl_unrealized and daily_pnl_realized breakdown when the gateway provides them — these are distinct from session-running unrealized/realized totals. For multi-currency accounts, also returns currency_exposure: one row per non-base currency holding with net liquidation in that currency, gateway-reported exchange rate, and the base-currency conversion. Useful for attributing P&L between underlying moves and FX moves.
+Account-level financials: net liquidation, buying power, cash, margin — all in base currency. Use when the question is about *the account as a whole* ("how much cash?", "how much margin am I using?", "what's today's P&L?"). Includes daily_pnl (start-of-trading-day to now), with daily_pnl_unrealized and daily_pnl_realized breakdown when the gateway provides them — these are distinct from session-running unrealized/realized totals. For multi-currency accounts, also returns currency_exposure: one row per non-base currency holding with net liquidation in that currency, gateway-reported exchange rate, and the base-currency conversion. Useful for attributing P&L between underlying moves and FX moves. NOT for per-position detail — use `ibkr_positions` to see what you actually own.
 
 *No parameters.*
 
 ## `ibkr_positions`
 
-Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Each row carries unrealized_pnl (session-running) and daily_pnl (start-of-trading-day to now, from IBKR's reqPnLSingle stream). daily_pnl is null when the daemon hasn't yet pre-warmed that contract's subscription or the account isn't entitled; never zero-substituted. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy.
+Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Use when the question is about *what you own* ("show me my positions", "what's my exposure to AAPL?", "how much delta do I have?"). Each row carries unrealized_pnl (session-running) and daily_pnl (start-of-trading-day to now, from IBKR's reqPnLSingle stream). daily_pnl is null when the daemon hasn't yet pre-warmed that contract's subscription or the account isn't entitled; never zero-substituted. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy. NOT for cash/margin totals (use `ibkr_account`) and NOT for live quotes on symbols you don't hold (use `ibkr_quote`).
 
 **Parameters:**
 
@@ -31,7 +31,7 @@ Open positions: stocks and options separated, plus a per-underlying grouping wit
 
 ## `ibkr_quote`
 
-Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and IV per symbol.
+Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and ATM IV per symbol. Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"). NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
 
 **Parameters:**
 
@@ -56,14 +56,14 @@ Option chain. Omit `expiry` to get the expiry list (with ATM IV, DTE, and 1-σ i
 
 ## `ibkr_history`
 
-Daily OHLCV bars for a symbol. Non-trading days are skipped, so the row count is typically smaller than `days`.
+Daily OHLCV bars for an equity / ETF symbol. Use for trend / moving-average / lookback questions ("is AAPL above its 50-DMA?", "what's the 90-day range?"). Non-trading days are skipped, so the row count is typically smaller than `days`. NOT for intraday bars (not exposed today), NOT for options (use `ibkr_chain`), NOT for the live current price (use `ibkr_quote`).
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `days` | integer | no | calendar lookback (default 90) |
-| `symbol` | string | **yes** | ticker symbol |
+| `days` | integer | no | calendar-day lookback (default 90); the returned row count is smaller because non-trading days are skipped |
+| `symbol` | string | **yes** | equity / ETF ticker, case-insensitive (e.g. "AAPL", "spy") |
 
 ## `ibkr_scan`
 
@@ -91,7 +91,7 @@ Discover the scanner catalog this IBKR gateway supports: every scanCode (the `ty
 
 ## `ibkr_breadth`
 
-S&P 500 market-breadth readings for the risk-regime dashboard. Returns three readings every call: `pct_above_50dma` (the percentage of S&P 500 constituents trading above their 50-day SMA — the tactical signal), `pct_above_200dma` (the slower companion that catches cyclical tops cleanly), and `new_highs_today`/`new_lows_today` (constituent counts of names making fresh 52-week highs/lows), plus the derived `net_new_highs_pct`. The classic narrow-rally pattern — SPX near highs with `net_new_highs_pct` near zero or negative — fires when a few mega-caps carry the index while the median name is rolling over. IBKR does not redistribute S&P DJI's S5FI or the equivalent breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (method: `constituent-fanout-50/200dma-hl`). A once-daily refresh post-close (16:35 ET) slides each name's 200-bar window forward and updates a 252-bar rolling max/min; readers see a cached snapshot. **Cold start (no cache yet) takes ~60 min** — IBKR's historical-data pacing limit caps the fan-out at ~6 names/min sustained, so the response carries `state: "computing"` until the cache is built. Pulling 200 bars per constituent instead of 50 doesn't cost more requests; the pacing limit is per-request, not per-bar, so the cold-start budget is unchanged. After cold-start the cache persists across daemon restarts and every subsequent call is instant. Threshold derivation (green/yellow/red) is intentionally left to the consumer; the spec calls those bands user-tunable. Suggested bands: 50-DMA — `>55` green / `40-55` yellow / `<40` with SPX at highs red. 200-DMA — `>60` green / `40-60` yellow / `<40` red (calibrated to the post-Mag-7 era; StockCharts' 70/30 default fires red far too often).
+S&P 500 market-breadth readings for the risk-regime dashboard. Use for questions about the *market's internals* — "how many S&P names are above their 50-DMA?", "is this a narrow rally?", "what's the new-high/new-low spread?". S&P 500 constituents only — NDX, RUT, sector-specific, or single-stock breadth are NOT supported. Returns three readings every call: `pct_above_50dma` (the percentage of S&P 500 constituents trading above their 50-day SMA — the tactical signal), `pct_above_200dma` (the slower companion that catches cyclical tops cleanly), and `new_highs_today`/`new_lows_today` (constituent counts of names making fresh 52-week highs/lows), plus the derived `net_new_highs_pct`. The classic narrow-rally pattern — SPX near highs with `net_new_highs_pct` near zero or negative — fires when a few mega-caps carry the index while the median name is rolling over. IBKR does not redistribute S&P DJI's S5FI or the equivalent breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (method: `constituent-fanout-50/200dma-hl`). A once-daily refresh post-close (16:35 ET) slides each name's 200-bar window forward and updates a 252-bar rolling max/min; readers see a cached snapshot. **Cold start (no cache yet) takes ~60 min** — IBKR's historical-data pacing limit caps the fan-out at ~6 names/min sustained, so the response carries `state: "computing"` until the cache is built. Pulling 200 bars per constituent instead of 50 doesn't cost more requests; the pacing limit is per-request, not per-bar, so the cold-start budget is unchanged. After cold-start the cache persists across daemon restarts and every subsequent call is instant. Threshold derivation (green/yellow/red) is intentionally left to the consumer; the spec calls those bands user-tunable. Suggested bands: 50-DMA — `>55` green / `40-55` yellow / `<40` with SPX at highs red. 200-DMA — `>60` green / `40-60` yellow / `<40` red (calibrated to the post-Mag-7 era; StockCharts' 70/30 default fires red far too often).
 
 **Parameters:**
 
