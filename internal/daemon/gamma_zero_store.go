@@ -123,6 +123,9 @@ func (s *gammaZeroStore) Load(scope string, nyNow time.Time) (*rpc.GammaZeroComp
 	if env.Result.Method != env.Method {
 		return nil, nil
 	}
+	if env.Method != gammaMethodToken {
+		return nil, nil
+	}
 	return env.Result, nil
 }
 
@@ -162,6 +165,9 @@ func (s *gammaZeroStore) LoadStale(scope string) (*rpc.GammaZeroComputed, error)
 		return nil, nil
 	}
 	if env.Result.Method != env.Method {
+		return nil, nil
+	}
+	if env.Method != gammaMethodToken {
 		return nil, nil
 	}
 	return env.Result, nil

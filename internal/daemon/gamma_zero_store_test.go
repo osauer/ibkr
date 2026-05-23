@@ -255,6 +255,51 @@ func TestGammaZeroStore_MethodMismatch(t *testing.T) {
 	}
 }
 
+// TestGammaZeroStore_StalerMethodGate confirms a persisted file from
+// a prior methodology era (envelope.Method matches its own result, but
+// neither matches the current gammaMethodToken) is rejected on Load
+// and LoadStale. Without this gate, a v2 cache survives a v3 daemon
+// boot and the renderer serves v2-shape data labelled as the current
+// method — silent semantic drift across a release.
+func TestGammaZeroStore_StalerMethodGate(t *testing.T) {
+	dir := t.TempDir()
+	store := newGammaZeroStore(dir)
+	now := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
+
+	priorToken := "perfiliev-bs-sweep-v2-stickymoneyness"
+	if priorToken == gammaMethodToken {
+		t.Fatalf("priorToken must differ from current gammaMethodToken; update fixture")
+	}
+	result := helperGammaResult(now)
+	result.Method = priorToken
+	env := gammaZeroPersistEnvelope{
+		Version:    currentGammaPersistVersion,
+		SessionKey: nySessionKey(now),
+		Scope:      rpc.GammaZeroScopeCombined,
+		Method:     priorToken,
+		Result:     result,
+	}
+	if err := writeTestEnvelope(dir, rpc.GammaZeroScopeCombined, env); err != nil {
+		t.Fatalf("seed envelope: %v", err)
+	}
+
+	got, err := store.Load(rpc.GammaZeroScopeCombined, now)
+	if err != nil {
+		t.Errorf("Load: prior-era method should return nil-nil, got err: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Load: prior-era method should return nil, got %v", got)
+	}
+
+	stale, err := store.LoadStale(rpc.GammaZeroScopeCombined)
+	if err != nil {
+		t.Errorf("LoadStale: prior-era method should return nil-nil, got err: %v", err)
+	}
+	if stale != nil {
+		t.Errorf("LoadStale: prior-era method should return nil, got %v", stale)
+	}
+}
+
 // TestGammaZeroStore_AtomicReplace confirms Save replaces an existing
 // file in place and leaves no orphan temp files in the dir.
 func TestGammaZeroStore_AtomicReplace(t *testing.T) {
