@@ -10,6 +10,34 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.1 — 2026-05-23 23:05 CEST
+
+### What's new
+
+- **Read-only hardening.** The default Go library build now refuses order-writing methods with `pkg/ibkr.ErrTradingDisabled` before any socket write. Only downstream forks built explicitly with `-tags trading` can reach the raw order encoder; the shipped daemon/CLI/MCP/plugin remain read-only.
+- Option quote snapshots now request real IBKR option contracts. `ibkr quote SPY 260619 C 600` sends an `OPT` subscription with `expiry=20260619`, `right=C`, and `strike=600` instead of treating the option as a synthetic stock symbol. Option streaming is rejected with a clear message until that path has a proper shared-subscription implementation.
+- Release/update polish: `go install` binaries now pass the embedded release version through update checks, daemon status, and MCP metadata; installer replacement stages inside the target directory with the prior binary still live until the final rename; release notes and MCP gamma docs now describe the v3 horizon split correctly.
+
+### Changed
+
+- `make release-binaries` stamps release artifacts with the tag commit timestamp instead of wall-clock build time, making rebuilt binaries deterministic on the same Go/toolchain pair.
+- `make release` now builds and signs release artifacts before pushing the public binary tag. A build/signing failure can leave only a local tag, which the target removes automatically before exiting.
+- GitHub release notes now append the changelog entry without duplicating the `### What's new` section already promoted into the release header.
+- README and SECURITY wording now describe the v1 stable support/read-only policy instead of the old pre-1.0 policy.
+
+### Fixed
+
+- `ibkr quote SYM YYMMDD C|P STRIKE` now routes through the daemon's option quote path, resolves the option contract, subscribes to the option market-data line, and returns bid/ask/last/prev-close/IV fields when IBKR delivers them within the snapshot timeout.
+- `ibkr quote ... --watch` for option-shaped arguments now fails before dialing the daemon with `option streaming is not supported yet`, rather than streaming a made-up stock symbol.
+- `cmd/ibkr` now uses Go module BuildInfo as the effective runtime version for `ibkr update`, daemon startup, MCP server metadata, and daemon version-skew warnings. This fixes `go install github.com/osauer/ibkr/cmd/ibkr@vX.Y.Z` binaries reporting the right version in `ibkr version` but still behaving like `dev` elsewhere.
+- The self-updater no longer moves the live binary out of the way before it knows the replacement can be renamed into the install directory. It copies the verified binary into the destination directory first, hard-links the prior binary to `.bak`, then performs one same-filesystem atomic rename.
+- MCP `ibkr_gamma` / `ibkr_regime` tool descriptions and the regime gamma notes now name `bs-gamma-profile-v3-stickymoneyness-0dte-split` and the `zero_gamma_0dte` / `zero_gamma_1_7` / `zero_gamma_term` fields instead of stale v2 near/term wording.
+- Claude Code release notes now use the same plugin install command as the README: `/plugin install ibkr@ibkr`.
+
+### Security
+
+- Default `pkg/ibkr` builds now hard-fail all order-writing methods with `ErrTradingDisabled`. The daemon already refused order RPCs; this patch closes the separate public Go-library path so the published module matches the read-only v1 promise.
+
 ## v1.0.0 — 2026-05-23 22:19 CEST
 
 ### What's new

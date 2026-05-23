@@ -337,7 +337,8 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 		exit 1; \
 	fi
 	$(eval RELEASE_COMMIT := $(shell git rev-parse $(RELEASE_VERSION)^{commit}))
-	$(eval RELEASE_LDFLAGS := $(STRIP_LDFLAGS) -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(DATE))
+	$(eval RELEASE_DATE := $(shell git show -s --format=%cI $(RELEASE_VERSION)^{commit}))
+	$(eval RELEASE_LDFLAGS := $(STRIP_LDFLAGS) -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(RELEASE_DATE))
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)
 	@for target in $(RELEASE_TARGETS); do \
@@ -398,7 +399,7 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 	trap 'rm -f $$notes $$highlights' EXIT && \
 	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ if(in_ver) exit; in_ver = ($$0 ~ "^## "ver" "); next } in_ver && /^### What.s new$$/{ in_new=1; next } in_ver && in_new && /^###/{ exit } in_new' CHANGELOG.md > $$highlights && \
 	awk -v ver='$(RELEASE_VERSION)' -v hf="$$highlights" '{ gsub(/__VERSION__/, ver) } /__HIGHLIGHTS__/{ while ((getline line < hf) > 0) print line; close(hf); next } { print }' .github/release-notes-template.md > $$notes && \
-	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " ") ; if(in_section){ next } } in_section' CHANGELOG.md >> $$notes && \
+	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " "); skip=0; if(in_section){ next } } in_section && /^### What.s new$$/{ skip=1; next } in_section && skip && /^### /{ skip=0 } in_section && !skip' CHANGELOG.md >> $$notes && \
 	title="$${MESSAGE:-$(RELEASE_VERSION)}" && \
 	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 
@@ -521,10 +522,13 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	$(MAKE) smoke-only SMOKE_STRICT=1
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
+	@$(MAKE) release-binaries RELEASE_VERSION=$(RELEASE_VERSION) || { \
+		git tag -d $(RELEASE_VERSION) >/dev/null 2>&1; \
+		exit 1; \
+	}
 	git push origin $(RELEASE_VERSION)
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	claude plugin tag . --push --message "$$msg"
-	$(MAKE) release-binaries RELEASE_VERSION=$(RELEASE_VERSION)
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	$(MAKE) release-publish RELEASE_VERSION=$(RELEASE_VERSION) MESSAGE="$$msg"
 	@echo

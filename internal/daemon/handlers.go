@@ -989,6 +989,9 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	if isOptionQuoteContract(p.Contract) {
+		return s.handleOptionQuoteSnapshot(ctx, c, p, timeout)
+	}
 
 	sym := normSym(p.Contract.Symbol)
 	q := &rpc.Quote{
@@ -1049,6 +1052,111 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	q.AsOf = time.Now()
 
 	return q, nil
+}
+
+func isOptionQuoteContract(c rpc.ContractParams) bool {
+	return strings.EqualFold(strings.TrimSpace(c.SecType), "OPT") ||
+		strings.TrimSpace(c.Expiry) != "" ||
+		strings.TrimSpace(c.Right) != "" ||
+		c.Strike > 0
+}
+
+func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Connector, p rpc.QuoteSnapshotParams, timeout time.Duration) (*rpc.Quote, error) {
+	contract, err := normaliseOptionQuoteContract(p.Contract)
+	if err != nil {
+		return nil, err
+	}
+	sym := contract.Symbol
+
+	// Hold the underlying while the option line is open. IBKR's model-
+	// computation ticks are more reliable when the underlier is also
+	// subscribed, and the hold shares any concurrent stock quote/watch line.
+	releaseUnder := func() {}
+	if release, err := s.subs.Hold(ctx, sym); err == nil {
+		releaseUnder = release
+	} else if errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+		return nil, err
+	} else {
+		s.logger.Debugf("quote.option underlying hold %s failed: %v", sym, err)
+	}
+	defer releaseUnder()
+
+	key, _, err := c.SubscribeOption(ctx, sym, sym, contract.Expiry, contract.Strike, contract.Right)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.UnsubscribeMarketData(key) }()
+
+	q := &rpc.Quote{
+		Symbol:   key,
+		Contract: contract,
+		IVStatus: "unavailable",
+		AsOf:     time.Now(),
+	}
+	if err := pollUntilWithReject(ctx, time.Now().Add(timeout), c.SubscriptionRejectCh(key), key, func() bool {
+		if d, ok := c.GetMarketData()[key]; ok {
+			q.Bid = ptrIfPos(d.Bid)
+			q.Ask = ptrIfPos(d.Ask)
+			q.Last = ptrIfPos(d.Last)
+			q.PrevClose = ptrIfPos(d.Close)
+			q.BidSize = ptrIfPos(d.BidSize)
+			q.AskSize = ptrIfPos(d.AskSize)
+			q.Volume = ptrIfPos(d.Volume)
+		}
+		if bid, ask, ok := c.GetOptionQuoteBidAsk(key); ok {
+			q.Bid = ptrIfPos(bid)
+			q.Ask = ptrIfPos(ask)
+		}
+		if prev, ok := c.GetOptionPrevClose(key); ok {
+			q.PrevClose = ptrIfPos(prev)
+		}
+		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
+			q.IV = &iv
+			q.IVStatus = "model"
+		}
+		if q.DataType == "" {
+			q.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(key))
+		}
+		return q.Bid != nil || q.Ask != nil || q.Last != nil || q.PrevClose != nil || q.IV != nil
+	}); err != nil && err != context.DeadlineExceeded {
+		return nil, err
+	}
+	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
+	q.AsOf = time.Now()
+	return q, nil
+}
+
+func normaliseOptionQuoteContract(in rpc.ContractParams) (rpc.ContractParams, error) {
+	sym := normSym(in.Symbol)
+	if sym == "" {
+		return rpc.ContractParams{}, errBadRequest("contract.symbol required")
+	}
+	expiry := strings.TrimSpace(in.Expiry)
+	if len(expiry) != 8 {
+		return rpc.ContractParams{}, errBadRequest("option contract.expiry must be YYYYMMDD")
+	}
+	if _, err := time.Parse("20060102", expiry); err != nil {
+		return rpc.ContractParams{}, errBadRequest("option contract.expiry must be YYYYMMDD")
+	}
+	right := strings.ToUpper(strings.TrimSpace(in.Right))
+	if right != "C" && right != "P" {
+		return rpc.ContractParams{}, errBadRequest("option contract.right must be C or P")
+	}
+	if in.Strike <= 0 {
+		return rpc.ContractParams{}, errBadRequest("option contract.strike must be positive")
+	}
+	out := in
+	out.Symbol = sym
+	out.SecType = "OPT"
+	out.Expiry = expiry
+	out.Right = right
+	if out.Exchange == "" {
+		out.Exchange = "SMART"
+	}
+	if out.Currency == "" {
+		out.Currency = "USD"
+	}
+	return out, nil
 }
 
 // handleCancel terminates a streaming subscription previously started via

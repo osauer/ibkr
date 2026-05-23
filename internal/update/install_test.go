@@ -231,6 +231,9 @@ func TestInstall_AtomicRenameAndBak(t *testing.T) {
 	if string(bak) != "prior-binary" {
 		t.Fatalf(".bak contents = %q, want 'prior-binary'", bak)
 	}
+	if got, err := os.ReadFile(src); err != nil || string(got) != "new-binary" {
+		t.Fatalf("source staging binary should remain for outer cleanup, got %q err=%v", got, err)
+	}
 }
 
 func TestInstall_FirstInstallNoPriorBak(t *testing.T) {

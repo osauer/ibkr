@@ -30,7 +30,7 @@ func runQuote(ctx context.Context, env *Env, args []string) int {
 	//   ibkr quote AAPL,MSFT[,...]            → list of stock snapshots
 	//   ibkr quote AAPL YYMMDD C|P STRIKE     → single option snapshot
 	if len(rest) == 4 {
-		return runQuoteOption(ctx, env, rest, *jsonOut, *watch, *rate, *timeout)
+		return runQuoteOption(ctx, env, rest, *jsonOut, *watch, *timeout)
 	}
 	if len(rest) > 1 {
 		return fail(env, "quote: unexpected positional args; use comma-separated symbols")
@@ -202,7 +202,7 @@ func ivStatus(iv *float64) string {
 	return fmt.Sprintf("%6.1f%%", *iv*100)
 }
 
-func runQuoteOption(ctx context.Context, env *Env, rest []string, jsonOut, watch bool, rate, timeout time.Duration) int {
+func runQuoteOption(ctx context.Context, env *Env, rest []string, jsonOut, watch bool, timeout time.Duration) int {
 	symbol := strings.ToUpper(rest[0])
 	expiry := strings.TrimSpace(rest[1]) // YYMMDD
 	right := strings.ToUpper(rest[2])    // C | P
@@ -211,17 +211,56 @@ func runQuoteOption(ctx context.Context, env *Env, rest []string, jsonOut, watch
 	if err != nil {
 		return fail(env, "quote: invalid strike %q", strikeStr)
 	}
+	if strike <= 0 {
+		return fail(env, "quote: strike must be positive")
+	}
 	if right != "C" && right != "P" {
 		return fail(env, "quote: option side must be C or P")
 	}
-	if len(expiry) != 6 {
-		return fail(env, "quote: expiry must be YYMMDD")
+	expiryYMD, err := optionExpiryYMD(expiry)
+	if err != nil {
+		return fail(env, "quote: %v", err)
 	}
-	full := fmt.Sprintf("%s_%s%s%.0f", symbol, expiry, right, strike)
 	if watch {
-		return runQuoteWatch(ctx, env, full, jsonOut, rate)
+		return fail(env, "quote: option streaming is not supported yet; omit --watch for an option snapshot")
 	}
-	return runQuoteSnapshotList(ctx, env, []string{full}, jsonOut, timeout)
+
+	var q rpc.Quote
+	params := rpc.QuoteSnapshotParams{
+		Contract: rpc.ContractParams{
+			Symbol:   symbol,
+			SecType:  "OPT",
+			Exchange: "SMART",
+			Currency: "USD",
+			Expiry:   expiryYMD,
+			Strike:   strike,
+			Right:    right,
+		},
+		TimeoutMs: int(timeout.Milliseconds()),
+	}
+	if err := env.Conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
+		return fail(env, "quote: %v", err)
+	}
+	if jsonOut {
+		return printJSON(env, q)
+	}
+	return renderQuoteSnapshotText(env, []rpc.Quote{q})
+}
+
+func optionExpiryYMD(expiry string) (string, error) {
+	if len(expiry) != 6 {
+		return "", fmt.Errorf("expiry must be YYMMDD")
+	}
+	for _, r := range expiry {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("expiry must be YYMMDD")
+		}
+	}
+	t, err := time.Parse("060102", expiry)
+	if err != nil {
+		return "", fmt.Errorf("expiry must be YYMMDD")
+	}
+	return t.Format("20060102"), nil
 }
 
 func runQuoteWatch(ctx context.Context, env *Env, sym string, jsonOut bool, rate time.Duration) int {

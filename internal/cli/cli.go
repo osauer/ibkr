@@ -126,7 +126,7 @@ func init() {
 		{"status", "Daemon + gateway health (run this first if anything fails)", "ibkr status [--json]", runStatus},
 		{"account", "Account summary snapshot (NLV, BP, cash, margin, daily P&L)", "ibkr account [--watch --rate 1s] [--json]", runAccount},
 		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch --rate 1s] [--json]", runPositions},
-		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] | ibkr quote SYM YYMMDD C|P STRIKE [--watch --rate 250ms] [--json]", runQuote},
+		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] [--watch --rate 250ms] | ibkr quote SYM YYMMDD C|P STRIKE [--json]", runQuote},
 		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"breadth", "S&P 500 breadth — % above 50/200-DMA + new-highs/new-lows, computed locally from constituent fan-out (~60 min cold)", "ibkr breadth [--days 30] [--json]", runBreadth},

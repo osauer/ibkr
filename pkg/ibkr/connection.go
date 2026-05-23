@@ -3328,6 +3328,9 @@ func (c *Connection) GetMarketDataType(reqID int) int {
 
 // PlaceOrder sends a placeOrder request to IBKR using the v45+ wire format.
 func (c *Connection) PlaceOrder(order *IBKROrder) error {
+	if !tradingEnabled {
+		return ErrTradingDisabled
+	}
 	if order == nil {
 		return fmt.Errorf("order is nil")
 	}
@@ -3415,6 +3418,9 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 
 // CancelOrder sends a cancelOrder request for an existing order ID.
 func (c *Connection) CancelOrder(orderID int) error {
+	if !tradingEnabled {
+		return ErrTradingDisabled
+	}
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}

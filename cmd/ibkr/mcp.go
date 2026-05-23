@@ -39,7 +39,7 @@ func runMCP(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	srv := mcp.NewServer(conn, version)
+	srv := mcp.NewServer(conn, effectiveVersion())
 	// Streaming subscriptions need their own daemon connections because
 	// dial.Conn.Stream holds the per-conn mutex for the stream's lifetime.
 	// The dialer reuses the same socket path the unary conn was opened

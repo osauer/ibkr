@@ -35,7 +35,7 @@ plugin_semver=""
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
 	plugin_semver=$(jq -r '.version // empty' "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null)
 fi
-[ -z "$plugin_semver" ] && plugin_semver="0.27.10"
+[ -z "$plugin_semver" ] && plugin_semver="1.0.1"
 
 bin_mm=$(printf '%s' "$bin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')
 plg_mm=$(printf '%s' "$plugin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')

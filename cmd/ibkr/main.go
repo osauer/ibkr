@@ -30,6 +30,7 @@ var (
 )
 
 func main() {
+	runtimeVersion := effectiveVersion()
 	args := os.Args[1:]
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		cli.PrintUsage(os.Stdout)
@@ -79,7 +80,7 @@ func main() {
 	if cmd == "update" {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
-		os.Exit(cli.RunUpdate(ctx, rest, version, os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(cli.RunUpdate(ctx, rest, runtimeVersion, os.Stdin, os.Stdout, os.Stderr))
 	}
 
 	color := cli.ShouldColor(os.Stdout)
@@ -117,7 +118,7 @@ func main() {
 	// only output is a stderr warning if the daemon was built from a
 	// different revision than this CLI binary.
 	if cmd != "status" {
-		warnIfDaemonVersionMismatch(conn, version)
+		warnIfDaemonVersionMismatch(conn, runtimeVersion)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

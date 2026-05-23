@@ -327,12 +327,15 @@ func StripQuarantine(path string) error {
 	return fmt.Errorf("strip quarantine from %s: %w (output: %s)", path, err, strings.TrimSpace(string(out)))
 }
 
-// Install atomically replaces destPath with srcBinary. The prior
-// binary is stashed as `destPath + ".bak"` (overwriting any existing
-// .bak — per design, .bak is the *immediately prior* binary, not
-// "before everything went wrong"). Atomic via os.Rename so a running
-// daemon keeps its prior inode and new invocations pick up the new
-// binary on next exec.
+// Install atomically replaces destPath with srcBinary. The prior binary is
+// stashed as `destPath + ".bak"` (overwriting any existing .bak — per design,
+// .bak is the *immediately prior* binary, not "before everything went wrong").
+//
+// The candidate is first copied into destPath's directory and chmodded there,
+// so the final os.Rename is same-filesystem and cannot fail with EXDEV after
+// the old binary has been touched. Existing installs are backed up with a hard
+// link before the final rename, so a failed rename leaves destPath pointing at
+// the prior inode instead of creating a no-binary window.
 //
 // The destination directory is created if missing — covers a fresh
 // install where ~/.local/bin/ doesn't exist yet.
@@ -341,26 +344,68 @@ func Install(srcBinary, destPath string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", destDir, err)
 	}
-	// Stash prior binary, if any. .bak is overwritten — there is
-	// exactly one slot of rollback history per design.
+	staged, err := copyBinaryIntoDir(srcBinary, destDir)
+	if err != nil {
+		return err
+	}
+	installed := false
+	defer func() {
+		if !installed {
+			_ = os.Remove(staged)
+		}
+	}()
+
+	// Stash prior binary, if any. .bak is overwritten — there is exactly one
+	// slot of rollback history per design.
 	if _, err := os.Stat(destPath); err == nil {
 		bak := destPath + ".bak"
-		// os.Rename overwrites on Unix when source and dest are on
-		// the same filesystem, which they always are here (both
-		// under destDir).
-		if err := os.Rename(destPath, bak); err != nil {
+		if err := os.Remove(bak); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove old backup %s: %w", bak, err)
+		}
+		if err := os.Link(destPath, bak); err != nil {
 			return fmt.Errorf("stash prior binary to %s: %w", bak, err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat %s: %w", destPath, err)
 	}
-	if err := os.Rename(srcBinary, destPath); err != nil {
-		return fmt.Errorf("install %s -> %s: %w", srcBinary, destPath, err)
+	if err := os.Rename(staged, destPath); err != nil {
+		return fmt.Errorf("install %s -> %s: %w", staged, destPath, err)
 	}
-	if err := os.Chmod(destPath, 0o755); err != nil {
-		return fmt.Errorf("chmod %s: %w", destPath, err)
-	}
+	installed = true
 	return nil
+}
+
+func copyBinaryIntoDir(srcBinary, destDir string) (string, error) {
+	in, err := os.Open(srcBinary)
+	if err != nil {
+		return "", fmt.Errorf("open extracted binary: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.CreateTemp(destDir, ".ibkr-update-*")
+	if err != nil {
+		return "", fmt.Errorf("create staging binary in %s: %w", destDir, err)
+	}
+	staged := out.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(staged)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return "", fmt.Errorf("copy extracted binary to staging path: %w", err)
+	}
+	if err := out.Chmod(0o755); err != nil {
+		_ = out.Close()
+		return "", fmt.Errorf("chmod staging binary: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("close staging binary: %w", err)
+	}
+	cleanup = false
+	return staged, nil
 }
 
 // CleanupOnSignal installs a SIGTERM/SIGINT handler that removes the

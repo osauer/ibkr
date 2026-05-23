@@ -43,7 +43,7 @@ sh install.sh
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Manual download**: pick a tarball from the Assets section below. Verify against `SHA256SUMS`.
 - **Cursor / Continue / Zed / other local MCP clients**: see [Pick your path](https://github.com/osauer/ibkr#claude-desktop-cursor-continue-zed) in the README for the JSON snippet (config file path differs per client).
-- **Claude Code**: `/plugin marketplace add osauer/ibkr` then `/plugin install ibkr@osauer-ibkr` inside any session.
+- **Claude Code**: `/plugin marketplace add osauer/ibkr` then `/plugin install ibkr@ibkr` inside any session.
 
 Windows isn't supported. The daemon uses Unix-only primitives (`setsid`, `flock`, AF_UNIX sockets). WSL works.
 

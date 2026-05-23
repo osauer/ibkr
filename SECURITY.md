@@ -24,7 +24,7 @@ This is a personal open-source project, not a funded program — responses are b
 
 ## Supported versions
 
-While `ibkr` is on the `0.x` line, only the latest minor version receives security fixes. A long-term-support backport policy will be defined at the `1.0` release.
+For the v1 stable line, only the latest minor release receives security fixes. Older v1 minors may receive a best-effort backport for a critical issue when the patch is low-risk; otherwise users should upgrade to the latest release.
 
 ## Scope
 

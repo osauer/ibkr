@@ -1,3 +1,5 @@
+//go:build trading
+
 package ibkr
 
 import (

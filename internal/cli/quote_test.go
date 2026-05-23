@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -338,5 +339,33 @@ func TestQuoteRenderer_StreamErrorBubbles(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "4.00") {
 		t.Fatalf("expected pending frame to flush before error return:\n%s", stdout.String())
+	}
+}
+
+func TestOptionExpiryYMD(t *testing.T) {
+	got, err := optionExpiryYMD("260619")
+	if err != nil {
+		t.Fatalf("optionExpiryYMD: %v", err)
+	}
+	if got != "20260619" {
+		t.Fatalf("optionExpiryYMD = %q, want 20260619", got)
+	}
+	if _, err := optionExpiryYMD("20260619"); err == nil {
+		t.Fatal("optionExpiryYMD accepted YYYYMMDD; CLI option shorthand must be YYMMDD")
+	}
+	if _, err := optionExpiryYMD("26x619"); err == nil {
+		t.Fatal("optionExpiryYMD accepted non-digits")
+	}
+}
+
+func TestQuoteOptionWatchRejectedBeforeDial(t *testing.T) {
+	var stderr bytes.Buffer
+	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &stderr}
+	code := Run(context.Background(), env, "quote", []string{"SPY", "260619", "C", "600", "--watch"})
+	if code == 0 {
+		t.Fatal("quote option --watch returned success")
+	}
+	if !strings.Contains(stderr.String(), "option streaming is not supported") {
+		t.Fatalf("stderr = %q, want unsupported option streaming message", stderr.String())
 	}
 }

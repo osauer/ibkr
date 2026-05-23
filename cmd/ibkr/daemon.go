@@ -73,7 +73,7 @@ func runDaemon(args []string) {
 	srv := daemon.New(daemon.Options{
 		Config:     resolved,
 		SocketPath: socketPath,
-		Version:    version,
+		Version:    effectiveVersion(),
 		Logger:     logger,
 	})
 	defer srv.Stop()

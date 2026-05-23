@@ -53,7 +53,7 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 
 - **Account snapshot.** NLV, buying power, cash, margin, available funds, gross position value, session unrealized/realized P&L, the margin cushion, and IBKR's start-of-trading-day Daily P&L (account-level) — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Margin accounts also get the look-ahead block (post-overnight-cycle projections of init/maint/available/excess), which catches "fine intraday, blown by 5pm" cases. Multi-currency accounts get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion.
 - **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. A `DAY P&L` column carries IBKR's per-conId start-of-trading-day delta (from `reqPnLSingle`) for both stocks and options — one consistent metric across the book. The column always renders; nil rows show em-dash so the field is discoverable on the first call. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name. `ibkr positions --watch` re-polls in place.
-- **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Options addressed as `SYM YYMMDD C|P STRIKE`. Streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
+- **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Option snapshots are addressed as `SYM YYMMDD C|P STRIKE`; option streaming is not exposed yet. Stock/ETF streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
 - **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid, with per-leg call/put OI alongside delta (em-dash off-hours when the options book is closed). JSON consumers see `call_oi` / `put_oi` on each `ChainStrike`. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
 - **Daily OHLCV history.** `ibkr history AAPL --days 30`.
 - **Scanners — preset or ad-hoc.** Seven built-in presets (`top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank`, `unusual-opt-vol`) covering direction, volume, opening gaps, and option-flow signals. `ibkr scan <preset>` for the shorthand; `ibkr scan --type SCANCODE --exchange LOCATIONCODE` for ad-hoc queries; `ibkr scan params [--instrument STK]` to dump the gateway's valid `scanCode` / `locationCode` catalog. Add your own presets in `config.toml`.
@@ -173,7 +173,7 @@ The wire between CLI and daemon has no version field today; the CLI prints a std
 
 ## Protocol coverage
 
-`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol — no Python bridge, no third-party dependencies on InteractiveBrokers source. The table below shows what's plumbed today. Wire ops with both a "read-side method" *and* a write-side counterpart (e.g. `placeOrder`) are exposed in the library but **refused at the daemon layer in v0.x** by a `//go:build !trading` stub; the binary cannot send them. The full per-method godoc lives in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
+`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol — no Python bridge, no third-party dependencies on InteractiveBrokers source. The table below shows what's plumbed today. Order-writing methods exist only for wire-format completeness and downstream forks: default builds return `pkg/ibkr.ErrTradingDisabled` before writing to the socket; intentionally order-capable forks must rebuild with `-tags trading`. The shipped daemon has its own order-dispatch guard, and the CLI/MCP/plugin expose no order surface. The full per-method godoc lives in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
 
 | Capability                       | Wire opcodes                                                              | Library entry point                                                | Status                |
 |----------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------------------|-----------------------|
@@ -187,7 +187,7 @@ The wire between CLI and daemon has no version field today; the CLI prints a std
 | Daily historical bars            | `reqHistoricalData` (20), `historicalData` (17)                           | `Connector.FetchHistoricalDailyBars`                               | ready                 |
 | Market scanner                   | `reqScannerSubscription` (22), `reqScannerParameters` (24)                | `Connector.RunScannerSubscription`, `RunScannerParameters`         | ready (v0.12)         |
 | Market-data type switch          | `reqMarketDataType` (59), `marketDataType` (58)                           | `Connector.SetMarketDataType`                                      | ready                 |
-| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.SubmitOrder`, `CancelOrder`                             | wire-ready, refused by daemon in v0.x |
+| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.SubmitOrder`, `CancelOrder`                             | disabled by default (`ErrTradingDisabled`); `-tags trading` only |
 | Real-time bars                   | `reqRealTimeBars` (50)                                                    | —                                                                  | not implemented       |
 | Market depth (L2)                | `reqMktDepth` (10), `reqMktDepthL2` (13)                                  | —                                                                  | not implemented       |
 | Fundamental data                 | `reqFundamentalData` (52)                                                 | —                                                                  | not implemented       |
@@ -262,14 +262,15 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 ## Safety
 
-`ibkr` is read-only in 0.x. Four independent layers refuse `order`, `trade`, `cancel`:
+`ibkr` is the stable read-only line. Five independent layers refuse `order`, `trade`, `cancel`:
 
-1. The daemon's order-handler dispatch returns `ErrTradingDisabled` for both `MethodOrderPlace` and `MethodOrderCancel` ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)). `pkg/ibkr` exposes order types and a wire-side `Connector.SubmitOrder` for library consumers, but no CLI subcommand reaches them.
-2. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies the verbs in `permissions.deny`.
-3. The plugin's `PreToolUse` hook hard-blocks the verb patterns and fails closed if `jq` is missing from PATH.
-4. A unit test in `internal/mcp` refuses to ship the MCP server with any tool whose name contains `order`, `trade`, `cancel`, `submit`, or `place`.
+1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from `Connection.PlaceOrder`, `Connection.CancelOrder`, `Connector.SubmitOrder`, and `Connector.CancelOrder` before any wire write. The raw encoder is available only to explicit downstream forks built with `-tags trading`.
+2. The daemon's order-handler dispatch returns `ErrTradingDisabled` for both `MethodOrderPlace` and `MethodOrderCancel` ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)).
+3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies the verbs in `permissions.deny`.
+4. The plugin's `PreToolUse` hook hard-blocks the verb patterns and fails closed if `jq` is missing from PATH.
+5. A unit test in `internal/mcp` refuses to ship the MCP server with any tool whose name contains `order`, `trade`, `cancel`, `submit`, or `place`.
 
-Per [semver](https://semver.org/#spec-item-4), 0.x releases may break compatibility between minor versions. 1.0 is reserved for the first stable read-only line.
+Per [semver](https://semver.org/), v1.x keeps the CLI/JSON/MCP read-only surfaces stable except for documented minor additions and patch fixes.
 
 ## Other install paths
 
@@ -278,7 +279,7 @@ Per [semver](https://semver.org/#spec-item-4), 0.x releases may break compatibil
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify against the bundled `SHA256SUMS`.
 - **Local build**: `git clone … && make install`.
-- **Reproducible builds**: release tarballs are built with `-trimpath -buildvcs=false` and stamp the version/commit/date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) produces byte-identical binaries — bring your own checksum and verify against the published `SHA256SUMS`.
+- **Reproducible builds**: release binaries are built with `-trimpath -buildvcs=false` and stamp the version, commit, and commit date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) should produce byte-identical binaries on the same Go/toolchain pair. The tarball checksum can still vary with tar/gzip metadata; verify downloaded release assets against the published `SHA256SUMS`.
 - **Upgrading from v1.0.0+**: `ibkr update` fetches the next stable release, SHA-verifies it, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.

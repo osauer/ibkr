@@ -56,7 +56,7 @@ type versionInfo struct {
 func collectVersionInfo(program string) versionInfo {
 	v := versionInfo{
 		Program:   program,
-		Version:   version,
+		Version:   effectiveVersion(),
 		Commit:    commit,
 		Built:     date,
 		GoVersion: runtime.Version(),
@@ -74,14 +74,6 @@ func collectVersionInfo(program string) versionInfo {
 	}
 
 	if bi, ok := debug.ReadBuildInfo(); ok {
-		// `go install github.com/osauer/ibkr/cmd/ibkr@vX.Y.Z` doesn't run
-		// the Makefile, so the -ldflags vars stay at their "dev" / "none"
-		// defaults. The Go module system embeds the resolved version in
-		// BuildInfo regardless — surface it so go-install users see the
-		// release tag instead of "dev".
-		if v.Version == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-			v.Version = bi.Main.Version
-		}
 		for _, s := range bi.Settings {
 			if s.Key == "vcs.modified" {
 				if s.Value == "true" {
@@ -101,6 +93,21 @@ func collectVersionInfo(program string) versionInfo {
 		}
 	}
 	return v
+}
+
+// effectiveVersion returns the runtime version other subcommands should
+// advertise to daemons, MCP clients, and the updater. `go install
+// github.com/osauer/ibkr/cmd/ibkr@vX.Y.Z` does not run the Makefile, so the
+// ldflags var remains "dev"; the Go module system still embeds the selected
+// release in BuildInfo.
+func effectiveVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return version
 }
 
 // shortCommit truncates a git sha to the conventional 7-char prefix

@@ -198,6 +198,28 @@ func TestComputeQuoteChange(t *testing.T) {
 	}
 }
 
+func TestNormaliseOptionQuoteContract(t *testing.T) {
+	t.Parallel()
+	got, err := normaliseOptionQuoteContract(rpc.ContractParams{
+		Symbol: "spy", Expiry: "20260619", Right: "c", Strike: 600,
+	})
+	if err != nil {
+		t.Fatalf("normaliseOptionQuoteContract: %v", err)
+	}
+	if got.Symbol != "SPY" || got.SecType != "OPT" || got.Exchange != "SMART" || got.Currency != "USD" || got.Right != "C" {
+		t.Fatalf("normalised contract = %+v", got)
+	}
+	for _, tc := range []rpc.ContractParams{
+		{Symbol: "SPY", Expiry: "260619", Right: "C", Strike: 600},
+		{Symbol: "SPY", Expiry: "20260619", Right: "X", Strike: 600},
+		{Symbol: "SPY", Expiry: "20260619", Right: "C", Strike: 0},
+	} {
+		if _, err := normaliseOptionQuoteContract(tc); err == nil {
+			t.Fatalf("normaliseOptionQuoteContract(%+v) returned nil error", tc)
+		}
+	}
+}
+
 // chain.expiries with an empty symbol must surface as bad_request, not
 // internal — the CLI relies on this to render a usage hint.
 func TestChainExpiriesEmptySymbolIsBadRequest(t *testing.T) {

@@ -1,10 +1,11 @@
 ---
 name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
-  about their IBKR account, positions, P&L, market quotes, option chains, daily price
-  history, running a market scan, sizing a planned trade by fixed-fractional risk, or
-  checking the market's risk regime (S&P 500 breadth, SPY dealer zero-gamma, the
-  five-indicator regime dashboard). Read-only — never attempts to place orders.
+  about their IBKR account, positions, P&L, market quotes, option chains (incl. per-leg
+  open interest), daily price history, running a market scan, sizing a planned trade by
+  fixed-fractional risk, or checking the market's risk regime (S&P 500 breadth, combined
+  SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the five-indicator
+  regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)

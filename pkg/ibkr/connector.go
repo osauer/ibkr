@@ -1654,6 +1654,9 @@ type RawOrder struct {
 
 // SubmitOrder submits an order to IBKR
 func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
+	if !tradingEnabled {
+		return ErrTradingDisabled
+	}
 	if !c.isConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -1741,6 +1744,9 @@ func multiplierToString(mult int) string {
 
 // CancelOrder cancels an open order by its internal ID
 func (c *Connector) CancelOrder(orderID int) error {
+	if !tradingEnabled {
+		return ErrTradingDisabled
+	}
 	if !c.isConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
