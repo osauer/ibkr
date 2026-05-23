@@ -30,14 +30,22 @@ const (
 	defaultSweepRangePct  = 0.15
 	defaultWorkerCount    = 4
 
-	// nearDTECutoffYears is the boundary between near and term gamma
-	// buckets — 7 days in fractional years. Picked to capture 0DTE
-	// through end-of-week (the high-velocity flow segment that's now
-	// ~59 % of 2025 SPX volume per Cboe Aug 2025), separating it from
-	// the monthly OPEX dynamics that dominate the term bucket.
-	// Hardcoded rather than parameterised on GammaZeroParams — it's a
-	// regime-meaningful boundary, not a tunable knob.
-	nearDTECutoffYears = 7.0 / 365.0
+	// Horizon bucket boundaries in fractional years.
+	//
+	// v3 split (M4): three buckets instead of v2's two —
+	//
+	//   0DTE      DTE == 0 in trading-class settlement years  ≈ 0
+	//   1-7 DTE   0 < DTE ≤ 7 days
+	//   term      DTE > 7 days
+	//
+	// Cboe 2025 data shows 0DTE = ~59% of SPX volume, so isolating it
+	// from the 1-7 weekly flow is the regime-meaningful split — lumping
+	// them together (v2's "near" bucket) muddied the signal.
+	//
+	// Hardcoded rather than parameterised on GammaZeroParams — these
+	// are regime-meaningful boundaries, not tunable knobs.
+	zeroDTECutoffYears = 1.0 / 365.0 // strictly-less-than: anything inside one calendar day is "0DTE"
+	nearDTECutoffYears = 7.0 / 365.0 // upper bound on the 1-7 bucket; >7 falls in term
 
 	// sweepPoints is the number of (spot, GEX) samples in the profile.
 	// 60 points across [0.85, 1.15] × spot ≈ 0.5 % per point, which
@@ -86,6 +94,15 @@ const (
 	// with an actionable error instead of grinding for minutes.
 	earlyAbortAfter = 30 * time.Second
 
+	// gammaMethodToken is the stable wire token consumers (renderers,
+	// cache method-mismatch gate) compare against to confirm the
+	// methodology. v3 carries two breaking changes from v2: horizon
+	// split is now 0DTE / 1-7 / >7 (was ≤7 / >7), and the per-leg
+	// snapshot gamma is BS-recomputed from captured IV rather than
+	// read from the gateway's optional Greeks tick (fixes a v2 race
+	// where IV-but-no-Greeks legs contributed 0 to GammaTotalAbs).
+	gammaMethodToken = "bs-gamma-profile-v3-stickymoneyness-0dte-split"
+
 	// MinLegCoverageFraction is the persist-or-not threshold: a
 	// compute whose successful-leg fraction falls below this is
 	// surfaced as an error (not a warning-flagged result), so the
@@ -112,6 +129,19 @@ const (
 	// enough signal to compute a meaningful γ-zero.
 	MinLegCoverageFraction = 0.2
 )
+
+// gammaMethodologyCitations is the short bibliography the compute
+// stamps on every result envelope. Surfaced via
+// GammaZeroComputed.MethodologyCitations so renderers can show the
+// citations alongside the headline numbers without consulting
+// out-of-band documentation. Order is significant: most relevant to
+// the headline first.
+var gammaMethodologyCitations = []string{
+	"Perfiliev (2022) — BS-sweep baseline",
+	"Derman / Daglish-Hull-Suo — sticky-moneyness skew dynamics",
+	"SqueezeMetrics (2017) — naive-sign GEX, deprecated 2022+",
+	"Cboe 2025 — 0DTE = ~59% of SPX volume",
+}
 
 // checkLegCoverage returns nil if the fan-out's leg-landing fraction
 // passes MinLegCoverageFraction; otherwise an error describing the
@@ -427,7 +457,7 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 // permissive MinLegCoverageFractionSPX (~0.05) are the off-hours
 // posture; see docs/design/gamma-spx-coverage.md §12.2.
 //
-// Methodology (perfiliev-bs-sweep-v1):
+// Methodology (bs-gamma-profile-v3-stickymoneyness-0dte-split):
 //
 //  1. Snapshot SPY spot. Refuse on stale (data_type != live and not
 //     empty-pending) — the compute is anchored on a single spot and a
@@ -777,38 +807,67 @@ func computeGammaZeroFor(
 	// (< 3 IV points, or degenerate solve) falls back to sticky-IV for
 	// that expiry alone — surfaced as "skew_fallback:YYYYMMDD" warning.
 	skewByExpiry, skewFitQuality, skewFallbacks := buildSkewCurves(legs, spot)
-	// Partition legs into near (DTE ≤ 7) and term (DTE > 7) buckets.
-	// The combined sweep stays the headline; the two bucket sweeps run
-	// alongside so the regime row can surface horizon agreement.
-	var nearLegs, termLegs []legData
+	// Partition legs into the v3 three-bucket horizon split:
+	//   0DTE   — DTE strictly inside one calendar day (the 09:30/16:00
+	//            settlement instant has not yet passed; selectExpirations
+	//            already filters past-settlement same-day listings).
+	//   1to7   — 0 < DTE ≤ 7 days (overnight through end-of-week).
+	//   term   — DTE > 7 days (monthly OPEX and quarterly horizons).
+	//
+	// Each bucket runs its own sweep; the regime row uses bucket
+	// agreement/divergence to surface horizon signal.
+	var zeroDTELegs, oneToSevenLegs, termLegs []legData
 	for _, l := range legs {
-		if l.dte <= nearDTECutoffYears {
-			nearLegs = append(nearLegs, l)
-		} else {
+		switch {
+		case l.dte < zeroDTECutoffYears:
+			zeroDTELegs = append(zeroDTELegs, l)
+		case l.dte <= nearDTECutoffYears:
+			oneToSevenLegs = append(oneToSevenLegs, l)
+		default:
 			termLegs = append(termLegs, l)
 		}
 	}
 
 	profile := sweepProfile(legs, spot, params.SweepRangePct, skewByExpiry)
-	profileNear := sweepProfile(nearLegs, spot, params.SweepRangePct, skewByExpiry)
+	profile0DTE := sweepProfile(zeroDTELegs, spot, params.SweepRangePct, skewByExpiry)
+	profile1to7 := sweepProfile(oneToSevenLegs, spot, params.SweepRangePct, skewByExpiry)
 	profileTerm := sweepProfile(termLegs, spot, params.SweepRangePct, skewByExpiry)
-	// At-spot aggregates: re-use the profile's snapshot bucket OR
-	// compute directly. We compute directly so the headline numbers
-	// don't depend on the sweep grid alignment.
+	// At-spot aggregate: Σ |Γ_i| × OI_i × multiplier × spot² over all
+	// legs, sign-agnostic by construction. v3 fix (B1): derive the
+	// per-leg gamma via Black-Scholes from the captured IV at snapshot
+	// spot rather than reading the gateway's optional Greeks tick. The
+	// v2 code path read r.Gamma which the productionLegFetcher only
+	// populated when GetOptionGreeks returned a non-empty row — but
+	// the IV-poll loop exits as soon as IV > 0, so an IV-arrived-but-
+	// Greeks-haven't race left gammaAtSnapshot = 0 and every such leg
+	// contributed 0 to the magnitude. Off-hours, where the model-tick
+	// engine is bursty, this cancelled out most legs and the sum
+	// landed at $0. Recomputing via bsGamma matches the sweep's recipe
+	// at the snapshot point (internally consistent) and is non-zero
+	// whenever IV > 0 — which is the OK-leg invariant.
 	gammaTotalAbs := 0.0
 	for _, l := range legs {
-		gammaTotalAbs += absGEX(l.gammaAtSnapshot, float64(l.oi), 100, spot)
+		γ := bsGamma(spot, l.strike, l.dte, l.iv, 0, 0)
+		gammaTotalAbs += absGEX(γ, float64(l.oi), 100, spot)
+	}
+	// Carry the snapshot-recomputed gamma onto each leg so
+	// rankTopStrikesByAbsGEX picks up the same value; otherwise the
+	// top-strikes table and the magnitude row would diverge for the
+	// same race-affected legs.
+	for i := range legs {
+		legs[i].gammaAtSnapshot = bsGamma(spot, legs[i].strike, legs[i].dte, legs[i].iv, 0, 0)
 	}
 	progress.Store(90)
 
-	// 8. Zero crossings: combined + near + term.
+	// 8. Zero crossings: combined + 0DTE + 1-7 + term.
 	zg, gammaSign := findZeroCrossing(profile)
 	var gapPct *float64
 	if zg != nil {
 		v := (spot - *zg) / *zg * 100
 		gapPct = &v
 	}
-	zgNear, signNear := findZeroCrossing(profileNear)
+	zg0DTE, sign0DTE := findZeroCrossing(profile0DTE)
+	zg1to7, sign1to7 := findZeroCrossing(profile1to7)
 	zgTerm, signTerm := findZeroCrossing(profileTerm)
 
 	// 9. Top strikes by magnitude.
@@ -835,8 +894,11 @@ func computeGammaZeroFor(
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")
 	}
-	if len(nearLegs) == 0 {
-		warnings = append(warnings, "near_no_legs")
+	if len(zeroDTELegs) == 0 {
+		warnings = append(warnings, "0dte_no_legs")
+	}
+	if len(oneToSevenLegs) == 0 {
+		warnings = append(warnings, "1to7_no_legs")
 	}
 	if len(termLegs) == 0 {
 		warnings = append(warnings, "term_no_legs")
@@ -862,8 +924,11 @@ func computeGammaZeroFor(
 	// the explicit "no_data" sign on the row so the consumer can
 	// distinguish "no crossing but the sweep had legs" (positive /
 	// negative) from "no legs to sweep" (no_data).
-	if len(nearLegs) == 0 {
-		signNear = "no_data"
+	if len(zeroDTELegs) == 0 {
+		sign0DTE = "no_data"
+	}
+	if len(oneToSevenLegs) == 0 {
+		sign1to7 = "no_data"
 	}
 	if len(termLegs) == 0 {
 		signTerm = "no_data"
@@ -882,38 +947,65 @@ func computeGammaZeroFor(
 		topConcentrationPct = topStrikes[0].AbsGEX / gammaTotalAbs * 100
 	}
 
+	// Back-compat aliases for v2 consumers: ZeroGammaNear / ProfileNear /
+	// GammaSignNear / NearLegCount carry the merged ≤7-DTE bucket
+	// (0DTE ∪ 1-7) so renderers/caches written against v2 keep
+	// rendering a meaningful "near" headline. Sweep over the merged
+	// leg set so the crossing is computed on the same population a v2
+	// daemon would have produced — not derived from the two child
+	// crossings, which can disagree on whether a crossing exists.
+	mergedNearLegs := make([]legData, 0, len(zeroDTELegs)+len(oneToSevenLegs))
+	mergedNearLegs = append(mergedNearLegs, zeroDTELegs...)
+	mergedNearLegs = append(mergedNearLegs, oneToSevenLegs...)
+	profileNearDeprecated := sweepProfile(mergedNearLegs, spot, params.SweepRangePct, skewByExpiry)
+	zgNearDeprecated, signNearDeprecated := findZeroCrossing(profileNearDeprecated)
+	if len(mergedNearLegs) == 0 {
+		signNearDeprecated = "no_data"
+	}
+
 	res := &rpc.GammaZeroComputed{
-		SpotUnderlying:      spot,
-		SpotAt:              spotAt,
-		ZeroGamma:           zg,
-		GapPct:              gapPct,
-		GammaSign:           gammaSign,
-		Profile:             profile,
-		ZeroGammaNear:       zgNear,
-		ProfileNear:         profileNear,
-		GammaSignNear:       signNear,
-		NearLegCount:        len(nearLegs),
-		ZeroGammaTerm:       zgTerm,
-		ProfileTerm:         profileTerm,
-		GammaSignTerm:       signTerm,
-		TermLegCount:        len(termLegs),
-		SkewModel:           skewModel,
-		SkewFitQuality:      skewFitQuality,
-		GammaTotalAbs:       gammaTotalAbs,
-		TopStrikes:          topStrikes,
-		TopConcentrationPct: topConcentrationPct,
-		SweepLowAbs:         spot * (1 - params.SweepRangePct),
-		SweepHighAbs:        spot * (1 + params.SweepRangePct),
-		Expirations:         pickedDatesFromPicked(picked),
-		LegCount:            len(legs),
-		DerivedIVLegs:       derivedCount,
-		Warnings:            warnings,
-		Params:              params,
-		Scope:               strings.ToLower(sym),
-		Source:              fmt.Sprintf("computed from IBKR %s option chain", sym),
-		Method:              "perfiliev-bs-sweep-v2-stickymoneyness",
-		AsOf:                now(),
-		DurationMS:          now().Sub(startWall).Milliseconds(),
+		SpotUnderlying:          spot,
+		SpotAt:                  spotAt,
+		ZeroGamma:               zg,
+		GapPct:                  gapPct,
+		GammaSign:               gammaSign,
+		Profile:                 profile,
+		ZeroGamma0DTE:           zg0DTE,
+		Profile0DTE:             profile0DTE,
+		GammaSign0DTE:           sign0DTE,
+		LegCount0DTE:            len(zeroDTELegs),
+		ZeroGamma1to7:           zg1to7,
+		Profile1to7:             profile1to7,
+		GammaSign1to7:           sign1to7,
+		LegCount1to7:            len(oneToSevenLegs),
+		ZeroGammaTerm:           zgTerm,
+		ProfileTerm:             profileTerm,
+		GammaSignTerm:           signTerm,
+		LegCountTerm:            len(termLegs),
+		ZeroGammaNear:           zgNearDeprecated,
+		ProfileNear:             profileNearDeprecated,
+		GammaSignNear:           signNearDeprecated,
+		NearLegCount:            len(mergedNearLegs),
+		TermLegCount:            len(termLegs),
+		SkewModel:               skewModel,
+		SkewFitQuality:          skewFitQuality,
+		GammaTotalAbs:           gammaTotalAbs,
+		GammaTotalAbsConvention: "sign-agnostic",
+		TopStrikes:              topStrikes,
+		TopConcentrationPct:     topConcentrationPct,
+		SweepLowAbs:             spot * (1 - params.SweepRangePct),
+		SweepHighAbs:            spot * (1 + params.SweepRangePct),
+		Expirations:             pickedDatesFromPicked(picked),
+		LegCount:                len(legs),
+		DerivedIVLegs:           derivedCount,
+		Warnings:                warnings,
+		Params:                  params,
+		Scope:                   strings.ToLower(sym),
+		Source:                  fmt.Sprintf("computed from IBKR %s option chain", sym),
+		Method:                  gammaMethodToken,
+		MethodologyCitations:    gammaMethodologyCitations,
+		AsOf:                    now(),
+		DurationMS:              now().Sub(startWall).Milliseconds(),
 	}
 	progress.Store(100)
 	zeroGammaStr := "—"

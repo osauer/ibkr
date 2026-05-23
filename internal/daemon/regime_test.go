@@ -1062,3 +1062,45 @@ func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
 	}
 	close(fakeJob.done) // tidy up the synthetic computation
 }
+
+// TestClassifyHorizonAgreement_ThreeBucketSplit pins the v3 enum-set
+// the classifier returns over the new 0DTE / 1-7 / term horizon
+// split. The canonical actionable label is "diverge:0dte_vs_term"
+// (short-fuse flow disagrees with monthly positioning); the rest
+// describe agreement and partial-data cases.
+func TestClassifyHorizonAgreement_ThreeBucketSplit(t *testing.T) {
+	ptr := func(v float64) *float64 { return &v }
+	const spot = 5000.0
+	cases := []struct {
+		name string
+		zero *float64
+		one  *float64
+		term *float64
+		want string
+	}{
+		{"no_data_all_nil", nil, nil, nil, ""},
+		{"0dte_only", ptr(4900), nil, nil, "0dte_only"},
+		{"1to7_only", nil, ptr(4900), nil, "1to7_only"},
+		{"term_only", nil, nil, ptr(4900), "term_only"},
+		{"all_above", ptr(4800), ptr(4850), ptr(4900), "all_above"},
+		{"all_below", ptr(5100), ptr(5150), ptr(5200), "all_below"},
+		{"diverge_0dte_vs_term", ptr(4900), ptr(4950), ptr(5100), "diverge:0dte_vs_term"},
+		{"diverge_term_vs_0dte", ptr(5100), ptr(5050), ptr(4900), "diverge:0dte_vs_term"},
+		{"diverge_partial_1to7_alone_disagrees", ptr(4900), ptr(5100), ptr(4900), "diverge:partial"},
+		{"diverge_partial_two_only", ptr(4900), nil, ptr(5100), "diverge:0dte_vs_term"},
+		{"diverge_partial_1to7_term_only", nil, ptr(4900), ptr(5100), "diverge:partial"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &rpc.GammaZeroComputed{
+				SpotUnderlying: spot,
+				ZeroGamma0DTE:  tc.zero,
+				ZeroGamma1to7:  tc.one,
+				ZeroGammaTerm:  tc.term,
+			}
+			if got := classifyHorizonAgreement(c); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

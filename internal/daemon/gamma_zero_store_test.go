@@ -31,7 +31,7 @@ func helperGammaResult(asOf time.Time) *rpc.GammaZeroComputed {
 		GammaTotalAbs: 3.41e9,
 		Expirations:   []string{"2026-05-22", "2026-07-17", "2026-09-18"},
 		LegCount:      1040,
-		Method:        "perfiliev-bs-sweep-v2-stickymoneyness",
+		Method:        gammaMethodToken,
 		Source:        "computed from IBKR SPY option chain",
 		AsOf:          asOf,
 		DurationMS:    324000,
@@ -156,7 +156,7 @@ func TestGammaZeroStore_VersionMismatch(t *testing.T) {
 		Version:    99,
 		SessionKey: nySessionKey(now),
 		Scope:      rpc.GammaZeroScopeCombined,
-		Method:     "perfiliev-bs-sweep-v2-stickymoneyness",
+		Method:     gammaMethodToken,
 		Result:     helperGammaResult(now),
 	}
 	if err := writeTestEnvelope(dir, rpc.GammaZeroScopeCombined, env); err != nil {
@@ -209,7 +209,7 @@ func TestGammaZeroStore_ScopeMismatch(t *testing.T) {
 		Version:    currentGammaPersistVersion,
 		SessionKey: nySessionKey(now),
 		Scope:      rpc.GammaZeroScopeCombined, // wrong-shape envelope at this path
-		Method:     "perfiliev-bs-sweep-v2-stickymoneyness",
+		Method:     gammaMethodToken,
 		Result:     helperGammaResult(now),
 	}
 	if err := writeTestEnvelope(dir, rpc.GammaZeroScopeSPY, env); err != nil {
@@ -239,7 +239,7 @@ func TestGammaZeroStore_MethodMismatch(t *testing.T) {
 		Version:    currentGammaPersistVersion,
 		SessionKey: nySessionKey(now),
 		Scope:      rpc.GammaZeroScopeCombined,
-		Method:     "perfiliev-bs-sweep-v2-stickymoneyness",
+		Method:     gammaMethodToken,
 		Result:     result,
 	}
 	if err := writeTestEnvelope(dir, rpc.GammaZeroScopeCombined, env); err != nil {

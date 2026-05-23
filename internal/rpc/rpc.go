@@ -707,6 +707,13 @@ type GammaZeroComputed struct {
 	// a 1% underlying move, independent of any positioning assumption.
 	// Larger = market is more sensitive to dealer rebalancing.
 	GammaTotalAbs float64 `json:"gamma_total_abs"`
+	// GammaTotalAbsConvention names the sign-handling for GammaTotalAbs
+	// so downstream renderers can label it without re-deriving
+	// methodology. Today's value is "sign-agnostic" — every leg's
+	// magnitude |Γ|·OI·100·spot²·0.01 is summed unconditionally. This
+	// is the convention-free read the M2 methodology refresh promotes
+	// to co-primary alongside the signed γ-zero level.
+	GammaTotalAbsConvention string `json:"gamma_total_abs_convention,omitempty"`
 	// TopStrikes is the top-N strikes ranked by absolute gamma notional.
 	// Concentration here is more reliable than the signed ZeroGamma in
 	// regimes where the dealer-sign assumption may invert.
@@ -754,30 +761,65 @@ type GammaZeroComputed struct {
 	// gate (mirror of breadth's MinCoverageFraction=0.80 pattern).
 	Warnings []string `json:"warnings,omitempty"`
 
-	// ZeroGammaNear / ProfileNear / GammaSignNear / NearLegCount are the
-	// same headline triple computed over legs with DTE ≤ 7 days only
-	// (0DTE through end-of-week). Captures the dynamics dominated by
-	// short-dated SPX flow (0DTE ≈ 59 % of 2025 SPX volume). When near
-	// and term disagree, the disagreement IS the signal — the renderer
-	// surfaces it via HorizonAgreement on the regime row.
-	//
-	// Nil when no legs fell in the bucket (e.g. mid-Friday after the
-	// weekly expired and the 6 nearest expirations are all > 7 DTE);
-	// GammaSignNear="no_data" + a "near_no_legs" warning communicate
+	// ZeroGamma0DTE / Profile0DTE / GammaSign0DTE / LegCount0DTE are the
+	// same headline triple computed over legs with DTE == 0 only —
+	// same-day expiries before their settlement cutoff. Captures the
+	// short-fuse flow that Cboe's 2025 data shows is ~59% of SPX
+	// volume, isolated from the longer-dated weeklies and monthlies.
+	// Nil when no 0DTE legs fell in the bucket (e.g. mid-week after
+	// Monday's daily settled, before the next daily lists) OR when
+	// the sweep over those legs had no crossing inside the ±10% band.
+	// GammaSign0DTE="no_data" plus a "0dte_no_legs" warning communicate
 	// the empty-bucket case.
+	ZeroGamma0DTE *float64            `json:"zero_gamma_0dte,omitempty"`
+	Profile0DTE   []GammaProfilePoint `json:"profile_0dte,omitempty"`
+	GammaSign0DTE string              `json:"gamma_sign_0dte,omitempty"`
+	LegCount0DTE  int                 `json:"leg_count_0dte,omitempty"`
+
+	// ZeroGamma1to7 / Profile1to7 / GammaSign1to7 / LegCount1to7 are the
+	// matching triple for legs with 0 < DTE ≤ 7 days — overnight
+	// through one calendar week. Captures end-of-week dynamics
+	// (weeklies, EOW Friday flow) without commingling with the 0DTE
+	// term that swamps the bucket on a third Friday.
+	ZeroGamma1to7 *float64            `json:"zero_gamma_1to7,omitempty"`
+	Profile1to7   []GammaProfilePoint `json:"profile_1to7,omitempty"`
+	GammaSign1to7 string              `json:"gamma_sign_1to7,omitempty"`
+	LegCount1to7  int                 `json:"leg_count_1to7,omitempty"`
+
+	// ZeroGammaTerm / ProfileTerm / GammaSignTerm / LegCountTerm are the
+	// matching triple for legs with DTE > 7 days — monthly OPEX and
+	// quarterly horizons. Slower-moving than the two near buckets;
+	// dominated by collar/structured-product positioning rather than
+	// dealer-flow speed.
+	ZeroGammaTerm *float64            `json:"zero_gamma_term,omitempty"`
+	ProfileTerm   []GammaProfilePoint `json:"profile_term,omitempty"`
+	GammaSignTerm string              `json:"gamma_sign_term,omitempty"`
+	LegCountTerm  int                 `json:"leg_count_term,omitempty"`
+
+	// ZeroGammaNear / ProfileNear / GammaSignNear / NearLegCount /
+	// TermLegCount are the v2 two-bucket projection of the v3
+	// three-bucket split. ZeroGammaNear / ProfileNear / GammaSignNear /
+	// NearLegCount carry the merged ≤7-DTE bucket (= 0DTE ∪ 1-7);
+	// TermLegCount mirrors LegCountTerm. Surfaced for back-compat with
+	// renderers and on-disk caches written by v2 daemons.
+	//
+	// v2-COMPAT ALIASES (slated for removal post-1.0): new code should
+	// read ZeroGamma0DTE / ZeroGamma1to7 / ZeroGammaTerm and the
+	// matching profile / sign / leg-count fields. Not using the
+	// `Deprecated:` godoc form so existing CLI/MCP consumers don't trip
+	// staticcheck SA1019 ahead of the workstream-B/D migration.
 	ZeroGammaNear *float64            `json:"zero_gamma_near,omitempty"`
 	ProfileNear   []GammaProfilePoint `json:"profile_near,omitempty"`
 	GammaSignNear string              `json:"gamma_sign_near,omitempty"`
 	NearLegCount  int                 `json:"near_leg_count,omitempty"`
-
-	// ZeroGammaTerm / ProfileTerm / GammaSignTerm / TermLegCount are the
-	// matching triple for legs with DTE > 7 days. Slower-moving than the
-	// near bucket; closer to the canonical "monthly OPEX" gamma
-	// positioning. Symmetric handling to the near fields.
-	ZeroGammaTerm *float64            `json:"zero_gamma_term,omitempty"`
-	ProfileTerm   []GammaProfilePoint `json:"profile_term,omitempty"`
-	GammaSignTerm string              `json:"gamma_sign_term,omitempty"`
 	TermLegCount  int                 `json:"term_leg_count,omitempty"`
+
+	// MethodologyCitations is the short bibliography backing the
+	// methodology disclosure. Each entry is a single line of the form
+	// "Author (Year) — short claim". Surfaced on the result envelope so
+	// renderers can show the citations alongside the headline numbers
+	// without the user having to consult out-of-band documentation.
+	MethodologyCitations []string `json:"methodology_citations,omitempty"`
 
 	// SkewModel names the IV model used during the sweep. v2 cutover:
 	// "sticky-moneyness-v1" means a quadratic skew curve in
@@ -798,13 +840,21 @@ type GammaZeroComputed struct {
 	Params GammaZeroParams `json:"params"`
 	// Source identifies the data provenance for the headline numbers.
 	Source string `json:"source"`
-	// Method is a short stable token for the computation path. v2:
-	// "perfiliev-bs-sweep-v2-stickymoneyness". The method bump signals
-	// to consumers that the dealer-gamma number is now sticky-moneyness-
-	// derived (a per-expiry quadratic skew curve fitted at snapshot time,
-	// evaluated at each scenario-spot moneyness during the sweep) rather
-	// than the v1 sticky-IV recipe. Full methodology disclosure lives in
-	// docs/specs/risk-regime-dashboard.md so renderers can deep-link.
+	// Method is a short stable token for the computation path. v3:
+	// "bs-gamma-profile-v3-stickymoneyness-0dte-split". The v3 bump
+	// signals two semantic changes from v2:
+	//   - horizon split is now 0DTE / 1-7 / >7 (was ≤7 / >7), because
+	//     Cboe 2025 data shows 0DTE = ~59% of SPX volume and lumping
+	//     it with weeklies muddies the signal.
+	//   - the per-leg snapshot gamma is BS-recomputed from captured IV
+	//     rather than read from the gateway's optional Greeks tick;
+	//     fixes a v2 race where IV-but-no-Greeks legs contributed 0 to
+	//     GammaTotalAbs.
+	// "perfiliev" is dropped from the token because Perfiliev's
+	// published method used sticky-IV; the sticky-moneyness refinement
+	// is citable to Derman / Daglish-Hull-Suo (see MethodologyCitations).
+	// Full disclosure lives in docs/specs/risk-regime-dashboard.md so
+	// renderers can deep-link.
 	Method string `json:"method"`
 	// AsOf is the daemon's wall-clock when the compute finished.
 	AsOf time.Time `json:"as_of"`
@@ -1106,19 +1156,26 @@ type RegimeGammaZero struct {
 	// notional summed over observed OI+IV).
 	ZeroGammaQuality     *Quality `json:"zero_gamma_quality,omitempty"`
 	GammaTotalAbsQuality *Quality `json:"gamma_total_abs_quality,omitempty"`
-	// HorizonAgreement names how the near (DTE ≤ 7) and term (DTE > 7)
-	// zero-gamma readings relate. One of:
+	// HorizonAgreement names how the three horizon-bucketed γ-zero
+	// readings (0DTE, 1-7, term) relate. One of:
 	//
-	//   - "both_above"  — spot above both near and term γ-zero
-	//   - "both_below"  — spot below both
-	//   - "diverge"     — spot on opposite sides of the two readings
-	//                     (high-information case worth surfacing)
-	//   - "near_only"   — only the near bucket has a crossing
-	//   - "term_only"   — only the term bucket has a crossing
-	//   - ""            — both buckets are no-crossing or no-data
+	//   - "all_above"             spot above every bucket's γ-zero AND
+	//                             every bucket has a crossing
+	//   - "all_below"             spot below every bucket's γ-zero AND
+	//                             every bucket has a crossing
+	//   - "diverge:0dte_vs_term"  0DTE and term γ-zeros sit on opposite
+	//                             sides of spot (highest-information
+	//                             case — short-fuse flow disagrees with
+	//                             monthly positioning)
+	//   - "diverge:partial"       other mixed cases (1-7 alone disagrees,
+	//                             only two buckets have crossings and
+	//                             they disagree, etc.)
+	//   - "0dte_only" / "1to7_only" / "term_only" — only one bucket has
+	//                             a crossing
+	//   - ""                      no bucket has a crossing
 	//
-	// The renderer annotates the row when the value is "diverge",
-	// "near_only", or "term_only" — those are the cases where the
+	// The renderer annotates the row whenever the value starts with
+	// "diverge:" or ends in "_only" — those are the cases where the
 	// combined headline doesn't tell the full story.
 	HorizonAgreement string `json:"horizon_agreement,omitempty"`
 	// Streak counts consecutive sessions in the current band. See

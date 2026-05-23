@@ -32,8 +32,8 @@ import (
 //     and starts fresh. Diagnostics only; the cache handles freshness.
 //
 // Methodology lives in docs/specs/risk-regime-dashboard.md. The result
-// envelope's Method field is "perfiliev-bs-sweep-v1"; renderers can
-// deep-link to the disclosure.
+// envelope's Method field is "bs-gamma-profile-v3-stickymoneyness-0dte-split";
+// renderers can deep-link to the disclosure.
 func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc.GammaZeroSPXResult, error) {
 	var p rpc.GammaZeroSPXParams
 	if err := decodeParams(req.Params, &p); err != nil {
