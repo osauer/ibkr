@@ -197,6 +197,7 @@ func (d *Daemon) SetIdleTimeout(t time.Duration) {
 
 // DefaultPath returns the canonical config path for the current user.
 func DefaultPath() string {
+	// docgen:env IBKR_CONFIG | Override the config.toml path. Defaults to `$XDG_CONFIG_HOME/ibkr/config.toml` or `$HOME/.config/ibkr/config.toml`.
 	if v := os.Getenv("IBKR_CONFIG"); v != "" {
 		return v
 	}
@@ -287,6 +288,7 @@ func (c *Config) Resolve() (*Resolved, error) {
 // Lives next to the SPX type so the precedence rules don't have to be
 // re-derived at every call site.
 func SPXMembersAutoRefreshFromEnv() (enabled bool, forced bool) {
+	// docgen:env IBKR_SPX_MEMBERS_AUTO_REFRESH | Symmetric override of `[spx] members_auto_refresh`. `1` force-enables, `0` force-disables, unset / other defers to TOML.
 	switch os.Getenv("IBKR_SPX_MEMBERS_AUTO_REFRESH") {
 	case "1":
 		return true, true

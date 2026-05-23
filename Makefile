@@ -73,7 +73,7 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # is recoverable because the schema is small and changes go through PR
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
-check: $(CHECK_DEPS) modernize-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check (binding pre-commit gate)
+check: $(CHECK_DEPS) modernize-check docs-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check (binding pre-commit gate)
 	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths
 	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
 	@# .gitignore by listing tracked + untracked-but-not-ignored files —
@@ -165,6 +165,39 @@ modernize-check: ## go fix -diff + modernize gate (Go idiom drift vs go.mod's go
 modernize: ## Apply go fix + modernize rewrites in place
 	go fix ./...
 	go tool modernize -fix ./...
+
+# Regenerate the docs/reference/*.md pages from their generators. The
+# generators live under scripts/docgen/; each emits one markdown file
+# from the canonical source (Go struct tags + `// docgen:env` comments
+# for config-ref; the internal/mcp.Tools registry for mcp-tools). Run
+# this after editing internal/config/config.go, internal/mcp/tools.go,
+# or adding/changing a // docgen:env comment, and commit the diff
+# alongside the source change. `make docs-check` enforces no drift.
+docs-regen: ## Regenerate docs/reference/*.md from generators
+	go run ./scripts/docgen/config-ref
+	go run ./scripts/docgen/mcp-tools
+
+# docs-check is the CI gate: regenerate to a tempfile, diff against the
+# checked-in copy, fail if they differ. Catches the "I changed a struct
+# tag but forgot to regen" case. Wired into `make check` so it cannot
+# be skipped. Uses POSIX tempfiles (not bash process substitution) so
+# the recipe runs under /bin/sh on every host.
+docs-check: ## Verify checked-in docs/reference/*.md match what the generators emit
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	fail=0; \
+	for gen in config-ref mcp-tools; do \
+		case $$gen in \
+			config-ref) ref=docs/reference/config.md ;; \
+			mcp-tools) ref=docs/reference/mcp-tools.md ;; \
+		esac; \
+		go run ./scripts/docgen/$$gen -o "$$tmp/$$gen.md" || exit 1; \
+		if ! diff -u "$$ref" "$$tmp/$$gen.md" > /dev/null 2>&1; then \
+			echo "docs-check: $$ref out of date; run \`make docs-regen\`"; \
+			diff -u "$$ref" "$$tmp/$$gen.md" || true; \
+			fail=1; \
+		fi; \
+	done; \
+	exit $$fail
 
 # Pull the current S&P-500 membership list from Wikipedia and rewrite
 # internal/breadth/spx/members_data.go. Invoked by `make release` so a

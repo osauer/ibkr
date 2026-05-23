@@ -33,12 +33,14 @@ const (
 // Computed once per process and cached on Env.Color so colored renderers
 // don't re-syscall on every value.
 func ShouldColor(w io.Writer) bool {
+	// docgen:env IBKR_COLOR | Force terminal colour on (`always`), off (`never`); any other value defers to NO_COLOR + TTY detection.
 	switch os.Getenv("IBKR_COLOR") {
 	case "always":
 		return true
 	case "never":
 		return false
 	}
+	// docgen:env NO_COLOR | Standard https://no-color.org/ override. Any non-empty value disables colour regardless of IBKR_COLOR (unless IBKR_COLOR=always).
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}

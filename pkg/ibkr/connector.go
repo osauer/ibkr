@@ -261,6 +261,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	// Honour IBKR_PACKET_LOG_TEMPLATE if set and BaseConfig didn't already pin
 	// a packet log path. Template tokens: trailing path-separator means
 	// "treat as directory"; otherwise the "%d" placeholder gets the client ID.
+	// docgen:env IBKR_PACKET_LOG_TEMPLATE | Template path for raw IBKR wire-packet logs. Trailing `/` treats as directory; `%d` placeholder gets the gateway client ID. Unset disables wire logging.
 	if template := strings.TrimSpace(os.Getenv("IBKR_PACKET_LOG_TEMPLATE")); template != "" && config.BaseConfig.PacketLogPath == "" {
 		if strings.HasSuffix(template, string(os.PathSeparator)) {
 			template = filepath.Join(template, "ibkr_client_%d.log")

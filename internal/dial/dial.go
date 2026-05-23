@@ -33,6 +33,7 @@ var ErrSocketMissing = errors.New("ibkrd socket missing")
 
 // DefaultSocketPath returns the canonical socket location.
 func DefaultSocketPath() string {
+	// docgen:env IBKR_SOCKET | Override the daemon IPC socket path. Defaults to `$XDG_RUNTIME_DIR/ibkr/ibkr.sock` or `$HOME/.cache/ibkr/ibkr.sock`.
 	if v := os.Getenv("IBKR_SOCKET"); v != "" {
 		return v
 	}
@@ -45,6 +46,7 @@ func DefaultSocketPath() string {
 
 // DefaultLogPath returns the canonical daemon log location.
 func DefaultLogPath() string {
+	// docgen:env IBKR_LOG | Override the daemon log file path. Defaults to `$HOME/.local/state/ibkr/ibkr-daemon.log`.
 	if v := os.Getenv("IBKR_LOG"); v != "" {
 		return v
 	}

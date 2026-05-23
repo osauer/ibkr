@@ -41,6 +41,7 @@ const defaultInstallSubdir = ".local/bin"
 // today and Phase 2's release pipeline dog-fooding: Phase 1 plumbs it,
 // Phase 2 wires the Makefile.
 func ResolveInstallDir() (string, error) {
+	// docgen:env IBKR_INSTALL_DIR | Override the install directory for `ibkr update`. Defaults to `$HOME/.local/bin`. Phase-2 release pipeline uses this to sandbox dog-food installs to a tmp dir.
 	if v := os.Getenv("IBKR_INSTALL_DIR"); v != "" {
 		return v, nil
 	}
