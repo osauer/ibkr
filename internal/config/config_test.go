@@ -196,3 +196,105 @@ tls = false
 		t.Errorf("TLS = %v, want false", *res.Gateway.TLS)
 	}
 }
+
+// TestMembers_AutoRefreshDefaultsToTrue: absent [members] block →
+// AutoRefreshEnabled() = true. Documents the opt-out posture.
+func TestMembers_AutoRefreshDefaultsToTrue(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "no-such.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !res.Members.AutoRefreshEnabled() {
+		t.Error("AutoRefreshEnabled should default to true when [members] block absent")
+	}
+}
+
+// TestMembers_AutoRefreshExplicitFalse: pinned TOML disables the
+// refresher. Status renderer surfaces this as "disabled (config)".
+func TestMembers_AutoRefreshExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `[members]
+auto_refresh = false
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if res.Members.AutoRefreshEnabled() {
+		t.Error("auto_refresh=false should disable the refresher")
+	}
+}
+
+// TestMembers_AutoRefreshExplicitTrue: pinned TOML = true matches the
+// default but the pointer-typed field carries the "user opted in"
+// signal for any future feature that distinguishes the two.
+func TestMembers_AutoRefreshExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `[members]
+auto_refresh = true
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	res, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !res.Members.AutoRefreshEnabled() {
+		t.Error("auto_refresh=true should enable the refresher")
+	}
+	if res.Members.AutoRefresh == nil || !*res.Members.AutoRefresh {
+		t.Error("explicit true should round-trip as non-nil pointer")
+	}
+}
+
+// TestMembersAutoRefreshFromEnv covers the env-override precedence.
+// IBKR_MEMBERS_AUTO_REFRESH=0 forces off; unset / "1" / anything
+// else is "fall through to config".
+func TestMembersAutoRefreshFromEnv(t *testing.T) {
+	cases := []struct {
+		name      string
+		set       bool
+		value     string
+		wantForce bool
+	}{
+		{"unset", false, "", false},
+		{"explicit zero", true, "0", true},
+		{"explicit one", true, "1", false},
+		{"garbage", true, "yes", false},
+		{"empty string set", true, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.set {
+				t.Setenv("IBKR_MEMBERS_AUTO_REFRESH", c.value)
+			} else {
+				_ = os.Unsetenv("IBKR_MEMBERS_AUTO_REFRESH")
+			}
+			forceOff, forced := MembersAutoRefreshFromEnv()
+			if forceOff != c.wantForce {
+				t.Errorf("forceOff: want %v got %v", c.wantForce, forceOff)
+			}
+			if forced != c.wantForce {
+				t.Errorf("forced: want %v got %v", c.wantForce, forced)
+			}
+		})
+	}
+}

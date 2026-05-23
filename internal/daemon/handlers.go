@@ -16,6 +16,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
+	"github.com/osauer/ibkr/internal/breadth/spx"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -1541,7 +1542,46 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	// — the same source isBusy() and the regime partial-envelope
 	// contention message ride, so the three surfaces never diverge.
 	res.BackgroundTasks = s.backgroundTasks()
+	res.Members = s.membersHealth()
 	return res
+}
+
+// membersHealth assembles the rpc.MembersHealth wire shape for the
+// status response. Source is "cache" when the engine loaded from the
+// runtime-refreshed file, "embedded" otherwise. RefreshState reflects
+// the refresher's current health, or empty when the refresher is
+// disabled / nil (the CLI uses Source alone to render the row).
+func (s *Server) membersHealth() rpc.MembersHealth {
+	if s.breadth == nil {
+		return rpc.MembersHealth{}
+	}
+	current := s.breadth.Members()
+	mh := rpc.MembersHealth{
+		Source: "embedded",
+		AsOf:   sp500EmbeddedAsOf(),
+		Count:  len(current),
+	}
+	// Prefer the runtime-refreshed file as the source signal when it
+	// exists and parses cleanly. A stale file (older than the embedded
+	// baseline) still counts as "cache" — the user sees the date and
+	// can decide if it's stale; we don't second-guess them.
+	if s.membersCachePath != "" {
+		if _, asOf, ok := spx.LoadExternal(s.membersCachePath); ok {
+			mh.Source = "cache"
+			mh.AsOf = asOf
+		}
+	}
+	if s.membersRefresher != nil {
+		mh.RefreshState = string(s.membersRefresher.State())
+	}
+	return mh
+}
+
+// sp500EmbeddedAsOf returns the asOf of the embedded list. Wrapped in
+// a helper so the per-call type-cast stays out of the status hot path.
+func sp500EmbeddedAsOf() time.Time {
+	_, asOf := spx.MemberList()
+	return asOf
 }
 
 // handleHistoryDaily returns N days of daily OHLCV bars for a symbol.
@@ -1631,6 +1671,17 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 		// gateway-unavailable so clients render a consistent "daemon
 		// I/O dependency missing" state.
 		return nil, ibkrlib.ErrIBKRUnavailable
+	}
+
+	// Opportunistic refresh trigger: on the first breadth call after
+	// the NY-date rolls over, kick the members refresher if its
+	// on-disk file is stale. Belt-and-suspenders against the 02:30
+	// ET ticker missing (network outage, daemon paused). No-op when
+	// the refresher is pinned off, or when the loaded file is
+	// already from today, or when a fetch is already in flight
+	// (singleflighted by the refresher).
+	if s.membersRefresher != nil && s.serverCtx != nil {
+		s.membersRefresher.TriggerIfRolledOver(s.serverCtx)
 	}
 
 	res := &rpc.BreadthSPXResult{

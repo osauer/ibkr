@@ -167,6 +167,24 @@ type Server struct {
 	// across the postConnectSetup re-runs that follow each reconnect.
 	breadthClientStarted sync.Once
 
+	// membersRefresher runs the daemon-internal SPX-constituent
+	// refresh: daily 02:30 ET fetch from Wikipedia, startup catchup,
+	// opportunistic post-rollover trigger from the breadth handler.
+	// All three triggers converge on one singleflighted fetch
+	// goroutine; the result is written to
+	// `~/.cache/ibkr/spx-members/sp500-members.json` and pushed into
+	// the breadth engine. nil when disabled by config / env, or when
+	// the cache-path resolution failed at New (no $HOME / XDG).
+	membersRefresher *spx.Refresher
+	// membersRefresherStarted guards Run() launch so a reconnect-
+	// driven second postConnectSetup doesn't spawn a duplicate
+	// scheduler loop. Mirrors breadthStarted / breadthClientStarted.
+	membersRefresherStarted sync.Once
+	// membersCachePath is captured at install so handlers reading the
+	// loaded file (status renderer) don't have to re-resolve the XDG
+	// path on every call. Empty when membersRefresher is nil.
+	membersCachePath string
+
 	// contractStore persists symbol→conID resolutions across daemon
 	// restarts. IBKR caps reqContractDetails at ~50 per 10 minutes
 	// per ACCOUNT (the per-clientID isolation breadthConnector enables
@@ -274,6 +292,7 @@ func New(opts Options) *Server {
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
 	s.installBreadthEngine()
+	s.installMembersRefresher()
 	s.installContractStore()
 	s.installStreakStore()
 	s.installGammaZeroCache()
@@ -313,6 +332,23 @@ func (s *Server) installStreakStore() {
 	s.streaks = NewStreakStore(dir)
 }
 
+// infof / warnf are nil-safe wrappers around s.logger. The tests that
+// construct a zero-value Server directly (breadth_connector_test.go)
+// reach installBreadthEngine / installMembersRefresher with logger=nil;
+// these wrappers let those tests keep working without seeding a logger
+// the test doesn't need.
+func (s *Server) infof(format string, args ...any) {
+	if s.logger != nil {
+		s.logger.Infof(format, args...)
+	}
+}
+
+func (s *Server) warnf(format string, args ...any) {
+	if s.logger != nil {
+		s.logger.Warnf(format, args...)
+	}
+}
+
 // installContractStore constructs the on-disk contract-cache store and
 // attaches it to s. Best-effort: if XDG_CACHE_HOME and HOME are both
 // unset (effectively never on a real OS user account), the field stays
@@ -341,6 +377,14 @@ func (s *Server) installContractStore() {
 // pointer on every call lets the engine survive a bulk-connector
 // reconnect without re-instantiation, mirroring the primary-thunk
 // pattern.
+//
+// Members seeding: prefers the runtime-refreshed cache file
+// (`~/.cache/ibkr/spx-members/sp500-members.json`) over the embedded
+// list, so a daemon installed from a months-old release that has
+// since cached a fresher list serves current membership immediately.
+// Falls back to the embedded list on missing/corrupt/sanity-failed
+// file. Logs the source on startup so a human triaging breadth values
+// can confirm which list is in play.
 func (s *Server) installBreadthEngine() {
 	dir, err := spx.DefaultDir()
 	if err != nil {
@@ -348,7 +392,62 @@ func (s *Server) installBreadthEngine() {
 		return
 	}
 	fetcher := newBreadthFetcher(s.breadthGatewayConnector)
-	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger})
+
+	var members []string
+	if path, perr := spx.MembersDefaultPath(); perr == nil {
+		if loaded, asOf, ok := spx.LoadExternal(path); ok {
+			members = loaded
+			s.infof("breadth: loaded %d members from cache (as_of %s)", len(loaded), asOf.Format("2006-01-02"))
+		}
+	}
+	if len(members) == 0 {
+		embedded, asOf := spx.MemberList()
+		members = embedded
+		s.infof("breadth: using embedded members list (%d names, as_of %s)", len(embedded), asOf.Format("2006-01-02"))
+	}
+
+	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger, Members: members})
+}
+
+// installMembersRefresher stands up the runtime SPX-members refresher
+// (path A of docs/design/ibkr-update-and-members-refresh.md). The
+// refresher fetches Wikipedia's constituent list daily at 02:30 ET
+// plus on startup catch-up, writes the result to the XDG cache file,
+// and pushes new lists into the breadth engine.
+//
+// Construction is best-effort:
+//   - breadth engine missing (cache-dir failure) → no refresher.
+//   - members cache path unresolvable (HOME unset) → no refresher.
+//
+// The IBKR_MEMBERS_AUTO_REFRESH env var takes precedence over the
+// TOML auto_refresh field; the status renderer surfaces which gate
+// is active. Run() is launched separately in postConnectSetup so the
+// refresher's goroutine lifetime tracks serverCtx.
+func (s *Server) installMembersRefresher() {
+	if s.breadth == nil {
+		return
+	}
+	cachePath, err := spx.MembersDefaultPath()
+	if err != nil {
+		s.warnf("members refresh: resolve cache path: %v (refresher disabled)", err)
+		return
+	}
+	envForceOff, _ := config.MembersAutoRefreshFromEnv()
+	pinnedByConfig := !s.cfg.Members.AutoRefreshEnabled()
+
+	version := s.version
+	fetch := func(ctx context.Context) ([]string, time.Time, error) {
+		return spx.FetchAndParse(ctx, spx.WikipediaURL, version)
+	}
+	s.membersRefresher = spx.NewRefresher(spx.RefresherOptions{
+		Engine:         s.breadth,
+		CachePath:      cachePath,
+		Fetch:          fetch,
+		Logger:         s.logger,
+		PinnedByConfig: pinnedByConfig,
+		PinnedByEnv:    envForceOff,
+	})
+	s.membersCachePath = cachePath
 }
 
 // breadthGatewayConnector returns the bulk-historical IBKR connector
@@ -1128,6 +1227,17 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 		s.breadthStarted.Do(func() {
 			s.breadth.MarkPendingBootstrap()
 			go s.breadth.Run(s.serverCtx)
+		})
+	}
+
+	// Launch the runtime members refresher alongside the breadth
+	// scheduler. The refresher's Run() no-ops immediately when the
+	// pin gates fire — keeps the start path uniform regardless of
+	// config. Once-guarded so reconnect-driven second postConnectSetup
+	// is a no-op rather than spawning a duplicate ticker loop.
+	if s.membersRefresher != nil && s.serverCtx != nil {
+		s.membersRefresherStarted.Do(func() {
+			go s.membersRefresher.Run(s.serverCtx)
 		})
 	}
 

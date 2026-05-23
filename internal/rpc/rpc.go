@@ -1826,4 +1826,32 @@ type HealthResult struct {
 	// `len(result.background_tasks) == 0` to mean "idle" without
 	// inferring from absence.
 	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
+	// Members carries the runtime SPX-membership state: source
+	// (cache vs embedded), count, as-of timestamp, refresh health.
+	// Populated unconditionally — even when the daemon falls back
+	// to the embedded list, the user needs to see WHICH list it's
+	// using so silent parser rot / disabled-refresh shows up in
+	// `ibkr status`. Zero-value Source means the daemon doesn't
+	// know yet (engine construction failed); the CLI hides the row
+	// in that case.
+	Members MembersHealth `json:"members"`
+}
+
+// MembersHealth is the wire shape for the SPX-members surface
+// rendered in `ibkr status`. Distinct from BreadthSPXResult: that
+// carries the COMPUTED breadth value; this carries metadata about
+// the constituent LIST.
+//
+// Source is "cache" when the daemon loaded the runtime-refreshed
+// file, "embedded" when it fell back to the binary's compiled-in
+// baseline. AsOf is the date the active list was generated.
+// RefreshState is one of the spx.RefreshState constants ("healthy",
+// "network_failed", "parse_failed", "disabled (config)", "disabled
+// (env)"). Healthy is the steady-state; renderer omits the
+// `refresh:` segment when healthy.
+type MembersHealth struct {
+	Source       string    `json:"source"`
+	AsOf         time.Time `json:"as_of"`
+	Count        int       `json:"count"`
+	RefreshState string    `json:"refresh_state"`
 }

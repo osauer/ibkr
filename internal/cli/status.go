@@ -126,7 +126,46 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 		}
 		fmt.Fprintf(out, "  Background:     %s\n", strings.Join(phrases, ", "))
 	}
+	if line := formatMembersLine(res.Members); line != "" {
+		fmt.Fprintln(out, line)
+	}
 	fmt.Fprintln(out)
+}
+
+// formatMembersLine renders the SPX-members row that lives under the
+// breadth surface. Returns the empty string when the daemon hasn't
+// populated the field (engine construction failed) — caller omits the
+// line entirely in that case.
+//
+// Healthy line (refresh state implicit):
+//
+//	Members:        cache:2026-05-22  count:503
+//
+// Unhealthy / pinned variants:
+//
+//	Members:        embedded:2026-05-22  count:503  refresh:parse_failed
+//	Members:        cache:2026-05-22     count:503  refresh:disabled (env)
+//
+// The bracketed `refresh:` segment is omitted in the healthy case —
+// the source token + as_of already carry the answer to "is my data
+// fresh?" Surfacing the refresh state only when it needs attention
+// keeps the steady-state row uncluttered.
+func formatMembersLine(m rpc.MembersHealth) string {
+	if m.Source == "" {
+		return ""
+	}
+	asOf := "—"
+	if !m.AsOf.IsZero() {
+		asOf = m.AsOf.Format("2006-01-02")
+	}
+	base := fmt.Sprintf("  Members:        %s:%s  count:%d", m.Source, asOf, m.Count)
+	// Empty / "healthy" → omit the refresh: tail. Disabled and
+	// failure states render explicitly so a user looking at
+	// unexpected breadth values can spot the cause in one glance.
+	if m.RefreshState == "" || m.RefreshState == "healthy" {
+		return base
+	}
+	return base + "  refresh:" + m.RefreshState
 }
 
 // isHandshakeInFlight reports whether the daemon has reported neither a

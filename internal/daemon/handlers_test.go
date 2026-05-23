@@ -602,3 +602,36 @@ func TestClassifyBreadthState(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusHealthReportsMembersEmbedded: status.health populates the
+// Members surface from the engine. When the engine has no external
+// cache file loaded (newTestServer doesn't install one), the row
+// surfaces source=embedded and the embedded as_of date.
+func TestStatusHealthReportsMembersEmbedded(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	srv.installBreadthEngine()
+	res := srv.handleStatusHealth()
+	if res.Members.Source != "embedded" {
+		t.Errorf("Members.Source: want embedded, got %q", res.Members.Source)
+	}
+	if res.Members.Count == 0 {
+		t.Error("Members.Count should be > 0 for the embedded list")
+	}
+	if res.Members.AsOf.IsZero() {
+		t.Error("Members.AsOf should reflect embedded sp500AsOf")
+	}
+}
+
+// TestStatusHealthMembersEmptyWithoutEngine: a daemon whose breadth
+// engine failed to install (e.g. unresolvable cache dir) returns an
+// empty Members shape. The CLI renderer hides the row in that case.
+func TestStatusHealthMembersEmptyWithoutEngine(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	// Don't install breadth.
+	res := srv.handleStatusHealth()
+	if res.Members.Source != "" {
+		t.Errorf("Members.Source: want empty (no engine), got %q", res.Members.Source)
+	}
+}

@@ -109,6 +109,36 @@ type Daemon struct {
 	LogLevel    string   `toml:"log_level"`
 }
 
+// Members controls the daemon's runtime S&P-500 membership refresh
+// (path A of docs/design/ibkr-update-and-members-refresh.md). When
+// AutoRefresh is true (default) the daemon fetches Wikipedia's
+// constituent list daily at 02:30 ET plus on startup if the cached
+// file is stale; when false it loads whatever is on disk (or the
+// binary's embedded fallback) and never reaches out.
+//
+// Use case for pinning: regulated traders running reproducibility
+// audits, air-gapped boxes, anyone debugging breadth drift. The
+// IBKR_MEMBERS_AUTO_REFRESH env var (1/0) overrides this field at
+// runtime for one-shot CI runs.
+type Members struct {
+	// AutoRefresh is a pointer so an explicit `auto_refresh = true`
+	// in the TOML is distinguishable from "field absent" — both end
+	// up enabling the refresher, but a future toggle that needs to
+	// distinguish "user opted in" from "default behaviour" doesn't
+	// have to change the type.
+	AutoRefresh *bool `toml:"auto_refresh"`
+}
+
+// AutoRefreshEnabled returns the resolved value of [members]
+// auto_refresh. Defaults to true when the field is absent — the
+// refresher is opt-out, not opt-in.
+func (m Members) AutoRefreshEnabled() bool {
+	if m.AutoRefresh == nil {
+		return true
+	}
+	return *m.AutoRefresh
+}
+
 // Scan holds a single scanner preset. Timeout is per-preset and optional;
 // <=0 falls back to the daemon's default (20s).
 type Scan struct {
@@ -122,6 +152,7 @@ type Scan struct {
 type Config struct {
 	Gateway Gateway         `toml:"gateway"`
 	Daemon  Daemon          `toml:"daemon"`
+	Members Members         `toml:"members"`
 	Scans   map[string]Scan `toml:"scans"`
 }
 
@@ -131,6 +162,7 @@ type Config struct {
 type Resolved struct {
 	Gateway Gateway
 	Daemon  Daemon
+	Members Members
 	Scans   map[string]Scan
 }
 
@@ -226,8 +258,33 @@ func (c *Config) Resolve() (*Resolved, error) {
 	return &Resolved{
 		Gateway: c.Gateway,
 		Daemon:  dae,
+		Members: c.Members,
 		Scans:   scans,
 	}, nil
+}
+
+// MembersAutoRefreshFromEnv resolves IBKR_MEMBERS_AUTO_REFRESH per
+// the design's env-override rules:
+//
+//   - "0"               → returns (false, true): explicit force-off.
+//   - unset or "1"      → returns (false, false): use config.
+//   - anything else     → returns (false, false): silently ignored
+//     (same as unset; rejecting wouldn't help — env-var typos are a
+//     CI friction we'd rather not fail-loud on).
+//
+// The second return is whether the env actively forced the override,
+// distinct from "env unset, fall through to config". The status
+// renderer uses this to pick the "disabled (env)" vs "disabled
+// (config)" string.
+//
+// Lives next to the Members type so the precedence rules don't have
+// to be re-derived at every call site.
+func MembersAutoRefreshFromEnv() (forceOff bool, forced bool) {
+	v := os.Getenv("IBKR_MEMBERS_AUTO_REFRESH")
+	if v == "0" {
+		return true, true
+	}
+	return false, false
 }
 
 // defaultScans is the built-in preset set, used when the user has no

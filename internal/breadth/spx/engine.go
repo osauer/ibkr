@@ -40,6 +40,12 @@ type Options struct {
 	// Defaults to 2 — today's bar plus one for duplicate-detection
 	// during the same-session retry path.
 	WarmLookbackDays int
+	// Members lets the caller seed the engine with a non-embedded
+	// constituent list — typically loaded from
+	// `~/.cache/ibkr/spx-members/sp500-members.json` by the daemon's
+	// startup path. nil/empty falls back to MemberList()'s embedded
+	// list, preserving every existing caller.
+	Members []string
 }
 
 // Engine is the breadth-spx state machine: it loads the on-disk
@@ -108,7 +114,11 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 	if fetcher == nil {
 		panic("spx.New: fetcher is required")
 	}
-	members, _ := MemberList()
+	members := opts.Members
+	if len(members) == 0 {
+		members, _ = MemberList()
+	}
+	members = slices.Clone(members)
 	e := &Engine{
 		store:        store,
 		fetcher:      fetcher,
@@ -495,6 +505,49 @@ func (e *Engine) warnf(format string, args ...any) {
 	if e.logger != nil {
 		e.logger.Warnf(format, args...)
 	}
+}
+
+// Members returns the constituent list the engine is currently using.
+// Defensive copy: callers cannot mutate engine state by editing the
+// returned slice. Used by the daemon's status renderer to surface
+// member count, and by the runtime refresher to compare its newly
+// fetched list against the in-process snapshot before swapping.
+func (e *Engine) Members() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return slices.Clone(e.members)
+}
+
+// SetMembers swaps the constituent list. Returns true when the new
+// list differs from the existing one (caller may want to invalidate
+// downstream state); returns false when the lists are identical
+// (no-op, no need to touch the cache or kick a recompute).
+//
+// On change, the in-memory windows map is NOT cleared: names dropped
+// from the list become irrelevant to Compute (which iterates over
+// members), and names added are picked up by the next Refresh which
+// sees them missing from cached and triggers a cold fetch. The
+// existing windows for surviving names stay warm — a reconstitution
+// of 1-3 names per quarter shouldn't invalidate ~500 cached windows.
+//
+// New constituents will be excluded from the next Compute pass with
+// Reason="thin_history" until their cold-fetch lands and their
+// window populates. Per design decision (b) — "pending until 50d
+// accrue" — full inclusion in the breadth reading is deferred until
+// the new name has 50 trading days of post-inclusion history. Today
+// the engine doesn't track per-symbol inclusion dates, so the
+// approximation we ship is: the name appears in the exclusion list
+// as "thin_history" until its window naturally exceeds WindowSize.
+// A follow-up can add per-symbol inclusion dates and the strict
+// "exclude for 50d regardless of bar count" semantics.
+func (e *Engine) SetMembers(members []string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if slices.Equal(e.members, members) {
+		return false
+	}
+	e.members = slices.Clone(members)
+	return true
 }
 
 // History returns up to `limit` trailing history points, oldest first.

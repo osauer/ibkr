@@ -226,3 +226,74 @@ func TestWaitForHandshakeWritesProgressToWriter(t *testing.T) {
 		t.Fatalf("expected at least one progress dot in output: %q", out)
 	}
 }
+
+// TestFormatMembersLine pins the four rendering variants of the
+// Members row: healthy (no refresh: tail), pinned (env/config),
+// silent rot (parse_failed / network_failed). Zero-value source omits
+// the line entirely so a daemon that hasn't populated MembersHealth
+// yet doesn't show a misleading "Members: :" row.
+func TestFormatMembersLine(t *testing.T) {
+	t.Parallel()
+	d := time.Date(2026, time.May, 22, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		health rpc.MembersHealth
+		want   string
+		empty  bool
+	}{
+		{
+			name:   "healthy cache",
+			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "healthy"},
+			want:   "Members:        cache:2026-05-22  count:503",
+		},
+		{
+			name:   "healthy embedded",
+			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "healthy"},
+			want:   "Members:        embedded:2026-05-22  count:503",
+		},
+		{
+			name:   "empty refresh state (no refresher attached) treated as healthy",
+			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: ""},
+			want:   "Members:        embedded:2026-05-22  count:503",
+		},
+		{
+			name:   "parse failure surfaces",
+			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "parse_failed"},
+			want:   "Members:        embedded:2026-05-22  count:503  refresh:parse_failed",
+		},
+		{
+			name:   "network failure surfaces",
+			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "network_failed"},
+			want:   "Members:        embedded:2026-05-22  count:503  refresh:network_failed",
+		},
+		{
+			name:   "disabled config",
+			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "disabled (config)"},
+			want:   "Members:        embedded:2026-05-22  count:503  refresh:disabled (config)",
+		},
+		{
+			name:   "disabled env on cache file",
+			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "disabled (env)"},
+			want:   "Members:        cache:2026-05-22  count:503  refresh:disabled (env)",
+		},
+		{
+			name:   "empty source omits row",
+			health: rpc.MembersHealth{},
+			empty:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatMembersLine(tc.health)
+			if tc.empty {
+				if got != "" {
+					t.Errorf("want empty, got %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("missing substring %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
