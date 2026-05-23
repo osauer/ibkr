@@ -8,15 +8,15 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 
 | Section | Field | Type | Description |
 |---------|-------|------|-------------|
-| `[daemon]` | `idle_timeout` | `duration` |  |
-| `[daemon]` | `log_level` | `string` |  |
-| `[gateway]` | `account` | `string` |  |
+| `[daemon]` | `idle_timeout` | `duration` | IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like "1h" or "0s"); set "0s" to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under `ibkr daemon --foreground`. |
+| `[daemon]` | `log_level` | `string` | LogLevel is the daemon's log verbosity — one of "debug", "info" (default), "warn", or "error". |
+| `[gateway]` | `account` | `string` | Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts. |
 | `[gateway]` | `breadth_client_id` | `*int` | BreadthClientID is the IBKR clientID used by the dedicated historical-bar connector that backs the SPX breadth refresh. |
-| `[gateway]` | `client_id` | `*int` |  |
-| `[gateway]` | `host` | `string` |  |
-| `[gateway]` | `port` | `*int` |  |
-| `[gateway]` | `tls` | `*bool` |  |
-| `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh is a pointer so an explicit `members_auto_refresh = true` in the TOML is distinguishable from "field absent" — both end up enabling the refresher, but a future toggle that needs to distinguish "user opted in" from "default behaviour" doesn't have to change the type. |
+| `[gateway]` | `client_id` | `*int` | ClientID pins the IBKR API clientID for the primary connection (default 15); collisions with another running ibkr process auto-walk to the next free ID via the SDK's retry path. |
+| `[gateway]` | `host` | `string` | Host pins the IB Gateway / TWS host; empty (the default) defers to auto-discovery on loopback (127.0.0.1), any non-empty value skips probing. |
+| `[gateway]` | `port` | `*int` | Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery. |
+| `[gateway]` | `tls` | `*bool` | TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, `true` forces TLS-only with no plain fallback, `false` forces plain — setting the field disables fallback in either direction. |
+| `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off). |
 
 ## Environment variables
 

@@ -28,9 +28,12 @@ import (
 // Account is plain string because empty already means "auto-detect via
 // managedAccounts" in the SDK.
 type Gateway struct {
-	Host     string `toml:"host"`
-	Port     *int   `toml:"port"`
-	ClientID *int   `toml:"client_id"`
+	// Host pins the IB Gateway / TWS host; empty (the default) defers to auto-discovery on loopback (127.0.0.1), any non-empty value skips probing.
+	Host string `toml:"host"`
+	// Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery.
+	Port *int `toml:"port"`
+	// ClientID pins the IBKR API clientID for the primary connection (default 15); collisions with another running ibkr process auto-walk to the next free ID via the SDK's retry path.
+	ClientID *int `toml:"client_id"`
 	// BreadthClientID is the IBKR clientID used by the dedicated
 	// historical-bar connector that backs the SPX breadth refresh.
 	// Default 16 (one above the primary's default 15). Pinned to its
@@ -41,9 +44,11 @@ type Gateway struct {
 	// primary cid is handled by the existing MaxClientIDRetries
 	// fall-through in pkg/ibkr — bulk silently increments to the next
 	// free ID, same as primary does.
-	BreadthClientID *int   `toml:"breadth_client_id"`
-	Account         string `toml:"account"`
-	TLS             *bool  `toml:"tls"`
+	BreadthClientID *int `toml:"breadth_client_id"`
+	// Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts.
+	Account string `toml:"account"`
+	// TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, `true` forces TLS-only with no plain fallback, `false` forces plain — setting the field disables fallback in either direction.
+	TLS *bool `toml:"tls"`
 }
 
 // PortPinned reports whether the user pinned a port. Discovery skips the
@@ -105,8 +110,10 @@ func (g Gateway) TLSOrFalse() bool {
 
 // Daemon holds runtime knobs for the daemon process.
 type Daemon struct {
+	// IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like "1h" or "0s"); set "0s" to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under `ibkr daemon --foreground`.
 	IdleTimeout duration `toml:"idle_timeout"`
-	LogLevel    string   `toml:"log_level"`
+	// LogLevel is the daemon's log verbosity — one of "debug", "info" (default), "warn", or "error".
+	LogLevel string `toml:"log_level"`
 }
 
 // SPX holds the SPX-related daemon knobs. Currently just the members
@@ -126,11 +133,9 @@ type Daemon struct {
 // (including unset) defers to the TOML value. Symmetric semantics —
 // the env is a bidirectional override, not a one-way kill switch.
 type SPX struct {
-	// MembersAutoRefresh is a pointer so an explicit
-	// `members_auto_refresh = true` in the TOML is distinguishable
-	// from "field absent" — both end up enabling the refresher, but a
-	// future toggle that needs to distinguish "user opted in" from
-	// "default behaviour" doesn't have to change the type.
+	// MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off).
+	//
+	// Pointer type lets the daemon distinguish an explicit `members_auto_refresh = true` from "field absent" — both enable the refresher today, but a future "user opted in" vs "default behaviour" distinction stays additive.
 	MembersAutoRefresh *bool `toml:"members_auto_refresh"`
 }
 
