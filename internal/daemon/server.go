@@ -419,10 +419,12 @@ func (s *Server) installBreadthEngine() {
 //   - breadth engine missing (cache-dir failure) → no refresher.
 //   - members cache path unresolvable (HOME unset) → no refresher.
 //
-// The IBKR_MEMBERS_AUTO_REFRESH env var takes precedence over the
-// TOML auto_refresh field; the status renderer surfaces which gate
-// is active. Run() is launched separately in postConnectSetup so the
-// refresher's goroutine lifetime tracks serverCtx.
+// The IBKR_SPX_MEMBERS_AUTO_REFRESH env var (symmetric override:
+// "1" force-on, "0" force-off, unset defers) takes precedence over the
+// TOML [spx] members_auto_refresh field. The status renderer surfaces
+// which gate is active. Run() is launched separately in
+// postConnectSetup so the refresher's goroutine lifetime tracks
+// serverCtx.
 func (s *Server) installMembersRefresher() {
 	if s.breadth == nil {
 		return
@@ -432,8 +434,25 @@ func (s *Server) installMembersRefresher() {
 		s.warnf("members refresh: resolve cache path: %v (refresher disabled)", err)
 		return
 	}
-	envForceOff, _ := config.MembersAutoRefreshFromEnv()
-	pinnedByConfig := !s.cfg.Members.AutoRefreshEnabled()
+
+	// Resolve env+config to a single enabled/disabled decision plus
+	// the reason. Env wins when present; otherwise TOML governs. The
+	// reason flags drive the status row's `disabled (env)` /
+	// `disabled (config)` suffix so a confused user knows which knob
+	// to flip.
+	envEnabled, envForced := config.SPXMembersAutoRefreshFromEnv()
+	configEnabled := s.cfg.SPX.MembersAutoRefreshEnabled()
+
+	var enabled, pinnedByEnv, pinnedByConfig bool
+	switch {
+	case envForced:
+		enabled = envEnabled
+		pinnedByEnv = !envEnabled
+	default:
+		enabled = configEnabled
+		pinnedByConfig = !configEnabled
+	}
+	_ = enabled // refresher derives state from the Pinned* flags
 
 	version := s.version
 	fetch := func(ctx context.Context) ([]string, time.Time, error) {
@@ -445,7 +464,7 @@ func (s *Server) installMembersRefresher() {
 		Fetch:          fetch,
 		Logger:         s.logger,
 		PinnedByConfig: pinnedByConfig,
-		PinnedByEnv:    envForceOff,
+		PinnedByEnv:    pinnedByEnv,
 	})
 	s.membersCachePath = cachePath
 }

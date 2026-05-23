@@ -109,34 +109,39 @@ type Daemon struct {
 	LogLevel    string   `toml:"log_level"`
 }
 
-// Members controls the daemon's runtime S&P-500 membership refresh
-// (path A of docs/design/ibkr-update-and-members-refresh.md). When
-// AutoRefresh is true (default) the daemon fetches Wikipedia's
-// constituent list daily at 02:30 ET plus on startup if the cached
-// file is stale; when false it loads whatever is on disk (or the
-// binary's embedded fallback) and never reaches out.
+// SPX holds the SPX-related daemon knobs. Currently just the members
+// auto-refresh toggle; grouping under [spx] gives future SPX-scoped
+// configs (e.g. fetcher concurrency, sweep tunables) a natural home
+// without proliferating top-level TOML sections.
 //
-// Use case for pinning: regulated traders running reproducibility
+// When MembersAutoRefresh is true (default) the daemon fetches
+// Wikipedia's constituent list daily at 02:30 ET plus on startup if
+// the cached file is stale; when false it loads whatever is on disk
+// (or the binary's embedded fallback) and never reaches out.
+//
+// Use case for pinning off: regulated traders running reproducibility
 // audits, air-gapped boxes, anyone debugging breadth drift. The
-// IBKR_MEMBERS_AUTO_REFRESH env var (1/0) overrides this field at
-// runtime for one-shot CI runs.
-type Members struct {
-	// AutoRefresh is a pointer so an explicit `auto_refresh = true`
-	// in the TOML is distinguishable from "field absent" — both end
-	// up enabling the refresher, but a future toggle that needs to
-	// distinguish "user opted in" from "default behaviour" doesn't
-	// have to change the type.
-	AutoRefresh *bool `toml:"auto_refresh"`
+// IBKR_SPX_MEMBERS_AUTO_REFRESH env var overrides this field at
+// runtime: "1" force-enables, "0" force-disables, anything else
+// (including unset) defers to the TOML value. Symmetric semantics —
+// the env is a bidirectional override, not a one-way kill switch.
+type SPX struct {
+	// MembersAutoRefresh is a pointer so an explicit
+	// `members_auto_refresh = true` in the TOML is distinguishable
+	// from "field absent" — both end up enabling the refresher, but a
+	// future toggle that needs to distinguish "user opted in" from
+	// "default behaviour" doesn't have to change the type.
+	MembersAutoRefresh *bool `toml:"members_auto_refresh"`
 }
 
-// AutoRefreshEnabled returns the resolved value of [members]
-// auto_refresh. Defaults to true when the field is absent — the
-// refresher is opt-out, not opt-in.
-func (m Members) AutoRefreshEnabled() bool {
-	if m.AutoRefresh == nil {
+// MembersAutoRefreshEnabled returns the resolved value of
+// [spx] members_auto_refresh. Defaults to true when the field is
+// absent — the refresher is opt-out, not opt-in.
+func (s SPX) MembersAutoRefreshEnabled() bool {
+	if s.MembersAutoRefresh == nil {
 		return true
 	}
-	return *m.AutoRefresh
+	return *s.MembersAutoRefresh
 }
 
 // Scan holds a single scanner preset. Timeout is per-preset and optional;
@@ -152,7 +157,7 @@ type Scan struct {
 type Config struct {
 	Gateway Gateway         `toml:"gateway"`
 	Daemon  Daemon          `toml:"daemon"`
-	Members Members         `toml:"members"`
+	SPX     SPX             `toml:"spx"`
 	Scans   map[string]Scan `toml:"scans"`
 }
 
@@ -162,7 +167,7 @@ type Config struct {
 type Resolved struct {
 	Gateway Gateway
 	Daemon  Daemon
-	Members Members
+	SPX     SPX
 	Scans   map[string]Scan
 }
 
@@ -258,33 +263,38 @@ func (c *Config) Resolve() (*Resolved, error) {
 	return &Resolved{
 		Gateway: c.Gateway,
 		Daemon:  dae,
-		Members: c.Members,
+		SPX:     c.SPX,
 		Scans:   scans,
 	}, nil
 }
 
-// MembersAutoRefreshFromEnv resolves IBKR_MEMBERS_AUTO_REFRESH per
-// the design's env-override rules:
+// SPXMembersAutoRefreshFromEnv resolves IBKR_SPX_MEMBERS_AUTO_REFRESH
+// as a bidirectional override of the [spx] members_auto_refresh TOML
+// field:
 //
+//   - "1"               → returns (true, true): explicit force-on.
 //   - "0"               → returns (false, true): explicit force-off.
-//   - unset or "1"      → returns (false, false): use config.
-//   - anything else     → returns (false, false): silently ignored
-//     (same as unset; rejecting wouldn't help — env-var typos are a
-//     CI friction we'd rather not fail-loud on).
+//   - unset / other     → returns (false, false): defer to TOML.
+//     Garbage values are silently ignored rather than rejected; env-var
+//     typos are a CI friction we'd rather not fail-loud on, and there's
+//     no realistic compliance posture that wants "fail when the env is
+//     present but malformed."
 //
-// The second return is whether the env actively forced the override,
-// distinct from "env unset, fall through to config". The status
-// renderer uses this to pick the "disabled (env)" vs "disabled
-// (config)" string.
+// The second return ("forced") distinguishes "env actively overrode
+// the TOML" from "env unset, TOML governs." The status renderer uses
+// this to pick the "disabled (env)" vs "disabled (config)" suffix.
 //
-// Lives next to the Members type so the precedence rules don't have
-// to be re-derived at every call site.
-func MembersAutoRefreshFromEnv() (forceOff bool, forced bool) {
-	v := os.Getenv("IBKR_MEMBERS_AUTO_REFRESH")
-	if v == "0" {
+// Lives next to the SPX type so the precedence rules don't have to be
+// re-derived at every call site.
+func SPXMembersAutoRefreshFromEnv() (enabled bool, forced bool) {
+	switch os.Getenv("IBKR_SPX_MEMBERS_AUTO_REFRESH") {
+	case "1":
 		return true, true
+	case "0":
+		return false, true
+	default:
+		return false, false
 	}
-	return false, false
 }
 
 // defaultScans is the built-in preset set, used when the user has no

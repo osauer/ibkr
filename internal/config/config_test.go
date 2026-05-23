@@ -197,9 +197,9 @@ tls = false
 	}
 }
 
-// TestMembers_AutoRefreshDefaultsToTrue: absent [members] block →
-// AutoRefreshEnabled() = true. Documents the opt-out posture.
-func TestMembers_AutoRefreshDefaultsToTrue(t *testing.T) {
+// TestSPX_MembersAutoRefreshDefaultsToTrue: absent [spx] block →
+// MembersAutoRefreshEnabled() = true. Documents the opt-out posture.
+func TestSPX_MembersAutoRefreshDefaultsToTrue(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "no-such.toml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -208,18 +208,18 @@ func TestMembers_AutoRefreshDefaultsToTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if !res.Members.AutoRefreshEnabled() {
-		t.Error("AutoRefreshEnabled should default to true when [members] block absent")
+	if !res.SPX.MembersAutoRefreshEnabled() {
+		t.Error("MembersAutoRefreshEnabled should default to true when [spx] block absent")
 	}
 }
 
-// TestMembers_AutoRefreshExplicitFalse: pinned TOML disables the
+// TestSPX_MembersAutoRefreshExplicitFalse: pinned TOML disables the
 // refresher. Status renderer surfaces this as "disabled (config)".
-func TestMembers_AutoRefreshExplicitFalse(t *testing.T) {
+func TestSPX_MembersAutoRefreshExplicitFalse(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	body := `[members]
-auto_refresh = false
+	body := `[spx]
+members_auto_refresh = false
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -232,19 +232,19 @@ auto_refresh = false
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if res.Members.AutoRefreshEnabled() {
-		t.Error("auto_refresh=false should disable the refresher")
+	if res.SPX.MembersAutoRefreshEnabled() {
+		t.Error("members_auto_refresh=false should disable the refresher")
 	}
 }
 
-// TestMembers_AutoRefreshExplicitTrue: pinned TOML = true matches the
-// default but the pointer-typed field carries the "user opted in"
+// TestSPX_MembersAutoRefreshExplicitTrue: pinned TOML = true matches
+// the default but the pointer-typed field carries the "user opted in"
 // signal for any future feature that distinguishes the two.
-func TestMembers_AutoRefreshExplicitTrue(t *testing.T) {
+func TestSPX_MembersAutoRefreshExplicitTrue(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	body := `[members]
-auto_refresh = true
+	body := `[spx]
+members_auto_refresh = true
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -257,43 +257,44 @@ auto_refresh = true
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if !res.Members.AutoRefreshEnabled() {
-		t.Error("auto_refresh=true should enable the refresher")
+	if !res.SPX.MembersAutoRefreshEnabled() {
+		t.Error("members_auto_refresh=true should enable the refresher")
 	}
-	if res.Members.AutoRefresh == nil || !*res.Members.AutoRefresh {
+	if res.SPX.MembersAutoRefresh == nil || !*res.SPX.MembersAutoRefresh {
 		t.Error("explicit true should round-trip as non-nil pointer")
 	}
 }
 
-// TestMembersAutoRefreshFromEnv covers the env-override precedence.
-// IBKR_MEMBERS_AUTO_REFRESH=0 forces off; unset / "1" / anything
-// else is "fall through to config".
-func TestMembersAutoRefreshFromEnv(t *testing.T) {
+// TestSPXMembersAutoRefreshFromEnv covers the env-override precedence.
+// Symmetric semantics: IBKR_SPX_MEMBERS_AUTO_REFRESH=1 force-enables,
+// =0 force-disables, unset / anything else defers to TOML.
+func TestSPXMembersAutoRefreshFromEnv(t *testing.T) {
 	cases := []struct {
-		name      string
-		set       bool
-		value     string
-		wantForce bool
+		name        string
+		set         bool
+		value       string
+		wantEnabled bool
+		wantForced  bool
 	}{
-		{"unset", false, "", false},
-		{"explicit zero", true, "0", true},
-		{"explicit one", true, "1", false},
-		{"garbage", true, "yes", false},
-		{"empty string set", true, "", false},
+		{"unset", false, "", false, false},
+		{"explicit zero", true, "0", false, true},
+		{"explicit one", true, "1", true, true},
+		{"garbage", true, "yes", false, false},
+		{"empty string set", true, "", false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if c.set {
-				t.Setenv("IBKR_MEMBERS_AUTO_REFRESH", c.value)
+				t.Setenv("IBKR_SPX_MEMBERS_AUTO_REFRESH", c.value)
 			} else {
-				_ = os.Unsetenv("IBKR_MEMBERS_AUTO_REFRESH")
+				_ = os.Unsetenv("IBKR_SPX_MEMBERS_AUTO_REFRESH")
 			}
-			forceOff, forced := MembersAutoRefreshFromEnv()
-			if forceOff != c.wantForce {
-				t.Errorf("forceOff: want %v got %v", c.wantForce, forceOff)
+			enabled, forced := SPXMembersAutoRefreshFromEnv()
+			if enabled != c.wantEnabled {
+				t.Errorf("enabled: want %v got %v", c.wantEnabled, enabled)
 			}
-			if forced != c.wantForce {
-				t.Errorf("forced: want %v got %v", c.wantForce, forced)
+			if forced != c.wantForced {
+				t.Errorf("forced: want %v got %v", c.wantForced, forced)
 			}
 		})
 	}

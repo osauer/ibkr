@@ -27,10 +27,10 @@ const (
 	// Wikipedia-side restructure or a regex regression.
 	RefreshParseFailed RefreshState = "parse_failed"
 	// RefreshDisabledConfig means the daemon's config.toml has
-	// `[members] auto_refresh = false`.
+	// `[spx] members_auto_refresh = false`.
 	RefreshDisabledConfig RefreshState = "disabled (config)"
-	// RefreshDisabledEnv means the IBKR_MEMBERS_AUTO_REFRESH env var
-	// forced refresh off, regardless of TOML.
+	// RefreshDisabledEnv means the IBKR_SPX_MEMBERS_AUTO_REFRESH env
+	// var force-disabled refresh (=0), regardless of TOML.
 	RefreshDisabledEnv RefreshState = "disabled (env)"
 )
 
@@ -102,12 +102,16 @@ type RefresherOptions struct {
 	// Clock injects a synthetic time source for tests. nil → time.Now.
 	Clock func() time.Time
 	// PinnedByConfig is true when config.toml has
-	// auto_refresh = false. The refresher renders the state as
+	// [spx] members_auto_refresh = false AND the env var did not
+	// force-enable. The refresher renders the state as
 	// "disabled (config)" and Run() returns immediately.
 	PinnedByConfig bool
-	// PinnedByEnv is true when IBKR_MEMBERS_AUTO_REFRESH=0 is set.
-	// Takes precedence over PinnedByConfig in the status surface.
-	// Run() returns immediately.
+	// PinnedByEnv is true when IBKR_SPX_MEMBERS_AUTO_REFRESH=0 is
+	// set. Takes precedence over PinnedByConfig in the status
+	// surface. Run() returns immediately. Env=1 force-enables and
+	// leaves both Pinned* flags false even when TOML says false —
+	// see internal/daemon/server.go installMembersRefresher for the
+	// resolution rules.
 	PinnedByEnv bool
 }
 
