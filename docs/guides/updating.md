@@ -10,9 +10,15 @@ Once you're on v1.0.0 or later, the next upgrade is one command:
 ibkr update            # fetch latest, prompt to restart daemon
 ```
 
-The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, SHA-verifies the download, and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
+The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on `SHA256SUMS`** against the maintainer's public key embedded in your current `ibkr` binary, then SHA-verifies the tarball and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
 
 A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.
+
+### Release integrity
+
+From v1.0.0 onward, every release ships `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's Ed25519 key (fingerprint `D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`). The public key is embedded in every ibkr binary, so `ibkr update` verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.
+
+`ibkr update` **refuses** any release missing the signature, and any release whose signature does not verify against the embedded key. There is no `--insecure` flag. If you ever need to debug a verification failure, the underlying error is printed verbatim and the manual verification steps are in [SECURITY.md → Release integrity](../../SECURITY.md#release-integrity-v100).
 
 ### Headless / scripted use
 

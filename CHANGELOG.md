@@ -10,10 +10,11 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
-## v1.0.0 — 2026-05-23 08:23 CEST
+## v1.0.0 — 2026-05-23 22:19 CEST
 
 ### What's new
 
+- **Signed release artifacts.** Every v1.0+ release ships `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's Ed25519 key (fingerprint `D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`). `ibkr update` refuses any release that does not publish the signature, and any release whose signature does not verify against the public key embedded in every shipped binary. Trust chain no longer depends solely on GitHub TLS + account security — an attacker with write access to the release page cannot produce a signature without the maintainer's private key. Manual-verification steps live in [SECURITY.md → Release integrity](SECURITY.md#release-integrity-v100); the bootstrap installer (`install.sh`) verifies best-effort when `gpg` is on PATH.
 - Dealer-gamma methodology refresh (v3). The horizon split now isolates **0DTE / 1-7 / >7 DTE** instead of lumping 0DTE in with the rest of the weeklies — 0DTE is ~59% of SPX volume per Cboe 2025 data, and dealer hedging behaves materially differently there. The `|Γ|·OI` magnitude reading is now a real number (the prior aggregator silently returned $0 over thousands of legs when the gateway's Greeks tick raced behind IV) and is promoted to a co-primary signal alongside the signed γ-zero in both `ibkr gamma` and the `ibkr regime` gamma row. `--explain` carries a citations block (Perfiliev, Derman/Daglish-Hull-Suo, SqueezeMetrics, Cboe) and a one-paragraph note on the SPY+SPX scaling convention. **Action required:** the method token bumped to `bs-gamma-profile-v3-stickymoneyness-0dte-split`; all pre-v1 cached gamma snapshots invalidate on first daemon boot. Next regime call during market hours triggers a fresh compute.
 - CLI hero and `--explain` are unified across `ibkr gamma` and `ibkr regime`. Both commands open with title · timestamp / anchor quote / status line and stop dumping methodology metadata at the user by default. `ibkr gamma --explain` matches the regime command and surfaces the per-bucket horizon breakdown, citations, scaling note, and sign-convention disclosure. Regime's gamma row renames to `γ-zero (SPY+SPX)` when scope is combined, drops the misleading SPY-spot prefix on combined rows, and no longer prints `|Γ|·OI 0.0bn` when no magnitude is available. `ibkr chain SPY --expiry <date>` gains an OI column per leg (calls + puts).
 - MCP/JSON wire is at full parity with `--explain`. The `ibkr_gamma` tool gains a `scope: "spy" | "spx" | "spy+spx"` param matching the CLI's `--only`. `ibkr_regime` now returns a top-level `composite: {verdict, green_count, yellow_count, red_count, ranked_count, unranked_count}`, per-indicator `streak` (band / sessions / since), and per-scalar `*_quality` (freshness class / confidence / source). The combined gamma envelope carries `spot_anchor: "SPY"` to signal which top-level fields are SPY-anchored shallow copies vs truly combined. Off-hours: the daemon never recomputes when markets are closed; it serves the persisted snapshot with a `cache_stale_off_hours` warning when more than 24h old.
@@ -55,6 +56,10 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 ### Deprecated
 
 - `rpc.GammaZeroComputed.ZeroGammaNear` / `ProfileNear` / `GammaSignNear` / `NearLegCount` — kept as v2-compatible aliases for the merged 0DTE∪1-7 bucket. New consumers should use the v3 per-bucket fields. Removal targeted post-1.0.
+
+### Security
+
+- Release SHA256SUMS files are now PGP-signed by the maintainer's Ed25519 key (`D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`), with the public key embedded in every ibkr binary at `internal/update/release-signing-key.asc` and a fingerprint constant cross-checked at startup. `ibkr update` fails closed on missing or invalid signatures — no `--insecure` flag. See [SECURITY.md → Release integrity (v1.0.0+)](SECURITY.md#release-integrity-v100) for the trust model, manual verification commands, and rotation policy. New dependency: `github.com/ProtonMail/go-crypto`.
 
 ### Engineering notes
 
