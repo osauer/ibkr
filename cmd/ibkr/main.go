@@ -70,6 +70,18 @@ func main() {
 		os.Exit(runSetup(rest))
 	}
 
+	// `ibkr update` self-updates the binary from GitHub releases.
+	// Purely local — no daemon dial (the daemon may itself be the
+	// binary we are about to replace; dialing into it before the
+	// install would either spawn an idle one or skew the version
+	// check). The CLI may SIGTERM the daemon at the end of the
+	// install if --restart was requested.
+	if cmd == "update" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		os.Exit(cli.RunUpdate(ctx, rest, version, os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	color := cli.ShouldColor(os.Stdout)
 
 	// `ibkr <cmd> --help` should not spawn the daemon — render help and exit.

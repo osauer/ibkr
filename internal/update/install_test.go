@@ -322,7 +322,7 @@ func TestAcquireLock_ConcurrentGoroutines(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var contended int32
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		wg.Go(func() {
 			_, err := AcquireLock(dir)
 			if errors.Is(err, ErrInstallInProgress) {

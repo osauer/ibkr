@@ -145,13 +145,13 @@ func lookupChecksum(sumsPath, assetName string) (string, error) {
 // (e.g. an HTML 404 page mistakenly tarred up) before we hand the
 // file to os.Rename and inherit it as the live ibkr binary.
 var magicNumbers = [][]byte{
-	{0x7F, 0x45, 0x4C, 0x46},             // ELF (Linux)
-	{0xFE, 0xED, 0xFA, 0xCE},             // Mach-O 32-bit LE
-	{0xFE, 0xED, 0xFA, 0xCF},             // Mach-O 64-bit LE
-	{0xCE, 0xFA, 0xED, 0xFE},             // Mach-O 32-bit BE (legacy)
-	{0xCF, 0xFA, 0xED, 0xFE},             // Mach-O 64-bit BE
-	{0xCA, 0xFE, 0xBA, 0xBE},             // Mach-O fat binary (multi-arch)
-	{0xCA, 0xFE, 0xBA, 0xBF},             // Mach-O fat binary 64-bit
+	{0x7F, 0x45, 0x4C, 0x46}, // ELF (Linux)
+	{0xFE, 0xED, 0xFA, 0xCE}, // Mach-O 32-bit LE
+	{0xFE, 0xED, 0xFA, 0xCF}, // Mach-O 64-bit LE
+	{0xCE, 0xFA, 0xED, 0xFE}, // Mach-O 32-bit BE (legacy)
+	{0xCF, 0xFA, 0xED, 0xFE}, // Mach-O 64-bit BE
+	{0xCA, 0xFE, 0xBA, 0xBE}, // Mach-O fat binary (multi-arch)
+	{0xCA, 0xFE, 0xBA, 0xBF}, // Mach-O fat binary 64-bit
 }
 
 // hasExecutableMagic reports whether the first bytes of the file at
@@ -379,15 +379,15 @@ func CleanupOnSignal(paths ...string) (cancel func()) {
 // so tests can construct partial state and exercise per-step branches
 // without re-running the network layer.
 type Plan struct {
-	CacheDir     string // ~/.cache/ibkr/update/
-	TarballPath  string // CacheDir/<asset>.tar.gz
-	SumsPath     string // CacheDir/SHA256SUMS
-	ExtractDir   string // CacheDir/extract/
-	InstallDir   string // $IBKR_INSTALL_DIR or ~/.local/bin
-	DestPath     string // InstallDir/ibkr
-	AssetName    string // <asset>.tar.gz (used for SHA lookup)
-	AssetURL     string // GitHub asset URL
-	SumsURL      string // SHA256SUMS asset URL
+	CacheDir    string // ~/.cache/ibkr/update/
+	TarballPath string // CacheDir/<asset>.tar.gz
+	SumsPath    string // CacheDir/SHA256SUMS
+	ExtractDir  string // CacheDir/extract/
+	InstallDir  string // $IBKR_INSTALL_DIR or ~/.local/bin
+	DestPath    string // InstallDir/ibkr
+	AssetName   string // <asset>.tar.gz (used for SHA lookup)
+	AssetURL    string // GitHub asset URL
+	SumsURL     string // SHA256SUMS asset URL
 }
 
 // PlanFor builds a Plan for the given release on the current host. The

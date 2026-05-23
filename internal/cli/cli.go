@@ -134,8 +134,9 @@ func init() {
 		{"regime", "Risk-regime snapshot: all 5 indicators in one call (VIX term, HYG/SPY, USD/JPY, gamma, breadth)", "ibkr regime [--json]", runRegime},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
-		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil}, // dispatched in cmd/ibkr/main.go — no daemon contact
-		{"version", "Print version, commit, build date", "ibkr version", nil},                                       // version is handled in cmd/ibkr/main.go before dispatch
+		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil},                               // dispatched in cmd/ibkr/main.go — no daemon contact
+		{"update", "Self-update the ibkr binary from the latest GitHub release", "ibkr update [--check] [--force] [--restart|--no-restart]", nil}, // dispatched in cmd/ibkr/main.go — no daemon contact
+		{"version", "Print version, commit, build date", "ibkr version", nil},                                                                     // version is handled in cmd/ibkr/main.go before dispatch
 	}
 }
 

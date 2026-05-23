@@ -359,6 +359,7 @@ var Tools = []Tool{
 var ExcludedCLI = map[string]string{
 	"version": "info-only CLI verb; not useful as a tool call",
 	"setup":   "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
+	"update":  "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {
