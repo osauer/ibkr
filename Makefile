@@ -357,7 +357,7 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 		echo "release-binaries: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
 		exit 1; \
 	}
-	@expected_fp=$$(awk '/ReleaseSigningKeyFingerprint =/{ gsub(/.*"|"/, ""); print; exit }' internal/update/keyring.go); \
+	@expected_fp=$$(awk -F\" '/ReleaseSigningKeyFingerprint =/{print $$2; exit}' internal/update/keyring.go); \
 	gpg --list-secret-keys --with-colons "$$expected_fp" >/dev/null 2>&1 || { \
 		echo "release-binaries: signing key $$expected_fp is not in the local gpg keyring — see SECURITY.md for setup" >&2; \
 		exit 1; \

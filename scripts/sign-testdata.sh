@@ -15,7 +15,7 @@ set -eu
 
 cd "$(git rev-parse --show-toplevel)"
 
-FP=$(awk '/ReleaseSigningKeyFingerprint =/{ gsub(/.*"|"/, ""); print; exit }' \
+FP=$(awk -F\" '/ReleaseSigningKeyFingerprint =/{print $2; exit}' \
     internal/update/keyring.go)
 if [ -z "$FP" ]; then
     echo "sign-testdata: could not extract fingerprint from internal/update/keyring.go" >&2
