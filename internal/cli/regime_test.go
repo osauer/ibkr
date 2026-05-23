@@ -107,7 +107,7 @@ func TestRenderRegime_RowsFitOneLineEach(t *testing.T) {
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
-	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "USD/JPY", "SPY γ-zero", "SPX breadth"}
+	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "USD/JPY", "γ-zero (SPY+SPX)", "SPX breadth"}
 	for _, name := range indicators {
 		hits := strings.Count(stdout.String(), name)
 		if hits != 1 {
@@ -865,8 +865,13 @@ func TestAppendRegimeLog_CreatesFileIfMissing(t *testing.T) {
 
 // TestGammaRowLabel_ScopeAware pins the name column for the gamma row:
 // SPY-only / SPX-only / combined runs each get their own label so a
-// reader doesn't mis-read a combined run as SPY. Empty Result falls
-// back to the legacy "SPY γ-zero" so older daemons stay rendered.
+// reader doesn't mis-read a combined run as SPY. A nil result (cold /
+// computing / error state) defaults to the combined label since the
+// regime daemon always asks for combined gamma — the row name must not
+// silently flip between calls depending on whether the envelope has
+// landed. A populated result with an empty Scope string (a legacy
+// daemon that pre-dates the scope field) still falls back to
+// "SPY γ-zero" to preserve old behaviour.
 func TestGammaRowLabel_ScopeAware(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -879,7 +884,7 @@ func TestGammaRowLabel_ScopeAware(t *testing.T) {
 		{"spx", rpc.GammaZeroScopeSPX, "SPX γ-zero", true},
 		{"combined", rpc.GammaZeroScopeCombined, "γ-zero (SPY+SPX)", true},
 		{"empty_scope_legacy", "", "SPY γ-zero", true},
-		{"nil_result_legacy", "", "SPY γ-zero", false},
+		{"nil_result_defaults_combined", "", "γ-zero (SPY+SPX)", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

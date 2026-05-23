@@ -155,6 +155,35 @@ func TestRenderGamma_MagnitudeOmittedWhenZero(t *testing.T) {
 	}
 }
 
+// TestRenderGamma_ColdRendersFriendlyExplainer pins the cold-state UX:
+// when the daemon returns Status=cold (e.g. off-hours with no v3 cache
+// yet), the renderer prints a clear explainer instead of the harsh
+// "without a result payload" defensive fallback. Includes the hint to
+// pass --force.
+func TestRenderGamma_ColdRendersFriendlyExplainer(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
+	if code := renderGammaText(env, res, false); code != 0 {
+		t.Fatalf("cold should exit 0, got %d", code)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "without a result payload") {
+		t.Errorf("cold path should not emit the defensive fallback:\n%s", out)
+	}
+	for _, want := range []string{
+		"no data yet",
+		"cold cache",
+		"first call of each NY",
+		"--force",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cold explainer missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderGamma_ExplainSurfacesMetadata pins B6: with --explain set,
 // the methodology block + citations + sign-convention disclosure all
 // render. The citations come verbatim from MethodologyCitations.

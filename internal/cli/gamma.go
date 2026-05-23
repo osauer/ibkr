@@ -92,6 +92,22 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 	}
 
 	switch r.Status {
+	case rpc.GammaZeroStatusCold:
+		// No compute has run this NY session and none is in flight. This is
+		// the common off-hours state: the daemon never recomputes on a closed
+		// market, so a stale or invalidated cache leaves us with no value to
+		// serve until the next U.S. equity-options session open. Friendly
+		// explainer beats a bare "without a result payload" error.
+		fmt.Fprintf(out, "  Status      no data yet (cold cache)\n")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, env.dim("  The compute runs automatically on the first call of each NY"))
+		fmt.Fprintln(out, env.dim("  trading session (09:30 ET, Mon-Fri). Outside session hours the"))
+		fmt.Fprintln(out, env.dim("  daemon does not run heavy option-chain fans against a closed"))
+		fmt.Fprintln(out, env.dim("  market. To force a compute now (mostly useful when troubleshooting"))
+		fmt.Fprintln(out, env.dim("  or testing): ibkr gamma --force"))
+		fmt.Fprintln(out)
+		return 0
+
 	case rpc.GammaZeroStatusComputing:
 		fmt.Fprintf(out, "  Status      computing\n")
 		if r.StartedAt != nil {

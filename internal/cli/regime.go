@@ -693,7 +693,11 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 func gammaRowLabel(r rpc.RegimeGammaZero) string {
 	res := r.Envelope.Result
 	if res == nil {
-		return "SPY γ-zero"
+		// No envelope yet (cold / computing / error). Regime always
+		// requests the combined SPY+SPX gamma — label accordingly so
+		// the row name doesn't silently flip from "γ-zero (SPY+SPX)"
+		// to "SPY γ-zero" depending on whether a compute has landed.
+		return "γ-zero (SPY+SPX)"
 	}
 	switch res.Scope {
 	case rpc.GammaZeroScopeSPX:
