@@ -160,3 +160,169 @@ func TestGammaScopeForRequestDefaultsToCombined(t *testing.T) {
 		t.Errorf("empty scope: got %q, want %q", got, rpc.GammaZeroScopeCombined)
 	}
 }
+
+// TestCombineGammaResultsSumsProfileOnSharedGrid covers the happy
+// path of combineProfileBuckets: when both halves share an identical
+// Spot grid (which is contrived for SPY+SPX but the helper's contract
+// nonetheless), the combined Profile carries the bucket-wise GEX sum.
+//
+// SPY-only field passthrough is also documented here: the shallow
+// copy means SpotUnderlying / ZeroGamma / GammaSign on the combined
+// envelope are SPY's, not "combined" — see the field-by-field intent
+// map above combineGammaResults' shallow copy.
+func TestCombineGammaResultsSumsProfileOnSharedGrid(t *testing.T) {
+	// Contrived shared grid (real SPY/SPX never align this way —
+	// SPY anchors ~540, SPX anchors ~5400 — so the mismatch path
+	// is the production case; see TestCombineGammaResultsProfileGridMismatch).
+	spy := &rpc.GammaZeroComputed{
+		SpotUnderlying: 110,
+		ZeroGamma:      new(108.0),
+		GammaSign:      "negative",
+		Profile: []rpc.GammaProfilePoint{
+			{Spot: 100, GEX: 10},
+			{Spot: 110, GEX: 20},
+			{Spot: 120, GEX: 30},
+		},
+		ProfileNear: []rpc.GammaProfilePoint{
+			{Spot: 100, GEX: 1},
+			{Spot: 110, GEX: 2},
+			{Spot: 120, GEX: 3},
+		},
+	}
+	spx := &rpc.GammaZeroComputed{
+		SpotUnderlying: 110,
+		Profile: []rpc.GammaProfilePoint{
+			{Spot: 100, GEX: -5},
+			{Spot: 110, GEX: 100},
+			{Spot: 120, GEX: -7},
+		},
+		ProfileNear: []rpc.GammaProfilePoint{
+			{Spot: 100, GEX: -1},
+			{Spot: 110, GEX: 4},
+			{Spot: 120, GEX: -2},
+		},
+	}
+	combined := combineGammaResults(spy, spx)
+	if combined == nil {
+		t.Fatal("combined is nil")
+	}
+	wantProfile := []rpc.GammaProfilePoint{
+		{Spot: 100, GEX: 5},
+		{Spot: 110, GEX: 120},
+		{Spot: 120, GEX: 23},
+	}
+	if len(combined.Profile) != len(wantProfile) {
+		t.Fatalf("combined.Profile len = %d, want %d (Profile=%+v)", len(combined.Profile), len(wantProfile), combined.Profile)
+	}
+	for i, w := range wantProfile {
+		if combined.Profile[i] != w {
+			t.Errorf("combined.Profile[%d] = %+v, want %+v", i, combined.Profile[i], w)
+		}
+	}
+	wantNear := []rpc.GammaProfilePoint{
+		{Spot: 100, GEX: 0},
+		{Spot: 110, GEX: 6},
+		{Spot: 120, GEX: 1},
+	}
+	for i, w := range wantNear {
+		if combined.ProfileNear[i] != w {
+			t.Errorf("combined.ProfileNear[%d] = %+v, want %+v", i, combined.ProfileNear[i], w)
+		}
+	}
+	// SPY-only field passthrough — these are SPY's values shallow-
+	// copied onto the combined envelope; renderers must pull true
+	// per-index numbers from PerIndex.
+	t.Logf("SPY-only on combined envelope (carried by shallow copy): SpotUnderlying=%v ZeroGamma=%v GammaSign=%q — consume per-index detail via PerIndex",
+		combined.SpotUnderlying, combined.ZeroGamma, combined.GammaSign)
+	if combined.SpotUnderlying != spy.SpotUnderlying {
+		t.Errorf("SPY passthrough broken: combined.SpotUnderlying=%v, want %v", combined.SpotUnderlying, spy.SpotUnderlying)
+	}
+	// Grid silence check — no mismatch warning should fire when
+	// grids actually match.
+	for _, w := range combined.Warnings {
+		if w == "combined_profile_grid_mismatch" {
+			t.Errorf("grids matched but combined_profile_grid_mismatch fired anyway; warnings=%v", combined.Warnings)
+		}
+	}
+}
+
+// TestCombineGammaResultsProfileGridMismatch covers the bail-with-
+// warning branch — realistic SPY (~540) + SPX (~5400) profiles sit
+// on different spot scales, so combineProfileBuckets returns nil and
+// stamps `combined_profile_grid_mismatch`. The user sees the warning
+// in the rendered envelope; per-index curves are still available via
+// PerIndex for any consumer that needs a real profile.
+func TestCombineGammaResultsProfileGridMismatch(t *testing.T) {
+	spy := &rpc.GammaZeroComputed{
+		Profile: []rpc.GammaProfilePoint{
+			{Spot: 540, GEX: 100},
+			{Spot: 550, GEX: -100},
+		},
+	}
+	spx := &rpc.GammaZeroComputed{
+		Profile: []rpc.GammaProfilePoint{
+			{Spot: 5400, GEX: 1000},
+			{Spot: 5500, GEX: -1000},
+		},
+	}
+	combined := combineGammaResults(spy, spx)
+	if combined == nil {
+		t.Fatal("combined is nil")
+	}
+	if combined.Profile != nil {
+		t.Errorf("grid mismatch: combined.Profile should be nil, got %+v", combined.Profile)
+	}
+	var sawMismatch bool
+	for _, w := range combined.Warnings {
+		if w == "combined_profile_grid_mismatch" {
+			sawMismatch = true
+		}
+	}
+	if !sawMismatch {
+		t.Errorf("grid mismatch warning missing from combined.Warnings: %v", combined.Warnings)
+	}
+}
+
+// TestCombineGammaResultsWarningsUnion proves Warnings on the combined
+// envelope is the dedup'd union of spy.Warnings and spx.Warnings,
+// not just the SPY-half slice that came along on the shallow copy.
+// A regression here would silently hide SPX-side warnings
+// (skew_fallback, throttled, etc.) from the rendered headline.
+func TestCombineGammaResultsWarningsUnion(t *testing.T) {
+	spy := &rpc.GammaZeroComputed{
+		Warnings: []string{"all_iv_derived", "no_crossing_in_window"},
+	}
+	spx := &rpc.GammaZeroComputed{
+		Warnings: []string{"throttled", "no_crossing_in_window"}, // last entry dupes SPY
+	}
+	combined := combineGammaResults(spy, spx)
+	if combined == nil {
+		t.Fatal("combined is nil")
+	}
+	want := map[string]bool{
+		"all_iv_derived":        false,
+		"no_crossing_in_window": false,
+		"throttled":             false,
+	}
+	for _, w := range combined.Warnings {
+		if _, ok := want[w]; ok {
+			want[w] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("warnings union missing %q; got %v", k, combined.Warnings)
+		}
+	}
+	// Dedup check — "no_crossing_in_window" appears in both inputs;
+	// it must appear exactly once in the union.
+	var dupes int
+	for _, w := range combined.Warnings {
+		if w == "no_crossing_in_window" {
+			dupes++
+		}
+	}
+	if dupes != 1 {
+		t.Errorf("union should dedup duplicates: got %d copies of no_crossing_in_window in %v", dupes, combined.Warnings)
+	}
+}

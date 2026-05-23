@@ -246,11 +246,29 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 		return c
 	}
 	wrap := gammaLogf{inner: log}
+	offHours := rpc.ClassifySession(now) == rpc.SessionClosed
 	for _, scope := range knownGammaScopes {
 		persisted, err := store.Load(scope, now)
 		if err != nil {
 			wrap.Warnf("gamma cache: load persisted scope=%s: %v (cold start for this scope)", scope, err)
 			continue
+		}
+		if persisted == nil && offHours {
+			// Off-hours fallback: today's session-key gate didn't
+			// match, but we'd rather serve yesterday's compute
+			// (flagged stale via cache_stale_off_hours when age > 24h)
+			// than force the user to wait until the next session open
+			// for any γ-zero answer. See kickOrJoin's SessionClosed
+			// gate for the serve-only-never-kick guarantee.
+			stale, stErr := store.LoadStale(scope)
+			if stErr != nil {
+				wrap.Warnf("gamma cache: load stale scope=%s: %v (cold start for this scope)", scope, stErr)
+				continue
+			}
+			if stale == nil {
+				continue
+			}
+			persisted = stale
 		}
 		if persisted == nil {
 			continue
@@ -377,6 +395,25 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 			slot.current = slot.refresh
 		}
 		slot.refresh = nil
+	}
+
+	// SessionClosed gate: outside U.S. equity-options trading hours
+	// we never kick a fresh compute (no fresh quotes inbound; the
+	// fan-out would either time out on dead model ticks or land
+	// garbage IVs against prior-session prices) and we serve any
+	// successful cached result we have — even one whose sessionKey
+	// belongs to a prior NY trading date. The persisted Friday-RTH
+	// result is the best answer we can give Saturday morning;
+	// freshness is the renderer's problem (snapshot stamps
+	// cache_stale_off_hours past 24h so the user sees the age).
+	//
+	// No usable cache + closed gateway → return (nil, false) and
+	// snapshot reports Cold rather than starting a doomed compute.
+	if rpc.ClassifySession(now) == rpc.SessionClosed {
+		if slot.current != nil && slot.current.isDone() && slot.current.err == nil && slot.current.result != nil {
+			return slot.current, false
+		}
+		return nil, false
 	}
 
 	if slot.current != nil && slot.current.sessionKey == key {
@@ -568,6 +605,19 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 		}
 		env.Status = rpc.GammaZeroStatusReady
 		env.Result = g.result
+		// Off-hours stale tag: when we're serving a cached result
+		// outside trading hours and it's more than 24h old, append
+		// the `cache_stale_off_hours` warning so the renderer can
+		// say "computed Nh ago" loudly instead of presenting an
+		// overnight-old reading as if it were fresh. Copy-on-write
+		// to avoid mutating the shared cache pointer that other
+		// concurrent snapshots may still be reading.
+		now := nowFn()
+		if g.result != nil && rpc.ClassifySession(now) == rpc.SessionClosed && now.Sub(g.result.AsOf) > 24*time.Hour {
+			r := *g.result
+			r.Warnings = dedupeStrings(append(append([]string{}, g.result.Warnings...), "cache_stale_off_hours"))
+			env.Result = &r
+		}
 		// Clear stale prior-error context for this scope — a successful
 		// compute means the previous failure is no longer informative.
 		c.mu.Lock()

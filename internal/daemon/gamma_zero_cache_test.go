@@ -626,8 +626,15 @@ func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
 		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
 	}
 
-	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
-	<-job1.done
+	// Pre-seed a Saturday compute as if Friday's daemon persisted it
+	// to disk and today's boot loaded it. SessionClosed callers must
+	// see this cached value; they must NOT kick a fresh compute (no
+	// fresh quotes inbound; the fan-out would land garbage IVs).
+	persisted := &rpc.GammaZeroComputed{SpotUnderlying: 5001, AsOf: now}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(persisted, rpc.GammaZeroScopeCombined, now)},
+	}
+	job1 := c.slots[rpc.GammaZeroScopeCombined].current
 
 	// 8 hours later — well past every active-session softTTL but
 	// still SessionClosed and still the same NY trading date.
@@ -643,8 +650,8 @@ func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
 	if fresh2 || job2 != job1 {
 		t.Errorf("closed session: should serve cached job1 with no refresh, got fresh=%v job=%p (want job=%p)", fresh2, job2, job1)
 	}
-	if got := computeRuns.Load(); got != 1 {
-		t.Errorf("closed session: compute ran %d times, want 1 (no refresh expected, ever)", got)
+	if got := computeRuns.Load(); got != 0 {
+		t.Errorf("closed session: compute ran %d times, want 0 (no kick, no refresh)", got)
 	}
 }
 
@@ -741,5 +748,140 @@ func TestClassifySession(t *testing.T) {
 		if got := rpc.ClassifySession(tc.t); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestGammaZeroCache_OffHoursServesFreshCacheWithoutWarning pins the
+// SessionClosed serve-cached-no-kick contract for a fresh persisted
+// value: a daemon that's been running through a session boundary (or
+// rebooted with today's cache on disk) must serve the cached result
+// to off-hours callers and must NOT append cache_stale_off_hours when
+// the result is under 24h old.
+func TestGammaZeroCache_OffHoursServesFreshCacheWithoutWarning(t *testing.T) {
+	c := newGammaZeroCache()
+	// Saturday 2026-05-23 10:00 EDT — SessionClosed, weekend.
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
+	}
+
+	// Cache holds a result computed 6h ago — fresh for off-hours
+	// (well under the 24h stale gate).
+	cached := &rpc.GammaZeroComputed{SpotUnderlying: 5001, AsOf: now.Add(-6 * time.Hour)}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(cached, rpc.GammaZeroScopeCombined, now)},
+	}
+	cachedJob := c.slots[rpc.GammaZeroScopeCombined].current
+
+	var kicked atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		kicked.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 9999}, nil
+	}
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	if fresh || job != cachedJob {
+		t.Errorf("off-hours w/ fresh cache: got fresh=%v job=%p, want fresh=false job=%p", fresh, job, cachedJob)
+	}
+	if kicked.Load() != 0 {
+		t.Errorf("off-hours must not kick a fresh compute, kicked=%d", kicked.Load())
+	}
+
+	env := c.snapshot(job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("snapshot status = %q, want ready", env.Status)
+	}
+	for _, w := range env.Result.Warnings {
+		if w == "cache_stale_off_hours" {
+			t.Errorf("fresh off-hours cache should not carry cache_stale_off_hours; warnings=%v", env.Result.Warnings)
+		}
+	}
+}
+
+// TestGammaZeroCache_OffHoursStaleCacheGetsWarning proves the
+// >24h-old branch of the SessionClosed serve path stamps the
+// cache_stale_off_hours warning on the served envelope (via copy-on-
+// write — the underlying cached pointer's Warnings must not be
+// mutated, so concurrent snapshots don't see drift).
+func TestGammaZeroCache_OffHoursStaleCacheGetsWarning(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC) // Sunday 10:00 EDT, SessionClosed
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
+	}
+
+	// Cache result is 36h old — past the 24h stale gate.
+	cached := &rpc.GammaZeroComputed{
+		SpotUnderlying: 5001,
+		AsOf:           now.Add(-36 * time.Hour),
+		Warnings:       []string{"all_iv_derived"},
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(cached, rpc.GammaZeroScopeCombined, now)},
+	}
+	cachedJob := c.slots[rpc.GammaZeroScopeCombined].current
+
+	env := c.snapshot(cachedJob, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("snapshot status = %q, want ready", env.Status)
+	}
+	var seen bool
+	for _, w := range env.Result.Warnings {
+		if w == "cache_stale_off_hours" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("stale off-hours cache must carry cache_stale_off_hours warning; got %v", env.Result.Warnings)
+	}
+	// Existing warning must survive the dedup'd union.
+	var hasOld bool
+	for _, w := range env.Result.Warnings {
+		if w == "all_iv_derived" {
+			hasOld = true
+		}
+	}
+	if !hasOld {
+		t.Errorf("existing warning lost during stale-tagging: got %v", env.Result.Warnings)
+	}
+	// Cache pointer must NOT have been mutated — copy-on-write
+	// guarantees concurrent snapshots see the original.
+	for _, w := range cached.Warnings {
+		if w == "cache_stale_off_hours" {
+			t.Errorf("snapshot mutated the cached Warnings slice: %v", cached.Warnings)
+		}
+	}
+}
+
+// TestGammaZeroCache_OffHoursColdReturnsEmpty proves the
+// SessionClosed-no-cache branch: with no usable persisted result on
+// hand, kickOrJoin must return (nil, false) and snapshot must report
+// Cold rather than starting a doomed compute against a closed
+// gateway. The dashboard renderer then surfaces "no data yet; try
+// after the open."
+func TestGammaZeroCache_OffHoursColdReturnsEmpty(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
+	}
+
+	var kicked atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		kicked.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
+	}
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	if job != nil {
+		t.Errorf("off-hours cold cache: expected nil job, got %p", job)
+	}
+	if fresh {
+		t.Errorf("off-hours cold cache: fresh must be false, got true")
+	}
+	if kicked.Load() != 0 {
+		t.Errorf("off-hours cold cache: must not kick compute, kicked=%d", kicked.Load())
+	}
+	env := c.snapshot(job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusCold {
+		t.Errorf("snapshot status = %q, want cold", env.Status)
 	}
 }

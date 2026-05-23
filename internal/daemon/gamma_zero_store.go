@@ -126,6 +126,47 @@ func (s *gammaZeroStore) Load(scope string, nyNow time.Time) (*rpc.GammaZeroComp
 	return env.Result, nil
 }
 
+// LoadStale returns the persisted result for scope without the
+// session-key freshness gate. Mirrors Load except it accepts a result
+// whose env.SessionKey was recorded under a prior NY trading date.
+// Version / Scope / Method gates still apply — a v1-shape file from a
+// prior methodology era is still rejected as cold.
+//
+// Used by the SessionClosed boot path: outside U.S. equity-options
+// trading hours we'd rather surface yesterday's compute (clearly
+// flagged as stale via the cache_stale_off_hours warning when age
+// exceeds 24h) than force the user to wait for the next session open
+// to see any γ-zero number at all. Inside trading hours callers must
+// use Load() — a stale value during an active session would be
+// indistinguishable from a fresh one once it lands in the cache slot.
+func (s *gammaZeroStore) LoadStale(scope string) (*rpc.GammaZeroComputed, error) {
+	path := filepath.Join(s.dir, gammaZeroStoreFilename(scope))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read gamma-zero cache scope=%s: %w", scope, err)
+	}
+	var env gammaZeroPersistEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, fmt.Errorf("decode gamma-zero cache scope=%s: %w", scope, err)
+	}
+	if env.Version != currentGammaPersistVersion {
+		return nil, nil
+	}
+	if env.Scope != scope {
+		return nil, nil
+	}
+	if env.Result == nil {
+		return nil, nil
+	}
+	if env.Result.Method != env.Method {
+		return nil, nil
+	}
+	return env.Result, nil
+}
+
 // Save writes the result atomically to the scope's canonical file.
 // sessionKey is captured separately (rather than derived from
 // time.Now() inside Save) so the caller's notion of "what session

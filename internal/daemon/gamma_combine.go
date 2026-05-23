@@ -15,18 +15,6 @@ import (
 // combineGammaResults builds the SPY+SPX result envelope from the two
 // single-underlying GammaZeroComputed payloads.
 //
-// What it does AND DOESN'T do — post-step-10 revision:
-//
-// It does NOT sum the two sweep profiles into a single combined
-// γ-zero level. The earlier draft did, on the theory that "dealer
-// gamma is dollars per 1 % move and dollars add." That's true
-// arithmetically, but the spot² scaling makes SPX dominate by ~100×
-// per contract (SPX_spot/SPY_spot ≈ 10, so spot² ratio ≈ 100). At
-// real OI mixes the SPX share of the dollar sum runs 60–70% — so
-// the "combined γ-zero" was structurally pinned to SPX's flip with
-// epsilon SPY noise, indistinguishable from SPX-only for regime-call
-// purposes. We dropped it.
-//
 // What it DOES surface:
 //
 //   - PerIndex: the two single-underlying GammaZeroComputed payloads,
@@ -43,20 +31,30 @@ import (
 //   - TopStrikes: merged + sorted + top-K. With the 100× per-contract
 //     scaling SPX rows will dominate; the renderer's INDEX column
 //     makes the imbalance visible rather than hidden.
+//   - Profile / ProfileNear / ProfileTerm: per-bucket sum of GEX on
+//     the SHARED spot grid via combineProfileBuckets. SPY (~540) and
+//     SPX (~5400) sit on different absolute spot scales today so the
+//     helper bails with a `combined_profile_grid_mismatch` warning
+//     and leaves the field nil — consumers needing a real curve must
+//     recurse on PerIndex. The summed path exists for future
+//     same-grid combinations.
 //   - Expirations, LegCount, DerivedIVLegs: unioned/summed for the
 //     diagnostic footer.
-//   - Warnings: unioned; entitlement-graceful path may append
-//     "spx_unavailable:<reason>" before we get here (in which case
-//     this function never runs and computeGammaCombined returns the
-//     SPY-only result directly).
+//   - Warnings: unioned across spy + spx then deduped; the profile
+//     mismatch warnings noted above land here. Entitlement-graceful
+//     path may append "spx_unavailable:<reason>" before we get here
+//     (in which case this function never runs and computeGammaCombined
+//     returns the SPY-only result directly).
 //
-// Top-level scalar fields (SpotUnderlying, ZeroGamma, GapPct, Profile,
-// ProfileNear, ProfileTerm, GammaSign*, NearLegCount, TermLegCount,
-// ZeroGammaNear, ZeroGammaTerm, SkewModel, SkewFitQuality) are LEFT
-// at the SPY-half values (shallow-copy) so JSON consumers that read
-// them get an SPY-anchored view. The combined headline is no longer
-// derived; consumers wanting a combined number must compute it
-// themselves from PerIndex.
+// SPY-only fields that come along by shallow copy and are NOT
+// re-derived for the combined headline (SpotUnderlying, SpotAt,
+// ZeroGamma, GapPct, GammaSign*, SweepLow/HighAbs, Zero/Sign*Near,
+// Near/TermLegCount, Zero/Sign*Term, SkewModel, SkewFitQuality,
+// Params, Method, PartialClasses) are documented in the field-by-
+// field intent map immediately above the shallow copy below.
+// Renderers reading the combined envelope should pull these from
+// PerIndex["SPY"] / PerIndex["SPX"] rather than trusting the
+// top-level scalars.
 func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 	if spy == nil && spx == nil {
 		return nil
@@ -88,10 +86,29 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		topConcPct = allTop[0].AbsGEX / combinedAbs * 100
 	}
 
-	// SPY-anchored top-level fields (shallow-copy preserves the
-	// per-index scalars on the headline so single-underlying-shaped
-	// JSON consumers see consistent SPY data). Combined-specific
-	// additions layer on top.
+	// Shallow-copy SPY onto out, then override the combined-specific
+	// fields below. Field-by-field intent map for any future reader:
+	//
+	//   COMBINED (overridden below — safe to read off `out`):
+	//     Scope, GammaTotalAbs, TopStrikes, TopConcentrationPct,
+	//     LegCount, DerivedIVLegs, Expirations, Warnings, Source,
+	//     RegimeAgreement, PerIndex, DurationMS, AsOf,
+	//     Profile, ProfileNear, ProfileTerm.
+	//
+	//   SPY-ONLY (carried from `out := *spy` shallow copy — DO NOT
+	//   consume these as "combined" values; they are the SPY-half
+	//   reading and a future post-1.0 CombinedGammaZeroComputed type
+	//   will hide them entirely from this shape):
+	//     SpotUnderlying, SpotAt, ZeroGamma, GapPct, GammaSign,
+	//     SweepLowAbs, SweepHighAbs,
+	//     ZeroGammaNear, GammaSignNear, NearLegCount,
+	//     ZeroGammaTerm, GammaSignTerm, TermLegCount,
+	//     SkewModel, SkewFitQuality, Params, Method, PartialClasses.
+	//
+	// Renderers reading the combined headline should pull the
+	// per-index numbers from PerIndex["SPY"] / PerIndex["SPX"]
+	// instead of trusting SpotUnderlying / ZeroGamma / GammaSign on
+	// the envelope.
 	out := *spy
 	out.Scope = rpc.GammaZeroScopeCombined
 	out.GammaTotalAbs = combinedAbs
@@ -101,7 +118,22 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 	out.DerivedIVLegs = spy.DerivedIVLegs + spx.DerivedIVLegs
 	out.Expirations = dedupeStrings(append(append([]string{}, spy.Expirations...), spx.Expirations...))
 	sort.Strings(out.Expirations)
-	out.Warnings = dedupeStrings(append(append([]string{}, spy.Warnings...), spx.Warnings...))
+
+	// Profile combination: replace the shallow-copied SPY-half
+	// profiles with a per-bucket sum across the shared spot grid.
+	// SPY (spot ~540) and SPX (spot ~5400) sit on radically different
+	// absolute spot scales, so in practice the grids almost always
+	// differ — combineProfileBuckets bails with a warning in that
+	// case and returns nil, which is the honest answer (a renderer
+	// that needs a per-index profile can recurse on PerIndex). The
+	// near/term profiles get the same treatment.
+	combinedWarnings := append([]string{}, spy.Warnings...)
+	combinedWarnings = append(combinedWarnings, spx.Warnings...)
+	out.Profile, combinedWarnings = combineProfileBuckets(spy.Profile, spx.Profile, "combined_profile_grid_mismatch", combinedWarnings)
+	out.ProfileNear, combinedWarnings = combineProfileBuckets(spy.ProfileNear, spx.ProfileNear, "combined_profile_near_grid_mismatch", combinedWarnings)
+	out.ProfileTerm, combinedWarnings = combineProfileBuckets(spy.ProfileTerm, spx.ProfileTerm, "combined_profile_term_grid_mismatch", combinedWarnings)
+	out.Warnings = dedupeStrings(combinedWarnings)
+
 	out.Source = "computed from IBKR SPY+SPX option chains"
 	out.RegimeAgreement = classifyRegimeAgreement(spy, spx)
 	out.PerIndex = map[string]*rpc.GammaZeroComputed{
@@ -113,6 +145,41 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		out.AsOf = spx.AsOf
 	}
 	return &out
+}
+
+// combineProfileBuckets sums the GEX values of two sweep profiles
+// bucket-by-bucket on the assumption they share the same Spot grid.
+// Returns nil + a warning appended to warnings when:
+//   - the two lengths differ;
+//   - any pair of corresponding Spot values is not exactly equal;
+//   - either side is empty (no useful sum is possible).
+//
+// The exact-equality spot check is intentional: dealer GEX has no
+// natural interpretation across spot scales, so any drift means we
+// can't be sure the buckets represent the same scenario, and an
+// incorrect sum is worse than a missing one. In SPY+SPX production
+// the grids will always differ (SPY anchors ~540, SPX anchors ~5400)
+// so this path is effectively "bail with a warning" today. The
+// summed path exists for future per-index combinations where the
+// grids align by construction (e.g. two trading classes of the same
+// underlying).
+func combineProfileBuckets(a, b []rpc.GammaProfilePoint, mismatchWarn string, warnings []string) ([]rpc.GammaProfilePoint, []string) {
+	if len(a) == 0 || len(b) == 0 {
+		return nil, warnings
+	}
+	if len(a) != len(b) {
+		return nil, append(warnings, mismatchWarn)
+	}
+	for i := range a {
+		if a[i].Spot != b[i].Spot {
+			return nil, append(warnings, mismatchWarn)
+		}
+	}
+	out := make([]rpc.GammaProfilePoint, len(a))
+	for i := range a {
+		out[i] = rpc.GammaProfilePoint{Spot: a[i].Spot, GEX: a[i].GEX + b[i].GEX}
+	}
+	return out, warnings
 }
 
 // classifyRegimeAgreement labels the SPY/SPX regime relationship by
