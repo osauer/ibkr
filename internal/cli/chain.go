@@ -60,6 +60,13 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "chain: --no-iv and --all-expiries only apply when --expiry is omitted")
 	}
 
+	// Format-validate --expiry locally so a typo like "tomorrow" or
+	// "2099-99-99" fails fast instead of burning the full RPC deadline
+	// against a doomed strike-fan that has no contract to fetch.
+	if _, err := time.Parse("2006-01-02", *expiry); err != nil {
+		return fail(env, "chain: --expiry must be YYYY-MM-DD (got %q)", *expiry)
+	}
+
 	params := rpc.ChainFetchParams{
 		Symbol: symbol,
 		Expiry: *expiry,
