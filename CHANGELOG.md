@@ -10,6 +10,25 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.3 — 2026-05-24 07:21 CEST
+
+### What's new
+
+- Release cuts are faster without relaxing the gates: the release target now overlaps the existing check, package-test, and daemon-test prerequisites, then runs JSON-contract and wire smoke in one live TWS daemon session.
+- Release artifacts build in parallel across the supported OS/arch matrix while keeping the same checksum, PGP signature, plugin tag, and GitHub release publication checks.
+- CI and local checks now use the same pinned staticcheck and govulncheck tool versions from `go.mod`, removing surprise `@latest` drift.
+
+### Changed
+
+- `make release` now runs the existing `test` gate with `RELEASE_TEST_JOBS` parallelism and replaces the separate `release-verify` plus `smoke-only` sequence with `release-smoke`, preserving the live-TWS requirement and version-stamped binary check.
+- `make release-binaries` now honors `RELEASE_BUILD_JOBS` to build the four release tarballs concurrently before generating and signing `SHA256SUMS`.
+- `make check` and GitHub Actions now invoke pinned lint and vulnerability tools via `go tool staticcheck ./...` and `go tool govulncheck ./...`.
+- Release-flow documentation now names the strict `release-smoke` gate and the pinned local/CI toolchain behavior.
+
+### Fixed
+
+- Wire smoke assertions using `--since-offset` now keep the first complete frame when the offset lands exactly on a JSONL line boundary, so per-command assertions prove the command that just ran instead of accidentally skipping its first frame.
+
 ## v1.0.2 — 2026-05-24 06:12 CEST
 
 ### What's new
