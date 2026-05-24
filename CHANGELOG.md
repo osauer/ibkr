@@ -10,7 +10,7 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
-## v1.0.6 — 2026-05-24 14:03 CEST
+## v1.0.6 — 2026-05-24 14:08 CEST
 
 ### What's new
 
@@ -30,6 +30,7 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 
 ### Fixed
 
+- Quote JSON now surfaces IBKR mark price and assigns a non-empty data type for mark/close-only frozen snapshots, so off-hours release smoke no longer sees a successful-but-empty quote.
 - Live wire smoke now accepts documented SPY mark/close fallback ticks in loose off-hours mode while still requiring bid/ask/last ticks in live mode.
 
 ## v1.0.5 — 2026-05-24 11:56 CEST

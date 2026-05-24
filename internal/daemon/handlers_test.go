@@ -304,6 +304,29 @@ func TestMarketDataTypeName(t *testing.T) {
 	}
 }
 
+func TestQuoteDataTypeNameFallbacks(t *testing.T) {
+	t.Parallel()
+
+	if got := quoteDataTypeName(2, true, false); got != rpc.MarketDataFrozen {
+		t.Fatalf("explicit notice wins: got %q, want frozen", got)
+	}
+	if got := quoteDataTypeName(1, false, true); got != rpc.MarketDataFrozen {
+		t.Fatalf("fallback-only price with live notice: got %q, want frozen", got)
+	}
+	if got := quoteDataTypeName(3, false, true); got != rpc.MarketDataDelayed {
+		t.Fatalf("fallback-only price with delayed notice: got %q, want delayed", got)
+	}
+	if got := quoteDataTypeName(0, true, false); got != rpc.MarketDataLive {
+		t.Fatalf("current price without notice: got %q, want live", got)
+	}
+	if got := quoteDataTypeName(0, false, true); got != rpc.MarketDataFrozen {
+		t.Fatalf("fallback-only price without notice: got %q, want frozen", got)
+	}
+	if got := quoteDataTypeName(0, false, false); got != "" {
+		t.Fatalf("no price without notice: got %q, want empty", got)
+	}
+}
+
 // closestStrike picks the strike closest to spot. Verifies the tie-break
 // rule (lower wins) and the boundary cases at both ends of the array.
 func TestClosestStrike(t *testing.T) {

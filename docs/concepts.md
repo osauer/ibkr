@@ -1,27 +1,32 @@
 # Concepts
 
+Updated: 2026-05-24 14:08 CEST
+
 What the three load-bearing indicators measure, in enough depth to read the output without mis-acting on it. Engineering rationale (methodology choices, fitting curves, regime classifiers) lives in [`docs/design/`](./design/); this page is the user's mental model.
 
 ---
 
 ## Regime
 
-The five-indicator risk-regime dashboard summarises *the market's current posture* in one snapshot, designed for a 30-second daily check rather than a continuous monitor. Each indicator measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
+The eight-row risk-regime dashboard summarises *the market's current posture* in one snapshot, designed for a 30-second daily check rather than a continuous monitor. Each row measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
 
-The five:
+The rows:
 
 1. **VIX term structure** (VIX vs VIX3M). Backwardation — short-dated vol pricing above 3-month vol — is the stress fingerprint. The deeper and more sustained the inversion, the bigger the dislocation.
-2. **HYG vs SPY divergence**. High-yield credit (HYG) leads equity selloffs on the way down; a HYG breakdown while SPY is still near highs is the classic late-cycle pre-tell.
-3. **USD/JPY weekly move**. JPY funding-pair unwinds are a recurring stress amplifier (Aug 2024, Dec 2018, Jan 2016). A >3% week is a Tier-1 signal.
-4. **Dealer zero-gamma** (SPY + SPX combined). Whether the dealer book stabilises or amplifies day-over-day moves. See the [Gamma](#gamma) section.
-5. **S&P 500 breadth**. Whether the index's strength is broad or carried by a handful of mega-caps. See the [Breadth](#breadth) section.
+2. **VVIX vol-of-vol**. Cboe's VIX-of-VIX reading catches convexity demand inside the equity-vol cluster.
+3. **HYG vs SPY divergence**. High-yield credit (HYG) leads equity selloffs on the way down; a HYG breakdown while SPY is still near highs is the classic late-cycle pre-tell.
+4. **HY/IG OAS**. Official ICE BofA cash-credit spreads via FRED are slower than HYG but harder to dismiss as ETF noise.
+5. **Funding spread**. 90-day AA financial commercial paper minus 3-month T-bill flags slow funding/liquidity pressure.
+6. **USD/JPY weekly move**. JPY funding-pair unwinds are a recurring stress amplifier (Aug 2024, Dec 2018, Jan 2016). A >3% week is a Tier-1 signal.
+7. **Dealer zero-gamma** (SPY + SPX combined). Whether the dealer book stabilises or amplifies day-over-day moves. See the [Gamma](#gamma) section.
+8. **S&P 500 breadth**. Whether the index's strength is broad or carried by a handful of mega-caps. See the [Breadth](#breadth) section.
 
 Each row carries raw measurements plus a `notes` field embedding the spec's threshold bands verbatim — green / yellow / red derivation is intentionally left to the consumer because every trader has a different risk tolerance. Each row also carries a `streak` field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one.
 
 Two failure modes worth flagging on the wire:
 
-- Indicators 4 (gamma) and 5 (breadth) are heavy computes. On the first call of an NY trading day, indicator 4 returns `status: "computing"` with an ETA; on a fresh daemon, indicator 5 returns `state: "computing"` while the constituent fan-out runs (~60 min cold).
-- Indicators 1–3 may carry a `fields_missing` array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat `fields_missing` as a render hint, not an error.
+- Gamma and breadth are heavy computes. On the first call of an NY trading day, gamma may return `status: "computing"` with an ETA; on a fresh daemon, breadth returns `state: "computing"` while the constituent fan-out runs (~60 min cold).
+- Live IBKR rows may carry a `fields_missing` array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat `fields_missing` as a render hint, not an error.
 
 The full methodology spec is at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Use it when calibrating your own threshold bands — the spec's suggestions are starting points, not gospel.
 

@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-24 12:50 CEST
+Updated: 2026-05-24 14:08 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -217,6 +217,7 @@ and `expiry` / `strike` / `right` together identify the contract.
   "bid": 207.86,
   "ask": 207.88,
   "last": 207.87,
+  "mark": 207.87,
   "bid_size": 100,
   "ask_size": 200,
   "volume": 12400000,
@@ -229,6 +230,9 @@ and `expiry` / `strike` / `right` together identify the contract.
 
 Field meanings:
 - `bid`, `ask`, `last` — `null` means not delivered. Do not substitute.
+- `mark` — optional IBKR tick 37 mark/fair price. It is most useful
+  off-hours or for instruments where bid/ask/last do not flow; render it
+  as a fallback price, not as an actual last trade.
 - `bid_size`, `ask_size` — top-of-book size in shares (stocks/ETFs) or
   contracts (options). Omitted when the gateway didn't deliver tick 0/3.
 - `volume` — cumulative day total. Omitted when the gateway didn't deliver

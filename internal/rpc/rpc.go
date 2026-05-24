@@ -1542,6 +1542,7 @@ type Quote struct {
 	Bid       *float64       `json:"bid"`
 	Ask       *float64       `json:"ask"`
 	Last      *float64       `json:"last"`
+	Mark      *float64       `json:"mark,omitempty"`
 	PrevClose *float64       `json:"prev_close"`
 	Change    *float64       `json:"change"`
 	ChangePct *float64       `json:"change_pct"`

@@ -116,7 +116,7 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 }
 
 // TestRenderRegime_RowsFitOneLineEach pins the compressed layout: each
-// of the five indicators occupies exactly one row in the rendered body
+// of the eight indicators occupies exactly one row in the rendered body
 // (excluding header, composite, blank, and footer lines). The old
 // renderer used 4 lines per indicator; the redesign collapses to one.
 func TestRenderRegime_RowsFitOneLineEach(t *testing.T) {

@@ -317,6 +317,22 @@ func TestRenderQuoteSnapshot_MissingChangeRendersEmDash(t *testing.T) {
 	}
 }
 
+func TestRenderQuoteSnapshot_UsesMarkWhenLastMissing(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+
+	mark := 743.73
+	qs := []rpc.Quote{{Symbol: "SPY", Mark: &mark, DataType: rpc.MarketDataFrozen}}
+	_ = renderQuoteSnapshotText(env, qs)
+	out := stdout.String()
+	for _, want := range []string{"LAST/MARK", "743.73", "frozen"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // A non-cancellation error from Stream surfaces to the caller; the final
 // flush still runs so any pending frame is rendered before exit.
 func TestQuoteRenderer_StreamErrorBubbles(t *testing.T) {

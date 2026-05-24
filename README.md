@@ -58,7 +58,7 @@ The installer downloads the release for your OS and architecture, verifies the c
 - **Position sizing.** Fixed-fractional sizing against live NLV, with optional target, R-multiple, and breakeven win rate. Pure math; never an order ticket.
 - **Market breadth.** S&P 500 participation from constituent daily bars: percent above 50-DMA, percent above 200-DMA, and fresh 52-week highs/lows. A fresh cache is instant; first-ever cold start can take about an hour because of IBKR pacing.
 - **Dealer gamma.** Best-effort SPY+SPX zero-gamma and concentration view, with scope controls and entitlement-graceful fallback to SPY when SPX data is unavailable. Treat the signed level as a regime hint, not a precise trading level.
-- **Risk regime.** One call returns the five-indicator dashboard: VIX term structure, HYG/SPY divergence, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
+- **Risk regime.** One call returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
 
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 

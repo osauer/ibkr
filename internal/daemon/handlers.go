@@ -1030,19 +1030,23 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		q.Bid = ptrIfPos(d.Bid)
 		q.Ask = ptrIfPos(d.Ask)
 		q.Last = ptrIfPos(d.Last)
+		q.Mark = ptrIfPos(d.MarkPrice)
 		q.PrevClose = ptrIfPos(d.Close)
 		q.BidSize = ptrIfPos(d.BidSize)
 		q.AskSize = ptrIfPos(d.AskSize)
 		q.Volume = ptrIfPos(d.Volume)
 		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
-		if ready {
+		fallback := q.Mark != nil || q.PrevClose != nil
+		if ready || fallback {
 			// Capture the gateway's feed state while the subscription is
 			// still live — once the deferred unsubscribe fires, the
 			// connector's symbol→reqID mapping is gone and the type would
-			// always read "". Empty IsLiveDataType is renderer-safe.
-			q.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			// always read "". When IBKR omits that notice but only
+			// fallback ticks landed, label the row frozen so JSON consumers
+			// don't mistake mark/close-only data for a live quote.
+			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(sym), ready, fallback)
 		}
-		return ready
+		return ready || q.Mark != nil
 	}); err != nil && err != context.DeadlineExceeded {
 		return nil, err
 	}
@@ -1296,6 +1300,25 @@ func marketDataTypeName(t int) string {
 	default:
 		return ""
 	}
+}
+
+func quoteDataTypeName(notice int, hasCurrentPrice, hasFallbackPrice bool) string {
+	dt := marketDataTypeName(notice)
+	if hasCurrentPrice {
+		if dt != "" {
+			return dt
+		}
+		return rpc.MarketDataLive
+	}
+	if hasFallbackPrice {
+		switch dt {
+		case rpc.MarketDataDelayed, rpc.MarketDataDelayedFrozen:
+			return dt
+		default:
+			return rpc.MarketDataFrozen
+		}
+	}
+	return dt
 }
 
 // adHocScanLimitCap is the maximum number of rows an ad-hoc scan

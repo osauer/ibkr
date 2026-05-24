@@ -1,5 +1,7 @@
 # Agentic use
 
+Updated: 2026-05-24 14:08 CEST
+
 ibkr ships as an MCP server (`ibkr mcp`), making every read-only operation in the CLI available to any MCP client — Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves both surfaces; the MCP layer is a thin adapter over the existing RPCs. Stock and ETF quotes are also exposed as an MCP resource: `resources/read` returns one snapshot, while `resources/subscribe` streams updates until unsubscribe.
 
 This page is for the human installing the plugin and wondering *"what can I actually ask Claude with this?"* For the per-tool surface — exact parameter shapes, JSON envelopes — see the auto-generated [MCP tools reference](../reference/mcp-tools.md). For protocol mechanics, see the upstream [Model Context Protocol spec](https://modelcontextprotocol.io/).
@@ -22,7 +24,7 @@ These are the kinds of questions the tool is built for. Each shows the user's me
 
 → Claude invokes `ibkr_regime`.
 
-Returns the five-indicator dashboard: VIX term structure, HYG/SPY divergence, USD/JPY weekly move, dealer zero-gamma, S&P breadth. Each carries the raw measurement, the spec's threshold bands as `notes`, and a `streak` field counting consecutive sessions in the current band.
+Returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, dealer zero-gamma, and S&P breadth. Each row carries raw measurements, compact band/as-of metadata, scoped warnings when data is stale or unavailable, and a `streak` field when the row is rankable.
 
 Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is *information*, not a verdict — the user's risk tolerance determines what to do with it. See [Concepts → Regime](../concepts.md#regime).
 
@@ -75,7 +77,7 @@ A few prompt patterns that work well, learned from observing real conversations:
 
 - **Ask the question, don't name the tool.** "How does my portfolio look?" works better than "Run ibkr_positions." Claude picks the right tool based on the question; naming the tool just adds friction.
 - **Chain follow-ups freely.** Each tool call is cheap (cached when possible). "And what about gamma for those?" or "How did that look yesterday?" generate natural follow-up tool calls.
-- **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the five-indicator snapshot in one call. Faster than asking about each indicator separately.
+- **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
 - **For sizing, give Claude the full plan.** "I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV" lets `ibkr_size` return the R-multiple, breakeven win rate, and share count in one round-trip.
 
 ## Reference

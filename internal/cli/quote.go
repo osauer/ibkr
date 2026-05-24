@@ -106,7 +106,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 	// see on every retail platform. Em-dash placeholders preserve column
 	// alignment when ticks haven't arrived yet (frozen, dead pre-market).
 	header := fmt.Sprintf("  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %7s  %s",
-		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "LAST", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
+		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "LAST/MARK", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, q := range qs {
@@ -123,7 +123,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 			formatSize(q.BidSize),
 			orDash(q.Ask, 10),
 			formatSize(q.AskSize),
-			orDash(q.Last, 10),
+			orDash(quoteLastOrMark(q), 10),
 			orDash(q.PrevClose, 10),
 			env.formatChange(q.Change, 8),
 			env.formatChangePct(q.ChangePct, 8),
@@ -134,6 +134,13 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 	}
 	fmt.Fprintln(out)
 	return 0
+}
+
+func quoteLastOrMark(q rpc.Quote) *float64 {
+	if q.Last != nil {
+		return q.Last
+	}
+	return q.Mark
 }
 
 // formatChange renders a signed dollar change right-aligned to width w,
