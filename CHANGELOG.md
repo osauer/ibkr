@@ -10,6 +10,24 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.8 — 2026-05-24 20:38 CEST
+
+### What's new
+
+- `osauer.dev/ibkr` is now a full project landing page for IBKR MCP, TWS API, and AI-assistant workflows, with fresh sanitized product screenshots.
+- Search and agent discovery now have machine-readable `llms.txt`, sitemap, and MCP server metadata files.
+- The project site now carries structured metadata and social-preview images for clearer sharing and indexing.
+
+### Added
+
+- Added a static landing page with SEO metadata, OpenGraph/Twitter cards, JSON-LD, install CTAs, and sanitized regime, option-chain, and positions screenshots.
+- Added project-level `llms.txt`, `sitemap.xml`, `mcp-server.json`, and `.well-known/mcp/server.json` files for crawler, agent, and MCP directory discovery.
+- Added `.nojekyll` so GitHub Pages serves static discovery paths such as `.well-known`.
+
+### Changed
+
+- Bumped the Claude Code plugin manifest version to `1.0.8` so the plugin release tag stays aligned with the binary release tag.
+
 ## v1.0.7 — 2026-05-24 17:25 CEST
 
 ### What's new
