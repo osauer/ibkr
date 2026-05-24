@@ -26,15 +26,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Install the optional gate tools the Makefile expects on PATH.
-      # plugin-check is skipped via CHECK_DEPS override below because the
-      # `claude` CLI isn't available on stock GitHub runners; parity-check
-      # (the MCP↔CLI drift gate) and the rest stay strict.
-      - name: install lint tools
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-
       - name: make check
         run: make check CHECK_DEPS=parity-check
 

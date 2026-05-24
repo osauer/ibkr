@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # lib-daemon-control.sh — shared helpers for the smoke scripts to spin
 # up an isolated `ibkr daemon` under /tmp without colliding with the
-# user's canonical daemon. Sourced by release-verify.sh and
-# wire-smoke.sh.
+# user's canonical daemon. Sourced by release-verify.sh, release-smoke.sh,
+# and wire-smoke.sh.
 #
 # Provides:
 #   stop_existing_daemons <label>
@@ -13,7 +13,7 @@
 #       v0.16.0 release on first run before the workaround was added.
 #       Survivors auto-spawn on the next CLI call, so the cost is one
 #       bounce. <label> is the prefix for the user-facing banner
-#       ("release-verify", "wire-smoke", …).
+#       ("release-verify", "release-smoke", "wire-smoke", …).
 #
 #   kill_daemon_from_lockfile <lockfile>
 #       SIGTERM the daemon whose PID is recorded in <lockfile>; wait up

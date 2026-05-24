@@ -31,8 +31,9 @@ SKILL_DIR  ?= $(CLAUDE_DIR)/skills/ibkr
 SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
+RELEASE_TEST_JOBS ?= 3
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -62,9 +63,8 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # Binding pre-commit gate: formatting + go vet + staticcheck + govulncheck +
 # plugin manifest validation. Fails on stdlib vulnerabilities too — keep Go
 # patched.
-# One-time installs:
-#   go install honnef.co/go/tools/cmd/staticcheck@latest
-#   go install golang.org/x/vuln/cmd/govulncheck@latest
+# staticcheck and govulncheck are pinned as go.mod tool dependencies and
+# invoked via `go tool`, so CI and local runs use the same versions.
 #
 # CHECK_DEPS gates the optional pieces of the check matrix. Default is the
 # full strict gate (plugin-check + parity-check). CI without the `claude`
@@ -94,10 +94,8 @@ check: $(CHECK_DEPS) modernize-check docs-check ## gofmt + go vet + staticcheck 
 		exit 1; \
 	fi
 	go vet ./...
-	@command -v staticcheck >/dev/null 2>&1 || { echo "staticcheck not on PATH; install: go install honnef.co/go/tools/cmd/staticcheck@latest"; exit 1; }
-	staticcheck ./...
-	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not on PATH; install: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
-	govulncheck ./...
+	go tool staticcheck ./...
+	go tool govulncheck ./...
 
 # Validate the Claude Code plugin + marketplace manifests with the official
 # `claude plugin validate` tool. The Go test in internal/cli that asserts
@@ -258,6 +256,7 @@ clean: ## Remove bin/ and dist/
 # colleague can extract, drop into ~/.local/bin, and run.
 RELEASE_TARGETS = darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
 DIST_DIR = dist
+RELEASE_BUILD_JOBS ?= 4
 
 # Release builds resolve the commit hash from the *tag*, not from HEAD,
 # so the binary's stamped commit matches the git tag a colleague would
@@ -281,6 +280,17 @@ release-verify: ## Smoke-test the local bin/ibkr against a live gateway (called 
 		exit 1; \
 	fi
 	./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
+
+release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one live-gateway daemon session
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-smoke: RELEASE_VERSION is required, e.g. make release-smoke RELEASE_VERSION=v0.15.1" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -x bin/ibkr ]; then \
+		echo "release-smoke: bin/ibkr missing — run 'make build VERSION=$(RELEASE_VERSION)' first" >&2; \
+		exit 1; \
+	fi
+	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/release-smoke.sh bin/ibkr $(RELEASE_VERSION) bin/wire-assert
 
 smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 	@mkdir -p bin
@@ -341,18 +351,7 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 	$(eval RELEASE_LDFLAGS := $(STRIP_LDFLAGS) -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(RELEASE_DATE))
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)
-	@for target in $(RELEASE_TARGETS); do \
-		os=$$(echo $$target | cut -d- -f1); \
-		arch=$$(echo $$target | cut -d- -f2); \
-		base=ibkr-$(RELEASE_VERSION)-$$target; \
-		stage=$(DIST_DIR)/$$base; \
-		echo "==> $$os/$$arch"; \
-		mkdir -p $$stage; \
-		GOOS=$$os GOARCH=$$arch go build -trimpath -buildvcs=false -ldflags '$(RELEASE_LDFLAGS)' -o $$stage/ibkr ./cmd/ibkr || exit 1; \
-		cp LICENSE README.md $$stage/; \
-		( cd $(DIST_DIR) && tar -czf $$base.tar.gz $$base ); \
-		rm -rf $$stage; \
-	done
+	@printf '%s\n' $(RELEASE_TARGETS) | xargs -P $(RELEASE_BUILD_JOBS) -I {} ./scripts/build-release-target.sh {} "$(RELEASE_VERSION)" "$(RELEASE_LDFLAGS)" "$(DIST_DIR)"
 	@( cd $(DIST_DIR) && shasum -a 256 *.tar.gz > SHA256SUMS )
 	@command -v gpg >/dev/null 2>&1 || { \
 		echo "release-binaries: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
@@ -497,29 +496,18 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		git status --short >&2; \
 		exit 1; \
 	fi
-	@# `test` already depends on `check`; make won't re-run a target
-	@# completed in this invocation, so listing both is redundant.
-	$(MAKE) test
+	@# Run the existing full test gate with parallel prerequisites. This
+	@# keeps the same checks/tests but overlaps check, pkg, and daemon work.
+	$(MAKE) -j$(RELEASE_TEST_JOBS) test
 	@# Build the release binary with the target version stamped BEFORE
 	@# tagging — pass VERSION explicitly so the build doesn't fall back
 	@# to `git describe` (which wouldn't see the tag yet). The smoke
 	@# script asserts `bin/ibkr version == $(RELEASE_VERSION)`, so the
 	@# stamp has to match.
 	$(MAKE) build VERSION=$(RELEASE_VERSION)
-	@# Binding live-gateway smoke against the freshly-stamped binary.
-	@# Runs against an isolated daemon so it doesn't disturb the user's
-	@# running one. A failure here aborts the release BEFORE the tag is
-	@# ever created — no orphan tag to clean up.
-	$(MAKE) release-verify RELEASE_VERSION=$(RELEASE_VERSION)
-	@# Wire-level smoke against the *same* version-stamped binary
-	@# release-verify just exercised. We use `smoke-only` (not `smoke`)
-	@# so the smoke dep chain doesn't rebuild bin/ibkr — that rebuild
-	@# would happen without VERSION=$(RELEASE_VERSION) (the tag doesn't
-	@# exist yet, so `git describe` would stamp the *previous* version)
-	@# and would clobber the stamped binary release-verify validated.
-	@# SMOKE_STRICT=1 makes no-gateway a failure: a release MUST run
-	@# wire-smoke against TWS — silent skip is unacceptable here.
-	$(MAKE) smoke-only SMOKE_STRICT=1
+	@# Binding live-gateway JSON + wire smoke against the freshly-stamped
+	@# binary. Runs one isolated daemon session and fails on no gateway.
+	$(MAKE) release-smoke RELEASE_VERSION=$(RELEASE_VERSION) SMOKE_STRICT=1
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	@$(MAKE) release-binaries RELEASE_VERSION=$(RELEASE_VERSION) || { \

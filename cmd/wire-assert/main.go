@@ -100,14 +100,23 @@ func readFrames(path string, sinceOffset int64) ([]WireFrame, error) {
 	defer f.Close()
 
 	if sinceOffset > 0 {
+		if _, err := f.Seek(sinceOffset-1, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("seek %d: %w", sinceOffset-1, err)
+		}
+		prev := []byte{0}
+		if _, err := f.Read(prev); err != nil {
+			return nil, fmt.Errorf("read byte before offset %d: %w", sinceOffset, err)
+		}
+		dropPartial := prev[0] != '\n'
+
 		if _, err := f.Seek(sinceOffset, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek %d: %w", sinceOffset, err)
 		}
-		// After a seek we may be in the middle of a JSON line; drop the
-		// partial.
 		br := bufio.NewReader(f)
-		if _, err := br.ReadBytes('\n'); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("skip partial line at offset %d: %w", sinceOffset, err)
+		if dropPartial {
+			if _, err := br.ReadBytes('\n'); err != nil && err != io.EOF {
+				return nil, fmt.Errorf("skip partial line at offset %d: %w", sinceOffset, err)
+			}
 		}
 		return parseFrames(br)
 	}

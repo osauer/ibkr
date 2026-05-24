@@ -291,7 +291,7 @@ make check      # gofmt + go vet + staticcheck + govulncheck + plugin/parity che
 make test       # check + unit tests + integration tests against a live gateway
 ```
 
-`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. One-time tool installs: `go install honnef.co/go/tools/cmd/staticcheck@latest` and `go install golang.org/x/vuln/cmd/govulncheck@latest`.
+`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. The lint/vuln tools are pinned in `go.mod` and run via `go tool`, so CI and local checks use the same versions.
 
 Integration tests under `test/integration/` connect to the live IB Gateway on `127.0.0.1:4001` and skip cleanly when it isn't reachable, so `go test ./...` doesn't hang on a laptop with no gateway. Override the port with `IBKR_TEST_PORT=4002 make test`.
 
