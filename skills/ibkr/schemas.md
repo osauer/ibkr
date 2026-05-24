@@ -1,5 +1,7 @@
 # `ibkr` JSON schemas
 
+Updated: 2026-05-24 12:50 CEST
+
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
 
@@ -847,7 +849,7 @@ methodology lives in `docs/specs/risk-regime-dashboard.md`.
 
 ## regime
 
-`ibkr regime --json` — single-call risk-regime dashboard: all nine
+`ibkr regime --json` — single-call risk-regime dashboard: all eight
 indicator rows in one compact JSON envelope. The default JSON/MCP surface
 leads with `summary`, `composite`, and `warning_details`, then raw
 measurements, streaks, and quality provenance. Long methodology `notes`
@@ -855,7 +857,7 @@ and breadth history are omitted by default; use `ibkr regime --json
 --explain` when a JSON consumer explicitly needs the spec prose.
 
 **MCP params** (`ibkr_regime`): none — the envelope always carries
-all nine indicator rows.
+all eight indicator rows.
 
 **CLI flags**:
 - `--explain` — show per-row streak markers, quality blocks, methodology disclosures; with `--json`, include full notes/history.
@@ -867,14 +869,21 @@ all nine indicator rows.
   "as_of": "2026-05-09T14:32:09Z",
   "summary": {
     "label": "Normal regime",
-    "evidence": "6 green clusters / 1 yellow cluster",
-    "indicator_evidence": "7 green / 1 yellow / 1 unranked",
-    "punch_line": "volatility term structure, vol-of-vol, rates volatility, cash credit spreads, funding spread, dealer gamma, and breadth are constructive; ETF credit proxy is mixed; FX carry proxy is unavailable.",
-    "confidence": "high",
+    "evidence": "4 green clusters / 1 yellow cluster / 1 unranked cluster",
+    "indicator_evidence": "6 green / 1 yellow / 1 unranked",
+    "punch_line": "volatility term structure, vol-of-vol, cash credit spreads, funding spread, dealer gamma, and breadth are constructive; ETF credit proxy is mixed; FX carry proxy is unavailable.",
+    "confidence": "medium",
     "not_advice": "Regime read only; not investment advice or a trade recommendation."
   },
   "vix_term_structure": {
     "status": "ok",
+    "band": "green",
+    "band_reason": "<0.92 contango",
+    "thresholds": {"label": "vix_term_structure_v1", "green": "VIX/VIX3M < 0.92",
+                   "yellow": "0.92 <= VIX/VIX3M < 1.00", "red": "VIX/VIX3M >= 1.00",
+                   "heuristic": true, "pending_backtest": true},
+    "as_of": {"label": "live", "freshness": "live", "source": "Cboe VIX and VIX3M via IBKR index market data",
+              "time": "2026-05-09T14:32:09Z"},
     "vix": 14.82,
     "vix3m": 16.41,
     "ratio": 0.903,
@@ -889,6 +898,13 @@ all nine indicator rows.
   },
   "vol_of_vol": {
     "status": "ok",
+    "band": "green",
+    "band_reason": "<90 vol-of-vol",
+    "thresholds": {"label": "vvix_daily_v1", "green": "VVIX < 90",
+                   "yellow": "90 <= VVIX < 110", "red": "VVIX >= 110",
+                   "heuristic": true, "pending_backtest": true},
+    "as_of": {"label": "close D-1", "freshness": "daily_close",
+              "source": "Cboe official VVIX daily close", "date": "2026-05-08"},
     "symbol": "VVIX",
     "last": 82.4,
     "change_20d_pct": -3.1,
@@ -897,18 +913,6 @@ all nine indicator rows.
     "value_quality": {"as_of": "2026-05-08T00:00:00Z", "freshness_class": "derived",
                       "confidence": "firm", "source": "Cboe VVIX daily close"},
     "streak": {"band": "green", "sessions": 3, "since": "2026-05-07"}
-  },
-  "rates_vol": {
-    "status": "ok",
-    "symbol": "MOVE",
-    "last": 96.2,
-    "prev_close": 98.1,
-    "change_pct": -1.94,
-    "data_type": "live",
-    "source": "ICE MOVE index via IBKR market data",
-    "value_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
-                      "confidence": "firm", "source": "MOVE index tick (ICE)"},
-    "streak": {"band": "green", "sessions": 2, "since": "2026-05-08"}
   },
   "hyg_spy_divergence": {
     "status": "ok",
@@ -973,16 +977,16 @@ all nine indicator rows.
   },
   "composite": {
     "verdict": "Normal regime",
-    "green_count": 7,
+    "green_count": 6,
     "yellow_count": 1,
     "red_count": 0,
-    "ranked_count": 8,
+    "ranked_count": 7,
     "unranked_count": 1,
-    "cluster_green_count": 6,
+    "cluster_green_count": 4,
     "cluster_yellow_count": 1,
     "cluster_red_count": 0,
-    "cluster_ranked_count": 7,
-    "cluster_unranked_count": 0
+    "cluster_ranked_count": 5,
+    "cluster_unranked_count": 1
   },
   "warning_details": [],
   "spec_doc": "docs/specs/risk-regime-dashboard.md"
@@ -1001,6 +1005,11 @@ Field meanings:
   delayed/frozen) | `"computing"` (heavy compute in flight; poll
   again) | `"unavailable"` (feed not entitled on this account; see
   `warning_details`) | `"error"` (`error_message` carries the reason).
+- Each indicator row also carries compact agent metadata:
+  `band` (`green` / `yellow` / `red` / `unranked`), `band_reason`,
+  `thresholds` (`label`, per-band text, `heuristic`, `pending_backtest`),
+  and `as_of` (`label`, `freshness`, `source`, optional `time` / `date`,
+  optional `age_seconds`). Use `as_of.label` for the table freshness badge.
 - Numerical fields are pointer-typed: `null` = "didn't arrive in the
   fetch budget," never zero-substituted.
 - `fields_missing` lists advisory sub-fields (e.g. `spy_52w_high`,

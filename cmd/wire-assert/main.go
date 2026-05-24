@@ -296,12 +296,17 @@ func checkQuoteSPY(in checkInputs) CheckResult {
 	frames := in.Frames
 	// Expected outbound: reqMktData (msg 1) with SecType=STK and
 	// Symbol=SPY. Expected inbound: tickPrice (msg 1) with tickType in
-	// {1, 2, 4} — bid, ask, last. tickType 9 (close) alone is not
-	// enough; close is the frozen-fallback path and we want some
-	// evidence the live tick path works.
+	// {1, 2, 4} — bid, ask, last. In loose off-hours mode, accept the
+	// same fallback ticks the quote engine documents: mark (37) and
+	// previous close (9). Live mode keeps the stricter check so a broken
+	// current-tick path does not slip through.
 	var outFound bool
 	var inTickPrice []WireFrame
 	wantTickTypes := map[string]bool{"1": true, "2": true, "4": true}
+	if in.Loose {
+		wantTickTypes["9"] = true
+		wantTickTypes["37"] = true
+	}
 
 	for _, f := range frames {
 		if f.Direction == "OUT" && f.MsgID == 1 && f.MsgName == "reqMktData" {
@@ -329,19 +334,29 @@ func checkQuoteSPY(in checkInputs) CheckResult {
 		}
 	}
 	if len(inTickPrice) == 0 {
-		var sawClose bool
+		var sawClose, sawMark bool
 		for _, f := range frames {
-			if f.Direction == "IN" && f.MsgID == 1 && len(f.Fields) >= 5 && f.Fields[3] == "9" {
+			if f.Direction != "IN" || f.MsgID != 1 || len(f.Fields) < 5 {
+				continue
+			}
+			switch f.Fields[3] {
+			case "9":
 				sawClose = true
-				break
+			case "37":
+				sawMark = true
 			}
 		}
+		expected := "≥1 inbound tickPrice (msg 1) with tickType ∈ {1,2,4} and price > 0 within the command's lifetime"
 		hyp := "gateway may have downgraded to type=2/3 and is only sending tickType=9 (close); or SPY entitlement is missing"
-		if !sawClose {
-			hyp = "gateway sent neither live tickPrice (1/2/4) nor close (9) — connection or entitlement issue"
+		if in.Loose {
+			expected = "≥1 inbound tickPrice (msg 1) with tickType ∈ {1,2,4,9,37} and price > 0 within the command's lifetime"
+			hyp = "gateway sent only non-price frames in loose/frozen mode; check quote fallback handling or entitlement"
+		}
+		if !sawClose && !sawMark {
+			hyp = "gateway sent neither current tickPrice (1/2/4) nor fallback mark/close (37/9) — connection or entitlement issue"
 		}
 		return CheckResult{
-			Expected:   "≥1 inbound tickPrice (msg 1) with tickType ∈ {1,2,4} and price > 0 within the command's lifetime",
+			Expected:   expected,
 			Observed:   "0 such tickPrice frames",
 			Hypothesis: hyp,
 		}

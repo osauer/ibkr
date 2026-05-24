@@ -21,8 +21,6 @@ const (
 	vixRatioRed        = 1.00 // above this is backwardation
 	vvixYellow         = 90.0
 	vvixRed            = 110.0
-	moveYellow         = 100.0
-	moveRed            = 130.0
 	hyOASYellow        = 4.0
 	hyOASRed           = 5.5
 	hyOASWidenYellow   = 0.50 // percentage points over ~20 observations
@@ -56,6 +54,7 @@ type regimeRow struct {
 	name      string     // "VIX/VIX3M"
 	cluster   string     // cluster token for composite de-duplication
 	value     string     // value cell, plain; dim-suffix attached at render time
+	asOf      string     // compact freshness badge ("live", "close D-1", "cached 11:42")
 	band      regimeBand // for glyph + band-word coloring
 	reason    string     // parenthetical band justification ("<0.92 contango")
 	status    string     // rpc.RegimeStatus*; drives glyph for unranked + stale suffix
@@ -193,7 +192,7 @@ func startRegimeSpinner(env *Env) func() {
 	done := make(chan struct{})
 	// Braille spinner — narrow, dense, reads as motion at 10 fps.
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	indicators := "VIX VIX3M VVIX MOVE HYG SPY OAS funding USD.JPY gamma breadth"
+	indicators := "VIX VIX3M VVIX HYG SPY OAS funding USD.JPY gamma breadth"
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(100 * time.Millisecond)
@@ -236,7 +235,6 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	rows := []regimeRow{
 		rowVIXTerm(now, r.VIXTermStructure),
 		rowVolOfVol(now, r.VolOfVol),
-		rowRatesVol(now, r.RatesVol),
 		rowHYGSPY(now, r.HYGSPYDivergence),
 		rowCreditSpreads(now, r.CreditSpreads),
 		rowFundingStress(now, r.FundingStress),
@@ -292,12 +290,14 @@ func renderRegimeHeader(env *Env) string {
 	const (
 		nameW  = 17
 		valueW = 30
+		asOfW  = 12
 		bandW  = 7
 	)
 	// "  " = 2-space indent + " " = where the glyph sits + 2 spaces.
-	header := fmt.Sprintf("     %s  %s  %s  %s",
+	header := fmt.Sprintf("     %s  %s  %s  %s  %s",
 		padRightVisible("INDICATOR", nameW),
 		padRightVisible("VALUE", valueW),
+		padRightVisible("AS OF", asOfW),
 		padRightVisible("BAND", bandW),
 		"NOTE")
 	return env.dim(header)
@@ -314,6 +314,7 @@ func renderRow(env *Env, r regimeRow) string {
 	const (
 		nameW  = 17
 		valueW = 30
+		asOfW  = 12
 		bandW  = 7
 	)
 	value := r.value
@@ -332,8 +333,9 @@ func renderRow(env *Env, r regimeRow) string {
 	// default scan and useful only when auditing one indicator's
 	// provenance.
 	note := env.dim(r.reason)
-	return fmt.Sprintf("  %s  %s  %s  %s  %s",
-		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW), bandCell, note)
+	return fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
+		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW),
+		padRightVisible(ifNonEmpty(r.asOf, "—"), asOfW), bandCell, note)
 }
 
 // streakMarker formats a *rpc.StreakInfo into the compact "day N"
@@ -450,6 +452,24 @@ func (b regimeBand) label() (string, func(*Env, string) string) {
 		return "red", func(e *Env, s string) string { return e.red(s) }
 	}
 	return "—", nil
+}
+
+func asOfLabel(meta *rpc.RegimeAsOfSummary, status string) string {
+	if meta != nil && meta.Label != "" {
+		return meta.Label
+	}
+	switch status {
+	case rpc.RegimeStatusOK:
+		return "live"
+	case rpc.RegimeStatusStale:
+		return "stale"
+	case rpc.RegimeStatusComputing:
+		return "computing"
+	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+		return "unavailable"
+	default:
+		return "—"
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -643,7 +663,24 @@ func regimePunchLine(rows []regimeRow) string {
 	if len(parts) == 0 {
 		return "No regime indicators produced a rankable reading."
 	}
+	if names := staleRegimeEvidenceNames(rows); len(names) > 0 {
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s ranked from stale data", joinHumanList(names), verb))
+	}
 	return strings.Join(parts, "; ") + "."
+}
+
+func staleRegimeEvidenceNames(rows []regimeRow) []string {
+	var names []string
+	for _, row := range rows {
+		if row.status == rpc.RegimeStatusStale && row.band != bandUnranked {
+			names = append(names, regimeEvidenceName(row.name))
+		}
+	}
+	return names
 }
 
 func (b regimeBand) labelKey(status string) string {
@@ -671,8 +708,6 @@ func regimeEvidenceName(name string) string {
 		return "volatility term structure"
 	case name == "VVIX":
 		return "vol-of-vol"
-	case name == "MOVE":
-		return "rates volatility"
 	case strings.HasPrefix(name, "HYG"):
 		return "ETF credit proxy"
 	case strings.Contains(name, "OAS"):
@@ -795,7 +830,7 @@ func signedFloat(v float64, decimals int) string {
 // from the top of the file.
 
 func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
-	row := regimeRow{name: "VIX/VIX3M", cluster: "equity_vol", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "VIX/VIX3M", cluster: "equity_vol", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Ratio == nil {
 		row.value = "—"
 		row.stateNote = "ratio unavailable"
@@ -816,7 +851,7 @@ func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 }
 
 func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
-	row := regimeRow{name: "VVIX", cluster: "equity_vol", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "VVIX", cluster: "equity_vol", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.Last == nil {
 		row.value = "—"
 		row.stateNote = "VVIX unavailable"
@@ -839,32 +874,8 @@ func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
 	return row
 }
 
-func rowRatesVol(now time.Time, r rpc.RegimeRatesVol) regimeRow {
-	row := regimeRow{name: "MOVE", cluster: "rates_vol", status: r.Status, streak: streakMarker(r.Streak)}
-	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.Last == nil {
-		row.value = "—"
-		row.stateNote = "MOVE unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "ICE/MOVE tick missing")
-		return row
-	}
-	row.value = fmt.Sprintf("%.1f", *r.Last)
-	if r.ChangePct != nil {
-		row.value += fmt.Sprintf("  %+.1f%%", *r.ChangePct)
-	}
-	row.quality = qualityTag(now, r.ValueQuality)
-	switch {
-	case *r.Last < moveYellow:
-		row.band, row.reason = bandGreen, "<100 rates vol"
-	case *r.Last < moveRed:
-		row.band, row.reason = bandYellow, "100–130"
-	default:
-		row.band, row.reason = bandRed, ">130 rates-vol stress"
-	}
-	return row
-}
-
 func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
-	row := regimeRow{name: "HYG vs SPY", cluster: "credit", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "HYG vs SPY", cluster: "credit", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError {
 		row.value = "—"
 		row.stateNote = "HYG/SPY unavailable"
@@ -902,7 +913,7 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 }
 
 func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
-	row := regimeRow{name: "HY/IG OAS", cluster: "credit", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "HY/IG OAS", cluster: "credit", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.HYOAS == nil {
 		row.value = "—"
 		row.stateNote = "OAS unavailable"
@@ -930,7 +941,7 @@ func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
 }
 
 func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
-	row := regimeRow{name: "funding spread", cluster: "funding", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "funding spread", cluster: "funding", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.SpreadBps == nil {
 		row.value = "—"
 		row.stateNote = "funding unavailable"
@@ -959,7 +970,7 @@ func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
 }
 
 func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
-	row := regimeRow{name: "USD/JPY", cluster: "fx_carry", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "USD/JPY", cluster: "fx_carry", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
 		row.value = "—"
 		row.stateNote = "no FX tick"
@@ -1019,7 +1030,7 @@ func gammaRowLabel(r rpc.RegimeGammaZero) string {
 }
 
 func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
-	row := regimeRow{name: gammaRowLabel(r), cluster: "dealer_gamma", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: gammaRowLabel(r), cluster: "dealer_gamma", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
@@ -1240,7 +1251,7 @@ func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 }
 
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
-	row := regimeRow{name: "SPX breadth", cluster: "breadth", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "SPX breadth", cluster: "breadth", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		switch r.Status {
 		case rpc.RegimeStatusUnavailable:
@@ -1310,9 +1321,6 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		}},
 		{"VVIX", r.VolOfVol.Notes, nil, []qField{
 			{"VVIX", r.VolOfVol.ValueQuality},
-		}},
-		{"MOVE", r.RatesVol.Notes, nil, []qField{
-			{"MOVE", r.RatesVol.ValueQuality},
 		}},
 		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing, []qField{
 			{"HYG", r.HYGSPYDivergence.HYGQuality},
@@ -1417,6 +1425,8 @@ func shortUnavailableReason(message, fallback string) string {
 		return fallback
 	}
 	switch {
+	case strings.Contains(message, "no security definition"), strings.Contains(message, "verified IBKR contract"):
+		return "no verified IBKR contract"
 	case strings.Contains(message, "entitlement"):
 		return "check market-data entitlement"
 	case strings.Contains(message, "no spot tick"), strings.Contains(message, "no tick"):

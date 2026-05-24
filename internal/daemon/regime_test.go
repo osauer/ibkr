@@ -37,14 +37,15 @@ type fakeDeps struct {
 	// rich holds the Week52High value the snapshotWith52WHigh dep
 	// returns for a given symbol. Tests that don't set an entry simulate
 	// the "Misc Stats tick 165 didn't land in the budget" case.
-	rich         map[string]fakeRichQuote
-	bars         map[string]fakeHistory
-	series       map[string][]regimeSeriesPoint
-	seriesErr    map[string]error
-	vvix         []regimeSeriesPoint
-	vvixErr      error
-	warnLog      *[]string
-	historyCalls map[string][]int
+	rich          map[string]fakeRichQuote
+	bars          map[string]fakeHistory
+	series        map[string][]regimeSeriesPoint
+	seriesErr     map[string]error
+	vvix          []regimeSeriesPoint
+	vvixErr       error
+	warnLog       *[]string
+	historyCalls  map[string][]int
+	snapshotCalls map[string]int
 }
 
 type fakeQuote struct {
@@ -68,6 +69,10 @@ type fakeHistory struct {
 func (f *fakeDeps) build() *regimeDeps {
 	return &regimeDeps{
 		snapshot: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
+			if f.snapshotCalls == nil {
+				f.snapshotCalls = make(map[string]int)
+			}
+			f.snapshotCalls[sym]++
 			q := f.snapshots[sym]
 			return q.price, q.prevClose, q.dataType
 		},
@@ -276,29 +281,6 @@ func TestFetchRegimeVolOfVol(t *testing.T) {
 	}
 	if got.Source == "" || got.ValueQuality == nil {
 		t.Errorf("official source/quality should be populated: %+v", got)
-	}
-}
-
-func TestFetchRegimeRatesVol(t *testing.T) {
-	ctx := context.Background()
-	deps := (&fakeDeps{
-		snapshots: map[string]fakeQuote{
-			"MOVE": {price: 118.0, prevClose: 110.0, dataType: rpc.MarketDataFrozen},
-		},
-	}).build()
-
-	got := fetchRegimeRatesVol(ctx, deps)
-	if got.Status != rpc.RegimeStatusStale {
-		t.Fatalf("status=%q, want stale", got.Status)
-	}
-	if got.Last == nil || *got.Last != 118.0 {
-		t.Fatalf("last=%v, want 118", got.Last)
-	}
-	if got.ChangePct == nil || *got.ChangePct < 7.27 || *got.ChangePct > 7.28 {
-		t.Errorf("change_pct=%v, want about 7.27", got.ChangePct)
-	}
-	if band := classifyRatesVolBand(got.Last); band != "yellow" {
-		t.Errorf("band=%q want yellow", band)
 	}
 }
 
@@ -1063,9 +1045,6 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 	fastVolOfVol := func(_ context.Context) rpc.RegimeVolOfVol {
 		return rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Symbol: "VVIX"}
 	}
-	fastRatesVol := func(_ context.Context) rpc.RegimeRatesVol {
-		return rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Symbol: "MOVE"}
-	}
 	fastCreditSpreads := func(_ context.Context) rpc.RegimeCreditSpreads {
 		return rpc.RegimeCreditSpreads{Status: rpc.RegimeStatusOK}
 	}
@@ -1090,8 +1069,8 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 	}
 	start := time.Now()
 	res := runRegimeFanout(ctx,
-		fastVIX, fastVolOfVol, fastRatesVol,
-		stuckHYG, fastCreditSpreads, fastFundingStress,
+		fastVIX, fastVolOfVol, stuckHYG,
+		fastCreditSpreads, fastFundingStress,
 		fastUSDJPY, fastGamma, fastBreadth,
 		contentionMsg)
 	elapsed := time.Since(start)
@@ -1153,9 +1132,6 @@ func TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage(t *testing.T) {
 	fastVolOfVol := func(_ context.Context) rpc.RegimeVolOfVol {
 		return rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Symbol: "VVIX"}
 	}
-	fastRatesVol := func(_ context.Context) rpc.RegimeRatesVol {
-		return rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Symbol: "MOVE"}
-	}
 	fastCreditSpreads := func(_ context.Context) rpc.RegimeCreditSpreads {
 		return rpc.RegimeCreditSpreads{Status: rpc.RegimeStatusOK}
 	}
@@ -1180,8 +1156,8 @@ func TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	res := runRegimeFanout(ctx,
-		fastVIX, fastVolOfVol, fastRatesVol,
-		stuckHYG, fastCreditSpreads, fastFundingStress,
+		fastVIX, fastVolOfVol, stuckHYG,
+		fastCreditSpreads, fastFundingStress,
 		fastUSDJPY, fastGamma, fastBreadth,
 		contentionMsg)
 

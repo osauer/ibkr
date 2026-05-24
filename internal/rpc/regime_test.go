@@ -16,6 +16,15 @@ func TestCompactRegimeSnapshotKeepsAgentSurfaceAndDropsMethodology(t *testing.T)
 			Label: "Normal regime", Evidence: "1 green", PunchLine: "volatility term structure is constructive.",
 		},
 		VIXTermStructure: RegimeVIXTerm{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "<0.92 contango",
+				Thresholds: &RegimeThresholds{
+					Label: "vix_term_structure_v1", Green: "VIX/VIX3M < 0.92", Yellow: "0.92-1.00", Red: ">=1.00",
+					Heuristic: true, PendingBacktest: true,
+				},
+				AsOf: &RegimeAsOfSummary{Label: "live", Time: time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC), Freshness: FreshnessLive, Source: "VIX tick"},
+			},
 			Status: RegimeStatusOK,
 			Ratio:  &v,
 			Notes:  strings.Repeat("methodology ", 50),
@@ -25,11 +34,6 @@ func TestCompactRegimeSnapshotKeepsAgentSurfaceAndDropsMethodology(t *testing.T)
 			Status: RegimeStatusOK,
 			Last:   &v,
 			Notes:  strings.Repeat("VVIX methodology ", 20),
-		},
-		RatesVol: RegimeRatesVol{
-			Status: RegimeStatusOK,
-			Last:   &v,
-			Notes:  strings.Repeat("MOVE methodology ", 20),
 		},
 		CreditSpreads: RegimeCreditSpreads{
 			Status: RegimeStatusOK,
@@ -62,12 +66,12 @@ func TestCompactRegimeSnapshotKeepsAgentSurfaceAndDropsMethodology(t *testing.T)
 		t.Fatalf("marshal: %v", err)
 	}
 	wire := string(b)
-	for _, want := range []string{"summary", "punch_line", "warning_details", "streak", "spec_doc"} {
+	for _, want := range []string{"summary", "punch_line", "warning_details", "streak", "spec_doc", "band_reason", "thresholds", "as_of"} {
 		if !strings.Contains(wire, want) {
 			t.Errorf("compact snapshot missing %q: %s", want, wire)
 		}
 	}
-	for _, notWant := range []string{"methodology methodology", "VVIX methodology", "MOVE methodology", "OAS methodology", "funding methodology", "breadth methodology", "history"} {
+	for _, notWant := range []string{"methodology methodology", "VVIX methodology", "OAS methodology", "funding methodology", "breadth methodology", "history"} {
 		if strings.Contains(wire, notWant) {
 			t.Errorf("compact snapshot should drop %q: %s", notWant, wire)
 		}

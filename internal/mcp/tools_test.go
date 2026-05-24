@@ -261,6 +261,15 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	res := rpc.RegimeSnapshotResult{
 		AsOf: now,
 		VIXTermStructure: rpc.RegimeVIXTerm{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "<0.92 contango",
+				Thresholds: &rpc.RegimeThresholds{
+					Label: "vix_term_structure_v1", Green: "VIX/VIX3M < 0.92", Yellow: "0.92-1.00", Red: ">=1.00",
+					Heuristic: true, PendingBacktest: true,
+				},
+				AsOf: &rpc.RegimeAsOfSummary{Label: "live", Time: now, Freshness: rpc.FreshnessLive, Source: "VIX tick"},
+			},
 			Status: rpc.RegimeStatusOK,
 			VIX:    &vix,
 			Ratio:  &ratio,
@@ -321,7 +330,7 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	if summary["indicator_evidence"] == "" {
 		t.Errorf("summary should carry indicator_evidence alongside cluster evidence: %#v", summary)
 	}
-	for _, key := range []string{"vol_of_vol", "rates_vol", "credit_spreads", "funding_stress"} {
+	for _, key := range []string{"vol_of_vol", "credit_spreads", "funding_stress"} {
 		if _, ok := wire[key]; !ok {
 			t.Errorf("%s missing from regime MCP/JSON shape", key)
 		}
@@ -340,5 +349,10 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	}
 	if _, ok := vixRow["vix_quality"]; !ok {
 		t.Errorf("vix_term_structure.vix_quality missing (CLI --explain shows it)")
+	}
+	for _, key := range []string{"band", "band_reason", "thresholds", "as_of"} {
+		if _, ok := vixRow[key]; !ok {
+			t.Errorf("vix_term_structure.%s missing (agent compact metadata)", key)
+		}
 	}
 }

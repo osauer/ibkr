@@ -1040,7 +1040,6 @@ func CompactRegimeSnapshot(r *RegimeSnapshotResult) {
 	StripRegimeGammaProfiles(r)
 	r.VIXTermStructure.Notes = ""
 	r.VolOfVol.Notes = ""
-	r.RatesVol.Notes = ""
 	r.HYGSPYDivergence.Notes = ""
 	r.CreditSpreads.Notes = ""
 	r.FundingStress.Notes = ""
@@ -1150,6 +1149,43 @@ type StreakInfo struct {
 	Since    string `json:"since"`
 }
 
+// RegimeIndicatorMeta is the compact interpretation/provenance layer shared
+// by every regime row. The fields are embedded into each indicator's JSON so
+// agents do not have to derive bands, thresholds, or freshness from prose.
+type RegimeIndicatorMeta struct {
+	Band       string             `json:"band,omitempty"`
+	BandReason string             `json:"band_reason,omitempty"`
+	Thresholds *RegimeThresholds  `json:"thresholds,omitempty"`
+	AsOf       *RegimeAsOfSummary `json:"as_of,omitempty"`
+}
+
+// RegimeThresholds names the heuristic threshold set used to classify an
+// indicator. The string bands are intentionally compact and heterogeneous:
+// each row has different units, so a label plus per-band text is friendlier
+// than forcing everything into one numeric schema.
+type RegimeThresholds struct {
+	Label           string `json:"label,omitempty"`
+	Green           string `json:"green,omitempty"`
+	Yellow          string `json:"yellow,omitempty"`
+	Red             string `json:"red,omitempty"`
+	Heuristic       bool   `json:"heuristic,omitempty"`
+	PendingBacktest bool   `json:"pending_backtest,omitempty"`
+}
+
+// RegimeAsOfSummary is the row-level freshness badge rendered in the CLI and
+// exposed in JSON/MCP. Label is the user-facing compact form ("live",
+// "15m delayed", "close D-1", "cached 11:42", "2d old", "unavailable").
+// Time is present when a real timestamp exists; Date is present for official
+// daily files whose observation date is more meaningful than midnight UTC.
+type RegimeAsOfSummary struct {
+	Label      string    `json:"label"`
+	Time       time.Time `json:"time,omitzero"`
+	Date       string    `json:"date,omitempty"`
+	Freshness  string    `json:"freshness,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	AgeSeconds int64     `json:"age_seconds,omitempty"`
+}
+
 // RegimeVIXTerm is Indicator 1: VIX/VIX3M ratio. Watch for sustained
 // inversion (ratio > 1.0) over 2-3 sessions, not a single spike.
 //
@@ -1159,6 +1195,7 @@ type StreakInfo struct {
 // nothing is missing. Use it to dim a sub-cell without re-classifying
 // the whole row as `error`.
 type RegimeVIXTerm struct {
+	RegimeIndicatorMeta
 	Status        string   `json:"status"`
 	VIX           *float64 `json:"vix"`
 	VIX3M         *float64 `json:"vix3m"`
@@ -1196,6 +1233,7 @@ type RegimeVIXTerm struct {
 // "hyg_50dma") that didn't land — both are best-effort and don't
 // downgrade the row's primary status.
 type RegimeHYGSPYDivergence struct {
+	RegimeIndicatorMeta
 	Status     string   `json:"status"`
 	HYGPrice   *float64 `json:"hyg_price"`
 	HYG50DMA   *float64 `json:"hyg_50dma"` // 50-day SMA of HYG daily close
@@ -1229,6 +1267,7 @@ type RegimeHYGSPYDivergence struct {
 // VVIX is itself an index calculation and end-of-day source quality is
 // better than pretending there is a continuously tradable instrument.
 type RegimeVolOfVol struct {
+	RegimeIndicatorMeta
 	Status       string      `json:"status"`
 	Symbol       string      `json:"symbol,omitempty"` // "VVIX"
 	Last         *float64    `json:"last"`
@@ -1241,31 +1280,12 @@ type RegimeVolOfVol struct {
 	Streak       *StreakInfo `json:"streak,omitempty"`
 }
 
-// RegimeRatesVol is the fixed-income/rates-volatility row. The preferred
-// live source is the ICE-owned MOVE index through the user's IBKR feed;
-// unavailable rows are still useful because they tell the composite that
-// an important cross-asset bucket is missing instead of silently assuming
-// equity vol is enough.
-type RegimeRatesVol struct {
-	Status       string      `json:"status"`
-	Symbol       string      `json:"symbol,omitempty"` // "MOVE"
-	Last         *float64    `json:"last"`
-	PrevClose    *float64    `json:"prev_close,omitempty"`
-	Change       *float64    `json:"change,omitempty"`
-	ChangePct    *float64    `json:"change_pct,omitempty"`
-	DataType     string      `json:"data_type,omitempty"`
-	Source       string      `json:"source,omitempty"`
-	Notes        string      `json:"notes,omitempty"`
-	ErrorMessage string      `json:"error_message,omitempty"`
-	ValueQuality *Quality    `json:"value_quality,omitempty"`
-	Streak       *StreakInfo `json:"streak,omitempty"`
-}
-
 // RegimeCreditSpreads is the official cash-credit companion to the HYG
 // ETF proxy. Values are ICE BofA option-adjusted spread series retrieved
 // via FRED/St. Louis Fed. Units are percentage points; e.g. 4.25 means
 // 425 bp.
 type RegimeCreditSpreads struct {
+	RegimeIndicatorMeta
 	Status        string      `json:"status"`
 	HYOAS         *float64    `json:"hy_oas"`
 	IGOAS         *float64    `json:"ig_oas"`
@@ -1287,6 +1307,7 @@ type RegimeCreditSpreads struct {
 // rate, both from official Federal Reserve/FRED series. Units are basis
 // points.
 type RegimeFundingStress struct {
+	RegimeIndicatorMeta
 	Status         string      `json:"status"`
 	CP3M           *float64    `json:"cp_3m_rate"`
 	TBill3M        *float64    `json:"tbill_3m_rate"`
@@ -1307,6 +1328,7 @@ type RegimeFundingStress struct {
 // the consumer can compute the change. Source is FX-pair routing
 // (CASH/IDEALPRO); routing arrives in a sibling commit.
 type RegimeUSDJPY struct {
+	RegimeIndicatorMeta
 	Status        string   `json:"status"`
 	Symbol        string   `json:"symbol"` // "USD.JPY" canonical form
 	Last          *float64 `json:"last"`
@@ -1330,6 +1352,7 @@ type RegimeUSDJPY struct {
 // call of an NY trading day; subsequent calls return the cached
 // result. Method token + warning_details carry methodology disclosures.
 type RegimeGammaZero struct {
+	RegimeIndicatorMeta
 	Status        string             `json:"status"`
 	Envelope      GammaZeroSPXResult `json:"envelope"`
 	Notes         string             `json:"notes,omitempty"`
@@ -1375,6 +1398,7 @@ type RegimeGammaZero struct {
 // a notes pointer; subsequent calls return Status="ok" from the
 // persisted cache.
 type RegimeBreadth struct {
+	RegimeIndicatorMeta
 	Status        string           `json:"status"`
 	Envelope      BreadthSPXResult `json:"envelope"`
 	Notes         string           `json:"notes,omitempty"`
@@ -1408,9 +1432,9 @@ type RegimeSnapshotParams struct{}
 // RegimeSnapshotResult is the wire payload for the dashboard
 // generator and the MCP natural-language interface. One JSON
 // envelope, all rows. Each row carries:
-//   - raw measurements (no derived status colors)
-//   - a `notes` field embedding the spec's threshold bands verbatim,
-//     so a consumer can interpret without reading the spec doc
+//   - raw measurements plus compact band/as-of metadata for agents
+//   - a `notes` field embedding the full methodology prose for
+//     explain-mode consumers
 //   - a structured Status the renderer branches on for UI state
 //
 // Compatibility note for renderers: the daemon never returns nil for
@@ -1423,7 +1447,6 @@ type RegimeSnapshotResult struct {
 	Summary          RegimeSummary          `json:"summary"`
 	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
 	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`
-	RatesVol         RegimeRatesVol         `json:"rates_vol"`
 	HYGSPYDivergence RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
 	CreditSpreads    RegimeCreditSpreads    `json:"credit_spreads"`
 	FundingStress    RegimeFundingStress    `json:"funding_stress"`

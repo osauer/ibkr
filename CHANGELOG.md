@@ -10,6 +10,28 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.6 — 2026-05-24 14:03 CEST
+
+### What's new
+
+- `ibkr regime` now shows an `AS OF` column and per-row freshness metadata, so live ticks, stale/frozen quotes, daily official files, cached gamma/breadth, and unavailable rows are clearly different.
+- Regime JSON and MCP responses now expose compact per-indicator `band`, `band_reason`, `thresholds`, and `as_of` metadata for agent-friendly reads without expanding methodology notes.
+- MOVE/rates-volatility is removed from the release dashboard until a verified IBKR contract or licensed official data connector exists; it is not proxied with ETFs or futures.
+
+### Added
+
+- Added a regime backtest plan covering point-in-time historical inputs, target stress definitions, walk-forward calibration, look-ahead controls, unavailable rows, source revisions, and cluster-weight evaluation.
+
+### Changed
+
+- The regime dashboard is now an eight-row, six-cluster evidence balance after removing unsourced MOVE/rates-volatility from the live surface.
+- Regime summary confidence and warning prose now account for stale, unavailable, computing, and unranked critical rows instead of treating all non-green rows as equivalent.
+- MCP and skill documentation now describe the eight-row regime contract, compact default fields, and no-probability policy pending backtest calibration.
+
+### Fixed
+
+- Live wire smoke now accepts documented SPY mark/close fallback ticks in loose off-hours mode while still requiring bid/ask/last ticks in live mode.
+
 ## v1.0.5 — 2026-05-24 11:56 CEST
 
 ### What's new

@@ -3,12 +3,13 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // TestBuildRegimeComposite_AllGreenIsNormalRegime pins the happy path:
-// nine green rows produce a "Normal regime" verdict with seven ranked
+// eight green rows produce a "Normal regime" verdict with six ranked
 // clusters, no unranked.
 func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	t.Parallel()
@@ -17,17 +18,17 @@ func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	if c.Verdict != "Normal regime" {
 		t.Errorf("verdict: got %q want %q", c.Verdict, "Normal regime")
 	}
-	if c.GreenCount != 9 {
-		t.Errorf("green: got %d want 9", c.GreenCount)
+	if c.GreenCount != 8 {
+		t.Errorf("green: got %d want 8", c.GreenCount)
 	}
-	if c.RankedCount != 9 {
-		t.Errorf("ranked: got %d want 9", c.RankedCount)
+	if c.RankedCount != 8 {
+		t.Errorf("ranked: got %d want 8", c.RankedCount)
 	}
 	if c.UnrankedCount != 0 {
 		t.Errorf("unranked: got %d want 0", c.UnrankedCount)
 	}
-	if c.ClusterGreenCount != 7 || c.ClusterRankedCount != 7 {
-		t.Errorf("clusters: got green=%d ranked=%d want 7/7", c.ClusterGreenCount, c.ClusterRankedCount)
+	if c.ClusterGreenCount != 6 || c.ClusterRankedCount != 6 {
+		t.Errorf("clusters: got green=%d ranked=%d want 6/6", c.ClusterGreenCount, c.ClusterRankedCount)
 	}
 }
 
@@ -67,6 +68,43 @@ func TestBuildRegimeComposite_SingleRedTriggersWatch(t *testing.T) {
 	}
 }
 
+func TestBuildRegimeComposite_RedClusterCannotBeHiddenByGreenRows(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	vvix := 125.0
+	r.VolOfVol.Last = &vvix
+	c := buildRegimeComposite(r)
+	if c.RedCount != 1 || c.GreenCount != 7 {
+		t.Fatalf("red/green counts = %d/%d, want 1/7", c.RedCount, c.GreenCount)
+	}
+	if c.ClusterRedCount != 1 {
+		t.Fatalf("equity-vol cluster should be red despite green VIX term row, got red clusters=%d", c.ClusterRedCount)
+	}
+	if c.Verdict != "Stress signal present" {
+		t.Errorf("verdict: got %q", c.Verdict)
+	}
+}
+
+func TestBuildRegimeComposite_MixedClusterDisagreementUsesWorstBand(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	hyg := 79.0
+	hyg50 := 80.0
+	spy := 737.0
+	spy52 := 740.0
+	r.HYGSPYDivergence.HYGPrice = &hyg
+	r.HYGSPYDivergence.HYG50DMA = &hyg50
+	r.HYGSPYDivergence.SPYPrice = &spy
+	r.HYGSPYDivergence.SPY52WHigh = &spy52
+	c := buildRegimeComposite(r)
+	if c.ClusterRedCount != 1 {
+		t.Fatalf("credit cluster should be red even with green OAS companion, got %+v", c)
+	}
+	if c.Verdict != "Stress signal present" {
+		t.Errorf("verdict: got %q", c.Verdict)
+	}
+}
+
 // TestBuildRegimeComposite_UnrankedDoesntCountTowardBand pins the
 // honesty contract: computing / unavailable rows don't contribute to
 // the green tally — they sit in unranked so a consumer sees the
@@ -77,14 +115,14 @@ func TestBuildRegimeComposite_UnrankedDoesntCountTowardBand(t *testing.T) {
 	r.GammaZero.Status = rpc.RegimeStatusComputing
 	r.GammaZero.Envelope.Result = nil
 	c := buildRegimeComposite(r)
-	if c.GreenCount != 8 {
-		t.Errorf("green: got %d want 8 (gamma row should not count)", c.GreenCount)
+	if c.GreenCount != 7 {
+		t.Errorf("green: got %d want 7 (gamma row should not count)", c.GreenCount)
 	}
 	if c.UnrankedCount != 1 {
 		t.Errorf("unranked: got %d want 1", c.UnrankedCount)
 	}
-	if c.RankedCount != 8 {
-		t.Errorf("ranked: got %d want 8", c.RankedCount)
+	if c.RankedCount != 7 {
+		t.Errorf("ranked: got %d want 7", c.RankedCount)
 	}
 }
 
@@ -115,7 +153,6 @@ func TestBuildRegimeComposite_BelowFloorIsInsufficient(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
 	// Kill enough clusters to leave only equity-vol + gamma ranked.
-	r.RatesVol.Status = rpc.RegimeStatusError
 	r.HYGSPYDivergence.Status = rpc.RegimeStatusError
 	r.CreditSpreads.Status = rpc.RegimeStatusError
 	r.FundingStress.Status = rpc.RegimeStatusError
@@ -158,10 +195,10 @@ func TestBuildRegimeSummaryAndWarnings(t *testing.T) {
 	if s.Label != "Normal regime" {
 		t.Errorf("summary label: got %q", s.Label)
 	}
-	if s.Evidence != "5 green clusters / 2 unranked clusters" {
+	if s.Evidence != "4 green clusters / 2 unranked clusters" {
 		t.Errorf("summary evidence: got %q", s.Evidence)
 	}
-	if s.IndicatorEvidence != "7 green / 2 unranked" {
+	if s.IndicatorEvidence != "6 green / 2 unranked" {
 		t.Errorf("summary indicator evidence: got %q", s.IndicatorEvidence)
 	}
 	if s.Confidence != "medium" {
@@ -183,6 +220,50 @@ func TestBuildRegimeSummaryAndWarnings(t *testing.T) {
 	}
 }
 
+func TestBuildRegimeSummaryStaleRankedRowsLowerConfidence(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	r.CreditSpreads.Status = rpc.RegimeStatusStale
+	r.Composite = buildRegimeComposite(r)
+
+	s := buildRegimeSummary(r)
+	if s.Confidence != "medium" {
+		t.Fatalf("confidence=%q, want medium when a ranked row is stale", s.Confidence)
+	}
+	if !strings.Contains(s.PunchLine, "cash credit spreads is ranked from stale data") {
+		t.Errorf("punch line should disclose stale ranked row: %q", s.PunchLine)
+	}
+}
+
+func TestAnnotateRegimeMetadataAddsBandThresholdsAndAsOf(t *testing.T) {
+	t.Parallel()
+	loc := time.FixedZone("CEST", 2*60*60)
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, loc)
+	r := mkAllGreenRegime()
+	r.AsOf = now
+	r.VIXTermStructure.DataType = rpc.MarketDataLive
+	r.VIXTermStructure.VIXQuality = &rpc.Quality{AsOf: now, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm, Source: "VIX tick"}
+	r.VolOfVol.AsOfDate = "2026-05-22"
+	r.Breadth.Envelope.AsOf = now.Add(-18 * time.Minute)
+	r.Breadth.Envelope.Source = "local breadth cache"
+	r.Breadth.Envelope.Method = "constituent-fanout"
+
+	annotateRegimeMetadata(r)
+
+	if r.VIXTermStructure.Band != "green" || r.VIXTermStructure.AsOf.Label != "live" {
+		t.Fatalf("VIX metadata = band %q as_of %#v, want green/live", r.VIXTermStructure.Band, r.VIXTermStructure.AsOf)
+	}
+	if r.VIXTermStructure.Thresholds == nil || !r.VIXTermStructure.Thresholds.Heuristic || !r.VIXTermStructure.Thresholds.PendingBacktest {
+		t.Fatalf("threshold metadata should mark heuristic pending backtest: %#v", r.VIXTermStructure.Thresholds)
+	}
+	if r.VolOfVol.AsOf.Label != "2d old" {
+		t.Fatalf("VVIX as_of=%#v, want 2d old", r.VolOfVol.AsOf)
+	}
+	if r.Breadth.AsOf.Label == "" || !strings.HasPrefix(r.Breadth.AsOf.Label, "cached ") {
+		t.Errorf("breadth as_of should be cached clock label, got %#v", r.Breadth.AsOf)
+	}
+}
+
 // mkAllGreenRegime returns a fixture where every row classifies green
 // under the spec defaults. Used as the baseline so each test can
 // perturb one indicator and verify the rollup tracks.
@@ -194,7 +275,6 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 	spy52 := 600.0
 	weekly := -0.5 // <1% weekly = green
 	vvix := 75.0
-	move := 95.0
 	hyOAS := 3.2
 	igOAS := 1.2
 	hyIG := 2.0
@@ -210,10 +290,6 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 		VolOfVol: rpc.RegimeVolOfVol{
 			Status: rpc.RegimeStatusOK,
 			Last:   &vvix,
-		},
-		RatesVol: rpc.RegimeRatesVol{
-			Status: rpc.RegimeStatusOK,
-			Last:   &move,
 		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
 			Status:     rpc.RegimeStatusOK,

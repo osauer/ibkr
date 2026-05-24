@@ -19,13 +19,10 @@ import (
 // can render.
 //
 // This is the surface the dashboard generator and the MCP
-// natural-language interface call. The daemon does NOT derive
-// green/yellow/red status from raw values: the spec explicitly calls
-// those thresholds user-tunable, and bundling threshold logic into
-// the daemon would force every renderer to share the daemon's edit
-// cycle. Instead each row's Notes field embeds the spec's threshold
-// language verbatim, giving an LLM consumer enough context to
-// interpret without reading the methodology doc.
+// natural-language interface call. The daemon attaches compact
+// spec-default band metadata so JSON/MCP clients can read one stable
+// agent surface, while the raw measurements remain present for
+// renderers that want to apply their own thresholds.
 //
 // Dealer gamma is auto-kicked: the first regime snapshot of
 // the NY trading session triggers the heavy compute, returns
@@ -47,7 +44,6 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
 		func(c context.Context) rpc.RegimeVolOfVol { return fetchRegimeVolOfVol(c, deps) },
-		func(c context.Context) rpc.RegimeRatesVol { return fetchRegimeRatesVol(c, deps) },
 		func(c context.Context) rpc.RegimeHYGSPYDivergence { return fetchRegimeHYGSPY(c, deps) },
 		func(c context.Context) rpc.RegimeCreditSpreads { return fetchRegimeCreditSpreads(c, deps) },
 		func(c context.Context) rpc.RegimeFundingStress { return fetchRegimeFundingStress(c, deps) },
@@ -63,6 +59,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	// classification — see regime_streaks.go for the rationale). Each
 	// indicator's StreakInfo is attached to its row before returning.
 	s.populateStreaks(res)
+	annotateRegimeMetadata(res)
 	// Roll up the per-row bands into the composite verdict + counts
 	// the CLI shows above the indicator rows. Reading off the same
 	// daemon-side classifiers used for streak persistence keeps the
@@ -159,7 +156,6 @@ func runRegimeFanout(
 	ctx context.Context,
 	vix func(context.Context) rpc.RegimeVIXTerm,
 	volOfVol func(context.Context) rpc.RegimeVolOfVol,
-	ratesVol func(context.Context) rpc.RegimeRatesVol,
 	hyg func(context.Context) rpc.RegimeHYGSPYDivergence,
 	creditSpreads func(context.Context) rpc.RegimeCreditSpreads,
 	fundingStress func(context.Context) rpc.RegimeFundingStress,
@@ -176,10 +172,9 @@ func runRegimeFanout(
 		kind string
 		v    any
 	}
-	results := make(chan regimeRow, 9)
+	results := make(chan regimeRow, 8)
 	go func() { results <- regimeRow{"vix", vix(ctx)} }()
 	go func() { results <- regimeRow{"vol_of_vol", volOfVol(ctx)} }()
-	go func() { results <- regimeRow{"rates_vol", ratesVol(ctx)} }()
 	go func() { results <- regimeRow{"hyg", hyg(ctx)} }()
 	go func() { results <- regimeRow{"credit_spreads", creditSpreads(ctx)} }()
 	go func() { results <- regimeRow{"funding_stress", fundingStress(ctx)} }()
@@ -187,9 +182,9 @@ func runRegimeFanout(
 	go func() { results <- regimeRow{"gamma", gamma(ctx)} }()
 	go func() { results <- regimeRow{"breadth", breadth(ctx)} }()
 
-	received := make(map[string]bool, 9)
+	received := make(map[string]bool, 8)
 	deadlineFired := false
-	for len(received) < 9 && !deadlineFired {
+	for len(received) < 8 && !deadlineFired {
 		select {
 		case r := <-results:
 			switch r.kind {
@@ -197,8 +192,6 @@ func runRegimeFanout(
 				res.VIXTermStructure = r.v.(rpc.RegimeVIXTerm)
 			case "vol_of_vol":
 				res.VolOfVol = r.v.(rpc.RegimeVolOfVol)
-			case "rates_vol":
-				res.RatesVol = r.v.(rpc.RegimeRatesVol)
 			case "hyg":
 				res.HYGSPYDivergence = r.v.(rpc.RegimeHYGSPYDivergence)
 			case "credit_spreads":
@@ -229,9 +222,6 @@ func runRegimeFanout(
 		}
 		if !received["vol_of_vol"] {
 			res.VolOfVol = rpc.RegimeVolOfVol{Symbol: "VVIX", Notes: volOfVolNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
-		}
-		if !received["rates_vol"] {
-			res.RatesVol = rpc.RegimeRatesVol{Symbol: "MOVE", Notes: ratesVolNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
 		}
 		if !received["hyg"] {
 			res.HYGSPYDivergence = rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
@@ -504,39 +494,6 @@ func fetchRegimeVolOfVol(ctx context.Context, deps *regimeDeps) rpc.RegimeVolOfV
 		out.Change20D = &chg
 	}
 	out.Status = statusForOfficialDaily(latest.Date, time.Now())
-	return out
-}
-
-const ratesVolNotes = "MOVE (ICE BofA U.S. Bond Market Option Volatility Estimate Index) as a rates-volatility cross-asset stress input. Default heuristic bands: <100 green, 100-130 yellow, >130 red. MOVE measures implied Treasury/rates volatility, so it can flag bond-market stress while equity vol is still calm. Source path is the user's IBKR market-data entitlement for the ICE index; if unavailable, the row is unranked rather than approximated from ETFs."
-
-func fetchRegimeRatesVol(ctx context.Context, deps *regimeDeps) rpc.RegimeRatesVol {
-	out := rpc.RegimeRatesVol{
-		Symbol: "MOVE",
-		Notes:  ratesVolNotes,
-		Source: "ICE MOVE index via IBKR market data",
-	}
-	move, prev, dt := boundedSnapshot(ctx, deps, "MOVE", 8*time.Second)
-	if move <= 0 {
-		out.Status = rpc.RegimeStatusUnavailable
-		out.ErrorMessage = "MOVE: no index tick (check ICE/rates-vol market-data entitlement)"
-		return out
-	}
-	now := time.Now()
-	out.Last = new(move)
-	out.PrevClose = nilIfZero(prev)
-	if prev > 0 {
-		diff := move - prev
-		out.Change = &diff
-		pct := diff / prev * 100
-		out.ChangePct = &pct
-	}
-	out.DataType = dt
-	out.ValueQuality = firmTickQuality(now, dt, "MOVE index tick (ICE)")
-	if rpc.IsLiveDataType(dt) {
-		out.Status = rpc.RegimeStatusOK
-	} else {
-		out.Status = rpc.RegimeStatusStale
-	}
 	return out
 }
 
@@ -997,13 +954,6 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 
 // ----------------------------------------------------------------------------
 // Helpers shared across the per-indicator fetchers.
-
-func nilIfZero(v float64) *float64 {
-	if v == 0 {
-		return nil
-	}
-	return new(v)
-}
 
 func officialDailyQuality(date time.Time, source string) *rpc.Quality {
 	return &rpc.Quality{

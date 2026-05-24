@@ -41,7 +41,6 @@ func buildRegimeComposite(r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 	bands := []string{
 		bandForVIX(r.VIXTermStructure),
 		bandForVolOfVol(r.VolOfVol),
-		bandForRatesVol(r.RatesVol),
 		bandForHYGSPY(r.HYGSPYDivergence),
 		bandForCreditSpreads(r.CreditSpreads),
 		bandForFundingStress(r.FundingStress),
@@ -106,7 +105,7 @@ func buildRegimeSummary(r *rpc.RegimeSnapshotResult) rpc.RegimeSummary {
 		Evidence:          regimeClusterEvidenceBalance(c),
 		IndicatorEvidence: regimeEvidenceBalance(c),
 		PunchLine:         regimePunchLine(rows),
-		Confidence:        regimeEvidenceConfidence(c),
+		Confidence:        regimeEvidenceConfidence(c, rows),
 		DominantRisks:     dominant,
 		NotAdvice:         regimeNotAdvice,
 	}
@@ -140,13 +139,6 @@ func regimeEvidenceRows(r *rpc.RegimeSnapshotResult) []regimeEvidenceRow {
 			status:  r.VolOfVol.Status,
 			band:    bandForVolOfVol(r.VolOfVol),
 			message: r.VolOfVol.ErrorMessage,
-		},
-		{
-			scope:   "rates_vol",
-			name:    "rates volatility",
-			status:  r.RatesVol.Status,
-			band:    bandForRatesVol(r.RatesVol),
-			message: r.RatesVol.ErrorMessage,
 		},
 		{
 			scope:   "hyg_spy_divergence",
@@ -233,15 +225,24 @@ func regimeClusterEvidenceBalance(c rpc.RegimeComposite) string {
 	return strings.Join(parts, " / ")
 }
 
-func regimeEvidenceConfidence(c rpc.RegimeComposite) string {
+func regimeEvidenceConfidence(c rpc.RegimeComposite, rows []regimeEvidenceRow) string {
 	switch {
 	case c.ClusterRankedCount < verdictFloor:
 		return "low"
-	case c.ClusterUnrankedCount > 0:
+	case c.ClusterUnrankedCount > 0 || hasStaleRegimeEvidence(rows):
 		return "medium"
 	default:
 		return "high"
 	}
+}
+
+func hasStaleRegimeEvidence(rows []regimeEvidenceRow) bool {
+	for _, row := range rows {
+		if row.status == rpc.RegimeStatusStale && row.band != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func regimeDominantRisks(rows []regimeEvidenceRow) []string {
@@ -291,7 +292,24 @@ func regimePunchLine(rows []regimeEvidenceRow) string {
 	if len(parts) == 0 {
 		return "No regime indicators produced a rankable reading."
 	}
+	if names := staleRegimeEvidenceNames(rows); len(names) > 0 {
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s ranked from stale data", joinHuman(names), verb))
+	}
 	return strings.Join(parts, "; ") + "."
+}
+
+func staleRegimeEvidenceNames(rows []regimeEvidenceRow) []string {
+	var names []string
+	for _, row := range rows {
+		if row.status == rpc.RegimeStatusStale && row.band != "" {
+			names = append(names, row.name)
+		}
+	}
+	return names
 }
 
 func unrankedEvidenceState(status string) string {
@@ -369,8 +387,6 @@ func warningForRegimeRow(row regimeEvidenceRow) (rpc.RegimeWarning, bool) {
 		w.Action = "Retry during Cboe index calculation hours or check index market-data entitlement."
 	case "vol_of_vol":
 		w.Action = "Retry once Cboe's official VVIX daily file is reachable."
-	case "rates_vol":
-		w.Action = "Check ICE/MOVE index market-data entitlement, then retry."
 	case "hyg_spy_divergence":
 		w.Action = "Retry when ETF quotes are live or check equity/ETF market-data entitlement."
 	case "credit_spreads":
@@ -446,13 +462,6 @@ func bandForVolOfVol(r rpc.RegimeVolOfVol) string {
 		return ""
 	}
 	return classifyVolOfVolBand(r.Last)
-}
-
-func bandForRatesVol(r rpc.RegimeRatesVol) string {
-	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
-		return ""
-	}
-	return classifyRatesVolBand(r.Last)
 }
 
 // bandForHYGSPY classifies the HYG vs SPY row. HYG below its 50dma
@@ -533,7 +542,6 @@ func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
 	}
 	return []string{
 		worstBand(bandForVIX(r.VIXTermStructure), bandForVolOfVol(r.VolOfVol)),
-		worstBand(bandForRatesVol(r.RatesVol)),
 		worstBand(bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads)),
 		worstBand(bandForFundingStress(r.FundingStress)),
 		worstBand(bandForUSDJPY(r.USDJPY)),

@@ -32,6 +32,9 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 		AsOf:    time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC),
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 		VIXTermStructure: rpc.RegimeVIXTerm{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				AsOf: &rpc.RegimeAsOfSummary{Label: "live"},
+			},
 			Status:   rpc.RegimeStatusOK,
 			VIX:      &vix,
 			VIX3M:    &vix3m,
@@ -40,6 +43,9 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 			Notes:    "VIX/VIX3M notes",
 		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				AsOf: &rpc.RegimeAsOfSummary{Label: "frozen"},
+			},
 			Status:     rpc.RegimeStatusStale,
 			HYGPrice:   &hyg,
 			HYG50DMA:   &hyg50,
@@ -48,6 +54,9 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 			Notes:      "HYG/SPY notes",
 		},
 		USDJPY: rpc.RegimeUSDJPY{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				AsOf: &rpc.RegimeAsOfSummary{Label: "15m delayed"},
+			},
 			Status:       rpc.RegimeStatusOK,
 			Symbol:       "USD.JPY",
 			Last:         &usdjpy,
@@ -56,6 +65,9 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 			Notes:        "USD/JPY notes",
 		},
 		GammaZero: rpc.RegimeGammaZero{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				AsOf: &rpc.RegimeAsOfSummary{Label: "computing"},
+			},
 			Status: rpc.RegimeStatusComputing,
 			Envelope: rpc.GammaZeroSPXResult{
 				Status:     rpc.GammaZeroStatusComputing,
@@ -65,6 +77,9 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 			Notes: "gamma notes",
 		},
 		Breadth: rpc.RegimeBreadth{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				AsOf: &rpc.RegimeAsOfSummary{Label: "unavailable"},
+			},
 			Status: rpc.RegimeStatusUnavailable,
 			Notes:  "breadth notes",
 		},
@@ -86,8 +101,8 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 	for _, want := range []string{
 		"Risk Regime",
 		"Normal regime",
-		"2 green clusters / 1 yellow cluster / 4 unranked clusters",
-		"Indicators: 2 green / 1 yellow / 6 unranked",
+		"2 green clusters / 1 yellow cluster / 3 unranked clusters",
+		"Indicators: 2 green / 1 yellow / 5 unranked",
 		"Punch line:",
 		"volatility term structure and FX carry proxy are constructive",
 		"ETF credit proxy is mixed",
@@ -131,6 +146,19 @@ func TestRenderRegime_BandWordsAppearOnRankedRows(t *testing.T) {
 	for _, want := range []string{"green", "yellow"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("band word %q missing:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderRegime_AsOfColumnShowsFreshnessLabels(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderRegimeText(env, regimeFixture())
+	out := stdout.String()
+	for _, want := range []string{"AS OF", "live", "frozen", "15m delayed", "computing", "unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("regime table missing as-of label %q:\n%s", want, out)
 		}
 	}
 }
@@ -469,11 +497,6 @@ func TestRegimeRow_NewStressSignalBands(t *testing.T) {
 	vvix := 112.0
 	if row := rowVolOfVol(now, rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Last: &vvix}); row.band != bandRed {
 		t.Errorf("VVIX 112 should be red, got %v", row.band)
-	}
-
-	move := 118.0
-	if row := rowRatesVol(now, rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Last: &move}); row.band != bandYellow {
-		t.Errorf("MOVE 118 should be yellow, got %v", row.band)
 	}
 
 	hy := 3.8

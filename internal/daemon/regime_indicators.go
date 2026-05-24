@@ -18,7 +18,7 @@ type streakIndicator interface {
 }
 
 var streakIndicators = []streakIndicator{
-	vixTermStreaks{}, volOfVolStreaks{}, ratesVolStreaks{},
+	vixTermStreaks{}, volOfVolStreaks{},
 	hygSpyStreaks{}, creditSpreadsStreaks{}, fundingStressStreaks{}, usdJpyStreaks{},
 	gammaZeroStreaks{}, breadthStreaks{},
 }
@@ -63,27 +63,6 @@ func (volOfVolStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, floa
 
 func (volOfVolStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
 	res.VolOfVol.Streak = s
-}
-
-// ratesVolStreaks — MOVE level.
-type ratesVolStreaks struct{}
-
-func (ratesVolStreaks) key() string { return StreakKeyRatesVol }
-
-func (ratesVolStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float64) {
-	if res.RatesVol.Status != rpc.RegimeStatusOK && res.RatesVol.Status != rpc.RegimeStatusStale {
-		return "", 0
-	}
-	band := classifyRatesVolBand(res.RatesVol.Last)
-	var value float64
-	if res.RatesVol.Last != nil {
-		value = *res.RatesVol.Last
-	}
-	return band, value
-}
-
-func (ratesVolStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
-	res.RatesVol.Streak = s
 }
 
 // hygSpyStreaks — HYG vs SPY divergence band.

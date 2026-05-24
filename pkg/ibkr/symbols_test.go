@@ -13,7 +13,6 @@ func TestClassifySymbol_Table(t *testing.T) {
 		{"VIX", "IND", "CBOE", "USD", "CBOE"},
 		{"VVIX", "IND", "CBOE", "USD", "CBOE"},
 		{"VIX3M", "IND", "CBOE", "USD", "CBOE"},
-		{"MOVE", "IND", "ICEUS", "USD", "ICEUS"},
 		{"SPY", "STK", "SMART", "USD", "ARCA"},
 		{"GLD", "STK", "SMART", "USD", "ARCA"},
 		{"TLT", "STK", "SMART", "USD", "ARCA"},
@@ -167,7 +166,6 @@ func TestContractDisplayHints(t *testing.T) {
 		{"SPY", "STK", "", ""},
 		{"VIX", "IND", "VIX", "VIX"},
 		{"VVIX", "IND", "VVIX", "VVIX"},
-		{"MOVE", "IND", "MOVE", "MOVE"},
 		{"DXY", "IND", "DXY", "DXY"},
 		{"ES", "STK", "", ""},
 	}

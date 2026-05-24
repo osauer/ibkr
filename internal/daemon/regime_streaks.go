@@ -261,7 +261,6 @@ type StreakInfo = rpc.StreakInfo
 const (
 	StreakKeyVIXTerm   = "vix_term"
 	StreakKeyVolOfVol  = "vol_of_vol"
-	StreakKeyRatesVol  = "rates_vol"
 	StreakKeyHYGSPY    = "hyg_spy"
 	StreakKeyCredit    = "credit_spreads"
 	StreakKeyFunding   = "funding_stress"
@@ -296,20 +295,6 @@ func classifyVolOfVolBand(vvix *float64) string {
 	case *vvix < 90:
 		return "green"
 	case *vvix < 110:
-		return "yellow"
-	default:
-		return "red"
-	}
-}
-
-func classifyRatesVolBand(move *float64) string {
-	if move == nil {
-		return ""
-	}
-	switch {
-	case *move < 100:
-		return "green"
-	case *move < 130:
 		return "yellow"
 	default:
 		return "red"

@@ -1,20 +1,23 @@
 # Risk Regime Dashboard — Build Spec
 
-**Updated:** 2026-05-24 11:31 CEST — dashboard widened to official credit,
-funding, vol-of-vol, and rates-volatility stress signals; composite labels
-are condition descriptions, not trade instructions.
+**Updated:** 2026-05-24 12:50 CEST — dashboard rows now expose compact
+`as_of`, band, threshold, and provenance metadata; MOVE/rates-vol is removed
+from the release surface until a verified licensed source exists.
 
-A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is **probability shifting, not prediction.** Multiple indicators flashing together is the real signal; any one alone is noise.
+A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is **evidence balance, not prediction.** Multiple indicators flashing together is the real signal; any one alone is noise.
 
 -----
 
 ## What to Build
 
-A single-page web dashboard (HTML or React) showing nine indicator rows,
-grouped into seven evidence clusters so related signals do not double-count:
+A single-page web dashboard (HTML or React) showing eight indicator rows,
+grouped into six evidence clusters so related signals do not double-count:
 
 - Current value and recent trend (sparkline, ~30 days)
-- Status light: **green** (normal), **yellow** (watch), **red** (warning)
+- Compact freshness/as-of badge per row: `live`, `15m delayed`, `close D-1`,
+  `2d old`, `cached 11:42`, `computing`, or `unavailable`
+- Status light: **green** (normal), **yellow** (watch), **red** (warning),
+  or unranked when the data path is missing
 - One-line plain-English interpretation under each
 - A composite regime label at the top based on cluster counts, plus a raw
   indicator-row count for transparency
@@ -27,7 +30,6 @@ grouped into seven evidence clusters so related signals do not double-count:
 Clusters:
 
 - Equity volatility: VIX/VIX3M and VVIX
-- Rates volatility: MOVE
 - Credit: HYG/SPY and official HY/IG OAS
 - Funding: 90-day AA financial commercial paper minus 3-month T-bill
 - FX carry: USD/JPY
@@ -37,6 +39,12 @@ Clusters:
 Within a cluster, use the worst ranked band (red > yellow > green). This keeps
 equity-vol or credit from counting twice while still showing disagreement in
 the row table.
+
+All threshold sets below are **heuristics pending backtest**. The dashboard
+reports a risk score / confidence / evidence balance, not a forecast
+probability. A probability field should not be added until the calibration
+framework in [regime-backtest-plan.md](regime-backtest-plan.md) has produced
+out-of-sample reliability evidence.
 
 ### 1. VIX Term Structure
 
@@ -72,27 +80,7 @@ equity-vol cluster. Do not read it as a standalone forecast.
 
 -----
 
-### 3. MOVE / Rates Volatility
-
-**What it is:** ICE BofA U.S. Bond Market Option Volatility Estimate Index
-(MOVE). It captures implied Treasury/rates volatility and can flag bond-market
-stress while equity volatility remains contained.
-
-**Source:** ICE/MOVE through the user's IBKR market-data entitlement when
-available. If not available, row is unranked.
-
-**Thresholds (heuristic):**
-
-- Green: < 100
-- Yellow: 100–130
-- Red: > 130
-
-**Observation window:** Daily. A rates-vol shock is cross-asset confirmation,
-not a trade instruction.
-
------
-
-### 4. HYG vs SPX Divergence
+### 3. HYG vs SPX Divergence
 
 **What it is:** High-yield corporate bond ETF (HYG) compared to S&P 500 (SPY). Credit markets often crack before equities.
 
@@ -110,7 +98,7 @@ not a trade instruction.
 
 -----
 
-### 5. Official HY/IG Credit Spreads
+### 4. Official HY/IG Credit Spreads
 
 **What it is:** ICE BofA high-yield and investment-grade corporate
 option-adjusted spreads. This is the official cash-credit companion to the
@@ -130,7 +118,7 @@ than ETF price action.
 
 -----
 
-### 6. Funding Stress Spread
+### 5. Funding Stress Spread
 
 **What it is:** 90-day AA financial commercial paper rate minus 3-month
 Treasury bill secondary-market rate, an OFR-style U.S. funding spread.
@@ -149,7 +137,7 @@ intraday funding-stress detector.
 
 -----
 
-### 7. USD/JPY
+### 6. USD/JPY
 
 **What it is:** Dollar-Yen exchange rate. A proxy for global carry trade leverage — when yen rallies hard (USD/JPY falls), leveraged risk positions are being unwound globally.
 
@@ -165,7 +153,7 @@ intraday funding-stress detector.
 
 -----
 
-### 8. Dealer Zero-Gamma Level (SPY+SPX)
+### 7. Dealer Zero-Gamma Level (SPY+SPX)
 
 **What it is:** The S&P 500 price level where market-maker hedging flips from dampening volatility to amplifying it. Above the level, dealers buy dips and sell rips. Below it, they sell into selloffs and buy into rallies — the dangerous regime.
 
@@ -183,7 +171,7 @@ intraday funding-stress detector.
 
 -----
 
-### 9. Market Breadth — % of SPX Stocks Above 50-Day MA
+### 8. Market Breadth — % of SPX Stocks Above 50-Day MA
 
 **What it is:** Tells you whether the rally is broad or carried by a few mega-caps. Narrow rallies are fragile.
 
@@ -212,8 +200,8 @@ Display at the top of the dashboard:
 |all ranked clusters red|—   |Full risk-off conditions  |
 
 Show raw indicator evidence beside or below the cluster evidence. Example:
-`Normal regime · 6 green clusters / 1 unranked cluster` followed by
-`Indicators: 7 green / 2 unranked`.
+`Normal regime · 5 green clusters / 1 unranked cluster` followed by
+`Indicators: 6 green / 2 unranked`.
 
 **Critical:** the dashboard should not tell you what to do. It should tell you what conditions are. Action rules must be pre-committed by the user before the moment arrives.
 
@@ -266,7 +254,7 @@ Show raw indicator evidence beside or below the cluster evidence. Example:
 
 ## Daemon API — `regime.snapshot` (v0.21.0+)
 
-`ibkr regime` / `ibkr_regime` / `regime.snapshot` returns all nine
+`ibkr regime` / `ibkr_regime` / `regime.snapshot` returns all eight
 indicator rows in one JSON envelope. The daemon derives default bands
 only for persisted streaks and the compact composite; raw measurements
 remain available so consumers can apply their own thresholds. Each
@@ -285,7 +273,7 @@ A `spec_doc` field on the envelope points back here for deep-linking.
 
 **Live-test result on 2026-05-17 (frozen weekend data)**:
 
-Read this as the *normal* weekend response — three rows stale, two
+Read this as the *normal* weekend response — several rows stale or
 unavailable. Live-market behavior populates `ratio` + `last` fields
 on the stale-during-weekend rows and surfaces gamma as `computing`
 on the first call of the NY session.
@@ -305,17 +293,29 @@ applied against the spec gives **green** (<0.92 is healthy contango).
 Gamma errored because SPX is not delivering any tick over weekend
 nights — expected; rerun during market hours. Breadth is served from
 the daemon's persisted cache (last weekday's post-close refresh — see
-Indicator 9 below for how the local engine computes the metric).
+Indicator 8 below for how the local engine computes the metric).
 
 ## Daemon methodology — what the IBKR daemon actually computes
 
-This section documents how Indicators 8 (Dealer Zero-Gamma) and 9
-(Market Breadth) are sourced from the IBKR gateway. VIX/VIX3M, MOVE,
-HYG/SPY, and USD/JPY use standard quote/history endpoints; VVIX,
-official OAS, and funding spreads use official Cboe/FRED daily files.
-USD/JPY routes through native CASH/IDEALPRO FX.
+This section documents how the daemon sources and labels the rows. VIX/VIX3M,
+HYG/SPY, and USD/JPY use standard IBKR quote/history endpoints; VVIX,
+official OAS, and funding spreads use official Cboe/FRED daily files. USD/JPY
+routes through native CASH/IDEALPRO FX. MOVE/rates-vol is intentionally absent
+until a verified IBKR contract or licensed official connector exists.
 
-### Indicator 9 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
+Every indicator row exposes compact metadata in default JSON/MCP:
+
+- `status`: `ok`, `stale`, `computing`, `unavailable`, or `error`
+- `band`: `green`, `yellow`, `red`, or `unranked`
+- `band_reason`: one short threshold explanation for the current row
+- `thresholds`: `{label, green, yellow, red, heuristic, pending_backtest}`
+- `as_of`: `{label, freshness, source, time/date, age_seconds}` where
+  `label` is the CLI column value
+
+Text output prints `AS OF` between `VALUE` and `BAND`; JSON/MCP keeps the same
+data under each row for agents.
+
+### Indicator 8 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 
 **Source.** S&P Dow Jones Indices publishes the `S5FI` (% above
 50-day SMA) and `S5TH` (% above 200-day SMA) index family plus the
@@ -566,8 +566,19 @@ SpotGamma's posted value.
 
 ### Composite-score honesty
 
-The dashboard composite (count of red / yellow indicators) does *not*
-account for correlation between indicators. Empirically:
+The dashboard composite is cluster-aware and uses the worst ranked band within
+each cluster, so a red equity-vol or credit sub-signal cannot be hidden by a
+larger number of green rows. The raw indicator counts remain visible for
+transparency.
+
+Stale ranked rows still contribute a band, but they lower summary confidence
+and appear in `warning_details`; unavailable/error/computing rows stay
+unranked, lower coverage, and affect the punch line. This is especially
+important for daily official files and cached gamma/breadth snapshots: a
+Friday close on Sunday is not the same freshness as a live SPY tick.
+
+The dashboard composite still does *not* claim statistical independence across
+clusters. Empirically:
 
 - Zero-gamma flips correlate ~0.6+ with VIX backwardation (Indicator 1).
 - Breadth collapse correlates with HYG/SPX divergence (Indicator 2).
@@ -590,4 +601,8 @@ for future versions:
   uncertainty signal).
 - Holiday-aware cache TTL (current: hardcoded NY date rollover at
   midnight; correct except on early-close days).
-- MOVE / IG-HY spread as a 6th regime indicator.
+- Re-add ICE BofA MOVE/rates-vol only after a verified IBKR contract or
+  licensed official data connector exists; do not proxy it with ETFs or
+  futures.
+- Backtest-derived calibration for threshold sets and cluster weights
+  (see `docs/specs/regime-backtest-plan.md`).

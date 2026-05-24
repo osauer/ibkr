@@ -162,10 +162,6 @@ func classifySymbol(symbol string) (string, string, string, string) {
 		secType = "IND"
 		exchange = "ICEUS"
 		primary = "ICEUS"
-	case "MOVE":
-		secType = "IND"
-		exchange = "ICEUS"
-		primary = "ICEUS"
 
 	// "ES" historically mapped here to FUT/GLOBEX for the E-mini S&P
 	// futures contract, but no caller ever requested ES via classifySymbol
@@ -187,7 +183,7 @@ func contractDisplayHints(symbol, secType string) (string, string) {
 	switch secType {
 	case "IND":
 		switch symbol {
-		case "VIX", "VVIX", "VIX3M", "SPX", "NDX", "DJI", "DJX", "DXY", "MOVE":
+		case "VIX", "VVIX", "VIX3M", "SPX", "NDX", "DJI", "DJX", "DXY":
 			return symbol, symbol
 		}
 	case "CMDTY":
