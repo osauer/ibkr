@@ -10,6 +10,26 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.4 — 2026-05-24 09:41 CEST
+
+### What's new
+
+- `ibkr gamma` now leads with a compact `summary` explaining which per-index γ-zero was identified, whether it is long/transition/short gamma, confidence, and the non-advisory caveat.
+- Combined SPY+SPX gamma no longer exposes a fake top-level zero-gamma price; agents read `summary.per_index` or `per_index` for SPY and SPX levels, while `gamma_total_abs` and `top_strikes` stay as scale-safe magnitude surfaces.
+- Default CLI JSON and MCP gamma/regime responses strip large profile arrays unless `--profiles` / `include_profiles` is requested, making the tooling surface much easier to consume.
+
+### Changed
+
+- A γ-zero crossing is classified by spot's distance from the identified level: above +2% is long-gamma, within ±2% is transition, and below -2% is short-gamma. The old `agree:flipping` combined classifier is replaced by `agree:transition-gamma`.
+- The combined regime row and streak classifier now weight mixed SPY/SPX gamma bands by gross gamma exposure, with an SPX structural fallback when magnitudes are absent, so a dominant short-gamma SPX book is not flattened into a neutral mixed headline.
+- Gamma warnings now serialize as scoped `warning_details` with message, impact, and action fields; raw warning tokens remain daemon-internal.
+- Derived-IV disclosures now say the fallback inverts option quote mids or prior-session closes, instead of implying every fallback leg used only a prior-session close.
+
+### Fixed
+
+- Gamma computes now reject and invalidate all-zero GEX profiles caused by priced option legs with no non-zero OI-weighted gamma, rather than reporting them as a usable long-gamma regime.
+- The regime breadth envelope no longer leaks a zero `spot_at` timestamp in JSON when the field was not observed.
+
 ## v1.0.3 — 2026-05-24 07:21 CEST
 
 ### What's new
