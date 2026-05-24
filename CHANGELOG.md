@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). v0.13.0 and later follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security). Earlier entries use descriptive subheadings and are kept as-is.
+All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-Recent entries (v0.27.5 onward, after backfill) tier by audience:
+Entries tier by audience:
 
 - **`### What's new`** — plain-English TL;DR for CLI/MCP users. Three bullets max. Mark user-action items with `**Action required:**`; mark Go-library-only breakage with `**Breaking (Go library):**`. The GitHub release body's "What's new in vX.Y.Z" section is mechanically derived from this section by `make release-publish`.
 - **`### Added / Changed / Deprecated / Removed / Fixed / Security`** — Keep-a-Changelog bullets for Go importers and power users. One user-visible change per bullet, framed as the consumer-visible effect — what the API caller / CLI user / MCP consumer notices — not the internal mechanism. No internal finding IDs (`F-NN`, lint-enforced); no bare "step N" without naming the workflow and what the step tests; no internal symbol-drops without a reader-value gloss; no relative dates or session-internal references.
@@ -2407,7 +2407,7 @@ Audit-driven cleanup: two portfolio-aggregate correctness fixes, plus ~5,000 LOC
 - **Portfolio aggregates honour the option contract multiplier from the wire.**
   `optionMultiplier` previously took a `PositionView` and discarded it, returning
   a hard-coded `100`. The wire already populates `PositionView.Multiplier` from
-  `pos.Asset.Multiplier` (it has since v0.12.4), so for index options on
+  `pos.Asset.Multiplier`, so for index options on
   multipliers other than 100 — NDX/SPX 100, mini-options 10, some indexes
   1000 — `effective_delta`, `dollar_delta`, and `daily_theta` were silently
   off by an integer factor. Helper now reads `p.Multiplier`, falling back to
@@ -2444,7 +2444,7 @@ Audit-driven cleanup: two portfolio-aggregate correctness fixes, plus ~5,000 LOC
 
 ### Removed
 
-First wave — v0.10–v0.12 lifecycle scaffolding never wired through:
+First wave — lifecycle scaffolding never wired through:
 
 - **`Connector.PlaceOrder(*Order)` simulator stub.** Comment said `// For now,
   simulate order placement`; status got stamped `Submitted` without touching
@@ -2487,7 +2487,7 @@ First wave — v0.10–v0.12 lifecycle scaffolding never wired through:
   Files at `~/.local/state/ibkr/contracts.json` and `inactive.json` from
   prior daemons can be deleted by hand — they're no longer touched.
 
-Second wave — dormant subsystems flagged in the post-v0.13 audit:
+Second wave — dormant subsystems flagged during cleanup:
 
 - **Wire interceptor's override path.** `ApplyOutboundOverrides`,
   `OverrideOperation`, `messageOverride`, `applyOperations`, the `autoApply`
@@ -2516,8 +2516,8 @@ Second wave — dormant subsystems flagged in the post-v0.13 audit:
   `dispatchCommissionReport` / `snapshotExecutionListeners` /
   `snapshotCommissionListeners` / `logError`, plus the dormant
   `tryDecodeProtoMessage` codepath and seven now-orphan IBKR server-version
-  / message-id constants. Plumbed end-to-end but zero non-test consumers
-  in v0.13; `pkg/ibkr/doc.go`'s "Protocol coverage" never advertised it.
+  / message-id constants. Plumbed end-to-end but zero non-test consumers;
+  `pkg/ibkr/doc.go`'s "Protocol coverage" never advertised it.
 - **`google.golang.org/protobuf` dependency.** The execution family was
   the only consumer; `go mod tidy` removed it. `pkg/ibkr` now has zero
   third-party Go dependencies on its hot path.
@@ -2592,9 +2592,9 @@ Third wave — test suites for surfaces the binary refuses or doesn't exercise:
   v0.12.5), `Connector.PlaceOrder` (now `SubmitOrder`), `go install` Go
   floor (1.25 → 1.26 to match `go.mod`), and the safety-layer description
   (no more `//go:build !trading`).
-- **`pkg/ibkr/doc.go`** header updated `(v0.12)` → `(v0.13)`; order-placement
-  bullet and read-only-safety section now point at `SubmitOrder` and describe
-  the daemon dispatch refusal accurately.
+- **`pkg/ibkr/doc.go`** protocol coverage header updated; order-placement bullet
+  and read-only-safety section now point at `SubmitOrder` and describe the
+  daemon dispatch refusal accurately.
 - **README troubleshooting** picks up an entry for the wire-capture
   diagnostic env vars (`IBKR_WIRE_INTERCEPTOR`, `IBKR_WIRE_LOG_PATH`,
   `IBKR_WIRE_RING_SIZE`, `IBKR_PACKET_LOG_TEMPLATE`) — all four are off
@@ -2604,8 +2604,8 @@ Third wave — test suites for surfaces the binary refuses or doesn't exercise:
   spelling out what the wire-capture files contain (account IDs, contract
   identifiers, P&L) and how to handle them when sharing for debugging.
 - **`internal/rpc.PositionsListParams`** doc-comment corrected: it
-  previously said "v1 ignores fields" but the daemon has been honouring
-  both `Symbol` and `Type` filters since v0.13.
+  previously said "v1 ignores fields" even though the daemon honours both
+  `Symbol` and `Type` filters.
 
 ## v0.13.0 — 2026-05-13 21:37 CEST
 
