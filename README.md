@@ -6,25 +6,11 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**Read-only Interactive Brokers access for humans and agents.** Ask what you own, how exposed you are, what the market backdrop looks like, or how large a planned trade should be, or simply request live market data.
+**Use your IBKR account from the terminal or an AI assistant without giving it trading access.**
 
-One Go binary gives you a shell CLI, a local stdio MCP server, and a Go library. Account data stays on the machine running IB Gateway or TWS unless you choose to pass it to an MCP host.
+`ibkr` answers account and market questions against your local IB Gateway or TWS session. It can show positions, exposure, live market data, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
 
-The important shape:
-
-- **Local first.** The daemon speaks to your local IB Gateway / TWS and listens on a Unix socket.
-- **Agent friendly.** Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP host can call the same read-only tools.
-- **Structurally read-only.** Order placement, cancellation, and modification are absent from the CLI/MCP surface and refused at multiple lower layers. [Details](#safety).
-- **One JSON contract.** CLI, MCP, and library callers see the same daemon responses.
-
-With `ibkr mcp` wired up, you can ask:
-
-> *"What's in my IBKR account and how am I doing this week?"*
-> *"Show me my AAPL exposure, including option deltas."*
-> *"How does the market regime look today?"*
-> *"If I buy 100 MSFT at 418 with a stop at 408, what's the EUR risk?"*
-
-Or use the shell directly:
+Use it from a shell:
 
 ```sh
 ibkr status
@@ -33,6 +19,18 @@ ibkr regime
 ibkr quote SPY --watch
 ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```
+
+Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP host and ask:
+
+> "What's in my IBKR account?"
+>
+> "Show my AAPL exposure, including option deltas."
+>
+> "How does the market regime look today?"
+>
+> "If I buy 100 MSFT at 418 with a stop at 408, what's my EUR risk?"
+
+Your account data stays on the machine running IB Gateway or TWS unless you choose to send it to an MCP host. The tool runs as one Go binary with a CLI, a local MCP server, and a Go library. No Python runtime, Java runtime, or hosted service is required.
 
 **Contents** — [Install](#install-in-two-commands) · [What you get](#what-you-get) · [Pick your path](#pick-your-path) · [How it works](#how-it-works) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Troubleshooting](#troubleshooting)
 
@@ -43,7 +41,11 @@ curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop
 ```
 
-The installer detects your OS/arch, fetches the matching tarball from the latest release, verifies the SHA-256, drops `ibkr` in `~/.local/bin`, clears macOS Gatekeeper quarantine, and adds `~/.local/bin` to your shell rc if it isn't on PATH. When `gpg` and `SHA256SUMS.asc` are both available, bootstrap also verifies the PGP signature; after install, `ibkr update` is stricter and refuses unsigned releases. The second command writes the MCP server entry into Claude Desktop's config — quit Claude (⌘Q) and relaunch. Skip it if you only want the shell tool. [Other install paths.](#other-install-paths)
+The installer downloads the release for your OS and architecture, verifies the checksum, installs `ibkr` in `~/.local/bin`, and adds that directory to your shell rc when needed. On macOS, it also clears Gatekeeper quarantine.
+
+`ibkr setup claude-desktop` writes the MCP server entry to Claude Desktop. Quit Claude completely and relaunch it. Skip this command if you only want the shell tool.
+
+`ibkr update` is stricter than bootstrap install. It refuses unsigned releases when release signatures are available. [Other install paths.](#other-install-paths)
 
 **Prerequisites.** A running [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) 10.37+ or TWS (paper or live) on the same machine. Auto-discovered on the four standard ports. An **IBKR Pro** account (IBKR Lite cannot use the TWS API).
 
@@ -58,17 +60,23 @@ The installer detects your OS/arch, fetches the matching tarball from the latest
 - **Dealer gamma.** Best-effort SPY+SPX zero-gamma and concentration view, with scope controls and entitlement-graceful fallback to SPY when SPX data is unavailable. Treat the signed level as a regime hint, not a precise trading level.
 - **Risk regime.** One call returns the five-indicator dashboard: VIX term structure, HYG/SPY divergence, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
 
-Every data/query command supports `--json`; local lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are intentionally human/transport oriented. For field-level schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
+Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
+
+For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
 
 ## Pick your path
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` is a stdio MCP server. Every CLI verb an LLM should ever call has a matching MCP tool (local lifecycle verbs like `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded), and `make check` fails if the surfaces drift. The server also exposes quotes for stocks and ETFs as an MCP resource:
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+
+The server also exposes quotes for stocks and ETFs as an MCP resource:
 
 - `ibkr://quote/{symbol}`
 
-`resources/read` returns one snapshot for that URI; `resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. The resource shape is documented in [docs/reference/mcp-resources.md](docs/reference/mcp-resources.md). `ibkr setup claude-desktop` handles Claude Desktop end-to-end. For other clients, paste this into the client's MCP config (path varies):
+`resources/read` returns one snapshot for that URI; `resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. The resource shape is documented in [docs/reference/mcp-resources.md](docs/reference/mcp-resources.md).
+
+`ibkr setup claude-desktop` configures Claude Desktop for you. For other clients, paste this into the client's MCP config (path varies):
 
 ```json
 {
@@ -153,17 +161,15 @@ From Python, TypeScript, or Rust, shell out to the CLI: subprocess in, JSON out.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    CLI["ibkr (CLI)<br/>stateless"] -->|JSON-RPC over Unix socket| D["ibkr daemon<br/>same binary, stateful"]
-    MCP["ibkr mcp<br/>stdio MCP server"] -->|same socket| D
-    D -->|TWS API protocol, TCP| GW["IB Gateway or TWS"]
-    D --- LIB["pkg/ibkr<br/>shared library"]
+`ibkr` runs local commands against one background daemon.
+
+When you run a CLI command or an MCP tool, it connects to the daemon over a Unix socket. The daemon keeps the IB Gateway or TWS connection open, caches contract details, manages quote subscriptions, and returns JSON responses. It starts on first use and exits after 15 minutes of inactivity unless you run it in the foreground.
+
+```text
+CLI or MCP host -> local ibkr daemon -> IB Gateway or TWS -> your account data
 ```
 
-The CLI and MCP server are short-lived clients. The daemon is the stateful half: it holds the IBKR connection, caches contract details, fans out quote subscriptions, and serves JSON-RPC over a local Unix socket. It autospawns on first use and idles out after fifteen minutes unless you run it in the foreground.
-
-One singleton daemon means your shell, Claude Desktop, Claude Code, and other MCP clients share one gateway connection and one IBKR client-ID slot. The MCP server keeps its daemon connection open while the host is running, so tool calls are fast and the daemon stays alive until the host quits.
+This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP clients can share one IBKR connection and one client ID. Tool calls stay fast because the gateway session is already open.
 
 `pkg/ibkr` is a clean-room Go implementation of the read-side TWS protocol. Full coverage details live in [docs/reference/protocol.md](docs/reference/protocol.md), and the public package docs live in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
 
@@ -197,7 +203,13 @@ limit    = 20
 
 **Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[spx]`, `[scans.<name>]`.
 
-The full per-field reference (TOML sections + `IBKR_*` env vars) is auto-generated at [docs/reference/config.md](docs/reference/config.md). Concept and mental-model docs for the indicators live at [docs/concepts.md](docs/concepts.md); the agentic (Claude / MCP) walkthrough is at [docs/guides/agentic-use.md](docs/guides/agentic-use.md); marketplace packaging notes live at [docs/guides/marketplace-readiness.md](docs/guides/marketplace-readiness.md); data locality is summarized in [PRIVACY.md](PRIVACY.md).
+References:
+
+- [Configuration reference](docs/reference/config.md) for TOML sections and `IBKR_*` environment variables.
+- [Concepts](docs/concepts.md) for breadth, gamma, and regime interpretation.
+- [Agentic use](docs/guides/agentic-use.md) for Claude and MCP workflows.
+- [Marketplace readiness](docs/guides/marketplace-readiness.md) for packaging notes.
+- [Privacy](PRIVACY.md) for data locality and local files.
 
 ### Adding scanners
 
@@ -249,7 +261,6 @@ Per [semver](https://semver.org/), v1.x keeps the CLI/JSON/MCP read-only surface
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify `SHA256SUMS.asc` against the release-signing key, then verify the tarball against `SHA256SUMS`; see [SECURITY.md](SECURITY.md#release-integrity-v100).
 - **Local build**: `git clone … && make install`.
-- **Reproducible builds**: release binaries are built with `-trimpath -buildvcs=false` and stamp the version, commit, and commit date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) should produce byte-identical binaries on the same Go/toolchain pair. The tarball checksum can still vary with tar/gzip metadata; verify downloaded release assets against the published `SHA256SUMS`.
 - **Self-update**: `ibkr update` fetches the next stable release, verifies the PGP signature on `SHA256SUMS`, SHA-verifies the tarball, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.
@@ -261,7 +272,7 @@ make check      # gofmt + go vet + staticcheck + govulncheck + plugin/parity che
 make test       # check + unit tests + integration tests against a live gateway
 ```
 
-`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. The lint/vuln tools are pinned in `go.mod` and run via `go tool`, so CI and local checks use the same versions.
+`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. The lint/vuln tools are pinned in `go.mod` and run via `go tool`, so CI and local checks use the same versions. The gate also checks that MCP tools, streaming resources, generated references, and plugin metadata stay aligned with the CLI surface.
 
 Integration tests under `test/integration/` connect to the live IB Gateway on `127.0.0.1:4001` and skip cleanly when it isn't reachable, so `go test ./...` doesn't hang on a laptop with no gateway. Override the port with `IBKR_TEST_PORT=4002 make test`.
 
