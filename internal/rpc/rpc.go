@@ -645,6 +645,26 @@ type StrikeConcentration struct {
 	OI           int64   `json:"open_interest"`
 }
 
+// GammaLegDiagnosticCounts splits the priced-leg funnel into the
+// conditions required for dealer GEX contribution. A leg can price and
+// still fail to contribute when open interest is missing/zero, gamma is
+// degenerate, or the resulting OI-weighted absolute GEX is zero.
+type GammaLegDiagnosticCounts struct {
+	PricedLegs        int `json:"priced_legs"`
+	OpenInterestLegs  int `json:"oi_positive_legs"`
+	GammaPositiveLegs int `json:"gamma_positive_legs"`
+	AbsGEXLegs        int `json:"abs_gex_positive_legs"`
+}
+
+// GammaLegDiagnostics carries the leg-quality funnel for the whole
+// result plus splits that identify whether the drop happened at the
+// underlying or trading-class level (for example SPX vs SPXW).
+type GammaLegDiagnostics struct {
+	Total          GammaLegDiagnosticCounts            `json:"total"`
+	ByUnderlying   map[string]GammaLegDiagnosticCounts `json:"by_underlying,omitempty"`
+	ByTradingClass map[string]GammaLegDiagnosticCounts `json:"by_trading_class,omitempty"`
+}
+
 // GammaWarningDetail is the human/agent-facing warning surface. The
 // daemon may use compact codes internally, but the wire carries this
 // scoped explanation so renderers do not have to decode raw tokens.
@@ -823,6 +843,10 @@ type GammaZeroComputed struct {
 	// IVs" disclosure so readers can tell those IVs came from option
 	// quote/close inversion rather than live model ticks.
 	DerivedIVLegs int `json:"derived_iv_legs,omitempty"`
+	// LegDiagnostics explains how priced legs flowed through the
+	// GEX-contribution funnel. It is especially useful when a forced
+	// off-hours run prices legs but every row has missing/zero OI.
+	LegDiagnostics *GammaLegDiagnostics `json:"leg_diagnostics,omitempty"`
 	// Warnings is the daemon-internal list of non-fatal condition codes:
 	// "no_crossing_in_window", "spxw_partial_oi", "throttled",
 	// "all_iv_derived". Empty when the computation was clean. It is not

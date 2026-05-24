@@ -786,6 +786,27 @@ Ready (combined scope, subsequent calls):
     "leg_count": 3202,
     "priced_leg_count": 3430,
     "derived_iv_legs": 0,
+    "leg_diagnostics": {
+      "total": {"priced_legs": 3430, "oi_positive_legs": 3202,
+                "gamma_positive_legs": 3430,
+                "abs_gex_positive_legs": 3202},
+      "by_underlying": {
+        "SPY": {"priced_legs": 1280, "oi_positive_legs": 1208,
+                "gamma_positive_legs": 1280,
+                "abs_gex_positive_legs": 1208},
+        "SPX": {"priced_legs": 2150, "oi_positive_legs": 1994,
+                "gamma_positive_legs": 2150,
+                "abs_gex_positive_legs": 1994}
+      },
+      "by_trading_class": {
+        "SPY": {"priced_legs": 1280, "oi_positive_legs": 1208,
+                "gamma_positive_legs": 1280,
+                "abs_gex_positive_legs": 1208},
+        "SPXW": {"priced_legs": 1900, "oi_positive_legs": 1750,
+                 "gamma_positive_legs": 1900,
+                 "abs_gex_positive_legs": 1750}
+      }
+    },
     "warning_details": [],
     "methodology_citations": [
       "Perfiliev (2022) — BS-sweep baseline",
@@ -852,6 +873,12 @@ Field meanings:
 - `result.derived_iv_legs` — legs whose IV fell back to the
   Newton-Raphson BS-inversion path because the gateway never pushed a
   model-computation tick. Compare to `priced_leg_count`.
+- `result.leg_diagnostics` — leg-quality funnel for the current result:
+  priced legs, legs with positive open interest, legs with positive
+  Black-Scholes gamma at the snapshot spot, and legs with non-zero
+  OI-weighted absolute GEX. Splits are provided by underlying and by
+  trading class (`SPX` vs `SPXW`) so off-hours failures can identify
+  whether pricing, OI, or gamma contribution disappeared.
 - `result.warning_details` — non-fatal data-quality/methodology issues
   as scoped prose: `{code, scope, severity, message, impact, action}`.
   Do not look for raw warning tokens in JSON.

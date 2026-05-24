@@ -834,9 +834,11 @@ func computeGammaZeroFor(
 	// rankTopStrikesByAbsGEX picks up the same value; otherwise the
 	// top-strikes table and the magnitude row would diverge for the
 	// same race-affected legs.
+	legDiagnostics := buildGammaLegDiagnostics(sym, legs, spot)
 	gexLegs, gammaTotalAbs := prepareGEXLegs(legs, spot)
 	if len(gexLegs) == 0 {
-		return nil, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma", len(legs))
+		return nil, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma (%s)",
+			len(legs), formatGammaLegDiagnostics(legDiagnostics))
 	}
 
 	for _, l := range gexLegs {
@@ -978,6 +980,7 @@ func computeGammaZeroFor(
 		LegCount:                len(gexLegs),
 		PricedLegCount:          len(legs),
 		DerivedIVLegs:           derivedCount,
+		LegDiagnostics:          legDiagnostics,
 		Warnings:                warnings,
 		Params:                  params,
 		Scope:                   strings.ToLower(sym),

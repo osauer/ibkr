@@ -394,9 +394,11 @@ func TestNewGammaZeroCacheWithStore_LoadsPersistedScopes(t *testing.T) {
 		t.Errorf("spy: got %+v, want LegCount=2222", spySlot.current.result)
 	}
 
-	// SPX wasn't persisted: no slot for it.
-	if _, ok := cache.slots[rpc.GammaZeroScopeSPX]; ok {
-		t.Error("spx slot should not exist when no persisted file for that scope")
+	// SPX wasn't persisted: no current computation is seeded for it.
+	// The cache may still create an empty per-scope slot while checking
+	// persisted state so it can attach cold-start diagnostics later.
+	if spxSlot, ok := cache.slots[rpc.GammaZeroScopeSPX]; ok && spxSlot.current != nil {
+		t.Error("spx slot should not have a current computation when no persisted file exists")
 	}
 }
 

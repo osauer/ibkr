@@ -92,6 +92,20 @@ func TestCombineGammaResultsMergesTopStrikes(t *testing.T) {
 		SpotUnderlying: 540,
 		GammaTotalAbs:  5e9,
 		GammaSign:      "negative",
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{
+				PricedLegs:        100,
+				OpenInterestLegs:  80,
+				GammaPositiveLegs: 100,
+				AbsGEXLegs:        80,
+			},
+			ByUnderlying: map[string]rpc.GammaLegDiagnosticCounts{
+				"SPY": {PricedLegs: 100, OpenInterestLegs: 80, GammaPositiveLegs: 100, AbsGEXLegs: 80},
+			},
+			ByTradingClass: map[string]rpc.GammaLegDiagnosticCounts{
+				"SPY": {PricedLegs: 100, OpenInterestLegs: 80, GammaPositiveLegs: 100, AbsGEXLegs: 80},
+			},
+		},
 		TopStrikes: []rpc.StrikeConcentration{
 			{Underlying: "SPY", Strike: 540, Right: "C", AbsGEX: 8e8, Expiry: "2026-06-19"},
 			{Underlying: "SPY", Strike: 540, Right: "P", AbsGEX: 6e8, Expiry: "2026-06-19"},
@@ -101,6 +115,21 @@ func TestCombineGammaResultsMergesTopStrikes(t *testing.T) {
 		SpotUnderlying: 5400,
 		GammaTotalAbs:  18e9,
 		GammaSign:      "negative",
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{
+				PricedLegs:        200,
+				OpenInterestLegs:  150,
+				GammaPositiveLegs: 200,
+				AbsGEXLegs:        150,
+			},
+			ByUnderlying: map[string]rpc.GammaLegDiagnosticCounts{
+				"SPX": {PricedLegs: 200, OpenInterestLegs: 150, GammaPositiveLegs: 200, AbsGEXLegs: 150},
+			},
+			ByTradingClass: map[string]rpc.GammaLegDiagnosticCounts{
+				"SPX":  {PricedLegs: 40, OpenInterestLegs: 30, GammaPositiveLegs: 40, AbsGEXLegs: 30},
+				"SPXW": {PricedLegs: 160, OpenInterestLegs: 120, GammaPositiveLegs: 160, AbsGEXLegs: 120},
+			},
+		},
 		TopStrikes: []rpc.StrikeConcentration{
 			{Underlying: "SPX", TradingClass: "SPXW", Strike: 5400, Right: "C", AbsGEX: 7e9, Expiry: "2026-06-19"},
 			{Underlying: "SPX", TradingClass: "SPXW", Strike: 5300, Right: "P", AbsGEX: 5e9, Expiry: "2026-06-19"},
@@ -122,6 +151,27 @@ func TestCombineGammaResultsMergesTopStrikes(t *testing.T) {
 	}
 	if combined.GammaTotalAbs != 23e9 {
 		t.Errorf("combined GammaTotalAbs = %v, want 23e9", combined.GammaTotalAbs)
+	}
+	wantDiagnostics := rpc.GammaLegDiagnosticCounts{
+		PricedLegs:        300,
+		OpenInterestLegs:  230,
+		GammaPositiveLegs: 300,
+		AbsGEXLegs:        230,
+	}
+	if combined.LegDiagnostics == nil {
+		t.Fatal("combined LegDiagnostics is nil")
+	}
+	if combined.LegDiagnostics.Total != wantDiagnostics {
+		t.Errorf("combined LegDiagnostics.Total = %+v, want %+v", combined.LegDiagnostics.Total, wantDiagnostics)
+	}
+	if got := combined.LegDiagnostics.ByUnderlying["SPY"].PricedLegs; got != 100 {
+		t.Errorf("combined SPY priced legs = %d, want 100", got)
+	}
+	if got := combined.LegDiagnostics.ByUnderlying["SPX"].PricedLegs; got != 200 {
+		t.Errorf("combined SPX priced legs = %d, want 200", got)
+	}
+	if got := combined.LegDiagnostics.ByTradingClass["SPXW"].AbsGEXLegs; got != 120 {
+		t.Errorf("combined SPXW GEX legs = %d, want 120", got)
 	}
 	// Regime classifier fires on the inputs (both short-γ → agree).
 	if combined.RegimeAgreement != "agree:short-gamma" {

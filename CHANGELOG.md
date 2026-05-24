@@ -10,6 +10,24 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.7 — 2026-05-24 17:25 CEST
+
+### What's new
+
+- `ibkr gamma` now explains why a cached gamma result cannot be served, instead of returning a bare cold state when a persisted snapshot is rejected.
+- Forced gamma diagnostics now identify whether priced legs were lost at open interest, Black-Scholes gamma, or OI-weighted GEX contribution.
+- Gamma JSON now includes leg-quality counts split by underlying and trading class, making SPX/SPXW data gaps visible to CLI, MCP, and agent consumers.
+
+### Added
+
+- Added `cold_reason_code`, `cold_reason`, and `cold_action` to cold gamma responses when the daemon knows why no cached value is usable.
+- Added `result.leg_diagnostics` with priced, positive-open-interest, positive-gamma, and positive-absolute-GEX counts by underlying and trading class.
+
+### Fixed
+
+- Completed forced gamma failures during closed markets now surface as errors, rather than being hidden behind the closed-session cold-cache gate.
+- Rejected persisted gamma caches now report the validation reason to the caller, including invalid per-index slices in combined SPY+SPX results.
+
 ## v1.0.6 — 2026-05-24 14:08 CEST
 
 ### What's new

@@ -974,6 +974,60 @@ func TestPrepareGEXLegsRequiresOpenInterest(t *testing.T) {
 	}
 }
 
+func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
+	t.Parallel()
+	const spot = 5000.0
+	legs := []legData{
+		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, oi: 10_000},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, oi: 0},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5100, right: "C", tradingClass: "SPX", isCall: true, iv: 0, oi: 20_000},
+	}
+
+	got := buildGammaLegDiagnostics("spx", legs, spot)
+	if got == nil {
+		t.Fatal("diagnostics are nil")
+	}
+	wantTotal := rpc.GammaLegDiagnosticCounts{
+		PricedLegs:        3,
+		OpenInterestLegs:  2,
+		GammaPositiveLegs: 2,
+		AbsGEXLegs:        1,
+	}
+	if got.Total != wantTotal {
+		t.Fatalf("total counts = %+v, want %+v", got.Total, wantTotal)
+	}
+	if got.ByUnderlying["SPX"] != wantTotal {
+		t.Fatalf("SPX underlying counts = %+v, want %+v", got.ByUnderlying["SPX"], wantTotal)
+	}
+	wantSPXW := rpc.GammaLegDiagnosticCounts{
+		PricedLegs:        2,
+		OpenInterestLegs:  1,
+		GammaPositiveLegs: 2,
+		AbsGEXLegs:        1,
+	}
+	if got.ByTradingClass["SPXW"] != wantSPXW {
+		t.Fatalf("SPXW class counts = %+v, want %+v", got.ByTradingClass["SPXW"], wantSPXW)
+	}
+	wantSPX := rpc.GammaLegDiagnosticCounts{
+		PricedLegs:       1,
+		OpenInterestLegs: 1,
+	}
+	if got.ByTradingClass["SPX"] != wantSPX {
+		t.Fatalf("SPX class counts = %+v, want %+v", got.ByTradingClass["SPX"], wantSPX)
+	}
+
+	formatted := formatGammaLegDiagnostics(got)
+	for _, want := range []string{
+		"total priced=3 oi>0=2 gamma>0=2 abs_gex>0=1",
+		"SPX priced=1 oi>0=1 gamma>0=0 abs_gex>0=0",
+		"SPXW priced=2 oi>0=1 gamma>0=2 abs_gex>0=1",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("formatted diagnostics %q missing %q", formatted, want)
+		}
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
