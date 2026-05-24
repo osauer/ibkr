@@ -20,7 +20,7 @@ Each row carries raw measurements plus a `notes` field embedding the spec's thre
 
 Two failure modes worth flagging on the wire:
 
-- Indicators 4 (gamma) and 5 (breadth) are heavy computes. On the first call of an NY trading day, indicator 4 returns `status: "computing"` with an ETA; on a fresh daemon, indicator 5 returns `status: "computing"` while the constituent fan-out runs (~60 min cold).
+- Indicators 4 (gamma) and 5 (breadth) are heavy computes. On the first call of an NY trading day, indicator 4 returns `status: "computing"` with an ETA; on a fresh daemon, indicator 5 returns `state: "computing"` while the constituent fan-out runs (~60 min cold).
 - Indicators 1–3 may carry a `fields_missing` array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat `fields_missing` as a render hint, not an error.
 
 The full methodology spec is at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Use it when calibrating your own threshold bands — the spec's suggestions are starting points, not gospel.
@@ -59,7 +59,7 @@ The daemon also surfaces 52-week new-highs / new-lows counts and the derived `ne
 
 IBKR doesn't redistribute S&P DJI's official breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (methodology token: `constituent-fanout-50/200dma-hl`). A once-daily post-close refresh (16:35 ET) slides each name's window forward.
 
-**Cold-start budget**: the first request against a fresh daemon takes ~60 minutes — IBKR's historical-data pacing caps the constituent fan-out at ~6 names/min sustained. The response carries `status: "computing"` until done; after cold-start, the cache persists across daemon restarts and every subsequent call is instant.
+**Cold-start budget**: the first request against a fresh daemon takes ~60 minutes — IBKR's historical-data pacing caps the constituent fan-out at ~6 names/min sustained. The response carries `state: "computing"` until done; after cold-start, the cache persists across daemon restarts and every subsequent call is instant.
 
 The constituent list itself is also refreshed runtime — see [Updating](./guides/updating.md#updating-the-sp-500-list--automatic) for the cadence and pinning options. Threshold derivation is left to the consumer; suggestions are in the spec.
 

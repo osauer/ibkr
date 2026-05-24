@@ -73,7 +73,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_quote",
-		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and ATM IV per symbol. Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\"). NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
+		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable). Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\"). NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbols": json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"AAPL\",\"MSFT\"]"}`),
 		}, []string{"symbols"}),
@@ -358,6 +358,8 @@ var Tools = []Tool{
 // resources_test.go.
 var ExcludedCLI = map[string]string{
 	"version": "info-only CLI verb; not useful as a tool call",
+	"mcp":     "transport server mode; the MCP host starts this process, no LLM should call it as a tool",
+	"daemon":  "local background service mode; autospawned by CLI/MCP clients and not an agent operation",
 	"setup":   "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
 	"update":  "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 }

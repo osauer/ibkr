@@ -1,6 +1,6 @@
 # Agentic use
 
-ibkr ships as an MCP server (`ibkr mcp`), making every read-only operation in the CLI available to any MCP client — Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves both surfaces; the MCP layer is a thin adapter over the existing RPCs.
+ibkr ships as an MCP server (`ibkr mcp`), making every read-only operation in the CLI available to any MCP client — Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves both surfaces; the MCP layer is a thin adapter over the existing RPCs. Stock and ETF quotes are also exposed as an MCP resource: `resources/read` returns one snapshot, while `resources/subscribe` streams updates until unsubscribe.
 
 This page is for the human installing the plugin and wondering *"what can I actually ask Claude with this?"* For the per-tool surface — exact parameter shapes, JSON envelopes — see the auto-generated [MCP tools reference](../reference/mcp-tools.md). For protocol mechanics, see the upstream [Model Context Protocol spec](https://modelcontextprotocol.io/).
 
@@ -9,10 +9,10 @@ This page is for the human installing the plugin and wondering *"what can I actu
 The plugin manifest (`.claude-plugin/plugin.json`) is registered when you install via the Claude Code marketplace. Confirm it's wired:
 
 ```sh
-ibkr status                   # daemon health, mcp tool count, gateway connection
+ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The 12 MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — but Claude calls them as MCP tools rather than CLI subcommands.
+The 12 MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the tool surface. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -61,9 +61,11 @@ The MCP surface is intentionally **read-only**. There is no trade-execution tool
 
 If you ask Claude to "buy 100 shares of AAPL," it will tell you it can't — and won't try to. This is a hard architectural boundary: the daemon never exposes write paths to IBKR, regardless of what Claude asks.
 
+Streaming quote resources are separate from tools. MCP clients discover the `ibkr://quote/{symbol}` template via `resources/templates/list`; `resources/read` gives one quote snapshot, and `resources/subscribe` emits coalesced tick frames through `notifications/resources/updated` until the client unsubscribes or closes the MCP session. This streaming surface is stock/ETF only; option streaming is not exposed.
+
 Other things outside the scope today:
 
-- **Real-time streaming** (continuous quote feeds, tick-by-tick). The MCP surface is snapshot-based — Claude asks, the daemon answers once. Streaming is a planned but unbuilt direction.
+- **Option streaming** (continuous option contract ticks). Option snapshots are available through chains and option quotes, but the MCP streaming resource is stock/ETF only.
 - **Non-equity asset classes** (futures, FX spot, crypto). Equity, ETF, and equity-options surfaces are covered; everything else is out of scope today.
 - **Other indices' breadth or constituents** (NDX, RUT, sector-specific). S&P 500 only.
 
@@ -79,6 +81,7 @@ A few prompt patterns that work well, learned from observing real conversations:
 ## Reference
 
 - [MCP tools reference](../reference/mcp-tools.md) — auto-generated table of every tool, parameters, descriptions.
+- [MCP resources reference](../reference/mcp-resources.md) — streaming stock/ETF quote resource semantics.
 - [Concepts](../concepts.md) — the mental model for regime / gamma / breadth.
 - [Updating](./updating.md) — keeping the binary + constituent list current.
 - [Model Context Protocol spec](https://modelcontextprotocol.io/) — the upstream protocol.

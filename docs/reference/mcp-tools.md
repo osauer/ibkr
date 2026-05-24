@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**12 tools** total. Listed in registration order (matches `cli.Commands()`).
+**12 tools** total. Listed in registration order, aligned with the agent-appropriate CLI surface. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -31,7 +31,7 @@ Open positions: stocks and options separated, plus a per-underlying grouping wit
 
 ## `ibkr_quote`
 
-Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and ATM IV per symbol. Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"). NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
+Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, sizes, volume, and opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable). Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"). NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
 
 **Parameters:**
 

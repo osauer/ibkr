@@ -57,7 +57,7 @@ Field meanings:
     is in the account's `base_currency`. Zero fields are real zeros
     from the gateway (e.g. no options held in that currency), not
     "unavailable".
-- `data_type` — one of `live`, `delayed`, `frozen`, `delayed_frozen`.
+- `data_type` — one of `live`, `delayed`, `frozen`, `delayed-frozen`.
 
 ## positions
 
@@ -234,7 +234,7 @@ Field meanings:
 - `iv` / `iv_status` — populated only when IBKR sends tick 106
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
-- `data_type` — `live`, `delayed`, `frozen`, or `delayed_frozen`.
+- `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`.
 
 For the multi-symbol form, the response is a top-level JSON array of these
 objects.
@@ -580,7 +580,7 @@ Action-relevant fields:
 - `gateway_tls` vs `negotiated_tls` — disagreement means the daemon's TLS
   fallback fired (config said plain, server demanded TLS, AUTO mode let it
   upgrade). Surface this when troubleshooting handshake errors.
-- `data_type` — `live`, `delayed`, `frozen`, or `delayed_frozen`. If a
+- `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`. If a
   user asks about a quote and `data_type != "live"`, mention it.
 
 A full set of additional metadata fields (`alternates`, `tls_origin`,
@@ -662,7 +662,7 @@ computes the S&P DJI S5FI metric locally from constituent daily closes
     {"date": "2026-04-10", "value": 59.6}
   ],
   "source": "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
-  "method": "constituent-fanout-50dma",
+  "method": "constituent-fanout-50/200dma-hl",
   "as_of": "2026-05-09T20:35:01Z",
   "data_type": "live"
 }
@@ -685,7 +685,7 @@ Field meanings:
 - `history` — trailing daily series, oldest first. Length capped by
   `--days` (default 30, max 90). Empty during cold start.
 - `source`, `method` — provenance strings the renderer can display
-  verbatim. Method token: `constituent-fanout-50dma`.
+  verbatim. Method token: `constituent-fanout-50/200dma-hl`.
 - `data_type` — gateway feed state (`live` / `delayed` / `frozen` /
   `delayed-frozen`) when the headline was captured. Omitted when no
   feed notice has arrived yet.

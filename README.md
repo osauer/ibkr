@@ -6,37 +6,35 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**A read-only client for your Interactive Brokers account.** One Go binary, three surfaces — CLI, stdio MCP server, Go library — all returning the same JSON. No Python or Java runtime to install.
+**Read-only Interactive Brokers access for humans and agents.** Ask what you own, how exposed you are, what the market backdrop looks like, or how large a planned trade should be — without giving the tool any trading permissions.
 
-![ibkr positions — stocks and options grouped by underlying, with per-leg Greeks (Δ Γ Θ ν) and a portfolio rollup of effective delta, dollar delta, daily theta, and FX sensitivity](docs/social/positions.png)
+One Go binary gives you a shell CLI, a local stdio MCP server, and a Go library. No Python or Java runtime. No hosted service. Account data stays on the machine running IB Gateway or TWS unless you choose to pass it to an MCP host.
 
-```sh
-$ ibkr account --watch        # in-place refresh, ^C to stop
+The important shape:
 
-$ ibkr quote AAPL --json | jq '{last, prev_close, change, change_pct}'
-{
-  "last": 207.42,
-  "prev_close": 206.10,
-  "change": 1.32,
-  "change_pct": 0.64
-}
+- **Local first.** The daemon speaks to your local IB Gateway / TWS and listens on a Unix socket.
+- **Agent friendly.** Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP host can call the same read-only tools.
+- **Structurally read-only.** Order placement, cancellation, and modification are absent from the CLI/MCP surface and refused at multiple lower layers. [Details](#safety).
+- **One JSON contract.** CLI, MCP, and library callers see the same daemon responses.
 
-$ ibkr quote SPY --watch        # streaming, ^C to stop
-  14:32:01    583.18  1.2k    583.21  800     583.20
-  14:32:02    583.19    900   583.22  650     583.21
-  14:32:03    583.21  1.1k    583.24  720     583.23
-```
-
-From a Claude Desktop or Claude Code session with `ibkr mcp` wired up:
+With `ibkr mcp` wired up, you can ask:
 
 > *"What's in my IBKR account and how am I doing this week?"*
-> *"Show me my AAPL position with today's P&L and the option-leg deltas."*
-> *"What expiries are available for NVDA, with ATM IV?"*
+> *"Show me my AAPL exposure, including option deltas."*
+> *"How does the market regime look today?"*
 > *"If I buy 100 MSFT at 418 with a stop at 408, what's the EUR risk?"*
 
-Read-only is structural — four independent layers refuse `order`, `trade`, `cancel`. [Details](#safety).
+Or use the shell directly:
 
-**Contents** — [Install](#install-in-two-commands) · [Features](#what-you-get) · [Pick your path](#pick-your-path) · [Architecture](#architecture) · [Protocol coverage](#protocol-coverage) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Testing](#testing) · [Troubleshooting](#troubleshooting)
+```sh
+ibkr status
+ibkr positions --by underlying
+ibkr regime
+ibkr quote SPY --watch
+ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
+```
+
+**Contents** — [Install](#install-in-two-commands) · [What you get](#what-you-get) · [Pick your path](#pick-your-path) · [How it works](#how-it-works) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Troubleshooting](#troubleshooting)
 
 ## Install in two commands
 
@@ -45,34 +43,32 @@ curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop
 ```
 
-The installer detects your OS/arch, fetches the matching tarball from the latest release, verifies the SHA-256, drops `ibkr` in `~/.local/bin`, clears macOS Gatekeeper quarantine, and adds `~/.local/bin` to your shell rc if it isn't on PATH. The second command writes the MCP server entry into Claude Desktop's config — quit Claude (⌘Q) and relaunch. Skip it if you only want the shell tool. [Other install paths.](#other-install-paths)
+The installer detects your OS/arch, fetches the matching tarball from the latest release, verifies the SHA-256, drops `ibkr` in `~/.local/bin`, clears macOS Gatekeeper quarantine, and adds `~/.local/bin` to your shell rc if it isn't on PATH. When `gpg` and `SHA256SUMS.asc` are both available, bootstrap also verifies the PGP signature; after install, `ibkr update` is stricter and refuses unsigned releases. The second command writes the MCP server entry into Claude Desktop's config — quit Claude (⌘Q) and relaunch. Skip it if you only want the shell tool. [Other install paths.](#other-install-paths)
 
 **Prerequisites.** A running [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) 10.37+ or TWS (paper or live) on the same machine. Auto-discovered on the four standard ports. An **IBKR Pro** account (IBKR Lite cannot use the TWS API).
 
 ## What you get
 
-- **Account snapshot.** NLV, buying power, cash, margin, available funds, gross position value, session unrealized/realized P&L, the margin cushion, and IBKR's start-of-trading-day Daily P&L (account-level) — rendered in the account's base currency with the right symbol (`€`, `$`, `£`, `¥`, or the ISO code). Margin accounts also get the look-ahead block (post-overnight-cycle projections of init/maint/available/excess), which catches "fine intraday, blown by 5pm" cases. Multi-currency accounts get a `currency_exposure` block: one row per non-base holding with the gateway-reported FX rate and the base-currency conversion.
-- **Positions with live Greeks.** Each option leg carries delta, gamma, theta, vega, plus its own bid/ask, IV, and prior settle — so wide spreads on illiquid contracts are visible and option-level daily P&L is unambiguous. A `DAY P&L` column carries IBKR's per-conId start-of-trading-day delta (from `reqPnLSingle`) for both stocks and options — one consistent metric across the book. The column always renders; nil rows show em-dash so the field is discoverable on the first call. A `portfolio` block aggregates effective delta in share-equivalents, dollar delta, daily theta, gamma, and vega, with an FX-sensitivity rollup for multi-currency books. `--by underlying` consolidates stock and option legs per name. `ibkr positions --watch` re-polls in place.
-- **Quotes — snapshot and streaming.** `ibkr quote AAPL` for a snapshot; `ibkr quote AAPL --watch` for coalesced live ticks. Prev-close, daily change, and change-% on every row (pre-market: yesterday's close arrives even when regular-session ticks haven't started). Option snapshots are addressed as `SYM YYMMDD C|P STRIKE`; option streaming is not exposed yet. Stock/ETF streaming is also exposed as an MCP resource subscription — multiple watchers share one IBKR market-data line per symbol.
-- **Option chains.** `ibkr chain SPY` lists expiries with ATM implied vol, days-to-expiry, and the 1-σ **implied move** (`spot × IV × √(DTE/365)` — the desk-standard "expected move by expiry" used for earnings sizing and strike selection) by default; `--expiry 2025-12-19` switches to the strike grid, with per-leg call/put OI alongside delta (em-dash off-hours when the options book is closed). JSON consumers see `call_oi` / `put_oi` on each `ChainStrike`. Chain IV is cached daemon-side with phase-aware TTL (60 s during RTH, 4 h otherwise) so repeated lookups within a decision pause cost zero gateway round trips.
-- **Daily OHLCV history.** `ibkr history AAPL --days 30`.
-- **Scanners — preset or ad-hoc.** Seven built-in presets (`top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank`, `unusual-opt-vol`) covering direction, volume, opening gaps, and option-flow signals. `ibkr scan <preset>` for the shorthand; `ibkr scan --type SCANCODE --exchange LOCATIONCODE` for ad-hoc queries; `ibkr scan params [--instrument STK]` to dump the gateway's valid `scanCode` / `locationCode` catalog. Add your own presets in `config.toml`.
-- **Position sizing.** `ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1` does fixed-fractional math against live NLV. Add `--target` to also get the **R-multiple** (reward:risk) and the breakeven win rate — the standard "is this trade worth taking" filter (≥ 2R typical). Pure arithmetic; never proposes or attempts an order.
-- **S&P 500 market breadth.** `ibkr breadth` returns three readings every call: the percentage of S&P 500 constituents above their 50-day SMA (the tactical signal), the percentage above the 200-day SMA (the slower companion that catches cyclical tops cleanly), and the count of names making fresh 52-week highs vs lows today. The narrow-rally pattern — SPX near highs with `net_new_highs_pct` near zero or negative — fires when a few mega-caps carry the index while the median name is rolling over. IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions (verified via `reqContractDetails`), so the daemon computes all three locally from the 500 constituent daily closes. A once-daily refresh post-close (16:35 ET) slides each name's 200-bar window forward and updates the 252-bar rolling max/min. **Cold start is the only long path: ~60 min on a fresh cache** — IBKR's historical-data pacing limit (60 requests per 10-min sliding window) caps the fan-out at ~6 names/min, and the cap is per-request not per-bar so pulling 262 days isn't slower than pulling 60. The autospawned daemon's default 15-minute idle window would still kill the daemon mid-bootstrap (the cold-start budget exceeds it ~4×), so spin it up explicitly with `ibkr daemon --foreground` the first time and leave it running until the indicator turns from `computing` to `ok`. After cold-start the cache persists across daemon restarts and every subsequent refresh is fast. Useful as an input to a risk-regime check; see `docs/specs/risk-regime-dashboard.md` for one such dashboard the daemon's two new endpoints (this one and the next) feed directly.
-- **Combined SPY+SPX dealer zero-gamma — best effort.** `ibkr gamma` estimates the price level where aggregate dealer gamma flips sign, using the [Perfiliev recipe](https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/) against IBKR's option chain (6 nearest expirations, ATM ±10 %, BS-recomputed gamma across a spot sweep). Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`) fits a per-expiry quadratic skew curve in log-moneyness at snapshot time and reprices each leg's IV at the scenario-spot's moneyness during the sweep — sticky-moneyness, not sticky-IV — and splits the γ-zero readout across three horizon buckets: **0DTE** (Cboe 2025: ~59 % of SPX volume), **1-7 DTE**, and **>7 DTE**. The default hero is compact (headline γ-zero · spot · `|Γ|·OI` magnitude · scope · status); pass `--explain` for the full provenance view — methodology token, citations (Perfiliev 2022, Derman / Daglish-Hull-Suo, SqueezeMetrics 2017, Cboe 2025), per-bucket horizon breakdown, sign-convention disclosure, and the scaling caveat. The compute runs against **both SPY and SPX by default**: SPY (the S&P 500 ETF — continuous extended-hours quoting on SMART/ARCA, single trading class) and SPX (the index — both SPX-class AM-settled monthlies and SPXW-class PM-settled weeklies, with AM/PM settlement honoured in the DTE filter). The combined envelope carries top-level headline fields that are SPY-anchored shallow copies (`spot_anchor: "SPY"` discloses this on the wire) plus per-index detail under `per_index.SPY` and `per_index.SPX`; the combined `gamma_total_abs` is the true cross-product magnitude. The top-strikes table gains an `INDEX` column in combined scope. **Entitlement-graceful fallback:** when the account lacks CBOE OPRA entitlements (354) or the SPX chain is unreachable, the default scope drops back to SPY-only and the text renderer prints a one-line `SPX skipped — <reason>. Showing SPY only.` banner above the headline (`warnings` carries an `spx_unavailable:<reason>` token in JSON). Exit code stays 0. Partial cases (one SPX trading class lands, the other 354s) surface in `partial_classes`. Pass `--only=spy` for SPY-only, or `--only=spx` for SPX-only (errors out if SPX is unreachable rather than degrading). MCP consumers pass the same value as the `scope` param to `ibkr_gamma`. Design rationale and the slot-leak audit checklist live in [docs/design/gamma-spx-coverage.md](docs/design/gamma-spx-coverage.md). The compute is heavy — multi-minute fan-out across hundreds of legs; the first caller of an NY trading session kicks a background job and gets `status: "computing"` with an ETA. Off-hours the daemon never recomputes — it serves the persisted snapshot, flagged `cache_stale_off_hours` when older than 24 h. The result carries two signals on purpose: the signed `zero_gamma` (a regime hint under the 2017 SqueezeMetrics "dealers long calls, short puts" convention — **deprecated by the literature since 2022** as customer-flow asymmetry has reversed under covered-call-ETF supply and autocallable hedging) and a sign-agnostic `gamma_total_abs` (convention disclosed via `gamma_total_abs_convention`) plus `top_strikes` — the more robust read. **Treat the signed level as a regime hint, not a precise level.** Full methodology and a manual calibration ritual against SpotGamma's public posts are documented in `docs/specs/risk-regime-dashboard.md`.
-- **Risk-regime snapshot — state of all five indicators in one call.** `ibkr regime` fetches the full risk-regime dashboard (VIX/VIX3M term structure, HYG vs SPY divergence, USD/JPY weekly move, combined SPY+SPX dealer zero-gamma, S&P 500 breadth) in a single call, so an LLM consumer or dashboard doesn't have to know individual tickers, IBKR data paths, or the methodology spec. The hero opens with the same title · timestamp / anchor / status line shape as `ibkr gamma` (shared `internal/cli/hero.go`). The gamma row's label is scope-aware (`SPY γ-zero` / `SPX γ-zero` / `γ-zero (SPY+SPX)`); it surfaces 0DTE / 1-7 / term γ-zero alongside the headline and flags `horizon_agreement` when the buckets straddle spot. The compact default keys five columns (state · indicator · value · band · note); `--explain` expands into the full provenance view with day-N streak markers, ETA clocks on `computing` rows, methodology tokens, and the spec's threshold prose under each row. JSON (`--json`) is unaffected and always carries every field, plus a top-level `composite: {verdict, green_count, yellow_count, red_count, ranked_count, unranked_count}` rollup, a per-indicator `streak: {band, sessions, since}` (consecutive sessions in the current band — useful for distinguishing day 1 of a stress event from day 5), and a per-scalar `*_quality: {freshness_class, confidence, source, as_of}` provenance block. The value isn't "all five always populated" — expect indicator 4 (gamma) to surface `status: "computing"` on the first call of an NY trading day, and indicator 5 (breadth) to do the same on the first call against a fresh daemon while the local 50-DMA engine bootstraps (~60 min — see the breadth bullet above for the pacing-limit reason and the `ibkr daemon --foreground` workaround). Each row carries raw measurements plus a `notes` field embedding the spec's threshold bands verbatim; rows where an advisory sub-field didn't land within the fetch budget surface a `fields_missing` array. The MCP-equivalent tool `ibkr_regime` makes this work in natural language from a Claude Desktop conversation. The daemon does not derive green/yellow/red status from the raw measurement (the spec calls those bands user-tunable, so threshold derivation stays in the renderer or in the LLM's reasoning); the daemon-side band classification used for streak persistence is documented in the spec and exposed via the streak field's `band` only. `ibkr regime --log <path>` appends today's snapshot to a JSONL file at the supplied path — useful for the 4-week SpotGamma cross-check the spec recommends; analyse with `jq` or pandas afterward.
+- **Account and positions.** Net liquidation, buying power, cash, margin, daily P&L, positions, option Greeks, per-underlying grouping, and portfolio-level delta/theta/gamma/vega rollups. Multi-currency accounts include FX exposure.
+- **Quotes and history.** Snapshot quotes, coalesced stock/ETF streaming, daily OHLCV bars, previous close, day change, and data freshness (`live`, `frozen`, `delayed`, `delayed-frozen`).
+- **Options.** Expiry lists with ATM IV and implied move, strike grids with call/put quotes, deltas, and open interest. Option snapshots are supported; option streaming is not exposed.
+- **Scanners.** Built-in market scans for movers, losers, unusual volume, gaps, high IV rank, and option volume. Agents can also compose ad-hoc scans without writing config.
+- **Position sizing.** Fixed-fractional sizing against live NLV, with optional target, R-multiple, and breakeven win rate. Pure math; never an order ticket.
+- **Market breadth.** S&P 500 participation from constituent daily bars: percent above 50-DMA, percent above 200-DMA, and fresh 52-week highs/lows. A fresh cache is instant; first-ever cold start can take about an hour because of IBKR pacing.
+- **Dealer gamma.** Best-effort SPY+SPX zero-gamma and concentration view, with scope controls and entitlement-graceful fallback to SPY when SPX data is unavailable. Treat the signed level as a regime hint, not a precise trading level.
+- **Risk regime.** One call returns the five-indicator dashboard: VIX term structure, HYG/SPY divergence, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
 
-Everything supports `--json`. Tables are color-coded by sign on a terminal (P&L green/red, non-live data badges yellow); pipes, redirects, and `--json` are always plain. `NO_COLOR=1` disables; `IBKR_COLOR=always|never` overrides.
+Every data/query command supports `--json`; local lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are intentionally human/transport oriented. For field-level schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
 
 ## Pick your path
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` is a stdio MCP server. Every CLI verb an LLM should ever call has a matching MCP tool (local-config verbs like `setup` and `version` are intentionally excluded), and `make check` fails if the two surfaces drift. The server also exposes streaming quotes for stocks and ETFs as an MCP resource:
+`ibkr mcp` is a stdio MCP server. Every CLI verb an LLM should ever call has a matching MCP tool (local lifecycle verbs like `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded), and `make check` fails if the surfaces drift. The server also exposes quotes for stocks and ETFs as an MCP resource:
 
 - `ibkr://quote/{symbol}`
 
-`resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. `ibkr setup claude-desktop` handles Claude Desktop end-to-end. For other clients, paste this into the client's MCP config (path varies):
+`resources/read` returns one snapshot for that URI; `resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. The resource shape is documented in [docs/reference/mcp-resources.md](docs/reference/mcp-resources.md). `ibkr setup claude-desktop` handles Claude Desktop end-to-end. For other clients, paste this into the client's MCP config (path varies):
 
 ```json
 {
@@ -155,7 +151,7 @@ fmt.Printf("NLV: %.2f %s\n", *snap.NetLiquidation, snap.Currency)
 
 From Python, TypeScript, or Rust, shell out to the CLI: subprocess in, JSON out. Wrap each `ibkr <cmd> --json` invocation as a function and register it with your model's tool-call API.
 
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
@@ -165,37 +161,11 @@ flowchart LR
     D --- LIB["pkg/ibkr<br/>shared library"]
 ```
 
-One binary, two halves. CLI and MCP server are stateless and short-lived. The daemon (same binary, `ibkr daemon`) holds the gateway connection, contract cache (stocks + options, persisted to `~/.cache/ibkr/contracts.json` across restarts), subscription state, and a per-symbol prev-close cache. Clients reach it over a Unix socket. The daemon autospawns on the first call and idle-exits after fifteen minutes (override via `[daemon] idle_timeout`). One client ID held for its lifetime, so a single TWS handshake amortises across every subsequent call.
+The CLI and MCP server are short-lived clients. The daemon is the stateful half: it holds the IBKR connection, caches contract details, fans out quote subscriptions, and serves JSON-RPC over a local Unix socket. It autospawns on first use and idles out after fifteen minutes unless you run it in the foreground.
 
-A `flock` instance lock on `<socket-dir>/ibkrd.lock` makes the daemon singleton — any second `ibkr daemon` exits with `another ibkrd holds the instance lock`. So the CLI, the MCP server, and as many MCP-enabled sessions as you have open all share **one daemon, one socket, one IBKR client-ID slot at the gateway**. The MCP server (`ibkr mcp`) keeps its socket connection open for the lifetime of the client (Claude Desktop, etc.) — this is by design, so tool calls return instantly — and that pinned connection keeps the daemon's active-connections count above zero, so the daemon stays alive as long as any MCP client is live. Quit the MCP host and the daemon idles out on its usual fifteen-minute timer.
+One singleton daemon means your shell, Claude Desktop, Claude Code, and other MCP clients share one gateway connection and one IBKR client-ID slot. The MCP server keeps its daemon connection open while the host is running, so tool calls are fast and the daemon stays alive until the host quits.
 
-The wire between CLI and daemon has no version field today; the CLI prints a stderr warning on version skew and points at the fix (`pkill -x ibkr` and let the next call respawn).
-
-## Protocol coverage
-
-`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol — no Python bridge, no third-party dependencies on InteractiveBrokers source. The table below shows what's plumbed today. Order-writing methods exist only for wire-format completeness and downstream forks: default builds return `pkg/ibkr.ErrTradingDisabled` before writing to the socket; intentionally order-capable forks must rebuild with `-tags trading`. The shipped daemon has its own order-dispatch guard, and the CLI/MCP/plugin expose no order surface. The full per-method godoc lives in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
-
-| Capability                       | Wire opcodes                                                              | Library entry point                                                | Status                |
-|----------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------------------|-----------------------|
-| Account summary                  | `reqAccountSummary` (62), `accountSummary` (63), `acctValue` (6)          | `Connector.RequestAccountSummary`, `GetAccountSummary`             | ready                 |
-| Positions + portfolio            | `reqPositions` (61), `position` (61), `portfolioValue` (7), $LEDGER:ALL   | `Connector.GetCachedPositions`                                     | ready                 |
-| Snapshot quote                   | `reqMktData` (1) snapshot=true, `tickPrice` (1), `tickSnapshotEnd` (57)   | `Connector.FetchMarketSnapshot`                                    | ready                 |
-| Streaming quote                  | `reqMktData` (1) snapshot=false, `tickPrice`/`tickSize`/`tickGeneric`     | `Connector.SubscribeMarketData`, `GetMarketData`                   | ready                 |
-| Generic-tick set                 | gen-ticks 100, 101, 104, 106, 165 (option vol, OI, HV, IV, Misc Stats)    | populated into `MarketData` automatically                          | ready                 |
-| Contract resolution              | `reqContractData` (9), `contractData` (10)                                | `Connector.FetchContractDetails`                                   | ready                 |
-| Option chains                    | `reqSecDefOptParams` (78), `tickOptionComputation` (21)                   | `Connector.FetchOptionExpiries`, `FetchOptionExpiryStrikes`, `GetOptionGreeks`, `GetOptionIV` | ready                 |
-| Daily historical bars            | `reqHistoricalData` (20), `historicalData` (17)                           | `Connector.FetchHistoricalDailyBars`                               | ready                 |
-| Market scanner                   | `reqScannerSubscription` (22), `reqScannerParameters` (24)                | `Connector.RunScannerSubscription`, `RunScannerParameters`         | ready                 |
-| Market-data type switch          | `reqMarketDataType` (59), `marketDataType` (58)                           | `Connector.SetMarketDataType`                                      | ready                 |
-| Order placement / cancel         | `placeOrder` (3), `cancelOrder` (4)                                       | `Connector.SubmitOrder`, `CancelOrder`                             | disabled by default (`ErrTradingDisabled`); `-tags trading` only |
-| Real-time bars                   | `reqRealTimeBars` (50)                                                    | —                                                                  | not implemented       |
-| Market depth (L2)                | `reqMktDepth` (10), `reqMktDepthL2` (13)                                  | —                                                                  | not implemented       |
-| Fundamental data                 | `reqFundamentalData` (52)                                                 | —                                                                  | not implemented       |
-| News bulletins                   | `reqNewsBulletins` (12)                                                   | —                                                                  | not implemented       |
-| Financial Advisor (FA)           | `reqFA` (18)                                                              | —                                                                  | not implemented       |
-| IV / option-price calculators    | `reqCalcImpliedVolatility` (54), `reqCalcOptionPrice` (55)                | —                                                                  | not implemented       |
-
-Tested against IB Gateway server-versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on. The library has no claim to be a full TWS API replacement — it covers the read-side surface the `ibkr` binary needs, with the order opcodes retained only for explicitly order-capable downstream forks. Open an issue if you want a "not implemented" row plumbed; the wire format is documented and additions are usually self-contained.
+`pkg/ibkr` is a clean-room Go implementation of the read-side TWS protocol. Full coverage details live in [docs/reference/protocol.md](docs/reference/protocol.md), and the public package docs live in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
 
 ## Configure
 
@@ -227,7 +197,7 @@ limit    = 20
 
 **Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[spx]`, `[scans.<name>]`.
 
-The full per-field reference (TOML sections + `IBKR_*` env vars) is auto-generated at [docs/reference/config.md](docs/reference/config.md). Concept and mental-model docs for the indicators live at [docs/concepts.md](docs/concepts.md); the agentic (Claude / MCP) walkthrough is at [docs/guides/agentic-use.md](docs/guides/agentic-use.md).
+The full per-field reference (TOML sections + `IBKR_*` env vars) is auto-generated at [docs/reference/config.md](docs/reference/config.md). Concept and mental-model docs for the indicators live at [docs/concepts.md](docs/concepts.md); the agentic (Claude / MCP) walkthrough is at [docs/guides/agentic-use.md](docs/guides/agentic-use.md); marketplace packaging notes live at [docs/guides/marketplace-readiness.md](docs/guides/marketplace-readiness.md); data locality is summarized in [PRIVACY.md](PRIVACY.md).
 
 ### Adding scanners
 
@@ -277,10 +247,10 @@ Per [semver](https://semver.org/), v1.x keeps the CLI/JSON/MCP read-only surface
 - **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@latest`. Requires Go 1.26+.
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
-- **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify against the bundled `SHA256SUMS`.
+- **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify `SHA256SUMS.asc` against the release-signing key, then verify the tarball against `SHA256SUMS`; see [SECURITY.md](SECURITY.md#release-integrity-v100).
 - **Local build**: `git clone … && make install`.
 - **Reproducible builds**: release binaries are built with `-trimpath -buildvcs=false` and stamp the version, commit, and commit date via `-ldflags`. Rebuilding the same tag (`make release-binaries RELEASE_VERSION=vX.Y.Z`) should produce byte-identical binaries on the same Go/toolchain pair. The tarball checksum can still vary with tar/gzip metadata; verify downloaded release assets against the published `SHA256SUMS`.
-- **Self-update**: `ibkr update` fetches the next stable release, SHA-verifies it, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
+- **Self-update**: `ibkr update` fetches the next stable release, verifies the PGP signature on `SHA256SUMS`, SHA-verifies the tarball, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.
 

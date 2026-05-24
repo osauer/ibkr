@@ -21,6 +21,10 @@ func runMCP(args []string) int {
 	// MCP servers take no flags today. Reject extras explicitly so a
 	// typo doesn't get silently swallowed and leave the client wondering.
 	if len(args) > 0 {
+		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "-help") {
+			printMCPUsage(os.Stdout)
+			return 0
+		}
 		fmt.Fprintln(os.Stderr, "ibkr mcp: takes no arguments")
 		return 2
 	}
@@ -53,4 +57,22 @@ func runMCP(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func printMCPUsage(w *os.File) {
+	fmt.Fprintln(w, "ibkr mcp - run the stdio MCP server for local AI clients")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage: ibkr mcp")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Configure your MCP host with an absolute command path and the arg \"mcp\":")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "{")
+	fmt.Fprintln(w, `  "mcpServers": {`)
+	fmt.Fprintln(w, `    "ibkr": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp"] }`)
+	fmt.Fprintln(w, "  }")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "The server exposes read-only ibkr_* tools plus the ibkr://quote/{symbol}")
+	fmt.Fprintln(w, "resource template. resources/read returns one snapshot; resources/subscribe")
+	fmt.Fprintln(w, "streams quote updates until unsubscribe or client shutdown.")
 }

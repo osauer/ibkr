@@ -129,7 +129,7 @@ func TestDataTypeBadgeQuietOnLive(t *testing.T) {
 		{"live", ""},
 		{"delayed", "data=delayed ⚠"},
 		{"frozen", "data=frozen ⚠"},
-		{"delayed_frozen", "data=delayed_frozen ⚠"},
+		{"delayed-frozen", "data=delayed-frozen ⚠"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

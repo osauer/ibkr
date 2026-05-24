@@ -131,12 +131,14 @@ func init() {
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"breadth", "S&P 500 breadth — % above 50/200-DMA + new-highs/new-lows, computed locally from constituent fan-out (~60 min cold)", "ibkr breadth [--days 30] [--json]", runBreadth},
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--json]", runGamma},
-		{"regime", "Risk-regime snapshot: all 5 indicators in one call (VIX term, HYG/SPY, USD/JPY, gamma, breadth)", "ibkr regime [--json]", runRegime},
+		{"regime", "Risk-regime snapshot: all 5 indicators in one call (VIX term, HYG/SPY, USD/JPY, gamma, breadth)", "ibkr regime [--explain] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
-		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil},                               // dispatched in cmd/ibkr/main.go — no daemon contact
-		{"update", "Self-update the ibkr binary from the latest GitHub release", "ibkr update [--check] [--force] [--restart|--no-restart]", nil}, // dispatched in cmd/ibkr/main.go — no daemon contact
-		{"version", "Print version, commit, build date", "ibkr version", nil},                                                                     // version is handled in cmd/ibkr/main.go before dispatch
+		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
+		{"daemon", "Run the stateful gateway daemon (normally autospawned)", "ibkr daemon [--foreground] [--config PATH] [--socket PATH] [--log PATH|stderr]", nil}, // dispatched in cmd/ibkr/main.go — long-lived daemon
+		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil},                                                 // dispatched in cmd/ibkr/main.go — no daemon contact
+		{"update", "Self-update the ibkr binary from the latest GitHub release", "ibkr update [--check] [--force] [--restart|--no-restart]", nil},                   // dispatched in cmd/ibkr/main.go — no daemon contact
+		{"version", "Print version, commit, build date", "ibkr version", nil},                                                                                       // version is handled in cmd/ibkr/main.go before dispatch
 	}
 }
 
@@ -186,7 +188,7 @@ func PrintUsage(w io.Writer) {
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run `ibkr <subcommand> --help` to see the flags it supports.")
-	fmt.Fprintln(w, "Add --json to any subcommand to emit machine-readable output.")
+	fmt.Fprintln(w, "Add --json to data/query subcommands to emit machine-readable output.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Color: respects NO_COLOR=1 to disable; IBKR_COLOR=always|never overrides.")
 	fmt.Fprintln(w, "First run? Try `ibkr status` to verify the gateway is reachable.")
