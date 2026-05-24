@@ -277,6 +277,7 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 			wrap.Warnf("gamma cache: discard persisted scope=%s: %v", scope, err)
 			continue
 		}
+		hydrateGammaComputed(persisted)
 		c.slots[scope] = &gammaSlot{current: newPersistedComputation(persisted, scope, now)}
 		wrap.Infof("gamma cache: loaded persisted result scope=%s session=%s as_of=%s",
 			scope, nySessionKey(now), persisted.AsOf.Format(time.RFC3339))
@@ -317,8 +318,16 @@ func validateGammaComputed(r *rpc.GammaZeroComputed) error {
 	if r == nil {
 		return fmt.Errorf("zero-gamma compute returned nil result")
 	}
+	if r.PricedLegCount > 0 && r.LegCount == 0 {
+		return fmt.Errorf("zero-gamma invalid result: %d priced legs but no usable GEX legs", r.PricedLegCount)
+	}
 	if r.LegCount > 0 && r.GammaTotalAbs == 0 && len(r.TopStrikes) == 0 && gammaProfileAllZero(r.Profile) {
-		return fmt.Errorf("zero-gamma invalid result: %d legs but zero gamma_total_abs/profile/top_strikes", r.LegCount)
+		return fmt.Errorf("zero-gamma invalid result: %d GEX legs but zero gamma_total_abs/profile/top_strikes", r.LegCount)
+	}
+	for key, sub := range r.PerIndex {
+		if err := validateGammaComputed(sub); err != nil {
+			return fmt.Errorf("per_index[%s]: %w", key, err)
+		}
 	}
 	return nil
 }
@@ -588,7 +597,7 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 			job.err = err
 			return
 		}
-		job.result = res
+		job.result = hydrateGammaComputed(res)
 		// Persist to disk on success. Failed computes do not persist
 		// (no Save call on the err != nil path) — mirrors breadth's
 		// MinCoverageFraction policy of "do not persist runs that
@@ -658,6 +667,7 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 		if g.result != nil && rpc.ClassifySession(now) == rpc.SessionClosed && now.Sub(g.result.AsOf) > 24*time.Hour {
 			r := *g.result
 			r.Warnings = dedupeStrings(append(append([]string{}, g.result.Warnings...), "cache_stale_off_hours"))
+			hydrateGammaComputed(&r)
 			env.Result = &r
 		}
 		// Clear stale prior-error context for this scope — a successful
@@ -745,12 +755,15 @@ func remainingEta(g *gammaComputation, now time.Time, progress int32) int {
 //
 // Returns:
 //   - (price, "") on a clean crossing.
-//   - (nil, "positive") when GEX is non-negative across the entire
-//     sweep (dealer book is long-gamma in every scenario considered).
-//   - (nil, "negative") when GEX is non-positive across the entire
-//     sweep (short-gamma regime).
-//   - (nil, "no_data") when the profile is empty or has fewer than
-//     two points (caller bug).
+//   - (nil, "positive") when GEX is positive across at least one sample
+//     and never negative (dealer book is long-gamma in every scenario
+//     considered).
+//   - (nil, "negative") when GEX is negative across at least one sample
+//     and never positive (short-gamma regime).
+//   - (nil, "no_data") when the profile is empty, has fewer than two
+//     points, or every sample is exactly zero. The all-zero case usually
+//     means landed IV legs carried no usable OI/gamma magnitude; treating
+//     it as long-gamma would be a false regime call.
 //
 // The interpolation is intentionally linear: dealer GEX is smooth
 // over a 30 %-wide spot sweep, but the sweep itself is sampled at
@@ -762,13 +775,19 @@ func findZeroCrossing(profile []rpc.GammaProfilePoint) (zeroGamma *float64, sign
 	}
 	allPositive := true
 	allNegative := true
+	nonZero := false
 	for _, p := range profile {
 		if p.GEX < 0 {
 			allPositive = false
+			nonZero = true
 		}
 		if p.GEX > 0 {
 			allNegative = false
+			nonZero = true
 		}
+	}
+	if !nonZero {
+		return nil, "no_data"
 	}
 	if allPositive {
 		return nil, "positive"

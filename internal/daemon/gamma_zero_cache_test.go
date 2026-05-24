@@ -516,6 +516,14 @@ func TestFindZeroCrossing(t *testing.T) {
 		if zg != nil || sign != "no_data" {
 			t.Errorf("single-point profile: got (%v, %q), want (nil, no_data)", zg, sign)
 		}
+		zg, sign = findZeroCrossing([]rpc.GammaProfilePoint{
+			{Spot: 4900, GEX: 0},
+			{Spot: 5000, GEX: 0},
+			{Spot: 5100, GEX: 0},
+		})
+		if zg != nil || sign != "no_data" {
+			t.Errorf("all-zero profile: got (%v, %q), want (nil, no_data)", zg, sign)
+		}
 	})
 
 	t.Run("exact_zero_at_sample", func(t *testing.T) {

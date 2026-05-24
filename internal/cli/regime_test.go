@@ -758,9 +758,9 @@ func TestRenderRegime_ExplainCarriesGammaZeroExplanation(t *testing.T) {
 
 // TestRenderRegime_ExplainSurfacesDerivedIVDisclosure pins the
 // "compute used N derived IVs" line that fires when any leg used the
-// BS-IV Newton-Raphson fallback. The fallback runs pre-market when the
-// gateway's model-computation engine is idle; the disclosure makes the
-// prior-session-price anchor visible to a reader auditing the result.
+// BS-IV Newton-Raphson fallback. The fallback runs when the gateway's
+// model-computation engine is idle; the disclosure makes the quote/close
+// inversion visible to a reader auditing the result.
 func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
@@ -782,7 +782,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 	}
 	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
 		AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
-		Source: "perfiliev-bs-sweep-v1 · BS-IV from prior-session last price",
+		Source: "perfiliev-bs-sweep-v1 · BS-IV from option quote/close fallback",
 	}
 
 	var stdout bytes.Buffer
@@ -791,7 +791,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"240/240 legs", "BS-IV", "prior-session"} {
+	for _, want := range []string{"240/240 legs", "BS-IV", "quote/close"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing derived-IV disclosure %q:\n%s", want, out)
 		}
@@ -1010,14 +1010,10 @@ func TestRowGamma_ShortReason(t *testing.T) {
 	}
 }
 
-// TestRegimeRow_GammaCombinedDropsRedundantSpotPrefix pins the C3
-// fix: combined-scope envelopes carry a SPY-anchored shallow copy of
-// SpotUnderlying. The SPY+VIX line above the table already shows
-// SPY's spot — repeating "spot 743.73" in a row labelled "γ-zero
-// (SPY+SPX)" creates drift between the label and the value. When
-// SpotAnchor=="SPY" the renderer drops the prefix and lets the value
-// cell focus on the regime statement.
-func TestRegimeRow_GammaCombinedDropsRedundantSpotPrefix(t *testing.T) {
+// TestRegimeRow_GammaCombinedUsesPerIndexSummary pins the combined
+// contract: there is no top-level SPY anchor, so the regime row reads
+// the SPY/SPX per-index regimes and renders their agreement directly.
+func TestRegimeRow_GammaCombinedUsesPerIndexSummary(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
 	row := rowGamma(now, rpc.RegimeGammaZero{
@@ -1025,22 +1021,53 @@ func TestRegimeRow_GammaCombinedDropsRedundantSpotPrefix(t *testing.T) {
 		Envelope: rpc.GammaZeroSPXResult{
 			Status: rpc.GammaZeroStatusReady,
 			Result: &rpc.GammaZeroComputed{
-				Scope:          rpc.GammaZeroScopeCombined,
-				SpotAnchor:     "SPY",
-				SpotUnderlying: 743.73,
-				GammaSign:      "positive",
-				GammaTotalAbs:  1.8e9,
+				Scope:           rpc.GammaZeroScopeCombined,
+				GammaTotalAbs:   1.8e9,
+				RegimeAgreement: "agree:long-gamma",
+				PerIndex: map[string]*rpc.GammaZeroComputed{
+					"SPY": {Scope: rpc.GammaZeroScopeSPY, SpotUnderlying: 743.73, GammaSign: "positive"},
+					"SPX": {Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5430.0, GammaSign: "positive"},
+				},
 			},
 		},
 	})
 	if strings.Contains(row.value, "spot 743.73") {
-		t.Errorf("combined-scope row must not repeat SPY spot in value cell: %q", row.value)
+		t.Errorf("combined-scope row must not invent a top-level SPY spot: %q", row.value)
 	}
-	if !strings.Contains(row.value, "long-γ") {
-		t.Errorf("combined-scope row should still surface the regime word: %q", row.value)
+	if !strings.Contains(row.value, "SPY and SPX both long-γ") {
+		t.Errorf("combined-scope row should surface per-index agreement: %q", row.value)
 	}
 	if !strings.Contains(row.value, "|Γ|·OI") {
 		t.Errorf("combined-scope row should still surface magnitude when non-zero: %q", row.value)
+	}
+	if row.band != bandGreen {
+		t.Errorf("combined long-gamma agreement should be green, got %v", row.band)
+	}
+}
+
+func TestRegimeRow_GammaCombinedDisagreementEscalatesDominantRed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	row := rowGamma(now, rpc.RegimeGammaZero{
+		Status: rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{
+			Status: rpc.GammaZeroStatusReady,
+			Result: &rpc.GammaZeroComputed{
+				Scope:           rpc.GammaZeroScopeCombined,
+				GammaTotalAbs:   1.8e9,
+				RegimeAgreement: "disagree",
+				PerIndex: map[string]*rpc.GammaZeroComputed{
+					"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive"},
+					"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative"},
+				},
+			},
+		},
+	})
+	if row.band != bandRed {
+		t.Errorf("SPX-dominant combined disagreement should be red, got %v", row.band)
+	}
+	if !strings.Contains(row.reason, "disagree") {
+		t.Errorf("combined disagreement reason should say disagree, got %q", row.reason)
 	}
 }
 
@@ -1059,7 +1086,6 @@ func TestRegimeRow_GammaSingleScopeKeepsSpotPrefix(t *testing.T) {
 				Status: rpc.GammaZeroStatusReady,
 				Result: &rpc.GammaZeroComputed{
 					Scope:          scope,
-					SpotAnchor:     "", // single-underlying scopes leave this empty
 					SpotUnderlying: 5430.0,
 					GammaSign:      "positive",
 					GammaTotalAbs:  4.2e9,

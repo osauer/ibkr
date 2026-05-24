@@ -226,9 +226,9 @@ Implementation touchpoints:
 
 ### Edge cases
 
-- **BS-IV fallback legs.** If a leg's IV came from Newton-Raphson against prior-session close,
-  its delta is similarly derived (not gateway-pushed). Compute `bsDelta` from the back-solved
-  IV — straightforward addition to `bsIVFallback`.
+- **BS-IV fallback legs.** If a leg's IV came from Newton-Raphson against an option
+  quote mid or prior-session close, its delta is similarly derived (not gateway-pushed).
+  Compute `bsDelta` from the back-solved IV — straightforward addition to `bsIVFallback`.
 - **Sign convention inversion.** Same as GEX. The `top_strikes_dex` magnitude view is robust;
   the signed `dex_total` carries the same dealer-prior caveats.
 
@@ -250,14 +250,20 @@ the disagreement is the signal.
 
 ### Design
 
+Current implementation note (2026-05-24 09:02 CEST): this design began
+as a two-bucket near/term sketch. The shipped wire contract uses three
+explicit buckets: 0DTE, 1-7 DTE, and term.
+
 After the existing leg fan-out collects all 6 expirations' worth of legs:
 
 - Partition by DTE:
-  - `nearLegs` = legs with `dte ≤ 7/365` (≤ 7 days)
+  - `zeroDTELegs` = legs with `DTE == 0`
+  - `oneToSevenLegs` = legs with `0 < DTE ≤ 7`
   - `termLegs` = legs with `dte > 7/365`
-- Run `sweepProfile` three times:
+- Run `sweepProfile` four times:
   - Combined (existing): all legs
-  - Near: nearLegs only
+  - 0DTE: zeroDTELegs only
+  - 1-7: oneToSevenLegs only
   - Term: termLegs only
 - Run `findZeroCrossing` on each profile
 
@@ -271,18 +277,19 @@ Implementation touchpoints:
 - Modify `computeGammaZeroSPX`: after legs collected, partition and run sweep×3 + zero-crossing×3
 - Wire on `rpc.GammaZeroComputed`:
   - Existing: `zero_gamma`, `profile`, `gamma_sign`
-  - New: `zero_gamma_near`, `profile_near`, `gamma_sign_near`, `near_leg_count`
-  - New: `zero_gamma_term`, `profile_term`, `gamma_sign_term`, `term_leg_count`
-- Regime row: surface the near vs term agreement as a flag (`"both above"`, `"both below"`,
-  `"diverge"`)
+  - New: `zero_gamma_0dte`, `profile_0dte`, `gamma_sign_0dte`, `leg_count_0dte`
+  - New: `zero_gamma_1to7`, `profile_1to7`, `gamma_sign_1to7`, `leg_count_1to7`
+  - New: `zero_gamma_term`, `profile_term`, `gamma_sign_term`, `leg_count_term`
+- Regime row: surface horizon agreement for single-underlying gamma envelopes; combined
+  SPY+SPX leaves horizon buckets under each `per_index` result.
 
 ### Edge cases
 
 - **All expirations are 0-7 DTE.** Mid-week morning before any longer-dated expiration in the
-  6 nearest. `term_leg_count == 0`. Surface `zero_gamma_term: null` with `term_status:
-  "no_qualifying_expirations"`.
+  6 nearest. `leg_count_term == 0`. Surface `zero_gamma_term: null` plus scoped
+  `warning_details`.
 - **All expirations are > 7 DTE.** Rare but possible Friday afternoon after the weekly expires.
-  `near_leg_count == 0`. Symmetric handling.
+  `leg_count_0dte == 0` and `leg_count_1to7 == 0`. Symmetric handling.
 - **Threshold edge.** A 7-day-and-1-hour expiration falls in term; a 6-day-and-23-hour falls in
   near. The two estimates change very little from each other at the boundary so the
   classification jitter doesn't matter.
@@ -395,8 +402,8 @@ For `--explain` mode: render an ASCII line plot with `+`/`-` markers for sign, e
     609     ------    -3.8
 ```
 
-For `--json`: emit the `profile` array (already exists in `GammaZeroComputed`) plus a new
-`profile_near` and `profile_term` from §3. The renderer reads from these directly.
+For `--json --profiles`: emit the `profile` array plus `profile_0dte`, `profile_1to7`,
+and `profile_term` from §3. Default JSON strips these arrays so agent/tooling output stays compact.
 
 Implementation touchpoints:
 

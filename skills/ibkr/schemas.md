@@ -696,21 +696,25 @@ its 52-week high is the classic late-cycle divergence.
 
 ## gamma
 
-`ibkr gamma --json` — combined SPY+SPX dealer zero-gamma estimate (default
-scope; `--only=spy` or `--only=spx` for single-underlying paths). The
-result is heavy (multi-minute fan-out across hundreds of legs); the first
-caller of an NY trading day kicks a background job, subsequent callers
-within the session receive the cached result instantly.
+`ibkr gamma --json` — dealer-gamma market-structure snapshot for SPY, SPX,
+or the default SPY+SPX view. The result is heavy (multi-minute fan-out
+across hundreds of legs); the first caller of an NY trading day kicks a
+background job, subsequent callers within the session receive the cached
+result instantly.
 
 **MCP params** (`ibkr_gamma`):
 - `scope` — `"spy" | "spx" | "spy+spx"`. Default `"spy+spx"`. CLI alias is `--only`.
 - `wait_ms` — integer ms to block on an in-flight compute. Default 0.
 - `force` — boolean; diagnostics-only — ignore cached result. Default false.
+- `include_profiles` — boolean; default false. Include full sweep profile
+  arrays only when charting.
 
 **CLI-only flags** (no MCP equivalent — text-mode rendering controls):
 - `--explain` — extra methodology, per-bucket horizon breakdown, scaling caveat. JSON unchanged.
 - `--no-wait` — CLI sugar for `wait_ms: 0`.
 - `--json` — switch the CLI from text to JSON output.
+- `--profiles` — with `--json`, include full sweep profile arrays. Default
+  JSON strips them so agents and shell tooling get compact payloads.
 
 Computing (first call of the day):
 
@@ -731,17 +735,26 @@ Ready (combined scope, subsequent calls):
   "started_at": "2026-05-09T13:30:14Z",
   "result": {
     "scope": "spy+spx",
-    "spot_anchor": "SPY",
-    "spot_underlying": 583.21,
-    "spot_at": "2026-05-09T14:32:11Z",
-    "zero_gamma": 581.40,
-    "gap_pct": 0.31,
-    "gamma_sign": "",
-    "profile": [{"spot": 495.73, "gex": -8420.5}, "..."],
+    "summary": {
+      "primary_statement": "Zero-gamma: SPY $581.40; SPX none in $4615.50-$6244.50 (long-gamma). No combined zero is computed across SPY/SPX price scales.",
+      "zero_gamma_status": "mixed",
+      "regime": "mixed",
+      "confidence": "estimate",
+      "not_advice": "Market-structure context only; not a trade recommendation.",
+      "per_index": {
+        "SPY": {"underlying": "SPY", "spot_underlying": 583.21,
+                "zero_gamma": 581.40, "zero_gamma_status": "crossing",
+                "regime": "transition_gamma", "leg_count": 1208,
+                "priced_leg_count": 1280},
+        "SPX": {"underlying": "SPX", "spot_underlying": 5430.0,
+                "zero_gamma_status": "none_in_window",
+                "regime": "long_gamma", "leg_count": 1994,
+                "priced_leg_count": 2150}
+      }
+    },
     "gamma_total_abs": 6.0e9,
     "gamma_total_abs_convention": "sign-agnostic",
-    "regime_agreement": "agree:long-gamma",
-    "horizon_agreement": "all_above",
+    "regime_agreement": "disagree",
     "top_strikes": [
       {"underlying": "SPX", "trading_class": "SPXW", "strike": 5400.0,
        "expiry": "2026-06-19", "right": "C",
@@ -754,11 +767,9 @@ Ready (combined scope, subsequent calls):
     "expirations": ["2026-05-16", "2026-05-23", "2026-05-30",
                     "2026-06-06", "2026-06-13", "2026-06-19"],
     "leg_count": 3202,
-    "leg_count_0dte": 1208,
-    "leg_count_1to7": 612,
-    "leg_count_term": 1382,
+    "priced_leg_count": 3430,
     "derived_iv_legs": 0,
-    "warnings": [],
+    "warning_details": [],
     "methodology_citations": [
       "Perfiliev (2022) — BS-sweep baseline",
       "Derman / Daglish-Hull-Suo — sticky-moneyness skew dynamics"
@@ -784,27 +795,19 @@ Field meanings:
   failed and `error` carries the classified reason.
 - `result.scope` — `"spy"` | `"spx"` | `"spy+spx"`. Discriminator for
   combined vs single-underlying envelopes.
-- `result.spot_anchor` — `"SPY"` on combined-scope envelopes (signals
-  that `spot_underlying`, `zero_gamma`, `gamma_sign`, `profile`, and the
-  per-bucket triples — `zero_gamma_0dte`/`_1to7`/`_term`,
-  `profile_0dte`/`_1to7`/`_term`, `gamma_sign_0dte`/`_1to7`/`_term` —
-  are SPY-anchored shallow copies; read `per_index["SPX"]` for SPX
-  values). Empty / omitted on single-underlying scopes — top-level
-  scalars are authoritative there. **Combined-and-correct fields** (safe
-  to consume off the top level on every scope): `scope`, `spot_anchor`,
-  `regime_agreement`, `horizon_agreement`, `gamma_total_abs`,
-  `gamma_total_abs_convention`, `leg_count`,
-  `leg_count_0dte`/`_1to7`/`_term`, `warnings`, `method`,
-  `methodology_citations`, `per_index`, `partial_classes`, `source`,
-  `duration_ms`, `as_of`, `top_strikes`, `expirations`, `derived_iv_legs`.
-- `result.zero_gamma` — the price level where dealer net gamma crosses
-  zero under the Perfiliev convention (dealers long calls, short puts).
-  `null` when no crossing exists in the sweep window; inspect
-  `gamma_sign` to learn which side of zero the whole sweep landed on
-  ("positive" = all long-γ, "negative" = all short-γ).
-- `result.gap_pct` — `(spot_underlying − zero_gamma) / zero_gamma × 100`.
-  Positive = spot above γ-zero (dampening regime); negative = below
-  γ-zero (amplifying regime). `null` when `zero_gamma` is `null`.
+- `result.summary` — agent-preferred readout. Start here. It tells you
+  which zero-gamma crossing, if any, was identified; whether the signed
+  profile stayed long-/short-gamma through the swept range; confidence;
+  and the non-advisory caveat.
+- In combined scope, **there is no top-level combined zero-gamma price**.
+  SPY and SPX use different price scales, so consume
+  `result.summary.per_index.SPY` / `.SPX` (or `result.per_index`) for
+  per-underlying spot, zero-gamma, swept range, and regime.
+- `result.leg_count` — legs with non-zero OI-weighted GEX. This is the
+  count that matters for dealer-gamma magnitude and profile.
+- `result.priced_leg_count` — legs that priced / fit IV. This can exceed
+  `leg_count` when IBKR supplied IV but not open interest; those legs help
+  skew fitting but do not contribute to GEX.
 - `result.gamma_total_abs` — sign-agnostic magnitude signal:
   `Σ |Γ| × OI × 100 × spot² × 0.01`, summed across both indices on
   combined scope. SPX dominates ~75–80% of the sum because of the S²
@@ -813,43 +816,31 @@ Field meanings:
   proximity). `gamma_total_abs_convention` names the sign-handling
   ("sign-agnostic" today).
 - `result.regime_agreement` — on combined scope, one of
-  `"agree:long-gamma"` / `"agree:short-gamma"` / `"agree:flipping"` /
-  `"disagree"` / `""` (no data). The `"disagree"` case is the
-  actionable signal — institutional SPX book and retail/ETF SPY book
-  are positioned opposite.
-- `result.horizon_agreement` — 8-value enum naming how the three
-  horizon-bucketed γ-zero readings (0DTE, 1-7, term) relate. One of
-  `"all_above"` / `"all_below"` / `"diverge:0dte_vs_term"` /
-  `"diverge:partial"` / `"0dte_only"` / `"1to7_only"` / `"term_only"` /
-  `""`. The `"diverge:0dte_vs_term"` case is highest-information:
-  short-fuse flow disagrees with monthly positioning.
+  `"agree:long-gamma"` / `"agree:short-gamma"` /
+  `"agree:transition-gamma"` / `"disagree"` / `""` (no data).
+  `"disagree"` means SPY and SPX modeled regimes differ; surface the
+  per-index details instead of forcing a single headline.
 - `result.per_index` — populated only on combined scope. Each entry
   (`"SPY"`, `"SPX"`) is a fully-formed single-underlying
   `GammaZeroComputed` so renderers can recurse for per-underlying
-  detail. **Always consume this for per-index spot / zero-gamma /
-  profile values when scope is combined** — the top-level fields are
-  SPY-anchored shallow copies per `spot_anchor`.
+  detail. Profiles are stripped from default CLI JSON and MCP responses;
+  pass `--profiles` / `include_profiles: true` when charting.
 - `result.top_strikes` — top-N strikes by absolute gamma notional,
   merged across both indices on combined scope (sorted by `abs_gex`
   descending; SPX rows dominate by structure). Each row carries
   `underlying` (`"SPY"`/`"SPX"`) so the renderer can label per-row.
 - `result.derived_iv_legs` — legs whose IV fell back to the
   Newton-Raphson BS-inversion path because the gateway never pushed a
-  model-computation tick. Pre-market this is typically equal to
-  `leg_count`; during RTH it should stay at 0. **Surface to the user
-  when non-zero so the prior-session-price anchor is visible.**
-- `result.warnings` — non-fatal conditions: `no_crossing_in_window`,
-  `spxw_partial_oi`, `throttled`, `all_iv_derived`,
-  `spx_unavailable:<reason>` (combined→SPY-only fallback),
-  `combined_profile_grid_mismatch`. Render as inline badges. Runs whose
-  leg coverage falls below the safety threshold are surfaced as
-  `status: "error"`, not as warnings.
+  model-computation tick. Compare to `priced_leg_count`.
+- `result.warning_details` — non-fatal data-quality/methodology issues
+  as scoped prose: `{code, scope, severity, message, impact, action}`.
+  Do not look for raw warning tokens in JSON.
 - `result.methodology_citations` — short bibliography backing the
   methodology disclosure. Surface verbatim in `--explain`.
 
 **Scaling caveat:** SPY contributes ~1/100 of SPX dollar-gamma per
-equivalent leg (S² scaling). The combined headline level uses SPY-scale
-(see `spot_anchor`); read `per_index` entries for per-underlying levels.
+equivalent leg (S² scaling). Combined `gamma_total_abs` sums the books,
+but zero-gamma levels stay per-index.
 
 **Treat the number as a regime hint, not a precise level.** Full
 methodology lives in `docs/specs/risk-regime-dashboard.md`.
@@ -924,7 +915,6 @@ all five indicators.
     "status": "ok",
     "envelope": {"status": "ready", "result": {"...": "see gamma schema"}},
     "notes": "...",
-    "horizon_agreement": "diverge:0dte_vs_term",
     "zero_gamma_quality": {"as_of": "2026-05-09T13:32:54Z", "freshness_class": "modelled",
                            "confidence": "proxy",
                            "source": "bs-gamma-profile-v3-stickymoneyness-0dte-split"},

@@ -619,7 +619,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "Combined SPY+SPX dealer γ-zero level (the spot where dealer net gamma crosses zero). Spec thresholds are evaluated against the SPY-anchored headline used by the combined envelope: anchor >2% above γ-zero (green, stabilizing); within 2% (yellow, regime can flip on a single session); below (red, amplifying). The crossing itself is the regime event — no waiting period. Default scope runs SPY and SPX together; top-level spot/zero-gamma fields are SPY-anchored for continuity and `spot_anchor` discloses that convention, while `per_index.SPY` and `per_index.SPX` carry the per-underlying envelopes and `gamma_total_abs` is the true combined magnitude. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit (fewer than 3 IV samples or degenerate solve) fall back to sticky-IV for that expiry only; surface as `skew_fallback:YYYYMMDD` warnings. The envelope carries three horizon-bucketed γ-zero readings — 0DTE (DTE == 0), 1-7 (overnight through end-of-week), and term (DTE > 7) — split this way because Cboe 2025 data shows 0DTE = ~59% of SPX volume and lumping it with weeklies muddies the signal. The `horizon_agreement` field flags `diverge` when the buckets land on opposite sides of spot — the high-information case. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is convention-free and is the more robust read in any regime where customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). Pre-market: when the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's gamma_total_abs + top_strikes give the sign-agnostic magnitude signal — co-primary alongside the signed γ-zero level."
+const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are reported as separate per-index γ-zero readings because their price scales differ; the combined top level intentionally has no spot, zero_gamma, gap_pct, or gamma_sign. Regime thresholds are applied to each per_index entry: spot >2% above γ-zero is green/stabilizing, within ±2% is yellow/transition, and below γ-zero is red/amplifying; when no crossing exists, a wholly long-γ sweep is green and a wholly short-γ sweep is red. The combined row uses per-index agreement and exposure weighting: both green => green, both red => red, a mixed book is red when the dominant/equal gamma exposure is red and yellow otherwise, no usable per-index profile => unranked. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit fall back to sticky-IV for that expiry only and appear in `warning_details`. Each per-index envelope carries 0DTE, 1-7 DTE, and term γ-zero buckets because 0DTE flow can mask weekly/monthly positioning. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is a sign-convention agnostic gross gamma concentration read and is the more robust surface when customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). When the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's bid/ask mid or prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's summary, per_index, gamma_total_abs, and top_strikes are the primary agent/tooling surface."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
@@ -646,19 +646,20 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 			// sign-agnostic notional aggregated from OI+IV observations
 			// — still an estimate because per-leg coverage varies.
 			//
-			// When DerivedIVLegs == LegCount, every IV in the compute came
-			// from the BS-IV Newton-Raphson fallback against
-			// prior-session prices (typical pre-market). The Source
-			// string disclosure surfaces that to the --explain reader so
-			// the prior-prices anchor is visible without re-reading the
-			// methodology spec.
+			// When DerivedIVLegs == PricedLegCount, every IV in the compute came
+			// from the BS-IV Newton-Raphson fallback against option quote
+			// mids or prior-session closes. The Source string disclosure
+			// surfaces that to the --explain reader without making the
+			// fallback look like a live model tick.
 			source := envelope.Result.Method
-			if r := envelope.Result; r.DerivedIVLegs > 0 && r.DerivedIVLegs == r.LegCount {
-				source = r.Method + " · BS-IV from prior-session last price"
+			if r := envelope.Result; r.DerivedIVLegs > 0 && r.DerivedIVLegs == r.PricedLegCount {
+				source = r.Method + " · BS-IV from option quote/close fallback"
 			}
 			out.ZeroGammaQuality = modelledQuality(envelope.Result.AsOf, source)
 			out.GammaTotalAbsQuality = derivedQuality(envelope.Result.AsOf, "BS-sweep |Γ|·OI·spot²")
-			out.HorizonAgreement = classifyHorizonAgreement(envelope.Result)
+			if envelope.Result.Scope != rpc.GammaZeroScopeCombined {
+				out.HorizonAgreement = classifyHorizonAgreement(envelope.Result)
+			}
 		}
 	case rpc.GammaZeroStatusComputing:
 		out.Status = rpc.RegimeStatusComputing
@@ -829,18 +830,17 @@ func maxHigh(bars []ibkrlib.HistoricalBar, n int) float64 {
 }
 
 // classifyHorizonAgreement compares the gamma compute's three
-// horizon-bucketed γ-zero readings (0DTE, 1-7, term) and names how
-// they relate. Returns one of the documented HorizonAgreement strings
-// — see rpc.RegimeGammaZero.HorizonAgreement for the meanings. Empty
-// string when no bucket has a crossing (the headline already carries
-// that case).
+// horizon-bucketed regimes (0DTE, 1-7, term) and names how they relate.
+// A bucket can get its regime from a zero-gamma gap or, when no crossing
+// exists, from its one-sided GammaSign. Returns one of the documented
+// HorizonAgreement strings — see rpc.RegimeGammaZero.HorizonAgreement
+// for the meanings.
 //
 // v3 split semantics — three buckets instead of v2's two:
 //
-//	"all_above"            spot is above every bucket with a crossing
-//	                       AND every bucket produced a crossing
-//	"all_below"            spot is below every bucket with a crossing
-//	                       AND every bucket produced a crossing
+//	"all_long"             every bucket is long-gamma
+//	"all_short"            every bucket is short-gamma
+//	"all_transition"       every bucket is within ±2% of its γ-zero
 //	"diverge:0dte_vs_term" 0DTE and term sit on opposite sides of spot
 //	                       (highest-information case — short-fuse flow
 //	                       disagrees with monthly positioning)
@@ -848,73 +848,67 @@ func maxHigh(bars []ibkrlib.HistoricalBar, n int) float64 {
 //	                       that isn't the 0DTE-vs-term split — e.g.
 //	                       1-7 alone disagrees, or only two buckets
 //	                       have crossings and they disagree
-//	"0dte_only"            only the 0DTE bucket has a crossing
-//	"1to7_only"            only the 1-7 bucket has a crossing
-//	"term_only"            only the term bucket has a crossing
-//	""                     no bucket has a crossing — combined headline
-//	                       covers it
+//	"0dte_only"            only the 0DTE bucket has a usable regime
+//	"1to7_only"            only the 1-7 bucket has a usable regime
+//	"term_only"            only the term bucket has a usable regime
+//	""                     no bucket has a usable regime
 func classifyHorizonAgreement(c *rpc.GammaZeroComputed) string {
 	if c == nil || c.SpotUnderlying <= 0 {
 		return ""
 	}
-	zeroAvail := c.ZeroGamma0DTE != nil
-	oneToSevenAvail := c.ZeroGamma1to7 != nil
-	termAvail := c.ZeroGammaTerm != nil
-	availCount := 0
-	for _, v := range []bool{zeroAvail, oneToSevenAvail, termAvail} {
-		if v {
-			availCount++
+	buckets := []struct {
+		name   string
+		regime string
+	}{
+		{"0dte", horizonBucketRegime(c.SpotUnderlying, c.ZeroGamma0DTE, c.GammaSign0DTE)},
+		{"1to7", horizonBucketRegime(c.SpotUnderlying, c.ZeroGamma1to7, c.GammaSign1to7)},
+		{"term", horizonBucketRegime(c.SpotUnderlying, c.ZeroGammaTerm, c.GammaSignTerm)},
+	}
+	var usable []struct {
+		name   string
+		regime string
+	}
+	for _, b := range buckets {
+		if b.regime != "" {
+			usable = append(usable, b)
 		}
 	}
-	switch availCount {
+	switch len(usable) {
 	case 0:
 		return ""
 	case 1:
-		switch {
-		case zeroAvail:
-			return "0dte_only"
-		case oneToSevenAvail:
-			return "1to7_only"
-		default:
-			return "term_only"
+		return usable[0].name + "_only"
+	}
+	first := usable[0].regime
+	allSame := true
+	for _, b := range usable[1:] {
+		if b.regime != first {
+			allSame = false
+			break
 		}
 	}
-	// 2+ buckets have a crossing. Classify by whether their
-	// spot-above-or-below relationships agree across the available
-	// buckets.
-	var sides []bool
-	if zeroAvail {
-		sides = append(sides, c.SpotUnderlying > *c.ZeroGamma0DTE)
+	if allSame && len(usable) == 3 {
+		return "all_" + strings.TrimSuffix(first, "_gamma")
 	}
-	if oneToSevenAvail {
-		sides = append(sides, c.SpotUnderlying > *c.ZeroGamma1to7)
+	if buckets[0].regime != "" && buckets[2].regime != "" && buckets[0].regime != buckets[2].regime {
+		return "diverge:0dte_vs_term"
 	}
-	if termAvail {
-		sides = append(sides, c.SpotUnderlying > *c.ZeroGammaTerm)
+	if !allSame {
+		return "diverge:partial"
 	}
-	allAbove, allBelow := true, true
-	for _, above := range sides {
-		if !above {
-			allAbove = false
-		}
-		if above {
-			allBelow = false
-		}
+	return strings.TrimSuffix(first, "_gamma") + "_only"
+}
+
+func horizonBucketRegime(spot float64, zero *float64, sign string) string {
+	if zero != nil && *zero > 0 {
+		gap := (spot - *zero) / *zero * 100
+		return gammaRegimeFromGap(&gap)
 	}
-	if availCount == 3 && allAbove {
-		return "all_above"
+	switch sign {
+	case "positive":
+		return "long_gamma"
+	case "negative":
+		return "short_gamma"
 	}
-	if availCount == 3 && allBelow {
-		return "all_below"
-	}
-	// Divergence: name the headline 0dte_vs_term case when both ends
-	// are available and disagree; otherwise it's a partial mix.
-	if zeroAvail && termAvail {
-		spotAbove0 := c.SpotUnderlying > *c.ZeroGamma0DTE
-		spotAboveT := c.SpotUnderlying > *c.ZeroGammaTerm
-		if spotAbove0 != spotAboveT {
-			return "diverge:0dte_vs_term"
-		}
-	}
-	return "diverge:partial"
+	return ""
 }

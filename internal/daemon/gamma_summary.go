@@ -1,0 +1,409 @@
+package daemon
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+const gammaNotAdvice = "Market-structure context only; not a trade recommendation."
+const gammaTransitionGapPct = 2.0
+
+func hydrateGammaComputed(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
+	if c == nil {
+		return nil
+	}
+	for _, sub := range c.PerIndex {
+		hydrateGammaComputed(sub)
+	}
+	c.WarningDetails = buildGammaWarningDetails(c)
+	c.Summary = buildGammaSummary(c)
+	return c
+}
+
+func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
+	if c == nil {
+		return nil
+	}
+	out := &rpc.GammaZeroSummary{
+		NotAdvice:  gammaNotAdvice,
+		Confidence: gammaResultConfidence(c),
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		out.PerIndex = make(map[string]rpc.GammaIndexSummary, len(c.PerIndex))
+		var parts []string
+		statuses := map[string]int{}
+		regimes := map[string]int{}
+		confidences := map[string]int{}
+		for _, key := range []string{"SPY", "SPX"} {
+			sub := c.PerIndex[key]
+			if sub == nil {
+				continue
+			}
+			item := buildGammaIndexSummary(sub, key)
+			out.PerIndex[key] = item
+			statuses[item.ZeroGammaStatus]++
+			regimes[item.Regime]++
+			confidences[item.Confidence]++
+			parts = append(parts, gammaIndexStatement(item))
+		}
+		out.ZeroGammaStatus = combineSummaryStatus(statuses)
+		out.Regime = combineSummaryRegime(c.RegimeAgreement, regimes)
+		out.Confidence = combineSummaryConfidence(confidences)
+		if len(parts) == 0 {
+			out.PrimaryStatement = "Zero-gamma: unavailable for SPY+SPX."
+		} else {
+			out.PrimaryStatement = "Zero-gamma: " + strings.Join(parts, "; ") + ". No combined zero is computed across SPY/SPX price scales."
+		}
+		return out
+	}
+	item := buildGammaIndexSummary(c, gammaUnderlyingLabel(c))
+	out.ZeroGammaStatus = item.ZeroGammaStatus
+	out.Regime = item.Regime
+	out.PrimaryStatement = "Zero-gamma: " + gammaIndexStatement(item) + "."
+	return out
+}
+
+func buildGammaIndexSummary(c *rpc.GammaZeroComputed, label string) rpc.GammaIndexSummary {
+	if label == "" {
+		label = gammaUnderlyingLabel(c)
+	}
+	status, regime := gammaZeroStatusAndRegime(c)
+	return rpc.GammaIndexSummary{
+		Underlying:      label,
+		SpotUnderlying:  c.SpotUnderlying,
+		ZeroGamma:       c.ZeroGamma,
+		ZeroGammaStatus: status,
+		Regime:          regime,
+		SweepLowAbs:     c.SweepLowAbs,
+		SweepHighAbs:    c.SweepHighAbs,
+		LegCount:        c.LegCount,
+		PricedLegCount:  c.PricedLegCount,
+		GammaTotalAbs:   c.GammaTotalAbs,
+		Confidence:      gammaResultConfidence(c),
+		Interpretation:  gammaInterpretation(c, status, regime),
+	}
+}
+
+func gammaIndexStatement(s rpc.GammaIndexSummary) string {
+	label := s.Underlying
+	if label == "" {
+		label = "underlying"
+	}
+	switch s.ZeroGammaStatus {
+	case "crossing":
+		if s.ZeroGamma != nil {
+			regime := strings.ReplaceAll(s.Regime, "_", "-")
+			if regime != "" {
+				return fmt.Sprintf("%s %s (%s)", label, formatGammaSummaryPrice(*s.ZeroGamma), regime)
+			}
+			return fmt.Sprintf("%s %s", label, formatGammaSummaryPrice(*s.ZeroGamma))
+		}
+	case "none_in_window":
+		rangeText := gammaSummaryRange(s.SweepLowAbs, s.SweepHighAbs)
+		regime := strings.ReplaceAll(s.Regime, "_", "-")
+		if rangeText != "" && regime != "" {
+			return fmt.Sprintf("%s none in %s (%s)", label, rangeText, regime)
+		}
+		if regime != "" {
+			return fmt.Sprintf("%s none in swept range (%s)", label, regime)
+		}
+		return fmt.Sprintf("%s none in swept range", label)
+	case "unavailable":
+		if s.Interpretation != "" {
+			return fmt.Sprintf("%s unavailable (%s)", label, s.Interpretation)
+		}
+		return fmt.Sprintf("%s unavailable", label)
+	}
+	return fmt.Sprintf("%s indeterminate", label)
+}
+
+func gammaZeroStatusAndRegime(c *rpc.GammaZeroComputed) (string, string) {
+	if c == nil {
+		return "unavailable", "unavailable"
+	}
+	if c.ZeroGamma != nil {
+		return "crossing", gammaRegimeFromGap(c.GapPct)
+	}
+	if c.LegCount > 0 && c.GammaTotalAbs == 0 && gammaProfileAllZero(c.Profile) {
+		return "unavailable", "unavailable"
+	}
+	switch c.GammaSign {
+	case "positive":
+		return "none_in_window", "long_gamma"
+	case "negative":
+		return "none_in_window", "short_gamma"
+	case "no_data":
+		return "unavailable", "unavailable"
+	default:
+		return "unavailable", "unavailable"
+	}
+}
+
+func gammaRegimeFromGap(gapPct *float64) string {
+	if gapPct == nil {
+		return "transition_gamma"
+	}
+	switch {
+	case *gapPct > gammaTransitionGapPct:
+		return "long_gamma"
+	case *gapPct >= -gammaTransitionGapPct:
+		return "transition_gamma"
+	default:
+		return "short_gamma"
+	}
+}
+
+func gammaInterpretation(c *rpc.GammaZeroComputed, status, regime string) string {
+	switch status {
+	case "crossing":
+		if c.ZeroGamma != nil {
+			if c.GapPct != nil {
+				return fmt.Sprintf("signed gamma profile crosses zero at %s; spot is %+.1f%% from that level",
+					formatGammaSummaryPrice(*c.ZeroGamma), *c.GapPct)
+			}
+			return "signed gamma profile crosses zero at " + formatGammaSummaryPrice(*c.ZeroGamma)
+		}
+	case "none_in_window":
+		switch regime {
+		case "long_gamma":
+			return "no crossing; model stayed long-gamma across the swept range"
+		case "short_gamma":
+			return "no crossing; model stayed short-gamma across the swept range"
+		}
+	case "unavailable":
+		if c != nil && c.LegCount > 0 && c.GammaTotalAbs == 0 {
+			return "no usable gamma magnitude from landed legs"
+		}
+		return "no usable signed gamma profile"
+	}
+	return ""
+}
+
+func gammaResultConfidence(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "unavailable"
+	}
+	if c.LegCount > 0 && c.GammaTotalAbs == 0 && gammaProfileAllZero(c.Profile) {
+		return "unavailable"
+	}
+	for _, w := range gammaWarningCodes(c) {
+		switch {
+		case w == "throttled", w == "all_iv_derived", w == "cache_stale_off_hours", w == "oi_missing":
+			return "degraded"
+		case strings.HasPrefix(w, "spx_unavailable:"):
+			return "degraded"
+		case strings.HasPrefix(w, "skew_fallback:"):
+			return "degraded"
+		}
+	}
+	return "estimate"
+}
+
+func gammaWarningCodes(c *rpc.GammaZeroComputed) []string {
+	if c == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, code := range c.Warnings {
+		if code == "" {
+			continue
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		out = append(out, code)
+	}
+	for _, d := range c.WarningDetails {
+		if d.Code == "" {
+			continue
+		}
+		if _, ok := seen[d.Code]; ok {
+			continue
+		}
+		seen[d.Code] = struct{}{}
+		out = append(out, d.Code)
+	}
+	return out
+}
+
+func combineSummaryStatus(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "unavailable"
+	}
+	if len(counts) == 1 {
+		for k := range counts {
+			return k
+		}
+	}
+	if counts["unavailable"] > 0 {
+		return "mixed_degraded"
+	}
+	return "mixed"
+}
+
+func combineSummaryRegime(agreement string, regimes map[string]int) string {
+	switch agreement {
+	case "agree:long-gamma":
+		return "long_gamma"
+	case "agree:short-gamma":
+		return "short_gamma"
+	case "agree:transition-gamma":
+		return "transition_gamma"
+	case "disagree":
+		return "mixed"
+	}
+	if len(regimes) == 1 {
+		for k := range regimes {
+			return k
+		}
+	}
+	if len(regimes) == 0 {
+		return "unavailable"
+	}
+	return "mixed"
+}
+
+func combineSummaryConfidence(counts map[string]int) string {
+	switch {
+	case len(counts) == 0:
+		return "unavailable"
+	case counts["unavailable"] > 0:
+		return "unavailable"
+	case counts["degraded"] > 0:
+		return "degraded"
+	default:
+		return "estimate"
+	}
+}
+
+func buildGammaWarningDetails(c *rpc.GammaZeroComputed) []rpc.GammaWarningDetail {
+	if c == nil {
+		return nil
+	}
+	codes := gammaWarningCodes(c)
+	if len(codes) == 0 {
+		return c.WarningDetails
+	}
+	out := make([]rpc.GammaWarningDetail, 0, len(codes))
+	for _, code := range codes {
+		out = append(out, gammaWarningDetail(c, code))
+	}
+	return out
+}
+
+func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningDetail {
+	scope := gammaWarningScope(c, code)
+	d := rpc.GammaWarningDetail{
+		Code:     code,
+		Scope:    scope,
+		Severity: "info",
+	}
+	switch {
+	case code == "no_crossing_in_window":
+		d.Message = "No signed gamma-zero crossing was found in the swept range."
+		d.Impact = "Use the regime label and swept range instead of a zero-gamma level."
+	case code == "0dte_no_legs":
+		d.Message = "No same-day expiry legs were included."
+		d.Impact = "The 0DTE horizon is unavailable for this run."
+	case code == "1to7_no_legs":
+		d.Message = "No 1-7 DTE legs were included."
+		d.Impact = "The weekly horizon is unavailable for this run."
+	case code == "term_no_legs":
+		d.Message = "No >7 DTE legs were included."
+		d.Impact = "The term horizon is unavailable for this run."
+	case code == "throttled":
+		d.Severity = "data_quality"
+		d.Message = "The gateway throttled part of the option fan-out."
+		d.Impact = "Coverage may be incomplete; treat this slice as lower confidence."
+		d.Action = "Retry later or during regular trading hours; avoid repeated forced runs."
+	case code == "oi_missing":
+		d.Severity = "data_quality"
+		d.Message = fmt.Sprintf("Open interest was missing or zero for %d priced legs.", max(c.PricedLegCount-c.LegCount, 0))
+		d.Impact = fmt.Sprintf("%d priced legs contributed to IV/skew fitting, but only %d legs contributed to dealer GEX.", c.PricedLegCount, c.LegCount)
+	case code == "all_iv_derived":
+		d.Severity = "data_quality"
+		d.Message = "All implied volatilities were back-solved instead of supplied by the gateway model tick."
+		d.Impact = "The result is more model-dependent, often because the option market was not actively quoting."
+	case code == "cache_stale_off_hours":
+		d.Severity = "data_quality"
+		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
+		d.Impact = "The daemon served the last persisted snapshot rather than recomputing against a closed market."
+	case strings.HasPrefix(code, "spx_unavailable:"):
+		d.Severity = "data_quality"
+		d.Message, d.Impact, d.Action = spxUnavailableWarningText(strings.TrimPrefix(code, "spx_unavailable:"))
+	case strings.HasPrefix(code, "skew_fallback:"):
+		d.Severity = "methodology"
+		expiry := strings.TrimPrefix(code, "skew_fallback:")
+		d.Scope = expiry
+		d.Message = "Skew fit fell back to sticky-IV for expiry " + expiry + "."
+		d.Impact = "That expiry used the simpler IV assumption during the sweep."
+	default:
+		d.Message = code
+	}
+	return d
+}
+
+func spxUnavailableWarningText(reason string) (message, impact, action string) {
+	switch reason {
+	case "354":
+		return "SPX option chain was skipped: missing CBOE OPRA entitlement (IBKR 354).",
+			"Showing SPY only; SPX gamma is not included.",
+			"Subscribe to the required market data or run --only=spy to suppress this banner."
+	case "200":
+		return "SPX option chain was skipped: contract resolution was rejected (IBKR 200).",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry later or run --only=spy if SPX is not available on this gateway."
+	case "no_data":
+		return "SPX option chain was skipped: no option data landed within the window.",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry during regular trading hours or run --only=spy."
+	case "throttled":
+		return "SPX option chain was skipped after gateway throttling.",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry later; avoid repeated forced runs."
+	case "zero_magnitude":
+		return "SPX option chain was skipped because landed legs produced zero usable gamma magnitude.",
+			"Showing SPY only; the SPX slice was not reliable enough to classify.",
+			"Retry during regular trading hours or run --only=spx --force for diagnostics."
+	default:
+		return "SPX option chain was skipped: " + reason + ".",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry later or run --only=spy."
+	}
+}
+
+func gammaWarningScope(c *rpc.GammaZeroComputed, code string) string {
+	if strings.HasPrefix(code, "spx_unavailable:") {
+		return "SPX"
+	}
+	return gammaUnderlyingLabel(c)
+}
+
+func gammaUnderlyingLabel(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	switch c.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX"
+	case rpc.GammaZeroScopeCombined:
+		return "SPY+SPX"
+	default:
+		return "SPY"
+	}
+}
+
+func gammaSummaryRange(lo, hi float64) string {
+	if lo <= 0 || hi <= 0 {
+		return ""
+	}
+	return formatGammaSummaryPrice(lo) + "-" + formatGammaSummaryPrice(hi)
+}
+
+func formatGammaSummaryPrice(v float64) string {
+	return fmt.Sprintf("$%.2f", v)
+}

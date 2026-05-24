@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 		GammaTotalAbs:           1.8e9,
 		GammaTotalAbsConvention: "sign-agnostic",
 		LegCount:                1052,
+		PricedLegCount:          1200,
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPY",
 		AsOf:                    now,
@@ -34,18 +36,19 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 		GammaTotalAbs:           4.2e9,
 		GammaTotalAbsConvention: "sign-agnostic",
 		LegCount:                2150,
+		PricedLegCount:          2400,
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPX",
 		AsOf:                    now,
 	}
 	combined := &rpc.GammaZeroComputed{
 		Scope:                   rpc.GammaZeroScopeCombined,
-		SpotUnderlying:          743.73,
-		SpotAt:                  now,
-		GammaSign:               "positive",
 		GammaTotalAbs:           6.0e9,
 		GammaTotalAbsConvention: "sign-agnostic",
 		LegCount:                3202,
+		PricedLegCount:          3600,
+		Params:                  rpc.GammaZeroParams{StrikeWidthPct: 0.10},
+		Expirations:             []string{"2026-05-26", "2026-05-29"},
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPY+SPX",
 		AsOf:                    now,
@@ -64,6 +67,38 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 	}
 }
 
+func TestRenderGammaSkippedBannerUsesWarningDetailsAfterJSONRoundTrip(t *testing.T) {
+	t.Parallel()
+	wire := &rpc.GammaZeroComputed{
+		WarningDetails: []rpc.GammaWarningDetail{
+			{Code: "spx_unavailable:zero_magnitude", Scope: "SPX"},
+		},
+		Warnings: []string{"spx_unavailable:zero_magnitude"},
+	}
+	var payload []byte
+	var err error
+	if payload, err = json.Marshal(wire); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTrip rpc.GammaZeroComputed
+	if err := json.Unmarshal(payload, &roundTrip); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(roundTrip.Warnings) != 0 {
+		t.Fatalf("warnings should be internal-only after JSON round trip: %v", roundTrip.Warnings)
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if !renderGammaSkippedBanner(env, &roundTrip) {
+		t.Fatal("expected SPX skipped banner from warning_details")
+	}
+	if got := stdout.String(); !strings.Contains(got, "SPX skipped") ||
+		!strings.Contains(got, "zero usable gamma magnitude") {
+		t.Fatalf("banner did not explain SPX skip: %q", got)
+	}
+}
+
 // TestRenderGamma_HeroHasTitleTimestampAnchor pins the shared hero
 // shape applied to gamma: a title on the same line as a timestamp
 // (joined with "  ·  "), followed by an indented SPY spot anchor.
@@ -76,7 +111,7 @@ func TestRenderGamma_HeroHasTitleTimestampAnchor(t *testing.T) {
 	}
 	out := stdout.String()
 	// Title + timestamp share one line.
-	if !strings.Contains(out, "Dealer γ-zero · SPY+SPX") {
+	if !strings.Contains(out, "Dealer gamma · SPY+SPX") {
 		t.Errorf("hero title missing:\n%s", out)
 	}
 	if !strings.Contains(out, "  ·  ") {
@@ -222,8 +257,8 @@ func TestRenderGamma_DefaultShowsPerIndexCompact(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"SPY   no crossing · long-γ · 1052 legs",
-		"SPX   no crossing · long-γ · 2150 legs",
+		"SPY   no crossing · long-γ · 1052 GEX legs",
+		"SPX   no crossing · long-γ · 2150 GEX legs",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("per-index compact line missing %q:\n%s", want, out)
@@ -292,10 +327,8 @@ func TestGammaHeroSummary_SingleAndCombined(t *testing.T) {
 
 // TestRenderGamma_ExplainCarriesScalingCaveat pins C4: the
 // --explain block always carries a short scaling caveat naming the
-// S² scaling that makes SPX dominate the combined |Γ|·OI sum, plus a
-// pointer at the spot_anchor field so a reader of the JSON wire can
-// machine-read the same disclaimer. Two lines, no jargon explosion —
-// the goal is "user reading --explain understands what 'combined' means".
+// S² scaling and states that zero-gamma levels stay per-index rather
+// than pretending the combined envelope has one price scale.
 func TestRenderGamma_ExplainCarriesScalingCaveat(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
@@ -307,9 +340,8 @@ func TestRenderGamma_ExplainCarriesScalingCaveat(t *testing.T) {
 	for _, want := range []string{
 		"Scaling",
 		"S² scaling",
-		"dominated by SPX",
-		"spot_anchor",
-		"per_index",
+		"combined |Γ|·OI sums the books",
+		"zero-gamma levels stay per-index",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain missing scaling-caveat marker %q:\n%s", want, out)

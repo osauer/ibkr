@@ -510,7 +510,7 @@ type BreadthSPXResult struct {
 	AsOf time.Time `json:"as_of"`
 	// SpotAt is the gateway-observation timestamp for the headline,
 	// distinct from AsOf which covers history + headline.
-	SpotAt time.Time `json:"spot_at"`
+	SpotAt time.Time `json:"spot_at,omitzero"`
 	// DataType reflects the gateway's feed state when the headline
 	// was captured — "live", "delayed", "frozen", "delayed-frozen",
 	// or "" when no notice has arrived yet. Renderers use this to
@@ -579,10 +579,13 @@ type GammaZeroSPXParams struct {
 	Force bool `json:"force,omitempty"`
 	// Scope selects which underlying(s) to compute. One of GammaZeroScopeSPY
 	// ("spy"), GammaZeroScopeSPX ("spx"), or GammaZeroScopeCombined ("spy+spx").
-	// Empty defaults to "spy" for back-compat until step 7 of the SPX
-	// coverage arc lands the combined orchestration; that step will switch
-	// the empty-Scope default to "spy+spx" with SPX-skipped fallback.
+	// Empty defaults to "spy+spx" with SPX-skipped fallback.
 	Scope string `json:"scope,omitempty"`
+	// IncludeProfiles asks clients/renderers to retain the full profile
+	// arrays in JSON/MCP responses. The daemon compute always produces
+	// profiles where meaningful; thin adapters may strip them by default
+	// to keep agent/tool payloads compact.
+	IncludeProfiles bool `json:"include_profiles,omitempty"`
 }
 
 // GammaZeroParams echoes the v1 calibration window back to the caller so
@@ -620,7 +623,7 @@ type GammaProfilePoint struct {
 // robust signal in regimes where the Perfiliev dealer-sign assumption
 // can invert (covered-call ETF flow, autocall barrier proximity); the
 // renderer can present it alongside ZeroGamma as a "call wall / put
-// wall" view that's methodology-agnostic.
+// wall" view that's sign-convention agnostic.
 type StrikeConcentration struct {
 	// Underlying identifies which index this strike belongs to —
 	// "SPY" or "SPX" today. Populated by single-underlying computes
@@ -640,6 +643,63 @@ type StrikeConcentration struct {
 	Right        string  `json:"right"`  // "C" | "P"
 	AbsGEX       float64 `json:"abs_gex"`
 	OI           int64   `json:"open_interest"`
+}
+
+// GammaWarningDetail is the human/agent-facing warning surface. The
+// daemon may use compact codes internally, but the wire carries this
+// scoped explanation so renderers do not have to decode raw tokens.
+type GammaWarningDetail struct {
+	// Code is the stable warning token, without lossy prose parsing.
+	// Examples: "throttled", "0dte_no_legs",
+	// "spx_unavailable:354", "oi_missing".
+	Code string `json:"code"`
+	// Scope names the affected slice: "SPY", "SPX", "SPY+SPX", or a
+	// narrower trading class / expiry when the condition is that local.
+	Scope string `json:"scope,omitempty"`
+	// Severity is one of "info", "data_quality", or "methodology".
+	// Renderers can show data_quality prominently and tuck info under
+	// an expanded view.
+	Severity string `json:"severity,omitempty"`
+	// Message is a short user-facing explanation of the condition.
+	Message string `json:"message"`
+	// Impact explains how to read the gamma result in light of the
+	// warning. Empty when the message is self-contained.
+	Impact string `json:"impact,omitempty"`
+	// Action is an optional non-advisory operational next step, such as
+	// retrying during RTH or suppressing a known SPX entitlement banner.
+	Action string `json:"action,omitempty"`
+}
+
+// GammaIndexSummary is a compact interpretation of one per-underlying
+// gamma compute. It gives agents and text renderers the answer they
+// usually need without walking profile arrays or knowing the raw
+// sign-convention details.
+type GammaIndexSummary struct {
+	Underlying      string   `json:"underlying,omitempty"`
+	SpotUnderlying  float64  `json:"spot_underlying,omitempty"`
+	ZeroGamma       *float64 `json:"zero_gamma,omitempty"`
+	ZeroGammaStatus string   `json:"zero_gamma_status,omitempty"`
+	Regime          string   `json:"regime,omitempty"`
+	SweepLowAbs     float64  `json:"sweep_low_abs,omitempty"`
+	SweepHighAbs    float64  `json:"sweep_high_abs,omitempty"`
+	LegCount        int      `json:"leg_count,omitempty"`
+	PricedLegCount  int      `json:"priced_leg_count,omitempty"`
+	GammaTotalAbs   float64  `json:"gamma_total_abs,omitempty"`
+	Confidence      string   `json:"confidence,omitempty"`
+	Interpretation  string   `json:"interpretation,omitempty"`
+}
+
+// GammaZeroSummary is the compact, non-advisory readout of a gamma
+// result. The raw fields remain canonical for charting and backtests;
+// Summary is for humans and agents answering "which gamma zero, if
+// any, did we identify?"
+type GammaZeroSummary struct {
+	PrimaryStatement string                       `json:"primary_statement,omitempty"`
+	ZeroGammaStatus  string                       `json:"zero_gamma_status,omitempty"`
+	Regime           string                       `json:"regime,omitempty"`
+	Confidence       string                       `json:"confidence,omitempty"`
+	NotAdvice        string                       `json:"not_advice,omitempty"`
+	PerIndex         map[string]GammaIndexSummary `json:"per_index,omitempty"`
 }
 
 // SkewFitInfo is the per-expiry diagnostic for the sticky-moneyness
@@ -671,33 +731,15 @@ type SkewFitInfo struct {
 // the more robust positioning view. See docs/specs/risk-regime-dashboard.md
 // for the full methodology disclosure.
 //
-// Combined-scope semantics (read before consuming top-level scalars):
+// Combined-scope semantics:
 //
-// When Scope == "spy+spx" the envelope shallow-copies its SPY half for
-// the SPY-anchored fields below. Consumers MUST disambiguate the
-// per-underlying view from PerIndex["SPY"] / PerIndex["SPX"] rather
-// than reading the top-level scalars as "combined". SpotAnchor codifies
-// this on the wire ("SPY" when the shallow-copy is in effect; "" for
-// single-underlying envelopes where the top-level scalars ARE
-// authoritative). Post-1.0 a CombinedGammaZeroComputed type will hide
-// the SPY-anchored fields entirely.
-//
-//   - Combined-and-correct (safe to consume off the top level on every
-//     scope, including spy+spx): Scope, SpotAnchor, RegimeAgreement,
-//     HorizonAgreement, GammaTotalAbs, GammaTotalAbsConvention,
-//     LegCount, LegCount0DTE / LegCount1to7 / LegCountTerm,
-//     NearLegCount / TermLegCount, Warnings, Method,
-//     MethodologyCitations, PerIndex, PartialClasses, Source,
-//     DurationMS, AsOf, TopStrikes, TopConcentrationPct, Expirations,
-//     DerivedIVLegs.
-//   - SPY-anchored when Scope == "spy+spx" (shallow-copied — read
-//     per_index["SPY"] / per_index["SPX"] for per-underlying values):
-//     SpotUnderlying, SpotAt, ZeroGamma, GapPct, GammaSign, Profile,
-//     ZeroGamma0DTE / Profile0DTE / GammaSign0DTE,
-//     ZeroGamma1to7 / Profile1to7 / GammaSign1to7,
-//     ZeroGammaTerm / ProfileTerm / GammaSignTerm,
-//     ZeroGammaNear / ProfileNear / GammaSignNear (v2-compat aliases),
-//     SweepLowAbs, SweepHighAbs, SkewModel, SkewFitQuality, Params.
+// When Scope == "spy+spx", there is intentionally no top-level
+// ZeroGamma, GapPct, GammaSign, SpotUnderlying, or horizon bucket.
+// SPY and SPX live on different price scales, so consumers must read
+// per_index.SPY and per_index.SPX for price-level regime detail. The
+// combined top level is limited to scale-safe diagnostics: summary,
+// regime agreement, sign-agnostic magnitude, top strikes, counts,
+// warnings, method/source, citations, timestamps, and the per-index map.
 type GammaZeroComputed struct {
 	// SpotUnderlying is the price of the underlying instrument
 	// (currently SPY — see Source) at which the aggregation was
@@ -705,20 +747,20 @@ type GammaZeroComputed struct {
 	// from SPX to the more liquid SPY chain (SPY has continuous
 	// extended-hours quoting and a single trading class, which keeps
 	// the compute robust off-hours).
-	SpotUnderlying float64 `json:"spot_underlying"`
+	SpotUnderlying float64 `json:"spot_underlying,omitempty"`
 	// SpotAt is the gateway-observation timestamp for SpotUnderlying.
 	// Distinct from AsOf which covers the whole computation.
-	SpotAt time.Time `json:"spot_at"`
+	SpotAt time.Time `json:"spot_at,omitzero"`
 
 	// ZeroGamma is the dealer γ-zero level under the Perfiliev convention
 	// (the spot where dealer net gamma crosses zero). nil when no
 	// crossing exists within the sweep window — inspect GammaSign in
 	// that case to learn whether the whole sweep is long-γ or short-γ.
-	ZeroGamma *float64 `json:"zero_gamma"`
+	ZeroGamma *float64 `json:"zero_gamma,omitempty"`
 	// GapPct is (SpotUnderlying − ZeroGamma) / ZeroGamma × 100. nil iff
 	// ZeroGamma is nil. Sign convention: positive = spot above γ-zero
 	// (dampening regime); negative = below γ-zero (amplifying regime).
-	GapPct *float64 `json:"gap_pct"`
+	GapPct *float64 `json:"gap_pct,omitempty"`
 	// GammaSign is "positive" or "negative" and is meaningful only when
 	// ZeroGamma is nil — it tells the renderer which side of zero the
 	// whole sweep landed on so the UI can say "all long-gamma" or "all
@@ -727,7 +769,7 @@ type GammaZeroComputed struct {
 	// Profile is the full (spot, gex) sweep, oldest first. 60 points
 	// over [0.85, 1.15] × SpotUnderlying. Renderers chart this as the
 	// gamma-exposure curve and visually confirm the zero crossing.
-	Profile []GammaProfilePoint `json:"profile"`
+	Profile []GammaProfilePoint `json:"profile,omitempty"`
 
 	// GammaTotalAbs is the sign-agnostic magnitude signal at
 	// SpotUnderlying: Σ |Γ| × OI × 100 × SpotUnderlying² × 0.01. In
@@ -764,30 +806,39 @@ type GammaZeroComputed struct {
 	// included in the aggregation (after 0DTE-post-settlement filtering
 	// and SPXW/SPX merging).
 	Expirations []string `json:"expirations"`
-	// LegCount is the number of option legs that successfully delivered
-	// OI + IV within the per-leg budget. Compare to the theoretical
-	// max from Params to spot-check whether the gateway throttled the
-	// run (e.g., 240 out of 480 means half the chain dropped — surface
-	// to the renderer as a confidence flag).
+	// LegCount is the number of option legs that contributed non-zero
+	// open-interest-weighted gamma exposure to the profile. It excludes
+	// priced legs whose IV landed but whose OI was missing/zero, because
+	// those legs cannot move dealer GEX.
 	LegCount int `json:"leg_count"`
-	// DerivedIVLegs counts how many of those legs used the BS-IV
+	// PricedLegCount is the number of option legs that delivered IV (or
+	// a BS-IV fallback) and were usable for skew fitting. It can exceed
+	// LegCount when IBKR supplied prices/IV but not open interest.
+	PricedLegCount int `json:"priced_leg_count,omitempty"`
+	// DerivedIVLegs counts how many priced legs used the BS-IV
 	// Newton-Raphson fallback because the gateway never pushed a
-	// model-computation tick. Pre-market this is typically equal to
-	// LegCount (the model engine is idle); during regular hours it
+	// model-computation tick. Pre-market this is often equal to
+	// PricedLegCount (the model engine is idle); during regular hours it
 	// should stay at 0. Renderers surface a "compute used N derived
-	// IVs" disclosure so the prior-session-price anchor is visible
-	// to a reader who's about to act on the γ-zero level.
+	// IVs" disclosure so readers can tell those IVs came from option
+	// quote/close inversion rather than live model ticks.
 	DerivedIVLegs int `json:"derived_iv_legs,omitempty"`
-	// Warnings is a structured list of non-fatal conditions: e.g.,
+	// Warnings is the daemon-internal list of non-fatal condition codes:
 	// "no_crossing_in_window", "spxw_partial_oi", "throttled",
-	// "all_iv_derived". Empty when the computation was clean.
-	// Renderers surface these as inline badges; the dashboard
-	// generator can fail loud or soft based on which codes appear.
+	// "all_iv_derived". Empty when the computation was clean. It is not
+	// serialized; wire consumers read WarningDetails instead.
 	// Runs whose leg coverage falls below the MinLegCoverageFraction
 	// persist threshold are surfaced as Status="error" with no
 	// Result, not as a warning — see gamma_zero_compute's coverage
 	// gate (mirror of breadth's MinCoverageFraction=0.80 pattern).
-	Warnings []string `json:"warnings,omitempty"`
+	Warnings []string `json:"-"`
+	// WarningDetails is the serialized warning surface: scoped,
+	// user-facing explanations plus optional impact/action text.
+	WarningDetails []GammaWarningDetail `json:"warning_details,omitempty"`
+	// Summary is a compact interpretation of the result. It is designed
+	// for CLI/MCP consumers that need to answer "what did the model
+	// identify?" before drilling into profile arrays.
+	Summary *GammaZeroSummary `json:"summary,omitempty"`
 
 	// ZeroGamma0DTE / Profile0DTE / GammaSign0DTE / LegCount0DTE are the
 	// same headline triple computed over legs with DTE == 0 only —
@@ -824,24 +875,6 @@ type GammaZeroComputed struct {
 	GammaSignTerm string              `json:"gamma_sign_term,omitempty"`
 	LegCountTerm  int                 `json:"leg_count_term,omitempty"`
 
-	// ZeroGammaNear / ProfileNear / GammaSignNear / NearLegCount /
-	// TermLegCount are the v2 two-bucket projection of the v3
-	// three-bucket split. ZeroGammaNear / ProfileNear / GammaSignNear /
-	// NearLegCount carry the merged ≤7-DTE bucket (= 0DTE ∪ 1-7);
-	// TermLegCount mirrors LegCountTerm. Surfaced for back-compat with
-	// renderers and on-disk caches written by v2 daemons.
-	//
-	// v2-COMPAT ALIASES (slated for removal post-1.0): new code should
-	// read ZeroGamma0DTE / ZeroGamma1to7 / ZeroGammaTerm and the
-	// matching profile / sign / leg-count fields. Not using the
-	// `Deprecated:` godoc form so existing CLI/MCP consumers don't trip
-	// staticcheck SA1019 ahead of the workstream-B/D migration.
-	ZeroGammaNear *float64            `json:"zero_gamma_near,omitempty"`
-	ProfileNear   []GammaProfilePoint `json:"profile_near,omitempty"`
-	GammaSignNear string              `json:"gamma_sign_near,omitempty"`
-	NearLegCount  int                 `json:"near_leg_count,omitempty"`
-	TermLegCount  int                 `json:"term_leg_count,omitempty"`
-
 	// MethodologyCitations is the short bibliography backing the
 	// methodology disclosure. Each entry is a single line of the form
 	// "Author (Year) — short claim". Surfaced on the result envelope so
@@ -854,7 +887,7 @@ type GammaZeroComputed struct {
 	// log-moneyness was fitted per expiry and σ was looked up at each
 	// (scenario spot, strike) pair. Empty when the curve fell back to
 	// sticky-IV everywhere (degenerate fits across every expiry); a
-	// per-expiry fallback shows up in Warnings as "skew_fallback:YYYYMMDD".
+	// per-expiry fallback shows up in warning_details.
 	SkewModel string `json:"skew_model,omitempty"`
 	// SkewFitQuality is one SkewFitInfo per expiry that fitted a curve
 	// successfully. Keyed by compact YYYYMMDD. Renderers can show fit
@@ -890,38 +923,14 @@ type GammaZeroComputed struct {
 	// clock; useful for tuning ExpiryCount / StrikeWidthPct.
 	DurationMS int64 `json:"duration_ms"`
 
-	// === SPY+SPX combined-view fields (added v0.31.x per design
-	// docs/design/gamma-spx-coverage.md §12.1) ===
-	//
 	// Scope is the discriminator for combined-vs-single-underlying
 	// payloads:
-	//   "spy"     — SPY-only (today's bit-for-bit behaviour and the
-	//               --only=spy regression target); PerIndex is nil
+	//   "spy"     — SPY-only; PerIndex is nil
 	//   "spx"     — SPX-only (--only=spx); PerIndex is nil
-	//   "spy+spx" — combined; the top-level headline fields
-	//               (SpotUnderlying, ZeroGamma, Profile, etc.) carry
-	//               the SPY-anchored view; PerIndex["SPY"] and
-	//               PerIndex["SPX"] each carry a fully-formed single-
-	//               underlying GammaZeroComputed for per-index detail.
-	// Empty when produced by a daemon that pre-dates this field — older
-	// payloads are equivalent to Scope="spy".
+	//   "spy+spx" — combined; price-level fields stay under PerIndex
+	//               because there is no meaningful combined price scale.
+	// Empty is treated as Scope="spy" by renderers.
 	Scope string `json:"scope,omitempty"`
-
-	// SpotAnchor names the underlying whose price/profile fields the
-	// top-level scalars carry under a combined-scope shallow copy. One of:
-	//
-	//	"SPY" — Scope == "spy+spx"; top-level SpotUnderlying / ZeroGamma /
-	//	        GammaSign / Profile and the per-bucket triples are the
-	//	        SPY-anchored half. Read PerIndex["SPY"] / PerIndex["SPX"]
-	//	        for per-underlying values when consumers need both books.
-	//	""    — Scope is single-underlying (spy-only or spx-only); the
-	//	        top-level scalars are authoritative.
-	//
-	// Added so wire consumers can detect the shallow-copy without
-	// having to remember the per-field intent map in combineGammaResults.
-	// See the doc-comment block above the struct for the full
-	// combined-and-correct vs SPY-anchored field split.
-	SpotAnchor string `json:"spot_anchor,omitempty"`
 
 	// PerIndex carries the per-underlying detail when Scope="spy+spx".
 	// Nil for single-underlying scopes. Keys are uppercased symbols
@@ -948,11 +957,11 @@ type GammaZeroComputed struct {
 	//   "agree:long-gamma"  — both indices' sweeps stay positive (dealer
 	//                         long-γ across the ±15% window, stabilizing).
 	//   "agree:short-gamma" — both stay negative (short-γ, amplifying).
-	//   "agree:flipping"    — both have a γ-zero crossing inside the
-	//                         window. The per-index ZeroGamma levels carry
-	//                         the precise prices.
+	//   "agree:transition-gamma" — both are within ±2% of their γ-zero
+	//                         crossings. The per-index ZeroGamma levels
+	//                         carry the precise prices.
 	//   "disagree"          — one index is long-γ, the other short-γ
-	//                         (or one's flipping while the other isn't).
+	//                         (or transition while the other isn't).
 	//                         The actionable signal: institutional SPX
 	//                         book and retail/ETF SPY book are positioned
 	//                         opposite, which the regime-call use case
@@ -1001,6 +1010,37 @@ type GammaZeroSPXResult struct {
 	RetryOfErrorSummary string     `json:"retry_of_error_summary,omitempty"`
 }
 
+// StripGammaProfiles removes chart-sized sweep arrays from a gamma result
+// while preserving headline levels, summaries, warning details, counts, and
+// top strikes. CLI JSON and MCP use this by default so agents do not receive
+// tens of kilobytes of points unless they explicitly ask for profiles.
+func StripGammaProfiles(r *GammaZeroSPXResult) {
+	if r == nil || r.Result == nil {
+		return
+	}
+	stripGammaComputedProfiles(r.Result)
+}
+
+func StripRegimeGammaProfiles(r *RegimeSnapshotResult) {
+	if r == nil {
+		return
+	}
+	StripGammaProfiles(&r.GammaZero.Envelope)
+}
+
+func stripGammaComputedProfiles(c *GammaZeroComputed) {
+	if c == nil {
+		return
+	}
+	c.Profile = nil
+	c.Profile0DTE = nil
+	c.Profile1to7 = nil
+	c.ProfileTerm = nil
+	for _, sub := range c.PerIndex {
+		stripGammaComputedProfiles(sub)
+	}
+}
+
 // RegimeIndicatorStatus is the high-level availability/freshness state
 // for one row of the regime snapshot. Renderers branch on it; the
 // daemon never derives green/yellow/red status from raw values (the
@@ -1041,7 +1081,7 @@ const (
 //   - "firm"     — direct gateway measurement
 //   - "estimate" — derived from historical bars
 //   - "proxy"    — modelled with methodology disclosure (caller's
-//     Method/Warnings document the assumptions)
+//     Method/warning_details document the assumptions)
 type Quality struct {
 	AsOf           time.Time `json:"as_of"`
 	FreshnessClass string    `json:"freshness_class"`
@@ -1188,7 +1228,7 @@ type RegimeUSDJPY struct {
 // RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
 // envelope embedded inline. Auto-kicked by regime.snapshot on first
 // call of an NY trading day; subsequent calls return the cached
-// result. Method token + warnings carry methodology disclosures.
+// result. Method token + warning_details carry methodology disclosures.
 type RegimeGammaZero struct {
 	Status        string             `json:"status"`
 	Envelope      GammaZeroSPXResult `json:"envelope"`
@@ -1200,23 +1240,23 @@ type RegimeGammaZero struct {
 	// notional summed over observed OI+IV).
 	ZeroGammaQuality     *Quality `json:"zero_gamma_quality,omitempty"`
 	GammaTotalAbsQuality *Quality `json:"gamma_total_abs_quality,omitempty"`
-	// HorizonAgreement names how the three horizon-bucketed γ-zero
-	// readings (0DTE, 1-7, term) relate. One of:
+	// HorizonAgreement names how a single-underlying envelope's three
+	// horizon-bucketed γ-zero readings (0DTE, 1-7, term) relate. Empty
+	// for combined SPY+SPX results, where horizon buckets live under
+	// per_index.SPY / per_index.SPX. One of:
 	//
-	//   - "all_above"             spot above every bucket's γ-zero AND
-	//                             every bucket has a crossing
-	//   - "all_below"             spot below every bucket's γ-zero AND
-	//                             every bucket has a crossing
-	//   - "diverge:0dte_vs_term"  0DTE and term γ-zeros sit on opposite
-	//                             sides of spot (highest-information
-	//                             case — short-fuse flow disagrees with
-	//                             monthly positioning)
+	//   - "all_long"             every usable bucket is long-γ
+	//   - "all_short"            every usable bucket is short-γ
+	//   - "all_transition"       every usable bucket is within ±2% of
+	//                            its γ-zero
+	//   - "diverge:0dte_vs_term"  0DTE and term buckets disagree
+	//                            (highest-information case — short-fuse
+	//                            flow disagrees with monthly positioning)
 	//   - "diverge:partial"       other mixed cases (1-7 alone disagrees,
-	//                             only two buckets have crossings and
-	//                             they disagree, etc.)
-	//   - "0dte_only" / "1to7_only" / "term_only" — only one bucket has
-	//                             a crossing
-	//   - ""                      no bucket has a crossing
+	//                            only two usable buckets disagree, etc.)
+	//   - "0dte_only" / "1to7_only" / "term_only" — only one bucket is
+	//                            usable
+	//   - ""                     no bucket has a usable signal
 	//
 	// The renderer annotates the row whenever the value starts with
 	// "diverge:" or ends in "_only" — those are the cases where the

@@ -85,6 +85,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 		if err := env.Conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &res); err != nil {
 			return fail(env, "regime: %v", err)
 		}
+		rpc.StripRegimeGammaProfiles(&res)
 		// Append to the JSONL log before rendering. If the write fails
 		// the user still sees the snapshot — log persistence is a
 		// side effect, not the primary goal. Stderr-equivalent warning
@@ -748,6 +749,34 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
 		// row will carry "· modelled" regardless of ranking.
 		row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
+		if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+			row.value = formatRegimeAgreement(c)
+			if c.GammaTotalAbs > 0 {
+				row.value += fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
+			}
+			row.band = gammaCombinedRegimeBand(c)
+			switch row.band {
+			case bandGreen:
+				row.reason = "SPY/SPX both stabilizing"
+			case bandRed:
+				if c.RegimeAgreement == "agree:short-gamma" {
+					row.reason = "SPY/SPX both amplifying"
+				} else if c.RegimeAgreement == "disagree" {
+					row.reason = "SPY/SPX disagree; dominant gamma exposure is amplifying"
+				} else {
+					row.reason = "dominant gamma exposure is amplifying"
+				}
+			case bandYellow:
+				if c.RegimeAgreement == "disagree" {
+					row.reason = "SPY/SPX gamma regimes disagree"
+				} else {
+					row.reason = "mixed per-index gamma bands"
+				}
+			default:
+				row.reason = "no usable per-index gamma profile"
+			}
+			return row
+		}
 		// Three rendering paths:
 		//
 		//  1. A real crossing exists in the swept window → band on the
@@ -794,18 +823,7 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		if c.GammaTotalAbs > 0 {
 			mag = fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
 		}
-		// Combined-scope envelopes carry a SPY-anchored shallow copy
-		// of SpotUnderlying — the same SPY price the header line above
-		// the table already shows. Dropping the redundant "spot X.XX"
-		// prefix on combined avoids the drift where the row label
-		// reads "γ-zero (SPY+SPX)" but the value cell prints a
-		// SPY-only spot. Single-underlying envelopes keep the prefix
-		// because the spot there IS the regime's anchor and the
-		// header line shows SPY for SPX-only too.
 		spotPrefix := fmt.Sprintf("spot %.2f · ", c.SpotUnderlying)
-		if c.SpotAnchor == "SPY" {
-			spotPrefix = ""
-		}
 		switch c.GammaSign {
 		case "positive":
 			row.value = fmt.Sprintf("%slong-γ%s", spotPrefix, mag)
@@ -816,15 +834,8 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			row.band = bandRed
 			row.reason = "dealer short-γ · amplifying"
 		default:
-			// "no_data" or empty: genuine no-signal case. On combined
-			// scope the value cell has nothing useful to say (the
-			// SPY-anchored spot is in the header line); fall back to
-			// an em-dash.
-			if c.SpotAnchor == "SPY" {
-				row.value = "—"
-			} else {
-				row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
-			}
+			// "no_data" or empty: genuine no-signal case.
+			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
 			row.band = bandUnranked
 			row.reason = "sweep produced no signed profile"
 		}
@@ -833,6 +844,82 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 	row.value = "—"
 	row.stateNote = string(r.Status)
 	return row
+}
+
+func gammaCombinedRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
+	type weightedBand struct {
+		band   regimeBand
+		weight float64
+	}
+	var bands []weightedBand
+	for _, key := range []string{"SPY", "SPX"} {
+		sub := c.PerIndex[key]
+		if sub == nil {
+			continue
+		}
+		b := gammaSingleRegimeBand(sub)
+		if b != bandUnranked {
+			bands = append(bands, weightedBand{band: b, weight: gammaPerIndexWeight(key, sub)})
+		}
+	}
+	if len(bands) == 0 {
+		return bandUnranked
+	}
+	first := bands[0].band
+	total := 0.0
+	redWeight := 0.0
+	for _, b := range bands[1:] {
+		if b.band != first {
+			first = bandUnranked
+		}
+	}
+	for _, b := range bands {
+		total += b.weight
+		if b.band == bandRed {
+			redWeight += b.weight
+		}
+	}
+	if first != bandUnranked {
+		return first
+	}
+	if total > 0 && redWeight/total >= 0.5 {
+		return bandRed
+	}
+	return bandYellow
+}
+
+func gammaPerIndexWeight(key string, c *rpc.GammaZeroComputed) float64 {
+	if c != nil && c.GammaTotalAbs > 0 {
+		return c.GammaTotalAbs
+	}
+	if key == "SPX" {
+		return 100
+	}
+	return 1
+}
+
+func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
+	if c == nil {
+		return bandUnranked
+	}
+	if c.GapPct != nil {
+		switch {
+		case *c.GapPct > gammaGapYellow:
+			return bandGreen
+		case *c.GapPct >= -gammaGapYellow:
+			return bandYellow
+		default:
+			return bandRed
+		}
+	}
+	switch c.GammaSign {
+	case "positive":
+		return bandGreen
+	case "negative":
+		return bandRed
+	default:
+		return bandUnranked
+	}
 }
 
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
@@ -952,7 +1039,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		if e.name == gammaRowLabel(r.GammaZero) {
 			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
 				fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf(
-					"compute used %d/%d legs with BS-IV from prior-session last price (model engine idle off-hours)",
+					"compute used %d/%d legs with BS-IV from option quote/close fallback (model engine idle)",
 					res.DerivedIVLegs, res.LegCount)))
 			}
 		}
@@ -987,40 +1074,52 @@ func ifNonEmpty(s, fallback string) string {
 
 // horizonAgreementNote returns a short parenthetical for the gamma row
 // when the horizon-bucketed γ-zero readings disagree with the combined
-// headline. v3 enum (8 values): "all_above" / "all_below" agree with
-// the combined reading and don't need a note; the renderer stays
-// silent. "diverge:0dte_vs_term" is the high-information case — 0DTE
-// and term γ-zeros sit on opposite sides of spot, which the combined
-// headline averages over.
+// headline. v4 enum: "all_long" / "all_short" / "all_transition"
+// agree with the combined reading and don't need a note; the renderer
+// stays silent. "diverge:0dte_vs_term" is the high-information case —
+// 0DTE and term γ regimes disagree, which the combined headline can
+// average over.
 func horizonAgreementNote(agreement string, c *rpc.GammaZeroComputed) string {
 	if c == nil {
 		return ""
 	}
-	fmt0 := func(p *float64) string {
+	fmtBucket := func(p *float64, sign string) string {
 		if p == nil {
-			return "—"
+			switch sign {
+			case "positive":
+				return "long"
+			case "negative":
+				return "short"
+			default:
+				return "—"
+			}
 		}
 		return fmt.Sprintf("%.0f", *p)
 	}
 	switch agreement {
 	case "diverge:0dte_vs_term":
 		return fmt.Sprintf("(0DTE %s · term %s · diverge)",
-			fmt0(c.ZeroGamma0DTE), fmt0(c.ZeroGammaTerm))
+			fmtBucket(c.ZeroGamma0DTE, c.GammaSign0DTE), fmtBucket(c.ZeroGammaTerm, c.GammaSignTerm))
 	case "diverge:partial":
 		return fmt.Sprintf("(0DTE %s · 1-7 %s · term %s · diverge)",
-			fmt0(c.ZeroGamma0DTE), fmt0(c.ZeroGamma1to7), fmt0(c.ZeroGammaTerm))
+			fmtBucket(c.ZeroGamma0DTE, c.GammaSign0DTE),
+			fmtBucket(c.ZeroGamma1to7, c.GammaSign1to7),
+			fmtBucket(c.ZeroGammaTerm, c.GammaSignTerm))
 	case "0dte_only":
 		if c.ZeroGamma0DTE != nil {
 			return fmt.Sprintf("(0DTE %.0f only · no 1-7 or term crossing)", *c.ZeroGamma0DTE)
 		}
+		return fmt.Sprintf("(0DTE %s only · no 1-7 or term signal)", fmtBucket(nil, c.GammaSign0DTE))
 	case "1to7_only":
 		if c.ZeroGamma1to7 != nil {
 			return fmt.Sprintf("(1-7 %.0f only · no 0DTE or term crossing)", *c.ZeroGamma1to7)
 		}
+		return fmt.Sprintf("(1-7 %s only · no 0DTE or term signal)", fmtBucket(nil, c.GammaSign1to7))
 	case "term_only":
 		if c.ZeroGammaTerm != nil {
 			return fmt.Sprintf("(term %.0f only · no near crossing)", *c.ZeroGammaTerm)
 		}
+		return fmt.Sprintf("(term %s only · no near signal)", fmtBucket(nil, c.GammaSignTerm))
 	}
 	return ""
 }

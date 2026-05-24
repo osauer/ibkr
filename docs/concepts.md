@@ -33,14 +33,14 @@ Dealer zero-gamma is the spot price at which the aggregate options-dealer book s
 
 `ibkr_gamma` and the regime row's indicator 4 both compute from IBKR's option chains using the Perfiliev convention (dealers long calls, short puts), summed across the 6 nearest non-0DTE-post-settlement expirations at ±10% strike width. Two key methodology choices:
 
-1. **Sticky-moneyness skew** (`perfiliev-bs-sweep-v2-stickymoneyness`). The spot sweep reprices each leg's IV at the scenario-spot's *moneyness* via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Without this, the put-side skew biases zero-gamma estimates upward by 5–10%.
+1. **Sticky-moneyness skew** (`bs-gamma-profile-v3-stickymoneyness-0dte-split`). The spot sweep reprices each leg's IV at the scenario-spot's *moneyness* via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Without this, the put-side skew biases zero-gamma estimates upward by 5–10%.
 
-2. **Combined SPY+SPX with regime-agreement classifier**. SPY (continuous ETF, retail flow) and SPX (index options, institutional flow) often agree on regime direction, but the actionable signal is **disagreement** — one book stabilising while the other amplifies. The classifier surfaces `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:flipping"`, or `"disagree"` directly so consumers don't have to derive it.
+2. **Combined SPY+SPX with regime-agreement classifier**. SPY (continuous ETF, retail flow) and SPX (index options, institutional flow) often agree on regime direction, but the actionable signal is **disagreement** — one book stabilising while the other amplifies. The classifier surfaces `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:transition-gamma"`, or `"disagree"` directly so consumers don't have to derive it. A crossing is long/transition/short based on spot's distance from the identified γ-zero, not merely the existence of a crossing.
 
 Two complementary outputs on every result:
 
 - **Signed zero-gamma**: the price level itself, plus a `gamma_sign` ("positive"/"negative") describing the dealer book's posture at current spot. The Perfiliev sign convention assumes the standard "dealers long calls, short puts" book; in regimes dominated by covered-call ETF flow or autocall hedging the sign can invert. Treat as a regime hint, not gospel.
-- **Sign-agnostic magnitude**: `gamma_total_abs` (sum of |Γ|·OI in notional terms) and `top_strikes` (the largest concentrations regardless of sign). Methodology-agnostic — useful when the signed reading is suspect.
+- **Sign-agnostic magnitude**: `gamma_total_abs` (sum of |Γ|·OI in notional terms) and `top_strikes` (the largest concentrations regardless of sign). Sign-convention agnostic — useful when the signed reading is suspect.
 
 Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see `status: "ready"` instantly. The cache persists across daemon restarts.
 

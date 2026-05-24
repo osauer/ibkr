@@ -402,18 +402,18 @@ changing the headline contract.
   criterion:** if four-week sign-agreement vs SpotGamma's Friday
   recap drops below the v1 baseline, revert to the prior recipe.
 
-- **Near vs term split.** The sweep now produces three γ-zero
-  readings: the combined headline plus separate near (`DTE ≤ 7`) and
-  term (`DTE > 7`) buckets. 0DTE through end-of-week vs monthly-OPEX
-  dynamics behave very differently; aggregating them hides the
-  highest-information case where the two readings disagree. The
-  regime row's `horizon_agreement` field names the relation
-  (`both_above` / `both_below` / `diverge` / `near_only` / `term_only`);
-  the renderer annotates the row when the two horizons would otherwise
-  mask each other. Wire fields: `zero_gamma_near`, `profile_near`,
-  `gamma_sign_near`, `near_leg_count`, plus the symmetric term
-  fields. Buckets with zero legs surface as nil + a `near_no_legs` /
-  `term_no_legs` warning.
+- **0DTE / weekly / term split.** The sweep now produces separate
+  per-index γ-zero readings for 0DTE (`DTE == 0`), 1-7 DTE, and term
+  (`DTE > 7`) buckets. 0DTE, end-of-week, and monthly-OPEX dynamics
+  behave differently; aggregating them hides the highest-information
+  case where the readings disagree. The regime row's
+  `horizon_agreement` field names the relation for single-underlying
+  gamma envelopes; in the default SPY+SPX view the horizon buckets live
+  under each `per_index` result because there is no combined price
+  scale. Wire fields: `zero_gamma_0dte`, `zero_gamma_1to7`,
+  `zero_gamma_term`, the matching `profile_*` and `gamma_sign_*`
+  fields, and `leg_count_*`. Buckets with zero usable GEX legs surface
+  as nil plus scoped `warning_details`.
 
 - **Per-indicator streak counter.** Every regime row now carries a
   `streak: {band, sessions, since}` field counting how many

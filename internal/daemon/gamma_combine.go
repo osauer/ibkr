@@ -21,40 +21,21 @@ import (
 //     each fully formed with their own ZeroGamma / GapPct / Profile.
 //     This is the load-bearing decision surface for the user.
 //   - RegimeAgreement: classifies whether SPY and SPX agree on the
-//     gamma regime (both long-γ / both short-γ / both flipping) or
-//     disagree (one stabilising, one amplifying). The disagree case
-//     is the actionable signal — it flags institutional vs retail/ETF
-//     positioning divergence that the per-index breakdown otherwise
-//     buries.
+//     gamma regime (long-γ / short-γ / transition) or disagree
+//     (one stabilising, one amplifying).
 //   - GammaTotalAbs: the sum across both indices, framed as "total
 //     dealer-book size" — a diagnostic, not a regime headline.
 //   - TopStrikes: merged + sorted + top-K. With the 100× per-contract
 //     scaling SPX rows will dominate; the renderer's INDEX column
 //     makes the imbalance visible rather than hidden.
-//   - Profile / ProfileNear / ProfileTerm: per-bucket sum of GEX on
-//     the SHARED spot grid via combineProfileBuckets. SPY (~540) and
-//     SPX (~5400) sit on different absolute spot scales today so the
-//     helper bails with a `combined_profile_grid_mismatch` warning
-//     and leaves the field nil — consumers needing a real curve must
-//     recurse on PerIndex. The summed path exists for future
-//     same-grid combinations.
-//   - Expirations, LegCount, DerivedIVLegs: unioned/summed for the
-//     diagnostic footer.
-//   - Warnings: unioned across spy + spx then deduped; the profile
-//     mismatch warnings noted above land here. Entitlement-graceful
-//     path may append "spx_unavailable:<reason>" before we get here
-//     (in which case this function never runs and computeGammaCombined
-//     returns the SPY-only result directly).
+//   - Expirations, LegCount, PricedLegCount, DerivedIVLegs: unioned /
+//     summed for the diagnostic footer.
+//   - Warnings: unioned across spy + spx then deduped. They hydrate into
+//     WarningDetails before the result leaves the cache.
 //
-// SPY-only fields that come along by shallow copy and are NOT
-// re-derived for the combined headline (SpotUnderlying, SpotAt,
-// ZeroGamma, GapPct, GammaSign*, SweepLow/HighAbs, Zero/Sign*Near,
-// Near/TermLegCount, Zero/Sign*Term, SkewModel, SkewFitQuality,
-// Params, Method, PartialClasses) are documented in the field-by-
-// field intent map immediately above the shallow copy below.
-// Renderers reading the combined envelope should pull these from
-// PerIndex["SPY"] / PerIndex["SPX"] rather than trusting the
-// top-level scalars.
+// What it DOES NOT surface: a top-level spot, gamma sign, or zero-gamma
+// price. SPY and SPX live on different price scales, so those fields are
+// per-index only in combined scope.
 func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 	if spy == nil && spx == nil {
 		return nil
@@ -86,71 +67,57 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		topConcPct = allTop[0].AbsGEX / combinedAbs * 100
 	}
 
-	// Shallow-copy SPY onto out, then override the combined-specific
-	// fields below. Field-by-field intent map for any future reader:
-	//
-	//   COMBINED (overridden below — safe to read off `out`):
-	//     Scope, GammaTotalAbs, TopStrikes, TopConcentrationPct,
-	//     LegCount, DerivedIVLegs, Expirations, Warnings, Source,
-	//     RegimeAgreement, PerIndex, DurationMS, AsOf,
-	//     Profile, ProfileNear, ProfileTerm.
-	//
-	//   SPY-ONLY (carried from `out := *spy` shallow copy — DO NOT
-	//   consume these as "combined" values; they are the SPY-half
-	//   reading and a future post-1.0 CombinedGammaZeroComputed type
-	//   will hide them entirely from this shape):
-	//     SpotUnderlying, SpotAt, ZeroGamma, GapPct, GammaSign,
-	//     SweepLowAbs, SweepHighAbs,
-	//     ZeroGammaNear, GammaSignNear, NearLegCount,
-	//     ZeroGammaTerm, GammaSignTerm, TermLegCount,
-	//     SkewModel, SkewFitQuality, Params, Method, PartialClasses.
-	//
-	// Renderers reading the combined headline should pull the
-	// per-index numbers from PerIndex["SPY"] / PerIndex["SPX"]
-	// instead of trusting SpotUnderlying / ZeroGamma / GammaSign on
-	// the envelope.
-	out := *spy
-	out.Scope = rpc.GammaZeroScopeCombined
-	// Mark the shallow-copy on the wire so consumers can detect that
-	// SpotUnderlying / ZeroGamma / GammaSign / Profile / the per-bucket
-	// triples are SPY-anchored rather than truly combined. See
-	// rpc.GammaZeroComputed doc-comment for the full field-by-field map
-	// and consumer guidance.
-	out.SpotAnchor = "SPY"
-	out.GammaTotalAbs = combinedAbs
-	out.TopStrikes = allTop
-	out.TopConcentrationPct = topConcPct
-	out.LegCount = spy.LegCount + spx.LegCount
-	out.DerivedIVLegs = spy.DerivedIVLegs + spx.DerivedIVLegs
-	out.Expirations = dedupeStrings(append(append([]string{}, spy.Expirations...), spx.Expirations...))
+	asOf := spy.AsOf
+	if spx.AsOf.After(asOf) {
+		asOf = spx.AsOf
+	}
+	method := spy.Method
+	if method == "" {
+		method = spx.Method
+	}
+	convention := spy.GammaTotalAbsConvention
+	if convention == "" {
+		convention = spx.GammaTotalAbsConvention
+	}
+	citations := spy.MethodologyCitations
+	if len(citations) == 0 {
+		citations = spx.MethodologyCitations
+	}
+	params := spy.Params
+
+	out := &rpc.GammaZeroComputed{
+		Scope:                   rpc.GammaZeroScopeCombined,
+		GammaTotalAbs:           combinedAbs,
+		GammaTotalAbsConvention: convention,
+		TopStrikes:              allTop,
+		TopConcentrationPct:     topConcPct,
+		LegCount:                spy.LegCount + spx.LegCount,
+		PricedLegCount:          spy.PricedLegCount + spx.PricedLegCount,
+		DerivedIVLegs:           spy.DerivedIVLegs + spx.DerivedIVLegs,
+		Expirations:             dedupeStrings(append(append([]string{}, spy.Expirations...), spx.Expirations...)),
+		Params:                  params,
+		Source:                  "computed from IBKR SPY+SPX option chains",
+		Method:                  method,
+		MethodologyCitations:    citations,
+		AsOf:                    asOf,
+		DurationMS:              spy.DurationMS + spx.DurationMS,
+		RegimeAgreement:         classifyRegimeAgreement(spy, spx),
+		PerIndex: map[string]*rpc.GammaZeroComputed{
+			"SPY": spy,
+			"SPX": spx,
+		},
+	}
 	sort.Strings(out.Expirations)
 
-	// Profile combination: replace the shallow-copied SPY-half
-	// profiles with a per-bucket sum across the shared spot grid.
-	// SPY (spot ~540) and SPX (spot ~5400) sit on radically different
-	// absolute spot scales, so in practice the grids almost always
-	// differ — combineProfileBuckets bails with a warning in that
-	// case and returns nil, which is the honest answer (a renderer
-	// that needs a per-index profile can recurse on PerIndex). The
-	// near/term profiles get the same treatment.
-	combinedWarnings := append([]string{}, spy.Warnings...)
-	combinedWarnings = append(combinedWarnings, spx.Warnings...)
-	out.Profile, combinedWarnings = combineProfileBuckets(spy.Profile, spx.Profile, "combined_profile_grid_mismatch", combinedWarnings)
-	out.ProfileNear, combinedWarnings = combineProfileBuckets(spy.ProfileNear, spx.ProfileNear, "combined_profile_near_grid_mismatch", combinedWarnings)
-	out.ProfileTerm, combinedWarnings = combineProfileBuckets(spy.ProfileTerm, spx.ProfileTerm, "combined_profile_term_grid_mismatch", combinedWarnings)
-	out.Warnings = dedupeStrings(combinedWarnings)
-
-	out.Source = "computed from IBKR SPY+SPX option chains"
-	out.RegimeAgreement = classifyRegimeAgreement(spy, spx)
-	out.PerIndex = map[string]*rpc.GammaZeroComputed{
-		"SPY": spy,
-		"SPX": spx,
+	// A combined SPY+SPX gamma-zero level is intentionally not
+	// interpolated: the two underlyings live on different spot scales.
+	// Per-index profiles remain available under PerIndex.
+	if len(spy.Profile) > 0 && len(spx.Profile) > 0 && sameProfileGrid(spy.Profile, spx.Profile) {
+		var combinedWarnings []string
+		out.Profile, combinedWarnings = combineProfileBuckets(spy.Profile, spx.Profile, "", nil)
+		out.Warnings = dedupeStrings(append(out.Warnings, combinedWarnings...))
 	}
-	out.DurationMS = spy.DurationMS + spx.DurationMS
-	if spx.AsOf.After(spy.AsOf) {
-		out.AsOf = spx.AsOf
-	}
-	return &out
+	return out
 }
 
 // combineProfileBuckets sums the GEX values of two sweep profiles
@@ -174,10 +141,16 @@ func combineProfileBuckets(a, b []rpc.GammaProfilePoint, mismatchWarn string, wa
 		return nil, warnings
 	}
 	if len(a) != len(b) {
+		if mismatchWarn == "" {
+			return nil, warnings
+		}
 		return nil, append(warnings, mismatchWarn)
 	}
 	for i := range a {
 		if a[i].Spot != b[i].Spot {
+			if mismatchWarn == "" {
+				return nil, warnings
+			}
 			return nil, append(warnings, mismatchWarn)
 		}
 	}
@@ -188,18 +161,30 @@ func combineProfileBuckets(a, b []rpc.GammaProfilePoint, mismatchWarn string, wa
 	return out, warnings
 }
 
+func sameProfileGrid(a, b []rpc.GammaProfilePoint) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Spot != b[i].Spot {
+			return false
+		}
+	}
+	return true
+}
+
 // classifyRegimeAgreement labels the SPY/SPX regime relationship by
 // comparing per-index γ-zero sweep outcomes. Returns one of
-// "agree:long-gamma", "agree:short-gamma", "agree:flipping",
+// "agree:long-gamma", "agree:short-gamma", "agree:transition-gamma",
 // "disagree", or "" (unknown — at least one bucket has no_data).
 //
-// The classification reads GammaSign + ZeroGamma rather than fetching
-// any external state:
+// The classification reads GammaSign plus the zero-gamma gap rather
+// than fetching any external state:
 //
-//	per-index regime ∈ { long-gamma, short-gamma, flipping, no-data }
+//	per-index regime ∈ { long-gamma, short-gamma, transition-gamma, no-data }
 //	  long-gamma:  GammaSign == "positive"    (whole sweep > 0)
 //	  short-gamma: GammaSign == "negative"    (whole sweep < 0)
-//	  flipping:    ZeroGamma != nil           (crossing inside window)
+//	  transition:  ZeroGamma != nil and spot is within ±2% of it
 //	  no-data:     GammaSign == "no_data" or anything else
 //
 // disagree fires whenever the two indices land in different non-no_data
@@ -225,7 +210,7 @@ func perIndexRegime(c *rpc.GammaZeroComputed) string {
 		return ""
 	}
 	if c.ZeroGamma != nil {
-		return "flipping"
+		return strings.ReplaceAll(gammaRegimeFromGap(c.GapPct), "_", "-")
 	}
 	switch c.GammaSign {
 	case "positive":
@@ -284,14 +269,14 @@ func computeGammaCombined(
 			s.logger.Warnf("gamma.combine.spx_unavailable err=%v (degrading to SPY-only)", spxErr)
 		}
 		spyRes.Warnings = append(spyRes.Warnings, "spx_unavailable:"+summarizeSPXFailure(spxErr))
-		return spyRes, nil
+		return hydrateGammaComputed(spyRes), nil
 	}
 
 	combined := combineGammaResults(spyRes, spxRes)
 	if combined == nil {
 		return nil, fmt.Errorf("zero-gamma: combine produced nil result")
 	}
-	return combined, nil
+	return hydrateGammaComputed(combined), nil
 }
 
 // summarizeSPXFailure turns an SPX-phase error into the short token
@@ -305,6 +290,7 @@ func computeGammaCombined(
 //	354       → entitlement gap (most common)
 //	200       → contract not found / SPX chain restricted
 //	timeout   → 30s early-abort with no legs
+//	zero_magnitude → legs landed but all gamma magnitude was zero
 //	<other>   → truncated error message, ≤ 60 chars
 func summarizeSPXFailure(err error) string {
 	if err == nil {
@@ -320,6 +306,8 @@ func summarizeSPXFailure(err error) string {
 		return "no_data"
 	case strings.Contains(msg, "throttled"):
 		return "throttled"
+	case strings.Contains(msg, "no usable GEX legs"), strings.Contains(msg, "zero gamma_total_abs/profile/top_strikes"):
+		return "zero_magnitude"
 	}
 	// Trim leading "zero-gamma: " jargon and cap length.
 	msg = strings.TrimPrefix(msg, "zero-gamma: ")

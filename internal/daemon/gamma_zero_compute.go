@@ -817,21 +817,6 @@ func computeGammaZeroFor(
 	// Each bucket runs its own sweep; the regime row uses bucket
 	// agreement/divergence to surface horizon signal.
 	var zeroDTELegs, oneToSevenLegs, termLegs []legData
-	for _, l := range legs {
-		switch {
-		case l.dte < zeroDTECutoffYears:
-			zeroDTELegs = append(zeroDTELegs, l)
-		case l.dte <= nearDTECutoffYears:
-			oneToSevenLegs = append(oneToSevenLegs, l)
-		default:
-			termLegs = append(termLegs, l)
-		}
-	}
-
-	profile := sweepProfile(legs, spot, params.SweepRangePct, skewByExpiry)
-	profile0DTE := sweepProfile(zeroDTELegs, spot, params.SweepRangePct, skewByExpiry)
-	profile1to7 := sweepProfile(oneToSevenLegs, spot, params.SweepRangePct, skewByExpiry)
-	profileTerm := sweepProfile(termLegs, spot, params.SweepRangePct, skewByExpiry)
 	// At-spot aggregate: Σ |Γ_i| × OI_i × multiplier × spot² over all
 	// legs, sign-agnostic by construction. v3 fix (B1): derive the
 	// per-leg gamma via Black-Scholes from the captured IV at snapshot
@@ -845,18 +830,30 @@ func computeGammaZeroFor(
 	// landed at $0. Recomputing via bsGamma matches the sweep's recipe
 	// at the snapshot point (internally consistent) and is non-zero
 	// whenever IV > 0 — which is the OK-leg invariant.
-	gammaTotalAbs := 0.0
-	for _, l := range legs {
-		γ := bsGamma(spot, l.strike, l.dte, l.iv, 0, 0)
-		gammaTotalAbs += absGEX(γ, float64(l.oi), 100, spot)
-	}
 	// Carry the snapshot-recomputed gamma onto each leg so
 	// rankTopStrikesByAbsGEX picks up the same value; otherwise the
 	// top-strikes table and the magnitude row would diverge for the
 	// same race-affected legs.
-	for i := range legs {
-		legs[i].gammaAtSnapshot = bsGamma(spot, legs[i].strike, legs[i].dte, legs[i].iv, 0, 0)
+	gexLegs, gammaTotalAbs := prepareGEXLegs(legs, spot)
+	if len(gexLegs) == 0 {
+		return nil, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma", len(legs))
 	}
+
+	for _, l := range gexLegs {
+		switch {
+		case l.dte < zeroDTECutoffYears:
+			zeroDTELegs = append(zeroDTELegs, l)
+		case l.dte <= nearDTECutoffYears:
+			oneToSevenLegs = append(oneToSevenLegs, l)
+		default:
+			termLegs = append(termLegs, l)
+		}
+	}
+
+	profile := sweepProfile(gexLegs, spot, params.SweepRangePct, skewByExpiry)
+	profile0DTE := sweepProfile(zeroDTELegs, spot, params.SweepRangePct, skewByExpiry)
+	profile1to7 := sweepProfile(oneToSevenLegs, spot, params.SweepRangePct, skewByExpiry)
+	profileTerm := sweepProfile(termLegs, spot, params.SweepRangePct, skewByExpiry)
 	progress.Store(90)
 
 	// 8. Zero crossings: combined + 0DTE + 1-7 + term.
@@ -871,7 +868,7 @@ func computeGammaZeroFor(
 	zgTerm, signTerm := findZeroCrossing(profileTerm)
 
 	// 9. Top strikes by magnitude.
-	topStrikes := rankTopStrikesByAbsGEX(legs, spot, topStrikesK, sym)
+	topStrikes := rankTopStrikesByAbsGEX(gexLegs, spot, topStrikesK, sym)
 
 	// Coverage gate. A compute whose successful-leg fraction falls
 	// below MinLegCoverageFraction is surfaced as an error so the
@@ -890,6 +887,9 @@ func computeGammaZeroFor(
 	var warnings []string
 	if throttledAbort.Load() {
 		warnings = append(warnings, "throttled")
+	}
+	if len(gexLegs) < len(legs) {
+		warnings = append(warnings, "oi_missing")
 	}
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")
@@ -947,22 +947,6 @@ func computeGammaZeroFor(
 		topConcentrationPct = topStrikes[0].AbsGEX / gammaTotalAbs * 100
 	}
 
-	// Back-compat aliases for v2 consumers: ZeroGammaNear / ProfileNear /
-	// GammaSignNear / NearLegCount carry the merged ≤7-DTE bucket
-	// (0DTE ∪ 1-7) so renderers/caches written against v2 keep
-	// rendering a meaningful "near" headline. Sweep over the merged
-	// leg set so the crossing is computed on the same population a v2
-	// daemon would have produced — not derived from the two child
-	// crossings, which can disagree on whether a crossing exists.
-	mergedNearLegs := make([]legData, 0, len(zeroDTELegs)+len(oneToSevenLegs))
-	mergedNearLegs = append(mergedNearLegs, zeroDTELegs...)
-	mergedNearLegs = append(mergedNearLegs, oneToSevenLegs...)
-	profileNearDeprecated := sweepProfile(mergedNearLegs, spot, params.SweepRangePct, skewByExpiry)
-	zgNearDeprecated, signNearDeprecated := findZeroCrossing(profileNearDeprecated)
-	if len(mergedNearLegs) == 0 {
-		signNearDeprecated = "no_data"
-	}
-
 	res := &rpc.GammaZeroComputed{
 		SpotUnderlying:          spot,
 		SpotAt:                  spotAt,
@@ -982,11 +966,6 @@ func computeGammaZeroFor(
 		ProfileTerm:             profileTerm,
 		GammaSignTerm:           signTerm,
 		LegCountTerm:            len(termLegs),
-		ZeroGammaNear:           zgNearDeprecated,
-		ProfileNear:             profileNearDeprecated,
-		GammaSignNear:           signNearDeprecated,
-		NearLegCount:            len(mergedNearLegs),
-		TermLegCount:            len(termLegs),
 		SkewModel:               skewModel,
 		SkewFitQuality:          skewFitQuality,
 		GammaTotalAbs:           gammaTotalAbs,
@@ -996,7 +975,8 @@ func computeGammaZeroFor(
 		SweepLowAbs:             spot * (1 - params.SweepRangePct),
 		SweepHighAbs:            spot * (1 + params.SweepRangePct),
 		Expirations:             pickedDatesFromPicked(picked),
-		LegCount:                len(legs),
+		LegCount:                len(gexLegs),
+		PricedLegCount:          len(legs),
 		DerivedIVLegs:           derivedCount,
 		Warnings:                warnings,
 		Params:                  params,
@@ -1012,10 +992,13 @@ func computeGammaZeroFor(
 	if zg != nil {
 		zeroGammaStr = fmt.Sprintf("%.2f", *zg)
 	}
-	log.Infof("gamma.done legs=%d/%d derived_iv=%d spot=%.2f zero_gamma=%s sign=%s elapsed=%s",
-		len(legs), len(jobs), derivedCount, spot, zeroGammaStr, gammaSign,
+	log.Infof("gamma.done gex_legs=%d priced_legs=%d/%d derived_iv=%d spot=%.2f zero_gamma=%s sign=%s elapsed=%s",
+		len(gexLegs), len(legs), len(jobs), derivedCount, spot, zeroGammaStr, gammaSign,
 		time.Since(startWall).Round(time.Millisecond))
-	return res, nil
+	if err := validateGammaComputed(res); err != nil {
+		return nil, err
+	}
+	return hydrateGammaComputed(res), nil
 }
 
 // buildSkewCurves groups legs by expiry, fits a quadratic
@@ -1549,4 +1532,19 @@ func rankTopStrikesByAbsGEX(legs []legData, spot float64, k int, underlying stri
 		out[i] = r.row
 	}
 	return out
+}
+
+func prepareGEXLegs(legs []legData, spot float64) ([]legData, float64) {
+	gexLegs := make([]legData, 0, len(legs))
+	total := 0.0
+	for _, l := range legs {
+		l.gammaAtSnapshot = bsGamma(spot, l.strike, l.dte, l.iv, 0, 0)
+		v := absGEX(l.gammaAtSnapshot, float64(l.oi), 100, spot)
+		if v == 0 {
+			continue
+		}
+		total += v
+		gexLegs = append(gexLegs, l)
+	}
+	return gexLegs, total
 }

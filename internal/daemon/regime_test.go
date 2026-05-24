@@ -1082,8 +1082,8 @@ func TestClassifyHorizonAgreement_ThreeBucketSplit(t *testing.T) {
 		{"0dte_only", ptr(4900), nil, nil, "0dte_only"},
 		{"1to7_only", nil, ptr(4900), nil, "1to7_only"},
 		{"term_only", nil, nil, ptr(4900), "term_only"},
-		{"all_above", ptr(4800), ptr(4850), ptr(4900), "all_above"},
-		{"all_below", ptr(5100), ptr(5150), ptr(5200), "all_below"},
+		{"all_long", ptr(4800), ptr(4850), ptr(4900), "all_long"},
+		{"all_short", ptr(5200), ptr(5250), ptr(5300), "all_short"},
 		{"diverge_0dte_vs_term", ptr(4900), ptr(4950), ptr(5100), "diverge:0dte_vs_term"},
 		{"diverge_term_vs_0dte", ptr(5100), ptr(5050), ptr(4900), "diverge:0dte_vs_term"},
 		{"diverge_partial_1to7_alone_disagrees", ptr(4900), ptr(5100), ptr(4900), "diverge:partial"},
@@ -1102,5 +1102,16 @@ func TestClassifyHorizonAgreement_ThreeBucketSplit(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClassifyHorizonAgreement_SignOnlyBucketsCanDiverge(t *testing.T) {
+	c := &rpc.GammaZeroComputed{
+		SpotUnderlying: 5000,
+		GammaSign0DTE:  "negative",
+		GammaSignTerm:  "positive",
+	}
+	if got := classifyHorizonAgreement(c); got != "diverge:0dte_vs_term" {
+		t.Errorf("got %q, want diverge:0dte_vs_term", got)
 	}
 }

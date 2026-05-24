@@ -7,6 +7,16 @@
 - Reviewers: senior-reviewer agent (round 1, done), user (interview after this draft)
 - Code touchpoints anchored on commit `6651e5b` (v0.30.1)
 
+### v4 change log (post-cleanup revision, 2026-05-24 09:02 CEST)
+
+The combined JSON contract no longer carries SPY-derived top-level
+price fields. In `scope: "spy+spx"`, `zero_gamma`, `gap_pct`,
+`gamma_sign`, `spot_underlying`, and horizon bucket fields are
+per-index only under `per_index.SPY` / `per_index.SPX`; the combined
+top level carries only scale-safe diagnostics (`summary`,
+`regime_agreement`, `gamma_total_abs`, `top_strikes`, counts,
+method/source, warning details, and timestamps).
+
 ### v3 change log (post-implementation revision, 2026-05-21 21:30 CEST)
 
 After landing steps 1–9, a live combined run on a healthy gateway
@@ -22,10 +32,8 @@ the per-index breakdown was already implying:
 
 - **§5.3 combined-sweep aggregation: REMOVED.** The
   `buildCombinedSweep` helper, `CombinedGapPct` wire field, and
-  `Combined γ-zero spot X %` renderer line are gone. JSON consumers
-  reading top-level `zero_gamma` still see the SPY-anchored value;
-  they're explicit that combined-headline derivation moves to the
-  caller via `per_index` if they want it.
+  `Combined γ-zero spot X %` renderer line are gone. Combined-headline
+  derivation moves to the caller via `per_index` if they want it.
 
 - **§5.3.1 decorrelation gate: REPLACED.** The 20-day daily-close
   price-correlation gate (Pearson r threshold 0.90) was the wrong
@@ -41,7 +49,7 @@ the per-index breakdown was already implying:
   ```
   agree:long-gamma   — both indices' sweeps stay positive (stabilising)
   agree:short-gamma  — both stay negative (amplifying)
-  agree:flipping     — both have a γ-zero crossing inside the window
+  agree:transition-gamma — both are within ±2% of their γ-zero
   disagree           — one stabilising, one amplifying (ACTIONABLE)
   ""                 — at least one bucket has no_data
   ```
@@ -547,20 +555,17 @@ For each sweep index `i ∈ [0, 60)`:
 - SPX scenario spot: `spot_spx × (1 - 0.15 + 0.30 × i / 59)`
 - Combined GEX: `gex_spy[i] + gex_spx[i]` (both in dollars; raw, no normalisation)
 
-This is the load-bearing rule the user called out in the brief.
-
-The combined zero-gamma is the spot-percent at which the combined sweep crosses
-zero. It is **not** a price level — it's a `%` move shared across both indices,
-assuming they move together.
+This summed profile is diagnostic only. The released surface no longer reports
+a combined γ-zero because SPY and SPX use different price scales and flow
+microstructure; forcing a shared crossing hid the per-index signal.
 
 Per-index headlines stay as price levels:
 
 - SPY γ-zero: 535.50 (spot +0.88 %)
 - SPX γ-zero: 5380.00 (spot +0.93 %)
 
-The combined γ-zero is rendered as: `combined γ-zero: spot −1.20 %`. The %
-gap is the headline, with the regime sign label (long-γ / short-γ /
-flipping).
+The combined headline renders regime agreement plus gross magnitude, while
+`summary.per_index` and `per_index` remain the authoritative spot/zero surfaces.
 
 #### 5.3.1 Decorrelation gate (post-round-1 addition)
 
@@ -800,7 +805,7 @@ Dealer Zero-Gamma (SPY + SPX)
   Disclosure: the signed γ-zero assumes the 2018 "dealers long calls,
   short puts" convention. In regimes dominated by covered-call ETFs or
   autocall hedging the sign can invert; treat as a regime hint, not a
-  level. The magnitude signal above is methodology-agnostic.
+  level. The magnitude signal above is sign-convention agnostic.
 ```
 
 ### 9.2 Combined with SPX skipped (entitlement gap)

@@ -48,3 +48,69 @@ func TestIsOptionRTH_AcceptsUTC(t *testing.T) {
 		t.Errorf("13:30 UTC on a weekday should map to 09:30 ET and be open")
 	}
 }
+
+func TestStripGammaProfilesRecursive(t *testing.T) {
+	t.Parallel()
+	res := &GammaZeroSPXResult{
+		Status: GammaZeroStatusReady,
+		Result: &GammaZeroComputed{
+			Scope: GammaZeroScopeCombined,
+			Profile: []GammaProfilePoint{
+				{Spot: 100, GEX: 1},
+			},
+			Profile0DTE: []GammaProfilePoint{
+				{Spot: 100, GEX: 2},
+			},
+			Profile1to7: []GammaProfilePoint{
+				{Spot: 100, GEX: 3},
+			},
+			ProfileTerm: []GammaProfilePoint{
+				{Spot: 100, GEX: 4},
+			},
+			Summary: &GammaZeroSummary{PrimaryStatement: "keep me"},
+			PerIndex: map[string]*GammaZeroComputed{
+				"SPY": {
+					Scope: GammaZeroScopeSPY,
+					Profile: []GammaProfilePoint{
+						{Spot: 100, GEX: 5},
+					},
+				},
+			},
+		},
+	}
+	StripGammaProfiles(res)
+	if len(res.Result.Profile) != 0 || len(res.Result.Profile0DTE) != 0 ||
+		len(res.Result.Profile1to7) != 0 || len(res.Result.ProfileTerm) != 0 {
+		t.Fatalf("top-level profiles were not stripped: %+v", res.Result)
+	}
+	if len(res.Result.PerIndex["SPY"].Profile) != 0 {
+		t.Fatalf("per-index profile was not stripped: %+v", res.Result.PerIndex["SPY"].Profile)
+	}
+	if res.Result.Summary == nil || res.Result.Summary.PrimaryStatement != "keep me" {
+		t.Fatalf("summary should survive profile stripping: %+v", res.Result.Summary)
+	}
+}
+
+func TestStripRegimeGammaProfiles(t *testing.T) {
+	t.Parallel()
+	res := &RegimeSnapshotResult{
+		GammaZero: RegimeGammaZero{
+			Envelope: GammaZeroSPXResult{
+				Status: GammaZeroStatusReady,
+				Result: &GammaZeroComputed{
+					Profile: []GammaProfilePoint{{Spot: 100, GEX: 1}},
+					PerIndex: map[string]*GammaZeroComputed{
+						"SPY": {Profile0DTE: []GammaProfilePoint{{Spot: 100, GEX: 2}}},
+					},
+				},
+			},
+		},
+	}
+	StripRegimeGammaProfiles(res)
+	if len(res.GammaZero.Envelope.Result.Profile) != 0 {
+		t.Fatalf("regime gamma profile was not stripped")
+	}
+	if len(res.GammaZero.Envelope.Result.PerIndex["SPY"].Profile0DTE) != 0 {
+		t.Fatalf("regime per-index profile was not stripped")
+	}
+}

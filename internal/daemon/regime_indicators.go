@@ -97,12 +97,7 @@ func (gammaZeroStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, flo
 		return "", 0
 	}
 	c := res.GammaZero.Envelope.Result
-	band := classifyGammaBand(c.GapPct, c.GammaSign)
-	var value float64
-	if c.GapPct != nil {
-		value = *c.GapPct
-	}
-	return band, value
+	return classifyGammaComputedBand(c), gammaComputedStreakValue(c)
 }
 
 func (gammaZeroStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {

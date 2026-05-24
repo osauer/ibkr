@@ -3,6 +3,8 @@ package daemon
 import (
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // TestStreakStore_FirstCall starts the counter at 1 with today's session.
@@ -165,6 +167,16 @@ func TestClassifyBands(t *testing.T) {
 		}
 		if got := classifyGammaBand(nil, "no_data"); got != "" {
 			t.Errorf("no crossing + no_data = %q, want empty", got)
+		}
+		combined := &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeCombined,
+			PerIndex: map[string]*rpc.GammaZeroComputed{
+				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive"},
+				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative"},
+			},
+		}
+		if got := classifyGammaComputedBand(combined); got != "red" {
+			t.Errorf("SPX-dominant mixed combined gamma bands = %q, want red", got)
 		}
 	})
 

@@ -354,6 +354,94 @@ func classifyGammaBand(gapPct *float64, gammaSign string) string {
 	return ""
 }
 
+func classifyGammaComputedBand(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		return combineGammaComputedBands(c)
+	}
+	return classifyGammaBand(c.GapPct, c.GammaSign)
+}
+
+func combineGammaComputedBands(c *rpc.GammaZeroComputed) string {
+	type weightedBand struct {
+		band   string
+		weight float64
+	}
+	var bands []weightedBand
+	for _, key := range []string{"SPY", "SPX"} {
+		sub := c.PerIndex[key]
+		if sub == nil {
+			continue
+		}
+		if band := classifyGammaComputedBand(sub); band != "" {
+			bands = append(bands, weightedBand{band: band, weight: gammaComputedBandWeight(key, sub)})
+		}
+	}
+	if len(bands) == 0 {
+		return ""
+	}
+	first := bands[0].band
+	for _, band := range bands[1:] {
+		if band.band != first {
+			first = ""
+			break
+		}
+	}
+	if first != "" {
+		return first
+	}
+	total := 0.0
+	redWeight := 0.0
+	for _, band := range bands {
+		total += band.weight
+		if band.band == "red" {
+			redWeight += band.weight
+		}
+	}
+	if total > 0 && redWeight/total >= 0.5 {
+		return "red"
+	}
+	return "yellow"
+}
+
+func gammaComputedBandWeight(key string, c *rpc.GammaZeroComputed) float64 {
+	if c != nil && c.GammaTotalAbs > 0 {
+		return c.GammaTotalAbs
+	}
+	if key == "SPX" {
+		return 100
+	}
+	return 1
+}
+
+func gammaComputedStreakValue(c *rpc.GammaZeroComputed) float64 {
+	if c == nil {
+		return 0
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		var sum float64
+		var count int
+		for _, key := range []string{"SPY", "SPX"} {
+			sub := c.PerIndex[key]
+			if sub == nil || sub.GapPct == nil {
+				continue
+			}
+			sum += *sub.GapPct
+			count++
+		}
+		if count > 0 {
+			return sum / float64(count)
+		}
+		return c.GammaTotalAbs
+	}
+	if c.GapPct != nil {
+		return *c.GapPct
+	}
+	return 0
+}
+
 // classifyBreadthBand maps the % above 50-DMA reading to its band.
 // Simplified value-only classification for streak purposes — the
 // spec's "SPX near highs" modifier (red trigger requires breadth < 40

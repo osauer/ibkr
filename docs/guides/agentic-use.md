@@ -38,7 +38,7 @@ If you also want context, follow-up questions naturally chain: *"and what's SPY'
 
 → Claude invokes `ibkr_gamma` (default scope = combined SPY+SPX).
 
-Returns the signed zero-gamma price level, the dealer book's current sign (`positive` = long-gamma = stabilising; `negative` = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (`agree:long-gamma` / `agree:short-gamma` / `agree:flipping` / `disagree`), and the magnitude view via `gamma_total_abs` and `top_strikes`.
+Returns the signed zero-gamma price level, the dealer book's current sign (`positive` = long-gamma = stabilising; `negative` = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (`agree:long-gamma` / `agree:short-gamma` / `agree:transition-gamma` / `disagree`), and the magnitude view via `gamma_total_abs` and `top_strikes`.
 
 The actionable signal is **`disagree`** — one book stabilising while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see `status: "computing"` with an ETA — re-ask in a few minutes for the result. See [Concepts → Gamma](../concepts.md#gamma).
 

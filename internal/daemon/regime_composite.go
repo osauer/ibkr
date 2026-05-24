@@ -136,7 +136,7 @@ func bandForGamma(r rpc.RegimeGammaZero) string {
 		return ""
 	}
 	c := r.Envelope.Result
-	return classifyGammaBand(c.GapPct, c.GammaSign)
+	return classifyGammaComputedBand(c)
 }
 
 // bandForBreadth classifies the SPX breadth row. Gated on

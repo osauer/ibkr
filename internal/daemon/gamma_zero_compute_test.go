@@ -947,6 +947,33 @@ func TestGammaTotalAbsAggregator_IgnoresGatewayGammaTickRace(t *testing.T) {
 	}
 }
 
+func TestPrepareGEXLegsRequiresOpenInterest(t *testing.T) {
+	t.Parallel()
+	const spot = 5000.0
+	pricedNoOI := []legData{
+		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", isCall: true, iv: 0.20, oi: 0},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", isCall: false, iv: 0.21, oi: 0},
+	}
+	gexLegs, total := prepareGEXLegs(pricedNoOI, spot)
+	if len(gexLegs) != 0 {
+		t.Fatalf("priced legs with missing OI must not count as GEX legs: %+v", gexLegs)
+	}
+	if total != 0 {
+		t.Fatalf("priced legs with missing OI must produce zero GEX, got %v", total)
+	}
+
+	withOI := append(append([]legData{}, pricedNoOI...), legData{
+		expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", isCall: true, iv: 0.20, oi: 10_000,
+	})
+	gexLegs, total = prepareGEXLegs(withOI, spot)
+	if len(gexLegs) != 1 {
+		t.Fatalf("only the leg with OI should contribute to GEX: got %d", len(gexLegs))
+	}
+	if total <= 0 {
+		t.Fatalf("leg with OI should produce positive absolute GEX, got %v", total)
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
