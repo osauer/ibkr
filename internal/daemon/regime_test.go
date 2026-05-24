@@ -39,6 +39,10 @@ type fakeDeps struct {
 	// the "Misc Stats tick 165 didn't land in the budget" case.
 	rich         map[string]fakeRichQuote
 	bars         map[string]fakeHistory
+	series       map[string][]regimeSeriesPoint
+	seriesErr    map[string]error
+	vvix         []regimeSeriesPoint
+	vvixErr      error
 	warnLog      *[]string
 	historyCalls map[string][]int
 }
@@ -79,6 +83,15 @@ func (f *fakeDeps) build() *regimeDeps {
 			h := f.bars[sym]
 			return h.bars, h.err
 		},
+		fredSeries: func(_ context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+			if err := f.seriesErr[seriesID]; err != nil {
+				return nil, err
+			}
+			return f.series[seriesID], nil
+		},
+		vvixSeries: func(_ context.Context) ([]regimeSeriesPoint, error) {
+			return f.vvix, f.vvixErr
+		},
 		logWarnf: func(format string, args ...any) {
 			if f.warnLog != nil {
 				*f.warnLog = append(*f.warnLog, fmt.Sprintf(format, args...))
@@ -93,6 +106,18 @@ func makeBars(n int, closePrice float64) []ibkrlib.HistoricalBar {
 	out := make([]ibkrlib.HistoricalBar, n)
 	for i := range n {
 		out[i] = ibkrlib.HistoricalBar{Close: closePrice}
+	}
+	return out
+}
+
+func makeSeries(n int, start float64) []regimeSeriesPoint {
+	out := make([]regimeSeriesPoint, n)
+	base := time.Now().UTC().AddDate(0, 0, -n)
+	for i := range n {
+		out[i] = regimeSeriesPoint{
+			Date:  base.AddDate(0, 0, i+1),
+			Value: start + float64(i)*0.01,
+		}
 	}
 	return out
 }
@@ -227,6 +252,54 @@ func TestFetchRegimeVIXTerm(t *testing.T) {
 			t.Errorf("VIXChangePct must populate even when ratio leg fails")
 		}
 	})
+}
+
+func TestFetchRegimeVolOfVol(t *testing.T) {
+	ctx := context.Background()
+	points := makeSeries(21, 80.0)
+	points[0].Value = 70.0
+	points[20].Value = 84.0
+	deps := (&fakeDeps{vvix: points}).build()
+
+	got := fetchRegimeVolOfVol(ctx, deps)
+	if got.Status != rpc.RegimeStatusOK {
+		t.Fatalf("status=%q, want ok (%s)", got.Status, got.ErrorMessage)
+	}
+	if got.Last == nil || *got.Last != 84.0 {
+		t.Fatalf("last=%v, want 84", got.Last)
+	}
+	if got.Change20D == nil || *got.Change20D < 19.9 || *got.Change20D > 20.1 {
+		t.Errorf("change20d=%v, want 20%%", got.Change20D)
+	}
+	if band := classifyVolOfVolBand(got.Last); band != "green" {
+		t.Errorf("band=%q want green", band)
+	}
+	if got.Source == "" || got.ValueQuality == nil {
+		t.Errorf("official source/quality should be populated: %+v", got)
+	}
+}
+
+func TestFetchRegimeRatesVol(t *testing.T) {
+	ctx := context.Background()
+	deps := (&fakeDeps{
+		snapshots: map[string]fakeQuote{
+			"MOVE": {price: 118.0, prevClose: 110.0, dataType: rpc.MarketDataFrozen},
+		},
+	}).build()
+
+	got := fetchRegimeRatesVol(ctx, deps)
+	if got.Status != rpc.RegimeStatusStale {
+		t.Fatalf("status=%q, want stale", got.Status)
+	}
+	if got.Last == nil || *got.Last != 118.0 {
+		t.Fatalf("last=%v, want 118", got.Last)
+	}
+	if got.ChangePct == nil || *got.ChangePct < 7.27 || *got.ChangePct > 7.28 {
+		t.Errorf("change_pct=%v, want about 7.27", got.ChangePct)
+	}
+	if band := classifyRatesVolBand(got.Last); band != "yellow" {
+		t.Errorf("band=%q want yellow", band)
+	}
 }
 
 func TestFetchRegimeHYGSPY(t *testing.T) {
@@ -516,6 +589,69 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 			t.Errorf("HYG history called with days=%v, want exactly [%d] (HYGLookbackDays)", got, HYGLookbackDays)
 		}
 	})
+}
+
+func TestFetchRegimeCreditSpreads(t *testing.T) {
+	ctx := context.Background()
+	hy := makeSeries(21, 3.50)
+	ig := makeSeries(21, 1.10)
+	hy[0].Value = 3.20
+	hy[20].Value = 3.80
+	ig[20].Value = 1.25
+	deps := (&fakeDeps{
+		series: map[string][]regimeSeriesPoint{
+			fredSeriesHYOAS: hy,
+			fredSeriesIGOAS: ig,
+		},
+	}).build()
+
+	got := fetchRegimeCreditSpreads(ctx, deps)
+	if got.Status != rpc.RegimeStatusOK {
+		t.Fatalf("status=%q, want ok (%s)", got.Status, got.ErrorMessage)
+	}
+	if got.HYOAS == nil || *got.HYOAS != 3.80 {
+		t.Fatalf("hy_oas=%v, want 3.80", got.HYOAS)
+	}
+	if got.HYIGSpread == nil || *got.HYIGSpread < 2.54 || *got.HYIGSpread > 2.56 {
+		t.Errorf("hy_ig_spread=%v, want 2.55", got.HYIGSpread)
+	}
+	if got.HY20DChange == nil || *got.HY20DChange < 0.59 || *got.HY20DChange > 0.61 {
+		t.Errorf("hy_20d_change=%v, want 0.60", got.HY20DChange)
+	}
+	if band := classifyCreditSpreadsBand(got); band != "yellow" {
+		t.Errorf("band=%q want yellow from 20d widening", band)
+	}
+	if got.Source == "" || got.HYOASQuality == nil || got.SpreadQuality == nil {
+		t.Errorf("source/quality should be populated: %+v", got)
+	}
+}
+
+func TestFetchRegimeFundingStress(t *testing.T) {
+	ctx := context.Background()
+	cp := makeSeries(3, 5.30)
+	tb := makeSeries(3, 5.10)
+	cp[2].Value = 5.34
+	tb[2].Value = 5.20
+	deps := (&fakeDeps{
+		series: map[string][]regimeSeriesPoint{
+			fredSeriesCP3M:    cp,
+			fredSeriesTBill3M: tb,
+		},
+	}).build()
+
+	got := fetchRegimeFundingStress(ctx, deps)
+	if got.Status != rpc.RegimeStatusOK {
+		t.Fatalf("status=%q, want ok (%s)", got.Status, got.ErrorMessage)
+	}
+	if got.SpreadBps == nil || *got.SpreadBps < 13.9 || *got.SpreadBps > 14.1 {
+		t.Fatalf("spread_bps=%v, want 14", got.SpreadBps)
+	}
+	if band := classifyFundingStressBand(got.SpreadBps); band != "green" {
+		t.Errorf("band=%q want green", band)
+	}
+	if got.Source == "" || got.CP3MQuality == nil || got.SpreadQuality == nil {
+		t.Errorf("source/quality should be populated: %+v", got)
+	}
 }
 
 func TestFetchRegimeUSDJPY(t *testing.T) {
@@ -924,6 +1060,18 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 	fastVIX := func(_ context.Context) rpc.RegimeVIXTerm {
 		return rpc.RegimeVIXTerm{Status: rpc.RegimeStatusOK}
 	}
+	fastVolOfVol := func(_ context.Context) rpc.RegimeVolOfVol {
+		return rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Symbol: "VVIX"}
+	}
+	fastRatesVol := func(_ context.Context) rpc.RegimeRatesVol {
+		return rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Symbol: "MOVE"}
+	}
+	fastCreditSpreads := func(_ context.Context) rpc.RegimeCreditSpreads {
+		return rpc.RegimeCreditSpreads{Status: rpc.RegimeStatusOK}
+	}
+	fastFundingStress := func(_ context.Context) rpc.RegimeFundingStress {
+		return rpc.RegimeFundingStress{Status: rpc.RegimeStatusOK}
+	}
 	fastUSDJPY := func(_ context.Context) rpc.RegimeUSDJPY {
 		return rpc.RegimeUSDJPY{Status: rpc.RegimeStatusOK, Symbol: "USD.JPY"}
 	}
@@ -941,7 +1089,11 @@ func TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope(t *testing.T) {
 		return "regime fan-out exceeded handler deadline (test)"
 	}
 	start := time.Now()
-	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth, contentionMsg)
+	res := runRegimeFanout(ctx,
+		fastVIX, fastVolOfVol, fastRatesVol,
+		stuckHYG, fastCreditSpreads, fastFundingStress,
+		fastUSDJPY, fastGamma, fastBreadth,
+		contentionMsg)
 	elapsed := time.Since(start)
 
 	// The whole point of the v0.27.6 fix: the handler returns when its
@@ -998,6 +1150,18 @@ func TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage(t *testing.T) {
 	fastVIX := func(_ context.Context) rpc.RegimeVIXTerm {
 		return rpc.RegimeVIXTerm{Status: rpc.RegimeStatusOK}
 	}
+	fastVolOfVol := func(_ context.Context) rpc.RegimeVolOfVol {
+		return rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Symbol: "VVIX"}
+	}
+	fastRatesVol := func(_ context.Context) rpc.RegimeRatesVol {
+		return rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Symbol: "MOVE"}
+	}
+	fastCreditSpreads := func(_ context.Context) rpc.RegimeCreditSpreads {
+		return rpc.RegimeCreditSpreads{Status: rpc.RegimeStatusOK}
+	}
+	fastFundingStress := func(_ context.Context) rpc.RegimeFundingStress {
+		return rpc.RegimeFundingStress{Status: rpc.RegimeStatusOK}
+	}
 	fastUSDJPY := func(_ context.Context) rpc.RegimeUSDJPY {
 		return rpc.RegimeUSDJPY{Status: rpc.RegimeStatusOK, Symbol: "USD.JPY"}
 	}
@@ -1015,7 +1179,11 @@ func TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	res := runRegimeFanout(ctx, fastVIX, stuckHYG, fastUSDJPY, fastGamma, fastBreadth, contentionMsg)
+	res := runRegimeFanout(ctx,
+		fastVIX, fastVolOfVol, fastRatesVol,
+		stuckHYG, fastCreditSpreads, fastFundingStress,
+		fastUSDJPY, fastGamma, fastBreadth,
+		contentionMsg)
 
 	if res.HYGSPYDivergence.ErrorMessage != fingerprint {
 		t.Errorf("HYG ErrorMessage=%q, want %q (the orchestrator must call contentionMsg() fresh at deadline time and write its return verbatim)", res.HYGSPYDivergence.ErrorMessage, fingerprint)

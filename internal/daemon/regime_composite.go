@@ -1,6 +1,11 @@
 package daemon
 
-import "github.com/osauer/ibkr/internal/rpc"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
 
 // composite-building logic. Mirrors the CLI's tallyComposite +
 // verdict() exactly so wire consumers (MCP, dashboard generators)
@@ -12,10 +17,9 @@ import "github.com/osauer/ibkr/internal/rpc"
 //     for streak persistence (regime_streaks.go) so the daemon stays
 //     internally consistent between "what counts as a band transition"
 //     and "what counts as a ranked row in the composite".
-//   - HYG/SPY caps at yellow per the CLI's documented v1 floor (the
-//     spec's red trigger requires multi-session history we don't track
-//     here; the streak counter exposes the consecutive-sessions count
-//     instead).
+//   - HYG/SPY can rank red when credit breaks below its 50dma while SPY
+//     remains near highs; the streak counter exposes whether that
+//     divergence is new or sustained.
 //   - Rows in computing / unavailable / error state stay unranked and
 //     do not contribute to the green/yellow/red tally.
 
@@ -36,7 +40,11 @@ func buildRegimeComposite(r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 	}
 	bands := []string{
 		bandForVIX(r.VIXTermStructure),
+		bandForVolOfVol(r.VolOfVol),
+		bandForRatesVol(r.RatesVol),
 		bandForHYGSPY(r.HYGSPYDivergence),
+		bandForCreditSpreads(r.CreditSpreads),
+		bandForFundingStress(r.FundingStress),
 		bandForUSDJPY(r.USDJPY),
 		bandForGamma(r.GammaZero),
 		bandForBreadth(r.Breadth),
@@ -57,28 +65,367 @@ func buildRegimeComposite(r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 			c.UnrankedCount++
 		}
 	}
-	c.Verdict = verdictFor(c, len(bands))
+	clusterBands := regimeClusterBands(r)
+	for _, b := range clusterBands {
+		switch b {
+		case "green":
+			c.ClusterGreenCount++
+			c.ClusterRankedCount++
+		case "yellow":
+			c.ClusterYellowCount++
+			c.ClusterRankedCount++
+		case "red":
+			c.ClusterRedCount++
+			c.ClusterRankedCount++
+		default:
+			c.ClusterUnrankedCount++
+		}
+	}
+	c.Verdict = verdictFor(c, len(clusterBands))
 	return c
 }
 
-// verdictFor maps the (red, yellow, ranked, total) tally onto the
-// spec's interpretation table. Mirrors cli.regimeComposite.verdict
-// — same words so MCP consumers can show the CLI's headline
-// verbatim. total is the indicator count (5 today).
+func buildRegimeSummary(r *rpc.RegimeSnapshotResult) rpc.RegimeSummary {
+	if r == nil {
+		return rpc.RegimeSummary{
+			Label:      "No ranked indicators",
+			Evidence:   "0 ranked",
+			PunchLine:  "No regime indicators produced a rankable reading.",
+			Confidence: "low",
+			NotAdvice:  regimeNotAdvice,
+		}
+	}
+	c := r.Composite
+	if c.Verdict == "" {
+		c = buildRegimeComposite(r)
+	}
+	rows := regimeEvidenceRows(r)
+	dominant := regimeDominantRisks(rows)
+	return rpc.RegimeSummary{
+		Label:             c.Verdict,
+		Evidence:          regimeClusterEvidenceBalance(c),
+		IndicatorEvidence: regimeEvidenceBalance(c),
+		PunchLine:         regimePunchLine(rows),
+		Confidence:        regimeEvidenceConfidence(c),
+		DominantRisks:     dominant,
+		NotAdvice:         regimeNotAdvice,
+	}
+}
+
+const regimeNotAdvice = "Regime read only; not investment advice or a trade recommendation."
+
+type regimeEvidenceRow struct {
+	scope   string
+	name    string
+	status  string
+	band    string
+	message string
+}
+
+func regimeEvidenceRows(r *rpc.RegimeSnapshotResult) []regimeEvidenceRow {
+	if r == nil {
+		return nil
+	}
+	return []regimeEvidenceRow{
+		{
+			scope:   "vix_term_structure",
+			name:    "volatility term structure",
+			status:  r.VIXTermStructure.Status,
+			band:    bandForVIX(r.VIXTermStructure),
+			message: r.VIXTermStructure.ErrorMessage,
+		},
+		{
+			scope:   "vol_of_vol",
+			name:    "vol-of-vol",
+			status:  r.VolOfVol.Status,
+			band:    bandForVolOfVol(r.VolOfVol),
+			message: r.VolOfVol.ErrorMessage,
+		},
+		{
+			scope:   "rates_vol",
+			name:    "rates volatility",
+			status:  r.RatesVol.Status,
+			band:    bandForRatesVol(r.RatesVol),
+			message: r.RatesVol.ErrorMessage,
+		},
+		{
+			scope:   "hyg_spy_divergence",
+			name:    "ETF credit proxy",
+			status:  r.HYGSPYDivergence.Status,
+			band:    bandForHYGSPY(r.HYGSPYDivergence),
+			message: r.HYGSPYDivergence.ErrorMessage,
+		},
+		{
+			scope:   "credit_spreads",
+			name:    "cash credit spreads",
+			status:  r.CreditSpreads.Status,
+			band:    bandForCreditSpreads(r.CreditSpreads),
+			message: r.CreditSpreads.ErrorMessage,
+		},
+		{
+			scope:   "funding_stress",
+			name:    "funding spread",
+			status:  r.FundingStress.Status,
+			band:    bandForFundingStress(r.FundingStress),
+			message: r.FundingStress.ErrorMessage,
+		},
+		{
+			scope:   "usd_jpy",
+			name:    "FX carry proxy",
+			status:  r.USDJPY.Status,
+			band:    bandForUSDJPY(r.USDJPY),
+			message: r.USDJPY.ErrorMessage,
+		},
+		{
+			scope:   "gamma_zero",
+			name:    "dealer gamma",
+			status:  r.GammaZero.Status,
+			band:    bandForGamma(r.GammaZero),
+			message: r.GammaZero.Envelope.Error,
+		},
+		{
+			scope:   "breadth",
+			name:    "breadth",
+			status:  r.Breadth.Status,
+			band:    bandForBreadth(r.Breadth),
+			message: "",
+		},
+	}
+}
+
+func regimeEvidenceBalance(c rpc.RegimeComposite) string {
+	var parts []string
+	if c.GreenCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d green", c.GreenCount))
+	}
+	if c.YellowCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d yellow", c.YellowCount))
+	}
+	if c.RedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d red", c.RedCount))
+	}
+	if c.UnrankedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d unranked", c.UnrankedCount))
+	}
+	if len(parts) == 0 {
+		return "0 ranked"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func regimeClusterEvidenceBalance(c rpc.RegimeComposite) string {
+	var parts []string
+	if c.ClusterGreenCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d green %s", c.ClusterGreenCount, plural(c.ClusterGreenCount, "cluster", "clusters")))
+	}
+	if c.ClusterYellowCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d yellow %s", c.ClusterYellowCount, plural(c.ClusterYellowCount, "cluster", "clusters")))
+	}
+	if c.ClusterRedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d red %s", c.ClusterRedCount, plural(c.ClusterRedCount, "cluster", "clusters")))
+	}
+	if c.ClusterUnrankedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d unranked %s", c.ClusterUnrankedCount, plural(c.ClusterUnrankedCount, "cluster", "clusters")))
+	}
+	if len(parts) == 0 {
+		return "0 ranked clusters"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func regimeEvidenceConfidence(c rpc.RegimeComposite) string {
+	switch {
+	case c.ClusterRankedCount < verdictFloor:
+		return "low"
+	case c.ClusterUnrankedCount > 0:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+func regimeDominantRisks(rows []regimeEvidenceRow) []string {
+	var out []string
+	for _, row := range rows {
+		if row.band == "red" {
+			out = append(out, row.name)
+		}
+	}
+	return out
+}
+
+func regimePunchLine(rows []regimeEvidenceRow) string {
+	if len(rows) == 0 {
+		return "No regime indicators produced a rankable reading."
+	}
+	groups := map[string][]string{}
+	for _, row := range rows {
+		key := row.band
+		if key == "" {
+			key = unrankedEvidenceState(row.status)
+		}
+		groups[key] = append(groups[key], row.name)
+	}
+	var parts []string
+	for _, spec := range []struct {
+		key  string
+		word string
+	}{
+		{"red", "stressed"},
+		{"yellow", "mixed"},
+		{"green", "constructive"},
+		{"computing", "computing"},
+		{"unavailable", "unavailable"},
+		{"unranked", "unranked"},
+	} {
+		names := groups[spec.key]
+		if len(names) == 0 {
+			continue
+		}
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s %s", joinHuman(names), verb, spec.word))
+	}
+	if len(parts) == 0 {
+		return "No regime indicators produced a rankable reading."
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func unrankedEvidenceState(status string) string {
+	switch status {
+	case rpc.RegimeStatusComputing:
+		return "computing"
+	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+		return "unavailable"
+	default:
+		return "unranked"
+	}
+}
+
+func joinHuman(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
+	}
+}
+
+func buildRegimeWarnings(r *rpc.RegimeSnapshotResult) []rpc.RegimeWarning {
+	if r == nil {
+		return nil
+	}
+	rows := regimeEvidenceRows(r)
+	warnings := make([]rpc.RegimeWarning, 0, len(rows))
+	for _, row := range rows {
+		if row.status == rpc.RegimeStatusOK {
+			continue
+		}
+		w, ok := warningForRegimeRow(row)
+		if ok {
+			warnings = append(warnings, w)
+		}
+	}
+	return warnings
+}
+
+func warningForRegimeRow(row regimeEvidenceRow) (rpc.RegimeWarning, bool) {
+	if row.status == "" {
+		return rpc.RegimeWarning{}, false
+	}
+	w := rpc.RegimeWarning{
+		Code:     row.scope + "_" + row.status,
+		Scope:    row.scope,
+		Severity: "warning",
+		Message:  ifEmpty(row.message, row.name+" "+row.status),
+		Impact:   row.name + " is unranked; the composite has lower coverage.",
+		Action:   "Retry when the relevant market data feed is active.",
+	}
+	switch row.status {
+	case rpc.RegimeStatusStale:
+		w.Severity = "info"
+		w.Impact = row.name + " is ranked from stale or frozen data; treat the band as a slower regime read."
+		w.Action = "Refresh during regular market hours for a live tick."
+	case rpc.RegimeStatusComputing:
+		w.Message = row.name + " is still computing."
+		w.Impact = row.name + " is temporarily unranked; the composite may change when it lands."
+		w.Action = "Re-run after the reported ETA or inspect the dedicated command for progress."
+	case rpc.RegimeStatusUnavailable:
+		w.Message = ifEmpty(row.message, row.name+" unavailable")
+	case rpc.RegimeStatusError:
+		w.Severity = "error"
+	default:
+		return rpc.RegimeWarning{}, false
+	}
+	switch row.scope {
+	case "vix_term_structure":
+		w.Action = "Retry during Cboe index calculation hours or check index market-data entitlement."
+	case "vol_of_vol":
+		w.Action = "Retry once Cboe's official VVIX daily file is reachable."
+	case "rates_vol":
+		w.Action = "Check ICE/MOVE index market-data entitlement, then retry."
+	case "hyg_spy_divergence":
+		w.Action = "Retry when ETF quotes are live or check equity/ETF market-data entitlement."
+	case "credit_spreads":
+		w.Action = "Retry when FRED/St. Louis Fed is reachable; the row uses official ICE BofA OAS series."
+	case "funding_stress":
+		w.Action = "Retry when FRED/St. Louis Fed is reachable; the row uses official Federal Reserve funding series."
+	case "usd_jpy":
+		w.Action = "Check IDEALPRO FX market-data entitlement, then retry when FX ticks are available."
+	case "gamma_zero":
+		if row.status == rpc.RegimeStatusComputing {
+			w.Action = "Re-run after the ETA or call ibkr gamma for the dedicated gamma status."
+		} else {
+			w.Action = "Run during NY market hours or let the gamma prewarm finish, then retry."
+		}
+	case "breadth":
+		if row.status == rpc.RegimeStatusComputing {
+			w.Action = "Keep the daemon running until the IBKR-paced breadth refresh finishes."
+		} else {
+			w.Action = "Run ibkr breadth to inspect the breadth engine state and cached snapshot."
+		}
+	}
+	return w, true
+}
+
+func ifEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// verdictFor maps the cluster-level (red, yellow, ranked, total) tally
+// onto the interpretation table. Mirrors cli.regimeComposite.verdict —
+// same words so MCP consumers can show the CLI's headline verbatim.
 func verdictFor(c rpc.RegimeComposite, total int) string {
 	switch {
-	case c.RankedCount == 0:
+	case c.ClusterRankedCount == 0:
 		return "No ranked indicators — see rows below for state"
-	case c.RankedCount < verdictFloor:
+	case c.ClusterRankedCount < verdictFloor:
 		return "Insufficient signal — too few indicators ranked"
-	case c.RankedCount == total && c.RedCount == total:
+	case c.ClusterRankedCount == total && c.ClusterRedCount == total:
 		return "Full risk-off conditions"
-	case c.RedCount >= 3:
-		return "Regime shift likely — execute pre-committed plan"
-	case c.RedCount >= 1:
-		return "Watch closely, prep defensive moves"
-	case c.YellowCount >= 3:
-		return "Elevated alert — review positioning"
+	case c.ClusterRedCount >= 3:
+		return "Broad stress regime"
+	case c.ClusterRedCount >= 1:
+		return "Stress signal present"
+	case c.ClusterYellowCount >= 3:
+		return "Elevated stress watch"
 	default:
 		return "Normal regime"
 	}
@@ -94,12 +441,23 @@ func bandForVIX(r rpc.RegimeVIXTerm) string {
 	return classifyVIXTermBand(r.Ratio)
 }
 
-// bandForHYGSPY classifies the HYG vs SPY row. v1 floor: never goes
-// red — the spec's red trigger requires multi-session history. Mirrors
-// the CLI's rowHYGSPY exactly so the composite tally agrees with what
-// the CLI shows the user. The streak counter (not this rollup)
-// surfaces the consecutive-sessions count that the spec's red trigger
-// references.
+func bandForVolOfVol(r rpc.RegimeVolOfVol) string {
+	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
+		return ""
+	}
+	return classifyVolOfVolBand(r.Last)
+}
+
+func bandForRatesVol(r rpc.RegimeRatesVol) string {
+	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
+		return ""
+	}
+	return classifyRatesVolBand(r.Last)
+}
+
+// bandForHYGSPY classifies the HYG vs SPY row. HYG below its 50dma
+// while SPY remains near highs is a current credit/equity divergence;
+// the streak field carries the persistence context separately.
 func bandForHYGSPY(r rpc.RegimeHYGSPYDivergence) string {
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		return ""
@@ -110,12 +468,29 @@ func bandForHYGSPY(r rpc.RegimeHYGSPYDivergence) string {
 	if *r.HYGPrice >= *r.HYG50DMA {
 		return "green"
 	}
-	// HYG below 50dma. CLI maps both "near highs" and "not-near-highs"
-	// to yellow; the unranked case is "SPY 52w-high context missing".
+	// HYG below 50dma. Red requires SPY near highs; otherwise the row is
+	// yellow. The unranked case is "SPY 52w-high context missing".
 	if r.SPY52WHigh == nil || r.SPYPrice == nil {
 		return ""
 	}
+	if *r.SPYPrice >= 0.97**r.SPY52WHigh {
+		return "red"
+	}
 	return "yellow"
+}
+
+func bandForCreditSpreads(r rpc.RegimeCreditSpreads) string {
+	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
+		return ""
+	}
+	return classifyCreditSpreadsBand(r)
+}
+
+func bandForFundingStress(r rpc.RegimeFundingStress) string {
+	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
+		return ""
+	}
+	return classifyFundingStressBand(r.SpreadBps)
 }
 
 // bandForUSDJPY classifies the USD/JPY row. Unranked on
@@ -150,4 +525,36 @@ func bandForBreadth(r rpc.RegimeBreadth) string {
 		return ""
 	}
 	return classifyBreadthBand(r.Envelope.PctAbove50DMA)
+}
+
+func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
+	if r == nil {
+		return nil
+	}
+	return []string{
+		worstBand(bandForVIX(r.VIXTermStructure), bandForVolOfVol(r.VolOfVol)),
+		worstBand(bandForRatesVol(r.RatesVol)),
+		worstBand(bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads)),
+		worstBand(bandForFundingStress(r.FundingStress)),
+		worstBand(bandForUSDJPY(r.USDJPY)),
+		worstBand(bandForGamma(r.GammaZero)),
+		worstBand(bandForBreadth(r.Breadth)),
+	}
+}
+
+func worstBand(bands ...string) string {
+	out := ""
+	for _, band := range bands {
+		switch band {
+		case "red":
+			return "red"
+		case "yellow":
+			out = "yellow"
+		case "green":
+			if out == "" {
+				out = "green"
+			}
+		}
+	}
+	return out
 }

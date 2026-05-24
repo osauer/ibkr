@@ -19,6 +19,16 @@ import (
 const (
 	vixRatioGreen      = 0.92 // VIX/VIX3M below this is healthy contango
 	vixRatioRed        = 1.00 // above this is backwardation
+	vvixYellow         = 90.0
+	vvixRed            = 110.0
+	moveYellow         = 100.0
+	moveRed            = 130.0
+	hyOASYellow        = 4.0
+	hyOASRed           = 5.5
+	hyOASWidenYellow   = 0.50 // percentage points over ~20 observations
+	hyOASWidenRed      = 1.00
+	fundingYellowBps   = 25.0
+	fundingRedBps      = 75.0
 	usdJpyMoveYellow   = 1.0  // % weekly yen strengthening
 	usdJpyMoveRed      = 2.0  // % weekly yen strengthening
 	gammaGapYellow     = 2.0  // spot within ±X% of zero-gamma
@@ -44,6 +54,7 @@ const (
 // counter and the row renderer share one source of truth.
 type regimeRow struct {
 	name      string     // "VIX/VIX3M"
+	cluster   string     // cluster token for composite de-duplication
 	value     string     // value cell, plain; dim-suffix attached at render time
 	band      regimeBand // for glyph + band-word coloring
 	reason    string     // parenthetical band justification ("<0.92 contango")
@@ -76,9 +87,6 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() > 0 {
 		return fail(env, "regime: takes no positional args (got %v)", fs.Args())
 	}
-	if *jsonOut && *explain {
-		return fail(env, "regime: --explain only affects text output; --json carries notes verbatim already")
-	}
 
 	fetchAndRender := func(out io.Writer) int {
 		var res rpc.RegimeSnapshotResult
@@ -97,8 +105,14 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 			}
 		}
 		if *jsonOut {
+			if !*explain {
+				rpc.CompactRegimeSnapshot(&res)
+			} else {
+				rpc.StripRegimeGammaProfiles(&res)
+			}
 			return printJSONTo(env, out, res)
 		}
+		rpc.StripRegimeGammaProfiles(&res)
 		return renderRegimeTextTo(env, out, &res, *explain)
 	}
 
@@ -109,7 +123,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 		return runWatch(ctx, env, *rate, "regime", fetchAndRender)
 	}
 	// Single-call TTY path: the daemon's fan-out can sit silent for
-	// 10-20 s on a cold cache while the five fetchers race contract-
+	// 10-20 s on a cold cache while the fetchers race contract-
 	// resolution against history pulls. Surface motion so the user
 	// sees the command is alive instead of staring at a blank
 	// terminal. Pipe / non-TTY callers and --json keep their atomic
@@ -179,7 +193,7 @@ func startRegimeSpinner(env *Env) func() {
 	done := make(chan struct{})
 	// Braille spinner — narrow, dense, reads as motion at 10 fps.
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	indicators := "VIX VIX3M HYG SPY USD.JPY gamma breadth"
+	indicators := "VIX VIX3M VVIX MOVE HYG SPY OAS funding USD.JPY gamma breadth"
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(100 * time.Millisecond)
@@ -215,13 +229,17 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 
 // renderRegimeTextTo writes the dashboard to out. Layout: header with
 // timestamp; bold composite verdict + ranked-count summary; horizontal
-// rule; five one-line indicator rows; optional --explain footer with
+// rule; one-line indicator rows; optional --explain footer with
 // the spec's prose per row. Pass explain=true for the verbose mode.
 func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, explain bool) int {
 	now := r.AsOf
 	rows := []regimeRow{
 		rowVIXTerm(now, r.VIXTermStructure),
+		rowVolOfVol(now, r.VolOfVol),
+		rowRatesVol(now, r.RatesVol),
 		rowHYGSPY(now, r.HYGSPYDivergence),
+		rowCreditSpreads(now, r.CreditSpreads),
+		rowFundingStress(now, r.FundingStress),
 		rowUSDJPY(now, r.USDJPY),
 		rowGamma(now, r.GammaZero),
 		rowBreadth(now, r.Breadth),
@@ -238,15 +256,17 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		renderRegimeHeadline(env, r),
 		"")
 
-	// Composite line: bold verdict + dim count summary. The count
-	// summary names ranked/unranked explicitly so a reader sees that
-	// some indicators were excluded rather than assuming the verdict
-	// was computed over all five.
-	fmt.Fprintf(out, "  %s\n", env.bold(c.verdict()))
-	fmt.Fprintf(out, "  %s\n", env.dim(c.summary()))
+	// Hero summary: a color-coded regime label plus a plain-English
+	// evidence balance. The table below remains the audit trail; this
+	// line is the three-second read.
+	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeLabel(env, c, c.verdict())), env.dim("· "+c.evidence()))
+	if indicatorEvidence := c.indicatorEvidence(); indicatorEvidence != c.evidence() {
+		fmt.Fprintf(out, "  %s\n", env.dim("Indicators: "+indicatorEvidence))
+	}
+	fmt.Fprintf(out, "  Punch line: %s\n", regimePunchLine(rows))
 	fmt.Fprintln(out)
 
-	// Header row + horizontal rule give the reader a key for the five
+	// Header row + horizontal rule give the reader a key for the
 	// columns. Dim-colored so the band rows stay visually dominant. The
 	// rule width matches the widest row layout (glyph + name + value +
 	// band + note), recomputed once here so it tracks layout changes.
@@ -351,11 +371,13 @@ func qualityTag(now time.Time, qs ...*rpc.Quality) string {
 		}
 		switch {
 		case q.FreshnessClass == rpc.FreshnessModelled || q.Confidence == rpc.ConfidenceProxy:
-			return 4
-		case q.FreshnessClass == rpc.FreshnessDerived || q.Confidence == rpc.ConfidenceEstimate:
-			return 3
-		case q.FreshnessClass == rpc.FreshnessFrozen:
+			return 5
+		case q.FreshnessClass == rpc.FreshnessDerived && q.Confidence == rpc.ConfidenceFirm:
 			return 2
+		case q.FreshnessClass == rpc.FreshnessDerived || q.Confidence == rpc.ConfidenceEstimate:
+			return 4
+		case q.FreshnessClass == rpc.FreshnessFrozen:
+			return 3
 		case q.FreshnessClass == rpc.FreshnessLive:
 			return 1
 		}
@@ -375,9 +397,10 @@ func qualityTag(now time.Time, qs ...*rpc.Quality) string {
 		ageUnit   func(time.Duration) int
 	}
 	specs := map[int]tagSpec{
-		4: {"· modelled", 5 * time.Minute, "%s %dm old", func(d time.Duration) int { return int(d.Minutes()) }},
-		3: {"· est", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
-		2: {"· frozen", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
+		4: {"· est", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
+		5: {"· modelled", 5 * time.Minute, "%s %dm old", func(d time.Duration) int { return int(d.Minutes()) }},
+		3: {"· frozen", 5 * time.Second, "%s %ds", func(d time.Duration) int { return int(d.Seconds()) }},
+		2: {"· official", 36 * time.Hour, "%s %dd old", func(d time.Duration) int { return int(d.Hours() / 24) }},
 	}
 	s, ok := specs[worstRank]
 	if !ok {
@@ -436,6 +459,12 @@ type regimeComposite struct {
 	green, yellow, red int
 	ranked, unranked   int
 	total              int
+	clusterGreen       int
+	clusterYellow      int
+	clusterRed         int
+	clusterRanked      int
+	clusterUnranked    int
+	clusterTotal       int
 }
 
 func tallyComposite(rows []regimeRow) regimeComposite {
@@ -455,13 +484,50 @@ func tallyComposite(rows []regimeRow) regimeComposite {
 			c.unranked++
 		}
 	}
+	clusters := map[string]regimeBand{}
+	for _, r := range rows {
+		key := r.cluster
+		if key == "" {
+			key = r.name
+		}
+		clusters[key] = worstRegimeBand(clusters[key], r.band)
+	}
+	c.clusterTotal = len(clusters)
+	for _, b := range clusters {
+		switch b {
+		case bandGreen:
+			c.clusterGreen++
+			c.clusterRanked++
+		case bandYellow:
+			c.clusterYellow++
+			c.clusterRanked++
+		case bandRed:
+			c.clusterRed++
+			c.clusterRanked++
+		default:
+			c.clusterUnranked++
+		}
+	}
 	return c
+}
+
+func worstRegimeBand(a, b regimeBand) regimeBand {
+	if a == bandRed || b == bandRed {
+		return bandRed
+	}
+	if a == bandYellow || b == bandYellow {
+		return bandYellow
+	}
+	if a == bandGreen || b == bandGreen {
+		return bandGreen
+	}
+	return bandUnranked
 }
 
 // verdictFloor is the minimum ranked-row count required for the
 // renderer to claim a verdict above "insufficient signal." The spec's
-// interpretation table assumes the dashboard is built from all five
-// indicators; below this floor any positive claim ("Normal regime")
+// interpretation table assumes the dashboard is built from multiple
+// evidence clusters; below this floor any positive claim ("Normal regime")
 // is based on too few measurements to be honest. Three was chosen
 // because the spec's yellow- and red-band thresholds both reference
 // "majority of indicators" — a verdict needs to see at least majority
@@ -478,37 +544,170 @@ const verdictFloor = 3
 // line first.
 func (c regimeComposite) verdict() string {
 	switch {
-	case c.ranked == 0:
+	case c.clusterRanked == 0:
 		return "No ranked indicators — see rows below for state"
-	case c.ranked < verdictFloor:
+	case c.clusterRanked < verdictFloor:
 		return "Insufficient signal — too few indicators ranked"
-	case c.ranked == c.total && c.red == c.total:
+	case c.clusterRanked == c.clusterTotal && c.clusterRed == c.clusterTotal:
 		return "Full risk-off conditions"
-	case c.red >= 3:
-		return "Regime shift likely — execute pre-committed plan"
-	case c.red >= 1:
-		return "Watch closely, prep defensive moves"
-	case c.yellow >= 3:
-		return "Elevated alert — review positioning"
+	case c.clusterRed >= 3:
+		return "Broad stress regime"
+	case c.clusterRed >= 1:
+		return "Stress signal present"
+	case c.clusterYellow >= 3:
+		return "Elevated stress watch"
 	default:
 		return "Normal regime"
 	}
 }
 
-// summary names the tally + coverage on one dim line. Format chosen so
-// the unranked count is visible alongside the ranked one; the reader
-// shouldn't have to do arithmetic to see what was excluded.
-func (c regimeComposite) summary() string {
-	parts := []string{
-		fmt.Sprintf("%d green", c.green),
-		fmt.Sprintf("%d yellow", c.yellow),
-		fmt.Sprintf("%d red", c.red),
+func (c regimeComposite) evidence() string {
+	var parts []string
+	if c.clusterGreen > 0 {
+		parts = append(parts, fmt.Sprintf("%d green %s", c.clusterGreen, plural(c.clusterGreen, "cluster", "clusters")))
 	}
-	coverage := fmt.Sprintf("%d of %d ranked", c.ranked, c.total)
+	if c.clusterYellow > 0 {
+		parts = append(parts, fmt.Sprintf("%d yellow %s", c.clusterYellow, plural(c.clusterYellow, "cluster", "clusters")))
+	}
+	if c.clusterRed > 0 {
+		parts = append(parts, fmt.Sprintf("%d red %s", c.clusterRed, plural(c.clusterRed, "cluster", "clusters")))
+	}
+	if c.clusterUnranked > 0 {
+		parts = append(parts, fmt.Sprintf("%d unranked %s", c.clusterUnranked, plural(c.clusterUnranked, "cluster", "clusters")))
+	}
+	if len(parts) == 0 {
+		return "0 ranked clusters"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func (c regimeComposite) indicatorEvidence() string {
+	var parts []string
+	if c.green > 0 {
+		parts = append(parts, fmt.Sprintf("%d green", c.green))
+	}
+	if c.yellow > 0 {
+		parts = append(parts, fmt.Sprintf("%d yellow", c.yellow))
+	}
+	if c.red > 0 {
+		parts = append(parts, fmt.Sprintf("%d red", c.red))
+	}
 	if c.unranked > 0 {
-		coverage += fmt.Sprintf(" · %d unranked", c.unranked)
+		parts = append(parts, fmt.Sprintf("%d unranked", c.unranked))
 	}
-	return strings.Join(parts, " · ") + "  ·  " + coverage
+	if len(parts) == 0 {
+		return "0 ranked"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func colorRegimeLabel(env *Env, c regimeComposite, label string) string {
+	switch {
+	case c.clusterRed > 0 || c.clusterRanked == c.clusterTotal && c.clusterRed == c.clusterTotal:
+		return env.red(label)
+	case c.clusterYellow >= 3 || c.clusterRanked < verdictFloor:
+		return env.yellow(label)
+	default:
+		return env.green(label)
+	}
+}
+
+func regimePunchLine(rows []regimeRow) string {
+	groups := map[string][]string{}
+	for _, row := range rows {
+		key := row.band.labelKey(row.status)
+		groups[key] = append(groups[key], regimeEvidenceName(row.name))
+	}
+	var parts []string
+	for _, spec := range []struct {
+		key  string
+		word string
+	}{
+		{"red", "stressed"},
+		{"yellow", "mixed"},
+		{"green", "constructive"},
+		{"computing", "computing"},
+		{"unavailable", "unavailable"},
+		{"unranked", "unranked"},
+	} {
+		names := groups[spec.key]
+		if len(names) == 0 {
+			continue
+		}
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s %s", joinHumanList(names), verb, spec.word))
+	}
+	if len(parts) == 0 {
+		return "No regime indicators produced a rankable reading."
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func (b regimeBand) labelKey(status string) string {
+	switch b {
+	case bandGreen:
+		return "green"
+	case bandYellow:
+		return "yellow"
+	case bandRed:
+		return "red"
+	}
+	switch status {
+	case rpc.RegimeStatusComputing:
+		return "computing"
+	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+		return "unavailable"
+	default:
+		return "unranked"
+	}
+}
+
+func regimeEvidenceName(name string) string {
+	switch {
+	case strings.HasPrefix(name, "VIX/"):
+		return "volatility term structure"
+	case name == "VVIX":
+		return "vol-of-vol"
+	case name == "MOVE":
+		return "rates volatility"
+	case strings.HasPrefix(name, "HYG"):
+		return "ETF credit proxy"
+	case strings.Contains(name, "OAS"):
+		return "cash credit spreads"
+	case strings.Contains(name, "funding"):
+		return "funding spread"
+	case strings.HasPrefix(name, "USD"):
+		return "FX carry proxy"
+	case strings.Contains(name, "γ-zero"):
+		return "dealer gamma"
+	case strings.Contains(name, "breadth"):
+		return "breadth"
+	default:
+		return name
+	}
+}
+
+func joinHumanList(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // renderRegimeHeadline returns the SPY + VIX summary line shown above
@@ -596,10 +795,11 @@ func signedFloat(v float64, decimals int) string {
 // from the top of the file.
 
 func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
-	row := regimeRow{name: "VIX/VIX3M", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "VIX/VIX3M", cluster: "equity_vol", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Ratio == nil {
 		row.value = "—"
-		row.stateNote = ifNonEmpty(r.ErrorMessage, "ratio unavailable")
+		row.stateNote = "ratio unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "VIX/VIX3M tick missing")
 		return row
 	}
 	row.value = fmt.Sprintf("%.3f  (%.2f / %.2f)", *r.Ratio, deref(r.VIX), deref(r.VIX3M))
@@ -615,11 +815,60 @@ func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 	return row
 }
 
+func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
+	row := regimeRow{name: "VVIX", cluster: "equity_vol", status: r.Status, streak: streakMarker(r.Streak)}
+	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.Last == nil {
+		row.value = "—"
+		row.stateNote = "VVIX unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "Cboe VVIX file unavailable")
+		return row
+	}
+	row.value = fmt.Sprintf("%.1f", *r.Last)
+	if r.Change20D != nil {
+		row.value += fmt.Sprintf("  %+.1f%%/20d", *r.Change20D)
+	}
+	row.quality = qualityTag(now, r.ValueQuality)
+	switch {
+	case *r.Last < vvixYellow:
+		row.band, row.reason = bandGreen, "<90 vol-of-vol"
+	case *r.Last < vvixRed:
+		row.band, row.reason = bandYellow, "90–110"
+	default:
+		row.band, row.reason = bandRed, ">110 vol-of-vol shock"
+	}
+	return row
+}
+
+func rowRatesVol(now time.Time, r rpc.RegimeRatesVol) regimeRow {
+	row := regimeRow{name: "MOVE", cluster: "rates_vol", status: r.Status, streak: streakMarker(r.Streak)}
+	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.Last == nil {
+		row.value = "—"
+		row.stateNote = "MOVE unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "ICE/MOVE tick missing")
+		return row
+	}
+	row.value = fmt.Sprintf("%.1f", *r.Last)
+	if r.ChangePct != nil {
+		row.value += fmt.Sprintf("  %+.1f%%", *r.ChangePct)
+	}
+	row.quality = qualityTag(now, r.ValueQuality)
+	switch {
+	case *r.Last < moveYellow:
+		row.band, row.reason = bandGreen, "<100 rates vol"
+	case *r.Last < moveRed:
+		row.band, row.reason = bandYellow, "100–130"
+	default:
+		row.band, row.reason = bandRed, ">130 rates-vol stress"
+	}
+	return row
+}
+
 func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
-	row := regimeRow{name: "HYG vs SPY", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "HYG vs SPY", cluster: "credit", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError {
 		row.value = "—"
-		row.stateNote = ifNonEmpty(r.ErrorMessage, "HYG/SPY unavailable")
+		row.stateNote = "HYG/SPY unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "credit proxy tick missing")
 		return row
 	}
 	// Value cell: HYG vs its 50dma is the structural signal; SPY's
@@ -630,16 +879,17 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	}
 	row.value = fmt.Sprintf("HYG %.2f / 50dma %s", deref(r.HYGPrice), hyg50)
 	row.quality = qualityTag(now, r.HYGQuality, r.HYG50DMAQuality, r.SPYQuality, r.SPY52WHighQuality)
-	// Banding. Cannot reach red without a multi-session history; the
-	// renderer's worst-case for HYG-below-50dma is yellow even when
-	// SPY is at highs. This is a documented v1 floor.
+	// Banding. HYG below 50dma while SPY is near highs is the credit-
+	// equity divergence this row exists to catch. Streaks carry the
+	// "is this sustained?" context; the band itself should not hide the
+	// current divergence.
 	switch {
 	case r.HYG50DMA == nil:
 		row.band, row.reason = bandUnranked, "50dma missing — cannot band"
 	case *r.HYGPrice >= *r.HYG50DMA:
 		row.band, row.reason = bandGreen, "HYG ≥ 50dma"
 	case r.SPY52WHigh != nil && r.SPYPrice != nil && *r.SPYPrice >= hygSpyNearHighProx**r.SPY52WHigh:
-		row.band, row.reason = bandYellow, "HYG < 50dma · SPY near highs"
+		row.band, row.reason = bandRed, "HYG < 50dma · SPY near highs"
 	case r.SPY52WHigh != nil:
 		row.band, row.reason = bandYellow, "HYG < 50dma"
 	default:
@@ -651,11 +901,69 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	return row
 }
 
+func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
+	row := regimeRow{name: "HY/IG OAS", cluster: "credit", status: r.Status, streak: streakMarker(r.Streak)}
+	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.HYOAS == nil {
+		row.value = "—"
+		row.stateNote = "OAS unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "FRED OAS series unavailable")
+		return row
+	}
+	ig := "—"
+	if r.IGOAS != nil {
+		ig = fmt.Sprintf("%.2f", *r.IGOAS)
+	}
+	row.value = fmt.Sprintf("HY %.2f / IG %s", *r.HYOAS, ig)
+	if r.HY20DChange != nil {
+		row.value += fmt.Sprintf("  Δ20d %+.2f", *r.HY20DChange)
+	}
+	row.quality = qualityTag(now, r.HYOASQuality, r.IGOASQuality, r.SpreadQuality)
+	switch {
+	case *r.HYOAS >= hyOASRed || (r.HY20DChange != nil && *r.HY20DChange >= hyOASWidenRed):
+		row.band, row.reason = bandRed, "HY OAS stress"
+	case *r.HYOAS >= hyOASYellow || (r.HY20DChange != nil && *r.HY20DChange >= hyOASWidenYellow):
+		row.band, row.reason = bandYellow, "HY OAS elevated/widening"
+	default:
+		row.band, row.reason = bandGreen, "HY OAS <4.0"
+	}
+	return row
+}
+
+func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
+	row := regimeRow{name: "funding spread", cluster: "funding", status: r.Status, streak: streakMarker(r.Streak)}
+	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.SpreadBps == nil {
+		row.value = "—"
+		row.stateNote = "funding unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "FRED funding series unavailable")
+		return row
+	}
+	cp := "—"
+	if r.CP3M != nil {
+		cp = fmt.Sprintf("%.2f", *r.CP3M)
+	}
+	tb := "—"
+	if r.TBill3M != nil {
+		tb = fmt.Sprintf("%.2f", *r.TBill3M)
+	}
+	row.value = fmt.Sprintf("%.0fbp  CP %s / TB %s", *r.SpreadBps, cp, tb)
+	row.quality = qualityTag(now, r.CP3MQuality, r.TBill3MQuality, r.SpreadQuality)
+	switch {
+	case *r.SpreadBps < fundingYellowBps:
+		row.band, row.reason = bandGreen, "<25bp"
+	case *r.SpreadBps < fundingRedBps:
+		row.band, row.reason = bandYellow, "25–75bp"
+	default:
+		row.band, row.reason = bandRed, ">75bp funding stress"
+	}
+	return row
+}
+
 func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
-	row := regimeRow{name: "USD/JPY", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "USD/JPY", cluster: "fx_carry", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
 		row.value = "—"
-		row.stateNote = ifNonEmpty(r.ErrorMessage, "no FX tick")
+		row.stateNote = "no FX tick"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "check IDEALPRO entitlement")
 		return row
 	}
 	wkly := "—"
@@ -711,7 +1019,7 @@ func gammaRowLabel(r rpc.RegimeGammaZero) string {
 }
 
 func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
-	row := regimeRow{name: gammaRowLabel(r), status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: gammaRowLabel(r), cluster: "dealer_gamma", status: r.Status, streak: streakMarker(r.Streak)}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
@@ -737,6 +1045,15 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		row.value = ""
 		row.stateNote = ifNonEmpty(r.Envelope.Error, "compute failed")
 		row.reason = "next regime call after 60 s will retry"
+		return row
+	case rpc.RegimeStatusUnavailable:
+		row.value = ""
+		row.stateNote = "unavailable"
+		if r.Envelope.Status == rpc.GammaZeroStatusCold {
+			row.reason = "no cached gamma snapshot"
+		} else {
+			row.reason = "gamma snapshot unavailable"
+		}
 		return row
 	case rpc.RegimeStatusOK:
 		c := r.Envelope.Result
@@ -923,7 +1240,7 @@ func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 }
 
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
-	row := regimeRow{name: "SPX breadth", status: r.Status, streak: streakMarker(r.Streak)}
+	row := regimeRow{name: "SPX breadth", cluster: "breadth", status: r.Status, streak: streakMarker(r.Streak)}
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		switch r.Status {
 		case rpc.RegimeStatusUnavailable:
@@ -991,11 +1308,27 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			{"VIX", r.VIXTermStructure.VIXQuality},
 			{"VIX3M", r.VIXTermStructure.VIX3MQuality},
 		}},
+		{"VVIX", r.VolOfVol.Notes, nil, []qField{
+			{"VVIX", r.VolOfVol.ValueQuality},
+		}},
+		{"MOVE", r.RatesVol.Notes, nil, []qField{
+			{"MOVE", r.RatesVol.ValueQuality},
+		}},
 		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing, []qField{
 			{"HYG", r.HYGSPYDivergence.HYGQuality},
 			{"HYG_50DMA", r.HYGSPYDivergence.HYG50DMAQuality},
 			{"SPY", r.HYGSPYDivergence.SPYQuality},
 			{"SPY_52w_high", r.HYGSPYDivergence.SPY52WHighQuality},
+		}},
+		{"HY/IG OAS", r.CreditSpreads.Notes, r.CreditSpreads.FieldsMissing, []qField{
+			{"HY_OAS", r.CreditSpreads.HYOASQuality},
+			{"IG_OAS", r.CreditSpreads.IGOASQuality},
+			{"HY-IG_spread", r.CreditSpreads.SpreadQuality},
+		}},
+		{"funding spread", r.FundingStress.Notes, r.FundingStress.FieldsMissing, []qField{
+			{"CP_3m", r.FundingStress.CP3MQuality},
+			{"TBill_3m", r.FundingStress.TBill3MQuality},
+			{"CP-TBill", r.FundingStress.SpreadQuality},
 		}},
 		{"USD/JPY", r.USDJPY.Notes, r.USDJPY.FieldsMissing, []qField{
 			{"Last", r.USDJPY.LastQuality},
@@ -1024,7 +1357,14 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			age := r.AsOf.Sub(qf.q.AsOf)
 			ageStr := ""
 			if age > time.Second {
-				ageStr = fmt.Sprintf(" · age %ds", int(age.Seconds()))
+				switch {
+				case age >= 48*time.Hour:
+					ageStr = fmt.Sprintf(" · age %dd", int(age.Hours()/24))
+				case age >= time.Hour:
+					ageStr = fmt.Sprintf(" · age %dh", int(age.Hours()))
+				default:
+					ageStr = fmt.Sprintf(" · age %ds", int(age.Seconds()))
+				}
 			}
 			src := ""
 			if qf.q.Source != "" {
@@ -1070,6 +1410,22 @@ func ifNonEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func shortUnavailableReason(message, fallback string) string {
+	if message == "" {
+		return fallback
+	}
+	switch {
+	case strings.Contains(message, "entitlement"):
+		return "check market-data entitlement"
+	case strings.Contains(message, "no spot tick"), strings.Contains(message, "no tick"):
+		return "gateway delivered no tick"
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline"):
+		return "fetch timed out"
+	default:
+		return fallback
+	}
 }
 
 // horizonAgreementNote returns a short parenthetical for the gamma row

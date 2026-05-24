@@ -10,6 +10,24 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.5 — 2026-05-24 11:56 CEST
+
+### What's new
+
+- `ibkr regime` now opens with a color-coded hero verdict, evidence balance, and punch line before the row table, so the regime read is visible in one glance.
+- The regime dashboard now adds vol-of-vol, rates-volatility, credit-spread, and funding-stress evidence alongside VIX term structure, HYG/SPY, USD/JPY, gamma, and breadth.
+- Default regime JSON and MCP responses now include a compact `summary` and omit bulky methodology notes/history unless `--explain` is used with JSON.
+
+### Changed
+
+- Composite regime scoring now de-duplicates correlated rows into evidence clusters before producing the headline verdict, reducing double-counting from related volatility and credit indicators.
+- Regime MCP/tooling docs now describe the expanded indicator set and compact-vs-explain JSON behavior.
+- Official daily series for VVIX, MOVE, high-yield OAS, and funding stress are fetched through the daemon and surfaced with provenance/freshness metadata.
+
+### Fixed
+
+- Regime streak and composite helpers now classify the expanded indicator set consistently instead of only handling the original five-row dashboard.
+
 ## v1.0.4 — 2026-05-24 09:41 CEST
 
 ### What's new

@@ -271,12 +271,24 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 			Streak: &rpc.StreakInfo{Band: "green", Sessions: 3, Since: "2026-05-20"},
 		},
 		Composite: rpc.RegimeComposite{
-			Verdict:     "Normal regime",
-			GreenCount:  3,
-			YellowCount: 0,
-			RedCount:    0,
-			RankedCount: 3,
+			Verdict:              "Normal regime",
+			GreenCount:           3,
+			YellowCount:          0,
+			RedCount:             0,
+			RankedCount:          3,
+			ClusterGreenCount:    3,
+			ClusterRankedCount:   3,
+			ClusterUnrankedCount: 4,
 		},
+		Summary: rpc.RegimeSummary{
+			Label: "Normal regime", Evidence: "3 green clusters / 4 unranked clusters", IndicatorEvidence: "3 green",
+			PunchLine:  "volatility term structure is constructive.",
+			Confidence: "high", NotAdvice: "Regime read only; not investment advice or a trade recommendation.",
+		},
+		WarningDetails: []rpc.RegimeWarning{{
+			Code: "gamma_zero_computing", Scope: "gamma_zero", Severity: "warning",
+			Message: "dealer gamma is still computing", Impact: "gamma is unranked", Action: "retry later",
+		}},
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 	}
 	b, err := json.Marshal(res)
@@ -295,6 +307,28 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	}
 	if comp["verdict"] != "Normal regime" {
 		t.Errorf("composite.verdict: got %v want %q", comp["verdict"], "Normal regime")
+	}
+	if _, ok := comp["cluster_green_count"]; !ok {
+		t.Errorf("composite should expose cluster counts for agent scoring: %#v", comp)
+	}
+	summary, ok := wire["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary missing from envelope: %s", b)
+	}
+	if summary["punch_line"] == "" || summary["not_advice"] == "" {
+		t.Errorf("summary should carry punch_line and not_advice: %#v", summary)
+	}
+	if summary["indicator_evidence"] == "" {
+		t.Errorf("summary should carry indicator_evidence alongside cluster evidence: %#v", summary)
+	}
+	for _, key := range []string{"vol_of_vol", "rates_vol", "credit_spreads", "funding_stress"} {
+		if _, ok := wire[key]; !ok {
+			t.Errorf("%s missing from regime MCP/JSON shape", key)
+		}
+	}
+	warnings, ok := wire["warning_details"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("warning_details missing or wrong shape: %#v", wire["warning_details"])
 	}
 	// Streak + Quality nested under each indicator row.
 	vixRow, ok := wire["vix_term_structure"].(map[string]any)

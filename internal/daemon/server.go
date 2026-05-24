@@ -720,7 +720,7 @@ func (s *Server) saveContractCache() {
 
 // pruneNonMembers returns a new map containing only entries whose
 // symbol is in the current SPX members list OR is one of the
-// well-known seeds (SPX, VIX, VIX3M, HYG, SPY, USD.JPY — the regime
+// well-known seeds (SPX, VIX, VIX3M, MOVE, HYG, SPY, USD.JPY — the regime
 // dashboard symbols). Caller uses this to strip delisted / renamed
 // tickers from the persisted cache when SPX has reconstituted since
 // the last save. The well-known seeds aren't SPX members but are
@@ -730,7 +730,7 @@ func pruneNonMembers(loaded map[string]ibkrlib.ContractDetailsLite, members []st
 	for _, m := range members {
 		keep[m] = struct{}{}
 	}
-	for _, sym := range []string{"SPX", "VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "DXY", "NDX"} {
+	for _, sym := range []string{"SPX", "VIX", "VIX3M", "MOVE", "HYG", "SPY", "USD.JPY", "DXY", "NDX"} {
 		keep[sym] = struct{}{}
 	}
 	out := make(map[string]ibkrlib.ContractDetailsLite, len(loaded))
@@ -1390,7 +1390,7 @@ func (s *Server) prewarmRegimeSymbols() {
 	if c == nil {
 		return
 	}
-	syms := []string{"VIX", "VIX3M", "HYG", "SPY", "USD.JPY", "SPX"}
+	syms := []string{"VIX", "VIX3M", "MOVE", "HYG", "SPY", "USD.JPY", "SPX"}
 	for _, sym := range syms {
 		if seed, ok := regimeSymbolSeed[sym]; ok {
 			c.SeedContractDetails(sym, seed)

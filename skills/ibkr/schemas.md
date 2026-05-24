@@ -847,33 +847,38 @@ methodology lives in `docs/specs/risk-regime-dashboard.md`.
 
 ## regime
 
-`ibkr regime --json` — single-call risk-regime dashboard: all five
-indicators in one JSON envelope. Each row carries raw measurements plus
-a `notes` field embedding the spec's threshold bands verbatim. The
-daemon does **not** derive green/yellow/red status for the per-row
-surface — the spec calls those bands user-tunable — but it DOES
-publish a `composite` rollup that mirrors what the CLI prints above
-the indicator table, so consumers can show the same headline verdict
-without re-implementing the band logic.
+`ibkr regime --json` — single-call risk-regime dashboard: all nine
+indicator rows in one compact JSON envelope. The default JSON/MCP surface
+leads with `summary`, `composite`, and `warning_details`, then raw
+measurements, streaks, and quality provenance. Long methodology `notes`
+and breadth history are omitted by default; use `ibkr regime --json
+--explain` when a JSON consumer explicitly needs the spec prose.
 
 **MCP params** (`ibkr_regime`): none — the envelope always carries
-all five indicators.
+all nine indicator rows.
 
-**CLI-only flags** (text-mode rendering controls; JSON unchanged):
-- `--explain` — show per-row streak markers, quality blocks, methodology disclosures.
+**CLI flags**:
+- `--explain` — show per-row streak markers, quality blocks, methodology disclosures; with `--json`, include full notes/history.
 - `--watch` / `--rate` — auto-poll in place.
 - `--log PATH` — append each snapshot to a JSONL trace file.
 
 ```json
 {
   "as_of": "2026-05-09T14:32:09Z",
+  "summary": {
+    "label": "Normal regime",
+    "evidence": "6 green clusters / 1 yellow cluster",
+    "indicator_evidence": "7 green / 1 yellow / 1 unranked",
+    "punch_line": "volatility term structure, vol-of-vol, rates volatility, cash credit spreads, funding spread, dealer gamma, and breadth are constructive; ETF credit proxy is mixed; FX carry proxy is unavailable.",
+    "confidence": "high",
+    "not_advice": "Regime read only; not investment advice or a trade recommendation."
+  },
   "vix_term_structure": {
     "status": "ok",
     "vix": 14.82,
     "vix3m": 16.41,
     "ratio": 0.903,
     "data_type": "live",
-    "notes": "VIX/VIX3M ratio. Sustained > 1.0 over 2-3 sessions = stress regime.",
     "vix_prev_close": 15.04,
     "vix_change_pct": -1.46,
     "vix_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
@@ -881,6 +886,29 @@ all five indicators.
     "vix3m_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "frozen",
                       "confidence": "firm", "source": "VIX3M tick (thin CBOE; off-hours typically frozen)"},
     "streak": {"band": "green", "sessions": 4, "since": "2026-05-06"}
+  },
+  "vol_of_vol": {
+    "status": "ok",
+    "symbol": "VVIX",
+    "last": 82.4,
+    "change_20d_pct": -3.1,
+    "as_of_date": "2026-05-08",
+    "source": "Cboe official VVIX daily time series",
+    "value_quality": {"as_of": "2026-05-08T00:00:00Z", "freshness_class": "derived",
+                      "confidence": "firm", "source": "Cboe VVIX daily close"},
+    "streak": {"band": "green", "sessions": 3, "since": "2026-05-07"}
+  },
+  "rates_vol": {
+    "status": "ok",
+    "symbol": "MOVE",
+    "last": 96.2,
+    "prev_close": 98.1,
+    "change_pct": -1.94,
+    "data_type": "live",
+    "source": "ICE MOVE index via IBKR market data",
+    "value_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
+                      "confidence": "firm", "source": "MOVE index tick (ICE)"},
+    "streak": {"band": "green", "sessions": 2, "since": "2026-05-08"}
   },
   "hyg_spy_divergence": {
     "status": "ok",
@@ -892,29 +920,43 @@ all five indicators.
     "spy_change": 1.27,
     "spy_change_pct": 0.218,
     "hyg_data_type": "live",
-    "notes": "HYG vs SPY divergence. HYG below its 50-day SMA while SPY within 3% of 52-week high = late-cycle red flag.",
     "hyg_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
                     "confidence": "firm", "source": "HYG tick (ARCA)"},
     "streak": {"band": "green", "sessions": 12, "since": "2026-04-28"}
   },
-  "usd_jpy": {
+  "credit_spreads": {
     "status": "ok",
+    "hy_oas": 3.62,
+    "ig_oas": 1.05,
+    "hy_ig_spread": 2.57,
+    "hy_oas_20d_change": 0.08,
+    "as_of_date": "2026-05-08",
+    "source": "FRED/St. Louis Fed official ICE BofA OAS CSV",
+    "hy_oas_quality": {"as_of": "2026-05-08T00:00:00Z", "freshness_class": "derived",
+                       "confidence": "firm", "source": "FRED BAMLH0A0HYM2 HY OAS"},
+    "spread_quality": {"as_of": "2026-05-08T00:00:00Z", "freshness_class": "derived",
+                       "confidence": "firm", "source": "HY OAS minus IG OAS"},
+    "streak": {"band": "green", "sessions": 4, "since": "2026-05-06"}
+  },
+  "funding_stress": {
+    "status": "ok",
+    "cp_3m_rate": 5.34,
+    "tbill_3m_rate": 5.20,
+    "spread_bps": 14.0,
+    "as_of_date": "2026-05-08",
+    "source": "FRED/St. Louis Fed official Federal Reserve CP and T-bill series",
+    "spread_quality": {"as_of": "2026-05-08T00:00:00Z", "freshness_class": "derived",
+                       "confidence": "firm", "source": "90-day AA financial CP minus 3-month T-bill"},
+    "streak": {"band": "green", "sessions": 8, "since": "2026-04-30"}
+  },
+  "usd_jpy": {
+    "status": "unavailable",
     "symbol": "USD.JPY",
-    "last": 152.41,
-    "close_7d_ago": 154.82,
-    "weekly_change_pct": -1.56,
-    "data_type": "live",
-    "notes": "USD/JPY weekly move. Spec watches > 2% moves as a carry-unwind signal.",
-    "last_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "live",
-                     "confidence": "firm", "source": "USD.JPY CASH tick (IDEALPRO)"},
-    "close_7d_ago_quality": {"as_of": "2026-05-09T14:32:09Z", "freshness_class": "derived",
-                             "confidence": "estimate", "source": "USD.JPY MIDPOINT bar t-7"},
-    "streak": {"band": "yellow", "sessions": 2, "since": "2026-05-08"}
+    "error_message": "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"
   },
   "gamma_zero": {
     "status": "ok",
     "envelope": {"status": "ready", "result": {"...": "see gamma schema"}},
-    "notes": "...",
     "zero_gamma_quality": {"as_of": "2026-05-09T13:32:54Z", "freshness_class": "modelled",
                            "confidence": "proxy",
                            "source": "bs-gamma-profile-v3-stickymoneyness-0dte-split"},
@@ -925,44 +967,58 @@ all five indicators.
     "envelope": {"state": "ready", "pct_above_50dma": 62.4, "...": "see breadth schema"},
     "pct_above_50dma": 62.4,
     "pct_above_200dma": 71.0,
-    "notes": "% S&P 500 stocks above their 50-day SMA...",
     "value_quality": {"as_of": "2026-05-09T13:00:00Z", "freshness_class": "derived",
                       "confidence": "estimate", "source": "constituent-fanout-50/200dma-hl"},
     "streak": {"band": "green", "sessions": 31, "since": "2026-04-08"}
   },
   "composite": {
     "verdict": "Normal regime",
-    "green_count": 4,
+    "green_count": 7,
     "yellow_count": 1,
     "red_count": 0,
-    "ranked_count": 5,
-    "unranked_count": 0
+    "ranked_count": 8,
+    "unranked_count": 1,
+    "cluster_green_count": 6,
+    "cluster_yellow_count": 1,
+    "cluster_red_count": 0,
+    "cluster_ranked_count": 7,
+    "cluster_unranked_count": 0
   },
+  "warning_details": [],
   "spec_doc": "docs/specs/risk-regime-dashboard.md"
 }
 ```
 
 Field meanings:
 
+- `summary` is the agent-preferred readout. Start here: `label` is the
+  non-advisory regime label, `evidence` is the cluster traffic-light
+  balance, `indicator_evidence` is the raw row balance, `punch_line`
+  explains the current read in one sentence, and `confidence` reflects
+  evidence coverage rather than forecast certainty.
 - Each indicator row carries a `status` field:
   `"ok"` (real fresh measurement) | `"stale"` (gateway labeled it
   delayed/frozen) | `"computing"` (heavy compute in flight; poll
-  again) | `"unavailable"` (feed not entitled on this account; `notes`
-  explains) | `"error"` (`error_message` carries the reason).
+  again) | `"unavailable"` (feed not entitled on this account; see
+  `warning_details`) | `"error"` (`error_message` carries the reason).
 - Numerical fields are pointer-typed: `null` = "didn't arrive in the
   fetch budget," never zero-substituted.
-- `fields_missing` (on rows 1–3) lists advisory sub-fields (e.g.
-  `spy_52w_high`, `hyg_50dma`) that didn't land — the row's primary
-  measurement still landed, so dim those sub-cells without
-  re-classifying the whole row as `error`.
-- `notes` on every row embeds the spec's threshold prose verbatim so a
-  consumer can interpret without reading the spec doc. Surface verbatim.
-- `composite` is the daemon-side rollup `{verdict, green_count,
-  yellow_count, red_count, ranked_count, unranked_count}` matching what
-  the CLI prints above its indicator table. `verdict` is one of
-  "Normal regime", "Elevated alert — review positioning", "Watch
-  closely, prep defensive moves", "Regime shift likely — execute
-  pre-committed plan", "Full risk-off conditions", "Insufficient
+- `fields_missing` lists advisory sub-fields (e.g. `spy_52w_high`,
+  `hyg_50dma`, `series_date_mismatch`) that didn't land or aligned
+  imperfectly — the row's primary measurement still landed, so dim those
+  sub-cells without re-classifying the whole row as `error`.
+- `warning_details` carries scoped `{message, impact, action}` prose for
+  stale, computing, unavailable, and error rows. Prefer this over parsing
+  row-level error strings.
+- `notes` are omitted from default JSON/MCP for compactness. Use
+  `--json --explain` or CLI `--explain` for full methodology prose.
+- `composite` is the daemon-side rollup matching what the CLI prints
+  above its indicator table. Raw row counts (`green_count`,
+  `yellow_count`, `red_count`, `ranked_count`, `unranked_count`) sit
+  beside cluster counts (`cluster_*`) so equity-vol or credit sub-signals
+  do not double-count as independent macro confirmations. `verdict` is one of
+  "Normal regime", "Elevated stress watch", "Stress signal present",
+  "Broad stress regime", "Full risk-off conditions", "Insufficient
   signal — too few indicators ranked", "No ranked indicators — see
   rows below for state". Renderers showing their own band coloring
   can ignore this and re-tally from per-row `status` + measurements.
@@ -984,5 +1040,5 @@ Field meanings:
   Surface as a deep link when explaining a band edge to the user.
 
 Use `ibkr regime --explain` to get the spec's per-indicator threshold
-prose printed alongside each row (human-readable view; not on the JSON
-surface).
+prose printed alongside each row, or `ibkr regime --json --explain` for
+the full JSON methodology payload.

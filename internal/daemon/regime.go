@@ -11,7 +11,7 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
-// handleRegimeSnapshot fans out fetches for all five risk-regime
+// handleRegimeSnapshot fans out fetches for all risk-regime
 // dashboard indicators in parallel and assembles one consolidated
 // envelope. Per-indicator failures are localised — a stale VIX feed
 // doesn't fail the whole call; the affected row carries
@@ -27,13 +27,13 @@ import (
 // language verbatim, giving an LLM consumer enough context to
 // interpret without reading the methodology doc.
 //
-// Indicator 4 (gamma) is auto-kicked: the first regime snapshot of
+// Dealer gamma is auto-kicked: the first regime snapshot of
 // the NY trading session triggers the heavy compute, returns
 // Status="computing" + an ETA. Subsequent calls within the day
 // return the cached result instantly via the existing
 // gammaZeroCache singleflight.
 //
-// Indicators 3 (USD/JPY) and 5 (breadth) may surface
+// USD/JPY and breadth may surface
 // Status="unavailable" depending on classifySymbol coverage at
 // snapshot time — see the per-indicator notes for the disposition.
 func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc.RegimeSnapshotResult, error) {
@@ -46,7 +46,11 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res := runRegimeFanout(
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
+		func(c context.Context) rpc.RegimeVolOfVol { return fetchRegimeVolOfVol(c, deps) },
+		func(c context.Context) rpc.RegimeRatesVol { return fetchRegimeRatesVol(c, deps) },
 		func(c context.Context) rpc.RegimeHYGSPYDivergence { return fetchRegimeHYGSPY(c, deps) },
+		func(c context.Context) rpc.RegimeCreditSpreads { return fetchRegimeCreditSpreads(c, deps) },
+		func(c context.Context) rpc.RegimeFundingStress { return fetchRegimeFundingStress(c, deps) },
 		func(c context.Context) rpc.RegimeUSDJPY { return fetchRegimeUSDJPY(c, deps) },
 		func(c context.Context) rpc.RegimeGammaZero { return fetchRegimeGamma(c, s) },
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
@@ -66,6 +70,8 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	// own renderer-local tally for layout reasons, but both paths
 	// share the verdict words via the helper.
 	res.Composite = buildRegimeComposite(res)
+	res.Summary = buildRegimeSummary(res)
+	res.WarningDetails = buildRegimeWarnings(res)
 	return res, nil
 }
 
@@ -81,7 +87,17 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) {
 	now := nyDateNow()
 	for _, ind := range streakIndicators {
 		band, value := ind.bandAndValue(res)
-		ind.attachStreak(res, s.streaks.Tick(ind.key(), value, band, now))
+		streak := s.streaks.Tick(ind.key(), value, band, now)
+		if band == "" {
+			// Freeze the persisted counter internally, but do not attach a
+			// stale prior-band streak to today's unranked row. JSON/MCP
+			// consumers otherwise read "status:error" beside "streak:green",
+			// which looks like usable evidence when it is only historical
+			// memory.
+			ind.attachStreak(res, nil)
+			continue
+		}
+		ind.attachStreak(res, streak)
 	}
 }
 
@@ -108,7 +124,7 @@ func (s *Server) regimeContentionMessage() string {
 	return fmt.Sprintf("regime fan-out exceeded handler deadline (contended with daemon-internal task(s): %s)", strings.Join(names, ", "))
 }
 
-// runRegimeFanout drives the five regime fetchers in parallel and
+// runRegimeFanout drives the regime fetchers in parallel and
 // returns a consolidated envelope. The function honours ctx's deadline:
 // any fetcher that hasn't returned by ctx.Done is surfaced as
 // Status=error in the envelope rather than blocking the handler.
@@ -123,7 +139,7 @@ func (s *Server) regimeContentionMessage() string {
 // 2026-05-19 that motivated v0.27.6.
 //
 // Lingering goroutines exit cleanly: the buffered results channel
-// (cap 5) accepts late sends without blocking; the late values are
+// (cap equals fetcher count) accepts late sends without blocking; the late values are
 // garbage-collected once the caller has returned. Gateway slots stay
 // held only as long as the per-call timeouts the fetchers already set
 // on their own derived contexts (productionRegimeDeps uses
@@ -142,7 +158,11 @@ func (s *Server) regimeContentionMessage() string {
 func runRegimeFanout(
 	ctx context.Context,
 	vix func(context.Context) rpc.RegimeVIXTerm,
+	volOfVol func(context.Context) rpc.RegimeVolOfVol,
+	ratesVol func(context.Context) rpc.RegimeRatesVol,
 	hyg func(context.Context) rpc.RegimeHYGSPYDivergence,
+	creditSpreads func(context.Context) rpc.RegimeCreditSpreads,
+	fundingStress func(context.Context) rpc.RegimeFundingStress,
 	usdjpy func(context.Context) rpc.RegimeUSDJPY,
 	gamma func(context.Context) rpc.RegimeGammaZero,
 	breadth func(context.Context) rpc.RegimeBreadth,
@@ -156,23 +176,35 @@ func runRegimeFanout(
 		kind string
 		v    any
 	}
-	results := make(chan regimeRow, 5)
+	results := make(chan regimeRow, 9)
 	go func() { results <- regimeRow{"vix", vix(ctx)} }()
+	go func() { results <- regimeRow{"vol_of_vol", volOfVol(ctx)} }()
+	go func() { results <- regimeRow{"rates_vol", ratesVol(ctx)} }()
 	go func() { results <- regimeRow{"hyg", hyg(ctx)} }()
+	go func() { results <- regimeRow{"credit_spreads", creditSpreads(ctx)} }()
+	go func() { results <- regimeRow{"funding_stress", fundingStress(ctx)} }()
 	go func() { results <- regimeRow{"usdjpy", usdjpy(ctx)} }()
 	go func() { results <- regimeRow{"gamma", gamma(ctx)} }()
 	go func() { results <- regimeRow{"breadth", breadth(ctx)} }()
 
-	received := make(map[string]bool, 5)
+	received := make(map[string]bool, 9)
 	deadlineFired := false
-	for len(received) < 5 && !deadlineFired {
+	for len(received) < 9 && !deadlineFired {
 		select {
 		case r := <-results:
 			switch r.kind {
 			case "vix":
 				res.VIXTermStructure = r.v.(rpc.RegimeVIXTerm)
+			case "vol_of_vol":
+				res.VolOfVol = r.v.(rpc.RegimeVolOfVol)
+			case "rates_vol":
+				res.RatesVol = r.v.(rpc.RegimeRatesVol)
 			case "hyg":
 				res.HYGSPYDivergence = r.v.(rpc.RegimeHYGSPYDivergence)
+			case "credit_spreads":
+				res.CreditSpreads = r.v.(rpc.RegimeCreditSpreads)
+			case "funding_stress":
+				res.FundingStress = r.v.(rpc.RegimeFundingStress)
 			case "usdjpy":
 				res.USDJPY = r.v.(rpc.RegimeUSDJPY)
 			case "gamma":
@@ -188,15 +220,27 @@ func runRegimeFanout(
 	if deadlineFired {
 		// Fill any rows that didn't complete with an honest error
 		// envelope so the wire payload is never half-filled. In
-		// practice the laggard is one of vix/hyg/usdjpy — gamma and
-		// breadth read in-memory state and shouldn't be missing here —
-		// but we cover all five defensively.
+		// practice the laggard is usually one of the quote/history or
+		// official daily-file rows — gamma and breadth mostly read
+		// in-memory state — but we cover every row defensively.
 		exceededMsg := contentionMsg()
 		if !received["vix"] {
 			res.VIXTermStructure = rpc.RegimeVIXTerm{Notes: vixTermNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
 		}
+		if !received["vol_of_vol"] {
+			res.VolOfVol = rpc.RegimeVolOfVol{Symbol: "VVIX", Notes: volOfVolNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["rates_vol"] {
+			res.RatesVol = rpc.RegimeRatesVol{Symbol: "MOVE", Notes: ratesVolNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
 		if !received["hyg"] {
 			res.HYGSPYDivergence = rpc.RegimeHYGSPYDivergence{Notes: hygSpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["credit_spreads"] {
+			res.CreditSpreads = rpc.RegimeCreditSpreads{Notes: creditSpreadsNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
+		}
+		if !received["funding_stress"] {
+			res.FundingStress = rpc.RegimeFundingStress{Notes: fundingStressNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
 		}
 		if !received["usdjpy"] {
 			res.USDJPY = rpc.RegimeUSDJPY{Symbol: "USD.JPY", Notes: usdJpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
@@ -254,8 +298,10 @@ type regimeDeps struct {
 	// for its own per-call budget; canceling either the parent ctx or
 	// the per-call ctx unblocks the call. See v0.27.6 changelog for
 	// the bug class this guards against.
-	history  func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error)
-	logWarnf func(format string, args ...any)
+	history    func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error)
+	fredSeries func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error)
+	vvixSeries func(ctx context.Context) ([]regimeSeriesPoint, error)
+	logWarnf   func(format string, args ...any)
 }
 
 // productionRegimeDeps wires the deps struct to the live connector.
@@ -272,7 +318,9 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
 			return c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
 		},
-		logWarnf: logWarnf,
+		fredSeries: fetchFREDSeries,
+		vvixSeries: fetchCBOEVVIXSeries,
+		logWarnf:   logWarnf,
 	}
 }
 
@@ -421,7 +469,78 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	return out
 }
 
-const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high; red when HYG in clear downtrend (5+ sessions below 50-day) while SPY at/near highs. Daemon returns raw measurements — consumer compares HYG vs hyg_50dma and SPY vs spy_52w_high. Observation window 2-4 weeks; single-day moves are noise."
+const volOfVolNotes = "VVIX (Cboe VIX-of-VIX) from Cboe's official daily VVIX time series. Default heuristic bands: <90 green (vol-of-vol contained), 90-110 yellow (volatility demand rising), >110 red (vol-of-vol shock / convexity demand). This is an evidence-balance input, not a volatility forecast; use with VIX term structure because both live in the equity-vol cluster and can disagree."
+
+func fetchRegimeVolOfVol(ctx context.Context, deps *regimeDeps) rpc.RegimeVolOfVol {
+	out := rpc.RegimeVolOfVol{
+		Symbol: "VVIX",
+		Notes:  volOfVolNotes,
+		Source: "Cboe official VVIX daily time series",
+	}
+	if deps == nil || deps.vvixSeries == nil {
+		out.Status = rpc.RegimeStatusUnavailable
+		out.ErrorMessage = "VVIX: no official series fetcher configured"
+		return out
+	}
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	points, err := deps.vvixSeries(cctx)
+	cancel()
+	if err != nil {
+		out.Status = rpc.RegimeStatusError
+		out.ErrorMessage = "VVIX: " + err.Error()
+		return out
+	}
+	latest, ok := latestSeriesPoint(points)
+	if !ok || latest.Value <= 0 {
+		out.Status = rpc.RegimeStatusError
+		out.ErrorMessage = "VVIX: no usable observation"
+		return out
+	}
+	out.Last = new(latest.Value)
+	out.AsOfDate = latest.Date.Format("2006-01-02")
+	out.ValueQuality = officialDailyQuality(latest.Date, "Cboe VVIX daily close")
+	if lagged, ok := laggedSeriesPoint(points, 20); ok && lagged.Value > 0 {
+		chg := (latest.Value - lagged.Value) / lagged.Value * 100
+		out.Change20D = &chg
+	}
+	out.Status = statusForOfficialDaily(latest.Date, time.Now())
+	return out
+}
+
+const ratesVolNotes = "MOVE (ICE BofA U.S. Bond Market Option Volatility Estimate Index) as a rates-volatility cross-asset stress input. Default heuristic bands: <100 green, 100-130 yellow, >130 red. MOVE measures implied Treasury/rates volatility, so it can flag bond-market stress while equity vol is still calm. Source path is the user's IBKR market-data entitlement for the ICE index; if unavailable, the row is unranked rather than approximated from ETFs."
+
+func fetchRegimeRatesVol(ctx context.Context, deps *regimeDeps) rpc.RegimeRatesVol {
+	out := rpc.RegimeRatesVol{
+		Symbol: "MOVE",
+		Notes:  ratesVolNotes,
+		Source: "ICE MOVE index via IBKR market data",
+	}
+	move, prev, dt := boundedSnapshot(ctx, deps, "MOVE", 8*time.Second)
+	if move <= 0 {
+		out.Status = rpc.RegimeStatusUnavailable
+		out.ErrorMessage = "MOVE: no index tick (check ICE/rates-vol market-data entitlement)"
+		return out
+	}
+	now := time.Now()
+	out.Last = new(move)
+	out.PrevClose = nilIfZero(prev)
+	if prev > 0 {
+		diff := move - prev
+		out.Change = &diff
+		pct := diff / prev * 100
+		out.ChangePct = &pct
+	}
+	out.DataType = dt
+	out.ValueQuality = firmTickQuality(now, dt, "MOVE index tick (ICE)")
+	if rpc.IsLiveDataType(dt) {
+		out.Status = rpc.RegimeStatusOK
+	} else {
+		out.Status = rpc.RegimeStatusStale
+	}
+	return out
+}
+
+const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when HYG is above its 50-day SMA; yellow when HYG breaks below its 50-day SMA; red when HYG is below its 50-day SMA while SPY remains within 3% of its 52-week high. Use the row's streak.sessions to distinguish an early one-session divergence from a sustained 5+ session credit downtrend. Observation window 2-4 weeks; single-day moves are noise."
 
 // HYGLookbackDays is the calendar-day window passed to the HMDS
 // history fetch when computing HYG's 50-day SMA. 50 trading days ≈ 70
@@ -542,6 +661,149 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	if out.HYG50DMA == nil {
 		out.FieldsMissing = append(out.FieldsMissing, "hyg_50dma")
 	}
+	return out
+}
+
+const (
+	fredSeriesHYOAS = "BAMLH0A0HYM2"
+	fredSeriesIGOAS = "BAMLC0A0CM"
+)
+
+const creditSpreadsNotes = "Cash credit spreads from official ICE BofA OAS series via FRED/St. Louis Fed: high-yield OAS (BAMLH0A0HYM2) and investment-grade corporate OAS (BAMLC0A0CM). Units are percentage points. Default heuristic bands use HY OAS: <4.0 green, 4.0-5.5 yellow, >5.5 red; a 20-observation HY OAS widening of >0.50 pp is mixed and >1.00 pp is stressed. This complements HYG/SPY: HYG is faster intraday, OAS is the official cash-credit close."
+
+func fetchRegimeCreditSpreads(ctx context.Context, deps *regimeDeps) rpc.RegimeCreditSpreads {
+	out := rpc.RegimeCreditSpreads{
+		Notes:  creditSpreadsNotes,
+		Source: "FRED/St. Louis Fed official ICE BofA OAS CSV",
+	}
+	if deps == nil || deps.fredSeries == nil {
+		out.Status = rpc.RegimeStatusUnavailable
+		out.ErrorMessage = "credit spreads: no FRED series fetcher configured"
+		return out
+	}
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	hyPoints, hyErr := deps.fredSeries(cctx, fredSeriesHYOAS)
+	igPoints, igErr := deps.fredSeries(cctx, fredSeriesIGOAS)
+	cancel()
+	if hyErr != nil || igErr != nil {
+		out.Status = rpc.RegimeStatusError
+		switch {
+		case hyErr != nil && igErr != nil:
+			out.ErrorMessage = "HY OAS: " + hyErr.Error() + "; IG OAS: " + igErr.Error()
+		case hyErr != nil:
+			out.ErrorMessage = "HY OAS: " + hyErr.Error()
+		default:
+			out.ErrorMessage = "IG OAS: " + igErr.Error()
+		}
+		return out
+	}
+	now := time.Now()
+	hy, hyOK := latestSeriesPoint(hyPoints)
+	ig, igOK := latestSeriesPoint(igPoints)
+	if !hyOK {
+		out.FieldsMissing = append(out.FieldsMissing, "hy_oas")
+	}
+	if !igOK {
+		out.FieldsMissing = append(out.FieldsMissing, "ig_oas")
+	}
+	if !hyOK && !igOK {
+		out.Status = rpc.RegimeStatusError
+		out.ErrorMessage = "credit spreads: no usable FRED observations"
+		return out
+	}
+	if hyOK {
+		out.HYOAS = new(hy.Value)
+		out.HYOASQuality = officialDailyQuality(hy.Date, "FRED "+fredSeriesHYOAS+" HY OAS")
+		out.AsOfDate = hy.Date.Format("2006-01-02")
+		if lagged, ok := laggedSeriesPoint(hyPoints, 20); ok {
+			chg := hy.Value - lagged.Value
+			out.HY20DChange = &chg
+		}
+	}
+	if igOK {
+		out.IGOAS = new(ig.Value)
+		out.IGOASQuality = officialDailyQuality(ig.Date, "FRED "+fredSeriesIGOAS+" IG OAS")
+		if out.AsOfDate == "" || ig.Date.Before(hy.Date) {
+			out.AsOfDate = ig.Date.Format("2006-01-02")
+		}
+	}
+	if hyOK && igOK {
+		spread := hy.Value - ig.Value
+		out.HYIGSpread = &spread
+		out.SpreadQuality = officialDerivedQuality(minTime(hy.Date, ig.Date), "HY OAS minus IG OAS")
+	}
+	if hyOK && igOK && hy.Date.Format("2006-01-02") != ig.Date.Format("2006-01-02") {
+		out.FieldsMissing = append(out.FieldsMissing, "series_date_mismatch")
+	}
+	if out.HYOAS == nil {
+		out.Status = rpc.RegimeStatusError
+		out.ErrorMessage = "credit spreads: HY OAS missing; cannot band"
+		return out
+	}
+	out.Status = statusForOfficialDaily(hy.Date, now)
+	return out
+}
+
+const (
+	fredSeriesCP3M    = "RIFSPPFAAD90NB"
+	fredSeriesTBill3M = "DTB3"
+)
+
+const fundingStressNotes = "Funding stress proxy from the OFR FSI source set: 90-day AA financial commercial paper rate minus 3-month Treasury bill secondary-market rate. Both series are official Federal Reserve/FRED daily rates. Units are basis points. Default heuristic bands: <25 bp green, 25-75 bp yellow, >75 bp red. This is a slow daily funding/liquidity check, not an intraday funding-stress detector."
+
+func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeFundingStress {
+	out := rpc.RegimeFundingStress{
+		Notes:  fundingStressNotes,
+		Source: "FRED/St. Louis Fed official Federal Reserve CP and T-bill series",
+	}
+	if deps == nil || deps.fredSeries == nil {
+		out.Status = rpc.RegimeStatusUnavailable
+		out.ErrorMessage = "funding stress: no FRED series fetcher configured"
+		return out
+	}
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	cpPoints, cpErr := deps.fredSeries(cctx, fredSeriesCP3M)
+	tbPoints, tbErr := deps.fredSeries(cctx, fredSeriesTBill3M)
+	cancel()
+	if cpErr != nil || tbErr != nil {
+		out.Status = rpc.RegimeStatusError
+		switch {
+		case cpErr != nil && tbErr != nil:
+			out.ErrorMessage = "CP 3M: " + cpErr.Error() + "; T-bill 3M: " + tbErr.Error()
+		case cpErr != nil:
+			out.ErrorMessage = "CP 3M: " + cpErr.Error()
+		default:
+			out.ErrorMessage = "T-bill 3M: " + tbErr.Error()
+		}
+		return out
+	}
+	now := time.Now()
+	cp, cpOK := latestSeriesPoint(cpPoints)
+	tb, tbOK := latestSeriesPoint(tbPoints)
+	if !cpOK {
+		out.FieldsMissing = append(out.FieldsMissing, "cp_3m_rate")
+	}
+	if !tbOK {
+		out.FieldsMissing = append(out.FieldsMissing, "tbill_3m_rate")
+	}
+	if !cpOK || !tbOK {
+		out.Status = rpc.RegimeStatusError
+		out.ErrorMessage = "funding stress: CP or T-bill observation missing; cannot compute spread"
+		return out
+	}
+	out.CP3M = new(cp.Value)
+	out.TBill3M = new(tb.Value)
+	spread := (cp.Value - tb.Value) * 100
+	out.SpreadBps = &spread
+	asOf := minTime(cp.Date, tb.Date)
+	out.AsOfDate = asOf.Format("2006-01-02")
+	out.CP3MQuality = officialDailyQuality(cp.Date, "FRED "+fredSeriesCP3M+" 90-day AA financial CP")
+	out.TBill3MQuality = officialDailyQuality(tb.Date, "FRED "+fredSeriesTBill3M+" 3-month T-bill")
+	out.SpreadQuality = officialDerivedQuality(asOf, "90-day AA financial CP minus 3-month T-bill")
+	if cp.Date.Format("2006-01-02") != tb.Date.Format("2006-01-02") {
+		out.FieldsMissing = append(out.FieldsMissing, "series_date_mismatch")
+	}
+	out.Status = statusForOfficialDaily(asOf, now)
 	return out
 }
 
@@ -735,6 +997,51 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 
 // ----------------------------------------------------------------------------
 // Helpers shared across the per-indicator fetchers.
+
+func nilIfZero(v float64) *float64 {
+	if v == 0 {
+		return nil
+	}
+	return new(v)
+}
+
+func officialDailyQuality(date time.Time, source string) *rpc.Quality {
+	return &rpc.Quality{
+		AsOf:           date,
+		FreshnessClass: rpc.FreshnessDerived,
+		Confidence:     rpc.ConfidenceFirm,
+		Source:         source,
+	}
+}
+
+func officialDerivedQuality(date time.Time, source string) *rpc.Quality {
+	return &rpc.Quality{
+		AsOf:           date,
+		FreshnessClass: rpc.FreshnessDerived,
+		Confidence:     rpc.ConfidenceFirm,
+		Source:         source,
+	}
+}
+
+func statusForOfficialDaily(date time.Time, now time.Time) string {
+	if date.IsZero() {
+		return rpc.RegimeStatusError
+	}
+	if seriesObservationAge(date, now) > 7*24*time.Hour {
+		return rpc.RegimeStatusStale
+	}
+	return rpc.RegimeStatusOK
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.IsZero() {
+		return b
+	}
+	if b.IsZero() || a.Before(b) {
+		return a
+	}
+	return b
+}
 
 // warnDeps is the per-deps log shim. Production deps wire logWarnf to
 // the daemon logger; tests inject a capture closure; nil is a no-op

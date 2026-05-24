@@ -18,7 +18,8 @@ type streakIndicator interface {
 }
 
 var streakIndicators = []streakIndicator{
-	vixTermStreaks{}, hygSpyStreaks{}, usdJpyStreaks{},
+	vixTermStreaks{}, volOfVolStreaks{}, ratesVolStreaks{},
+	hygSpyStreaks{}, creditSpreadsStreaks{}, fundingStressStreaks{}, usdJpyStreaks{},
 	gammaZeroStreaks{}, breadthStreaks{},
 }
 
@@ -43,6 +44,48 @@ func (vixTermStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakI
 	res.VIXTermStructure.Streak = s
 }
 
+// volOfVolStreaks — VVIX level.
+type volOfVolStreaks struct{}
+
+func (volOfVolStreaks) key() string { return StreakKeyVolOfVol }
+
+func (volOfVolStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float64) {
+	if res.VolOfVol.Status != rpc.RegimeStatusOK && res.VolOfVol.Status != rpc.RegimeStatusStale {
+		return "", 0
+	}
+	band := classifyVolOfVolBand(res.VolOfVol.Last)
+	var value float64
+	if res.VolOfVol.Last != nil {
+		value = *res.VolOfVol.Last
+	}
+	return band, value
+}
+
+func (volOfVolStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
+	res.VolOfVol.Streak = s
+}
+
+// ratesVolStreaks — MOVE level.
+type ratesVolStreaks struct{}
+
+func (ratesVolStreaks) key() string { return StreakKeyRatesVol }
+
+func (ratesVolStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float64) {
+	if res.RatesVol.Status != rpc.RegimeStatusOK && res.RatesVol.Status != rpc.RegimeStatusStale {
+		return "", 0
+	}
+	band := classifyRatesVolBand(res.RatesVol.Last)
+	var value float64
+	if res.RatesVol.Last != nil {
+		value = *res.RatesVol.Last
+	}
+	return band, value
+}
+
+func (ratesVolStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
+	res.RatesVol.Streak = s
+}
+
 // hygSpyStreaks — HYG vs SPY divergence band.
 type hygSpyStreaks struct{}
 
@@ -62,6 +105,48 @@ func (hygSpyStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float6
 
 func (hygSpyStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
 	res.HYGSPYDivergence.Streak = s
+}
+
+// creditSpreadsStreaks — official HY OAS stress band.
+type creditSpreadsStreaks struct{}
+
+func (creditSpreadsStreaks) key() string { return StreakKeyCredit }
+
+func (creditSpreadsStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float64) {
+	if res.CreditSpreads.Status != rpc.RegimeStatusOK && res.CreditSpreads.Status != rpc.RegimeStatusStale {
+		return "", 0
+	}
+	band := classifyCreditSpreadsBand(res.CreditSpreads)
+	var value float64
+	if res.CreditSpreads.HYOAS != nil {
+		value = *res.CreditSpreads.HYOAS
+	}
+	return band, value
+}
+
+func (creditSpreadsStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
+	res.CreditSpreads.Streak = s
+}
+
+// fundingStressStreaks — CP/T-bill spread in basis points.
+type fundingStressStreaks struct{}
+
+func (fundingStressStreaks) key() string { return StreakKeyFunding }
+
+func (fundingStressStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float64) {
+	if res.FundingStress.Status != rpc.RegimeStatusOK && res.FundingStress.Status != rpc.RegimeStatusStale {
+		return "", 0
+	}
+	band := classifyFundingStressBand(res.FundingStress.SpreadBps)
+	var value float64
+	if res.FundingStress.SpreadBps != nil {
+		value = *res.FundingStress.SpreadBps
+	}
+	return band, value
+}
+
+func (fundingStressStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
+	res.FundingStress.Streak = s
 }
 
 // usdJpyStreaks — USD/JPY weekly-change band.

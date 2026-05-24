@@ -1,22 +1,42 @@
 # Risk Regime Dashboard — Build Spec
 
+**Updated:** 2026-05-24 11:31 CEST — dashboard widened to official credit,
+funding, vol-of-vol, and rates-volatility stress signals; composite labels
+are condition descriptions, not trade instructions.
+
 A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is **probability shifting, not prediction.** Multiple indicators flashing together is the real signal; any one alone is noise.
 
 -----
 
 ## What to Build
 
-A single-page web dashboard (HTML or React) showing five indicators with:
+A single-page web dashboard (HTML or React) showing nine indicator rows,
+grouped into seven evidence clusters so related signals do not double-count:
 
 - Current value and recent trend (sparkline, ~30 days)
 - Status light: **green** (normal), **yellow** (watch), **red** (warning)
 - One-line plain-English interpretation under each
-- A composite “regime score” at the top (count of red/yellow indicators)
+- A composite regime label at the top based on cluster counts, plus a raw
+  indicator-row count for transparency
 - Data refresh: daily is sufficient. No need for real-time.
 
 -----
 
-## The Five Indicators
+## Indicator Rows and Evidence Clusters
+
+Clusters:
+
+- Equity volatility: VIX/VIX3M and VVIX
+- Rates volatility: MOVE
+- Credit: HYG/SPY and official HY/IG OAS
+- Funding: 90-day AA financial commercial paper minus 3-month T-bill
+- FX carry: USD/JPY
+- Dealer gamma: SPY+SPX zero-gamma
+- Breadth: S&P 500 breadth
+
+Within a cluster, use the worst ranked band (red > yellow > green). This keeps
+equity-vol or credit from counting twice while still showing disagreement in
+the row table.
 
 ### 1. VIX Term Structure
 
@@ -34,7 +54,45 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 
 -----
 
-### 2. HYG vs SPX Divergence
+### 2. VVIX Vol-of-Vol
+
+**What it is:** Cboe VVIX, the expected volatility of VIX. It is a convexity
+demand / vol-of-vol stress input and can rise before VIX/VIX3M fully inverts.
+
+**Source:** Cboe official VVIX daily time series.
+
+**Thresholds (heuristic):**
+
+- Green: < 90
+- Yellow: 90–110
+- Red: > 110
+
+**Observation window:** Treat as confirmation or disagreement inside the
+equity-vol cluster. Do not read it as a standalone forecast.
+
+-----
+
+### 3. MOVE / Rates Volatility
+
+**What it is:** ICE BofA U.S. Bond Market Option Volatility Estimate Index
+(MOVE). It captures implied Treasury/rates volatility and can flag bond-market
+stress while equity volatility remains contained.
+
+**Source:** ICE/MOVE through the user's IBKR market-data entitlement when
+available. If not available, row is unranked.
+
+**Thresholds (heuristic):**
+
+- Green: < 100
+- Yellow: 100–130
+- Red: > 130
+
+**Observation window:** Daily. A rates-vol shock is cross-asset confirmation,
+not a trade instruction.
+
+-----
+
+### 4. HYG vs SPX Divergence
 
 **What it is:** High-yield corporate bond ETF (HYG) compared to S&P 500 (SPY). Credit markets often crack before equities.
 
@@ -45,14 +103,53 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 **Thresholds:**
 
 - Green: HYG and SPY both trending up together
-- Yellow: HYG breaks 50-day MA while SPY still within 3% of highs
-- Red: HYG in clear downtrend (below 50-day for 5+ sessions) while SPY at/near highs
+- Yellow: HYG breaks 50-day MA while SPY is not near highs, or the 52-week-high context is incomplete
+- Red: HYG below 50-day MA while SPY is still within 3% of highs; use the row streak to distinguish an early one-session divergence from a sustained 5+ session credit downtrend
 
 **Observation window:** Divergence over **2–4 weeks** is meaningful. Single-day moves are noise.
 
 -----
 
-### 3. USD/JPY
+### 5. Official HY/IG Credit Spreads
+
+**What it is:** ICE BofA high-yield and investment-grade corporate
+option-adjusted spreads. This is the official cash-credit companion to the
+faster HYG/SPY ETF proxy.
+
+**Source:** FRED/St. Louis Fed CSV endpoints for ICE BofA OAS series:
+`BAMLH0A0HYM2` (HY OAS) and `BAMLC0A0CM` (IG OAS).
+
+**Thresholds (heuristic, percentage points):**
+
+- Green: HY OAS < 4.0 and not widening quickly
+- Yellow: HY OAS 4.0–5.5, or HY OAS widening > 0.50 pp over ~20 observations
+- Red: HY OAS > 5.5, or HY OAS widening > 1.00 pp over ~20 observations
+
+**Observation window:** Daily close. The signal is slower but more official
+than ETF price action.
+
+-----
+
+### 6. Funding Stress Spread
+
+**What it is:** 90-day AA financial commercial paper rate minus 3-month
+Treasury bill secondary-market rate, an OFR-style U.S. funding spread.
+
+**Source:** FRED/St. Louis Fed official Federal Reserve series
+`RIFSPPFAAD90NB` and `DTB3`.
+
+**Thresholds (heuristic, basis points):**
+
+- Green: < 25 bp
+- Yellow: 25–75 bp
+- Red: > 75 bp
+
+**Observation window:** Daily. This is a slow funding/liquidity check, not an
+intraday funding-stress detector.
+
+-----
+
+### 7. USD/JPY
 
 **What it is:** Dollar-Yen exchange rate. A proxy for global carry trade leverage — when yen rallies hard (USD/JPY falls), leveraged risk positions are being unwound globally.
 
@@ -68,7 +165,7 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 
 -----
 
-### 4. Dealer Zero-Gamma Level (SPY)
+### 8. Dealer Zero-Gamma Level (SPY+SPX)
 
 **What it is:** The S&P 500 price level where market-maker hedging flips from dampening volatility to amplifying it. Above the level, dealers buy dips and sell rips. Below it, they sell into selloffs and buy into rallies — the dangerous regime.
 
@@ -86,7 +183,7 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 
 -----
 
-### 5. Market Breadth — % of SPX Stocks Above 50-Day MA
+### 9. Market Breadth — % of SPX Stocks Above 50-Day MA
 
 **What it is:** Tells you whether the rally is broad or carried by a few mega-caps. Narrow rallies are fragile.
 
@@ -106,13 +203,17 @@ A single-page web dashboard (HTML or React) showing five indicators with:
 
 Display at the top of the dashboard:
 
-|Reds|Yellows|Interpretation                                  |
-|----|-------|------------------------------------------------|
-|0   |0–2    |Normal regime                                   |
-|0   |3–5    |Elevated alert — review positioning             |
-|1–2 |any    |Watch closely, prep defensive moves             |
-|3+  |any    |Regime shift likely — execute pre-committed plan|
-|5   |—      |Full risk-off conditions                        |
+|Cluster reds|Cluster yellows|Interpretation            |
+|------------|---------------|--------------------------|
+|0           |0–2            |Normal regime             |
+|0           |3+             |Elevated stress watch     |
+|1–2         |any            |Stress signal present     |
+|3+          |any            |Broad stress regime       |
+|all ranked clusters red|—   |Full risk-off conditions  |
+
+Show raw indicator evidence beside or below the cluster evidence. Example:
+`Normal regime · 6 green clusters / 1 unranked cluster` followed by
+`Indicators: 7 green / 2 unranked`.
 
 **Critical:** the dashboard should not tell you what to do. It should tell you what conditions are. Action rules must be pre-committed by the user before the moment arrives.
 
@@ -165,20 +266,20 @@ Display at the top of the dashboard:
 
 ## Daemon API — `regime.snapshot` (v0.21.0+)
 
-`ibkr regime` / `ibkr_regime` / `regime.snapshot` returns all five
-indicators in one JSON envelope. The daemon never derives
-green/yellow/red status — the bands above are user-tunable per
-this spec, so threshold derivation lives in the renderer (or in an
-LLM consumer's reasoning when called via MCP). Each indicator row
-on the response carries:
+`ibkr regime` / `ibkr_regime` / `regime.snapshot` returns all nine
+indicator rows in one JSON envelope. The daemon derives default bands
+only for persisted streaks and the compact composite; raw measurements
+remain available so consumers can apply their own thresholds. Each
+indicator row on the response carries:
 
 - raw measurement(s) — pointers so "not arrived yet" vs "exactly
   zero" stays distinguishable;
 - a `status` field — `ok`, `stale` (gateway delivered a frozen or
   delayed tick), `computing` (gamma's background compute), `unavailable`
   (no data source), or `error`;
-- a `notes` field — the spec's threshold bands embedded verbatim,
-  so an LLM consumer doesn't need to consult this document.
+- a `notes` field in `--explain` / expanded JSON — the spec's threshold
+  bands embedded verbatim, so an LLM consumer doesn't need to consult this
+  document.
 
 A `spec_doc` field on the envelope points back here for deep-linking.
 
@@ -204,17 +305,17 @@ applied against the spec gives **green** (<0.92 is healthy contango).
 Gamma errored because SPX is not delivering any tick over weekend
 nights — expected; rerun during market hours. Breadth is served from
 the daemon's persisted cache (last weekday's post-close refresh — see
-Indicator 5 below for how the local engine computes the metric).
+Indicator 9 below for how the local engine computes the metric).
 
 ## Daemon methodology — what the IBKR daemon actually computes
 
-This section documents how Indicators 4 (Dealer Zero-Gamma) and 5
-(Market Breadth) are sourced from the IBKR gateway. Indicators 1–3
-(VIX term structure, HYG/SPX divergence, USD/JPY) use the standard
-quote/history endpoints; USD/JPY routes through native CASH/IDEALPRO
-FX (added in v0.21.0).
+This section documents how Indicators 8 (Dealer Zero-Gamma) and 9
+(Market Breadth) are sourced from the IBKR gateway. VIX/VIX3M, MOVE,
+HYG/SPY, and USD/JPY use standard quote/history endpoints; VVIX,
+official OAS, and funding spreads use official Cboe/FRED daily files.
+USD/JPY routes through native CASH/IDEALPRO FX.
 
-### Indicator 5 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
+### Indicator 9 — Market Breadth (`breadth.spx`, `ibkr_breadth`)
 
 **Source.** S&P Dow Jones Indices publishes the `S5FI` (% above
 50-day SMA) and `S5TH` (% above 200-day SMA) index family plus the

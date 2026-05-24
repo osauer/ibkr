@@ -79,6 +79,24 @@ func TestStreakStore_EmptyBandFreezes(t *testing.T) {
 	}
 }
 
+func TestPopulateStreaksDoesNotAttachFrozenStreakToUnrankedRow(t *testing.T) {
+	store := NewStreakStore(t.TempDir())
+	now := mustParseNY(t, "2026-05-20 10:00 EST")
+	store.Tick(StreakKeyVIXTerm, 0.85, "green", now)
+
+	srv := &Server{streaks: store}
+	res := &rpc.RegimeSnapshotResult{
+		VIXTermStructure: rpc.RegimeVIXTerm{Status: rpc.RegimeStatusError, ErrorMessage: "no tick"},
+	}
+	srv.populateStreaks(res)
+	if res.VIXTermStructure.Streak != nil {
+		t.Fatalf("unranked VIX row should not expose frozen prior streak, got %+v", res.VIXTermStructure.Streak)
+	}
+	if got := store.Get(StreakKeyVIXTerm); got == nil || got.Band != "green" {
+		t.Fatalf("store should still retain the frozen streak internally, got %+v", got)
+	}
+}
+
 // TestStreakStore_PersistAcrossInstances: a store written by one instance
 // should be loaded by a fresh instance pointed at the same dir.
 func TestStreakStore_PersistAcrossInstances(t *testing.T) {
@@ -138,6 +156,24 @@ func TestClassifyBands(t *testing.T) {
 			if got := classifyUSDJPYBand(mkPtr(c.weeklyPct)); got != c.want {
 				t.Errorf("classifyUSDJPYBand(%v) = %q, want %q", c.weeklyPct, got, c.want)
 			}
+		}
+	})
+
+	t.Run("hyg spy", func(t *testing.T) {
+		hyg := 79.0
+		hyg50 := 80.0
+		spy := 737.0
+		nearHigh := 749.0
+		farHigh := 780.0
+		if got := classifyHYGSPYBand(rpc.RegimeHYGSPYDivergence{
+			HYGPrice: &hyg, HYG50DMA: &hyg50, SPYPrice: &spy, SPY52WHigh: &nearHigh,
+		}); got != "red" {
+			t.Errorf("HYG below 50dma + SPY near highs = %q, want red", got)
+		}
+		if got := classifyHYGSPYBand(rpc.RegimeHYGSPYDivergence{
+			HYGPrice: &hyg, HYG50DMA: &hyg50, SPYPrice: &spy, SPY52WHigh: &farHigh,
+		}); got != "yellow" {
+			t.Errorf("HYG below 50dma away from highs = %q, want yellow", got)
 		}
 	})
 

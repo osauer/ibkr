@@ -24,7 +24,7 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 	hyg := 79.55
 	spy := 737.34
 	hyg50 := 80.10
-	spy52 := 749.30
+	spy52 := 780.00
 	usdjpy := 158.7285
 	close7 := 158.05
 	weekly := 0.43
@@ -86,11 +86,13 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 	for _, want := range []string{
 		"Risk Regime",
 		"Normal regime",
-		"2 green",
-		"1 yellow",
-		"0 red",
-		"3 of 5 ranked",
-		"2 unranked",
+		"2 green clusters / 1 yellow cluster / 4 unranked clusters",
+		"Indicators: 2 green / 1 yellow / 6 unranked",
+		"Punch line:",
+		"volatility term structure and FX carry proxy are constructive",
+		"ETF credit proxy is mixed",
+		"dealer gamma is computing",
+		"breadth is unavailable",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("composite header missing %q\n%s", want, out)
@@ -107,7 +109,7 @@ func TestRenderRegime_RowsFitOneLineEach(t *testing.T) {
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
-	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "USD/JPY", "γ-zero (SPY+SPX)", "SPX breadth"}
+	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "HY/IG OAS", "USD/JPY", "γ-zero (SPY+SPX)", "SPX breadth"}
 	for _, name := range indicators {
 		hits := strings.Count(stdout.String(), name)
 		if hits != 1 {
@@ -322,15 +324,15 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 	}{
 		{"all green = normal", 5, 0, 0, 5, "Normal regime"},
 		{"two yellow = normal", 3, 2, 0, 5, "Normal regime"},
-		{"three yellow = elevated", 2, 3, 0, 5, "Elevated alert — review positioning"},
-		{"five yellow = elevated", 0, 5, 0, 5, "Elevated alert — review positioning"},
-		{"one red = watch", 2, 2, 1, 5, "Watch closely, prep defensive moves"},
-		{"two red = watch", 1, 2, 2, 5, "Watch closely, prep defensive moves"},
-		{"three red = regime shift", 0, 2, 3, 5, "Regime shift likely — execute pre-committed plan"},
-		{"four red = regime shift", 0, 1, 4, 5, "Regime shift likely — execute pre-committed plan"},
+		{"three yellow = elevated", 2, 3, 0, 5, "Elevated stress watch"},
+		{"five yellow = elevated", 0, 5, 0, 5, "Elevated stress watch"},
+		{"one red = watch", 2, 2, 1, 5, "Stress signal present"},
+		{"two red = watch", 1, 2, 2, 5, "Stress signal present"},
+		{"three red = regime shift", 0, 2, 3, 5, "Broad stress regime"},
+		{"four red = regime shift", 0, 1, 4, 5, "Broad stress regime"},
 		{"five red (full ranked) = full risk-off", 0, 0, 5, 5, "Full risk-off conditions"},
 		// Coverage edge: 3 red but two unranked → still "regime shift", not "full"
-		{"three red with two unranked", 0, 0, 3, 5, "Regime shift likely — execute pre-committed plan"},
+		{"three red with two unranked", 0, 0, 3, 5, "Broad stress regime"},
 		// Coverage edge: nothing ranked → no verdict claim
 		{"all unranked", 0, 0, 0, 5, "No ranked indicators — see rows below for state"},
 		// Honesty floor: a positive "Normal regime" verdict requires
@@ -349,6 +351,12 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 			c := regimeComposite{green: tc.green, yellow: tc.yellow, red: tc.red, total: tc.total}
 			c.ranked = c.green + c.yellow + c.red
 			c.unranked = c.total - c.ranked
+			c.clusterGreen = tc.green
+			c.clusterYellow = tc.yellow
+			c.clusterRed = tc.red
+			c.clusterRanked = c.ranked
+			c.clusterUnranked = c.unranked
+			c.clusterTotal = tc.total
 			if got := c.verdict(); got != tc.want {
 				t.Errorf("verdict for %v = %q, want %q", tc, got, tc.want)
 			}
@@ -432,6 +440,51 @@ func TestRegimeRow_HYGSPYUnrankedWhen52WMissing(t *testing.T) {
 	})
 	if row.band != bandUnranked {
 		t.Errorf("HYG<50dma + 52w missing should leave row unranked, got %v", row.band)
+	}
+}
+
+func TestRegimeRow_HYGSPYNearHighIsRed(t *testing.T) {
+	t.Parallel()
+	hyg := 79.0
+	hyg50 := 80.0
+	spy := 737.0
+	spy52 := 749.0
+	row := rowHYGSPY(time.Now(), rpc.RegimeHYGSPYDivergence{
+		Status:   rpc.RegimeStatusOK,
+		HYGPrice: &hyg, HYG50DMA: &hyg50,
+		SPYPrice: &spy, SPY52WHigh: &spy52,
+	})
+	if row.band != bandRed {
+		t.Errorf("HYG<50dma + SPY near highs should be red, got %v", row.band)
+	}
+	if !strings.Contains(row.reason, "SPY near highs") {
+		t.Errorf("red HYG/SPY row should explain the divergence, got %q", row.reason)
+	}
+}
+
+func TestRegimeRow_NewStressSignalBands(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+
+	vvix := 112.0
+	if row := rowVolOfVol(now, rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Last: &vvix}); row.band != bandRed {
+		t.Errorf("VVIX 112 should be red, got %v", row.band)
+	}
+
+	move := 118.0
+	if row := rowRatesVol(now, rpc.RegimeRatesVol{Status: rpc.RegimeStatusOK, Last: &move}); row.band != bandYellow {
+		t.Errorf("MOVE 118 should be yellow, got %v", row.band)
+	}
+
+	hy := 3.8
+	widen := 0.6
+	if row := rowCreditSpreads(now, rpc.RegimeCreditSpreads{Status: rpc.RegimeStatusOK, HYOAS: &hy, HY20DChange: &widen}); row.band != bandYellow {
+		t.Errorf("HY OAS widening +0.6pp should be yellow, got %v", row.band)
+	}
+
+	funding := 80.0
+	if row := rowFundingStress(now, rpc.RegimeFundingStress{Status: rpc.RegimeStatusOK, SpreadBps: &funding}); row.band != bandRed {
+		t.Errorf("funding spread 80bp should be red, got %v", row.band)
 	}
 }
 

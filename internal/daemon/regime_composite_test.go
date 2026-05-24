@@ -1,14 +1,15 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // TestBuildRegimeComposite_AllGreenIsNormalRegime pins the happy path:
-// five green rows produce a "Normal regime" verdict with five ranked
-// rows, no unranked.
+// nine green rows produce a "Normal regime" verdict with seven ranked
+// clusters, no unranked.
 func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
@@ -16,19 +17,22 @@ func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	if c.Verdict != "Normal regime" {
 		t.Errorf("verdict: got %q want %q", c.Verdict, "Normal regime")
 	}
-	if c.GreenCount != 5 {
-		t.Errorf("green: got %d want 5", c.GreenCount)
+	if c.GreenCount != 9 {
+		t.Errorf("green: got %d want 9", c.GreenCount)
 	}
-	if c.RankedCount != 5 {
-		t.Errorf("ranked: got %d want 5", c.RankedCount)
+	if c.RankedCount != 9 {
+		t.Errorf("ranked: got %d want 9", c.RankedCount)
 	}
 	if c.UnrankedCount != 0 {
 		t.Errorf("unranked: got %d want 0", c.UnrankedCount)
 	}
+	if c.ClusterGreenCount != 7 || c.ClusterRankedCount != 7 {
+		t.Errorf("clusters: got green=%d ranked=%d want 7/7", c.ClusterGreenCount, c.ClusterRankedCount)
+	}
 }
 
 // TestBuildRegimeComposite_ThreeRedTriggersRegimeShift pins the spec
-// interpretation table: ≥3 red bands surface as "Regime shift likely".
+// interpretation table: ≥3 red bands surface as a broad stress label.
 func TestBuildRegimeComposite_ThreeRedTriggersRegimeShift(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
@@ -42,13 +46,13 @@ func TestBuildRegimeComposite_ThreeRedTriggersRegimeShift(t *testing.T) {
 	if c.RedCount != 3 {
 		t.Errorf("red: got %d want 3", c.RedCount)
 	}
-	if c.Verdict != "Regime shift likely — execute pre-committed plan" {
+	if c.Verdict != "Broad stress regime" {
 		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
 
 // TestBuildRegimeComposite_SingleRedTriggersWatch pins the
-// one-red branch: a single red row reads as "Watch closely".
+// one-red branch: a single red row reads as a stress signal.
 func TestBuildRegimeComposite_SingleRedTriggersWatch(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
@@ -58,7 +62,7 @@ func TestBuildRegimeComposite_SingleRedTriggersWatch(t *testing.T) {
 	if c.RedCount != 1 {
 		t.Errorf("red: got %d want 1", c.RedCount)
 	}
-	if c.Verdict != "Watch closely, prep defensive moves" {
+	if c.Verdict != "Stress signal present" {
 		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
@@ -73,14 +77,34 @@ func TestBuildRegimeComposite_UnrankedDoesntCountTowardBand(t *testing.T) {
 	r.GammaZero.Status = rpc.RegimeStatusComputing
 	r.GammaZero.Envelope.Result = nil
 	c := buildRegimeComposite(r)
-	if c.GreenCount != 4 {
-		t.Errorf("green: got %d want 4 (gamma row should not count)", c.GreenCount)
+	if c.GreenCount != 8 {
+		t.Errorf("green: got %d want 8 (gamma row should not count)", c.GreenCount)
 	}
 	if c.UnrankedCount != 1 {
 		t.Errorf("unranked: got %d want 1", c.UnrankedCount)
 	}
-	if c.RankedCount != 4 {
-		t.Errorf("ranked: got %d want 4", c.RankedCount)
+	if c.RankedCount != 8 {
+		t.Errorf("ranked: got %d want 8", c.RankedCount)
+	}
+}
+
+func TestBuildRegimeComposite_HYGSPYNearHighCountsRed(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	hyg := 79.0
+	hyg50 := 80.0
+	spy := 737.0
+	spy52 := 749.0
+	r.HYGSPYDivergence.HYGPrice = &hyg
+	r.HYGSPYDivergence.HYG50DMA = &hyg50
+	r.HYGSPYDivergence.SPYPrice = &spy
+	r.HYGSPYDivergence.SPY52WHigh = &spy52
+	c := buildRegimeComposite(r)
+	if c.RedCount != 1 {
+		t.Errorf("HYG/SPY current divergence should count as one red row, got %d", c.RedCount)
+	}
+	if c.Verdict != "Stress signal present" {
+		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
 
@@ -90,13 +114,16 @@ func TestBuildRegimeComposite_UnrankedDoesntCountTowardBand(t *testing.T) {
 func TestBuildRegimeComposite_BelowFloorIsInsufficient(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
-	// Kill HYG/SPY, USD/JPY, breadth to leave only VIX + gamma ranked.
+	// Kill enough clusters to leave only equity-vol + gamma ranked.
+	r.RatesVol.Status = rpc.RegimeStatusError
 	r.HYGSPYDivergence.Status = rpc.RegimeStatusError
+	r.CreditSpreads.Status = rpc.RegimeStatusError
+	r.FundingStress.Status = rpc.RegimeStatusError
 	r.USDJPY.Status = rpc.RegimeStatusError
 	r.Breadth.Status = rpc.RegimeStatusError
 	c := buildRegimeComposite(r)
-	if c.RankedCount >= verdictFloor {
-		t.Fatalf("test setup wrong: ranked %d, want < %d", c.RankedCount, verdictFloor)
+	if c.ClusterRankedCount >= verdictFloor {
+		t.Fatalf("test setup wrong: ranked clusters %d, want < %d", c.ClusterRankedCount, verdictFloor)
 	}
 	if c.Verdict != "Insufficient signal — too few indicators ranked" {
 		t.Errorf("verdict: got %q", c.Verdict)
@@ -117,6 +144,45 @@ func TestBuildRegimeComposite_NilReturnsHonestVerdict(t *testing.T) {
 	}
 }
 
+func TestBuildRegimeSummaryAndWarnings(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	r.USDJPY.Status = rpc.RegimeStatusUnavailable
+	r.USDJPY.WeeklyChange = nil
+	r.USDJPY.ErrorMessage = "USD.JPY: gateway delivered no FX tick"
+	r.GammaZero.Status = rpc.RegimeStatusComputing
+	r.GammaZero.Envelope = rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusComputing, EtaSeconds: 42}
+	r.Composite = buildRegimeComposite(r)
+
+	s := buildRegimeSummary(r)
+	if s.Label != "Normal regime" {
+		t.Errorf("summary label: got %q", s.Label)
+	}
+	if s.Evidence != "5 green clusters / 2 unranked clusters" {
+		t.Errorf("summary evidence: got %q", s.Evidence)
+	}
+	if s.IndicatorEvidence != "7 green / 2 unranked" {
+		t.Errorf("summary indicator evidence: got %q", s.IndicatorEvidence)
+	}
+	if s.Confidence != "medium" {
+		t.Errorf("summary confidence: got %q", s.Confidence)
+	}
+	if s.NotAdvice == "" {
+		t.Errorf("summary should carry non-advice disclosure")
+	}
+	if s.PunchLine == "" || !containsAll(s.PunchLine, "constructive", "unavailable", "computing") {
+		t.Errorf("summary punch line missing evidence states: %q", s.PunchLine)
+	}
+
+	warnings := buildRegimeWarnings(r)
+	if len(warnings) != 2 {
+		t.Fatalf("warnings len=%d want 2: %+v", len(warnings), warnings)
+	}
+	if warnings[0].Scope == "" || warnings[0].Impact == "" || warnings[0].Action == "" {
+		t.Errorf("warnings should be scoped prose with impact/action: %+v", warnings[0])
+	}
+}
+
 // mkAllGreenRegime returns a fixture where every row classifies green
 // under the spec defaults. Used as the baseline so each test can
 // perturb one indicator and verify the rollup tracks.
@@ -127,6 +193,13 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 	spy := 580.0
 	spy52 := 600.0
 	weekly := -0.5 // <1% weekly = green
+	vvix := 75.0
+	move := 95.0
+	hyOAS := 3.2
+	igOAS := 1.2
+	hyIG := 2.0
+	hy20d := 0.1
+	funding := 12.0
 	zg := 580.0
 	gap := 5.0 // >2% above γ-zero = green
 	return &rpc.RegimeSnapshotResult{
@@ -134,12 +207,31 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 			Status: rpc.RegimeStatusOK,
 			Ratio:  &ratio,
 		},
+		VolOfVol: rpc.RegimeVolOfVol{
+			Status: rpc.RegimeStatusOK,
+			Last:   &vvix,
+		},
+		RatesVol: rpc.RegimeRatesVol{
+			Status: rpc.RegimeStatusOK,
+			Last:   &move,
+		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
 			Status:     rpc.RegimeStatusOK,
 			HYGPrice:   &hyg,
 			HYG50DMA:   &hyg50,
 			SPYPrice:   &spy,
 			SPY52WHigh: &spy52,
+		},
+		CreditSpreads: rpc.RegimeCreditSpreads{
+			Status:      rpc.RegimeStatusOK,
+			HYOAS:       &hyOAS,
+			IGOAS:       &igOAS,
+			HYIGSpread:  &hyIG,
+			HY20DChange: &hy20d,
+		},
+		FundingStress: rpc.RegimeFundingStress{
+			Status:    rpc.RegimeStatusOK,
+			SpreadBps: &funding,
 		},
 		USDJPY: rpc.RegimeUSDJPY{
 			Status:       rpc.RegimeStatusOK,
@@ -164,4 +256,13 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 			},
 		},
 	}
+}
+
+func containsAll(s string, needles ...string) bool {
+	for _, n := range needles {
+		if !strings.Contains(s, n) {
+			return false
+		}
+	}
+	return true
 }

@@ -260,7 +260,11 @@ type StreakInfo = rpc.StreakInfo
 // compile time rather than silently writing to a misnamed key.
 const (
 	StreakKeyVIXTerm   = "vix_term"
+	StreakKeyVolOfVol  = "vol_of_vol"
+	StreakKeyRatesVol  = "rates_vol"
 	StreakKeyHYGSPY    = "hyg_spy"
+	StreakKeyCredit    = "credit_spreads"
+	StreakKeyFunding   = "funding_stress"
 	StreakKeyUSDJPY    = "usdjpy"
 	StreakKeyGammaZero = "gamma_zero"
 	StreakKeyBreadth   = "breadth"
@@ -278,6 +282,34 @@ func classifyVIXTermBand(ratio *float64) string {
 	case *ratio < 0.92:
 		return "green"
 	case *ratio < 1.00:
+		return "yellow"
+	default:
+		return "red"
+	}
+}
+
+func classifyVolOfVolBand(vvix *float64) string {
+	if vvix == nil {
+		return ""
+	}
+	switch {
+	case *vvix < 90:
+		return "green"
+	case *vvix < 110:
+		return "yellow"
+	default:
+		return "red"
+	}
+}
+
+func classifyRatesVolBand(move *float64) string {
+	if move == nil {
+		return ""
+	}
+	switch {
+	case *move < 100:
+		return "green"
+	case *move < 130:
 		return "yellow"
 	default:
 		return "red"
@@ -308,6 +340,33 @@ func classifyHYGSPYBand(r rpc.RegimeHYGSPYDivergence) string {
 		return "red"
 	}
 	return "yellow"
+}
+
+func classifyCreditSpreadsBand(r rpc.RegimeCreditSpreads) string {
+	if r.HYOAS == nil {
+		return ""
+	}
+	if *r.HYOAS >= 5.5 || (r.HY20DChange != nil && *r.HY20DChange >= 1.0) {
+		return "red"
+	}
+	if *r.HYOAS >= 4.0 || (r.HY20DChange != nil && *r.HY20DChange >= 0.5) {
+		return "yellow"
+	}
+	return "green"
+}
+
+func classifyFundingStressBand(spreadBps *float64) string {
+	if spreadBps == nil {
+		return ""
+	}
+	switch {
+	case *spreadBps < 25:
+		return "green"
+	case *spreadBps < 75:
+		return "yellow"
+	default:
+		return "red"
+	}
 }
 
 // classifyUSDJPYBand maps the weekly USD/JPY change to its band per

@@ -494,7 +494,7 @@ type BreadthSPXResult struct {
 	// History is the trailing daily series, oldest first. Length is
 	// bounded by BreadthSPXParams.HistoryDays. Each point carries
 	// both SMA readings plus the new-highs/lows counts.
-	History []BreadthDailyValue `json:"history"`
+	History []BreadthDailyValue `json:"history,omitempty"`
 	// Source identifies the data provenance for the headline value.
 	// Free-form; renderers display verbatim.
 	Source string `json:"source"`
@@ -1028,6 +1028,28 @@ func StripRegimeGammaProfiles(r *RegimeSnapshotResult) {
 	StripGammaProfiles(&r.GammaZero.Envelope)
 }
 
+// CompactRegimeSnapshot removes methodology prose and chart/history payloads
+// from a regime response while preserving the current measurements, summary,
+// composite counts, streaks, quality provenance, scoped warnings, and gamma
+// headline diagnostics. CLI --json and MCP use this default shape so agent
+// consumers get the decision surface without multi-kilobyte notes blocks.
+func CompactRegimeSnapshot(r *RegimeSnapshotResult) {
+	if r == nil {
+		return
+	}
+	StripRegimeGammaProfiles(r)
+	r.VIXTermStructure.Notes = ""
+	r.VolOfVol.Notes = ""
+	r.RatesVol.Notes = ""
+	r.HYGSPYDivergence.Notes = ""
+	r.CreditSpreads.Notes = ""
+	r.FundingStress.Notes = ""
+	r.USDJPY.Notes = ""
+	r.GammaZero.Notes = ""
+	r.Breadth.Notes = ""
+	r.Breadth.Envelope.History = nil
+}
+
 func stripGammaComputedProfiles(c *GammaZeroComputed) {
 	if c == nil {
 		return
@@ -1142,7 +1164,7 @@ type RegimeVIXTerm struct {
 	VIX3M         *float64 `json:"vix3m"`
 	Ratio         *float64 `json:"ratio"` // VIX / VIX3M
 	DataType      string   `json:"data_type,omitempty"`
-	Notes         string   `json:"notes"`
+	Notes         string   `json:"notes,omitempty"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
 	// VIX previous regular-session close (tick 9) and the day's percent
@@ -1187,7 +1209,7 @@ type RegimeHYGSPYDivergence struct {
 	SPYChange     *float64 `json:"spy_change,omitempty"`     // last − prev_close (dollars)
 	SPYChangePct  *float64 `json:"spy_change_pct,omitempty"` // (last − prev_close) / prev_close × 100
 	HYGDataType   string   `json:"hyg_data_type,omitempty"`
-	Notes         string   `json:"notes"`
+	Notes         string   `json:"notes,omitempty"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
 	// Per-scalar provenance. SPY52WHigh has two paths (live tick 165 vs
@@ -1202,7 +1224,85 @@ type RegimeHYGSPYDivergence struct {
 	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
-// RegimeUSDJPY is Indicator 3: USD/JPY exchange rate. Spec measures
+// RegimeVolOfVol is the VVIX vol-of-vol row. It uses Cboe's official
+// daily VVIX time series rather than a retail-gateway quote, because
+// VVIX is itself an index calculation and end-of-day source quality is
+// better than pretending there is a continuously tradable instrument.
+type RegimeVolOfVol struct {
+	Status       string      `json:"status"`
+	Symbol       string      `json:"symbol,omitempty"` // "VVIX"
+	Last         *float64    `json:"last"`
+	Change20D    *float64    `json:"change_20d_pct,omitempty"` // (last − t-20) / t-20 × 100
+	AsOfDate     string      `json:"as_of_date,omitempty"`     // YYYY-MM-DD observation date
+	Source       string      `json:"source,omitempty"`
+	Notes        string      `json:"notes,omitempty"`
+	ErrorMessage string      `json:"error_message,omitempty"`
+	ValueQuality *Quality    `json:"value_quality,omitempty"`
+	Streak       *StreakInfo `json:"streak,omitempty"`
+}
+
+// RegimeRatesVol is the fixed-income/rates-volatility row. The preferred
+// live source is the ICE-owned MOVE index through the user's IBKR feed;
+// unavailable rows are still useful because they tell the composite that
+// an important cross-asset bucket is missing instead of silently assuming
+// equity vol is enough.
+type RegimeRatesVol struct {
+	Status       string      `json:"status"`
+	Symbol       string      `json:"symbol,omitempty"` // "MOVE"
+	Last         *float64    `json:"last"`
+	PrevClose    *float64    `json:"prev_close,omitempty"`
+	Change       *float64    `json:"change,omitempty"`
+	ChangePct    *float64    `json:"change_pct,omitempty"`
+	DataType     string      `json:"data_type,omitempty"`
+	Source       string      `json:"source,omitempty"`
+	Notes        string      `json:"notes,omitempty"`
+	ErrorMessage string      `json:"error_message,omitempty"`
+	ValueQuality *Quality    `json:"value_quality,omitempty"`
+	Streak       *StreakInfo `json:"streak,omitempty"`
+}
+
+// RegimeCreditSpreads is the official cash-credit companion to the HYG
+// ETF proxy. Values are ICE BofA option-adjusted spread series retrieved
+// via FRED/St. Louis Fed. Units are percentage points; e.g. 4.25 means
+// 425 bp.
+type RegimeCreditSpreads struct {
+	Status        string      `json:"status"`
+	HYOAS         *float64    `json:"hy_oas"`
+	IGOAS         *float64    `json:"ig_oas"`
+	HYIGSpread    *float64    `json:"hy_ig_spread,omitempty"`
+	HY20DChange   *float64    `json:"hy_oas_20d_change,omitempty"` // percentage points
+	AsOfDate      string      `json:"as_of_date,omitempty"`
+	Source        string      `json:"source,omitempty"`
+	Notes         string      `json:"notes,omitempty"`
+	ErrorMessage  string      `json:"error_message,omitempty"`
+	FieldsMissing []string    `json:"fields_missing,omitempty"`
+	HYOASQuality  *Quality    `json:"hy_oas_quality,omitempty"`
+	IGOASQuality  *Quality    `json:"ig_oas_quality,omitempty"`
+	SpreadQuality *Quality    `json:"spread_quality,omitempty"`
+	Streak        *StreakInfo `json:"streak,omitempty"`
+}
+
+// RegimeFundingStress is the OFR-style U.S. funding spread row:
+// 90-day AA financial commercial paper rate minus 3-month Treasury bill
+// rate, both from official Federal Reserve/FRED series. Units are basis
+// points.
+type RegimeFundingStress struct {
+	Status         string      `json:"status"`
+	CP3M           *float64    `json:"cp_3m_rate"`
+	TBill3M        *float64    `json:"tbill_3m_rate"`
+	SpreadBps      *float64    `json:"spread_bps"`
+	AsOfDate       string      `json:"as_of_date,omitempty"`
+	Source         string      `json:"source,omitempty"`
+	Notes          string      `json:"notes,omitempty"`
+	ErrorMessage   string      `json:"error_message,omitempty"`
+	FieldsMissing  []string    `json:"fields_missing,omitempty"`
+	CP3MQuality    *Quality    `json:"cp_3m_quality,omitempty"`
+	TBill3MQuality *Quality    `json:"tbill_3m_quality,omitempty"`
+	SpreadQuality  *Quality    `json:"spread_quality,omitempty"`
+	Streak         *StreakInfo `json:"streak,omitempty"`
+}
+
+// RegimeUSDJPY is the FX-carry stress row: USD/JPY exchange rate. Spec measures
 // "weekly move" — daemon surfaces last and 7-trading-days-ago close so
 // the consumer can compute the change. Source is FX-pair routing
 // (CASH/IDEALPRO); routing arrives in a sibling commit.
@@ -1213,7 +1313,7 @@ type RegimeUSDJPY struct {
 	Close7DAgo    *float64 `json:"close_7d_ago"`      // close from 7 trading days ago
 	WeeklyChange  *float64 `json:"weekly_change_pct"` // (last − close_7d_ago) / close_7d_ago × 100
 	DataType      string   `json:"data_type,omitempty"`
-	Notes         string   `json:"notes"`
+	Notes         string   `json:"notes,omitempty"`
 	ErrorMessage  string   `json:"error_message,omitempty"`
 	FieldsMissing []string `json:"fields_missing,omitempty"`
 	// Per-scalar provenance. Last is firm-live (or firm-frozen);
@@ -1225,14 +1325,14 @@ type RegimeUSDJPY struct {
 	Streak *StreakInfo `json:"streak,omitempty"`
 }
 
-// RegimeGammaZero is Indicator 4: the existing gamma.zero_spx
+// RegimeGammaZero is the existing gamma.zero_spx
 // envelope embedded inline. Auto-kicked by regime.snapshot on first
 // call of an NY trading day; subsequent calls return the cached
 // result. Method token + warning_details carry methodology disclosures.
 type RegimeGammaZero struct {
 	Status        string             `json:"status"`
 	Envelope      GammaZeroSPXResult `json:"envelope"`
-	Notes         string             `json:"notes"`
+	Notes         string             `json:"notes,omitempty"`
 	FieldsMissing []string           `json:"fields_missing,omitempty"`
 	// Per-scalar provenance for the two values the renderer prints:
 	// ZeroGamma is proxy-modelled (carries the perfiliev-bs-sweep
@@ -1277,7 +1377,7 @@ type RegimeGammaZero struct {
 type RegimeBreadth struct {
 	Status        string           `json:"status"`
 	Envelope      BreadthSPXResult `json:"envelope"`
-	Notes         string           `json:"notes"`
+	Notes         string           `json:"notes,omitempty"`
 	FieldsMissing []string         `json:"fields_missing,omitempty"`
 	// PctAbove50DMA / PctAbove200DMA / NewHighsToday / NewLowsToday /
 	// NetNewHighsPct are surfaced directly on the regime row so a
@@ -1300,14 +1400,14 @@ type RegimeBreadth struct {
 }
 
 // RegimeSnapshotParams is the input for MethodRegimeSnapshot. Empty
-// body means "fetch all five indicators with default parameters." A
+// body means "fetch all regime indicators with default parameters." A
 // future caller could trim to a subset, but v1 always returns all
 // rows — partial responses are surfaced via per-indicator Status.
 type RegimeSnapshotParams struct{}
 
 // RegimeSnapshotResult is the wire payload for the dashboard
 // generator and the MCP natural-language interface. One JSON
-// envelope, all five rows. Each row carries:
+// envelope, all rows. Each row carries:
 //   - raw measurements (no derived status colors)
 //   - a `notes` field embedding the spec's threshold bands verbatim,
 //     so a consumer can interpret without reading the spec doc
@@ -1320,8 +1420,13 @@ type RegimeSnapshotParams struct{}
 // distinguishable.
 type RegimeSnapshotResult struct {
 	AsOf             time.Time              `json:"as_of"`
+	Summary          RegimeSummary          `json:"summary"`
 	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
+	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`
+	RatesVol         RegimeRatesVol         `json:"rates_vol"`
 	HYGSPYDivergence RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
+	CreditSpreads    RegimeCreditSpreads    `json:"credit_spreads"`
+	FundingStress    RegimeFundingStress    `json:"funding_stress"`
 	USDJPY           RegimeUSDJPY           `json:"usd_jpy"`
 	GammaZero        RegimeGammaZero        `json:"gamma_zero"`
 	Breadth          RegimeBreadth          `json:"breadth"`
@@ -1330,29 +1435,65 @@ type RegimeSnapshotResult struct {
 	// don't have to recompute it from per-row Status fields. Populated on
 	// every response.
 	Composite RegimeComposite `json:"composite"`
+	// WarningDetails carries structured, row-scoped data-quality issues
+	// that affected this snapshot but did not make the whole RPC fail.
+	// Agent surfaces should prefer these over parsing ErrorMessage strings:
+	// each warning states what happened, what it changes in the composite,
+	// and the next useful action.
+	WarningDetails []RegimeWarning `json:"warning_details,omitempty"`
 	// SpecDoc points consumers (especially LLM-driven ones) at the
 	// canonical methodology + threshold reference so they don't
 	// hallucinate band edges. Same path on every response.
 	SpecDoc string `json:"spec_doc"`
 }
 
-// RegimeComposite is the daemon-side rollup of the five indicator rows.
+// RegimeSummary is the compact, agent-first reading of a regime snapshot.
+// It deliberately avoids probabilities or trade instructions: the fields
+// describe the evidence balance, coverage, and current condition only.
+type RegimeSummary struct {
+	Label             string   `json:"label"`
+	Evidence          string   `json:"evidence"` // cluster-level balance
+	IndicatorEvidence string   `json:"indicator_evidence,omitempty"`
+	PunchLine         string   `json:"punch_line"`
+	Confidence        string   `json:"confidence"`
+	DominantRisks     []string `json:"dominant_risks,omitempty"`
+	NotAdvice         string   `json:"not_advice,omitempty"`
+}
+
+// RegimeWarning is a structured data-quality or availability issue scoped
+// to one regime indicator. Severity is "info", "warning", or "error" from
+// the point of view of interpreting the snapshot, not the RPC transport.
+type RegimeWarning struct {
+	Code     string `json:"code"`
+	Scope    string `json:"scope"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+	Impact   string `json:"impact"`
+	Action   string `json:"action"`
+}
+
+// RegimeComposite is the daemon-side rollup of the regime rows.
 // Verdict mirrors the CLI's text rendering verbatim ("Normal regime",
-// "Watch closely, prep defensive moves", etc.) so consumers can show the
-// same headline without re-implementing the band logic. Each band's
-// constituent count is exposed so a renderer that wants its own verdict
-// can read the raw tally without re-deriving from per-row status.
+// "Stress signal present", etc.) so consumers can show the same
+// non-advisory headline without re-implementing the band logic. The raw
+// row counts are exposed alongside cluster counts so related signals
+// (e.g. VIX term structure + VVIX, HYG proxy + cash credit spreads) do
+// not double-count as independent macro confirmations.
 //
-// RankedCount + UnrankedCount sum to 5 (the indicator count); ranked are
-// rows in a real band (green/yellow/red), unranked are computing /
-// unavailable / error / no-data.
+// RankedCount + UnrankedCount sum to the indicator count; cluster counts
+// sum to the cluster count. Verdict is based on clusters, not raw rows.
 type RegimeComposite struct {
-	Verdict       string `json:"verdict"`
-	GreenCount    int    `json:"green_count"`
-	YellowCount   int    `json:"yellow_count"`
-	RedCount      int    `json:"red_count"`
-	RankedCount   int    `json:"ranked_count"`
-	UnrankedCount int    `json:"unranked_count"`
+	Verdict              string `json:"verdict"`
+	GreenCount           int    `json:"green_count"`
+	YellowCount          int    `json:"yellow_count"`
+	RedCount             int    `json:"red_count"`
+	RankedCount          int    `json:"ranked_count"`
+	UnrankedCount        int    `json:"unranked_count"`
+	ClusterGreenCount    int    `json:"cluster_green_count"`
+	ClusterYellowCount   int    `json:"cluster_yellow_count"`
+	ClusterRedCount      int    `json:"cluster_red_count"`
+	ClusterRankedCount   int    `json:"cluster_ranked_count"`
+	ClusterUnrankedCount int    `json:"cluster_unranked_count"`
 }
 
 // Quote is the daemon's snapshot result.

@@ -131,7 +131,7 @@ func init() {
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"breadth", "S&P 500 breadth — % above 50/200-DMA + new-highs/new-lows, computed locally from constituent fan-out (~60 min cold)", "ibkr breadth [--days 30] [--json]", runBreadth},
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--json]", runGamma},
-		{"regime", "Risk-regime snapshot: all 5 indicators in one call (VIX term, HYG/SPY, USD/JPY, gamma, breadth)", "ibkr regime [--explain] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
+		{"regime", "Risk-regime snapshot: 9 rows across vol, rates, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
