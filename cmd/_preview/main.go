@@ -440,13 +440,22 @@ func fixtureRegime() *rpc.RegimeSnapshotResult {
 		Breadth: rpc.RegimeBreadth{
 			Status: rpc.RegimeStatusOK,
 			Envelope: rpc.BreadthSPXResult{
-				State:  rpc.BreadthStateReady,
-				Value:  61.8,
-				Source: "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
-				Method: "constituent-fanout-50dma",
-				AsOf:   time.Date(2026, 5, 16, 20, 35, 0, 0, time.UTC),
+				State:          rpc.BreadthStateReady,
+				PctAbove50DMA:  61.8,
+				PctAbove200DMA: 68.2,
+				NewHighsToday:  27,
+				NewLowsToday:   8,
+				NetNewHighsPct: 3.8,
+				Source:         "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
+				Method:         "constituent-fanout-50/200dma-hl",
+				AsOf:           time.Date(2026, 5, 16, 20, 35, 0, 0, time.UTC),
 			},
-			Notes: "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR doesn't redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes (once-daily refresh post-close).",
+			PctAbove50DMA:  61.8,
+			PctAbove200DMA: 68.2,
+			NewHighsToday:  27,
+			NewLowsToday:   8,
+			NetNewHighsPct: 3.8,
+			Notes:          "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR doesn't redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes (once-daily refresh post-close).",
 		},
 	}
 }

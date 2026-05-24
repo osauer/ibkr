@@ -115,6 +115,26 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 	}
 }
 
+func TestRenderRegime_TapeSitsBetweenDescriptionAndIndicators(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeText(env, regimeFixture()); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	punch := strings.Index(out, "Punch line:")
+	spy := strings.Index(out, "SPY 737.34")
+	vix := strings.Index(out, "VIX 18.43")
+	header := strings.Index(out, "INDICATOR")
+	if punch < 0 || spy < 0 || vix < 0 || header < 0 {
+		t.Fatalf("missing expected blocks: punch=%d spy=%d vix=%d header=%d\n%s", punch, spy, vix, header, out)
+	}
+	if !(punch < spy && spy < header && punch < vix && vix < header) {
+		t.Errorf("SPY/VIX tape should sit after the description block and before indicators:\n%s", out)
+	}
+}
+
 // TestRenderRegime_RowsFitOneLineEach pins the compressed layout: each
 // of the eight indicators occupies exactly one row in the rendered body
 // (excluding header, composite, blank, and footer lines). The old
@@ -251,13 +271,13 @@ func TestRenderRegime_DefaultOmitsNotesHasHint(t *testing.T) {
 	}
 }
 
-// ----- SPY + VIX headline above the indicator rows -----
+// ----- SPY + VIX tape above the indicator rows -----
 
 // TestRenderRegime_HeadlineShowsSPYAndVIX pins the headline contract:
 // when both SPY and VIX carry their prev-close anchors, the dashboard
-// surfaces "SPY <price> <±$> (<±%>)    VIX <price> (<±%>)" above the
-// verdict line. The line never invents numbers — a missing prev close
-// shows the price with a dim "(—)" placeholder.
+// surfaces "SPY <price> <±$> (<±%>)    VIX <price> (<±%>)" between the
+// verdict block and the audit rows. The line never invents numbers — a
+// missing prev close shows the price with a dim "(—)" placeholder.
 func TestRenderRegime_HeadlineShowsSPYAndVIX(t *testing.T) {
 	t.Parallel()
 	fix := regimeFixture()
@@ -471,6 +491,24 @@ func TestRegimeRow_HYGSPYUnrankedWhen52WMissing(t *testing.T) {
 	}
 }
 
+func TestRegimeRow_HYGSPYMissingPriceDoesNotRenderZeroOrPanic(t *testing.T) {
+	t.Parallel()
+	hyg50 := 80.0
+	row := rowHYGSPY(time.Now(), rpc.RegimeHYGSPYDivergence{
+		Status:   rpc.RegimeStatusOK,
+		HYG50DMA: &hyg50,
+	})
+	if row.band != bandUnranked {
+		t.Errorf("missing HYG price should leave row unranked, got %v", row.band)
+	}
+	if row.stateNote != "HYG price unavailable" {
+		t.Errorf("missing HYG price should surface an honest state note, got %q", row.stateNote)
+	}
+	if strings.Contains(row.value, "0.00") {
+		t.Errorf("missing HYG price must not render a fake zero: %q", row.value)
+	}
+}
+
 func TestRegimeRow_HYGSPYNearHighIsRed(t *testing.T) {
 	t.Parallel()
 	hyg := 79.0
@@ -487,6 +525,41 @@ func TestRegimeRow_HYGSPYNearHighIsRed(t *testing.T) {
 	}
 	if !strings.Contains(row.reason, "SPY near highs") {
 		t.Errorf("red HYG/SPY row should explain the divergence, got %q", row.reason)
+	}
+}
+
+func TestRegimeRow_VIXMissingLegDoesNotRenderZero(t *testing.T) {
+	t.Parallel()
+	vix3m := 21.36
+	ratio := 0.86
+	row := rowVIXTerm(time.Now(), rpc.RegimeVIXTerm{
+		Status: rpc.RegimeStatusOK,
+		VIX3M:  &vix3m,
+		Ratio:  &ratio,
+	})
+	if strings.Contains(row.value, "0.00 /") {
+		t.Errorf("missing VIX leg must not render a fake zero: %q", row.value)
+	}
+	if !strings.Contains(row.value, "— / 21.36") {
+		t.Errorf("missing VIX leg should render as an em dash, got %q", row.value)
+	}
+}
+
+func TestRegimeRow_USDJPYMissingLastDoesNotRenderZero(t *testing.T) {
+	t.Parallel()
+	weekly := -1.2
+	row := rowUSDJPY(time.Now(), rpc.RegimeUSDJPY{
+		Status:       rpc.RegimeStatusOK,
+		WeeklyChange: &weekly,
+	})
+	if row.band != bandUnranked {
+		t.Errorf("missing USD/JPY last should leave row unranked, got %v", row.band)
+	}
+	if row.stateNote != "FX tick unavailable" {
+		t.Errorf("missing USD/JPY last should surface an honest state note, got %q", row.stateNote)
+	}
+	if strings.Contains(row.value, "0.0000") {
+		t.Errorf("missing USD/JPY last must not render a fake zero: %q", row.value)
 	}
 }
 

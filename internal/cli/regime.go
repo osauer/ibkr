@@ -227,9 +227,9 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 }
 
 // renderRegimeTextTo writes the dashboard to out. Layout: header with
-// timestamp; bold composite verdict + ranked-count summary; horizontal
-// rule; one-line indicator rows; optional --explain footer with
-// the spec's prose per row. Pass explain=true for the verbose mode.
+// timestamp; bold composite verdict + ranked-count summary; market tape;
+// one-line indicator rows; optional --explain footer with the spec's prose
+// per row. Pass explain=true for the verbose mode.
 func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, explain bool) int {
 	now := r.AsOf
 	rows := []regimeRow{
@@ -244,14 +244,14 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	}
 	c := tallyComposite(rows)
 
-	// Shared hero: title + timestamp share one line; SPY+VIX anchor
-	// sits below indented; the regime summary line is optional (empty
-	// when no ranked indicators have landed, but the verdict + count
-	// summary below still surface).
+	// Shared hero: only the title + timestamp live here. The regime
+	// renderer keeps its own flow below so the verdict/punch-line block
+	// reads first and the SPY/VIX tape lands immediately above the audit
+	// rows it anchors.
 	renderCommandHero(out,
 		"Risk Regime",
 		r.AsOf.Format("2006-01-02 15:04 MST"),
-		renderRegimeHeadline(env, r),
+		"",
 		"")
 
 	// Hero summary: a color-coded regime label plus a plain-English
@@ -263,6 +263,11 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	}
 	fmt.Fprintf(out, "  Punch line: %s\n", regimePunchLine(rows))
 	fmt.Fprintln(out)
+
+	if headline := renderRegimeHeadline(env, r); headline != "" {
+		fmt.Fprintf(out, "  %s\n", headline)
+		fmt.Fprintln(out)
+	}
 
 	// Header row + horizontal rule give the reader a key for the
 	// columns. Dim-colored so the band rows stay visually dominant. The
@@ -745,12 +750,12 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// renderRegimeHeadline returns the SPY + VIX summary line shown above
-// the indicator rows: spot price + day's dollar / percent change for
-// SPY, spot + percent change for VIX (which has no shares so dollar
-// change is meaningless). Each side renders only when its primary
-// price arrived; either half can be missing without dropping the line.
-// Returns "" when neither half has data.
+// renderRegimeHeadline returns the SPY + VIX tape line shown immediately
+// above the indicator rows: spot price + day's dollar / percent change
+// for SPY, spot + percent change for VIX (which has no shares so dollar
+// change is meaningless). Each side renders only when its primary price
+// arrived; either half can be missing without dropping the line. Returns
+// "" when neither half has data.
 //
 // Color convention:
 //   - SPY change green when positive, red when negative — the reader's
@@ -837,7 +842,7 @@ func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 		row.reason = shortUnavailableReason(r.ErrorMessage, "VIX/VIX3M tick missing")
 		return row
 	}
-	row.value = fmt.Sprintf("%.3f  (%.2f / %.2f)", *r.Ratio, deref(r.VIX), deref(r.VIX3M))
+	row.value = fmt.Sprintf("%.3f  (%s / %s)", *r.Ratio, floatPtr(r.VIX, 2), floatPtr(r.VIX3M, 2))
 	row.quality = qualityTag(now, r.VIXQuality, r.VIX3MQuality)
 	switch {
 	case *r.Ratio < vixRatioGreen:
@@ -876,10 +881,16 @@ func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
 
 func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	row := regimeRow{name: "HYG vs SPY", cluster: "credit", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
-	if r.Status == rpc.RegimeStatusError {
+	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
 		row.value = "—"
 		row.stateNote = "HYG/SPY unavailable"
 		row.reason = shortUnavailableReason(r.ErrorMessage, "credit proxy tick missing")
+		return row
+	}
+	if r.HYGPrice == nil {
+		row.value = "—"
+		row.stateNote = "HYG price unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "HYG tick missing")
 		return row
 	}
 	// Value cell: HYG vs its 50dma is the structural signal; SPY's
@@ -888,7 +899,7 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	if r.HYG50DMA != nil {
 		hyg50 = fmt.Sprintf("%.2f", *r.HYG50DMA)
 	}
-	row.value = fmt.Sprintf("HYG %.2f / 50dma %s", deref(r.HYGPrice), hyg50)
+	row.value = fmt.Sprintf("HYG %.2f / 50dma %s", *r.HYGPrice, hyg50)
 	row.quality = qualityTag(now, r.HYGQuality, r.HYG50DMAQuality, r.SPYQuality, r.SPY52WHighQuality)
 	// Banding. HYG below 50dma while SPY is near highs is the credit-
 	// equity divergence this row exists to catch. Streaks carry the
@@ -977,6 +988,12 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 		row.reason = shortUnavailableReason(r.ErrorMessage, "check IDEALPRO entitlement")
 		return row
 	}
+	if r.Last == nil {
+		row.value = "—"
+		row.stateNote = "FX tick unavailable"
+		row.reason = shortUnavailableReason(r.ErrorMessage, "last tick missing")
+		return row
+	}
 	wkly := "—"
 	if r.WeeklyChange != nil {
 		sign := "+"
@@ -985,7 +1002,7 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 		}
 		wkly = fmt.Sprintf("%s%.2f%%/wk", sign, *r.WeeklyChange)
 	}
-	row.value = fmt.Sprintf("%.4f  %s", deref(r.Last), wkly)
+	row.value = fmt.Sprintf("%.4f  %s", *r.Last, wkly)
 	row.quality = qualityTag(now, r.LastQuality, r.Close7DAgoQuality)
 	// Spec: yen strengthening (USD/JPY *falling*) is the risk signal.
 	// Convention: WeeklyChange negative = yen strengthening.
@@ -1406,11 +1423,11 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 // Tiny helpers — local to this file, not promoted to cli.go because no
 // other renderer needs them.
 
-func deref(p *float64) float64 {
+func floatPtr(p *float64, decimals int) string {
 	if p == nil {
-		return 0
+		return "—"
 	}
-	return *p
+	return fmt.Sprintf("%.*f", decimals, *p)
 }
 
 func ifNonEmpty(s, fallback string) string {
