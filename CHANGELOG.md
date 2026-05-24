@@ -15,8 +15,8 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 ### What's new
 
 - `ibkr gamma` now explains why a cached gamma result cannot be served, instead of returning a bare cold state when a persisted snapshot is rejected.
-- Forced gamma diagnostics now identify whether priced legs were lost at open interest, Black-Scholes gamma, or OI-weighted GEX contribution.
-- Gamma JSON now includes leg-quality counts split by underlying and trading class, making SPX/SPXW data gaps visible to CLI, MCP, and agent consumers.
+- Gamma forced-run errors and JSON now include leg-quality counts split by underlying and trading class, making SPX/SPXW data gaps visible to CLI, MCP, and agent consumers.
+- `ibkr regime` keeps the SPY/VIX tape between the verdict and indicator table, and missing row values no longer render as fake zeroes.
 
 ### Added
 
@@ -27,6 +27,7 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 
 - Completed forced gamma failures during closed markets now surface as errors, rather than being hidden behind the closed-session cold-cache gate.
 - Rejected persisted gamma caches now report the validation reason to the caller, including invalid per-index slices in combined SPY+SPX results.
+- The regime dashboard now places the SPY/VIX tape above the indicator rows and preserves honest unavailable placeholders for missing VIX, HYG, and USD/JPY inputs.
 
 ## v1.0.6 — 2026-05-24 14:08 CEST
 
