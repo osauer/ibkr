@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -794,6 +795,47 @@ func TestGammaZeroCache_OffHoursServesFreshCacheWithoutWarning(t *testing.T) {
 		if w == "cache_stale_off_hours" {
 			t.Errorf("fresh off-hours cache should not carry cache_stale_off_hours; warnings=%v", env.Result.Warnings)
 		}
+	}
+}
+
+func TestGammaZeroCache_InvalidReadyResultRejected(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 22, 15, 0, 0, 0, time.UTC)
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		return &rpc.GammaZeroComputed{
+			SpotUnderlying: 743.73,
+			LegCount:       1060,
+			Profile: []rpc.GammaProfilePoint{
+				{Spot: 740, GEX: 0},
+				{Spot: 745, GEX: 0},
+			},
+			AsOf: now,
+		}, nil
+	}
+
+	job := c.force(context.Background(), rpc.GammaZeroScopeSPY, now, 300, compute)
+	<-job.done
+
+	env := c.snapshot(job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusError {
+		t.Fatalf("snapshot status = %q, want error", env.Status)
+	}
+	if !strings.Contains(env.Error, "zero gamma_total_abs/profile/top_strikes") {
+		t.Fatalf("snapshot error = %q, want invalid-result explanation", env.Error)
+	}
+}
+
+func TestValidateGammaComputedAllowsLegsWithMagnitude(t *testing.T) {
+	err := validateGammaComputed(&rpc.GammaZeroComputed{
+		LegCount:       2,
+		GammaTotalAbs:  1,
+		TopStrikes:     []rpc.StrikeConcentration{{Strike: 740, AbsGEX: 1}},
+		Profile:        []rpc.GammaProfilePoint{{Spot: 740, GEX: 1}},
+		SpotUnderlying: 743.73,
+		AsOf:           time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("validateGammaComputed returned %v, want nil", err)
 	}
 }
 

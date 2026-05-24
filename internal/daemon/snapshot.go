@@ -222,6 +222,50 @@ func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string,
 	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
+	return briefSnapshotFullHeld(ctx, c, sym, timeout)
+}
+
+// briefSnapshotPriceHeld is the refcounted sibling of briefSnapshotPrice.
+// Callers that already have a Server should use this path so concurrent
+// snapshots on the same symbol share the daemon's subscription manager rather
+// than racing direct Subscribe/Unsubscribe calls against each other.
+func (s *Server) briefSnapshotPriceHeld(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
+	if s == nil || s.subs == nil {
+		return briefSnapshotPrice(ctx, c, symbol, timeout)
+	}
+	sym := normSym(symbol)
+	release, err := s.subs.Hold(ctx, sym)
+	if err != nil {
+		return 0, ""
+	}
+	defer release()
+	bid, ask, last, mark, closePx, dt := briefSnapshotFullHeld(ctx, c, sym, timeout)
+	if dt == "" {
+		dt = "live"
+	}
+	switch {
+	case last > 0:
+		return last, dt
+	case bid > 0 && ask > 0:
+		return (bid + ask) / 2, dt
+	case bid > 0:
+		return bid, dt
+	case ask > 0:
+		return ask, dt
+	case mark > 0:
+		return mark, dt
+	case closePx > 0:
+		return closePx, dt
+	default:
+		return 0, ""
+	}
+}
+
+func briefSnapshotFullHeld(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (bid, ask, last, mark, closePx float64, dataType string) {
+	if c == nil {
+		return 0, 0, 0, 0, 0, ""
+	}
+	sym := normSym(symbol)
 	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
 		// Capture every tick we've seen so far; on timeout the final
 		// iteration's values are what the caller observes.

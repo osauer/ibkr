@@ -284,7 +284,7 @@ if [[ "${LOOSE:-0}" -eq 1 ]]; then
             exit 1
         fi
         printf '%s' "$LAST_CMD_OUTPUT" > "$GAMMA_ENV"
-        if echo "$LAST_CMD_OUTPUT" | grep -q '"status": *"ready"'; then
+        if grep -q '"status": *"ready"' <<<"$LAST_CMD_OUTPUT"; then
             break
         fi
         echo "    poll $attempt: still computing"

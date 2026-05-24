@@ -10,6 +10,24 @@ Recent entries (v0.27.5 onward, after backfill) tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.2 — 2026-05-24 06:12 CEST
+
+### What's new
+
+- Quote and scanner volume fields now stay human-scale when TWS sends IBKR Decimal sizes; strict release verification rejects empty quote snapshots and impossible billion-share volumes before publish.
+- MCP quote resources now answer with an initial snapshot and late subscribers receive the current frame, so off-hours subscriptions do not appear idle after the ACK.
+- CLI and daemon hardening covers spaced value flags (`--only spy`, `--target 780`, `--log path`), parallel option-chain calls, and invalid all-zero gamma cache entries.
+
+### Fixed
+
+- Normalized Decimal-encoded volume tick-size payloads on modern IBKR server versions while preserving ordinary tick sizes and legacy server behavior.
+- Release verification now requires non-empty quote data type plus at least one price field, and fails suspiciously large SPY volume.
+- CLI flag hoisting now treats `--only`, `--target`, and `--log` as value flags in all documented syntaxes.
+- MCP resource reads use a longer snapshot timeout; resource subscription sends an initial update and shared subscribers are seeded from the connector cache.
+- Gamma cache writes and persisted cache loads now reject ready results with option legs but zero magnitude, empty top strikes, and an all-zero profile.
+- Option-chain spot discovery now holds the shared market-data subscription across the snapshot, avoiding parallel subscribe/unsubscribe races that previously surfaced as no-spot failures.
+- Strict wire smoke no longer prints broken-pipe noise when `pipefail` is enabled.
+
 ## v1.0.1 — 2026-05-23 23:05 CEST
 
 ### What's new

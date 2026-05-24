@@ -252,9 +252,16 @@ if sym != "SPY":
     print("symbol=" + repr(sym) + ", want SPY")
     sys.exit(0)
 dt = d.get("data_type", "")
-valid = {"", "live", "delayed", "frozen", "delayed-frozen"}
+valid = {"live", "delayed", "frozen", "delayed-frozen"}
 if dt not in valid:
     print("data_type=" + repr(dt) + ", want one of " + str(sorted(valid)))
+    sys.exit(0)
+if not any(d.get(k) is not None for k in ("bid", "ask", "last")):
+    print("quote has no bid/ask/last price; refusing all-empty successful snapshot")
+    sys.exit(0)
+vol = d.get("volume")
+if vol is not None and vol > 1_000_000_000:
+    print("volume=" + repr(vol) + " exceeds 1B shares; likely IBKR Decimal size not normalised")
     sys.exit(0)
 print("ok")
 ')"

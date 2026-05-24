@@ -273,6 +273,10 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 		if persisted == nil {
 			continue
 		}
+		if err := validateGammaComputed(persisted); err != nil {
+			wrap.Warnf("gamma cache: discard persisted scope=%s: %v", scope, err)
+			continue
+		}
 		c.slots[scope] = &gammaSlot{current: newPersistedComputation(persisted, scope, now)}
 		wrap.Infof("gamma cache: loaded persisted result scope=%s session=%s as_of=%s",
 			scope, nySessionKey(now), persisted.AsOf.Format(time.RFC3339))
@@ -307,6 +311,28 @@ func newPersistedComputation(r *rpc.GammaZeroComputed, scope string, now time.Ti
 	}
 	close(job.done)
 	return job
+}
+
+func validateGammaComputed(r *rpc.GammaZeroComputed) error {
+	if r == nil {
+		return fmt.Errorf("zero-gamma compute returned nil result")
+	}
+	if r.LegCount > 0 && r.GammaTotalAbs == 0 && len(r.TopStrikes) == 0 && gammaProfileAllZero(r.Profile) {
+		return fmt.Errorf("zero-gamma invalid result: %d legs but zero gamma_total_abs/profile/top_strikes", r.LegCount)
+	}
+	return nil
+}
+
+func gammaProfileAllZero(profile []rpc.GammaProfilePoint) bool {
+	if len(profile) == 0 {
+		return true
+	}
+	for _, p := range profile {
+		if math.Abs(p.GEX) > 1e-9 {
+			return false
+		}
+	}
+	return true
 }
 
 // IsComputing reports whether a gamma compute is currently in flight.
@@ -555,6 +581,10 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 		}()
 		res, err := compute(bgCtx, &job.progress)
 		if err != nil {
+			job.err = err
+			return
+		}
+		if err := validateGammaComputed(res); err != nil {
 			job.err = err
 			return
 		}

@@ -81,6 +81,16 @@ func TestHoistFlagsReordersValueFlags(t *testing.T) {
 			want: []string{"--expiry", "2026-06-19", "AAPL"},
 		},
 		{
+			name: "gamma only value flag hoisted as pair",
+			in:   []string{"--only", "spy", "--no-wait"},
+			want: []string{"--only", "spy", "--no-wait"},
+		},
+		{
+			name: "size target value flag hoisted as pair",
+			in:   []string{"--symbol", "SPY", "--entry", "740", "--stop", "720", "--target", "780", "--risk-pct", "0.5"},
+			want: []string{"--symbol", "SPY", "--entry", "740", "--stop", "720", "--target", "780", "--risk-pct", "0.5"},
+		},
+		{
 			name: "value flag with = form hoisted as one token",
 			in:   []string{"AAPL", "--expiry=2026-06-19"},
 			want: []string{"--expiry=2026-06-19", "AAPL"},

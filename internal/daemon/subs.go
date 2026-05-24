@@ -177,7 +177,17 @@ func (m *subManager) acquire(ctx context.Context, sym string, addTap bool) (*fra
 		e.taps[tap] = struct{}{}
 	}
 	e.refcount++
+	seedExisting := tap != nil && e.emitted
 	e.mu.Unlock()
+	if seedExisting {
+		if md, ok := c.GetMarketData()[sym]; ok {
+			frame := buildFrame(md, marketDataTypeName(c.GetMarketDataTypeForSymbol(sym)))
+			select {
+			case tap.ch <- frame:
+			default:
+			}
+		}
+	}
 	return tap, nil
 }
 

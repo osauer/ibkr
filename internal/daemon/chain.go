@@ -94,7 +94,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// shared across all expiries — pre-fix this ran once before the loop
 	// already; only the loop changed shape (parallel + cached).
 	tSpot := time.Now()
-	spot, _ := briefSnapshotPrice(ctx, c, sym, 5*time.Second)
+	spot, _ := s.briefSnapshotPriceHeld(ctx, c, sym, 5*time.Second)
 	spotMs = time.Since(tSpot).Milliseconds()
 	if spot > 0 {
 		res.Spot = spot
@@ -376,7 +376,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	}()
 
 	tSnapshot := time.Now()
-	spot, dataType := briefSnapshotPrice(ctx, c, p.Symbol, 5*time.Second)
+	spot, dataType := s.briefSnapshotPriceHeld(ctx, c, p.Symbol, 5*time.Second)
 	snapshotMs = time.Since(tSnapshot).Milliseconds()
 	if spot <= 0 {
 		if s.gatewayConnector() == nil {

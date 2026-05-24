@@ -313,6 +313,34 @@ func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 	}
 }
 
+func TestParseTickSize_NormalizesDecimalEncodedVolume(t *testing.T) {
+	t.Parallel()
+
+	got, ok := parseTickSize(minServerVerSizeRules, 8, "41762007966821")
+	if !ok {
+		t.Fatal("parseTickSize returned !ok")
+	}
+	if got != 41762007 {
+		t.Fatalf("decimal-encoded volume = %d, want 41762007", got)
+	}
+
+	got, ok = parseTickSize(minServerVerSizeRules, 8, "166")
+	if !ok {
+		t.Fatal("parseTickSize small returned !ok")
+	}
+	if got != 166 {
+		t.Fatalf("small integer volume = %d, want 166", got)
+	}
+
+	got, ok = parseTickSize(minServerVerSizeRules-1, 8, "9876543")
+	if !ok {
+		t.Fatal("parseTickSize legacy returned !ok")
+	}
+	if got != 9876543 {
+		t.Fatalf("legacy volume = %d, want 9876543", got)
+	}
+}
+
 // TestHandleTickSize_OpenInterest pins tick types 27 (callOpenInterest) and
 // 28 (putOpenInterest) into Subscription.OpenInt. The two ticks share the
 // same slot because a given option-leg subscription is for exactly one

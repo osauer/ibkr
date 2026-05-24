@@ -97,8 +97,8 @@ func isValueFlag(name string) bool {
 	switch name {
 	case "expiry", "width", "side", "rate", "timeout", "limit", "symbol",
 		"type", "sort", "days", "by",
-		"entry", "stop", "risk-pct", "lot", "fx",
-		"exchange", "instrument":
+		"entry", "stop", "target", "risk-pct", "lot", "fx",
+		"only", "exchange", "instrument", "log":
 		return true
 	}
 	return false

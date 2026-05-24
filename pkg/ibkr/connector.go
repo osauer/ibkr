@@ -3522,7 +3522,10 @@ func (c *Connector) handleTickSize(fields []string) {
 
 	reqID, _ := strconv.Atoi(reqIDStr)
 	tickType, _ := strconv.Atoi(tickTypeStr)
-	size, _ := strconv.ParseInt(sizeStr, 10, 64)
+	size, ok := parseTickSize(c.ServerVersion(), tickType, sizeStr)
+	if !ok {
+		return
+	}
 
 	// Find the symbol for this request ID
 	c.subMu.RLock()
@@ -3561,6 +3564,31 @@ func (c *Connector) handleTickSize(fields []string) {
 		sub.OpenInt = size
 	}
 	sub.LastTime = time.Now()
+}
+
+// parseTickSize normalises IBKR tickSize payloads.
+//
+// Recent TWS/Gateway builds expose size values as IBKR Decimal payloads.
+// For stock volume (tick type 8) the wire field can arrive as a fixed-scale
+// integer where 41,762,007 shares is encoded as 41762007966821. Treating that
+// as a plain int produces trillion-share volume in quote/scanner output. Small
+// values still arrive as ordinary integers for some instruments, so only
+// normalise obviously-scaled volume payloads and leave bid/ask sizes and option
+// open-interest ticks untouched.
+func parseTickSize(serverVersion, tickType int, raw string) (int64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		marketDataLogger.Warnf("Invalid tick size for tickType %d: %q (error: %v)", tickType, raw, err)
+		return 0, false
+	}
+	if serverVersion >= minServerVerSizeRules && tickType == 8 && size >= 1_000_000 {
+		return size / 1_000_000, true
+	}
+	return size, true
 }
 
 // handlePosition processes position updates

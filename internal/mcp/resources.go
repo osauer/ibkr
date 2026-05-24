@@ -126,10 +126,11 @@ type resourceContent struct {
 }
 
 // snapshotReadTimeout bounds how long resources/read waits for the daemon
-// to deliver a snapshot quote. Generous because a cold subscribe against
-// an unfamiliar symbol can take a few seconds for the gateway to deliver
-// the first ticks.
-const snapshotReadTimeout = 5 * time.Second
+// to deliver a snapshot quote. Keep it longer than the CLI's common happy path:
+// MCP resource reads often happen beside a long-lived resource subscription or
+// a gamma/breadth background job, and a five-second budget produced avoidable
+// off-hours context-deadline failures while the ordinary quote tool succeeded.
+const snapshotReadTimeout = 10 * time.Second
 
 // handleResourcesList satisfies MCP's resources/list. We don't enumerate
 // concrete resources because every symbol is implicitly a resource — the
@@ -294,6 +295,8 @@ func (s *Server) runResourceSubscription(ctx context.Context, pu parsedURI, conn
 		s.subMu.Unlock()
 	}()
 
+	s.emitInitialResourceSnapshot(ctx, pu, conn)
+
 	subParams := rpc.QuoteSubscribeParams{
 		Contract: rpc.ContractParams{Symbol: pu.Sym, SecType: "STK", Currency: "USD"},
 	}
@@ -319,6 +322,34 @@ func (s *Server) runResourceSubscription(ctx context.Context, pu parsedURI, conn
 		raw, _ := json.Marshal(frame)
 		s.emitResourceUpdate(pu.OriginalURI, raw)
 	}
+}
+
+func (s *Server) emitInitialResourceSnapshot(ctx context.Context, pu parsedURI, conn *dial.Conn) {
+	readCtx, cancel := context.WithTimeout(ctx, snapshotReadTimeout)
+	defer cancel()
+
+	params := rpc.QuoteSnapshotParams{
+		Contract:  rpc.ContractParams{Symbol: pu.Sym, SecType: "STK", Currency: "USD"},
+		TimeoutMs: int(snapshotReadTimeout.Milliseconds()),
+	}
+	var q rpc.Quote
+	if err := conn.Call(readCtx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
+		return
+	}
+	frame := rpc.Frame{
+		T:        q.AsOf,
+		Bid:      q.Bid,
+		Ask:      q.Ask,
+		Last:     q.Last,
+		BidSize:  q.BidSize,
+		AskSize:  q.AskSize,
+		DataType: q.DataType,
+	}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return
+	}
+	s.emitResourceUpdate(pu.OriginalURI, raw)
 }
 
 // emitResourceUpdate writes a notifications/resources/updated message with

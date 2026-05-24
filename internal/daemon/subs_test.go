@@ -210,6 +210,36 @@ func TestFanoutSharesIBKRLine(t *testing.T) {
 	}
 }
 
+func TestLateSubscriberReceivesCurrentFrame(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConnector()
+	m := newTestManager(fake)
+	defer m.Close()
+
+	a, releaseA, err := m.Subscribe(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatalf("Subscribe A: %v", err)
+	}
+	defer releaseA()
+
+	fake.putTick("AAPL", 100.0, 100.05, 100.02)
+	receiveFrame(t, a, 200*time.Millisecond)
+
+	b, releaseB, err := m.Subscribe(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatalf("Subscribe B: %v", err)
+	}
+	defer releaseB()
+
+	fB := receiveFrame(t, b, 200*time.Millisecond)
+	if fB.Last == nil || *fB.Last != 100.02 {
+		t.Fatalf("late subscriber frame.Last: got %v, want 100.02", fB.Last)
+	}
+	if got := fake.subCount("AAPL"); got != 1 {
+		t.Fatalf("late subscriber opened %d IBKR lines, want 1", got)
+	}
+}
+
 // TestRefcountReleasesLastSub covers F5: the IBKR line is released the
 // moment the last subscriber releases.
 func TestRefcountReleasesLastSub(t *testing.T) {
