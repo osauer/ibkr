@@ -6,9 +6,9 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**Read-only Interactive Brokers access for humans and agents.** Ask what you own, how exposed you are, what the market backdrop looks like, or how large a planned trade should be — without giving the tool any trading permissions.
+**Read-only Interactive Brokers access for humans and agents.** Ask what you own, how exposed you are, what the market backdrop looks like, or how large a planned trade should be, or simply request live market data.
 
-One Go binary gives you a shell CLI, a local stdio MCP server, and a Go library. No Python or Java runtime. No hosted service. Account data stays on the machine running IB Gateway or TWS unless you choose to pass it to an MCP host.
+One Go binary gives you a shell CLI, a local stdio MCP server, and a Go library. Account data stays on the machine running IB Gateway or TWS unless you choose to pass it to an MCP host.
 
 The important shape:
 
