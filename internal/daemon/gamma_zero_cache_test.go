@@ -936,6 +936,33 @@ func TestGammaZeroCache_OffHoursForceAllowsPollToJoin(t *testing.T) {
 	}
 }
 
+func TestGammaZeroCache_OffHoursForceErrorStaysVisible(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
+	computeErr := errors.New("zero-gamma: no usable GEX legs")
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		return nil, computeErr
+	}
+
+	forced := c.force(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	<-forced.done
+
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now.Add(time.Minute), 300, compute)
+	if job != forced {
+		t.Fatalf("off-hours poll after forced error: got job=%p, want forced job=%p", job, forced)
+	}
+	if fresh {
+		t.Fatalf("off-hours poll after forced error: fresh must be false")
+	}
+	env := c.snapshotForScope(rpc.GammaZeroScopeCombined, job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusError {
+		t.Fatalf("snapshot status = %q, want error", env.Status)
+	}
+	if !strings.Contains(env.Error, computeErr.Error()) {
+		t.Fatalf("snapshot error = %q, want %q", env.Error, computeErr.Error())
+	}
+}
+
 // TestGammaZeroCache_OffHoursColdReturnsEmpty proves the
 // SessionClosed-no-cache branch: with no usable persisted result on
 // hand, kickOrJoin must return (nil, false) and snapshot must report
@@ -967,5 +994,64 @@ func TestGammaZeroCache_OffHoursColdReturnsEmpty(t *testing.T) {
 	env := c.snapshot(job, func() time.Time { return now })
 	if env.Status != rpc.GammaZeroStatusCold {
 		t.Errorf("snapshot status = %q, want cold", env.Status)
+	}
+}
+
+func TestGammaZeroCache_OffHoursColdReportsRejectedPersistedCache(t *testing.T) {
+	dir := t.TempDir()
+	store := newGammaZeroStore(dir)
+	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC) // Sunday 10:00 EDT, SessionClosed
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
+	}
+	asOf := time.Date(2026, 5, 23, 21, 45, 0, 0, time.UTC)
+	combined := helperGammaResult(asOf)
+	combined.Scope = rpc.GammaZeroScopeCombined
+	combined.PerIndex = map[string]*rpc.GammaZeroComputed{
+		"SPY": helperGammaResult(asOf),
+		"SPX": {
+			Scope:          rpc.GammaZeroScopeSPX,
+			SpotUnderlying: 7474.07,
+			AsOf:           asOf,
+			Method:         gammaMethodToken,
+			LegCount:       890,
+			Profile: []rpc.GammaProfilePoint{
+				{Spot: 7000, GEX: 0},
+				{Spot: 7500, GEX: 0},
+			},
+		},
+	}
+	if err := store.Save(rpc.GammaZeroScopeCombined, nySessionKey(asOf), combined); err != nil {
+		t.Fatalf("Save invalid combined cache: %v", err)
+	}
+
+	c := newGammaZeroCacheWithStore(store, now, nil)
+	var kicked atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		kicked.Add(1)
+		return helperGammaResult(now), nil
+	}
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, compute)
+	if job != nil || fresh {
+		t.Fatalf("off-hours invalid cache: got job=%p fresh=%v, want no kick", job, fresh)
+	}
+	if kicked.Load() != 0 {
+		t.Fatalf("off-hours invalid cache must not kick compute, kicked=%d", kicked.Load())
+	}
+
+	env := c.snapshotForScope(rpc.GammaZeroScopeCombined, job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusCold {
+		t.Fatalf("snapshot status = %q, want cold", env.Status)
+	}
+	if env.ColdReasonCode != "persisted_cache_rejected" {
+		t.Fatalf("cold reason code = %q, want persisted_cache_rejected", env.ColdReasonCode)
+	}
+	for _, want := range []string{"persisted gamma cache", "per_index[SPX]", "zero gamma_total_abs/profile/top_strikes"} {
+		if !strings.Contains(env.ColdReason, want) {
+			t.Fatalf("cold reason missing %q: %q", want, env.ColdReason)
+		}
+	}
+	if !strings.Contains(env.ColdAction, "--force") {
+		t.Fatalf("cold action should suggest --force, got %q", env.ColdAction)
 	}
 }

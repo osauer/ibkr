@@ -999,6 +999,14 @@ type GammaZeroSPXResult struct {
 	Result *GammaZeroComputed `json:"result,omitempty"`
 	// Error is populated when Status == "error".
 	Error string `json:"error,omitempty"`
+	// ColdReasonCode / ColdReason / ColdAction are populated when
+	// Status == "cold" and the daemon knows why no result can be
+	// served. This distinguishes a true first-run cold cache from a
+	// persisted snapshot that existed but was rejected by schema,
+	// methodology, or data-quality gates.
+	ColdReasonCode string `json:"cold_reason_code,omitempty"`
+	ColdReason     string `json:"cold_reason,omitempty"`
+	ColdAction     string `json:"cold_action,omitempty"`
 	// RetryOfErrorAt + RetryOfErrorSummary are non-nil/non-empty only
 	// when Status == "computing" AND the in-flight compute was kicked
 	// because the previous attempt failed past gammaErrorRetryTTL. The

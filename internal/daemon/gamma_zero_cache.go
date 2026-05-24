@@ -72,6 +72,8 @@ type gammaZeroCache struct {
 	log gammaLogger
 }
 
+const gammaColdCacheAction = "Run `ibkr gamma --force` for a diagnostic off-hours recompute, or call again during the next U.S. equity-options session."
+
 // gammaSlot is the per-scope cache cell. Mirrors the original
 // single-slot fields of gammaZeroCache: current, refresh, plus the
 // last-error retention that powers the "retry of X" rendering across
@@ -79,6 +81,13 @@ type gammaZeroCache struct {
 type gammaSlot struct {
 	current *gammaComputation // nil until first kickOrJoin for this scope
 	refresh *gammaComputation // soft-TTL refresh in flight behind current; nil otherwise
+	// coldReason* explains why this slot has no serveable result when
+	// the daemon can tell the difference between "never computed" and
+	// "a persisted cache existed but was unusable." Snapshot surfaces
+	// these fields on Status=cold so users do not have to grep logs.
+	coldReasonCode string
+	coldReason     string
+	coldAction     string
 	// lastErr / lastErrAt / lastErrSummary retain the prior failure
 	// context across the gammaErrorRetryTTL boundary. Without this,
 	// a caller polling during a retry window sees Status=Computing
@@ -102,6 +111,18 @@ func (c *gammaZeroCache) getOrCreateSlotLocked(scope string) *gammaSlot {
 	s := &gammaSlot{}
 	c.slots[scope] = s
 	return s
+}
+
+func (s *gammaSlot) setColdReason(code, reason, action string) {
+	s.coldReasonCode = code
+	s.coldReason = reason
+	s.coldAction = action
+}
+
+func (s *gammaSlot) clearColdReason() {
+	s.coldReasonCode = ""
+	s.coldReason = ""
+	s.coldAction = ""
 }
 
 // gammaComputation is one zero-gamma run from kickoff through result
@@ -248,8 +269,14 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 	wrap := gammaLogf{inner: log}
 	offHours := rpc.ClassifySession(now) == rpc.SessionClosed
 	for _, scope := range knownGammaScopes {
+		slot := c.getOrCreateSlotLocked(scope)
 		persisted, err := store.Load(scope, now)
 		if err != nil {
+			slot.setColdReason(
+				"persisted_cache_load_error",
+				fmt.Sprintf("persisted gamma cache for %s could not be read: %v", scope, err),
+				gammaColdCacheAction,
+			)
 			wrap.Warnf("gamma cache: load persisted scope=%s: %v (cold start for this scope)", scope, err)
 			continue
 		}
@@ -262,6 +289,11 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 			// gate for the serve-only-never-kick guarantee.
 			stale, stErr := store.LoadStale(scope)
 			if stErr != nil {
+				slot.setColdReason(
+					"persisted_stale_cache_load_error",
+					fmt.Sprintf("persisted stale gamma cache for %s could not be read: %v", scope, stErr),
+					gammaColdCacheAction,
+				)
 				wrap.Warnf("gamma cache: load stale scope=%s: %v (cold start for this scope)", scope, stErr)
 				continue
 			}
@@ -274,11 +306,17 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 			continue
 		}
 		if err := validateGammaComputed(persisted); err != nil {
+			slot.setColdReason(
+				"persisted_cache_rejected",
+				fmt.Sprintf("persisted gamma cache for %s was rejected: %v", scope, err),
+				gammaColdCacheAction,
+			)
 			wrap.Warnf("gamma cache: discard persisted scope=%s: %v", scope, err)
 			continue
 		}
 		hydrateGammaComputed(persisted)
-		c.slots[scope] = &gammaSlot{current: newPersistedComputation(persisted, scope, now)}
+		slot.current = newPersistedComputation(persisted, scope, now)
+		slot.clearColdReason()
 		wrap.Infof("gamma cache: loaded persisted result scope=%s session=%s as_of=%s",
 			scope, nySessionKey(now), persisted.AsOf.Format(time.RFC3339))
 	}
@@ -448,12 +486,15 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	// Exception: a force()-kicked compute can be in flight even on a
 	// closed session (force bypasses this gate by design — see force()).
 	// Subsequent non-force callers must be able to join the existing job
-	// instead of being told Cold while the compute runs, so an in-flight
-	// slot.current is returned regardless of session class. Only fully
-	// idle + no successful cache returns (nil, false).
+	// instead of being told Cold while the compute runs, and a completed
+	// force error must remain visible instead of collapsing back to Cold.
+	// Only fully idle + no successful/error cache returns (nil, false).
 	if rpc.ClassifySession(now) == rpc.SessionClosed {
 		if slot.current != nil {
 			if !slot.current.isDone() {
+				return slot.current, false
+			}
+			if slot.current.err != nil {
 				return slot.current, false
 			}
 			if slot.current.err == nil && slot.current.result != nil {
@@ -586,15 +627,18 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 		defer func() {
 			if r := recover(); r != nil {
 				job.err = fmt.Errorf("zero-gamma compute panicked: %v", r)
+				gammaLogf{inner: c.log}.Warnf("gamma compute: scope=%s failed: %v", scope, job.err)
 			}
 		}()
 		res, err := compute(bgCtx, &job.progress)
 		if err != nil {
 			job.err = err
+			gammaLogf{inner: c.log}.Warnf("gamma compute: scope=%s failed: %v", scope, err)
 			return
 		}
 		if err := validateGammaComputed(res); err != nil {
 			job.err = err
+			gammaLogf{inner: c.log}.Warnf("gamma compute: scope=%s failed: %v", scope, err)
 			return
 		}
 		job.result = hydrateGammaComputed(res)
@@ -641,8 +685,22 @@ func (c *gammaZeroCache) startLocked(parent context.Context, scope, key string, 
 //
 // nowFn is injectable for tests — production callers pass time.Now.
 func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) rpc.GammaZeroSPXResult {
+	return c.snapshotForScope("", g, nowFn)
+}
+
+func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, nowFn func() time.Time) rpc.GammaZeroSPXResult {
 	if g == nil {
-		return rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
+		env := rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
+		if scope != "" {
+			c.mu.Lock()
+			if slot, ok := c.slots[scope]; ok {
+				env.ColdReasonCode = slot.coldReasonCode
+				env.ColdReason = slot.coldReason
+				env.ColdAction = slot.coldAction
+			}
+			c.mu.Unlock()
+		}
+		return env
 	}
 	started := g.startedAt
 	env := rpc.GammaZeroSPXResult{

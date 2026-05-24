@@ -102,12 +102,19 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 		// serve until the next U.S. equity-options session open. Friendly
 		// explainer beats a bare "without a result payload" error.
 		fmt.Fprintf(out, "  Status      no data yet (cold cache)\n")
+		if r.ColdReason != "" {
+			fmt.Fprintf(out, "  Reason      %s\n", r.ColdReason)
+		}
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  The compute runs automatically on the first call of each NY"))
 		fmt.Fprintln(out, env.dim("  trading session (09:30 ET, Mon-Fri). Outside session hours the"))
 		fmt.Fprintln(out, env.dim("  daemon does not run heavy option-chain fans against a closed"))
-		fmt.Fprintln(out, env.dim("  market. To force a compute now (mostly useful when troubleshooting"))
-		fmt.Fprintln(out, env.dim("  or testing): ibkr gamma --force"))
+		if r.ColdAction != "" {
+			fmt.Fprintln(out, env.dim("  market. "+r.ColdAction))
+		} else {
+			fmt.Fprintln(out, env.dim("  market. To force a compute now (mostly useful when troubleshooting"))
+			fmt.Fprintln(out, env.dim("  or testing): ibkr gamma --force"))
+		}
 		fmt.Fprintln(out)
 		return 0
 

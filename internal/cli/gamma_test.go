@@ -219,6 +219,30 @@ func TestRenderGamma_ColdRendersFriendlyExplainer(t *testing.T) {
 	}
 }
 
+func TestRenderGamma_ColdRendersDaemonReason(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.GammaZeroSPXResult{
+		Status:     rpc.GammaZeroStatusCold,
+		ColdReason: "persisted gamma cache for spy+spx was rejected: per_index[SPX]: zero-gamma invalid result",
+		ColdAction: "Run `ibkr gamma --force` for a diagnostic off-hours recompute.",
+	}
+	if code := renderGammaText(env, res, false); code != 0 {
+		t.Fatalf("cold should exit 0, got %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Reason      persisted gamma cache",
+		"per_index[SPX]",
+		"diagnostic off-hours recompute",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cold reason render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderGamma_ExplainSurfacesMetadata pins B6: with --explain set,
 // the methodology block + citations + sign-convention disclosure all
 // render. The citations come verbatim from MethodologyCitations.

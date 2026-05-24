@@ -733,6 +733,17 @@ Computing (first call of the day):
 }
 ```
 
+Cold (closed market with unusable persisted cache):
+
+```json
+{
+  "status": "cold",
+  "cold_reason_code": "persisted_cache_rejected",
+  "cold_reason": "persisted gamma cache for spy+spx was rejected: per_index[SPX]: zero-gamma invalid result: 890 GEX legs but zero gamma_total_abs/profile/top_strikes",
+  "cold_action": "Run `ibkr gamma --force` for a diagnostic off-hours recompute, or call again during the next U.S. equity-options session."
+}
+```
+
 Ready (combined scope, subsequent calls):
 
 ```json
@@ -799,6 +810,9 @@ Field meanings:
   is in flight (use `eta_seconds` / `progress` for the renderer);
   `ready` means `result` is populated; `error` means the last compute
   failed and `error` carries the classified reason.
+- `cold_reason_code` / `cold_reason` / `cold_action` — present only on
+  `status: "cold"` when the daemon knows why no value is serveable (for
+  example, a persisted cache existed but failed data-quality validation).
 - `result.scope` — `"spy"` | `"spx"` | `"spy+spx"`. Discriminator for
   combined vs single-underlying envelopes.
 - `result.summary` — agent-preferred readout. Start here. It tells you

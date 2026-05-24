@@ -125,6 +125,6 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 		}
 	}
 
-	env := s.zeroGamma.snapshot(job, time.Now)
+	env := s.zeroGamma.snapshotForScope(scope, job, time.Now)
 	return &env, nil
 }
