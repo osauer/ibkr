@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBKR MCP Server for AI Assistants | Interactive Brokers TWS API</title>
+  <meta name="description" content="ibkr is a local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API that lets AI assistants analyze account, options, quotes, scanners, gamma, breadth, and market-regime context safely.">
+  <link rel="canonical" href="https://osauer.dev/ibkr/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://osauer.dev/ibkr/">
+  <meta property="og:title" content="Let AI assistants analyze your IBKR account safely">
+  <meta property="og:description" content="Connect Interactive Brokers Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other agent workflows through a local read-only MCP server, CLI, and Go API.">
+  <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Let AI assistants analyze your IBKR account safely">
+  <meta name="twitter:description" content="A local Interactive Brokers MCP server, CLI, and Go TWS API for agent workflows.">
+  <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "ibkr",
+        "url": "https://osauer.dev/ibkr/",
+        "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for secure AI-assisted account and market analysis.",
+        "applicationCategory": "FinanceApplication",
+        "operatingSystem": "macOS, Linux, Unix",
+        "softwareVersion": "1.0.7",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "downloadUrl": "https://github.com/osauer/ibkr/releases/latest",
+        "codeRepository": "https://github.com/osauer/ibkr",
+        "isAccessibleForFree": true,
+        "keywords": "Interactive Brokers, IBKR, TWS API, IB Gateway, MCP server, Claude Desktop, Claude Code, Cursor, Zed, Go"
+      },
+      {
+        "@type": "SoftwareSourceCode",
+        "name": "ibkr",
+        "codeRepository": "https://github.com/osauer/ibkr",
+        "programmingLanguage": "Go",
+        "runtimePlatform": "macOS, Linux, Unix",
+        "license": "https://github.com/osauer/ibkr/blob/main/LICENSE",
+        "about": "Clean-room Go implementation of the Interactive Brokers TWS read-side protocol with CLI and MCP surfaces."
+      }
+    ]
+  }
+  </script>
+
+  <style>
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --amber: #b16b00;
+      --blue: #245dbb;
+      --terminal: #0e1626;
+      --terminal-line: #26364c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+
+    a {
+      color: var(--green-dark);
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.18em;
+    }
+
+    .topline {
+      height: 12px;
+      background: var(--green);
+    }
+
+    .wrap {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
+      gap: 38px;
+      align-items: center;
+      padding: 20px 0 34px;
+    }
+
+    .eyebrow {
+      margin: 0 0 18px;
+      color: var(--green-dark);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(40px, 4.8vw, 58px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 24px 0 0;
+      color: #26364d;
+      font-size: clamp(18px, 1.55vw, 19px);
+      line-height: 1.35;
+    }
+
+    .safety {
+      max-width: 760px;
+      margin: 18px 0 0;
+      color: var(--green-dark);
+      font-size: 18px;
+      font-weight: 750;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 26px 0 0;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      color: var(--ink);
+      font-weight: 750;
+      text-decoration: none;
+      background: transparent;
+    }
+
+    .button.primary {
+      border-color: var(--green);
+      background: var(--green);
+      color: #fff;
+    }
+
+    .hero-shot {
+      padding: 0;
+    }
+
+    .hero-shot img,
+    .proof img {
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      box-shadow: 0 18px 42px rgba(16, 24, 39, 0.18);
+    }
+
+    .trust {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-strong);
+    }
+
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+    }
+
+    .trust-item {
+      min-height: 120px;
+      padding: 24px;
+      border-left: 1px solid var(--line);
+    }
+
+    .trust-item:last-child {
+      border-right: 1px solid var(--line);
+    }
+
+    .trust-item strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    .trust-item span {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    section {
+      padding: 76px 0;
+    }
+
+    .section-head {
+      max-width: 760px;
+      margin-bottom: 34px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(32px, 4vw, 52px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .proof-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .proof {
+      display: grid;
+      gap: 14px;
+    }
+
+    .proof h3,
+    .feature h3 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .proof p,
+    .feature p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    .feature {
+      min-height: 210px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper-strong);
+    }
+
+    .feature small {
+      display: block;
+      margin-bottom: 16px;
+      color: var(--amber);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .install {
+      display: grid;
+      grid-template-columns: minmax(0, 0.85fr) minmax(360px, 1fr);
+      gap: 36px;
+      align-items: start;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 24px;
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      background: var(--terminal);
+      color: #f4f7fb;
+      font: 16px/1.55 Menlo, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .questions {
+      columns: 2;
+      column-gap: 36px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .questions li {
+      break-inside: avoid;
+      margin: 0 0 14px;
+      padding-left: 18px;
+      position: relative;
+      color: #24324a;
+      font-size: 18px;
+    }
+
+    .questions li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.7em;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    footer {
+      padding: 36px 0 54px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    footer .wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: start;
+    }
+
+    footer p {
+      margin: 0;
+      max-width: 840px;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 16px;
+    }
+
+    @media (max-width: 980px) {
+      .hero,
+      .install {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        gap: 34px;
+        padding-top: 24px;
+      }
+
+      .hero-shot {
+        max-width: 760px;
+      }
+
+      .trust-grid,
+      .proof-grid,
+      .feature-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 660px) {
+      .wrap {
+        width: min(100% - 28px, 1180px);
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px 0 10px;
+      }
+
+      .nav-links {
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        font-size: 14px;
+      }
+
+      h1 {
+        font-size: 36px;
+        line-height: 1.03;
+      }
+
+      .hero {
+        gap: 22px;
+        padding: 14px 0 26px;
+      }
+
+      .lead {
+        margin-top: 18px;
+        font-size: 15px;
+        line-height: 1.34;
+      }
+
+      .safety {
+        margin-top: 14px;
+        font-size: 16px;
+      }
+
+      .actions {
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .button {
+        min-height: 42px;
+        padding: 0 10px;
+        font-size: 14px;
+      }
+
+      .hero-shot {
+        max-width: 320px;
+      }
+
+      section {
+        padding: 58px 0;
+      }
+
+      .trust-grid,
+      .proof-grid,
+      .feature-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .trust-item,
+      .trust-item:last-child {
+        border-right: 1px solid var(--line);
+      }
+
+      .questions {
+        columns: 1;
+      }
+
+      footer .wrap {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="https://osauer.dev/ibkr/" aria-label="ibkr home">ibkr</a>
+    <nav class="nav-links" aria-label="Page">
+      <a href="#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="reference/mcp-tools.html">MCP tools</a>
+      <a href="guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="wrap hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">Interactive Brokers MCP server</p>
+        <h1 id="hero-title">Let AI assistants analyze your IBKR account and market context safely</h1>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to your AI workflow. Use live portfolio, options, quotes, scanners, breadth, gamma, and risk-regime data to explore trade ideas, exposure, and market direction from Claude Desktop, Claude Code, Cursor, Zed, and other agent workflows.</p>
+        <p class="safety">Built for secure analysis: the bundled CLI and MCP server expose account and market data, but no order-entry surface.</p>
+        <div class="actions" aria-label="Main actions">
+          <a class="button primary" href="#install">Install</a>
+          <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
+          <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
+        </div>
+      </div>
+      <div class="hero-shot">
+        <img src="social/regime.png" width="1280" height="650" alt="Terminal screenshot of ibkr regime showing volatility, credit, funding, FX, gamma, and breadth indicators">
+      </div>
+    </section>
+
+    <div class="trust" aria-label="Core properties">
+      <div class="wrap trust-grid">
+        <div class="trust-item">
+          <strong>Local by default</strong>
+          <span>Connects to IB Gateway or TWS on your machine. No hosted broker custody layer.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Agent-ready</strong>
+          <span>Runs as a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Trading research</strong>
+          <span>Portfolio, options, quotes, scanners, breadth, gamma, and regime context in one tool.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Go binary</strong>
+          <span>One installable CLI with a local daemon and a clean-room Go TWS protocol library.</span>
+        </div>
+      </div>
+    </div>
+
+    <section class="wrap">
+      <div class="section-head">
+        <h2>Market context, account context, and option context.</h2>
+        <p>Fresh terminal screenshots from the live CLI surface, with position quantities and monetary account details sanitized before publication.</p>
+      </div>
+      <div class="proof-grid">
+        <article class="proof">
+          <img src="social/regime.png" width="1280" height="650" loading="lazy" alt="ibkr regime terminal output">
+          <h3>Risk regime</h3>
+          <p>One dashboard for volatility, credit, funding, FX carry, dealer gamma, and S&amp;P 500 breadth.</p>
+        </article>
+        <article class="proof">
+          <img src="social/chain.png" width="1080" height="560" loading="lazy" alt="ibkr chain SPY terminal output">
+          <h3>Option chains</h3>
+          <p>Expiry lists, ATM implied volatility, and expected moves from the local IBKR market-data session.</p>
+        </article>
+        <article class="proof">
+          <img src="social/positions.png" width="1280" height="880" loading="lazy" alt="sanitized ibkr positions by underlying terminal output">
+          <h3>Positions and exposure</h3>
+          <p>Underlying grouping, option legs, marks, Greek coverage, and portfolio-level exposure with sensitive values redacted here.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <div class="section-head">
+        <h2>Ask portfolio and market questions in plain language.</h2>
+        <p>The MCP descriptions are written for agent routing, so assistants can pick the right tool without you naming commands.</p>
+      </div>
+      <ul class="questions">
+        <li>What is in my IBKR account?</li>
+        <li>Show my SPY exposure, including option deltas.</li>
+        <li>How does the market regime look today?</li>
+        <li>Are dealers supporting or amplifying today's SPY move?</li>
+        <li>What expiries are listed for SPY and what is the implied move?</li>
+        <li>If I enter MSFT at 418 with a stop at 408, what is my EUR risk?</li>
+      </ul>
+    </section>
+
+    <section class="wrap" aria-labelledby="surfaces-title">
+      <div class="section-head">
+        <h2 id="surfaces-title">One local tool, three useful surfaces.</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>MCP server</small>
+          <h3>For AI assistants</h3>
+          <p><code>ibkr mcp</code> exposes read-only account, quote, chain, scanner, sizing, breadth, gamma, and regime tools to MCP clients.</p>
+        </article>
+        <article class="feature">
+          <small>Terminal CLI</small>
+          <h3>For fast checks</h3>
+          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON.</p>
+        </article>
+        <article class="feature">
+          <small>Go library</small>
+          <h3>For custom systems</h3>
+          <p><code>github.com/osauer/ibkr/pkg/ibkr</code> speaks the TWS protocol directly with no Python bridge and no IBKR jars.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap install" id="install" aria-labelledby="install-title">
+      <div>
+        <div class="section-head">
+          <h2 id="install-title">Install in two commands.</h2>
+          <p>The installer downloads the release for your OS and architecture, verifies the checksum, installs <code>ibkr</code>, and can write the Claude Desktop MCP entry for you.</p>
+        </div>
+        <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
+      </div>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr setup claude-desktop
+
+# then ask:
+# "How does my IBKR account look today?"</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p><strong>Independent third-party project.</strong> "Interactive Brokers", "IBKR", "TWS", and "IB Gateway" are trademarks or registered trademarks of Interactive Brokers Group, Inc. or its affiliates. This project is not built, endorsed, sponsored, or supported by Interactive Brokers Group, Inc. or its affiliates.</p>
+      <div class="footer-links">
+        <a href="https://github.com/osauer/ibkr">GitHub</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
