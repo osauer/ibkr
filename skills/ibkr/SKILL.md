@@ -7,12 +7,12 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
   regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
-  Bash(ibkr calendar*) Bash(ibkr watch --list*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
+  Bash(ibkr calendar*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-25 11:44 CEST
+Updated: 2026-05-25 13:40 CEST
 
 ## When to use
 
@@ -39,6 +39,10 @@ release. Do not invent or simulate trade execution.
 - Always include the `data_type` field (`live` / `delayed` / `frozen`). If it
   isn't `live`, mention it in the answer so the user knows the prices may not
   reflect the current market.
+- For decision-making quote/watchlist answers, prefer `price` +
+  `price_source`, `price_as_of`, `prev_close`, absolute/percent change,
+  day range, 52-week range, volume, and `avg_volume` over raw `last` alone.
+  If `stale` or `stale_reason` is present, say so plainly.
 - If quote JSON includes `session_context`, surface it briefly. It explains
   official exchange-calendar state such as holidays, early closes, closed
   regular sessions, or the next known open.
@@ -56,7 +60,7 @@ release. Do not invent or simulate trade execution.
 | `ibkr status` | Daemon + gateway health (run this first if anything fails) | [schemas.md#status](schemas.md#status) |
 | `ibkr account` | Account summary (NLV, BP, cash, margin, daily P&L); add `--watch` for in-place refresh | [schemas.md#account](schemas.md#account) |
 | `ibkr positions` | Open positions (stocks + options) with per-position daily P&L; add `--watch` for in-place refresh | [schemas.md#positions](schemas.md#positions) |
-| `ibkr watch --list` | Read the local saved-symbol watchlist; add `--watch` for live quote polling | [schemas.md#watch](schemas.md#watch) |
+| `ibkr watch --list` | Read the local saved-symbol watchlist; use `--quotes` or `--watch` for decision-making quote context | [schemas.md#watch](schemas.md#watch) |
 | `ibkr calendar` | Official sessions for US equities, US listed options regular sessions, and Xetra | [schemas.md#calendar](schemas.md#calendar) |
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
@@ -87,7 +91,8 @@ symbols — the CLI hoists them automatically.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
 - `ibkr watch --list [--json]` — read the local saved-symbol watchlist. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
-- `ibkr watch --watch [--rate 1s]` — re-poll live quote snapshots for the saved symbols; no JSON mode because it is an in-place live view.
+- `ibkr watch --quotes [--timeout 5s] [--json]` — one-shot enriched quote monitor for the saved symbols. JSON rows include current `price` with `price_source`, currency, change, previous close, day/52-week ranges, volume/average volume, `price_as_of`, stale flags, session context, and compact stock holding context when the symbol is held.
+- `ibkr watch --watch [--rate 1s] [--timeout 5s]` — re-poll the enriched quote monitor for the saved symbols; no JSON mode because it is an in-place live view.
 - `ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]` — official embedded calendars for US cash equities, US listed options regular sessions, and German Xetra cash equities. Use this for "is the market open?", "when is the next session?", "is this an early close?", and holiday/long-weekend context before risk checks. `--next` is a calendar-day horizon capped at 400. Other markets and asset classes are not modeled in v1; outside embedded coverage returns `state: "unknown"` rather than a weekday guess.
 - `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
 - `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one. Per-leg open interest is shown after IV in the text view (compact abbreviation — `1.2K`, `45K`, `1.2M`) and as `call_oi` / `put_oi` (int64, nullable) in JSON; empty cells / `null` mean the gateway didn't push tick 27/28 within the fill budget (common off-hours or for illiquid wings) — never zero-substituted.
@@ -205,16 +210,19 @@ for the same nil-vs-zero discipline.
 ### Quote snapshot
 ```
 $ ibkr quote AAPL --json
-{ "symbol": "AAPL", "bid": 207.85, "ask": 207.88, "last": 207.86,
-  "bid_size": 100, "ask_size": 200, "volume": 12400000,
+{ "symbol": "AAPL", "price": 207.86, "price_source": "last",
+  "prev_close": 205.52, "change": 2.34, "change_pct": 1.14,
+  "bid": 207.85, "ask": 207.88, "last": 207.86,
+  "bid_size": 100, "ask_size": 200, "volume": 12400000, "avg_volume": 58900000,
+  "price_as_of": "As of: May 22 at 04:01:02 PM EDT",
   "iv": null, "iv_status": "unavailable", "data_type": "live", ... }
 ```
 
-Present as: `AAPL — $207.86 (bid 207.85 × 100 / ask 207.88 × 200) · vol 12.4M · live`.
+Present as: `AAPL — $207.86 (+$2.34, +1.14%) · prev $205.52 · vol 12.4M / avg 58.9M · live · As of: May 22 at 04:01:02 PM EDT`.
 If `data_type` is not `live`, prepend a short warning. Sizes and volume can be
-`null` (omitted) when the gateway didn't deliver them. If `session_context`
-is present, add a short calendar note, for example `US equities closed:
-Memorial Day; next open 2026-05-26 09:30 EDT`.
+`null` (omitted) when the gateway didn't deliver them. If `stale_reason` or
+`session_context` is present, add a short freshness/calendar note, for example
+`US equities closed: Memorial Day; next open 2026-05-26 09:30 EDT`.
 
 ### Calendar
 ```

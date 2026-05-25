@@ -1629,26 +1629,80 @@ type RegimeComposite struct {
 //     IV-bearing field in this package (chain expiries, chain strikes,
 //     scan rows, position rows).
 type Quote struct {
-	Symbol    string         `json:"symbol"`
-	Contract  ContractParams `json:"contract"`
-	Bid       *float64       `json:"bid"`
-	Ask       *float64       `json:"ask"`
-	Last      *float64       `json:"last"`
-	Mark      *float64       `json:"mark,omitempty"`
-	PrevClose *float64       `json:"prev_close"`
-	Change    *float64       `json:"change"`
-	ChangePct *float64       `json:"change_pct"`
-	BidSize   *int           `json:"bid_size,omitempty"`
-	AskSize   *int           `json:"ask_size,omitempty"`
-	Volume    *int64         `json:"volume,omitempty"`
-	IV        *float64       `json:"iv"`
-	IVStatus  string         `json:"iv_status"`
-	DataType  string         `json:"data_type"`
-	AsOf      time.Time      `json:"as_of"`
+	Symbol   string         `json:"symbol"`
+	Contract ContractParams `json:"contract"`
+	Bid      *float64       `json:"bid"`
+	Ask      *float64       `json:"ask"`
+	Last     *float64       `json:"last"`
+	Mark     *float64       `json:"mark,omitempty"`
+	// Price is the best user-facing current price selected by the daemon:
+	// last → mark → bid/ask midpoint → bid → ask → prev_close. PriceSource
+	// names the selected input so consumers can avoid treating a close-only
+	// fallback as a live last trade.
+	Price       *float64 `json:"price,omitempty"`
+	PriceSource string   `json:"price_source,omitempty"`
+	PrevClose   *float64 `json:"prev_close"`
+	Change      *float64 `json:"change"`
+	ChangePct   *float64 `json:"change_pct"`
+	DayHigh     *float64 `json:"day_high,omitempty"`
+	DayLow      *float64 `json:"day_low,omitempty"`
+	Week52High  *float64 `json:"week_52_high,omitempty"`
+	Week52Low   *float64 `json:"week_52_low,omitempty"`
+	BidSize     *int     `json:"bid_size,omitempty"`
+	AskSize     *int     `json:"ask_size,omitempty"`
+	Volume      *int64   `json:"volume,omitempty"`
+	AvgVolume   *int64   `json:"avg_volume,omitempty"`
+	IV          *float64 `json:"iv"`
+	IVStatus    string   `json:"iv_status"`
+	DataType    string   `json:"data_type"`
+	// PriceAt is the best timestamp for Price. For last trades this is
+	// IBKR tick-string 45 when delivered; for prev_close fallbacks it is
+	// the official prior regular-session close; otherwise it is the local
+	// observation time. PriceAsOf is the preformatted human label renderers
+	// can show directly ("At close: May 22 at 04:01:02 PM EDT").
+	PriceAt     time.Time `json:"price_at,omitzero"`
+	PriceAsOf   string    `json:"price_as_of,omitempty"`
+	Stale       bool      `json:"stale,omitempty"`
+	StaleReason string    `json:"stale_reason,omitempty"`
+	AsOf        time.Time `json:"as_of"`
 	// SessionContext explains whether the relevant market was open at the
 	// quote time. Populated when the context is useful for interpreting a
 	// stale/frozen/missing quote; omitted on ordinary live in-session rows.
 	SessionContext *MarketSession `json:"session_context,omitempty"`
+}
+
+// WatchlistResult is the daemon-backed rich watchlist surface used by
+// `ibkr watch --quotes --json` and MCP `ibkr_watch` when include_quotes is
+// true. The persisted local watchlist remains [watchlist.Snapshot]; this
+// type is a read-only market-data view over those saved symbols.
+type WatchlistResult struct {
+	Name    string         `json:"name"`
+	Symbols []string       `json:"symbols"`
+	Rows    []WatchlistRow `json:"rows"`
+	AsOf    time.Time      `json:"as_of"`
+}
+
+// WatchlistRow flattens the Quote fields and optionally annotates a saved
+// symbol with the user's held stock position. Error is per-row so one dead
+// symbol does not hide the rest of a watchlist.
+type WatchlistRow struct {
+	Quote
+	Holding *WatchlistHolding `json:"holding,omitempty"`
+	Error   string            `json:"error,omitempty"`
+}
+
+// WatchlistHolding is intentionally compact and stock-focused so watchlist
+// refreshes can reuse the cheap `positions.list type=stk` path instead of
+// the full option-Greeks prewarm.
+type WatchlistHolding struct {
+	Quantity      float64  `json:"quantity"`
+	AvgCost       float64  `json:"avg_cost"`
+	Mark          float64  `json:"mark"`
+	MarketValue   float64  `json:"market_value"`
+	UnrealizedPnL float64  `json:"unrealized_pnl"`
+	DailyPnL      *float64 `json:"daily_pnl,omitempty"`
+	Exchange      string   `json:"exchange,omitempty"`
+	Currency      string   `json:"currency,omitempty"`
 }
 
 // Frame is a single streaming tick. DataType carries the gateway's
@@ -1714,6 +1768,7 @@ type PositionView struct {
 	Multiplier int      `json:"multiplier"`
 	AvgCost    float64  `json:"avg_cost"`
 	Mark       float64  `json:"mark"`
+	DataType   string   `json:"data_type,omitempty"`
 	PrevClose  *float64 `json:"prev_close,omitempty"`
 	// DayChange is per-share for stocks (Mark − stock prev close); for
 	// options it stays nil because we don't track contract-level prev
@@ -1722,14 +1777,24 @@ type PositionView struct {
 	// dollar impact: quantity × DayChange for stocks; quantity × multiplier
 	// × (Mark − OptionPrevClose) for options when OptionPrevClose is
 	// populated. nil when any input is missing — never fabricated.
-	DayChange      *float64 `json:"day_change,omitempty"`
-	DayChangePct   *float64 `json:"day_change_pct,omitempty"`
-	DayChangeMoney *float64 `json:"day_change_money,omitempty"`
-	MarketValue    float64  `json:"market_value"`
-	MarketValueCcy *float64 `json:"market_value_ccy,omitempty"`
-	FXRate         *float64 `json:"fx_rate,omitempty"`
-	UnrealizedPnL  float64  `json:"unrealized_pnl"`
-	RealizedPnL    float64  `json:"realized_pnl"`
+	DayChange      *float64  `json:"day_change,omitempty"`
+	DayChangePct   *float64  `json:"day_change_pct,omitempty"`
+	DayChangeMoney *float64  `json:"day_change_money,omitempty"`
+	DayHigh        *float64  `json:"day_high,omitempty"`
+	DayLow         *float64  `json:"day_low,omitempty"`
+	Week52High     *float64  `json:"week_52_high,omitempty"`
+	Week52Low      *float64  `json:"week_52_low,omitempty"`
+	Volume         *int64    `json:"volume,omitempty"`
+	AvgVolume      *int64    `json:"avg_volume,omitempty"`
+	PriceAt        time.Time `json:"price_at,omitzero"`
+	PriceAsOf      string    `json:"price_as_of,omitempty"`
+	Stale          bool      `json:"stale,omitempty"`
+	StaleReason    string    `json:"stale_reason,omitempty"`
+	MarketValue    float64   `json:"market_value"`
+	MarketValueCcy *float64  `json:"market_value_ccy,omitempty"`
+	FXRate         *float64  `json:"fx_rate,omitempty"`
+	UnrealizedPnL  float64   `json:"unrealized_pnl"`
+	RealizedPnL    float64   `json:"realized_pnl"`
 
 	// DailyPnL is the start-of-trading-day to now P&L for this single
 	// contract, sourced from IBKR's reqPnLSingle stream (TWS msg 95).

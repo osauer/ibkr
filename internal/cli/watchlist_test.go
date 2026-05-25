@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/osauer/ibkr/internal/rpc"
 	"github.com/osauer/ibkr/internal/watchlist"
 )
 
@@ -63,4 +65,114 @@ func TestRunWatchlistClearText(t *testing.T) {
 	if out := stdout.String(); !strings.Contains(out, "No symbols in watchlist") {
 		t.Fatalf("clear output missing empty-list message:\n%s", out)
 	}
+}
+
+func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
+	t.Parallel()
+	nextOpen := time.Date(2026, 5, 26, 9, 30, 0, 0, mustTestLocation(t, "America/New_York"))
+	res := &rpc.WatchlistResult{
+		Name:    "default",
+		Symbols: []string{"AAPL", "MSFT"},
+		AsOf:    time.Date(2026, 5, 25, 16, 15, 0, 0, time.UTC),
+		Rows: []rpc.WatchlistRow{
+			{
+				Quote: rpc.Quote{
+					Symbol:      "AAPL",
+					Contract:    rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+					Price:       new(190.12),
+					PriceSource: "last",
+					PrevClose:   new(188.20),
+					Change:      new(1.92),
+					ChangePct:   new(1.02),
+					DayLow:      new(187.55),
+					DayHigh:     new(191.30),
+					Week52Low:   new(164.08),
+					Week52High:  new(199.62),
+					Volume:      new(int64(41762007)),
+					AvgVolume:   new(int64(58900000)),
+					DataType:    rpc.MarketDataDelayed,
+					PriceAsOf:   "Delayed: May 22 at 04:01:02 PM EDT",
+					StaleReason: "price timestamp is 20m old during market hours",
+					SessionContext: &rpc.MarketSession{
+						Label:    "US equities",
+						Timezone: "America/New_York",
+						State:    "holiday",
+						Reason:   "Memorial Day",
+						NextOpen: &nextOpen,
+					},
+				},
+				Holding: &rpc.WatchlistHolding{Quantity: 25, Currency: "USD"},
+			},
+			{
+				Quote: rpc.Quote{
+					Symbol:      "MSFT",
+					Contract:    rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Currency: "USD"},
+					Price:       new(421.44),
+					PriceSource: "last",
+					PrevClose:   new(422.25),
+					Change:      new(-0.81),
+					ChangePct:   new(-0.19),
+					DataType:    rpc.MarketDataLive,
+				},
+			},
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	if code := renderWatchlistQuoteText(env, &stdout, res); code != 0 {
+		t.Fatalf("render exit = %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"SYMBOL", "PRICE", "DAY RANGE", "52W RANGE", "VOL / AVG", "DATA",
+		"AAPL", "25 sh", "$190.12", "+$1.92", "+1.02%", "$188.20",
+		"$187.55..$191.30", "$164.08..$199.62", "41.76M / 58.90M",
+		"Delayed: May 22 at 04:01:02 PM EDT", "source=last",
+		"price timestamp is 20m old during market hours",
+		"US equities · holiday · Memorial Day · next open 2026-05-26 09:30 EDT",
+		"MSFT", "-$0.81", "-0.19%", "live",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("watchlist quote output missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, ansiGreen) {
+		t.Fatalf("positive movement should be green:\n%q", out)
+	}
+	if !strings.Contains(out, ansiRed) {
+		t.Fatalf("negative movement should be red:\n%q", out)
+	}
+	if !strings.Contains(out, ansiYellow+"delayed"+ansiReset) {
+		t.Fatalf("delayed data type should be yellow:\n%q", out)
+	}
+}
+
+func TestRunWatchlistQuotesRejectsPositionalSymbols(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	if code := Run(context.Background(), env, "watch", []string{"AAPL", "--quotes"}); code == 0 {
+		t.Fatalf("watch --quotes with positional symbol should fail, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unexpected symbol") {
+		t.Fatalf("stderr should explain positional-symbol error:\n%s", stderr.String())
+	}
+}
+
+func TestWatchlistQuoteContractUsesHoldingRoute(t *testing.T) {
+	t.Parallel()
+	got := watchlistQuoteContract("MBG", &rpc.WatchlistHolding{Currency: "EUR", Exchange: "IBIS"})
+	if got.Currency != "EUR" || got.Exchange != "IBIS" {
+		t.Fatalf("watchlistQuoteContract route = %+v, want EUR/IBIS", got)
+	}
+}
+
+func mustTestLocation(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("LoadLocation(%q): %v", name, err)
+	}
+	return loc
 }

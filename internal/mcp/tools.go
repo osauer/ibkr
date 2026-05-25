@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/internal/cli"
 	"github.com/osauer/ibkr/internal/dial"
@@ -120,9 +121,21 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_watch",
-		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks \"what's on my watchlist?\" or wants quotes/context for their saved watch symbols. This MCP tool is read-only: it lists symbols only; it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. To quote the returned symbols, call `ibkr_quote` with the `symbols` array.",
-		JSONSchema:  schemaObject(nil, nil),
-		Handler: func(_ context.Context, _ *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks \"what's on my watchlist?\"; set `include_quotes: true` when they want a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, data freshness, session context, and optional held-stock context. This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"when true, return enriched quote rows for saved symbols instead of only the local symbol list; default false preserves offline/list-only behavior"}`),
+			"include_positions": json.RawMessage(`{"type":"boolean","description":"when include_quotes is true, attach compact held-stock context where available; default true"}`),
+			"timeout_ms":        json.RawMessage(`{"type":"integer","minimum":100,"description":"per-symbol quote timeout when include_quotes is true; default 5000 ms"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				IncludeQuotes    bool  `json:"include_quotes"`
+				IncludePositions *bool `json:"include_positions"`
+				TimeoutMs        int   `json:"timeout_ms"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
 			path, err := watchlist.DefaultPath()
 			if err != nil {
 				return nil, err
@@ -131,7 +144,21 @@ var Tools = []Tool{
 			if err != nil {
 				return nil, err
 			}
-			return json.Marshal(snap)
+			if !in.IncludeQuotes {
+				return json.Marshal(snap)
+			}
+			if conn == nil {
+				return nil, fmt.Errorf("include_quotes requires a daemon connection")
+			}
+			includePositions := true
+			if in.IncludePositions != nil {
+				includePositions = *in.IncludePositions
+			}
+			res, err := buildWatchlistQuoteResult(ctx, conn, snap, in.TimeoutMs, includePositions)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
 		},
 	},
 	{
@@ -405,6 +432,72 @@ var Tools = []Tool{
 			return json.Marshal(res)
 		},
 	},
+}
+
+func buildWatchlistQuoteResult(ctx context.Context, conn *dial.Conn, snap *watchlist.Snapshot, timeoutMs int, includePositions bool) (*rpc.WatchlistResult, error) {
+	if timeoutMs <= 0 {
+		timeoutMs = int((5 * time.Second).Milliseconds())
+	}
+	res := &rpc.WatchlistResult{
+		Name:    snap.Name,
+		Symbols: append([]string(nil), snap.Symbols...),
+		Rows:    make([]rpc.WatchlistRow, 0, len(snap.Symbols)),
+		AsOf:    time.Now(),
+	}
+	holdings := map[string]*rpc.WatchlistHolding{}
+	if includePositions {
+		var pos rpc.PositionsResult
+		if err := conn.Call(ctx, rpc.MethodPositionsList, rpc.PositionsListParams{Type: "stk"}, &pos); err == nil {
+			for _, p := range pos.Stocks {
+				holdings[strings.ToUpper(p.Symbol)] = &rpc.WatchlistHolding{
+					Quantity:      p.Quantity,
+					AvgCost:       p.AvgCost,
+					Mark:          p.Mark,
+					MarketValue:   p.MarketValue,
+					UnrealizedPnL: p.UnrealizedPnL,
+					DailyPnL:      p.DailyPnL,
+					Exchange:      p.Exchange,
+					Currency:      p.Currency,
+				}
+			}
+		}
+	}
+	for _, sym := range snap.Symbols {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var q rpc.Quote
+		params := rpc.QuoteSnapshotParams{
+			Contract:  watchlistQuoteContract(sym, holdings[strings.ToUpper(sym)]),
+			TimeoutMs: timeoutMs,
+		}
+		row := rpc.WatchlistRow{}
+		if err := conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
+			row.Quote = rpc.Quote{Symbol: sym}
+			row.Error = err.Error()
+		} else {
+			row.Quote = q
+		}
+		if h, ok := holdings[strings.ToUpper(sym)]; ok {
+			row.Holding = h
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	return res, nil
+}
+
+func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractParams {
+	c := rpc.ContractParams{Symbol: sym, SecType: "STK", Currency: "USD"}
+	if h == nil {
+		return c
+	}
+	if h.Currency != "" {
+		c.Currency = h.Currency
+	}
+	if h.Exchange != "" {
+		c.Exchange = h.Exchange
+	}
+	return c
 }
 
 // ExcludedCLI is the set of cli.Commands() names that intentionally have no
