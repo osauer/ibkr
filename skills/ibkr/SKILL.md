@@ -2,22 +2,22 @@
 name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
   about their IBKR account, positions, P&L, market quotes, option chains (incl. per-leg
-  open interest), daily price history, running a market scan, sizing a planned trade by
+  open interest), local watchlist, daily price history, running a market scan, sizing a planned trade by
   fixed-fractional risk, or checking the market's risk regime (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
   regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
-  Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
+  Bash(ibkr watch --list*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-25 08:03 CEST
+Updated: 2026-05-25 10:13 CEST
 
 ## When to use
 
-If the user asks about holdings, cash, buying power, P&L, a specific stock or ETF
-quote, an option chain, daily history, or wants to scan the market, run the
+If the user asks about holdings, cash, buying power, P&L, a local watchlist,
+a specific stock or ETF quote, an option chain, daily history, or wants to scan the market, run the
 relevant `ibkr` subcommand with `--json` and parse the output.
 
 If the user asks about the *market environment* — "is the market risky today?",
@@ -53,6 +53,7 @@ release. Do not invent or simulate trade execution.
 | `ibkr status` | Daemon + gateway health (run this first if anything fails) | [schemas.md#status](schemas.md#status) |
 | `ibkr account` | Account summary (NLV, BP, cash, margin, daily P&L); add `--watch` for in-place refresh | [schemas.md#account](schemas.md#account) |
 | `ibkr positions` | Open positions (stocks + options) with per-position daily P&L; add `--watch` for in-place refresh | [schemas.md#positions](schemas.md#positions) |
+| `ibkr watch --list` | Read the local saved-symbol watchlist; add `--watch` for live quote polling | [schemas.md#watch](schemas.md#watch) |
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM --watch` | Streaming ticks (Ctrl-C to stop) | streaming frames per [schemas.md#frame](schemas.md#frame) |
@@ -81,6 +82,8 @@ symbols — the CLI hoists them automatically.
   - `--watch` re-polls on the rate (default 1s); same TTY/pipe behaviour as `account --watch`. Mutually exclusive with `--json`.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
+- `ibkr watch --list [--json]` — read the local saved-symbol watchlist. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
+- `ibkr watch --watch [--rate 1s]` — re-poll live quote snapshots for the saved symbols; no JSON mode because it is an in-place live view.
 - `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
 - `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one. Per-leg open interest is shown after IV in the text view (compact abbreviation — `1.2K`, `45K`, `1.2M`) and as `call_oi` / `put_oi` (int64, nullable) in JSON; empty cells / `null` mean the gateway didn't push tick 27/28 within the fill budget (common off-hours or for illiquid wings) — never zero-substituted.
   - **MCP params** (for `ibkr_chain`): `symbol` (required); `expiry` (`YYYY-MM-DD` — omit to list expiries); `width` (integer; ATM ± strikes, default 5); `side` (`"calls" | "puts" | "both"`); `no_iv` (boolean — skip ATM IV in the expiry list); `all_expiries` (boolean — lift the 12-expiry cap).

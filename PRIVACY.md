@@ -1,6 +1,6 @@
 # Privacy
 
-Last reviewed: 2026-05-24 07:38 CEST
+Last reviewed: 2026-05-25 10:13 CEST
 
 `ibkr` is a local, read-only Interactive Brokers client. It does not run a hosted service, collect telemetry, or send account data to the project maintainer.
 
@@ -32,6 +32,7 @@ If you paste output into a chat, connect the MCP server through a remote tunnel,
 
 - daemon logs under `~/.local/state/ibkr/` by default
 - caches under `~/.cache/ibkr/`, including contract details, S&P 500 constituent data, breadth history, and gamma snapshots
+- local watchlists under `$XDG_DATA_HOME/ibkr/watchlist.json`, falling back to `~/.local/share/ibkr/watchlist.json`
 - optional user configuration under `~/.config/ibkr/config.toml`
 - optional user-requested regime JSONL logs at paths passed to `ibkr regime --log`
 - optional diagnostic wire logs only when explicitly enabled with the diagnostic environment variables documented in [SECURITY.md](./SECURITY.md#diagnostic-data-sensitivity)
