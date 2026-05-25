@@ -10,6 +10,36 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.1.0 — 2026-05-25 14:09 CEST
+
+### What's new
+
+- Watchlists are now useful as a decision monitor: `ibkr watch --quotes` and MCP `ibkr_watch` with `include_quotes` show price, currency, movement, ranges, volume, freshness text, closed-market context, and held-stock context for saved symbols.
+- Official market calendars explain US equity, US options, and Xetra sessions, including holidays, early closes, next open/close, and quote `session_context` when stale or frozen data needs explanation.
+- German/Xetra stock routing is now first-class for quotes and watched held positions, so EUR holdings can be monitored without forcing a USD/default route.
+
+### Added
+
+- Added `ibkr watch --quotes [--json]` for a one-shot enriched watchlist monitor, while `ibkr watch --watch` now reuses the same richer rows for repeated terminal refreshes.
+- Added MCP `ibkr_watch` parameters `include_quotes`, `include_positions`, and `timeout_ms`, returning enriched saved-symbol rows when quote context is requested.
+- Added quote JSON fields for the headline `price`, `price_source`, day and 52-week ranges, average volume, `price_at`, `price_as_of`, and stale reasons.
+- Added stock-position quote context for previous close, ranges, volume, average volume, data type, freshness labels, and stale reasons on stock rows.
+- Added official embedded calendars through `ibkr calendar`, with support for US cash equities, US listed options regular sessions, and German Xetra cash equities.
+- Added German market routing shortcuts for stock quotes, including Xetra/EUR contract normalization where the caller or held position supplies that context.
+
+### Changed
+
+- Quote text output now labels the headline price as `PRICE` and includes a source hint when the daemon used mark, midpoint, bid, ask, or previous close rather than a last trade.
+- Watched held stocks reuse their position exchange and currency when available, so the watchlist and positions views stay aligned for non-USD holdings.
+- Status output keeps S&P 500 member metadata compact while preserving source/date/count detail for the health check.
+- Position and calendar text tables have tighter alignment for narrow terminals and localized date rendering.
+
+### Fixed
+
+- `ibkr watch --quotes` now opens a daemon connection instead of being treated as an offline watchlist-file command.
+- Frozen data during an officially open market is now marked stale and labeled as frozen instead of being described as an at-close price.
+- Previous-close fallbacks now use the official prior regular-session close for their timestamp labels, including long weekends and holidays.
+
 ## v1.0.9 — 2026-05-25 08:50 CEST
 
 ### What's new
