@@ -271,6 +271,42 @@ func TestChainFetchInvalidParamsAreBadRequest(t *testing.T) {
 	}
 }
 
+func TestChainHistoricalSpotFallbackOnlyWhenMarketClosed(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holiday := time.Date(2026, 5, 25, 12, 0, 0, 0, loc)
+	if !chainCanUseHistoricalSpot(marketcal.MarketUSEquity, holiday) {
+		t.Fatal("Memorial Day should allow historical spot fallback")
+	}
+	open := time.Date(2026, 5, 26, 10, 0, 0, 0, loc)
+	if chainCanUseHistoricalSpot(marketcal.MarketUSEquity, open) {
+		t.Fatal("open market should not allow historical spot fallback")
+	}
+	outsideCoverage := time.Date(2029, 1, 2, 10, 0, 0, 0, loc)
+	if chainCanUseHistoricalSpot(marketcal.MarketUSEquity, outsideCoverage) {
+		t.Fatal("outside calendar coverage should not allow historical spot fallback")
+	}
+}
+
+func TestChainHistoricalSpotFromBarsUsesLatestPositiveClose(t *testing.T) {
+	t.Parallel()
+	bars := []ibkrlib.HistoricalBar{
+		{Close: 100},
+		{Close: 0},
+		{Close: 103.25},
+	}
+	spot, dataType := chainHistoricalSpotFromBars(bars)
+	if spot != 103.25 {
+		t.Fatalf("spot = %v, want 103.25", spot)
+	}
+	if dataType != rpc.MarketDataFrozen {
+		t.Fatalf("dataType = %q, want %q", dataType, rpc.MarketDataFrozen)
+	}
+}
+
 func TestDaysUntilFromUsesNYCalendarDate(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 25, 20, 0, 0, 0, time.UTC) // Monday afternoon in New York.

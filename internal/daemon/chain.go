@@ -12,6 +12,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
+	"github.com/osauer/ibkr/internal/marketcal"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -380,6 +381,9 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 
 	tSnapshot := time.Now()
 	spot, dataType := s.briefSnapshotPriceHeld(ctx, c, p.Symbol, 5*time.Second)
+	if spot <= 0 {
+		spot, dataType = chainHistoricalSpotFallback(ctx, c, sym, 5*time.Second)
+	}
 	snapshotMs = time.Since(tSnapshot).Milliseconds()
 	if spot <= 0 {
 		if s.gatewayConnector() == nil {
@@ -452,6 +456,39 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		return nil, err
 	}
 	return res, nil
+}
+
+func chainHistoricalSpotFallback(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
+	if c == nil || !chainCanUseHistoricalSpot(marketcal.MarketUSEquity, time.Now()) {
+		return 0, ""
+	}
+	if timeout <= 0 || timeout > 5*time.Second {
+		timeout = 5 * time.Second
+	}
+	fallbackCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	bars, err := c.FetchHistoricalDailyBarsCtx(fallbackCtx, symbol, 10)
+	if err != nil {
+		return 0, ""
+	}
+	return chainHistoricalSpotFromBars(bars)
+}
+
+func chainCanUseHistoricalSpot(market marketcal.Market, at time.Time) bool {
+	session, err := marketcal.New().SessionAt(market, at)
+	if err != nil || session.State == marketcal.StateUnknown {
+		return false
+	}
+	return !session.IsOpen
+}
+
+func chainHistoricalSpotFromBars(bars []ibkrlib.HistoricalBar) (float64, string) {
+	for _, bar := range slices.Backward(bars) {
+		if bar.Close > 0 {
+			return bar.Close, rpc.MarketDataFrozen
+		}
+	}
+	return 0, ""
 }
 
 // mergeStrikeSide copies the side-specific fields (call or put)
