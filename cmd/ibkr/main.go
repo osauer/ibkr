@@ -154,7 +154,7 @@ func main() {
 		defer dlCancel()
 	}
 
-	env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Conn: conn, Color: color}
+	env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Conn: conn, Version: runtimeVersion, Color: color}
 	os.Exit(cli.Run(ctx, env, cmd, rest))
 }
 

@@ -61,9 +61,10 @@ func runStatus(ctx context.Context, env *Env, args []string) int {
 // can exercise the rendering without a live socket.
 func renderStatusText(env *Env, res *rpc.HealthResult) {
 	out := env.Stdout
+	cliVersion := env.Version
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "IBKR Gateway  %s\n", env.statusBadge(statusVerdict(*res)))
+	fmt.Fprintf(out, "IBKR Gateway  %s\n", env.statusBadge(statusVerdict(*res, cliVersion)))
 	fmt.Fprintln(out)
 
 	statusRow(env, out, "Session", formatSessionValue(*res))
@@ -83,7 +84,7 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if members := formatMembersValue(res.Members); members != "" {
 		statusRow(env, out, "SPX members", members)
 	}
-	statusRow(env, out, "Next concern", env.concernText(nextConcern(*res)))
+	statusRow(env, out, "Next concern", env.concernText(nextConcern(*res, cliVersion)))
 
 	if isHandshakeInFlight(*res) {
 		fmt.Fprintln(out)
@@ -118,8 +119,8 @@ type statusConcern struct {
 	Level statusConcernLevel
 }
 
-func statusVerdict(res rpc.HealthResult) statusConcern {
-	concern := nextConcern(res)
+func statusVerdict(res rpc.HealthResult, cliVersion string) statusConcern {
+	concern := nextConcern(res, cliVersion)
 	switch {
 	case isHandshakeInFlight(res):
 		return statusConcern{Text: "STARTING", Level: statusConcernNotice}
@@ -159,12 +160,17 @@ func (e *Env) concernText(c statusConcern) string {
 	}
 }
 
-func nextConcern(res rpc.HealthResult) statusConcern {
+func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 	switch {
 	case !res.Connected && res.LastError != "":
 		return statusConcern{Text: "Gateway offline: " + res.LastError, Level: statusConcernBad}
 	case isHandshakeInFlight(res):
 		return statusConcern{Text: "Gateway handshake still in progress", Level: statusConcernNotice}
+	case daemonVersionDrift(res.DaemonVersion, cliVersion):
+		return statusConcern{
+			Text:  fmt.Sprintf("CLI version %s differs from daemon %s; restart daemon to pick up the new binary", cliVersion, res.DaemonVersion),
+			Level: statusConcernWarn,
+		}
 	case res.Connected && !rpc.IsLiveDataType(res.DataType):
 		return statusConcern{Text: "Market data is " + dataTypeLabel(res.DataType), Level: statusConcernWarn}
 	case res.Connected && res.GatewayTLS != res.NegotiatedTLS:
@@ -179,6 +185,12 @@ func nextConcern(res rpc.HealthResult) statusConcern {
 	default:
 		return statusConcern{Text: "None", Level: statusConcernNone}
 	}
+}
+
+func daemonVersionDrift(daemonVersion, cliVersion string) bool {
+	return daemonVersion != "" && daemonVersion != "dev" &&
+		cliVersion != "" && cliVersion != "dev" &&
+		daemonVersion != cliVersion
 }
 
 func formatSessionValue(res rpc.HealthResult) string {
