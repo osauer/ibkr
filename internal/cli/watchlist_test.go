@@ -91,12 +91,15 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 					Volume:      new(int64(41762007)),
 					AvgVolume:   new(int64(58900000)),
 					DataType:    rpc.MarketDataDelayed,
+					PriceAt:     time.Date(2026, 5, 22, 16, 1, 2, 0, mustTestLocation(t, "America/New_York")),
+					AsOf:        time.Date(2026, 5, 25, 16, 15, 0, 0, time.UTC),
 					PriceAsOf:   "Delayed: May 22 at 04:01:02 PM EDT",
 					StaleReason: "price timestamp is 20m old during market hours",
 					SessionContext: &rpc.MarketSession{
 						Label:    "US equities",
 						Timezone: "America/New_York",
 						State:    "holiday",
+						IsOpen:   false,
 						Reason:   "Memorial Day",
 						NextOpen: &nextOpen,
 					},
@@ -113,6 +116,13 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 					Change:      new(-0.81),
 					ChangePct:   new(-0.19),
 					DataType:    rpc.MarketDataLive,
+					PriceAt:     time.Date(2026, 5, 25, 17, 30, 0, 0, mustTestLocation(t, "Europe/Berlin")),
+					AsOf:        time.Date(2026, 5, 25, 21, 15, 0, 0, mustTestLocation(t, "Europe/Berlin")),
+					SessionContext: &rpc.MarketSession{
+						Timezone: "Europe/Berlin",
+						State:    "regular",
+						IsOpen:   true,
+					},
 				},
 			},
 		},
@@ -125,17 +135,18 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"SYMBOL", "PRICE", "DAY RANGE", "52W RANGE", "VOL / AVG", "DATA",
-		"AAPL", "25 sh", "$190.12", "+$1.92", "+1.02%", "$188.20",
-		"$187.55..$191.30", "$164.08..$199.62", "41.76M / 58.90M",
-		"Delayed: May 22 at 04:01:02 PM EDT", "source=last",
-		"price timestamp is 20m old during market hours",
-		"US equities · holiday · Memorial Day · next open 2026-05-26 09:30 EDT",
-		"MSFT", "-$0.81", "-0.19%", "live",
+		"SYMBOL", "CCY", "PRICE", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
+		"AAPL", "25 sh", "USD", "190.12", "+1.92", "+1.02%", "188.20",
+		"187.55-191.30", "164.08-199.62", "41.8M/58.9M",
+		"stale", "closed May22 16:01",
+		"MSFT", "-0.81", "-0.19%", "live", "open May25 17:30 CEST",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("watchlist quote output missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "Memorial Day") || strings.Contains(out, "next open") {
+		t.Fatalf("watchlist monitor should not print per-row calendar prose:\n%s", out)
 	}
 	if !strings.Contains(out, ansiGreen) {
 		t.Fatalf("positive movement should be green:\n%q", out)
@@ -143,8 +154,32 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 	if !strings.Contains(out, ansiRed) {
 		t.Fatalf("negative movement should be red:\n%q", out)
 	}
-	if !strings.Contains(out, ansiYellow+"delayed"+ansiReset) {
-		t.Fatalf("delayed data type should be yellow:\n%q", out)
+	if !strings.Contains(out, ansiYellow+"stale"+ansiReset) {
+		t.Fatalf("stale data badge should be yellow:\n%q", out)
+	}
+}
+
+func TestFormatWatchlistAsOfIncludesPreMarketState(t *testing.T) {
+	t.Parallel()
+	loc := mustTestLocation(t, "America/New_York")
+	row := rpc.WatchlistRow{
+		Quote: rpc.Quote{
+			Symbol:      "IBM",
+			Price:       new(252.01),
+			PriceSource: "last",
+			PriceAt:     time.Date(2026, 5, 26, 8, 15, 0, 0, loc),
+			AsOf:        time.Date(2026, 5, 26, 8, 15, 0, 0, loc),
+			SessionContext: &rpc.MarketSession{
+				Timezone: "America/New_York",
+				State:    "regular",
+				IsOpen:   false,
+				Open:     time.Date(2026, 5, 26, 9, 30, 0, 0, loc),
+			},
+		},
+	}
+
+	if got, want := formatWatchlistAsOf(row), "pre-market May26 08:15 EDT"; got != want {
+		t.Fatalf("formatWatchlistAsOf = %q, want %q", got, want)
 	}
 }
 
@@ -163,8 +198,8 @@ func TestRunWatchlistQuotesRejectsPositionalSymbols(t *testing.T) {
 func TestWatchlistQuoteContractUsesHoldingRoute(t *testing.T) {
 	t.Parallel()
 	got := watchlistQuoteContract("MBG", &rpc.WatchlistHolding{Currency: "EUR", Exchange: "IBIS"})
-	if got.Currency != "EUR" || got.Exchange != "IBIS" {
-		t.Fatalf("watchlistQuoteContract route = %+v, want EUR/IBIS", got)
+	if got.Currency != "EUR" || got.Market != "de" || got.Exchange != "" {
+		t.Fatalf("watchlistQuoteContract route = %+v, want market=de EUR", got)
 	}
 }
 

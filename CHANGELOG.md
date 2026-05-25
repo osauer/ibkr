@@ -10,6 +10,25 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.1.1 — 2026-05-25 21:53 CEST
+
+### What's new
+
+- `ibkr watch` now opens the quote monitor by default, while `ibkr watch --list` remains the offline saved-symbol inventory.
+- Watchlist rows are more decision-ready after hours: compact columns show price, currency, movement, ranges, volume, data freshness, and an `AS OF` value prefixed with market state such as `closed`, `open`, or `pre-market`.
+- Closed-market watchlist prices now use quote and historical market data consistently, including Xetra/EUR held positions, without substituting account-position marks as quote data.
+
+### Changed
+
+- `ibkr watch --json` and MCP `ibkr_watch` now expose the quote monitor as the default read shape; consumers that only need saved symbols can request the list-only mode.
+- Watchlist text output keeps market-calendar explanations out of per-row prose and instead places the state directly in the `AS OF` column.
+- CLI hero summaries are highlighted more strongly, and the Interactive Brokers MCP landing page now shows a visible highlighted `Summary` label in the hero summary strip.
+
+### Fixed
+
+- Watchlist snapshots no longer stop too early on mark or previous-close ticks when a frozen last trade can still arrive shortly afterward.
+- Historical close timestamps now resolve to the exchange close instant, avoiding date-only daily bars appearing as midnight UTC or the prior local evening.
+- Xetra watchlist rows now reuse SMART/IBIS/EUR routing for both quote and historical enrichment, so 52-week range and average-volume fields can populate for German held positions.
 ## v1.1.0 — 2026-05-25 14:09 CEST
 
 ### What's new

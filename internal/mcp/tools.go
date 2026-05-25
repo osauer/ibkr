@@ -121,15 +121,15 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_watch",
-		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks \"what's on my watchlist?\"; set `include_quotes: true` when they want a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, data freshness, session context, and optional held-stock context. This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
+		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Defaults to a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, data freshness, session context, and optional held-stock context; set `include_quotes: false` only when the user explicitly wants the saved symbol list without market data. This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"when true, return enriched quote rows for saved symbols instead of only the local symbol list; default false preserves offline/list-only behavior"}`),
+			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"return enriched quote rows for saved symbols; default true. Set false only for the offline/list-only symbol inventory"}`),
 			"include_positions": json.RawMessage(`{"type":"boolean","description":"when include_quotes is true, attach compact held-stock context where available; default true"}`),
 			"timeout_ms":        json.RawMessage(`{"type":"integer","minimum":100,"description":"per-symbol quote timeout when include_quotes is true; default 5000 ms"}`),
 		}, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in struct {
-				IncludeQuotes    bool  `json:"include_quotes"`
+				IncludeQuotes    *bool `json:"include_quotes"`
 				IncludePositions *bool `json:"include_positions"`
 				TimeoutMs        int   `json:"timeout_ms"`
 			}
@@ -144,7 +144,11 @@ var Tools = []Tool{
 			if err != nil {
 				return nil, err
 			}
-			if !in.IncludeQuotes {
+			includeQuotes := true
+			if in.IncludeQuotes != nil {
+				includeQuotes = *in.IncludeQuotes
+			}
+			if !includeQuotes {
 				return json.Marshal(snap)
 			}
 			if conn == nil {
@@ -495,7 +499,11 @@ func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractPar
 		c.Currency = h.Currency
 	}
 	if h.Exchange != "" {
-		c.Exchange = h.Exchange
+		if strings.EqualFold(h.Exchange, "IBIS") && strings.EqualFold(c.Currency, "EUR") {
+			c.Market = "de"
+		} else {
+			c.Exchange = h.Exchange
+		}
 	}
 	return c
 }

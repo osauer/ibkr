@@ -1104,10 +1104,11 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	}
 	defer releaseSub()
 
-	if err := pollMarketData(ctx, c, pollKey, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+	pollStarted := time.Now()
+	if err := pollMarketData(ctx, c, pollKey, pollStarted.Add(timeout), func(d *ibkrlib.MarketData) bool {
 		fillQuoteMarketData(q, d)
 		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
-		fallback := q.Mark != nil || q.PrevClose != nil
+		fallback := quoteFallbackReady(q, pollStarted, timeout)
 		if ready || fallback {
 			// Capture the gateway's feed state while the subscription is
 			// still live — once the deferred unsubscribe fires, the
@@ -1117,7 +1118,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 			// don't mistake mark/close-only data for a live quote.
 			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(pollKey), ready, fallback)
 		}
-		return ready || q.Mark != nil
+		return ready || fallback
 	}); err != nil {
 		if err == context.DeadlineExceeded {
 			inactiveKey := pollKey
@@ -1134,6 +1135,9 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 	q.AsOf = time.Now()
+	if quoteNeedsHistoricalContext(q, sessionMarket) {
+		s.fillQuoteHistoricalFallback(ctx, c, q, sessionMarket, timeout)
+	}
 	s.attachQuoteSessionContext(q, sessionMarket)
 	s.decorateQuote(q, sessionMarket)
 
@@ -1483,6 +1487,233 @@ func fillQuoteMarketData(q *rpc.Quote, d *ibkrlib.MarketData) {
 	}
 }
 
+func quoteNeedsHistoricalFallback(q *rpc.Quote) bool {
+	if q == nil {
+		return false
+	}
+	return q.Price == nil &&
+		q.Bid == nil &&
+		q.Ask == nil &&
+		q.Last == nil &&
+		q.Mark == nil
+}
+
+func quoteNeedsClosedMarketHistoricalContext(q *rpc.Quote, market marketcal.Market) bool {
+	if q == nil || quoteMarketIsOpen(q, market) {
+		return false
+	}
+	if q.Last != nil {
+		return false
+	}
+	return q.Mark != nil || q.PrevClose != nil || q.Bid != nil || q.Ask != nil
+}
+
+func quoteNeedsHistoricalContext(q *rpc.Quote, market marketcal.Market) bool {
+	if q == nil {
+		return false
+	}
+	if quoteNeedsHistoricalFallback(q) || quoteNeedsClosedMarketHistoricalContext(q, market) {
+		return true
+	}
+	if quoteMarketIsOpen(q, market) {
+		return false
+	}
+	return q.PrevClose == nil ||
+		q.DayHigh == nil ||
+		q.DayLow == nil ||
+		q.Week52High == nil ||
+		q.Week52Low == nil ||
+		q.AvgVolume == nil
+}
+
+func (s *Server) fillQuoteHistoricalFallback(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, market marketcal.Market, timeout time.Duration) {
+	if c == nil || q == nil || q.Symbol == "" {
+		return
+	}
+	fallbackCtx, cancel := context.WithTimeout(ctx, quoteHistoricalFallbackTimeout(timeout))
+	defer cancel()
+	bars, err := c.FetchHistoricalDailyBarsWithContractCtx(fallbackCtx, quoteHistoricalContract(q), 400)
+	if err != nil {
+		bars, err = c.FetchHistoricalDailyBarsCtx(fallbackCtx, q.Symbol, 400)
+	}
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Debugf("quote historical fallback %s: %v", q.Symbol, err)
+		}
+		return
+	}
+	applyQuoteHistoricalFallback(q, market, bars)
+}
+
+func quoteHistoricalContract(q *rpc.Quote) ibkrlib.Contract {
+	if q == nil {
+		return ibkrlib.Contract{}
+	}
+	c := ibkrlib.Contract{
+		Symbol:       q.Contract.Symbol,
+		SecType:      q.Contract.SecType,
+		Exchange:     q.Contract.Exchange,
+		PrimaryExch:  q.Contract.PrimaryExch,
+		Currency:     q.Contract.Currency,
+		LocalSymbol:  q.Contract.LocalSymbol,
+		TradingClass: q.Contract.TradingClass,
+	}
+	if c.Symbol == "" {
+		c.Symbol = q.Symbol
+	}
+	if c.SecType == "" {
+		c.SecType = "STK"
+	}
+	switch strings.ToLower(strings.TrimSpace(q.Contract.Market)) {
+	case "de", "germany", "xetra", "ibis":
+		if c.Exchange == "" {
+			c.Exchange = "SMART"
+		}
+		if c.PrimaryExch == "" {
+			c.PrimaryExch = "IBIS"
+		}
+		if c.Currency == "" {
+			c.Currency = "EUR"
+		}
+	}
+	return c
+}
+
+func quoteHistoricalFallbackTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 5 * time.Second
+	}
+	if timeout > 5*time.Second {
+		return 5 * time.Second
+	}
+	return timeout
+}
+
+func applyQuoteHistoricalFallback(q *rpc.Quote, market marketcal.Market, bars []ibkrlib.HistoricalBar) {
+	if q == nil || len(bars) == 0 {
+		return
+	}
+	last := bars[len(bars)-1]
+	if last.Close <= 0 {
+		return
+	}
+	if q.Last == nil && q.Bid == nil && q.Ask == nil {
+		price := last.Close
+		q.Price = &price
+		q.PriceSource = "historical_close"
+		q.DataType = rpc.MarketDataFrozen
+		if t := marketCloseForHistoricalBar(market, last, q.AsOf); !t.IsZero() {
+			q.PriceAt = t
+		}
+	}
+	if last.High > 0 && q.DayHigh == nil {
+		v := last.High
+		q.DayHigh = &v
+	}
+	if last.Low > 0 && q.DayLow == nil {
+		v := last.Low
+		q.DayLow = &v
+	}
+	if last.Volume > 0 && q.Volume == nil {
+		v := last.Volume
+		q.Volume = &v
+	}
+	if len(bars) >= 2 {
+		prev := bars[len(bars)-2].Close
+		if prev > 0 && q.PrevClose == nil {
+			q.PrevClose = &prev
+		}
+	}
+	if lo, hi := historicalRange(bars, 252); lo > 0 && hi > 0 && (q.Week52Low == nil || q.Week52High == nil) {
+		q.Week52Low = &lo
+		q.Week52High = &hi
+	}
+	if avg := averageHistoricalVolume(bars, 30); avg > 0 && q.AvgVolume == nil {
+		q.AvgVolume = &avg
+	}
+}
+
+func marketCloseForDate(market marketcal.Market, date string, at time.Time) time.Time {
+	date = normalizeHistoricalDate(date)
+	if date == "" && !at.IsZero() {
+		date = at.Format("2006-01-02")
+	}
+	if date == "" {
+		return time.Time{}
+	}
+	res, err := marketcal.New().Query(marketcal.Query{Market: market, Date: date, Days: 1})
+	if err != nil || res.Session.Close.IsZero() {
+		return time.Time{}
+	}
+	return res.Session.Close
+}
+
+func marketCloseForHistoricalBar(market marketcal.Market, bar ibkrlib.HistoricalBar, at time.Time) time.Time {
+	if t := marketCloseForDate(market, bar.Date, at); !t.IsZero() {
+		return t
+	}
+	if !bar.Time.IsZero() {
+		if t := marketCloseForDate(market, bar.Time.Format("2006-01-02"), at); !t.IsZero() {
+			return t
+		}
+		return bar.Time
+	}
+	return time.Time{}
+}
+
+func normalizeHistoricalDate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if fields := strings.Fields(raw); len(fields) > 0 {
+		raw = fields[0]
+	}
+	for _, layout := range []string{"2006-01-02", "20060102"} {
+		if t, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	return raw
+}
+
+func historicalRange(bars []ibkrlib.HistoricalBar, n int) (float64, float64) {
+	if n <= 0 || len(bars) < n {
+		n = len(bars)
+	}
+	start := len(bars) - n
+	var lo, hi float64
+	for _, b := range bars[start:] {
+		if b.Low > 0 && (lo == 0 || b.Low < lo) {
+			lo = b.Low
+		}
+		if b.High > hi {
+			hi = b.High
+		}
+	}
+	return lo, hi
+}
+
+func averageHistoricalVolume(bars []ibkrlib.HistoricalBar, n int) int64 {
+	if n <= 0 || len(bars) < n {
+		n = len(bars)
+	}
+	start := len(bars) - n
+	var sum int64
+	var count int64
+	for _, b := range bars[start:] {
+		if b.Volume <= 0 {
+			continue
+		}
+		sum += b.Volume
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / count
+}
+
 func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
 	if q == nil {
 		return
@@ -1500,6 +1731,9 @@ func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
 func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
 	if q == nil {
 		return nil, ""
+	}
+	if q.Price != nil && q.PriceSource != "" {
+		return q.Price, q.PriceSource
 	}
 	if q.Last != nil {
 		return q.Last, "last"
@@ -1523,6 +1757,23 @@ func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
 	return nil, ""
 }
 
+func quoteFallbackReady(q *rpc.Quote, pollStarted time.Time, timeout time.Duration) bool {
+	if q == nil || (q.Mark == nil && q.PrevClose == nil) {
+		return false
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	grace := 750 * time.Millisecond
+	if timeout < grace {
+		grace = timeout / 2
+	}
+	if grace <= 0 {
+		return true
+	}
+	return time.Since(pollStarted) >= grace
+}
+
 func quotePriceTime(q *rpc.Quote, market marketcal.Market) time.Time {
 	if q == nil || q.Price == nil {
 		return time.Time{}
@@ -1532,9 +1783,27 @@ func quotePriceTime(q *rpc.Quote, market marketcal.Market) time.Time {
 		if !q.PriceAt.IsZero() {
 			return q.PriceAt
 		}
+		if !quoteMarketIsOpen(q, market) {
+			if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
+				return t
+			}
+		}
+	case "mark":
+		if !q.PriceAt.IsZero() {
+			return q.PriceAt
+		}
+		if !quoteMarketIsOpen(q, market) {
+			if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
+				return t
+			}
+		}
 	case "prev_close":
 		if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
 			return t
+		}
+	case "historical_close":
+		if !q.PriceAt.IsZero() {
+			return q.PriceAt
 		}
 	}
 	if !q.AsOf.IsZero() {
@@ -1585,7 +1854,7 @@ func quotePriceAsOf(q *rpc.Quote, market marketcal.Market) string {
 		t = t.In(loc)
 	}
 	label := "As of"
-	if q.PriceSource == "prev_close" {
+	if q.PriceSource == "prev_close" || q.PriceSource == "historical_close" {
 		label = "At close"
 	} else if q.DataType == rpc.MarketDataDelayedFrozen {
 		if quoteMarketIsOpen(q, market) {

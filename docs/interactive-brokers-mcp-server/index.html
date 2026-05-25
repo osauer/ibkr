@@ -48,7 +48,7 @@
         "description": "Local read-only Interactive Brokers MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.1.0",
+        "softwareVersion": "1.1.1",
         "codeRepository": "https://github.com/osauer/ibkr",
         "isAccessibleForFree": true
       }
@@ -258,6 +258,22 @@
       border-top: 1px solid var(--line);
       border-bottom: 1px solid var(--line);
       background: var(--paper-strong);
+    }
+
+    .strip-inner {
+      padding-top: 18px;
+    }
+
+    .strip-label {
+      display: inline-block;
+      margin: 0 0 14px;
+      padding-left: 10px;
+      border-left: 4px solid var(--green);
+      color: var(--green-dark);
+      font-size: 14px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
     }
 
     .strip-grid {
@@ -532,22 +548,25 @@
     </section>
 
     <div class="strip" aria-label="Summary">
-      <div class="wrap strip-grid">
-        <div class="strip-item">
-          <strong>Local stdio MCP</strong>
-          <span>Runs beside your AI host and talks to your local daemon over a Unix socket.</span>
-        </div>
-        <div class="strip-item">
-          <strong>IB Gateway or TWS</strong>
-          <span>Uses Interactive Brokers' local API session; no hosted broker layer.</span>
-        </div>
-        <div class="strip-item">
-          <strong>Read-side tools</strong>
-          <span>Account, positions, quotes, calendars, options, scans, sizing, breadth, gamma, and regime.</span>
-        </div>
-        <div class="strip-item">
-          <strong>No order entry</strong>
-          <span>The bundled CLI and MCP server do not expose place, modify, or cancel order tools.</span>
+      <div class="wrap strip-inner">
+        <div class="strip-label">Summary</div>
+        <div class="strip-grid">
+          <div class="strip-item">
+            <strong>Local stdio MCP</strong>
+            <span>Runs beside your AI host and talks to your local daemon over a Unix socket.</span>
+          </div>
+          <div class="strip-item">
+            <strong>IB Gateway or TWS</strong>
+            <span>Uses Interactive Brokers' local API session; no hosted broker layer.</span>
+          </div>
+          <div class="strip-item">
+            <strong>Read-side tools</strong>
+            <span>Account, positions, quotes, calendars, options, scans, sizing, breadth, gamma, and regime.</span>
+          </div>
+          <div class="strip-item">
+            <strong>No order entry</strong>
+            <span>The bundled CLI and MCP server do not expose place, modify, or cancel order tools.</span>
+          </div>
         </div>
       </div>
     </div>

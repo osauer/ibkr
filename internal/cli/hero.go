@@ -12,7 +12,7 @@ import (
 //
 //	<title>  ·  <timestamp>
 //	  <anchor>
-//	  <summary>     (preceded by blank line when non-empty)
+//	  <summary>     (preceded by blank line when non-empty; highlighted)
 //
 // All four fields are pre-rendered strings. Empty inputs are skipped
 // cleanly so callers don't have to branch — a bare title still renders
@@ -23,7 +23,7 @@ import (
 // are collapsed to a single space so the header layout stays
 // predictable. Callers that want multi-line context should print it
 // below the hero, not inside it.
-func renderCommandHero(w io.Writer, title, timestamp, anchor, summary string) {
+func renderCommandHero(env *Env, w io.Writer, title, timestamp, anchor, summary string) {
 	fmt.Fprintln(w)
 	switch {
 	case title != "" && timestamp != "":
@@ -41,11 +41,18 @@ func renderCommandHero(w io.Writer, title, timestamp, anchor, summary string) {
 		if anchor == "" {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "  %s\n", collapseLine(summary))
+		fmt.Fprintf(w, "  %s\n", heroSummaryStyle(env, collapseLine(summary)))
 	}
 	if anchor != "" || summary != "" {
 		fmt.Fprintln(w)
 	}
+}
+
+func heroSummaryStyle(env *Env, s string) string {
+	if env == nil || !env.Color {
+		return s
+	}
+	return ansiBold + ansiYellow + s + ansiReset
 }
 
 // collapseLine flattens any embedded newlines to single spaces so the

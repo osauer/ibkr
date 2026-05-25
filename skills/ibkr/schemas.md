@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-25 13:40 CEST
+Updated: 2026-05-25 21:25 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -173,7 +173,7 @@ and `expiry` / `strike` / `right` together identify the contract.
 - `day_high`, `day_low`, `week_52_high`, `week_52_low`, `volume`,
   `avg_volume`, `price_at`, `price_as_of`, `stale`, `stale_reason`,
   and `data_type` — stock-only quote context reused from the same
-  market-data path as `ibkr quote` / `ibkr watch --quotes`. Nil fields
+  market-data path as `ibkr quote` / `ibkr watch`. Nil fields
   mean the gateway did not deliver that tick within the short prewarm
   window. `price_as_of` is display-ready text; `price_at` is the typed
   timestamp.
@@ -236,10 +236,12 @@ Field meanings:
 - `as_of` — local read time; this is not an IBKR market-data timestamp.
 
 Human CLI mutations are `ibkr watch SYM --add`, `ibkr watch SYM --remove`,
-and `ibkr watch --clear`. MCP exposes read-only watchlist list and
-enriched quote views only.
+and `ibkr watch --clear`. `ibkr watch` defaults to the enriched quote
+monitor; use `--list` only when you need the offline symbol inventory
+without market data. MCP exposes the same read-only list and enriched quote
+views, with quote rows enabled by default.
 
-`ibkr watch --quotes --json`
+`ibkr watch --json` (same as `ibkr watch --quotes --json`)
 
 ```json
 {
@@ -299,8 +301,10 @@ enriched quote views only.
 watchlist row, plus optional `holding` context for saved symbols that are
 currently held as stocks. When a holding is present, its `currency` and
 `exchange` are also reused for the quote request so non-USD watched
-positions route like `ibkr positions`. A per-row `error` string can appear
-when one symbol fails while the rest of the watchlist succeeds.
+positions route like `ibkr positions`. Holding marks remain in the nested
+`holding` block and are never used as substitute quote prices; if the quote
+path fails, `price` and movement fields stay absent. A per-row `error` string
+can appear when one symbol fails while the rest of the watchlist succeeds.
 `ibkr watch --watch` renders the same enriched rows repeatedly in text mode; `--watch`
 and `--json` are mutually exclusive.
 
@@ -359,7 +363,8 @@ and `--json` are mutually exclusive.
 
 Field meanings:
 - `price` — the daemon's best display price. `price_source` names the
-  input used: `last`, `mark`, `mid`, `bid`, `ask`, or `prev_close`.
+  input used: `last`, `mark`, `mid`, `bid`, `ask`, `prev_close`,
+  or `historical_close`.
   Use this for headline rendering; keep the source visible when it is not
   a live last trade.
 - `prev_close`, `change`, `change_pct` — previous regular-session close
@@ -382,9 +387,14 @@ Field meanings:
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
 - `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`.
+- `historical_close` — latest daily bar close fallback when market-data
+  ticks are absent but historical bars are available.
 - `price_at` / `price_as_of` — timestamp for `price` and display-ready
   freshness text. Last trades use IBKR's last-timestamp tick when present;
-  previous-close fallbacks use the prior official regular-session close.
+  closed-market last/mark prices without an exchange-side tick timestamp use
+  the relevant official regular-session close rather than local observation
+  time. Previous-close and historical-close fallbacks use the relevant
+  official regular-session close.
 - `stale` / `stale_reason` — present when the market is officially open
   but the best available price is only previous close or its timestamp is
   old enough to be misleading.

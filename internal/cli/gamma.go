@@ -82,7 +82,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 	timestamp := gammaHeroTimestamp(r)
 	anchor := gammaHeroAnchor(r)
 	summary := gammaHeroSummary(r)
-	renderCommandHero(out, title, timestamp, anchor, summary)
+	renderCommandHero(env, out, title, timestamp, anchor, summary)
 
 	// Top-of-output banner for entitlement-degraded states. Surfaces
 	// the SPX-skipped fallback per design §8.2 above the headline

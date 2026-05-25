@@ -17,7 +17,7 @@ ibkr status
 ibkr positions --by underlying
 ibkr regime
 ibkr watch IBM --add
-ibkr watch --quotes
+ibkr watch
 ibkr calendar --market us --date 2026-05-25
 ibkr quote SPY --watch
 ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
@@ -138,7 +138,7 @@ Restart the host (Claude for Mac, standalone Claude Code session, Cursor, …) a
 $ ibkr account --json | jq '.net_liquidation, .base_currency'
 $ ibkr watch IBM --add
 $ ibkr watch --list --json
-$ ibkr watch --quotes --json | jq '.rows[] | {sym: .symbol, price: .price, chg: .change_pct, as_of: .price_as_of}'
+$ ibkr watch --json | jq '.rows[] | {sym: .symbol, price: .price, chg: .change_pct, as_of: .price_as_of}'
 $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, price: .price, chg: .change_pct}'
 $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
 $ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
