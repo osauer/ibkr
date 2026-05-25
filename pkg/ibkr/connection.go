@@ -350,6 +350,9 @@ type handlerEntry struct {
 type reqAliasEntry struct {
 	symbol       string
 	secType      string
+	exchange     string
+	primaryExch  string
+	currency     string
 	localSymbol  string
 	tradingClass string
 }
@@ -361,6 +364,9 @@ func (c *Connection) registerReqAlias(reqID int, contract Contract) {
 	entry := reqAliasEntry{
 		symbol:       strings.ToUpper(contract.Symbol),
 		secType:      strings.ToUpper(contract.SecType),
+		exchange:     strings.ToUpper(contract.Exchange),
+		primaryExch:  strings.ToUpper(contract.PrimaryExch),
+		currency:     strings.ToUpper(contract.Currency),
 		localSymbol:  contract.LocalSymbol,
 		tradingClass: contract.TradingClass,
 	}

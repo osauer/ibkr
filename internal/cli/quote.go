@@ -18,6 +18,10 @@ func runQuote(ctx context.Context, env *Env, args []string) int {
 	watch := fs.Bool("watch", false, "stream ticks until Ctrl-C")
 	rate := fs.Duration("rate", 250*time.Millisecond, "render throttle window for --watch (0 = every tick)")
 	timeout := fs.Duration("timeout", 5*time.Second, "snapshot timeout")
+	market := fs.String("market", "", "stock market routing shortcut: us (default) or de")
+	exchange := fs.String("exchange", "", "IBKR stock exchange/venue override (e.g. SMART, IBIS)")
+	primary := fs.String("primary", "", "IBKR stock primary-exchange hint when routing through SMART")
+	currency := fs.String("currency", "", "stock quote currency override (e.g. USD, EUR)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -30,6 +34,9 @@ func runQuote(ctx context.Context, env *Env, args []string) int {
 	//   ibkr quote AAPL,MSFT[,...]            → list of stock snapshots
 	//   ibkr quote AAPL YYMMDD C|P STRIKE     → single option snapshot
 	if len(rest) == 4 {
+		if quoteRouteFlagsSet(*market, *exchange, *primary, *currency) {
+			return fail(env, "quote option: --market/--exchange/--primary/--currency apply only to stock snapshots")
+		}
 		return runQuoteOption(ctx, env, rest, *jsonOut, *watch, *timeout)
 	}
 	if len(rest) > 1 {
@@ -37,13 +44,31 @@ func runQuote(ctx context.Context, env *Env, args []string) int {
 	}
 
 	symbols := splitSymbols(rest[0])
+	route := rpc.ContractParams{
+		Market:      strings.TrimSpace(*market),
+		Exchange:    strings.TrimSpace(*exchange),
+		PrimaryExch: strings.TrimSpace(*primary),
+		Currency:    strings.TrimSpace(*currency),
+	}
 	if *watch {
+		if quoteRouteFlagsSet(route.Market, route.Exchange, route.PrimaryExch, route.Currency) {
+			return fail(env, "quote --watch: explicit market routing is only supported for snapshots")
+		}
 		if len(symbols) != 1 {
 			return fail(env, "quote --watch: only one symbol may be streamed at a time")
 		}
 		return runQuoteWatch(ctx, env, symbols[0], *jsonOut, *rate)
 	}
-	return runQuoteSnapshotList(ctx, env, symbols, *jsonOut, *timeout)
+	return runQuoteSnapshotList(ctx, env, symbols, *jsonOut, *timeout, route)
+}
+
+func quoteRouteFlagsSet(values ...string) bool {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func splitSymbols(s string) []string {
@@ -58,13 +83,24 @@ func splitSymbols(s string) []string {
 	return out
 }
 
-func runQuoteSnapshotList(ctx context.Context, env *Env, syms []string, jsonOut bool, timeout time.Duration) int {
+func runQuoteSnapshotList(ctx context.Context, env *Env, syms []string, jsonOut bool, timeout time.Duration, route rpc.ContractParams) int {
 	results := make([]rpc.Quote, 0, len(syms))
 	var lastErr error
 	for _, sym := range syms {
 		var q rpc.Quote
+		contract := rpc.ContractParams{
+			Symbol:      sym,
+			SecType:     "STK",
+			Market:      route.Market,
+			Exchange:    strings.ToUpper(strings.TrimSpace(route.Exchange)),
+			PrimaryExch: strings.ToUpper(strings.TrimSpace(route.PrimaryExch)),
+			Currency:    strings.ToUpper(strings.TrimSpace(route.Currency)),
+		}
+		if contract.Currency == "" && contract.Market == "" && contract.Exchange == "" && contract.PrimaryExch == "" {
+			contract.Currency = "USD"
+		}
 		params := rpc.QuoteSnapshotParams{
-			Contract:  rpc.ContractParams{Symbol: sym, SecType: "STK", Currency: "USD"},
+			Contract:  contract,
 			TimeoutMs: int(timeout.Milliseconds()),
 		}
 		if err := env.Conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {

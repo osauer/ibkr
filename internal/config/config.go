@@ -152,10 +152,12 @@ func (s SPX) MembersAutoRefreshEnabled() bool {
 // Scan holds a single scanner preset. Timeout is per-preset and optional;
 // <=0 falls back to the daemon's default (20s).
 type Scan struct {
-	Type     string   `toml:"type"`
-	Exchange string   `toml:"exchange"`
-	Limit    int      `toml:"limit"`
-	Timeout  duration `toml:"timeout"`
+	Type     string `toml:"type"`
+	Exchange string `toml:"exchange"`
+	// Instrument is the IBKR scanner instrument token, such as STK for US stocks or STOCK.EU for European stocks; empty defaults to STK.
+	Instrument string   `toml:"instrument"`
+	Limit      int      `toml:"limit"`
+	Timeout    duration `toml:"timeout"`
 }
 
 // Config is the on-disk shape of ~/.config/ibkr/config.toml.

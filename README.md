@@ -130,6 +130,7 @@ Restart the host (Claude for Mac, standalone Claude Code session, Cursor, …) a
 ```sh
 $ ibkr account --json | jq '.net_liquidation, .base_currency'
 $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, last: .last, chg: .change_pct}'
+$ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
@@ -230,6 +231,7 @@ Then `ibkr scan tech-gainers`. **Caveat:** writing **any** `[scans.*]` block mak
 
 ```
 ibkr scan --type TOP_PERC_GAIN --exchange STK.NASDAQ --limit 25 --json
+ibkr scan --type TOP_PERC_GAIN --exchange STK.EU.IBIS --instrument STOCK.EU --limit 25 --json
 ```
 
 Ad-hoc rows are capped at 50 (vs. preset's user-set limit) to keep an agent from accidentally pulling thousands.
@@ -240,7 +242,7 @@ Ad-hoc rows are capped at 50 (vs. preset's user-set limit) to keep an agent from
 ibkr scan params --instrument STK [--json]
 ```
 
-The catalog varies by gateway version and by your market-data subscriptions — `scanCode`s like `HIGH_OPT_IMP_VOLAT_OVER_HIST` require US options data. `--instrument STK` narrows to stock scans; omit for everything. Add `--raw` to get the full XML (~200 KB–2 MB) if you need a less-common field. There's no need to memorize the values — the catalog is the source of truth.
+The catalog varies by gateway version and by your market-data subscriptions — `scanCode`s like `HIGH_OPT_IMP_VOLAT_OVER_HIST` require US options data, and European stock locations often require `--instrument STOCK.EU` instead of the US default `STK`. `--instrument STK` narrows to US stock scans; omit for everything. Add `--raw` to get the full XML (~200 KB–2 MB) if you need a less-common field. There's no need to memorize the values — the catalog is the source of truth.
 
 ## Safety
 

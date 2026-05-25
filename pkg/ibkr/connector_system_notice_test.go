@@ -38,3 +38,27 @@ func TestProcessSystemNoticeMarksStockInactive(t *testing.T) {
 		t.Fatalf("expected HGENQ to be marked inactive")
 	}
 }
+
+func TestProcessSystemNoticeMarksRoutedStockInactiveByRoute(t *testing.T) {
+	c := &Connector{}
+	alias := reqAliasEntry{
+		symbol:   "MBG",
+		secType:  "STK",
+		exchange: "SMART",
+		currency: "USD",
+	}
+	note := &systemNotification{
+		code:    200,
+		message: "No security definition has been found for the request",
+	}
+
+	c.processSystemNotice(alias, note)
+
+	if c.IsSymbolInactive("MBG") {
+		t.Fatalf("bare MBG should remain usable for an explicit non-US route")
+	}
+	key := MarketDataKeyForContract(Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", Currency: "USD"})
+	if !c.IsSymbolInactive(key) {
+		t.Fatalf("expected failed route %q to be marked inactive", key)
+	}
+}

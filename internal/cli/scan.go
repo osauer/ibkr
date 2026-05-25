@@ -24,7 +24,7 @@ func runScan(ctx context.Context, env *Env, args []string) int {
 	limit := fs.Int("limit", 0, "max rows (0 = preset default / 50 cap for ad-hoc)")
 	adHocType := fs.String("type", "", "ad-hoc scanCode (e.g. TOP_PERC_GAIN) — required with --exchange when no preset is given")
 	adHocExch := fs.String("exchange", "", "ad-hoc locationCode (e.g. STK.US.MAJOR) — required with --type when no preset is given")
-	paramsInstrument := fs.String("instrument", "", "filter the params dump by instrument type (e.g. STK); only meaningful for `ibkr scan params`")
+	paramsInstrument := fs.String("instrument", "", "IBKR scanner instrument (e.g. STK, STOCK.EU); filters `scan params` and routes ad-hoc scans")
 	paramsRaw := fs.Bool("raw", false, "include the gateway's raw XML payload in the params dump (~200 KB)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
@@ -37,7 +37,7 @@ func runScan(ctx context.Context, env *Env, args []string) int {
 	case len(rest) >= 1 && rest[0] == "params":
 		return runScanParams(ctx, env, *paramsInstrument, *paramsRaw, *jsonOut)
 	case len(rest) == 0 && *adHocType != "" && *adHocExch != "":
-		params := rpc.ScanRunParams{Type: *adHocType, Exchange: *adHocExch, Limit: *limit}
+		params := rpc.ScanRunParams{Type: *adHocType, Exchange: *adHocExch, Instrument: *paramsInstrument, Limit: *limit}
 		return runScanCall(ctx, env, params, *jsonOut)
 	case len(rest) == 0 && (*adHocType != "" || *adHocExch != ""):
 		return fail(env, "scan: ad-hoc mode requires both --type and --exchange (see 'ibkr scan params' for valid values)")
@@ -45,7 +45,7 @@ func runScan(ctx context.Context, env *Env, args []string) int {
 		params := rpc.ScanRunParams{Preset: rest[0], Limit: *limit}
 		return runScanCall(ctx, env, params, *jsonOut)
 	default:
-		return fail(env, "scan: usage: ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] | ibkr scan --type X --exchange Y")
+		return fail(env, "scan: usage: ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] | ibkr scan --type X --exchange Y [--instrument STK|STOCK.EU]")
 	}
 }
 
@@ -77,15 +77,20 @@ func runScanList(ctx context.Context, env *Env, jsonOut bool) int {
 		wPreset = 20
 		wType   = 32
 		wExch   = 18
+		wInst   = 10
 		wLimit  = 5
 	)
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s",
-		wPreset, "PRESET", wType, "TYPE", wExch, "EXCHANGE", wLimit, "LIMIT")
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s",
+		wPreset, "PRESET", wType, "TYPE", wExch, "EXCHANGE", wInst, "INSTRUMENT", wLimit, "LIMIT")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, p := range res.Presets {
-		fmt.Fprintf(out, "  %-*s  %-*s  %-*s  %*d\n",
-			wPreset, p.Name, wType, p.Type, wExch, p.Exchange, wLimit, p.Limit)
+		inst := p.Instrument
+		if inst == "" {
+			inst = "STK"
+		}
+		fmt.Fprintf(out, "  %-*s  %-*s  %-*s  %-*s  %*d\n",
+			wPreset, p.Name, wType, p.Type, wExch, p.Exchange, wInst, inst, wLimit, p.Limit)
 	}
 	fmt.Fprintln(out)
 	return 0
