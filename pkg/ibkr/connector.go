@@ -123,6 +123,7 @@ type Subscription struct {
 	BidSize   int64
 	AskSize   int64
 	Volume    int64
+	AvgVolume int64
 	// OpenInt is the option open interest at this contract: tick 27
 	// (callOpenInterest) for CALL legs, tick 28 (putOpenInterest) for
 	// PUT legs. One leg subscription receives exactly one of the two —
@@ -143,6 +144,10 @@ type Subscription struct {
 	Week26High float64
 	Week52Low  float64
 	Week52High float64
+	// LastTradeTime is IBKR tick-string type 45, a Unix timestamp for the
+	// last trade/close print. It is distinct from LastTime, which records
+	// when this process observed any tick on the subscription.
+	LastTradeTime time.Time
 	// IV is the option implied volatility tick (generic tick 106), present
 	// only when the streaming subscribe requested it. Stored as a fraction
 	// (0.234 == 23.4%); the gateway sometimes emits the percent form, which
@@ -2285,6 +2290,12 @@ func (c *Connector) registerHandlers(conn *Connection) {
 		c.handleTickGeneric(fields)
 	})
 
+	// Register string tick handler (msgID 46) for values such as last
+	// trade timestamp (tick type 45), used by quote/watchlist as-of text.
+	conn.RegisterHandler(msgTickString, func(fields []string) {
+		c.handleTickString(fields)
+	})
+
 	// Register option computation handler (msgID 21) for greeks and model IV
 	conn.RegisterHandler(msgTickOptionComputation, func(fields []string) {
 		c.handleOptionComputation(fields)
@@ -3735,6 +3746,7 @@ func (c *Connector) handleTickSize(fields []string) {
 	sub.Observed = true
 
 	// IBKR tick types: 0=BID_SIZE, 3=ASK_SIZE, 8=VOLUME (cumulative day total).
+	// 21=average volume, delivered by the Misc Stats generic-tick bundle (165).
 	// Delayed subscriptions use 69/70/74 for bid size / ask size / volume.
 	// 5=LAST_SIZE is intentionally dropped — too noisy and not surfaced.
 	// 27=callOpenInterest, 28=putOpenInterest land on the same OpenInt
@@ -3747,10 +3759,49 @@ func (c *Connector) handleTickSize(fields []string) {
 		sub.AskSize = size
 	case 8, 74:
 		sub.Volume = size
+	case 21:
+		sub.AvgVolume = size
 	case 27, 28:
 		sub.OpenInt = size
 	}
 	sub.LastTime = time.Now()
+}
+
+// handleTickString processes IBKR tick-string updates. The only value we
+// persist today is tick type 45 (last timestamp), encoded by the gateway as
+// Unix seconds. This is the exchange-side time users expect in "At close"
+// labels; LastTime remains the local observation timestamp.
+func (c *Connector) handleTickString(fields []string) {
+	if len(fields) < 5 {
+		return
+	}
+	reqID, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return
+	}
+	tickType, err := strconv.Atoi(fields[3])
+	if err != nil || tickType != 45 {
+		return
+	}
+	sec, err := strconv.ParseInt(strings.TrimSpace(fields[4]), 10, 64)
+	if err != nil || sec <= 0 {
+		return
+	}
+
+	c.subMu.RLock()
+	symbol, exists := c.reqIDMap[reqID]
+	c.subMu.RUnlock()
+	if !exists {
+		return
+	}
+
+	c.subMu.Lock()
+	if sub, ok := c.subscriptions[symbol]; ok {
+		sub.LastTradeTime = time.Unix(sec, 0)
+		sub.LastTime = time.Now()
+		sub.Observed = true
+	}
+	c.subMu.Unlock()
 }
 
 // parseTickSize normalises IBKR tickSize payloads.
@@ -3903,27 +3954,29 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 
 	for symbol, sub := range c.subscriptions {
 		data[symbol] = &MarketData{
-			Symbol:     symbol,
-			Bid:        sub.Bid,
-			Ask:        sub.Ask,
-			Last:       sub.LastPrice,
-			MarkPrice:  sub.MarkPrice,
-			BidSize:    int(sub.BidSize),
-			AskSize:    int(sub.AskSize),
-			Volume:     sub.Volume,
-			OpenInt:    sub.OpenInt,
-			Close:      sub.PrevClose,
-			Open:       sub.Open,
-			High:       sub.High,
-			Low:        sub.Low,
-			Week13Low:  sub.Week13Low,
-			Week13High: sub.Week13High,
-			Week26Low:  sub.Week26Low,
-			Week26High: sub.Week26High,
-			Week52Low:  sub.Week52Low,
-			Week52High: sub.Week52High,
-			IV:         sub.IV,
-			Timestamp:  sub.LastTime,
+			Symbol:        symbol,
+			Bid:           sub.Bid,
+			Ask:           sub.Ask,
+			Last:          sub.LastPrice,
+			MarkPrice:     sub.MarkPrice,
+			BidSize:       int(sub.BidSize),
+			AskSize:       int(sub.AskSize),
+			Volume:        sub.Volume,
+			AvgVolume:     sub.AvgVolume,
+			LastTradeTime: sub.LastTradeTime,
+			OpenInt:       sub.OpenInt,
+			Close:         sub.PrevClose,
+			Open:          sub.Open,
+			High:          sub.High,
+			Low:           sub.Low,
+			Week13Low:     sub.Week13Low,
+			Week13High:    sub.Week13High,
+			Week26Low:     sub.Week26Low,
+			Week26High:    sub.Week26High,
+			Week52Low:     sub.Week52Low,
+			Week52High:    sub.Week52High,
+			IV:            sub.IV,
+			Timestamp:     sub.LastTime,
 		}
 	}
 

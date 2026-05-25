@@ -312,8 +312,8 @@ func TestHandleTickPrice_VerySmallPrice(t *testing.T) {
 }
 
 // TestHandleTickSize_DispatchesByTickType verifies bid_size (0), ask_size (3),
-// and volume (8) ticks land on the right Subscription field. Other tick types
-// (e.g. 5=last_size) are intentionally dropped.
+// volume (8), and average volume (21) ticks land on the right Subscription
+// field. Other tick types (e.g. 5=last_size) are intentionally dropped.
 func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.subMu.Lock()
@@ -322,13 +322,14 @@ func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 	c.subMu.Unlock()
 
 	// Fields format: [msgID, version, reqID, tickType, size]
-	c.handleTickSize([]string{"2", "6", "7", "0", "1500"})     // bid_size
-	c.handleTickSize([]string{"2", "6", "7", "3", "2200"})     // ask_size
-	c.handleTickSize([]string{"2", "6", "7", "8", "9876543"})  // volume
-	c.handleTickSize([]string{"2", "6", "7", "69", "1600"})    // delayed_bid_size
-	c.handleTickSize([]string{"2", "6", "7", "70", "2300"})    // delayed_ask_size
-	c.handleTickSize([]string{"2", "6", "7", "74", "9876544"}) // delayed_volume
-	c.handleTickSize([]string{"2", "6", "7", "5", "999"})      // last_size — ignored
+	c.handleTickSize([]string{"2", "6", "7", "0", "1500"})      // bid_size
+	c.handleTickSize([]string{"2", "6", "7", "3", "2200"})      // ask_size
+	c.handleTickSize([]string{"2", "6", "7", "8", "9876543"})   // volume
+	c.handleTickSize([]string{"2", "6", "7", "69", "1600"})     // delayed_bid_size
+	c.handleTickSize([]string{"2", "6", "7", "70", "2300"})     // delayed_ask_size
+	c.handleTickSize([]string{"2", "6", "7", "74", "9876544"})  // delayed_volume
+	c.handleTickSize([]string{"2", "6", "7", "21", "58900000"}) // avg_volume
+	c.handleTickSize([]string{"2", "6", "7", "5", "999"})       // last_size — ignored
 
 	c.subMu.RLock()
 	sub := c.subscriptions["AAPL"]
@@ -342,6 +343,34 @@ func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 	}
 	if sub.Volume != 9876544 {
 		t.Errorf("Volume: want 9876544, got %d", sub.Volume)
+	}
+	if sub.AvgVolume != 58900000 {
+		t.Errorf("AvgVolume: want 58900000, got %d", sub.AvgVolume)
+	}
+}
+
+func TestHandleTickString_LastTradeTime(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[7] = "AAPL"
+	c.subscriptions["AAPL"] = &Subscription{Symbol: "AAPL"}
+	c.subMu.Unlock()
+
+	want := time.Unix(1770000062, 0)
+	c.handleTickString([]string{"46", "1", "7", "45", "1770000062"})
+
+	c.subMu.RLock()
+	sub := c.subscriptions["AAPL"]
+	c.subMu.RUnlock()
+
+	if !sub.LastTradeTime.Equal(want) {
+		t.Fatalf("LastTradeTime = %s, want %s", sub.LastTradeTime, want)
+	}
+	if !sub.Observed {
+		t.Fatal("Observed not set after last-timestamp tick")
+	}
+	if sub.LastTime.IsZero() {
+		t.Fatal("LastTime not updated after last-timestamp tick")
 	}
 }
 
@@ -516,14 +545,16 @@ func TestGetMarketData_SurfacesWeekRangeAndIV(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.subMu.Lock()
 	c.subscriptions["AAPL"] = &Subscription{
-		Symbol:     "AAPL",
-		Week52Low:  120.00,
-		Week52High: 260.50,
-		Week26Low:  140.00,
-		Week26High: 245.00,
-		Week13Low:  150.10,
-		Week13High: 240.55,
-		IV:         0.234,
+		Symbol:        "AAPL",
+		Week52Low:     120.00,
+		Week52High:    260.50,
+		Week26Low:     140.00,
+		Week26High:    245.00,
+		Week13Low:     150.10,
+		Week13High:    240.55,
+		AvgVolume:     58900000,
+		LastTradeTime: time.Unix(1770000062, 0),
+		IV:            0.234,
 	}
 	c.subMu.Unlock()
 
@@ -543,5 +574,11 @@ func TestGetMarketData_SurfacesWeekRangeAndIV(t *testing.T) {
 	}
 	if got.IV != 0.234 {
 		t.Errorf("IV: got %.4f, want 0.234", got.IV)
+	}
+	if got.AvgVolume != 58900000 {
+		t.Errorf("AvgVolume: got %d, want 58900000", got.AvgVolume)
+	}
+	if want := time.Unix(1770000062, 0); !got.LastTradeTime.Equal(want) {
+		t.Errorf("LastTradeTime: got %s, want %s", got.LastTradeTime, want)
 	}
 }

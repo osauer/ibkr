@@ -85,9 +85,10 @@ func main() {
 
 	color := cli.ShouldColor(os.Stdout)
 
-	// `ibkr watch` is local metadata unless --watch is actively quoting the
-	// saved symbols. Keep add/remove/list/clear usable without a gateway.
-	if cmd == "watch" && !isStreamingInvocation(cmd, rest) {
+	// `ibkr watch` is local metadata unless --quotes or --watch is actively
+	// quoting saved symbols. Keep add/remove/list/clear usable without a
+	// gateway.
+	if cmd == "watch" && !isWatchDaemonInvocation(rest) {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Color: color}
@@ -197,6 +198,16 @@ func isStreamingInvocation(cmd string, args []string) bool {
 	}
 	for _, a := range args {
 		if a == "--watch" || a == "-watch" || a == "--watch=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func isWatchDaemonInvocation(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--watch", "-watch", "--watch=true", "--quotes", "-quotes", "--quotes=true":
 			return true
 		}
 	}

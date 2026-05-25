@@ -234,11 +234,11 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 		return cmp.Compare(a.Strike, b.Strike)
 	})
 
-	// Pre-warm prev-close cache for the held stock underlyings, then
-	// fill DayChange/DayChangePct on each row. Bounded fan-out keeps the
-	// gateway's market-data slot churn under control even for accounts
-	// with many positions; the cache makes subsequent calls instant.
-	s.prewarmPrevCloses(ctx, c, res.Stocks)
+	// Pre-warm quote summaries for held stock underlyings, then fill
+	// DayChange/DayChangePct on each row. This supersedes the older
+	// prev-close-only probe for stock rows while still feeding the same
+	// prev-close cache options use as their underlying anchor.
+	s.prewarmStockQuoteSummaries(ctx, c, res.Stocks)
 	s.fillDailyChange(res.Stocks)
 	// Options group with their underlying so stock prev close feeds the
 	// option's underlying field too — useful as a contextual anchor even
@@ -276,6 +276,102 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	res.Portfolio = buildPortfolioAggregates(res.Stocks, res.Options)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
 	return res, nil
+}
+
+// positionStockQuoteBudget is the per-symbol wait for enriching held stock
+// positions with the same quote summary fields watchlist/quote render.
+// Short by design: positions already have portfolio marks, so this path is
+// opportunistic context, not the source of truth for holdings.
+const positionStockQuoteBudget = 1500 * time.Millisecond
+
+// prewarmStockQuoteSummaries dispatches brief refcounted market-data holds
+// for held stock rows and copies quote-context fields onto the position
+// views. It also writes tick-9 previous close into the existing cache so
+// fillDailyChange and option-underlying context reuse the same value.
+func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Connector, stocks []rpc.PositionView) {
+	if c == nil || len(stocks) == 0 {
+		return
+	}
+	type job struct {
+		index int
+		sym   string
+		ccy   string
+	}
+	jobs := make([]job, 0, len(stocks))
+	seen := map[string]bool{}
+	for i := range stocks {
+		sym := normSym(stocks[i].Symbol)
+		if sym == "" || seen[sym] {
+			continue
+		}
+		seen[sym] = true
+		jobs = append(jobs, job{index: i, sym: sym, ccy: stocks[i].Currency})
+	}
+	runBounded(jobs, positionsPrewarmWorkers, func(j job) {
+		if ctx.Err() != nil {
+			return
+		}
+		q, ok := s.snapshotHeldStockQuote(ctx, c, j.sym, normCcy(j.ccy), positionStockQuoteBudget)
+		if !ok {
+			if s.prevCloses != nil {
+				s.prevCloses.put(j.sym, prevCloseEntry{}, time.Now())
+			}
+			return
+		}
+		if q.PrevClose != nil && s.prevCloses != nil {
+			s.prevCloses.put(j.sym, prevCloseEntry{value: *q.PrevClose}, time.Now())
+		}
+		p := &stocks[j.index]
+		p.DataType = q.DataType
+		p.PrevClose = q.PrevClose
+		p.DayHigh = q.DayHigh
+		p.DayLow = q.DayLow
+		p.Week52High = q.Week52High
+		p.Week52Low = q.Week52Low
+		p.Volume = q.Volume
+		p.AvgVolume = q.AvgVolume
+		p.PriceAt = q.PriceAt
+		p.PriceAsOf = q.PriceAsOf
+		p.Stale = q.Stale
+		p.StaleReason = q.StaleReason
+	})
+}
+
+func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connector, sym, ccy string, timeout time.Duration) (rpc.Quote, bool) {
+	if s == nil || s.subs == nil {
+		return rpc.Quote{}, false
+	}
+	release, err := s.subs.Hold(ctx, sym)
+	if err != nil {
+		return rpc.Quote{}, false
+	}
+	defer release()
+
+	q := rpc.Quote{
+		Symbol: sym,
+		Contract: rpc.ContractParams{
+			Symbol:   sym,
+			SecType:  "STK",
+			Currency: ccy,
+		},
+		IVStatus: "unavailable",
+		AsOf:     time.Now(),
+	}
+	var seen bool
+	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+		fillQuoteMarketData(&q, d)
+		seen = true
+		return q.Last != nil || q.Mark != nil || q.PrevClose != nil
+	})
+	if !seen {
+		return rpc.Quote{}, false
+	}
+	ready := q.Bid != nil || q.Ask != nil || q.Last != nil
+	fallback := q.Mark != nil || q.PrevClose != nil
+	q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(sym), ready, fallback)
+	q.AsOf = time.Now()
+	s.decorateQuote(&q, marketcal.MarketUSEquity)
+	return q, true
 }
 
 // positionSecType maps IBKR's raw SecType codes ("STK", "OPT", "FUT", "IND")
@@ -482,38 +578,6 @@ func addFXSensitivity(p *rpc.PositionsPortfolio, ledger map[string]ibkrlib.Curre
 	v := sens
 	p.FXSensitivityPerPct = &v
 	p.FXBaseCurrency = baseCcy
-}
-
-// prewarmPrevCloses dispatches up to positionsPrewarmWorkers concurrent
-// brief subscribes to fetch the previous regular-session close for any
-// held stock underlying not already cached. Negative-caches a zero on
-// timeout / dead stream so a second positions call within the TTL
-// doesn't re-poll a known-empty source.
-func (s *Server) prewarmPrevCloses(ctx context.Context, c *ibkrlib.Connector, stocks []rpc.PositionView) {
-	if s.prevCloses == nil || c == nil || len(stocks) == 0 {
-		return
-	}
-	now := time.Now()
-	seen := map[string]bool{}
-	var jobs []string
-	for _, p := range stocks {
-		sym := normSym(p.Symbol)
-		if sym == "" || seen[sym] {
-			continue
-		}
-		seen[sym] = true
-		if _, ok := s.prevCloses.get(sym, now); ok {
-			continue
-		}
-		jobs = append(jobs, sym)
-	}
-	runBounded(jobs, positionsPrewarmWorkers, func(sym string) {
-		if ctx.Err() != nil {
-			return
-		}
-		pc := briefSnapshotClose(ctx, c, sym, 1*time.Second)
-		s.prevCloses.put(sym, prevCloseEntry{value: pc}, time.Now())
-	})
 }
 
 // fillDailyChange populates PrevClose / DayChange / DayChangePct /
@@ -1041,14 +1105,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	defer releaseSub()
 
 	if err := pollMarketData(ctx, c, pollKey, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
-		q.Bid = ptrIfPos(d.Bid)
-		q.Ask = ptrIfPos(d.Ask)
-		q.Last = ptrIfPos(d.Last)
-		q.Mark = ptrIfPos(d.MarkPrice)
-		q.PrevClose = ptrIfPos(d.Close)
-		q.BidSize = ptrIfPos(d.BidSize)
-		q.AskSize = ptrIfPos(d.AskSize)
-		q.Volume = ptrIfPos(d.Volume)
+		fillQuoteMarketData(q, d)
 		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
 		fallback := q.Mark != nil || q.PrevClose != nil
 		if ready || fallback {
@@ -1076,11 +1133,9 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 			return nil, err
 		}
 	}
-	// Compute deltas daemon-side so every consumer (CLI text, JSON,
-	// MCP) sees the same numbers without re-deriving them.
-	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
 	q.AsOf = time.Now()
 	s.attachQuoteSessionContext(q, sessionMarket)
+	s.decorateQuote(q, sessionMarket)
 
 	return q, nil
 }
@@ -1200,13 +1255,7 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 	}
 	if err := pollUntilWithReject(ctx, time.Now().Add(timeout), c.SubscriptionRejectCh(key), key, func() bool {
 		if d, ok := c.GetMarketData()[key]; ok {
-			q.Bid = ptrIfPos(d.Bid)
-			q.Ask = ptrIfPos(d.Ask)
-			q.Last = ptrIfPos(d.Last)
-			q.PrevClose = ptrIfPos(d.Close)
-			q.BidSize = ptrIfPos(d.BidSize)
-			q.AskSize = ptrIfPos(d.AskSize)
-			q.Volume = ptrIfPos(d.Volume)
+			fillQuoteMarketData(q, d)
 		}
 		if bid, ask, ok := c.GetOptionQuoteBidAsk(key); ok {
 			q.Bid = ptrIfPos(bid)
@@ -1226,9 +1275,9 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 	}); err != nil && err != context.DeadlineExceeded {
 		return nil, err
 	}
-	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
 	q.AsOf = time.Now()
 	s.attachQuoteSessionContext(q, marketcal.MarketUSOptions)
+	s.decorateQuote(q, marketcal.MarketUSOptions)
 	return q, nil
 }
 
@@ -1404,16 +1453,236 @@ func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc
 	}
 }
 
-// computeQuoteChange returns (change, change_pct) pointers given last and
-// prevClose. Both stay nil unless last and prevClose are present and
-// prevClose is strictly positive — no fabrication, no divide-by-zero.
-// Centralised here so quote (snapshot) and any future watch / position
-// delta caller share one formula.
-func computeQuoteChange(last, prevClose *float64) (*float64, *float64) {
-	if last == nil || prevClose == nil || *prevClose <= 0 {
+// fillQuoteMarketData projects the connector's current tick cache onto the
+// Quote wire shape. Pointer fields preserve the nil-vs-zero contract: absent
+// ticks stay nil, genuine positive gateway values are surfaced.
+func fillQuoteMarketData(q *rpc.Quote, d *ibkrlib.MarketData) {
+	if q == nil || d == nil {
+		return
+	}
+	q.Bid = ptrIfPos(d.Bid)
+	q.Ask = ptrIfPos(d.Ask)
+	q.Last = ptrIfPos(d.Last)
+	q.Mark = ptrIfPos(d.MarkPrice)
+	q.PrevClose = ptrIfPos(d.Close)
+	q.DayHigh = ptrIfPos(d.High)
+	q.DayLow = ptrIfPos(d.Low)
+	q.Week52High = ptrIfPos(d.Week52High)
+	q.Week52Low = ptrIfPos(d.Week52Low)
+	q.BidSize = ptrIfPos(d.BidSize)
+	q.AskSize = ptrIfPos(d.AskSize)
+	q.Volume = ptrIfPos(d.Volume)
+	q.AvgVolume = ptrIfPos(d.AvgVolume)
+	if d.IV > 0 {
+		v := d.IV
+		q.IV = &v
+		q.IVStatus = "model"
+	}
+	if !d.LastTradeTime.IsZero() {
+		q.PriceAt = d.LastTradeTime
+	}
+}
+
+func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
+	if q == nil {
+		return
+	}
+	q.Price, q.PriceSource = quoteCurrentPrice(q)
+	q.Change, q.ChangePct = computeQuoteChange(q.Price, q.PrevClose)
+	q.PriceAt = quotePriceTime(q, market)
+	q.PriceAsOf = quotePriceAsOf(q, market)
+	if stale, reason := quoteStaleness(q, market); stale {
+		q.Stale = true
+		q.StaleReason = reason
+	}
+}
+
+func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
+	if q == nil {
+		return nil, ""
+	}
+	if q.Last != nil {
+		return q.Last, "last"
+	}
+	if q.Mark != nil {
+		return q.Mark, "mark"
+	}
+	if q.Bid != nil && q.Ask != nil {
+		v := (*q.Bid + *q.Ask) / 2
+		return &v, "mid"
+	}
+	if q.Bid != nil {
+		return q.Bid, "bid"
+	}
+	if q.Ask != nil {
+		return q.Ask, "ask"
+	}
+	if q.PrevClose != nil {
+		return q.PrevClose, "prev_close"
+	}
+	return nil, ""
+}
+
+func quotePriceTime(q *rpc.Quote, market marketcal.Market) time.Time {
+	if q == nil || q.Price == nil {
+		return time.Time{}
+	}
+	switch q.PriceSource {
+	case "last":
+		if !q.PriceAt.IsZero() {
+			return q.PriceAt
+		}
+	case "prev_close":
+		if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
+			return t
+		}
+	}
+	if !q.AsOf.IsZero() {
+		return q.AsOf
+	}
+	return time.Now()
+}
+
+func previousMarketCloseTime(market marketcal.Market, at time.Time) time.Time {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	cal := marketcal.New()
+	session, err := cal.SessionAt(market, at)
+	if err != nil {
+		return time.Time{}
+	}
+	loc, err := time.LoadLocation(session.Timezone)
+	if err != nil {
+		return time.Time{}
+	}
+	local := at.In(loc)
+	if (session.State == marketcal.StateRegular || session.State == marketcal.StateEarlyClose) &&
+		!session.Close.IsZero() && !local.Before(session.Close) {
+		return session.Close
+	}
+	for i := 1; i <= 14; i++ {
+		day := local.AddDate(0, 0, -i).Format("2006-01-02")
+		res, err := cal.Query(marketcal.Query{Market: market, Date: day, Days: 1})
+		if err != nil {
+			continue
+		}
+		s := res.Session
+		if (s.State == marketcal.StateRegular || s.State == marketcal.StateEarlyClose) && !s.Close.IsZero() {
+			return s.Close
+		}
+	}
+	return time.Time{}
+}
+
+func quotePriceAsOf(q *rpc.Quote, market marketcal.Market) string {
+	if q == nil || q.PriceAt.IsZero() {
+		return ""
+	}
+	loc := quoteMarketLocation(q, market)
+	t := q.PriceAt
+	if loc != nil {
+		t = t.In(loc)
+	}
+	label := "As of"
+	if q.PriceSource == "prev_close" {
+		label = "At close"
+	} else if q.DataType == rpc.MarketDataDelayedFrozen {
+		if quoteMarketIsOpen(q, market) {
+			label = "Delayed frozen"
+		} else {
+			label = "At close"
+		}
+	} else if q.DataType == rpc.MarketDataFrozen {
+		if quoteMarketIsOpen(q, market) {
+			label = "Frozen"
+		} else {
+			label = "At close"
+		}
+	} else if q.DataType == rpc.MarketDataDelayed {
+		label = "Delayed"
+	}
+	return fmt.Sprintf("%s: %s", label, t.Format("Jan 2 at 03:04:05 PM MST"))
+}
+
+func quoteMarketLocation(q *rpc.Quote, market marketcal.Market) *time.Location {
+	if q != nil && q.SessionContext != nil && q.SessionContext.Timezone != "" {
+		if loc, err := time.LoadLocation(q.SessionContext.Timezone); err == nil {
+			return loc
+		}
+	}
+	at := time.Now()
+	if q != nil && !q.AsOf.IsZero() {
+		at = q.AsOf
+	}
+	session, err := marketcal.New().SessionAt(market, at)
+	if err != nil || session.Timezone == "" {
+		return nil
+	}
+	loc, err := time.LoadLocation(session.Timezone)
+	if err != nil {
+		return nil
+	}
+	return loc
+}
+
+func quoteStaleness(q *rpc.Quote, market marketcal.Market) (bool, string) {
+	if q == nil || !quoteMarketIsOpen(q, market) {
+		return false, ""
+	}
+	if q.PriceSource == "prev_close" {
+		return true, "market is open but only previous close is available"
+	}
+	if q.DataType == rpc.MarketDataFrozen || q.DataType == rpc.MarketDataDelayedFrozen {
+		return true, "market is open but quote data is frozen"
+	}
+	if q.PriceAt.IsZero() || q.AsOf.IsZero() {
+		return false, ""
+	}
+	if age := q.AsOf.Sub(q.PriceAt); age > 15*time.Minute {
+		return true, fmt.Sprintf("price timestamp is %s old during market hours", formatQuoteAge(age))
+	}
+	return false, ""
+}
+
+func quoteMarketIsOpen(q *rpc.Quote, market marketcal.Market) bool {
+	if q != nil && q.SessionContext != nil {
+		return q.SessionContext.IsOpen
+	}
+	at := time.Now()
+	if q != nil && !q.AsOf.IsZero() {
+		at = q.AsOf
+	}
+	session, err := marketcal.New().SessionAt(market, at)
+	return err == nil && session.IsOpen
+}
+
+func formatQuoteAge(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	d = d.Round(time.Minute)
+	h := d / time.Hour
+	m := (d % time.Hour) / time.Minute
+	if h > 0 && m > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	if h > 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// computeQuoteChange returns (change, change_pct) pointers given a current
+// price and prevClose. Both stay nil unless price and prevClose are present
+// and prevClose is strictly positive — no fabrication, no divide-by-zero.
+// Centralised here so quote, watchlist, scan, and position callers share
+// one formula.
+func computeQuoteChange(price, prevClose *float64) (*float64, *float64) {
+	if price == nil || prevClose == nil || *prevClose <= 0 {
 		return nil, nil
 	}
-	chg := *last - *prevClose
+	chg := *price - *prevClose
 	pct := chg / *prevClose * 100
 	return &chg, &pct
 }

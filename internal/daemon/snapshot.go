@@ -7,36 +7,6 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
-// briefSnapshotClose subscribes to sym for up to timeout, polls the
-// connector's market-data cache for a positive tick 9 (previous
-// regular-session close), then unsubscribes. Returns 0 on miss /
-// timeout / error so callers can negative-cache. Distinct from
-// briefSnapshotPrice / briefSnapshotFull because daily-change consumers
-// don't need a price — just the anchor.
-func briefSnapshotClose(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) float64 {
-	if c == nil {
-		return 0
-	}
-	sym := normSym(symbol)
-	if sym == "" {
-		return 0
-	}
-	// SubscribeMarketData is idempotent — a pre-existing subscription is
-	// not an error here, just fall through and read.
-	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"})
-	defer func() { _ = c.UnsubscribeMarketData(sym) }()
-
-	var close float64
-	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
-		if d.Close > 0 {
-			close = d.Close
-			return true
-		}
-		return false
-	})
-	return close
-}
-
 // briefSnapshotPrice subscribes to a symbol, polls the cache for the first
 // usable price, and unsubscribes. Returns the price (last → mid → bid → ask
 // → mark → close) and the gateway's data-type notice. Zero price + empty
@@ -89,9 +59,7 @@ func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string
 // renderers can show day-over-day change without a second subscribe.
 //
 // Used by the regime VIX fetcher so the dashboard header can carry
-// "VIX 18.4 −1.2%" alongside the term-structure ratio. Distinct from
-// briefSnapshotClose (which returns *only* the close and is the right
-// shape for daily-change consumers that don't need a live price).
+// "VIX 18.4 −1.2%" alongside the term-structure ratio.
 func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose float64, dataType string) {
 	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
 	if dt == "" {

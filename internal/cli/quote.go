@@ -137,12 +137,12 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 	// so any future width tweak only touches one verb instead of a hand-
 	// spaced label string.
 	//
-	// PREV CLOSE / CHG / CHG% sit after LAST so the reader's eye lands
+	// PREV CLOSE / CHG / CHG% sit after PRICE so the reader's eye lands
 	// on the price first then the move — same left-to-right priority you
 	// see on every retail platform. Em-dash placeholders preserve column
 	// alignment when ticks haven't arrived yet (frozen, dead pre-market).
 	header := fmt.Sprintf("  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %7s  %s",
-		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "LAST/MARK", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
+		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "PRICE", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, q := range qs {
@@ -159,7 +159,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 			formatSize(q.BidSize),
 			orDash(q.Ask, 10),
 			formatSize(q.AskSize),
-			orDash(quoteLastOrMark(q), 10),
+			orDash(quoteDisplayPrice(q), 10),
 			orDash(q.PrevClose, 10),
 			env.formatChange(q.Change, 8),
 			env.formatChangePct(q.ChangePct, 8),
@@ -170,12 +170,22 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 		if hint := quoteSessionHint(env, q.SessionContext); hint != "" {
 			fmt.Fprintf(out, "    %s\n", hint)
 		}
+		if q.PriceAsOf != "" {
+			hint := q.PriceAsOf
+			if q.PriceSource != "" {
+				hint += " · source=" + q.PriceSource
+			}
+			fmt.Fprintf(out, "    %s\n", env.dim(hint))
+		}
 	}
 	fmt.Fprintln(out)
 	return 0
 }
 
-func quoteLastOrMark(q rpc.Quote) *float64 {
+func quoteDisplayPrice(q rpc.Quote) *float64 {
+	if q.Price != nil {
+		return q.Price
+	}
 	if q.Last != nil {
 		return q.Last
 	}

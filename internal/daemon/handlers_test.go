@@ -790,6 +790,106 @@ func TestAttachQuoteSessionContextOmittedDuringLiveRTH(t *testing.T) {
 	}
 }
 
+func TestDecorateQuotePrevCloseUsesPriorMarketClose(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "America/New_York")
+	prev := 650.25
+	q := &rpc.Quote{
+		Symbol:    "SPY",
+		PrevClose: &prev,
+		DataType:  rpc.MarketDataFrozen,
+		AsOf:      time.Date(2026, 5, 25, 10, 0, 0, 0, loc), // Memorial Day.
+	}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
+	srv.decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.Price == nil || *q.Price != prev {
+		t.Fatalf("Price = %v, want prev close %.2f", q.Price, prev)
+	}
+	if q.PriceSource != "prev_close" {
+		t.Fatalf("PriceSource = %q, want prev_close", q.PriceSource)
+	}
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-22T16:00:00-04:00"; got != want {
+		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+	if got, want := q.PriceAsOf, "At close: May 22 at 04:00:00 PM EDT"; got != want {
+		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+	if q.Stale {
+		t.Fatalf("holiday prev-close quote should not be stale during closed market: %s", q.StaleReason)
+	}
+}
+
+func TestDecorateQuoteMarksOldLivePriceStale(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "America/New_York")
+	last, prev := 652.10, 650.25
+	asOf := time.Date(2026, 5, 26, 10, 30, 0, 0, loc)
+	q := &rpc.Quote{
+		Symbol:    "SPY",
+		Last:      &last,
+		PrevClose: &prev,
+		DataType:  rpc.MarketDataLive,
+		PriceAt:   asOf.Add(-20 * time.Minute),
+		AsOf:      asOf,
+	}
+
+	srv.decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.Price == nil || *q.Price != last {
+		t.Fatalf("Price = %v, want last %.2f", q.Price, last)
+	}
+	if q.PriceSource != "last" {
+		t.Fatalf("PriceSource = %q, want last", q.PriceSource)
+	}
+	if q.Change == nil || math.Abs(*q.Change-1.85) > 0.0001 {
+		t.Fatalf("Change = %v, want 1.85", q.Change)
+	}
+	if !q.Stale {
+		t.Fatal("expected stale quote during open market")
+	}
+	if !strings.Contains(q.StaleReason, "20m old") {
+		t.Fatalf("StaleReason = %q, want age detail", q.StaleReason)
+	}
+	if got, want := q.PriceAsOf, "As of: May 26 at 10:10:00 AM EDT"; got != want {
+		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+}
+
+func TestDecorateQuoteMarksOpenFrozenDataStale(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "Europe/Berlin")
+	mark := 51.04
+	q := &rpc.Quote{
+		Symbol:   "MBG",
+		Mark:     &mark,
+		DataType: rpc.MarketDataFrozen,
+		AsOf:     time.Date(2026, 5, 25, 13, 52, 0, 0, loc),
+	}
+
+	srv.decorateQuote(q, marketcal.MarketDEXetra)
+
+	if q.Price == nil || *q.Price != mark {
+		t.Fatalf("Price = %v, want mark %.2f", q.Price, mark)
+	}
+	if q.PriceSource != "mark" {
+		t.Fatalf("PriceSource = %q, want mark", q.PriceSource)
+	}
+	if got, want := q.PriceAsOf, "Frozen: May 25 at 01:52:00 PM CEST"; got != want {
+		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+	if !q.Stale {
+		t.Fatal("expected frozen data to be stale during an open market")
+	}
+	if q.StaleReason != "market is open but quote data is frozen" {
+		t.Fatalf("StaleReason = %q", q.StaleReason)
+	}
+}
+
 func TestQuoteMarketForStockContract(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

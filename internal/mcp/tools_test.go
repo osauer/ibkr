@@ -247,6 +247,49 @@ func TestIbkrGammaRejectsUnknownScope(t *testing.T) {
 	}
 }
 
+func TestIbkrWatchSchemaHasQuoteParams(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_watch")
+	if !ok {
+		t.Fatalf("ibkr_watch tool not registered")
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+			Minimum     int    `json:"minimum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.JSONSchema, &schema); err != nil {
+		t.Fatalf("decode ibkr_watch schema: %v", err)
+	}
+	for _, name := range []string{"include_quotes", "include_positions", "timeout_ms"} {
+		if _, ok := schema.Properties[name]; !ok {
+			t.Fatalf("ibkr_watch schema missing %q", name)
+		}
+	}
+	if schema.Properties["include_quotes"].Type != "boolean" {
+		t.Fatalf("include_quotes.type = %q, want boolean", schema.Properties["include_quotes"].Type)
+	}
+	if schema.Properties["include_positions"].Type != "boolean" {
+		t.Fatalf("include_positions.type = %q, want boolean", schema.Properties["include_positions"].Type)
+	}
+	if schema.Properties["timeout_ms"].Type != "integer" || schema.Properties["timeout_ms"].Minimum != 100 {
+		t.Fatalf("timeout_ms schema = %+v, want integer minimum 100", schema.Properties["timeout_ms"])
+	}
+	if !strings.Contains(tool.Description, "decision-making monitor") {
+		t.Fatalf("ibkr_watch description should explain the enriched quote use case:\n%s", tool.Description)
+	}
+}
+
+func TestWatchlistQuoteContractUsesHoldingRoute(t *testing.T) {
+	t.Parallel()
+	got := watchlistQuoteContract("MBG", &rpc.WatchlistHolding{Currency: "EUR", Exchange: "IBIS"})
+	if got.Currency != "EUR" || got.Exchange != "IBIS" {
+		t.Fatalf("watchlistQuoteContract route = %+v, want EUR/IBIS", got)
+	}
+}
+
 func TestIbkrCalendarSchemaHasSupportedMarkets(t *testing.T) {
 	t.Parallel()
 	tool, ok := lookupTool("ibkr_calendar")

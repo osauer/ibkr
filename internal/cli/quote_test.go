@@ -326,7 +326,7 @@ func TestRenderQuoteSnapshot_UsesMarkWhenLastMissing(t *testing.T) {
 	qs := []rpc.Quote{{Symbol: "SPY", Mark: &mark, DataType: rpc.MarketDataFrozen}}
 	_ = renderQuoteSnapshotText(env, qs)
 	out := stdout.String()
-	for _, want := range []string{"LAST/MARK", "743.73", "frozen"} {
+	for _, want := range []string{"PRICE", "743.73", "frozen"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}

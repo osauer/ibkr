@@ -56,10 +56,12 @@ type MarketData struct {
 	Week52Low  float64 `json:"week_52_low,omitempty"`
 	Week52High float64 `json:"week_52_high,omitempty"`
 
-	Volume  int64 `json:"volume"`
-	BidSize int   `json:"bid_size"`
-	AskSize int   `json:"ask_size"`
-	OpenInt int64 `json:"open_int"`
+	Volume        int64     `json:"volume"`
+	AvgVolume     int64     `json:"avg_volume,omitempty"`
+	LastTradeTime time.Time `json:"last_trade_time,omitzero"`
+	BidSize       int       `json:"bid_size"`
+	AskSize       int       `json:"ask_size"`
+	OpenInt       int64     `json:"open_int"`
 
 	IV     float64 `json:"iv"`
 	HV     float64 `json:"hv"`

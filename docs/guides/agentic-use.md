@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-25 11:44 CEST
+Updated: 2026-05-25 13:40 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ read-only `ibkr watch --list`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ read-only `ibkr watch --list` or enriched `ibkr watch --quotes`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -41,6 +41,12 @@ If you also want context, follow-up questions naturally chain: *"and what's SPY'
 → Claude invokes `ibkr_watch`.
 
 Returns the local saved-symbol list from `ibkr watch --list`. The MCP tool is read-only: Claude can use the symbols for follow-up quote, history, chain, scan, gamma, or regime context, but it cannot add, remove, or clear watchlist entries through MCP.
+
+### "Show my watchlist with current prices and what I hold."
+
+→ Claude invokes `ibkr_watch` with `{"include_quotes": true}`.
+
+Returns one row per saved symbol with headline price and currency, previous close, absolute and percent change, day range, 52-week range, volume versus average volume, `price_as_of`, stale/session context, and compact stock holding context where the account owns the symbol. Claude should call out stale or closed-market rows instead of treating the values as fresh live prices.
 
 ### "Why does SPY look stale at 1am ET?"
 

@@ -45,9 +45,15 @@ Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark
 
 ## `ibkr_watch`
 
-Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks "what's on my watchlist?" or wants quotes/context for their saved watch symbols. This MCP tool is read-only: it lists symbols only; it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. To quote the returned symbols, call `ibkr_quote` with the `symbols` array.
+Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks "what's on my watchlist?"; set `include_quotes: true` when they want a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, data freshness, session context, and optional held-stock context. This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.
 
-*No parameters.*
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `include_positions` | boolean | no | when include_quotes is true, attach compact held-stock context where available; default true |
+| `include_quotes` | boolean | no | when true, return enriched quote rows for saved symbols instead of only the local symbol list; default false preserves offline/list-only behavior |
+| `timeout_ms` | integer | no | per-symbol quote timeout when include_quotes is true; default 5000 ms |
 
 ## `ibkr_calendar`
 

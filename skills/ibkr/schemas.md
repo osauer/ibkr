@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-25 11:44 CEST
+Updated: 2026-05-25 13:40 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -80,9 +80,18 @@ Field meanings:
       "multiplier": 1,
       "avg_cost": 412.18,
       "mark": 478.55,
+      "data_type": "live",
       "prev_close": 471.20,
       "day_change": 7.35,
       "day_change_pct": 1.56,
+      "day_high": 481.10,
+      "day_low": 472.08,
+      "week_52_high": 502.66,
+      "week_52_low": 302.25,
+      "volume": 41762007,
+      "avg_volume": 58900000,
+      "price_at": "2026-05-09T14:31:58-04:00",
+      "price_as_of": "As of: May 9 at 02:31:58 PM EDT",
       "market_value": 57426.00,
       "market_value_ccy": 57426.00,
       "fx_rate": 1.0823,
@@ -161,6 +170,13 @@ and `expiry` / `strike` / `right` together identify the contract.
 - `prev_close`, `day_change`, `day_change_pct` — populated on STOCK rows
   via the daemon's prev-close prewarm. `null` when the gateway hasn't
   delivered tick 9 (rare on the happy path; usually pre-market).
+- `day_high`, `day_low`, `week_52_high`, `week_52_low`, `volume`,
+  `avg_volume`, `price_at`, `price_as_of`, `stale`, `stale_reason`,
+  and `data_type` — stock-only quote context reused from the same
+  market-data path as `ibkr quote` / `ibkr watch --quotes`. Nil fields
+  mean the gateway did not deliver that tick within the short prewarm
+  window. `price_as_of` is display-ready text; `price_at` is the typed
+  timestamp.
 - `market_value_ccy`, `fx_rate` — only set on non-base-currency positions.
   `market_value` remains in account base for back-compat; `market_value_ccy`
   is the contract-currency view, `fx_rate` the gateway-reported BASE/CCY
@@ -220,7 +236,73 @@ Field meanings:
 - `as_of` — local read time; this is not an IBKR market-data timestamp.
 
 Human CLI mutations are `ibkr watch SYM --add`, `ibkr watch SYM --remove`,
-and `ibkr watch --clear`. MCP exposes watchlist reading only.
+and `ibkr watch --clear`. MCP exposes read-only watchlist list and
+enriched quote views only.
+
+`ibkr watch --quotes --json`
+
+```json
+{
+  "name": "default",
+  "symbols": ["AAPL", "MSFT"],
+  "rows": [
+    {
+      "symbol": "AAPL",
+      "contract": {
+        "symbol": "AAPL",
+        "sec_type": "STK",
+        "currency": "USD"
+      },
+      "price": 190.12,
+      "price_source": "last",
+      "prev_close": 188.20,
+      "change": 1.92,
+      "change_pct": 1.02,
+      "day_high": 191.30,
+      "day_low": 187.55,
+      "week_52_high": 199.62,
+      "week_52_low": 164.08,
+      "volume": 41762007,
+      "avg_volume": 58900000,
+      "data_type": "delayed",
+      "price_at": "2026-05-22T16:01:02-04:00",
+      "price_as_of": "Delayed: May 22 at 04:01:02 PM EDT",
+      "stale": true,
+      "stale_reason": "price timestamp is 20m old during market hours",
+      "session_context": {
+        "market": "us_equity",
+        "label": "US equities",
+        "date": "2026-05-25",
+        "timezone": "America/New_York",
+        "state": "holiday",
+        "is_open": false,
+        "reason": "Memorial Day",
+        "next_open": "2026-05-26T09:30:00-04:00"
+      },
+      "holding": {
+        "quantity": 25,
+        "avg_cost": 176.50,
+        "mark": 190.12,
+        "market_value": 4753.00,
+        "unrealized_pnl": 340.50,
+        "daily_pnl": 48.00,
+        "exchange": "NASDAQ",
+        "currency": "USD"
+      }
+    }
+  ],
+  "as_of": "2026-05-25T16:15:00+02:00"
+}
+```
+
+`rows[]` uses the same quote fields documented below, flattened onto each
+watchlist row, plus optional `holding` context for saved symbols that are
+currently held as stocks. When a holding is present, its `currency` and
+`exchange` are also reused for the quote request so non-USD watched
+positions route like `ibkr positions`. A per-row `error` string can appear
+when one symbol fails while the rest of the watchlist succeeds.
+`ibkr watch --watch` renders the same enriched rows repeatedly in text mode; `--watch`
+and `--json` are mutually exclusive.
 
 ## quote
 
@@ -236,16 +318,28 @@ and `ibkr watch --clear`. MCP exposes watchlist reading only.
     "exchange": "SMART",
     "currency": "USD"
   },
+  "price": 207.87,
+  "price_source": "last",
+  "prev_close": 205.52,
+  "change": 2.35,
+  "change_pct": 1.14,
   "bid": 207.86,
   "ask": 207.88,
   "last": 207.87,
   "mark": 207.87,
+  "day_high": 209.10,
+  "day_low": 204.80,
+  "week_52_high": 237.49,
+  "week_52_low": 164.08,
   "bid_size": 100,
   "ask_size": 200,
   "volume": 12400000,
+  "avg_volume": 58900000,
   "iv": null,
   "iv_status": "unavailable",
   "data_type": "frozen",
+  "price_at": "2026-05-22T16:01:02-04:00",
+  "price_as_of": "At close: May 22 at 04:01:02 PM EDT",
   "as_of": "2026-05-25T16:32:11.421+02:00",
   "session_context": {
     "market": "us_equity",
@@ -264,18 +358,36 @@ and `ibkr watch --clear`. MCP exposes watchlist reading only.
 ```
 
 Field meanings:
+- `price` — the daemon's best display price. `price_source` names the
+  input used: `last`, `mark`, `mid`, `bid`, `ask`, or `prev_close`.
+  Use this for headline rendering; keep the source visible when it is not
+  a live last trade.
+- `prev_close`, `change`, `change_pct` — previous regular-session close
+  and movement from `price`. Pointers/nulls preserve "not delivered"
+  separately from an exactly flat day.
 - `bid`, `ask`, `last` — `null` means not delivered. Do not substitute.
 - `mark` — optional IBKR tick 37 mark/fair price. It is most useful
   off-hours or for instruments where bid/ask/last do not flow; render it
   as a fallback price, not as an actual last trade.
+- `day_high`, `day_low`, `week_52_high`, `week_52_low` — range context
+  from the market-data subscription. Nil means the gateway did not push
+  the tick within the snapshot window.
 - `bid_size`, `ask_size` — top-of-book size in shares (stocks/ETFs) or
   contracts (options). Omitted when the gateway didn't deliver tick 0/3.
 - `volume` — cumulative day total. Omitted when the gateway didn't deliver
   tick 8.
+- `avg_volume` — IBKR average volume tick from the Misc Stats bundle.
+  Omitted when not delivered.
 - `iv` / `iv_status` — populated only when IBKR sends tick 106
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
 - `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`.
+- `price_at` / `price_as_of` — timestamp for `price` and display-ready
+  freshness text. Last trades use IBKR's last-timestamp tick when present;
+  previous-close fallbacks use the prior official regular-session close.
+- `stale` / `stale_reason` — present when the market is officially open
+  but the best available price is only previous close or its timestamp is
+  old enough to be misleading.
 - `session_context` — optional official calendar explanation. Present
   when the snapshot is frozen/delayed/missing prices or the market is not
   in an ordinary open regular session. It names the supported market,

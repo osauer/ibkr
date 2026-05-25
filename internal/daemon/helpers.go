@@ -125,7 +125,7 @@ func normSym(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
 
 // runBounded runs fn(jobs[i]) concurrently with at most workers in flight.
 // Replaces hand-rolled buffered-channel + WaitGroup blocks across
-// handlers.go (prewarmPrevCloses, prewarmOptionGreeks, chain expiry IV
+// handlers.go (stock quote prewarm, prewarmOptionGreeks, chain expiry IV
 // fetch, chain strike fetch, scan-row enrichment). The fn closure is
 // responsible for ctx-cancellation observation if it does any blocking
 // work; this helper only bounds parallelism.
