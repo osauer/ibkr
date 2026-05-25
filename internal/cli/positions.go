@@ -99,41 +99,40 @@ func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult) int 
 // the "subscribing" placeholder on the first call after a daemon restart
 // and a value on the next refresh.
 //
-// Widths are sized for realistic data on a 100-col terminal: AvgCost/Mark
-// hold "$ 9,999.99" (10) or "$ 99,999.99" (11); MarketValue holds up to
-// "$ 9,999,999.99" (14); UNREAL/DAILY hold signed money to that magnitude.
-// Total ~80 cells before optional REAL P&L column, ~93 with it.
+// Column widths are sized from the rows being rendered, with the header as
+// the floor. That keeps small books compact while preserving right-aligned
+// money and quantity columns when a larger account needs more room.
 func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool) {
-	const (
-		wSymbol = 8
-		wQty    = 7
-		wAvg    = 11
-		wMark   = 11
-		wMkt    = 14
-		wPnL    = 13
-	)
 	fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(dataType))
-	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %*s  %*s  %*s",
-		wSymbol, "SYMBOL", wQty, "QTY", wAvg, "AVG COST", wMark, "MARK",
-		wMkt, "MKT VALUE", wPnL, "DAY P&L", wPnL, "UNREAL P&L")
+	cols := []positionTableColumn{
+		{header: "SYMBOL", align: positionAlignLeft},
+		{header: "QTY", align: positionAlignRight},
+		{header: "AVG COST", align: positionAlignRight},
+		{header: "MARK", align: positionAlignRight},
+		{header: "MKT VALUE", align: positionAlignRight},
+		{header: "DAY P&L", align: positionAlignRight},
+		{header: "UNREAL P&L", align: positionAlignRight},
+	}
 	if showRealized {
-		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
+		cols = append(cols, positionTableColumn{header: "REAL P&L", align: positionAlignRight})
 	}
-	fmt.Fprintln(out, env.dim(header))
-	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
+	tableRows := make([][]string, 0, len(rows))
 	for _, p := range rows {
-		row := fmt.Sprintf("  %-*s  %*.0f  %s  %s  %s  %s  %s",
-			wSymbol, p.Symbol, wQty, p.Quantity,
-			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
-			padLeftVisible(formatMoney(p.Mark), wMark),
-			padLeftVisible(formatMoney(p.MarketValue), wMkt),
-			env.formatPnLPtrRight(p.DailyPnL, wPnL),
-			env.formatPnLRight(p.UnrealizedPnL, wPnL))
-		if showRealized {
-			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
+		row := []string{
+			p.Symbol,
+			fmt.Sprintf("%.0f", p.Quantity),
+			formatPositionMoney(avgCostPerShare(p)),
+			formatPositionMoney(p.Mark),
+			formatPositionMoney(p.MarketValue),
+			env.formatPositionPnLPtr(p.DailyPnL),
+			env.formatPositionPnL(p.UnrealizedPnL),
 		}
-		fmt.Fprintln(out, row)
+		if showRealized {
+			row = append(row, env.formatPositionPnL(p.RealizedPnL))
+		}
+		tableRows = append(tableRows, row)
 	}
+	renderPositionTable(env, out, cols, tableRows)
 	fmt.Fprintln(out)
 }
 
@@ -142,41 +141,117 @@ func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTyp
 // (reqPnLSingle), same alignment — so a reader can scan one column down
 // to see "today's P&L" across the whole book.
 func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool) {
-	const (
-		wUnder  = 9
-		wSide   = 4
-		wExpiry = 10
-		wStrike = 8
-		wQty    = 5
-		wAvg    = 11
-		wMark   = 11
-		wPnL    = 13
-	)
 	fmt.Fprintf(out, "Options%s\n", env.suffixBadge(dataType))
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s  %*s  %*s  %*s  %*s  %*s",
-		wUnder, "UNDERLYING", wSide, "SIDE", wExpiry, "EXPIRY",
-		wStrike, "STRIKE", wQty, "QTY",
-		wAvg, "AVG COST", wMark, "MARK",
-		wPnL, "DAY P&L", wPnL, "UNREAL P&L")
-	if showRealized {
-		header += fmt.Sprintf("  %*s", wPnL, "REAL P&L")
+	cols := []positionTableColumn{
+		{header: "UNDERLYING", align: positionAlignLeft},
+		{header: "SIDE", align: positionAlignLeft},
+		{header: "EXPIRY", align: positionAlignLeft},
+		{header: "STRIKE", align: positionAlignRight},
+		{header: "QTY", align: positionAlignRight},
+		{header: "AVG COST", align: positionAlignRight},
+		{header: "MARK", align: positionAlignRight},
+		{header: "DAY P&L", align: positionAlignRight},
+		{header: "UNREAL P&L", align: positionAlignRight},
 	}
+	if showRealized {
+		cols = append(cols, positionTableColumn{header: "REAL P&L", align: positionAlignRight})
+	}
+	tableRows := make([][]string, 0, len(rows))
+	for _, p := range rows {
+		row := []string{
+			p.Symbol,
+			p.Right,
+			formatExpiry(p.Expiry),
+			fmt.Sprintf("%.2f", p.Strike),
+			fmt.Sprintf("%.0f", p.Quantity),
+			formatPositionMoney(avgCostPerShare(p)),
+			formatPositionMoney(p.Mark),
+			env.formatPositionPnLPtr(p.DailyPnL),
+			env.formatPositionPnL(p.UnrealizedPnL),
+		}
+		if showRealized {
+			row = append(row, env.formatPositionPnL(p.RealizedPnL))
+		}
+		tableRows = append(tableRows, row)
+	}
+	renderPositionTable(env, out, cols, tableRows)
+	fmt.Fprintln(out)
+}
+
+type positionColumnAlign int
+
+const (
+	positionAlignLeft positionColumnAlign = iota
+	positionAlignRight
+)
+
+type positionTableColumn struct {
+	header string
+	align  positionColumnAlign
+}
+
+func renderPositionTable(env *Env, out io.Writer, cols []positionTableColumn, rows [][]string) {
+	widths := make([]int, len(cols))
+	headers := make([]string, len(cols))
+	for i, col := range cols {
+		headers[i] = col.header
+		widths[i] = visibleLen(col.header)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				break
+			}
+			widths[i] = max(widths[i], visibleLen(cell))
+		}
+	}
+	header := formatPositionTableRow(cols, widths, headers)
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
-	for _, p := range rows {
-		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %*.2f  %*.0f  %s  %s  %s  %s",
-			wUnder, p.Symbol, wSide, p.Right, wExpiry, formatExpiry(p.Expiry),
-			wStrike, p.Strike, wQty, p.Quantity,
-			padLeftVisible(formatMoney(avgCostPerShare(p)), wAvg),
-			padLeftVisible(formatMoney(p.Mark), wMark),
-			env.formatPnLPtrRight(p.DailyPnL, wPnL),
-			env.formatPnLRight(p.UnrealizedPnL, wPnL))
-		if showRealized {
-			row += "  " + env.formatPnLRight(p.RealizedPnL, wPnL)
-		}
-		fmt.Fprintln(out, row)
+	for _, row := range rows {
+		fmt.Fprintln(out, formatPositionTableRow(cols, widths, row))
 	}
-	fmt.Fprintln(out)
+}
+
+func formatPositionTableRow(cols []positionTableColumn, widths []int, cells []string) string {
+	var b strings.Builder
+	b.WriteString("  ")
+	for i, col := range cols {
+		if i > 0 {
+			b.WriteString("  ")
+		}
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		if col.align == positionAlignRight {
+			b.WriteString(padLeftVisible(cell, widths[i]))
+		} else {
+			b.WriteString(padRightVisible(cell, widths[i]))
+		}
+	}
+	return b.String()
+}
+
+func formatPositionMoney(v float64) string {
+	if v == 0 {
+		return "—"
+	}
+	return formatMoney(v)
+}
+
+func (e *Env) formatPositionPnL(v float64) string {
+	if v == 0 {
+		return e.dim("—")
+	}
+	return e.colorBySign(v, formatMoney(v), signPnL)
+}
+
+func (e *Env) formatPositionPnLPtr(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return e.formatPositionPnL(*v)
 }
 
 // renderPortfolioSummary keeps its old name as the test entry-point.
