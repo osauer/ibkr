@@ -41,18 +41,147 @@ func TestRenderCalendarTextShowsHolidayNextOpenAndCoverage(t *testing.T) {
 		t.Fatalf("renderCalendarText code = %d, want 0", code)
 	}
 	out := stdout.String()
+	sessionDate := calendarDateLabel("2026-05-25", time.Now())
+	nextSessionDate := calendarDateLabel("2026-05-26", time.Now())
 	for _, want := range []string{
 		"US equities calendar",
-		"Session:       2026-05-25  holiday",
+		"Session:       " + sessionDate + "  holiday",
 		"Reason:        Memorial Day",
 		"Next open:     2026-05-26 09:30 EDT",
 		"Coverage:      2026-01-01 to 2028-12-31",
-		"2026-05-26",
+		nextSessionDate,
 		"09:30-16:00 EDT",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("calendar output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatCalendarDateLabel(t *testing.T) {
+	t.Parallel()
+	today := time.Date(2026, 5, 26, 11, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name  string
+		date  string
+		style calendarDateStyle
+		want  string
+	}{
+		{
+			name:  "us format with today marker",
+			date:  "2026-05-26",
+			style: calendarDateISO,
+			want:  "Tue 2026-05-26 (today)",
+		},
+		{
+			name:  "german format with today marker",
+			date:  "2026-05-26",
+			style: calendarDateDayMonthYear,
+			want:  "Tue 26-05-2026 (today)",
+		},
+		{
+			name:  "weekday without today marker",
+			date:  "2026-05-25",
+			style: calendarDateISO,
+			want:  "Mon 2026-05-25",
+		},
+		{
+			name:  "unparseable date falls back unchanged",
+			date:  "not-a-date",
+			style: calendarDateISO,
+			want:  "not-a-date",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCalendarDateLabel(tc.date, today, tc.style)
+			if got != tc.want {
+				t.Fatalf("formatCalendarDateLabel(%q) = %q, want %q", tc.date, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCalendarDateStyleFromLocale(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		locale string
+		want   calendarDateStyle
+	}{
+		{locale: "de_DE.UTF-8", want: calendarDateDayMonthYear},
+		{locale: "de-DE", want: calendarDateDayMonthYear},
+		{locale: "de", want: calendarDateDayMonthYear},
+		{locale: "en_US.UTF-8", want: calendarDateISO},
+		{locale: "C", want: calendarDateISO},
+		{locale: "fr_FR.UTF-8", want: calendarDateISO},
+		{locale: "", want: calendarDateISO},
+	} {
+		t.Run(tc.locale, func(t *testing.T) {
+			t.Parallel()
+			got := calendarDateStyleFromLocale(tc.locale)
+			if got != tc.want {
+				t.Fatalf("calendarDateStyleFromLocale(%q) = %v, want %v", tc.locale, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCalendarDateStyleFromEnvUsesLocalePriority(t *testing.T) {
+	t.Setenv("LC_TIME", "C")
+	t.Setenv("LC_ALL", "en_US.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+
+	if got := calendarDateStyleFromEnv(); got != calendarDateISO {
+		t.Fatalf("calendarDateStyleFromEnv() = %v, want US ISO style from LC_ALL", got)
+	}
+
+	t.Setenv("LC_TIME", "de_DE.UTF-8")
+	if got := calendarDateStyleFromEnv(); got != calendarDateDayMonthYear {
+		t.Fatalf("calendarDateStyleFromEnv() = %v, want German style from LC_TIME", got)
+	}
+}
+
+func TestRenderCalendarTextDimsClosedDays(t *testing.T) {
+	t.Parallel()
+	loc := mustLoadLocation(t, "America/New_York")
+	open := time.Date(2026, 5, 26, 9, 30, 0, 0, loc)
+	closeT := time.Date(2026, 5, 26, 16, 0, 0, 0, loc)
+	res := &rpc.MarketCalendarResult{
+		Label:         "US equities",
+		Timezone:      "America/New_York",
+		CoverageStart: "2026-01-01",
+		CoverageEnd:   "2028-12-31",
+		Session: rpc.MarketSession{
+			Date:     "2026-05-26",
+			Timezone: "America/New_York",
+			State:    "regular",
+			Open:     open,
+			Close:    closeT,
+		},
+		Sessions: []rpc.MarketSession{
+			{Date: "2026-05-25", State: "holiday", Reason: "Memorial Day"},
+			{Date: "2026-05-26", State: "regular", Open: open, Close: closeT},
+			{Date: "2026-05-30", State: "closed", Reason: "weekend"},
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	if code := renderCalendarText(env, res); code != 0 {
+		t.Fatalf("renderCalendarText code = %d, want 0", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		ansiDim + "  " + calendarDateLabel("2026-05-25", time.Now()),
+		ansiDim + "  " + calendarDateLabel("2026-05-30", time.Now()),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("closed-day row missing dim prefix %q:\n%s", want, out)
+		}
+	}
+	regularLine := calendarDateLabel("2026-05-26", time.Now()) + "  regular"
+	if strings.Contains(out, ansiDim+regularLine) {
+		t.Fatalf("regular row should not be dimmed:\n%s", out)
 	}
 }
 
