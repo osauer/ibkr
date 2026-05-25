@@ -132,19 +132,19 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	fmt.Fprintln(out)
 }
 
-// formatMembersLine renders the S&P 500-members row that lives under the
+// formatMembersLine renders the S&P500 members row that lives under the
 // breadth surface. Returns the empty string when the daemon hasn't
 // populated the field (engine construction failed) — caller omits the
 // line entirely in that case.
 //
 // Healthy line (refresh state implicit):
 //
-//	S&P 500 members:cache:2026-05-22  count:503
+//	S&P500 members: cache:2026-05-22  count:503
 //
 // Unhealthy / pinned variants:
 //
-//	S&P 500 members:embedded:2026-05-22  count:503  refresh:parse_failed
-//	S&P 500 members:cache:2026-05-22     count:503  refresh:disabled (env)
+//	S&P500 members: embedded:2026-05-22  count:503  refresh:parse_failed
+//	S&P500 members: cache:2026-05-22     count:503  refresh:disabled (env)
 //
 // The bracketed `refresh:` segment is omitted in the healthy case —
 // the source token + as_of already carry the answer to "is my data
@@ -158,7 +158,7 @@ func formatMembersLine(m rpc.MembersHealth) string {
 	if !m.AsOf.IsZero() {
 		asOf = m.AsOf.Format("2006-01-02")
 	}
-	base := fmt.Sprintf("  S&P 500 members:%s:%s  count:%d", m.Source, asOf, m.Count)
+	base := fmt.Sprintf("  S&P500 members: %s:%s  count:%d", m.Source, asOf, m.Count)
 	// Empty / "healthy" → omit the refresh: tail. Disabled and
 	// failure states render explicitly so a user looking at
 	// unexpected breadth values can spot the cause in one glance.

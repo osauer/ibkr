@@ -228,10 +228,10 @@ func TestWaitForHandshakeWritesProgressToWriter(t *testing.T) {
 }
 
 // TestFormatMembersLine pins the four rendering variants of the
-// S&P 500 members row: healthy (no refresh: tail), pinned (env/config),
+// S&P500 members row: healthy (no refresh: tail), pinned (env/config),
 // silent rot (parse_failed / network_failed). Zero-value source omits
 // the line entirely so a daemon that hasn't populated MembersHealth
-// yet doesn't show a misleading "S&P 500 members::" row.
+// yet doesn't show a misleading "S&P500 members: :" row.
 func TestFormatMembersLine(t *testing.T) {
 	t.Parallel()
 	d := time.Date(2026, time.May, 22, 0, 0, 0, 0, time.UTC)
@@ -244,37 +244,37 @@ func TestFormatMembersLine(t *testing.T) {
 		{
 			name:   "healthy cache",
 			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "healthy"},
-			want:   "S&P 500 members:cache:2026-05-22  count:503",
+			want:   "S&P500 members: cache:2026-05-22  count:503",
 		},
 		{
 			name:   "healthy embedded",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "healthy"},
-			want:   "S&P 500 members:embedded:2026-05-22  count:503",
+			want:   "S&P500 members: embedded:2026-05-22  count:503",
 		},
 		{
 			name:   "empty refresh state (no refresher attached) treated as healthy",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: ""},
-			want:   "S&P 500 members:embedded:2026-05-22  count:503",
+			want:   "S&P500 members: embedded:2026-05-22  count:503",
 		},
 		{
 			name:   "parse failure surfaces",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "parse_failed"},
-			want:   "S&P 500 members:embedded:2026-05-22  count:503  refresh:parse_failed",
+			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:parse_failed",
 		},
 		{
 			name:   "network failure surfaces",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "network_failed"},
-			want:   "S&P 500 members:embedded:2026-05-22  count:503  refresh:network_failed",
+			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:network_failed",
 		},
 		{
 			name:   "disabled config",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "disabled (config)"},
-			want:   "S&P 500 members:embedded:2026-05-22  count:503  refresh:disabled (config)",
+			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:disabled (config)",
 		},
 		{
 			name:   "disabled env on cache file",
 			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "disabled (env)"},
-			want:   "S&P 500 members:cache:2026-05-22  count:503  refresh:disabled (env)",
+			want:   "S&P500 members: cache:2026-05-22  count:503  refresh:disabled (env)",
 		},
 		{
 			name:   "empty source omits row",
