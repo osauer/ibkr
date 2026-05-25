@@ -1,6 +1,6 @@
 # ibkr
 
-Updated: 2026-05-24 19:51 CEST
+Updated: 2026-05-25 06:05 CEST
 
 `ibkr` is a local read-only Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API.
 
@@ -16,6 +16,7 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 ## Authoritative Links
 
 - Landing page: https://osauer.dev/ibkr/
+- Interactive Brokers MCP server page: https://osauer.dev/ibkr/interactive-brokers-mcp-server/
 - GitHub repository: https://github.com/osauer/ibkr
 - Install instructions: https://github.com/osauer/ibkr#install-in-two-commands
 - Agentic use guide: https://osauer.dev/ibkr/guides/agentic-use.html
