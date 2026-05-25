@@ -458,6 +458,27 @@ func TestHistoryDailyEmptySymbolIsBadRequest(t *testing.T) {
 	}
 }
 
+func TestNormaliseStockQuoteContractMarketDE(t *testing.T) {
+	t.Parallel()
+
+	contract, echoed, routed, err := normaliseStockQuoteContract(rpc.ContractParams{
+		Symbol: "mbg",
+		Market: "de",
+	})
+	if err != nil {
+		t.Fatalf("normaliseStockQuoteContract: %v", err)
+	}
+	if !routed {
+		t.Fatal("market=de should use routed quote path")
+	}
+	if contract.Symbol != "MBG" || contract.SecType != "STK" || contract.Exchange != "SMART" || contract.PrimaryExch != "IBIS" || contract.Currency != "EUR" {
+		t.Fatalf("contract = %+v, want MBG STK SMART/IBIS EUR", contract)
+	}
+	if echoed.Symbol != "MBG" || echoed.Market != "de" || echoed.Exchange != "SMART" || echoed.PrimaryExch != "IBIS" || echoed.Currency != "EUR" {
+		t.Fatalf("echoed = %+v, want normalized DE route", echoed)
+	}
+}
+
 // scan.run with an unknown preset is a client error, not internal — and
 // classifyError must map it to bad_request, not internal (D6 in the review).
 func TestScanRunUnknownPresetIsBadRequest(t *testing.T) {

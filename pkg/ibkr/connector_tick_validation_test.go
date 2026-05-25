@@ -97,6 +97,35 @@ func TestHandleTickPrice_ValidPriceUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleTickPrice_DelayedPriceUpdate(t *testing.T) {
+	connector := NewConnector(&ConnectorConfig{})
+	connector.subMu.Lock()
+	connector.reqIDMap[42] = "MBG|STK|IBIS||EUR||"
+	connector.subscriptions["MBG|STK|IBIS||EUR||"] = &Subscription{Symbol: "MBG|STK|IBIS||EUR||"}
+	connector.subMu.Unlock()
+
+	connector.handleTickPrice([]string{"1", "2", "42", "66", "56.10"})
+	connector.handleTickPrice([]string{"1", "2", "42", "67", "56.12"})
+	connector.handleTickPrice([]string{"1", "2", "42", "68", "56.11"})
+	connector.handleTickPrice([]string{"1", "2", "42", "75", "55.50"})
+
+	connector.subMu.RLock()
+	sub := connector.subscriptions["MBG|STK|IBIS||EUR||"]
+	connector.subMu.RUnlock()
+	if sub.Bid != 56.10 {
+		t.Errorf("delayed bid: want 56.10, got %.2f", sub.Bid)
+	}
+	if sub.Ask != 56.12 {
+		t.Errorf("delayed ask: want 56.12, got %.2f", sub.Ask)
+	}
+	if sub.LastPrice != 56.11 {
+		t.Errorf("delayed last: want 56.11, got %.2f", sub.LastPrice)
+	}
+	if sub.PrevClose != 55.50 {
+		t.Errorf("delayed close: want 55.50, got %.2f", sub.PrevClose)
+	}
+}
+
 // TestHandleTickPrice_InvalidParsing tests that malformed price strings are handled gracefully.
 func TestHandleTickPrice_InvalidParsing(t *testing.T) {
 	connector := NewConnector(&ConnectorConfig{})
@@ -293,23 +322,26 @@ func TestHandleTickSize_DispatchesByTickType(t *testing.T) {
 	c.subMu.Unlock()
 
 	// Fields format: [msgID, version, reqID, tickType, size]
-	c.handleTickSize([]string{"2", "6", "7", "0", "1500"})    // bid_size
-	c.handleTickSize([]string{"2", "6", "7", "3", "2200"})    // ask_size
-	c.handleTickSize([]string{"2", "6", "7", "8", "9876543"}) // volume
-	c.handleTickSize([]string{"2", "6", "7", "5", "999"})     // last_size — ignored
+	c.handleTickSize([]string{"2", "6", "7", "0", "1500"})     // bid_size
+	c.handleTickSize([]string{"2", "6", "7", "3", "2200"})     // ask_size
+	c.handleTickSize([]string{"2", "6", "7", "8", "9876543"})  // volume
+	c.handleTickSize([]string{"2", "6", "7", "69", "1600"})    // delayed_bid_size
+	c.handleTickSize([]string{"2", "6", "7", "70", "2300"})    // delayed_ask_size
+	c.handleTickSize([]string{"2", "6", "7", "74", "9876544"}) // delayed_volume
+	c.handleTickSize([]string{"2", "6", "7", "5", "999"})      // last_size — ignored
 
 	c.subMu.RLock()
 	sub := c.subscriptions["AAPL"]
 	c.subMu.RUnlock()
 
-	if sub.BidSize != 1500 {
-		t.Errorf("BidSize: want 1500, got %d", sub.BidSize)
+	if sub.BidSize != 1600 {
+		t.Errorf("BidSize: want 1600, got %d", sub.BidSize)
 	}
-	if sub.AskSize != 2200 {
-		t.Errorf("AskSize: want 2200, got %d", sub.AskSize)
+	if sub.AskSize != 2300 {
+		t.Errorf("AskSize: want 2300, got %d", sub.AskSize)
 	}
-	if sub.Volume != 9876543 {
-		t.Errorf("Volume: want 9876543, got %d", sub.Volume)
+	if sub.Volume != 9876544 {
+		t.Errorf("Volume: want 9876544, got %d", sub.Volume)
 	}
 }
 
@@ -322,6 +354,14 @@ func TestParseTickSize_NormalizesDecimalEncodedVolume(t *testing.T) {
 	}
 	if got != 41762007 {
 		t.Fatalf("decimal-encoded volume = %d, want 41762007", got)
+	}
+
+	got, ok = parseTickSize(minServerVerSizeRules, 74, "41762007966821")
+	if !ok {
+		t.Fatal("parseTickSize delayed returned !ok")
+	}
+	if got != 41762007 {
+		t.Fatalf("decimal-encoded delayed volume = %d, want 41762007", got)
 	}
 
 	got, ok = parseTickSize(minServerVerSizeRules, 8, "166")

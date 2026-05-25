@@ -247,16 +247,25 @@ func (e *Error) Error() string {
 // paths and the gateway uses different vocabularies at each end; this
 // type uses the request vocabulary.
 //
+// Market is an optional shorthand for stock routing defaults. Empty / "us"
+// preserves the legacy US SMART/USD path; "de" selects the German/Xetra
+// EUR route used by IBKR's IBIS listing codes. Exchange/Currency/PrimaryExch
+// override the shorthand when supplied.
+//
 // SecType "STK" for stocks/ETFs; "OPT" for options (Expiry, Strike,
 // Right required).
 type ContractParams struct {
-	Symbol   string  `json:"symbol"`
-	SecType  string  `json:"sec_type,omitempty"` // STK | OPT | FUT | IND (request-side; see asymmetry note)
-	Exchange string  `json:"exchange,omitempty"` // SMART
-	Currency string  `json:"currency,omitempty"`
-	Expiry   string  `json:"expiry,omitempty"` // YYYYMMDD
-	Strike   float64 `json:"strike,omitempty"`
-	Right    string  `json:"right,omitempty"` // C | P
+	Symbol       string  `json:"symbol"`
+	SecType      string  `json:"sec_type,omitempty"` // STK | OPT | FUT | IND (request-side; see asymmetry note)
+	Market       string  `json:"market,omitempty"`   // us | de
+	Exchange     string  `json:"exchange,omitempty"` // SMART, IBIS, ...
+	PrimaryExch  string  `json:"primary_exchange,omitempty"`
+	Currency     string  `json:"currency,omitempty"`
+	LocalSymbol  string  `json:"local_symbol,omitempty"`
+	TradingClass string  `json:"trading_class,omitempty"`
+	Expiry       string  `json:"expiry,omitempty"` // YYYYMMDD
+	Strike       float64 `json:"strike,omitempty"`
+	Right        string  `json:"right,omitempty"` // C | P
 }
 
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
@@ -294,18 +303,19 @@ type ChainFetchParams struct {
 //  1. Preset shorthand: set Preset to the name of a [scans.<name>] block
 //     from config.toml (or one of the built-in defaults). Type/Exchange
 //     are ignored.
-//  2. Ad-hoc: leave Preset empty and set Type (scanCode) and Exchange
-//     (locationCode) directly. Useful for agents that don't want to
+//  2. Ad-hoc: leave Preset empty and set Type (scanCode), Exchange
+//     (locationCode), and optionally Instrument directly. Useful for agents that don't want to
 //     persist a preset to the user's config file.
 //
 // Exactly one of Preset or Type is required. Limit is optional in both
 // modes; <=0 falls back to the preset's configured Limit (mode 1) or
 // the daemon's hard cap of 50 (mode 2).
 type ScanRunParams struct {
-	Preset   string `json:"preset,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Exchange string `json:"exchange,omitempty"`
-	Limit    int    `json:"limit,omitempty"`
+	Preset     string `json:"preset,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Exchange   string `json:"exchange,omitempty"`
+	Instrument string `json:"instrument,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
 }
 
 // ScanParamsParams requests the gateway's full scanner catalog. Instrument
@@ -1973,18 +1983,22 @@ type ChainResult struct {
 // Unit conventions follow Quote: ChangePct is in PERCENT units (5.41
 // means 5.41 %), IV is a DECIMAL FRACTION (0.342 means 34.2 %).
 type ScanRow struct {
-	Rank       int      `json:"rank"`
-	Symbol     string   `json:"symbol"`
-	Currency   string   `json:"currency,omitempty"`
-	Last       *float64 `json:"last,omitempty"`
-	PrevClose  *float64 `json:"prev_close,omitempty"`
-	Change     *float64 `json:"change,omitempty"`
-	ChangePct  *float64 `json:"change_pct,omitempty"`
-	Volume     *int64   `json:"volume,omitempty"`
-	IV         *float64 `json:"iv,omitempty"`
-	Week52High *float64 `json:"week_52_high,omitempty"`
-	Week52Low  *float64 `json:"week_52_low,omitempty"`
-	Comment    string   `json:"comment,omitempty"`
+	Rank         int      `json:"rank"`
+	Symbol       string   `json:"symbol"`
+	SecType      string   `json:"sec_type,omitempty"`
+	Exchange     string   `json:"exchange,omitempty"`
+	Currency     string   `json:"currency,omitempty"`
+	LocalSymbol  string   `json:"local_symbol,omitempty"`
+	TradingClass string   `json:"trading_class,omitempty"`
+	Last         *float64 `json:"last,omitempty"`
+	PrevClose    *float64 `json:"prev_close,omitempty"`
+	Change       *float64 `json:"change,omitempty"`
+	ChangePct    *float64 `json:"change_pct,omitempty"`
+	Volume       *int64   `json:"volume,omitempty"`
+	IV           *float64 `json:"iv,omitempty"`
+	Week52High   *float64 `json:"week_52_high,omitempty"`
+	Week52Low    *float64 `json:"week_52_low,omitempty"`
+	Comment      string   `json:"comment,omitempty"`
 }
 
 // ScanResult wraps the rows.
@@ -2002,10 +2016,11 @@ type ScanListResult struct {
 
 // ScanPresetSummary describes a single preset entry in scan list.
 type ScanPresetSummary struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Exchange string `json:"exchange"`
-	Limit    int    `json:"limit"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Exchange   string `json:"exchange"`
+	Instrument string `json:"instrument,omitempty"`
+	Limit      int    `json:"limit"`
 }
 
 // BackgroundTaskStatus names a daemon-internal long-running task that

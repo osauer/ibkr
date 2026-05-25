@@ -59,10 +59,11 @@ idle_timeout = "10m"
 log_level    = "debug"
 
 [scans.movers]
-type     = "TOP_PERC_GAIN"
-exchange = "STK.US.MAJOR"
-limit    = 10
-timeout  = "30s"
+type       = "TOP_PERC_GAIN"
+exchange   = "STK.EU.IBIS"
+instrument = "STOCK.EU"
+limit      = 10
+timeout    = "30s"
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -102,6 +103,9 @@ timeout  = "30s"
 	}
 	if got.Limit != 10 {
 		t.Errorf("scans[movers].Limit = %d, want 10", got.Limit)
+	}
+	if got.Instrument != "STOCK.EU" {
+		t.Errorf("scans[movers].Instrument = %q, want STOCK.EU", got.Instrument)
 	}
 	if got.Timeout.Std() != 30*time.Second {
 		t.Errorf("scans[movers].Timeout = %v, want 30s", got.Timeout.Std())

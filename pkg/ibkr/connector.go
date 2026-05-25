@@ -45,7 +45,7 @@ type Connector struct {
 
 	// Market data subscriptions
 	subscriptions map[string]*Subscription
-	reqIDMap      map[int]string // Maps request IDs to symbols
+	reqIDMap      map[int]string // Maps request IDs to symbols or routed subscription keys
 	subMu         sync.RWMutex
 
 	// Order management
@@ -490,8 +490,12 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 		return
 	}
 	symbol := strings.ToUpper(strings.TrimSpace(alias.symbol))
-	if symbol == "" {
+	inactiveKey := inactiveKeyForAlias(alias)
+	if inactiveKey == "" {
 		return
+	}
+	if symbol == "" {
+		symbol = inactiveKey
 	}
 
 	secType := strings.ToUpper(strings.TrimSpace(alias.secType))
@@ -505,14 +509,14 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 				c.logDebug("Ignoring system notice code %d for derivative request %s (%s): %s", note.code, symbol, alias.localSymbol, note.message)
 				return
 			}
-			c.registerInactiveCandidate(symbol, note.message)
+			c.registerInactiveCandidate(inactiveKey, note.message)
 		}
 	case 162:
 		if strings.Contains(upperMsg, "NO DATA") {
-			c.registerInactiveCandidate(symbol, note.message)
+			c.registerInactiveCandidate(inactiveKey, note.message)
 		}
 	case 366:
-		c.registerInactiveCandidate(symbol, note.message)
+		c.registerInactiveCandidate(inactiveKey, note.message)
 	}
 }
 
@@ -747,6 +751,91 @@ type inactiveCandidateState struct {
 	count       int
 	lastReason  string
 	lastUpdated time.Time
+}
+
+// MarketDataKeyForContract returns the cache/subscription key for an explicit
+// market-data contract. The legacy symbol-only path stays keyed by bare symbol;
+// contracts with caller- or gateway-supplied venue/currency include those
+// routing fields so a failed speculative route (for example MBG as SMART/USD)
+// does not poison MBG on IBIS/EUR.
+func MarketDataKeyForContract(contract Contract) string {
+	symbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	if symbol == "" {
+		return ""
+	}
+	secType := strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if secType == "" {
+		secType = "STK"
+	}
+	exchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	currency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	localSymbol := strings.ToUpper(strings.TrimSpace(contract.LocalSymbol))
+	tradingClass := strings.ToUpper(strings.TrimSpace(contract.TradingClass))
+	if secType == "STK" &&
+		exchange == "" &&
+		primary == "" &&
+		currency == "" &&
+		localSymbol == "" &&
+		tradingClass == "" {
+		return symbol
+	}
+	return strings.Join([]string{symbol, secType, exchange, primary, currency, localSymbol, tradingClass}, "|")
+}
+
+// DefaultMarketDataKeyForSymbol is the route-aware key the symbol-only
+// subscription path will use on the wire after classifySymbol applies its
+// defaults. It lets callers check a failed default route without assuming
+// every ticker is US SMART/USD.
+func DefaultMarketDataKeyForSymbol(symbol string) string {
+	upper := strings.ToUpper(strings.TrimSpace(symbol))
+	if upper == "" {
+		return ""
+	}
+	secType, exchange, currency, primary := classifySymbol(upper)
+	wireSymbol := dualClassWireSymbol(upper)
+	if base, _, ok := FxPair(upper); ok {
+		wireSymbol = base
+	}
+	return MarketDataKeyForContract(Contract{
+		Symbol:      wireSymbol,
+		SecType:     secType,
+		Exchange:    exchange,
+		PrimaryExch: primary,
+		Currency:    currency,
+	})
+}
+
+func normalizeMarketDataContract(contract Contract) Contract {
+	contract.Symbol = strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	contract.SecType = strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if contract.SecType == "" {
+		contract.SecType = "STK"
+	}
+	contract.Exchange = strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	contract.PrimaryExch = strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	contract.Currency = strings.ToUpper(strings.TrimSpace(contract.Currency))
+	if contract.Currency == "" {
+		contract.Currency = "USD"
+	}
+	contract.LocalSymbol = strings.TrimSpace(contract.LocalSymbol)
+	contract.TradingClass = strings.TrimSpace(contract.TradingClass)
+	if contract.Exchange == "" {
+		contract.Exchange = "SMART"
+	}
+	return contract
+}
+
+func inactiveKeyForAlias(alias reqAliasEntry) string {
+	return MarketDataKeyForContract(Contract{
+		Symbol:       alias.symbol,
+		SecType:      alias.secType,
+		Exchange:     alias.exchange,
+		PrimaryExch:  alias.primaryExch,
+		Currency:     alias.currency,
+		LocalSymbol:  alias.localSymbol,
+		TradingClass: alias.tradingClass,
+	})
 }
 
 func shouldPersistInactiveReason(reason string) bool {
@@ -1400,9 +1489,22 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 		ctx = context.Background()
 	}
 	symbol = strings.ToUpper(symbol)
-	if _, inactive := c.inactiveReason(symbol); inactive {
-		c.logDebug("Skipping SubscribeMarketData for inactive symbol %s", symbol)
-		return nil
+	if reason, inactive := c.inactiveReason(symbol); inactive {
+		if reason == "" {
+			reason = "inactive"
+		}
+		c.logDebug("Skipping SubscribeMarketData for inactive symbol %s (%s)", symbol, reason)
+		return ErrSymbolInactive
+	}
+	defaultRouteKey := DefaultMarketDataKeyForSymbol(symbol)
+	if defaultRouteKey != "" && defaultRouteKey != symbol {
+		if reason, inactive := c.inactiveReason(defaultRouteKey); inactive {
+			if reason == "" {
+				reason = "inactive"
+			}
+			c.logDebug("Skipping SubscribeMarketData for inactive route %s (%s)", defaultRouteKey, reason)
+			return ErrSymbolInactive
+		}
 	}
 	c.subMu.RLock()
 	if sub, exists := c.subscriptions[symbol]; exists {
@@ -1466,6 +1568,72 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 	marketDataLogger.Infof("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
 
 	return nil
+}
+
+// SubscribeMarketDataWithContract subscribes to a fully specified contract
+// under a route-aware key. It is for quote/scan paths where the caller knows
+// the venue/currency (for example German STK/IBIS/EUR) and the legacy
+// symbol-only classifier would otherwise send SMART/USD.
+func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contract Contract, fields []string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	contract = normalizeMarketDataContract(contract)
+	key := MarketDataKeyForContract(contract)
+	if key == "" {
+		return "", fmt.Errorf("contract symbol is required for market data")
+	}
+	if reason, inactive := c.inactiveReason(key); inactive {
+		if reason == "" {
+			reason = "inactive"
+		}
+		c.logDebug("Skipping routed SubscribeMarketData for %s (%s)", key, reason)
+		return key, ErrSymbolInactive
+	}
+
+	c.subMu.RLock()
+	if sub, exists := c.subscriptions[key]; exists {
+		c.subMu.RUnlock()
+		marketDataLogger.Debugf("%s: SubscribeMarketDataWithContract(%s) is a no-op; existing subscription reqID=%d", c.name, key, sub.ReqID)
+		return key, nil
+	}
+	c.subMu.RUnlock()
+
+	reqID := 0
+	if c.conn != nil && c.conn.IsConnected() {
+		var err error
+		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
+		if err != nil {
+			c.logWarn("Failed to request market data for %s: %v", key, err)
+			return key, err
+		}
+	}
+
+	c.subMu.Lock()
+	if _, exists := c.subscriptions[key]; exists {
+		raceReqID := reqID
+		conn := c.conn
+		c.subMu.Unlock()
+		if raceReqID != 0 && conn != nil && conn.IsConnected() {
+			_ = conn.CancelMarketData(raceReqID)
+		}
+		marketDataLogger.Debugf("%s: SubscribeMarketDataWithContract(%s) raced; reusing existing subscription", c.name, key)
+		return key, nil
+	}
+	if reqID != 0 {
+		c.reqIDMap[reqID] = key
+	}
+	c.subscriptions[key] = &Subscription{
+		Symbol:   key,
+		ReqID:    reqID,
+		Fields:   fields,
+		LastTime: time.Now(),
+		RejectCh: make(chan SubscriptionRejection, 1),
+	}
+	c.subMu.Unlock()
+
+	marketDataLogger.Infof("%s: Subscribed to routed market data for %s (ReqID: %d)", c.name, key, reqID)
+	return key, nil
 }
 
 // EnsureMarketDataSubscription ensures there is an active, fresh subscription for a symbol.
@@ -2274,6 +2442,23 @@ func (c *Connector) handleTickPrice(fields []string) {
 	case 37:
 		tickTypeName = "mark_price"
 		isImportantTick = true
+	case 66:
+		tickTypeName = "delayed_bid"
+		isImportantTick = true
+	case 67:
+		tickTypeName = "delayed_ask"
+		isImportantTick = true
+	case 68:
+		tickTypeName = "delayed_last"
+		isImportantTick = true
+	case 72:
+		tickTypeName = "delayed_high"
+	case 73:
+		tickTypeName = "delayed_low"
+	case 75:
+		tickTypeName = "delayed_close"
+	case 76:
+		tickTypeName = "delayed_open"
 	case 221:
 		tickTypeName = "mark_price_slow"
 	case 225:
@@ -2339,6 +2524,7 @@ func (c *Connector) handleTickPrice(fields []string) {
 	sub.Observed = true
 
 	// Tick types: 1=bid, 2=ask, 4=last, 6=high, 7=low, 9=close, 14=open.
+	// Delayed subscriptions use 66/67/68/72/73/75/76 for the same fields.
 	// Close (9) is yesterday's regular-session close — the anchor for
 	// change-vs-prev-close. IBKR sends it automatically once per reqMktData,
 	// regardless of generic-tick flags.
@@ -2349,19 +2535,19 @@ func (c *Connector) handleTickPrice(fields []string) {
 	// would be silently blank for symbols that didn't have an explicit
 	// historical-bars fetch.
 	switch tickType {
-	case 1:
+	case 1, 66:
 		sub.Bid = price
-	case 2:
+	case 2, 67:
 		sub.Ask = price
-	case 4:
+	case 4, 68:
 		sub.LastPrice = price
-	case 6:
+	case 6, 72:
 		sub.High = price
-	case 7:
+	case 7, 73:
 		sub.Low = price
-	case 9:
+	case 9, 75:
 		sub.PrevClose = price
-	case 14:
+	case 14, 76:
 		sub.Open = price
 	case 15:
 		sub.Week13Low = price
@@ -3549,16 +3735,17 @@ func (c *Connector) handleTickSize(fields []string) {
 	sub.Observed = true
 
 	// IBKR tick types: 0=BID_SIZE, 3=ASK_SIZE, 8=VOLUME (cumulative day total).
+	// Delayed subscriptions use 69/70/74 for bid size / ask size / volume.
 	// 5=LAST_SIZE is intentionally dropped — too noisy and not surfaced.
 	// 27=callOpenInterest, 28=putOpenInterest land on the same OpenInt
 	// slot because a given option-leg subscription is for one specific
 	// right; the gateway emits at most one of the two per subscription.
 	switch tickType {
-	case 0:
+	case 0, 69:
 		sub.BidSize = size
-	case 3:
+	case 3, 70:
 		sub.AskSize = size
-	case 8:
+	case 8, 74:
 		sub.Volume = size
 	case 27, 28:
 		sub.OpenInt = size
@@ -3585,7 +3772,7 @@ func parseTickSize(serverVersion, tickType int, raw string) (int64, bool) {
 		marketDataLogger.Warnf("Invalid tick size for tickType %d: %q (error: %v)", tickType, raw, err)
 		return 0, false
 	}
-	if serverVersion >= minServerVerSizeRules && tickType == 8 && size >= 1_000_000 {
+	if serverVersion >= minServerVerSizeRules && (tickType == 8 || tickType == 74) && size >= 1_000_000 {
 		return size / 1_000_000, true
 	}
 	return size, true

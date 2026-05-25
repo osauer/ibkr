@@ -96,6 +96,11 @@ func TestHoistFlagsReordersValueFlags(t *testing.T) {
 			want: []string{"--expiry=2026-06-19", "AAPL"},
 		},
 		{
+			name: "quote market flag hoisted as pair",
+			in:   []string{"MBG", "--market", "de", "--json"},
+			want: []string{"--market", "de", "--json", "MBG"},
+		},
+		{
 			name: "flag before positional preserved",
 			in:   []string{"--json", "AAPL"},
 			want: []string{"--json", "AAPL"},

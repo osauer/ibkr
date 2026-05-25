@@ -993,17 +993,17 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		return s.handleOptionQuoteSnapshot(ctx, c, p, timeout)
 	}
 
-	sym := normSym(p.Contract.Symbol)
+	routeContract, echoedContract, routedQuote, err := normaliseStockQuoteContract(p.Contract)
+	if err != nil {
+		return nil, err
+	}
+	sym := echoedContract.Symbol
 	q := &rpc.Quote{
 		Symbol:   sym,
-		Contract: p.Contract,
+		Contract: echoedContract,
 		IVStatus: "unavailable",
 		AsOf:     time.Now(),
 	}
-	if q.Contract.SecType == "" {
-		q.Contract.SecType = "STK"
-	}
-	q.Contract.Symbol = sym
 	// FX pairs (USD.JPY / USD/JPY) route through CASH/IDEALPRO regardless
 	// of what the caller stamped on the request. Override the echoed
 	// Contract so JSON consumers see the canonical routing — the actual
@@ -1015,18 +1015,30 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		q.Contract.Currency = quote
 	}
 
-	// Route through the daemon's subscription manager so a snapshot
-	// running concurrently with `quote --watch` (or another snapshot, or
-	// an MCP subscriber) shares the same IBKR market-data line via the
-	// refcount. Without this, the snapshot's deferred unsubscribe used
-	// to cancel the watcher's sub mid-stream.
-	releaseSub, err := s.subs.Hold(ctx, sym)
-	if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
-		return nil, err
+	pollKey := sym
+	var releaseSub func()
+	if routedQuote {
+		key, err := c.SubscribeMarketDataWithContract(ctx, routeContract, defaultGenericTicks)
+		if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+			return nil, err
+		}
+		pollKey = key
+		releaseSub = func() { _ = c.UnsubscribeMarketData(key) }
+	} else {
+		// Route through the daemon's subscription manager so a snapshot
+		// running concurrently with `quote --watch` (or another snapshot, or
+		// an MCP subscriber) shares the same IBKR market-data line via the
+		// refcount. Without this, the snapshot's deferred unsubscribe used
+		// to cancel the watcher's sub mid-stream.
+		release, err := s.subs.Hold(ctx, sym)
+		if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+			return nil, err
+		}
+		releaseSub = release
 	}
 	defer releaseSub()
 
-	if err := pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+	if err := pollMarketData(ctx, c, pollKey, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
 		q.Bid = ptrIfPos(d.Bid)
 		q.Ask = ptrIfPos(d.Ask)
 		q.Last = ptrIfPos(d.Last)
@@ -1044,11 +1056,23 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 			// always read "". When IBKR omits that notice but only
 			// fallback ticks landed, label the row frozen so JSON consumers
 			// don't mistake mark/close-only data for a live quote.
-			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(sym), ready, fallback)
+			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(pollKey), ready, fallback)
 		}
 		return ready || q.Mark != nil
-	}); err != nil && err != context.DeadlineExceeded {
-		return nil, err
+	}); err != nil {
+		if err == context.DeadlineExceeded {
+			inactiveKey := pollKey
+			if !routedQuote {
+				inactiveKey = ibkrlib.DefaultMarketDataKeyForSymbol(sym)
+			}
+			if inactiveKey != "" {
+				if _, inactive := c.InactiveReason(inactiveKey); inactive {
+					return nil, ibkrlib.ErrSymbolInactive
+				}
+			}
+		} else {
+			return nil, err
+		}
 	}
 	// Compute deltas daemon-side so every consumer (CLI text, JSON,
 	// MCP) sees the same numbers without re-deriving them.
@@ -1063,6 +1087,80 @@ func isOptionQuoteContract(c rpc.ContractParams) bool {
 		strings.TrimSpace(c.Expiry) != "" ||
 		strings.TrimSpace(c.Right) != "" ||
 		c.Strike > 0
+}
+
+func normaliseStockQuoteContract(in rpc.ContractParams) (ibkrlib.Contract, rpc.ContractParams, bool, error) {
+	sym := normSym(in.Symbol)
+	if sym == "" {
+		return ibkrlib.Contract{}, rpc.ContractParams{}, false, errBadRequest("contract.symbol required")
+	}
+	secType := strings.ToUpper(strings.TrimSpace(in.SecType))
+	if secType == "" {
+		secType = "STK"
+	}
+	market := strings.ToLower(strings.TrimSpace(in.Market))
+	exchange := strings.ToUpper(strings.TrimSpace(in.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(in.PrimaryExch))
+	currency := normCcy(in.Currency)
+	localSymbol := strings.TrimSpace(in.LocalSymbol)
+	tradingClass := strings.TrimSpace(in.TradingClass)
+
+	routed := market != "" && market != "us" ||
+		exchange != "" ||
+		primary != "" ||
+		localSymbol != "" ||
+		tradingClass != "" ||
+		(currency != "" && currency != "USD")
+
+	switch market {
+	case "", "us":
+		if currency == "" {
+			currency = "USD"
+		}
+		if routed && exchange == "" {
+			exchange = "SMART"
+		}
+	case "de", "germany", "xetra", "ibis":
+		if currency == "" {
+			currency = "EUR"
+		}
+		if exchange == "" && primary == "" {
+			exchange = "SMART"
+			primary = "IBIS"
+		}
+	default:
+		return ibkrlib.Contract{}, rpc.ContractParams{}, false, errBadRequest(fmt.Sprintf("unsupported quote market %q (supported: us, de)", in.Market))
+	}
+	if routed && exchange == "" {
+		exchange = "SMART"
+	}
+
+	echo := rpc.ContractParams{
+		Symbol:       sym,
+		SecType:      secType,
+		Market:       market,
+		Exchange:     exchange,
+		PrimaryExch:  primary,
+		Currency:     currency,
+		LocalSymbol:  localSymbol,
+		TradingClass: tradingClass,
+	}
+	if !routed {
+		echo.Exchange = ""
+		if strings.TrimSpace(in.Currency) == "" {
+			echo.Currency = ""
+		}
+	}
+	contract := ibkrlib.Contract{
+		Symbol:       sym,
+		SecType:      secType,
+		Exchange:     exchange,
+		PrimaryExch:  primary,
+		Currency:     currency,
+		LocalSymbol:  localSymbol,
+		TradingClass: tradingClass,
+	}
+	return contract, echo, routed, nil
 }
 
 func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Connector, p rpc.QuoteSnapshotParams, timeout time.Duration) (*rpc.Quote, error) {
@@ -1345,8 +1443,9 @@ const defaultScanSubscriptionTimeout = 35 * time.Second
 //     it. Limit override honored; preset.Timeout applies. Returns
 //     bad_request if the preset is unknown.
 //  2. Ad-hoc (p.Preset == ""): runs scanCode = p.Type / locationCode =
-//     p.Exchange directly. Both fields required; missing either → bad_request.
-//     Limit clamped to adHocScanLimitCap. Fixed 20s timeout.
+//     p.Exchange directly, with optional p.Instrument for non-US markets.
+//     Both Type and Exchange are required; missing either → bad_request.
+//     Limit clamped to adHocScanLimitCap. Fixed default timeout.
 func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.ScanResult, error) {
 	var p rpc.ScanRunParams
 	if err := decodeParams(req.Params, &p); err != nil {
@@ -1356,6 +1455,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 	var (
 		scanType    string
 		scanExch    string
+		scanInst    string
 		scanLimit   int
 		scanTimeout time.Duration
 		presetName  string
@@ -1368,6 +1468,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		}
 		scanType = preset.Type
 		scanExch = preset.Exchange
+		scanInst = preset.Instrument
 		scanLimit = p.Limit
 		if scanLimit <= 0 {
 			scanLimit = preset.Limit
@@ -1387,6 +1488,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		}
 		scanType = p.Type
 		scanExch = p.Exchange
+		scanInst = p.Instrument
 		scanLimit = p.Limit
 		if scanLimit <= 0 || scanLimit > adHocScanLimitCap {
 			scanLimit = adHocScanLimitCap
@@ -1404,19 +1506,24 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		AsOf:   time.Now(),
 	}
 	rows, err := c.RunScannerSubscription(ctx, ibkrlib.ScannerSubscription{
-		Type:     scanType,
-		Exchange: scanExch,
-		Limit:    scanLimit,
+		Type:       scanType,
+		Exchange:   scanExch,
+		Instrument: scanInst,
+		Limit:      scanLimit,
 	}, scanTimeout)
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
 		res.Rows = append(res.Rows, rpc.ScanRow{
-			Rank:     r.Rank,
-			Symbol:   r.Symbol,
-			Currency: normCcy(r.Currency),
-			Comment:  r.Comment,
+			Rank:         r.Rank,
+			Symbol:       r.Symbol,
+			SecType:      strings.ToUpper(strings.TrimSpace(r.SecType)),
+			Exchange:     strings.ToUpper(strings.TrimSpace(r.Exchange)),
+			Currency:     normCcy(r.Currency),
+			LocalSymbol:  strings.TrimSpace(r.LocalSymbol),
+			TradingClass: strings.TrimSpace(r.TradingClass),
+			Comment:      r.Comment,
 		})
 	}
 	s.enrichScanRows(ctx, c, res.Rows)
@@ -1481,12 +1588,32 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 // even after `last` arrives because IV and 52w typically lag bid/ask/last
 // by 1-2 s, and the row is more useful with them than without.
 func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row *rpc.ScanRow) {
-	releaseSub, err := s.subs.Hold(ctx, row.Symbol)
-	if err != nil {
-		// Hold can only fail with ErrIBKRUnavailable (gateway dropped
-		// mid-scan) or an internal subscribe error. Either way, the
-		// row stays bare — no fabrication.
-		return
+	pollKey := row.Symbol
+	var releaseSub func()
+	if scanRowNeedsRoutedQuote(row) {
+		contract := ibkrlib.Contract{
+			Symbol:       normSym(row.Symbol),
+			SecType:      strings.ToUpper(strings.TrimSpace(row.SecType)),
+			Exchange:     strings.ToUpper(strings.TrimSpace(row.Exchange)),
+			Currency:     normCcy(row.Currency),
+			LocalSymbol:  strings.TrimSpace(row.LocalSymbol),
+			TradingClass: strings.TrimSpace(row.TradingClass),
+		}
+		key, err := c.SubscribeMarketDataWithContract(ctx, contract, defaultGenericTicks)
+		if err != nil {
+			return
+		}
+		pollKey = key
+		releaseSub = func() { _ = c.UnsubscribeMarketData(key) }
+	} else {
+		release, err := s.subs.Hold(ctx, row.Symbol)
+		if err != nil {
+			// Hold can only fail with ErrIBKRUnavailable (gateway dropped
+			// mid-scan) or an internal subscribe error. Either way, the
+			// row stays bare — no fabrication.
+			return
+		}
+		releaseSub = release
 	}
 	defer releaseSub()
 
@@ -1496,7 +1623,7 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 	var snap *ibkrlib.MarketData
 	for {
 		md := c.GetMarketData()
-		if data, ok := md[row.Symbol]; ok {
+		if data, ok := md[pollKey]; ok {
 			snap = data
 		}
 		if time.Now().After(deadline) {
@@ -1540,6 +1667,14 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 		v := snap.Week52Low
 		row.Week52Low = &v
 	}
+}
+
+func scanRowNeedsRoutedQuote(row *rpc.ScanRow) bool {
+	if row == nil {
+		return false
+	}
+	ccy := normCcy(row.Currency)
+	return ccy != "" && ccy != "USD"
 }
 
 // handleScanParams fetches the gateway's scanner catalog (scanCodes,
@@ -1589,10 +1724,11 @@ func (s *Server) handleScanList() *rpc.ScanListResult {
 	out := &rpc.ScanListResult{}
 	for name, preset := range s.cfg.Scans {
 		out.Presets = append(out.Presets, rpc.ScanPresetSummary{
-			Name:     name,
-			Type:     preset.Type,
-			Exchange: preset.Exchange,
-			Limit:    preset.Limit,
+			Name:       name,
+			Type:       preset.Type,
+			Exchange:   preset.Exchange,
+			Instrument: preset.Instrument,
+			Limit:      preset.Limit,
 		})
 	}
 	slices.SortStableFunc(out.Presets, func(a, b rpc.ScanPresetSummary) int { return cmp.Compare(a.Name, b.Name) })

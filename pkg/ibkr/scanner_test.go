@@ -91,6 +91,31 @@ func TestRunScannerSubscription_SurfacesGatewayError(t *testing.T) {
 	}
 }
 
+func TestRequestScannerSubscriptionUsesInstrument(t *testing.T) {
+	var out bytes.Buffer
+	conn := NewConnection(nil)
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(&out)
+	c := &Connector{conn: conn}
+
+	err := c.requestScannerSubscription(7, ScannerSubscription{
+		Type:     "TOP_PERC_GAIN",
+		Exchange: "STK.EU.IBIS",
+		Limit:    5,
+	}, "STOCK.EU")
+	if err != nil {
+		t.Fatalf("requestScannerSubscription: %v", err)
+	}
+
+	payload := out.String()
+	for _, want := range []string{"STOCK.EU\x00", "STK.EU.IBIS\x00", "TOP_PERC_GAIN\x00"} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("payload missing %q: %q", want, payload)
+		}
+	}
+}
+
 // TestParseScannerData_LiveFixture decodes the captured msgScannerData frame
 // recorded against IB Gateway 10.37 (serverVersion 203) on 2026-05-09 to
 // nail down field offsets after the [msgID, version, reqID, count, rows...]
@@ -151,6 +176,9 @@ func TestParseScannerData_LiveFixture(t *testing.T) {
 		}
 		if row.Currency != tt.currency {
 			t.Errorf("rows[%d].Currency = %q, want %q", tt.idx, row.Currency, tt.currency)
+		}
+		if row.TradingClass != tt.tradingClass {
+			t.Errorf("rows[%d].TradingClass = %q, want %q", tt.idx, row.TradingClass, tt.tradingClass)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,72 @@ func TestEnsureMarketDataSubscription_ReturnsInactiveError(t *testing.T) {
 	}
 	if made {
 		t.Fatalf("expected made=false for inactive symbol, got true")
+	}
+}
+
+func TestSubscribeMarketData_ReturnsInactiveError(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.markSymbolInactive("HGENQ", "No security definition has been found for the request")
+
+	err := c.SubscribeMarketData(context.Background(), "HGENQ", []string{"LAST"})
+	if !errors.Is(err, ErrSymbolInactive) {
+		t.Fatalf("expected ErrSymbolInactive, got %v", err)
+	}
+}
+
+func TestSubscribeMarketData_ReturnsInactiveErrorForDefaultRoute(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	key := DefaultMarketDataKeyForSymbol("MBG")
+	if key != "MBG|STK|SMART||USD||" {
+		t.Fatalf("DefaultMarketDataKeyForSymbol(MBG) = %q", key)
+	}
+	c.markSymbolInactive(key, "No security definition has been found for the request")
+
+	err := c.SubscribeMarketData(context.Background(), "MBG", []string{"LAST"})
+	if !errors.Is(err, ErrSymbolInactive) {
+		t.Fatalf("expected ErrSymbolInactive, got %v", err)
+	}
+}
+
+func TestSubscribeMarketDataWithContractUsesRouteKey(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	var out safeBuffer
+	conn := NewConnection(nil)
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+
+	key, err := c.SubscribeMarketDataWithContract(context.Background(), Contract{
+		Symbol:   "MBG",
+		SecType:  "STK",
+		Exchange: "IBIS",
+		Currency: "EUR",
+	}, []string{"LAST"})
+	if err != nil {
+		t.Fatalf("SubscribeMarketDataWithContract: %v", err)
+	}
+	wantKey := "MBG|STK|IBIS||EUR||"
+	if key != wantKey {
+		t.Fatalf("key = %q, want %q", key, wantKey)
+	}
+	c.subMu.RLock()
+	_, subOK := c.subscriptions[wantKey]
+	reqKey := c.reqIDMap[1]
+	c.subMu.RUnlock()
+	if !subOK {
+		t.Fatalf("expected subscription under routed key %q", wantKey)
+	}
+	if reqKey != wantKey {
+		t.Fatalf("reqIDMap[1] = %q, want %q", reqKey, wantKey)
+	}
+	payload := string(out.Bytes())
+	for _, want := range []string{"MBG\x00", "STK\x00", "IBIS\x00", "EUR\x00"} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("payload missing %q: %q", want, payload)
+		}
 	}
 }
 

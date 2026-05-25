@@ -20,16 +20,17 @@ type ScannerSubscription struct {
 
 // ScannerRow is one element of the scanner result set.
 type ScannerRow struct {
-	Rank        int
-	Symbol      string
-	SecType     string
-	Exchange    string
-	Currency    string
-	LocalSymbol string
-	Distance    string
-	Benchmark   string
-	Projection  string
-	Comment     string
+	Rank         int
+	Symbol       string
+	SecType      string
+	Exchange     string
+	Currency     string
+	LocalSymbol  string
+	TradingClass string
+	Distance     string
+	Benchmark    string
+	Projection   string
+	Comment      string
 }
 
 // scannerSession tracks pending scanner state for a single subscription.
@@ -199,7 +200,7 @@ func parseScannerData(fields []string) []ScannerRow {
 		row.Currency = fields[idx+8]
 		row.LocalSymbol = fields[idx+9]
 		// marketName at idx+10
-		// tradingClass at idx+11
+		row.TradingClass = fields[idx+11]
 		row.Distance = fields[idx+12]
 		row.Benchmark = fields[idx+13]
 		row.Projection = fields[idx+14]

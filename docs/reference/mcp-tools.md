@@ -31,13 +31,17 @@ Open positions: stocks and options separated, plus a per-underlying grouping wit
 
 ## `ibkr_quote`
 
-Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, and opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable). Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"); off-hours/frozen snapshots may have `mark` or `prev_close` when bid/ask/last are absent. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
+Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, and opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable). Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"); off-hours/frozen snapshots may have `mark` or `prev_close` when bid/ask/last are absent. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: "de"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `symbols` | array | **yes** | ticker symbols, e.g. ["AAPL","MSFT"] |
+| `currency` | string | no | optional ISO currency override for stocks, e.g. USD or EUR |
+| `exchange` | string | no | optional IBKR exchange/venue override for stocks, e.g. SMART or IBIS; omit unless the default market route fails |
+| `market` | string | no | optional stock routing shortcut; omit or use "us" for SMART/USD, use "de" for German/Xetra EUR equities via SMART with primary_exchange=IBIS |
+| `primary_exchange` | string | no | optional IBKR primary-exchange hint when routing a stock through SMART, e.g. NASDAQ or IBIS |
+| `symbols` | array | **yes** | ticker symbols, e.g. ["AAPL","MSFT"] or ["MBG"] with market="de" |
 
 ## `ibkr_chain`
 
@@ -67,27 +71,28 @@ Daily OHLCV bars for an equity / ETF symbol. Use for trend / moving-average / lo
 
 ## `ibkr_scan`
 
-Run a market scanner. Three call shapes: (1) preset by name — `{preset: "top-movers"}` — for the configured shortcuts; (2) ad-hoc — `{type: "TOP_PERC_GAIN", exchange: "STK.US.MAJOR"}` — to compose a scan without writing to the user's config; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For ad-hoc, call `ibkr_scan_params` first to discover the scanCode (`type`) and locationCode (`exchange`) values this gateway accepts. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.
+Run a market scanner. Three call shapes: (1) preset by name — `{preset: "top-movers"}` — for the configured shortcuts; (2) ad-hoc — `{type: "TOP_PERC_GAIN", exchange: "STK.US.MAJOR"}` for US stocks or `{type: "TOP_PERC_GAIN", exchange: "STK.EU.IBIS", instrument: "STOCK.EU"}` for German/Xetra stocks — to compose a scan without writing to the user's config; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For ad-hoc, call `ibkr_scan_params` first to discover the scanCode (`type`), locationCode (`exchange`), and instrument values this gateway accepts. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `exchange` | string | no | ad-hoc locationCode (e.g. "STK.US.MAJOR") — required with `type` when no `preset` is given |
+| `exchange` | string | no | ad-hoc locationCode (e.g. "STK.US.MAJOR" or "STK.EU.IBIS") — required with `type` when no `preset` is given |
+| `instrument` | string | no | IBKR scanner instrument for ad-hoc scans; defaults to STK for US stocks, use STOCK.EU for European stock locations such as STK.EU.IBIS |
 | `limit` | integer | no | max rows; preset default when omitted; ad-hoc capped at 50 |
 | `preset` | string | no | preset name from `ibkr_scan` with no args (e.g. "top-movers"); omit for ad-hoc or list mode |
 | `type` | string | no | ad-hoc scanCode (e.g. "TOP_PERC_GAIN") — required with `exchange` when no `preset` is given |
 
 ## `ibkr_scan_params`
 
-Discover the scanner catalog this IBKR gateway supports: every scanCode (the `type` for ad-hoc `ibkr_scan`) and every locationCode (`exchange`), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version and by the user's market-data permissions. Pass `instrument: "STK"` to narrow scan_types to stocks; pass `include_raw_xml: true` only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB).
+Discover the scanner catalog this IBKR gateway supports: every scanCode (the `type` for ad-hoc `ibkr_scan`) and every locationCode (`exchange`), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version, market-data permissions, and region. Pass `instrument: "STK"` to narrow scan_types to US stocks or `instrument: "STOCK.EU"` for European stocks; pass `include_raw_xml: true` only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB).
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `include_raw_xml` | boolean | no | include the gateway's raw XML payload (~200 KB); default false |
-| `instrument` | string | no | filter scan_types to those valid for this instrument (e.g. "STK", "OPT", "ETF"); empty returns all |
+| `instrument` | string | no | filter scan_types to those valid for this instrument (e.g. "STK", "STOCK.EU", "OPT", "ETF"); empty returns all |
 
 ## `ibkr_breadth`
 
