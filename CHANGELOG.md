@@ -10,6 +10,26 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.1.2 — 2026-05-25 22:42 CEST
+
+### What's new
+
+- `ibkr status` now reads like a compact gateway flight deck, with a single verdict and a `Next concern` line for the first thing that needs attention.
+- `ibkr version` now acts as a trust receipt, showing local build provenance, binary path, runtime, modified time, and whether the build looks complete.
+- Stock positions can now show richer quote context, including currency, price movement, freshness, ranges, volume, and market-session context.
+
+### Changed
+
+- `ibkr status` uses a clearer hierarchy for gateway, market-data, daemon, TWS, S&P 500 member-list, background-work, and concern state.
+- `ibkr status` now surfaces CLI/daemon version drift as an `ATTENTION` verdict with restart guidance, instead of requiring the user to notice the daemon version manually.
+- `ibkr version` keeps JSON unchanged while making the default text output easier to scan for provenance and stale-binary diagnosis.
+- `ibkr positions --quotes` adds quote-detail columns for stock rows; the default positions view stays more compact.
+- MCP `ibkr_positions` documents and returns stock quote-context fields when available, so agents can explain held-stock freshness and price source without calling a separate quote tool.
+
+### Fixed
+
+- Stock-position rows no longer hide available market context behind account-position marks when quote enrichment is requested.
+
 ## v1.1.1 — 2026-05-25 21:53 CEST
 
 ### What's new
