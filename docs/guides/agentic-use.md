@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-25 08:03 CEST
+Updated: 2026-05-25 10:13 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Stock and ETF quotes are also available as an MCP resource: `resources/read` returns one snapshot, while `resources/subscribe` streams updates until unsubscribe.
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The 12 MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_watch` ↔ read-only `ibkr watch --list`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -36,6 +36,12 @@ Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (de
 
 If you also want context, follow-up questions naturally chain: *"and what's SPY's dealer gamma profile?"* invokes `ibkr_gamma`; *"how does that compare to where SPY closed yesterday?"* invokes `ibkr_history` + `ibkr_quote`.
 
+### "What's on my watchlist?"
+
+→ Claude invokes `ibkr_watch`.
+
+Returns the local saved-symbol list from `ibkr watch --list`. The MCP tool is read-only: Claude can use the symbols for follow-up quote, history, chain, scan, gamma, or regime context, but it cannot add, remove, or clear watchlist entries through MCP.
+
 ### "Are SPY dealers supporting or amplifying today's moves?"
 
 → Claude invokes `ibkr_gamma` (default scope = combined SPY+SPX).
@@ -55,6 +61,7 @@ Returns the % of S&P names above their 50-DMA (the tactical signal) and per-row 
 The MCP interface is intentionally **read-only**. There is no trade-execution tool. Claude can:
 
 - ✅ tell you what you own
+- ✅ read your local saved-symbol watchlist
 - ✅ tell you the market state
 - ✅ size a trade (`ibkr_size` — pure math against your NLV, never proposes an order)
 - ❌ place an order

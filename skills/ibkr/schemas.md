@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-25 08:03 CEST
+Updated: 2026-05-25 10:13 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -199,6 +199,28 @@ and `expiry` / `strike` / `right` together identify the contract.
   underlying. Always populated regardless of the `--by underlying` flag,
   which only affects the text view. `group_*` totals sum every leg in
   the group.
+
+## watch
+
+`ibkr watch --list --json`
+
+```json
+{
+  "name": "default",
+  "symbols": ["IBM", "SPY", "AAPL"],
+  "as_of": "2026-05-25T10:13:00+02:00"
+}
+```
+
+Field meanings:
+- `name` — always `"default"` in this release; named lists are not exposed.
+- `symbols` — locally stored symbols, normalized the same way as
+  `ibkr quote`: comma-separated input is split, whitespace is trimmed,
+  and symbols are uppercased. No IBKR lookup is performed when storing.
+- `as_of` — local read time; this is not an IBKR market-data timestamp.
+
+Human CLI mutations are `ibkr watch SYM --add`, `ibkr watch SYM --remove`,
+and `ibkr watch --clear`. MCP exposes watchlist reading only.
 
 ## quote
 

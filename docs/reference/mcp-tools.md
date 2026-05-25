@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**12 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**13 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -42,6 +42,12 @@ Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark
 | `market` | string | no | optional stock routing shortcut; omit or use "us" for SMART/USD, use "de" for German/Xetra EUR equities via SMART with primary_exchange=IBIS |
 | `primary_exchange` | string | no | optional IBKR primary-exchange hint when routing a stock through SMART, e.g. NASDAQ or IBIS |
 | `symbols` | array | **yes** | ticker symbols, e.g. ["AAPL","MSFT"] or ["MBG"] with market="de" |
+
+## `ibkr_watch`
+
+Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks "what's on my watchlist?" or wants quotes/context for their saved watch symbols. This MCP tool is read-only: it lists symbols only; it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. To quote the returned symbols, call `ibkr_quote` with the `symbols` array.
+
+*No parameters.*
 
 ## `ibkr_chain`
 

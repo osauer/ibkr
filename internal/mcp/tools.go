@@ -10,6 +10,7 @@ import (
 	"github.com/osauer/ibkr/internal/cli"
 	"github.com/osauer/ibkr/internal/dial"
 	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/internal/watchlist"
 )
 
 // Tool is the registered shape of an MCP tool exposed by `ibkr mcp`.
@@ -115,6 +116,22 @@ var Tools = []Tool{
 				return json.Marshal(quotes[0])
 			}
 			return json.Marshal(quotes)
+		},
+	},
+	{
+		Name:        "ibkr_watch",
+		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks \"what's on my watchlist?\" or wants quotes/context for their saved watch symbols. This MCP tool is read-only: it lists symbols only; it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. To quote the returned symbols, call `ibkr_quote` with the `symbols` array.",
+		JSONSchema:  schemaObject(nil, nil),
+		Handler: func(_ context.Context, _ *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+			path, err := watchlist.DefaultPath()
+			if err != nil {
+				return nil, err
+			}
+			snap, err := watchlist.New(path).Snapshot()
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(snap)
 		},
 	},
 	{

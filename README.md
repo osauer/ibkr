@@ -16,6 +16,8 @@ Use it from a shell:
 ibkr status
 ibkr positions --by underlying
 ibkr regime
+ibkr watch IBM --add
+ibkr watch --watch
 ibkr quote SPY --watch
 ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```
@@ -53,6 +55,7 @@ For v1.0.0+ releases, the installer and `ibkr update` both verify the signed `SH
 
 - **Account and positions.** Net liquidation, buying power, cash, margin, daily P&L, positions, option Greeks, per-underlying grouping, and portfolio-level delta/theta/gamma/vega rollups. Multi-currency accounts include FX exposure.
 - **Quotes and history.** Snapshot quotes, coalesced stock/ETF streaming, daily OHLCV bars, previous close, day change, and data freshness (`live`, `frozen`, `delayed`, `delayed-frozen`).
+- **Local watchlist.** Add/remove/clear symbols offline, list them as JSON, or poll live quotes for the saved list with `ibkr watch --watch`.
 - **Options.** Expiry lists with ATM IV and implied move, strike grids with call/put quotes, deltas, and open interest. Option snapshots are supported; option streaming is not exposed.
 - **Scanners.** Built-in market scans for movers, losers, unusual volume, gaps, high IV rank, and option volume. Agents can also compose ad-hoc scans without writing config.
 - **Position sizing.** Fixed-fractional sizing against live NLV, with optional target, R-multiple, and breakeven win rate. Pure math; never an order ticket.
@@ -68,7 +71,7 @@ For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schem
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Watchlist access through MCP is list-only; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -129,6 +132,8 @@ Restart the host (Claude for Mac, standalone Claude Code session, Cursor, …) a
 
 ```sh
 $ ibkr account --json | jq '.net_liquidation, .base_currency'
+$ ibkr watch IBM --add
+$ ibkr watch --list --json
 $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, last: .last, chg: .change_pct}'
 $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'

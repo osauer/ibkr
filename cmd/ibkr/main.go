@@ -85,6 +85,15 @@ func main() {
 
 	color := cli.ShouldColor(os.Stdout)
 
+	// `ibkr watch` is local metadata unless --watch is actively quoting the
+	// saved symbols. Keep add/remove/list/clear usable without a gateway.
+	if cmd == "watch" && !isStreamingInvocation(cmd, rest) {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Color: color}
+		os.Exit(cli.Run(ctx, env, cmd, rest))
+	}
+
 	// `ibkr <cmd> --help` should not spawn the daemon — render help and exit.
 	for _, a := range rest {
 		if a == "--help" || a == "-h" || a == "-help" {
@@ -178,11 +187,11 @@ func warnIfDaemonVersionMismatch(conn *dial.Conn, cliVersion string) {
 }
 
 // isStreamingInvocation reports whether the CLI invocation will hold the
-// daemon socket open for an open-ended stream. `quote`, `account`, and
-// `positions` all support `--watch` as a long-running poll/render loop.
+// daemon socket open for an open-ended stream. `quote`, `account`, `positions`,
+// and `watch` all support `--watch` as a long-running render loop.
 func isStreamingInvocation(cmd string, args []string) bool {
 	switch cmd {
-	case "quote", "account", "positions":
+	case "quote", "account", "positions", "watch":
 	default:
 		return false
 	}
