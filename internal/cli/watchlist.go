@@ -19,8 +19,8 @@ func runWatchlist(ctx context.Context, env *Env, args []string) int {
 	add := fs.Bool("add", false, "add symbol(s) to the local watchlist")
 	remove := fs.Bool("remove", false, "remove symbol(s) from the local watchlist")
 	clear := fs.Bool("clear", false, "remove every symbol from the local watchlist")
-	list := fs.Bool("list", false, "list saved symbols")
-	quotes := fs.Bool("quotes", false, "show saved symbols with enriched quote context")
+	list := fs.Bool("list", false, "list saved symbols without quote context")
+	quotes := fs.Bool("quotes", false, "show saved symbols with enriched quote context (default)")
 	live := fs.Bool("watch", false, "quote saved symbols repeatedly until Ctrl-C")
 	rate := fs.Duration("rate", time.Second, "poll interval for --watch")
 	timeout := fs.Duration("timeout", 5*time.Second, "per-symbol quote timeout for --quotes/--watch")
@@ -32,7 +32,7 @@ func runWatchlist(ctx context.Context, env *Env, args []string) int {
 	symbols := watchlist.NormalizeSymbols(strings.Join(rest, ","))
 	actions := boolCount(*add, *remove, *clear, *list, *quotes, *live)
 	if actions == 0 {
-		*list = true
+		*quotes = true
 	}
 	if actions > 1 {
 		return fail(env, "watch: choose one of --add, --remove, --clear, --list, --quotes, or --watch")
@@ -47,7 +47,7 @@ func runWatchlist(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "watch: --watch and --json are mutually exclusive")
 	}
 	if *quotes && env.Conn == nil {
-		return fail(env, "watch: --quotes requires the ibkr daemon")
+		return fail(env, "watch: quote view requires the ibkr daemon; use --list for the offline symbol list")
 	}
 
 	store, err := openWatchlistStore()
@@ -217,7 +217,11 @@ func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractPar
 		c.Currency = h.Currency
 	}
 	if h.Exchange != "" {
-		c.Exchange = h.Exchange
+		if strings.EqualFold(h.Exchange, "IBIS") && strings.EqualFold(c.Currency, "EUR") {
+			c.Market = "de"
+		} else {
+			c.Exchange = h.Exchange
+		}
 	}
 	return c
 }
@@ -233,17 +237,20 @@ func renderWatchlistQuoteText(env *Env, out io.Writer, r *rpc.WatchlistResult) i
 	}
 	fmt.Fprintln(out, "Watchlist")
 	const (
-		wSymbol = 9
-		wPos    = 9
-		wPrice  = 11
-		wChange = 10
-		wPrev   = 11
-		wRange  = 21
-		wVol    = 17
+		wSymbol = 7
+		wPos    = 8
+		wCCY    = 3
+		wPrice  = 9
+		wChange = 8
+		wPrev   = 9
+		wRange  = 15
+		wVol    = 11
+		wData   = 7
+		wAsOf   = 28
 	)
-	header := fmt.Sprintf("  %-*s  %*s  %*s  %*s  %8s  %*s  %-*s  %-*s  %-*s  %s",
-		wSymbol, "SYMBOL", wPos, "POS", wPrice, "PRICE", wChange, "CHG", "CHG%",
-		wPrev, "PREV", wRange, "DAY RANGE", wRange, "52W RANGE", wVol, "VOL / AVG", "DATA")
+	header := fmt.Sprintf("  %-*s %*s %*s %*s %*s %7s %*s %-*s %-*s %*s %-*s %-*s",
+		wSymbol, "SYMBOL", wPos, "POS", wCCY, "CCY", wPrice, "PRICE", wChange, "CHG", "CHG%",
+		wPrev, "PREV", wRange, "DAY", wRange, "52W", wVol, "VOL/AVG", wData, "DATA", wAsOf, "AS OF")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, row := range r.Rows {
@@ -255,28 +262,20 @@ func renderWatchlistQuoteText(env *Env, out io.Writer, r *rpc.WatchlistResult) i
 		if ccy == "" {
 			ccy = "USD"
 		}
-		dataType := row.DataType
-		if rpc.IsLiveDataType(dataType) {
-			dataType = rpc.MarketDataLive
-		} else {
-			dataType = env.yellow(dataType)
-		}
-		fmt.Fprintf(out, "  %-*s  %s  %s  %s  %s  %s  %s  %s  %s  %s\n",
+		fmt.Fprintf(out, "  %-*s %s %*s %s %s %s %s %s %s %s %s %s\n",
 			wSymbol, row.Symbol,
 			padLeftVisible(formatWatchlistHolding(row.Holding), wPos),
-			formatPrice(row.Price, wPrice, ccy),
-			formatWatchlistChange(env, row.Change, ccy, wChange),
-			env.formatChangePct(row.ChangePct, 8),
-			formatPrice(row.PrevClose, wPrev, ccy),
-			formatWatchlistRange(env, row.DayLow, row.DayHigh, ccy, wRange),
-			formatWatchlistRange(env, row.Week52Low, row.Week52High, ccy, wRange),
+			wCCY, ccy,
+			formatWatchlistNumber(row.Price, wPrice),
+			formatWatchlistChange(env, row.Change, wChange),
+			env.formatChangePct(row.ChangePct, 7),
+			formatWatchlistNumber(row.PrevClose, wPrev),
+			formatWatchlistRange(env, row.DayLow, row.DayHigh, wRange),
+			formatWatchlistRange(env, row.Week52Low, row.Week52High, wRange),
 			formatWatchlistVolume(row.Volume, row.AvgVolume, wVol),
-			dataType,
+			padRightVisible(formatWatchlistData(env, row), wData),
+			padRightVisible(formatWatchlistAsOf(row), wAsOf),
 		)
-		hints := watchlistQuoteHints(env, row)
-		for _, hint := range hints {
-			fmt.Fprintf(out, "    %s\n", hint)
-		}
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %d symbols  ·  as of %s\n", len(r.Symbols), formatTimeShort(r.AsOf))
@@ -290,31 +289,36 @@ func formatWatchlistHolding(h *rpc.WatchlistHolding) string {
 	return fmt.Sprintf("%.0f sh", h.Quantity)
 }
 
-func formatWatchlistRange(env *Env, lo, hi *float64, ccy string, w int) string {
-	sym := strings.TrimSpace(moneyPrefix(ccy))
-	loS := "—"
-	if lo != nil {
-		loS = fmt.Sprintf("%s%.2f", sym, *lo)
-	}
-	hiS := "—"
-	if hi != nil {
-		hiS = fmt.Sprintf("%s%.2f", sym, *hi)
-	}
-	return env.dim(fmt.Sprintf("%*s..%-*s", (w-2)/2, loS, w-(w-2)/2-2, hiS))
-}
-
-func formatWatchlistChange(env *Env, p *float64, ccy string, w int) string {
+func formatWatchlistNumber(p *float64, w int) string {
 	if p == nil {
 		return padDash(w)
 	}
-	sym := strings.TrimSpace(moneyPrefix(ccy))
+	return fmt.Sprintf("%*.2f", w, *p)
+}
+
+func formatWatchlistRange(env *Env, lo, hi *float64, w int) string {
+	loS := "—"
+	if lo != nil {
+		loS = fmt.Sprintf("%.2f", *lo)
+	}
+	hiS := "—"
+	if hi != nil {
+		hiS = fmt.Sprintf("%.2f", *hi)
+	}
+	return env.dim(fmt.Sprintf("%*s-%-*s", (w-1)/2, loS, w-(w-1)/2-1, hiS))
+}
+
+func formatWatchlistChange(env *Env, p *float64, w int) string {
+	if p == nil {
+		return padDash(w)
+	}
 	abs := *p
 	sign := "+"
 	if abs < 0 {
 		sign = "-"
 		abs = -abs
 	}
-	s := fmt.Sprintf("%*s", w, fmt.Sprintf("%s%s%.2f", sign, sym, abs))
+	s := fmt.Sprintf("%*s", w, fmt.Sprintf("%s%.2f", sign, abs))
 	switch {
 	case *p > 0:
 		return env.green(s)
@@ -326,33 +330,118 @@ func formatWatchlistChange(env *Env, p *float64, ccy string, w int) string {
 }
 
 func formatWatchlistVolume(volume, avg *int64, w int) string {
-	left := "—"
-	if volume != nil && *volume > 0 {
-		left = strings.TrimSpace(formatVolumeCompact(volume, 8))
-	}
-	right := "—"
-	if avg != nil && *avg > 0 {
-		right = strings.TrimSpace(formatVolumeCompact(avg, 8))
-	}
-	return fmt.Sprintf("%*s", w, left+" / "+right)
+	left := formatWatchlistVolumePart(volume)
+	right := formatWatchlistVolumePart(avg)
+	return fmt.Sprintf("%*s", w, left+"/"+right)
 }
 
-func watchlistQuoteHints(env *Env, row rpc.WatchlistRow) []string {
-	var hints []string
-	if row.PriceAsOf != "" {
-		hint := row.PriceAsOf
-		if row.PriceSource != "" {
-			hint += " · source=" + row.PriceSource
+func formatWatchlistVolumePart(v *int64) string {
+	if v == nil || *v <= 0 {
+		return "—"
+	}
+	n := float64(*v)
+	switch {
+	case n >= 1e9:
+		return fmt.Sprintf("%.1fB", n/1e9)
+	case n >= 1e6:
+		return fmt.Sprintf("%.1fM", n/1e6)
+	case n >= 1e3:
+		return fmt.Sprintf("%.0fK", n/1e3)
+	default:
+		return fmt.Sprintf("%d", *v)
+	}
+}
+
+func formatWatchlistData(env *Env, row rpc.WatchlistRow) string {
+	if row.Price == nil {
+		return env.yellow("no data")
+	}
+	if row.Stale || row.StaleReason != "" {
+		return env.yellow("stale")
+	}
+	switch row.PriceSource {
+	case "historical_close":
+		return "hist"
+	}
+	switch row.DataType {
+	case "", rpc.MarketDataLive:
+		return rpc.MarketDataLive
+	case rpc.MarketDataDelayed:
+		return env.yellow("delay")
+	case rpc.MarketDataFrozen:
+		return env.yellow("frozen")
+	case rpc.MarketDataDelayedFrozen:
+		return env.yellow("dly-frz")
+	default:
+		return env.yellow(row.DataType)
+	}
+}
+
+func formatWatchlistAsOf(row rpc.WatchlistRow) string {
+	if row.PriceAt.IsZero() {
+		return "—"
+	}
+	loc := time.Local
+	if row.SessionContext != nil && row.SessionContext.Timezone != "" {
+		if l, err := time.LoadLocation(row.SessionContext.Timezone); err == nil {
+			loc = l
 		}
-		hints = append(hints, env.dim(hint))
 	}
-	if row.StaleReason != "" {
-		hints = append(hints, env.yellow(row.StaleReason))
+	t := row.PriceAt.In(loc)
+	switch row.PriceSource {
+	case "prev_close", "historical_close":
+		return joinWatchlistAsOf(watchlistMarketState(row), t.Format("Jan02 close"))
+	default:
+		return joinWatchlistAsOf(watchlistMarketState(row), t.Format("Jan02 15:04 MST"))
 	}
-	if hint := quoteSessionHint(env, row.SessionContext); hint != "" {
-		hints = append(hints, hint)
+}
+
+func joinWatchlistAsOf(state, stamp string) string {
+	if state == "" {
+		return stamp
 	}
-	return hints
+	return state + " " + stamp
+}
+
+func watchlistMarketState(row rpc.WatchlistRow) string {
+	s := row.SessionContext
+	if s == nil {
+		if row.Price != nil && !row.Stale {
+			return "open"
+		}
+		return ""
+	}
+	if s.IsOpen {
+		return "open"
+	}
+	if watchlistIsPreMarket(row, *s) {
+		return "pre-market"
+	}
+	return "closed"
+}
+
+func watchlistIsPreMarket(row rpc.WatchlistRow, s rpc.MarketSession) bool {
+	if s.Open.IsZero() {
+		return false
+	}
+	state := strings.ToLower(strings.TrimSpace(s.State))
+	if state != "regular" && state != "early_close" {
+		return false
+	}
+	at := row.AsOf
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return at.In(watchlistSessionLocation(s)).Before(s.Open.In(watchlistSessionLocation(s)))
+}
+
+func watchlistSessionLocation(s rpc.MarketSession) *time.Location {
+	if s.Timezone != "" {
+		if loc, err := time.LoadLocation(s.Timezone); err == nil {
+			return loc
+		}
+	}
+	return time.Local
 }
 
 func boolCount(values ...bool) int {

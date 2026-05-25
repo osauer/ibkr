@@ -123,6 +123,48 @@ func TestSubscribeMarketDataWithContractUsesRouteKey(t *testing.T) {
 	}
 }
 
+func TestSubscribeMarketDataWithContractHydratesCachedRoute(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	var out safeBuffer
+	conn := NewConnection(nil)
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+
+	c.contractMu.Lock()
+	c.contractCache["MBG"] = ContractDetailsLite{
+		ConID:        29622935,
+		Symbol:       "MBG",
+		Exchange:     "IBIS",
+		LocalSymbol:  "MBG",
+		TradingClass: "MBG",
+	}
+	c.contractMu.Unlock()
+
+	key, err := c.SubscribeMarketDataWithContract(context.Background(), Contract{
+		Symbol:   "MBG",
+		SecType:  "STK",
+		Exchange: "IBIS",
+		Currency: "EUR",
+	}, []string{"LAST"})
+	if err != nil {
+		t.Fatalf("SubscribeMarketDataWithContract: %v", err)
+	}
+	wantKey := "MBG|STK|SMART|IBIS|EUR|MBG|MBG"
+	if key != wantKey {
+		t.Fatalf("key = %q, want hydrated key %q", key, wantKey)
+	}
+	payload := string(out.Bytes())
+	for _, want := range []string{"29622935\x00", "SMART\x00", "IBIS\x00", "EUR\x00"} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("payload missing %q: %q", want, payload)
+		}
+	}
+}
+
 func TestSubscribeMarketDataUsesContractCache(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	var out safeBuffer

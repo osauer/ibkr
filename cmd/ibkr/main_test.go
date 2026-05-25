@@ -10,7 +10,11 @@ func TestIsWatchDaemonInvocation(t *testing.T) {
 		want bool
 	}{
 		{"list stays local", []string{"--list"}, false},
+		{"list json stays local", []string{"--list", "--json"}, false},
 		{"add stays local", []string{"AAPL", "--add"}, false},
+		{"default watch needs daemon", nil, true},
+		{"json default needs daemon", []string{"--json"}, true},
+		{"timeout default needs daemon", []string{"--timeout", "2s"}, true},
 		{"quotes needs daemon", []string{"--quotes"}, true},
 		{"quotes true needs daemon", []string{"--quotes=true"}, true},
 		{"watch needs daemon", []string{"--watch"}, true},

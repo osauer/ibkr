@@ -128,7 +128,7 @@ func init() {
 		{"account", "Account summary snapshot (NLV, BP, cash, margin, daily P&L)", "ibkr account [--watch --rate 1s] [--json]", runAccount},
 		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch --rate 1s] [--json]", runPositions},
 		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] [--market us|de] [--watch --rate 250ms] | ibkr quote SYM YYMMDD C|P STRIKE [--json]", runQuote},
-		{"watch", "Local watchlist symbols; add/remove/clear offline or quote the list live", "ibkr watch [--list|--quotes] [--watch --rate 1s] [--timeout 5s] [--json] | ibkr watch SYM[,SYM…] --add|--remove | ibkr watch --clear", runWatchlist},
+		{"watch", "Local watchlist symbols; add/remove/clear offline or quote the list live", "ibkr watch [--quotes] [--timeout 5s] [--json] | ibkr watch --list [--json] | ibkr watch --watch --rate 1s | ibkr watch SYM[,SYM…] --add|--remove | ibkr watch --clear", runWatchlist},
 		{"calendar", "Official market sessions for US equities, US options, and Xetra", "ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]", runCalendar},
 		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},

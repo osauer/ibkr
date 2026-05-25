@@ -1584,6 +1584,7 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 		ctx = context.Background()
 	}
 	contract = normalizeMarketDataContract(contract)
+	contract = c.hydrateExplicitMarketDataContract(contract)
 	key := MarketDataKeyForContract(contract)
 	if key == "" {
 		return "", fmt.Errorf("contract symbol is required for market data")
@@ -1639,6 +1640,42 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 
 	marketDataLogger.Infof("%s: Subscribed to routed market data for %s (ReqID: %d)", c.name, key, reqID)
 	return key, nil
+}
+
+func (c *Connector) hydrateExplicitMarketDataContract(contract Contract) Contract {
+	if contract.ConID != 0 || contract.Symbol == "" {
+		return contract
+	}
+	detail := c.cachedContractDetail(contract.Symbol)
+	if detail == nil || detail.ConID == 0 {
+		return contract
+	}
+	candidate := contract
+	if !c.applyContractDetail(*detail, &candidate) {
+		return contract
+	}
+	normalizeEquityRouting(&candidate, contract.PrimaryExch)
+	if explicitContractRouteMatches(contract, candidate) {
+		return candidate
+	}
+	return contract
+}
+
+func explicitContractRouteMatches(requested, candidate Contract) bool {
+	if requested.Currency != "" && candidate.Currency != "" && !strings.EqualFold(requested.Currency, candidate.Currency) {
+		return false
+	}
+	reqExchange := strings.ToUpper(strings.TrimSpace(requested.Exchange))
+	reqPrimary := strings.ToUpper(strings.TrimSpace(requested.PrimaryExch))
+	candExchange := strings.ToUpper(strings.TrimSpace(candidate.Exchange))
+	candPrimary := strings.ToUpper(strings.TrimSpace(candidate.PrimaryExch))
+	if reqPrimary != "" {
+		return reqPrimary == candPrimary || reqPrimary == candExchange
+	}
+	if reqExchange == "" || reqExchange == "SMART" {
+		return true
+	}
+	return reqExchange == candExchange || reqExchange == candPrimary
 }
 
 // EnsureMarketDataSubscription ensures there is an active, fresh subscription for a symbol.
@@ -3294,34 +3331,43 @@ func formatHistoricalDuration(lookbackDays int) string {
 // push ctx down through fetchHistoricalWithContract; until then, the
 // wrapper buys most of the value for one file's worth of code.
 func (c *Connector) FetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int) ([]HistoricalBar, error) {
-	// Derive the inner timeout from ctx so the goroutine doesn't keep
-	// running long after the caller has moved on. Default to the same
-	// 45 s as FetchHistoricalDailyBars when ctx has no deadline.
+	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
+		bars, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
+		return bars, err
+	})
+}
+
+func (c *Connector) fetchHistoricalDailyBarsCtx(ctx context.Context, fetch func(timeout time.Duration) ([]HistoricalBar, error)) ([]HistoricalBar, error) {
 	timeout := 45 * time.Second
 	if dl, ok := ctx.Deadline(); ok {
 		if d := time.Until(dl); d > 0 {
 			timeout = d
 		}
 	}
-
 	type result struct {
 		bars []HistoricalBar
 		err  error
 	}
-	// Buffered cap-1 so the producer goroutine never blocks on send
-	// after the caller has returned via the ctx.Done branch.
 	ch := make(chan result, 1)
 	go func() {
-		bars, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
+		bars, err := fetch(timeout)
 		ch <- result{bars: bars, err: err}
 	}()
-
 	select {
 	case r := <-ch:
 		return r.bars, r.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// FetchHistoricalDailyBarsWithContractCtx is FetchHistoricalDailyBarsWithContract
+// with prompt cancellation when ctx is done.
+func (c *Connector) FetchHistoricalDailyBarsWithContractCtx(ctx context.Context, contract Contract, lookbackDays int) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
+		bars, err := c.FetchHistoricalDailyBarsWithContract(contract, lookbackDays, timeout)
+		return bars, err
+	})
 }
 
 // FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol.
@@ -3361,6 +3407,45 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 		Currency:    currency,
 	}
 
+	return c.fetchHistoricalDailyBarsWithBase(symbol, baseContract, primary, lookbackDays, timeout, true)
+}
+
+// FetchHistoricalDailyBarsWithContract requests HMDS daily bars using an
+// already-routed contract. It is intended for callers that learned an exchange,
+// primary exchange, currency, local symbol, or conID while resolving a quote.
+func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	if !c.IsReady() {
+		return nil, fmt.Errorf("IBKR connection not ready")
+	}
+	contract = normalizeMarketDataContract(contract)
+	if contract.Symbol == "" {
+		return nil, fmt.Errorf("contract symbol is required")
+	}
+	symbol := strings.ToUpper(contract.Symbol)
+	if _, inactive := c.inactiveReason(MarketDataKeyForContract(contract)); inactive {
+		return nil, ErrSymbolInactive
+	}
+	if lookbackDays <= 0 {
+		lookbackDays = 400
+	}
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	fallbackPrimary := contract.PrimaryExch
+	if detail := c.cachedContractDetail(symbol); detail != nil && detail.ConID != 0 {
+		candidate := contract
+		if c.applyContractDetail(*detail, &candidate) {
+			normalizeEquityRouting(&candidate, fallbackPrimary)
+			if explicitContractRouteMatches(contract, candidate) {
+				contract = candidate
+			}
+		}
+	}
+	return c.fetchHistoricalDailyBarsWithBase(symbol, contract, fallbackPrimary, lookbackDays, timeout, false)
+}
+
+func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool) ([]HistoricalBar, error) {
+	requestedContract := baseContract
 	graceWindow := contractDetailsLateGrace
 	if timeout > 0 {
 		if half := timeout / 2; half > 0 && half < graceWindow {
@@ -3381,18 +3466,29 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 	// upstream by the breadth fetcher's per-call timeout.
 	var fetchErr error
 	if detail, err := c.ensureContractDetails(symbol, 30*time.Second); err == nil && detail != nil {
-		c.applyContractDetail(*detail, &baseContract)
+		candidate := baseContract
+		if c.applyContractDetail(*detail, &candidate) {
+			normalizeEquityRouting(&candidate, primary)
+			if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
+				baseContract = candidate
+			}
+		}
 	} else {
 		fetchErr = err
 		late := c.awaitContractDetail(symbol, graceWindow)
-		if late != nil && c.applyContractDetail(*late, &baseContract) {
+		candidate := baseContract
+		if late != nil && c.applyContractDetail(*late, &candidate) {
+			normalizeEquityRouting(&candidate, primary)
+			if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
+				baseContract = candidate
+			}
 			c.logInfo("Contract details for %s arrived during grace window (conID=%d)", symbol, late.ConID)
 		} else if fetchErr != nil {
 			c.logWarn("Contract details for %s unavailable (%v); using static classification hints only", symbol, fetchErr)
 		}
 	}
 
-	if baseContract.ConID == 0 {
+	if requireConID && baseContract.ConID == 0 {
 		c.logWarn("Historical data request aborted for %s: contract ID unresolved (exchange=%s primary=%s)", symbol, baseContract.Exchange, baseContract.PrimaryExch)
 		return nil, fmt.Errorf("contract details unresolved for %s (exchange=%s primary=%s)", symbol, baseContract.Exchange, baseContract.PrimaryExch)
 	}

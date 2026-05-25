@@ -7,12 +7,12 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
   regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
-  Bash(ibkr calendar*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
+  Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-25 13:40 CEST
+Updated: 2026-05-25 20:50 CEST
 
 ## When to use
 
@@ -60,7 +60,7 @@ release. Do not invent or simulate trade execution.
 | `ibkr status` | Daemon + gateway health (run this first if anything fails) | [schemas.md#status](schemas.md#status) |
 | `ibkr account` | Account summary (NLV, BP, cash, margin, daily P&L); add `--watch` for in-place refresh | [schemas.md#account](schemas.md#account) |
 | `ibkr positions` | Open positions (stocks + options) with per-position daily P&L; add `--watch` for in-place refresh | [schemas.md#positions](schemas.md#positions) |
-| `ibkr watch --list` | Read the local saved-symbol watchlist; use `--quotes` or `--watch` for decision-making quote context | [schemas.md#watch](schemas.md#watch) |
+| `ibkr watch` | Default decision-making monitor for the local saved-symbol watchlist; use `--list` only for the offline symbol inventory | [schemas.md#watch](schemas.md#watch) |
 | `ibkr calendar` | Official sessions for US equities, US listed options regular sessions, and Xetra | [schemas.md#calendar](schemas.md#calendar) |
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
@@ -90,8 +90,8 @@ symbols — the CLI hoists them automatically.
   - `--watch` re-polls on the rate (default 1s); same TTY/pipe behaviour as `account --watch`. Mutually exclusive with `--json`.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
-- `ibkr watch --list [--json]` — read the local saved-symbol watchlist. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
-- `ibkr watch --quotes [--timeout 5s] [--json]` — one-shot enriched quote monitor for the saved symbols. JSON rows include current `price` with `price_source`, currency, change, previous close, day/52-week ranges, volume/average volume, `price_as_of`, stale flags, session context, and compact stock holding context when the symbol is held.
+- `ibkr watch [--quotes] [--timeout 5s] [--json]` — one-shot enriched quote monitor for the saved symbols; this is the default watch action, and `--quotes` is an explicit alias. JSON rows include current `price` with `price_source`, currency, change, previous close, day/52-week ranges, volume/average volume, `price_as_of`, stale flags, session context, and compact stock holding context when the symbol is held.
+- `ibkr watch --list [--json]` — read only the local saved-symbol inventory without market data. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
 - `ibkr watch --watch [--rate 1s] [--timeout 5s]` — re-poll the enriched quote monitor for the saved symbols; no JSON mode because it is an in-place live view.
 - `ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]` — official embedded calendars for US cash equities, US listed options regular sessions, and German Xetra cash equities. Use this for "is the market open?", "when is the next session?", "is this an early close?", and holiday/long-weekend context before risk checks. `--next` is a calendar-day horizon capped at 400. Other markets and asset classes are not modeled in v1; outside embedded coverage returns `state: "unknown"` rather than a weekday guess.
 - `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".

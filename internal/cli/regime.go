@@ -248,7 +248,7 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	// renderer keeps its own flow below so the verdict/punch-line block
 	// reads first and the SPY/VIX tape lands immediately above the audit
 	// rows it anchors.
-	renderCommandHero(out,
+	renderCommandHero(env, out,
 		"Risk Regime",
 		r.AsOf.Format("2006-01-02 15:04 MST"),
 		"",

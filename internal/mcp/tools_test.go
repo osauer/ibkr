@@ -280,13 +280,16 @@ func TestIbkrWatchSchemaHasQuoteParams(t *testing.T) {
 	if !strings.Contains(tool.Description, "decision-making monitor") {
 		t.Fatalf("ibkr_watch description should explain the enriched quote use case:\n%s", tool.Description)
 	}
+	if !strings.Contains(schema.Properties["include_quotes"].Description, "default true") {
+		t.Fatalf("include_quotes description should document the quote-default behavior: %q", schema.Properties["include_quotes"].Description)
+	}
 }
 
 func TestWatchlistQuoteContractUsesHoldingRoute(t *testing.T) {
 	t.Parallel()
 	got := watchlistQuoteContract("MBG", &rpc.WatchlistHolding{Currency: "EUR", Exchange: "IBIS"})
-	if got.Currency != "EUR" || got.Exchange != "IBIS" {
-		t.Fatalf("watchlistQuoteContract route = %+v, want EUR/IBIS", got)
+	if got.Currency != "EUR" || got.Market != "de" || got.Exchange != "" {
+		t.Fatalf("watchlistQuoteContract route = %+v, want market=de EUR", got)
 	}
 }
 

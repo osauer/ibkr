@@ -369,6 +369,194 @@ func TestQuoteDataTypeNameFallbacks(t *testing.T) {
 	}
 }
 
+func TestQuoteFallbackReadyWaitsBrieflyForLastTick(t *testing.T) {
+	t.Parallel()
+	mark := 456.50
+	q := &rpc.Quote{Mark: &mark}
+
+	if quoteFallbackReady(q, time.Now(), 5*time.Second) {
+		t.Fatal("mark-only fallback should wait briefly so a last tick can arrive")
+	}
+	if !quoteFallbackReady(q, time.Now().Add(-time.Second), 5*time.Second) {
+		t.Fatal("mark-only fallback should become usable after the grace window")
+	}
+}
+
+func TestApplyQuoteHistoricalFallback(t *testing.T) {
+	t.Parallel()
+	loc := mustLocation(t, "America/New_York")
+	q := &rpc.Quote{
+		Symbol: "IBM",
+		AsOf:   time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+	}
+	bars := []ibkrlib.HistoricalBar{
+		{Date: "20260521", Time: time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC), Close: 449.00, High: 452.00, Low: 447.00, Volume: 2_000_000},
+		{Date: "20260522", Time: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC), Close: 456.50, High: 459.25, Low: 454.75, Volume: 3_000_000},
+	}
+
+	applyQuoteHistoricalFallback(q, marketcal.MarketUSEquity, bars)
+	(&Server{}).decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.Price == nil || *q.Price != 456.50 {
+		t.Fatalf("Price = %v, want latest daily close", q.Price)
+	}
+	if q.PriceSource != "historical_close" {
+		t.Fatalf("PriceSource = %q, want historical_close", q.PriceSource)
+	}
+	if q.PrevClose == nil || *q.PrevClose != 449.00 {
+		t.Fatalf("PrevClose = %v, want prior daily close", q.PrevClose)
+	}
+	if q.Change == nil || *q.Change != 7.50 {
+		t.Fatalf("Change = %v, want 7.50", q.Change)
+	}
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-22T16:00:00-04:00"; got != want {
+		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+	if got, want := q.PriceAsOf, "At close: May 22 at 04:00:00 PM EDT"; got != want {
+		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+}
+
+func TestQuoteNeedsHistoricalFallbackWithPrevCloseOnly(t *testing.T) {
+	t.Parallel()
+	prev := 456.50
+	if !quoteNeedsHistoricalFallback(&rpc.Quote{PrevClose: &prev}) {
+		t.Fatal("prev-close-only quote should still try historical fallback for latest close/range/volume context")
+	}
+	mark := 456.50
+	if quoteNeedsHistoricalFallback(&rpc.Quote{Mark: &mark}) {
+		t.Fatal("mark price should be enough quote context without historical fallback")
+	}
+}
+
+func TestQuoteNeedsClosedMarketHistoricalContext(t *testing.T) {
+	t.Parallel()
+	loc := mustLocation(t, "America/New_York")
+	mark, prev := 456.50, 456.50
+	holiday := &rpc.Quote{
+		Symbol:    "IBM",
+		Mark:      &mark,
+		PrevClose: &prev,
+		AsOf:      time.Date(2026, 5, 25, 15, 0, 0, 0, loc), // Memorial Day.
+	}
+	if !quoteNeedsClosedMarketHistoricalContext(holiday, marketcal.MarketUSEquity) {
+		t.Fatal("closed-market mark/prev-close-only quote should fetch historical context")
+	}
+
+	last := 456.50
+	closedWithLast := &rpc.Quote{
+		Symbol:    "IBM",
+		Last:      &last,
+		PrevClose: &prev,
+		AsOf:      time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+	}
+	if quoteNeedsClosedMarketHistoricalContext(closedWithLast, marketcal.MarketUSEquity) {
+		t.Fatal("closed-market quote with a last price should not need historical replacement")
+	}
+
+	open := &rpc.Quote{
+		Symbol:    "IBM",
+		Mark:      &mark,
+		PrevClose: &prev,
+		AsOf:      time.Date(2026, 5, 26, 10, 0, 0, 0, loc),
+	}
+	if quoteNeedsClosedMarketHistoricalContext(open, marketcal.MarketUSEquity) {
+		t.Fatal("open-market quote should not fetch historical close context")
+	}
+}
+
+func TestQuoteNeedsHistoricalContextFillsClosedMarketMetadata(t *testing.T) {
+	t.Parallel()
+	loc := mustLocation(t, "America/New_York")
+	last, prev, dayLow, dayHigh, weekLow, weekHigh, avgVol := 456.50, 449.00, 454.75, 459.25, 400.00, 500.00, int64(3_000_000)
+	closedMissingRanges := &rpc.Quote{
+		Symbol:    "IBM",
+		Last:      &last,
+		PrevClose: &prev,
+		AsOf:      time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+	}
+	if !quoteNeedsHistoricalContext(closedMissingRanges, marketcal.MarketUSEquity) {
+		t.Fatal("closed-market quote should fetch historical context when range/volume metadata is missing")
+	}
+
+	complete := &rpc.Quote{
+		Symbol:     "IBM",
+		Last:       &last,
+		PrevClose:  &prev,
+		DayLow:     &dayLow,
+		DayHigh:    &dayHigh,
+		Week52Low:  &weekLow,
+		Week52High: &weekHigh,
+		AvgVolume:  &avgVol,
+		AsOf:       time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+	}
+	if quoteNeedsHistoricalContext(complete, marketcal.MarketUSEquity) {
+		t.Fatal("complete closed-market quote should not fetch historical context")
+	}
+}
+
+func TestQuoteHistoricalFallbackTimeoutCapsAtQuoteBudget(t *testing.T) {
+	t.Parallel()
+	if got := quoteHistoricalFallbackTimeout(2 * time.Second); got != 2*time.Second {
+		t.Fatalf("short quote timeout = %s, want 2s", got)
+	}
+	if got := quoteHistoricalFallbackTimeout(30 * time.Second); got != 5*time.Second {
+		t.Fatalf("long quote timeout cap = %s, want 5s", got)
+	}
+}
+
+func TestQuoteHistoricalContractUsesQuoteRoute(t *testing.T) {
+	t.Parallel()
+	got := quoteHistoricalContract(&rpc.Quote{
+		Symbol: "MBG",
+		Contract: rpc.ContractParams{
+			Symbol:  "MBG",
+			SecType: "STK",
+			Market:  "de",
+		},
+	})
+	if got.Symbol != "MBG" || got.SecType != "STK" || got.Exchange != "SMART" || got.PrimaryExch != "IBIS" || got.Currency != "EUR" {
+		t.Fatalf("quoteHistoricalContract = %+v, want SMART/IBIS/EUR route", got)
+	}
+}
+
+func TestApplyQuoteHistoricalFallbackPreservesLastPrice(t *testing.T) {
+	t.Parallel()
+	loc := mustLocation(t, "America/New_York")
+	last := 456.25
+	q := &rpc.Quote{
+		Symbol: "IBM",
+		Last:   &last,
+		AsOf:   time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+	}
+	bars := []ibkrlib.HistoricalBar{
+		{Date: "20260521", Time: time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC), Close: 449.00, High: 452.00, Low: 447.00, Volume: 2_000_000},
+		{Date: "20260522", Time: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC), Close: 456.50, High: 459.25, Low: 454.75, Volume: 3_000_000},
+	}
+
+	applyQuoteHistoricalFallback(q, marketcal.MarketUSEquity, bars)
+	(&Server{}).decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.Price == nil || *q.Price != last {
+		t.Fatalf("Price = %v, want last %.2f", q.Price, last)
+	}
+	if q.PriceSource != "last" {
+		t.Fatalf("PriceSource = %q, want last", q.PriceSource)
+	}
+	if q.PrevClose == nil || *q.PrevClose != 449.00 {
+		t.Fatalf("PrevClose = %v, want prior daily close", q.PrevClose)
+	}
+	if q.Week52Low == nil || q.Week52High == nil || *q.Week52Low != 447.00 || *q.Week52High != 459.25 {
+		t.Fatalf("52w range = %v/%v, want historical low/high", q.Week52Low, q.Week52High)
+	}
+	if q.AvgVolume == nil || *q.AvgVolume != 2_500_000 {
+		t.Fatalf("AvgVolume = %v, want historical average volume", q.AvgVolume)
+	}
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-22T16:00:00-04:00"; got != want {
+		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+}
+
 // closestStrike picks the strike closest to spot. Verifies the tie-break
 // rule (lower wins) and the boundary cases at both ends of the array.
 func TestClosestStrike(t *testing.T) {
@@ -819,6 +1007,39 @@ func TestDecorateQuotePrevCloseUsesPriorMarketClose(t *testing.T) {
 	}
 	if q.Stale {
 		t.Fatalf("holiday prev-close quote should not be stale during closed market: %s", q.StaleReason)
+	}
+}
+
+func TestDecorateQuoteLastWithoutExchangeTimestampUsesMarketCloseWhenClosed(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "Europe/Berlin")
+	last, prev := 50.81, 50.12
+	q := &rpc.Quote{
+		Symbol:    "MBG",
+		Last:      &last,
+		PrevClose: &prev,
+		DataType:  rpc.MarketDataLive,
+		AsOf:      time.Date(2026, 5, 25, 21, 15, 0, 0, loc),
+	}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketDEXetra)
+	srv.decorateQuote(q, marketcal.MarketDEXetra)
+
+	if q.Price == nil || *q.Price != last {
+		t.Fatalf("Price = %v, want last %.2f", q.Price, last)
+	}
+	if q.PriceSource != "last" {
+		t.Fatalf("PriceSource = %q, want last", q.PriceSource)
+	}
+	if q.Change == nil || math.Abs(*q.Change-0.69) > 0.0001 {
+		t.Fatalf("Change = %v, want 0.69", q.Change)
+	}
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-25T17:30:00+02:00"; got != want {
+		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+	if got, want := q.PriceAsOf, "As of: May 25 at 05:30:00 PM CEST"; got != want {
+		t.Fatalf("PriceAsOf = %q, want %q", got, want)
 	}
 }
 

@@ -414,6 +414,75 @@ func TestFetchHistoricalDailyBarsUsesSmartExchange(t *testing.T) {
 	}
 }
 
+func TestFetchHistoricalDailyBarsWithContractUsesExplicitRoute(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	var out bytes.Buffer
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.contractCache["MBG"] = ContractDetailsLite{
+		ConID:        1234568,
+		Symbol:       "MBG",
+		LocalSymbol:  "MBG",
+		TradingClass: "MBG",
+		Exchange:     "SMART",
+		PrimaryExch:  "IBIS",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		var reqID int
+		for time.Now().Before(deadline) {
+			c.historicalMu.Lock()
+			for id := range c.historicalReqs {
+				reqID = id
+				break
+			}
+			c.historicalMu.Unlock()
+			if reqID != 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if reqID != 0 {
+			fields := []string{
+				strconv.Itoa(msgHistoricalData),
+				strconv.Itoa(reqID),
+				"1",
+				"20260525",
+				"50.50",
+				"51.15",
+				"50.23",
+				"50.81",
+				"3000000",
+				"50.80",
+				"900",
+			}
+			c.handleHistoricalData(fields)
+		}
+		close(done)
+	}()
+
+	contract := Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR"}
+	if _, err := c.FetchHistoricalDailyBarsWithContract(contract, 10, time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	<-done
+
+	payload := out.Bytes()
+	for _, want := range [][]byte{[]byte("MBG"), []byte("SMART"), []byte("IBIS"), []byte("EUR"), []byte("TRADES")} {
+		if !bytes.Contains(payload, want) {
+			t.Fatalf("expected historical request to include %q, payload=%q", want, payload)
+		}
+	}
+}
+
 func TestFetchHistoricalDailyBarsFallbackToPrimaryExchange(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	conn := NewConnection(nil)

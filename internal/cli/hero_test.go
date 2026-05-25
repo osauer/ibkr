@@ -12,7 +12,7 @@ import (
 func TestRenderCommandHero_TitleOnly(t *testing.T) {
 	t.Parallel()
 	var b bytes.Buffer
-	renderCommandHero(&b, "Risk Regime", "", "", "")
+	renderCommandHero(nil, &b, "Risk Regime", "", "", "")
 	out := b.String()
 	if !strings.HasPrefix(out, "\n") {
 		t.Errorf("expected leading blank line, got %q", out)
@@ -30,7 +30,7 @@ func TestRenderCommandHero_TitleOnly(t *testing.T) {
 func TestRenderCommandHero_TitlePlusTimestamp(t *testing.T) {
 	t.Parallel()
 	var b bytes.Buffer
-	renderCommandHero(&b, "Dealer γ-zero · SPY+SPX", "06:25 CEST", "", "")
+	renderCommandHero(nil, &b, "Dealer γ-zero · SPY+SPX", "06:25 CEST", "", "")
 	out := b.String()
 	if !strings.Contains(out, "Dealer γ-zero · SPY+SPX  ·  06:25 CEST") {
 		t.Errorf("title and timestamp should share one line with · separator:\n%q", out)
@@ -43,7 +43,7 @@ func TestRenderCommandHero_TitlePlusTimestamp(t *testing.T) {
 func TestRenderCommandHero_TitleTimestampAnchorSummary(t *testing.T) {
 	t.Parallel()
 	var b bytes.Buffer
-	renderCommandHero(&b,
+	renderCommandHero(nil, &b,
 		"Risk Regime",
 		"2026-05-23 06:25 CEST",
 		"SPY 743.73  +1.01 (+0.14%)    VIX 16.70 (−0.36%)",
@@ -64,13 +64,28 @@ func TestRenderCommandHero_TitleTimestampAnchorSummary(t *testing.T) {
 	}
 }
 
+func TestRenderCommandHero_HighlightsSummaryWhenColorEnabled(t *testing.T) {
+	t.Parallel()
+	var b bytes.Buffer
+	renderCommandHero(&Env{Color: true}, &b,
+		"Dealer gamma",
+		"06:25 CEST",
+		"SPY 743.73",
+		"Zero-gamma: SPY 740")
+	out := b.String()
+	want := ansiBold + ansiYellow + "Zero-gamma: SPY 740" + ansiReset
+	if !strings.Contains(out, want) {
+		t.Fatalf("summary should be bold-highlighted with color enabled:\n%q", out)
+	}
+}
+
 // TestRenderCommandHero_EmptySummary pins that an empty summary doesn't
 // inject a stray blank line between anchor and the trailing newline.
 // The expected shape: title+timestamp, blank, anchor, blank.
 func TestRenderCommandHero_EmptySummary(t *testing.T) {
 	t.Parallel()
 	var b bytes.Buffer
-	renderCommandHero(&b, "Dealer γ-zero", "06:25 CEST",
+	renderCommandHero(nil, &b, "Dealer γ-zero", "06:25 CEST",
 		"SPY 743.73  ·  computed 06:25 CEST · 34m ago", "")
 	out := b.String()
 	lines := strings.Split(out, "\n")
@@ -90,7 +105,7 @@ func TestRenderCommandHero_EmptySummary(t *testing.T) {
 func TestRenderCommandHero_MultiLineAnchorCollapsed(t *testing.T) {
 	t.Parallel()
 	var b bytes.Buffer
-	renderCommandHero(&b, "Title", "10:00",
+	renderCommandHero(nil, &b, "Title", "10:00",
 		"SPY 743.73\nVIX 16.70", "")
 	out := b.String()
 	// Anchor line should be one line containing both values.

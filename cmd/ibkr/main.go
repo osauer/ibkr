@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -85,9 +86,8 @@ func main() {
 
 	color := cli.ShouldColor(os.Stdout)
 
-	// `ibkr watch` is local metadata unless --quotes or --watch is actively
-	// quoting saved symbols. Keep add/remove/list/clear usable without a
-	// gateway.
+	// `ibkr watch` defaults to the quote monitor, but add/remove/list/clear
+	// stay local metadata so they remain usable without a gateway.
 	if cmd == "watch" && !isWatchDaemonInvocation(rest) {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
@@ -205,11 +205,20 @@ func isStreamingInvocation(cmd string, args []string) bool {
 }
 
 func isWatchDaemonInvocation(args []string) bool {
+	localOnly := false
 	for _, a := range args {
+		name := strings.TrimLeft(a, "-")
+		if i := strings.Index(name, "="); i >= 0 {
+			name = name[:i]
+		}
 		switch a {
 		case "--watch", "-watch", "--watch=true", "--quotes", "-quotes", "--quotes=true":
 			return true
 		}
+		switch name {
+		case "add", "remove", "clear", "list":
+			localOnly = true
+		}
 	}
-	return false
+	return !localOnly
 }
