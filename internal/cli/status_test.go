@@ -265,11 +265,38 @@ func TestRenderStatus_FlightDeckShape(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_VersionDrift(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Version: "v1.2.4"}
+	res := &rpc.HealthResult{
+		DaemonVersion: "v1.2.3",
+		UptimeSeconds: 1842,
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   7496,
+		ClientID:      15,
+		Connected:     true,
+		ServerVersion: 203,
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Gateway  ATTENTION",
+		"Daemon         v1.2.3, up 30m42s",
+		"Next concern   CLI version v1.2.4 differs from daemon v1.2.3; restart daemon to pick up the new binary",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestNextConcernPriority(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		in   rpc.HealthResult
+		cli  string
 		want string
 	}{
 		{
@@ -280,7 +307,18 @@ func TestNextConcernPriority(t *testing.T) {
 		{
 			name: "handshake pending",
 			in:   rpc.HealthResult{},
+			cli:  "v1.2.4",
 			want: "Gateway handshake still in progress",
+		},
+		{
+			name: "version drift before market data",
+			in: rpc.HealthResult{
+				DaemonVersion: "v1.2.3",
+				Connected:     true,
+				DataType:      rpc.MarketDataFrozen,
+			},
+			cli:  "v1.2.4",
+			want: "CLI version v1.2.4 differs from daemon v1.2.3; restart daemon to pick up the new binary",
 		},
 		{
 			name: "market data before members",
@@ -315,7 +353,7 @@ func TestNextConcernPriority(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := nextConcern(tc.in)
+			got := nextConcern(tc.in, tc.cli)
 			if got.Text != tc.want {
 				t.Fatalf("nextConcern(%+v) = %q, want %q", tc.in, got.Text, tc.want)
 			}
@@ -328,6 +366,7 @@ func TestStatusVerdict(t *testing.T) {
 	cases := []struct {
 		name string
 		in   rpc.HealthResult
+		cli  string
 		want string
 	}{
 		{
@@ -342,6 +381,12 @@ func TestStatusVerdict(t *testing.T) {
 				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
 			},
 			want: "READY",
+		},
+		{
+			name: "version drift",
+			in:   rpc.HealthResult{DaemonVersion: "v1.2.3", Connected: true},
+			cli:  "v1.2.4",
+			want: "ATTENTION",
 		},
 		{
 			name: "market data warning",
@@ -361,9 +406,34 @@ func TestStatusVerdict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := statusVerdict(tc.in)
+			got := statusVerdict(tc.in, tc.cli)
 			if got.Text != tc.want {
 				t.Fatalf("statusVerdict(%+v) = %q, want %q", tc.in, got.Text, tc.want)
+			}
+		})
+	}
+}
+
+func TestDaemonVersionDrift(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		daemon string
+		cli    string
+		want   bool
+	}{
+		{name: "same", daemon: "v1.2.3", cli: "v1.2.3"},
+		{name: "different", daemon: "v1.2.3", cli: "v1.2.4", want: true},
+		{name: "empty cli quiet", daemon: "v1.2.3"},
+		{name: "empty daemon quiet", cli: "v1.2.3"},
+		{name: "dev cli quiet", daemon: "v1.2.3", cli: "dev"},
+		{name: "dev daemon quiet", daemon: "dev", cli: "v1.2.3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := daemonVersionDrift(tc.daemon, tc.cli)
+			if got != tc.want {
+				t.Fatalf("daemonVersionDrift(%q, %q) = %v, want %v", tc.daemon, tc.cli, got, tc.want)
 			}
 		})
 	}

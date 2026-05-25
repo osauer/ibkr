@@ -24,6 +24,10 @@ type Env struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Conn   *dial.Conn
+	// Version is the running CLI version stamped by cmd/ibkr. Empty in
+	// renderer tests and local-only helper paths that do not need parity
+	// checks against the daemon.
+	Version string
 	// Color is true when ANSI color escapes should be emitted on Stdout.
 	// Computed once in main.go via ShouldColor(Stdout) so renderers don't
 	// re-syscall stat() per value. Defaults to false in tests (Stdout is
