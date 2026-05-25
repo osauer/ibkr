@@ -62,43 +62,30 @@ func runStatus(ctx context.Context, env *Env, args []string) int {
 func renderStatusText(env *Env, res *rpc.HealthResult) {
 	out := env.Stdout
 
-	// State is the headline signal: ok / degraded / starting. Color it so
-	// the answer to "is the gateway up?" lands on the first line without
-	// having to scan the Connected row. degraded → yellow (warning,
-	// matches the data-type badges); starting → dim (transient, no
-	// action needed); ok → plain.
-	state := "ok"
-	connecting := false
-	if !res.Connected {
-		if res.LastError != "" {
-			state = env.yellow("degraded ⚠ gateway not connected")
-		} else {
-			state = env.dim("starting · gateway handshake in progress")
-			connecting = true
-		}
-	}
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "ibkr daemon %s  ·  uptime %s  ·  %s\n",
-		res.DaemonVersion, time.Duration(res.UptimeSeconds)*time.Second, state)
+	fmt.Fprintf(out, "IBKR Gateway  %s\n", env.statusBadge(statusVerdict(*res)))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Account:        %s\n", nonEmpty(res.Account, "auto-detect"))
-	fmt.Fprintf(out, "  Gateway:        %s:%d %s\n", res.GatewayHost, res.GatewayPort, formatGatewayBadge(*res))
-	if len(res.Alternates) > 0 {
-		fmt.Fprintf(out, "                  also up: %s\n", joinPorts(res.Alternates))
-	}
-	fmt.Fprintf(out, "  Client ID:      %d\n", res.ClientID)
-	// Bold the Connected value: it's the single hero answer per screen —
-	// everything else on the page is context for this one yes/no.
-	fmt.Fprintf(out, "  Connected:      %s\n", env.bold(fmt.Sprintf("%v", res.Connected)))
+
+	statusRow(env, out, "Session", formatSessionValue(*res))
+	statusRow(env, out, "Market data", formatMarketDataValue(env, *res))
+	statusRow(env, out, "Daemon", formatDaemonValue(*res))
 	switch {
 	case res.Connected:
-		fmt.Fprintf(out, "  Server version: %d\n", res.ServerVersion)
-		dt := nonEmpty(res.DataType, rpc.MarketDataLive)
-		if !rpc.IsLiveDataType(res.DataType) {
-			dt = env.yellow(dt + " ⚠")
-		}
-		fmt.Fprintf(out, "  Data type:      %s\n", dt)
-	case connecting:
+		statusRow(env, out, "TWS", formatTWSValue(*res))
+	case isHandshakeInFlight(*res):
+		statusRow(env, out, "TWS", env.dim("handshake in progress"))
+	default:
+		statusRow(env, out, "TWS", env.red("not connected"))
+	}
+	if len(res.BackgroundTasks) > 0 {
+		statusRow(env, out, "Background", formatBackgroundTasks(res.BackgroundTasks))
+	}
+	if members := formatMembersValue(res.Members); members != "" {
+		statusRow(env, out, "SPX members", members)
+	}
+	statusRow(env, out, "Next concern", env.concernText(nextConcern(*res)))
+
+	if isHandshakeInFlight(*res) {
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "  Handshake did not complete within %s. Check the daemon log for\n", handshakeWaitBudget)
 		fmt.Fprintln(out, "  the underlying error, then verify in IB Gateway:")
@@ -106,66 +93,186 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 		fmt.Fprintln(out, "    Trusted IPs include 127.0.0.1 (or empty)")
 		fmt.Fprintln(out, "    Login fully completed (not paused at 2FA)")
 		fmt.Fprintln(out, env.dim("  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log"))
-	default:
-		if res.LastError != "" {
-			fmt.Fprintf(out, "  Reason:         %s\n", env.red(res.LastError))
-		}
+	} else if !res.Connected {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, env.dim("  Daemon log: ~/.local/state/ibkr/ibkr-daemon.log"))
-	}
-	// Surface daemon-internal long-running work the user can't see
-	// from the CLI otherwise. Empty list → omit the line entirely
-	// (idle is the common case). Stable wire tokens are mapped to
-	// short noun phrases so the row reads as English when one or
-	// more long-running computes (breadth-spx refresh, gamma-zero
-	// compute) are in flight at the same time.
-	if len(res.BackgroundTasks) > 0 {
-		phrases := make([]string, 0, len(res.BackgroundTasks))
-		for _, t := range res.BackgroundTasks {
-			phrases = append(phrases, backgroundTaskPhrase(t.Name))
-		}
-		fmt.Fprintf(out, "  Background:     %s\n", strings.Join(phrases, ", "))
-	}
-	if line := formatMembersLine(res.Members); line != "" {
-		fmt.Fprintln(out, line)
 	}
 	fmt.Fprintln(out)
 }
 
-// formatMembersLine renders the S&P500 members row that lives under the
-// breadth surface. Returns the empty string when the daemon hasn't
-// populated the field (engine construction failed) — caller omits the
-// line entirely in that case.
-//
-// Healthy line (refresh state implicit):
-//
-//	S&P500 members: cache:2026-05-22  count:503
-//
-// Unhealthy / pinned variants:
-//
-//	S&P500 members: embedded:2026-05-22  count:503  refresh:parse_failed
-//	S&P500 members: cache:2026-05-22     count:503  refresh:disabled (env)
-//
-// The bracketed `refresh:` segment is omitted in the healthy case —
-// the source token + as_of already carry the answer to "is my data
-// fresh?" Surfacing the refresh state only when it needs attention
-// keeps the steady-state row uncluttered.
-func formatMembersLine(m rpc.MembersHealth) string {
+func statusRow(env *Env, out io.Writer, label, value string) {
+	fmt.Fprintf(out, "%s %s\n", env.dim(fmt.Sprintf("%-14s", label)), value)
+}
+
+type statusConcernLevel int
+
+const (
+	statusConcernNone statusConcernLevel = iota
+	statusConcernNotice
+	statusConcernWarn
+	statusConcernBad
+)
+
+type statusConcern struct {
+	Text  string
+	Level statusConcernLevel
+}
+
+func statusVerdict(res rpc.HealthResult) statusConcern {
+	concern := nextConcern(res)
+	switch {
+	case isHandshakeInFlight(res):
+		return statusConcern{Text: "STARTING", Level: statusConcernNotice}
+	case !res.Connected:
+		return statusConcern{Text: "OFFLINE", Level: statusConcernBad}
+	case concern.Level == statusConcernWarn || concern.Level == statusConcernBad:
+		return statusConcern{Text: "ATTENTION", Level: statusConcernWarn}
+	default:
+		return statusConcern{Text: "READY", Level: statusConcernNone}
+	}
+}
+
+func (e *Env) statusBadge(c statusConcern) string {
+	text := e.bold(c.Text)
+	switch c.Level {
+	case statusConcernBad:
+		return e.red(text)
+	case statusConcernWarn:
+		return e.yellow(text)
+	case statusConcernNotice:
+		return e.dim(text)
+	default:
+		return e.green(text)
+	}
+}
+
+func (e *Env) concernText(c statusConcern) string {
+	switch c.Level {
+	case statusConcernBad:
+		return e.red(c.Text)
+	case statusConcernWarn:
+		return e.yellow(c.Text)
+	case statusConcernNotice:
+		return e.dim(c.Text)
+	default:
+		return e.green(c.Text)
+	}
+}
+
+func nextConcern(res rpc.HealthResult) statusConcern {
+	switch {
+	case !res.Connected && res.LastError != "":
+		return statusConcern{Text: "Gateway offline: " + res.LastError, Level: statusConcernBad}
+	case isHandshakeInFlight(res):
+		return statusConcern{Text: "Gateway handshake still in progress", Level: statusConcernNotice}
+	case res.Connected && !rpc.IsLiveDataType(res.DataType):
+		return statusConcern{Text: "Market data is " + dataTypeLabel(res.DataType), Level: statusConcernWarn}
+	case res.Connected && res.GatewayTLS != res.NegotiatedTLS:
+		return statusConcern{
+			Text:  fmt.Sprintf("TLS fallback: configured %v, negotiated %v", res.GatewayTLS, res.NegotiatedTLS),
+			Level: statusConcernWarn,
+		}
+	case membersRefreshNeedsAttention(res.Members):
+		return statusConcern{Text: "SPX members refresh " + res.Members.RefreshState, Level: statusConcernWarn}
+	case len(res.BackgroundTasks) > 0:
+		return statusConcern{Text: "Background work: " + formatBackgroundTasks(res.BackgroundTasks), Level: statusConcernNotice}
+	default:
+		return statusConcern{Text: "None", Level: statusConcernNone}
+	}
+}
+
+func formatSessionValue(res rpc.HealthResult) string {
+	account := nonEmpty(res.Account, "auto-detect")
+	endpoint := formatGatewayAddress(res)
+	value := fmt.Sprintf("%s via %s %s, client %d", account, endpoint, formatGatewayBadge(res), res.ClientID)
+	if len(res.Alternates) > 0 {
+		value += "; also up: " + joinPorts(res.Alternates)
+	}
+	return value
+}
+
+func formatGatewayAddress(res rpc.HealthResult) string {
+	host := nonEmpty(res.GatewayHost, "auto-detect")
+	if res.GatewayPort == 0 {
+		return host
+	}
+	return fmt.Sprintf("%s:%d", host, res.GatewayPort)
+}
+
+func formatMarketDataValue(env *Env, res rpc.HealthResult) string {
+	if !res.Connected {
+		return env.dim("unavailable until connected")
+	}
+	label := dataTypeLabel(nonEmpty(res.DataType, rpc.MarketDataLive))
+	if !rpc.IsLiveDataType(res.DataType) {
+		return env.yellow(label + " ⚠")
+	}
+	return label
+}
+
+func dataTypeLabel(dt string) string {
+	dt = nonEmpty(dt, rpc.MarketDataLive)
+	switch dt {
+	case rpc.MarketDataLive:
+		return "Live"
+	case rpc.MarketDataFrozen:
+		return "Frozen"
+	case rpc.MarketDataDelayed:
+		return "Delayed"
+	case rpc.MarketDataDelayedFrozen:
+		return "Delayed frozen"
+	default:
+		return dt
+	}
+}
+
+func formatDaemonValue(res rpc.HealthResult) string {
+	uptime := time.Duration(res.UptimeSeconds) * time.Second
+	if uptime <= 0 {
+		return nonEmpty(res.DaemonVersion, "unknown") + ", just started"
+	}
+	return fmt.Sprintf("%s, up %s", nonEmpty(res.DaemonVersion, "unknown"), uptime)
+}
+
+func formatTWSValue(res rpc.HealthResult) string {
+	if res.ServerVersion == 0 {
+		return "connected, API server unknown"
+	}
+	return fmt.Sprintf("API server %d", res.ServerVersion)
+}
+
+func formatBackgroundTasks(tasks []rpc.BackgroundTaskStatus) string {
+	phrases := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		phrases = append(phrases, backgroundTaskPhrase(t.Name))
+	}
+	return strings.Join(phrases, ", ")
+}
+
+// formatMembersValue renders the S&P 500 members metadata that lives
+// under the breadth surface. Returns the empty string when the daemon
+// hasn't populated the field yet.
+func formatMembersValue(m rpc.MembersHealth) string {
 	if m.Source == "" {
 		return ""
 	}
-	asOf := "—"
+	asOf := "unknown"
 	if !m.AsOf.IsZero() {
 		asOf = m.AsOf.Format("2006-01-02")
 	}
-	base := fmt.Sprintf("  S&P500 members: %s:%s  count:%d", m.Source, asOf, m.Count)
-	// Empty / "healthy" → omit the refresh: tail. Disabled and
-	// failure states render explicitly so a user looking at
-	// unexpected breadth values can spot the cause in one glance.
-	if m.RefreshState == "" || m.RefreshState == "healthy" {
+	name := "names"
+	if m.Count == 1 {
+		name = "name"
+	}
+	base := fmt.Sprintf("%s:%s, %d %s", m.Source, asOf, m.Count, name)
+	if !membersRefreshNeedsAttention(m) {
 		return base
 	}
-	return base + "  refresh:" + m.RefreshState
+	return base + ", refresh " + m.RefreshState
+}
+
+func membersRefreshNeedsAttention(m rpc.MembersHealth) bool {
+	return m.Source != "" && m.RefreshState != "" && m.RefreshState != "healthy"
 }
 
 // isHandshakeInFlight reports whether the daemon has reported neither a

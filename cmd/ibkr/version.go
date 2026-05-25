@@ -29,7 +29,10 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"time"
+
+	"github.com/osauer/ibkr/internal/cli"
 )
 
 // versionInfo is the wire+text shape returned by collectVersionInfo.
@@ -134,29 +137,152 @@ func printVersion(w io.Writer, program string, jsonOut bool) {
 		_, _ = w.Write([]byte("\n"))
 		return
 	}
-	fmt.Fprintf(w, "%s %s\n", v.Program, v.Version)
-	// Commit line: print whenever there's *something* to say. A stripped
-	// binary may have no commit but still carry vcs.modified — surface
-	// the state alone in that case.
+	renderVersionText(w, v, versionTextStyle{color: cli.ShouldColor(w)})
+}
+
+func renderVersionText(w io.Writer, v versionInfo, style versionTextStyle) {
+	fmt.Fprintf(w, "%s  %s\n", programDisplayName(v.Program), style.versionBadge(v.Version))
+	fmt.Fprintln(w)
+	versionRow(w, style, "Commit", formatVersionCommit(v))
+	versionRow(w, style, "Built", nonEmptyVersion(formatVersionTime(v.Built), "not stamped"))
+	versionRow(w, style, "Runtime", fmt.Sprintf("%s %s/%s", v.GoVersion, v.GOOS, v.GOARCH))
+	if v.Binary != "" {
+		versionRow(w, style, "Binary", v.Binary)
+	}
+	if v.BinaryMtime != "" {
+		versionRow(w, style, "Modified", formatVersionTime(v.BinaryMtime))
+	}
+	trust := versionTrust(v)
+	versionRow(w, style, "Trust", style.trustText(trust))
+}
+
+func versionRow(w io.Writer, style versionTextStyle, label, value string) {
+	fmt.Fprintf(w, "%s %s\n", style.dim(fmt.Sprintf("%-12s", label)), value)
+}
+
+func programDisplayName(program string) string {
+	switch strings.TrimSpace(program) {
+	case "ibkr":
+		return "IBKR CLI"
+	case "ibkr daemon":
+		return "IBKR Daemon"
+	default:
+		return program
+	}
+}
+
+func formatVersionCommit(v versionInfo) string {
 	switch {
 	case v.Commit != "" && v.VCSState != "":
-		fmt.Fprintf(w, "  %-8s %s (%s)\n", "Commit:", shortCommit(v.Commit), v.VCSState)
+		return fmt.Sprintf("%s, %s tree", shortCommit(v.Commit), v.VCSState)
 	case v.Commit != "":
-		fmt.Fprintf(w, "  %-8s %s\n", "Commit:", shortCommit(v.Commit))
+		return shortCommit(v.Commit)
 	case v.VCSState != "":
-		fmt.Fprintf(w, "  %-8s (%s)\n", "Commit:", v.VCSState)
+		return v.VCSState + " tree, no commit stamp"
+	default:
+		return "not stamped"
 	}
-	if v.Built != "" {
-		fmt.Fprintf(w, "  %-8s %s\n", "Built:", v.Built)
+}
+
+func formatVersionTime(s string) string {
+	if s == "" {
+		return ""
 	}
-	if v.Binary != "" {
-		if v.BinaryMtime != "" {
-			fmt.Fprintf(w, "  %-8s %s (mtime %s)\n", "Binary:", v.Binary, v.BinaryMtime)
-		} else {
-			fmt.Fprintf(w, "  %-8s %s\n", "Binary:", v.Binary)
-		}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
 	}
-	fmt.Fprintf(w, "  %-8s %s %s/%s\n", "Go:", v.GoVersion, v.GOOS, v.GOARCH)
+	return t.Local().Format("2006-01-02 15:04 MST")
+}
+
+func nonEmptyVersion(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+type versionTrustLevel int
+
+const (
+	versionTrustOK versionTrustLevel = iota
+	versionTrustNotice
+	versionTrustWarn
+)
+
+type versionTrustStatus struct {
+	Text  string
+	Level versionTrustLevel
+}
+
+func versionTrust(v versionInfo) versionTrustStatus {
+	dirty := v.VCSState == "modified" || strings.Contains(v.Version, "-dirty")
+	switch {
+	case dirty:
+		return versionTrustStatus{Text: "dirty tree; rebuild after commit", Level: versionTrustWarn}
+	case v.Version == "dev" || v.Commit == "" || v.Built == "":
+		return versionTrustStatus{Text: "local build; provenance incomplete", Level: versionTrustWarn}
+	case v.VCSState == "clean":
+		return versionTrustStatus{Text: "stamped build, clean tree", Level: versionTrustOK}
+	default:
+		return versionTrustStatus{Text: "stamped build; tree state unavailable", Level: versionTrustNotice}
+	}
+}
+
+// versionTextStyle mirrors internal/cli's tiny ANSI palette. Kept local
+// because `ibkr version` is rendered before the normal CLI Env exists.
+type versionTextStyle struct {
+	color bool
+}
+
+const (
+	versionAnsiReset  = "\x1b[0m"
+	versionAnsiGreen  = "\x1b[32m"
+	versionAnsiYellow = "\x1b[33m"
+	versionAnsiDim    = "\x1b[2m"
+	versionAnsiBold   = "\x1b[1m"
+)
+
+func (s versionTextStyle) wrap(code, text string) string {
+	if !s.color {
+		return text
+	}
+	return code + text + versionAnsiReset
+}
+
+func (s versionTextStyle) green(text string) string {
+	return s.wrap(versionAnsiGreen, text)
+}
+
+func (s versionTextStyle) yellow(text string) string {
+	return s.wrap(versionAnsiYellow, text)
+}
+
+func (s versionTextStyle) dim(text string) string {
+	return s.wrap(versionAnsiDim, text)
+}
+
+func (s versionTextStyle) bold(text string) string {
+	return s.wrap(versionAnsiBold, text)
+}
+
+func (s versionTextStyle) versionBadge(version string) string {
+	text := s.bold(version)
+	if version == "dev" || strings.Contains(version, "-dirty") {
+		return s.yellow(text)
+	}
+	return s.green(text)
+}
+
+func (s versionTextStyle) trustText(trust versionTrustStatus) string {
+	switch trust.Level {
+	case versionTrustOK:
+		return s.green(trust.Text)
+	case versionTrustNotice:
+		return s.dim(trust.Text)
+	default:
+		return s.yellow(trust.Text)
+	}
 }
 
 // hasJSONFlag is the version subcommand's mini-parser. The subcommand

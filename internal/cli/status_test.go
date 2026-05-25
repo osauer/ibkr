@@ -13,7 +13,7 @@ import (
 )
 
 // TestRenderStatus_BackgroundLine pins the rendering contract: the
-// `Background:` line appears iff `result.BackgroundTasks` is non-empty;
+// `Background` line appears iff `result.BackgroundTasks` is non-empty;
 // wire tokens are mapped to short verb phrases (so the row reads as
 // English); phrases are comma-separated when multiple tasks run; an
 // unknown token falls through verbatim. Empty list omits the line.
@@ -33,7 +33,7 @@ func TestRenderStatus_BackgroundLine(t *testing.T) {
 		{
 			name:  "single task renders as verb phrase",
 			tasks: []rpc.BackgroundTaskStatus{{Name: "breadth-spx"}},
-			want:  "Background:     refreshing rolling SPX breadth",
+			want:  "Background     refreshing rolling SPX breadth",
 		},
 		{
 			name: "multiple tasks render comma-separated",
@@ -41,12 +41,12 @@ func TestRenderStatus_BackgroundLine(t *testing.T) {
 				{Name: "breadth-spx"},
 				{Name: "gamma-zero"},
 			},
-			want: "Background:     refreshing rolling SPX breadth, computing dealer zero-gamma",
+			want: "Background     refreshing rolling SPX breadth, computing dealer zero-gamma",
 		},
 		{
 			name:  "unknown token falls through verbatim",
 			tasks: []rpc.BackgroundTaskStatus{{Name: "future-task"}},
-			want:  "Background:     future-task",
+			want:  "Background     future-task",
 		},
 	}
 	for _, tc := range cases {
@@ -227,12 +227,154 @@ func TestWaitForHandshakeWritesProgressToWriter(t *testing.T) {
 	}
 }
 
-// TestFormatMembersLine pins the four rendering variants of the
+func TestRenderStatus_FlightDeckShape(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.HealthResult{
+		DaemonVersion: "v1.0.0",
+		UptimeSeconds: 1842,
+		Account:       "DU0000000",
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   4001,
+		PortOrigin:    "discovered",
+		ClientID:      17,
+		Connected:     true,
+		ServerVersion: 178,
+		Members: rpc.MembersHealth{
+			Source:       "cache",
+			AsOf:         time.Date(2026, time.May, 22, 0, 0, 0, 0, time.UTC),
+			Count:        503,
+			RefreshState: "healthy",
+		},
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Gateway  READY",
+		"Session        DU0000000 via 127.0.0.1:4001 (tls=false, discovered), client 17",
+		"Market data    Live",
+		"Daemon         v1.0.0, up 30m42s",
+		"TWS            API server 178",
+		"SPX members    cache:2026-05-22, 503 names",
+		"Next concern   None",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestNextConcernPriority(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   rpc.HealthResult
+		want string
+	}{
+		{
+			name: "gateway error wins",
+			in:   rpc.HealthResult{LastError: "dial timeout", DataType: rpc.MarketDataDelayed},
+			want: "Gateway offline: dial timeout",
+		},
+		{
+			name: "handshake pending",
+			in:   rpc.HealthResult{},
+			want: "Gateway handshake still in progress",
+		},
+		{
+			name: "market data before members",
+			in: rpc.HealthResult{
+				Connected: true,
+				DataType:  rpc.MarketDataFrozen,
+				Members:   rpc.MembersHealth{Source: "cache", RefreshState: "parse_failed"},
+			},
+			want: "Market data is Frozen",
+		},
+		{
+			name: "members refresh",
+			in: rpc.HealthResult{
+				Connected: true,
+				Members:   rpc.MembersHealth{Source: "cache", RefreshState: "parse_failed"},
+			},
+			want: "SPX members refresh parse_failed",
+		},
+		{
+			name: "background work",
+			in: rpc.HealthResult{
+				Connected:       true,
+				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
+			},
+			want: "Background work: computing dealer zero-gamma",
+		},
+		{
+			name: "none",
+			in:   rpc.HealthResult{Connected: true},
+			want: "None",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nextConcern(tc.in)
+			if got.Text != tc.want {
+				t.Fatalf("nextConcern(%+v) = %q, want %q", tc.in, got.Text, tc.want)
+			}
+		})
+	}
+}
+
+func TestStatusVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   rpc.HealthResult
+		want string
+	}{
+		{
+			name: "ready",
+			in:   rpc.HealthResult{Connected: true},
+			want: "READY",
+		},
+		{
+			name: "background is still ready",
+			in: rpc.HealthResult{
+				Connected:       true,
+				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
+			},
+			want: "READY",
+		},
+		{
+			name: "market data warning",
+			in:   rpc.HealthResult{Connected: true, DataType: rpc.MarketDataDelayed},
+			want: "ATTENTION",
+		},
+		{
+			name: "starting",
+			in:   rpc.HealthResult{},
+			want: "STARTING",
+		},
+		{
+			name: "offline",
+			in:   rpc.HealthResult{LastError: "dial timeout"},
+			want: "OFFLINE",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := statusVerdict(tc.in)
+			if got.Text != tc.want {
+				t.Fatalf("statusVerdict(%+v) = %q, want %q", tc.in, got.Text, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatMembersValue pins the four rendering variants of the
 // S&P500 members row: healthy (no refresh: tail), pinned (env/config),
 // silent rot (parse_failed / network_failed). Zero-value source omits
 // the line entirely so a daemon that hasn't populated MembersHealth
 // yet doesn't show a misleading "S&P500 members: :" row.
-func TestFormatMembersLine(t *testing.T) {
+func TestFormatMembersValue(t *testing.T) {
 	t.Parallel()
 	d := time.Date(2026, time.May, 22, 0, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -244,37 +386,37 @@ func TestFormatMembersLine(t *testing.T) {
 		{
 			name:   "healthy cache",
 			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "healthy"},
-			want:   "S&P500 members: cache:2026-05-22  count:503",
+			want:   "cache:2026-05-22, 503 names",
 		},
 		{
 			name:   "healthy embedded",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "healthy"},
-			want:   "S&P500 members: embedded:2026-05-22  count:503",
+			want:   "embedded:2026-05-22, 503 names",
 		},
 		{
 			name:   "empty refresh state (no refresher attached) treated as healthy",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: ""},
-			want:   "S&P500 members: embedded:2026-05-22  count:503",
+			want:   "embedded:2026-05-22, 503 names",
 		},
 		{
 			name:   "parse failure surfaces",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "parse_failed"},
-			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:parse_failed",
+			want:   "embedded:2026-05-22, 503 names, refresh parse_failed",
 		},
 		{
 			name:   "network failure surfaces",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "network_failed"},
-			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:network_failed",
+			want:   "embedded:2026-05-22, 503 names, refresh network_failed",
 		},
 		{
 			name:   "disabled config",
 			health: rpc.MembersHealth{Source: "embedded", AsOf: d, Count: 503, RefreshState: "disabled (config)"},
-			want:   "S&P500 members: embedded:2026-05-22  count:503  refresh:disabled (config)",
+			want:   "embedded:2026-05-22, 503 names, refresh disabled (config)",
 		},
 		{
 			name:   "disabled env on cache file",
 			health: rpc.MembersHealth{Source: "cache", AsOf: d, Count: 503, RefreshState: "disabled (env)"},
-			want:   "S&P500 members: cache:2026-05-22  count:503  refresh:disabled (env)",
+			want:   "cache:2026-05-22, 503 names, refresh disabled (env)",
 		},
 		{
 			name:   "empty source omits row",
@@ -284,7 +426,7 @@ func TestFormatMembersLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatMembersLine(tc.health)
+			got := formatMembersValue(tc.health)
 			if tc.empty {
 				if got != "" {
 					t.Errorf("want empty, got %q", got)

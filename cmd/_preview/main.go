@@ -351,6 +351,12 @@ func fixtureStatus() *rpc.HealthResult {
 		ClientID:      17,
 		Connected:     true,
 		ServerVersion: 178,
+		Members: rpc.MembersHealth{
+			Source:       "cache",
+			AsOf:         time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+			Count:        503,
+			RefreshState: "healthy",
+		},
 		// HealthResult.DataType is omitempty-emit-empty post-v0.16.0
 		// (the daemon stopped hardcoding "live" — status has no per-
 		// reqID feed type to honestly report). Renderer falls back to
