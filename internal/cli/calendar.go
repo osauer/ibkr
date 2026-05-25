@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -41,10 +42,11 @@ func runCalendar(ctx context.Context, env *Env, args []string) int {
 
 func renderCalendarText(env *Env, r *rpc.MarketCalendarResult) int {
 	out := env.Stdout
+	today := time.Now()
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "%s calendar  ·  %s\n", r.Label, r.Timezone)
 	fmt.Fprintln(out)
-	renderCalendarSessionLine(env, r.Session)
+	renderCalendarSessionLine(env, r.Session, today)
 	if r.Session.SourceURL != "" {
 		fmt.Fprintf(out, "  Source:        %s\n", r.Session.SourceURL)
 	}
@@ -52,19 +54,29 @@ func renderCalendarText(env *Env, r *rpc.MarketCalendarResult) int {
 
 	if len(r.Sessions) > 1 {
 		fmt.Fprintln(out)
-		header := fmt.Sprintf("  %-12s  %-11s  %-20s  %s", "DATE", "STATE", "HOURS", "REASON")
+		dateLabels := make([]string, len(r.Sessions))
+		dateWidth := visibleLen("DATE")
+		for i, s := range r.Sessions {
+			dateLabels[i] = calendarDateLabel(s.Date, today)
+			dateWidth = max(dateWidth, visibleLen(dateLabels[i]))
+		}
+		header := fmt.Sprintf("  %-*s  %-11s  %-20s  %s", dateWidth, "DATE", "STATE", "HOURS", "REASON")
 		fmt.Fprintln(out, env.dim(header))
 		fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
-		for _, s := range r.Sessions {
-			fmt.Fprintf(out, "  %-12s  %-11s  %-20s  %s\n",
-				s.Date, s.State, marketSessionHours(s), nonEmpty(s.Reason, ""))
+		for i, s := range r.Sessions {
+			row := fmt.Sprintf("  %-*s  %-11s  %-20s  %s",
+				dateWidth, dateLabels[i], s.State, marketSessionHours(s), nonEmpty(s.Reason, ""))
+			if calendarSessionClosedDay(s) {
+				row = env.dim(row)
+			}
+			fmt.Fprintln(out, row)
 		}
 	}
 	fmt.Fprintln(out)
 	return 0
 }
 
-func renderCalendarSessionLine(env *Env, s rpc.MarketSession) {
+func renderCalendarSessionLine(env *Env, s rpc.MarketSession, today time.Time) {
 	out := env.Stdout
 	state := s.State
 	if s.IsOpen {
@@ -72,7 +84,7 @@ func renderCalendarSessionLine(env *Env, s rpc.MarketSession) {
 	} else if s.State == "holiday" || s.State == "early_close" || s.State == "unknown" {
 		state = env.yellow(state)
 	}
-	fmt.Fprintf(out, "  Session:       %s  %s\n", s.Date, state)
+	fmt.Fprintf(out, "  Session:       %s  %s\n", calendarDateLabel(s.Date, today), state)
 	if hours := marketSessionHours(s); hours != "" {
 		fmt.Fprintf(out, "  Hours:         %s\n", hours)
 	}
@@ -86,6 +98,80 @@ func renderCalendarSessionLine(env *Env, s rpc.MarketSession) {
 	if s.Notes != "" {
 		fmt.Fprintf(out, "  Notes:         %s\n", s.Notes)
 	}
+}
+
+type calendarDateStyle int
+
+const (
+	calendarDateISO calendarDateStyle = iota
+	calendarDateDayMonthYear
+)
+
+func calendarDateLabel(date string, today time.Time) string {
+	return formatCalendarDateLabel(date, today, calendarDateStyleFromEnv())
+}
+
+func formatCalendarDateLabel(date string, today time.Time, style calendarDateStyle) string {
+	day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(date), time.Local)
+	if err != nil {
+		return date
+	}
+	layout := "Mon 2006-01-02"
+	if style == calendarDateDayMonthYear {
+		layout = "Mon 02-01-2006"
+	}
+	label := day.Format(layout)
+	localToday := today.In(time.Local)
+	if day.Year() == localToday.Year() && day.Month() == localToday.Month() && day.Day() == localToday.Day() {
+		label += " (today)"
+	}
+	return label
+}
+
+func calendarDateStyleFromEnv() calendarDateStyle {
+	for _, key := range []string{"LC_TIME", "LC_ALL", "LANG"} {
+		raw := os.Getenv(key)
+		if calendarLocaleConfigured(raw) {
+			return calendarDateStyleFromLocale(raw)
+		}
+	}
+	return calendarDateISO
+}
+
+func calendarDateStyleFromLocale(raw string) calendarDateStyle {
+	locale := normalizedCalendarLocale(raw)
+	if locale == "" || locale == "C" || locale == "POSIX" {
+		return calendarDateISO
+	}
+	parts := strings.Split(locale, "_")
+	if len(parts) >= 2 {
+		switch strings.ToUpper(parts[1]) {
+		case "DE":
+			return calendarDateDayMonthYear
+		case "US":
+			return calendarDateISO
+		}
+	}
+	if len(parts) >= 1 && strings.EqualFold(parts[0], "de") {
+		return calendarDateDayMonthYear
+	}
+	return calendarDateISO
+}
+
+func calendarLocaleConfigured(raw string) bool {
+	locale := normalizedCalendarLocale(raw)
+	return locale != "" && locale != "C" && locale != "POSIX"
+}
+
+func normalizedCalendarLocale(raw string) string {
+	locale := strings.TrimSpace(raw)
+	locale = strings.Split(locale, ".")[0]
+	locale = strings.Split(locale, "@")[0]
+	return strings.ReplaceAll(locale, "-", "_")
+}
+
+func calendarSessionClosedDay(s rpc.MarketSession) bool {
+	return s.State == "closed" || s.State == "holiday"
 }
 
 func marketSessionHours(s rpc.MarketSession) string {
