@@ -1,0 +1,13 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.osauer/ibkr",
+  "title": "ibkr",
+  "description": "Read-only Interactive Brokers MCP server for account and market analysis.",
+  "version": "1.0.8",
+  "websiteUrl": "https://osauer.dev/ibkr/",
+  "repository": {
+    "url": "https://github.com/osauer/ibkr",
+    "source": "github",
+    "id": "1234071553"
+  }
+}
