@@ -199,6 +199,7 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodScanList, cliDefault},
 		{rpc.MethodScanParams, cliDefault},
 		{rpc.MethodHistoryDaily, cliDefault},
+		{rpc.MethodMarketCalendar, cliDefault},
 		{rpc.MethodStatusHealth, cliDefault},
 	}
 	for _, tc := range cases {

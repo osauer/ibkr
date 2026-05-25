@@ -1,8 +1,8 @@
 # Agentic use
 
-Updated: 2026-05-25 10:13 CEST
+Updated: 2026-05-25 11:44 CEST
 
-`ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Stock and ETF quotes are also available as an MCP resource: `resources/read` returns one snapshot, while `resources/subscribe` streams updates until unsubscribe.
+`ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
 This page is for the human installing the plugin and wondering *"what can I actually ask Claude with this?"* For exact tool parameters and JSON envelopes, see the auto-generated [MCP tools reference](../reference/mcp-tools.md). For protocol mechanics, see the upstream [Model Context Protocol spec](https://modelcontextprotocol.io/).
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_watch` ↔ read-only `ibkr watch --list`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ read-only `ibkr watch --list`, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -41,6 +41,12 @@ If you also want context, follow-up questions naturally chain: *"and what's SPY'
 → Claude invokes `ibkr_watch`.
 
 Returns the local saved-symbol list from `ibkr watch --list`. The MCP tool is read-only: Claude can use the symbols for follow-up quote, history, chain, scan, gamma, or regime context, but it cannot add, remove, or clear watchlist entries through MCP.
+
+### "Why does SPY look stale at 1am ET?"
+
+→ Claude invokes `ibkr_quote`; if the snapshot is frozen, delayed, or missing live prices, the response may include `session_context`. Claude may also invoke `ibkr_calendar` directly to answer "when does it reopen?"
+
+Returns the official market state for the relevant supported calendar: US cash equities, US listed options regular sessions, or German Xetra cash equities. A US quote at 1am ET will normally say the regular session is closed and show the next 09:30 ET open; a US holiday shows the holiday reason and the next known open. For example, Whit Monday 2026 is closed for US equities because it is Memorial Day, while Xetra is open.
 
 ### "Are SPY dealers supporting or amplifying today's moves?"
 
@@ -75,7 +81,7 @@ Streaming quote resources are separate from tools. MCP clients discover the `ibk
 Other things outside the scope today:
 
 - **Option streaming** (continuous option contract ticks). Option snapshots are available through chains and option quotes, but the MCP streaming resource is stock/ETF only.
-- **Non-equity asset classes** (futures, FX spot, crypto). Equity, ETF, and equity-options data is covered; everything else is out of scope today.
+- **Non-equity asset classes** (futures, FX spot, crypto, bonds). Equity, ETF, Xetra cash-equity, and regular-session US listed-options calendars are covered; everything else is out of scope or partial context today.
 - **Other indices' breadth or constituents** (NDX, RUT, sector-specific). S&P 500 only.
 
 ## Tips for getting good answers

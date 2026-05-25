@@ -247,6 +247,37 @@ func TestIbkrGammaRejectsUnknownScope(t *testing.T) {
 	}
 }
 
+func TestIbkrCalendarSchemaHasSupportedMarkets(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_calendar")
+	if !ok {
+		t.Fatalf("ibkr_calendar tool not registered")
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string   `json:"type"`
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.JSONSchema, &schema); err != nil {
+		t.Fatalf("decode ibkr_calendar schema: %v", err)
+	}
+	market, ok := schema.Properties["market"]
+	if !ok {
+		t.Fatalf("ibkr_calendar schema missing market property")
+	}
+	if market.Type != "string" {
+		t.Fatalf("market.type = %q, want string", market.Type)
+	}
+	want := map[string]bool{"us": true, "us-equity": true, "us-options": true, "de": true, "de-xetra": true}
+	for _, v := range market.Enum {
+		delete(want, v)
+	}
+	if len(want) > 0 {
+		t.Fatalf("market enum missing values: %v (got %v)", want, market.Enum)
+	}
+}
+
 // TestIbkrRegimeResponseHasCompositeStreaksQuality is the P2 wire-
 // parity gate: every RegimeSnapshotResult field the CLI consumes must
 // be reachable via the MCP envelope so an MCP-only client sees the

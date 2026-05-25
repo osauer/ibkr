@@ -4,6 +4,7 @@
       "Bash(ibkr account*)",
       "Bash(ibkr positions*)",
       "Bash(ibkr quote*)",
+      "Bash(ibkr calendar*)",
       "Bash(ibkr watch --list*)",
       "Bash(ibkr watch --watch*)",
       "Bash(ibkr chain*)",

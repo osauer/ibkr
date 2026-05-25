@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**13 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**14 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -31,7 +31,7 @@ Open positions: stocks and options separated, plus a per-underlying grouping wit
 
 ## `ibkr_quote`
 
-Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, and opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable). Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"); off-hours/frozen snapshots may have `mark` or `prev_close` when bid/ask/last are absent. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: "de"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
+Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable), and `session_context` when the official market calendar explains stale/frozen/missing data. Use for *current price* questions on stocks/ETFs ("what's SPY trading at?"); off-hours/frozen snapshots may have `mark` or `prev_close` when bid/ask/last are absent. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: "de"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).
 
 **Parameters:**
 
@@ -48,6 +48,18 @@ Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark
 Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Use when the user asks "what's on my watchlist?" or wants quotes/context for their saved watch symbols. This MCP tool is read-only: it lists symbols only; it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. To quote the returned symbols, call `ibkr_quote` with the `symbols` array.
 
 *No parameters.*
+
+## `ibkr_calendar`
+
+Official market-session calendar for supported first-release markets: U.S. cash equities (`market: "us"` / `"us-equity"`), U.S. listed options regular sessions (`"us-options"`), and German Xetra cash equities (`"de"` / `"de-xetra"`). Use for questions like "is the market open?", "when is the next session?", "is today a holiday or early close?", "why is this quote frozen at 1am ET?", or risk-manager context before a long market holiday weekend. NOT for prices (use `ibkr_quote`), NOT for broad futures/FX/bonds/Eurex/crypto calendars, and NOT for per-contract SPX/VIX global-hours nuance — v1 is official exchange calendars only and returns `unknown` outside embedded coverage rather than guessing from weekdays.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `date` | string | no | optional local market date YYYY-MM-DD; omit to use now |
+| `days` | integer | no | number of calendar days to include in sessions (default 14, capped at 400) |
+| `market` | string | no | which official calendar to query: us/us-equity for U.S. stocks and ETFs, us-options for U.S. listed options regular sessions, de/de-xetra for Xetra cash equities |
 
 ## `ibkr_chain`
 

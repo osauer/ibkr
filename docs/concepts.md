@@ -1,8 +1,26 @@
 # Concepts
 
-Updated: 2026-05-25 08:03 CEST
+Updated: 2026-05-25 11:44 CEST
 
-What the three load-bearing indicators measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
+What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
+
+---
+
+## Market Calendars
+
+Market calendars answer a simple but risk-relevant question: *is this market supposed to be trading right now, and if not, when does the official session resume?*
+
+The first release is deliberately narrow and official-source only:
+
+- **US equities** (`us` / `us-equity`): regular NYSE/Nasdaq-style cash-equity sessions, holidays, and early closes.
+- **US listed options** (`us-options`): regular listed-options sessions. This is a separate calendar because options have their own close window and holiday schedule surface. Per-class global hours, SPX/VIX extended sessions, curb trading, and exercise/settlement nuance are not modeled in v1.
+- **German Xetra equities** (`de` / `de-xetra`): Deutsche Boerse Xetra cash-equity sessions and non-trading days. Frankfurt floor trading and Eurex derivatives are not modeled in v1.
+
+Other markets and asset classes are therefore only partly supported today. Futures, FX, crypto, bonds, Eurex, and exchange-specific derivatives calendars should be treated as out of scope unless a result explicitly names a supported market.
+
+Calendars are embedded official schedules, not IBKR overlays. The official exchange calendar is binding for this feature; IBKR quote state still matters for entitlement, routing, and farm-health issues, but it is not used to redefine whether the exchange is open. This keeps cold starts instant and avoids a runtime dependency on remote calendar files. The tradeoff is explicit coverage: the response includes `coverage_start` / `coverage_end`, `days` is capped at 400 calendar days, and dates outside embedded coverage return `state: "unknown"` rather than guessing from weekdays.
+
+`ibkr quote` adds a `session_context` block only when it helps explain stale/frozen/missing data. During an ordinary live regular session with prices present, quote output stays quiet.
 
 ---
 

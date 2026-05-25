@@ -16,6 +16,7 @@ import (
 
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
+	"github.com/osauer/ibkr/internal/marketcal"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -741,4 +742,115 @@ func TestStatusHealthMembersEmptyWithoutEngine(t *testing.T) {
 	if res.Members.Source != "" {
 		t.Errorf("Members.Source: want empty (no engine), got %q", res.Members.Source)
 	}
+}
+
+func TestAttachQuoteSessionContextHoliday(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	asOf := time.Date(2026, 5, 25, 10, 0, 0, 0, mustLocation(t, "America/New_York"))
+	q := &rpc.Quote{Symbol: "SPY", DataType: rpc.MarketDataFrozen, AsOf: asOf}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
+
+	if q.SessionContext == nil {
+		t.Fatal("expected session context")
+	}
+	if q.SessionContext.State != string(marketcal.StateHoliday) {
+		t.Fatalf("State = %q, want %q", q.SessionContext.State, marketcal.StateHoliday)
+	}
+	if q.SessionContext.Reason != "Memorial Day" {
+		t.Fatalf("Reason = %q, want Memorial Day", q.SessionContext.Reason)
+	}
+	if q.SessionContext.NextOpen == nil {
+		t.Fatal("expected next_open")
+	}
+	if got, want := q.SessionContext.NextOpen.Format(time.RFC3339), "2026-05-26T09:30:00-04:00"; got != want {
+		t.Fatalf("NextOpen = %q, want %q", got, want)
+	}
+}
+
+func TestAttachQuoteSessionContextOmittedDuringLiveRTH(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "America/New_York")
+	bid, ask, last := 100.0, 100.1, 100.05
+	q := &rpc.Quote{
+		Symbol:   "SPY",
+		Bid:      &bid,
+		Ask:      &ask,
+		Last:     &last,
+		DataType: rpc.MarketDataLive,
+		AsOf:     time.Date(2026, 5, 26, 10, 0, 0, 0, loc),
+	}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
+
+	if q.SessionContext != nil {
+		t.Fatalf("SessionContext = %+v, want nil during ordinary live RTH", q.SessionContext)
+	}
+}
+
+func TestQuoteMarketForStockContract(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   rpc.ContractParams
+		want marketcal.Market
+	}{
+		{"explicit de market", rpc.ContractParams{Market: "de"}, marketcal.MarketDEXetra},
+		{"xetra exchange", rpc.ContractParams{Exchange: "IBIS"}, marketcal.MarketDEXetra},
+		{"xetra primary exchange", rpc.ContractParams{PrimaryExch: "IBIS"}, marketcal.MarketDEXetra},
+		{"default US", rpc.ContractParams{Symbol: "SPY"}, marketcal.MarketUSEquity},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quoteMarketForStockContract(tc.in); got != tc.want {
+				t.Fatalf("quoteMarketForStockContract(%+v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleMarketCalendarWithoutGateway(t *testing.T) {
+	t.Parallel()
+	params, _ := json.Marshal(rpc.MarketCalendarParams{Market: "de", Date: "2026-05-25", Days: 2})
+	req := &rpc.Request{ID: "calendar", Method: rpc.MethodMarketCalendar, Params: params}
+
+	res, err := newTestServer(t).handleMarketCalendar(req)
+	if err != nil {
+		t.Fatalf("handleMarketCalendar: %v", err)
+	}
+	if res.Market != string(marketcal.MarketDEXetra) {
+		t.Fatalf("Market = %q, want %q", res.Market, marketcal.MarketDEXetra)
+	}
+	if !res.Session.IsOpen || res.Session.State != string(marketcal.StateRegular) {
+		t.Fatalf("Whit Monday 2026 should be an open Xetra session: %+v", res.Session)
+	}
+	if len(res.Sessions) != 2 {
+		t.Fatalf("Sessions len = %d, want 2", len(res.Sessions))
+	}
+}
+
+func TestHandleMarketCalendarBadMarketIsBadRequest(t *testing.T) {
+	t.Parallel()
+	params, _ := json.Marshal(rpc.MarketCalendarParams{Market: "mars"})
+	req := &rpc.Request{ID: "calendar", Method: rpc.MethodMarketCalendar, Params: params}
+
+	_, err := newTestServer(t).handleMarketCalendar(req)
+	if err == nil {
+		t.Fatal("expected bad_request for unsupported market")
+	}
+	code, _ := classifyError(err)
+	if code != rpc.CodeBadRequest {
+		t.Fatalf("code = %q, want %q (err=%v)", code, rpc.CodeBadRequest, err)
+	}
+}
+
+func mustLocation(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("load location %q: %v", name, err)
+	}
+	return loc
 }

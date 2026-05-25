@@ -1,7 +1,7 @@
 {
   "name": "ibkr",
   "version": "1.0.9",
-  "description": "Read-only Interactive Brokers (IBKR) integration for Claude Code and any MCP client: account, positions, snapshot + streaming quotes (MCP resource subscriptions), option chains, daily history, market scans, fixed-fractional position sizing, and an eight-row risk-regime dashboard via the local ibkr CLI.",
+  "description": "Read-only Interactive Brokers (IBKR) integration for Claude Code and any MCP client: account, positions, snapshot + streaming quotes (MCP resource subscriptions), official market calendars, option chains, daily history, market scans, fixed-fractional position sizing, and an eight-row risk-regime dashboard via the local ibkr CLI.",
   "author": {
     "name": "osauer",
     "url": "https://github.com/osauer"
