@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"strings"
 	"testing"
@@ -280,6 +281,44 @@ func TestComputeSizeRMultiple(t *testing.T) {
 			t.Fatalf("breakeven = %v, want 0.25", res.BreakevenWinRate)
 		}
 	})
+}
+
+func TestRunSizeValidatesLocalInputBeforeAccountRPC(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing symbol",
+			args: []string{"--entry", "200", "--stop", "195"},
+			want: "symbol is required",
+		},
+		{
+			name: "invalid side",
+			args: []string{"--symbol", "AAPL", "--entry", "200", "--stop", "195", "--side", "sideways"},
+			want: "side must be long or short",
+		},
+		{
+			name: "invalid entry",
+			args: []string{"--symbol", "AAPL", "--entry", "0", "--stop", "195"},
+			want: "entry must be > 0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			env := &Env{Stdout: &bytes.Buffer{}, Stderr: &stderr}
+			if code := runSize(context.Background(), env, tc.args); code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr missing %q: %s", tc.want, stderr.String())
+			}
+		})
+	}
 }
 
 // renderSizeText must surface the user-facing fields and only mention status

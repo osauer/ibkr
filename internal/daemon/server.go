@@ -308,7 +308,7 @@ func New(opts Options) *Server {
 // session is loaded and installed as `current`, so the first caller
 // after restart skips the compute. See
 // docs/design/gamma-zero-cache-persistence.md for the cost/benefit
-// rationale (compute time crossed the 5-min threshold post-PR-#1).
+// rationale (cold combined runs can cross the 5-min threshold).
 func (s *Server) installGammaZeroCache() {
 	dir, err := gammaZeroStoreDefaultDir()
 	if err != nil {
@@ -409,9 +409,8 @@ func (s *Server) installBreadthEngine() {
 	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger, Members: members})
 }
 
-// installMembersRefresher stands up the runtime SPX-members refresher
-// (path A of docs/design/ibkr-update-and-members-refresh.md). The
-// refresher fetches Wikipedia's constituent list daily at 02:30 ET
+// installMembersRefresher stands up the runtime SPX-members refresher.
+// The refresher fetches Wikipedia's constituent list daily at 02:30 ET
 // plus on startup catch-up, writes the result to the XDG cache file,
 // and pushes new lists into the breadth engine.
 //

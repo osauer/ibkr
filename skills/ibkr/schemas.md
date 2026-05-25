@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-24 14:08 CEST
+Updated: 2026-05-25 08:03 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -575,7 +575,7 @@ user closed Gateway / opened TWS on a different port):
 Action-relevant fields:
 
 - `connected` — `true` only when the TWS handshake completed. `false` =
-  surface the error to the user.
+  show the error to the user.
 - `last_error` — populated when the daemon attempted a connection and it
   failed. Empty during the in-flight initial handshake (the daemon may
   still be waiting); populated once the daemon gives up.
@@ -591,7 +591,7 @@ Action-relevant fields:
 
 A full set of additional metadata fields (`alternates`, `tls_origin`,
 `server_version`, `daemon_started`) is also returned but rarely
-actionable; surface them only when the user is debugging discovery.
+actionable; show them only when the user is debugging discovery.
 
 ## size
 
@@ -859,7 +859,7 @@ Field meanings:
 - `result.regime_agreement` — on combined scope, one of
   `"agree:long-gamma"` / `"agree:short-gamma"` /
   `"agree:transition-gamma"` / `"disagree"` / `""` (no data).
-  `"disagree"` means SPY and SPX modeled regimes differ; surface the
+  `"disagree"` means SPY and SPX modeled regimes differ; show the
   per-index details instead of forcing a single headline.
 - `result.per_index` — populated only on combined scope. Each entry
   (`"SPY"`, `"SPX"`) is a fully-formed single-underlying
@@ -895,7 +895,7 @@ methodology lives in `docs/specs/risk-regime-dashboard.md`.
 ## regime
 
 `ibkr regime --json` — single-call risk-regime dashboard: all eight
-indicator rows in one compact JSON envelope. The default JSON/MCP surface
+indicator rows in one compact JSON envelope. The default JSON/MCP shape
 leads with `summary`, `composite`, and `warning_details`, then raw
 measurements, streaks, and quality provenance. Long methodology `notes`
 and breadth history are omitted by default; use `ibkr regime --json
@@ -1078,7 +1078,7 @@ Field meanings:
   can ignore this and re-tally from per-row `status` + measurements.
 - Each row's `streak: {band, sessions, since}` counts consecutive NY
   trading sessions in the current band. Nil on computing / unavailable /
-  error rows (streak freezes rather than resets). The CLI surfaces
+  error rows (streak freezes rather than resets). The CLI shows
   this inline ("yellow · day 3"); MCP consumers can render the same.
 - Each row's `*_quality` objects (`vix_quality`, `hyg_quality`,
   `last_quality`, `zero_gamma_quality`, `value_quality`, etc.) carry

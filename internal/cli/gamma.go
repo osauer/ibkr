@@ -15,7 +15,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	noWait := fs.Bool("no-wait", false, "return immediately with current status; don't block on the compute")
 	force := fs.Bool("force", false, "ignore the cached result and start a fresh compute (diagnostics)")
-	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable, see docs/design/gamma-spx-coverage.md)")
+	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable)")
 	explain := fs.Bool("explain", false, "show methodology, citations, skew/source/compute metadata, per-bucket breakdown")
 	profiles := fs.Bool("profiles", false, "include full gamma-profile arrays in --json output")
 	if err := fs.Parse(args); err != nil {

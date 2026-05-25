@@ -31,6 +31,14 @@ fi
 
 GATEWAY_HOST="${IBKR_TEST_HOST:-127.0.0.1}"
 GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
+if [[ ! "$GATEWAY_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    echo "release-smoke: invalid IBKR_TEST_HOST: $GATEWAY_HOST" >&2
+    exit 2
+fi
+if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
+    echo "release-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
+    exit 2
+fi
 STRICT="${IBKR_SMOKE_STRICT:-0}"
 JSON_TIMEOUT="${IBKR_RELEASE_VERIFY_TIMEOUT:-15}"
 WIRE_TIMEOUT="${IBKR_SMOKE_TIMEOUT:-60}"

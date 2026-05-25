@@ -96,44 +96,57 @@ tmp=$(mktemp -d -t ibkr-install.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 SIG_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS.asc"
+KEY_URL="https://raw.githubusercontent.com/${REPO}/${VERSION}/internal/update/release-signing-key.asc"
 EXPECTED_FP="D98426D48FED85EFA33904694D922A4F922B7D7D"
+release_major=$(printf '%s' "$VERSION" | sed -E 's/^v([0-9]+).*/\1/')
+require_sig=0
+if [ "$release_major" -ge 1 ] 2>/dev/null; then
+	require_sig=1
+fi
 
 step "Downloading $TARBALL..."
 curl -fSL --progress-bar -o "$tmp/$TARBALL" "$TARBALL_URL"
 curl -fsSL -o "$tmp/SHA256SUMS" "$SUMS_URL"
-# .asc is best-effort during bootstrap — releases from v1.0.0 onward
-# publish it, earlier ones don't. We don't fail when missing; subsequent
-# `ibkr update` calls run against the binary's embedded key and DO fail
-# closed on missing signature.
-curl -fsSL -o "$tmp/SHA256SUMS.asc" "$SIG_URL" 2>/dev/null || true
-
-# --- verify PGP signature (best-effort during bootstrap) --------------------
-# The bootstrap installer can't carry the maintainer's pubkey embedded
-# (you're downloading the binary that *would* carry it), so this leg is
-# advisory: when both gpg and SHA256SUMS.asc are available, verify; on
-# success print a strong banner so paranoid users can see it; on failure
-# abort. When either is missing, fall through to TLS-only trust.
-if [ -s "$tmp/SHA256SUMS.asc" ] && command -v gpg >/dev/null 2>&1; then
-	step "Verifying PGP signature on SHA256SUMS..."
-	# Fetch the key from github.com (HTTPS-rooted trust during bootstrap).
-	# A keyring lives in $tmp/gnupg so we don't pollute the user's keystore.
-	mkdir -p "$tmp/gnupg" && chmod 700 "$tmp/gnupg"
-	if curl -fsSL "https://github.com/osauer.gpg" | GNUPGHOME="$tmp/gnupg" gpg --batch --quiet --import 2>/dev/null; then
-		got_fp=$(GNUPGHOME="$tmp/gnupg" gpg --batch --with-colons --fingerprint 2>/dev/null \
-			| awk -F: '/^fpr:/{print $10; exit}')
-		if [ "$got_fp" != "$EXPECTED_FP" ]; then
-			fail "GitHub-served maintainer key fingerprint $got_fp != expected $EXPECTED_FP — aborting (SECURITY.md has the canonical fingerprint)"
-		fi
-		if GNUPGHOME="$tmp/gnupg" gpg --batch --verify "$tmp/SHA256SUMS.asc" "$tmp/SHA256SUMS" 2>/dev/null; then
-			info "PGP signature OK (maintainer key $EXPECTED_FP)"
-		else
-			fail "PGP signature on SHA256SUMS did not verify — aborting (tarball may be tampered)"
-		fi
-	else
-		warn "Couldn't fetch maintainer key from GitHub; falling through to TLS-only trust"
+# .asc is required for v1.0.0+ bootstrap installs. Older pre-v1 releases did
+# not publish it, so they keep the historical checksum-only path.
+if ! curl -fsSL -o "$tmp/SHA256SUMS.asc" "$SIG_URL" 2>/dev/null; then
+	if [ "$require_sig" = "1" ]; then
+		fail "release $VERSION does not publish SHA256SUMS.asc — aborting instead of downgrading integrity verification"
 	fi
-elif command -v gpg >/dev/null 2>&1; then
-	warn "Release predates SHA256SUMS.asc (pre-v1.0.0) — skipping PGP verification; future \`ibkr update\` calls will verify"
+	warn "Release predates SHA256SUMS.asc (pre-v1.0.0) — skipping PGP verification"
+fi
+
+# --- verify PGP signature ----------------------------------------------------
+if [ -s "$tmp/SHA256SUMS.asc" ]; then
+	if ! command -v gpg >/dev/null 2>&1; then
+		if [ "$require_sig" = "1" ]; then
+			fail "gpg is required to verify $VERSION (install gpg or download and verify manually)"
+		fi
+		warn "gpg missing; skipping PGP verification for pre-v1 release"
+	else
+		step "Verifying PGP signature on SHA256SUMS..."
+		# Fetch the release-signing public key from the tagged source tree, then
+		# pin it by fingerprint before trusting it. A keyring lives in $tmp/gnupg
+		# so we don't pollute the user's keystore.
+		mkdir -p "$tmp/gnupg" && chmod 700 "$tmp/gnupg"
+		if curl -fsSL "$KEY_URL" | GNUPGHOME="$tmp/gnupg" gpg --batch --quiet --import 2>/dev/null; then
+			got_fp=$(GNUPGHOME="$tmp/gnupg" gpg --batch --with-colons --fingerprint 2>/dev/null \
+				| awk -F: '/^fpr:/{print $10; exit}')
+			if [ "$got_fp" != "$EXPECTED_FP" ]; then
+				fail "release-signing key fingerprint $got_fp != expected $EXPECTED_FP — aborting (SECURITY.md has the canonical fingerprint)"
+			fi
+			if GNUPGHOME="$tmp/gnupg" gpg --batch --verify "$tmp/SHA256SUMS.asc" "$tmp/SHA256SUMS" 2>/dev/null; then
+				info "PGP signature OK (maintainer key $EXPECTED_FP)"
+			else
+				fail "PGP signature on SHA256SUMS did not verify — aborting (tarball may be tampered)"
+			fi
+		else
+			if [ "$require_sig" = "1" ]; then
+				fail "could not fetch/import release-signing key for $VERSION — aborting"
+			fi
+			warn "Couldn't fetch maintainer key; skipping PGP verification for pre-v1 release"
+		fi
+	fi
 fi
 
 # --- verify checksum ---------------------------------------------------------
@@ -144,9 +157,21 @@ info "Checksum OK"
 
 # --- extract + install -------------------------------------------------------
 step "Extracting..."
+tar -tzf "$tmp/$TARBALL" > "$tmp/tar.entries" || fail "could not list $TARBALL"
+archive_prefix="ibkr-${VERSION}-${PLATFORM}"
+while IFS= read -r entry; do
+	case "$entry" in
+		"$archive_prefix/"|"$archive_prefix/ibkr"|"$archive_prefix/LICENSE"|"$archive_prefix/README.md") ;;
+		""|/*|*"/../"*|"../"*|*"/.."|*\\*)
+			fail "unsafe archive entry: $entry" ;;
+		*)
+			fail "unexpected archive entry: $entry" ;;
+	esac
+done < "$tmp/tar.entries"
 tar -xzf "$tmp/$TARBALL" -C "$tmp"
 extracted_dir="$tmp/ibkr-${VERSION}-${PLATFORM}"
-[ -x "$extracted_dir/ibkr" ] || fail "extracted tree missing the ibkr binary (tried $extracted_dir/ibkr)"
+[ ! -L "$extracted_dir/ibkr" ] || fail "extracted ibkr binary is a symlink — aborting"
+[ -f "$extracted_dir/ibkr" ] && [ -x "$extracted_dir/ibkr" ] || fail "extracted tree missing the ibkr binary (tried $extracted_dir/ibkr)"
 
 step "Installing to $INSTALL_DIR/ibkr..."
 mkdir -p "$INSTALL_DIR"

@@ -100,12 +100,20 @@ func NewWireInterceptorFromEnv(clientID int) (*WireInterceptor, error) {
 
 	var jsonFile *os.File
 	if path := strings.TrimSpace(os.Getenv(envWireLogPath)); path != "" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return nil, fmt.Errorf("wire interceptor: mkdir %s: %w", filepath.Dir(path), err)
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("wire interceptor: mkdir %s: %w", dir, err)
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("wire interceptor: chmod %s: %w", dir, err)
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("wire interceptor: open log %s: %w", path, err)
+		}
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("wire interceptor: chmod log %s: %w", path, err)
 		}
 		jsonFile = f
 		wireLogger.Infof("Wire interceptor logging to %s", path)

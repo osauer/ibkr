@@ -55,6 +55,14 @@ fi
 
 GATEWAY_HOST="${IBKR_TEST_HOST:-127.0.0.1}"
 GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
+if [[ ! "$GATEWAY_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    echo "wire-smoke: invalid IBKR_TEST_HOST: $GATEWAY_HOST" >&2
+    exit 2
+fi
+if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
+    echo "wire-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
+    exit 2
+fi
 # 60s default. The chain fetch can legitimately take ~30s when 22 legs
 # need contract resolution from a cold cache (observed 2026-05-18:
 # chain SPY --width 5 → 30018ms wall clock). 30s was too tight; 60s

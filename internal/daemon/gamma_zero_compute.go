@@ -440,10 +440,9 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 // usable legs, gateway disconnect).
 //
 // `underlying` is the symbol whose option chain drives the compute —
-// "SPY" today; "SPX" support arrives in a later step of the
-// gamma-spx-coverage design. The function is structurally
-// single-underlying: callers that want SPY+SPX run it twice (serially)
-// and aggregate at a higher layer.
+// "SPY" or "SPX" today. The function is structurally
+// single-underlying: callers that want SPY+SPX run it once per
+// underlying and aggregate at a higher layer.
 //
 // Underlying choice notes (carried forward from the SPY-only era):
 // SPY has continuous extended-hours quoting on SMART/ARCA, a single
@@ -453,9 +452,9 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 // that produces real IV ticks pre-market. SPX (the index) by contrast
 // has no spot trading outside RTH, so IBKR's model-computation engine
 // doesn't push IV ticks for SPX options off-hours, and an SPX-only
-// off-hours compute will land few legs — the BS-IV fallback and a
+// off-hours compute will land few legs. The BS-IV fallback and a
 // permissive MinLegCoverageFractionSPX (~0.05) are the off-hours
-// posture; see docs/design/gamma-spx-coverage.md §12.2.
+// posture.
 //
 // Methodology (bs-gamma-profile-v3-stickymoneyness-0dte-split):
 //

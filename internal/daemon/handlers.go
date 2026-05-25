@@ -1933,9 +1933,29 @@ func normalizeExpiry(s string) (string, error) {
 }
 
 func daysUntil(expiryYMD string) int {
-	t, err := time.Parse("20060102", expiryYMD)
+	return daysUntilFrom(expiryYMD, time.Now())
+}
+
+func daysUntilFrom(expiryYMD string, now time.Time) int {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		ny = time.UTC
+	}
+	t, err := time.ParseInLocation("20060102", expiryYMD, ny)
 	if err != nil {
 		return 0
 	}
-	return int(time.Until(t).Hours() / 24)
+	y, m, d := now.In(ny).Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	expiry := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	return int(expiry.Sub(today).Hours() / 24)
+}
+
+func validChainSide(side string) bool {
+	switch strings.ToLower(strings.TrimSpace(side)) {
+	case "calls", "puts", "both":
+		return true
+	default:
+		return false
+	}
 }

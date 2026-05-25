@@ -113,9 +113,19 @@ func spawnDaemon() error {
 	cmd.Stdin = nil
 
 	logPath := DefaultLogPath()
-	_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logDir := filepath.Dir(logPath)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("create daemon log dir: %w", err)
+	}
+	if err := os.Chmod(logDir, 0o700); err != nil {
+		return fmt.Errorf("secure daemon log dir: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err == nil {
+		if err := logFile.Chmod(0o600); err != nil {
+			_ = logFile.Close()
+			return fmt.Errorf("secure daemon log file: %w", err)
+		}
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 		defer logFile.Close()

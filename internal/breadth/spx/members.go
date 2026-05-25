@@ -50,12 +50,11 @@ func MembersDefaultPath() (string, error) {
 // startup, tests) without forcing them to know about the cache file's
 // existence.
 //
-// NOTE: deferred from path A (docs/design/ibkr-update-and-members-refresh.md):
-// new constituents from reconstitution are admitted to breadth with full
-// weight from day 1 of inclusion. The design's "pending until 50d accrue"
-// exclusion was scoped out as disproportionate complexity vs. the <1%
-// noise on 1-3 names per quarter. Revisit if a user complains breadth
-// reads materially off.
+// NOTE: new constituents from reconstitution are admitted to breadth
+// with full weight from day 1 of inclusion. A "pending until 50d
+// accrue" exclusion was scoped out as disproportionate complexity vs.
+// the <1% noise on 1-3 names per quarter. Revisit if a user complains
+// breadth reads materially off.
 func MemberList() (members []string, asOf time.Time) {
 	out := slices.Clone(sp500Members)
 	return out, sp500AsOf

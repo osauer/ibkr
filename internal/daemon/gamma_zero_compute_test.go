@@ -64,8 +64,8 @@ func TestNormalizeGammaParams(t *testing.T) {
 //
 // Together they make sure (a) past-settlement same-day expiries fall
 // out and (b) the basket reaches monthly + quarterly horizons rather
-// than picking only weeklies inside ~2 weeks (which the lexicographic-N
-// predecessor did — see docs/design/gamma-adaptive-strike-window.md).
+// than picking only weeklies inside ~2 weeks, which the old
+// lexicographic-N predecessor did.
 func TestSelectExpirations(t *testing.T) {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {

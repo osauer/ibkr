@@ -4,19 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IBKR MCP Server for AI Assistants | Interactive Brokers TWS API</title>
-  <meta name="description" content="ibkr is a local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API that lets AI assistants analyze account, options, quotes, scanners, gamma, breadth, and market-regime context safely.">
+  <meta name="description" content="ibkr is a local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, positions, quotes, options, scanners, gamma, breadth, and market-regime data.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="Let AI assistants analyze your IBKR account safely">
-  <meta property="og:description" content="Connect Interactive Brokers Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other agent workflows through a local read-only MCP server, CLI, and Go API.">
+  <meta property="og:title" content="Analyze your IBKR account without order access">
+  <meta property="og:description" content="Connect Interactive Brokers Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts through a local read-only MCP server, CLI, and Go API.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Let AI assistants analyze your IBKR account safely">
-  <meta name="twitter:description" content="A local Interactive Brokers MCP server, CLI, and Go TWS API for agent workflows.">
+  <meta name="twitter:title" content="Analyze your IBKR account without order access">
+  <meta name="twitter:description" content="A local read-only Interactive Brokers MCP server, CLI, and Go TWS API.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
   <script type="application/ld+json">
@@ -27,10 +27,10 @@
         "@type": "SoftwareApplication",
         "name": "ibkr",
         "url": "https://osauer.dev/ibkr/",
-        "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for secure AI-assisted account and market analysis.",
+        "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.0.8",
+        "softwareVersion": "1.0.9",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -48,7 +48,7 @@
         "programmingLanguage": "Go",
         "runtimePlatform": "macOS, Linux, Unix",
         "license": "https://github.com/osauer/ibkr/blob/main/LICENSE",
-        "about": "Clean-room Go implementation of the Interactive Brokers TWS read-side protocol with CLI and MCP surfaces."
+        "about": "Clean-room Go implementation of the Interactive Brokers TWS read-side protocol with CLI and MCP interfaces."
       }
     ]
   }
@@ -508,9 +508,9 @@
     <section class="wrap hero" aria-labelledby="hero-title">
       <div>
         <p class="eyebrow">Interactive Brokers MCP server</p>
-        <h1 id="hero-title">Let AI assistants analyze your IBKR account and market context safely</h1>
-        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to your AI workflow. Use live portfolio, options, quotes, scanners, breadth, gamma, and risk-regime data to explore trade ideas, exposure, and market direction from Claude Desktop, Claude Code, Cursor, Zed, and other agent workflows.</p>
-        <p class="safety">Built for secure analysis: the bundled CLI and MCP server expose account and market data, but no order-entry surface.</p>
+        <h1 id="hero-title">Analyze your IBKR account without order access</h1>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Read live portfolio, options, quotes, scanners, breadth, gamma, and risk-regime data from one local tool.</p>
+        <p class="safety">The bundled CLI and MCP server expose account and market data, but no order-entry interface.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="#install">Install</a>
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
@@ -545,8 +545,8 @@
 
     <section class="wrap">
       <div class="section-head">
-        <h2>Market context, account context, and option context.</h2>
-        <p>Fresh terminal screenshots from the live CLI surface, with position quantities and monetary account details sanitized before publication.</p>
+        <h2>Market, account, and option context.</h2>
+        <p>Fresh terminal screenshots from the live CLI, with position quantities and monetary account details sanitized before publication.</p>
       </div>
       <div class="proof-grid">
         <article class="proof">
@@ -584,7 +584,7 @@
 
     <section class="wrap" aria-labelledby="surfaces-title">
       <div class="section-head">
-        <h2 id="surfaces-title">One local tool, three useful surfaces.</h2>
+        <h2 id="surfaces-title">One local tool, three ways to use it.</h2>
       </div>
       <div class="feature-grid">
         <article class="feature">
