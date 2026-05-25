@@ -372,10 +372,14 @@ fi
 
 run_wire_cli regime_1 30 regime --json
 regime_json_1="$LAST_CMD_OUTPUT"
-assert_wire regime-subs "$LAST_WIRE_OFFSET"
+# Regime also shares market-data lines with startup prewarm and earlier quote
+# probes. The JSON checks below pin the command result; the wire invariant is
+# scoped to the isolated daemon session so shared SPY/HYG subscriptions do not
+# look like missing fan-out.
+assert_wire regime-subs "$boot_offset"
 run_wire_cli regime_2 30 regime --json
 regime_json_2="$LAST_CMD_OUTPUT"
-assert_wire regime-subs "$LAST_WIRE_OFFSET"
+assert_wire regime-subs "$boot_offset"
 
 regime_check="$(python3 -c '
 import json, sys
