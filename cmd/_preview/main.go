@@ -107,11 +107,21 @@ func fixtureAccount() *rpc.AccountResult {
 }
 
 func fixturePositions() *rpc.PositionsResult {
+	ny := time.FixedZone("EDT", -4*60*60)
 	// AAPL: long stock plus a covered call and a protective put.
 	aaplStock := rpc.PositionView{
 		Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 100, AvgCost: 192.10, Mark: 207.42,
-		DayChange: f64(1.32), DayChangePct: f64(0.64), DayChangeMoney: f64(132.00),
+		DataType: rpc.MarketDataLive, PriceSource: "last",
+		PrevClose: f64(206.10), DayChange: f64(1.32), DayChangePct: f64(0.64), DayChangeMoney: f64(132.00),
+		DayLow: f64(205.85), DayHigh: f64(209.80), Week52Low: f64(164.08), Week52High: f64(237.49),
+		Volume: ptrInt64(41_762_007), AvgVolume: ptrInt64(58_900_000),
+		PriceAt: time.Date(2026, 5, 13, 10, 32, 18, 0, ny),
+		SessionContext: &rpc.MarketSession{
+			Timezone: "America/New_York",
+			State:    "regular",
+			IsOpen:   true,
+		},
 		MarketValue: 20742.00, UnrealizedPnL: 1532.00, DailyPnL: f64(132.00),
 	}
 	// AvgCost is per-contract on OPT (multiplier-inclusive) — mirrors what
@@ -135,7 +145,16 @@ func fixturePositions() *rpc.PositionsResult {
 	nvdaStock := rpc.PositionView{
 		Symbol: "NVDA", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1,
 		Quantity: 250, AvgCost: 119.05, Mark: 128.54,
-		DayChange: f64(-0.98), DayChangePct: f64(-0.77), DayChangeMoney: f64(-245.00),
+		DataType: rpc.MarketDataLive, PriceSource: "last",
+		PrevClose: f64(129.52), DayChange: f64(-0.98), DayChangePct: f64(-0.77), DayChangeMoney: f64(-245.00),
+		DayLow: f64(126.70), DayHigh: f64(130.12), Week52Low: f64(86.62), Week52High: f64(153.13),
+		Volume: ptrInt64(248_000_000), AvgVolume: ptrInt64(212_400_000),
+		PriceAt: time.Date(2026, 5, 13, 10, 32, 18, 0, ny),
+		SessionContext: &rpc.MarketSession{
+			Timezone: "America/New_York",
+			State:    "regular",
+			IsOpen:   true,
+		},
 		MarketValue: 32135.00, UnrealizedPnL: 2372.50, DailyPnL: f64(-245.00),
 	}
 	nvdaCall := rpc.PositionView{
@@ -392,6 +411,8 @@ func fixtureChain() *rpc.ChainExpiriesResult {
 }
 
 func f64(v float64) *float64 { return &v }
+
+func ptrInt64(v int64) *int64 { return &v }
 
 // fixtureRegime returns a realistic mid-session regime envelope that
 // exercises every render branch: one OK-live row, one stale row with a

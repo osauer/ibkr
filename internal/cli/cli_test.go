@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -341,6 +342,79 @@ func TestRenderPositions_DayDollarColumnRemoved(t *testing.T) {
 	}
 }
 
+func TestRenderPositionsStockQuoteContext(t *testing.T) {
+	t.Parallel()
+	loc := mustTestLocation(t, "America/New_York")
+	nextOpen := time.Date(2026, 5, 26, 9, 30, 0, 0, loc)
+	daily := 48.00
+	res := &rpc.PositionsResult{
+		Stocks: []rpc.PositionView{
+			{
+				Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD",
+				Quantity: 25, AvgCost: 188.00, Mark: 190.12,
+				DataType: rpc.MarketDataDelayed, PriceSource: "last",
+				PrevClose: new(188.20), DayChange: new(1.92), DayChangePct: new(1.02),
+				DayLow: new(187.55), DayHigh: new(191.30), Week52Low: new(164.08), Week52High: new(199.62),
+				Volume: new(int64(41762007)), AvgVolume: new(int64(58900000)),
+				PriceAt: time.Date(2026, 5, 22, 16, 1, 2, 0, loc),
+				Stale:   true,
+				SessionContext: &rpc.MarketSession{
+					Label:    "US equities",
+					Timezone: "America/New_York",
+					State:    "holiday",
+					IsOpen:   false,
+					Reason:   "Memorial Day",
+					NextOpen: &nextOpen,
+				},
+				MarketValue: 4753.00, UnrealizedPnL: 53.00, DailyPnL: &daily,
+			},
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	_ = renderPositionsTextTo(env, &stdout, res, true)
+	out := stdout.String()
+	for _, want := range []string{
+		"SYMBOL", "POS", "CCY", "MARK", "CHG", "CHG%", "PREV", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
+		"AAPL", "25 sh", "USD", "190.12", "+1.92", "+1.02%", "188.20",
+		"187.55-191.30", "164.08-199.62", "41.8M/58.9M", "stale", "closed May22 16:01",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("positions quote output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Memorial Day") || strings.Contains(out, "next open") {
+		t.Fatalf("positions should not print per-row calendar prose:\n%s", out)
+	}
+	if !strings.Contains(out, ansiGreen) {
+		t.Fatalf("positive movement should be green:\n%q", out)
+	}
+}
+
+func TestRenderPositionsDefaultOmitsWideQuoteColumns(t *testing.T) {
+	t.Parallel()
+	res := &rpc.PositionsResult{
+		Stocks: []rpc.PositionView{
+			{Symbol: "AAPL", Currency: "USD", Quantity: 25, AvgCost: 188.00, Mark: 190.12, MarketValue: 4753.00},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderPositionsText(env, res)
+	out := stdout.String()
+	for _, want := range []string{"DATA", "AS OF", "pos"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("default positions output missing %q:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"VOL/AVG", "52W"} {
+		if strings.Contains(out, notWant) {
+			t.Fatalf("default positions output should omit wide quote column %q:\n%s", notWant, out)
+		}
+	}
+}
+
 // Realized P&L is rendered only when at least one row carries a non-zero
 // value, otherwise the column is omitted to avoid dead width.
 func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
@@ -354,9 +428,9 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 			},
 		}
 		_ = renderPositionsText(env, res)
-		// "UNREAL P&L" contains "REAL P&L" as a substring, so look for the
-		// realized header preceded by whitespace (table column separator).
-		if strings.Contains(stdout.String(), "  REAL P&L") {
+		// "UNREAL" contains "REAL" as a substring, so look for the realized
+		// header as a full table column.
+		if strings.Contains(stdout.String(), "  REAL  DATA") {
 			t.Errorf("expected REAL P&L column to be hidden when all zero:\n%s", stdout.String())
 		}
 	})
@@ -370,7 +444,7 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 		}
 		_ = renderPositionsText(env, res)
 		out := stdout.String()
-		if !strings.Contains(out, "  REAL P&L") {
+		if !strings.Contains(out, "  REAL  DATA") {
 			t.Errorf("expected REAL P&L column when row carries non-zero:\n%s", out)
 		}
 		if !strings.Contains(out, "220.50") {
@@ -379,11 +453,11 @@ func TestPositionsRealizedColumnOnlyShownWhenNonZero(t *testing.T) {
 	})
 }
 
-// The by-underlying view shows the Portfolio aggregate block (effective
+// The by-underlying view shows the Summary aggregate block (effective
 // delta, dollar delta, theta, gamma, vega, FX sensitivity, greeks
 // coverage) at the bottom — same as the flat positions view — so the
 // conclusion numbers are visible in both layouts.
-func TestRenderPositionsByUnderlying_IncludesPortfolio(t *testing.T) {
+func TestRenderPositionsByUnderlying_IncludesSummary(t *testing.T) {
 	t.Parallel()
 	delta, theta := 1847.0, -42.18
 	res := &rpc.PositionsResult{
@@ -406,7 +480,7 @@ func TestRenderPositionsByUnderlying_IncludesPortfolio(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderPositionsByUnderlying(env, res)
 	out := stdout.String()
-	for _, want := range []string{"Portfolio", "Effective delta", "+1,847.0", "Daily theta", "Greeks coverage", "1 / 1"} {
+	for _, want := range []string{"Summary", "Effective delta", "+1,847.0", "Daily theta", "Greeks coverage", "1 / 1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}

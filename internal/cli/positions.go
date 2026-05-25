@@ -19,6 +19,7 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 	typeF := fs.String("type", "", "filter by type: stk | opt")
 	sortBy := fs.String("sort", "alpha", "sort: alpha | pnl | value")
 	by := fs.String("by", "", "group view: underlying (default = flat stocks/options tables)")
+	quotes := fs.Bool("quotes", false, "include quote-detail columns on stock rows: previous close, ranges, volume")
 	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
 	rate := fs.Duration("rate", time.Second, "poll interval for --watch")
 	if err := fs.Parse(args); err != nil {
@@ -42,7 +43,7 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 		if *by == "underlying" {
 			return renderPositionsByUnderlyingTo(env, out, &res)
 		}
-		return renderPositionsTextTo(env, out, &res)
+		return renderPositionsTextTo(env, out, &res, *quotes)
 	}
 
 	if *watch {
@@ -68,10 +69,10 @@ func applySort(rows []rpc.PositionView, by string) {
 // renderPositionsText is preserved as a thin wrapper for tests and
 // preview that pass an Env holding the destination writer.
 func renderPositionsText(env *Env, r *rpc.PositionsResult) int {
-	return renderPositionsTextTo(env, env.Stdout, r)
+	return renderPositionsTextTo(env, env.Stdout, r, false)
 }
 
-func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult) int {
+func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult, quoteDetails bool) int {
 	fmt.Fprintln(out)
 	if len(r.Stocks) == 0 && len(r.Options) == 0 {
 		fmt.Fprintf(out, "No open positions%s\n\n", env.suffixBadge(r.DataType))
@@ -81,13 +82,13 @@ func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult) int 
 	// value — most accounts in a same-day snapshot have all zeros, and an
 	// always-on column adds dead width to the table.
 	showRealized := anyRealized(r.Stocks) || anyRealized(r.Options)
+	renderPortfolioSummaryTo(env, out, r)
 	if len(r.Stocks) > 0 {
-		renderStocksTable(env, out, r.Stocks, r.DataType, showRealized)
+		renderStocksTable(env, out, r.Stocks, r.DataType, showRealized, quoteDetails)
 	}
 	if len(r.Options) > 0 {
 		renderOptionsTable(env, out, r.Options, r.DataType, showRealized)
 	}
-	renderPortfolioSummaryTo(env, out, r)
 	fmt.Fprintf(out, "  %d positions  ·  as of %s\n",
 		len(r.Stocks)+len(r.Options), formatTimeShort(r.AsOf))
 	return 0
@@ -102,34 +103,65 @@ func renderPositionsTextTo(env *Env, out io.Writer, r *rpc.PositionsResult) int 
 // Column widths are sized from the rows being rendered, with the header as
 // the floor. That keeps small books compact while preserving right-aligned
 // money and quantity columns when a larger account needs more room.
-func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool) {
+func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataType string, showRealized bool, quoteDetails bool) {
 	fmt.Fprintf(out, "Stocks & ETFs%s\n", env.suffixBadge(dataType))
 	cols := []positionTableColumn{
 		{header: "SYMBOL", align: positionAlignLeft},
-		{header: "QTY", align: positionAlignRight},
-		{header: "AVG COST", align: positionAlignRight},
+		{header: "POS", align: positionAlignRight},
+		{header: "CCY", align: positionAlignLeft},
 		{header: "MARK", align: positionAlignRight},
-		{header: "MKT VALUE", align: positionAlignRight},
-		{header: "DAY P&L", align: positionAlignRight},
-		{header: "UNREAL P&L", align: positionAlignRight},
+		{header: "CHG", align: positionAlignRight},
+		{header: "CHG%", align: positionAlignRight},
 	}
+	if quoteDetails {
+		cols = append(cols,
+			positionTableColumn{header: "PREV", align: positionAlignRight},
+			positionTableColumn{header: "DAY", align: positionAlignRight},
+			positionTableColumn{header: "52W", align: positionAlignRight},
+			positionTableColumn{header: "VOL/AVG", align: positionAlignRight},
+		)
+	}
+	cols = append(cols,
+		positionTableColumn{header: "AVG", align: positionAlignRight},
+		positionTableColumn{header: "VALUE", align: positionAlignRight},
+		positionTableColumn{header: "DAY P&L", align: positionAlignRight},
+		positionTableColumn{header: "UNREAL", align: positionAlignRight},
+	)
 	if showRealized {
-		cols = append(cols, positionTableColumn{header: "REAL P&L", align: positionAlignRight})
+		cols = append(cols, positionTableColumn{header: "REAL", align: positionAlignRight})
 	}
+	cols = append(cols,
+		positionTableColumn{header: "DATA", align: positionAlignLeft},
+		positionTableColumn{header: "AS OF", align: positionAlignLeft},
+	)
 	tableRows := make([][]string, 0, len(rows))
 	for _, p := range rows {
 		row := []string{
 			p.Symbol,
-			fmt.Sprintf("%.0f", p.Quantity),
-			formatPositionMoney(avgCostPerShare(p)),
-			formatPositionMoney(p.Mark),
-			formatPositionMoney(p.MarketValue),
+			formatPositionQuantity(p.Quantity, "sh"),
+			formatPositionCurrency(p.Currency),
+			formatPositionPrice(p.Mark),
+			formatWatchlistChange(env, p.DayChange, 8),
+			env.formatChangePct(p.DayChangePct, 7),
+		}
+		if quoteDetails {
+			row = append(row,
+				formatWatchlistNumber(p.PrevClose, 9),
+				formatWatchlistRange(env, p.DayLow, p.DayHigh, 15),
+				formatWatchlistRange(env, p.Week52Low, p.Week52High, 15),
+				formatWatchlistVolume(p.Volume, p.AvgVolume, 11),
+			)
+		}
+		row = append(row,
+			formatPositionPrice(avgCostPerShare(p)),
+			formatPositionValue(p),
 			env.formatPositionPnLPtr(p.DailyPnL),
 			env.formatPositionPnL(p.UnrealizedPnL),
-		}
+		)
 		if showRealized {
 			row = append(row, env.formatPositionPnL(p.RealizedPnL))
 		}
+		row = append(row, formatPositionData(env, p), formatPositionAsOf(p))
 		tableRows = append(tableRows, row)
 	}
 	renderPositionTable(env, out, cols, tableRows)
@@ -147,14 +179,14 @@ func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTy
 		{header: "SIDE", align: positionAlignLeft},
 		{header: "EXPIRY", align: positionAlignLeft},
 		{header: "STRIKE", align: positionAlignRight},
-		{header: "QTY", align: positionAlignRight},
-		{header: "AVG COST", align: positionAlignRight},
+		{header: "POS", align: positionAlignRight},
+		{header: "AVG", align: positionAlignRight},
 		{header: "MARK", align: positionAlignRight},
 		{header: "DAY P&L", align: positionAlignRight},
-		{header: "UNREAL P&L", align: positionAlignRight},
+		{header: "UNREAL", align: positionAlignRight},
 	}
 	if showRealized {
-		cols = append(cols, positionTableColumn{header: "REAL P&L", align: positionAlignRight})
+		cols = append(cols, positionTableColumn{header: "REAL", align: positionAlignRight})
 	}
 	tableRows := make([][]string, 0, len(rows))
 	for _, p := range rows {
@@ -163,9 +195,9 @@ func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTy
 			p.Right,
 			formatExpiry(p.Expiry),
 			fmt.Sprintf("%.2f", p.Strike),
-			fmt.Sprintf("%.0f", p.Quantity),
-			formatPositionMoney(avgCostPerShare(p)),
-			formatPositionMoney(p.Mark),
+			formatPositionQuantity(p.Quantity, "ct"),
+			formatPositionPrice(avgCostPerShare(p)),
+			formatPositionPrice(p.Mark),
 			env.formatPositionPnLPtr(p.DailyPnL),
 			env.formatPositionPnL(p.UnrealizedPnL),
 		}
@@ -233,11 +265,81 @@ func formatPositionTableRow(cols []positionTableColumn, widths []int, cells []st
 	return b.String()
 }
 
-func formatPositionMoney(v float64) string {
+func formatPositionCurrency(ccy string) string {
+	ccy = strings.ToUpper(strings.TrimSpace(ccy))
+	if ccy == "" {
+		return "—"
+	}
+	return ccy
+}
+
+func formatPositionQuantity(qty float64, unit string) string {
+	if unit == "" {
+		return fmt.Sprintf("%.0f", qty)
+	}
+	return fmt.Sprintf("%.0f %s", qty, unit)
+}
+
+func formatPositionPrice(v float64) string {
 	if v == 0 {
 		return "—"
 	}
-	return formatMoney(v)
+	return fmt.Sprintf("%.2f", v)
+}
+
+func formatPositionValue(p rpc.PositionView) string {
+	value := p.MarketValue
+	ccy := p.Currency
+	if p.MarketValueCcy != nil {
+		value = *p.MarketValueCcy
+	}
+	return formatMoneyCcy(value, ccy)
+}
+
+func formatPositionData(env *Env, p rpc.PositionView) string {
+	if p.DataType == "" && p.PriceAt.IsZero() {
+		return env.dim("pos")
+	}
+	return formatWatchlistData(env, positionWatchlistRow(p))
+}
+
+func formatPositionAsOf(p rpc.PositionView) string {
+	return formatWatchlistAsOf(positionWatchlistRow(p))
+}
+
+func positionWatchlistRow(p rpc.PositionView) rpc.WatchlistRow {
+	var price *float64
+	if p.Mark != 0 {
+		v := p.Mark
+		price = &v
+	}
+	source := p.PriceSource
+	if source == "" && price != nil {
+		source = "mark"
+	}
+	return rpc.WatchlistRow{
+		Quote: rpc.Quote{
+			Symbol:         p.Symbol,
+			Contract:       rpc.ContractParams{Symbol: p.Symbol, SecType: "STK", Currency: p.Currency},
+			Price:          price,
+			PriceSource:    source,
+			PrevClose:      p.PrevClose,
+			Change:         p.DayChange,
+			ChangePct:      p.DayChangePct,
+			DayHigh:        p.DayHigh,
+			DayLow:         p.DayLow,
+			Week52High:     p.Week52High,
+			Week52Low:      p.Week52Low,
+			Volume:         p.Volume,
+			AvgVolume:      p.AvgVolume,
+			DataType:       p.DataType,
+			PriceAt:        p.PriceAt,
+			PriceAsOf:      p.PriceAsOf,
+			Stale:          p.Stale,
+			StaleReason:    p.StaleReason,
+			SessionContext: p.SessionContext,
+		},
+	}
 }
 
 func (e *Env) formatPositionPnL(v float64) string {
@@ -274,7 +376,7 @@ func renderPortfolioSummaryTo(env *Env, out io.Writer, r *rpc.PositionsResult) {
 	if !hasGreeks && !hasFX {
 		return
 	}
-	fmt.Fprintln(out, env.bold("Portfolio"))
+	fmt.Fprintln(out, heroSummaryStyle(env, "Summary"))
 	// All numeric values right-align to col (labelStart + labelWidth +
 	// space + valueWidth) so the unit text (share-equivalents, USD,
 	// / day, etc.) lands at a single column regardless of value
