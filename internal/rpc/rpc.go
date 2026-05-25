@@ -25,6 +25,7 @@ const (
 	MethodScanList       = "scan.list"
 	MethodScanParams     = "scan.params"
 	MethodHistoryDaily   = "history.daily"
+	MethodMarketCalendar = "market.calendar"
 	MethodStatusHealth   = "status.health"
 	MethodBreadthSPX     = "breadth.spx"
 	MethodGammaZeroSPX   = "gamma.zero_spx"
@@ -392,6 +393,55 @@ type HistoryDailyResult struct {
 	DataType string       `json:"data_type,omitempty"`
 	Bars     []HistoryBar `json:"bars"`
 	AsOf     time.Time    `json:"as_of"`
+}
+
+// MarketCalendarParams requests official exchange-session context. Market is
+// one of "us", "us-equity", "us-options", "de", or "de-xetra" aliases; the
+// daemon normalizes it to the stable result.market token. Date is YYYY-MM-DD
+// in the market's local timezone. At, when non-zero, wins over Date and asks
+// for the market state at that exact instant. Days controls how many calendar
+// days to include in Sessions; default 14, capped daemon-side at 400.
+type MarketCalendarParams struct {
+	Market string    `json:"market,omitempty"`
+	Date   string    `json:"date,omitempty"`
+	At     time.Time `json:"at,omitzero"`
+	Days   int       `json:"days,omitempty"`
+}
+
+// MarketSession is one official market-calendar row. Open/Close are present
+// for trading days; NextOpen/NextClose are present when the requested instant
+// is closed but a next session is known within coverage.
+type MarketSession struct {
+	Market        string     `json:"market"`
+	Label         string     `json:"label,omitempty"`
+	Date          string     `json:"date"`
+	Timezone      string     `json:"timezone"`
+	State         string     `json:"state"`
+	IsOpen        bool       `json:"is_open"`
+	Reason        string     `json:"reason,omitempty"`
+	Open          time.Time  `json:"open,omitzero"`
+	Close         time.Time  `json:"close,omitzero"`
+	NextOpen      *time.Time `json:"next_open,omitempty"`
+	NextClose     *time.Time `json:"next_close,omitempty"`
+	Source        string     `json:"source,omitempty"`
+	SourceURL     string     `json:"source_url,omitempty"`
+	CoverageStart string     `json:"coverage_start,omitempty"`
+	CoverageEnd   string     `json:"coverage_end,omitempty"`
+	Notes         string     `json:"notes,omitempty"`
+}
+
+// MarketCalendarResult is MethodMarketCalendar's payload.
+type MarketCalendarResult struct {
+	Market        string          `json:"market"`
+	Label         string          `json:"label"`
+	Timezone      string          `json:"timezone"`
+	AsOf          time.Time       `json:"as_of"`
+	CoverageStart string          `json:"coverage_start"`
+	CoverageEnd   string          `json:"coverage_end"`
+	Source        string          `json:"source"`
+	SourceURL     string          `json:"source_url"`
+	Session       MarketSession   `json:"session"`
+	Sessions      []MarketSession `json:"sessions,omitempty"`
 }
 
 // BreadthSPXParams is the input for MethodBreadthSPX. All fields are
@@ -1595,6 +1645,10 @@ type Quote struct {
 	IVStatus  string         `json:"iv_status"`
 	DataType  string         `json:"data_type"`
 	AsOf      time.Time      `json:"as_of"`
+	// SessionContext explains whether the relevant market was open at the
+	// quote time. Populated when the context is useful for interpreting a
+	// stale/frozen/missing quote; omitted on ordinary live in-session rows.
+	SessionContext *MarketSession `json:"session_context,omitempty"`
 }
 
 // Frame is a single streaming tick. DataType carries the gateway's

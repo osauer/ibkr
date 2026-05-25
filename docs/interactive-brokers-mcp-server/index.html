@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Interactive Brokers MCP Server for Trading Research | ibkr</title>
-  <meta name="description" content="A practical Interactive Brokers MCP server page for Claude Desktop, Claude Code, Cursor, Zed, IB Gateway, and TWS. Learn what ibkr exposes, what it does not expose, and how to install it.">
+  <meta name="description" content="A practical Interactive Brokers MCP server page for Claude Desktop, Claude Code, Cursor, Zed, IB Gateway, TWS, quotes, calendars, and portfolio context.">
   <link rel="canonical" href="https://osauer.dev/ibkr/interactive-brokers-mcp-server/">
 
   <meta property="og:type" content="article">
@@ -26,7 +26,7 @@
       {
         "@type": "TechArticle",
         "headline": "Interactive Brokers MCP server for trading research",
-        "description": "A practical guide to using ibkr as a local read-only Interactive Brokers MCP server for Claude Desktop, Claude Code, Cursor, Zed, IB Gateway, and TWS.",
+        "description": "A practical guide to using ibkr as a local read-only Interactive Brokers MCP server for Claude Desktop, Claude Code, Cursor, Zed, IB Gateway, TWS, quotes, calendars, and portfolio context.",
         "url": "https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
         "author": {
           "@type": "Person",
@@ -45,7 +45,7 @@
         "@type": "SoftwareApplication",
         "name": "ibkr",
         "url": "https://osauer.dev/ibkr/",
-        "description": "Local read-only Interactive Brokers MCP server, CLI, and Go TWS API for account and market analysis.",
+        "description": "Local read-only Interactive Brokers MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
         "softwareVersion": "1.0.9",
@@ -506,7 +506,7 @@
       <div>
         <p class="eyebrow">Interactive Brokers MCP server</p>
         <h1 id="hero-title">Interactive Brokers MCP server for trading research</h1>
-        <p class="lead">Connect IB Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Use account, positions, quotes, option chains, scanners, breadth, gamma, and risk-regime data without giving the host order access.</p>
+        <p class="lead">Connect IB Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Use account, positions, quotes, official calendars, option chains, scanners, breadth, gamma, and risk-regime data without giving the host order access.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="#install">Install</a>
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
@@ -543,7 +543,7 @@
         </div>
         <div class="strip-item">
           <strong>Read-side tools</strong>
-          <span>Account, positions, quotes, options, scans, sizing, breadth, gamma, and regime.</span>
+          <span>Account, positions, quotes, calendars, options, scans, sizing, breadth, gamma, and regime.</span>
         </div>
         <div class="strip-item">
           <strong>No order entry</strong>
@@ -565,8 +565,8 @@
         </article>
         <article class="card">
           <small>Markets</small>
-          <h3>Pull quotes and chains</h3>
-          <p>Ask for stock or ETF quotes, daily bars, option expiries, expected moves, and strike grids from the local IBKR session.</p>
+          <h3>Pull quotes, calendars, and chains</h3>
+          <p>Ask for stock or ETF quotes, official open/holiday context, daily bars, option expiries, expected moves, and strike grids from the local IBKR session.</p>
         </article>
         <article class="card">
           <small>Discovery</small>

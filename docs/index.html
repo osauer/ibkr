@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IBKR MCP Server for AI Assistants | Interactive Brokers TWS API</title>
-  <meta name="description" content="ibkr is a local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, positions, quotes, options, scanners, gamma, breadth, and market-regime data.">
+  <meta name="description" content="ibkr is a local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, positions, quotes, official calendars, options, scanners, gamma, breadth, and market-regime data.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
 
   <meta property="og:type" content="website">
@@ -27,7 +27,7 @@
         "@type": "SoftwareApplication",
         "name": "ibkr",
         "url": "https://osauer.dev/ibkr/",
-        "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account and market analysis.",
+        "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
         "softwareVersion": "1.0.9",
@@ -509,7 +509,7 @@
       <div>
         <p class="eyebrow">Interactive Brokers MCP server</p>
         <h1 id="hero-title">Analyze your IBKR account without order access</h1>
-        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Read live portfolio, options, quotes, scanners, breadth, gamma, and risk-regime data from one local tool.</p>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Read live portfolio, calendars, options, quotes, scanners, breadth, gamma, and risk-regime data from one local tool.</p>
         <p class="safety">The bundled CLI and MCP server expose account and market data, but no order-entry interface.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="#install">Install</a>
@@ -534,7 +534,7 @@
         </div>
         <div class="trust-item">
           <strong>Trading research</strong>
-          <span>Portfolio, options, quotes, scanners, breadth, gamma, and regime context in one tool.</span>
+          <span>Portfolio, calendars, options, quotes, scanners, breadth, gamma, and regime context in one tool.</span>
         </div>
         <div class="trust-item">
           <strong>Go binary</strong>
@@ -576,6 +576,7 @@
         <li>What is in my IBKR account?</li>
         <li>Show my SPY exposure, including option deltas.</li>
         <li>How does the market regime look today?</li>
+        <li>Is Xetra open on Whit Monday?</li>
         <li>Are dealers supporting or amplifying today's SPY move?</li>
         <li>What expiries are listed for SPY and what is the implied move?</li>
         <li>If I enter MSFT at 418 with a stop at 408, what is my EUR risk?</li>
@@ -590,12 +591,12 @@
         <article class="feature">
           <small>MCP server</small>
           <h3>For AI assistants</h3>
-          <p><code>ibkr mcp</code> exposes read-only account, quote, chain, scanner, sizing, breadth, gamma, and regime tools to MCP clients.</p>
+          <p><code>ibkr mcp</code> exposes read-only account, quote, calendar, chain, scanner, sizing, breadth, gamma, and regime tools to MCP clients.</p>
         </article>
         <article class="feature">
           <small>Terminal CLI</small>
           <h3>For fast checks</h3>
-          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON.</p>
+          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON.</p>
         </article>
         <article class="feature">
           <small>Go library</small>

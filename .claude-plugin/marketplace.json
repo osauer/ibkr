@@ -9,7 +9,7 @@
     {
       "name": "ibkr",
       "source": "./",
-      "description": "Read-only Interactive Brokers integration: account, positions, snapshot + streaming stock/ETF quotes, option chains, daily history, market scans, fixed-fractional position sizing, S&P 500 breadth, combined SPY+SPX dealer gamma, and an eight-row risk-regime dashboard. Requires the `ibkr` binary on PATH; see the project README for install and update instructions."
+      "description": "Read-only Interactive Brokers integration: account, positions, snapshot + streaming stock/ETF quotes, official market calendars, option chains, daily history, market scans, fixed-fractional position sizing, S&P 500 breadth, combined SPY+SPX dealer gamma, and an eight-row risk-regime dashboard. Requires the `ibkr` binary on PATH; see the project README for install and update instructions."
     }
   ]
 }

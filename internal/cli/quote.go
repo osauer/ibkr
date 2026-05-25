@@ -167,6 +167,9 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 			ivStatus(q.IV),
 			dt,
 		)
+		if hint := quoteSessionHint(env, q.SessionContext); hint != "" {
+			fmt.Fprintf(out, "    %s\n", hint)
+		}
 	}
 	fmt.Fprintln(out)
 	return 0

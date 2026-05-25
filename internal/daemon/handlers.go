@@ -17,6 +17,7 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
 	"github.com/osauer/ibkr/internal/breadth/spx"
+	"github.com/osauer/ibkr/internal/marketcal"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -997,6 +998,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	if err != nil {
 		return nil, err
 	}
+	sessionMarket := quoteMarketForStockContract(echoedContract)
 	sym := echoedContract.Symbol
 	q := &rpc.Quote{
 		Symbol:   sym,
@@ -1078,6 +1080,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	// MCP) sees the same numbers without re-deriving them.
 	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
 	q.AsOf = time.Now()
+	s.attachQuoteSessionContext(q, sessionMarket)
 
 	return q, nil
 }
@@ -1225,7 +1228,41 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 	}
 	q.Change, q.ChangePct = computeQuoteChange(q.Last, q.PrevClose)
 	q.AsOf = time.Now()
+	s.attachQuoteSessionContext(q, marketcal.MarketUSOptions)
 	return q, nil
+}
+
+func quoteMarketForStockContract(c rpc.ContractParams) marketcal.Market {
+	market := strings.ToLower(strings.TrimSpace(c.Market))
+	exchange := strings.ToUpper(strings.TrimSpace(c.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(c.PrimaryExch))
+	switch {
+	case market == "de" || market == "germany" || market == "xetra" || market == "ibis":
+		return marketcal.MarketDEXetra
+	case exchange == "IBIS" || primary == "IBIS":
+		return marketcal.MarketDEXetra
+	default:
+		return marketcal.MarketUSEquity
+	}
+}
+
+func (s *Server) attachQuoteSessionContext(q *rpc.Quote, market marketcal.Market) {
+	if q == nil {
+		return
+	}
+	session, err := marketcal.New().SessionAt(market, q.AsOf)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Debugf("quote session context: %v", err)
+		}
+		return
+	}
+	priceMissing := q.Bid == nil && q.Ask == nil && q.Last == nil
+	if session.IsOpen && rpc.IsLiveDataType(q.DataType) && !priceMissing {
+		return
+	}
+	converted := marketSessionToRPC(session)
+	q.SessionContext = &converted
 }
 
 func normaliseOptionQuoteContract(in rpc.ContractParams) (rpc.ContractParams, error) {
@@ -1849,6 +1886,66 @@ func (s *Server) membersHealth() rpc.MembersHealth {
 func sp500EmbeddedAsOf() time.Time {
 	_, asOf := spx.MemberList()
 	return asOf
+}
+
+// handleMarketCalendar returns official exchange-session context for the
+// supported first-release markets: U.S. cash equities, U.S. listed options,
+// and Xetra cash equities.
+func (s *Server) handleMarketCalendar(req *rpc.Request) (*rpc.MarketCalendarResult, error) {
+	var p rpc.MarketCalendarParams
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	market, ok := marketcal.NormalizeMarket(p.Market)
+	if !ok {
+		return nil, errBadRequest(fmt.Sprintf("unsupported market %q (supported: us, us-options, de)", p.Market))
+	}
+	res, err := marketcal.New().Query(marketcal.Query{
+		Market: market,
+		Date:   p.Date,
+		At:     p.At,
+		Days:   p.Days,
+	})
+	if err != nil {
+		return nil, errBadRequest(err.Error())
+	}
+	out := &rpc.MarketCalendarResult{
+		Market:        string(res.Market),
+		Label:         res.Label,
+		Timezone:      res.Timezone,
+		AsOf:          res.AsOf,
+		CoverageStart: res.CoverageStart,
+		CoverageEnd:   res.CoverageEnd,
+		Source:        res.Source,
+		SourceURL:     res.SourceURL,
+		Session:       marketSessionToRPC(res.Session),
+		Sessions:      make([]rpc.MarketSession, 0, len(res.Sessions)),
+	}
+	for _, s := range res.Sessions {
+		out.Sessions = append(out.Sessions, marketSessionToRPC(s))
+	}
+	return out, nil
+}
+
+func marketSessionToRPC(s marketcal.Session) rpc.MarketSession {
+	return rpc.MarketSession{
+		Market:        string(s.Market),
+		Label:         s.Label,
+		Date:          s.Date,
+		Timezone:      s.Timezone,
+		State:         string(s.State),
+		IsOpen:        s.IsOpen,
+		Reason:        s.Reason,
+		Open:          s.Open,
+		Close:         s.Close,
+		NextOpen:      s.NextOpen,
+		NextClose:     s.NextClose,
+		Source:        s.Source,
+		SourceURL:     s.SourceURL,
+		CoverageStart: s.CoverageStart,
+		CoverageEnd:   s.CoverageEnd,
+		Notes:         s.Notes,
+	}
 }
 
 // handleHistoryDaily returns N days of daily OHLCV bars for a symbol.

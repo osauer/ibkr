@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-25 10:13 CEST
+Updated: 2026-05-25 11:44 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -245,8 +245,21 @@ and `ibkr watch --clear`. MCP exposes watchlist reading only.
   "volume": 12400000,
   "iv": null,
   "iv_status": "unavailable",
-  "data_type": "live",
-  "as_of": "2026-05-09T14:32:11.421+02:00"
+  "data_type": "frozen",
+  "as_of": "2026-05-25T16:32:11.421+02:00",
+  "session_context": {
+    "market": "us_equity",
+    "label": "US equities",
+    "date": "2026-05-25",
+    "timezone": "America/New_York",
+    "state": "holiday",
+    "is_open": false,
+    "reason": "Memorial Day",
+    "next_open": "2026-05-26T09:30:00-04:00",
+    "next_close": "2026-05-26T16:00:00-04:00",
+    "coverage_start": "2026-01-01",
+    "coverage_end": "2028-12-31"
+  }
 }
 ```
 
@@ -263,9 +276,100 @@ Field meanings:
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
 - `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`.
+- `session_context` — optional official calendar explanation. Present
+  when the snapshot is frozen/delayed/missing prices or the market is not
+  in an ordinary open regular session. It names the supported market,
+  current state (`regular`, `closed`, `holiday`, `early_close`, `unknown`),
+  reason when known, session hours for trading days, next open/close when
+  known, and embedded coverage. During ordinary live RTH with prices
+  present, this field is omitted.
 
 For the multi-symbol form, the response is a top-level JSON array of these
 objects.
+
+## calendar
+
+`ibkr calendar --market us --date 2026-05-25 --next 3 --json`
+
+Supported markets:
+
+- `us` / `us-equity` — US cash equities.
+- `us-options` — US listed options regular sessions.
+- `de` / `de-xetra` — German Xetra cash equities.
+
+Other markets and asset classes are only partly supported today. Futures,
+FX, crypto, bonds, Eurex, Frankfurt floor trading, and per-class SPX/VIX
+global-hours nuance are out of scope for v1.
+
+```json
+{
+  "market": "us_equity",
+  "label": "US equities",
+  "timezone": "America/New_York",
+  "as_of": "2026-05-25T11:44:00+02:00",
+  "coverage_start": "2026-01-01",
+  "coverage_end": "2028-12-31",
+  "source": "official_exchange_calendar",
+  "source_url": "https://www.nyse.com/markets/hours-calendars",
+  "session": {
+    "market": "us_equity",
+    "label": "US equities",
+    "date": "2026-05-25",
+    "timezone": "America/New_York",
+    "state": "holiday",
+    "is_open": false,
+    "reason": "Memorial Day",
+    "next_open": "2026-05-26T09:30:00-04:00",
+    "next_close": "2026-05-26T16:00:00-04:00",
+    "source": "official_exchange_calendar",
+    "source_url": "https://www.nyse.com/markets/hours-calendars",
+    "coverage_start": "2026-01-01",
+    "coverage_end": "2028-12-31",
+    "notes": "Official NYSE/Nasdaq cash-equity holidays and early closes; other U.S. products may differ."
+  },
+  "sessions": [
+    {
+      "market": "us_equity",
+      "label": "US equities",
+      "date": "2026-05-25",
+      "timezone": "America/New_York",
+      "state": "holiday",
+      "is_open": false,
+      "reason": "Memorial Day",
+      "next_open": "2026-05-26T09:30:00-04:00",
+      "next_close": "2026-05-26T16:00:00-04:00"
+    },
+    {
+      "market": "us_equity",
+      "label": "US equities",
+      "date": "2026-05-26",
+      "timezone": "America/New_York",
+      "state": "regular",
+      "is_open": false,
+      "open": "2026-05-26T09:30:00-04:00",
+      "close": "2026-05-26T16:00:00-04:00"
+    }
+  ]
+}
+```
+
+Field meanings:
+
+- `market` — stable market id: `us_equity`, `us_options`, or `de_xetra`.
+- `session` — the current/date session requested by `--date` or by now
+  when omitted.
+- `sessions[]` — forward calendar-day rows starting at the requested date
+  or current market date. `--next` defaults to 14 and is capped at 400.
+- `state` — `regular`, `closed`, `holiday`, `early_close`, or `unknown`.
+  `unknown` means outside embedded official coverage; do not infer open
+  from weekdays.
+- `open` / `close` — present on trading days. Times are RFC 3339 in the
+  market's timezone.
+- `next_open` / `next_close` — present when the requested instant is closed
+  and a next session is known within coverage.
+- `coverage_start` / `coverage_end` — embedded official schedule coverage.
+  Calendar updates arrive with binary releases in v1; there is no runtime
+  network refresh.
 
 ## frame
 

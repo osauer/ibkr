@@ -8,7 +8,7 @@
 
 **Use your IBKR account from the terminal or an AI assistant without giving it trading access.**
 
-`ibkr` answers account and market questions against your local IB Gateway or TWS session. It shows positions, exposure, live market data, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
+`ibkr` answers account and market questions against your local IB Gateway or TWS session. It shows positions, exposure, live market data, official market calendars, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
 
 Use it from a shell:
 
@@ -18,6 +18,7 @@ ibkr positions --by underlying
 ibkr regime
 ibkr watch IBM --add
 ibkr watch --watch
+ibkr calendar --market us --date 2026-05-25
 ibkr quote SPY --watch
 ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```
@@ -29,6 +30,8 @@ Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP 
 > "Show my AAPL exposure, including option deltas."
 >
 > "How does the market regime look today?"
+>
+> "Is Xetra open on Whit Monday?"
 >
 > "If I buy 100 MSFT at 418 with a stop at 408, what's my EUR risk?"
 
@@ -55,6 +58,7 @@ For v1.0.0+ releases, the installer and `ibkr update` both verify the signed `SH
 
 - **Account and positions.** Net liquidation, buying power, cash, margin, daily P&L, positions, option Greeks, per-underlying grouping, and portfolio-level delta/theta/gamma/vega rollups. Multi-currency accounts include FX exposure.
 - **Quotes and history.** Snapshot quotes, coalesced stock/ETF streaming, daily OHLCV bars, previous close, day change, and data freshness (`live`, `frozen`, `delayed`, `delayed-frozen`).
+- **Official market calendars.** US cash equities, US listed options regular sessions, and German Xetra cash equities with holidays, early closes, next open/close, and quote `session_context` when calendar state explains stale or missing data.
 - **Local watchlist.** Add/remove/clear symbols offline, list them as JSON, or poll live quotes for the saved list with `ibkr watch --watch`.
 - **Options.** Expiry lists with ATM IV and implied move, strike grids with call/put quotes, deltas, and open interest. Option snapshots are supported; option streaming is not exposed.
 - **Scanners.** Built-in market scans for movers, losers, unusual volume, gaps, high IV rank, and option volume. Agents can also compose ad-hoc scans without writing config.
@@ -71,7 +75,7 @@ For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schem
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Watchlist access through MCP is list-only; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Watchlist access through MCP is list-only; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -136,6 +140,7 @@ $ ibkr watch IBM --add
 $ ibkr watch --list --json
 $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, last: .last, chg: .change_pct}'
 $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
+$ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1

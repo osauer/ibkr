@@ -2,22 +2,22 @@
 name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
   about their IBKR account, positions, P&L, market quotes, option chains (incl. per-leg
-  open interest), local watchlist, daily price history, running a market scan, sizing a planned trade by
+  open interest), official market calendars, local watchlist, daily price history, running a market scan, sizing a planned trade by
   fixed-fractional risk, or checking the market's risk regime (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
   regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
-  Bash(ibkr watch --list*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
+  Bash(ibkr calendar*) Bash(ibkr watch --list*) Bash(ibkr watch --watch*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-25 10:13 CEST
+Updated: 2026-05-25 11:44 CEST
 
 ## When to use
 
 If the user asks about holdings, cash, buying power, P&L, a local watchlist,
-a specific stock or ETF quote, an option chain, daily history, or wants to scan the market, run the
+a specific stock or ETF quote, whether a supported market is open, an option chain, daily history, or wants to scan the market, run the
 relevant `ibkr` subcommand with `--json` and parse the output.
 
 If the user asks about the *market environment* — "is the market risky today?",
@@ -39,6 +39,9 @@ release. Do not invent or simulate trade execution.
 - Always include the `data_type` field (`live` / `delayed` / `frozen`). If it
   isn't `live`, mention it in the answer so the user knows the prices may not
   reflect the current market.
+- If quote JSON includes `session_context`, surface it briefly. It explains
+  official exchange-calendar state such as holidays, early closes, closed
+  regular sessions, or the next known open.
 - Never claim an order was placed. The CLI cannot trade.
 - Never fabricate Greeks or implied volatility. If the JSON returns
   `"iv": null` and `"iv_status": "unavailable"`, say so plainly. The same
@@ -54,6 +57,7 @@ release. Do not invent or simulate trade execution.
 | `ibkr account` | Account summary (NLV, BP, cash, margin, daily P&L); add `--watch` for in-place refresh | [schemas.md#account](schemas.md#account) |
 | `ibkr positions` | Open positions (stocks + options) with per-position daily P&L; add `--watch` for in-place refresh | [schemas.md#positions](schemas.md#positions) |
 | `ibkr watch --list` | Read the local saved-symbol watchlist; add `--watch` for live quote polling | [schemas.md#watch](schemas.md#watch) |
+| `ibkr calendar` | Official sessions for US equities, US listed options regular sessions, and Xetra | [schemas.md#calendar](schemas.md#calendar) |
 | `ibkr quote SYM[,SYM…]` | Snapshot quotes for one or many symbols | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM YYMMDD C\|P STRIKE` | Single-option snapshot | [schemas.md#quote](schemas.md#quote) |
 | `ibkr quote SYM --watch` | Streaming ticks (Ctrl-C to stop) | streaming frames per [schemas.md#frame](schemas.md#frame) |
@@ -84,6 +88,7 @@ symbols — the CLI hoists them automatically.
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
 - `ibkr watch --list [--json]` — read the local saved-symbol watchlist. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
 - `ibkr watch --watch [--rate 1s]` — re-poll live quote snapshots for the saved symbols; no JSON mode because it is an in-place live view.
+- `ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]` — official embedded calendars for US cash equities, US listed options regular sessions, and German Xetra cash equities. Use this for "is the market open?", "when is the next session?", "is this an early close?", and holiday/long-weekend context before risk checks. `--next` is a calendar-day horizon capped at 400. Other markets and asset classes are not modeled in v1; outside embedded coverage returns `state: "unknown"` rather than a weekday guess.
 - `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
 - `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one. Per-leg open interest is shown after IV in the text view (compact abbreviation — `1.2K`, `45K`, `1.2M`) and as `call_oi` / `put_oi` (int64, nullable) in JSON; empty cells / `null` mean the gateway didn't push tick 27/28 within the fill budget (common off-hours or for illiquid wings) — never zero-substituted.
   - **MCP params** (for `ibkr_chain`): `symbol` (required); `expiry` (`YYYY-MM-DD` — omit to list expiries); `width` (integer; ATM ± strikes, default 5); `side` (`"calls" | "puts" | "both"`); `no_iv` (boolean — skip ATM IV in the expiry list); `all_expiries` (boolean — lift the 12-expiry cap).
@@ -207,7 +212,31 @@ $ ibkr quote AAPL --json
 
 Present as: `AAPL — $207.86 (bid 207.85 × 100 / ask 207.88 × 200) · vol 12.4M · live`.
 If `data_type` is not `live`, prepend a short warning. Sizes and volume can be
-`null` (omitted) when the gateway didn't deliver them.
+`null` (omitted) when the gateway didn't deliver them. If `session_context`
+is present, add a short calendar note, for example `US equities closed:
+Memorial Day; next open 2026-05-26 09:30 EDT`.
+
+### Calendar
+```
+$ ibkr calendar --market us --date 2026-05-25 --json
+{
+  "market": "us_equity",
+  "label": "US equities",
+  "timezone": "America/New_York",
+  "coverage_start": "2026-01-01",
+  "coverage_end": "2028-12-31",
+  "session": {
+    "date": "2026-05-25",
+    "state": "holiday",
+    "reason": "Memorial Day",
+    "next_open": "2026-05-26T09:30:00-04:00"
+  }
+}
+```
+
+Use this for open/closed context, holidays, early closes, and supported
+market-specific risk timing. For options, use `--market us-options`; for
+German cash equities, use `--market de`.
 
 ### Daily history
 ```

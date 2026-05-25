@@ -101,6 +101,11 @@ func TestHoistFlagsReordersValueFlags(t *testing.T) {
 			want: []string{"--market", "de", "--json", "MBG"},
 		},
 		{
+			name: "calendar date and next flags hoisted as pairs",
+			in:   []string{"SPY", "--date", "2026-05-25", "--next", "3"},
+			want: []string{"--date", "2026-05-25", "--next", "3", "SPY"},
+		},
+		{
 			name: "flag before positional preserved",
 			in:   []string{"--json", "AAPL"},
 			want: []string{"--json", "AAPL"},
