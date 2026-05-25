@@ -69,55 +69,14 @@ type SizeResult struct {
 // the ibkr_size tool — the daemon has no size RPC; sizing is account-snapshot
 // + local arithmetic.
 func ComputeSize(in SizeInput) (SizeResult, error) {
-	side := strings.ToLower(strings.TrimSpace(in.Side))
-	if side == "" {
-		side = "long"
-	}
-	if side != "long" && side != "short" {
-		return SizeResult{}, fmt.Errorf("side must be long or short (got %q)", in.Side)
-	}
-	if in.Symbol == "" {
-		return SizeResult{}, fmt.Errorf("symbol is required")
-	}
-	if in.Entry <= 0 {
-		return SizeResult{}, fmt.Errorf("entry must be > 0 (got %v)", in.Entry)
-	}
-	if in.Stop <= 0 {
-		return SizeResult{}, fmt.Errorf("stop must be > 0 (got %v)", in.Stop)
-	}
-	if side == "long" && in.Stop >= in.Entry {
-		return SizeResult{}, fmt.Errorf("long trade requires stop (%v) < entry (%v)", in.Stop, in.Entry)
-	}
-	if side == "short" && in.Stop <= in.Entry {
-		return SizeResult{}, fmt.Errorf("short trade requires stop (%v) > entry (%v)", in.Stop, in.Entry)
-	}
-	if in.Target != 0 {
-		if in.Target < 0 {
-			return SizeResult{}, fmt.Errorf("target must be > 0 (got %v)", in.Target)
-		}
-		if side == "long" && in.Target <= in.Entry {
-			return SizeResult{}, fmt.Errorf("long trade requires target (%v) > entry (%v)", in.Target, in.Entry)
-		}
-		if side == "short" && in.Target >= in.Entry {
-			return SizeResult{}, fmt.Errorf("short trade requires target (%v) < entry (%v)", in.Target, in.Entry)
-		}
-	}
-	if in.RiskPct <= 0 || in.RiskPct > 100 {
-		return SizeResult{}, fmt.Errorf("risk-pct must be in (0, 100] (got %v)", in.RiskPct)
-	}
-	if in.Lot < 1 {
-		return SizeResult{}, fmt.Errorf("lot must be >= 1 (got %v)", in.Lot)
-	}
-	if in.FX <= 0 {
-		return SizeResult{}, fmt.Errorf("fx must be > 0 (got %v)", in.FX)
-	}
-	if in.NLV <= 0 {
-		return SizeResult{}, fmt.Errorf("nlv must be > 0 (got %v) — is the gateway connected?", in.NLV)
+	side, err := validateSizePlan(in, true)
+	if err != nil {
+		return SizeResult{}, err
 	}
 
 	perShare := math.Abs(in.Entry - in.Stop)
 	if perShare == 0 {
-		// Defensive — the side-vs-stop checks above should make this unreachable.
+		// Defensive — the side-vs-stop checks in validateSizePlan should make this unreachable.
 		return SizeResult{}, fmt.Errorf("per-share risk is zero (entry == stop)")
 	}
 
@@ -169,6 +128,55 @@ func ComputeSize(in SizeInput) (SizeResult, error) {
 	return res, nil
 }
 
+func validateSizePlan(in SizeInput, requireAccount bool) (string, error) {
+	side := strings.ToLower(strings.TrimSpace(in.Side))
+	if side == "" {
+		side = "long"
+	}
+	if side != "long" && side != "short" {
+		return "", fmt.Errorf("side must be long or short (got %q)", in.Side)
+	}
+	if in.Symbol == "" {
+		return "", fmt.Errorf("symbol is required")
+	}
+	if in.Entry <= 0 {
+		return "", fmt.Errorf("entry must be > 0 (got %v)", in.Entry)
+	}
+	if in.Stop <= 0 {
+		return "", fmt.Errorf("stop must be > 0 (got %v)", in.Stop)
+	}
+	if side == "long" && in.Stop >= in.Entry {
+		return "", fmt.Errorf("long trade requires stop (%v) < entry (%v)", in.Stop, in.Entry)
+	}
+	if side == "short" && in.Stop <= in.Entry {
+		return "", fmt.Errorf("short trade requires stop (%v) > entry (%v)", in.Stop, in.Entry)
+	}
+	if in.Target != 0 {
+		if in.Target < 0 {
+			return "", fmt.Errorf("target must be > 0 (got %v)", in.Target)
+		}
+		if side == "long" && in.Target <= in.Entry {
+			return "", fmt.Errorf("long trade requires target (%v) > entry (%v)", in.Target, in.Entry)
+		}
+		if side == "short" && in.Target >= in.Entry {
+			return "", fmt.Errorf("short trade requires target (%v) < entry (%v)", in.Target, in.Entry)
+		}
+	}
+	if in.RiskPct <= 0 || in.RiskPct > 100 {
+		return "", fmt.Errorf("risk-pct must be in (0, 100] (got %v)", in.RiskPct)
+	}
+	if in.Lot < 1 {
+		return "", fmt.Errorf("lot must be >= 1 (got %v)", in.Lot)
+	}
+	if in.FX <= 0 {
+		return "", fmt.Errorf("fx must be > 0 (got %v)", in.FX)
+	}
+	if requireAccount && in.NLV <= 0 {
+		return "", fmt.Errorf("nlv must be > 0 (got %v) — is the gateway connected?", in.NLV)
+	}
+	return side, nil
+}
+
 func runSize(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "size")
 	symbol := fs.String("symbol", "", "underlying symbol (required)")
@@ -184,24 +192,29 @@ func runSize(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 
+	plan := SizeInput{
+		Symbol:  *symbol,
+		Side:    *side,
+		Entry:   *entry,
+		Stop:    *stop,
+		Target:  *target,
+		RiskPct: *riskPct,
+		Lot:     *lot,
+		FX:      *fx,
+	}
+	if _, err := validateSizePlan(plan, false); err != nil {
+		return fail(env, "size: %v", err)
+	}
+
 	var acct rpc.AccountResult
 	if err := env.Conn.Call(ctx, rpc.MethodAccountSummary, nil, &acct); err != nil {
 		return fail(env, "size: %v", err)
 	}
 
-	in := SizeInput{
-		Symbol:      *symbol,
-		Side:        *side,
-		Entry:       *entry,
-		Stop:        *stop,
-		Target:      *target,
-		RiskPct:     *riskPct,
-		Lot:         *lot,
-		FX:          *fx,
-		NLV:         acct.NetLiquidation,
-		BuyingPower: acct.BuyingPower,
-		Currency:    acct.BaseCurrency,
-	}
+	in := plan
+	in.NLV = acct.NetLiquidation
+	in.BuyingPower = acct.BuyingPower
+	in.Currency = acct.BaseCurrency
 	res, err := ComputeSize(in)
 	if err != nil {
 		return fail(env, "size: %v", err)

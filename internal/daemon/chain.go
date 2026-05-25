@@ -348,11 +348,14 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	if p.Symbol == "" {
 		return nil, errBadRequest("symbol required")
 	}
-	if p.Width <= 0 {
-		p.Width = 5
+	if p.Width < 0 {
+		return nil, errBadRequest("width must be >= 0")
 	}
 	if p.Side == "" {
 		p.Side = "both"
+	}
+	if !validChainSide(p.Side) {
+		return nil, errBadRequest("side must be calls, puts, or both")
 	}
 	c := s.gatewayConnector()
 	if c == nil {

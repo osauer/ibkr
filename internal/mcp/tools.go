@@ -108,7 +108,7 @@ var Tools = []Tool{
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":       schemaString("underlying ticker"),
 			"expiry":       schemaString("expiry date YYYY-MM-DD; omit to list available expiries"),
-			"width":        json.RawMessage(`{"type":"integer","minimum":1,"description":"strikes ATM ± this count (default 5)"}`),
+			"width":        json.RawMessage(`{"type":"integer","minimum":0,"description":"strikes ATM ± this count (default 5; 0 returns ATM only)"}`),
 			"side":         schemaEnum([]string{"calls", "puts", "both"}, "filter strike legs (default both)"),
 			"no_iv":        json.RawMessage(`{"type":"boolean","description":"when listing expiries, skip ATM IV (faster)"}`),
 			"all_expiries": json.RawMessage(`{"type":"boolean","description":"when listing expiries, return every listed date (default: nearest 12 with IV)"}`),
@@ -117,7 +117,7 @@ var Tools = []Tool{
 			var in struct {
 				Symbol      string `json:"symbol"`
 				Expiry      string `json:"expiry"`
-				Width       int    `json:"width"`
+				Width       *int   `json:"width"`
 				Side        string `json:"side"`
 				NoIV        bool   `json:"no_iv"`
 				AllExpiries bool   `json:"all_expiries"`
@@ -140,14 +140,15 @@ var Tools = []Tool{
 				}
 				return json.Marshal(res)
 			}
-			if in.Width == 0 {
-				in.Width = 5
+			width := 5
+			if in.Width != nil {
+				width = *in.Width
 			}
 			if in.Side == "" {
 				in.Side = "both"
 			}
 			var res rpc.ChainResult
-			params := rpc.ChainFetchParams{Symbol: strings.ToUpper(in.Symbol), Expiry: in.Expiry, Width: in.Width, Side: in.Side}
+			params := rpc.ChainFetchParams{Symbol: strings.ToUpper(in.Symbol), Expiry: in.Expiry, Width: width, Side: in.Side}
 			if err := conn.Call(ctx, rpc.MethodChainFetch, params, &res); err != nil {
 				return nil, err
 			}

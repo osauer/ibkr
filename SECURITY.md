@@ -30,7 +30,7 @@ For the v1 stable line, only the latest minor release receives security fixes. O
 
 **In scope** — the daemon, CLI, stdio MCP server, Claude Code plugin, the `pkg/ibkr` wire-protocol implementation, the install script, and the published release artifacts in this repository.
 
-**Out of scope** — vulnerabilities in Interactive Brokers' TWS / IB Gateway software (please report those directly to IBKR), vulnerabilities in upstream Go modules (please notify the upstream maintainer; this project will re-release after the fix lands), and denial-of-service against the local daemon by a user who already has shell access on the same machine (the daemon is designed for single-user local use).
+**Out of scope** — vulnerabilities in Interactive Brokers' TWS / IB Gateway software (please report those directly to IBKR), vulnerabilities in upstream Go modules (please notify the upstream maintainer; this project will re-release after the fix lands), and denial-of-service against the local daemon by a user who already has shell access on the same machine (the daemon is intended for single-user local use).
 
 ## Threat model
 
@@ -46,7 +46,7 @@ Every GitHub release from v1.0.0 onward ships **three artefacts per platform** t
 2. `SHA256SUMS` — one line per tarball with its SHA-256.
 3. `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's release-signing key.
 
-`ibkr update` (from v1.0.0 onward) **refuses** any release that does not publish `SHA256SUMS.asc`, and refuses any release whose `SHA256SUMS.asc` does not verify against the public key embedded in the running binary. There is no fallback path. A release whose signature cannot be checked is treated as a compromised release.
+`install.sh` and `ibkr update` (from v1.0.0 onward) **refuse** any release that does not publish `SHA256SUMS.asc`, and refuse any release whose `SHA256SUMS.asc` does not verify against the maintainer's release-signing key. `install.sh` pins the key fingerprint during bootstrap; `ibkr update` verifies against the public key embedded in the running binary. There is no fallback path. A release whose signature cannot be checked is treated as a compromised release.
 
 ### The maintainer's release-signing key
 
@@ -103,7 +103,7 @@ Two opt-in environment variables write the raw IBKR wire protocol to disk. Both 
 | Variable | Effect |
 |---|---|
 | `IBKR_WIRE_INTERCEPTOR=1` | Activates the in-process wire recorder. Frames are mirrored into a per-process ring buffer (in-memory). |
-| `IBKR_WIRE_LOG_PATH=/path/to/wire.jsonl` | When set with `IBKR_WIRE_INTERCEPTOR=1`, every frame is also appended to this file as one JSON object per line. The file is created with mode `0644` — restrict the directory if other UIDs share the host. |
+| `IBKR_WIRE_LOG_PATH=/path/to/wire.jsonl` | When set with `IBKR_WIRE_INTERCEPTOR=1`, every frame is also appended to this file as one JSON object per line. The parent directory is created `0700` and the file `0600`. |
 | `IBKR_WIRE_RING_SIZE=N` | Bound on the in-memory ring (default 256 frames). |
 | `IBKR_PACKET_LOG_TEMPLATE=/path/to/packets.bin` | Independent low-level packet logger writing raw bytes (length-prefixed). Same sensitivity as the wire log; lower-level shape. |
 

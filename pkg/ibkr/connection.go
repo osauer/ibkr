@@ -2245,7 +2245,7 @@ func (c *Connection) handlePosition(fields []string) {
 	}
 	c.positionsMu.Unlock()
 
-	portfolioLogger.Infof("Position: %s %s %.2f @ %.2f",
+	portfolioLogger.Debugf("Position: %s %s %.2f @ %.2f",
 		fields[2], key, positionSize, avgCost)
 }
 
@@ -2285,7 +2285,7 @@ func (c *Connection) handleAccountSummary(fields []string) {
 	// Log important values
 	switch tag {
 	case "NetLiquidation", "BuyingPower", "TotalCashValue", "GrossPositionValue":
-		portfolioLogger.Infof("%s: %s %s", tag, value, currency)
+		portfolioLogger.Debugf("%s: %s %s", tag, value, currency)
 	}
 }
 
@@ -2397,7 +2397,7 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 		c.optionContractMu.Unlock()
 	}
 
-	portfolioLogger.Infof("Updated: %s %.2f @ %.2f, PnL: %.2f",
+	portfolioLogger.Debugf("Updated: %s %.2f @ %.2f, PnL: %.2f",
 		key, position, marketPrice, unrealizedPNL)
 }
 
@@ -2432,7 +2432,7 @@ func (c *Connection) handleAccountValue(fields []string) {
 	// Log important values
 	switch key {
 	case "NetLiquidation", "BuyingPower", "TotalCashValue", "UnrealizedPnL", "RealizedPnL":
-		portfolioLogger.Infof("%s: %s %s", key, value, currency)
+		portfolioLogger.Debugf("%s: %s %s", key, value, currency)
 	}
 }
 

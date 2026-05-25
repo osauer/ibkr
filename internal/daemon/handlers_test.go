@@ -237,6 +237,47 @@ func TestChainExpiriesEmptySymbolIsBadRequest(t *testing.T) {
 	}
 }
 
+func TestChainFetchInvalidParamsAreBadRequest(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	tests := []struct {
+		name   string
+		params rpc.ChainFetchParams
+	}{
+		{
+			name:   "invalid side",
+			params: rpc.ChainFetchParams{Symbol: "AAPL", Expiry: "2026-06-19", Width: 1, Side: "sideways"},
+		},
+		{
+			name:   "negative width",
+			params: rpc.ChainFetchParams{Symbol: "AAPL", Expiry: "2026-06-19", Width: -1, Side: "both"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params, _ := json.Marshal(tc.params)
+			req := &rpc.Request{ID: "tx", Method: rpc.MethodChainFetch, Params: params}
+			_, err := srv.handleChainFetch(context.Background(), req)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			code, _ := classifyError(err)
+			if code != rpc.CodeBadRequest {
+				t.Fatalf("classifyError code = %q, want %q", code, rpc.CodeBadRequest)
+			}
+		})
+	}
+}
+
+func TestDaysUntilFromUsesNYCalendarDate(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 25, 20, 0, 0, 0, time.UTC) // Monday afternoon in New York.
+	if got := daysUntilFrom("20260529", now); got != 4 {
+		t.Fatalf("daysUntilFrom Friday expiry = %d, want 4", got)
+	}
+}
+
 // mergeStrikeSide is the publish step in handleChainFetch's parallel
 // fan-out: each worker fills a private rpc.ChainStrike and merges its
 // side under a shared mutex. Verifies the side-disjoint copy: a "C"

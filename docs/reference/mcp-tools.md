@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**12 tools** total. Listed in registration order, aligned with the agent-appropriate CLI surface. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**12 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -52,7 +52,7 @@ Option chain — use whenever the user asks anything about options ("AAPL puts",
 | `no_iv` | boolean | no | when listing expiries, skip ATM IV (faster) |
 | `side` | string | no | filter strike legs (default both) |
 | `symbol` | string | **yes** | underlying ticker |
-| `width` | integer | no | strikes ATM ± this count (default 5) |
+| `width` | integer | no | strikes ATM ± this count (default 5; 0 returns ATM only) |
 
 ## `ibkr_history`
 

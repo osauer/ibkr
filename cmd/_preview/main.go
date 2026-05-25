@@ -73,7 +73,7 @@ func main() {
 
 func fixtureAccount() *rpc.AccountResult {
 	return &rpc.AccountResult{
-		AccountID:            "U7842931",
+		AccountID:            "DU0000000",
 		AccountType:          "IB-MARGIN",
 		BaseCurrency:         "EUR",
 		NetLiquidation:       248310.42,
@@ -342,7 +342,7 @@ func fixtureStatus() *rpc.HealthResult {
 	return &rpc.HealthResult{
 		DaemonVersion: "v1.0.0",
 		UptimeSeconds: 1842,
-		Account:       "U7842931",
+		Account:       "DU0000000",
 		GatewayHost:   "127.0.0.1",
 		GatewayPort:   4001,
 		GatewayTLS:    false,

@@ -59,6 +59,13 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	if *noIV || *allExpiries {
 		return fail(env, "chain: --no-iv and --all-expiries only apply when --expiry is omitted")
 	}
+	if *width < 0 {
+		return fail(env, "chain: --width must be >= 0")
+	}
+	sideValue := strings.ToLower(strings.TrimSpace(*side))
+	if sideValue != "calls" && sideValue != "puts" && sideValue != "both" {
+		return fail(env, "chain: --side must be calls, puts, or both (got %q)", *side)
+	}
 
 	// Format-validate --expiry locally so a typo like "tomorrow" or
 	// "2099-99-99" fails fast instead of burning the full RPC deadline
@@ -71,7 +78,7 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 		Symbol: symbol,
 		Expiry: *expiry,
 		Width:  *width,
-		Side:   strings.ToLower(*side),
+		Side:   sideValue,
 	}
 	var res rpc.ChainResult
 	if err := env.Conn.Call(ctx, rpc.MethodChainFetch, params, &res); err != nil {

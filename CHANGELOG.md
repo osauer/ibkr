@@ -10,6 +10,34 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.0.9 — 2026-05-25 08:50 CEST
+
+### What's new
+
+- Release/install integrity is stricter: v1+ bootstrap installs now require the signed `SHA256SUMS` file, verify the pinned release-signing key, and reject unexpected archive entries.
+- The read-only boundary is tighter for agents: bundled hooks now reject shell metacharacters in allowed `ibkr` Bash calls, while `ibkr chain` and `ibkr size` fail invalid input before touching the gateway.
+- Public package copy is cleaner for MCP directories and landing pages, with stale design/research notes removed from the public docs tree.
+
+### Changed
+
+- Polished README, landing-page, MCP package, skill, and guide copy to use concrete read-only language and avoid vague AI-assistant marketing phrasing.
+- `ibkr_chain` now treats `width: 0` as an explicit ATM-only request in MCP instead of silently falling back to the default width.
+- `ibkr size` validates the local trade plan before requesting account state, so malformed input returns immediately without a daemon/account RPC.
+- Removed stale design, research, and superseded spec notes that no longer reflected the current gamma, regime, and release architecture.
+
+### Fixed
+
+- Option-chain DTE now uses the New York calendar date, avoiding off-by-one reads caused by fractional UTC time remaining until midnight.
+- Chain `--side` and negative `--width` errors are now rejected locally in the CLI and classified as `bad_request` at the daemon boundary.
+- Account and portfolio wire updates now log at debug level instead of info level, reducing account-sensitive default log noise.
+
+### Security
+
+- `install.sh` now fails closed for v1+ releases when `SHA256SUMS.asc` or `gpg` verification is unavailable, imports the tagged release-signing key, checks its fingerprint, and validates tarball paths before extraction.
+- Daemon logs and opt-in wire-interceptor logs now force private directory/file modes (`0700` directories, `0600` files), including pre-existing paths.
+- The Claude hook and user-copyable settings hook now share the same guard: they block trading verbs, fail closed when `jq` is missing, and reject command chaining/metacharacters in allowed `ibkr` Bash commands.
+- Wire and release smoke scripts now validate `IBKR_TEST_HOST` and `IBKR_TEST_PORT` before using them.
+
 ## v1.0.8 — 2026-05-24 20:38 CEST
 
 ### What's new
@@ -249,7 +277,7 @@ The 1.0 line locks down four surfaces — Go API, CLI human text, CLI `--json`, 
 
 ### Engineering notes
 
-The pre-this-release single-slot cache keyed only by NY session date would, once persistence landed, have surfaced a `--only=spy` result to a combined caller — fixed by carrying one slot per scope from day one of persistence; `gamma-zero-spy+spx.json` / `-spy.json` / `-spx.json` are written and gated independently. The session-aware soft TTL replaces a constant 5-min window that was both noisy intraday (refreshing more often than dealer positioning actually shifts) and wasteful overnight (kicking 5-min recomputes against a market that won't produce fresh quotes). The expiry-picker change is scoped to the equity single-class path (`selectExpirations`); the SPX multi-class path (`selectSPXExpirationsClassed`) is covered separately by the `gamma-adaptive-strike-window` roadmap, and strike-window / skew-weighting / multi-cross detection / cache-key refactor remain explicitly out of scope here, gated on live measurement of this release's basket.
+The pre-this-release single-slot cache keyed only by NY session date would, once persistence landed, have surfaced a `--only=spy` result to a combined caller — fixed by carrying one slot per scope from day one of persistence; `gamma-zero-spy+spx.json` / `-spy.json` / `-spx.json` are written and gated independently. The session-aware soft TTL replaces a constant 5-min window that was both noisy intraday (refreshing more often than dealer positioning actually shifts) and wasteful overnight (kicking 5-min recomputes against a market that won't produce fresh quotes). The expiry-picker change is scoped to the equity single-class path (`selectExpirations`); the SPX multi-class path (`selectSPXExpirationsClassed`) is handled separately, and strike-window / skew-weighting / multi-cross detection / cache-key refactor remain explicitly out of scope here, gated on live measurement of this release's basket.
 
 ## v0.31.0 — 2026-05-21 22:12 CEST
 
@@ -2949,7 +2977,7 @@ Added an explicit "not affiliated with Interactive Brokers" notice naming the tr
 
 ### Personal-path hygiene
 
-Removed hard-coded `/Users/osauer/…` paths that had crept into three places: the `pkg/ibkr/connection.go` package doc (now points at IBKR's public GitHub mirror), the two `pkg/ibkr/testdata/generate_*.py` fixture generators (now read `IBPY_ROOT` from the environment with an actionable error when unset), and the macOS-shaped TWS process line in `internal/discover/process_test.go` (anonymised to `/Users/local/...`). No behavioural impact — the tests still verify the same substring match — just clean for outside contributors reading the repo.
+Removed hard-coded `/Users/<user>/...` paths that had crept into three places: the `pkg/ibkr/connection.go` package doc (now points at IBKR's public GitHub mirror), the two `pkg/ibkr/testdata/generate_*.py` fixture generators (now read `IBPY_ROOT` from the environment with an actionable error when unset), and the macOS-shaped TWS process line in `internal/discover/process_test.go` (anonymised to `/Users/local/...`). No behavioural impact — the tests still verify the same substring match — just clean for outside contributors reading the repo.
 
 ## v0.10.1 — 2026-05-11 21:16 CEST
 

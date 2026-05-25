@@ -14,15 +14,14 @@ import (
 
 // gammaZeroStore persists the gamma-zero compute result across daemon
 // restarts. The TTL of the result is one NY trading session, and the
-// compute itself now runs 5+ minutes cold (post-PR-#1 slot-anchored
-// picker), so restart-cost matters more than the regime-v2 design
-// originally assumed.
+// compute itself can run 5+ minutes cold after the slot-anchored
+// expiry picker, so restart-cost matters.
 //
 // Convention mirrors internal/breadth/spx/store.go's per-domain
 // pattern (own directory, atomic temp+rename, version field with
-// mismatch-is-cold semantics, method-token gate) — deliberately NOT
-// unified into a shared store, per regime-v2-design.md §"Caching
-// context" which set the per-domain convention.
+// mismatch-is-cold semantics, method-token gate). It is deliberately
+// not unified into a shared store because the invalidation semantics
+// are domain-specific and the shared code would be tiny.
 //
 // One file per scope: gamma-zero-{scope}.json. Scopes are
 // rpc.GammaZeroScope* constants ("spy", "spx", "spy+spx"). Each scope
@@ -200,8 +199,8 @@ func (s *gammaZeroStore) Save(scope, sessionKey string, r *rpc.GammaZeroComputed
 // debugging the cache can `cat` and read it) and replaces dir/name in
 // a single atomic os.Rename. Mirrors the same helper in
 // internal/breadth/spx/store.go; the two stores are deliberately
-// distinct (per regime-v2-design.md) and the small code duplication is
-// preferred over a generic shared layer.
+// distinct and the small code duplication is preferred over a generic
+// shared layer.
 func (s *gammaZeroStore) writeAtomic(name string, v any) error {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)

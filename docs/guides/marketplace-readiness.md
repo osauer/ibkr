@@ -1,12 +1,12 @@
 # Marketplace readiness
 
-Last reviewed: 2026-05-24 14:08 CEST
+Last reviewed: 2026-05-25 08:03 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
 ## Positioning
 
-`ibkr` is a local, read-only Interactive Brokers integration for users who already run IB Gateway or TWS. The strongest marketplace description is:
+`ibkr` is a local, read-only Interactive Brokers integration for users who already run IB Gateway or TWS. The clearest marketplace description is:
 
 > Read-only Interactive Brokers access for agents: account, positions, quotes, option chains, history, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server.
 
@@ -24,7 +24,7 @@ Current package:
 
 - `.claude-plugin/plugin.json` describes the plugin.
 - `.claude-plugin/marketplace.json` exposes the self-hosted marketplace.
-- `skills/ibkr/SKILL.md` teaches Claude how to use the CLI safely.
+- `skills/ibkr/SKILL.md` teaches Claude the read-only CLI workflow.
 - `hooks/hooks.json` blocks trading-verb Bash calls and starts the install/version warning hook.
 - `settings/ibkr.settings.json` is the optional global allow/deny template.
 
@@ -47,7 +47,7 @@ Before submitting to OpenAI, add or decide:
 - how a local-only IB Gateway dependency will be reached from ChatGPT, for example a supported secure tunnel or a clear "local/developer mode only" installation story
 - a privacy policy URL pointing at [PRIVACY.md](../../PRIVACY.md)
 - a safety statement that no order placement, cancellation, or modification exists
-- user-facing setup text covering IB Gateway/TWS prerequisites and the local binary install
+- setup text covering IB Gateway/TWS prerequisites and the local binary install
 - screenshots or a short demo focused on the risk-regime and portfolio workflows
 
 OpenAI's Apps SDK help says app submissions are open, apps are built on MCP, and developers should prepare for safety, privacy, and functionality review, including a clear privacy policy. The current help article is at <https://help.openai.com/en/articles/12515353-build-with-the-apps-sdk>.

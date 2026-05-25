@@ -1,20 +1,20 @@
 # Concepts
 
-Updated: 2026-05-24 14:08 CEST
+Updated: 2026-05-25 08:03 CEST
 
-What the three load-bearing indicators measure, in enough depth to read the output without mis-acting on it. Engineering rationale (methodology choices, fitting curves, regime classifiers) lives in [`docs/design/`](./design/); this page is the user's mental model.
+What the three load-bearing indicators measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
 ---
 
 ## Regime
 
-The eight-row risk-regime dashboard summarises *the market's current posture* in one snapshot, designed for a 30-second daily check rather than a continuous monitor. Each row measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
+The eight-row risk-regime dashboard summarises *the market's current posture* in one snapshot. It is for a 30-second daily check, not a continuous monitor. Each row measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
 
 The rows:
 
 1. **VIX term structure** (VIX vs VIX3M). Backwardation — short-dated vol pricing above 3-month vol — is the stress fingerprint. The deeper and more sustained the inversion, the bigger the dislocation.
 2. **VVIX vol-of-vol**. Cboe's VIX-of-VIX reading catches convexity demand inside the equity-vol cluster.
-3. **HYG vs SPY divergence**. High-yield credit (HYG) leads equity selloffs on the way down; a HYG breakdown while SPY is still near highs is the classic late-cycle pre-tell.
+3. **HYG vs SPY divergence**. High-yield credit (HYG) leads equity selloffs on the way down; a HYG breakdown while SPY is still near highs is the classic late-cycle warning.
 4. **HY/IG OAS**. Official ICE BofA cash-credit spreads via FRED are slower than HYG but harder to dismiss as ETF noise.
 5. **Funding spread**. 90-day AA financial commercial paper minus 3-month T-bill flags slow funding/liquidity pressure.
 6. **USD/JPY weekly move**. JPY funding-pair unwinds are a recurring stress amplifier (Aug 2024, Dec 2018, Jan 2016). A >3% week is a Tier-1 signal.
@@ -34,13 +34,13 @@ The full methodology spec is at [`docs/specs/risk-regime-dashboard.md`](./specs/
 
 ## Gamma
 
-Dealer zero-gamma is the spot price at which the aggregate options-dealer book switches from amplifying market moves (short-gamma, below zero) to stabilising them (long-gamma, above zero). It's a regime hint, not a precision level — but the qualitative state matters enormously for short-horizon risk.
+Dealer zero-gamma is the spot price at which the aggregate options-dealer book switches from amplifying market moves (short-gamma, below zero) to stabilising them (long-gamma, above zero). It's a regime hint, not a precision level, but the qualitative state matters for short-horizon risk.
 
 `ibkr_gamma` and the regime row's indicator 4 both compute from IBKR's option chains using the Perfiliev convention (dealers long calls, short puts), summed across the 6 nearest non-0DTE-post-settlement expirations at ±10% strike width. Two key methodology choices:
 
 1. **Sticky-moneyness skew** (`bs-gamma-profile-v3-stickymoneyness-0dte-split`). The spot sweep reprices each leg's IV at the scenario-spot's *moneyness* via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Without this, the put-side skew biases zero-gamma estimates upward by 5–10%.
 
-2. **Combined SPY+SPX with regime-agreement classifier**. SPY (continuous ETF, retail flow) and SPX (index options, institutional flow) often agree on regime direction, but the actionable signal is **disagreement** — one book stabilising while the other amplifies. The classifier surfaces `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:transition-gamma"`, or `"disagree"` directly so consumers don't have to derive it. A crossing is long/transition/short based on spot's distance from the identified γ-zero, not merely the existence of a crossing.
+2. **Combined SPY+SPX with regime-agreement classifier**. SPY (continuous ETF, retail flow) and SPX (index options, institutional flow) often agree on regime direction, but the useful diagnostic is **disagreement** — one book stabilising while the other amplifies. The classifier reports `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:transition-gamma"`, or `"disagree"` directly so consumers don't have to derive it. A crossing is long/transition/short based on spot's distance from the identified γ-zero, not merely the existence of a crossing.
 
 Two complementary outputs on every result:
 
@@ -49,7 +49,7 @@ Two complementary outputs on every result:
 
 Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see `status: "ready"` instantly. The cache persists across daemon restarts.
 
-Full methodology at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md) and [`docs/design/gamma-spx-coverage.md`](./design/gamma-spx-coverage.md).
+Full methodology at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Cache persistence details are in [`docs/design/gamma-zero-cache-persistence.md`](./design/gamma-zero-cache-persistence.md).
 
 ---
 
@@ -60,7 +60,7 @@ S&P 500 breadth answers a question the index level alone can't: *is this rally b
 - **% above 50-DMA** — the tactical signal. >55 historically marks healthy uptrends; <40 with SPX at highs is the classic narrow-rally warning sign.
 - **% above 200-DMA** — the cyclical companion. Tops cleanly when the median name rolls over, even when the index is still being held up by mega-caps.
 
-The daemon also surfaces 52-week new-highs / new-lows counts and the derived `net_new_highs_pct`. The "SPX near highs with net_new_highs_pct near zero or negative" pattern is the most reliable narrow-rally fingerprint.
+The daemon also reports 52-week new-highs / new-lows counts and the derived `net_new_highs_pct`. The "SPX near highs with net_new_highs_pct near zero or negative" pattern is the most reliable narrow-rally fingerprint.
 
 IBKR doesn't redistribute S&P DJI's official breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (methodology token: `constituent-fanout-50/200dma-hl`). A once-daily post-close refresh (16:35 ET) slides each name's window forward.
 

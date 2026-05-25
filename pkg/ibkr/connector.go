@@ -3602,7 +3602,7 @@ func (c *Connector) handlePosition(fields []string) {
 	positionStr := fields[12]
 	avgCostStr := fields[13]
 
-	c.logInfo("Position update - Symbol: %s, Position: %s, AvgCost: %s",
+	c.logDebug("Position update - Symbol: %s, Position: %s, AvgCost: %s",
 		symbol, positionStr, avgCostStr)
 }
 
@@ -3621,7 +3621,7 @@ func (c *Connector) handlePortfolioValue(fields []string) {
 	unrealizedPnL := fields[10]
 	realizedPnL := fields[11]
 
-	c.logInfo("Portfolio update - Symbol: %s, Position: %s, Price: %s, Value: %s, UnrealizedPnL: %s, RealizedPnL: %s, AvgCost: %s",
+	c.logDebug("Portfolio update - Symbol: %s, Position: %s, Price: %s, Value: %s, UnrealizedPnL: %s, RealizedPnL: %s, AvgCost: %s",
 		symbol, position, marketPrice, marketValue, unrealizedPnL, realizedPnL, avgCost)
 }
 

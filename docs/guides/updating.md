@@ -46,7 +46,7 @@ ibkr update --force          # re-install latest even if same version (corrupt-b
 
 ## Updating the S&P 500 list — automatic
 
-The daemon refreshes the constituent list from [Wikipedia's "List of S&P 500 companies"](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies) on three triggers, all converging on one singleflighted fetch:
+The daemon refreshes the constituent list from [Wikipedia's "List of S&P 500 companies"](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies) on three triggers, all converging on one shared fetch:
 
 - **Daily at 02:30 ET** — between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.
 - **On daemon startup** if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).
@@ -72,7 +72,7 @@ IBKR_SPX_MEMBERS_AUTO_REFRESH=0 ibkr daemon   # force off
 IBKR_SPX_MEMBERS_AUTO_REFRESH=1 ibkr daemon   # force on (even if TOML says off)
 ```
 
-When pinned, `ibkr status` surfaces the reason — `refresh:disabled (env)` vs `refresh:disabled (config)` — so a confused user knows which knob to flip.
+When pinned, `ibkr status` shows the reason — `refresh:disabled (env)` vs `refresh:disabled (config)` — so a confused user knows which knob to flip.
 
 ### Status row
 
@@ -98,4 +98,4 @@ All under `$XDG_CACHE_HOME` / `$XDG_CONFIG_HOME` when set; the paths above are t
 ## Reference
 
 - [Configuration reference](../reference/config.md) — every TOML field and `IBKR_*` env var.
-- [Design rationale](../design/ibkr-update-and-members-refresh.md) — why the env var is symmetric, why the cache file is in `~/.cache/`, why `.bak` is one step back.
+- The updater keeps one `.bak` binary beside `~/.local/bin/ibkr`, and the SPX members cache lives under `~/.cache/ibkr/` unless XDG paths override it.

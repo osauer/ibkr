@@ -8,7 +8,7 @@
 
 **Use your IBKR account from the terminal or an AI assistant without giving it trading access.**
 
-`ibkr` answers account and market questions against your local IB Gateway or TWS session. It can show positions, exposure, live market data, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
+`ibkr` answers account and market questions against your local IB Gateway or TWS session. It shows positions, exposure, live market data, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
 
 Use it from a shell:
 
@@ -30,7 +30,7 @@ Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP 
 >
 > "If I buy 100 MSFT at 418 with a stop at 408, what's my EUR risk?"
 
-Your account data stays on the machine running IB Gateway or TWS unless you choose to send it to an MCP host. The tool runs as one Go binary with a CLI, a local MCP server, and a Go library. No Python runtime, Java runtime, or hosted service is required.
+Your account data stays on the machine running IB Gateway or TWS unless you choose to send it to an MCP host. The project ships as one Go binary with a CLI, a local MCP server, and a Go library. No Python runtime, Java runtime, or hosted service is required.
 
 **Contents** — [Install](#install-in-two-commands) · [What you get](#what-you-get) · [Pick your path](#pick-your-path) · [How it works](#how-it-works) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Troubleshooting](#troubleshooting)
 
@@ -45,7 +45,7 @@ The installer downloads the release for your OS and architecture, verifies the c
 
 `ibkr setup claude-desktop` writes the MCP server entry to Claude Desktop. Quit Claude completely and relaunch it. Skip this command if you only want the shell tool.
 
-`ibkr update` is stricter than bootstrap install. It refuses unsigned releases when release signatures are available. [Other install paths.](#other-install-paths)
+For v1.0.0+ releases, the installer and `ibkr update` both verify the signed `SHA256SUMS` file and refuse unsigned releases. [Other install paths.](#other-install-paths)
 
 **Prerequisites.** A running [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) 10.37+ or TWS (paper or live) on the same machine. Auto-discovered on the four standard ports. An **IBKR Pro** account (IBKR Lite cannot use the TWS API).
 
@@ -68,7 +68,7 @@ For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schem
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, quote, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -111,7 +111,7 @@ claude plugin marketplace add osauer/ibkr
 claude plugin install ibkr@ibkr
 ```
 
-The plugin carries a skill, a `PreToolUse` hook that hard-blocks trading verbs (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
+The plugin carries a skill, a `PreToolUse` hook that hard-blocks trading verbs and shell command chaining (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
 
 **The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install in two commands](#install-in-two-commands). The two have independent release cadences and independent update paths:
 
@@ -252,7 +252,7 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 4. The plugin's `PreToolUse` hook hard-blocks the verb patterns and fails closed if `jq` is missing from PATH.
 5. A unit test in `internal/mcp` refuses to ship the MCP server with any tool whose name contains `order`, `trade`, `cancel`, `submit`, or `place`.
 
-Per [semver](https://semver.org/), v1.x keeps the CLI/JSON/MCP read-only surfaces stable except for documented minor additions and patch fixes.
+Per [semver](https://semver.org/), v1.x keeps the CLI, JSON, and MCP read-only interfaces stable except for documented minor additions and patch fixes.
 
 ## Other install paths
 
@@ -272,7 +272,7 @@ make check      # gofmt + go vet + staticcheck + govulncheck + plugin/parity che
 make test       # check + unit tests + integration tests against a live gateway
 ```
 
-`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. The lint/vuln tools are pinned in `go.mod` and run via `go tool`, so CI and local checks use the same versions. The gate also checks that MCP tools, streaming resources, generated references, and plugin metadata stay aligned with the CLI surface.
+`make check` is the binding gate. It fails on stdlib vulnerabilities, so an outdated Go toolchain is a build failure. The lint/vuln tools are pinned in `go.mod` and run via `go tool`, so CI and local checks use the same versions. The gate also checks that MCP tools, streaming resources, generated references, and plugin metadata stay aligned with the CLI commands.
 
 Integration tests under `test/integration/` connect to the live IB Gateway on `127.0.0.1:4001` and skip cleanly when it isn't reachable, so `go test ./...` doesn't hang on a laptop with no gateway. Override the port with `IBKR_TEST_PORT=4002 make test`.
 
