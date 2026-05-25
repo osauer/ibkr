@@ -293,9 +293,8 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		return
 	}
 	type job struct {
-		index int
-		sym   string
-		ccy   string
+		index    int
+		contract rpc.ContractParams
 	}
 	jobs := make([]job, 0, len(stocks))
 	seen := map[string]bool{}
@@ -305,24 +304,33 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 			continue
 		}
 		seen[sym] = true
-		jobs = append(jobs, job{index: i, sym: sym, ccy: stocks[i].Currency})
+		jobs = append(jobs, job{
+			index: i,
+			contract: rpc.ContractParams{
+				Symbol:   sym,
+				SecType:  "STK",
+				Exchange: stocks[i].Exchange,
+				Currency: stocks[i].Currency,
+			},
+		})
 	}
 	runBounded(jobs, positionsPrewarmWorkers, func(j job) {
 		if ctx.Err() != nil {
 			return
 		}
-		q, ok := s.snapshotHeldStockQuote(ctx, c, j.sym, normCcy(j.ccy), positionStockQuoteBudget)
+		q, ok := s.snapshotHeldStockQuote(ctx, c, j.contract, positionStockQuoteBudget)
 		if !ok {
 			if s.prevCloses != nil {
-				s.prevCloses.put(j.sym, prevCloseEntry{}, time.Now())
+				s.prevCloses.put(j.contract.Symbol, prevCloseEntry{}, time.Now())
 			}
 			return
 		}
 		if q.PrevClose != nil && s.prevCloses != nil {
-			s.prevCloses.put(j.sym, prevCloseEntry{value: *q.PrevClose}, time.Now())
+			s.prevCloses.put(j.contract.Symbol, prevCloseEntry{value: *q.PrevClose}, time.Now())
 		}
 		p := &stocks[j.index]
 		p.DataType = q.DataType
+		p.PriceSource = q.PriceSource
 		p.PrevClose = q.PrevClose
 		p.DayHigh = q.DayHigh
 		p.DayLow = q.DayLow
@@ -334,43 +342,66 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		p.PriceAsOf = q.PriceAsOf
 		p.Stale = q.Stale
 		p.StaleReason = q.StaleReason
+		p.SessionContext = q.SessionContext
 	})
 }
 
-func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connector, sym, ccy string, timeout time.Duration) (rpc.Quote, bool) {
+func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connector, contract rpc.ContractParams, timeout time.Duration) (rpc.Quote, bool) {
 	if s == nil || s.subs == nil {
 		return rpc.Quote{}, false
 	}
-	release, err := s.subs.Hold(ctx, sym)
+	routeContract, echoedContract, routedQuote, err := normaliseStockQuoteContract(contract)
 	if err != nil {
 		return rpc.Quote{}, false
 	}
-	defer release()
+	sessionMarket := quoteMarketForStockContract(echoedContract)
+	sym := echoedContract.Symbol
+
+	pollKey := sym
+	var releaseSub func()
+	if routedQuote {
+		key, err := c.SubscribeMarketDataWithContract(ctx, routeContract, defaultGenericTicks)
+		if err != nil {
+			return rpc.Quote{}, false
+		}
+		pollKey = key
+		releaseSub = func() { _ = c.UnsubscribeMarketData(key) }
+	} else {
+		release, err := s.subs.Hold(ctx, sym)
+		if err != nil {
+			return rpc.Quote{}, false
+		}
+		releaseSub = release
+	}
+	defer releaseSub()
 
 	q := rpc.Quote{
-		Symbol: sym,
-		Contract: rpc.ContractParams{
-			Symbol:   sym,
-			SecType:  "STK",
-			Currency: ccy,
-		},
+		Symbol:   sym,
+		Contract: echoedContract,
 		IVStatus: "unavailable",
 		AsOf:     time.Now(),
 	}
 	var seen bool
-	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
+	pollStarted := time.Now()
+	_ = pollMarketData(ctx, c, pollKey, pollStarted.Add(timeout), func(d *ibkrlib.MarketData) bool {
 		fillQuoteMarketData(&q, d)
 		seen = true
-		return q.Last != nil || q.Mark != nil || q.PrevClose != nil
+		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
+		fallback := quoteFallbackReady(&q, pollStarted, timeout)
+		if ready || fallback {
+			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(pollKey), ready, fallback)
+		}
+		return ready || fallback
 	})
 	if !seen {
 		return rpc.Quote{}, false
 	}
-	ready := q.Bid != nil || q.Ask != nil || q.Last != nil
-	fallback := q.Mark != nil || q.PrevClose != nil
-	q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(sym), ready, fallback)
 	q.AsOf = time.Now()
-	s.decorateQuote(&q, marketcal.MarketUSEquity)
+	if quoteNeedsHistoricalContext(&q, sessionMarket) {
+		s.fillQuoteHistoricalFallback(ctx, c, &q, sessionMarket, timeout)
+	}
+	s.attachQuoteSessionContext(&q, sessionMarket)
+	s.decorateQuote(&q, sessionMarket)
 	return q, true
 }
 

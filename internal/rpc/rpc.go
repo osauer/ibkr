@@ -1765,11 +1765,16 @@ type PositionView struct {
 	// equity options, sometimes higher for index options. Needed by JSON
 	// consumers to convert between per-share Mark and per-contract AvgCost
 	// on options (IBKR's averageCost is multiplier-inclusive on OPT).
-	Multiplier int      `json:"multiplier"`
-	AvgCost    float64  `json:"avg_cost"`
-	Mark       float64  `json:"mark"`
-	DataType   string   `json:"data_type,omitempty"`
-	PrevClose  *float64 `json:"prev_close,omitempty"`
+	Multiplier int     `json:"multiplier"`
+	AvgCost    float64 `json:"avg_cost"`
+	Mark       float64 `json:"mark"`
+	DataType   string  `json:"data_type,omitempty"`
+	// PriceSource names the quote input that produced the row's quote
+	// context (last, mark, prev_close, historical_close, ...). Optional
+	// because position marks can arrive from the portfolio stream before
+	// the daemon has enriched the row with quote data.
+	PriceSource string   `json:"price_source,omitempty"`
+	PrevClose   *float64 `json:"prev_close,omitempty"`
 	// DayChange is per-share for stocks (Mark − stock prev close); for
 	// options it stays nil because we don't track contract-level prev
 	// close on the underlying-grouped path. DayChangePct is the same
@@ -1790,11 +1795,15 @@ type PositionView struct {
 	PriceAsOf      string    `json:"price_as_of,omitempty"`
 	Stale          bool      `json:"stale,omitempty"`
 	StaleReason    string    `json:"stale_reason,omitempty"`
-	MarketValue    float64   `json:"market_value"`
-	MarketValueCcy *float64  `json:"market_value_ccy,omitempty"`
-	FXRate         *float64  `json:"fx_rate,omitempty"`
-	UnrealizedPnL  float64   `json:"unrealized_pnl"`
-	RealizedPnL    float64   `json:"realized_pnl"`
+	// SessionContext explains the trading-calendar state behind PriceAt.
+	// Populated when the quote context needs interpretation (closed,
+	// pre-market, frozen/stale/missing), matching Quote.SessionContext.
+	SessionContext *MarketSession `json:"session_context,omitempty"`
+	MarketValue    float64        `json:"market_value"`
+	MarketValueCcy *float64       `json:"market_value_ccy,omitempty"`
+	FXRate         *float64       `json:"fx_rate,omitempty"`
+	UnrealizedPnL  float64        `json:"unrealized_pnl"`
+	RealizedPnL    float64        `json:"realized_pnl"`
 
 	// DailyPnL is the start-of-trading-day to now P&L for this single
 	// contract, sourced from IBKR's reqPnLSingle stream (TWS msg 95).

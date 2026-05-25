@@ -126,7 +126,7 @@ func init() {
 	commands = []Command{
 		{"status", "Daemon + gateway health (run this first if anything fails)", "ibkr status [--json]", runStatus},
 		{"account", "Account summary snapshot (NLV, BP, cash, margin, daily P&L)", "ibkr account [--watch --rate 1s] [--json]", runAccount},
-		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch --rate 1s] [--json]", runPositions},
+		{"positions", "List open positions (stocks + options)", "ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--quotes] [--by underlying] [--watch --rate 1s] [--json]", runPositions},
 		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] [--market us|de] [--watch --rate 250ms] | ibkr quote SYM YYMMDD C|P STRIKE [--json]", runQuote},
 		{"watch", "Local watchlist symbols; add/remove/clear offline or quote the list live", "ibkr watch [--quotes] [--timeout 5s] [--json] | ibkr watch --list [--json] | ibkr watch --watch --rate 1s | ibkr watch SYM[,SYM…] --add|--remove | ibkr watch --clear", runWatchlist},
 		{"calendar", "Official market sessions for US equities, US options, and Xetra", "ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]", runCalendar},
