@@ -230,41 +230,7 @@ fi
 assert_wire status-handshake "$boot_offset"
 echo "    status.background_tasks: $bg_check"
 
-echo "  [3] account.summary..."
-run_wire_cli account "$JSON_TIMEOUT" account --json
-account_json="$LAST_CMD_OUTPUT"
-account_id="$(json_field account_id "$account_json")"
-if [[ -z "$account_id" ]]; then
-    echo "release-smoke: FAIL: account_id missing from account.summary response" >&2
-    echo "$account_json" >&2
-    exit 1
-fi
-if json_has_key data_type "$account_json"; then
-    echo "release-smoke: FAIL: account.summary leaked data_type field (v0.15 must omit it)" >&2
-    echo "$account_json" >&2
-    exit 1
-fi
-assert_wire account-summary "$LAST_WIRE_OFFSET"
-
-echo "  [4] positions.list..."
-positions_json="$(run_cli positions "$JSON_TIMEOUT" positions --json)"
-positions_shape_ok="$(printf '%s' "$positions_json" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-print("ok" if isinstance(d.get("stocks"), list) and isinstance(d.get("options"), list) else "bad")
-')"
-if [[ "$positions_shape_ok" != "ok" ]]; then
-    echo "release-smoke: FAIL: positions.list missing stocks/options arrays" >&2
-    echo "$positions_json" >&2
-    exit 1
-fi
-if json_has_key data_type "$positions_json"; then
-    echo "release-smoke: FAIL: positions.list leaked data_type field (v0.15 must omit it)" >&2
-    echo "$positions_json" >&2
-    exit 1
-fi
-
-echo "  [5] quote SPY..."
+echo "  [3] quote SPY..."
 run_wire_cli quote_SPY "$JSON_TIMEOUT" quote SPY --json
 quote_json="$LAST_CMD_OUTPUT"
 quote_check="$(printf '%s' "$quote_json" | python3 -c '
@@ -308,7 +274,46 @@ case "$data_type" in
         echo "    mode: unknown ($data_type) - loose"
         ;;
 esac
-assert_wire quote-spy "$LAST_WIRE_OFFSET"
+# Quote snapshots intentionally share the daemon's refcounted SPY line with
+# startup gamma/regime prewarm when it already exists. Validate the command's
+# JSON above, then scan the isolated daemon's boot window for the underlying
+# SPY STK market-data request instead of requiring a duplicate request inside
+# this command's byte slice.
+assert_wire quote-spy "$boot_offset"
+
+echo "  [4] account.summary..."
+run_wire_cli account "$JSON_TIMEOUT" account --json
+account_json="$LAST_CMD_OUTPUT"
+account_id="$(json_field account_id "$account_json")"
+if [[ -z "$account_id" ]]; then
+    echo "release-smoke: FAIL: account_id missing from account.summary response" >&2
+    echo "$account_json" >&2
+    exit 1
+fi
+if json_has_key data_type "$account_json"; then
+    echo "release-smoke: FAIL: account.summary leaked data_type field (v0.15 must omit it)" >&2
+    echo "$account_json" >&2
+    exit 1
+fi
+assert_wire account-summary "$LAST_WIRE_OFFSET"
+
+echo "  [5] positions.list..."
+positions_json="$(run_cli positions "$JSON_TIMEOUT" positions --json)"
+positions_shape_ok="$(printf '%s' "$positions_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("ok" if isinstance(d.get("stocks"), list) and isinstance(d.get("options"), list) else "bad")
+')"
+if [[ "$positions_shape_ok" != "ok" ]]; then
+    echo "release-smoke: FAIL: positions.list missing stocks/options arrays" >&2
+    echo "$positions_json" >&2
+    exit 1
+fi
+if json_has_key data_type "$positions_json"; then
+    echo "release-smoke: FAIL: positions.list leaked data_type field (v0.15 must omit it)" >&2
+    echo "$positions_json" >&2
+    exit 1
+fi
 
 echo "  [6] breadth.spx state..."
 breadth_json="$(run_cli breadth "$JSON_TIMEOUT" breadth --json)"
