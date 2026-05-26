@@ -37,9 +37,23 @@ Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP 
 
 Your account data stays on the machine running IB Gateway or TWS unless you choose to send it to an MCP host. The project ships as one Go binary with a CLI, a local MCP server, and a Go library. No Python runtime, Java runtime, or hosted service is required.
 
-**Contents** — [Install](#install-in-two-commands) · [What you get](#what-you-get) · [Pick your path](#pick-your-path) · [How it works](#how-it-works) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Troubleshooting](#troubleshooting)
+**Contents** — [Install](#install) · [What you get](#what-you-get) · [Pick your path](#pick-your-path) · [How it works](#how-it-works) · [Configure](#configure) · [Safety](#safety) · [Other install paths](#other-install-paths) · [Troubleshooting](#troubleshooting)
 
-## Install in two commands
+## Install
+
+**Prerequisites.** A running [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) 10.37+ or TWS (paper or live) on the same machine. Auto-discovered on the four standard ports. An **IBKR Pro** account (IBKR Lite cannot use the TWS API).
+
+### Claude Desktop
+
+Download the latest MCP Bundle:
+
+<https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>
+
+Open the `.mcpb` file with Claude Desktop, drag it into Claude Desktop, or use Settings -> Extensions -> Advanced settings -> Install Extension. Quit Claude completely and relaunch it after installation.
+
+The MCPB bundles the `ibkr` binary for macOS and Linux, runs it locally through stdio, and does not require a separate shell install. Windows Claude Desktop is not supported because `ibkr` has no native Windows daemon; WSL works through the shell install path below.
+
+### Shell, Cursor, Continue, Zed, and generic MCP hosts
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
@@ -48,11 +62,9 @@ ibkr setup claude-desktop
 
 The installer downloads the release for your OS and architecture, verifies the checksum, installs `ibkr` in `~/.local/bin`, and adds that directory to your shell rc when needed. On macOS, it also clears Gatekeeper quarantine.
 
-`ibkr setup claude-desktop` writes the MCP server entry to Claude Desktop. Quit Claude completely and relaunch it. Skip this command if you only want the shell tool.
+`ibkr setup claude-desktop` writes the legacy MCP server entry to Claude Desktop. Prefer the MCPB path above for Claude Desktop unless you specifically want one shared shell-managed binary. Skip the setup command if you only want the shell tool.
 
-For v1.0.0+ releases, the installer and `ibkr update` both verify the signed `SHA256SUMS` file and refuse unsigned releases. [Other install paths.](#other-install-paths)
-
-**Prerequisites.** A running [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) 10.37+ or TWS (paper or live) on the same machine. Auto-discovered on the four standard ports. An **IBKR Pro** account (IBKR Lite cannot use the TWS API).
+For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset are covered by the signed `SHA256SUMS` file. The MCP Registry metadata also carries the MCPB file SHA-256. [Other install paths.](#other-install-paths)
 
 ## What you get
 
@@ -83,7 +95,7 @@ The server also exposes quotes for stocks and ETFs as an MCP resource:
 
 `resources/read` returns one snapshot for that URI; `resources/subscribe` delivers coalesced ticks via `notifications/resources/updated` until you `resources/unsubscribe` or close the stdio. The resource shape is documented in [docs/reference/mcp-resources.md](docs/reference/mcp-resources.md).
 
-`ibkr setup claude-desktop` configures Claude Desktop for you. For other clients, paste this into the client's MCP config (path varies):
+For Claude Desktop, the recommended install path is the `.mcpb` asset from the latest release. For other clients, paste this into the client's MCP config (path varies):
 
 ```json
 {
@@ -96,7 +108,7 @@ The server also exposes quotes for stocks and ETFs as an MCP resource:
 }
 ```
 
-The `command` must be the absolute path. `~` is not expanded by `exec` and `$PATH` is not consulted. `which ibkr` gives you the right value. After upgrading the binary, fully quit and relaunch the client — it caches the spawned server process.
+The `command` must be the absolute path. `~` is not expanded by `exec` and `$PATH` is not consulted. `which ibkr` gives you the right value. After upgrading the binary, fully quit and relaunch the client — it caches the spawned server process. MCPB installs carry their own embedded binary; reinstall the new `.mcpb` release to update that path.
 
 `claude.ai` (web) accepts only remote MCP servers and cannot reach a local IB Gateway. Use Desktop.
 
@@ -120,7 +132,7 @@ claude plugin install ibkr@ibkr
 
 The plugin carries a skill, a `PreToolUse` hook that hard-blocks trading verbs and shell command chaining (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
 
-**The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install in two commands](#install-in-two-commands). The two have independent release cadences and independent update paths:
+**The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install](#install). The two have independent release cadences and independent update paths:
 
 ```sh
 # Binary release (new MCP tool descriptions are baked into the binary):
@@ -270,6 +282,7 @@ Per [semver](https://semver.org/), v1.x keeps the CLI, JSON, and MCP read-only i
 ## Other install paths
 
 - **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@latest`. Requires Go 1.26+.
+- **Claude Desktop MCPB**: download `ibkr.mcpb` from the latest [release](https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb) and open it with Claude Desktop. The release also publishes `ibkr-vX.Y.Z.mcpb` for registry integrity and reproducible manual verification.
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify `SHA256SUMS.asc` against the release-signing key, then verify the tarball against `SHA256SUMS`; see [SECURITY.md](SECURITY.md#release-integrity-v100).

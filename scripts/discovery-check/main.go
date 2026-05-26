@@ -129,6 +129,13 @@ func checkDocsMCPMetadata(problems *[]string, version string) {
 		checkStringValue(problems, path, obj, "homepage", "https://osauer.dev/ibkr/")
 		checkStringValue(problems, path, obj, "repository", "https://github.com/osauer/ibkr")
 
+		install, ok := obj["install"].(map[string]any)
+		if !ok {
+			*problems = append(*problems, path+" install must be an object")
+		} else {
+			checkStringValue(problems, path+" install", install, "mcpb", "https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb")
+		}
+
 		transport, ok := obj["transport"].(map[string]any)
 		if !ok {
 			*problems = append(*problems, path+" transport must be an object")

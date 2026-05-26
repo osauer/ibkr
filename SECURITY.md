@@ -40,13 +40,19 @@ Reports that demonstrate a deviation from any of those properties — a successf
 
 ## Release integrity (v1.0.0+)
 
-Every GitHub release from v1.0.0 onward ships **three artefacts per platform** that together form the trust chain:
+Every GitHub release from v1.0.0 onward ships signed checksums for the published install assets:
 
-1. `ibkr-vX.Y.Z-<os>-<arch>.tar.gz` — the binary tarball.
-2. `SHA256SUMS` — one line per tarball with its SHA-256.
-3. `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's release-signing key.
+1. `ibkr-vX.Y.Z-<os>-<arch>.tar.gz` — the shell/manual binary tarballs.
+2. `ibkr-vX.Y.Z.mcpb` — the versioned Claude Desktop MCP Bundle, when published.
+3. `ibkr.mcpb` — stable latest-download alias for the same MCP Bundle bytes, when published.
+4. `SHA256SUMS` — one line per tarball and MCPB asset with its SHA-256.
+5. `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's release-signing key.
 
 `install.sh` and `ibkr update` (from v1.0.0 onward) **refuse** any release that does not publish `SHA256SUMS.asc`, and refuse any release whose `SHA256SUMS.asc` does not verify against the maintainer's release-signing key. `install.sh` pins the key fingerprint during bootstrap; `ibkr update` verifies against the public key embedded in the running binary. There is no fallback path. A release whose signature cannot be checked is treated as a compromised release.
+
+The MCP Registry publish metadata for an MCPB release also includes the versioned bundle URL and `fileSha256`. That registry hash is a discovery/install integrity hint; the signed `SHA256SUMS` file remains the release-level trust anchor.
+
+The MCPB container itself is not yet code-signed. Do not treat the `.mcpb` file as signed unless `mcpb verify ibkr-vX.Y.Z.mcpb` succeeds. TODO: add trusted MCPB signing once a CA-backed code-signing key or compatible signing API can be wired into `mcpb sign`; self-signed bundles are not a trust upgrade.
 
 ### The maintainer's release-signing key
 
@@ -71,7 +77,7 @@ gpg --import internal/update/release-signing-key.asc
 # 2. Confirm the fingerprint matches the line in this file.
 gpg --fingerprint oliver.sauer@gmail.com
 
-# 3. Download the three release artefacts for your platform.
+# 3. Download the release artefacts for your platform.
 VERSION=v1.0.0
 PLAT=darwin-arm64
 BASE=https://github.com/osauer/ibkr/releases/download/$VERSION

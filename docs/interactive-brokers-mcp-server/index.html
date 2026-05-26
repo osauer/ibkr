@@ -48,7 +48,7 @@
         "description": "Local read-only Interactive Brokers MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.2.0",
+        "softwareVersion": "1.2.1",
         "codeRepository": "https://github.com/osauer/ibkr",
         "isAccessibleForFree": true
       }
@@ -629,9 +629,11 @@
     <section class="wrap split" id="install">
       <div>
         <div class="section-head">
-          <h2>Install in two commands.</h2>
-          <p>Use this when you already have IB Gateway 10.37+ or TWS running locally and an IBKR Pro account with TWS API access.</p>
+          <h2>Install for Claude Desktop or shell.</h2>
+          <p>Use the MCPB for Claude Desktop. Use the shell install for Cursor, Continue, Zed, terminal workflows, or other local MCP hosts.</p>
         </div>
+        <p><a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a></p>
+        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or install it from Claude Desktop settings. Requires IB Gateway 10.37+ or TWS running locally and an IBKR Pro account with TWS API access.</p>
       </div>
       <div class="terminal">
         <div class="terminal-bar">
@@ -640,7 +642,8 @@
           <span class="dot green"></span>
           <span class="terminal-title">install</span>
         </div>
-        <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+        <pre><code># Shell, Cursor, Continue, Zed, generic MCP hosts
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop</code></pre>
       </div>
     </section>

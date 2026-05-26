@@ -32,8 +32,10 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 RELEASE_TEST_JOBS ?= 3
+MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
+MCP_PUBLISHER ?= mcp-publisher
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub discovery-check release-prep
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub discovery-check release-prep
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -347,7 +349,7 @@ smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild)
 
 smoke: build smoke-only ## Wire-level smoke vs. a live gateway (rebuilds bin/ibkr; SKIP if no gateway)
 
-release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE_VERSION=vX.Y.Z
+release-binaries: ## Cross-compile release tarballs + MCPB into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-binaries: RELEASE_VERSION is required, e.g. make release-binaries RELEASE_VERSION=v0.6.0" >&2; \
 		exit 1; \
@@ -362,25 +364,67 @@ release-binaries: ## Cross-compile release tarballs into dist/ — needs RELEASE
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)
 	@printf '%s\n' $(RELEASE_TARGETS) | xargs -P $(RELEASE_BUILD_JOBS) -I {} ./scripts/build-release-target.sh {} "$(RELEASE_VERSION)" "$(RELEASE_LDFLAGS)" "$(DIST_DIR)"
-	@( cd $(DIST_DIR) && shasum -a 256 *.tar.gz > SHA256SUMS )
+	$(MAKE) release-mcpb RELEASE_VERSION=$(RELEASE_VERSION)
+	$(MAKE) release-checksums RELEASE_VERSION=$(RELEASE_VERSION)
+	@echo
+	@echo "Built artefacts in $(DIST_DIR)/:"
+	@ls -la $(DIST_DIR)
+
+release-mcpb: ## Build the cross-platform MCP Bundle from release tarballs
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-mcpb: RELEASE_VERSION is required, e.g. make release-mcpb RELEASE_VERSION=v1.2.1" >&2; \
+		exit 1; \
+	fi
+	MCPB_PACKAGE=$(MCPB_PACKAGE) ./scripts/build-mcpb.sh "$(RELEASE_VERSION)" "$(DIST_DIR)" "$(RELEASE_TARGETS)"
+
+release-checksums: ## Sign SHA256SUMS for tarballs and MCPB assets
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-checksums: RELEASE_VERSION is required, e.g. make release-checksums RELEASE_VERSION=v1.2.1" >&2; \
+		exit 1; \
+	fi
+	@if ! ls $(DIST_DIR)/ibkr-$(RELEASE_VERSION)-*.tar.gz >/dev/null 2>&1; then \
+		echo "release-checksums: missing release tarballs in $(DIST_DIR)" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" ]; then \
+		echo "release-checksums: missing $(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb; run make release-mcpb" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DIST_DIR)/ibkr.mcpb" ]; then \
+		echo "release-checksums: missing $(DIST_DIR)/ibkr.mcpb; run make release-mcpb" >&2; \
+		exit 1; \
+	fi
+	@( cd $(DIST_DIR) && shasum -a 256 ibkr-$(RELEASE_VERSION)-*.tar.gz ibkr-$(RELEASE_VERSION).mcpb ibkr.mcpb > SHA256SUMS )
 	@command -v gpg >/dev/null 2>&1 || { \
-		echo "release-binaries: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
+		echo "release-checksums: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
 		exit 1; \
 	}
 	@expected_fp=$$(awk -F\" '/ReleaseSigningKeyFingerprint =/{print $$2; exit}' internal/update/keyring.go); \
 	gpg --list-secret-keys --with-colons "$$expected_fp" >/dev/null 2>&1 || { \
-		echo "release-binaries: signing key $$expected_fp is not in the local gpg keyring — see SECURITY.md for setup" >&2; \
+		echo "release-checksums: signing key $$expected_fp is not in the local gpg keyring — see SECURITY.md for setup" >&2; \
 		exit 1; \
 	}; \
 	echo "==> signing SHA256SUMS with $$expected_fp"; \
 	( cd $(DIST_DIR) && gpg --batch --yes --local-user "$$expected_fp" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS ) || exit 1; \
 	( cd $(DIST_DIR) && gpg --verify SHA256SUMS.asc SHA256SUMS ) >/dev/null 2>&1 || { \
-		echo "release-binaries: produced SHA256SUMS.asc but it failed self-verify — aborting" >&2; \
+		echo "release-checksums: produced SHA256SUMS.asc but it failed self-verify — aborting" >&2; \
 		exit 1; \
 	}
-	@echo
-	@echo "Built artefacts in $(DIST_DIR)/:"
-	@ls -la $(DIST_DIR)
+
+release-registry-server: ## Generate and validate dist/server.json for MCP Registry publishing
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-registry-server: RELEASE_VERSION is required, e.g. make release-registry-server RELEASE_VERSION=v1.2.1" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" ]; then \
+		echo "release-registry-server: missing $(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb; run make release-mcpb" >&2; \
+		exit 1; \
+	fi
+	go run ./scripts/release-registry-server $(RELEASE_VERSION) "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" "$(DIST_DIR)/server.json"
+	$(MCP_PUBLISHER) validate "$(DIST_DIR)/server.json"
+
+registry-publish: release-registry-server ## Publish dist/server.json to the MCP Registry
+	$(MCP_PUBLISHER) publish "$(DIST_DIR)/server.json"
 
 # Compose the GitHub Release notes by substituting __VERSION__ and
 # __HIGHLIGHTS__ in the install-header template, then appending the
@@ -401,6 +445,14 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 		echo "release-publish: $(DIST_DIR)/SHA256SUMS.asc missing — `ibkr update` from v1.0+ requires the signature; re-run release-binaries" >&2; \
 		exit 1; \
 	fi
+	@if [ ! -f "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" ]; then \
+		echo "release-publish: $(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb missing — re-run release-binaries" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DIST_DIR)/ibkr.mcpb" ]; then \
+		echo "release-publish: $(DIST_DIR)/ibkr.mcpb missing — re-run release-binaries" >&2; \
+		exit 1; \
+	fi
 	@command -v gh >/dev/null 2>&1 || { echo "release-publish: gh CLI not on PATH; brew install gh" >&2; exit 1; }
 	$(MAKE) changelog-lint RELEASE_VERSION=$(RELEASE_VERSION)
 	@notes=$$(mktemp -t ibkr-release-notes.XXXXXX) && \
@@ -410,7 +462,7 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 	awk -v ver='$(RELEASE_VERSION)' -v hf="$$highlights" '{ gsub(/__VERSION__/, ver) } /__HIGHLIGHTS__/{ while ((getline line < hf) > 0) print line; close(hf); next } { print }' .github/release-notes-template.md > $$notes && \
 	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " "); skip=0; if(in_section){ next } } in_section && /^### What.s new$$/{ skip=1; next } in_section && skip && /^### /{ skip=0 } in_section && !skip' CHANGELOG.md >> $$notes && \
 	title="$${MESSAGE:-$(RELEASE_VERSION)}" && \
-	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
+	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/*.mcpb $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 
 changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -529,6 +581,7 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	claude plugin tag . --push --message "$$msg"
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	$(MAKE) release-publish RELEASE_VERSION=$(RELEASE_VERSION) MESSAGE="$$msg"
+	$(MAKE) registry-publish RELEASE_VERSION=$(RELEASE_VERSION)
 	@echo
 	@echo "Released $(RELEASE_VERSION):"
 	@echo "  https://github.com/osauer/ibkr/releases/tag/$(RELEASE_VERSION)"
