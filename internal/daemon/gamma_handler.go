@@ -46,12 +46,20 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	}
 
 	// Scope: which underlying(s) to compute. Empty defaults to combined
-	// (the new canonical headline post-step-7). Single-underlying paths
-	// (--only=spy / --only=spx) bypass the canonical cache via force()
-	// since they're diagnostic shapes.
+	// (the canonical headline post-step-7). Single-underlying paths
+	// (--only=spy / --only=spx) first reuse the combined cache's
+	// matching per-index slice when available so drill-down matches the
+	// default gamma/regime view. Force=true bypasses that canonical
+	// slice and runs the requested single-underlying diagnostic compute.
 	scope, scopeErr := gammaScopeForRequest(p.Scope)
 	if scopeErr != nil {
 		return nil, fmt.Errorf("zero-gamma: %w", scopeErr)
+	}
+
+	if !p.Force {
+		if env, ok := s.zeroGamma.snapshotCombinedSlice(scope, time.Now); ok {
+			return &env, nil
+		}
 	}
 
 	// Background ctx for the compute goroutine — independent of the

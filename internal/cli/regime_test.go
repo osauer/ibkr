@@ -925,6 +925,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 			ZeroGamma:      &zg,
 			GapPct:         &gap,
 			LegCount:       240,
+			PricedLegCount: 900,
 			DerivedIVLegs:  240,
 			Method:         "perfiliev-bs-sweep-v1",
 		},
@@ -940,7 +941,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"240/240 legs", "BS-IV", "quote/close"} {
+	for _, want := range []string{"240/900 priced legs", "BS-IV", "quote/close"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing derived-IV disclosure %q:\n%s", want, out)
 		}

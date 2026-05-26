@@ -147,6 +147,77 @@ func TestGammaZeroCache_ForceSupersedesInflight(t *testing.T) {
 	}
 }
 
+func TestGammaZeroCache_SnapshotCombinedSliceUsesCanonicalPerIndex(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
+	combinedAsOf := now.Add(-time.Minute)
+	staleSingleAsOf := now.Add(-4 * time.Hour)
+
+	spy := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 749.26,
+		GammaSign:      "negative",
+		GammaTotalAbs:  6.2e9,
+		LegCount:       375,
+		AsOf:           combinedAsOf,
+	}
+	spx := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7506.83,
+		GammaSign:      "negative",
+		GammaTotalAbs:  25.8e9,
+		LegCount:       821,
+		AsOf:           combinedAsOf,
+	}
+	combined := &rpc.GammaZeroComputed{
+		Scope:           rpc.GammaZeroScopeCombined,
+		GammaTotalAbs:   32.0e9,
+		RegimeAgreement: "agree:short-gamma",
+		PerIndex: map[string]*rpc.GammaZeroComputed{
+			"SPY": spy,
+			"SPX": spx,
+		},
+		AsOf: combinedAsOf,
+	}
+	staleSPXOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7473.47,
+		GammaSign:      "negative",
+		GammaTotalAbs:  38.4e9,
+		LegCount:       824,
+		AsOf:           staleSingleAsOf,
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(combined, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPX:      {current: newPersistedComputation(staleSPXOnly, rpc.GammaZeroScopeSPX, now)},
+	}
+
+	env, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now })
+	if !ok {
+		t.Fatal("snapshotCombinedSlice returned ok=false")
+	}
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want %q", env.Status, rpc.GammaZeroStatusReady)
+	}
+	if env.Result == nil || env.Result.Scope != rpc.GammaZeroScopeSPX {
+		t.Fatalf("Result = %+v, want SPX per-index result", env.Result)
+	}
+	if env.Result.SpotUnderlying != spx.SpotUnderlying {
+		t.Fatalf("SpotUnderlying = %.2f, want canonical combined SPX slice %.2f",
+			env.Result.SpotUnderlying, spx.SpotUnderlying)
+	}
+	if env.Result.GammaTotalAbs != spx.GammaTotalAbs {
+		t.Fatalf("GammaTotalAbs = %.1f, want canonical combined SPX slice %.1f",
+			env.Result.GammaTotalAbs, spx.GammaTotalAbs)
+	}
+
+	priorSession := now.Add(-24 * time.Hour)
+	c.slots[rpc.GammaZeroScopeCombined].current = newPersistedComputation(combined, rpc.GammaZeroScopeCombined, priorSession)
+	if _, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now }); ok {
+		t.Fatal("prior-session combined slice should not satisfy an open-session single-scope request")
+	}
+}
+
 // TestGammaZeroCache_RetriesErrorAfterTTL pins the no-poison
 // invariant: a transient compute error must NOT stick in cache for
 // the rest of the NY trading session. Before this fix the cache

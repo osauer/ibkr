@@ -1403,9 +1403,13 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		// fallback fired, and a plain-English read of what γ-zero means.
 		if e.name == gammaRowLabel(r.GammaZero) {
 			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
+				denom := res.PricedLegCount
+				if denom == 0 {
+					denom = res.LegCount
+				}
 				fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf(
-					"compute used %d/%d legs with BS-IV from option quote/close fallback (model engine idle)",
-					res.DerivedIVLegs, res.LegCount)))
+					"compute used %d/%d priced legs with BS-IV from option quote/close fallback (model engine idle)",
+					res.DerivedIVLegs, denom)))
 			}
 		}
 		fmt.Fprintf(out, "  %s\n", env.dim(e.notes))

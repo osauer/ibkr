@@ -82,7 +82,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 	timestamp := gammaHeroTimestamp(r)
 	anchor := gammaHeroAnchor(r)
 	summary := gammaHeroSummary(r)
-	renderCommandHero(env, out, title, timestamp, anchor, summary)
+	renderCommandHeroStyled(env, out, title, timestamp, anchor, summary, gammaHeroSummaryStyle(r))
 
 	// Top-of-output banner for entitlement-degraded states. Surfaces
 	// the SPX-skipped fallback per design §8.2 above the headline
@@ -283,6 +283,30 @@ func gammaHeroSummary(r *rpc.GammaZeroSPXResult) string {
 		return fmt.Sprintf("%s short-γ (amplifying)", label)
 	}
 	return ""
+}
+
+func gammaHeroSummaryStyle(r *rpc.GammaZeroSPXResult) func(*Env, string) string {
+	return func(env *Env, s string) string {
+		if env == nil || !env.Color {
+			return s
+		}
+		band := bandUnranked
+		if r != nil && r.Result != nil {
+			if r.Result.Scope == rpc.GammaZeroScopeCombined && len(r.Result.PerIndex) > 0 {
+				band = gammaCombinedRegimeBand(r.Result)
+			} else {
+				band = gammaSingleRegimeBand(r.Result)
+			}
+		}
+		switch band {
+		case bandGreen:
+			return ansiBold + ansiGreen + s + ansiReset
+		case bandRed:
+			return ansiBold + ansiRed + s + ansiReset
+		default:
+			return heroSummaryStyle(env, s)
+		}
+	}
 }
 
 // renderGammaPerIndexLines emits the compact per-index summary lines.
