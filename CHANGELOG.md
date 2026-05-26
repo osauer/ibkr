@@ -10,6 +10,31 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.2.1 — 2026-05-26 22:02 CEST
+
+### What's new
+
+- Claude Desktop users can now install `ibkr` as an MCP Bundle (`.mcpb`) that carries the local macOS/Linux binary and runs the read-only MCP server through stdio.
+- Releases now publish both versioned and stable MCPB assets, include them in signed `SHA256SUMS`, and generate MCP Registry metadata with the versioned bundle's SHA-256.
+- Gamma drill-down, regime disclosure text, and option-chain closed-market spot fallbacks are tighter, so CLI/MCP reads stay aligned during smoke and off-hours use.
+
+### Added
+
+- Added `ibkr-vX.Y.Z.mcpb` and stable `ibkr.mcpb` release assets for Claude Desktop MCPB installs.
+- Added MCP Registry `server.json` generation and validation for MCPB publish metadata.
+- Added README, release-note, website, discovery, and updating documentation for the MCPB install and update path.
+
+### Changed
+
+- Release checksums now cover release tarballs, the versioned MCPB asset, and the stable `ibkr.mcpb` alias before `SHA256SUMS` is signed.
+- Claude Desktop install guidance now prefers the MCPB path, while shell-managed installs remain the path for Cursor, Continue, Zed, terminal use, and generic MCP hosts.
+
+### Fixed
+
+- `ibkr chain` now labels previous-close and historical-close spot fallbacks and can reuse quote and historical data when live spot snapshots are unavailable.
+- `ibkr gamma --only=spy` and `--only=spx` now reuse the matching slice from the combined gamma cache when available, keeping drill-down reads aligned with the default gamma and regime surfaces.
+- `ibkr regime --explain` now reports gamma fallback leg counts against priced legs when that denominator is available.
+
 ## v1.2.0 — 2026-05-26 20:49 CEST
 
 ### What's new

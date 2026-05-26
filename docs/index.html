@@ -30,7 +30,7 @@
         "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.2.0",
+        "softwareVersion": "1.2.1",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -609,12 +609,15 @@
     <section class="wrap install" id="install" aria-labelledby="install-title">
       <div>
         <div class="section-head">
-          <h2 id="install-title">Install in two commands.</h2>
-          <p>The installer downloads the release for your OS and architecture, verifies the checksum, installs <code>ibkr</code>, and can write the Claude Desktop MCP entry for you.</p>
+          <h2 id="install-title">Install for Claude Desktop or shell.</h2>
+          <p>Claude Desktop users can install the MCP Bundle release asset directly. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
         </div>
         <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
+        <p><a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a></p>
+        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings → Extensions → Install Extension. macOS and Linux are supported; Windows users can use WSL with the shell path.</p>
       </div>
-      <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+      <pre><code># Shell, Cursor, Continue, Zed, generic MCP hosts
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop
 
 # then ask:

@@ -6,14 +6,22 @@
 
 __HIGHLIGHTS__
 
-## Install in two commands
+## Claude Desktop MCPB
+
+Download `ibkr.mcpb` from the Assets section below or from:
+
+<https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>
+
+Open the `.mcpb` file with Claude Desktop, drag it into Claude Desktop, or use Settings -> Extensions -> Advanced settings -> Install Extension. The bundle carries the local `ibkr` binary for macOS and Linux. Windows is not supported outside WSL because the daemon uses Unix-only primitives.
+
+## Shell and generic MCP install
 
 ~~~sh
 curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop
 ~~~
 
-The first command picks the right binary for your platform, verifies its SHA-256, installs it to `~/.local/bin/ibkr`, and adds that directory to your `PATH` if needed. On macOS it also clears the Gatekeeper quarantine flag. The second command writes the MCP server entry into Claude Desktop's config; fully quit Claude Desktop (⌘Q on macOS) and reopen.
+The first command picks the right binary for your platform, verifies its SHA-256, installs it to `~/.local/bin/ibkr`, and adds that directory to your `PATH` if needed. On macOS it also clears the Gatekeeper quarantine flag. The second command writes the legacy MCP server entry into Claude Desktop's config; fully quit Claude Desktop and reopen.
 
 If you only want the shell tool, stop after the first command and try:
 
@@ -41,7 +49,7 @@ sh install.sh
 
 - **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@__VERSION__` (or `@latest`).
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
-- **Manual download**: pick a tarball from the Assets section below. Verify against `SHA256SUMS`.
+- **Manual download**: pick a tarball or `.mcpb` from the Assets section below. Verify against `SHA256SUMS`.
 - **Cursor / Continue / Zed / other local MCP clients**: see [Pick your path](https://github.com/osauer/ibkr#claude-desktop-cursor-continue-zed) in the README for the JSON snippet (config file path differs per client).
 - **Claude Code**: `/plugin marketplace add osauer/ibkr` then `/plugin install ibkr@ibkr` inside any session.
 

@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+#
+# build-mcpb.sh - assemble the release MCP Bundle from the native tarballs.
+#
+# Called by `make release-mcpb` after `make release-binaries` has produced
+# dist/ibkr-vX.Y.Z-<os>-<arch>.tar.gz. The bundle reuses those tarball
+# binaries so the one-click MCPB path and the direct-download path ship the
+# same stamped executables.
+
+set -euo pipefail
+
+version="${1:?usage: build-mcpb.sh <version> <dist-dir> <targets>}"
+dist_dir="${2:?dist dir required}"
+targets="${3:?release targets required}"
+
+case "$version" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *)
+        echo "build-mcpb: version must look like vX.Y.Z (got $version)" >&2
+        exit 2
+        ;;
+esac
+
+semver="${version#v}"
+stage="${dist_dir}/mcpb/ibkr"
+bundle="${dist_dir}/ibkr-${version}.mcpb"
+stable_bundle="${dist_dir}/ibkr.mcpb"
+
+mcpb_package="${MCPB_PACKAGE:-@anthropic-ai/mcpb@2.1.2}"
+mcpb() {
+    npx -y "$mcpb_package" "$@"
+}
+
+rm -rf "$stage" "$bundle" "$stable_bundle"
+mkdir -p "$stage/server/bin"
+
+for target in $targets; do
+    tarball="${dist_dir}/ibkr-${version}-${target}.tar.gz"
+    if [[ ! -f "$tarball" ]]; then
+        echo "build-mcpb: missing release tarball: $tarball" >&2
+        exit 1
+    fi
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    tar -xzf "$tarball" -C "$tmp" "ibkr-${version}-${target}/ibkr"
+    install -m 0755 "$tmp/ibkr-${version}-${target}/ibkr" "$stage/server/bin/ibkr-${target}"
+    rm -rf "$tmp"
+    trap - RETURN
+done
+
+cat > "$stage/server/ibkr" <<'SH'
+#!/usr/bin/env sh
+set -eu
+
+server_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *)
+        echo "ibkr MCPB: unsupported OS $(uname -s); supported: Darwin, Linux" >&2
+        exit 127
+        ;;
+esac
+
+case "$(uname -m)" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=amd64 ;;
+    *)
+        echo "ibkr MCPB: unsupported architecture $(uname -m); supported: arm64, amd64" >&2
+        exit 127
+        ;;
+esac
+
+bin="$server_dir/bin/ibkr-$os-$arch"
+if [ ! -x "$bin" ]; then
+    echo "ibkr MCPB: missing bundled binary $bin" >&2
+    exit 127
+fi
+
+exec "$bin" "$@"
+SH
+chmod 0755 "$stage/server/ibkr"
+
+cat > "$stage/manifest.json" <<JSON
+{
+  "\$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "ibkr",
+  "display_name": "ibkr",
+  "version": "$semver",
+  "description": "Read-only Interactive Brokers MCP server for account and market analysis.",
+  "long_description": "ibkr packages a local read-only Interactive Brokers (IBKR) MCP server for Claude Desktop and other MCPB-compatible clients. It exposes account, positions, quotes, watchlists, option chains, scanners, technical screens, breadth, dealer gamma, and risk-regime context through the local ibkr CLI. It does not expose order entry, order modification, or order cancellation.",
+  "author": {
+    "name": "Oliver Sauer",
+    "url": "https://github.com/osauer"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/osauer/ibkr"
+  },
+  "homepage": "https://osauer.dev/ibkr/",
+  "documentation": "https://osauer.dev/ibkr/guides/agentic-use.html",
+  "support": "https://github.com/osauer/ibkr/issues",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/ibkr",
+    "mcp_config": {
+      "command": "\${__dirname}/server/ibkr",
+      "args": ["mcp"],
+      "env": {}
+    }
+  },
+  "keywords": [
+    "ibkr",
+    "interactive-brokers",
+    "mcp",
+    "mcpb",
+    "tws-api",
+    "claude-desktop",
+    "finance",
+    "read-only"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://github.com/osauer/ibkr/blob/main/PRIVACY.md"
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "linux"]
+  }
+}
+JSON
+
+mcpb validate "$stage/manifest.json"
+mcpb pack "$stage" "$bundle"
+mcpb info "$bundle"
+cp "$bundle" "$stable_bundle"
+cmp -s "$bundle" "$stable_bundle" || {
+    echo "build-mcpb: stable asset differs from versioned bundle" >&2
+    exit 1
+}
+
+unpack_dir="$(mktemp -d)"
+trap 'rm -rf "$unpack_dir"' EXIT
+mcpb unpack "$bundle" "$unpack_dir" >/dev/null
+wrapped_version="$("$unpack_dir/server/ibkr" version | head -n1)"
+case "$wrapped_version" in
+    "ibkr $version"*|"ibkr  $version"*|"IBKR CLI  $version"*) ;;
+    *)
+        echo "build-mcpb: unpacked wrapper reports unexpected version: $wrapped_version" >&2
+        exit 1
+        ;;
+esac
+
+echo "build-mcpb: built $bundle"
+echo "build-mcpb: copied stable asset $stable_bundle"
+echo "build-mcpb: unpacked wrapper verified: $wrapped_version"

@@ -1,8 +1,8 @@
 # Updating
 
-Updated: 2026-05-25 11:44 CEST
+Updated: 2026-05-26 22:02 CEST
 
-Three things can affect data freshness: the **binary** (`ibkr` itself), the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
+Four things can affect data freshness: the **binary** (`ibkr` itself), the **Claude Desktop MCPB** when installed through Desktop Extensions, the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
 
 ## Updating the binary — `ibkr update`
 
@@ -19,6 +19,10 @@ A running daemon is asked to restart at the end — the daemon picks up the new 
 ### Release integrity
 
 From v1.0.0 onward, every release ships `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's Ed25519 key (fingerprint `D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`). The public key is embedded in every ibkr binary, so `ibkr update` verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.
+
+Releases that publish an MCP Bundle include both `ibkr-vX.Y.Z.mcpb` and the stable latest-download asset `ibkr.mcpb` in `SHA256SUMS`. The MCP Registry publish artifact also records the versioned MCPB file's SHA-256 in `server.json` as `fileSha256`.
+
+The MCPB container itself is not yet code-signed. Treat MCPB release integrity as signed-checksum and registry-hash based unless `mcpb verify ibkr-vX.Y.Z.mcpb` succeeds for a future release.
 
 `ibkr update` **refuses** any release missing the signature, and any release whose signature does not verify against the embedded key. There is no `--insecure` flag. If you ever need to debug a verification failure, the underlying error is printed verbatim and the manual verification steps are in [SECURITY.md → Release integrity](../../SECURITY.md#release-integrity-v100).
 
@@ -45,6 +49,16 @@ ibkr update --force          # re-install latest even if same version (corrupt-b
 ### Pre-v1.0.0 binaries
 
 `ibkr update` only exists from v1.0.0 onward. Earlier installs upgrade once manually (download the tarball from [releases](https://github.com/osauer/ibkr/releases), extract, run `make install`), then carry forward with `ibkr update`.
+
+## Updating Claude Desktop MCPB installs
+
+Claude Desktop MCPB installs carry their own embedded `ibkr` binary. `ibkr update` updates shell-managed installs such as `~/.local/bin/ibkr`; it does not replace a binary embedded inside Claude Desktop's extension store.
+
+To update a Claude Desktop MCPB install, download the latest bundle and reinstall it in Claude Desktop:
+
+<https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>
+
+After reinstalling, fully quit Claude Desktop and reopen it so it respawns the MCP server from the updated bundle.
 
 ## Updating the S&P 500 list — automatic
 
@@ -99,6 +113,7 @@ Calendar updates arrive with normal `ibkr` binary updates. If a supported exchan
 ## Where state lives
 
 - `~/.local/bin/ibkr` — installed binary; `.bak` carries the immediately-prior version.
+- Claude Desktop extension storage — MCPB-managed installs carry a separate embedded binary; update by reinstalling `ibkr.mcpb`.
 - `~/.cache/ibkr/spx-members/sp500-members.json` — runtime-refreshed members file.
 - `~/.cache/ibkr/update/` — install-time scratch space (downloaded tarball, lock file).
 - `~/.config/ibkr/config.toml` — optional persistent config (see [config reference](../reference/config.md)).
