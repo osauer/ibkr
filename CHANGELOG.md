@@ -10,6 +10,34 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.2.0 — 2026-05-26 20:49 CEST
+
+### What's new
+
+- `ibkr technical` and MCP `ibkr_technical` add a multi-symbol technical screen with trend, relative-strength, volatility, volume, and data-quality context.
+- Option-chain output now says whether the displayed contracts look executable, including live bid/ask coverage, open-interest coverage, liquidity grade, and structure hints.
+- Quote, watchlist, chain, status, and MCP responses now explain stale, indicative, fallback, or still-computing data more explicitly instead of leaving users to infer it from missing fields.
+
+### Added
+
+- Added `ibkr technical SYM[,SYM...]` with `--benchmark`, `--lookback-days`, and `--json` flags for relative-strength and trend screening.
+- Added MCP `ibkr_technical` for the same technical-screen data, including per-symbol trend state, relative-strength metrics, ATR percentage, average volume, dollar volume, and data-quality status.
+- Added option-chain tradability and liquidity fields in CLI, JSON, and MCP responses so agents can distinguish executable chains from stale or stock-only situations.
+- Added quote liquidity context for stock snapshots, including 20-day average dollar volume and spread/quality fields when historical bars and live bid/ask data are available.
+- Added subsystem health rows to `ibkr status` so long-running computed surfaces can report ready, computing, unavailable, or error states.
+
+### Changed
+
+- `ibkr chain` now highlights previous-session option closes and IV quality so off-hours option grids are easier to read without treating stale closes as live prints.
+- `ibkr quote` includes average dollar volume and quote-quality badges in text output when liquidity enrichment is available.
+- MCP tool descriptions now document the new technical screen, chain tradability fields, quote-liquidity context, and timeout behavior in the wording agents read before invoking tools.
+- MCP calls that wait on slow market-data paths now honor bounded timeouts more consistently, reducing the chance that one delayed gateway response blocks an agent workflow.
+
+### Fixed
+
+- Option-chain and quote responses now surface data-quality warnings instead of silently presenting incomplete or fallback market data as ordinary live data.
+- The changelog scaffold helper no longer executes backticked example text while generating a release entry.
+
 ## v1.1.2 — 2026-05-25 22:42 CEST
 
 ### What's new

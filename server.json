@@ -3,7 +3,7 @@
   "name": "io.github.osauer/ibkr",
   "title": "ibkr",
   "description": "Read-only Interactive Brokers MCP server for account and market analysis.",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "websiteUrl": "https://osauer.dev/ibkr/",
   "repository": {
     "url": "https://github.com/osauer/ibkr",
