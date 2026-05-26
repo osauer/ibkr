@@ -15,7 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
+	"time"
 
 	"github.com/osauer/ibkr/internal/dial"
 )
@@ -24,11 +26,10 @@ import (
 // stable revision Claude Desktop and the official Go/TypeScript SDKs target.
 const ProtocolVersion = "2025-03-26"
 
-// Server hosts the MCP loop. One per process; safe to reuse Conn across
-// requests because the daemon serializes each Call internally. Streaming
-// resource subscriptions open additional daemon connections via dialer
-// because dial.Conn.Stream holds the per-connection mutex for the stream's
-// lifetime — multiplexing is left as a future optimization.
+// Server hosts the MCP loop. One per process. Tool calls and streaming
+// resource subscriptions open additional daemon connections via dialer when
+// available, so per-call timeouts cannot leave late daemon replies queued on
+// the shared control connection. Without a dialer, tools fall back to conn.
 type Server struct {
 	conn    *dial.Conn
 	version string
@@ -305,20 +306,25 @@ func (s *Server) handleToolsCall(ctx context.Context, id, params json.RawMessage
 		s.writeError(id, codeMethodNotFound, "unknown tool: "+p.Name)
 		return
 	}
-	out, err := tool.Handler(ctx, s.conn, p.Arguments)
+	timeout := mcpToolCallTimeout(p.Name, p.Arguments)
+	callCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	conn, closeConn, err := s.toolConn()
 	if err != nil {
-		// Tool-level errors land inside a non-error JSON-RPC response with
-		// isError=true, per the MCP spec — clients distinguish protocol
-		// errors (codeMethodNotFound, codeInvalidParams) from tool
-		// failures (gateway down, symbol inactive). Surfacing inactive-
-		// symbol or gateway-unavailable as JSON-RPC errors would mislead
-		// the LLM into thinking the protocol broke.
-		payload := toolResultPayload{
-			IsError: true,
-			Content: []contentBlock{{Type: "text", Text: err.Error()}},
+		s.writeToolError(id, err)
+		return
+	}
+	defer closeConn()
+	out, err := tool.Handler(callCtx, conn, p.Arguments)
+	if err != nil {
+		if toolCallTimedOut(callCtx, err) && timeout > 0 {
+			err = fmt.Errorf("%s timed out after %s", p.Name, timeout)
 		}
-		b, _ := json.Marshal(payload)
-		s.writeResult(id, b)
+		s.writeToolError(id, err)
 		return
 	}
 	payload := toolResultPayload{
@@ -326,6 +332,100 @@ func (s *Server) handleToolsCall(ctx context.Context, id, params json.RawMessage
 	}
 	b, _ := json.Marshal(payload)
 	s.writeResult(id, b)
+}
+
+func (s *Server) toolConn() (*dial.Conn, func(), error) {
+	if s.dialer != nil {
+		conn, err := s.dialer()
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return conn, func() { _ = conn.Close() }, nil
+	}
+	if s.conn == nil {
+		return nil, func() {}, errors.New("daemon connection required")
+	}
+	return s.conn, func() {}, nil
+}
+
+func toolCallTimedOut(ctx context.Context, err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func (s *Server) writeToolError(id json.RawMessage, err error) {
+	// Tool-level errors land inside a non-error JSON-RPC response with
+	// isError=true, per the MCP spec — clients distinguish protocol
+	// errors (codeMethodNotFound, codeInvalidParams) from tool failures
+	// (gateway down, symbol inactive, bounded timeout). Surfacing these
+	// as JSON-RPC errors would mislead the LLM into thinking the protocol
+	// broke.
+	payload := toolResultPayload{
+		IsError: true,
+		Content: []contentBlock{{Type: "text", Text: err.Error()}},
+	}
+	b, _ := json.Marshal(payload)
+	s.writeResult(id, b)
+}
+
+const (
+	mcpFastToolTimeout    = 2 * time.Second
+	mcpDefaultToolTimeout = 35 * time.Second
+	mcpLongToolTimeout    = 60 * time.Second
+	mcpScannerToolTimeout = 90 * time.Second
+	mcpWatchQuoteTimeout  = 45 * time.Second
+	mcpScanParamsTimeout  = 20 * time.Second
+	mcpRegimeToolTimeout  = 50 * time.Second
+)
+
+func mcpToolCallTimeout(name string, args json.RawMessage) time.Duration {
+	switch name {
+	case "ibkr_status", "ibkr_calendar", "ibkr_breadth":
+		return mcpFastToolTimeout
+	case "ibkr_scan":
+		if scanListModeArgs(args) {
+			return mcpFastToolTimeout
+		}
+		return mcpScannerToolTimeout
+	case "ibkr_scan_params":
+		return mcpScanParamsTimeout
+	case "ibkr_watch":
+		if watchListOnlyArgs(args) {
+			return mcpFastToolTimeout
+		}
+		return mcpWatchQuoteTimeout
+	case "ibkr_chain", "ibkr_gamma":
+		return mcpLongToolTimeout
+	case "ibkr_regime":
+		return mcpRegimeToolTimeout
+	default:
+		return mcpDefaultToolTimeout
+	}
+}
+
+func scanListModeArgs(args json.RawMessage) bool {
+	var in struct {
+		Preset   string `json:"preset"`
+		Type     string `json:"type"`
+		Exchange string `json:"exchange"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	return in.Preset == "" && in.Type == "" && in.Exchange == ""
+}
+
+func watchListOnlyArgs(args json.RawMessage) bool {
+	var in struct {
+		IncludeQuotes *bool `json:"include_quotes"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	return in.IncludeQuotes != nil && !*in.IncludeQuotes
 }
 
 func lookupTool(name string) (Tool, bool) {

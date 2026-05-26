@@ -293,6 +293,21 @@ func TestWatchlistQuoteContractUsesHoldingRoute(t *testing.T) {
 	}
 }
 
+func TestIbkrWatchListOnlyRequiresDaemon(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	tool, ok := lookupTool("ibkr_watch")
+	if !ok {
+		t.Fatalf("ibkr_watch tool not registered")
+	}
+	_, err := tool.Handler(context.Background(), nil, json.RawMessage(`{"include_quotes":false}`))
+	if err == nil {
+		t.Fatal("expected list-only watch to require a daemon connection")
+	}
+	if !strings.Contains(err.Error(), "daemon connection required") {
+		t.Fatalf("error = %v, want daemon connection required", err)
+	}
+}
+
 func TestIbkrCalendarSchemaHasSupportedMarkets(t *testing.T) {
 	t.Parallel()
 	tool, ok := lookupTool("ibkr_calendar")

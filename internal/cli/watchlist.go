@@ -356,6 +356,18 @@ func formatWatchlistData(env *Env, row rpc.WatchlistRow) string {
 	if row.Price == nil {
 		return env.yellow("no data")
 	}
+	switch row.QuoteQuality {
+	case "wide":
+		return env.yellow("wide")
+	case "indicative":
+		return env.yellow("indic")
+	case "prev_close":
+		return env.yellow("prev")
+	case "stale":
+		return env.yellow("stale")
+	case "missing":
+		return env.red("missing")
+	}
 	if row.Stale || row.StaleReason != "" {
 		return env.yellow("stale")
 	}

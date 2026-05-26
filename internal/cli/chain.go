@@ -127,9 +127,9 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 			marker = " ← ATM"
 		}
 		fmt.Fprintf(out, "  %s %s %s %s %s   %s   %s %s %s %s %s%s\n",
-			fmt2(s.CallBid), fmt2(s.CallAsk), fmt2(s.CallLast), fmtPct(s.CallIV), fmtOICell(s.CallOI),
+			fmt2(s.CallBid), fmt2(s.CallAsk), fmtChainLast(env, s.CallLast, s.CallPrevClose, s.CallDataStatus), fmtPct(s.CallIV), fmtOICell(s.CallOI),
 			strike,
-			fmt2(s.PutBid), fmt2(s.PutAsk), fmt2(s.PutLast), fmtPct(s.PutIV), fmtOICell(s.PutOI),
+			fmt2(s.PutBid), fmt2(s.PutAsk), fmtChainLast(env, s.PutLast, s.PutPrevClose, s.PutDataStatus), fmtPct(s.PutIV), fmtOICell(s.PutOI),
 			marker)
 	}
 	fmt.Fprintln(out)
@@ -139,6 +139,21 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 	fmt.Fprintln(out, env.dim("  IV is delivered as a model-computation tick. Empty cells = unavailable, never derived."))
 	if !rpc.IsOptionRTH(time.Now()) {
 		fmt.Fprintln(out, env.yellow("  "+optionOffHoursBanner))
+		fmt.Fprintln(out, env.dim("  Yellow LAST cells are prior-session option closes."))
+	}
+	for _, w := range c.WarningDetails {
+		if w.Message == "" {
+			continue
+		}
+		line := "  " + w.Message
+		if w.Impact != "" {
+			line += " " + w.Impact
+		}
+		if w.Severity == "data_quality" {
+			fmt.Fprintln(out, env.yellow(line))
+		} else {
+			fmt.Fprintln(out, env.dim(line))
+		}
 	}
 	return 0
 }
@@ -244,6 +259,16 @@ func fmt2(p *float64) string {
 		return padDash(6)
 	}
 	return fmt.Sprintf("%6.2f", *p)
+}
+
+func fmtChainLast(env *Env, last, prevClose *float64, status string) string {
+	if last != nil && *last > 0 {
+		return fmt2(last)
+	}
+	if status == "prev_close" && prevClose != nil && *prevClose > 0 {
+		return env.yellow(fmt.Sprintf("%6.2f", *prevClose))
+	}
+	return padDash(6)
 }
 
 // fmtPct renders an IV percentage right-aligned to 6 visible columns, or

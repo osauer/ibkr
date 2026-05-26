@@ -340,8 +340,14 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		p.AvgVolume = q.AvgVolume
 		p.PriceAt = q.PriceAt
 		p.PriceAsOf = q.PriceAsOf
+		p.FeedType = q.FeedType
+		p.SpreadPct = q.SpreadPct
+		p.QuoteQuality = q.QuoteQuality
+		p.Indicative = q.Indicative
+		p.VolumePhase = q.VolumePhase
 		p.Stale = q.Stale
 		p.StaleReason = q.StaleReason
+		p.WarningDetails = q.WarningDetails
 		p.SessionContext = q.SessionContext
 	})
 }
@@ -1749,14 +1755,26 @@ func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
 	if q == nil {
 		return
 	}
+	feedType := q.DataType
 	q.Price, q.PriceSource = quoteCurrentPrice(q)
 	q.Change, q.ChangePct = computeQuoteChange(q.Price, q.PrevClose)
 	q.PriceAt = quotePriceTime(q, market)
-	q.PriceAsOf = quotePriceAsOf(q, market)
 	if stale, reason := quoteStaleness(q, market); stale {
 		q.Stale = true
 		q.StaleReason = reason
 	}
+	q.DataType = quoteEffectiveDataType(q, market, feedType)
+	if feedType != "" && feedType != q.DataType {
+		q.FeedType = feedType
+	} else {
+		q.FeedType = ""
+	}
+	q.PriceAsOf = quotePriceAsOf(q, market)
+	q.SpreadPct = quoteSpreadPct(q)
+	q.VolumePhase = quoteVolumePhase(q, market)
+	q.QuoteQuality = quoteQuality(q, market)
+	q.Indicative = quoteIndicative(q, market)
+	q.WarningDetails = quoteWarningDetails(q, market)
 }
 
 func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
@@ -1786,6 +1804,189 @@ func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
 		return q.PrevClose, "prev_close"
 	}
 	return nil, ""
+}
+
+func quoteSpreadPct(q *rpc.Quote) *float64 {
+	if q == nil || q.Bid == nil || q.Ask == nil || *q.Bid <= 0 || *q.Ask <= 0 || *q.Ask < *q.Bid {
+		return nil
+	}
+	mid := (*q.Bid + *q.Ask) / 2
+	if mid <= 0 {
+		return nil
+	}
+	v := (*q.Ask - *q.Bid) / mid * 100
+	return &v
+}
+
+func quoteEffectiveDataType(q *rpc.Quote, market marketcal.Market, feedType string) string {
+	if q == nil || q.Price == nil {
+		return feedType
+	}
+	if q.PriceSource == "prev_close" || q.PriceSource == "historical_close" {
+		return rpc.MarketDataPrevClose
+	}
+	session := quoteSessionFor(q, market)
+	if session != nil {
+		if quotePriceBeforeSessionDate(q, *session) {
+			return rpc.MarketDataPrevClose
+		}
+		if quotePriceAtSessionClose(q, *session) && !session.IsOpen {
+			return rpc.MarketDataFrozen
+		}
+	}
+	if q.Stale {
+		return rpc.MarketDataFrozen
+	}
+	if feedType != "" {
+		return feedType
+	}
+	return rpc.MarketDataLive
+}
+
+func quotePriceBeforeSessionDate(q *rpc.Quote, session rpc.MarketSession) bool {
+	if q == nil || q.PriceAt.IsZero() || session.Date == "" || session.Timezone == "" {
+		return false
+	}
+	loc, err := time.LoadLocation(session.Timezone)
+	if err != nil {
+		return false
+	}
+	return q.PriceAt.In(loc).Format("2006-01-02") < session.Date
+}
+
+func quotePriceAtSessionClose(q *rpc.Quote, session rpc.MarketSession) bool {
+	if q == nil || q.PriceAt.IsZero() || session.Close.IsZero() {
+		return false
+	}
+	return q.PriceAt.Equal(session.Close)
+}
+
+func quoteQuality(q *rpc.Quote, market marketcal.Market) string {
+	if q == nil || q.Price == nil {
+		return "missing"
+	}
+	if q.DataType == rpc.MarketDataPrevClose {
+		return "prev_close"
+	}
+	if q.Stale {
+		return "stale"
+	}
+	if quoteSpreadIsWide(q) {
+		return "wide"
+	}
+	if quoteOffHours(q, market) {
+		return "indicative"
+	}
+	return "firm"
+}
+
+func quoteIndicative(q *rpc.Quote, market marketcal.Market) bool {
+	if q == nil {
+		return false
+	}
+	return quoteOffHours(q, market) || quoteSpreadIsWide(q) || q.DataType == rpc.MarketDataPrevClose
+}
+
+func quoteSpreadIsWide(q *rpc.Quote) bool {
+	return q != nil && q.SpreadPct != nil && *q.SpreadPct > 2
+}
+
+func quoteOffHours(q *rpc.Quote, market marketcal.Market) bool {
+	session := quoteSessionFor(q, market)
+	return session != nil && !session.IsOpen
+}
+
+func quoteVolumePhase(q *rpc.Quote, market marketcal.Market) string {
+	session := quoteSessionFor(q, market)
+	if session == nil {
+		return ""
+	}
+	if session.IsOpen {
+		return "regular_session"
+	}
+	at := time.Now()
+	if q != nil && !q.AsOf.IsZero() {
+		at = q.AsOf
+	}
+	loc, err := time.LoadLocation(session.Timezone)
+	if err == nil {
+		local := at.In(loc)
+		switch {
+		case !session.Open.IsZero() && local.Before(session.Open.In(loc)):
+			return "pre_market_or_prior_session"
+		case !session.Close.IsZero() && !local.Before(session.Close.In(loc)):
+			return "post_market_or_regular_session"
+		}
+	}
+	return "closed_or_prior_session"
+}
+
+func quoteWarningDetails(q *rpc.Quote, market marketcal.Market) []rpc.DataWarning {
+	if q == nil {
+		return nil
+	}
+	var out []rpc.DataWarning
+	scope := q.Symbol
+	if scope == "" {
+		scope = q.Contract.Symbol
+	}
+	switch q.DataType {
+	case rpc.MarketDataPrevClose:
+		out = append(out, rpc.DataWarning{
+			Code:     "selected_price_prev_close",
+			Scope:    scope,
+			Severity: "data_quality",
+			Message:  "Selected price is from a prior regular-session close.",
+			Impact:   "Do not treat bid/ask/last context as a fresh regular-session trade signal.",
+			Action:   "Retry during the regular session or use quote_quality/spread_pct as a gate.",
+		})
+	case rpc.MarketDataFrozen, rpc.MarketDataDelayedFrozen:
+		if quoteOffHours(q, market) {
+			out = append(out, rpc.DataWarning{
+				Code:     "selected_price_closed_session",
+				Scope:    scope,
+				Severity: "info",
+				Message:  "Selected price is from a closed regular session.",
+				Impact:   "The value is suitable as stale context, not as an executable quote.",
+			})
+		}
+	}
+	if quoteSpreadIsWide(q) {
+		out = append(out, rpc.DataWarning{
+			Code:     "wide_spread",
+			Scope:    scope,
+			Severity: "data_quality",
+			Message:  "Bid/ask spread is wide.",
+			Impact:   "Liquidity gates should treat this as indicative until quotes tighten.",
+			Action:   "Check spread_pct and retry during regular trading hours.",
+		})
+	}
+	if quoteOffHours(q, market) {
+		out = append(out, rpc.DataWarning{
+			Code:     "off_hours_quote",
+			Scope:    scope,
+			Severity: "info",
+			Message:  "Market is outside its regular session.",
+			Impact:   "Quotes and volume may be thin, partial, or carried from the prior session.",
+		})
+	}
+	return out
+}
+
+func quoteSessionFor(q *rpc.Quote, market marketcal.Market) *rpc.MarketSession {
+	if q != nil && q.SessionContext != nil {
+		return q.SessionContext
+	}
+	at := time.Now()
+	if q != nil && !q.AsOf.IsZero() {
+		at = q.AsOf
+	}
+	session, err := marketcal.New().SessionAt(market, at)
+	if err != nil {
+		return nil
+	}
+	converted := marketSessionToRPC(session)
+	return &converted
 }
 
 func quoteFallbackReady(q *rpc.Quote, pollStarted time.Time, timeout time.Duration) bool {
@@ -1885,7 +2086,7 @@ func quotePriceAsOf(q *rpc.Quote, market marketcal.Market) string {
 		t = t.In(loc)
 	}
 	label := "As of"
-	if q.PriceSource == "prev_close" || q.PriceSource == "historical_close" {
+	if q.PriceSource == "prev_close" || q.PriceSource == "historical_close" || q.DataType == rpc.MarketDataPrevClose {
 		label = "At close"
 	} else if q.DataType == rpc.MarketDataDelayedFrozen {
 		if quoteMarketIsOpen(q, market) {
@@ -2273,6 +2474,33 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 		v := snap.Week52Low
 		row.Week52Low = &v
 	}
+	row.AsOf = time.Now()
+	row.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(pollKey))
+	q := rpc.Quote{
+		Symbol:    row.Symbol,
+		Last:      row.Last,
+		PrevClose: row.PrevClose,
+		Volume:    row.Volume,
+		IV:        row.IV,
+		IVStatus:  "unavailable",
+		DataType:  row.DataType,
+		AsOf:      row.AsOf,
+	}
+	if !snap.LastTradeTime.IsZero() {
+		q.PriceAt = snap.LastTradeTime
+	}
+	market := marketcal.MarketUSEquity
+	if normCcy(row.Currency) == "EUR" {
+		market = marketcal.MarketDEXetra
+	}
+	s.attachQuoteSessionContext(&q, market)
+	s.decorateQuote(&q, market)
+	row.DataType = q.DataType
+	row.FeedType = q.FeedType
+	row.PriceAt = q.PriceAt
+	row.PriceAsOf = q.PriceAsOf
+	row.VolumePhase = q.VolumePhase
+	row.WarningDetails = q.WarningDetails
 }
 
 func scanRowNeedsRoutedQuote(row *rpc.ScanRow) bool {
@@ -2415,8 +2643,35 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	// — the same source isBusy() and the regime partial-envelope
 	// contention message ride, so the three surfaces never diverge.
 	res.BackgroundTasks = s.backgroundTasks()
+	res.Subsystems = s.subsystemHealth(res.Connected)
 	res.Members = s.membersHealth()
 	return res
+}
+
+func (s *Server) subsystemHealth(connected bool) []rpc.SubsystemHealth {
+	gatewayStatus := "ready"
+	if !connected {
+		gatewayStatus = "unavailable"
+	}
+	out := []rpc.SubsystemHealth{
+		{Name: "watchlist", Status: "ready", Message: "list-only path is local; quote enrichment requires gateway"},
+		{Name: "quote", Status: gatewayStatus},
+		{Name: "scanner", Status: gatewayStatus},
+		{Name: "chain", Status: gatewayStatus},
+	}
+	gamma := rpc.SubsystemHealth{Name: "gamma", Status: gatewayStatus}
+	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
+		gamma.Status = "computing"
+		gamma.Message = "dealer gamma compute is fanning out option legs"
+	}
+	out = append(out, gamma)
+	breadth := rpc.SubsystemHealth{Name: "breadth", Status: gatewayStatus}
+	if s.breadth != nil && s.breadth.IsRefreshing() {
+		breadth.Status = "computing"
+		breadth.Message = "S&P 500 breadth refresh is running"
+	}
+	out = append(out, breadth)
+	return out
 }
 
 // membersHealth assembles the rpc.MembersHealth wire shape for the

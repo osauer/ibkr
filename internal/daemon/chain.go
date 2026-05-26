@@ -395,12 +395,19 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	atm := math.Round(spot/step) * step
 
 	res := &rpc.ChainResult{
-		Symbol:   strings.ToUpper(p.Symbol),
-		Spot:     spot,
-		Expiry:   expiryYMD[:4] + "-" + expiryYMD[4:6] + "-" + expiryYMD[6:8],
-		DTE:      dte,
-		DataType: dataType,
-		AsOf:     time.Now(),
+		Symbol:       strings.ToUpper(p.Symbol),
+		Spot:         spot,
+		Expiry:       expiryYMD[:4] + "-" + expiryYMD[4:6] + "-" + expiryYMD[6:8],
+		DTE:          dte,
+		DataType:     dataType,
+		SessionState: rpc.ClassifySession(time.Now()).String(),
+		AsOf:         time.Now(),
+	}
+	if !rpc.IsOptionRTH(res.AsOf) {
+		if dataType != "" {
+			res.FeedType = dataType
+		}
+		res.DataType = rpc.MarketDataClosed
 	}
 
 	wantCalls := p.Side == "calls" || p.Side == "both"
@@ -455,6 +462,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	res.WarningDetails = chainWarningDetails(res, wantCalls, wantPuts)
 	return res, nil
 }
 
@@ -500,17 +508,27 @@ func mergeStrikeSide(dst, src *rpc.ChainStrike, right string) {
 		dst.CallBid = src.CallBid
 		dst.CallAsk = src.CallAsk
 		dst.CallLast = src.CallLast
+		dst.CallPrevClose = src.CallPrevClose
 		dst.CallIV = src.CallIV
 		dst.CallDelta = src.CallDelta
 		dst.CallOI = src.CallOI
+		dst.CallAsOf = src.CallAsOf
+		dst.CallDataStatus = src.CallDataStatus
+		dst.CallIVStatus = src.CallIVStatus
+		dst.CallOIStatus = src.CallOIStatus
 		return
 	}
 	dst.PutBid = src.PutBid
 	dst.PutAsk = src.PutAsk
 	dst.PutLast = src.PutLast
+	dst.PutPrevClose = src.PutPrevClose
 	dst.PutIV = src.PutIV
 	dst.PutDelta = src.PutDelta
 	dst.PutOI = src.PutOI
+	dst.PutAsOf = src.PutAsOf
+	dst.PutDataStatus = src.PutDataStatus
+	dst.PutIVStatus = src.PutIVStatus
+	dst.PutOIStatus = src.PutOIStatus
 }
 
 func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStrike, symbol, expiryYMD string, strike float64, right string) {
@@ -521,13 +539,16 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	// would extend this in step 6 of the gamma SPX coverage arc.
 	key, _, err := c.SubscribeOption(ctx, symbol, symbol, expiryYMD, strike, right)
 	if err != nil {
+		setOptionLegUnavailable(row, right, "subscribe_error")
 		return
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
+	asOf := time.Now()
 	deadline := time.Now().Add(2500 * time.Millisecond)
 	var bid, ask, last float64
 	if err := pollMarketData(ctx, c, key, deadline, func(d *ibkrlib.MarketData) bool {
+		asOf = time.Now()
 		if d.Bid > 0 || d.Ask > 0 || d.Last > 0 {
 			bid, ask, last = d.Bid, d.Ask, d.Last
 			return true
@@ -554,6 +575,7 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		v, ok := c.GetOptionIV(key)
 		if ok && v > 0 {
 			iv = v
+			asOf = time.Now()
 			return true
 		}
 		return false
@@ -575,6 +597,10 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		d := g.Delta
 		delta = &d
 	}
+	var prevClose float64
+	if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
+		prevClose = px
+	}
 	// Opportunistic OI read off the same subscription. Tick types 27
 	// (callOpenInterest) and 28 (putOpenInterest) land on the cached
 	// MarketData.OpenInt — same pattern gamma uses
@@ -586,6 +612,15 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	if d, ok := c.GetMarketData()[key]; ok && d.OpenInt > 0 {
 		v := d.OpenInt
 		oi = &v
+	}
+	dataStatus := optionLegDataStatus(bid, ask, last, prevClose, iv, delta)
+	ivStatus := "unavailable"
+	if iv > 0 {
+		ivStatus = "ok"
+	}
+	oiStatus := "unavailable"
+	if oi != nil {
+		oiStatus = "ok"
 	}
 	if right == "C" {
 		if bid > 0 {
@@ -600,12 +635,20 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 			v := last
 			row.CallLast = &v
 		}
+		if prevClose > 0 {
+			v := prevClose
+			row.CallPrevClose = &v
+		}
 		if iv > 0 {
 			v := iv
 			row.CallIV = &v
 		}
 		row.CallDelta = delta
 		row.CallOI = oi
+		row.CallAsOf = asOf
+		row.CallDataStatus = dataStatus
+		row.CallIVStatus = ivStatus
+		row.CallOIStatus = oiStatus
 		return
 	}
 	if bid > 0 {
@@ -620,10 +663,135 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		v := last
 		row.PutLast = &v
 	}
+	if prevClose > 0 {
+		v := prevClose
+		row.PutPrevClose = &v
+	}
 	if iv > 0 {
 		v := iv
 		row.PutIV = &v
 	}
 	row.PutDelta = delta
 	row.PutOI = oi
+	row.PutAsOf = asOf
+	row.PutDataStatus = dataStatus
+	row.PutIVStatus = ivStatus
+	row.PutOIStatus = oiStatus
+}
+
+func optionLegDataStatus(bid, ask, last, prevClose, iv float64, delta *float64) string {
+	switch {
+	case bid > 0 || ask > 0 || last > 0:
+		return "quoted"
+	case prevClose > 0:
+		return "prev_close"
+	case iv > 0 || delta != nil:
+		return "model_only"
+	default:
+		return "no_quote"
+	}
+}
+
+func setOptionLegUnavailable(row *rpc.ChainStrike, right, status string) {
+	if status == "" {
+		status = "unavailable"
+	}
+	now := time.Now()
+	if right == "C" {
+		row.CallAsOf = now
+		row.CallDataStatus = status
+		row.CallIVStatus = "unavailable"
+		row.CallOIStatus = "unavailable"
+		return
+	}
+	row.PutAsOf = now
+	row.PutDataStatus = status
+	row.PutIVStatus = "unavailable"
+	row.PutOIStatus = "unavailable"
+}
+
+func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.DataWarning {
+	if res == nil {
+		return nil
+	}
+	var out []rpc.DataWarning
+	if res.DataType == rpc.MarketDataClosed {
+		out = append(out, rpc.DataWarning{
+			Code:     "options_closed",
+			Scope:    res.Symbol,
+			Severity: "info",
+			Message:  "U.S. listed options are outside regular trading hours.",
+			Impact:   "Bid/ask/last and open interest may be unavailable; model IV can still populate from IBKR's option model.",
+			Action:   "Retry during 09:30-16:00 ET for executable option quotes.",
+		})
+	}
+	var prevCloseOnly, modelOnly, missingOI, missingIV int
+	for _, row := range res.Strikes {
+		if wantCalls {
+			if row.CallDataStatus == "prev_close" {
+				prevCloseOnly++
+			}
+			if row.CallDataStatus == "model_only" {
+				modelOnly++
+			}
+			if row.CallOIStatus == "unavailable" {
+				missingOI++
+			}
+			if row.CallIVStatus == "unavailable" {
+				missingIV++
+			}
+		}
+		if wantPuts {
+			if row.PutDataStatus == "prev_close" {
+				prevCloseOnly++
+			}
+			if row.PutDataStatus == "model_only" {
+				modelOnly++
+			}
+			if row.PutOIStatus == "unavailable" {
+				missingOI++
+			}
+			if row.PutIVStatus == "unavailable" {
+				missingIV++
+			}
+		}
+	}
+	if prevCloseOnly > 0 {
+		out = append(out, rpc.DataWarning{
+			Code:     "prev_close_legs",
+			Scope:    res.Symbol,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("%d option legs used prior-session close as the only price anchor.", prevCloseOnly),
+			Impact:   "The leg has price context but no executable bid/ask/last quote within the fill window.",
+			Action:   "Use call_prev_close/put_prev_close only as stale context, not a live fill price.",
+		})
+	}
+	if modelOnly > 0 {
+		out = append(out, rpc.DataWarning{
+			Code:     "model_only_legs",
+			Scope:    res.Symbol,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("%d option legs returned model data without bid/ask/last.", modelOnly),
+			Impact:   "IV/delta may be usable for context, but the legs were not quotable within the fill window.",
+		})
+	}
+	if missingOI > 0 {
+		out = append(out, rpc.DataWarning{
+			Code:     "oi_unavailable",
+			Scope:    res.Symbol,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("Open interest was unavailable for %d option legs.", missingOI),
+			Impact:   "Liquidity and gamma filters should not assume missing OI is zero.",
+		})
+	}
+	if missingIV > 0 {
+		out = append(out, rpc.DataWarning{
+			Code:     "iv_unavailable",
+			Scope:    res.Symbol,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("Implied volatility was unavailable for %d option legs.", missingIV),
+			Impact:   "The gateway did not deliver a model fit for those strikes within the chain budget.",
+		})
+	}
+	return out
 }

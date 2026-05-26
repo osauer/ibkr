@@ -81,6 +81,9 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if len(res.BackgroundTasks) > 0 {
 		statusRow(env, out, "Background", formatBackgroundTasks(res.BackgroundTasks))
 	}
+	if len(res.Subsystems) > 0 {
+		statusRow(env, out, "Subsystems", formatSubsystemsValue(env, res.Subsystems))
+	}
 	if members := formatMembersValue(res.Members); members != "" {
 		statusRow(env, out, "SPX members", members)
 	}
@@ -281,6 +284,32 @@ func formatMembersValue(m rpc.MembersHealth) string {
 		return base
 	}
 	return base + ", refresh " + m.RefreshState
+}
+
+func formatSubsystemsValue(env *Env, subs []rpc.SubsystemHealth) string {
+	parts := make([]string, 0, len(subs))
+	for _, s := range subs {
+		if s.Name == "" || s.Status == "" {
+			continue
+		}
+		status := s.Status
+		switch s.Status {
+		case "ready":
+			status = env.green(status)
+		case "computing":
+			status = env.yellow(status)
+		case "unavailable", "error":
+			status = env.red(status)
+		default:
+			status = env.dim(status)
+		}
+		part := s.Name + ":" + status
+		if s.Progress > 0 {
+			part += fmt.Sprintf(" %d%%", s.Progress)
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func membersRefreshNeedsAttention(m rpc.MembersHealth) bool {
