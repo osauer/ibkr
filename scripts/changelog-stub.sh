@@ -31,8 +31,9 @@ stub_file=$(mktemp -t changelog-stub.XXXXXX)
 tmp=$(mktemp -t changelog-out.XXXXXX)
 trap 'rm -f "$stub_file" "$tmp"' EXIT
 
-cat >"$stub_file" <<STUB_EOF
-## $ver — $ts
+{
+printf '## %s — %s\n' "$ver" "$ts"
+cat <<'STUB_EOF'
 
 ### What's new
 
@@ -92,6 +93,7 @@ cat >"$stub_file" <<STUB_EOF
       Changed/Fixed, not here.
 -->
 STUB_EOF
+} >"$stub_file"
 
 awk -v stub_file="$stub_file" '
   !inserted && /^## v/ {
