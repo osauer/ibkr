@@ -79,3 +79,46 @@ func TestModelTickPopulatesOptionIVNotSubscriptionIV(t *testing.T) {
 		t.Errorf("MarketData.IV = %v; want 0 (sub.IV is the underlying-IV path, not a per-strike source)", md.IV)
 	}
 }
+
+func TestOptionMarketDataKeyDistinguishesExpiries(t *testing.T) {
+	t.Parallel()
+	front := OptionMarketDataKey("asts", "2026-09-18", "c", 55)
+	back := OptionMarketDataKey("ASTS", "2027-01-15", "C", 55)
+	if front == back {
+		t.Fatalf("keys collide across expiries: %q", front)
+	}
+	if front != "ASTS_260918C55" {
+		t.Fatalf("front key = %q, want ASTS_260918C55", front)
+	}
+}
+
+func TestKeyedOptionIVRoutesSameUnderlyingToSeparateSlots(t *testing.T) {
+	c := NewConnector(nil)
+	const (
+		frontReqID = 101
+		backReqID  = 102
+	)
+	frontKey := OptionMarketDataKey("ASTS", "20260918", "C", 55)
+	backKey := OptionMarketDataKey("ASTS", "20270115", "C", 55)
+
+	c.optReqIDs[frontReqID] = frontKey
+	c.optReqIDs[backReqID] = backKey
+
+	c.handleOptionComputation([]string{
+		"21", strconv.Itoa(frontReqID), "13", "0",
+		"0.80", "0.50", "10.0", "0", "0.01", "20.0", "-0.05", "55",
+	})
+	c.handleOptionComputation([]string{
+		"21", strconv.Itoa(backReqID), "13", "0",
+		"1.10", "0.45", "12.0", "0", "0.01", "22.0", "-0.04", "55",
+	})
+
+	frontIV, frontOK := c.GetOptionIV(frontKey)
+	backIV, backOK := c.GetOptionIV(backKey)
+	if !frontOK || frontIV != 0.80 {
+		t.Fatalf("front IV = %v ok=%v, want 0.80 true", frontIV, frontOK)
+	}
+	if !backOK || backIV != 1.10 {
+		t.Fatalf("back IV = %v ok=%v, want 1.10 true", backIV, backOK)
+	}
+}

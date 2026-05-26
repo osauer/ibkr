@@ -29,14 +29,15 @@ func newTestServer(t *testing.T) *Server {
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4001), ClientID: new(15)},
 	}
 	s := &Server{
-		cfg:        cfg,
-		endpoint:   discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginPinned},
-		version:    "test",
-		streams:    map[string]context.CancelFunc{},
-		logger:     NewLogger(&bytes.Buffer{}, "error"),
-		expiryIVs:  newExpiryIVCache(),
-		prevCloses: newPrevCloseCache(),
-		zeroGamma:  newGammaZeroCache(),
+		cfg:            cfg,
+		endpoint:       discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 15, PortOrigin: discover.OriginPinned},
+		version:        "test",
+		streams:        map[string]context.CancelFunc{},
+		logger:         NewLogger(&bytes.Buffer{}, "error"),
+		expiryIVs:      newExpiryIVCache(),
+		quoteLiquidity: newQuoteLiquidityCache(),
+		prevCloses:     newPrevCloseCache(),
+		zeroGamma:      newGammaZeroCache(),
 	}
 	s.installSubs()
 	return s
@@ -108,6 +109,13 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 		params, _ := json.Marshal(rpc.HistoryDailyParams{Symbol: "AAPL", Days: 30})
 		req := &rpc.Request{ID: "t6", Method: rpc.MethodHistoryDaily, Params: params}
 		_, err := srv.handleHistoryDaily(ctx, req)
+		assertGatewayUnavailable(t, err)
+	})
+
+	t.Run("technical.snapshot", func(t *testing.T) {
+		params, _ := json.Marshal(rpc.TechnicalParams{Symbols: []string{"AAPL"}})
+		req := &rpc.Request{ID: "t6t", Method: rpc.MethodTechnical, Params: params}
+		_, err := srv.handleTechnical(ctx, req)
 		assertGatewayUnavailable(t, err)
 	})
 
@@ -360,6 +368,96 @@ func TestMergeStrikeSide(t *testing.T) {
 			t.Errorf("CallBid was clobbered")
 		}
 	})
+}
+
+func TestChainSummariesSurfaceTradabilityAndLiquidity(t *testing.T) {
+	t.Parallel()
+	cb, ca, civ := 2.00, 2.20, 0.55
+	pb, pa := 1.50, 2.10
+	oi := int64(1200)
+	delta := 0.48
+	prev := 0.90
+	res := &rpc.ChainResult{
+		Symbol: "ASTS", Spot: 55, Expiry: "2026-09-18", DataType: rpc.MarketDataLive, SessionState: rpc.SessionRTH.String(),
+		Strikes: []rpc.ChainStrike{
+			{
+				Strike: 55, IsATM: true,
+				CallBid: &cb, CallAsk: &ca, CallIV: &civ, CallOI: &oi, CallDelta: &delta, CallDataStatus: "quoted", CallOIStatus: "ok",
+				PutBid: &pb, PutAsk: &pa, PutDataStatus: "quoted",
+			},
+			{Strike: 60, CallPrevClose: &prev, CallDataStatus: "prev_close", PutDataStatus: "model_only"},
+			{Strike: 65, CallDataStatus: "subscribe_error", PutDataStatus: "no_quote"},
+		},
+	}
+
+	tradable, liquidity := chainSummaries(res, true, true)
+	if tradable == nil || liquidity == nil {
+		t.Fatal("expected summaries")
+	}
+	if tradable.TotalLegs != 6 || tradable.LiveBidAskLegs != 2 || !tradable.OptionsTradable {
+		t.Fatalf("tradable summary = %+v, want 6 total / 2 live / tradable", tradable)
+	}
+	if tradable.StaleLegs != 1 || tradable.ModelOnlyLegs != 1 || tradable.SubscribeErrorLegs != 1 || tradable.NoQuoteLegs != 1 {
+		t.Fatalf("status counts = %+v, want one stale/model/subscribe/no_quote", tradable)
+	}
+	if math.Abs(tradable.OICoveragePct-(1.0/6.0)) > 1e-9 {
+		t.Fatalf("oi coverage = %v, want 1/6", tradable.OICoveragePct)
+	}
+	if liquidity.LiquidityGrade != "good" || liquidity.RecommendedStructureHint != "calls_ok" {
+		t.Fatalf("liquidity = %+v, want good/calls_ok", liquidity)
+	}
+	if liquidity.ATMSpreadPct == nil || math.Abs(*liquidity.ATMSpreadPct-0.0952380952380953) > 1e-9 {
+		t.Fatalf("ATM spread pct = %v, want call spread around 9.5%%", liquidity.ATMSpreadPct)
+	}
+	if liquidity.NearestLiveCall == nil || liquidity.NearestLiveCall.Strike != 55 || liquidity.MinSpreadLiveStrike == nil {
+		t.Fatalf("nearest/min live legs missing: %+v", liquidity)
+	}
+}
+
+func TestChainSummariesClassifyUntradableChain(t *testing.T) {
+	t.Parallel()
+	prev := 0.90
+	res := &rpc.ChainResult{
+		Symbol: "ONDS", Spot: 10, Expiry: "2026-09-18", DataType: rpc.MarketDataLive, SessionState: rpc.SessionRTH.String(),
+		Strikes: []rpc.ChainStrike{
+			{Strike: 10, IsATM: true, CallPrevClose: &prev, CallDataStatus: "prev_close"},
+			{Strike: 11, CallDataStatus: "model_only"},
+		},
+	}
+	tradable, liquidity := chainSummaries(res, true, false)
+	if tradable.OptionsTradable {
+		t.Fatalf("expected untradable summary, got %+v", tradable)
+	}
+	if tradable.FeedGap != "thin_contract" {
+		t.Fatalf("feed gap = %q, want thin_contract", tradable.FeedGap)
+	}
+	if liquidity.LiquidityGrade != "untradable" || liquidity.RecommendedStructureHint != "untradable_chain" {
+		t.Fatalf("liquidity = %+v, want untradable/untradable_chain", liquidity)
+	}
+}
+
+func TestAnnotateRepeatedExpiryIVMarksQualityAndWarning(t *testing.T) {
+	t.Parallel()
+	iv := 0.42
+	other := 0.47
+	rows := []rpc.ChainExpiry{
+		{Date: "2026-06-19", IV: &iv, IVQuality: "live_model"},
+		{Date: "2026-09-18", IV: &iv, IVQuality: "live_model"},
+		{Date: "2027-01-15", IV: &iv, IVQuality: "cached"},
+		{Date: "2027-06-18", IV: &other, IVQuality: "live_model"},
+	}
+	warnings := annotateRepeatedExpiryIV("ASTS", rows)
+	if len(warnings) != 1 || warnings[0].Code != "repeated_expiry_iv" {
+		t.Fatalf("warnings = %+v, want repeated_expiry_iv", warnings)
+	}
+	for i := range 3 {
+		if rows[i].IVQuality != "reused_fallback" {
+			t.Fatalf("row %d quality = %q, want reused_fallback", i, rows[i].IVQuality)
+		}
+	}
+	if rows[3].IVQuality != "live_model" {
+		t.Fatalf("non-repeated row quality changed to %q", rows[3].IVQuality)
+	}
 }
 
 // marketDataTypeName maps the gateway's per-reqID notice to the
@@ -832,6 +930,10 @@ func TestDecodeParamsMalformedIsBadRequest(t *testing.T) {
 		}},
 		{"history.daily", func() error {
 			_, err := srv.handleHistoryDaily(context.Background(), &rpc.Request{ID: "t", Params: malformed})
+			return err
+		}},
+		{"technical.snapshot", func() error {
+			_, err := srv.handleTechnical(context.Background(), &rpc.Request{ID: "t", Params: malformed})
 			return err
 		}},
 		{"quote.snapshot", func() error {

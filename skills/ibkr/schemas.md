@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-25 21:25 CEST
+Updated: 2026-05-26 20:12 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -339,6 +339,12 @@ and `--json` are mutually exclusive.
   "ask_size": 200,
   "volume": 12400000,
   "avg_volume": 58900000,
+  "avg_volume_20d": 61200000,
+  "avg_dollar_volume_20d": 12721440000,
+  "liquidity_status": "ok",
+  "liquidity_source": "daily_bars",
+  "liquidity_sample_days": 20,
+  "liquidity_as_of": "2026-05-22T00:00:00Z",
   "iv": null,
   "iv_status": "unavailable",
   "data_type": "frozen",
@@ -383,6 +389,17 @@ Field meanings:
   tick 8.
 - `avg_volume` — IBKR average volume tick from the Misc Stats bundle.
   Omitted when not delivered.
+- `avg_volume_20d`, `avg_dollar_volume_20d` — computed from the latest
+  daily bars, not from scanner output. Use these as the investability
+  liquidity gate for stock screens. `avg_dollar_volume_20d` is average
+  `close × volume` over the sample.
+- `liquidity_status` — `ok`, `partial`, or `unavailable`. `partial`
+  means fewer than 20 valid daily bars contributed; do not compare it
+  as confidently as a full 20-day sample.
+- `liquidity_source` — currently `daily_bars` when the computed fields
+  are present.
+- `liquidity_sample_days`, `liquidity_as_of` — number of daily bars used
+  and the latest bar timestamp/date for the liquidity calculation.
 - `iv` / `iv_status` — populated only when IBKR sends tick 106
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
@@ -596,6 +613,27 @@ goes away.
   "expiry": "2026-06-19",
   "dte": 41,
   "data_type": "live",
+  "tradable_summary": {
+    "total_legs": 22,
+    "live_bid_ask_legs": 18,
+    "one_sided_live_legs": 2,
+    "stale_legs": 0,
+    "model_only_legs": 1,
+    "subscribe_error_legs": 0,
+    "no_quote_legs": 1,
+    "oi_covered_legs": 16,
+    "oi_coverage_pct": 0.7273,
+    "options_tradable": true
+  },
+  "liquidity_summary": {
+    "liquidity_grade": "good",
+    "atm_spread_pct": 0.0193,
+    "nearest_live_call": {"right": "C", "strike": 210.0, "bid": 7.10, "ask": 7.25, "mid": 7.175, "spread": 0.15, "spread_pct": 0.0209, "oi": 18420},
+    "nearest_live_put": {"right": "P", "strike": 205.0, "bid": 5.95, "ask": 6.10, "mid": 6.025, "spread": 0.15, "spread_pct": 0.0249, "oi": 9215},
+    "min_spread_live_strike": {"right": "C", "strike": 210.0, "bid": 7.10, "ask": 7.25, "mid": 7.175, "spread": 0.15, "spread_pct": 0.0209, "oi": 18420},
+    "oi_coverage_pct": 0.7273,
+    "recommended_structure_hint": "calls_ok"
+  },
   "as_of": "2026-05-09T14:32:11Z",
   "strikes": [
     {
@@ -611,6 +649,25 @@ goes away.
 The `is_atm: true` row is the strike closest to spot. Greeks are populated
 only when IBKR delivers them; per-leg quotes may be `null` when the option
 contract cannot be resolved without conID hydration.
+
+Top-level summaries:
+
+- `tradable_summary.options_tradable` — `true` only when at least one
+  requested option leg has live two-sided bid/ask. `false` is a hard gate
+  for option structures in screening output.
+- `tradable_summary.live_bid_ask_legs`, `stale_legs`, `model_only_legs`,
+  `subscribe_error_legs`, `no_quote_legs` — counts across the requested
+  calls/puts, explaining why the chain is or is not executable.
+- `tradable_summary.oi_coverage_pct` — fraction of requested legs where
+  IBKR delivered open interest. Missing OI is unknown, not zero.
+- `tradable_summary.feed_gap` — best-effort weak-data classification:
+  `stale_close_only`, `thin_contract`, or `unknown_feed_gap`.
+- `liquidity_summary.liquidity_grade` — `good`, `fair`, `poor`, or
+  `untradable`; derived from two-sided bid/ask availability and spread.
+- `liquidity_summary.recommended_structure_hint` — `calls_ok`,
+  `shares_or_spreads`, `stock_only`, or `untradable_chain`.
+- `liquidity_summary.atm_spread_pct` and `min_spread_live_strike.spread_pct`
+  are fractions (`0.10` = 10% spread / mid).
 
 Per-leg fields:
 
@@ -633,12 +690,13 @@ for the nearest 12 expiries by default; daemon caches results).
   "spot": 207.42,
   "as_of": "2026-05-09T14:32:11Z",
   "expiries": [
-    {"date": "2026-05-16", "dte": 7, "iv": 0.312, "iv_status": "ok", "implied_move": 9.04, "implied_move_pct": 0.0436},
-    {"date": "2026-05-23", "dte": 14, "iv": 0.298, "iv_status": "ok", "implied_move": 12.21, "implied_move_pct": 0.0589},
-    {"date": "2026-06-19", "dte": 41, "iv": 0.284, "iv_status": "ok", "implied_move": 19.85, "implied_move_pct": 0.0957},
-    {"date": "2026-07-17", "dte": 69, "iv": null, "iv_status": "timeout"},
+    {"date": "2026-05-16", "dte": 7, "iv": 0.312, "iv_status": "ok", "iv_source": "live_model", "iv_quality": "live_model", "implied_move": 9.04, "implied_move_pct": 0.0436},
+    {"date": "2026-05-23", "dte": 14, "iv": 0.298, "iv_status": "ok", "iv_source": "cached", "iv_quality": "cached", "implied_move": 12.21, "implied_move_pct": 0.0589},
+    {"date": "2026-06-19", "dte": 41, "iv": 0.284, "iv_status": "ok", "iv_source": "live_model", "iv_quality": "live_model", "implied_move": 19.85, "implied_move_pct": 0.0957},
+    {"date": "2026-07-17", "dte": 69, "iv": null, "iv_status": "timeout", "iv_source": "unavailable", "iv_quality": "unavailable"},
     {"date": "2026-12-18", "dte": 223}
-  ]
+  ],
+  "warning_details": []
 }
 ```
 
@@ -656,12 +714,22 @@ Field meanings:
 - `expiries[].iv_status` — `ok`, `timeout`, or `unavailable`. Set
   when IV was fetched (or attempted); absent on bare rows beyond the
   default cap. Surface non-`ok` rows clearly; do not substitute a proxy.
+- `expiries[].iv_source` — `live_model`, `cached`, or `unavailable`.
+  Names how the IV got onto the row; cached values come from the daemon
+  TTL cache, not a fresh gateway round trip.
+- `expiries[].iv_quality` — `live_model`, `cached`, `reused_fallback`,
+  or `unavailable`. Surface `reused_fallback` as degraded term-structure
+  data; the row may still have a numeric IV, but repeated ATM IV across
+  expiries should not be treated as a clean curve.
 - `expiries[].implied_move` — the 1-σ expected dollar move by
   expiration, computed `spot × IV × √(DTE/365)`. The desk-standard
   "expected move" used to size event trades and pick option strikes.
   Populated only when spot and IV are both known; `null` otherwise.
 - `expiries[].implied_move_pct` — `implied_move / spot` as a fraction
   (e.g. `0.0436` means 4.36% expected move by expiry).
+- `warning_details` — structured data-quality warnings. `code:
+  "repeated_expiry_iv"` means the same ATM IV appeared across at least
+  three expiries and those rows are marked `iv_quality: "reused_fallback"`.
 
 Empty `expiries` means the symbol has no listed options (typical for
 ETFs without an option program). Surface this honestly rather than
@@ -691,6 +759,70 @@ Field meanings:
 - `volume` — daily total share/contract volume.
 
 Daily granularity only; intraday bars are not implemented.
+
+## technical
+
+`ibkr technical ASTS,IREN,BB --benchmark SPY --json`
+
+```json
+{
+  "benchmark": "SPY",
+  "lookback_days": 420,
+  "as_of": "2026-05-26T20:12:00+02:00",
+  "rows": [
+    {
+      "symbol": "ASTS",
+      "price": 42.10,
+      "price_as_of": "2026-05-22",
+      "bars": 252,
+      "sma_50": 35.20,
+      "sma_200": 27.85,
+      "pct_above_50dma": 0.196,
+      "pct_above_200dma": 0.512,
+      "return_21d": 0.184,
+      "return_63d": 0.721,
+      "return_126d": 1.842,
+      "benchmark_return_63d": 0.092,
+      "benchmark_return_126d": 0.144,
+      "rs_63d": 0.629,
+      "rs_126d": 1.698,
+      "atr_14": 2.15,
+      "atr_pct": 0.051,
+      "avg_volume_20d": 12400000,
+      "avg_dollar_volume_20d": 522040000,
+      "liquidity_sample_days": 20,
+      "trend_state": "extended",
+      "data_quality": "ok"
+    }
+  ]
+}
+```
+
+Field meanings:
+
+- `benchmark` — relative-strength benchmark. Defaults to `SPY`.
+- `lookback_days` — calendar-day HMDS request. Default 420 is intended
+  to provide enough trading bars for SMA200 and 126-bar returns.
+- `price` / `price_as_of` — latest daily close and bar date.
+- `sma_50`, `sma_200` — simple moving averages over the latest 50/200
+  trading bars.
+- `pct_above_50dma`, `pct_above_200dma` — distance from the moving
+  average as decimal fractions (`0.10` = 10% above).
+- `return_21d`, `return_63d`, `return_126d` — trading-bar returns as
+  decimal fractions.
+- `benchmark_return_63d`, `benchmark_return_126d` — benchmark returns
+  over the same bar windows.
+- `rs_63d`, `rs_126d` — symbol return minus benchmark return. Positive
+  means the symbol outperformed the benchmark over that window.
+- `atr_14`, `atr_pct` — 14-bar average true range in price units and as
+  a fraction of latest close.
+- `avg_volume_20d`, `avg_dollar_volume_20d` — 20-bar liquidity gate
+  computed from daily bars.
+- `trend_state` — `uptrend`, `recovering`, `extended`, `broken`, or
+  `insufficient_data`. `extended` means price is more than 35% above
+  SMA200 in the first implementation.
+- `data_quality` — `ok`, `partial`, `insufficient_data`, or `error`.
+  Inspect `missing_reasons` before using partial rows in a screen.
 
 ## scan
 

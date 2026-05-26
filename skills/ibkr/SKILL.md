@@ -2,22 +2,22 @@
 name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
   about their IBKR account, positions, P&L, market quotes, option chains (incl. per-leg
-  open interest), official market calendars, local watchlist, daily price history, running a market scan, sizing a planned trade by
+  open interest), official market calendars, local watchlist, daily price history, technical/relative-strength screens, running a market scan, sizing a planned trade by
   fixed-fractional risk, or checking the market's risk regime (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
   regime dashboard). Read-only — never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
-  Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
+  Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-25 20:50 CEST
+Updated: 2026-05-26 20:12 CEST
 
 ## When to use
 
 If the user asks about holdings, cash, buying power, P&L, a local watchlist,
-a specific stock or ETF quote, whether a supported market is open, an option chain, daily history, or wants to scan the market, run the
+a specific stock or ETF quote, whether a supported market is open, an option chain, daily history, technical/relative-strength screen, or wants to scan the market, run the
 relevant `ibkr` subcommand with `--json` and parse the output.
 
 If the user asks about the *market environment* — "is the market risky today?",
@@ -41,7 +41,8 @@ release. Do not invent or simulate trade execution.
   reflect the current market.
 - For decision-making quote/watchlist answers, prefer `price` +
   `price_source`, `price_as_of`, `prev_close`, absolute/percent change,
-  day range, 52-week range, volume, and `avg_volume` over raw `last` alone.
+  day range, 52-week range, volume, `avg_volume`, `avg_volume_20d`, and
+  `avg_dollar_volume_20d` over raw `last` alone.
   If `stale` or `stale_reason` is present, say so plainly.
 - If quote JSON includes `session_context`, surface it briefly. It explains
   official exchange-calendar state such as holidays, early closes, closed
@@ -68,6 +69,7 @@ release. Do not invent or simulate trade execution.
 | `ibkr chain SYM` | List available option expiries for the underlying | [schemas.md#chain-expiries](schemas.md#chain-expiries) |
 | `ibkr chain SYM --expiry YYYY-MM-DD` | Option chain ATM ± width for that expiry | [schemas.md#chain](schemas.md#chain) |
 | `ibkr history SYM` | Daily OHLCV bars | [schemas.md#history](schemas.md#history) |
+| `ibkr technical SYM[,SYM…]` | 50/200-DMA, RS vs benchmark, ATR, and 20-day liquidity | [schemas.md#technical](schemas.md#technical) |
 | `ibkr scan <preset>` | Run a configured scanner preset | [schemas.md#scan](schemas.md#scan) |
 | `ibkr scan list` | Enumerate configured scanner presets | [schemas.md#scan-list](schemas.md#scan-list) |
 | `ibkr scan --type SCANCODE --exchange LOCATIONCODE` | Ad-hoc scan without writing a preset to config | [schemas.md#scan](schemas.md#scan) |
@@ -90,15 +92,16 @@ symbols — the CLI hoists them automatically.
   - `--watch` re-polls on the rate (default 1s); same TTY/pipe behaviour as `account --watch`. Mutually exclusive with `--json`.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
 - `ibkr quote SYM --watch [--rate 250ms] [--json]` — only one symbol at a time
-- `ibkr watch [--quotes] [--timeout 5s] [--json]` — one-shot enriched quote monitor for the saved symbols; this is the default watch action, and `--quotes` is an explicit alias. JSON rows include current `price` with `price_source`, currency, change, previous close, day/52-week ranges, volume/average volume, `price_as_of`, stale flags, session context, and compact stock holding context when the symbol is held.
+- `ibkr watch [--quotes] [--timeout 5s] [--json]` — one-shot enriched quote monitor for the saved symbols; this is the default watch action, and `--quotes` is an explicit alias. JSON rows include current `price` with `price_source`, currency, change, previous close, day/52-week ranges, volume/average volume, 20-day average volume/dollar volume from daily bars, `price_as_of`, stale flags, session context, and compact stock holding context when the symbol is held.
 - `ibkr watch --list [--json]` — read only the local saved-symbol inventory without market data. The CLI also has mutating `--add`, `--remove`, and `--clear` flags for the human, but agents should use read-only `--list` unless the user explicitly asks to change the local file.
 - `ibkr watch --watch [--rate 1s] [--timeout 5s]` — re-poll the enriched quote monitor for the saved symbols; no JSON mode because it is an in-place live view.
 - `ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]` — official embedded calendars for US cash equities, US listed options regular sessions, and German Xetra cash equities. Use this for "is the market open?", "when is the next session?", "is this an early close?", and holiday/long-weekend context before risk checks. `--next` is a calendar-day horizon capped at 400. Other markets and asset classes are not modeled in v1; outside embedded coverage returns `state: "unknown"` rather than a weekday guess.
-- `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `dte` (calendar days to expiration) and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
-- `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one. Per-leg open interest is shown after IV in the text view (compact abbreviation — `1.2K`, `45K`, `1.2M`) and as `call_oi` / `put_oi` (int64, nullable) in JSON; empty cells / `null` mean the gateway didn't push tick 27/28 within the fill budget (common off-hours or for illiquid wings) — never zero-substituted.
+- `ibkr chain SYM [--no-iv] [--all-expiries] [--json]` — list expiries for the underlying. Per-expiry ATM implied volatility is included **by default** (daemon caches results; second call within ~60 s during RTH is instant), along with `iv_source`, `iv_quality`, `dte` (calendar days to expiration), and `implied_move` / `implied_move_pct` (the 1-σ expected dollar move by expiration, computed `spot × IV × √(DTE/365)`). Top-level `spot` carries the underlying mid the daemon used. Treat `iv_quality: "reused_fallback"` plus `warning_details[].code="repeated_expiry_iv"` as a term-structure warning, not a normal clean IV surface. `--no-iv` skips the IV fetch (and implied move) when only the date list is needed. `--all-expiries` lifts the default 12-expiry cap (the nearest 12 are picked since the back-half LEAPS are rarely on the decision path). Use this first when the user asks "what expiries are available for X?", "which expiry has the highest IV?", or "what move is the market pricing into earnings?".
+- `ibkr chain SYM --expiry YYYY-MM-DD [--width 5] [--side calls|puts|both] [--json]` — full chain table for one expiry. Pick an expiry from the listing above when the user doesn't specify one. Read `tradable_summary` and `liquidity_summary` before recommending options: `options_tradable:false` means no requested leg returned live two-sided bid/ask and option structures should be gated off. Use `liquidity_grade`, `atm_spread_pct`, `nearest_live_call`, `nearest_live_put`, `min_spread_live_strike`, `oi_coverage_pct`, and `recommended_structure_hint` (`stock_only`, `shares_or_spreads`, `calls_ok`, `untradable_chain`) as the trader-facing verdict before inspecting raw rows. Per-leg open interest is shown after IV in the text view (compact abbreviation — `1.2K`, `45K`, `1.2M`) and as `call_oi` / `put_oi` (int64, nullable) in JSON; empty cells / `null` mean the gateway didn't push tick 27/28 within the fill budget (common off-hours or for illiquid wings) — never zero-substituted.
   - **MCP params** (for `ibkr_chain`): `symbol` (required); `expiry` (`YYYY-MM-DD` — omit to list expiries); `width` (integer; ATM ± strikes, default 5); `side` (`"calls" | "puts" | "both"`); `no_iv` (boolean — skip ATM IV in the expiry list); `all_expiries` (boolean — lift the 12-expiry cap).
   - **CLI-only flags**: none for chain (the CLI parses positional args differently but maps the same params).
 - `ibkr history SYM [--days 90] [--json]` — calendar lookback; daily bars only
+- `ibkr technical SYM[,SYM…] [--benchmark SPY] [--lookback-days 420] [--json]` — one-call weekly-screening primitive. Returns price, SMA50/SMA200, extension from each average, 21/63/126-trading-bar returns, 63/126-bar relative strength versus the benchmark (`symbol return - benchmark return`), ATR14/ATR%, `avg_volume_20d`, `avg_dollar_volume_20d`, `trend_state`, `data_quality`, and `missing_reasons`. JSON percent/return fields are decimal fractions (`0.10` = 10%). Use this after scanner/watchlist/manual candidate discovery to gate trend, relative strength, extension risk, and liquidity without stitching multiple history calls yourself.
 - `ibkr scan <preset> [--limit N] [--json]` — built-in presets: `top-movers`, `top-losers`, `most-active`, `unusual-vol`, `gappers`, `high-iv-rank` (IV elevated vs. its own history), `unusual-opt-vol` (hot options flow). User-defined presets may also exist; run `ibkr scan list` first when unsure. **Each row carries enriched data:** `last`, `prev_close`, `change`, `change_pct`, `volume`, `iv` (underlying's averaged option IV, as a fraction — 0.234 = 23.4%), `week_52_high`, `week_52_low`. These are populated by per-row market-data subscriptions the daemon issues automatically (IBKR's scanner subscription itself only returns rank + symbol). Nil fields = gateway didn't deliver that tick within the enrichment window; common off-hours, and `iv` is nil for symbols without actively-traded options. Don't fabricate values — say "unavailable" when a field is nil. **Off-hours behaviour:** scans that depend on the current session (`gappers`, `top-movers`, `top-losers`, `high-iv-rank`, `unusual-opt-vol`) often time out or return cold-start errors before market open. If the user sees `scanner subsystem did not respond...`, retry once before reporting it as broken — the TWS scanner farm warms lazily and a second attempt frequently succeeds within a few seconds. `most-active` and `unusual-vol` rank against tape and tend to stay warm.
 - `ibkr scan list [--json]`
 - `ibkr scan --type SCANCODE --exchange LOCATIONCODE [--limit N] [--json]` — **ad-hoc scan, agent-preferred.** Use this when the user asks for a screen that doesn't match any existing preset (e.g. "show me losers on NASDAQ only", "find unusual put activity"). Avoids writing to the user's `config.toml`. Rows are capped at 50. The two magic strings (`scanCode` and `locationCode`) come from the gateway catalog — call `ibkr scan params` first to discover them rather than guessing. **Non-US exchanges:** each row carries `currency` (e.g. `EUR` for `STK.EU.IBIS`, `HKD` for `STK.HK`); render prices with the row's symbol, not a hardcoded `$`.

@@ -111,6 +111,11 @@ type Server struct {
 	// subscribe cost; subsequent calls are near-instant.
 	expiryIVs *expiryIVCache
 
+	// quoteLiquidity memoises 20-day average volume / dollar volume derived
+	// from daily bars. Quote/watch can poll frequently, so this keeps the
+	// hard liquidity gate cheap after the first snapshot.
+	quoteLiquidity *quoteLiquidityCache
+
 	// prevCloses memoises per-symbol previous-session close (tick 9)
 	// so the positions handler can render daily-change deltas without
 	// re-subscribing on every invocation. The first `ibkr positions`
@@ -278,16 +283,17 @@ func New(opts Options) *Server {
 		opts.Logger = NewLogger(os.Stderr, opts.Config.Daemon.LogLevel)
 	}
 	s := &Server{
-		cfg:        opts.Config,
-		socketPath: opts.SocketPath,
-		version:    opts.Version,
-		streams:    map[string]context.CancelFunc{},
-		idleStop:   make(chan struct{}),
-		logger:     opts.Logger,
-		expiryIVs:  newExpiryIVCache(),
-		prevCloses: newPrevCloseCache(),
-		greeks:     newGreeksCache(),
-		zeroGamma:  newGammaZeroCache(),
+		cfg:            opts.Config,
+		socketPath:     opts.SocketPath,
+		version:        opts.Version,
+		streams:        map[string]context.CancelFunc{},
+		idleStop:       make(chan struct{}),
+		logger:         opts.Logger,
+		expiryIVs:      newExpiryIVCache(),
+		quoteLiquidity: newQuoteLiquidityCache(),
+		prevCloses:     newPrevCloseCache(),
+		greeks:         newGreeksCache(),
+		zeroGamma:      newGammaZeroCache(),
 	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
@@ -1771,6 +1777,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleScanParams(ctx, req) })
 	case rpc.MethodHistoryDaily:
 		s.unary(req, enc, func() (any, error) { return s.handleHistoryDaily(ctx, req) })
+	case rpc.MethodTechnical:
+		s.unary(req, enc, func() (any, error) { return s.handleTechnical(ctx, req) })
 	case rpc.MethodMarketCalendar:
 		s.unary(req, enc, func() (any, error) { return s.handleMarketCalendar(req) })
 	case rpc.MethodBreadthSPX:
@@ -1836,6 +1844,8 @@ func unaryDeadline(method string) time.Duration {
 		return 50 * time.Second
 	case rpc.MethodHistoryDaily, rpc.MethodPositionsList:
 		return 30 * time.Second
+	case rpc.MethodTechnical:
+		return 75 * time.Second
 	case rpc.MethodMarketCalendar, rpc.MethodBreadthSPX:
 		// 2 s — both handlers are pure projections of in-process data.
 		// handleMarketCalendar reads embedded official schedules;

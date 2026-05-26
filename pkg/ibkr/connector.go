@@ -61,10 +61,10 @@ type Connector struct {
 	inactiveCandidates map[string]inactiveCandidateState
 	inactiveStore      inactiveSymbolStore
 
-	// Option IV tracking (by underlying symbol)
+	// Option IV tracking (by underlying symbol or per-contract key)
 	optMu           sync.RWMutex
 	optIV           map[string]float64 // last observed implied vol (fraction, e.g., 0.30)
-	optReqIDs       map[int]string     // option reqID -> underlying symbol
+	optReqIDs       map[int]string     // option reqID -> underlying or option market-data key
 	optQuoteBid     map[string]float64 // last observed option bid per underlying
 	optQuoteAsk     map[string]float64 // last observed option ask per underlying
 	optPrevClose    map[string]float64 // tick 9 on the option contract itself (NOT the underlying)
@@ -2144,7 +2144,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	if upperClass == "" {
 		upperClass = upperUnderlying
 	}
-	key := fmt.Sprintf("%s_%s%s%.0f", upperUnderlying, expiryYMD[2:], strings.ToUpper(right), strike)
+	key := OptionMarketDataKey(upperUnderlying, expiryYMD, right, strike)
 
 	c.subMu.RLock()
 	if existing, ok := c.subscriptions[key]; ok {
@@ -2216,6 +2216,19 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	c.optReqIDs[reqID] = key
 	c.optMu.Unlock()
 	return key, reqID, nil
+}
+
+// OptionMarketDataKey returns the stable cache key used for per-contract
+// option market-data ticks. The format is intentionally compact because it is
+// shown in diagnostic maps and persisted only in memory: UNDERLYING_YYMMDDC100.
+func OptionMarketDataKey(underlying, expiryYMD, right string, strike float64) string {
+	upperUnderlying := strings.ToUpper(strings.TrimSpace(underlying))
+	upperRight := strings.ToUpper(strings.TrimSpace(right))
+	expiryKey := strings.ReplaceAll(strings.TrimSpace(expiryYMD), "-", "")
+	if len(expiryKey) > 6 {
+		expiryKey = expiryKey[len(expiryKey)-6:]
+	}
+	return fmt.Sprintf("%s_%s%s%.0f", upperUnderlying, expiryKey, upperRight, strike)
 }
 
 // PrewarmOptionChain bulk-resolves an option chain for (symbol, tradingClass)
@@ -3760,15 +3773,40 @@ func (c *Connector) CancelOptionIV(reqID int) {
 	}
 }
 
-// SubscribeOptionIV subscribes to an ATM-ish option contract to receive implied volatility ticks (106).
-// expiry should be in UTC; right is "C" or "P". ctx cancellation aborts
-// the underlying contract-resolution round trip. The returned reqID is
-// the cancel key — pair every Subscribe with a CancelOptionIV.
+// SubscribeOptionIV subscribes to an ATM-ish option contract to receive implied
+// volatility ticks. The model-computation IV is routed to GetOptionIV(symbol),
+// preserving the historical underlying-keyed behavior for callers that ask for
+// one leg at a time.
+//
+// expiry should be in UTC; right is "C" or "P". ctx cancellation aborts the
+// underlying contract-resolution round trip. The returned reqID is the cancel
+// key — pair every Subscribe with a CancelOptionIV.
 func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, error) {
+	return c.subscribeOptionIV(ctx, symbol, expiry, strike, right, strings.ToUpper(symbol))
+}
+
+// SubscribeOptionIVKeyed subscribes to one option leg and routes model IV to a
+// per-contract key. Use this for concurrent fan-out across expiries/strikes:
+// underlying-keyed GetOptionIV(symbol) would let multiple reqIDs for the same
+// stock overwrite each other.
+func (c *Connector) SubscribeOptionIVKeyed(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, string, error) {
+	expStr := expiry.UTC().Format("20060102")
+	key := OptionMarketDataKey(symbol, expStr, right, strike)
+	reqID, err := c.subscribeOptionIV(ctx, symbol, expiry, strike, right, key)
+	if err != nil {
+		return 0, "", err
+	}
+	return reqID, key, nil
+}
+
+func (c *Connector) subscribeOptionIV(ctx context.Context, symbol string, expiry time.Time, strike float64, right, routeKey string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	symbol = strings.ToUpper(symbol)
+	if routeKey == "" {
+		routeKey = symbol
+	}
 	if _, inactive := c.inactiveReason(symbol); inactive {
 		c.logDebug("Skipping option IV subscription for inactive symbol %s", symbol)
 		return 0, ErrSymbolInactive
@@ -3787,15 +3825,15 @@ func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry
 		return 0, err
 	}
 
-	// Map reqID to underlying symbol so we can attribute IV updates
+	// Map reqID to the requested route key so we can attribute IV updates.
 	c.subMu.Lock()
-	c.reqIDMap[reqID] = symbol
+	c.reqIDMap[reqID] = routeKey
 	c.subMu.Unlock()
 	c.optMu.Lock()
-	c.optReqIDs[reqID] = symbol
+	c.optReqIDs[reqID] = routeKey
 	c.optMu.Unlock()
 
-	c.logInfo("Subscribed option IV for %s %s %.2f %s (ReqID: %d)", symbol, expStr, strike, right, reqID)
+	c.logInfo("Subscribed option IV for %s %s %.2f %s (ReqID: %d, key: %s)", symbol, expStr, strike, right, reqID, routeKey)
 	return reqID, nil
 }
 

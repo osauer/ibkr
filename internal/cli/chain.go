@@ -97,6 +97,7 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 	fmt.Fprintf(out, "%s  spot %s  ·  expiry %s  ·  %d DTE%s\n",
 		c.Symbol, formatMoney(c.Spot), c.Expiry, c.DTE, env.suffixBadge(c.DataType))
 	fmt.Fprintln(out)
+	renderChainDecisionSummary(env, c)
 	// Two-line header: line 1 spans CALLS over the five call columns and
 	// PUTS over the five put columns; line 2 right-aligns each label over
 	// its right-aligned data column. Both lines built from the same field
@@ -158,6 +159,65 @@ func renderChainText(env *Env, c *rpc.ChainResult) int {
 	return 0
 }
 
+func renderChainDecisionSummary(env *Env, c *rpc.ChainResult) {
+	out := env.Stdout
+	ts := c.TradableSummary
+	ls := c.LiquiditySummary
+	if ts == nil && ls == nil {
+		return
+	}
+	if ts != nil {
+		line := fmt.Sprintf("  Tradability: %d/%d live bid/ask legs · OI %.0f%%",
+			ts.LiveBidAskLegs, ts.TotalLegs, ts.OICoveragePct*100)
+		if !ts.OptionsTradable {
+			line += " · not executable"
+			if ts.FeedGap != "" {
+				line += " · " + ts.FeedGap
+			}
+			fmt.Fprintln(out, env.yellow(line))
+		} else {
+			fmt.Fprintln(out, env.dim(line))
+		}
+	}
+	if ls != nil {
+		line := fmt.Sprintf("  Liquidity: %s · %s", ls.LiquidityGrade, renderStructureHint(ls.RecommendedStructureHint))
+		if ls.ATMSpreadPct != nil {
+			line += fmt.Sprintf(" · ATM spread %.0f%%", *ls.ATMSpreadPct*100)
+		}
+		if ls.MinSpreadLiveStrike != nil {
+			line += " · tightest " + renderLegSummary(ls.MinSpreadLiveStrike)
+		}
+		if ls.LiquidityGrade == "untradable" || ls.RecommendedStructureHint == "stock_only" {
+			fmt.Fprintln(out, env.yellow(line))
+		} else {
+			fmt.Fprintln(out, env.dim(line))
+		}
+	}
+	fmt.Fprintln(out)
+}
+
+func renderStructureHint(hint string) string {
+	switch hint {
+	case "calls_ok":
+		return "calls ok"
+	case "shares_or_spreads":
+		return "shares/spreads"
+	case "stock_only":
+		return "stock only"
+	case "untradable_chain":
+		return "untradable chain"
+	default:
+		return hint
+	}
+}
+
+func renderLegSummary(leg *rpc.ChainLegSummary) string {
+	if leg == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f%s %.2f/%.2f (%.0f%%)", leg.Strike, leg.Right, leg.Bid, leg.Ask, leg.SpreadPct*100)
+}
+
 // renderChainExpiriesText prints the expiry list. Two columns when withIV
 // is set so users can see the ATM IV term structure at a glance; single
 // column otherwise. Empty list → guidance, not silence.
@@ -187,12 +247,13 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 		// Expected move is the canonical spot × IV × √(DTE/365) — same
 		// shape CBOE's option calculator and most desk tools use. Pre-
 		// computed on the daemon side; renderer just lays it out.
-		fmt.Fprintln(out, "  EXPIRY        DTE   ATM IV   "+env.bold("EXPECTED MOVE"))
+		fmt.Fprintln(out, "  EXPIRY        DTE   ATM IV            QUALITY          "+env.bold("EXPECTED MOVE"))
 		for _, e := range r.Expiries {
-			fmt.Fprintf(out, "  %-10s  %4s   %s   %s\n",
+			fmt.Fprintf(out, "  %-10s  %4s   %-17s %-15s  %s\n",
 				e.Date,
 				env.dim(fmtDTE(e.DTE)),
 				fmtIVRow(e.IV, e.IVStatus),
+				fmtIVQuality(e),
 				env.bold(fmtImpliedMove(e.ImpliedMove, e.ImpliedMovePct)))
 		}
 		fmt.Fprintln(out)
@@ -210,6 +271,20 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 	fmt.Fprintf(out, "  Pick one with `ibkr chain %s --expiry YYYY-MM-DD`.\n", r.Symbol)
 	if withIV && !rpc.IsOptionRTH(time.Now()) {
 		fmt.Fprintln(out, env.yellow("  "+optionOffHoursBanner))
+	}
+	for _, w := range r.WarningDetails {
+		if w.Message == "" {
+			continue
+		}
+		line := "  " + w.Message
+		if w.Impact != "" {
+			line += " " + w.Impact
+		}
+		if w.Severity == "data_quality" {
+			fmt.Fprintln(out, env.yellow(line))
+		} else {
+			fmt.Fprintln(out, env.dim(line))
+		}
 	}
 	return 0
 }
@@ -248,6 +323,22 @@ func fmtIVRow(iv *float64, status string) string {
 	default:
 		return "  —"
 	}
+}
+
+func fmtIVQuality(row rpc.ChainExpiry) string {
+	if row.IVQuality != "" {
+		return row.IVQuality
+	}
+	if row.IVSource != "" {
+		return row.IVSource
+	}
+	if row.IVStatus == "ok" {
+		return "live_model"
+	}
+	if row.IVStatus == "timeout" || row.IVStatus == "unavailable" {
+		return "unavailable"
+	}
+	return "—"
 }
 
 // fmt2 renders a quote price right-aligned to 6 visible columns, or a

@@ -75,7 +75,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_quote",
-		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, effective data_type for the selected price, feed_type when the gateway subscription state differs, quote_quality (firm/indicative/wide/prev_close/stale/missing), indicative, spread_pct, volume_phase, warning_details, and `session_context` when the official market calendar explains stale/frozen/missing data. Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\"); off-hours snapshots may carry thin or prior-session values, so gate decisions on quote_quality/spread_pct/data_type/price_at rather than assuming `live` means regular-session executable. Stock/ETF IV tick 106 is opportunistic and often null/unavailable; for a real IV read use `ibkr_chain` expiry IV or an expiry strike grid. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: \"de\"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
+		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, avg_volume, avg_volume_20d, avg_dollar_volume_20d, liquidity_status/source, effective data_type for the selected price, feed_type when the gateway subscription state differs, quote_quality (firm/indicative/wide/prev_close/stale/missing), indicative, spread_pct, volume_phase, warning_details, and `session_context` when the official market calendar explains stale/frozen/missing data. Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\") and quick liquidity gates; for multi-symbol trend/RS screens use `ibkr_technical` because it batches daily-history calculations. Off-hours snapshots may carry thin or prior-session values, so gate decisions on quote_quality/spread_pct/data_type/price_at rather than assuming `live` means regular-session executable. Stock/ETF IV tick 106 is opportunistic and often null/unavailable; for a real IV read use `ibkr_chain` expiry IV or an expiry strike grid. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: \"de\"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for full technical screens (use `ibkr_technical`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbols":          json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"AAPL\",\"MSFT\"] or [\"MBG\"] with market=\"de\""}`),
 			"market":           json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
@@ -106,7 +106,7 @@ var Tools = []Tool{
 					Exchange:    strings.ToUpper(strings.TrimSpace(in.Exchange)),
 					PrimaryExch: strings.ToUpper(strings.TrimSpace(in.PrimaryExchange)),
 					Currency:    strings.ToUpper(strings.TrimSpace(in.Currency)),
-				}}
+				}, IncludeLiquidity: true}
 				var q rpc.Quote
 				if err := conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
 					return nil, fmt.Errorf("quote %s: %w", sym, err)
@@ -121,7 +121,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_watch",
-		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Defaults to a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, effective data freshness, quote_quality/spread_pct/volume_phase, warning_details, session context, and optional held-stock context; set `include_quotes: false` only when the user explicitly wants the saved symbol list without market data (still requires a reachable daemon). This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
+		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Defaults to a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, 20-day average volume/dollar volume from daily bars, effective data freshness, quote_quality/spread_pct/volume_phase, warning_details, session context, and optional held-stock context; set `include_quotes: false` only when the user explicitly wants the saved symbol list without market data (still requires a reachable daemon). This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead; for trend/RS ranking use `ibkr_technical`.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"return enriched quote rows for saved symbols; default true. Set false only for the daemon-reachable list-only symbol inventory"}`),
 			"include_positions": json.RawMessage(`{"type":"boolean","description":"when include_quotes is true, attach compact held-stock context where available; default true"}`),
@@ -190,7 +190,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_chain",
-		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. The strike grid has top-level data_type/session_state/feed_type plus warning_details; outside regular option hours data_type is `closed` even if the underlying stock feed is live. Per-leg fields include bid/ask/last, prev_close, IV, delta, OI, as_of, data_status (`quoted`, `prev_close`, `model_only`, `no_quote`, `subscribe_error`), iv_status, and oi_status. `call_prev_close` / `put_prev_close` are the option contract's own prior close and are stale context, not executable quotes. `call_oi` / `put_oi` are option open interest from IBKR ticks 27/28 and stay null when the gateway did not push OI within budget; never treat missing OI as zero. Off-hours, `prev_close` and `model_only` legs can be useful context but are not executable quotes. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
+		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, `iv_source`, `iv_quality`, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant; `iv_quality: reused_fallback` and `warning_details[].code=repeated_expiry_iv` mean term-structure comparisons are degraded); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. The strike grid leads with `tradable_summary` and `liquidity_summary`: live bid/ask leg counts, stale/model-only/subscribe-error/no-quote counts, OI coverage, `options_tradable`, `feed_gap`, `liquidity_grade`, ATM spread, nearest live call/put, tightest live spread, and `recommended_structure_hint` (`stock_only`, `shares_or_spreads`, `calls_ok`, `untradable_chain`). Treat `options_tradable:false` as a hard gate for option structures. The grid also has top-level data_type/session_state/feed_type plus warning_details; outside regular option hours data_type is `closed` even if the underlying stock feed is live. Per-leg fields include bid/ask/last, prev_close, IV, delta, OI, as_of, data_status (`quoted`, `prev_close`, `model_only`, `no_quote`, `subscribe_error`), iv_status, and oi_status. `call_prev_close` / `put_prev_close` are the option contract's own prior close and are stale context, not executable quotes. `call_oi` / `put_oi` are option open interest from IBKR ticks 27/28 and stay null when the gateway did not push OI within budget; never treat missing OI as zero. Off-hours, `prev_close` and `model_only` legs can be useful context but are not executable quotes. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":       schemaString("underlying ticker"),
 			"expiry":       schemaString("expiry date YYYY-MM-DD; omit to list available expiries"),
@@ -259,6 +259,29 @@ var Tools = []Tool{
 			in.Symbol = strings.ToUpper(in.Symbol)
 			var res rpc.HistoryDailyResult
 			if err := conn.Call(ctx, rpc.MethodHistoryDaily, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:        "ibkr_technical",
+		Description: "One-call technical and relative-strength screen for equity / ETF symbols. Use for weekly stock screening questions such as \"is IREN above its 50/200-DMA?\", \"rank these names vs SPY\", \"is this extended from the 200-DMA?\", or \"does this pass liquidity?\" Returns price, SMA50/SMA200, percent distance from those moving averages, 21/63/126-trading-bar returns, 63/126-bar RS versus the benchmark (symbol return minus benchmark return), ATR14/ATR%, avg_volume_20d, avg_dollar_volume_20d, trend_state, data_quality, and missing_reasons. Values ending in `_pct` and `return_*` are decimal fractions (0.10 = 10%). Uses daily bars only; not for live quotes (use `ibkr_quote`) and not for options (use `ibkr_chain`).",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"symbols":       json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"ASTS\",\"IREN\",\"BB\"]"}`),
+			"benchmark":     schemaString("relative-strength benchmark, default SPY"),
+			"lookback_days": json.RawMessage(`{"type":"integer","minimum":30,"maximum":800,"description":"calendar-day history lookback; default 420, enough for 200-DMA and 126 trading-bar returns"}`),
+		}, []string{"symbols"}),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.TechnicalParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			if len(in.Symbols) == 0 {
+				return nil, fmt.Errorf("symbols is required and must be non-empty")
+			}
+			var res rpc.TechnicalResult
+			if err := conn.Call(ctx, rpc.MethodTechnical, in, &res); err != nil {
 				return nil, err
 			}
 			return json.Marshal(res)
@@ -475,8 +498,9 @@ func buildWatchlistQuoteResult(ctx context.Context, conn *dial.Conn, snap *watch
 		}
 		var q rpc.Quote
 		params := rpc.QuoteSnapshotParams{
-			Contract:  watchlistQuoteContract(sym, holdings[strings.ToUpper(sym)]),
-			TimeoutMs: timeoutMs,
+			Contract:         watchlistQuoteContract(sym, holdings[strings.ToUpper(sym)]),
+			TimeoutMs:        timeoutMs,
+			IncludeLiquidity: true,
 		}
 		row := rpc.WatchlistRow{}
 		if err := conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {

@@ -1,6 +1,6 @@
 # MCP resources reference
 
-Last reviewed: 2026-05-25 13:40 CEST
+Last reviewed: 2026-05-26 20:12 CEST
 
 These are the non-tool resources `ibkr mcp` exposes to MCP clients. Tools are documented separately in [MCP tools reference](./mcp-tools.md).
 
@@ -16,7 +16,7 @@ Example URI:
 ibkr://quote/AAPL
 ```
 
-`resources/read` returns a one-off quote snapshot with the same JSON shape as `ibkr quote AAPL --json`, including the enriched headline `price`, `price_source`, previous close, change, ranges, volume/average volume, `price_as_of`, stale flags, and optional `session_context`.
+`resources/read` returns a one-off quote snapshot with the same JSON shape as `ibkr quote AAPL --json`, including the enriched headline `price`, `price_source`, previous close, change, ranges, volume/average volume, 20-day average volume/dollar volume, `price_as_of`, stale flags, and optional `session_context`.
 
 `resources/subscribe` returns `{}` and then streams coalesced tick frames through `notifications/resources/updated` until the client calls `resources/unsubscribe` or closes the MCP session. Notification payloads embed a JSON frame in `params.contents[].text`; the frame shape matches `ibkr quote AAPL --watch --json`.
 

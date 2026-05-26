@@ -1172,8 +1172,12 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 	q.AsOf = time.Now()
+	var historicalBars []ibkrlib.HistoricalBar
 	if quoteNeedsHistoricalContext(q, sessionMarket) {
-		s.fillQuoteHistoricalFallback(ctx, c, q, sessionMarket, timeout)
+		historicalBars = s.fillQuoteHistoricalFallback(ctx, c, q, sessionMarket, timeout)
+	}
+	if p.IncludeLiquidity && strings.EqualFold(q.Contract.SecType, "STK") {
+		s.fillQuoteLiquidity(ctx, c, q, sessionMarket, timeout, historicalBars)
 	}
 	s.attachQuoteSessionContext(q, sessionMarket)
 	s.decorateQuote(q, sessionMarket)
@@ -1563,23 +1567,110 @@ func quoteNeedsHistoricalContext(q *rpc.Quote, market marketcal.Market) bool {
 		q.AvgVolume == nil
 }
 
-func (s *Server) fillQuoteHistoricalFallback(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, market marketcal.Market, timeout time.Duration) {
+func (s *Server) fillQuoteHistoricalFallback(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, market marketcal.Market, timeout time.Duration) []ibkrlib.HistoricalBar {
 	if c == nil || q == nil || q.Symbol == "" {
-		return
+		return nil
 	}
-	fallbackCtx, cancel := context.WithTimeout(ctx, quoteHistoricalFallbackTimeout(timeout))
-	defer cancel()
-	bars, err := c.FetchHistoricalDailyBarsWithContractCtx(fallbackCtx, quoteHistoricalContract(q), 400)
-	if err != nil {
-		bars, err = c.FetchHistoricalDailyBarsCtx(fallbackCtx, q.Symbol, 400)
-	}
+	bars, err := s.fetchQuoteHistoricalBars(ctx, c, q, timeout, 400)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Debugf("quote historical fallback %s: %v", q.Symbol, err)
 		}
-		return
+		return nil
 	}
 	applyQuoteHistoricalFallback(q, market, bars)
+	return bars
+}
+
+func (s *Server) fetchQuoteHistoricalBars(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, timeout time.Duration, lookbackDays int) ([]ibkrlib.HistoricalBar, error) {
+	if c == nil || q == nil || q.Symbol == "" {
+		return nil, fmt.Errorf("quote missing symbol")
+	}
+	fallbackCtx, cancel := context.WithTimeout(ctx, quoteHistoricalFallbackTimeout(timeout))
+	defer cancel()
+	bars, err := c.FetchHistoricalDailyBarsWithContractCtx(fallbackCtx, quoteHistoricalContract(q), lookbackDays)
+	if err != nil {
+		bars, err = c.FetchHistoricalDailyBarsCtx(fallbackCtx, q.Symbol, lookbackDays)
+	}
+	return bars, err
+}
+
+func (s *Server) fillQuoteLiquidity(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, market marketcal.Market, timeout time.Duration, bars []ibkrlib.HistoricalBar) {
+	if q == nil {
+		return
+	}
+	key := quoteLiquidityCacheKey(q)
+	if cached, ok := s.quoteLiquidity.get(key, time.Now()); ok {
+		applyQuoteLiquidityEntry(q, cached)
+		return
+	}
+	if len(bars) == 0 {
+		var err error
+		bars, err = s.fetchQuoteHistoricalBars(ctx, c, q, timeout, 45)
+		if err != nil {
+			entry := quoteLiquidityEntry{status: "unavailable"}
+			s.quoteLiquidity.put(key, entry, time.Now())
+			applyQuoteLiquidityEntry(q, entry)
+			if s.logger != nil {
+				s.logger.Debugf("quote liquidity %s: %v", q.Symbol, err)
+			}
+			return
+		}
+	}
+	liq := computeHistoricalLiquidity20D(bars)
+	if liq.sampleDays == 0 {
+		entry := quoteLiquidityEntry{status: "unavailable"}
+		s.quoteLiquidity.put(key, entry, time.Now())
+		applyQuoteLiquidityEntry(q, entry)
+		return
+	}
+	entry := quoteLiquidityEntry{
+		status:     "ok",
+		source:     "daily_bars",
+		sampleDays: liq.sampleDays,
+		asOf:       liq.asOf,
+	}
+	if liq.avgVolume != nil {
+		entry.avgVolume = *liq.avgVolume
+	}
+	if liq.avgDollarVolume != nil {
+		entry.avgDollarVolume = *liq.avgDollarVolume
+	}
+	if liq.sampleDays < 20 {
+		entry.status = "partial"
+	}
+	if entry.asOf.IsZero() {
+		if last, ok := latestTechnicalBar(bars); ok {
+			entry.asOf = marketCloseForHistoricalBar(market, last, q.AsOf)
+		}
+	}
+	s.quoteLiquidity.put(key, entry, time.Now())
+	applyQuoteLiquidityEntry(q, entry)
+}
+
+func quoteLiquidityCacheKey(q *rpc.Quote) quoteLiquidityKey {
+	if q == nil {
+		return quoteLiquidityKey{}
+	}
+	return quoteLiquidityKey{
+		symbol:   normSym(q.Contract.Symbol),
+		market:   strings.ToLower(strings.TrimSpace(q.Contract.Market)),
+		exchange: normSym(q.Contract.Exchange),
+		primary:  normSym(q.Contract.PrimaryExch),
+		currency: normCcy(q.Contract.Currency),
+	}
+}
+
+func applyQuoteLiquidityEntry(q *rpc.Quote, e quoteLiquidityEntry) {
+	if q == nil {
+		return
+	}
+	q.LiquidityStatus = e.status
+	q.LiquiditySource = e.source
+	q.LiquiditySampleDays = e.sampleDays
+	q.LiquidityAsOf = e.asOf
+	q.AvgVolume20D = ptrIfPos(e.avgVolume)
+	q.AvgDollarVolume20D = ptrIfPos(e.avgDollarVolume)
 }
 
 func quoteHistoricalContract(q *rpc.Quote) ibkrlib.Contract {
