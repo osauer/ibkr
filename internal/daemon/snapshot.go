@@ -7,51 +7,6 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
-// briefSnapshotPrice subscribes to a symbol, polls the cache for the first
-// usable price, and unsubscribes. Returns the price (last → mid → bid → ask
-// → mark → close) and the gateway's data-type notice. Zero price + empty
-// data type on timeout. Pre-fix the data-type string was hardcoded "live";
-// the chain + watch UX now needs the truthful value (frozen / delayed /
-// etc.) to render the after-hours badge.
-//
-// Fallback ladder reflects how IBKR delivers ticks across instrument types:
-//
-//   - last/bid/ask: standard for stocks, ETFs, FX in live or frozen mode.
-//   - mark (tick 37): the gateway's calculated fair price. Indices (VIX,
-//     SPX) emit this as their only price because indices don't trade.
-//   - close (tick 9): yesterday's regular-session close. Thin CBOE
-//     indices like VIX3M routinely emit ONLY this off-hours — no bid,
-//     ask, last, or mark for the full snapshot budget. Without this
-//     last-resort fallback, VIX3M would never rank pre-open even with
-//     a healthy gateway, and the VIX/VIX3M term-structure regime row
-//     would drop to error.
-//
-// Returning the close keeps the indicator informative; the data-type
-// field ("frozen" or similar) tells the renderer to dim the row rather
-// than treating it as live.
-func briefSnapshotPrice(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
-	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
-	if dt == "" {
-		dt = "live"
-	}
-	switch {
-	case last > 0:
-		return last, dt
-	case bid > 0 && ask > 0:
-		return (bid + ask) / 2, dt
-	case bid > 0:
-		return bid, dt
-	case ask > 0:
-		return ask, dt
-	case mark > 0:
-		return mark, dt
-	case closePx > 0:
-		return closePx, dt
-	default:
-		return 0, ""
-	}
-}
-
 // briefSnapshotPriceWithClose wraps briefSnapshotFull and returns the
 // price (last → mid → bid → ask → mark → close), the previous regular-
 // session close (tick 9), and the gateway data-type. Same price-fallback
@@ -191,42 +146,6 @@ func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string,
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	return briefSnapshotFullHeld(ctx, c, sym, timeout)
-}
-
-// briefSnapshotPriceHeld is the refcounted sibling of briefSnapshotPrice.
-// Callers that already have a Server should use this path so concurrent
-// snapshots on the same symbol share the daemon's subscription manager rather
-// than racing direct Subscribe/Unsubscribe calls against each other.
-func (s *Server) briefSnapshotPriceHeld(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
-	if s == nil || s.subs == nil {
-		return briefSnapshotPrice(ctx, c, symbol, timeout)
-	}
-	sym := normSym(symbol)
-	release, err := s.subs.Hold(ctx, sym)
-	if err != nil {
-		return 0, ""
-	}
-	defer release()
-	bid, ask, last, mark, closePx, dt := briefSnapshotFullHeld(ctx, c, sym, timeout)
-	if dt == "" {
-		dt = "live"
-	}
-	switch {
-	case last > 0:
-		return last, dt
-	case bid > 0 && ask > 0:
-		return (bid + ask) / 2, dt
-	case bid > 0:
-		return bid, dt
-	case ask > 0:
-		return ask, dt
-	case mark > 0:
-		return mark, dt
-	case closePx > 0:
-		return closePx, dt
-	default:
-		return 0, ""
-	}
 }
 
 func briefSnapshotFullHeld(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (bid, ask, last, mark, closePx float64, dataType string) {

@@ -113,3 +113,16 @@ func TestFmtIVQuality(t *testing.T) {
 		t.Fatalf("timeout quality = %q, want unavailable", got)
 	}
 }
+
+func TestFmtChainSpotSource(t *testing.T) {
+	t.Parallel()
+	if got := fmtChainSpotSource("prev_close"); got != " (prev close)" {
+		t.Fatalf("prev_close source = %q", got)
+	}
+	if got := fmtChainSpotSource("historical_close"); got != " (hist close)" {
+		t.Fatalf("historical_close source = %q", got)
+	}
+	if got := fmtChainSpotSource("last"); got != "" {
+		t.Fatalf("live source should not render suffix, got %q", got)
+	}
+}
