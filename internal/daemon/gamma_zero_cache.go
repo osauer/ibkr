@@ -688,6 +688,45 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 	return c.snapshotForScope("", g, nowFn)
 }
 
+func (c *gammaZeroCache) snapshotCombinedSlice(scope string, nowFn func() time.Time) (rpc.GammaZeroSPXResult, bool) {
+	key := ""
+	switch scope {
+	case rpc.GammaZeroScopeSPY:
+		key = "SPY"
+	case rpc.GammaZeroScopeSPX:
+		key = "SPX"
+	default:
+		return rpc.GammaZeroSPXResult{}, false
+	}
+
+	c.mu.Lock()
+	slot := c.slots[rpc.GammaZeroScopeCombined]
+	var job *gammaComputation
+	if slot != nil {
+		job = slot.current
+	}
+	c.mu.Unlock()
+	if job == nil {
+		return rpc.GammaZeroSPXResult{}, false
+	}
+
+	now := nowFn()
+	if job.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
+		return rpc.GammaZeroSPXResult{}, false
+	}
+
+	env := c.snapshotForScope(rpc.GammaZeroScopeCombined, job, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+		return rpc.GammaZeroSPXResult{}, false
+	}
+	sub := env.Result.PerIndex[key]
+	if sub == nil {
+		return rpc.GammaZeroSPXResult{}, false
+	}
+	env.Result = sub
+	return env, true
+}
+
 func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, nowFn func() time.Time) rpc.GammaZeroSPXResult {
 	if g == nil {
 		env := rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}

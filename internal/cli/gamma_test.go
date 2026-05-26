@@ -123,6 +123,42 @@ func TestRenderGamma_HeroHasTitleTimestampAnchor(t *testing.T) {
 	}
 }
 
+func TestRenderGamma_HeroSummaryColorFollowsRegime(t *testing.T) {
+	t.Parallel()
+
+	t.Run("long gamma is green", func(t *testing.T) {
+		t.Parallel()
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+		if code := renderGammaText(env, gammaReadyFixture(), false); code != 0 {
+			t.Fatalf("code=%d", code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, ansiBold+ansiGreen+"SPY and SPX both long-γ") {
+			t.Fatalf("long-gamma hero summary should be bold green:\n%q", out)
+		}
+	})
+
+	t.Run("short gamma is red", func(t *testing.T) {
+		t.Parallel()
+		fix := gammaReadyFixture()
+		fix.Result.RegimeAgreement = "agree:short-gamma"
+		for _, sub := range fix.Result.PerIndex {
+			sub.GammaSign = "negative"
+		}
+
+		var stdout bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+		if code := renderGammaText(env, fix, false); code != 0 {
+			t.Fatalf("code=%d", code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, ansiBold+ansiRed+"SPY and SPX both short-γ") {
+			t.Fatalf("short-gamma hero summary should be bold red:\n%q", out)
+		}
+	})
+}
+
 // TestRenderGamma_DefaultOmitsMetadataBlock pins U1: the metadata block
 // (Skew model, Method, Source, Compute, Derived IV, Leg count, Scope)
 // no longer renders in default mode. Citations and the sign-convention

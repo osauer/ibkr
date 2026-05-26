@@ -24,6 +24,10 @@ import (
 // predictable. Callers that want multi-line context should print it
 // below the hero, not inside it.
 func renderCommandHero(env *Env, w io.Writer, title, timestamp, anchor, summary string) {
+	renderCommandHeroStyled(env, w, title, timestamp, anchor, summary, heroSummaryStyle)
+}
+
+func renderCommandHeroStyled(env *Env, w io.Writer, title, timestamp, anchor, summary string, summaryStyle func(*Env, string) string) {
 	fmt.Fprintln(w)
 	switch {
 	case title != "" && timestamp != "":
@@ -41,7 +45,10 @@ func renderCommandHero(env *Env, w io.Writer, title, timestamp, anchor, summary 
 		if anchor == "" {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "  %s\n", heroSummaryStyle(env, collapseLine(summary)))
+		if summaryStyle == nil {
+			summaryStyle = heroSummaryStyle
+		}
+		fmt.Fprintf(w, "  %s\n", summaryStyle(env, collapseLine(summary)))
 	}
 	if anchor != "" || summary != "" {
 		fmt.Fprintln(w)
