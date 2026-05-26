@@ -23,8 +23,11 @@ type expiryIVKey struct {
 }
 
 type expiryIVEntry struct {
-	iv     float64 // 0 when status != "ok"
-	status string  // "ok" | "timeout" | "unavailable"
+	iv      float64 // 0 when status != "ok"
+	status  string  // "ok" | "timeout" | "unavailable"
+	source  string  // "live_model" | "unavailable"
+	quality string  // "live_model" | "unavailable"
+	asOf    time.Time
 }
 
 func newExpiryIVCache() *expiryIVCache {

@@ -163,8 +163,9 @@ func fetchWatchlistQuotes(ctx context.Context, env *Env, snap *watchlist.Snapsho
 	for _, sym := range snap.Symbols {
 		var q rpc.Quote
 		params := rpc.QuoteSnapshotParams{
-			Contract:  watchlistQuoteContract(sym, holdings[sym]),
-			TimeoutMs: int(timeout.Milliseconds()),
+			Contract:         watchlistQuoteContract(sym, holdings[sym]),
+			TimeoutMs:        int(timeout.Milliseconds()),
+			IncludeLiquidity: true,
 		}
 		row := rpc.WatchlistRow{}
 		if err := env.Conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
@@ -245,12 +246,13 @@ func renderWatchlistQuoteText(env *Env, out io.Writer, r *rpc.WatchlistResult) i
 		wPrev   = 9
 		wRange  = 15
 		wVol    = 11
+		wADV    = 9
 		wData   = 7
 		wAsOf   = 28
 	)
-	header := fmt.Sprintf("  %-*s %*s %*s %*s %*s %7s %*s %-*s %-*s %*s %-*s %-*s",
+	header := fmt.Sprintf("  %-*s %*s %*s %*s %*s %7s %*s %-*s %-*s %*s %*s %-*s %-*s",
 		wSymbol, "SYMBOL", wPos, "POS", wCCY, "CCY", wPrice, "PRICE", wChange, "CHG", "CHG%",
-		wPrev, "PREV", wRange, "DAY", wRange, "52W", wVol, "VOL/AVG", wData, "DATA", wAsOf, "AS OF")
+		wPrev, "PREV", wRange, "DAY", wRange, "52W", wVol, "VOL/AVG", wADV, "ADV$20", wData, "DATA", wAsOf, "AS OF")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, row := range r.Rows {
@@ -262,7 +264,7 @@ func renderWatchlistQuoteText(env *Env, out io.Writer, r *rpc.WatchlistResult) i
 		if ccy == "" {
 			ccy = "USD"
 		}
-		fmt.Fprintf(out, "  %-*s %s %*s %s %s %s %s %s %s %s %s %s\n",
+		fmt.Fprintf(out, "  %-*s %s %*s %s %s %s %s %s %s %s %s %s %s\n",
 			wSymbol, row.Symbol,
 			padLeftVisible(formatWatchlistHolding(row.Holding), wPos),
 			wCCY, ccy,
@@ -273,6 +275,7 @@ func renderWatchlistQuoteText(env *Env, out io.Writer, r *rpc.WatchlistResult) i
 			formatWatchlistRange(env, row.DayLow, row.DayHigh, wRange),
 			formatWatchlistRange(env, row.Week52Low, row.Week52High, wRange),
 			formatWatchlistVolume(row.Volume, row.AvgVolume, wVol),
+			formatTechnicalDollarVolume(row.AvgDollarVolume20D, wADV),
 			padRightVisible(formatWatchlistData(env, row), wData),
 			padRightVisible(formatWatchlistAsOf(row), wAsOf),
 		)

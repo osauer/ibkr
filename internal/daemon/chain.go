@@ -120,15 +120,25 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 				row.IV = &v
 			}
 			row.IVStatus = cached.status
+			row.IVSource = "cached"
+			if cached.status == "ok" {
+				row.IVQuality = "cached"
+			} else {
+				row.IVQuality = "unavailable"
+			}
+			row.IVAsOf = cached.asOf
 			rows[i] = row
 			continue
 		}
 		strikes := strikesByExpiry[e]
 		if spot <= 0 || len(strikes) == 0 {
 			row.IVStatus = "unavailable"
+			row.IVSource = "unavailable"
+			row.IVQuality = "unavailable"
+			row.IVAsOf = now
 			rows[i] = row
 			// Negative-cache so we don't re-poll every refresh.
-			s.expiryIVs.put(sym, e, expiryIVEntry{status: "unavailable"}, now)
+			s.expiryIVs.put(sym, e, expiryIVEntry{status: "unavailable", source: "unavailable", quality: "unavailable", asOf: now}, now)
 			continue
 		}
 		atm := closestStrike(strikes, spot)
@@ -145,16 +155,19 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		if ctx.Err() != nil {
 			return
 		}
-		iv, status := collectExpiryATMIV(ctx, c, sym, j.expiryYMD, j.atm, 2*time.Second)
-		entry := expiryIVEntry{status: status}
-		if iv != nil {
-			entry.iv = *iv
+		obs := collectExpiryATMIV(ctx, c, sym, j.expiryYMD, j.atm, 2*time.Second)
+		entry := expiryIVEntry{status: obs.status, source: obs.source, quality: obs.quality, asOf: obs.asOf}
+		if obs.iv != nil {
+			entry.iv = *obs.iv
 		}
 		s.expiryIVs.put(sym, j.expiry, entry, time.Now())
-		if iv != nil {
-			rows[j.idx].IV = iv
+		if obs.iv != nil {
+			rows[j.idx].IV = obs.iv
 		}
-		rows[j.idx].IVStatus = status
+		rows[j.idx].IVStatus = obs.status
+		rows[j.idx].IVSource = obs.source
+		rows[j.idx].IVQuality = obs.quality
+		rows[j.idx].IVAsOf = obs.asOf
 	})
 	fanoutMs = time.Since(tFanout).Milliseconds()
 	if err := ctx.Err(); err != nil {
@@ -171,6 +184,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 			rows[i].ImpliedMovePct = &mvPct
 		}
 	}
+	res.WarningDetails = append(res.WarningDetails, annotateRepeatedExpiryIV(sym, rows)...)
 
 	// Append the working set, then the rest (without IV) when caller
 	// asked for the full list. AllExpiries=false drops the tail.
@@ -297,20 +311,38 @@ func closestStrike(strikes []float64, spot float64) float64 {
 	return best
 }
 
+type expiryIVObservation struct {
+	iv      *float64
+	status  string
+	source  string
+	quality string
+	asOf    time.Time
+}
+
+func unavailableExpiryIV(status string) expiryIVObservation {
+	if status == "" {
+		status = "unavailable"
+	}
+	return expiryIVObservation{
+		status:  status,
+		source:  "unavailable",
+		quality: "unavailable",
+		asOf:    time.Now(),
+	}
+}
+
 // collectExpiryATMIV subscribes to the ATM option for one expiry, polls the
-// connector's IV cache for up to perStrikeTimeout, then unsubscribes. Returns
-// (iv, "ok"), (nil, "timeout"), or (nil, "unavailable") on subscribe failure.
-// Takes the connector as an argument so the caller's snapshot is reused —
-// avoids re-reading s.connector from inside a per-strike loop where a
-// concurrent stopConnector would cause a nil deref.
-func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expiryYMD string, strike float64, perStrikeTimeout time.Duration) (*float64, string) {
+// connector's IV cache for up to perStrikeTimeout, then unsubscribes. The IV is
+// routed through a per-contract key so concurrent expiry fan-out for the same
+// underlying cannot overwrite a sibling expiry's model tick.
+func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expiryYMD string, strike float64, perStrikeTimeout time.Duration) expiryIVObservation {
 	expiryT, err := time.Parse("20060102", expiryYMD)
 	if err != nil {
-		return nil, "unavailable"
+		return unavailableExpiryIV("unavailable")
 	}
-	reqID, err := c.SubscribeOptionIV(ctx, symbol, expiryT, strike, "C")
+	reqID, key, err := c.SubscribeOptionIVKeyed(ctx, symbol, expiryT, strike, "C")
 	if err != nil {
-		return nil, "unavailable"
+		return unavailableExpiryIV("unavailable")
 	}
 	// reqID-scoped cancel: the 4-worker fan-out at collectExpiryIVs runs
 	// multiple expiries against the same underlier concurrently. A
@@ -324,19 +356,64 @@ func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expir
 	poll := time.NewTicker(75 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		if iv, ok := c.GetOptionIV(symbol); ok && iv > 0 {
+		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
 			v := iv
-			return &v, "ok"
+			return expiryIVObservation{
+				iv:      &v,
+				status:  "ok",
+				source:  "live_model",
+				quality: "live_model",
+				asOf:    time.Now(),
+			}
 		}
 		if time.Now().After(deadline) {
-			return nil, "timeout"
+			return unavailableExpiryIV("timeout")
 		}
 		select {
 		case <-ctx.Done():
-			return nil, "timeout"
+			return unavailableExpiryIV("timeout")
 		case <-poll.C:
 		}
 	}
+}
+
+func annotateRepeatedExpiryIV(symbol string, rows []rpc.ChainExpiry) []rpc.DataWarning {
+	type bucket struct {
+		count int
+		iv    float64
+	}
+	counts := make(map[string]bucket)
+	for _, row := range rows {
+		if row.IV == nil || *row.IV <= 0 {
+			continue
+		}
+		key := fmt.Sprintf("%.6f", *row.IV)
+		b := counts[key]
+		b.count++
+		b.iv = *row.IV
+		counts[key] = b
+	}
+	var out []rpc.DataWarning
+	for key, b := range counts {
+		if b.count < 3 {
+			continue
+		}
+		for i := range rows {
+			if rows[i].IV == nil || fmt.Sprintf("%.6f", *rows[i].IV) != key {
+				continue
+			}
+			rows[i].IVQuality = "reused_fallback"
+		}
+		out = append(out, rpc.DataWarning{
+			Code:     "repeated_expiry_iv",
+			Scope:    symbol,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("ATM IV %.1f%% repeated across %d expiries.", b.iv*100, b.count),
+			Impact:   "IBKR may have reused a fallback/model value; term-structure and LEAPS-vs-stock decisions are degraded.",
+			Action:   "Inspect the strike grid for live bid/ask before using these IVs for structure selection.",
+		})
+	}
+	return out
 }
 
 // handleChainFetch returns ATM ± width strikes for the specified expiry.
@@ -462,6 +539,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	res.TradableSummary, res.LiquiditySummary = chainSummaries(res, wantCalls, wantPuts)
 	res.WarningDetails = chainWarningDetails(res, wantCalls, wantPuts)
 	return res, nil
 }
@@ -710,6 +788,127 @@ func setOptionLegUnavailable(row *rpc.ChainStrike, right, status string) {
 	row.PutOIStatus = "unavailable"
 }
 
+func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainTradableSummary, *rpc.ChainLiquiditySummary) {
+	if res == nil {
+		return nil, nil
+	}
+	tradable := &rpc.ChainTradableSummary{}
+	var nearestCall, nearestPut, minSpread, atmLive *rpc.ChainLegSummary
+	nearestCallDist, nearestPutDist, minSpreadPct := math.MaxFloat64, math.MaxFloat64, math.MaxFloat64
+
+	observe := func(row rpc.ChainStrike, right string, bid, ask, last *float64, oi *int64, delta *float64, dataStatus string) {
+		tradable.TotalLegs++
+		if oi != nil {
+			tradable.OICoveredLegs++
+		}
+		switch dataStatus {
+		case "prev_close":
+			tradable.StaleLegs++
+		case "model_only":
+			tradable.ModelOnlyLegs++
+		case "subscribe_error":
+			tradable.SubscribeErrorLegs++
+		case "no_quote", "unavailable":
+			tradable.NoQuoteLegs++
+		}
+
+		hasBid := bid != nil && *bid > 0
+		hasAsk := ask != nil && *ask > 0
+		if hasBid != hasAsk {
+			tradable.OneSidedLiveLegs++
+		}
+		if !hasBid || !hasAsk {
+			return
+		}
+		tradable.LiveBidAskLegs++
+		mid := (*bid + *ask) / 2
+		spread := *ask - *bid
+		spreadPct := 0.0
+		if mid > 0 {
+			spreadPct = spread / mid
+		}
+		leg := &rpc.ChainLegSummary{
+			Right:     right,
+			Strike:    row.Strike,
+			Bid:       *bid,
+			Ask:       *ask,
+			Mid:       mid,
+			Spread:    spread,
+			SpreadPct: spreadPct,
+			OI:        oi,
+			Delta:     delta,
+		}
+		dist := math.Abs(row.Strike - res.Spot)
+		if right == "C" && dist < nearestCallDist {
+			nearestCall = leg
+			nearestCallDist = dist
+		}
+		if right == "P" && dist < nearestPutDist {
+			nearestPut = leg
+			nearestPutDist = dist
+		}
+		if spreadPct < minSpreadPct {
+			minSpread = leg
+			minSpreadPct = spreadPct
+		}
+		if row.IsATM && (atmLive == nil || spreadPct < atmLive.SpreadPct) {
+			atmLive = leg
+		}
+	}
+
+	for _, row := range res.Strikes {
+		if wantCalls {
+			observe(row, "C", row.CallBid, row.CallAsk, row.CallLast, row.CallOI, row.CallDelta, row.CallDataStatus)
+		}
+		if wantPuts {
+			observe(row, "P", row.PutBid, row.PutAsk, row.PutLast, row.PutOI, row.PutDelta, row.PutDataStatus)
+		}
+	}
+	if tradable.TotalLegs > 0 {
+		tradable.OICoveragePct = float64(tradable.OICoveredLegs) / float64(tradable.TotalLegs)
+	}
+	tradable.OptionsTradable = tradable.LiveBidAskLegs > 0
+	if !tradable.OptionsTradable {
+		switch {
+		case res.DataType == rpc.MarketDataClosed || res.SessionState == rpc.SessionClosed.String():
+			tradable.FeedGap = "stale_close_only"
+		case tradable.SubscribeErrorLegs > 0:
+			tradable.FeedGap = "unknown_feed_gap"
+		case tradable.TotalLegs > 0:
+			tradable.FeedGap = "thin_contract"
+		default:
+			tradable.FeedGap = "unknown_feed_gap"
+		}
+	}
+
+	liquidity := &rpc.ChainLiquiditySummary{
+		LiquidityGrade:           "untradable",
+		NearestLiveCall:          nearestCall,
+		NearestLivePut:           nearestPut,
+		MinSpreadLiveStrike:      minSpread,
+		OICoveragePct:            tradable.OICoveragePct,
+		RecommendedStructureHint: "untradable_chain",
+	}
+	if atmLive != nil {
+		v := atmLive.SpreadPct
+		liquidity.ATMSpreadPct = &v
+	}
+	switch {
+	case tradable.LiveBidAskLegs == 0:
+		// Defaults already express the state.
+	case liquidity.ATMSpreadPct != nil && *liquidity.ATMSpreadPct <= 0.15 && nearestCall != nil:
+		liquidity.LiquidityGrade = "good"
+		liquidity.RecommendedStructureHint = "calls_ok"
+	case minSpread != nil && minSpread.SpreadPct <= 0.25:
+		liquidity.LiquidityGrade = "fair"
+		liquidity.RecommendedStructureHint = "shares_or_spreads"
+	default:
+		liquidity.LiquidityGrade = "poor"
+		liquidity.RecommendedStructureHint = "stock_only"
+	}
+	return tradable, liquidity
+}
+
 func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.DataWarning {
 	if res == nil {
 		return nil
@@ -723,6 +922,20 @@ func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.D
 			Message:  "U.S. listed options are outside regular trading hours.",
 			Impact:   "Bid/ask/last and open interest may be unavailable; model IV can still populate from IBKR's option model.",
 			Action:   "Retry during 09:30-16:00 ET for executable option quotes.",
+		})
+	}
+	if res.TradableSummary != nil && !res.TradableSummary.OptionsTradable {
+		action := "Retry during RTH or compare against TWS option-chain display and market-data subscriptions."
+		if res.TradableSummary.FeedGap == "thin_contract" {
+			action = "Treat this as stock-only unless a wider chain request finds live two-sided strikes."
+		}
+		out = append(out, rpc.DataWarning{
+			Code:     "no_live_option_bid_ask",
+			Scope:    res.Symbol,
+			Severity: "data_quality",
+			Message:  "No requested option legs returned live two-sided bid/ask quotes.",
+			Impact:   "The displayed chain is not executable for trade-structure selection.",
+			Action:   action,
 		})
 	}
 	var prevCloseOnly, modelOnly, missingOI, missingIV int

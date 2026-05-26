@@ -25,6 +25,7 @@ const (
 	MethodScanList       = "scan.list"
 	MethodScanParams     = "scan.params"
 	MethodHistoryDaily   = "history.daily"
+	MethodTechnical      = "technical.snapshot"
 	MethodMarketCalendar = "market.calendar"
 	MethodStatusHealth   = "status.health"
 	MethodBreadthSPX     = "breadth.spx"
@@ -273,8 +274,9 @@ type ContractParams struct {
 
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
 type QuoteSnapshotParams struct {
-	Contract  ContractParams `json:"contract"`
-	TimeoutMs int            `json:"timeout_ms,omitempty"`
+	Contract         ContractParams `json:"contract"`
+	TimeoutMs        int            `json:"timeout_ms,omitempty"`
+	IncludeLiquidity bool           `json:"include_liquidity,omitempty"`
 }
 
 // QuoteSubscribeParams is the input for MethodQuoteSubscribe.
@@ -395,6 +397,55 @@ type HistoryDailyResult struct {
 	DataType string       `json:"data_type,omitempty"`
 	Bars     []HistoryBar `json:"bars"`
 	AsOf     time.Time    `json:"as_of"`
+}
+
+// TechnicalParams asks the daemon to compute weekly-screening indicators from
+// daily bars. Symbols may be passed as a comma-separated string by the CLI or
+// as an array by MCP after normalisation.
+type TechnicalParams struct {
+	Symbols      []string `json:"symbols"`
+	Benchmark    string   `json:"benchmark,omitempty"`     // default SPY
+	LookbackDays int      `json:"lookback_days,omitempty"` // calendar days, default 420
+}
+
+// TechnicalRow is one symbol's trend, relative-strength, volatility, and
+// liquidity summary. Percentage-like fields are decimal fractions:
+// 0.10 means +10%. RS is symbol return minus benchmark return over the same
+// trading-bar window.
+type TechnicalRow struct {
+	Symbol              string    `json:"symbol"`
+	Price               *float64  `json:"price,omitempty"`
+	PriceAsOf           string    `json:"price_as_of,omitempty"`
+	Bars                int       `json:"bars"`
+	SMA50               *float64  `json:"sma_50,omitempty"`
+	SMA200              *float64  `json:"sma_200,omitempty"`
+	PctAbove50DMA       *float64  `json:"pct_above_50dma,omitempty"`
+	PctAbove200DMA      *float64  `json:"pct_above_200dma,omitempty"`
+	Return21D           *float64  `json:"return_21d,omitempty"`
+	Return63D           *float64  `json:"return_63d,omitempty"`
+	Return126D          *float64  `json:"return_126d,omitempty"`
+	BenchmarkReturn63D  *float64  `json:"benchmark_return_63d,omitempty"`
+	BenchmarkReturn126D *float64  `json:"benchmark_return_126d,omitempty"`
+	RS63D               *float64  `json:"rs_63d,omitempty"`
+	RS126D              *float64  `json:"rs_126d,omitempty"`
+	ATR14               *float64  `json:"atr_14,omitempty"`
+	ATRPct              *float64  `json:"atr_pct,omitempty"`
+	AvgVolume20D        *int64    `json:"avg_volume_20d,omitempty"`
+	AvgDollarVolume20D  *float64  `json:"avg_dollar_volume_20d,omitempty"`
+	LiquiditySampleDays int       `json:"liquidity_sample_days,omitempty"`
+	TrendState          string    `json:"trend_state,omitempty"`
+	DataQuality         string    `json:"data_quality,omitempty"` // ok | partial | insufficient_data | error
+	MissingReasons      []string  `json:"missing_reasons,omitempty"`
+	Error               string    `json:"error,omitempty"`
+	AsOf                time.Time `json:"as_of,omitzero"`
+}
+
+// TechnicalResult is MethodTechnical's payload.
+type TechnicalResult struct {
+	Benchmark    string         `json:"benchmark"`
+	LookbackDays int            `json:"lookback_days"`
+	Rows         []TechnicalRow `json:"rows"`
+	AsOf         time.Time      `json:"as_of"`
 }
 
 // MarketCalendarParams requests official exchange-session context. Market is
@@ -1641,24 +1692,30 @@ type Quote struct {
 	// last → mark → bid/ask midpoint → bid → ask → prev_close. PriceSource
 	// names the selected input so consumers can avoid treating a close-only
 	// fallback as a live last trade.
-	Price       *float64 `json:"price,omitempty"`
-	PriceSource string   `json:"price_source,omitempty"`
-	PrevClose   *float64 `json:"prev_close"`
-	Change      *float64 `json:"change"`
-	ChangePct   *float64 `json:"change_pct"`
-	DayHigh     *float64 `json:"day_high,omitempty"`
-	DayLow      *float64 `json:"day_low,omitempty"`
-	Week52High  *float64 `json:"week_52_high,omitempty"`
-	Week52Low   *float64 `json:"week_52_low,omitempty"`
-	BidSize     *int     `json:"bid_size,omitempty"`
-	AskSize     *int     `json:"ask_size,omitempty"`
-	Volume      *int64   `json:"volume,omitempty"`
-	AvgVolume   *int64   `json:"avg_volume,omitempty"`
-	IV          *float64 `json:"iv"`
-	IVStatus    string   `json:"iv_status"`
-	DataType    string   `json:"data_type"`
-	FeedType    string   `json:"feed_type,omitempty"`
-	SpreadPct   *float64 `json:"spread_pct,omitempty"`
+	Price               *float64  `json:"price,omitempty"`
+	PriceSource         string    `json:"price_source,omitempty"`
+	PrevClose           *float64  `json:"prev_close"`
+	Change              *float64  `json:"change"`
+	ChangePct           *float64  `json:"change_pct"`
+	DayHigh             *float64  `json:"day_high,omitempty"`
+	DayLow              *float64  `json:"day_low,omitempty"`
+	Week52High          *float64  `json:"week_52_high,omitempty"`
+	Week52Low           *float64  `json:"week_52_low,omitempty"`
+	BidSize             *int      `json:"bid_size,omitempty"`
+	AskSize             *int      `json:"ask_size,omitempty"`
+	Volume              *int64    `json:"volume,omitempty"`
+	AvgVolume           *int64    `json:"avg_volume,omitempty"`
+	AvgVolume20D        *int64    `json:"avg_volume_20d,omitempty"`
+	AvgDollarVolume20D  *float64  `json:"avg_dollar_volume_20d,omitempty"`
+	LiquidityStatus     string    `json:"liquidity_status,omitempty"` // ok | partial | unavailable
+	LiquiditySource     string    `json:"liquidity_source,omitempty"` // daily_bars
+	LiquidityAsOf       time.Time `json:"liquidity_as_of,omitzero"`
+	LiquiditySampleDays int       `json:"liquidity_sample_days,omitempty"`
+	IV                  *float64  `json:"iv"`
+	IVStatus            string    `json:"iv_status"`
+	DataType            string    `json:"data_type"`
+	FeedType            string    `json:"feed_type,omitempty"`
+	SpreadPct           *float64  `json:"spread_pct,omitempty"`
 	// QuoteQuality is a compact machine hint: "firm", "indicative",
 	// "wide", "prev_close", "stale", or "missing". It summarizes the
 	// selected price and spread/session context; WarningDetails carries
@@ -2077,7 +2134,10 @@ type ChainExpiriesParams struct {
 
 // ChainExpiry is one row in MethodChainExpiries' response. IV is nil when
 // --with-iv wasn't requested or when the per-strike IV fetch timed out;
-// IVStatus disambiguates ("ok" | "unavailable" | "timeout").
+// IVStatus disambiguates ("ok" | "unavailable" | "timeout"). IVSource names
+// how the value was obtained ("live_model" | "cached" | "unavailable");
+// IVQuality tells consumers whether to trust it for term-structure decisions
+// ("live_model" | "cached" | "reused_fallback" | "unavailable").
 //
 // DTE is the integer day count from "today (local)" to the expiry date,
 // inclusive of the expiry day (so a same-day expiry has DTE=0, next-day
@@ -2089,12 +2149,15 @@ type ChainExpiriesParams struct {
 // available; otherwise nil. The matching ImpliedMovePct is the same value
 // expressed as a fraction of spot (so `0.042` means 4.2%).
 type ChainExpiry struct {
-	Date           string   `json:"date"` // YYYY-MM-DD
-	DTE            int      `json:"dte,omitempty"`
-	IV             *float64 `json:"iv,omitempty"`
-	IVStatus       string   `json:"iv_status,omitempty"`
-	ImpliedMove    *float64 `json:"implied_move,omitempty"`
-	ImpliedMovePct *float64 `json:"implied_move_pct,omitempty"`
+	Date           string    `json:"date"` // YYYY-MM-DD
+	DTE            int       `json:"dte,omitempty"`
+	IV             *float64  `json:"iv,omitempty"`
+	IVStatus       string    `json:"iv_status,omitempty"`
+	IVSource       string    `json:"iv_source,omitempty"`
+	IVQuality      string    `json:"iv_quality,omitempty"`
+	IVAsOf         time.Time `json:"iv_as_of,omitzero"`
+	ImpliedMove    *float64  `json:"implied_move,omitempty"`
+	ImpliedMovePct *float64  `json:"implied_move_pct,omitempty"`
 }
 
 // ChainExpiriesResult is MethodChainExpiries' payload. Expiries are sorted
@@ -2104,24 +2167,73 @@ type ChainExpiry struct {
 // strike and to compute ImpliedMove. Zero when the spot probe failed or
 // WithIV wasn't requested.
 type ChainExpiriesResult struct {
-	Symbol   string        `json:"symbol"`
-	Spot     float64       `json:"spot,omitempty"`
-	Expiries []ChainExpiry `json:"expiries"`
-	AsOf     time.Time     `json:"as_of"`
+	Symbol         string        `json:"symbol"`
+	Spot           float64       `json:"spot,omitempty"`
+	Expiries       []ChainExpiry `json:"expiries"`
+	WarningDetails []DataWarning `json:"warning_details,omitempty"`
+	AsOf           time.Time     `json:"as_of"`
+}
+
+// ChainLegSummary is a compact executable-leg descriptor used by chain
+// liquidity summaries. It duplicates a subset of ChainStrike side fields so a
+// consumer can answer "which leg should I inspect first?" without walking the
+// whole grid.
+type ChainLegSummary struct {
+	Right     string   `json:"right"` // C | P
+	Strike    float64  `json:"strike"`
+	Bid       float64  `json:"bid,omitempty"`
+	Ask       float64  `json:"ask,omitempty"`
+	Mid       float64  `json:"mid,omitempty"`
+	Spread    float64  `json:"spread,omitempty"`
+	SpreadPct float64  `json:"spread_pct,omitempty"`
+	OI        *int64   `json:"oi,omitempty"`
+	Delta     *float64 `json:"delta,omitempty"`
+}
+
+// ChainTradableSummary is the top-level option-chain census a trader needs
+// before reading strike rows. LiveBidAskLegs is the executable count; stale,
+// model-only, subscribe-error, and no-quote counts explain why the rest are
+// not immediately tradable.
+type ChainTradableSummary struct {
+	TotalLegs          int     `json:"total_legs"`
+	LiveBidAskLegs     int     `json:"live_bid_ask_legs"`
+	OneSidedLiveLegs   int     `json:"one_sided_live_legs"`
+	StaleLegs          int     `json:"stale_legs"`
+	ModelOnlyLegs      int     `json:"model_only_legs"`
+	SubscribeErrorLegs int     `json:"subscribe_error_legs"`
+	NoQuoteLegs        int     `json:"no_quote_legs"`
+	OICoveredLegs      int     `json:"oi_covered_legs"`
+	OICoveragePct      float64 `json:"oi_coverage_pct"`
+	OptionsTradable    bool    `json:"options_tradable"`
+	FeedGap            string  `json:"feed_gap,omitempty"` // stale_close_only | thin_contract | unknown_feed_gap
+}
+
+// ChainLiquiditySummary surfaces the decision-grade option-liquidity facts
+// before the raw grid. Spread percentages are fractions (0.10 = 10%).
+type ChainLiquiditySummary struct {
+	LiquidityGrade           string           `json:"liquidity_grade"` // good | fair | poor | untradable
+	ATMSpreadPct             *float64         `json:"atm_spread_pct,omitempty"`
+	NearestLiveCall          *ChainLegSummary `json:"nearest_live_call,omitempty"`
+	NearestLivePut           *ChainLegSummary `json:"nearest_live_put,omitempty"`
+	MinSpreadLiveStrike      *ChainLegSummary `json:"min_spread_live_strike,omitempty"`
+	OICoveragePct            float64          `json:"oi_coverage_pct"`
+	RecommendedStructureHint string           `json:"recommended_structure_hint"` // stock_only | shares_or_spreads | calls_ok | untradable_chain
 }
 
 // ChainResult is MethodChainFetch's payload.
 type ChainResult struct {
-	Symbol         string        `json:"symbol"`
-	Spot           float64       `json:"spot"`
-	Expiry         string        `json:"expiry"`
-	DTE            int           `json:"dte"`
-	DataType       string        `json:"data_type"`
-	FeedType       string        `json:"feed_type,omitempty"`
-	SessionState   string        `json:"session_state,omitempty"`
-	Strikes        []ChainStrike `json:"strikes"`
-	WarningDetails []DataWarning `json:"warning_details,omitempty"`
-	AsOf           time.Time     `json:"as_of"`
+	Symbol           string                 `json:"symbol"`
+	Spot             float64                `json:"spot"`
+	Expiry           string                 `json:"expiry"`
+	DTE              int                    `json:"dte"`
+	DataType         string                 `json:"data_type"`
+	FeedType         string                 `json:"feed_type,omitempty"`
+	SessionState     string                 `json:"session_state,omitempty"`
+	TradableSummary  *ChainTradableSummary  `json:"tradable_summary,omitempty"`
+	LiquiditySummary *ChainLiquiditySummary `json:"liquidity_summary,omitempty"`
+	Strikes          []ChainStrike          `json:"strikes"`
+	WarningDetails   []DataWarning          `json:"warning_details,omitempty"`
+	AsOf             time.Time              `json:"as_of"`
 }
 
 // ScanRow is one row of a scanner result. The IBKR scanner subscription

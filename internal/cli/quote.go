@@ -100,8 +100,9 @@ func runQuoteSnapshotList(ctx context.Context, env *Env, syms []string, jsonOut 
 			contract.Currency = "USD"
 		}
 		params := rpc.QuoteSnapshotParams{
-			Contract:  contract,
-			TimeoutMs: int(timeout.Milliseconds()),
+			Contract:         contract,
+			TimeoutMs:        int(timeout.Milliseconds()),
+			IncludeLiquidity: true,
 		}
 		if err := env.Conn.Call(ctx, rpc.MethodQuoteSnapshot, params, &q); err != nil {
 			lastErr = err
@@ -141,8 +142,8 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 	// on the price first then the move — same left-to-right priority you
 	// see on every retail platform. Em-dash placeholders preserve column
 	// alignment when ticks haven't arrived yet (frozen, dead pre-market).
-	header := fmt.Sprintf("  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %7s  %s",
-		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "PRICE", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "IV", "DATA")
+	header := fmt.Sprintf("  %-9s  %10s  %-6s  %10s  %-6s  %10s  %10s  %8s  %8s  %-7s  %9s  %7s  %s",
+		"SYMBOL", "BID", "BID_SZ", "ASK", "ASK_SZ", "PRICE", "PREV CLOSE", "CHG", "CHG%", "VOLUME", "ADV$20", "IV", "DATA")
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim(strings.Repeat("─", visibleLen(header))))
 	for _, q := range qs {
@@ -150,7 +151,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 		// frozen/delayed quotes is obvious at a glance — same policy as
 		// the table-header badge.
 		dt := quoteDataBadge(env, q)
-		fmt.Fprintf(out, "  %-9s  %s  %-6s  %s  %-6s  %s  %s  %s  %s  %-7s  %s  %s\n",
+		fmt.Fprintf(out, "  %-9s  %s  %-6s  %s  %-6s  %s  %s  %s  %s  %-7s  %s  %s  %s\n",
 			q.Symbol,
 			orDash(q.Bid, 10),
 			formatSize(q.BidSize),
@@ -161,6 +162,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 			env.formatChange(q.Change, 8),
 			env.formatChangePct(q.ChangePct, 8),
 			formatSize(q.Volume),
+			formatTechnicalDollarVolume(q.AvgDollarVolume20D, 9),
 			ivStatus(q.IV),
 			dt,
 		)

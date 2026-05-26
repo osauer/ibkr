@@ -619,7 +619,7 @@ func TestRenderChainExpiriesText(t *testing.T) {
 			t.Fatalf("code = %d", code)
 		}
 		out := stdout.String()
-		for _, want := range []string{"ATM IV", "28.4%", "(timeout)", "(unavailable)"} {
+		for _, want := range []string{"ATM IV", "QUALITY", "28.4%", "(timeout)", "(unavailable)"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q\n%s", want, out)
 			}

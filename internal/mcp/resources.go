@@ -170,8 +170,9 @@ func (s *Server) handleResourcesRead(ctx context.Context, id, params json.RawMes
 	defer cancel()
 
 	snapParams := rpc.QuoteSnapshotParams{
-		Contract:  rpc.ContractParams{Symbol: pu.Sym, SecType: "STK", Currency: "USD"},
-		TimeoutMs: int(snapshotReadTimeout.Milliseconds()),
+		Contract:         rpc.ContractParams{Symbol: pu.Sym, SecType: "STK", Currency: "USD"},
+		TimeoutMs:        int(snapshotReadTimeout.Milliseconds()),
+		IncludeLiquidity: true,
 	}
 	var quote rpc.Quote
 	if err := s.conn.Call(readCtx, rpc.MethodQuoteSnapshot, snapParams, &quote); err != nil {

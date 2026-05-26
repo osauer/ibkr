@@ -1,6 +1,6 @@
 # Marketplace readiness
 
-Last reviewed: 2026-05-25 11:44 CEST
+Last reviewed: 2026-05-26 20:12 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
@@ -8,7 +8,7 @@ This page is the maintainer checklist for presenting `ibkr` in AI tool marketpla
 
 `ibkr` is a local, read-only Interactive Brokers integration for users who already run IB Gateway or TWS. The clearest marketplace description is:
 
-> Read-only Interactive Brokers access for agents: account, positions, quotes, official market calendars, option chains, history, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server.
+> Read-only Interactive Brokers access for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server.
 
 Always include these qualifiers:
 

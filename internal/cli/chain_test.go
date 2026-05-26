@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 // fmtOI renders open interest compactly for the chain table. Mirrors the
@@ -67,5 +69,47 @@ func TestRunChainValidatesLocalFlagsBeforeRPC(t *testing.T) {
 				t.Fatalf("stderr missing %q: %s", tc.want, stderr.String())
 			}
 		})
+	}
+}
+
+func TestRenderChainDecisionSummary(t *testing.T) {
+	t.Parallel()
+	spread := 0.12
+	res := &rpc.ChainResult{
+		Symbol: "IREN", Spot: 55, Expiry: "2026-09-18", DTE: 115,
+		TradableSummary: &rpc.ChainTradableSummary{
+			TotalLegs:       6,
+			LiveBidAskLegs:  0,
+			OICoveragePct:   0.33,
+			OptionsTradable: false,
+			FeedGap:         "thin_contract",
+		},
+		LiquiditySummary: &rpc.ChainLiquiditySummary{
+			LiquidityGrade:           "untradable",
+			ATMSpreadPct:             &spread,
+			RecommendedStructureHint: "untradable_chain",
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderChainDecisionSummary(env, res)
+	out := stdout.String()
+	for _, want := range []string{"Tradability", "0/6 live bid/ask", "not executable", "thin_contract", "Liquidity", "untradable chain"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFmtIVQuality(t *testing.T) {
+	t.Parallel()
+	if got := fmtIVQuality(rpc.ChainExpiry{IVQuality: "reused_fallback"}); got != "reused_fallback" {
+		t.Fatalf("quality = %q, want reused_fallback", got)
+	}
+	if got := fmtIVQuality(rpc.ChainExpiry{IVSource: "cached"}); got != "cached" {
+		t.Fatalf("source fallback = %q, want cached", got)
+	}
+	if got := fmtIVQuality(rpc.ChainExpiry{IVStatus: "timeout"}); got != "unavailable" {
+		t.Fatalf("timeout quality = %q, want unavailable", got)
 	}
 }

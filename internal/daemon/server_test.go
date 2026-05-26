@@ -179,12 +179,13 @@ func TestDispatchQuoteSubscribeReportsTerminal(t *testing.T) {
 // streaming method (quote.subscribe) without a deadline. Locks two
 // invariants: every unary method has d > 0, and d stays under the CLI's
 // budget for that command. Most commands share the default 60s CLI budget;
-// `scan` has a 90s budget because cold-start off-hours scanner subsystem
-// warmup is genuine and longer than other paths.
+// `scan` and `technical` have a 90s budget because cold-start off-hours
+// scanner warmup and multi-symbol daily-history fan-out are genuine and
+// longer than other paths.
 func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 	t.Parallel()
 	const cliDefault = 60 * time.Second
-	const cliScan = 90 * time.Second
+	const cliLong = 90 * time.Second
 
 	cases := []struct {
 		method    string
@@ -195,10 +196,11 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodQuoteSnapshot, cliDefault},
 		{rpc.MethodChainFetch, cliDefault},
 		{rpc.MethodChainExpiries, cliDefault},
-		{rpc.MethodScanRun, cliScan},
+		{rpc.MethodScanRun, cliLong},
 		{rpc.MethodScanList, cliDefault},
 		{rpc.MethodScanParams, cliDefault},
 		{rpc.MethodHistoryDaily, cliDefault},
+		{rpc.MethodTechnical, cliLong},
 		{rpc.MethodMarketCalendar, cliDefault},
 		{rpc.MethodStatusHealth, cliDefault},
 	}
