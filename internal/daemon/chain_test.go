@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -59,6 +60,70 @@ func TestChainWarningDetailsSummarizesUnavailableLegs(t *testing.T) {
 	}
 	if !strings.Contains(warningMessage(got, "oi_unavailable"), "3 option legs") {
 		t.Fatalf("oi warning should summarize all requested legs: %+v", got)
+	}
+}
+
+func TestChainSpotFromSnapshotLabelsPreviousClose(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, 5, 26, 8, 5, 0, 0, time.UTC)
+
+	got := chainSpotFromSnapshot(0, 0, 0, 0, 637.42, rpc.MarketDataFrozen, asOf)
+
+	if got.Price != 637.42 {
+		t.Fatalf("Price = %v, want 637.42", got.Price)
+	}
+	if got.Source != "prev_close" {
+		t.Fatalf("Source = %q, want prev_close", got.Source)
+	}
+	if got.DataType != rpc.MarketDataPrevClose {
+		t.Fatalf("DataType = %q, want prev_close", got.DataType)
+	}
+	if got.FeedType != rpc.MarketDataFrozen {
+		t.Fatalf("FeedType = %q, want frozen", got.FeedType)
+	}
+	if !got.AsOf.Equal(asOf) {
+		t.Fatalf("AsOf = %v, want %v", got.AsOf, asOf)
+	}
+}
+
+func TestChainSpotFromQuoteUsesSelectedHistoricalClose(t *testing.T) {
+	t.Parallel()
+	price := 637.42
+	priceAt := time.Date(2026, 5, 22, 20, 0, 0, 0, time.UTC)
+	got := chainSpotFromQuote(&rpc.Quote{
+		Price:       &price,
+		PriceSource: "historical_close",
+		DataType:    rpc.MarketDataPrevClose,
+		PriceAt:     priceAt,
+	})
+
+	if got.Price != price {
+		t.Fatalf("Price = %v, want %v", got.Price, price)
+	}
+	if got.Source != "historical_close" {
+		t.Fatalf("Source = %q, want historical_close", got.Source)
+	}
+	if got.DataType != rpc.MarketDataPrevClose {
+		t.Fatalf("DataType = %q, want prev_close", got.DataType)
+	}
+	if !got.AsOf.Equal(priceAt) {
+		t.Fatalf("AsOf = %v, want %v", got.AsOf, priceAt)
+	}
+}
+
+func TestChainWarningDetailsMarksPreviousCloseSpotAnchor(t *testing.T) {
+	t.Parallel()
+	res := &rpc.ChainResult{
+		Symbol:     "SPY",
+		Spot:       637.42,
+		SpotSource: "historical_close",
+		Strikes:    []rpc.ChainStrike{},
+	}
+
+	got := chainWarningDetails(res, true, true)
+
+	if !hasWarningCode(got, "selected_chain_spot_prev_close") {
+		t.Fatalf("previous-close spot warning missing from %+v", got)
 	}
 }
 

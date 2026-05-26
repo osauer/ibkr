@@ -94,8 +94,8 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 func renderChainText(env *Env, c *rpc.ChainResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "%s  spot %s  ·  expiry %s  ·  %d DTE%s\n",
-		c.Symbol, formatMoney(c.Spot), c.Expiry, c.DTE, env.suffixBadge(c.DataType))
+	fmt.Fprintf(out, "%s  spot %s%s  ·  expiry %s  ·  %d DTE%s\n",
+		c.Symbol, formatMoney(c.Spot), fmtChainSpotSource(c.SpotSource), c.Expiry, c.DTE, env.suffixBadge(c.DataType))
 	fmt.Fprintln(out)
 	renderChainDecisionSummary(env, c)
 	// Two-line header: line 1 spans CALLS over the five call columns and
@@ -238,7 +238,7 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 	cappedAt := chainExpiriesCapBoundary(r.Expiries, withIV)
 	header := fmt.Sprintf("%s  %d expiries available", r.Symbol, len(r.Expiries))
 	if r.Spot > 0 {
-		header += fmt.Sprintf("  ·  spot %s", formatMoney(r.Spot))
+		header += fmt.Sprintf("  ·  spot %s%s", formatMoney(r.Spot), fmtChainSpotSource(r.SpotSource))
 	}
 	fmt.Fprintln(out, header)
 	fmt.Fprintln(out)
@@ -287,6 +287,17 @@ func renderChainExpiriesText(env *Env, r *rpc.ChainExpiriesResult, withIV bool) 
 		}
 	}
 	return 0
+}
+
+func fmtChainSpotSource(source string) string {
+	switch source {
+	case "prev_close":
+		return " (prev close)"
+	case "historical_close":
+		return " (hist close)"
+	default:
+		return ""
+	}
 }
 
 // chainExpiriesCapBoundary returns the index N at which the daemon stopped

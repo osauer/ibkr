@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -95,10 +96,12 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// shared across all expiries — pre-fix this ran once before the loop
 	// already; only the loop changed shape (parallel + cached).
 	tSpot := time.Now()
-	spot, _ := s.briefSnapshotPriceHeld(ctx, c, sym, 5*time.Second)
+	spot := s.chainSpotForATM(ctx, c, sym, 5*time.Second)
 	spotMs = time.Since(tSpot).Milliseconds()
-	if spot > 0 {
-		res.Spot = spot
+	if spot.Price > 0 {
+		res.Spot = spot.Price
+		res.SpotSource = spot.Source
+		res.SpotAsOf = spot.AsOf
 	}
 
 	now := time.Now()
@@ -131,7 +134,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 			continue
 		}
 		strikes := strikesByExpiry[e]
-		if spot <= 0 || len(strikes) == 0 {
+		if spot.Price <= 0 || len(strikes) == 0 {
 			row.IVStatus = "unavailable"
 			row.IVSource = "unavailable"
 			row.IVQuality = "unavailable"
@@ -141,7 +144,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 			s.expiryIVs.put(sym, e, expiryIVEntry{status: "unavailable", source: "unavailable", quality: "unavailable", asOf: now}, now)
 			continue
 		}
-		atm := closestStrike(strikes, spot)
+		atm := closestStrike(strikes, spot.Price)
 		expiryYMD := strings.ReplaceAll(e, "-", "")
 		rows[i] = row // populate placeholder; worker will overwrite IV/IVStatus
 		jobs = append(jobs, job{idx: i, expiry: e, expiryYMD: expiryYMD, atm: atm})
@@ -179,11 +182,12 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	// rows missing any of the three so the field stays nil rather than
 	// silently absorbing a zero.
 	for i := range rows {
-		if mv, mvPct, ok := computeImpliedMove(spot, rows[i].IV, rows[i].DTE); ok {
+		if mv, mvPct, ok := computeImpliedMove(spot.Price, rows[i].IV, rows[i].DTE); ok {
 			rows[i].ImpliedMove = &mv
 			rows[i].ImpliedMovePct = &mvPct
 		}
 	}
+	res.WarningDetails = append(res.WarningDetails, chainSpotWarning(sym, spot)...)
 	res.WarningDetails = append(res.WarningDetails, annotateRepeatedExpiryIV(sym, rows)...)
 
 	// Append the working set, then the rest (without IV) when caller
@@ -457,32 +461,32 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	}()
 
 	tSnapshot := time.Now()
-	spot, dataType := s.briefSnapshotPriceHeld(ctx, c, p.Symbol, 5*time.Second)
-	if spot <= 0 {
-		spot, dataType = chainHistoricalSpotFallback(ctx, c, sym, 5*time.Second)
-	}
+	spot := s.chainSpotForATM(ctx, c, sym, 5*time.Second)
 	snapshotMs = time.Since(tSnapshot).Milliseconds()
-	if spot <= 0 {
+	if spot.Price <= 0 {
 		if s.gatewayConnector() == nil {
 			return nil, ibkrlib.ErrIBKRUnavailable
 		}
 		return nil, fmt.Errorf("no spot price available for %s (market closed or symbol inactive)", p.Symbol)
 	}
-	step := strikeStep(spot)
-	atm := math.Round(spot/step) * step
+	step := strikeStep(spot.Price)
+	atm := math.Round(spot.Price/step) * step
 
 	res := &rpc.ChainResult{
 		Symbol:       strings.ToUpper(p.Symbol),
-		Spot:         spot,
+		Spot:         spot.Price,
+		SpotSource:   spot.Source,
+		SpotAsOf:     spot.AsOf,
 		Expiry:       expiryYMD[:4] + "-" + expiryYMD[4:6] + "-" + expiryYMD[6:8],
 		DTE:          dte,
-		DataType:     dataType,
+		DataType:     spot.DataType,
+		FeedType:     spot.FeedType,
 		SessionState: rpc.ClassifySession(time.Now()).String(),
 		AsOf:         time.Now(),
 	}
 	if !rpc.IsOptionRTH(res.AsOf) {
-		if dataType != "" {
-			res.FeedType = dataType
+		if res.DataType != "" {
+			res.FeedType = res.DataType
 		}
 		res.DataType = rpc.MarketDataClosed
 	}
@@ -542,6 +546,123 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	res.TradableSummary, res.LiquiditySummary = chainSummaries(res, wantCalls, wantPuts)
 	res.WarningDetails = chainWarningDetails(res, wantCalls, wantPuts)
 	return res, nil
+}
+
+type chainSpotSelection struct {
+	Price    float64
+	DataType string
+	FeedType string
+	Source   string
+	AsOf     time.Time
+}
+
+func (s *Server) chainSpotForATM(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) chainSpotSelection {
+	sym := normSym(symbol)
+	if sym == "" {
+		return chainSpotSelection{}
+	}
+	if spot := s.chainSnapshotSpot(ctx, c, sym, timeout); spot.Price > 0 {
+		return spot
+	}
+	if spot := s.chainQuoteSpotFallback(ctx, sym, timeout); spot.Price > 0 {
+		return spot
+	}
+	if px, feedType := chainHistoricalSpotFallback(ctx, c, sym, timeout); px > 0 {
+		return chainSpotSelection{
+			Price:    px,
+			DataType: rpc.MarketDataPrevClose,
+			FeedType: feedType,
+			Source:   "historical_close",
+			AsOf:     time.Now(),
+		}
+	}
+	return chainSpotSelection{}
+}
+
+func (s *Server) chainSnapshotSpot(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) chainSpotSelection {
+	if s == nil || s.subs == nil {
+		bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
+		return chainSpotFromSnapshot(bid, ask, last, mark, closePx, dt, time.Now())
+	}
+	release, err := s.subs.Hold(ctx, symbol)
+	if err != nil {
+		return chainSpotSelection{}
+	}
+	defer release()
+	bid, ask, last, mark, closePx, dt := briefSnapshotFullHeld(ctx, c, symbol, timeout)
+	return chainSpotFromSnapshot(bid, ask, last, mark, closePx, dt, time.Now())
+}
+
+func chainSpotFromSnapshot(bid, ask, last, mark, closePx float64, dataType string, asOf time.Time) chainSpotSelection {
+	if dataType == "" {
+		dataType = rpc.MarketDataLive
+	}
+	switch {
+	case last > 0:
+		return chainSpotSelection{Price: last, DataType: dataType, Source: "last", AsOf: asOf}
+	case bid > 0 && ask > 0:
+		return chainSpotSelection{Price: (bid + ask) / 2, DataType: dataType, Source: "mid", AsOf: asOf}
+	case bid > 0:
+		return chainSpotSelection{Price: bid, DataType: dataType, Source: "bid", AsOf: asOf}
+	case ask > 0:
+		return chainSpotSelection{Price: ask, DataType: dataType, Source: "ask", AsOf: asOf}
+	case mark > 0:
+		return chainSpotSelection{Price: mark, DataType: dataType, Source: "mark", AsOf: asOf}
+	case closePx > 0:
+		return chainSpotSelection{Price: closePx, DataType: rpc.MarketDataPrevClose, FeedType: dataType, Source: "prev_close", AsOf: asOf}
+	default:
+		return chainSpotSelection{}
+	}
+}
+
+func (s *Server) chainQuoteSpotFallback(ctx context.Context, symbol string, timeout time.Duration) chainSpotSelection {
+	timeoutMs := int(timeout / time.Millisecond)
+	if timeoutMs <= 0 {
+		timeoutMs = int((5 * time.Second) / time.Millisecond)
+	}
+	params, err := json.Marshal(rpc.QuoteSnapshotParams{
+		Contract:  rpc.ContractParams{Symbol: symbol},
+		TimeoutMs: timeoutMs,
+	})
+	if err != nil {
+		return chainSpotSelection{}
+	}
+	q, err := s.handleQuoteSnapshot(ctx, &rpc.Request{ID: "chain-spot-fallback", Method: rpc.MethodQuoteSnapshot, Params: params})
+	if err != nil {
+		return chainSpotSelection{}
+	}
+	return chainSpotFromQuote(q)
+}
+
+func chainSpotFromQuote(q *rpc.Quote) chainSpotSelection {
+	if q == nil || q.Price == nil || *q.Price <= 0 {
+		return chainSpotSelection{}
+	}
+	dataType := q.DataType
+	if dataType == "" {
+		dataType = rpc.MarketDataLive
+	}
+	source := q.PriceSource
+	if source == "" {
+		source = "quote"
+	}
+	spot := chainSpotSelection{
+		Price:    *q.Price,
+		DataType: dataType,
+		FeedType: q.FeedType,
+		Source:   source,
+		AsOf:     q.PriceAt,
+	}
+	if source == "prev_close" || source == "historical_close" || dataType == rpc.MarketDataPrevClose {
+		spot.DataType = rpc.MarketDataPrevClose
+		if spot.FeedType == "" && dataType != rpc.MarketDataPrevClose {
+			spot.FeedType = dataType
+		}
+	}
+	if spot.AsOf.IsZero() {
+		spot.AsOf = q.AsOf
+	}
+	return spot
 }
 
 func chainHistoricalSpotFallback(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (float64, string) {
@@ -913,7 +1034,11 @@ func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.D
 	if res == nil {
 		return nil
 	}
-	var out []rpc.DataWarning
+	out := chainSpotWarning(res.Symbol, chainSpotSelection{
+		Price:  res.Spot,
+		Source: res.SpotSource,
+		AsOf:   res.SpotAsOf,
+	})
 	if res.DataType == rpc.MarketDataClosed {
 		out = append(out, rpc.DataWarning{
 			Code:     "options_closed",
@@ -1007,4 +1132,23 @@ func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.D
 		})
 	}
 	return out
+}
+
+func chainSpotWarning(symbol string, spot chainSpotSelection) []rpc.DataWarning {
+	if spot.Price <= 0 {
+		return nil
+	}
+	switch spot.Source {
+	case "prev_close", "historical_close":
+		return []rpc.DataWarning{{
+			Code:     "selected_chain_spot_prev_close",
+			Scope:    symbol,
+			Severity: "data_quality",
+			Message:  "ATM strike selection used the underlying's prior regular-session close.",
+			Impact:   "The strike grid is suitable for off-hours inspection, but the ATM anchor is stale.",
+			Action:   "Retry during the regular session for a live underlying spot.",
+		}}
+	default:
+		return nil
+	}
 }

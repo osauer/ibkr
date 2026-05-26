@@ -2165,10 +2165,14 @@ type ChainExpiry struct {
 //
 // Spot is the underlying mid the daemon used to pick the per-expiry ATM
 // strike and to compute ImpliedMove. Zero when the spot probe failed or
-// WithIV wasn't requested.
+// WithIV wasn't requested. SpotSource names the selected-price source
+// ("last", "mid", "prev_close", "historical_close", ...); SpotAsOf is the
+// best timestamp known for that selected price.
 type ChainExpiriesResult struct {
 	Symbol         string        `json:"symbol"`
 	Spot           float64       `json:"spot,omitempty"`
+	SpotSource     string        `json:"spot_source,omitempty"`
+	SpotAsOf       time.Time     `json:"spot_as_of,omitzero"`
 	Expiries       []ChainExpiry `json:"expiries"`
 	WarningDetails []DataWarning `json:"warning_details,omitempty"`
 	AsOf           time.Time     `json:"as_of"`
@@ -2220,10 +2224,15 @@ type ChainLiquiditySummary struct {
 	RecommendedStructureHint string           `json:"recommended_structure_hint"` // stock_only | shares_or_spreads | calls_ok | untradable_chain
 }
 
-// ChainResult is MethodChainFetch's payload.
+// ChainResult is MethodChainFetch's payload. SpotSource names the selected
+// underlying price source used to anchor ATM ("last", "mid", "prev_close",
+// "historical_close", ...); SpotAsOf is the best timestamp known for that
+// selected price.
 type ChainResult struct {
 	Symbol           string                 `json:"symbol"`
 	Spot             float64                `json:"spot"`
+	SpotSource       string                 `json:"spot_source,omitempty"`
+	SpotAsOf         time.Time              `json:"spot_as_of,omitzero"`
 	Expiry           string                 `json:"expiry"`
 	DTE              int                    `json:"dte"`
 	DataType         string                 `json:"data_type"`
