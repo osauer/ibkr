@@ -1998,13 +1998,13 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	tasks := []rpc.BackgroundTaskStatus{}
 	if s.breadth != nil && s.breadth.IsRefreshing() {
-		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "breadth-spx"})
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "breadth-spx", Status: "computing"})
 	}
 	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
-		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "gamma-zero"})
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "gamma-zero", Status: "computing"})
 	}
 	if s.regimePrewarming.Load() {
-		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm"})
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm", Status: "computing"})
 	}
 	return tasks
 }

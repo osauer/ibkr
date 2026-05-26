@@ -1,0 +1,131 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/osauer/ibkr/internal/dial"
+)
+
+func TestMCPToolCallTimeoutBudgets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args json.RawMessage
+		want time.Duration
+	}{
+		{name: "ibkr_status", want: mcpFastToolTimeout},
+		{name: "ibkr_scan", args: json.RawMessage(`{}`), want: mcpFastToolTimeout},
+		{name: "ibkr_scan", args: json.RawMessage(`{"preset":"top-movers"}`), want: mcpScannerToolTimeout},
+		{name: "ibkr_watch", args: json.RawMessage(`{"include_quotes":false}`), want: mcpFastToolTimeout},
+		{name: "ibkr_watch", args: json.RawMessage(`{}`), want: mcpWatchQuoteTimeout},
+		{name: "ibkr_chain", args: json.RawMessage(`{"symbol":"BB","expiry":"2026-07-17"}`), want: mcpLongToolTimeout},
+		{name: "ibkr_regime", want: mcpRegimeToolTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+" "+string(tc.args), func(t *testing.T) {
+			t.Parallel()
+			if got := mcpToolCallTimeout(tc.name, tc.args); got != tc.want {
+				t.Fatalf("mcpToolCallTimeout(%q, %s) = %s, want %s", tc.name, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMCPToolCallTimesOutHungDaemon(t *testing.T) {
+	dialer, stop := silentDaemonDialer(t)
+	defer stop()
+
+	in := &bytes.Buffer{}
+	in.WriteString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ibkr_status","arguments":{}}}` + "\n")
+	out := &bytes.Buffer{}
+	srv := NewServer(nil, "test")
+	srv.SetDialer(dialer)
+
+	start := time.Now()
+	if err := srv.Serve(context.Background(), in, out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 4*time.Second {
+		t.Fatalf("hung daemon response took %s, want bounded below MCP host timeout", elapsed)
+	}
+
+	var resp struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, out.String())
+	}
+	if !resp.Result.IsError {
+		t.Fatalf("expected isError=true, got: %s", out.String())
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, "ibkr_status timed out after 2s") {
+		t.Fatalf("timeout message = %+v", resp.Result.Content)
+	}
+}
+
+func silentDaemonDialer(t *testing.T) (func() (*dial.Conn, error), func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ibkr-mcp-")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	path := filepath.Join(dir, "m.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("listen unix: %v", err)
+	}
+
+	var mu sync.Mutex
+	var conns []net.Conn
+	done := make(chan struct{})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			go func(c net.Conn) {
+				<-done
+				_ = c.Close()
+			}(conn)
+		}
+	}()
+
+	stopOnce := sync.Once{}
+	stop := func() {
+		stopOnce.Do(func() {
+			close(done)
+			_ = ln.Close()
+			_ = os.RemoveAll(dir)
+			mu.Lock()
+			defer mu.Unlock()
+			for _, conn := range conns {
+				_ = conn.Close()
+			}
+		})
+	}
+	dialer := func() (*dial.Conn, error) {
+		return dial.Connect(path)
+	}
+	return dialer, stop
+}

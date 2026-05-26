@@ -32,7 +32,7 @@ type Tool struct {
 var Tools = []Tool{
 	{
 		Name:        "ibkr_status",
-		Description: "Daemon + gateway health snapshot: connection state, account, market-data type (live/frozen/delayed), server version, members-list source, last-error. Run this first when troubleshooting connectivity (\"why is data missing / stale / wrong-account?\"). NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own.",
+		Description: "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, and per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.HealthResult
@@ -56,7 +56,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_positions",
-		Description: "Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Use when the question is about *what you own* (\"show me my positions\", \"what's my exposure to AAPL?\", \"how much delta do I have?\"). Stock rows include quote context for decision-making when available: data_type, price_source, prev_close, day_change/day_change_pct, day/52-week ranges, volume/avg_volume, price_at/price_as_of, stale flags, and session_context from the trading calendar. Each row carries unrealized_pnl (session-running) and daily_pnl (start-of-trading-day to now, from IBKR's reqPnLSingle stream). daily_pnl is null when the daemon hasn't yet pre-warmed that contract's subscription or the account isn't entitled; never zero-substituted. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy. NOT for cash/margin totals (use `ibkr_account`) and NOT for live quotes on symbols you don't hold (use `ibkr_quote`).",
+		Description: "Open positions: stocks and options separated, plus a per-underlying grouping with summed P&L. Use when the question is about *what you own* (\"show me my positions\", \"what's my exposure to AAPL?\", \"how much delta do I have?\"). Stock rows include quote context for decision-making when available: data_type (effective freshness of selected price), feed_type (gateway subscription state when different), price_source, quote_quality, indicative, spread_pct, prev_close, day_change/day_change_pct, day/52-week ranges, volume/avg_volume, volume_phase, price_at/price_as_of, warning_details, stale flags, and session_context from the trading calendar. Each row carries unrealized_pnl (session-running) and daily_pnl (start-of-trading-day to now, from IBKR's reqPnLSingle stream). daily_pnl is null when the daemon hasn't yet pre-warmed that contract's subscription or the account isn't entitled; never zero-substituted. Option legs include per-leg Greeks (delta/gamma/theta/vega) when IBKR delivers the model-computation tick within budget. The `portfolio` block aggregates effective_delta (share-equivalents), dollar_delta, daily_theta, gamma, vega, plus fx_sensitivity_per_pct for accounts with non-base-currency holdings. Non-base positions also carry fx_rate and market_value_ccy. NOT for cash/margin totals (use `ibkr_account`) and NOT for live quotes on symbols you don't hold (use `ibkr_quote`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol": schemaString("filter to a single underlying symbol (case-insensitive)"),
 			"type":   schemaEnum([]string{"stk", "opt"}, "filter to stock or option positions"),
@@ -75,7 +75,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_quote",
-		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, opportunistic IV when the gateway delivers tick 106 (stock/ETF IV is often null/unavailable), and `session_context` when the official market calendar explains stale/frozen/missing data. Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\"); off-hours/frozen snapshots may have `mark` or `prev_close` when bid/ask/last are absent. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: \"de\"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
+		Description: "Snapshot quotes for one or more equity / ETF symbols. Returns bid/ask/last, mark, sizes, volume, effective data_type for the selected price, feed_type when the gateway subscription state differs, quote_quality (firm/indicative/wide/prev_close/stale/missing), indicative, spread_pct, volume_phase, warning_details, and `session_context` when the official market calendar explains stale/frozen/missing data. Use for *current price* questions on stocks/ETFs (\"what's SPY trading at?\"); off-hours snapshots may carry thin or prior-session values, so gate decisions on quote_quality/spread_pct/data_type/price_at rather than assuming `live` means regular-session executable. Stock/ETF IV tick 106 is opportunistic and often null/unavailable; for a real IV read use `ibkr_chain` expiry IV or an expiry strike grid. US symbols default to SMART/USD. For German/Xetra equities whose ticker collides with the US default route (for example MBG), set `market: \"de\"` or explicit `exchange`/`currency`. NOT for options (use `ibkr_chain` with an `expiry` argument), NOT for historical bars (use `ibkr_history`), NOT for the position you already hold (`ibkr_positions` already includes live marks).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbols":          json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"AAPL\",\"MSFT\"] or [\"MBG\"] with market=\"de\""}`),
 			"market":           json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
@@ -121,9 +121,9 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_watch",
-		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Defaults to a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, data freshness, session context, and optional held-stock context; set `include_quotes: false` only when the user explicitly wants the saved symbol list without market data. This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
+		Description: "Read the user's local ibkr watchlist: symbols they explicitly saved with the CLI via `ibkr watch SYMBOL --add`. Defaults to a decision-making monitor with current price/currency, change, previous close, day range, 52-week range, volume, average volume, effective data freshness, quote_quality/spread_pct/volume_phase, warning_details, session context, and optional held-stock context; set `include_quotes: false` only when the user explicitly wants the saved symbol list without market data (still requires a reachable daemon). This MCP tool is read-only: it does NOT add, remove, clear, create IBKR/TWS watchlists, or place trades. For ad-hoc symbols that are not saved in the watchlist, use `ibkr_quote` instead.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"return enriched quote rows for saved symbols; default true. Set false only for the offline/list-only symbol inventory"}`),
+			"include_quotes":    json.RawMessage(`{"type":"boolean","description":"return enriched quote rows for saved symbols; default true. Set false only for the daemon-reachable list-only symbol inventory"}`),
 			"include_positions": json.RawMessage(`{"type":"boolean","description":"when include_quotes is true, attach compact held-stock context where available; default true"}`),
 			"timeout_ms":        json.RawMessage(`{"type":"integer","minimum":100,"description":"per-symbol quote timeout when include_quotes is true; default 5000 ms"}`),
 		}, nil),
@@ -149,6 +149,9 @@ var Tools = []Tool{
 				includeQuotes = *in.IncludeQuotes
 			}
 			if !includeQuotes {
+				if err := ensureDaemonReachable(ctx, conn); err != nil {
+					return nil, err
+				}
 				return json.Marshal(snap)
 			}
 			if conn == nil {
@@ -187,7 +190,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_chain",
-		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. Per-leg fields on the strike grid: bid/ask/last for calls and puts, IV when delivered, per-leg call/put delta when delivered, and **`call_oi` / `put_oi`** (option open interest, int64) sourced from IBKR ticks 27/28 on the existing per-leg subscription — `null` when the gateway didn't push the tick within the chain fill budget (common off-hours and for illiquid wings), never zero-substituted. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
+		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. The strike grid has top-level data_type/session_state/feed_type plus warning_details; outside regular option hours data_type is `closed` even if the underlying stock feed is live. Per-leg fields include bid/ask/last, prev_close, IV, delta, OI, as_of, data_status (`quoted`, `prev_close`, `model_only`, `no_quote`, `subscribe_error`), iv_status, and oi_status. `call_prev_close` / `put_prev_close` are the option contract's own prior close and are stale context, not executable quotes. `call_oi` / `put_oi` are option open interest from IBKR ticks 27/28 and stay null when the gateway did not push OI within budget; never treat missing OI as zero. Off-hours, `prev_close` and `model_only` legs can be useful context but are not executable quotes. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":       schemaString("underlying ticker"),
 			"expiry":       schemaString("expiry date YYYY-MM-DD; omit to list available expiries"),
@@ -263,7 +266,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "ibkr_scan",
-		Description: "Run a market scanner. Three call shapes: (1) preset by name — `{preset: \"top-movers\"}` — for the configured shortcuts; (2) ad-hoc — `{type: \"TOP_PERC_GAIN\", exchange: \"STK.US.MAJOR\"}` for US stocks or `{type: \"TOP_PERC_GAIN\", exchange: \"STK.EU.IBIS\", instrument: \"STOCK.EU\"}` for German/Xetra stocks — to compose a scan without writing to the user's config; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For ad-hoc, call `ibkr_scan_params` first to discover the scanCode (`type`), locationCode (`exchange`), and instrument values this gateway accepts. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.",
+		Description: "Run a market scanner. Three call shapes: (1) preset by name — `{preset: \"top-movers\"}` — for the configured shortcuts; (2) ad-hoc — `{type: \"TOP_PERC_GAIN\", exchange: \"STK.US.MAJOR\"}` for US stocks or `{type: \"TOP_PERC_GAIN\", exchange: \"STK.EU.IBIS\", instrument: \"STOCK.EU\"}` for German/Xetra stocks — to compose a scan without writing to the user's config; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For ad-hoc, call `ibkr_scan_params` first to discover the scanCode (`type`), locationCode (`exchange`), and instrument values this gateway accepts. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low plus data_type/feed_type/price_at/price_as_of/volume_phase/warning_details via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"preset":     schemaString("preset name from `ibkr_scan` with no args (e.g. \"top-movers\"); omit for ad-hoc or list mode"),
 			"type":       schemaString("ad-hoc scanCode (e.g. \"TOP_PERC_GAIN\") — required with `exchange` when no `preset` is given"),
@@ -488,6 +491,17 @@ func buildWatchlistQuoteResult(ctx context.Context, conn *dial.Conn, snap *watch
 		res.Rows = append(res.Rows, row)
 	}
 	return res, nil
+}
+
+func ensureDaemonReachable(ctx context.Context, conn *dial.Conn) error {
+	if conn == nil {
+		return fmt.Errorf("daemon connection required")
+	}
+	var health rpc.HealthResult
+	if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &health); err != nil {
+		return fmt.Errorf("daemon reachability check failed: %w", err)
+	}
+	return nil
 }
 
 func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractParams {

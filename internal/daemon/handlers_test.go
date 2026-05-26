@@ -1074,8 +1074,14 @@ func TestDecorateQuoteLastWithoutExchangeTimestampUsesMarketCloseWhenClosed(t *t
 	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-25T17:30:00+02:00"; got != want {
 		t.Fatalf("PriceAt = %q, want %q", got, want)
 	}
-	if got, want := q.PriceAsOf, "As of: May 25 at 05:30:00 PM CEST"; got != want {
+	if got, want := q.PriceAsOf, "At close: May 25 at 05:30:00 PM CEST"; got != want {
 		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+	if q.DataType != rpc.MarketDataFrozen {
+		t.Fatalf("DataType = %q, want frozen after close", q.DataType)
+	}
+	if q.QuoteQuality != "indicative" {
+		t.Fatalf("QuoteQuality = %q, want indicative after close", q.QuoteQuality)
 	}
 }
 
@@ -1111,8 +1117,45 @@ func TestDecorateQuoteMarksOldLivePriceStale(t *testing.T) {
 	if !strings.Contains(q.StaleReason, "20m old") {
 		t.Fatalf("StaleReason = %q, want age detail", q.StaleReason)
 	}
-	if got, want := q.PriceAsOf, "As of: May 26 at 10:10:00 AM EDT"; got != want {
+	if got, want := q.PriceAsOf, "Frozen: May 26 at 10:10:00 AM EDT"; got != want {
 		t.Fatalf("PriceAsOf = %q, want %q", got, want)
+	}
+	if q.DataType != rpc.MarketDataFrozen {
+		t.Fatalf("DataType = %q, want frozen for stale selected price", q.DataType)
+	}
+}
+
+func TestDecorateQuoteLabelsPriorSessionLastAsPrevClose(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "America/New_York")
+	last, prev := 310.86, 308.82
+	q := &rpc.Quote{
+		Symbol:    "AAPL",
+		Last:      &last,
+		PrevClose: &prev,
+		DataType:  rpc.MarketDataLive,
+		PriceAt:   time.Date(2026, 5, 22, 16, 0, 0, 0, loc),
+		AsOf:      time.Date(2026, 5, 26, 8, 15, 0, 0, loc),
+	}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
+	srv.decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.DataType != rpc.MarketDataPrevClose {
+		t.Fatalf("DataType = %q, want prev_close", q.DataType)
+	}
+	if q.FeedType != rpc.MarketDataLive {
+		t.Fatalf("FeedType = %q, want live", q.FeedType)
+	}
+	if q.QuoteQuality != "prev_close" {
+		t.Fatalf("QuoteQuality = %q, want prev_close", q.QuoteQuality)
+	}
+	if !q.Indicative {
+		t.Fatal("expected prior-session selected price to be indicative")
+	}
+	if len(q.WarningDetails) == 0 || q.WarningDetails[0].Code != "selected_price_prev_close" {
+		t.Fatalf("WarningDetails = %+v, want selected_price_prev_close first", q.WarningDetails)
 	}
 }
 

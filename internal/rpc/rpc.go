@@ -64,6 +64,8 @@ const (
 	MarketDataFrozen        = "frozen"
 	MarketDataDelayed       = "delayed"
 	MarketDataDelayedFrozen = "delayed-frozen"
+	MarketDataPrevClose     = "prev_close"
+	MarketDataClosed        = "closed"
 )
 
 // IsLiveDataType reports whether the gateway's per-reqID feed state is
@@ -1655,16 +1657,26 @@ type Quote struct {
 	IV          *float64 `json:"iv"`
 	IVStatus    string   `json:"iv_status"`
 	DataType    string   `json:"data_type"`
+	FeedType    string   `json:"feed_type,omitempty"`
+	SpreadPct   *float64 `json:"spread_pct,omitempty"`
+	// QuoteQuality is a compact machine hint: "firm", "indicative",
+	// "wide", "prev_close", "stale", or "missing". It summarizes the
+	// selected price and spread/session context; WarningDetails carries
+	// the explainable reasons.
+	QuoteQuality string `json:"quote_quality,omitempty"`
+	Indicative   bool   `json:"indicative,omitempty"`
+	VolumePhase  string `json:"volume_phase,omitempty"`
 	// PriceAt is the best timestamp for Price. For last trades this is
 	// IBKR tick-string 45 when delivered; for prev_close fallbacks it is
 	// the official prior regular-session close; otherwise it is the local
 	// observation time. PriceAsOf is the preformatted human label renderers
 	// can show directly ("At close: May 22 at 04:01:02 PM EDT").
-	PriceAt     time.Time `json:"price_at,omitzero"`
-	PriceAsOf   string    `json:"price_as_of,omitempty"`
-	Stale       bool      `json:"stale,omitempty"`
-	StaleReason string    `json:"stale_reason,omitempty"`
-	AsOf        time.Time `json:"as_of"`
+	PriceAt        time.Time     `json:"price_at,omitzero"`
+	PriceAsOf      string        `json:"price_as_of,omitempty"`
+	Stale          bool          `json:"stale,omitempty"`
+	StaleReason    string        `json:"stale_reason,omitempty"`
+	WarningDetails []DataWarning `json:"warning_details,omitempty"`
+	AsOf           time.Time     `json:"as_of"`
 	// SessionContext explains whether the relevant market was open at the
 	// quote time. Populated when the context is useful for interpreting a
 	// stale/frozen/missing quote; omitted on ordinary live in-session rows.
@@ -1782,19 +1794,25 @@ type PositionView struct {
 	// dollar impact: quantity × DayChange for stocks; quantity × multiplier
 	// × (Mark − OptionPrevClose) for options when OptionPrevClose is
 	// populated. nil when any input is missing — never fabricated.
-	DayChange      *float64  `json:"day_change,omitempty"`
-	DayChangePct   *float64  `json:"day_change_pct,omitempty"`
-	DayChangeMoney *float64  `json:"day_change_money,omitempty"`
-	DayHigh        *float64  `json:"day_high,omitempty"`
-	DayLow         *float64  `json:"day_low,omitempty"`
-	Week52High     *float64  `json:"week_52_high,omitempty"`
-	Week52Low      *float64  `json:"week_52_low,omitempty"`
-	Volume         *int64    `json:"volume,omitempty"`
-	AvgVolume      *int64    `json:"avg_volume,omitempty"`
-	PriceAt        time.Time `json:"price_at,omitzero"`
-	PriceAsOf      string    `json:"price_as_of,omitempty"`
-	Stale          bool      `json:"stale,omitempty"`
-	StaleReason    string    `json:"stale_reason,omitempty"`
+	DayChange      *float64      `json:"day_change,omitempty"`
+	DayChangePct   *float64      `json:"day_change_pct,omitempty"`
+	DayChangeMoney *float64      `json:"day_change_money,omitempty"`
+	DayHigh        *float64      `json:"day_high,omitempty"`
+	DayLow         *float64      `json:"day_low,omitempty"`
+	Week52High     *float64      `json:"week_52_high,omitempty"`
+	Week52Low      *float64      `json:"week_52_low,omitempty"`
+	Volume         *int64        `json:"volume,omitempty"`
+	AvgVolume      *int64        `json:"avg_volume,omitempty"`
+	PriceAt        time.Time     `json:"price_at,omitzero"`
+	PriceAsOf      string        `json:"price_as_of,omitempty"`
+	FeedType       string        `json:"feed_type,omitempty"`
+	SpreadPct      *float64      `json:"spread_pct,omitempty"`
+	QuoteQuality   string        `json:"quote_quality,omitempty"`
+	Indicative     bool          `json:"indicative,omitempty"`
+	VolumePhase    string        `json:"volume_phase,omitempty"`
+	Stale          bool          `json:"stale,omitempty"`
+	StaleReason    string        `json:"stale_reason,omitempty"`
+	WarningDetails []DataWarning `json:"warning_details,omitempty"`
 	// SessionContext explains the trading-calendar state behind PriceAt.
 	// Populated when the quote context needs interpretation (closed,
 	// pre-market, frozen/stale/missing), matching Quote.SessionContext.
@@ -2013,19 +2031,29 @@ type ChainStrike struct {
 	Strike float64 `json:"strike"`
 	IsATM  bool    `json:"is_atm,omitempty"`
 
-	CallBid   *float64 `json:"call_bid"`
-	CallAsk   *float64 `json:"call_ask"`
-	CallLast  *float64 `json:"call_last"`
-	CallIV    *float64 `json:"call_iv"`
-	CallDelta *float64 `json:"call_delta"`
-	CallOI    *int64   `json:"call_oi"`
+	CallBid        *float64  `json:"call_bid"`
+	CallAsk        *float64  `json:"call_ask"`
+	CallLast       *float64  `json:"call_last"`
+	CallPrevClose  *float64  `json:"call_prev_close,omitempty"`
+	CallIV         *float64  `json:"call_iv"`
+	CallDelta      *float64  `json:"call_delta"`
+	CallOI         *int64    `json:"call_oi"`
+	CallAsOf       time.Time `json:"call_as_of,omitzero"`
+	CallDataStatus string    `json:"call_data_status,omitempty"`
+	CallIVStatus   string    `json:"call_iv_status,omitempty"`
+	CallOIStatus   string    `json:"call_oi_status,omitempty"`
 
-	PutBid   *float64 `json:"put_bid"`
-	PutAsk   *float64 `json:"put_ask"`
-	PutLast  *float64 `json:"put_last"`
-	PutIV    *float64 `json:"put_iv"`
-	PutDelta *float64 `json:"put_delta"`
-	PutOI    *int64   `json:"put_oi"`
+	PutBid        *float64  `json:"put_bid"`
+	PutAsk        *float64  `json:"put_ask"`
+	PutLast       *float64  `json:"put_last"`
+	PutPrevClose  *float64  `json:"put_prev_close,omitempty"`
+	PutIV         *float64  `json:"put_iv"`
+	PutDelta      *float64  `json:"put_delta"`
+	PutOI         *int64    `json:"put_oi"`
+	PutAsOf       time.Time `json:"put_as_of,omitzero"`
+	PutDataStatus string    `json:"put_data_status,omitempty"`
+	PutIVStatus   string    `json:"put_iv_status,omitempty"`
+	PutOIStatus   string    `json:"put_oi_status,omitempty"`
 }
 
 // ChainExpiriesParams is the input for MethodChainExpiries.
@@ -2084,13 +2112,16 @@ type ChainExpiriesResult struct {
 
 // ChainResult is MethodChainFetch's payload.
 type ChainResult struct {
-	Symbol   string        `json:"symbol"`
-	Spot     float64       `json:"spot"`
-	Expiry   string        `json:"expiry"`
-	DTE      int           `json:"dte"`
-	DataType string        `json:"data_type"`
-	Strikes  []ChainStrike `json:"strikes"`
-	AsOf     time.Time     `json:"as_of"`
+	Symbol         string        `json:"symbol"`
+	Spot           float64       `json:"spot"`
+	Expiry         string        `json:"expiry"`
+	DTE            int           `json:"dte"`
+	DataType       string        `json:"data_type"`
+	FeedType       string        `json:"feed_type,omitempty"`
+	SessionState   string        `json:"session_state,omitempty"`
+	Strikes        []ChainStrike `json:"strikes"`
+	WarningDetails []DataWarning `json:"warning_details,omitempty"`
+	AsOf           time.Time     `json:"as_of"`
 }
 
 // ScanRow is one row of a scanner result. The IBKR scanner subscription
@@ -2111,22 +2142,29 @@ type ChainResult struct {
 // Unit conventions follow Quote: ChangePct is in PERCENT units (5.41
 // means 5.41 %), IV is a DECIMAL FRACTION (0.342 means 34.2 %).
 type ScanRow struct {
-	Rank         int      `json:"rank"`
-	Symbol       string   `json:"symbol"`
-	SecType      string   `json:"sec_type,omitempty"`
-	Exchange     string   `json:"exchange,omitempty"`
-	Currency     string   `json:"currency,omitempty"`
-	LocalSymbol  string   `json:"local_symbol,omitempty"`
-	TradingClass string   `json:"trading_class,omitempty"`
-	Last         *float64 `json:"last,omitempty"`
-	PrevClose    *float64 `json:"prev_close,omitempty"`
-	Change       *float64 `json:"change,omitempty"`
-	ChangePct    *float64 `json:"change_pct,omitempty"`
-	Volume       *int64   `json:"volume,omitempty"`
-	IV           *float64 `json:"iv,omitempty"`
-	Week52High   *float64 `json:"week_52_high,omitempty"`
-	Week52Low    *float64 `json:"week_52_low,omitempty"`
-	Comment      string   `json:"comment,omitempty"`
+	Rank           int           `json:"rank"`
+	Symbol         string        `json:"symbol"`
+	SecType        string        `json:"sec_type,omitempty"`
+	Exchange       string        `json:"exchange,omitempty"`
+	Currency       string        `json:"currency,omitempty"`
+	LocalSymbol    string        `json:"local_symbol,omitempty"`
+	TradingClass   string        `json:"trading_class,omitempty"`
+	Last           *float64      `json:"last,omitempty"`
+	PrevClose      *float64      `json:"prev_close,omitempty"`
+	Change         *float64      `json:"change,omitempty"`
+	ChangePct      *float64      `json:"change_pct,omitempty"`
+	Volume         *int64        `json:"volume,omitempty"`
+	IV             *float64      `json:"iv,omitempty"`
+	Week52High     *float64      `json:"week_52_high,omitempty"`
+	Week52Low      *float64      `json:"week_52_low,omitempty"`
+	DataType       string        `json:"data_type,omitempty"`
+	FeedType       string        `json:"feed_type,omitempty"`
+	PriceAt        time.Time     `json:"price_at,omitzero"`
+	PriceAsOf      string        `json:"price_as_of,omitempty"`
+	AsOf           time.Time     `json:"as_of,omitzero"`
+	VolumePhase    string        `json:"volume_phase,omitempty"`
+	WarningDetails []DataWarning `json:"warning_details,omitempty"`
+	Comment        string        `json:"comment,omitempty"`
 }
 
 // ScanResult wraps the rows.
@@ -2173,7 +2211,37 @@ type ScanPresetSummary struct {
 type BackgroundTaskStatus struct {
 	// Name is a stable token identifying the task. Stable across
 	// daemon versions; one of the documented values above.
-	Name string `json:"name"`
+	Name       string    `json:"name"`
+	Status     string    `json:"status,omitempty"`
+	Scope      string    `json:"scope,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	EtaSeconds int       `json:"eta_seconds,omitempty"`
+	Progress   int       `json:"progress,omitempty"`
+}
+
+// DataWarning is the common structured warning shape used by price-level
+// tools. It deliberately matches RegimeWarning / GammaWarningDetail's JSON
+// contract so agents can handle freshness and provenance uniformly.
+type DataWarning struct {
+	Code     string `json:"code"`
+	Scope    string `json:"scope,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Message  string `json:"message"`
+	Impact   string `json:"impact,omitempty"`
+	Action   string `json:"action,omitempty"`
+}
+
+// SubsystemHealth is a compact status.health diagnostic for tool families
+// that can degrade independently while the gateway remains connected.
+type SubsystemHealth struct {
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	Message     string    `json:"message,omitempty"`
+	LastError   string    `json:"last_error,omitempty"`
+	LastErrorAt time.Time `json:"last_error_at,omitzero"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	EtaSeconds  int       `json:"eta_seconds,omitempty"`
+	Progress    int       `json:"progress,omitempty"`
 }
 
 // HealthResult is the response to MethodStatusHealth.
@@ -2206,6 +2274,7 @@ type HealthResult struct {
 	// `len(result.background_tasks) == 0` to mean "idle" without
 	// inferring from absence.
 	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
+	Subsystems      []SubsystemHealth      `json:"subsystems,omitempty"`
 	// Members carries the runtime SPX-membership state: source
 	// (cache vs embedded), count, as-of timestamp, refresh health.
 	// Populated unconditionally — even when the daemon falls back

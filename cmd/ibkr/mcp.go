@@ -44,11 +44,12 @@ func runMCP(args []string) int {
 	defer cancel()
 
 	srv := mcp.NewServer(conn, effectiveVersion())
-	// Streaming subscriptions need their own daemon connections because
-	// dial.Conn.Stream holds the per-conn mutex for the stream's lifetime.
-	// The dialer reuses the same socket path the unary conn was opened
-	// against, so the daemon's subscription manager reference-counts every
-	// (CLI watch, MCP subscriber, snapshot poll) into one IBKR line.
+	// Tool calls and streaming subscriptions use short-lived daemon
+	// connections so a timed-out MCP call cannot leave a late daemon reply
+	// queued on the server's shared control socket. The dialer reuses the
+	// same socket path the unary conn was opened against, so the daemon's
+	// subscription manager reference-counts every (CLI watch, MCP
+	// subscriber, snapshot poll) into one IBKR line.
 	srv.SetDialer(func() (*dial.Conn, error) {
 		return dial.Connect(socketPath)
 	})

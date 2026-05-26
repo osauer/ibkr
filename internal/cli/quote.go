@@ -149,10 +149,7 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 		// Tint the data-type column yellow when not live so a row of
 		// frozen/delayed quotes is obvious at a glance — same policy as
 		// the table-header badge.
-		dt := q.DataType
-		if !rpc.IsLiveDataType(dt) {
-			dt = env.yellow(dt)
-		}
+		dt := quoteDataBadge(env, q)
 		fmt.Fprintf(out, "  %-9s  %s  %-6s  %s  %-6s  %s  %s  %s  %s  %-7s  %s  %s\n",
 			q.Symbol,
 			orDash(q.Bid, 10),
@@ -175,11 +172,38 @@ func renderQuoteSnapshotText(env *Env, qs []rpc.Quote) int {
 			if q.PriceSource != "" {
 				hint += " · source=" + q.PriceSource
 			}
+			if q.SpreadPct != nil {
+				hint += fmt.Sprintf(" · spread=%.2f%%", *q.SpreadPct)
+			}
 			fmt.Fprintf(out, "    %s\n", env.dim(hint))
 		}
 	}
 	fmt.Fprintln(out)
 	return 0
+}
+
+func quoteDataBadge(env *Env, q rpc.Quote) string {
+	dt := q.DataType
+	if dt == "" {
+		dt = rpc.MarketDataLive
+	}
+	if q.QuoteQuality != "" && q.QuoteQuality != "firm" {
+		dt += "/" + q.QuoteQuality
+	}
+	switch q.QuoteQuality {
+	case "firm":
+		if rpc.IsLiveDataType(q.DataType) {
+			return env.green(dt)
+		}
+	case "wide", "indicative", "prev_close", "stale":
+		return env.yellow(dt)
+	case "missing":
+		return env.red(dt)
+	}
+	if !rpc.IsLiveDataType(q.DataType) {
+		return env.yellow(dt)
+	}
+	return dt
 }
 
 func quoteDisplayPrice(q rpc.Quote) *float64 {
