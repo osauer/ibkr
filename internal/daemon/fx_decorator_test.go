@@ -187,6 +187,34 @@ func TestBaseCurrencyFromRaw_ExchangeRateOnly(t *testing.T) {
 	}
 }
 
+// TestBaseCurrencyFromRaw_PrefersAccountValueSuffix pins the live-account
+// regression where several $LEDGER exchange-rate rows were 1.0 and the
+// old map iteration fallback randomly labelled the portfolio base CHF/USD.
+func TestBaseCurrencyFromRaw_PrefersAccountValueSuffix(t *testing.T) {
+	raw := map[string]string{
+		"Currency":           "BASE",
+		"NetLiquidation_EUR": "181000",
+		"ExchangeRate_CHF":   "1.0",
+		"ExchangeRate_USD":   "1.0",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "EUR" {
+		t.Errorf("baseCurrencyFromRaw = %q, want EUR", got)
+	}
+}
+
+// TestBaseCurrencyFromRaw_AmbiguousUnitRates: if all we know is that
+// multiple currencies have unit exchange rates, returning any one of them
+// is worse than returning unknown.
+func TestBaseCurrencyFromRaw_AmbiguousUnitRates(t *testing.T) {
+	raw := map[string]string{
+		"ExchangeRate_CHF": "1.0",
+		"ExchangeRate_USD": "1.0",
+	}
+	if got := baseCurrencyFromRaw(raw); got != "" {
+		t.Errorf("baseCurrencyFromRaw = %q, want empty for ambiguous unit rates", got)
+	}
+}
+
 // TestBaseCurrencyFromRaw_NoSignal: nothing usable in the raw map — we
 // return empty, never invent a default.
 func TestBaseCurrencyFromRaw_NoSignal(t *testing.T) {

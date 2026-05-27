@@ -174,6 +174,29 @@ func TestUSOptionsRegularSession(t *testing.T) {
 	}
 }
 
+func TestQuerySessionsFirstRowMirrorsCurrentSession(t *testing.T) {
+	t.Parallel()
+	loc := mustLoc(t, "America/New_York")
+	cal := NewWithClock(func() time.Time { return time.Date(2026, 5, 26, 15, 0, 0, 0, loc) })
+
+	res, err := cal.Query(Query{Market: MarketUSOptions, Days: 2})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if !res.Session.IsOpen {
+		t.Fatal("Session.IsOpen = false, want true")
+	}
+	if len(res.Sessions) != 2 {
+		t.Fatalf("Sessions len = %d, want 2", len(res.Sessions))
+	}
+	if !res.Sessions[0].IsOpen {
+		t.Fatalf("Sessions[0].IsOpen = false while top-level session is open: %+v", res.Sessions[0])
+	}
+	if res.Sessions[1].IsOpen {
+		t.Fatalf("Sessions[1].IsOpen = true for a forward schedule row: %+v", res.Sessions[1])
+	}
+}
+
 func mustLoc(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)

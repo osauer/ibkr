@@ -1,6 +1,6 @@
 # Fresh-Ideas Screen — Minimal IBKR MCP Path
 
-Last updated: 2026-05-27 21:10 CEST
+Last updated: 2026-05-27 21:17 CEST
 
 Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
@@ -40,7 +40,7 @@ Classify the tape as **early / mid / mid-late / late** cycle with one PHIA confi
 
 ### 3. Universe Funnel
 
-Run one scan first and a second scan only if the first scan leaves fewer than 6 non-held, non-ETF candidates after basic filtering. **Do not call `ibkr_scan_params` in the default path.** The scan codes below are known; call `ibkr_scan_params` only after a scan fails with an unsupported-code/location error, then spend at most one recovery call.
+Run one scan first and a second scan only if the first scan leaves fewer than 2 non-held, non-ETF candidates after the technical liquidity gate. **Do not call `ibkr_scan_params` in the default path.** The scan codes below are known; call `ibkr_scan_params` only after a scan fails with an unsupported-code/location error, then spend at most one recovery call.
 
 - US RTH default: run `HIGH_LAST_VS_EMA50` first, using `instrument:"STK"` and `exchange:"STK.US.MAJOR"`. If a second scan is justified, prefer `HIGH_VS_52W_HL` or `HIGH_LAST_VS_EMA200`. Use `MOST_ACTIVE_USD` only as the liquidity fallback when the breakout scan leaves too few usable single-name candidates; it is broad-market beta heavy and usually less fresh. Avoid `HOT_BY_VOLUME` in the default latency path; it is a noisy fallback for unusual IPO/SPAC-style tapes and commonly returns poor liquidity after a slow enrichment pass.
 - If Xetra is open and the US tape is thin, use one US scan and one German scan with `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"`, preferably `HIGH_VS_52W_HL` or `HIGH_LAST_VS_EMA50`.
@@ -49,7 +49,7 @@ Run one scan first and a second scan only if the first scan leaves fewer than 6 
 - `ibkr_technical`: batch by market, up to 5 symbols per call and 2 calls total. Drop `data_quality!="ok"` or `avg_dollar_volume_20d < 50000000`. Do not retry benchmark warnings; use trend and liquidity fields or drop.
 - `ibkr_quote`: validate at most 5 survivors, split US/German only if needed. Drop stale/wide/illiquid rows.
 
-Shortlist 3-5 names. For each, record theme, direction, one-line edge, trend/RS evidence, liquidity, and why it can move violently in 3-6 months. If the shortlist is mostly mega-cap beta, already very extended, option-untradable, or unlikely to double without a fresh catalyst, say so and stop with 1-2 watch candidates instead of forcing trades.
+If the first scan took more than ~20 seconds or returned mostly micro/small-cap squeezes, do not spend a second scan unless the technical gate leaves no usable candidates. Shortlist 2-5 names. For each, record theme, direction, one-line edge, trend/RS evidence, liquidity, and why it can move violently in 3-6 months. For sub-$25 names with `spread_pct > 0.25%`, `atr_pct > 0.10`, or a one-day move over 50%, use watch-candidate language unless a live option chain and catalyst-quality evidence support a real plan. If the shortlist is mostly mega-cap beta, already very extended, option-untradable, or unlikely to double without a fresh catalyst, say so and stop with 1-2 watch candidates instead of forcing trades.
 
 ### 4. Finalist Structure And Sizing
 
