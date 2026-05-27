@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Updating | ibkr</title>
+  <link rel="canonical" href="https://osauer.dev/ibkr/guides/updating.html">
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="updating">Updating</h1>
+<p>Updated: 2026-05-26 22:02 CEST</p>
+<p>Four things can affect data freshness: the <strong>binary</strong> (<code>ibkr</code> itself), the <strong>Claude Desktop MCPB</strong> when installed through Desktop Extensions, the <strong>S&amp;P 500 constituent list</strong> the breadth indicator uses, and the embedded <strong>official market calendars</strong>. They update independently because they have different sources and cadences.</p>
+<h2 id="updating-the-binary-ibkr-update">Updating the binary — <code>ibkr update</code></h2>
+<p>Once you&#39;re on v1.0.0 or later, the next upgrade is one command:</p>
+<pre><code>ibkr update            # fetch latest, prompt to restart daemon</code></pre>
+<p>The CLI checks the <a href="https://api.github.com/repos/osauer/ibkr/releases/latest">GitHub <code>/releases/latest</code></a> endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on <code>SHA256SUMS</code>** against the maintainer&#39;s public key embedded in your current <code>ibkr</code> binary, then SHA-verifies the tarball and atomically replaces <code>~/.local/bin/ibkr</code>. The prior binary is stashed as <code>~/.local/bin/ibkr.bak</code> for one-step rollback (<code>mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr</code>).</p>
+<p>A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.</p>
+<h3 id="release-integrity">Release integrity</h3>
+<p>From v1.0.0 onward, every release ships <code>SHA256SUMS.asc</code> — a PGP detached signature over <code>SHA256SUMS</code>, produced by the maintainer&#39;s Ed25519 key (fingerprint <code>D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D</code>). The public key is embedded in every ibkr binary, so <code>ibkr update</code> verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.</p>
+<p>Releases that publish an MCP Bundle include both <code>ibkr-vX.Y.Z.mcpb</code> and the stable latest-download asset <code>ibkr.mcpb</code> in <code>SHA256SUMS</code>. The MCP Registry publish artifact also records the versioned MCPB file&#39;s SHA-256 in <code>server.json</code> as <code>fileSha256</code>.</p>
+<p>The MCPB container itself is not yet code-signed. Treat MCPB release integrity as signed-checksum and registry-hash based unless <code>mcpb verify ibkr-vX.Y.Z.mcpb</code> succeeds for a future release.</p>
+<p><code>ibkr update</code> <strong>refuses</strong> any release missing the signature, and any release whose signature does not verify against the embedded key. There is no <code>--insecure</code> flag. If you ever need to debug a verification failure, the underlying error is printed verbatim and the manual verification steps are in <a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md#release-integrity-v100">SECURITY.md → Release integrity</a>.</p>
+<h3 id="headless-scripted-use">Headless / scripted use</h3>
+<p>In non-interactive contexts (cron, systemd timers, CI, stdin-redirected shells) the <code>[Y/n]</code> prompt would block. Pass an explicit restart decision:</p>
+<pre><code>ibkr update --restart        # auto-restart daemon
+ibkr update --no-restart     # don&#39;t restart; print &#34;restart pending&#34; hint</code></pre>
+<p>Running <code>ibkr update</code> from a non-TTY <em>without</em> either flag exits non-zero with <code>ambiguous in non-interactive mode</code> and does not install. This is deliberate — silent default-to-N would be a footgun for systemd timers expecting auto-restart.</p>
+<h3 id="other-flags">Other flags</h3>
+<pre><code>ibkr update --check          # dry-run: print &#34;would install vX.Y.Z&#34;, exit 0
+ibkr update --force          # re-install latest even if same version (corrupt-binary recovery)</code></pre>
+<p><code>--check</code> exits 0 whether or not an update is available — only fetch failures exit non-zero. So <code>ibkr update --check &amp;&amp; ibkr update</code> is the idiomatic confirm-then-install pattern.</p>
+<h3 id="pre-v100-binaries">Pre-v1.0.0 binaries</h3>
+<p><code>ibkr update</code> only exists from v1.0.0 onward. Earlier installs upgrade once manually (download the tarball from <a href="https://github.com/osauer/ibkr/releases">releases</a>, extract, run <code>make install</code>), then carry forward with <code>ibkr update</code>.</p>
+<h2 id="updating-claude-desktop-mcpb-installs">Updating Claude Desktop MCPB installs</h2>
+<p>Claude Desktop MCPB installs carry their own embedded <code>ibkr</code> binary. <code>ibkr update</code> updates shell-managed installs such as <code>~/.local/bin/ibkr</code>; it does not replace a binary embedded inside Claude Desktop&#39;s extension store.</p>
+<p>To update a Claude Desktop MCPB install, download the latest bundle and reinstall it in Claude Desktop:</p>
+<p>&lt;https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb&gt;</p>
+<p>After reinstalling, fully quit Claude Desktop and reopen it so it respawns the MCP server from the updated bundle.</p>
+<h2 id="updating-the-sp-500-list-automatic">Updating the S&amp;P 500 list — automatic</h2>
+<p>The daemon refreshes the constituent list from <a href="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies">Wikipedia&#39;s &#34;List of S&amp;P 500 companies&#34;</a> on three triggers, all converging on one shared fetch:</p>
+<ul>
+<li><strong>Daily at 02:30 ET</strong> — between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.</li>
+<li><strong>On daemon startup</strong> if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).</li>
+<li><strong>On the first breadth call after midnight ET rollover</strong> if neither of the above fired (network outage during the ticker, etc.).</li>
+</ul>
+<p>On success the new list is written to <code>~/.cache/ibkr/spx-members/sp500-members.json</code> and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded — breadth never goes silent.</p>
+<h3 id="pinning-the-list-regulated-traders-reproducibility-audits-air-gapped">Pinning the list (regulated traders, reproducibility audits, air-gapped)</h3>
+<p>Some users need a frozen membership list. Two override layers, with symmetric semantics:</p>
+<p><strong>Persistent (TOML config):</strong></p>
+<pre><code>[spx]
+members_auto_refresh = false</code></pre>
+<p><strong>Ad-hoc (env var, overrides TOML):</strong></p>
+<pre><code>IBKR_SPX_MEMBERS_AUTO_REFRESH=0 ibkr daemon   # force off
+IBKR_SPX_MEMBERS_AUTO_REFRESH=1 ibkr daemon   # force on (even if TOML says off)</code></pre>
+<p>When pinned, <code>ibkr status</code> shows the reason — <code>refresh:disabled (env)</code> vs <code>refresh:disabled (config)</code> — so a confused user knows which knob to flip.</p>
+<h3 id="status-row">Status row</h3>
+<p><code>ibkr status</code> always carries a one-line summary of the members source and refresh health:</p>
+<pre><code>Members  cache:2026-05-22  count:503                            # healthy
+Members  embedded:2026-05-22  count:503  refresh:parse_failed   # silent rot (Wikipedia changed HTML)
+Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS down</code></pre>
+<p>The <code>cache:DATE</code> vs <code>embedded:DATE</code> source token tells you whether the in-process list is from the auto-refresh path or the binary&#39;s compiled-in fallback. The bracketed <code>refresh:&lt;state&gt;</code> suffix appears only when something needs attention.</p>
+<h2 id="updating-market-calendars-binary-release">Updating market calendars - binary release</h2>
+<p>Market calendars are embedded official exchange schedules in this first release. The supported calendars are US cash equities, US listed options regular sessions, and German Xetra cash equities. They do not cold-start, hit a network cache, or apply an IBKR-specific overlay at runtime; the official exchange calendar is the binding source for open/closed/holiday/early-close context.</p>
+<p>Each response includes <code>coverage_start</code> and <code>coverage_end</code>. Queries outside embedded coverage return <code>state: &#34;unknown&#34;</code> rather than guessing from weekdays. The CLI/MCP <code>days</code> horizon is capped at 400 calendar days, which covers the practical risk-manager lookahead for next-session, long-weekend, year-end, and next-year holiday checks while keeping responses bounded.</p>
+<p>Calendar updates arrive with normal <code>ibkr</code> binary updates. If a supported exchange publishes an unscheduled closure or changes a future holiday after your installed binary was built, update the binary once a release carrying the refreshed calendar is available.</p>
+<h2 id="where-state-lives">Where state lives</h2>
+<ul>
+<li><code>~/.local/bin/ibkr</code> — installed binary; <code>.bak</code> carries the immediately-prior version.</li>
+<li>Claude Desktop extension storage — MCPB-managed installs carry a separate embedded binary; update by reinstalling <code>ibkr.mcpb</code>.</li>
+<li><code>~/.cache/ibkr/spx-members/sp500-members.json</code> — runtime-refreshed members file.</li>
+<li><code>~/.cache/ibkr/update/</code> — install-time scratch space (downloaded tarball, lock file).</li>
+<li><code>~/.config/ibkr/config.toml</code> — optional persistent config (see <a href="../reference/config.html">config reference</a>).</li>
+</ul>
+<p>All under <code>$XDG_CACHE_HOME</code> / <code>$XDG_CONFIG_HOME</code> when set; the paths above are the fallback.</p>
+<h2 id="reference">Reference</h2>
+<ul>
+<li><a href="../reference/config.html">Configuration reference</a> — every TOML field and <code>IBKR_*</code> env var.</li>
+<li>The updater keeps one <code>.bak</code> binary beside <code>~/.local/bin/ibkr</code>, and the SPX members cache lives under <code>~/.cache/ibkr/</code> unless XDG paths override it.</li>
+</ul>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>

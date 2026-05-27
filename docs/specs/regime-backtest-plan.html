@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Regime Backtest Plan | ibkr</title>
+  <link rel="canonical" href="https://osauer.dev/ibkr/specs/regime-backtest-plan.html">
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="../guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="regime-backtest-plan">Regime Backtest Plan</h1>
+<p><strong>Updated:</strong> 2026-05-24 12:50 CEST</p>
+<p>This plan defines the calibration work required before <code>ibkr regime</code> may expose forecast probabilities. Until then, the dashboard should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only.</p>
+<h2 id="historical-inputs">Historical Inputs</h2>
+<p>Build a daily panel with one row per U.S. trading day, using only data that would have been observable at that day&#39;s decision time.</p>
+<ul>
+<li>VIX and VIX3M closes, plus any available intraday/frozen labels if the study</li>
+</ul>
+<p>evaluates intraday reads.</p>
+<ul>
+<li>Cboe VVIX official close and publication availability date.</li>
+<li>HYG and SPY daily OHLC, HYG 50-DMA, SPY 52-week high, and HYG/SPY divergence</li>
+</ul>
+<p>streak state.</p>
+<ul>
+<li>FRED/ICE BofA HY OAS and IG OAS vintages, including release dates and any</li>
+</ul>
+<p>source revisions.</p>
+<ul>
+<li>FRED CP 90-day AA financial and 3-month T-bill vintages, including release</li>
+</ul>
+<p>dates and revisions.</p>
+<ul>
+<li>USD/JPY daily midpoint/close, 7-trading-day change, and missing-market days.</li>
+<li>Dealer gamma snapshots, with method version, input option universe, data</li>
+</ul>
+<p>coverage, warning details, and cache timestamp.</p>
+<ul>
+<li>SPX breadth snapshots, with constituent universe as of that day, coverage,</li>
+</ul>
+<p>50/200-DMA percentages, new-high/new-low counts, and cache timestamp.</p>
+<ul>
+<li>Candidate future input: ICE BofA MOVE official daily or intraday series from</li>
+</ul>
+<p>a licensed point-in-time source. Keep it outside the production feature set until the live sourcing question is solved; never fill it with ETF/futures proxies.</p>
+<h2 id="target-stress-definitions">Target Stress Definitions</h2>
+<p>Test several targets rather than tune to one story:</p>
+<ul>
+<li>Forward SPX drawdown: max close-to-close drawdown over 5, 10, and 20 trading</li>
+</ul>
+<p>days exceeding 3%, 5%, and 8%.</p>
+<ul>
+<li>Volatility shock: VIX close or intraday high crossing 25/30, or VIX 5-day</li>
+</ul>
+<p>change exceeding a fixed percentile of its trailing distribution.</p>
+<ul>
+<li>Credit stress: HY OAS widening by at least 50 bp or 100 bp over the next 20</li>
+</ul>
+<p>observations.</p>
+<ul>
+<li>Cross-asset stress: any two of SPX drawdown, VIX shock, HY OAS widening, or</li>
+</ul>
+<p>USD/JPY yen-strengthening shock occur inside the target window. MOVE can be evaluated as a candidate target only after a licensed point-in-time source is available.</p>
+<p>Targets must be evaluated from the timestamp at which the dashboard would have been read; do not let later official revisions change the historical feature row used for that read.</p>
+<h2 id="walk-forward-calibration">Walk-Forward Calibration</h2>
+<p>Use expanding or rolling walk-forward windows:</p>
+<ul>
+<li>Fit thresholds/weights on an initial window, for example 2006-2015.</li>
+<li>Validate on the next block, then roll forward yearly or quarterly.</li>
+<li>Freeze all threshold decisions before scoring the next out-of-sample block.</li>
+<li>Report discrimination (AUROC/PR), calibration (Brier/reliability only if a</li>
+</ul>
+<p>probability model is actually fitted), false-alarm rate, missed-stress rate, and average lead time.</p>
+<ul>
+<li>Compare simple baselines: VIX-only, VIX/VIX3M-only, equal-weight row count,</li>
+</ul>
+<p>cluster worst-band count, and any proposed cluster weighting.</p>
+<h2 id="look-ahead-controls">Look-Ahead Controls</h2>
+<ul>
+<li>Use point-in-time FRED vintages; when unavailable, lag official series by a</li>
+</ul>
+<p>conservative publication delay and label that assumption.</p>
+<ul>
+<li>Use only constituent membership known on the date for breadth.</li>
+<li>Recompute rolling windows from data available up to the read timestamp.</li>
+<li>Treat gamma as absent before the method existed unless historical option</li>
+</ul>
+<p>chains, OI, IV, and the exact method version can be reconstructed.</p>
+<ul>
+<li>Keep source outages and entitlement gaps as <code>unavailable</code>; do not forward-fill</li>
+</ul>
+<p>a missing critical row into a fake green/yellow/red reading.</p>
+<h2 id="missing-rows-and-revisions">Missing Rows and Revisions</h2>
+<p>Score each historical row with the same contract as live JSON:</p>
+<ul>
+<li><code>status</code></li>
+<li><code>band</code></li>
+<li><code>as_of</code></li>
+<li><code>source</code></li>
+<li><code>warning_details</code></li>
+<li>row-level confidence/freshness</li>
+</ul>
+<p>Evaluate both the predictive signal and the coverage signal. A model that looks good only after dropping unavailable gamma/breadth/official-file days is not a valid live dashboard model.</p>
+<h2 id="cluster-weight-evaluation">Cluster Weight Evaluation</h2>
+<p>Test cluster logic separately from row thresholds:</p>
+<ul>
+<li>Worst-band cluster tally, current production behavior.</li>
+<li>Equal-weight rows, to show the over-counting baseline.</li>
+<li>Equal-weight clusters.</li>
+<li>Learned cluster weights with shrinkage and strict walk-forward validation.</li>
+<li>Red-dominance rule: any red cluster forces at least a &#34;Stress signal present&#34;</li>
+</ul>
+<p>label, regardless of green row count.</p>
+<p>Promote a learned weight only if it improves out-of-sample utility without making stale/unavailable critical rows look safer than they are.</p>
+<h2 id="current-recommendation">Current Recommendation</h2>
+<p>Keep the present threshold labels marked <code>heuristic: true</code> and <code>pending_backtest: true</code>. Do not add forecast probabilities. The next useful implementation step is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a separate notebook/script that evaluates the targets above.</p>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>
