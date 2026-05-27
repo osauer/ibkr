@@ -1,6 +1,6 @@
 # Fresh-Ideas Screen — Minimal IBKR MCP Path
 
-Last updated: 2026-05-27 20:30 CEST
+Last updated: 2026-05-27 20:50 CEST
 
 Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
@@ -11,7 +11,7 @@ Optimize for **decision quality per tool call**. A good run proves data readines
 - `ALLOW_OFFHOURS=false`: if US listed options are closed or live option IV is unavailable, stop unless `TEST_MODE=true`.
 - `TEST_MODE=false`: if true, run a shares-only smoke path, label it clearly, skip option structures, and cap universe work at one scan plus one technical call.
 - Target budget after preflight: **12-16 tool calls**. Hard cap: **22 total tool calls**. Do not spend calls trying to rescue a weak screen.
-- Primary scanner floor: `min_price:5`, `min_dollar_volume:50000000`, `require_live:true`, `exclude_penny:true`, `limit:12`. One recovery scan may relax to `min_dollar_volume:10000000` and `require_live:false`; quote validation must then restore live-quality filtering.
+- Primary scanner floor: `min_price:5`, `require_live:true`, `exclude_penny:true`, `limit:12`. Gate liquidity after scanning with `ibkr_technical.avg_dollar_volume_20d >= 50000000`; scanner live volume can be nil even when quotes are firm.
 - Candidate caps: at most 2 scans, 10 technical symbols, 5 quote survivors, 3 final ideas, 2 option-chain candidates, 2 sizing calls per idea maximum.
 - PHIA probability yardstick is mandatory for all forward-looking claims: `remote <=5%`, `highly unlikely 10-20%`, `unlikely 25-35%`, `realistic possibility 40-50%`, `likely 55-75%`, `highly likely 80-90%`, `almost certain >=95%`.
 
@@ -44,9 +44,9 @@ Run at most two scans. **Do not call `ibkr_scan_params` in the default path.** T
 
 - US RTH default: run `MOST_ACTIVE_USD` first, then one of `HOT_BY_VOLUME`, `HIGH_VS_52W_HL`, `HIGH_LAST_VS_EMA50`, or `HIGH_LAST_VS_EMA200` using `instrument:"STK"` and `exchange:"STK.US.MAJOR"`.
 - If Xetra is open and the US tape is thin, use one US scan and one German scan with `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"`, preferably `HIGH_VS_52W_HL` or `HOT_BY_VOLUME`.
-- If both primary scans return zero rows during US RTH, run exactly one recovery scan: `MOST_ACTIVE_USD`, same exchange/instrument, `limit:12`, `min_price:5`, `min_dollar_volume:10000000`, `exclude_penny:true`, `require_live:false`. This is a scanner-enrichment recovery only; do not accept any recovered name without firm quote validation.
+- If both primary scans return zero rows during US RTH, run exactly one recovery scan: `MOST_ACTIVE_USD`, same exchange/instrument, `limit:12`, `min_price:5`, `exclude_penny:true`, `require_live:false`. This is a scanner-enrichment recovery only; do not accept any recovered name without firm quote validation and technical liquidity.
 - Dedupe immediately to at most 10 names. Prefer fresh breakouts, high relative volume, liquid optionable names, and non-obvious value-chain beneficiaries. Keep one "Other" slot for an exceptional setup.
-- `ibkr_technical`: batch by market, up to 5 symbols per call and 2 calls total. Drop `data_quality!="ok"`. Do not retry benchmark warnings; use trend and liquidity fields or drop.
+- `ibkr_technical`: batch by market, up to 5 symbols per call and 2 calls total. Drop `data_quality!="ok"` or `avg_dollar_volume_20d < 50000000`. Do not retry benchmark warnings; use trend and liquidity fields or drop.
 - `ibkr_quote`: validate at most 5 survivors, split US/German only if needed. Drop stale/wide/illiquid rows.
 
 Shortlist 3-5 names. For each, record theme, direction, one-line edge, trend/RS evidence, liquidity, and why it can move violently in 3-6 months. If the shortlist is weak, say so and stop with 1-2 watch candidates instead of forcing trades.
@@ -55,7 +55,7 @@ Shortlist 3-5 names. For each, record theme, direction, one-line edge, trend/RS 
 
 Pick 1-3 final ideas. Use options only when live chain data supports them.
 
-- For at most 2 finalists, call `ibkr_chain` without `expiry` and set `all_expiries:true` only when the default list does not show a usable 90-180 DTE expiry. Choose one 90-180 DTE expiry with usable IV and 1-sigma move, then call one strike grid with small `width` and the relevant `side`.
+- For at most 2 finalists, call `ibkr_chain` without `expiry` using `min_dte:90` and `max_dte:180` (or `target_dte:120` when one expiry is enough). Choose one 90-180 DTE expiry with usable IV and 1-sigma move, then call one strike grid with small `width` and the relevant `side`. Do not use `all_expiries:true` for this path.
 - Hard-gate options on `options_tradable:false`, stale/model-only legs, subscribe errors, no bid/ask, no IV, no implied move, or `live_option_iv_unavailable`/`expiry_iv_unavailable`. After one hard-gated grid, stop chain probing and use shares or drop.
 - Prefer simple structures: shares, long call/put, or defined-risk debit spread. No 0DTE. No multi-leg complexity unless both legs have live quotes and tight spreads.
 - Size with 1-3% NLV risk. For shares, use `ibkr_size` with entry/stop/target. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.

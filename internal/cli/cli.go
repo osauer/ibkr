@@ -103,7 +103,8 @@ func isValueFlag(name string) bool {
 		"type", "sort", "days", "by", "lookback-days",
 		"entry", "stop", "target", "risk-pct", "lot", "fx",
 		"only", "market", "exchange", "primary", "currency", "instrument", "log",
-		"date", "next", "min-price", "min-volume", "min-dollar-volume":
+		"date", "next", "min-price", "min-volume", "min-dollar-volume",
+		"min-dte", "max-dte", "target-dte":
 		return true
 	}
 	return false
@@ -134,7 +135,7 @@ func init() {
 		{"quote", "Snapshot or stream quotes for symbols / option contracts", "ibkr quote SYM[,SYM…] [--market us|de] [--watch --rate 250ms] | ibkr quote SYM YYMMDD C|P STRIKE [--json]", runQuote},
 		{"watch", "Local watchlist symbols; add/remove/clear offline or quote the list live", "ibkr watch [--quotes] [--timeout 5s] [--json] | ibkr watch --list [--json] | ibkr watch --watch --rate 1s | ibkr watch SYM[,SYM…] --add|--remove | ibkr watch --clear", runWatchlist},
 		{"calendar", "Official market sessions for US equities, US options, and Xetra", "ibkr calendar [--market us|us-options|de] [--date YYYY-MM-DD] [--next 14] [--json]", runCalendar},
-		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--require-live-iv] [--json]", runChain},
+		{"chain", "Option chain table or expiry list", "ibkr chain SYM [--expiry YYYY-MM-DD [--width 5] [--side calls|puts|both]] [--no-iv] [--all-expiries] [--require-live-iv] [--min-dte N] [--max-dte N] [--target-dte N] [--json]", runChain},
 		{"history", "Daily OHLCV bars for a symbol", "ibkr history SYM [--days 90] [--json]", runHistory},
 		{"technical", "Trend, relative strength, ATR, and liquidity from daily bars", "ibkr technical SYM[,SYM...] [--benchmark SPY] [--market us|de] [--json]", runTechnical},
 		{"breadth", "S&P 500 breadth — % above 50/200-DMA + new-highs/new-lows, computed locally from constituent fan-out (~60 min cold)", "ibkr breadth [--days 30] [--json]", runBreadth},

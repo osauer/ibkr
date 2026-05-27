@@ -57,6 +57,16 @@ func TestRunChainValidatesLocalFlagsBeforeRPC(t *testing.T) {
 			args: []string{"--expiry", "2026-06-19", "--width", "-1", "AAPL"},
 			want: "--width must be >= 0",
 		},
+		{
+			name: "negative dte filter",
+			args: []string{"--min-dte", "-1", "AAPL"},
+			want: "--min-dte, --max-dte, and --target-dte must be >= 0",
+		},
+		{
+			name: "dte filter only applies to expiry list",
+			args: []string{"--expiry", "2026-06-19", "--target-dte", "120", "AAPL"},
+			want: "DTE filters only apply when --expiry is omitted",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

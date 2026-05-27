@@ -24,3 +24,27 @@ func TestFilterScanRowsDropsIlliquidOffHoursRows(t *testing.T) {
 		t.Fatalf("filtered rows = %+v, want only GOOD", got)
 	}
 }
+
+func TestFilterScanRowsUsesAverageDollarVolumeWhenLiveVolumeMissing(t *testing.T) {
+	t.Parallel()
+	rows := []rpc.ScanRow{
+		{Symbol: "LIVE", Last: ptrIfPos(10.00), Volume: ptrIfPos[int64](6_000_000), DataType: rpc.MarketDataLive},
+		{Symbol: "AVG_DOLLAR", Last: ptrIfPos(25.00), AvgDollarVolume20D: ptrIfPos(75_000_000.0), DataType: rpc.MarketDataLive},
+		{Symbol: "AVG_SHARES", Last: ptrIfPos(40.00), AvgVolume20D: ptrIfPos[int64](2_000_000), DataType: rpc.MarketDataLive},
+		{Symbol: "TOO_THIN", Last: ptrIfPos(12.00), AvgDollarVolume20D: ptrIfPos(25_000_000.0), DataType: rpc.MarketDataLive},
+	}
+
+	got := filterScanRows(rows, rpc.ScanRunParams{
+		MinDollarVolume: 50_000_000,
+		RequireLive:     true,
+	})
+
+	if len(got) != 3 {
+		t.Fatalf("filtered row count = %d, want 3: %+v", len(got), got)
+	}
+	for i, want := range []string{"LIVE", "AVG_DOLLAR", "AVG_SHARES"} {
+		if got[i].Symbol != want {
+			t.Fatalf("row %d = %s, want %s", i, got[i].Symbol, want)
+		}
+	}
+}

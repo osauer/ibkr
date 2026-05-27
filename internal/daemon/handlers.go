@@ -2519,7 +2519,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 			Comment:      r.Comment,
 		})
 	}
-	s.enrichScanRows(ctx, c, res.Rows)
+	s.enrichScanRows(ctx, c, res.Rows, p)
 	res.Rows = filterScanRows(res.Rows, p)
 	return res, nil
 }
@@ -2557,7 +2557,7 @@ func scanRowPassesFilters(row rpc.ScanRow, p rpc.ScanRunParams) bool {
 		}
 	}
 	if p.MinDollarVolume > 0 {
-		if row.Last == nil || row.Volume == nil || *row.Last*float64(*row.Volume) < p.MinDollarVolume {
+		if scanRowDollarVolume(row) < p.MinDollarVolume {
 			return false
 		}
 	}
@@ -2565,6 +2565,22 @@ func scanRowPassesFilters(row rpc.ScanRow, p rpc.ScanRunParams) bool {
 		return false
 	}
 	return true
+}
+
+func scanRowDollarVolume(row rpc.ScanRow) float64 {
+	if row.Last == nil {
+		return 0
+	}
+	if row.Volume != nil {
+		return *row.Last * float64(*row.Volume)
+	}
+	if row.AvgDollarVolume20D != nil {
+		return *row.AvgDollarVolume20D
+	}
+	if row.AvgVolume20D != nil {
+		return *row.Last * float64(*row.AvgVolume20D)
+	}
+	return 0
 }
 
 func scanRowHasUsableLiveQuote(row rpc.ScanRow) bool {
@@ -2606,7 +2622,7 @@ const scanEnrichConcurrency = 20
 // Ctx cancellation propagates: a CLI Ctrl-C during enrichment aborts
 // in-flight subscriptions and lets the result return with whatever data
 // arrived first, again with no fabrication.
-func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows []rpc.ScanRow) {
+func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows []rpc.ScanRow, filters rpc.ScanRunParams) {
 	if len(rows) == 0 || c == nil {
 		return
 	}
@@ -2623,7 +2639,7 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 		}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			s.enrichOneScanRow(ctx, c, &rows[i])
+			s.enrichOneScanRow(ctx, c, &rows[i], filters)
 		})
 	}
 	wg.Wait()
@@ -2637,7 +2653,7 @@ func (s *Server) enrichScanRows(ctx context.Context, c *ibkrlib.Connector, rows 
 // The shape of "good enough" is intentionally loose: we keep polling
 // even after `last` arrives because IV and 52w typically lag bid/ask/last
 // by 1-2 s, and the row is more useful with them than without.
-func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row *rpc.ScanRow) {
+func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row *rpc.ScanRow, filters rpc.ScanRunParams) {
 	pollKey := row.Symbol
 	var releaseSub func()
 	if scanRowNeedsRoutedQuote(row) {
@@ -2735,6 +2751,11 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 	market := marketcal.MarketUSEquity
 	if normCcy(row.Currency) == "EUR" {
 		market = marketcal.MarketDEXetra
+	}
+	if filters.MinDollarVolume > 0 {
+		s.fillQuoteLiquidity(ctx, c, &q, market, scanEnrichWindow, nil)
+		row.AvgVolume20D = q.AvgVolume20D
+		row.AvgDollarVolume20D = q.AvgDollarVolume20D
 	}
 	s.attachQuoteSessionContext(&q, market)
 	s.decorateQuote(&q, market)

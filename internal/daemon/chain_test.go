@@ -139,6 +139,30 @@ func TestChainExpiryIVWarningsMarksNoUsableMoves(t *testing.T) {
 	}
 }
 
+func TestSelectChainExpiriesByDTE(t *testing.T) {
+	t.Parallel()
+	today := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	expiries := []string{
+		"2026-05-29",
+		"2026-06-19",
+		"2026-08-31",
+		"2026-09-18",
+		"2026-11-20",
+		"2027-01-15",
+	}
+
+	got := selectChainExpiriesByDTE(expiries, today, 90, 180, 0)
+	want := []string{"2026-08-31", "2026-09-18", "2026-11-20"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("range filtered expiries = %v, want %v", got, want)
+	}
+
+	got = selectChainExpiriesByDTE(expiries, today, 90, 180, 120)
+	if len(got) != 1 || got[0] != "2026-09-18" {
+		t.Fatalf("target filtered expiries = %v, want [2026-09-18]", got)
+	}
+}
+
 func hasWarningCode(warnings []rpc.DataWarning, code string) bool {
 	for _, w := range warnings {
 		if w.Code == code {

@@ -2165,12 +2165,20 @@ type ChainStrike struct {
 // default because the back-half LEAPS are rarely consulted and pay the
 // IV-fetch cost for no decision value.
 //
+// MinDTE/MaxDTE/TargetDTE narrow expiry-list mode before any IV fan-out.
+// TargetDTE returns the single listed expiry closest to the requested day
+// count, after MinDTE/MaxDTE filtering when those are also set. This lets
+// agents ask for "roughly 120 DTE" without fetching IV for every weekly.
+//
 // Empty Symbol → bad_request.
 type ChainExpiriesParams struct {
 	Symbol        string `json:"symbol"`
 	WithIV        bool   `json:"with_iv,omitempty"`
 	AllExpiries   bool   `json:"all_expiries,omitempty"`
 	RequireLiveIV bool   `json:"require_live_iv,omitempty"`
+	MinDTE        int    `json:"min_dte,omitempty"`
+	MaxDTE        int    `json:"max_dte,omitempty"`
+	TargetDTE     int    `json:"target_dte,omitempty"`
 }
 
 // ChainExpiry is one row in MethodChainExpiries' response. IV is nil when
@@ -2304,29 +2312,31 @@ type ChainResult struct {
 // Unit conventions follow Quote: ChangePct is in PERCENT units (5.41
 // means 5.41 %), IV is a DECIMAL FRACTION (0.342 means 34.2 %).
 type ScanRow struct {
-	Rank           int           `json:"rank"`
-	Symbol         string        `json:"symbol"`
-	SecType        string        `json:"sec_type,omitempty"`
-	Exchange       string        `json:"exchange,omitempty"`
-	Currency       string        `json:"currency,omitempty"`
-	LocalSymbol    string        `json:"local_symbol,omitempty"`
-	TradingClass   string        `json:"trading_class,omitempty"`
-	Last           *float64      `json:"last,omitempty"`
-	PrevClose      *float64      `json:"prev_close,omitempty"`
-	Change         *float64      `json:"change,omitempty"`
-	ChangePct      *float64      `json:"change_pct,omitempty"`
-	Volume         *int64        `json:"volume,omitempty"`
-	IV             *float64      `json:"iv,omitempty"`
-	Week52High     *float64      `json:"week_52_high,omitempty"`
-	Week52Low      *float64      `json:"week_52_low,omitempty"`
-	DataType       string        `json:"data_type,omitempty"`
-	FeedType       string        `json:"feed_type,omitempty"`
-	PriceAt        time.Time     `json:"price_at,omitzero"`
-	PriceAsOf      string        `json:"price_as_of,omitempty"`
-	AsOf           time.Time     `json:"as_of,omitzero"`
-	VolumePhase    string        `json:"volume_phase,omitempty"`
-	WarningDetails []DataWarning `json:"warning_details,omitempty"`
-	Comment        string        `json:"comment,omitempty"`
+	Rank               int           `json:"rank"`
+	Symbol             string        `json:"symbol"`
+	SecType            string        `json:"sec_type,omitempty"`
+	Exchange           string        `json:"exchange,omitempty"`
+	Currency           string        `json:"currency,omitempty"`
+	LocalSymbol        string        `json:"local_symbol,omitempty"`
+	TradingClass       string        `json:"trading_class,omitempty"`
+	Last               *float64      `json:"last,omitempty"`
+	PrevClose          *float64      `json:"prev_close,omitempty"`
+	Change             *float64      `json:"change,omitempty"`
+	ChangePct          *float64      `json:"change_pct,omitempty"`
+	Volume             *int64        `json:"volume,omitempty"`
+	AvgVolume20D       *int64        `json:"avg_volume_20d,omitempty"`
+	AvgDollarVolume20D *float64      `json:"avg_dollar_volume_20d,omitempty"`
+	IV                 *float64      `json:"iv,omitempty"`
+	Week52High         *float64      `json:"week_52_high,omitempty"`
+	Week52Low          *float64      `json:"week_52_low,omitempty"`
+	DataType           string        `json:"data_type,omitempty"`
+	FeedType           string        `json:"feed_type,omitempty"`
+	PriceAt            time.Time     `json:"price_at,omitzero"`
+	PriceAsOf          string        `json:"price_as_of,omitempty"`
+	AsOf               time.Time     `json:"as_of,omitzero"`
+	VolumePhase        string        `json:"volume_phase,omitempty"`
+	WarningDetails     []DataWarning `json:"warning_details,omitempty"`
+	Comment            string        `json:"comment,omitempty"`
 }
 
 // ScanResult wraps the rows.

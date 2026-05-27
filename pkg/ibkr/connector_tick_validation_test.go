@@ -374,6 +374,50 @@ func TestHandleTickString_LastTradeTime(t *testing.T) {
 	}
 }
 
+func TestHandleTickString_RTVolumeUpdatesVolume(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[7] = "AAPL"
+	c.subscriptions["AAPL"] = &Subscription{Symbol: "AAPL"}
+	c.subMu.Unlock()
+
+	wantTime := time.UnixMilli(1770000062000)
+	c.handleTickString([]string{"46", "1", "7", "233", "203.14;100;1770000062000;41762007;202.98;true"})
+
+	c.subMu.RLock()
+	sub := c.subscriptions["AAPL"]
+	c.subMu.RUnlock()
+
+	if sub.LastPrice != 203.14 {
+		t.Fatalf("LastPrice = %.2f, want 203.14", sub.LastPrice)
+	}
+	if sub.Volume != 41762007 {
+		t.Fatalf("Volume = %d, want 41762007", sub.Volume)
+	}
+	if !sub.LastTradeTime.Equal(wantTime) {
+		t.Fatalf("LastTradeTime = %s, want %s", sub.LastTradeTime, wantTime)
+	}
+	if !sub.Observed {
+		t.Fatal("Observed not set after RTVolume tick")
+	}
+}
+
+func TestParseRTVolumeTickNormalizesDecimalVolume(t *testing.T) {
+	last, volume, ts, ok := parseRTVolumeTick("203.14;100;1770000062000;41762007966821;202.98;true", minServerVerSizeRules)
+	if !ok {
+		t.Fatal("parseRTVolumeTick returned ok=false")
+	}
+	if last != 203.14 {
+		t.Fatalf("last = %.2f, want 203.14", last)
+	}
+	if volume != 41762007 {
+		t.Fatalf("volume = %d, want 41762007", volume)
+	}
+	if want := time.UnixMilli(1770000062000); !ts.Equal(want) {
+		t.Fatalf("time = %s, want %s", ts, want)
+	}
+}
+
 func TestParseTickSize_NormalizesDecimalEncodedVolume(t *testing.T) {
 	t.Parallel()
 
