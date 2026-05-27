@@ -1,6 +1,6 @@
 # Fresh-Ideas Screen — Minimal IBKR MCP Path
 
-Last updated: 2026-05-27 21:08 CEST
+Last updated: 2026-05-27 21:10 CEST
 
 Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
@@ -42,7 +42,7 @@ Classify the tape as **early / mid / mid-late / late** cycle with one PHIA confi
 
 Run one scan first and a second scan only if the first scan leaves fewer than 6 non-held, non-ETF candidates after basic filtering. **Do not call `ibkr_scan_params` in the default path.** The scan codes below are known; call `ibkr_scan_params` only after a scan fails with an unsupported-code/location error, then spend at most one recovery call.
 
-- US RTH default: run `MOST_ACTIVE_USD` first. If a second scan is justified, prefer `HIGH_LAST_VS_EMA50`, `HIGH_LAST_VS_EMA200`, or `HIGH_VS_52W_HL` using `instrument:"STK"` and `exchange:"STK.US.MAJOR"`. Avoid `HOT_BY_VOLUME` in the default latency path; it is a noisy fallback for unusual IPO/SPAC-style tapes and commonly returns poor liquidity after a slow enrichment pass.
+- US RTH default: run `HIGH_LAST_VS_EMA50` first, using `instrument:"STK"` and `exchange:"STK.US.MAJOR"`. If a second scan is justified, prefer `HIGH_VS_52W_HL` or `HIGH_LAST_VS_EMA200`. Use `MOST_ACTIVE_USD` only as the liquidity fallback when the breakout scan leaves too few usable single-name candidates; it is broad-market beta heavy and usually less fresh. Avoid `HOT_BY_VOLUME` in the default latency path; it is a noisy fallback for unusual IPO/SPAC-style tapes and commonly returns poor liquidity after a slow enrichment pass.
 - If Xetra is open and the US tape is thin, use one US scan and one German scan with `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"`, preferably `HIGH_VS_52W_HL` or `HIGH_LAST_VS_EMA50`.
 - If both primary scans return zero rows during US RTH, run exactly one recovery scan: `MOST_ACTIVE_USD`, same exchange/instrument, `limit:12`, `min_price:5`, `exclude_penny:true`, `require_live:false`. This is a scanner-enrichment recovery only; do not accept any recovered name without firm quote validation and technical liquidity.
 - Dedupe immediately to at most 10 names. Exclude held tickers, broad index ETFs, and leveraged ETFs before the technical call unless explicitly labeling them as hedges or add-ons. Prefer fresh breakouts, high relative volume, liquid optionable names, and non-obvious value-chain beneficiaries. Keep one "Other" slot for an exceptional setup.
