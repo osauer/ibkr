@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"math"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
@@ -139,6 +143,153 @@ func TestBuildCurrencyExposureFallbackByFXRate(t *testing.T) {
 	}
 	if got[0].Currency != "USD" {
 		t.Errorf("Currency = %q, want USD", got[0].Currency)
+	}
+}
+
+// TestRepairCurrencyLedgerFXRatesFixesSuspiciousUnitRates covers the live
+// regression where the gateway reports ExchangeRate=1 (or omits it) for
+// held non-base currencies in a EUR account. Repaired rates must feed both
+// account exposure and positions FX sensitivity.
+func TestRepairCurrencyLedgerFXRatesFixesSuspiciousUnitRates(t *testing.T) {
+	ledger := map[string]ibkrlib.CurrencyLedger{
+		"EUR": {NetLiquidationByCurrency: 5000, ExchangeRate: 1.0},
+		"USD": {NetLiquidationByCurrency: 95000, ExchangeRate: 1.0},
+		"CHF": {NetLiquidationByCurrency: 1000, ExchangeRate: 0},
+	}
+	calls := map[string]int{}
+	var mu sync.Mutex
+	got := repairCurrencyLedgerFXRatesWithResolver(context.Background(), ledger, "EUR", time.Millisecond, func(_ context.Context, baseCcy, ccy string, _ time.Duration) (float64, bool) {
+		if baseCcy != "EUR" {
+			return 0, false
+		}
+		mu.Lock()
+		calls[ccy]++
+		mu.Unlock()
+		switch ccy {
+		case "USD":
+			return 0.86, true
+		case "CHF":
+			return 1.05, true
+		default:
+			return 0, false
+		}
+	})
+
+	if got["EUR"].ExchangeRate != 1.0 {
+		t.Errorf("EUR ExchangeRate = %v, want 1", got["EUR"].ExchangeRate)
+	}
+	if math.Abs(got["USD"].ExchangeRate-0.86) > 1e-9 {
+		t.Errorf("USD ExchangeRate = %v, want 0.86", got["USD"].ExchangeRate)
+	}
+	if math.Abs(got["CHF"].ExchangeRate-1.05) > 1e-9 {
+		t.Errorf("CHF ExchangeRate = %v, want 1.05", got["CHF"].ExchangeRate)
+	}
+	if calls["USD"] != 1 || calls["CHF"] != 1 || calls["EUR"] != 0 {
+		t.Errorf("resolver calls = %#v, want USD=1 CHF=1 EUR=0", calls)
+	}
+
+	exposure := buildCurrencyExposure(got, "EUR")
+	if len(exposure) != 2 {
+		t.Fatalf("got %d exposure rows, want 2", len(exposure))
+	}
+	for _, row := range exposure {
+		want := row.NetLiquidationCcy * row.ExchangeRate
+		if math.Abs(row.NetLiquidationBase-want) > 0.01 {
+			t.Errorf("%s NetLiquidationBase = %v, want %v", row.Currency, row.NetLiquidationBase, want)
+		}
+	}
+
+	p := &rpc.PositionsPortfolio{}
+	addFXSensitivity(p, got, "EUR")
+	wantSens := (95000*0.86 + 1000*1.05) * 0.01
+	if p.FXSensitivityPerPct == nil || math.Abs(*p.FXSensitivityPerPct-wantSens) > 0.01 {
+		t.Errorf("FXSensitivityPerPct = %v, want %v", p.FXSensitivityPerPct, wantSens)
+	}
+}
+
+func TestRepairCurrencyLedgerFXRatesKeepsValidRates(t *testing.T) {
+	ledger := map[string]ibkrlib.CurrencyLedger{
+		"EUR": {NetLiquidationByCurrency: 5000, ExchangeRate: 1.0},
+		"USD": {NetLiquidationByCurrency: 95000, ExchangeRate: 0.9214},
+	}
+	called := false
+	got := repairCurrencyLedgerFXRatesWithResolver(context.Background(), ledger, "EUR", time.Millisecond, func(context.Context, string, string, time.Duration) (float64, bool) {
+		called = true
+		return 0, false
+	})
+	if called {
+		t.Fatal("resolver should not be called for an existing non-unit FX rate")
+	}
+	if math.Abs(got["USD"].ExchangeRate-0.9214) > 1e-9 {
+		t.Errorf("USD ExchangeRate = %v, want 0.9214", got["USD"].ExchangeRate)
+	}
+}
+
+func TestRepairCurrencyLedgerFXRatesZerosUnresolvedUnitRates(t *testing.T) {
+	ledger := map[string]ibkrlib.CurrencyLedger{
+		"EUR": {NetLiquidationByCurrency: 5000, ExchangeRate: 1.0},
+		"USD": {NetLiquidationByCurrency: 95000, ExchangeRate: 1.0},
+	}
+	got := repairCurrencyLedgerFXRatesWithResolver(context.Background(), ledger, "EUR", time.Millisecond, func(context.Context, string, string, time.Duration) (float64, bool) {
+		return 0, false
+	})
+	if got["USD"].ExchangeRate != 0 {
+		t.Errorf("USD ExchangeRate = %v, want 0 for unresolved suspicious rate", got["USD"].ExchangeRate)
+	}
+	if exposure := buildCurrencyExposure(got, "EUR"); len(exposure) != 0 {
+		t.Fatalf("got %d exposure rows, want 0 when FX rate is unresolved", len(exposure))
+	}
+	rows := []rpc.PositionView{{Symbol: "AAPL", Currency: "USD", MarketValue: 10000}}
+	fillFXRates(rows, got, "EUR")
+	if rows[0].FXRate != nil {
+		t.Errorf("FXRate should be nil for unresolved suspicious rate, got %v", *rows[0].FXRate)
+	}
+}
+
+func TestAddFXSensitivitySkipsUnknownBase(t *testing.T) {
+	p := &rpc.PositionsPortfolio{}
+	ledger := map[string]ibkrlib.CurrencyLedger{
+		"USD": {NetLiquidationByCurrency: 95000, ExchangeRate: 0.9214},
+	}
+	addFXSensitivity(p, ledger, "")
+	if p.FXSensitivityPerPct != nil {
+		t.Errorf("FXSensitivityPerPct should be nil with unknown base currency, got %v", *p.FXSensitivityPerPct)
+	}
+}
+
+func TestMissingPositionFXCurrenciesDetectsIncompleteLedger(t *testing.T) {
+	stocks := []rpc.PositionView{
+		{Symbol: "AAPL", Currency: "USD"},
+		{Symbol: "SAP", Currency: "EUR"},
+	}
+	options := []rpc.PositionView{
+		{Symbol: "VOD", Currency: "GBP"},
+	}
+	ledger := map[string]ibkrlib.CurrencyLedger{
+		"USD": {ExchangeRate: 0},
+		"GBP": {ExchangeRate: 1.15},
+	}
+	got := missingPositionFXCurrencies(stocks, options, ledger, "EUR")
+	want := []string{"USD"}
+	if !slices.Equal(got, want) {
+		t.Errorf("missingPositionFXCurrencies = %v, want %v", got, want)
+	}
+}
+
+func TestMergeCurrencyLedgersPrefersFreshPrimary(t *testing.T) {
+	primary := map[string]ibkrlib.CurrencyLedger{
+		"USD": {NetLiquidationByCurrency: 95000, ExchangeRate: 0.86},
+	}
+	fallback := map[string]ibkrlib.CurrencyLedger{
+		"USD": {NetLiquidationByCurrency: 94000, ExchangeRate: 1.0},
+		"CHF": {NetLiquidationByCurrency: 825, ExchangeRate: 1.09},
+	}
+	got := mergeCurrencyLedgers(primary, fallback)
+	if math.Abs(got["USD"].ExchangeRate-0.86) > 1e-9 {
+		t.Errorf("USD ExchangeRate = %v, want primary 0.86", got["USD"].ExchangeRate)
+	}
+	if math.Abs(got["CHF"].ExchangeRate-1.09) > 1e-9 {
+		t.Errorf("CHF ExchangeRate = %v, want fallback 1.09", got["CHF"].ExchangeRate)
 	}
 }
 

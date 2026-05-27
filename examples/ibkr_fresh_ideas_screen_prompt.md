@@ -1,6 +1,6 @@
 # Fresh-Ideas Screen — Minimal IBKR MCP Path
 
-Last updated: 2026-05-27 21:17 CEST
+Last updated: 2026-05-27 21:24 CEST
 
 Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
@@ -58,7 +58,7 @@ Pick 1-3 final ideas. Use options only when live chain data supports them.
 - For at most 2 finalists, call `ibkr_chain` without `expiry` using `min_dte:90` and `max_dte:180` (or `target_dte:120` when one expiry is enough). Choose one 90-180 DTE expiry with usable IV and 1-sigma move, then call one strike grid with small `width` and the relevant `side`. Do not use `all_expiries:true` for this path.
 - Hard-gate options on `options_tradable:false`, stale/model-only legs, subscribe errors, no bid/ask, no IV, no implied move, or `live_option_iv_unavailable`/`expiry_iv_unavailable`. Count expiry-list IV failures and untradable grids as chain failures; after two chain failures total or one hard-gated grid, stop chain probing and use shares, watch candidates, or drop.
 - Prefer simple structures: shares, long call/put, or defined-risk debit spread. No 0DTE. No multi-leg complexity unless both legs have live quotes and tight spreads.
-- Size with 1-3% NLV risk. For shares, use `ibkr_size` with entry/stop/target. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.
+- Size with 1-3% NLV risk. For shares, use `ibkr_size` with entry/stop/target. For non-base trades, pass the quote-currency FX rate from `ibkr_account.currency_exposure` or `ibkr_positions` when available; if no reliable FX rate is present, keep the name watch-only and say sizing is blocked. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.
 - Fit each idea against open exposure, Greeks, and regime. If it conflicts, keep it only with a countermeasure: smaller risk, staggered entry, hedge, or shares-only expression.
 
 ### 5. Compact Report
