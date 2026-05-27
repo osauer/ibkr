@@ -83,7 +83,8 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	if raw.LookAheadExcess != nil {
 		res.LookAheadExcess = *raw.LookAheadExcess
 	}
-	res.CurrencyExposure = buildCurrencyExposure(raw.CurrencyLedger, res.BaseCurrency)
+	ledger := repairCurrencyLedgerFXRates(ctx, c, raw.CurrencyLedger, res.BaseCurrency)
+	res.CurrencyExposure = buildCurrencyExposure(ledger, res.BaseCurrency)
 	// Daily P&L: read the connector's most-recent reqPnL frame. ok=false
 	// before the first frame arrives — leave pointers nil (no fabrication).
 	// Subscribe lazily on the first call when the cache is empty: post-
@@ -111,8 +112,9 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 // wire-shape CurrencyExposure rows, sorted by currency for stable output.
 // Drops the row whose currency matches the account base (it duplicates
 // the top-level totals and exposure is by definition "non-base") and
-// also drops rows whose ExchangeRate is exactly 1.0 as a defense-in-
-// depth fallback when the caller didn't supply a base.
+// also drops rows with missing/invalid exchange rates. When the caller
+// didn't supply a base, rows whose ExchangeRate is exactly 1.0 are dropped
+// as a defense-in-depth fallback because the row may be the base currency.
 func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) []rpc.CurrencyExposure {
 	if len(ledger) == 0 {
 		return nil
@@ -122,6 +124,9 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 	for ccy, row := range ledger {
 		upper := normCcy(ccy)
 		if upper == baseCcy {
+			continue
+		}
+		if row.ExchangeRate <= 0 {
 			continue
 		}
 		// ExchangeRate==1 fallback for accounts where the base
@@ -254,13 +259,24 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// is where OptionPrevClose is read from the per-leg tick stream.
 	fillOptionDayChangeMoney(res.Options)
 
-	// FX decoration: read the per-currency snapshot maintained by the
-	// daemon's reqAccountUpdates subscription (no extra gateway round
-	// trip) and fill MarketValueCcy / FXRate on each non-base position.
-	// Empty map → no FX data yet (pre-handshake or single-currency
-	// account); leaves all pointers nil.
-	ledger := c.CurrencyLedgerSnapshot()
+	// FX decoration: prefer the per-currency snapshot maintained by the
+	// daemon's reqAccountUpdates subscription. If that startup cache lacks a
+	// held non-base currency, take one bounded account-summary refresh before
+	// filling MarketValueCcy / FXRate; otherwise downstream math would use a
+	// partial ledger.
 	baseCcy := normCcy(s.cachedBaseCurrency())
+	ledger := repairCurrencyLedgerFXRates(ctx, c, c.CurrencyLedgerSnapshot(), baseCcy)
+	if missing := missingPositionFXCurrencies(res.Stocks, res.Options, ledger, baseCcy); len(missing) > 0 {
+		if raw, err := c.RequestAccountSummary(ctx, 3*time.Second); err == nil {
+			if baseCcy == "" {
+				baseCcy = normCcy(raw.Currency)
+			}
+			freshLedger := repairCurrencyLedgerFXRates(ctx, c, raw.CurrencyLedger, baseCcy)
+			ledger = mergeCurrencyLedgers(freshLedger, ledger)
+		} else {
+			s.logger.Debugf("positions FX ledger refresh failed for %v: %v", missing, err)
+		}
+	}
 	fillFXRates(res.Stocks, ledger, baseCcy)
 	fillFXRates(res.Options, ledger, baseCcy)
 
@@ -616,12 +632,151 @@ func accountValueCurrencySuffix(raw map[string]string, tag string) string {
 	return best
 }
 
+const fxRepairQuoteBudget = 1200 * time.Millisecond
+
+type currencyRateResolver func(context.Context, string, string, time.Duration) (float64, bool)
+
+// repairCurrencyLedgerFXRates fixes a live-gateway quirk where streaming
+// $LEDGER rows sometimes report ExchangeRate=1 for non-base currencies.
+// Downstream exposure math treats ExchangeRate as BASE per CCY, so a fake
+// unit rate is worse than missing data. Keep valid non-unit rates, resolve
+// missing or suspicious unit rates through bounded FX snapshots, and mark
+// unresolved rates as unavailable (0) so consumers skip them.
+func repairCurrencyLedgerFXRates(ctx context.Context, c *ibkrlib.Connector, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) map[string]ibkrlib.CurrencyLedger {
+	return repairCurrencyLedgerFXRatesWithResolver(ctx, ledger, baseCcy, fxRepairQuoteBudget, func(ctx context.Context, baseCcy, ccy string, timeout time.Duration) (float64, bool) {
+		return resolveBasePerCurrencyFXRate(ctx, c, baseCcy, ccy, timeout)
+	})
+}
+
+func repairCurrencyLedgerFXRatesWithResolver(ctx context.Context, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string, timeout time.Duration, resolver currencyRateResolver) map[string]ibkrlib.CurrencyLedger {
+	if len(ledger) == 0 {
+		return nil
+	}
+	baseCcy = normCcy(baseCcy)
+	out := make(map[string]ibkrlib.CurrencyLedger, len(ledger))
+	needsRepair := make([]string, 0)
+	for ccy, row := range ledger {
+		ccy = normCcy(ccy)
+		if ccy == "" {
+			continue
+		}
+		if baseCcy != "" && ccy != baseCcy && (row.ExchangeRate <= 0 || row.ExchangeRate == 1.0) {
+			needsRepair = append(needsRepair, ccy)
+		}
+		out[ccy] = row
+	}
+	if baseCcy == "" || resolver == nil || len(needsRepair) == 0 {
+		return out
+	}
+
+	resolved := make(map[string]float64, len(needsRepair))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, ccy := range needsRepair {
+		wg.Go(func() {
+			rate, ok := resolver(ctx, baseCcy, ccy, timeout)
+			if !ok || rate <= 0 {
+				return
+			}
+			mu.Lock()
+			resolved[ccy] = rate
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+
+	for _, ccy := range needsRepair {
+		row := out[ccy]
+		if rate, ok := resolved[ccy]; ok {
+			row.ExchangeRate = rate
+		} else {
+			row.ExchangeRate = 0
+		}
+		out[ccy] = row
+	}
+	return out
+}
+
+func resolveBasePerCurrencyFXRate(ctx context.Context, c *ibkrlib.Connector, baseCcy, ccy string, timeout time.Duration) (float64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	baseCcy = normCcy(baseCcy)
+	ccy = normCcy(ccy)
+	if baseCcy == "" || ccy == "" {
+		return 0, false
+	}
+	if baseCcy == ccy {
+		return 1, true
+	}
+	if price, ok := snapshotFXPrice(ctx, c, baseCcy+"."+ccy, timeout); ok {
+		return 1 / price, true
+	}
+	if price, ok := snapshotFXPrice(ctx, c, ccy+"."+baseCcy, timeout); ok {
+		return price, true
+	}
+	return 0, false
+}
+
+func snapshotFXPrice(ctx context.Context, c *ibkrlib.Connector, pair string, timeout time.Duration) (float64, bool) {
+	price, _, _ := briefSnapshotPriceWithClose(ctx, c, pair, timeout)
+	if price <= 0 {
+		return 0, false
+	}
+	return price, true
+}
+
+func mergeCurrencyLedgers(primary, fallback map[string]ibkrlib.CurrencyLedger) map[string]ibkrlib.CurrencyLedger {
+	if len(primary) == 0 {
+		return fallback
+	}
+	out := make(map[string]ibkrlib.CurrencyLedger, len(primary)+len(fallback))
+	for ccy, row := range primary {
+		if ccy = normCcy(ccy); ccy != "" {
+			out[ccy] = row
+		}
+	}
+	for ccy, row := range fallback {
+		ccy = normCcy(ccy)
+		if ccy == "" {
+			continue
+		}
+		if _, ok := out[ccy]; !ok {
+			out[ccy] = row
+		}
+	}
+	return out
+}
+
+func missingPositionFXCurrencies(stocks, options []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) []string {
+	baseCcy = normCcy(baseCcy)
+	missing := map[string]struct{}{}
+	check := func(rows []rpc.PositionView) {
+		for _, row := range rows {
+			ccy := normCcy(row.Currency)
+			if ccy == "" || ccy == baseCcy {
+				continue
+			}
+			entry, ok := ledger[ccy]
+			if !ok || entry.ExchangeRate <= 0 {
+				missing[ccy] = struct{}{}
+			}
+		}
+	}
+	check(stocks)
+	check(options)
+	out := make([]string, 0, len(missing))
+	for ccy := range missing {
+		out = append(out, ccy)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // fillFXRates copies the per-currency ExchangeRate into each non-base
-// position's FXRate field and computes MarketValueCcy when we know the
-// rate (MarketValueCcy = MarketValue / ExchangeRate, since IBKR's
-// MarketValue is in base currency for option/stock rows reported via
-// reqAccountUpdates). Same-currency rows (Currency == baseCcy) keep
-// both pointers nil — exposure surfacing applies only to non-base.
+// position's FXRate field and labels MarketValueCcy when we know the
+// rate. Same-currency rows (Currency == baseCcy) keep both pointers nil
+// — exposure surfacing applies only to non-base.
 func fillFXRates(rows []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) {
 	for i := range rows {
 		p := &rows[i]
@@ -652,10 +807,14 @@ func addFXSensitivity(p *rpc.PositionsPortfolio, ledger map[string]ibkrlib.Curre
 	if p == nil || len(ledger) == 0 {
 		return
 	}
+	baseCcy = normCcy(baseCcy)
+	if baseCcy == "" {
+		return
+	}
 	var sens float64
 	any := false
 	for ccy, row := range ledger {
-		if strings.EqualFold(ccy, baseCcy) {
+		if normCcy(ccy) == baseCcy {
 			continue
 		}
 		if row.NetLiquidationByCurrency == 0 || row.ExchangeRate <= 0 {
