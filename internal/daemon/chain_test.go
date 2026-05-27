@@ -127,6 +127,18 @@ func TestChainWarningDetailsMarksPreviousCloseSpotAnchor(t *testing.T) {
 	}
 }
 
+func TestChainExpiryIVWarningsMarksNoUsableMoves(t *testing.T) {
+	t.Parallel()
+	got := chainExpiryIVWarnings("SPY", []rpc.ChainExpiry{
+		{Date: "2026-06-19", IVStatus: "timeout", IVQuality: "unavailable"},
+		{Date: "2026-09-18", IVStatus: "unavailable", IVQuality: "unavailable"},
+	}, true)
+
+	if !hasWarningCode(got, "live_option_iv_unavailable") {
+		t.Fatalf("live IV warning missing from %+v", got)
+	}
+}
+
 func hasWarningCode(warnings []rpc.DataWarning, code string) bool {
 	for _, w := range warnings {
 		if w.Code == code {

@@ -29,6 +29,7 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	// the list of available dates.
 	noIV := fs.Bool("no-iv", false, "skip ATM IV per expiry (faster; default fetches IV)")
 	allExpiries := fs.Bool("all-expiries", false, "fetch IV for every listed expiry (default: nearest 12)")
+	requireLiveIV := fs.Bool("require-live-iv", false, "fail fast when live option IV is unavailable (expiry-list mode)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -41,10 +42,14 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	// No --expiry: list available expiries (with ATM IV by default).
 	if *expiry == "" {
 		withIV := !*noIV
+		if *requireLiveIV && !withIV {
+			return fail(env, "chain: --require-live-iv cannot be combined with --no-iv")
+		}
 		params := rpc.ChainExpiriesParams{
-			Symbol:      symbol,
-			WithIV:      withIV,
-			AllExpiries: *allExpiries,
+			Symbol:        symbol,
+			WithIV:        withIV,
+			AllExpiries:   *allExpiries,
+			RequireLiveIV: *requireLiveIV,
 		}
 		var res rpc.ChainExpiriesResult
 		if err := env.Conn.Call(ctx, rpc.MethodChainExpiries, params, &res); err != nil {
@@ -56,8 +61,8 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 		return renderChainExpiriesText(env, &res, withIV)
 	}
 
-	if *noIV || *allExpiries {
-		return fail(env, "chain: --no-iv and --all-expiries only apply when --expiry is omitted")
+	if *noIV || *allExpiries || *requireLiveIV {
+		return fail(env, "chain: --no-iv, --all-expiries, and --require-live-iv only apply when --expiry is omitted")
 	}
 	if *width < 0 {
 		return fail(env, "chain: --width must be >= 0")

@@ -186,10 +186,11 @@ done
 assert_wire status-handshake
 echo "  [boot] ok"
 
-# 5. Detect frozen/off-hours mode by querying SPY's data_type. If
-# frozen/delayed, set LOOSE=1 so the chain-iv-source check warns
-# instead of failing (model engine doesn't fire when options aren't
-# trading — that's an IBKR characteristic, not a regression).
+# 5. Detect frozen/off-hours mode by querying SPY's quote state. IBKR can
+# still label the feed "live" outside RTH, so data_type alone is not
+# enough; off_hours_quote / non-firm quality also means the option model
+# engine may be idle. In loose mode the chain-iv-source check warns
+# instead of failing.
 
 run_cli quote-spy quote SPY --json
 if [[ $LAST_CMD_EXIT -ne 0 ]]; then
@@ -198,10 +199,20 @@ if [[ $LAST_CMD_EXIT -ne 0 ]]; then
     exit 1
 fi
 data_type="$(echo "$LAST_CMD_OUTPUT" | grep -o '"data_type": *"[^"]*"' | head -1 | sed 's/.*"\(.*\)"/\1/')"
+quote_quality="$(echo "$LAST_CMD_OUTPUT" | grep -o '"quote_quality": *"[^"]*"' | head -1 | sed 's/.*"\(.*\)"/\1/')"
+off_hours=0
+if grep -q '"code": *"off_hours_quote"' <<<"$LAST_CMD_OUTPUT"; then
+    off_hours=1
+fi
 case "$data_type" in
     live)
-        LOOSE=0
-        echo "  [mode] live"
+        if [[ "$off_hours" -eq 0 && "$quote_quality" == "firm" ]]; then
+            LOOSE=0
+            echo "  [mode] live"
+        else
+            LOOSE=1
+            echo "  [mode] live/${quote_quality:-unknown} off-hours — loose (model engine may be idle)"
+        fi
         ;;
     frozen|delayed|delayed-frozen|"")
         LOOSE=1

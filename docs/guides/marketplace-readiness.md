@@ -1,6 +1,6 @@
 # Marketplace readiness
 
-Last reviewed: 2026-05-26 20:12 CEST
+Last reviewed: 2026-05-27 06:32 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
@@ -88,3 +88,49 @@ ibkr regime --json
 ```
 
 For a Claude Code release, reinstall from the marketplace path and confirm the SessionStart hook is quiet when binary and plugin major.minor match.
+
+## Anthropic / Claude Desktop MCPB
+
+Anthropic's public distribution surface for `.mcpb` files is the Claude Connectors Directory, not the open MCP Registry. The open registry at `registry.modelcontextprotocol.io` is useful metadata distribution, but Anthropic's docs say registry publication does not surface a connector in Claude products; directory submission is a separate review process.
+
+Current package:
+
+- GitHub release asset: `ibkr-vX.Y.Z.mcpb`, plus stable `ibkr.mcpb`.
+- MCP Registry metadata: generated to `dist/server.json` with `registryType: "mcpb"` and `fileSha256`.
+- Release integrity: both MCPB assets are listed in signed `SHA256SUMS`; the bundle itself is not code-signed unless `mcpb verify dist/ibkr-vX.Y.Z.mcpb` succeeds.
+
+Local gates before submitting:
+
+```sh
+npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb/ibkr/manifest.json
+npx -y @anthropic-ai/mcpb@2.1.2 info dist/ibkr-vX.Y.Z.mcpb
+npx -y @anthropic-ai/mcpb@2.1.2 verify dist/ibkr-vX.Y.Z.mcpb
+bin/mcp-publisher validate dist/server.json
+make check
+make smoke
+```
+
+Submission blockers to clear:
+
+- Tool annotations: every MCP tool must expose a human-readable `title` and `readOnlyHint: true` in `tools/list`. This is required by Anthropic's review checklist and should be verified from the built binary, not just source.
+- Claude Desktop custom-install smoke: install the `.mcpb` through Settings -> Extensions -> Advanced settings -> Install Extension, restart Claude Desktop, then call every tool at least once with valid parameters against a paper or live IB Gateway.
+- Reviewer test path: Anthropic asks for test credentials and setup instructions. For `ibkr`, this means either a reviewer-ready IBKR paper setup with TWS API access or a documented reviewer path that Anthropic accepts for local finance tools.
+- Branding: provide a store-ready logo/icon and a concise detail-card description. The MCPB manifest should include an `icon` before broad promotion.
+- Platform claim: Claude Desktop's documented primary platforms are macOS and Windows. If native Windows support remains absent, describe the MCPB as macOS-only for Claude Desktop review, and keep Linux as a generic MCPB/client capability only if the target directory accepts it.
+- Signing posture: unsigned MCPBs are installable in permissive Claude Desktop configurations, but enterprise admins can require signatures. A trusted code-signing certificate or compatible signing API is needed before advertising the bundle as signed.
+
+Submission materials:
+
+- Server name: `ibkr`.
+- Tagline: "Read-only Interactive Brokers account and market context for Claude Desktop."
+- Description: emphasize local-only operation, IB Gateway/TWS prerequisite, IBKR Pro requirement, no order placement/modification/cancellation, and account-sensitive outputs.
+- Documentation: README install section, [agentic use](./agentic-use.md), [configuration reference](../reference/config.md), and [privacy policy](../../PRIVACY.md).
+- Support: GitHub issues; security through GitHub Private Vulnerability Reporting.
+- Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, sizing math, S&P 500 breadth, dealer gamma, risk regime; no prompts; quote resource read/subscribe.
+
+Publish sequence:
+
+1. Release any MCPB-readiness changes through `make release RELEASE_VERSION=vX.Y.Z`; do not tag or create releases manually.
+2. Publish the open MCP Registry metadata only through `make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher` after `mcp-publisher login github` succeeds.
+3. Submit to Anthropic's Desktop extension submission form from the Claude docs, attaching the public GitHub release asset URL and the submission materials above.
+4. Wait for Anthropic review. Directory approval, listing slug, and in-product availability are controlled by Anthropic; a successful MCP Registry publish is not a Claude Directory publish.

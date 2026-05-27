@@ -25,6 +25,11 @@ func runScan(ctx context.Context, env *Env, args []string) int {
 	adHocType := fs.String("type", "", "ad-hoc scanCode (e.g. TOP_PERC_GAIN) — required with --exchange when no preset is given")
 	adHocExch := fs.String("exchange", "", "ad-hoc locationCode (e.g. STK.US.MAJOR) — required with --type when no preset is given")
 	paramsInstrument := fs.String("instrument", "", "IBKR scanner instrument (e.g. STK, STOCK.EU); filters `scan params` and routes ad-hoc scans")
+	minPrice := fs.Float64("min-price", 0, "drop enriched rows below this last price")
+	minVolume := fs.Int64("min-volume", 0, "drop enriched rows below this share volume")
+	minDollarVolume := fs.Float64("min-dollar-volume", 0, "drop enriched rows below this last×volume dollar-volume")
+	requireLive := fs.Bool("require-live", false, "drop rows whose quote context is off-hours/stale/prev-close")
+	excludePenny := fs.Bool("exclude-penny", false, "drop enriched rows below $5")
 	paramsRaw := fs.Bool("raw", false, "include the gateway's raw XML payload in the params dump (~200 KB)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
@@ -37,12 +42,30 @@ func runScan(ctx context.Context, env *Env, args []string) int {
 	case len(rest) >= 1 && rest[0] == "params":
 		return runScanParams(ctx, env, *paramsInstrument, *paramsRaw, *jsonOut)
 	case len(rest) == 0 && *adHocType != "" && *adHocExch != "":
-		params := rpc.ScanRunParams{Type: *adHocType, Exchange: *adHocExch, Instrument: *paramsInstrument, Limit: *limit}
+		params := rpc.ScanRunParams{
+			Type:            *adHocType,
+			Exchange:        *adHocExch,
+			Instrument:      *paramsInstrument,
+			Limit:           *limit,
+			MinPrice:        *minPrice,
+			MinVolume:       *minVolume,
+			MinDollarVolume: *minDollarVolume,
+			RequireLive:     *requireLive,
+			ExcludePenny:    *excludePenny,
+		}
 		return runScanCall(ctx, env, params, *jsonOut)
 	case len(rest) == 0 && (*adHocType != "" || *adHocExch != ""):
 		return fail(env, "scan: ad-hoc mode requires both --type and --exchange (see 'ibkr scan params' for valid values)")
 	case len(rest) == 1:
-		params := rpc.ScanRunParams{Preset: rest[0], Limit: *limit}
+		params := rpc.ScanRunParams{
+			Preset:          rest[0],
+			Limit:           *limit,
+			MinPrice:        *minPrice,
+			MinVolume:       *minVolume,
+			MinDollarVolume: *minDollarVolume,
+			RequireLive:     *requireLive,
+			ExcludePenny:    *excludePenny,
+		}
 		return runScanCall(ctx, env, params, *jsonOut)
 	default:
 		return fail(env, "scan: usage: ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] | ibkr scan --type X --exchange Y [--instrument STK|STOCK.EU]")

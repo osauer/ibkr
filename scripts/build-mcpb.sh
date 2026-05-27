@@ -112,6 +112,7 @@ cat > "$stage/manifest.json" <<JSON
       "env": {}
     }
   },
+  "tools_generated": true,
   "keywords": [
     "ibkr",
     "interactive-brokers",

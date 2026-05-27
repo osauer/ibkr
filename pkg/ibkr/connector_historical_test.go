@@ -483,6 +483,119 @@ func TestFetchHistoricalDailyBarsWithContractUsesExplicitRoute(t *testing.T) {
 	}
 }
 
+func TestFetchHistoricalDailyBarsWithContractResolvesExplicitRoute(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	var out bytes.Buffer
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.contractCache["MBG"] = ContractDetailsLite{
+		ConID:       999,
+		Symbol:      "MBG",
+		Exchange:    "NYSE",
+		PrimaryExch: "NYSE",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		var detailReqID int
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			conn.handlersMu.RLock()
+			registered := len(conn.msgHandlers[msgContractData]) > 0
+			conn.handlersMu.RUnlock()
+			if registered {
+				conn.reqIDMu.Lock()
+				detailReqID = conn.reqIDSeq - 1
+				conn.reqIDMu.Unlock()
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		if detailReqID == 0 {
+			t.Errorf("contract data handlers never registered")
+			return
+		}
+
+		frame := make([]string, 29)
+		frame[0] = strconv.Itoa(msgContractData)
+		frame[1] = strconv.Itoa(detailReqID)
+		frame[2] = "MBG"
+		frame[3] = "STK"
+		frame[8] = "IBIS"
+		frame[9] = "EUR"
+		frame[10] = "MBG"
+		frame[12] = "MBG"
+		frame[13] = "1357911"
+		frame[21] = "IBIS"
+		for _, h := range conn.snapshotHandlers(msgContractData) {
+			h(frame)
+		}
+		time.Sleep(20 * time.Millisecond)
+		endFrame := []string{
+			strconv.Itoa(msgContractDataEnd),
+			"1",
+			strconv.Itoa(detailReqID),
+		}
+		for _, h := range conn.snapshotHandlers(msgContractDataEnd) {
+			h(endFrame)
+		}
+
+		var histReqID int
+		deadline = time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			c.historicalMu.Lock()
+			for id := range c.historicalReqs {
+				histReqID = id
+				break
+			}
+			c.historicalMu.Unlock()
+			if histReqID != 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if histReqID == 0 {
+			t.Errorf("historical request was not sent")
+			return
+		}
+		fields := []string{
+			strconv.Itoa(msgHistoricalData),
+			strconv.Itoa(histReqID),
+			"1",
+			"20260525",
+			"50.50",
+			"51.15",
+			"50.23",
+			"50.81",
+			"3000000",
+			"50.80",
+			"900",
+		}
+		c.handleHistoricalData(fields)
+	}()
+
+	contract := Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR"}
+	if _, err := c.FetchHistoricalDailyBarsWithContract(contract, 10, 2*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	<-done
+
+	payload := out.Bytes()
+	for _, want := range [][]byte{[]byte("MBG"), []byte("SMART"), []byte("IBIS"), []byte("EUR"), []byte("1357911")} {
+		if !bytes.Contains(payload, want) {
+			t.Fatalf("expected payload to include %q, payload=%q", want, payload)
+		}
+	}
+}
+
 func TestFetchHistoricalDailyBarsFallbackToPrimaryExchange(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	conn := NewConnection(nil)

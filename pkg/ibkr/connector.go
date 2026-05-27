@@ -1164,6 +1164,85 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 	}
 }
 
+func (c *Connector) fetchContractDetailsForContract(contract Contract, timeout time.Duration) ([]ContractDetailsLite, error) {
+	contract = normalizeMarketDataContract(contract)
+	if contract.Symbol == "" {
+		return nil, fmt.Errorf("contract symbol is required")
+	}
+	key := MarketDataKeyForContract(contract)
+	if _, inactive := c.inactiveReason(key); inactive {
+		c.logDebug("Contract details fetch skipped for inactive routed contract %s", key)
+		return nil, ErrSymbolInactive
+	}
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	if !c.isConnected() {
+		return nil, fmt.Errorf("IBKR connection not available")
+	}
+
+	lookup := contract
+	if lookup.SecType == "STK" && lookup.ConID == 0 && lookup.PrimaryExch != "" &&
+		(lookup.Exchange == "" || strings.EqualFold(lookup.Exchange, "SMART")) {
+		lookup.Exchange = lookup.PrimaryExch
+	}
+
+	detailsCh := make(chan ContractDetailsLite, 10)
+	doneCh := make(chan struct{})
+	serverVersion := c.conn.serverVersion
+	reqID := c.conn.GetNextRequestID()
+
+	c.logDebug("Routed contract details fetch start reqID=%d key=%s secType=%s exch=%s primary=%s currency=%s",
+		reqID, key, lookup.SecType, lookup.Exchange, lookup.PrimaryExch, lookup.Currency)
+
+	dataHandlerID := c.conn.RegisterHandler(msgContractData, func(fields []string) {
+		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
+			detailsCh <- *lite
+		}
+	})
+
+	endHandlerID := c.conn.RegisterHandler(msgContractDataEnd, func(fields []string) {
+		if len(fields) < 3 {
+			return
+		}
+		rid, _ := strconv.Atoi(safeGet(fields, 2))
+		if rid == reqID {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	if err := c.conn.sendContractDetailsRequest(lookup, reqID); err != nil {
+		c.conn.UnregisterHandler(msgContractData, dataHandlerID)
+		c.conn.UnregisterHandler(msgContractDataEnd, endHandlerID)
+		return nil, err
+	}
+
+	var results []ContractDetailsLite
+	deadline := time.After(timeout)
+	for {
+		select {
+		case d := <-detailsCh:
+			results = append(results, d)
+		case <-doneCh:
+			c.conn.UnregisterHandler(msgContractData, dataHandlerID)
+			c.conn.UnregisterHandler(msgContractDataEnd, endHandlerID)
+			if len(results) > 0 {
+				c.clearInactiveCandidate(key)
+			}
+			c.logDebug("Routed contract details fetch complete reqID=%d key=%s count=%d", reqID, key, len(results))
+			return results, nil
+		case <-deadline:
+			c.conn.UnregisterHandler(msgContractData, dataHandlerID)
+			c.conn.UnregisterHandler(msgContractDataEnd, endHandlerID)
+			c.logDebug("Routed contract details fetch timeout reqID=%d key=%s received=%d", reqID, key, len(results))
+			return results, ErrContractDetailsTimeout
+		}
+	}
+}
+
 // contractDetailsLateGrace is how long the deferred cleanup goroutine
 // keeps listening for ContractData frames after FetchContractDetails has
 // already timed out and returned to its caller. A late frame within this
@@ -3454,6 +3533,29 @@ func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, look
 			}
 		}
 	}
+	if contract.ConID == 0 {
+		resolveTimeout := min(timeout, 12*time.Second)
+		details, err := c.fetchContractDetailsForContract(contract, resolveTimeout)
+		if len(details) > 0 {
+			for _, detail := range details {
+				candidate := contract
+				if !c.applyContractDetail(detail, &candidate) {
+					continue
+				}
+				normalizeEquityRouting(&candidate, fallbackPrimary)
+				if explicitContractRouteMatches(contract, candidate) {
+					contract = candidate
+					break
+				}
+			}
+			if contract.ConID == 0 {
+				c.logWarn("Routed contract details for %s returned no route match (exchange=%s primary=%s currency=%s)",
+					symbol, contract.Exchange, contract.PrimaryExch, contract.Currency)
+			}
+		} else if err != nil {
+			c.logWarn("Routed contract details for %s unavailable (%v)", symbol, err)
+		}
+	}
 	return c.fetchHistoricalDailyBarsWithBase(symbol, contract, fallbackPrimary, lookbackDays, timeout, false)
 }
 
@@ -3475,29 +3577,35 @@ func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract
 	// gateway was busy and the awaitContractDetail grace window
 	// couldn't recover the late frames in time, surfacing as
 	// "contract details unresolved" with primary='' in the daemon log.
-	// 30 s aligns with the prewarm path (server.go:749) and is bounded
-	// upstream by the breadth fetcher's per-call timeout.
-	var fetchErr error
-	if detail, err := c.ensureContractDetails(symbol, 30*time.Second); err == nil && detail != nil {
-		candidate := baseContract
-		if c.applyContractDetail(*detail, &candidate) {
-			normalizeEquityRouting(&candidate, primary)
-			if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
-				baseContract = candidate
-			}
+	// Up to 30 s aligns with the prewarm path (server.go:749), but
+	// shorter caller budgets stay shorter for prompt-facing screens.
+	if baseContract.ConID == 0 && requireConID {
+		var fetchErr error
+		resolveTimeout := 30 * time.Second
+		if timeout > 0 {
+			resolveTimeout = min(resolveTimeout, timeout)
 		}
-	} else {
-		fetchErr = err
-		late := c.awaitContractDetail(symbol, graceWindow)
-		candidate := baseContract
-		if late != nil && c.applyContractDetail(*late, &candidate) {
-			normalizeEquityRouting(&candidate, primary)
-			if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
-				baseContract = candidate
+		if detail, err := c.ensureContractDetails(symbol, resolveTimeout); err == nil && detail != nil {
+			candidate := baseContract
+			if c.applyContractDetail(*detail, &candidate) {
+				normalizeEquityRouting(&candidate, primary)
+				if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
+					baseContract = candidate
+				}
 			}
-			c.logInfo("Contract details for %s arrived during grace window (conID=%d)", symbol, late.ConID)
-		} else if fetchErr != nil {
-			c.logWarn("Contract details for %s unavailable (%v); using static classification hints only", symbol, fetchErr)
+		} else {
+			fetchErr = err
+			late := c.awaitContractDetail(symbol, graceWindow)
+			candidate := baseContract
+			if late != nil && c.applyContractDetail(*late, &candidate) {
+				normalizeEquityRouting(&candidate, primary)
+				if requireConID || explicitContractRouteMatches(requestedContract, candidate) {
+					baseContract = candidate
+				}
+				c.logInfo("Contract details for %s arrived during grace window (conID=%d)", symbol, late.ConID)
+			} else if fetchErr != nil {
+				c.logWarn("Contract details for %s unavailable (%v); using static classification hints only", symbol, fetchErr)
+			}
 		}
 	}
 

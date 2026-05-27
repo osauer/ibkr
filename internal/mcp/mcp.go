@@ -257,8 +257,15 @@ func (s *Server) handleInitialize(id, _ json.RawMessage) {
 // toolDescriptor is the wire shape MCP expects in tools/list.
 type toolDescriptor struct {
 	Name        string          `json:"name"`
+	Title       string          `json:"title,omitempty"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"inputSchema"`
+	Annotations toolAnnotations `json:"annotations"`
+}
+
+type toolAnnotations struct {
+	Title        string `json:"title,omitempty"`
+	ReadOnlyHint bool   `json:"readOnlyHint"`
 }
 
 func (s *Server) handleToolsList(id json.RawMessage) {
@@ -266,8 +273,13 @@ func (s *Server) handleToolsList(id json.RawMessage) {
 	for _, t := range Tools {
 		descs = append(descs, toolDescriptor{
 			Name:        t.Name,
+			Title:       t.Title,
 			Description: t.Description,
 			InputSchema: t.JSONSchema,
+			Annotations: toolAnnotations{
+				Title:        t.Title,
+				ReadOnlyHint: true,
+			},
 		})
 	}
 	b, _ := json.Marshal(map[string]any{"tools": descs})
