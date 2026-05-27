@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>IBKR MCP Server for AI Assistants | Interactive Brokers TWS API</title>
-  <meta name="description" content="ibkr is a local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, positions, quotes, official calendars, options, scanners, gamma, breadth, and market-regime data.">
+  <title>IBKR MCP Server | Interactive Brokers TWS, IB Gateway & Claude Desktop</title>
+  <meta name="description" content="Local read-only IBKR MCP server for Interactive Brokers TWS and IB Gateway. Connect Claude Desktop, Claude Code, Cursor, and Zed to account and market data.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="Analyze your IBKR account without order access">
-  <meta property="og:description" content="Connect Interactive Brokers Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts through a local read-only MCP server, CLI, and Go API.">
+  <meta property="og:title" content="IBKR MCP server for Interactive Brokers">
+  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts through a local read-only MCP server.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Analyze your IBKR account without order access">
-  <meta name="twitter:description" content="A local read-only Interactive Brokers MCP server, CLI, and Go TWS API.">
+  <meta name="twitter:title" content="IBKR MCP server for Interactive Brokers">
+  <meta name="twitter:description" content="A local read-only IBKR MCP server for Claude Desktop, TWS, and IB Gateway.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
   <script type="application/ld+json">
@@ -26,11 +26,19 @@
       {
         "@type": "SoftwareApplication",
         "name": "ibkr",
+        "alternateName": [
+          "IBKR MCP Server",
+          "Interactive Brokers MCP Server",
+          "TWS MCP Server",
+          "IB Gateway MCP Server"
+        ],
         "url": "https://osauer.dev/ibkr/",
         "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
         "applicationCategory": "FinanceApplication",
+        "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
         "softwareVersion": "1.3.0",
+        "dateModified": "2026-05-27T22:28:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -38,8 +46,20 @@
         },
         "downloadUrl": "https://github.com/osauer/ibkr/releases/latest",
         "codeRepository": "https://github.com/osauer/ibkr",
+        "softwareHelp": "https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
+        "sameAs": [
+          "https://github.com/osauer/ibkr",
+          "https://pkg.go.dev/github.com/osauer/ibkr"
+        ],
         "isAccessibleForFree": true,
-        "keywords": "Interactive Brokers, IBKR, TWS API, IB Gateway, MCP server, Claude Desktop, Claude Code, Cursor, Zed, Go"
+        "keywords": "IBKR MCP, Interactive Brokers MCP server, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
+        "featureList": [
+          "Read-only stdio MCP server",
+          "Interactive Brokers TWS and IB Gateway support",
+          "Account and positions tools",
+          "Stock and ETF quote resources",
+          "Options, scanners, breadth, gamma, and risk-regime tools"
+        ]
       },
       {
         "@type": "SoftwareSourceCode",
@@ -49,6 +69,54 @@
         "runtimePlatform": "macOS, Linux, Unix",
         "license": "https://github.com/osauer/ibkr/blob/main/LICENSE",
         "about": "Clean-room Go implementation of the Interactive Brokers TWS read-side protocol with CLI and MCP interfaces."
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is the IBKR MCP server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "ibkr mcp is a local read-only Model Context Protocol server that lets Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts read Interactive Brokers account and market data through IB Gateway or TWS."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can this MCP server place Interactive Brokers orders?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The bundled CLI and MCP server expose account and market data, but they do not expose order placement, order modification, or order cancellation tools."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does ibkr work with TWS and IB Gateway?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. ibkr can connect to a local Trader Workstation or IB Gateway API session and auto-discovers the standard paper and live ports unless you pin a specific config."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I connect Claude Desktop to IBKR?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install the latest ibkr MCP Bundle from the GitHub release, open the .mcpb file with Claude Desktop, and restart Claude Desktop while IB Gateway or TWS is running locally."
+            }
+          }
+        ]
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "ibkr",
+            "item": "https://osauer.dev/ibkr/"
+          }
+        ]
       }
     ]
   }
@@ -63,7 +131,7 @@
       --line: #d8d2c4;
       --green: #087f6b;
       --green-dark: #055f52;
-      --amber: #b16b00;
+      --amber: #9a5b00;
       --blue: #245dbb;
       --terminal: #0e1626;
       --terminal-line: #26364c;
@@ -507,8 +575,8 @@
   <main>
     <section class="wrap hero" aria-labelledby="hero-title">
       <div>
-        <p class="eyebrow">Interactive Brokers MCP server</p>
-        <h1 id="hero-title">Analyze your IBKR account without order access</h1>
+        <p class="eyebrow">IBKR MCP server</p>
+        <h1 id="hero-title">IBKR MCP server for Interactive Brokers account research</h1>
         <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Read live portfolio, calendars, options, quotes, scanners, breadth, gamma, and risk-regime data from one local tool.</p>
         <p class="safety">The bundled CLI and MCP server expose account and market data, but no order-entry interface.</p>
         <div class="actions" aria-label="Main actions">
@@ -606,6 +674,55 @@
       </div>
     </section>
 
+    <section class="wrap" aria-labelledby="search-paths-title">
+      <div class="section-head">
+        <h2 id="search-paths-title">Popular setup paths.</h2>
+        <p>Use the page that matches the phrase you searched for; all paths install the same local read-only <code>ibkr mcp</code> server.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>IBKR MCP</small>
+          <h3><a href="ibkr-mcp/">IBKR MCP server</a></h3>
+          <p>Exact setup notes for users searching by the IBKR acronym and MCP server phrase.</p>
+        </article>
+        <article class="feature">
+          <small>Interactive Brokers</small>
+          <h3><a href="interactive-brokers-mcp-server/">Interactive Brokers MCP server</a></h3>
+          <p>The broader guide for account, market-data, install, and safety boundaries.</p>
+        </article>
+        <article class="feature">
+          <small>TWS</small>
+          <h3><a href="tws-mcp-server/">TWS MCP server</a></h3>
+          <p>Use Trader Workstation as the local API session behind the MCP tools.</p>
+        </article>
+        <article class="feature">
+          <small>IB Gateway</small>
+          <h3><a href="ib-gateway-mcp/">IB Gateway MCP server</a></h3>
+          <p>Use the lighter local Gateway process as the source for account and market data.</p>
+        </article>
+        <article class="feature">
+          <small>Claude Desktop</small>
+          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Interactive Brokers setup</a></h3>
+          <p>Install the MCPB and connect Claude Desktop to your local IBKR session.</p>
+        </article>
+        <article class="feature">
+          <small>Claude</small>
+          <h3><a href="connect-claude-to-ibkr/">Connect Claude to IBKR</a></h3>
+          <p>Use Claude Desktop or Claude Code for local read-only IBKR account and market analysis.</p>
+        </article>
+        <article class="feature">
+          <small>Portfolio AI</small>
+          <h3><a href="analyze-interactive-brokers-portfolio-with-ai/">Analyze an Interactive Brokers portfolio with AI</a></h3>
+          <p>Ask natural-language portfolio questions against live local positions, options, and market context.</p>
+        </article>
+        <article class="feature">
+          <small>Safety</small>
+          <h3><a href="read-only-mcp-server/">Read-only MCP server</a></h3>
+          <p>Make the no-order-entry boundary explicit for agentic account and market workflows.</p>
+        </article>
+      </div>
+    </section>
+
     <section class="wrap install" id="install" aria-labelledby="install-title">
       <div>
         <div class="section-head">
@@ -622,6 +739,30 @@ ibkr setup claude-desktop
 
 # then ask:
 # "How does my IBKR account look today?"</code></pre>
+    </section>
+
+    <section class="wrap" aria-labelledby="faq-title">
+      <div class="section-head">
+        <h2 id="faq-title">IBKR MCP FAQ.</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <h3>What is the IBKR MCP server?</h3>
+          <p><code>ibkr mcp</code> is a local read-only Model Context Protocol server for Interactive Brokers account and market data.</p>
+        </article>
+        <article class="feature">
+          <h3>Can it place orders?</h3>
+          <p>No. The bundled CLI and MCP server expose account and market data, but no place, modify, or cancel order tools.</p>
+        </article>
+        <article class="feature">
+          <h3>Does it use TWS or IB Gateway?</h3>
+          <p>Yes. It connects to a local TWS or IB Gateway API session and auto-discovers the standard paper and live ports.</p>
+        </article>
+        <article class="feature">
+          <h3>How does Claude Desktop connect?</h3>
+          <p>Install the latest MCPB release asset, open it with Claude Desktop, and restart Claude while IB Gateway or TWS is running.</p>
+        </article>
+      </div>
     </section>
   </main>
 

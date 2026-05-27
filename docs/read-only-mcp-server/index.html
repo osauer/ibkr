@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MCP resources reference | ibkr</title>
-  <meta name="description" content="Last reviewed: 2026-05-26 20:12 CEST">
-  <link rel="canonical" href="https://osauer.dev/ibkr/reference/mcp-resources.html">
+  <title>Read-only MCP server for Interactive Brokers | ibkr</title>
+  <meta name="description" content="ibkr mcp is intentionally a read-only MCP server for Interactive Brokers. It gives AI assistants account and market context from IB Gateway or TWS, but it...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/read-only-mcp-server/">
   <script type="application/ld+json">
 {
     "@context": "https://schema.org",
@@ -15,15 +15,15 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-26T20:12:00+02:00",
-    "description": "Last reviewed: 2026-05-26 20:12 CEST",
-    "headline": "MCP resources reference",
+    "dateModified": "2026-05-27T22:39:00+02:00",
+    "description": "ibkr mcp is intentionally a read-only MCP server for Interactive Brokers. It gives AI assistants account and market context from IB Gateway or TWS, but it...",
+    "headline": "Read-only MCP server for Interactive Brokers",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
       "url": "https://osauer.dev/ibkr/"
     },
-    "url": "https://osauer.dev/ibkr/reference/mcp-resources.html"
+    "url": "https://osauer.dev/ibkr/read-only-mcp-server/"
   }
   </script>
   <style>
@@ -151,22 +151,64 @@
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
-      <a href="mcp-tools.html">MCP tools</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
       <a href="../guides/agentic-use.html">Agent guide</a>
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="mcp-resources-reference">MCP resources reference</h1>
-<p>Last reviewed: 2026-05-26 20:12 CEST</p>
-<p>These are the non-tool resources <code>ibkr mcp</code> exposes to MCP clients. Tools are documented separately in <a href="mcp-tools.html">MCP tools reference</a>.</p>
-<h2 id="ibkrquotesymbol"><code>ibkr://quote/{symbol}</code></h2>
-<p>Live stock / ETF quote resource.</p>
-<p>Use this when an MCP client wants to keep watching one equity or ETF quote without repeatedly calling <code>ibkr_quote</code>. The template is discovered through <code>resources/templates/list</code>.</p>
-<p>Example URI:</p>
-<pre><code>ibkr://quote/AAPL</code></pre>
-<p><code>resources/read</code> returns a one-off quote snapshot with the same JSON shape as <code>ibkr quote AAPL --json</code>, including the enriched headline <code>price</code>, <code>price_source</code>, previous close, change, ranges, volume/average volume, 20-day average volume/dollar volume, <code>price_as_of</code>, stale flags, and optional <code>session_context</code>.</p>
-<p><code>resources/subscribe</code> returns <code>{}</code> and then streams coalesced tick frames through <code>notifications/resources/updated</code> until the client calls <code>resources/unsubscribe</code> or closes the MCP session. Notification payloads embed a JSON frame in <code>params.contents[].text</code>; the frame shape matches <code>ibkr quote AAPL --watch --json</code>.</p>
-<p>Only stock and ETF symbols are supported. Option contract streaming is not exposed as an MCP resource today; use <code>ibkr_chain</code> or CLI option quotes for option snapshots.</p>
+<h1 id="read-only-mcp-server-for-interactive-brokers">Read-only MCP server for Interactive Brokers</h1>
+<p>Updated: 2026-05-27 22:39 CEST</p>
+<p><code>ibkr mcp</code> is intentionally a read-only MCP server for Interactive Brokers. It gives AI assistants account and market context from IB Gateway or TWS, but it does not expose a place-order, modify-order, or cancel-order tool.</p>
+<p>This page is for searches such as &#34;read-only IBKR MCP server&#34;, &#34;safe AI trading assistant Interactive Brokers&#34;, &#34;Interactive Brokers MCP no order access&#34;, and &#34;portfolio analysis MCP server&#34;.</p>
+<h2 id="what-read-only-means-here">What read-only means here</h2>
+<p>Allowed surfaces:</p>
+<ul>
+<li>account summary, cash, margin, buying power, daily P&amp;L</li>
+<li>positions, option legs, marks, and Greek coverage</li>
+<li>quotes, quote freshness, daily bars, and official market calendars</li>
+<li>option chains, expiries, expected moves, scanners, breadth, dealer gamma, and risk regime</li>
+<li>fixed-fractional position sizing as math only</li>
+</ul>
+<p>Not exposed:</p>
+<ul>
+<li>no order placement</li>
+<li>no order modification</li>
+<li>no order cancellation</li>
+<li>no hosted broker credential store</li>
+<li>no remote service sitting between the assistant and IBKR</li>
+</ul>
+<h2 id="why-this-matters-for-agents">Why this matters for agents</h2>
+<p>Agentic workflows are useful for analysis: &#34;what do I own?&#34;, &#34;what changed today?&#34;, &#34;which positions carry option delta?&#34;, &#34;is the market regime stressed?&#34;, and &#34;how large is this hypothetical trade?&#34;. Those questions need account and market data, not order-entry authority.</p>
+<p><code>ibkr</code> keeps that boundary explicit. The MCP tool list is generated from the same source as the CLI documentation, and the public references call out that lifecycle and trading verbs stay outside the MCP surface.</p>
+<h2 id="install">Install</h2>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr status</code></pre>
+<p>For Claude Desktop, install:</p>
+<pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
+<p>For a generic local MCP host:</p>
+<pre><code>{
+  &#34;mcpServers&#34;: {
+    &#34;ibkr&#34;: {
+      &#34;command&#34;: &#34;/ABSOLUTE/PATH/TO/ibkr&#34;,
+      &#34;args&#34;: [&#34;mcp&#34;]
+    }
+  }
+}</code></pre>
+<h2 id="good-assistant-prompts">Good assistant prompts</h2>
+<ul>
+<li>&#34;Summarize my IBKR account and positions.&#34;</li>
+<li>&#34;Show positions by underlying and include option Greeks.&#34;</li>
+<li>&#34;Are any watchlist quotes stale because the market is closed?&#34;</li>
+<li>&#34;How does today&#39;s risk regime look?&#34;</li>
+<li>&#34;For this hypothetical entry and stop, what position size risks 1%?&#34;</li>
+</ul>
+<p>If the assistant tries to trade through <code>ibkr mcp</code>, it has reached outside the tool&#39;s capability boundary.</p>
+<h2 id="references">References</h2>
+<ul>
+<li><a href="../ibkr-mcp/index.html">IBKR MCP server</a> for the main server overview.</li>
+<li><a href="../guides/agentic-use.html">Agentic use guide</a> for example conversations.</li>
+<li><a href="../reference/mcp-tools.html">MCP tools reference</a> for the read-only tool inventory.</li>
+</ul>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>

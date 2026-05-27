@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MCP resources reference | ibkr</title>
-  <meta name="description" content="Last reviewed: 2026-05-26 20:12 CEST">
-  <link rel="canonical" href="https://osauer.dev/ibkr/reference/mcp-resources.html">
+  <title>Connect Claude to IBKR | ibkr</title>
+  <meta name="description" content="Use ibkr mcp to connect Claude Desktop or Claude Code to Interactive Brokers without giving Claude order access. The server runs locally, talks to IB Gateway...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/connect-claude-to-ibkr/">
   <script type="application/ld+json">
 {
     "@context": "https://schema.org",
@@ -15,15 +15,15 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-26T20:12:00+02:00",
-    "description": "Last reviewed: 2026-05-26 20:12 CEST",
-    "headline": "MCP resources reference",
+    "dateModified": "2026-05-27T22:39:00+02:00",
+    "description": "Use ibkr mcp to connect Claude Desktop or Claude Code to Interactive Brokers without giving Claude order access. The server runs locally, talks to IB Gateway...",
+    "headline": "Connect Claude to IBKR",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
       "url": "https://osauer.dev/ibkr/"
     },
-    "url": "https://osauer.dev/ibkr/reference/mcp-resources.html"
+    "url": "https://osauer.dev/ibkr/connect-claude-to-ibkr/"
   }
   </script>
   <style>
@@ -151,22 +151,46 @@
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
-      <a href="mcp-tools.html">MCP tools</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
       <a href="../guides/agentic-use.html">Agent guide</a>
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="mcp-resources-reference">MCP resources reference</h1>
-<p>Last reviewed: 2026-05-26 20:12 CEST</p>
-<p>These are the non-tool resources <code>ibkr mcp</code> exposes to MCP clients. Tools are documented separately in <a href="mcp-tools.html">MCP tools reference</a>.</p>
-<h2 id="ibkrquotesymbol"><code>ibkr://quote/{symbol}</code></h2>
-<p>Live stock / ETF quote resource.</p>
-<p>Use this when an MCP client wants to keep watching one equity or ETF quote without repeatedly calling <code>ibkr_quote</code>. The template is discovered through <code>resources/templates/list</code>.</p>
-<p>Example URI:</p>
-<pre><code>ibkr://quote/AAPL</code></pre>
-<p><code>resources/read</code> returns a one-off quote snapshot with the same JSON shape as <code>ibkr quote AAPL --json</code>, including the enriched headline <code>price</code>, <code>price_source</code>, previous close, change, ranges, volume/average volume, 20-day average volume/dollar volume, <code>price_as_of</code>, stale flags, and optional <code>session_context</code>.</p>
-<p><code>resources/subscribe</code> returns <code>{}</code> and then streams coalesced tick frames through <code>notifications/resources/updated</code> until the client calls <code>resources/unsubscribe</code> or closes the MCP session. Notification payloads embed a JSON frame in <code>params.contents[].text</code>; the frame shape matches <code>ibkr quote AAPL --watch --json</code>.</p>
-<p>Only stock and ETF symbols are supported. Option contract streaming is not exposed as an MCP resource today; use <code>ibkr_chain</code> or CLI option quotes for option snapshots.</p>
+<h1 id="connect-claude-to-ibkr">Connect Claude to IBKR</h1>
+<p>Updated: 2026-05-27 22:39 CEST</p>
+<p>Use <code>ibkr mcp</code> to connect Claude Desktop or Claude Code to Interactive Brokers without giving Claude order access. The server runs locally, talks to IB Gateway or Trader Workstation (TWS), and exposes read-only account and market-data tools over MCP.</p>
+<p>This page is for searches such as &#34;connect Claude to IBKR&#34;, &#34;connect Claude to Interactive Brokers&#34;, &#34;Claude Code IBKR MCP&#34;, and &#34;Claude Desktop IBKR portfolio analysis&#34;.</p>
+<h2 id="claude-desktop">Claude Desktop</h2>
+<p>The shortest path is the MCP Bundle from the latest release:</p>
+<pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
+<p>Open the <code>.mcpb</code> file with Claude Desktop, install it from settings, then fully quit and relaunch Claude Desktop. Keep IB Gateway or TWS running locally before asking account or market questions.</p>
+<h2 id="claude-code">Claude Code</h2>
+<p>Install the Claude Code plugin from the self-hosted marketplace:</p>
+<pre><code>/plugin marketplace add osauer/ibkr
+/plugin install ibkr@ibkr</code></pre>
+<p>For Claude for Mac&#39;s embedded Claude Code pane, run the equivalent commands from a regular terminal:</p>
+<pre><code>claude plugin marketplace add osauer/ibkr
+claude plugin install ibkr@ibkr</code></pre>
+<p>The Claude Code plugin carries the skill, hooks, and manifest. It does not ship the <code>ibkr</code> binary, so install the binary separately:</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh</code></pre>
+<h2 id="what-claude-can-ask">What Claude can ask</h2>
+<ul>
+<li>&#34;What&#39;s in my IBKR account?&#34;</li>
+<li>&#34;Show my SPY exposure, including option deltas.&#34;</li>
+<li>&#34;What changed in my portfolio today?&#34;</li>
+<li>&#34;What expiries are listed for NVDA and what is the implied move?&#34;</li>
+<li>&#34;How does the risk regime look today?&#34;</li>
+<li>&#34;If I enter AAPL at 180 with a stop at 175, how many shares fit 1% risk?&#34;</li>
+</ul>
+<p>Claude will choose tools such as <code>ibkr_account</code>, <code>ibkr_positions</code>, <code>ibkr_quote</code>, <code>ibkr_chain</code>, <code>ibkr_regime</code>, and <code>ibkr_size</code> from the MCP descriptions.</p>
+<h2 id="safety-boundary">Safety boundary</h2>
+<p><code>ibkr mcp</code> has no order-entry tools. Claude can read account and market context, size a hypothetical plan, and explain stale data; it cannot place, modify, or cancel Interactive Brokers orders through this server.</p>
+<h2 id="related-pages">Related pages</h2>
+<ul>
+<li><a href="../claude-desktop-interactive-brokers/index.html">Claude Desktop Interactive Brokers setup</a> for the MCPB path.</li>
+<li><a href="../guides/agentic-use.html">Agentic use guide</a> for more example conversations.</li>
+<li><a href="../reference/mcp-tools.html">MCP tools reference</a> for exact tool names and schemas.</li>
+</ul>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>

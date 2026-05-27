@@ -1,6 +1,6 @@
 # ibkr
 
-Updated: 2026-05-26 21:44 CEST
+Updated: 2026-05-27 22:28 CEST
 
 `ibkr` is a local read-only Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API.
 
@@ -16,28 +16,39 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 
 ## Authoritative Links
 
-- Landing page: https://osauer.dev/ibkr/
-- Interactive Brokers MCP server page: https://osauer.dev/ibkr/interactive-brokers-mcp-server/
-- GitHub repository: https://github.com/osauer/ibkr
-- Install instructions: https://github.com/osauer/ibkr#install
-- Claude Desktop MCPB download: https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb
-- Agentic use guide: https://osauer.dev/ibkr/guides/agentic-use.html
-- MCP tools reference: https://osauer.dev/ibkr/reference/mcp-tools.html
-- MCP resources reference: https://osauer.dev/ibkr/reference/mcp-resources.html
-- Configuration reference: https://osauer.dev/ibkr/reference/config.html
-- TWS protocol coverage: https://osauer.dev/ibkr/reference/protocol.html
-- Concepts: https://osauer.dev/ibkr/concepts.html
+- [Landing page](https://osauer.dev/ibkr/)
+- [IBKR MCP server](https://osauer.dev/ibkr/ibkr-mcp/)
+- [Interactive Brokers MCP server page](https://osauer.dev/ibkr/interactive-brokers-mcp-server/)
+- [TWS MCP server](https://osauer.dev/ibkr/tws-mcp-server/)
+- [IB Gateway MCP server](https://osauer.dev/ibkr/ib-gateway-mcp/)
+- [Claude Desktop Interactive Brokers setup](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/)
+- [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/)
+- [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/)
+- [Read-only MCP server for Interactive Brokers](https://osauer.dev/ibkr/read-only-mcp-server/)
+- [GitHub repository](https://github.com/osauer/ibkr)
+- [Install instructions](https://github.com/osauer/ibkr#install)
+- [Claude Desktop MCPB download](https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb)
+- [Agentic use guide](https://osauer.dev/ibkr/guides/agentic-use.html)
+- [MCP tools reference](https://osauer.dev/ibkr/reference/mcp-tools.html)
+- [MCP resources reference](https://osauer.dev/ibkr/reference/mcp-resources.html)
+- [Configuration reference](https://osauer.dev/ibkr/reference/config.html)
+- [TWS protocol coverage](https://osauer.dev/ibkr/reference/protocol.html)
+- [Concepts](https://osauer.dev/ibkr/concepts.html)
 
 ## Primary Search Phrases
 
 - Interactive Brokers MCP server
 - IBKR MCP server
 - TWS MCP server
+- IB Gateway MCP
 - Claude Desktop Interactive Brokers
+- connect Claude to IBKR
+- analyze Interactive Brokers portfolio with AI
+- AI assistant IBKR portfolio analysis
+- read-only IBKR MCP server
 - Claude Desktop MCPB Interactive Brokers
 - Claude Code IBKR
 - Cursor MCP Interactive Brokers
 - Go TWS API
 - Interactive Brokers Go API
-- IB Gateway MCP
 - read-only broker MCP server

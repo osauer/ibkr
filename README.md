@@ -10,6 +10,8 @@
 
 `ibkr` answers account and market questions against your local IB Gateway or TWS session. It shows positions, exposure, live market data, official market calendars, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
 
+For MCP users, `ibkr mcp` is a local read-only IBKR MCP server for Claude Desktop, Claude Code, Cursor, Continue, Zed, and other stdio MCP hosts. It works with both Interactive Brokers Trader Workstation (TWS) and IB Gateway.
+
 Use it from a shell:
 
 ```sh
@@ -81,7 +83,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 
-For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
+For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
 
 ## Pick your path
 
