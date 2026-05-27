@@ -10,6 +10,36 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.3.0 — 2026-05-27 22:05 CEST
+
+### What's new
+
+- Fresh-idea screening is now a documented low-latency MCP path, with tighter scanner, technical, quote, option-chain, and sizing gates for 3-6 month trade research.
+- Scanner rows now expose conservative `instrument_tags` for known ETFs and leveraged ETPs that IBKR can return from stock scans, so agents can avoid ETF false positives without guessing from `sec_type`.
+- Position and FX context is safer for portfolio-aware recommendations: flat position updates no longer leak as open holdings, and non-base-currency sizing uses the correct quote/base direction.
+
+### Added
+
+- Added `examples/ibkr_fresh_ideas_screen_prompt.md` as a compact MCP screening prompt for surfacing 1-3 fresh trade ideas with explicit readiness, liquidity, option-chain, sizing, and no-order-placement guardrails.
+- Added `instrument_tags` to scanner rows in CLI/JSON/MCP output for known ETFs, broad index ETFs, sector ETPs, leveraged ETPs, and single-stock ETPs that can appear in stock scanner results.
+- Added scan filters for minimum price, minimum volume, minimum dollar volume, penny-stock exclusion, and live-quote requirement so noisy scanner rows can be filtered before agent analysis.
+- Added 90-180 DTE expiry-selection parameters for option-chain expiry reads so agents can ask for the trade horizon directly instead of fetching every expiry.
+
+### Changed
+
+- MCP tool descriptions now steer agents toward the high-signal fresh-idea path: status and calendar readiness first, one or two bounded scans, batched technical validation, quote-quality gates, and limited chain probing.
+- Scanner enrichment, technical screens, watchlist, positions, and chain outputs now expose more freshness and liquidity context for agent routing without requiring extra rescue calls.
+- The release MCPB wrapper now tolerates Claude Desktop launch environments that do not preserve the expected executable path layout.
+- Fresh-idea sizing guidance now documents the FX direction expected by `ibkr_size` for non-base trades.
+
+### Fixed
+
+- Closed stock and option positions are removed from the cached positions surface when IBKR sends a zero-quantity update, preventing stale holdings from being treated as open exposure.
+- Non-base currency exposure now uses gateway exchange rates as base-currency units per one quote-currency unit, fixing EUR/USD ledger math and downstream position sizing context.
+- Option-chain live-IV gating now reports unavailable live IV distinctly and avoids treating stale or missing expiry IV as a valid options structure.
+- Scanner filtering now falls back to 20-day average dollar volume when live volume is missing, improving off-hours and sparse-tick screening without fabricating volume.
+- Market-calendar handling now treats U.S. equity and U.S. options sessions separately, so a prompt can require listed-options RTH before recommending option structures.
+
 ## v1.2.1 — 2026-05-26 22:02 CEST
 
 ### What's new
