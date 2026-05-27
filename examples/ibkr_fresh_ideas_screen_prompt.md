@@ -1,74 +1,73 @@
-# Fresh-Ideas Screen — IBKR Senior Agent Brief
+# Fresh-Ideas Screen — Minimal IBKR MCP Path
 
-Last updated: 2026-05-27 11:16 CEST
+Last updated: 2026-05-27 20:30 CEST
 
-**Role.** You are a senior macro/momentum screening agent. Surface **≤5 fresh, non-consensus** trade ideas (US + German equities/options) capable of a violent move in **3-6 months**: a long that could **double (+100% or more)**, or a short/put that pays similarly. Optimize for **signal per token**: prove the data path is healthy, scan wide enough, narrow fast, and stop rather than grinding through bad data. The toolkit is **read-only**: screen and produce order-ready plans; never place orders.
+Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
-**Runtime knobs.** Defaults are conservative unless the user overrides them explicitly:
-- `ALLOW_OFFHOURS=false` — if false, stop when US option live IV is unavailable.
-- `ALLOW_STALE_IV=false` — if false, do not choose option structures without usable `ibkr_chain` IV + 1-sigma move.
-- `TEST_MODE=false` — if true, run a bounded shares-only smoke path even when live option data is closed/unavailable.
-- `MAX_TECHNICAL_BATCH=3`; `SCAN_LIMIT=15`; `MAX_CHAIN_CANDIDATES=5`.
-- Scanner liquidity floor: `min_price:5`, `min_dollar_volume:50000000`, `require_live:true`, `exclude_penny:true`.
+Optimize for **decision quality per tool call**. A good run proves data readiness, scans wide enough, narrows once, validates only the finalists, and stops. Do not narrate progress while running; emit only the final report or a readiness/partial-stop report.
 
-**Probability convention (mandatory).** Tag every forward-looking judgment with a PHIA Probability Yardstick term + range:
-`remote <=5% · highly unlikely 10-20% · unlikely 25-35% · realistic possibility 40-50% · likely 55-75% · highly likely 80-90% · almost certain >=95%` (gaps are intentional; snap to the nearest band).
+## Defaults
 
-**Tooling map.** Preflight -> `ibkr_status`, `ibkr_calendar`, `ibkr_quote`, `ibkr_chain`. Regime -> `ibkr_regime`, `ibkr_breadth`, `ibkr_gamma`, `ibkr_calendar`. Universe -> `ibkr_scan_params` only when scan-code discovery is needed, then `ibkr_scan`. Single-name -> `ibkr_technical` (small batches), `ibkr_quote`, `ibkr_history`, `ibkr_chain`. Account/sizing -> `ibkr_account`, `ibkr_positions`, `ibkr_size`, `ibkr_watch`. Notes: stock IV via quote is unreliable; real IV + 1-sigma implied move comes from `ibkr_chain`. German names use `market:"de"` on quote/technical. US ETF resolver gaps can use `primary_exchange:"ARCA"`. Scans: US `instrument:"STK"`, `exchange:"STK.US.MAJOR"`; German `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"`.
+- `ALLOW_OFFHOURS=false`: if US listed options are closed or live option IV is unavailable, stop unless `TEST_MODE=true`.
+- `TEST_MODE=false`: if true, run a shares-only smoke path, label it clearly, skip option structures, and cap universe work at one scan plus one technical call.
+- Target budget after preflight: **12-16 tool calls**. Hard cap: **22 total tool calls**. Do not spend calls trying to rescue a weak screen.
+- Primary scanner floor: `min_price:5`, `min_dollar_volume:50000000`, `require_live:true`, `exclude_penny:true`, `limit:12`. One recovery scan may relax to `min_dollar_volume:10000000` and `require_live:false`; quote validation must then restore live-quality filtering.
+- Candidate caps: at most 2 scans, 10 technical symbols, 5 quote survivors, 3 final ideas, 2 option-chain candidates, 2 sizing calls per idea maximum.
+- PHIA probability yardstick is mandatory for all forward-looking claims: `remote <=5%`, `highly unlikely 10-20%`, `unlikely 25-35%`, `realistic possibility 40-50%`, `likely 55-75%`, `highly likely 80-90%`, `almost certain >=95%`.
 
----
+## Minimal Path
 
-## Phase 0 — Data Readiness Gate (hard stop)
-Do this before account, regime, scans, technicals, or chains:
-1. Call `ibkr_status`. If gateway disconnected, daemon missing, or the relevant subsystem is unavailable -> **stop** with a readiness report.
-2. Call `ibkr_calendar` for `us-options`, `us`, and `de`. Use the top-level `session` object for current open/closed state; the `sessions` array is forward schedule context and future rows are normally `is_open:false`.
-3. Call `ibkr_quote` for `SPY`. Require `quote_quality:"firm"` during US RTH for a full live run. Off-hours `indicative`, `prev_close`, stale, or wide quotes are not enough for trade selection.
-4. Call `ibkr_chain` for `SPY` with `require_live_iv:true` and no `expiry`. Require at least one 30-180 DTE expiry with usable IV and `implied_move`.
-5. If US options are closed, the SPY IV probe times out/errors, or it returns `warning_details.code` in `["live_option_iv_unavailable","expiry_iv_unavailable"]`:
-   - If `ALLOW_OFFHOURS=false` and `TEST_MODE=false`: **stop**. Output a short readiness report with exact market open time and what would be run later.
-   - If `TEST_MODE=true`: continue shares-only, skip option structures, skip gamma refresh, cap scans/technicals tightly, and label the result "test/off-hours".
+### 1. Readiness Gate
 
-Only after Phase 0 passes, pull `ibkr_account` + `ibkr_positions` once for NLV, buying power, cash, exposure, and Greeks.
+Run this first. If any hard gate fails, stop with a readiness report that names the blocker, the next relevant market open, and the exact path to run later.
 
-## Phase 1 — Context: themes + cycle
-Build a frame, do not just list indicators.
-- **Tape & regime:** `ibkr_regime`, `ibkr_breadth`, and `ibkr_gamma --no-wait`/MCP equivalent. Treat cached/degraded gamma, stale VIX term structure, or cached breadth as context, not fresh signals.
-- **Price structure >=12mo:** `ibkr_technical` on SPY + leading sectors/benchmarks in batches of <=3. For sector ETFs, pass `primary_exchange:"ARCA"` if a resolver error appears.
-- **Cycle call:** classify **early / mid / mid-late / late** from macro + price; state it with a yardstick confidence.
-- **Forward view:** reason ahead from policy, rates, fiscal, elections, supply chains, AI/compute, energy, defense, and capital-cycle setup — what is priced vs not.
-- **Standing theme — Retail/WSB momentum:** read current Reddit/WSB sentiment via web only if browsing is available and time budget allows. Treat crowded retail option flow as a real momentum vector, not noise.
-- **First-principles value chain:** for each economic theme, decompose input -> component -> integrator -> platform -> end-demand. The best candidate is often not the obvious leader.
-- **Output:** 3-6 themes (including Retail/WSB when checked), each a one-line thesis + yardstick conviction, plus the cycle call.
+1. `ibkr_status`: require gateway connected and quote/scanner/chain subsystems not unavailable.
+2. `ibkr_calendar` with `market:"us-options"`: require US option RTH open for a live options run. If German names may be scanned, also call `market:"de"` and skip German scans when Xetra is closed.
+3. `ibkr_quote` for `["SPY"]`: require `quote_quality:"firm"` during US RTH. Treat indicative, stale, wide, or previous-close-only quotes as not trade-selectable.
+4. `ibkr_chain` for `SPY` with `require_live_iv:true` and no `expiry`: require any usable live IV and `implied_move`. This is only a live-IV readiness probe; do not require the default expiry list to include the later 90-180 DTE trade horizon.
 
-## Phase 2 — Universe (wide -> narrow, fast)
-Target liquid names in **early/mid** cycle (mid-late only by exception) with credible path to the move above; bias to momentum, high relative volume, high IV, and fresh breakouts. Keep an "Other" bucket for outsized setups that fit no theme.
-- Do **not** call `ibkr_scan_params` every run if the scan codes are already known. If needed, call it once per instrument (`STK`, `STOCK.EU`) and cache mentally for the run.
-- Avoid `TOP_PERC_GAIN`, `HIGH_OPEN_GAP`, and raw option-IV scans before US RTH unless `TEST_MODE=true`; pre-open they are usually micro-cap/noise.
-- Preferred US RTH scans: `MOST_ACTIVE_USD`, `HOT_BY_VOLUME`, `HIGH_VS_52W_HL`, `HIGH_LAST_VS_EMA50`, `HIGH_LAST_VS_EMA200`, and one thematic/wildcard scan. Use `limit:SCAN_LIMIT`, `min_price:5`, `min_dollar_volume:50000000`, `require_live:true`, `exclude_penny:true`.
-- German/Xetra scans: use `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"` or more specific IBIS-XETRA locations when available. Apply the same liquidity discipline, adjusted for EUR if needed.
-- Dedupe -> `ibkr_technical` in batches of <=3. US ETF candidates may pass `primary_exchange:"ARCA"`; German candidates must pass `market:"de"`. Drop rows with `data_quality!="ok"`; do not retry a timed-out batch more than once.
-- If `ibkr_technical` returns `warning_details.code:"technical_benchmark_unavailable"`, do not loop on it. Use the trend/liquidity fields without RS for a test/off-hours run, or stop if RS is required for the live decision.
-- Spot-check survivors with `ibkr_quote` for `quote_quality`, spread, and current/regular-close context.
-- **Output:** ranked shortlist of ~8-15 -> reason down to <=5. Tag each with theme/Other + cycle + one-line edge. Favor fresh setups over crowded mega-cap repeats.
+If the SPY chain returns `live_option_iv_unavailable`, `expiry_iv_unavailable`, no implied move, or times out, stop unless `TEST_MODE=true`. Do not continue into scans with fake option confidence.
 
-## Phase 3 — Trading Plan (<=5 ideas)
-Be aggressive; both long and short ideas are allowed. Pick the instrument per name from IV + liquidity.
-- Chain only the final `MAX_CHAIN_CANDIDATES`. First call `ibkr_chain SYMBOL` to choose a 3-6 month expiry with usable IV + 1-sigma move, then fetch one strike grid (`width` small, side relevant).
-- `options_tradable:false`, `live_option_iv_unavailable`, `expiry_iv_unavailable`, or no implied move is a **hard gate**: choose shares or drop. No 0DTE; expiries should give the thesis room (3-6 months, at least ~30 DTE).
-- **Sizing:** conviction-flexed **1-3% NLV risk** via `ibkr_size` (more conviction -> more risk, capped 3%). Report shares/contracts, R-multiple, breakeven win-rate.
-- **Fit check, do not silently discard:** weigh each idea vs account + open exposure/Greeks + regime. If it clashes, keep it and flag concern + countermeasure (downsize, stagger, hedge, or shares-only).
-- **Per idea:** thesis & catalyst; theme/Other; direction; instrument + structure; entry/stop/target; R-multiple + size; probability of hitting target; key risks + invalidation.
+### 2. Context In Three Calls
 
-## Phase 4 — HTML Dashboard
-Produce one **self-contained HTML file** (inline CSS, no external deps), exec-readable, with sections:
-1. Readiness + regime/themes/cycle call.
-2. Universe funnel -> shortlist.
-3. The <=5 ideas as scannable cards: thesis, structure, entry/stop/target, size, R, yardstick probability, risks/hedge.
-Lead with the punchline; keep it skimmable. If Phase 0 stopped, produce a readiness-only HTML report instead of a fake idea list.
+Only after readiness passes:
 
-## Phase 5 — Retro
-Small footer: what slowed or blocked this run (daemon/subsystem gaps, stale/computing data, off-hours IV, scanner coverage, technical resolver rows), and 2-4 concrete improvements for next cycle.
+1. `ibkr_regime`: use its embedded gamma and breadth context. Do not separately call `ibkr_gamma` or `ibkr_breadth` unless the regime result explicitly says those rows are unavailable and one extra call would change sizing or direction.
+2. `ibkr_account`: capture NLV, buying power, cash, margin, base currency.
+3. `ibkr_positions`: treat holdings as exposure context. Exclude held tickers from "fresh" ideas unless labeling them as add-ons.
 
----
+Classify the tape as **early / mid / mid-late / late** cycle with one PHIA confidence tag. Infer 2-3 themes from the regime plus current scan evidence; avoid web/Reddit browsing in the default run.
 
-**Guardrails.** No order placement. No 0DTE. Re-derive fresh each cycle. Prefer fewer high-conviction ideas over filling all five. When data is missing/stale, say so and either stop (default) or run explicit test/shares-only mode.
+### 3. Universe Funnel
+
+Run at most two scans. **Do not call `ibkr_scan_params` in the default path.** The scan codes below are known; call `ibkr_scan_params` only after a scan fails with an unsupported-code/location error, then spend at most one recovery call.
+
+- US RTH default: run `MOST_ACTIVE_USD` first, then one of `HOT_BY_VOLUME`, `HIGH_VS_52W_HL`, `HIGH_LAST_VS_EMA50`, or `HIGH_LAST_VS_EMA200` using `instrument:"STK"` and `exchange:"STK.US.MAJOR"`.
+- If Xetra is open and the US tape is thin, use one US scan and one German scan with `instrument:"STOCK.EU"`, `exchange:"STK.EU.IBIS"`, preferably `HIGH_VS_52W_HL` or `HOT_BY_VOLUME`.
+- If both primary scans return zero rows during US RTH, run exactly one recovery scan: `MOST_ACTIVE_USD`, same exchange/instrument, `limit:12`, `min_price:5`, `min_dollar_volume:10000000`, `exclude_penny:true`, `require_live:false`. This is a scanner-enrichment recovery only; do not accept any recovered name without firm quote validation.
+- Dedupe immediately to at most 10 names. Prefer fresh breakouts, high relative volume, liquid optionable names, and non-obvious value-chain beneficiaries. Keep one "Other" slot for an exceptional setup.
+- `ibkr_technical`: batch by market, up to 5 symbols per call and 2 calls total. Drop `data_quality!="ok"`. Do not retry benchmark warnings; use trend and liquidity fields or drop.
+- `ibkr_quote`: validate at most 5 survivors, split US/German only if needed. Drop stale/wide/illiquid rows.
+
+Shortlist 3-5 names. For each, record theme, direction, one-line edge, trend/RS evidence, liquidity, and why it can move violently in 3-6 months. If the shortlist is weak, say so and stop with 1-2 watch candidates instead of forcing trades.
+
+### 4. Finalist Structure And Sizing
+
+Pick 1-3 final ideas. Use options only when live chain data supports them.
+
+- For at most 2 finalists, call `ibkr_chain` without `expiry` and set `all_expiries:true` only when the default list does not show a usable 90-180 DTE expiry. Choose one 90-180 DTE expiry with usable IV and 1-sigma move, then call one strike grid with small `width` and the relevant `side`.
+- Hard-gate options on `options_tradable:false`, stale/model-only legs, subscribe errors, no bid/ask, no IV, no implied move, or `live_option_iv_unavailable`/`expiry_iv_unavailable`. After one hard-gated grid, stop chain probing and use shares or drop.
+- Prefer simple structures: shares, long call/put, or defined-risk debit spread. No 0DTE. No multi-leg complexity unless both legs have live quotes and tight spreads.
+- Size with 1-3% NLV risk. For shares, use `ibkr_size` with entry/stop/target. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.
+- Fit each idea against open exposure, Greeks, and regime. If it conflicts, keep it only with a countermeasure: smaller risk, staggered entry, hedge, or shares-only expression.
+
+### 5. Compact Report
+
+Lead with the punchline. Use compact Markdown, not HTML, unless explicitly requested.
+
+1. **Readiness + Tape:** data status, regime/cycle call, 2-3 themes, and account exposure constraints.
+2. **Funnel:** scans used, shortlist, and why names were cut.
+3. **Ideas:** each idea gets thesis/catalyst, direction, instrument, entry/stop/target, size, R, PHIA probability of target, key risks, invalidation, and exposure fit.
+4. **Run Stats:** tool-call count estimate, what slowed/blocked the run, and 2-3 improvements for next cycle.
+
+Guardrails: no order placement, no stale option structures, no held-name recycling without an add-on label, no filler ideas, and no extra research branches after the call cap is hit.
