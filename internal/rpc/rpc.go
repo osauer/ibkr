@@ -2319,6 +2319,7 @@ type ScanRow struct {
 	Currency           string        `json:"currency,omitempty"`
 	LocalSymbol        string        `json:"local_symbol,omitempty"`
 	TradingClass       string        `json:"trading_class,omitempty"`
+	InstrumentTags     []string      `json:"instrument_tags,omitempty"`
 	Last               *float64      `json:"last,omitempty"`
 	PrevClose          *float64      `json:"prev_close,omitempty"`
 	Change             *float64      `json:"change,omitempty"`

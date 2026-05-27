@@ -2364,8 +2364,9 @@ func (c *Connector) RequestAccountUpdates(account string) error {
 // downstream consumers read typed contract fields (Symbol, SecType, Expiry,
 // Right, Strike) instead of re-parsing an encoded symbol.
 //
-// Filters out the degenerate STK placeholder rows (ConID == 0) and any stock
-// symbols currently flagged inactive by the connector.
+// Filters out zero-quantity stale rows, degenerate STK placeholders
+// (ConID == 0), and any stock symbols currently flagged inactive by
+// the connector.
 func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 	if !c.isConnected() {
 		return nil, nil
@@ -2381,6 +2382,9 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 	result := make([]*RawPosition, 0, len(ibkrPositions))
 	for _, pos := range ibkrPositions {
 		if pos == nil {
+			continue
+		}
+		if pos.Position == 0 {
 			continue
 		}
 		if pos.Contract.SecType == "STK" && pos.Contract.ConID == 0 {

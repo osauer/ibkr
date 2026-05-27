@@ -2240,6 +2240,13 @@ func (c *Connection) handlePosition(fields []string) {
 	if contract.SecType == "OPT" {
 		key = fmt.Sprintf("%s_%s_%s%.0f", contract.Symbol, contract.Expiry, contract.Right, contract.Strike)
 	}
+	if positionSize == 0 {
+		c.positionsMu.Lock()
+		delete(c.positions, key)
+		c.positionsMu.Unlock()
+		portfolioLogger.Debugf("Position closed: %s %s", fields[2], key)
+		return
+	}
 
 	// Store position
 	c.positionsMu.Lock()
@@ -2358,6 +2365,13 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 	key := contract.Symbol
 	if contract.SecType == "OPT" {
 		key = fmt.Sprintf("%s_%s_%s%.0f", contract.Symbol, contract.Expiry, contract.Right, contract.Strike)
+	}
+	if position == 0 {
+		c.positionsMu.Lock()
+		delete(c.positions, key)
+		c.positionsMu.Unlock()
+		portfolioLogger.Debugf("Position closed: %s", key)
+		return
 	}
 
 	// Store position with full data
