@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBKR MCP server | ibkr</title>
+  <meta name="description" content="ibkr mcp is a local, read-only MCP server for Interactive Brokers account and market data. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue,...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/ibkr-mcp/">
+  <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "author": {
+      "@type": "Person",
+      "name": "Oliver Sauer",
+      "url": "https://github.com/osauer"
+    },
+    "dateModified": "2026-05-27T22:28:00+02:00",
+    "description": "ibkr mcp is a local, read-only MCP server for Interactive Brokers account and market data. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue,...",
+    "headline": "IBKR MCP server",
+    "isPartOf": {
+      "@type": "SoftwareApplication",
+      "name": "ibkr",
+      "url": "https://osauer.dev/ibkr/"
+    },
+    "url": "https://osauer.dev/ibkr/ibkr-mcp/"
+  }
+  </script>
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="../guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="ibkr-mcp-server">IBKR MCP server</h1>
+<p>Updated: 2026-05-27 22:28 CEST</p>
+<p><code>ibkr mcp</code> is a local, read-only MCP server for Interactive Brokers account and market data. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).</p>
+<p>Use this page when you searched for &#34;IBKR MCP&#34;, &#34;ibkr mcp server&#34;, or &#34;Interactive Brokers MCP&#34;. The short version: install the <code>ibkr</code> binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, and risk-regime tools without exposing order entry.</p>
+<h2 id="best-fit">Best fit</h2>
+<ul>
+<li>You want an IBKR MCP server that works locally through stdio.</li>
+<li>You already run IB Gateway or TWS and want Claude or another agent to read account and market context.</li>
+<li>You want a single Go binary instead of a Python bridge, Java jar, hosted broker proxy, or remote custody layer.</li>
+<li>You want account and market analysis, not automated order placement.</li>
+</ul>
+<h2 id="install">Install</h2>
+<p>Claude Desktop users can install the MCP Bundle:</p>
+<pre><code>open https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
+<p>Shell, Cursor, Continue, Zed, and generic MCP users can install the binary:</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr setup claude-desktop</code></pre>
+<p>Generic MCP configuration:</p>
+<pre><code>{
+  &#34;mcpServers&#34;: {
+    &#34;ibkr&#34;: {
+      &#34;command&#34;: &#34;/ABSOLUTE/PATH/TO/ibkr&#34;,
+      &#34;args&#34;: [&#34;mcp&#34;]
+    }
+  }
+}</code></pre>
+<h2 id="what-the-mcp-server-exposes">What the MCP server exposes</h2>
+<ul>
+<li>Account summary, buying power, cash, margin, daily P&amp;L, positions, option legs, and Greek coverage.</li>
+<li>Snapshot stock and ETF quotes, daily history, previous close, and quote freshness.</li>
+<li>Official market calendars for US equities, US listed options, and Xetra.</li>
+<li>Option expiries, implied volatility, expected moves, strike grids, deltas, and open interest.</li>
+<li>Market scanners, fixed-fractional position sizing, S&amp;P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard.</li>
+<li>Streaming stock and ETF quote resources through <code>ibkr://quote/{symbol}</code>.</li>
+</ul>
+<p>The full schema is in the <a href="../reference/mcp-tools.html">MCP tools reference</a> and <a href="../reference/mcp-resources.html">MCP resources reference</a>.</p>
+<h2 id="safety-boundary">Safety boundary</h2>
+<p>The bundled CLI and MCP server are read-only. They do not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If a host asks to buy or sell securities through this MCP server, the correct answer is that the server has no order-entry interface.</p>
+<h2 id="related-pages">Related pages</h2>
+<ul>
+<li><a href="https://osauer.dev/ibkr/interactive-brokers-mcp-server/">Interactive Brokers MCP server</a> for the broader setup guide.</li>
+<li><a href="https://osauer.dev/ibkr/tws-mcp-server/">TWS MCP server</a> for Trader Workstation-specific setup notes.</li>
+<li><a href="https://osauer.dev/ibkr/ib-gateway-mcp/">IB Gateway MCP server</a> for headless Gateway-oriented setup.</li>
+<li><a href="https://osauer.dev/ibkr/claude-desktop-interactive-brokers/">Claude Desktop Interactive Brokers setup</a> for the Claude MCPB path.</li>
+<li><a href="https://osauer.dev/ibkr/connect-claude-to-ibkr/">Connect Claude to IBKR</a> for Claude Desktop and Claude Code setup.</li>
+<li><a href="https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/">Analyze Interactive Brokers portfolio with AI</a> for agent-first portfolio questions.</li>
+<li><a href="https://osauer.dev/ibkr/read-only-mcp-server/">Read-only MCP server</a> for the safety boundary.</li>
+</ul>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>

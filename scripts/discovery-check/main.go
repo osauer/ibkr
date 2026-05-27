@@ -22,6 +22,7 @@ const (
 	wellKnownMCPPath   = "docs/.well-known/mcp/server.json"
 	docsSitemapPath    = "docs/sitemap.xml"
 	docsLLMSPath       = "docs/llms.txt"
+	indexNowKeyPath    = "docs/indexnow.txt"
 )
 
 var (
@@ -35,7 +36,14 @@ var (
 
 	requiredSitemapURLs = []string{
 		"https://osauer.dev/ibkr/",
+		"https://osauer.dev/ibkr/ibkr-mcp/",
 		"https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
+		"https://osauer.dev/ibkr/tws-mcp-server/",
+		"https://osauer.dev/ibkr/ib-gateway-mcp/",
+		"https://osauer.dev/ibkr/claude-desktop-interactive-brokers/",
+		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
+		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/read-only-mcp-server/",
 		"https://osauer.dev/ibkr/guides/agentic-use.html",
 		"https://osauer.dev/ibkr/reference/mcp-tools.html",
 		"https://osauer.dev/ibkr/reference/mcp-resources.html",
@@ -43,7 +51,14 @@ var (
 
 	requiredLLMSURLs = []string{
 		"https://osauer.dev/ibkr/",
+		"https://osauer.dev/ibkr/ibkr-mcp/",
 		"https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
+		"https://osauer.dev/ibkr/tws-mcp-server/",
+		"https://osauer.dev/ibkr/ib-gateway-mcp/",
+		"https://osauer.dev/ibkr/claude-desktop-interactive-brokers/",
+		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
+		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/read-only-mcp-server/",
 		"https://github.com/osauer/ibkr",
 		"https://osauer.dev/ibkr/reference/mcp-tools.html",
 		"https://osauer.dev/ibkr/reference/mcp-resources.html",
@@ -74,6 +89,7 @@ func run() error {
 	checkJSONLDVersions(&problems, version)
 	checkSitemap(&problems)
 	checkLLMS(&problems)
+	checkIndexNowKey(&problems)
 
 	if len(problems) > 0 {
 		return errors.New("\n  - " + strings.Join(problems, "\n  - "))
@@ -81,6 +97,25 @@ func run() error {
 
 	fmt.Printf("discovery-check: version %s across public discovery surfaces\n", version)
 	return nil
+}
+
+func checkIndexNowKey(problems *[]string) {
+	data, err := os.ReadFile(indexNowKeyPath)
+	if err != nil {
+		*problems = append(*problems, err.Error())
+		return
+	}
+	key := strings.TrimSpace(string(data))
+	if utf8.RuneCountInString(key) < 8 || utf8.RuneCountInString(key) > 128 {
+		*problems = append(*problems, indexNowKeyPath+" key must be 8 to 128 characters")
+	}
+	for _, r := range key {
+		if r == '-' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' {
+			continue
+		}
+		*problems = append(*problems, indexNowKeyPath+" key contains unsupported character")
+		return
+	}
 }
 
 func checkRegistryServer(problems *[]string, version string) {

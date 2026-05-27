@@ -64,7 +64,14 @@ func run(args []string) error {
 	today := berlinDate()
 	for _, url := range []string{
 		"https://osauer.dev/ibkr/",
+		"https://osauer.dev/ibkr/ibkr-mcp/",
 		"https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
+		"https://osauer.dev/ibkr/tws-mcp-server/",
+		"https://osauer.dev/ibkr/ib-gateway-mcp/",
+		"https://osauer.dev/ibkr/claude-desktop-interactive-brokers/",
+		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
+		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/read-only-mcp-server/",
 	} {
 		fileChanged, err := replaceExactlyOne("docs/sitemap.xml", sitemapLastmodRE(url), today)
 		if err != nil {

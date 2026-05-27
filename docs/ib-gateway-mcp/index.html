@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MCP resources reference | ibkr</title>
-  <meta name="description" content="Last reviewed: 2026-05-26 20:12 CEST">
-  <link rel="canonical" href="https://osauer.dev/ibkr/reference/mcp-resources.html">
+  <title>IB Gateway MCP server | ibkr</title>
+  <meta name="description" content="ibkr mcp is an IB Gateway MCP server for users who want a local, headless Interactive Brokers data bridge for AI assistants. It uses the same local socket...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/ib-gateway-mcp/">
   <script type="application/ld+json">
 {
     "@context": "https://schema.org",
@@ -15,15 +15,15 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-26T20:12:00+02:00",
-    "description": "Last reviewed: 2026-05-26 20:12 CEST",
-    "headline": "MCP resources reference",
+    "dateModified": "2026-05-27T22:28:00+02:00",
+    "description": "ibkr mcp is an IB Gateway MCP server for users who want a local, headless Interactive Brokers data bridge for AI assistants. It uses the same local socket...",
+    "headline": "IB Gateway MCP server",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
       "url": "https://osauer.dev/ibkr/"
     },
-    "url": "https://osauer.dev/ibkr/reference/mcp-resources.html"
+    "url": "https://osauer.dev/ibkr/ib-gateway-mcp/"
   }
   </script>
   <style>
@@ -151,22 +151,48 @@
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
-      <a href="mcp-tools.html">MCP tools</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
       <a href="../guides/agentic-use.html">Agent guide</a>
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="mcp-resources-reference">MCP resources reference</h1>
-<p>Last reviewed: 2026-05-26 20:12 CEST</p>
-<p>These are the non-tool resources <code>ibkr mcp</code> exposes to MCP clients. Tools are documented separately in <a href="mcp-tools.html">MCP tools reference</a>.</p>
-<h2 id="ibkrquotesymbol"><code>ibkr://quote/{symbol}</code></h2>
-<p>Live stock / ETF quote resource.</p>
-<p>Use this when an MCP client wants to keep watching one equity or ETF quote without repeatedly calling <code>ibkr_quote</code>. The template is discovered through <code>resources/templates/list</code>.</p>
-<p>Example URI:</p>
-<pre><code>ibkr://quote/AAPL</code></pre>
-<p><code>resources/read</code> returns a one-off quote snapshot with the same JSON shape as <code>ibkr quote AAPL --json</code>, including the enriched headline <code>price</code>, <code>price_source</code>, previous close, change, ranges, volume/average volume, 20-day average volume/dollar volume, <code>price_as_of</code>, stale flags, and optional <code>session_context</code>.</p>
-<p><code>resources/subscribe</code> returns <code>{}</code> and then streams coalesced tick frames through <code>notifications/resources/updated</code> until the client calls <code>resources/unsubscribe</code> or closes the MCP session. Notification payloads embed a JSON frame in <code>params.contents[].text</code>; the frame shape matches <code>ibkr quote AAPL --watch --json</code>.</p>
-<p>Only stock and ETF symbols are supported. Option contract streaming is not exposed as an MCP resource today; use <code>ibkr_chain</code> or CLI option quotes for option snapshots.</p>
+<h1 id="ib-gateway-mcp-server">IB Gateway MCP server</h1>
+<p>Updated: 2026-05-27 22:28 CEST</p>
+<p><code>ibkr mcp</code> is an IB Gateway MCP server for users who want a local, headless Interactive Brokers data bridge for AI assistants. It uses the same local socket API that IB Gateway exposes for ordinary TWS API clients, then presents the read-only data surface as MCP tools.</p>
+<p>Use this setup for Claude Desktop, Claude Code, Cursor, Zed, Continue, and other MCP hosts when IB Gateway is the process you keep running for account and market-data access.</p>
+<h2 id="gateway-prerequisites">Gateway prerequisites</h2>
+<ul>
+<li>IB Gateway 10.37 or newer, running on the same machine.</li>
+<li>An IBKR Pro account with TWS API access.</li>
+<li>API socket access enabled in IB Gateway.</li>
+<li>The paper or live Gateway port reachable on loopback.</li>
+</ul>
+<p><code>ibkr</code> probes the standard Gateway and TWS ports by default. If your setup uses a custom port, write a local config file and pin only the fields you need.</p>
+<h2 id="install">Install</h2>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr status</code></pre>
+<p>Claude Desktop users can install the MCP Bundle from the latest release:</p>
+<pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
+<p>Other MCP hosts can launch:</p>
+<pre><code>{
+  &#34;mcpServers&#34;: {
+    &#34;ibkr&#34;: {
+      &#34;command&#34;: &#34;/Users/you/.local/bin/ibkr&#34;,
+      &#34;args&#34;: [&#34;mcp&#34;]
+    }
+  }
+}</code></pre>
+<h2 id="what-gateway-backed-mcp-tools-can-read">What Gateway-backed MCP tools can read</h2>
+<ul>
+<li>Account summary, positions, daily P&amp;L, buying power, cash, and margin.</li>
+<li>Stock and ETF quotes, quote freshness, and daily history.</li>
+<li>Official market calendars and stale-quote session context.</li>
+<li>Option chains, expiries, expected moves, deltas, and open interest.</li>
+<li>Market scanners, sizing math, S&amp;P 500 breadth, dealer gamma, and risk-regime context.</li>
+</ul>
+<p>See the <a href="../guides/agentic-use.html">agentic use guide</a> for example questions and <a href="../reference/mcp-tools.html">MCP tools reference</a> for the exact schema.</p>
+<h2 id="why-local-gateway-matters">Why local Gateway matters</h2>
+<p>Brokerage data should not need a hosted middle layer just to answer account and market questions. <code>ibkr</code> keeps the broker connection local, shares one daemon between shell and MCP clients, and does not expose order-entry tools.</p>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>
