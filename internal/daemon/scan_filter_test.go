@@ -48,3 +48,33 @@ func TestFilterScanRowsUsesAverageDollarVolumeWhenLiveVolumeMissing(t *testing.T
 		}
 	}
 }
+
+func TestScanInstrumentTagsFlagETPsWithoutMislabelingStock(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		symbol string
+		want   []string
+	}{
+		{symbol: "SPY", want: []string{"etf", "broad_index_etf"}},
+		{symbol: "SOXL", want: []string{"etf", "leveraged_etp", "sector_etp"}},
+		{symbol: "MUU", want: []string{"etf", "leveraged_etp", "single_stock_etp"}},
+		{symbol: "MULL", want: []string{"etf", "leveraged_etp", "single_stock_etp"}},
+		{symbol: "AMDL", want: []string{"etf", "leveraged_etp", "single_stock_etp"}},
+		{symbol: "AMDG", want: []string{"etf", "leveraged_etp", "single_stock_etp"}},
+		{symbol: "DLLL", want: []string{"etf", "leveraged_etp", "single_stock_etp"}},
+		{symbol: "MXL", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.symbol, func(t *testing.T) {
+			got := scanInstrumentTags(rpc.ScanRow{Symbol: tc.symbol})
+			if len(got) != len(tc.want) {
+				t.Fatalf("scanInstrumentTags(%s) = %v, want %v", tc.symbol, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("scanInstrumentTags(%s) = %v, want %v", tc.symbol, got, tc.want)
+				}
+			}
+		})
+	}
+}

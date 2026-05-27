@@ -2707,7 +2707,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		return nil, err
 	}
 	for _, r := range rows {
-		res.Rows = append(res.Rows, rpc.ScanRow{
+		row := rpc.ScanRow{
 			Rank:         r.Rank,
 			Symbol:       r.Symbol,
 			SecType:      strings.ToUpper(strings.TrimSpace(r.SecType)),
@@ -2716,7 +2716,9 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 			LocalSymbol:  strings.TrimSpace(r.LocalSymbol),
 			TradingClass: strings.TrimSpace(r.TradingClass),
 			Comment:      r.Comment,
-		})
+		}
+		row.InstrumentTags = scanInstrumentTags(row)
+		res.Rows = append(res.Rows, row)
 	}
 	s.enrichScanRows(ctx, c, res.Rows, p)
 	res.Rows = filterScanRows(res.Rows, p)

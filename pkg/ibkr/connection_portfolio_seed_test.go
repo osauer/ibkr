@@ -104,3 +104,54 @@ func TestHandlePortfolioValueIgnoresStockForOptionCache(t *testing.T) {
 			len(conn.optionContractCache))
 	}
 }
+
+func TestHandlePortfolioValueZeroQuantityDeletesCachedPosition(t *testing.T) {
+	conn := &Connection{
+		positions:           map[string]*RawPosition{},
+		positionsMu:         sync.RWMutex{},
+		optionContractCache: map[string]ContractDetailsLite{},
+		optionContractMu:    sync.RWMutex{},
+	}
+
+	open := []string{
+		"7", "8",
+		"999001", "GME", "OPT", "20260618", "30", "C", "100",
+		"AMEX", "USD", "GME 260618C30", "GME",
+		"1", "0.14", "14.00", "0.00", "0.00", "-3899.40", "DU1234567",
+	}
+	closed := append([]string{}, open...)
+	closed[13] = "0"
+	closed[15] = "0.00"
+
+	conn.handlePortfolioValue(open)
+	if got := len(conn.GetPositions()); got != 1 {
+		t.Fatalf("positions after open update = %d, want 1", got)
+	}
+	conn.handlePortfolioValue(closed)
+	if got := len(conn.GetPositions()); got != 0 {
+		t.Fatalf("positions after zero-quantity update = %d, want 0: %+v", got, conn.GetPositions())
+	}
+}
+
+func TestHandlePositionZeroQuantityDeletesCachedPosition(t *testing.T) {
+	conn := &Connection{
+		positions:   map[string]*RawPosition{},
+		positionsMu: sync.RWMutex{},
+	}
+
+	open := []string{
+		"61", "3", "DU1234567", "265598", "AAPL", "STK", "1",
+		"NASDAQ", "USD", "AAPL", "AAPL", "100", "195.00",
+	}
+	closed := append([]string{}, open...)
+	closed[11] = "0"
+
+	conn.handlePosition(open)
+	if got := len(conn.GetPositions()); got != 1 {
+		t.Fatalf("positions after open update = %d, want 1", got)
+	}
+	conn.handlePosition(closed)
+	if got := len(conn.GetPositions()); got != 0 {
+		t.Fatalf("positions after zero-quantity update = %d, want 0: %+v", got, conn.GetPositions())
+	}
+}
