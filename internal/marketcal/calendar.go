@@ -77,6 +77,10 @@ func (c *Calendar) Query(q Query) (Result, error) {
 	startDate := localDate(at.In(loc))
 	for i := range days {
 		day := startDate.AddDate(0, 0, i)
+		if day.Equal(startDate) {
+			sessions = append(sessions, session)
+			continue
+		}
 		sessions = append(sessions, c.sessionForDate(spec, loc, day, time.Time{}))
 	}
 	return Result{

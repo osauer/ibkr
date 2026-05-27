@@ -545,10 +545,10 @@ func (s *Server) cachedBaseCurrency() string {
 // the raw accountSummary map. The bare "Currency" tag IBKR emits carries
 // the literal string "BASE" (the pseudo-currency name, not the actual
 // base currency), so it is useless on its own — we only return it when
-// the value is something other than "BASE". The reliable signal is the
-// `$LEDGER:ALL` subscription's `ExchangeRate_<ccy>` rows: the currency
-// whose rate is ~1.0 is the base by definition. A small epsilon tolerates
-// the gateway's occasional float drift (e.g. 1.0000000001).
+// the value is something other than "BASE". Prefer account-level value
+// suffixes (`NetLiquidation_EUR`) because the streaming `$LEDGER:ALL`
+// ExchangeRate rows can all be 1.0 on some accounts; use the exchange-rate
+// fallback only when exactly one real currency has a unit rate.
 func baseCurrencyFromRaw(raw map[string]string) string {
 	if v, ok := raw["Currency"]; ok {
 		ccy := normCcy(v)
@@ -556,8 +556,26 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 			return ccy
 		}
 	}
+	for _, tag := range []string{
+		"NetLiquidation",
+		"BuyingPower",
+		"AvailableFunds",
+		"ExcessLiquidity",
+		"TotalCashValue",
+		"MaintMarginReq",
+		"MaintenanceMarginReq",
+		"InitMarginReq",
+		"GrossPositionValue",
+		"UnrealizedPnL",
+		"RealizedPnL",
+	} {
+		if ccy := accountValueCurrencySuffix(raw, tag); ccy != "" {
+			return ccy
+		}
+	}
 	const erPrefix = "ExchangeRate_"
 	const eps = 1e-6
+	match := ""
 	for k, v := range raw {
 		ccy, ok := strings.CutPrefix(k, erPrefix)
 		if !ok {
@@ -571,9 +589,31 @@ func baseCurrencyFromRaw(raw map[string]string) string {
 		if err != nil || math.Abs(rate-1.0) > eps {
 			continue
 		}
-		return ccy
+		if match != "" && ccy != match {
+			return ""
+		}
+		match = ccy
 	}
-	return ""
+	return match
+}
+
+func accountValueCurrencySuffix(raw map[string]string, tag string) string {
+	prefix := tag + "_"
+	best := ""
+	for k := range raw {
+		ccy, ok := strings.CutPrefix(k, prefix)
+		if !ok {
+			continue
+		}
+		ccy = normCcy(ccy)
+		if ccy == "" || ccy == "BASE" {
+			continue
+		}
+		if best == "" || ccy < best {
+			best = ccy
+		}
+	}
+	return best
 }
 
 // fillFXRates copies the per-currency ExchangeRate into each non-base
