@@ -198,7 +198,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_chain",
 		Title:       "IBKR Option Chain",
-		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, `iv_source`, `iv_quality`, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant; `warning_details[].code=expiry_iv_unavailable` means IV/move is unusable); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. Set `require_live_iv:true` for preflight/readiness checks: outside U.S. option RTH it returns a fast warning instead of spending the IV fan-out budget. The strike grid leads with `tradable_summary` and `liquidity_summary`: live bid/ask leg counts, stale/model-only/subscribe-error/no-quote counts, OI coverage, `options_tradable`, `feed_gap`, `liquidity_grade`, ATM spread, nearest live call/put, tightest live spread, and `recommended_structure_hint` (`stock_only`, `shares_or_spreads`, `calls_ok`, `untradable_chain`). Treat `options_tradable:false` as a hard gate for option structures. The grid also has top-level data_type/session_state/feed_type plus warning_details; outside regular option hours data_type is `closed` even if the underlying stock feed is live. Per-leg fields include bid/ask/last, prev_close, IV, delta, OI, as_of, data_status (`quoted`, `prev_close`, `model_only`, `no_quote`, `subscribe_error`), iv_status, and oi_status. `call_prev_close` / `put_prev_close` are the option contract's own prior close and are stale context, not executable quotes. `call_oi` / `put_oi` are option open interest from IBKR ticks 27/28 and stay null when the gateway did not push OI within budget; never treat missing OI as zero. Off-hours, `prev_close` and `model_only` legs can be useful context but are not executable quotes. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
+		Description: "Option chain — use whenever the user asks anything about options (\"AAPL puts\", \"this Friday's chain\", \"call wall on SPY\"). Two shapes: **omit `expiry`** to get the expiry list (each row carries ATM IV, `iv_source`, `iv_quality`, DTE, and the 1-σ implied move `spot × IV × √(DTE/365)` — the desk-standard expected dollar move by expiration, used for earnings sizing and strike selection; daemon caches IV results, second call within ~60 s during RTH is instant; `warning_details[].code=expiry_iv_unavailable` means IV/move is unusable); **provide `expiry`** (YYYY-MM-DD) for the ATM±`width` strike grid. For 3-6 month screening, prefer expiry-list filters such as `min_dte:90,max_dte:180` or `target_dte:120` instead of `all_expiries:true`; filters are applied before IV fan-out. Set `require_live_iv:true` for preflight/readiness checks: outside U.S. option RTH it returns a fast warning instead of spending the IV fan-out budget. The strike grid leads with `tradable_summary` and `liquidity_summary`: live bid/ask leg counts, stale/model-only/subscribe-error/no-quote counts, OI coverage, `options_tradable`, `feed_gap`, `liquidity_grade`, ATM spread, nearest live call/put, tightest live spread, and `recommended_structure_hint` (`stock_only`, `shares_or_spreads`, `calls_ok`, `untradable_chain`). Treat `options_tradable:false` as a hard gate for option structures. The grid also has top-level data_type/session_state/feed_type plus warning_details; outside regular option hours data_type is `closed` even if the underlying stock feed is live. Per-leg fields include bid/ask/last, prev_close, IV, delta, OI, as_of, data_status (`quoted`, `prev_close`, `model_only`, `no_quote`, `subscribe_error`), iv_status, and oi_status. `call_prev_close` / `put_prev_close` are the option contract's own prior close and are stale context, not executable quotes. `call_oi` / `put_oi` are option open interest from IBKR ticks 27/28 and stay null when the gateway did not push OI within budget; never treat missing OI as zero. Off-hours, `prev_close` and `model_only` legs can be useful context but are not executable quotes. `no_iv` returns the fast skeleton for the expiry list (DTE only). `all_expiries` lifts the default 12-expiry cap (nearest 12 normally — back-half LEAPS rarely on the decision path). NOT for stock-level quotes (use `ibkr_quote`), NOT for historical bars (use `ibkr_history`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol":          schemaString("underlying ticker"),
 			"expiry":          schemaString("expiry date YYYY-MM-DD; omit to list available expiries"),
@@ -207,6 +207,9 @@ var Tools = []Tool{
 			"no_iv":           json.RawMessage(`{"type":"boolean","description":"when listing expiries, skip ATM IV (faster)"}`),
 			"all_expiries":    json.RawMessage(`{"type":"boolean","description":"when listing expiries, return every listed date (default: nearest 12 with IV)"}`),
 			"require_live_iv": json.RawMessage(`{"type":"boolean","description":"expiry-list preflight guard; when true, skip slow IV fan-out outside U.S. option regular hours and return warning_details code live_option_iv_unavailable"}`),
+			"min_dte":         json.RawMessage(`{"type":"integer","minimum":0,"description":"expiry-list filter: minimum calendar days to expiration, applied before IV fan-out; useful for 3-6 month option screening"}`),
+			"max_dte":         json.RawMessage(`{"type":"integer","minimum":0,"description":"expiry-list filter: maximum calendar days to expiration, applied before IV fan-out"}`),
+			"target_dte":      json.RawMessage(`{"type":"integer","minimum":0,"description":"expiry-list filter: return the listed expiry closest to this calendar DTE, after min/max DTE filters when present"}`),
 		}, []string{"symbol"}),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in struct {
@@ -217,6 +220,9 @@ var Tools = []Tool{
 				NoIV          bool   `json:"no_iv"`
 				AllExpiries   bool   `json:"all_expiries"`
 				RequireLiveIV bool   `json:"require_live_iv"`
+				MinDTE        int    `json:"min_dte"`
+				MaxDTE        int    `json:"max_dte"`
+				TargetDTE     int    `json:"target_dte"`
 			}
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
@@ -231,6 +237,9 @@ var Tools = []Tool{
 					WithIV:        !in.NoIV,
 					AllExpiries:   in.AllExpiries,
 					RequireLiveIV: in.RequireLiveIV,
+					MinDTE:        in.MinDTE,
+					MaxDTE:        in.MaxDTE,
+					TargetDTE:     in.TargetDTE,
 				}
 				if err := conn.Call(ctx, rpc.MethodChainExpiries, params, &res); err != nil {
 					return nil, err

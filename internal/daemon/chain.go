@@ -46,6 +46,12 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	if sym == "" {
 		return nil, errBadRequest("symbol required")
 	}
+	if p.MinDTE < 0 || p.MaxDTE < 0 || p.TargetDTE < 0 {
+		return nil, errBadRequest("min_dte, max_dte, and target_dte must be >= 0")
+	}
+	if p.MinDTE > 0 && p.MaxDTE > 0 && p.MinDTE > p.MaxDTE {
+		return nil, errBadRequest("min_dte must be <= max_dte")
+	}
 	c := s.gatewayConnector()
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
@@ -68,6 +74,8 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	if err != nil {
 		return nil, wrapChainExpiriesErr(sym, err)
 	}
+	today := todayLocal()
+	expiries = selectChainExpiriesByDTE(expiries, today, p.MinDTE, p.MaxDTE, p.TargetDTE)
 
 	res := &rpc.ChainExpiriesResult{
 		Symbol:   sym,
@@ -76,7 +84,6 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 
 	if !p.WithIV {
-		today := todayLocal()
 		for _, e := range expiries {
 			res.Expiries = append(res.Expiries, rpc.ChainExpiry{Date: e, DTE: dteFromDate(today, e)})
 		}
@@ -92,7 +99,6 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		work = work[:defaultExpiryIVCap]
 	}
 	if p.RequireLiveIV && !rpc.IsOptionRTH(time.Now()) {
-		today := todayLocal()
 		for _, e := range work {
 			res.Expiries = append(res.Expiries, rpc.ChainExpiry{
 				Date:      e,
@@ -126,7 +132,6 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 
 	now := time.Now()
-	today := todayLocal()
 	rows := make([]rpc.ChainExpiry, len(work))
 	type job struct {
 		idx       int
@@ -221,6 +226,43 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 	return res, nil
+}
+
+func selectChainExpiriesByDTE(expiries []string, today time.Time, minDTE, maxDTE, targetDTE int) []string {
+	if minDTE <= 0 && maxDTE <= 0 && targetDTE <= 0 {
+		return expiries
+	}
+	filtered := make([]string, 0, len(expiries))
+	for _, expiry := range expiries {
+		dte := dteFromDate(today, expiry)
+		if minDTE > 0 && dte < minDTE {
+			continue
+		}
+		if maxDTE > 0 && dte > maxDTE {
+			continue
+		}
+		filtered = append(filtered, expiry)
+	}
+	if targetDTE <= 0 || len(filtered) <= 1 {
+		return filtered
+	}
+	best := filtered[0]
+	bestDistance := absInt(dteFromDate(today, best) - targetDTE)
+	for _, expiry := range filtered[1:] {
+		distance := absInt(dteFromDate(today, expiry) - targetDTE)
+		if distance < bestDistance {
+			best = expiry
+			bestDistance = distance
+		}
+	}
+	return []string{best}
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func chainExpiryIVWarnings(symbol string, rows []rpc.ChainExpiry, requireLive bool) []rpc.DataWarning {

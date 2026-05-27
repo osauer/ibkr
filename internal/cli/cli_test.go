@@ -107,6 +107,11 @@ func TestHoistFlagsReordersValueFlags(t *testing.T) {
 			want: []string{"--date", "2026-05-25", "--next", "3", "SPY"},
 		},
 		{
+			name: "chain dte filters hoisted as pairs",
+			in:   []string{"SPY", "--min-dte", "90", "--max-dte", "180", "--target-dte", "120"},
+			want: []string{"--min-dte", "90", "--max-dte", "180", "--target-dte", "120", "SPY"},
+		},
+		{
 			name: "flag before positional preserved",
 			in:   []string{"--json", "AAPL"},
 			want: []string{"--json", "AAPL"},

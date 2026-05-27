@@ -4009,10 +4009,10 @@ func (c *Connector) handleTickSize(fields []string) {
 	sub.LastTime = time.Now()
 }
 
-// handleTickString processes IBKR tick-string updates. The only value we
-// persist today is tick type 45 (last timestamp), encoded by the gateway as
-// Unix seconds. This is the exchange-side time users expect in "At close"
-// labels; LastTime remains the local observation timestamp.
+// handleTickString processes IBKR tick-string updates. Tick type 45 carries
+// the last timestamp as Unix seconds; tick type 233 (RTVolume) carries a
+// semicolon-delimited real-time volume payload whose cumulative-volume field
+// is the most reliable intraday volume source for some live subscriptions.
 func (c *Connector) handleTickString(fields []string) {
 	if len(fields) < 5 {
 		return
@@ -4022,11 +4022,11 @@ func (c *Connector) handleTickString(fields []string) {
 		return
 	}
 	tickType, err := strconv.Atoi(fields[3])
-	if err != nil || tickType != 45 {
+	if err != nil {
 		return
 	}
-	sec, err := strconv.ParseInt(strings.TrimSpace(fields[4]), 10, 64)
-	if err != nil || sec <= 0 {
+	value := strings.TrimSpace(fields[4])
+	if value == "" {
 		return
 	}
 
@@ -4038,12 +4038,59 @@ func (c *Connector) handleTickString(fields []string) {
 	}
 
 	c.subMu.Lock()
-	if sub, ok := c.subscriptions[symbol]; ok {
-		sub.LastTradeTime = time.Unix(sec, 0)
-		sub.LastTime = time.Now()
-		sub.Observed = true
+	defer c.subMu.Unlock()
+	sub, ok := c.subscriptions[symbol]
+	if !ok {
+		return
 	}
-	c.subMu.Unlock()
+	switch tickType {
+	case 45:
+		sec, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || sec <= 0 {
+			return
+		}
+		sub.LastTradeTime = time.Unix(sec, 0)
+	case 233:
+		last, volume, ts, ok := parseRTVolumeTick(value, c.ServerVersion())
+		if !ok {
+			return
+		}
+		if last > 0 {
+			sub.LastPrice = last
+		}
+		if volume > 0 {
+			sub.Volume = volume
+		}
+		if !ts.IsZero() {
+			sub.LastTradeTime = ts
+		}
+	default:
+		return
+	}
+	sub.LastTime = time.Now()
+	sub.Observed = true
+}
+
+func parseRTVolumeTick(value string, serverVersion int) (last float64, volume int64, ts time.Time, ok bool) {
+	parts := strings.Split(value, ";")
+	if len(parts) < 4 {
+		return 0, 0, time.Time{}, false
+	}
+	last, _ = strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if v, parsed := parseTickSize(serverVersion, 8, strings.TrimSpace(parts[3])); parsed {
+		volume = v
+	}
+	rawTime := strings.TrimSpace(parts[2])
+	if rawTime != "" {
+		if n, err := strconv.ParseInt(rawTime, 10, 64); err == nil && n > 0 {
+			if n > 10_000_000_000 {
+				ts = time.UnixMilli(n)
+			} else {
+				ts = time.Unix(n, 0)
+			}
+		}
+	}
+	return last, volume, ts, last > 0 || volume > 0 || !ts.IsZero()
 }
 
 // parseTickSize normalises IBKR tickSize payloads.
