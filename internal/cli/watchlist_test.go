@@ -77,24 +77,33 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 		Rows: []rpc.WatchlistRow{
 			{
 				Quote: rpc.Quote{
-					Symbol:      "AAPL",
-					Contract:    rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
-					Price:       new(190.12),
-					PriceSource: "last",
-					PrevClose:   new(188.20),
-					Change:      new(1.92),
-					ChangePct:   new(1.02),
-					DayLow:      new(187.55),
-					DayHigh:     new(191.30),
-					Week52Low:   new(164.08),
-					Week52High:  new(199.62),
-					Volume:      new(int64(41762007)),
-					AvgVolume:   new(int64(58900000)),
-					DataType:    rpc.MarketDataDelayed,
-					PriceAt:     time.Date(2026, 5, 22, 16, 1, 2, 0, mustTestLocation(t, "America/New_York")),
-					AsOf:        time.Date(2026, 5, 25, 16, 15, 0, 0, time.UTC),
-					PriceAsOf:   "Delayed: May 22 at 04:01:02 PM EDT",
-					StaleReason: "price timestamp is 20m old during market hours",
+					Symbol:            "AAPL",
+					Contract:          rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+					Price:             new(190.12),
+					PriceSource:       "last",
+					RegularClose:      new(188.20),
+					RegularCloseAt:    time.Date(2026, 5, 22, 16, 0, 0, 0, mustTestLocation(t, "America/New_York")),
+					PriorRegularClose: new(186.28),
+					RegularChange:     new(1.92),
+					RegularChangePct:  new(1.03),
+					QuotePrice:        new(190.12),
+					QuotePriceSource:  "last",
+					QuotePriceAt:      time.Date(2026, 5, 22, 16, 1, 2, 0, mustTestLocation(t, "America/New_York")),
+					QuoteChangePct:    new(1.02),
+					PrevClose:         new(188.20),
+					Change:            new(1.92),
+					ChangePct:         new(1.02),
+					DayLow:            new(187.55),
+					DayHigh:           new(191.30),
+					Week52Low:         new(164.08),
+					Week52High:        new(199.62),
+					Volume:            new(int64(41762007)),
+					AvgVolume:         new(int64(58900000)),
+					DataType:          rpc.MarketDataDelayed,
+					PriceAt:           time.Date(2026, 5, 22, 16, 1, 2, 0, mustTestLocation(t, "America/New_York")),
+					AsOf:              time.Date(2026, 5, 25, 16, 15, 0, 0, time.UTC),
+					PriceAsOf:         "Delayed: May 22 at 04:01:02 PM EDT",
+					StaleReason:       "price timestamp is 20m old during market hours",
 					SessionContext: &rpc.MarketSession{
 						Label:    "US equities",
 						Timezone: "America/New_York",
@@ -108,16 +117,24 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 			},
 			{
 				Quote: rpc.Quote{
-					Symbol:      "MSFT",
-					Contract:    rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Currency: "USD"},
-					Price:       new(421.44),
-					PriceSource: "last",
-					PrevClose:   new(422.25),
-					Change:      new(-0.81),
-					ChangePct:   new(-0.19),
-					DataType:    rpc.MarketDataLive,
-					PriceAt:     time.Date(2026, 5, 25, 17, 30, 0, 0, mustTestLocation(t, "Europe/Berlin")),
-					AsOf:        time.Date(2026, 5, 25, 21, 15, 0, 0, mustTestLocation(t, "Europe/Berlin")),
+					Symbol:            "MSFT",
+					Contract:          rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Currency: "USD"},
+					Price:             new(421.44),
+					PriceSource:       "last",
+					RegularClose:      new(422.25),
+					PriorRegularClose: new(423.06),
+					RegularChange:     new(-0.81),
+					RegularChangePct:  new(-0.19),
+					QuotePrice:        new(421.44),
+					QuotePriceSource:  "last",
+					QuotePriceAt:      time.Date(2026, 5, 25, 17, 30, 0, 0, mustTestLocation(t, "Europe/Berlin")),
+					QuoteChangePct:    new(-0.19),
+					PrevClose:         new(422.25),
+					Change:            new(-0.81),
+					ChangePct:         new(-0.19),
+					DataType:          rpc.MarketDataLive,
+					PriceAt:           time.Date(2026, 5, 25, 17, 30, 0, 0, mustTestLocation(t, "Europe/Berlin")),
+					AsOf:              time.Date(2026, 5, 25, 21, 15, 0, 0, mustTestLocation(t, "Europe/Berlin")),
 					SessionContext: &rpc.MarketSession{
 						Timezone: "Europe/Berlin",
 						State:    "regular",
@@ -135,11 +152,11 @@ func TestRenderWatchlistQuoteTextRichRows(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"SYMBOL", "CCY", "PRICE", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
-		"AAPL", "25 sh", "USD", "190.12", "+1.92", "+1.02%", "188.20",
+		"SYMBOL", "CCY", "CLOSE", "C-CHG", "C%", "QUOTE", "Q%", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
+		"AAPL", "25 sh", "USD", "188.20", "+1.92", "+1.03%", "190.12", "+1.02%",
 		"187.55-191.30", "164.08-199.62", "41.8M/58.9M",
-		"stale", "closed May22 16:01",
-		"MSFT", "-0.81", "-0.19%", "live", "open May25 17:30 CEST",
+		"stale", "closed close May22 / quote May22 16:01 EDT",
+		"MSFT", "422.25", "421.44", "-0.81", "-0.19%", "live", "open quote May25 17:30 CEST",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("watchlist quote output missing %q:\n%s", want, out)
@@ -178,7 +195,7 @@ func TestFormatWatchlistAsOfIncludesPreMarketState(t *testing.T) {
 		},
 	}
 
-	if got, want := formatWatchlistAsOf(row), "pre-market May26 08:15 EDT"; got != want {
+	if got, want := formatWatchlistAsOf(row), "pre-market quote May26 08:15 EDT"; got != want {
 		t.Fatalf("formatWatchlistAsOf = %q, want %q", got, want)
 	}
 }

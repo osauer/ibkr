@@ -18,6 +18,7 @@ const (
 	technicalMaxLookbackDays     = 800
 	technicalMaxSymbols          = 50
 	technicalWorkers             = 4
+	technicalPerSymbolTimeout    = 15 * time.Second
 )
 
 func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.TechnicalResult, error) {
@@ -47,18 +48,39 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
-
-	benchBars, err := c.FetchHistoricalDailyBarsCtx(ctx, benchmark, days)
+	route, routed, err := technicalRoute(p)
 	if err != nil {
-		return nil, fmt.Errorf("benchmark %s history: %w", benchmark, err)
+		return nil, err
 	}
-	benchRow := buildTechnicalRow(benchmark, benchBars, nil, nil, time.Now())
 
 	res := &rpc.TechnicalResult{
 		Benchmark:    benchmark,
 		LookbackDays: days,
+		Market:       route.Market,
+		Exchange:     route.Exchange,
+		PrimaryExch:  route.PrimaryExch,
+		Currency:     route.Currency,
 		Rows:         make([]rpc.TechnicalRow, len(symbols)),
 		AsOf:         time.Now(),
+	}
+	benchCtx, cancelBench := context.WithTimeout(ctx, technicalPerSymbolTimeout)
+	benchBars, benchErr := c.FetchHistoricalDailyBarsCtx(benchCtx, benchmark, days)
+	cancelBench()
+	var benchRow rpc.TechnicalRow
+	var bench63, bench126 *float64
+	if benchErr != nil {
+		res.WarningDetails = append(res.WarningDetails, rpc.DataWarning{
+			Code:     "technical_benchmark_unavailable",
+			Scope:    benchmark,
+			Severity: "data_quality",
+			Message:  fmt.Sprintf("Benchmark history for %s was unavailable within the technical-screen budget.", benchmark),
+			Impact:   "Rows can still report trend and liquidity fields, but relative-strength fields are omitted.",
+			Action:   "Retry when the gateway is responsive, use a warm contract cache, or run smaller batches.",
+		})
+	} else {
+		benchRow = buildTechnicalRow(benchmark, benchBars, nil, nil, res.AsOf)
+		bench63 = benchRow.Return63D
+		bench126 = benchRow.Return126D
 	}
 	type job struct {
 		idx int
@@ -67,7 +89,17 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 	jobs := make([]job, 0, len(symbols))
 	for i, sym := range symbols {
 		if sym == benchmark {
-			res.Rows[i] = buildTechnicalRow(sym, benchBars, benchRow.Return63D, benchRow.Return126D, res.AsOf)
+			if benchErr != nil {
+				res.Rows[i] = rpc.TechnicalRow{
+					Symbol:         sym,
+					DataQuality:    "error",
+					MissingReasons: []string{"history_unavailable"},
+					Error:          benchErr.Error(),
+					AsOf:           time.Now(),
+				}
+			} else {
+				res.Rows[i] = buildTechnicalRow(sym, benchBars, bench63, bench126, res.AsOf)
+			}
 			continue
 		}
 		jobs = append(jobs, job{idx: i, sym: sym})
@@ -76,7 +108,9 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 		if ctx.Err() != nil {
 			return
 		}
-		bars, err := c.FetchHistoricalDailyBarsCtx(ctx, j.sym, days)
+		fetchCtx, cancel := context.WithTimeout(ctx, technicalPerSymbolTimeout)
+		defer cancel()
+		bars, err := fetchTechnicalBars(fetchCtx, c, route, routed, j.sym, days)
 		if err != nil {
 			res.Rows[j.idx] = rpc.TechnicalRow{
 				Symbol:         j.sym,
@@ -87,12 +121,72 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 			}
 			return
 		}
-		res.Rows[j.idx] = buildTechnicalRow(j.sym, bars, benchRow.Return63D, benchRow.Return126D, res.AsOf)
+		res.Rows[j.idx] = buildTechnicalRow(j.sym, bars, bench63, bench126, res.AsOf)
 	})
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		res.WarningDetails = append(res.WarningDetails, rpc.DataWarning{
+			Code:     "technical_partial_timeout",
+			Severity: "data_quality",
+			Message:  "Technical screen hit the handler deadline and returned partial rows.",
+			Impact:   "Rows marked error or timeout should be excluded from ranking.",
+			Action:   "Retry in smaller batches or pass explicit market/exchange routing for symbols that need it.",
+		})
+		for i, row := range res.Rows {
+			if row.Symbol != "" {
+				continue
+			}
+			res.Rows[i] = rpc.TechnicalRow{
+				Symbol:         symbols[i],
+				DataQuality:    "error",
+				MissingReasons: []string{"history_unavailable"},
+				Error:          err.Error(),
+				AsOf:           time.Now(),
+			}
+		}
 	}
 	return res, nil
+}
+
+func technicalRoute(p rpc.TechnicalParams) (rpc.ContractParams, bool, error) {
+	route := rpc.ContractParams{
+		Market:       strings.TrimSpace(p.Market),
+		Exchange:     strings.ToUpper(strings.TrimSpace(p.Exchange)),
+		PrimaryExch:  strings.ToUpper(strings.TrimSpace(p.PrimaryExch)),
+		Currency:     strings.ToUpper(strings.TrimSpace(p.Currency)),
+		LocalSymbol:  strings.TrimSpace(p.LocalSymbol),
+		TradingClass: strings.TrimSpace(p.TradingClass),
+	}
+	routed := route.Market != "" ||
+		route.Exchange != "" ||
+		route.PrimaryExch != "" ||
+		route.Currency != "" ||
+		route.LocalSymbol != "" ||
+		route.TradingClass != ""
+	if !routed {
+		return rpc.ContractParams{}, false, nil
+	}
+	probe := route
+	probe.Symbol = "AAPL"
+	if _, echo, _, err := normaliseStockQuoteContract(probe); err != nil {
+		return rpc.ContractParams{}, false, err
+	} else {
+		echo.Symbol = ""
+		route = echo
+	}
+	return route, true, nil
+}
+
+func fetchTechnicalBars(ctx context.Context, c *ibkrlib.Connector, route rpc.ContractParams, routed bool, symbol string, days int) ([]ibkrlib.HistoricalBar, error) {
+	if !routed {
+		return c.FetchHistoricalDailyBarsCtx(ctx, symbol, days)
+	}
+	params := route
+	params.Symbol = symbol
+	contract, _, _, err := normaliseStockQuoteContract(params)
+	if err != nil {
+		return nil, err
+	}
+	return c.FetchHistoricalDailyBarsWithContractCtx(ctx, contract, days)
 }
 
 func normalizeTechnicalSymbols(raw []string) []string {

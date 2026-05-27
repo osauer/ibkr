@@ -110,12 +110,14 @@ func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTyp
 		{header: "POS", align: positionAlignRight},
 		{header: "CCY", align: positionAlignLeft},
 		{header: "MARK", align: positionAlignRight},
+		{header: "CLOSE", align: positionAlignRight},
 		{header: "CHG", align: positionAlignRight},
 		{header: "CHG%", align: positionAlignRight},
+		{header: "QUOTE", align: positionAlignRight},
 	}
 	if quoteDetails {
 		cols = append(cols,
-			positionTableColumn{header: "PREV", align: positionAlignRight},
+			positionTableColumn{header: "PRIOR", align: positionAlignRight},
 			positionTableColumn{header: "DAY", align: positionAlignRight},
 			positionTableColumn{header: "52W", align: positionAlignRight},
 			positionTableColumn{header: "VOL/AVG", align: positionAlignRight},
@@ -141,12 +143,14 @@ func renderStocksTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTyp
 			formatPositionQuantity(p.Quantity, "sh"),
 			formatPositionCurrency(p.Currency),
 			formatPositionPrice(p.Mark),
+			formatPositionPricePtr(positionRegularClose(p)),
 			formatWatchlistChange(env, p.DayChange, 8),
 			env.formatChangePct(p.DayChangePct, 7),
+			formatPositionPricePtr(p.QuotePrice),
 		}
 		if quoteDetails {
 			row = append(row,
-				formatWatchlistNumber(p.PrevClose, 9),
+				formatWatchlistNumber(p.PriorRegularClose, 9),
 				formatWatchlistRange(env, p.DayLow, p.DayHigh, 15),
 				formatWatchlistRange(env, p.Week52Low, p.Week52High, 15),
 				formatWatchlistVolume(p.Volume, p.AvgVolume, 11),
@@ -182,6 +186,7 @@ func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTy
 		{header: "POS", align: positionAlignRight},
 		{header: "AVG", align: positionAlignRight},
 		{header: "MARK", align: positionAlignRight},
+		{header: "BID/ASK", align: positionAlignRight},
 		{header: "DAY P&L", align: positionAlignRight},
 		{header: "UNREAL", align: positionAlignRight},
 	}
@@ -198,6 +203,7 @@ func renderOptionsTable(env *Env, out io.Writer, rows []rpc.PositionView, dataTy
 			formatPositionQuantity(p.Quantity, "ct"),
 			formatPositionPrice(avgCostPerShare(p)),
 			formatPositionPrice(p.Mark),
+			formatOptionBidAsk(p),
 			env.formatPositionPnLPtr(p.DailyPnL),
 			env.formatPositionPnL(p.UnrealizedPnL),
 		}
@@ -287,6 +293,32 @@ func formatPositionPrice(v float64) string {
 	return fmt.Sprintf("%.2f", v)
 }
 
+func formatPositionPricePtr(v *float64) string {
+	if v == nil || *v == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f", *v)
+}
+
+func positionRegularClose(p rpc.PositionView) *float64 {
+	if p.RegularClose != nil {
+		return p.RegularClose
+	}
+	return p.PrevClose
+}
+
+func formatOptionBidAsk(p rpc.PositionView) string {
+	bid := "—"
+	if p.OptionBid != nil && *p.OptionBid > 0 {
+		bid = fmt.Sprintf("%.2f", *p.OptionBid)
+	}
+	ask := "—"
+	if p.OptionAsk != nil && *p.OptionAsk > 0 {
+		ask = fmt.Sprintf("%.2f", *p.OptionAsk)
+	}
+	return bid + "/" + ask
+}
+
 func formatPositionValue(p rpc.PositionView) string {
 	value := p.MarketValue
 	ccy := p.Currency
@@ -297,7 +329,7 @@ func formatPositionValue(p rpc.PositionView) string {
 }
 
 func formatPositionData(env *Env, p rpc.PositionView) string {
-	if p.DataType == "" && p.PriceAt.IsZero() {
+	if p.DataType == "" && p.QuotePriceAt.IsZero() && p.RegularCloseAt.IsZero() && p.QuotePrice == nil && p.RegularClose == nil {
 		return env.dim("pos")
 	}
 	return formatWatchlistData(env, positionWatchlistRow(p))
@@ -309,35 +341,65 @@ func formatPositionAsOf(p rpc.PositionView) string {
 
 func positionWatchlistRow(p rpc.PositionView) rpc.WatchlistRow {
 	var price *float64
-	if p.Mark != 0 {
+	if p.QuotePrice != nil {
+		price = p.QuotePrice
+	} else if close := positionRegularClose(p); close != nil {
+		price = close
+	}
+	if price == nil && p.Mark != 0 {
 		v := p.Mark
 		price = &v
 	}
-	source := p.PriceSource
+	source := p.QuotePriceSource
+	if source == "" && price != nil {
+		switch price {
+		case p.RegularClose, p.PrevClose:
+			source = "historical_close"
+		default:
+			source = p.PriceSource
+		}
+	}
 	if source == "" && price != nil {
 		source = "mark"
 	}
 	return rpc.WatchlistRow{
 		Quote: rpc.Quote{
-			Symbol:         p.Symbol,
-			Contract:       rpc.ContractParams{Symbol: p.Symbol, SecType: "STK", Currency: p.Currency},
-			Price:          price,
-			PriceSource:    source,
-			PrevClose:      p.PrevClose,
-			Change:         p.DayChange,
-			ChangePct:      p.DayChangePct,
-			DayHigh:        p.DayHigh,
-			DayLow:         p.DayLow,
-			Week52High:     p.Week52High,
-			Week52Low:      p.Week52Low,
-			Volume:         p.Volume,
-			AvgVolume:      p.AvgVolume,
-			DataType:       p.DataType,
-			PriceAt:        p.PriceAt,
-			PriceAsOf:      p.PriceAsOf,
-			Stale:          p.Stale,
-			StaleReason:    p.StaleReason,
-			SessionContext: p.SessionContext,
+			Symbol:            p.Symbol,
+			Contract:          rpc.ContractParams{Symbol: p.Symbol, SecType: "STK", Currency: p.Currency},
+			Price:             price,
+			PriceSource:       source,
+			RegularClose:      p.RegularClose,
+			RegularCloseAt:    p.RegularCloseAt,
+			PriorRegularClose: p.PriorRegularClose,
+			RegularChange:     p.RegularChange,
+			RegularChangePct:  p.RegularChangePct,
+			QuotePrice:        p.QuotePrice,
+			QuotePriceSource:  p.QuotePriceSource,
+			QuotePriceAt:      p.QuotePriceAt,
+			QuotePriceAsOf:    p.QuotePriceAsOf,
+			QuoteChange:       p.QuoteChange,
+			QuoteChangePct:    p.QuoteChangePct,
+			PrevClose:         p.PrevClose,
+			Change:            p.DayChange,
+			ChangePct:         p.DayChangePct,
+			DayHigh:           p.DayHigh,
+			DayLow:            p.DayLow,
+			Week52High:        p.Week52High,
+			Week52Low:         p.Week52Low,
+			Volume:            p.Volume,
+			AvgVolume:         p.AvgVolume,
+			DataType:          p.DataType,
+			PriceAt:           p.PriceAt,
+			PriceAsOf:         p.PriceAsOf,
+			Stale:             p.Stale,
+			StaleReason:       p.StaleReason,
+			FeedType:          p.FeedType,
+			SpreadPct:         p.SpreadPct,
+			QuoteQuality:      p.QuoteQuality,
+			Indicative:        p.Indicative,
+			VolumePhase:       p.VolumePhase,
+			WarningDetails:    p.WarningDetails,
+			SessionContext:    p.SessionContext,
 		},
 	}
 }

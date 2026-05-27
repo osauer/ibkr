@@ -614,15 +614,16 @@ func TestQuoteNeedsHistoricalContextFillsClosedMarketMetadata(t *testing.T) {
 	}
 
 	complete := &rpc.Quote{
-		Symbol:     "IBM",
-		Last:       &last,
-		PrevClose:  &prev,
-		DayLow:     &dayLow,
-		DayHigh:    &dayHigh,
-		Week52Low:  &weekLow,
-		Week52High: &weekHigh,
-		AvgVolume:  &avgVol,
-		AsOf:       time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
+		Symbol:       "IBM",
+		Last:         &last,
+		RegularClose: &prev,
+		PrevClose:    &prev,
+		DayLow:       &dayLow,
+		DayHigh:      &dayHigh,
+		Week52Low:    &weekLow,
+		Week52High:   &weekHigh,
+		AvgVolume:    &avgVol,
+		AsOf:         time.Date(2026, 5, 25, 15, 0, 0, 0, loc),
 	}
 	if quoteNeedsHistoricalContext(complete, marketcal.MarketUSEquity) {
 		t.Fatal("complete closed-market quote should not fetch historical context")
@@ -677,8 +678,23 @@ func TestApplyQuoteHistoricalFallbackPreservesLastPrice(t *testing.T) {
 	if q.PriceSource != "last" {
 		t.Fatalf("PriceSource = %q, want last", q.PriceSource)
 	}
-	if q.PrevClose == nil || *q.PrevClose != 449.00 {
-		t.Fatalf("PrevClose = %v, want prior daily close", q.PrevClose)
+	if q.RegularClose == nil || *q.RegularClose != 456.50 {
+		t.Fatalf("RegularClose = %v, want latest daily close", q.RegularClose)
+	}
+	if q.PrevClose == nil || *q.PrevClose != 456.50 {
+		t.Fatalf("PrevClose = %v, want selected-price anchor", q.PrevClose)
+	}
+	if q.PriorRegularClose == nil || *q.PriorRegularClose != 449.00 {
+		t.Fatalf("PriorRegularClose = %v, want prior daily close", q.PriorRegularClose)
+	}
+	if q.QuotePrice == nil || *q.QuotePrice != last {
+		t.Fatalf("QuotePrice = %v, want last %.2f", q.QuotePrice, last)
+	}
+	if q.RegularChange == nil || *q.RegularChange != 7.50 {
+		t.Fatalf("RegularChange = %v, want 7.50", q.RegularChange)
+	}
+	if q.QuoteChange == nil || math.Abs(*q.QuoteChange+0.25) > 0.0001 {
+		t.Fatalf("QuoteChange = %v, want -0.25", q.QuoteChange)
 	}
 	if q.Week52Low == nil || q.Week52High == nil || *q.Week52Low != 447.00 || *q.Week52High != 459.25 {
 		t.Fatalf("52w range = %v/%v, want historical low/high", q.Week52Low, q.Week52High)
@@ -686,8 +702,11 @@ func TestApplyQuoteHistoricalFallbackPreservesLastPrice(t *testing.T) {
 	if q.AvgVolume == nil || *q.AvgVolume != 2_500_000 {
 		t.Fatalf("AvgVolume = %v, want historical average volume", q.AvgVolume)
 	}
-	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-22T16:00:00-04:00"; got != want {
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-25T15:00:00-04:00"; got != want {
 		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+	if got, want := q.RegularCloseAt.Format(time.RFC3339), "2026-05-22T16:00:00-04:00"; got != want {
+		t.Fatalf("RegularCloseAt = %q, want %q", got, want)
 	}
 }
 
@@ -1148,7 +1167,7 @@ func TestDecorateQuotePrevCloseUsesPriorMarketClose(t *testing.T) {
 	}
 }
 
-func TestDecorateQuoteLastWithoutExchangeTimestampUsesMarketCloseWhenClosed(t *testing.T) {
+func TestDecorateQuoteLastWithoutExchangeTimestampUsesObservationTimeWhenClosed(t *testing.T) {
 	t.Parallel()
 	srv := &Server{}
 	loc := mustLocation(t, "Europe/Berlin")
@@ -1173,14 +1192,14 @@ func TestDecorateQuoteLastWithoutExchangeTimestampUsesMarketCloseWhenClosed(t *t
 	if q.Change == nil || math.Abs(*q.Change-0.69) > 0.0001 {
 		t.Fatalf("Change = %v, want 0.69", q.Change)
 	}
-	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-25T17:30:00+02:00"; got != want {
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-25T21:15:00+02:00"; got != want {
 		t.Fatalf("PriceAt = %q, want %q", got, want)
 	}
-	if got, want := q.PriceAsOf, "At close: May 25 at 05:30:00 PM CEST"; got != want {
+	if got, want := q.PriceAsOf, "As of: May 25 at 09:15:00 PM CEST"; got != want {
 		t.Fatalf("PriceAsOf = %q, want %q", got, want)
 	}
-	if q.DataType != rpc.MarketDataFrozen {
-		t.Fatalf("DataType = %q, want frozen after close", q.DataType)
+	if q.DataType != rpc.MarketDataLive {
+		t.Fatalf("DataType = %q, want live feed type preserved after close", q.DataType)
 	}
 	if q.QuoteQuality != "indicative" {
 		t.Fatalf("QuoteQuality = %q, want indicative after close", q.QuoteQuality)
@@ -1227,7 +1246,7 @@ func TestDecorateQuoteMarksOldLivePriceStale(t *testing.T) {
 	}
 }
 
-func TestDecorateQuoteLabelsPriorSessionLastAsPrevClose(t *testing.T) {
+func TestDecorateQuotePriorSessionLastStaysIndicative(t *testing.T) {
 	t.Parallel()
 	srv := &Server{}
 	loc := mustLocation(t, "America/New_York")
@@ -1244,20 +1263,77 @@ func TestDecorateQuoteLabelsPriorSessionLastAsPrevClose(t *testing.T) {
 	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
 	srv.decorateQuote(q, marketcal.MarketUSEquity)
 
-	if q.DataType != rpc.MarketDataPrevClose {
-		t.Fatalf("DataType = %q, want prev_close", q.DataType)
+	if q.DataType != rpc.MarketDataLive {
+		t.Fatalf("DataType = %q, want live feed type preserved", q.DataType)
 	}
-	if q.FeedType != rpc.MarketDataLive {
-		t.Fatalf("FeedType = %q, want live", q.FeedType)
+	if q.FeedType != "" {
+		t.Fatalf("FeedType = %q, want empty when effective type equals feed", q.FeedType)
 	}
-	if q.QuoteQuality != "prev_close" {
-		t.Fatalf("QuoteQuality = %q, want prev_close", q.QuoteQuality)
+	if q.QuoteQuality != "indicative" {
+		t.Fatalf("QuoteQuality = %q, want indicative", q.QuoteQuality)
 	}
 	if !q.Indicative {
-		t.Fatal("expected prior-session selected price to be indicative")
+		t.Fatal("expected prior-session quote to be indicative")
 	}
-	if len(q.WarningDetails) == 0 || q.WarningDetails[0].Code != "selected_price_prev_close" {
-		t.Fatalf("WarningDetails = %+v, want selected_price_prev_close first", q.WarningDetails)
+	if len(q.WarningDetails) == 0 || q.WarningDetails[0].Code != "off_hours_quote" {
+		t.Fatalf("WarningDetails = %+v, want off_hours_quote", q.WarningDetails)
+	}
+}
+
+func TestDecorateQuoteRejectsCloseTimestampForMismatchedOvernightLast(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	loc := mustLocation(t, "America/New_York")
+	last, regularClose, priorClose := 248.91, 250.69, 253.84
+	closeAt := time.Date(2026, 5, 26, 16, 0, 0, 0, loc)
+	asOf := time.Date(2026, 5, 27, 0, 55, 0, 0, loc)
+	q := &rpc.Quote{
+		Symbol:            "IBM",
+		Contract:          rpc.ContractParams{Symbol: "IBM", SecType: "STK", Currency: "USD"},
+		Last:              &last,
+		RegularClose:      &regularClose,
+		RegularCloseAt:    closeAt,
+		PriorRegularClose: &priorClose,
+		PrevClose:         &regularClose,
+		DataType:          rpc.MarketDataLive,
+		PriceAt:           closeAt,
+		AsOf:              asOf,
+	}
+
+	srv.attachQuoteSessionContext(q, marketcal.MarketUSEquity)
+	srv.decorateQuote(q, marketcal.MarketUSEquity)
+
+	if q.Price == nil || *q.Price != last {
+		t.Fatalf("Price = %v, want overnight last %.2f", q.Price, last)
+	}
+	if q.QuotePrice == nil || *q.QuotePrice != last {
+		t.Fatalf("QuotePrice = %v, want overnight last %.2f", q.QuotePrice, last)
+	}
+	if q.PrevClose == nil || *q.PrevClose != regularClose {
+		t.Fatalf("PrevClose = %v, want regular close anchor %.2f", q.PrevClose, regularClose)
+	}
+	if got, want := q.PriceAt.Format(time.RFC3339), "2026-05-27T00:55:00-04:00"; got != want {
+		t.Fatalf("PriceAt = %q, want %q", got, want)
+	}
+	if got, want := q.QuotePriceAt.Format(time.RFC3339), "2026-05-27T00:55:00-04:00"; got != want {
+		t.Fatalf("QuotePriceAt = %q, want %q", got, want)
+	}
+	if q.DataType != rpc.MarketDataLive {
+		t.Fatalf("DataType = %q, want live", q.DataType)
+	}
+	if q.QuoteQuality != "indicative" {
+		t.Fatalf("QuoteQuality = %q, want indicative", q.QuoteQuality)
+	}
+	if q.RegularChange == nil || math.Abs(*q.RegularChange+3.15) > 0.0001 {
+		t.Fatalf("RegularChange = %v, want -3.15", q.RegularChange)
+	}
+	if q.QuoteChange == nil || math.Abs(*q.QuoteChange+1.78) > 0.0001 {
+		t.Fatalf("QuoteChange = %v, want -1.78", q.QuoteChange)
+	}
+	for _, w := range q.WarningDetails {
+		if w.Code == "selected_price_prev_close" {
+			t.Fatalf("WarningDetails = %+v, must not classify overnight last as selected prev close", q.WarningDetails)
+		}
 	}
 }
 

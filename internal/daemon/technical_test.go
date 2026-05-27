@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
@@ -71,6 +72,23 @@ func TestComputeHistoricalLiquidity20DPartialSample(t *testing.T) {
 	}
 	if liq.avgDollarVolume == nil || math.Abs(*liq.avgDollarVolume-2450) > 1e-9 {
 		t.Fatalf("avg dollar = %v, want 2450", liq.avgDollarVolume)
+	}
+}
+
+func TestTechnicalRouteSupportsXetraMarket(t *testing.T) {
+	t.Parallel()
+	route, routed, err := technicalRoute(rpc.TechnicalParams{Market: "de"})
+	if err != nil {
+		t.Fatalf("technicalRoute returned error: %v", err)
+	}
+	if !routed {
+		t.Fatal("technicalRoute did not mark market=de as routed")
+	}
+	if route.Market != "de" {
+		t.Fatalf("Market = %q, want de", route.Market)
+	}
+	if route.Exchange != "SMART" || route.PrimaryExch != "IBIS" || route.Currency != "EUR" {
+		t.Fatalf("route = %+v, want SMART/IBIS/EUR", route)
 	}
 }
 

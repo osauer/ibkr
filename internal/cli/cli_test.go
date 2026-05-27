@@ -353,8 +353,14 @@ func TestRenderPositionsStockQuoteContext(t *testing.T) {
 				Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD",
 				Quantity: 25, AvgCost: 188.00, Mark: 190.12,
 				DataType: rpc.MarketDataDelayed, PriceSource: "last",
-				PrevClose: new(188.20), DayChange: new(1.92), DayChangePct: new(1.02),
-				DayLow: new(187.55), DayHigh: new(191.30), Week52Low: new(164.08), Week52High: new(199.62),
+				RegularClose: new(188.20), RegularCloseAt: time.Date(2026, 5, 22, 16, 0, 0, 0, loc),
+				PriorRegularClose: new(186.28), RegularChange: new(1.92), RegularChangePct: new(1.03),
+				QuotePrice: new(190.12), QuotePriceSource: "last", QuotePriceAt: time.Date(2026, 5, 22, 16, 1, 2, 0, loc),
+				QuoteChangePct: new(1.02),
+				PrevClose:      new(188.20),
+				DayChange:      new(1.92),
+				DayChangePct:   new(1.02),
+				DayLow:         new(187.55), DayHigh: new(191.30), Week52Low: new(164.08), Week52High: new(199.62),
 				Volume: new(int64(41762007)), AvgVolume: new(int64(58900000)),
 				PriceAt: time.Date(2026, 5, 22, 16, 1, 2, 0, loc),
 				Stale:   true,
@@ -376,9 +382,9 @@ func TestRenderPositionsStockQuoteContext(t *testing.T) {
 	_ = renderPositionsTextTo(env, &stdout, res, true)
 	out := stdout.String()
 	for _, want := range []string{
-		"SYMBOL", "POS", "CCY", "MARK", "CHG", "CHG%", "PREV", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
-		"AAPL", "25 sh", "USD", "190.12", "+1.92", "+1.02%", "188.20",
-		"187.55-191.30", "164.08-199.62", "41.8M/58.9M", "stale", "closed May22 16:01",
+		"SYMBOL", "POS", "CCY", "MARK", "CLOSE", "CHG", "CHG%", "QUOTE", "PRIOR", "DAY", "52W", "VOL/AVG", "DATA", "AS OF",
+		"AAPL", "25 sh", "USD", "190.12", "188.20", "+1.92", "+1.02%", "186.28",
+		"187.55-191.30", "164.08-199.62", "41.8M/58.9M", "stale", "closed close May22 / quote May22 16:01 EDT",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("positions quote output missing %q:\n%s", want, out)

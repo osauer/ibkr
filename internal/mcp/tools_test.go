@@ -97,6 +97,15 @@ func TestNoTradingTools(t *testing.T) {
 	}
 }
 
+func TestToolsHaveDirectoryAnnotations(t *testing.T) {
+	t.Parallel()
+	for _, tool := range Tools {
+		if strings.TrimSpace(tool.Title) == "" {
+			t.Errorf("tool %s missing Title; Anthropic directory submissions require human-readable tool titles", tool.Name)
+		}
+	}
+}
+
 // TestInitializeAndToolsList walks the MCP handshake without touching the
 // daemon: send initialize, expect serverInfo + tools capability; send
 // tools/list, expect every Tool we registered.
@@ -145,8 +154,13 @@ func TestInitializeAndToolsList(t *testing.T) {
 		Result struct {
 			Tools []struct {
 				Name        string          `json:"name"`
+				Title       string          `json:"title"`
 				Description string          `json:"description"`
 				InputSchema json.RawMessage `json:"inputSchema"`
+				Annotations struct {
+					Title        string `json:"title"`
+					ReadOnlyHint bool   `json:"readOnlyHint"`
+				} `json:"annotations"`
 			} `json:"tools"`
 		} `json:"result"`
 	}
@@ -159,6 +173,15 @@ func TestInitializeAndToolsList(t *testing.T) {
 	for i, want := range Tools {
 		if listResp.Result.Tools[i].Name != want.Name {
 			t.Errorf("tool[%d].name: got %q want %q", i, listResp.Result.Tools[i].Name, want.Name)
+		}
+		if listResp.Result.Tools[i].Title != want.Title {
+			t.Errorf("tool[%d].title: got %q want %q", i, listResp.Result.Tools[i].Title, want.Title)
+		}
+		if listResp.Result.Tools[i].Annotations.Title != want.Title {
+			t.Errorf("tool[%d].annotations.title: got %q want %q", i, listResp.Result.Tools[i].Annotations.Title, want.Title)
+		}
+		if !listResp.Result.Tools[i].Annotations.ReadOnlyHint {
+			t.Errorf("tool[%d].annotations.readOnlyHint: got false want true", i)
 		}
 	}
 }

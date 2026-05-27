@@ -91,6 +91,27 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	if !p.AllExpiries && len(work) > defaultExpiryIVCap {
 		work = work[:defaultExpiryIVCap]
 	}
+	if p.RequireLiveIV && !rpc.IsOptionRTH(time.Now()) {
+		today := todayLocal()
+		for _, e := range work {
+			res.Expiries = append(res.Expiries, rpc.ChainExpiry{
+				Date:      e,
+				DTE:       dteFromDate(today, e),
+				IVStatus:  "unavailable",
+				IVSource:  "unavailable",
+				IVQuality: "unavailable",
+			})
+		}
+		res.WarningDetails = append(res.WarningDetails, rpc.DataWarning{
+			Code:     "live_option_iv_unavailable",
+			Scope:    sym,
+			Severity: "data_quality",
+			Message:  "Live option IV is unavailable because U.S. listed options are outside regular trading hours.",
+			Impact:   "Expiry IV and 1-sigma implied moves are not reliable enough for option strike selection.",
+			Action:   "Retry during 09:30-16:00 ET, or omit require_live_iv for an off-hours/test run.",
+		})
+		return res, nil
+	}
 
 	// Spot is required to pick the ATM strike. A single brief subscribe
 	// shared across all expiries — pre-fix this ran once before the loop
@@ -189,6 +210,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 	res.WarningDetails = append(res.WarningDetails, chainSpotWarning(sym, spot)...)
 	res.WarningDetails = append(res.WarningDetails, annotateRepeatedExpiryIV(sym, rows)...)
+	res.WarningDetails = append(res.WarningDetails, chainExpiryIVWarnings(sym, rows, p.RequireLiveIV)...)
 
 	// Append the working set, then the rest (without IV) when caller
 	// asked for the full list. AllExpiries=false drops the tail.
@@ -199,6 +221,33 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 	return res, nil
+}
+
+func chainExpiryIVWarnings(symbol string, rows []rpc.ChainExpiry, requireLive bool) []rpc.DataWarning {
+	if len(rows) == 0 {
+		return nil
+	}
+	var usable int
+	for _, row := range rows {
+		if row.IV != nil && row.ImpliedMove != nil && row.IVQuality != "unavailable" {
+			usable++
+		}
+	}
+	if usable > 0 {
+		return nil
+	}
+	code := "expiry_iv_unavailable"
+	if requireLive {
+		code = "live_option_iv_unavailable"
+	}
+	return []rpc.DataWarning{{
+		Code:     code,
+		Scope:    symbol,
+		Severity: "data_quality",
+		Message:  "No requested expiries returned usable IV and 1-sigma implied moves.",
+		Impact:   "The chain is not sufficient for option instrument or strike selection.",
+		Action:   "Retry during U.S. option regular trading hours, or use shares-only/test-mode logic.",
+	}}
 }
 
 // todayLocal returns today's date at midnight local time. Surfaced as a

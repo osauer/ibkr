@@ -316,11 +316,16 @@ type ChainFetchParams struct {
 // modes; <=0 falls back to the preset's configured Limit (mode 1) or
 // the daemon's hard cap of 50 (mode 2).
 type ScanRunParams struct {
-	Preset     string `json:"preset,omitempty"`
-	Type       string `json:"type,omitempty"`
-	Exchange   string `json:"exchange,omitempty"`
-	Instrument string `json:"instrument,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
+	Preset          string  `json:"preset,omitempty"`
+	Type            string  `json:"type,omitempty"`
+	Exchange        string  `json:"exchange,omitempty"`
+	Instrument      string  `json:"instrument,omitempty"`
+	Limit           int     `json:"limit,omitempty"`
+	MinPrice        float64 `json:"min_price,omitempty"`
+	MinVolume       int64   `json:"min_volume,omitempty"`
+	MinDollarVolume float64 `json:"min_dollar_volume,omitempty"`
+	RequireLive     bool    `json:"require_live,omitempty"`
+	ExcludePenny    bool    `json:"exclude_penny,omitempty"`
 }
 
 // ScanParamsParams requests the gateway's full scanner catalog. Instrument
@@ -406,6 +411,12 @@ type TechnicalParams struct {
 	Symbols      []string `json:"symbols"`
 	Benchmark    string   `json:"benchmark,omitempty"`     // default SPY
 	LookbackDays int      `json:"lookback_days,omitempty"` // calendar days, default 420
+	Market       string   `json:"market,omitempty"`        // us | de; applies to Symbols, not Benchmark
+	Exchange     string   `json:"exchange,omitempty"`
+	PrimaryExch  string   `json:"primary_exchange,omitempty"`
+	Currency     string   `json:"currency,omitempty"`
+	LocalSymbol  string   `json:"local_symbol,omitempty"`
+	TradingClass string   `json:"trading_class,omitempty"`
 }
 
 // TechnicalRow is one symbol's trend, relative-strength, volatility, and
@@ -442,10 +453,15 @@ type TechnicalRow struct {
 
 // TechnicalResult is MethodTechnical's payload.
 type TechnicalResult struct {
-	Benchmark    string         `json:"benchmark"`
-	LookbackDays int            `json:"lookback_days"`
-	Rows         []TechnicalRow `json:"rows"`
-	AsOf         time.Time      `json:"as_of"`
+	Benchmark      string         `json:"benchmark"`
+	LookbackDays   int            `json:"lookback_days"`
+	Market         string         `json:"market,omitempty"`
+	Exchange       string         `json:"exchange,omitempty"`
+	PrimaryExch    string         `json:"primary_exchange,omitempty"`
+	Currency       string         `json:"currency,omitempty"`
+	Rows           []TechnicalRow `json:"rows"`
+	WarningDetails []DataWarning  `json:"warning_details,omitempty"`
+	AsOf           time.Time      `json:"as_of"`
 }
 
 // MarketCalendarParams requests official exchange-session context. Market is
@@ -1666,13 +1682,15 @@ type RegimeComposite struct {
 
 // Quote is the daemon's snapshot result.
 //
-// PrevClose / Change / ChangePct are non-nil only when the gateway has
-// delivered both the previous regular-session close (tick 9) and a
-// current Last (tick 4). Pre-market with no live ticks: Last is nil and
-// so are Change / ChangePct, but PrevClose typically still arrives — the
-// honest answer is "yesterday closed at X, no live print yet". No
-// fabrication: never substitute mid-of-bid-ask for Last when computing
-// Change.
+// RegularClose is the latest completed regular-session close (daily bars when
+// the market is closed; the gateway close tick during regular hours).
+// QuotePrice is the current live/pre/post/overnight indication selected from
+// last → mark → bid/ask midpoint → bid → ask. Price/PriceSource are retained
+// as the legacy selected-price pair and mirror QuotePrice when an indicative
+// quote exists, otherwise RegularClose. PrevClose is the comparison anchor for
+// Price: usually RegularClose for an indicative/live quote, and
+// PriorRegularClose for a historical-close-only row. No fabrication: missing
+// price families stay nil.
 //
 // Unit conventions:
 //   - ChangePct is in PERCENT units (0.70 means 0.70 %, not 70 %). The
@@ -1688,12 +1706,23 @@ type Quote struct {
 	Ask      *float64       `json:"ask"`
 	Last     *float64       `json:"last"`
 	Mark     *float64       `json:"mark,omitempty"`
-	// Price is the best user-facing current price selected by the daemon:
-	// last → mark → bid/ask midpoint → bid → ask → prev_close. PriceSource
-	// names the selected input so consumers can avoid treating a close-only
-	// fallback as a live last trade.
+	// Price is the legacy selected price: QuotePrice when the gateway has a
+	// current indication, otherwise RegularClose. PriceSource names the
+	// selected input so consumers can avoid treating a close-only fallback
+	// as a live last trade.
 	Price               *float64  `json:"price,omitempty"`
 	PriceSource         string    `json:"price_source,omitempty"`
+	RegularClose        *float64  `json:"regular_close,omitempty"`
+	RegularCloseAt      time.Time `json:"regular_close_at,omitzero"`
+	PriorRegularClose   *float64  `json:"prior_regular_close,omitempty"`
+	RegularChange       *float64  `json:"regular_change,omitempty"`
+	RegularChangePct    *float64  `json:"regular_change_pct,omitempty"`
+	QuotePrice          *float64  `json:"quote_price,omitempty"`
+	QuotePriceSource    string    `json:"quote_price_source,omitempty"`
+	QuotePriceAt        time.Time `json:"quote_price_at,omitzero"`
+	QuotePriceAsOf      string    `json:"quote_price_as_of,omitempty"`
+	QuoteChange         *float64  `json:"quote_change,omitempty"`
+	QuoteChangePct      *float64  `json:"quote_change_pct,omitempty"`
 	PrevClose           *float64  `json:"prev_close"`
 	Change              *float64  `json:"change"`
 	ChangePct           *float64  `json:"change_pct"`
@@ -1807,12 +1836,11 @@ type FrameError struct {
 
 // PositionView is the wire shape of a single position returned to the CLI.
 //
-// DayChange / DayChangePct describe how far Mark sits from the underlying's
-// previous regular-session close. Pointers so "no data" (pre-market with
-// no tick 9 yet, options where we don't track contract-level prev close)
-// is distinct from "exactly flat". The daemon caches prev close per
-// underlying so the first call pre-warms and subsequent ones are
-// instant — no fabrication.
+// DayChange / DayChangePct describe how far the account valuation mark sits
+// from RegularClose. Pointers so "no data" (no daily bar yet, options where
+// we don't track contract-level prev close) is distinct from "exactly flat".
+// The daemon caches close anchors per underlying so the first call pre-warms
+// and subsequent ones are instant — no fabrication.
 //
 // MarketValueCcy and FXRate carry the contract-currency view: MarketValue
 // remains in account base currency for back-compat, but for a USD position
@@ -1834,16 +1862,28 @@ type PositionView struct {
 	// equity options, sometimes higher for index options. Needed by JSON
 	// consumers to convert between per-share Mark and per-contract AvgCost
 	// on options (IBKR's averageCost is multiplier-inclusive on OPT).
-	Multiplier int     `json:"multiplier"`
-	AvgCost    float64 `json:"avg_cost"`
-	Mark       float64 `json:"mark"`
-	DataType   string  `json:"data_type,omitempty"`
+	Multiplier    int     `json:"multiplier"`
+	AvgCost       float64 `json:"avg_cost"`
+	Mark          float64 `json:"mark"`
+	ValuationMark float64 `json:"valuation_mark,omitempty"`
+	DataType      string  `json:"data_type,omitempty"`
 	// PriceSource names the quote input that produced the row's quote
 	// context (last, mark, prev_close, historical_close, ...). Optional
 	// because position marks can arrive from the portfolio stream before
 	// the daemon has enriched the row with quote data.
-	PriceSource string   `json:"price_source,omitempty"`
-	PrevClose   *float64 `json:"prev_close,omitempty"`
+	PriceSource       string    `json:"price_source,omitempty"`
+	RegularClose      *float64  `json:"regular_close,omitempty"`
+	RegularCloseAt    time.Time `json:"regular_close_at,omitzero"`
+	PriorRegularClose *float64  `json:"prior_regular_close,omitempty"`
+	RegularChange     *float64  `json:"regular_change,omitempty"`
+	RegularChangePct  *float64  `json:"regular_change_pct,omitempty"`
+	QuotePrice        *float64  `json:"quote_price,omitempty"`
+	QuotePriceSource  string    `json:"quote_price_source,omitempty"`
+	QuotePriceAt      time.Time `json:"quote_price_at,omitzero"`
+	QuotePriceAsOf    string    `json:"quote_price_as_of,omitempty"`
+	QuoteChange       *float64  `json:"quote_change,omitempty"`
+	QuoteChangePct    *float64  `json:"quote_change_pct,omitempty"`
+	PrevClose         *float64  `json:"prev_close,omitempty"`
 	// DayChange is per-share for stocks (Mark − stock prev close); for
 	// options it stays nil because we don't track contract-level prev
 	// close on the underlying-grouped path. DayChangePct is the same
@@ -2127,9 +2167,10 @@ type ChainStrike struct {
 //
 // Empty Symbol → bad_request.
 type ChainExpiriesParams struct {
-	Symbol      string `json:"symbol"`
-	WithIV      bool   `json:"with_iv,omitempty"`
-	AllExpiries bool   `json:"all_expiries,omitempty"`
+	Symbol        string `json:"symbol"`
+	WithIV        bool   `json:"with_iv,omitempty"`
+	AllExpiries   bool   `json:"all_expiries,omitempty"`
+	RequireLiveIV bool   `json:"require_live_iv,omitempty"`
 }
 
 // ChainExpiry is one row in MethodChainExpiries' response. IV is nil when

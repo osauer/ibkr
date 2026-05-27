@@ -260,10 +260,20 @@ if [[ "$quote_check" != "ok" ]]; then
     exit 1
 fi
 data_type="$(json_field data_type "$quote_json")"
+quote_quality="$(json_field quote_quality "$quote_json")"
+off_hours=0
+if grep -q '"code": *"off_hours_quote"' <<<"$quote_json"; then
+    off_hours=1
+fi
 case "$data_type" in
     live)
-        LOOSE=0
-        echo "    mode: live"
+        if [[ "$off_hours" -eq 0 && "$quote_quality" == "firm" ]]; then
+            LOOSE=0
+            echo "    mode: live"
+        else
+            LOOSE=1
+            echo "    mode: live/${quote_quality:-unknown} off-hours - loose (model engine may be idle)"
+        fi
         ;;
     frozen|delayed|delayed-frozen|"")
         LOOSE=1

@@ -207,6 +207,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 			Multiplier:    multiplier,
 			AvgCost:       pos.AverageCost,
 			Mark:          pos.MarketPrice,
+			ValuationMark: pos.MarketPrice,
 			MarketValue:   pos.MarketPrice * pos.Position * float64(multiplier),
 			UnrealizedPnL: pos.UnrealizedPNL,
 			RealizedPnL:   pos.RealizedPNL,
@@ -286,8 +287,9 @@ const positionStockQuoteBudget = 1500 * time.Millisecond
 
 // prewarmStockQuoteSummaries dispatches brief refcounted market-data holds
 // for held stock rows and copies quote-context fields onto the position
-// views. It also writes tick-9 previous close into the existing cache so
-// fillDailyChange and option-underlying context reuse the same value.
+// views. It also writes the latest completed regular-session close into the
+// existing cache so fillDailyChange and option-underlying context reuse the
+// same value.
 func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Connector, stocks []rpc.PositionView) {
 	if c == nil || len(stocks) == 0 {
 		return
@@ -325,21 +327,34 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 			}
 			return
 		}
-		if q.PrevClose != nil && s.prevCloses != nil {
-			s.prevCloses.put(j.contract.Symbol, prevCloseEntry{value: *q.PrevClose}, time.Now())
+		closeAnchor := q.RegularClose
+		if closeAnchor == nil {
+			closeAnchor = q.PrevClose
+		}
+		if closeAnchor != nil && s.prevCloses != nil {
+			s.prevCloses.put(j.contract.Symbol, prevCloseEntry{value: *closeAnchor}, time.Now())
 		}
 		p := &stocks[j.index]
 		p.DataType = q.DataType
-		p.PriceSource = q.PriceSource
-		p.PrevClose = q.PrevClose
+		p.PriceSource = "portfolio_mark"
+		p.RegularClose = q.RegularClose
+		p.RegularCloseAt = q.RegularCloseAt
+		p.PriorRegularClose = q.PriorRegularClose
+		p.RegularChange = q.RegularChange
+		p.RegularChangePct = q.RegularChangePct
+		p.QuotePrice = q.QuotePrice
+		p.QuotePriceSource = q.QuotePriceSource
+		p.QuotePriceAt = q.QuotePriceAt
+		p.QuotePriceAsOf = q.QuotePriceAsOf
+		p.QuoteChange = q.QuoteChange
+		p.QuoteChangePct = q.QuoteChangePct
+		p.PrevClose = closeAnchor
 		p.DayHigh = q.DayHigh
 		p.DayLow = q.DayLow
 		p.Week52High = q.Week52High
 		p.Week52Low = q.Week52Low
 		p.Volume = q.Volume
 		p.AvgVolume = q.AvgVolume
-		p.PriceAt = q.PriceAt
-		p.PriceAsOf = q.PriceAsOf
 		p.FeedType = q.FeedType
 		p.SpreadPct = q.SpreadPct
 		p.QuoteQuality = q.QuoteQuality
@@ -618,9 +633,10 @@ func addFXSensitivity(p *rpc.PositionsPortfolio, ledger map[string]ibkrlib.Curre
 }
 
 // fillDailyChange populates PrevClose / DayChange / DayChangePct /
-// DayChangeMoney on each stock row from the cache. Rows whose underlying
-// has no positive cached prev close (cache miss, dead stream) are left
-// untouched — pointers stay nil and the renderer shows an em-dash.
+// DayChangeMoney on each stock row from the row's regular-close field or
+// the cache. Rows whose underlying has no positive close anchor (cache
+// miss, dead stream) are left untouched — pointers stay nil and the renderer
+// shows an em-dash.
 //
 // DayChangeMoney is qty × DayChange (stocks have multiplier 1; the
 // dollar impact on the position equals the per-share move times shares
@@ -628,20 +644,27 @@ func addFXSensitivity(p *rpc.PositionsPortfolio, ledger map[string]ibkrlib.Curre
 // option path can supply its own (Mark − OptionPrevClose) inputs without
 // duplicating the price-level math.
 func (s *Server) fillDailyChange(stocks []rpc.PositionView) {
-	if s.prevCloses == nil {
-		return
-	}
 	now := time.Now()
 	for i := range stocks {
 		p := &stocks[i]
-		sym := normSym(p.Symbol)
-		e, ok := s.prevCloses.get(sym, now)
-		if !ok || e.value <= 0 {
+		anchor := 0.0
+		if p.RegularClose != nil && *p.RegularClose > 0 {
+			anchor = *p.RegularClose
+		} else if s.prevCloses != nil {
+			sym := normSym(p.Symbol)
+			if e, ok := s.prevCloses.get(sym, now); ok && e.value > 0 {
+				anchor = e.value
+			}
+		}
+		if anchor <= 0 {
 			continue
 		}
-		v := e.value
+		v := anchor
+		if p.RegularClose == nil {
+			p.RegularClose = &v
+		}
 		p.PrevClose = &v
-		p.DayChange, p.DayChangePct = computePositionDayChange(p.Mark, e.value)
+		p.DayChange, p.DayChangePct = computePositionDayChange(p.Mark, anchor)
 		if p.DayChange != nil {
 			money := p.Quantity * *p.DayChange
 			p.DayChangeMoney = &money
@@ -676,7 +699,7 @@ func fillOptionDayChangeMoney(options []rpc.PositionView) {
 	}
 }
 
-// fillOptionUnderlyingPrevClose copies the cached underlying prev close
+// fillOptionUnderlyingPrevClose copies the cached underlying regular close
 // onto each option leg's PrevClose field — useful as a contextual anchor
 // when the renderer groups by underlying. The option's own DayChange
 // stays nil because we don't track contract-level prev close.
@@ -1525,6 +1548,7 @@ func fillQuoteMarketData(q *rpc.Quote, d *ibkrlib.MarketData) {
 	}
 	if !d.LastTradeTime.IsZero() {
 		q.PriceAt = d.LastTradeTime
+		q.QuotePriceAt = d.LastTradeTime
 	}
 }
 
@@ -1559,7 +1583,7 @@ func quoteNeedsHistoricalContext(q *rpc.Quote, market marketcal.Market) bool {
 	if quoteMarketIsOpen(q, market) {
 		return false
 	}
-	return q.PrevClose == nil ||
+	return q.RegularClose == nil ||
 		q.DayHigh == nil ||
 		q.DayLow == nil ||
 		q.Week52High == nil ||
@@ -1725,14 +1749,21 @@ func applyQuoteHistoricalFallback(q *rpc.Quote, market marketcal.Market, bars []
 	if last.Close <= 0 {
 		return
 	}
+	regularClose := last.Close
+	q.RegularClose = &regularClose
+	if t := marketCloseForHistoricalBar(market, last, q.AsOf); !t.IsZero() {
+		q.RegularCloseAt = t
+	}
+	hasQuote := q.Last != nil || q.Mark != nil || q.Bid != nil || q.Ask != nil
+	if hasQuote {
+		q.PrevClose = &regularClose
+	}
 	if q.Last == nil && q.Bid == nil && q.Ask == nil {
-		price := last.Close
+		price := regularClose
 		q.Price = &price
 		q.PriceSource = "historical_close"
 		q.DataType = rpc.MarketDataFrozen
-		if t := marketCloseForHistoricalBar(market, last, q.AsOf); !t.IsZero() {
-			q.PriceAt = t
-		}
+		q.PriceAt = q.RegularCloseAt
 	}
 	if last.High > 0 && q.DayHigh == nil {
 		v := last.High
@@ -1748,8 +1779,11 @@ func applyQuoteHistoricalFallback(q *rpc.Quote, market marketcal.Market, bars []
 	}
 	if len(bars) >= 2 {
 		prev := bars[len(bars)-2].Close
-		if prev > 0 && q.PrevClose == nil {
-			q.PrevClose = &prev
+		if prev > 0 {
+			q.PriorRegularClose = &prev
+			if !hasQuote {
+				q.PrevClose = &prev
+			}
 		}
 	}
 	if lo, hi := historicalRange(bars, 252); lo > 0 && hi > 0 && (q.Week52Low == nil || q.Week52High == nil) {
@@ -1847,7 +1881,24 @@ func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
 		return
 	}
 	feedType := q.DataType
+	if q.RegularClose == nil && q.PrevClose != nil && quoteStockLike(q) && quoteMarketIsOpen(q, market) {
+		q.RegularClose = q.PrevClose
+		q.RegularCloseAt = previousMarketCloseTime(market, q.AsOf)
+	}
+	q.QuotePrice, q.QuotePriceSource = quoteCurrentQuotePrice(q)
+	q.QuotePriceAt = quotePriceTimeForSource(q, q.QuotePriceSource, q.QuotePrice, market)
+	if q.RegularClose != nil && q.PriorRegularClose != nil {
+		q.RegularChange, q.RegularChangePct = computeQuoteChange(q.RegularClose, q.PriorRegularClose)
+	}
+	if q.RegularClose != nil && q.QuotePrice != nil {
+		q.QuoteChange, q.QuoteChangePct = computeQuoteChange(q.QuotePrice, q.RegularClose)
+	}
 	q.Price, q.PriceSource = quoteCurrentPrice(q)
+	if q.QuotePrice != nil && q.RegularClose != nil {
+		q.PrevClose = q.RegularClose
+	} else if q.PriceSource == "historical_close" && q.PriorRegularClose != nil {
+		q.PrevClose = q.PriorRegularClose
+	}
 	q.Change, q.ChangePct = computeQuoteChange(q.Price, q.PrevClose)
 	q.PriceAt = quotePriceTime(q, market)
 	if stale, reason := quoteStaleness(q, market); stale {
@@ -1861,11 +1912,20 @@ func (s *Server) decorateQuote(q *rpc.Quote, market marketcal.Market) {
 		q.FeedType = ""
 	}
 	q.PriceAsOf = quotePriceAsOf(q, market)
+	q.QuotePriceAsOf = quoteAsOfLabel(q, market, q.QuotePriceAt, q.QuotePriceSource, q.DataType)
 	q.SpreadPct = quoteSpreadPct(q)
 	q.VolumePhase = quoteVolumePhase(q, market)
 	q.QuoteQuality = quoteQuality(q, market)
 	q.Indicative = quoteIndicative(q, market)
 	q.WarningDetails = quoteWarningDetails(q, market)
+}
+
+func quoteStockLike(q *rpc.Quote) bool {
+	if q == nil {
+		return false
+	}
+	secType := strings.ToUpper(strings.TrimSpace(q.Contract.SecType))
+	return secType == "" || secType == "STK" || secType == "ETF"
 }
 
 func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
@@ -1874,6 +1934,22 @@ func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
 	}
 	if q.Price != nil && q.PriceSource != "" {
 		return q.Price, q.PriceSource
+	}
+	if q.QuotePrice != nil {
+		return q.QuotePrice, q.QuotePriceSource
+	}
+	if q.RegularClose != nil {
+		return q.RegularClose, "historical_close"
+	}
+	if q.PrevClose != nil {
+		return q.PrevClose, "prev_close"
+	}
+	return nil, ""
+}
+
+func quoteCurrentQuotePrice(q *rpc.Quote) (*float64, string) {
+	if q == nil {
+		return nil, ""
 	}
 	if q.Last != nil {
 		return q.Last, "last"
@@ -1890,9 +1966,6 @@ func quoteCurrentPrice(q *rpc.Quote) (*float64, string) {
 	}
 	if q.Ask != nil {
 		return q.Ask, "ask"
-	}
-	if q.PrevClose != nil {
-		return q.PrevClose, "prev_close"
 	}
 	return nil, ""
 }
@@ -1918,9 +1991,6 @@ func quoteEffectiveDataType(q *rpc.Quote, market marketcal.Market, feedType stri
 	}
 	session := quoteSessionFor(q, market)
 	if session != nil {
-		if quotePriceBeforeSessionDate(q, *session) {
-			return rpc.MarketDataPrevClose
-		}
 		if quotePriceAtSessionClose(q, *session) && !session.IsOpen {
 			return rpc.MarketDataFrozen
 		}
@@ -2101,38 +2171,60 @@ func quotePriceTime(q *rpc.Quote, market marketcal.Market) time.Time {
 	if q == nil || q.Price == nil {
 		return time.Time{}
 	}
-	switch q.PriceSource {
+	return quotePriceTimeForSource(q, q.PriceSource, q.Price, market)
+}
+
+func quotePriceTimeForSource(q *rpc.Quote, source string, price *float64, market marketcal.Market) time.Time {
+	if q == nil || price == nil {
+		return time.Time{}
+	}
+	switch source {
 	case "last":
-		if !q.PriceAt.IsZero() {
+		if quoteTickTimeUsable(q, price, q.PriceAt, market) {
 			return q.PriceAt
-		}
-		if !quoteMarketIsOpen(q, market) {
-			if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
-				return t
-			}
 		}
 	case "mark":
-		if !q.PriceAt.IsZero() {
+		if quoteTickTimeUsable(q, price, q.PriceAt, market) {
 			return q.PriceAt
 		}
-		if !quoteMarketIsOpen(q, market) {
-			if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
-				return t
-			}
+	case "mid", "bid", "ask":
+		if !q.AsOf.IsZero() {
+			return q.AsOf
 		}
 	case "prev_close":
 		if t := previousMarketCloseTime(market, q.AsOf); !t.IsZero() {
 			return t
 		}
 	case "historical_close":
-		if !q.PriceAt.IsZero() {
-			return q.PriceAt
+		if !q.RegularCloseAt.IsZero() {
+			return q.RegularCloseAt
 		}
 	}
 	if !q.AsOf.IsZero() {
 		return q.AsOf
 	}
 	return time.Now()
+}
+
+func quoteTickTimeUsable(q *rpc.Quote, price *float64, tickAt time.Time, market marketcal.Market) bool {
+	if q == nil || price == nil || tickAt.IsZero() {
+		return false
+	}
+	if q.RegularClose != nil && !q.RegularCloseAt.IsZero() && tickAt.Equal(q.RegularCloseAt) && !floatClose(*price, *q.RegularClose) {
+		return false
+	}
+	session := quoteSessionFor(q, market)
+	if session == nil || session.Timezone == "" {
+		return true
+	}
+	if q.RegularClose != nil && quotePriceBeforeSessionDate(&rpc.Quote{PriceAt: tickAt}, *session) && !floatClose(*price, *q.RegularClose) {
+		return false
+	}
+	return true
+}
+
+func floatClose(a, b float64) bool {
+	return math.Abs(a-b) < 0.005
 }
 
 func previousMarketCloseTime(market marketcal.Market, at time.Time) time.Time {
@@ -2171,27 +2263,30 @@ func quotePriceAsOf(q *rpc.Quote, market marketcal.Market) string {
 	if q == nil || q.PriceAt.IsZero() {
 		return ""
 	}
+	return quoteAsOfLabel(q, market, q.PriceAt, q.PriceSource, q.DataType)
+}
+
+func quoteAsOfLabel(q *rpc.Quote, market marketcal.Market, at time.Time, source, dataType string) string {
+	if q == nil || at.IsZero() {
+		return ""
+	}
 	loc := quoteMarketLocation(q, market)
-	t := q.PriceAt
+	t := at
 	if loc != nil {
 		t = t.In(loc)
 	}
 	label := "As of"
-	if q.PriceSource == "prev_close" || q.PriceSource == "historical_close" || q.DataType == rpc.MarketDataPrevClose {
+	if source == "prev_close" || source == "historical_close" || dataType == rpc.MarketDataPrevClose {
 		label = "At close"
-	} else if q.DataType == rpc.MarketDataDelayedFrozen {
+	} else if dataType == rpc.MarketDataDelayedFrozen {
 		if quoteMarketIsOpen(q, market) {
 			label = "Delayed frozen"
-		} else {
-			label = "At close"
 		}
-	} else if q.DataType == rpc.MarketDataFrozen {
+	} else if dataType == rpc.MarketDataFrozen {
 		if quoteMarketIsOpen(q, market) {
 			label = "Frozen"
-		} else {
-			label = "At close"
 		}
-	} else if q.DataType == rpc.MarketDataDelayed {
+	} else if dataType == rpc.MarketDataDelayed {
 		label = "Delayed"
 	}
 	return fmt.Sprintf("%s: %s", label, t.Format("Jan 2 at 03:04:05 PM MST"))
@@ -2425,7 +2520,64 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 		})
 	}
 	s.enrichScanRows(ctx, c, res.Rows)
+	res.Rows = filterScanRows(res.Rows, p)
 	return res, nil
+}
+
+func filterScanRows(rows []rpc.ScanRow, p rpc.ScanRunParams) []rpc.ScanRow {
+	if !scanFiltersActive(p) || len(rows) == 0 {
+		return rows
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		if scanRowPassesFilters(row, p) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func scanFiltersActive(p rpc.ScanRunParams) bool {
+	return p.MinPrice > 0 || p.MinVolume > 0 || p.MinDollarVolume > 0 || p.RequireLive || p.ExcludePenny
+}
+
+func scanRowPassesFilters(row rpc.ScanRow, p rpc.ScanRunParams) bool {
+	minPrice := p.MinPrice
+	if p.ExcludePenny {
+		minPrice = max(minPrice, 5)
+	}
+	if minPrice > 0 {
+		if row.Last == nil || *row.Last < minPrice {
+			return false
+		}
+	}
+	if p.MinVolume > 0 {
+		if row.Volume == nil || *row.Volume < p.MinVolume {
+			return false
+		}
+	}
+	if p.MinDollarVolume > 0 {
+		if row.Last == nil || row.Volume == nil || *row.Last*float64(*row.Volume) < p.MinDollarVolume {
+			return false
+		}
+	}
+	if p.RequireLive && !scanRowHasUsableLiveQuote(row) {
+		return false
+	}
+	return true
+}
+
+func scanRowHasUsableLiveQuote(row rpc.ScanRow) bool {
+	if row.Last == nil || !rpc.IsLiveDataType(row.DataType) {
+		return false
+	}
+	for _, w := range row.WarningDetails {
+		switch w.Code {
+		case "off_hours_quote", "selected_price_prev_close", "selected_price_closed_session", "stale_quote", "missing_quote":
+			return false
+		}
+	}
+	return true
 }
 
 // scanEnrichWindow is the per-row deadline for collecting market-data ticks
