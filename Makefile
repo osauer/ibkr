@@ -33,7 +33,7 @@ SKILL_SRC  ?= skills/ibkr
 MAIN_BRANCH ?= main
 RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
-MCP_PUBLISHER ?= mcp-publisher
+MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
 .PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub discovery-check release-prep
 
@@ -176,6 +176,7 @@ modernize: ## Apply go fix + modernize rewrites in place
 docs-regen: ## Regenerate docs/reference/*.md from generators
 	go run ./scripts/docgen/config-ref
 	go run ./scripts/docgen/mcp-tools
+	go run ./scripts/docgen/site-html
 
 # docs-check is the CI gate: regenerate to a tempfile, diff against the
 # checked-in copy, fail if they differ. Catches the "I changed a struct
@@ -197,6 +198,7 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 			fail=1; \
 		fi; \
 	done; \
+	go run ./scripts/docgen/site-html -check || fail=1; \
 	exit $$fail
 
 discovery-check: ## Verify public discovery metadata, sitemap, llms.txt, and JSON-LD stay in sync

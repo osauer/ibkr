@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -231,7 +232,9 @@ func checkSitemap(problems *[]string) {
 
 	seen := make(map[string]bool, len(sitemap.URLs))
 	for _, entry := range sitemap.URLs {
-		seen[strings.TrimSpace(entry.Loc)] = true
+		loc := strings.TrimSpace(entry.Loc)
+		seen[loc] = true
+		checkPublicURLFile(problems, docsSitemapPath, loc)
 	}
 	for _, url := range requiredSitemapURLs {
 		if !seen[url] {
@@ -251,6 +254,33 @@ func checkLLMS(problems *[]string) {
 		if !strings.Contains(text, url) {
 			*problems = append(*problems, docsLLMSPath+" missing "+url)
 		}
+		checkPublicURLFile(problems, docsLLMSPath, url)
+	}
+}
+
+func checkPublicURLFile(problems *[]string, source string, rawURL string) {
+	const prefix = "https://osauer.dev/ibkr/"
+	if !strings.HasPrefix(rawURL, prefix) {
+		return
+	}
+	rel := strings.TrimPrefix(rawURL, prefix)
+	if rel == "" {
+		rel = "index.html"
+	} else if strings.HasSuffix(rel, "/") {
+		rel += "index.html"
+	}
+	path := filepath.Clean(filepath.Join("docs", filepath.FromSlash(rel)))
+	if path != "docs" && !strings.HasPrefix(path, "docs"+string(os.PathSeparator)) {
+		*problems = append(*problems, fmt.Sprintf("%s public URL escapes docs root: %s", source, rawURL))
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		*problems = append(*problems, fmt.Sprintf("%s public URL has no checked-in file: %s -> %s", source, rawURL, path))
+		return
+	}
+	if info.IsDir() {
+		*problems = append(*problems, fmt.Sprintf("%s public URL maps to directory, not file: %s -> %s", source, rawURL, path))
 	}
 }
 

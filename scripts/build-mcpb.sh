@@ -135,6 +135,23 @@ JSON
 
 mcpb validate "$stage/manifest.json"
 mcpb pack "$stage" "$bundle"
+if [[ -n "${MCPB_SIGN_CERT:-}" || -n "${MCPB_SIGN_KEY:-}" ]]; then
+    if [[ -z "${MCPB_SIGN_CERT:-}" || -z "${MCPB_SIGN_KEY:-}" ]]; then
+        echo "build-mcpb: set both MCPB_SIGN_CERT and MCPB_SIGN_KEY to sign the bundle" >&2
+        exit 1
+    fi
+    sign_args=(sign --cert "$MCPB_SIGN_CERT" --key "$MCPB_SIGN_KEY")
+    if [[ -n "${MCPB_SIGN_INTERMEDIATE:-}" ]]; then
+        sign_args+=(--intermediate)
+        # shellcheck disable=SC2206 # intentional word splitting for multiple intermediate paths
+        intermediates=($MCPB_SIGN_INTERMEDIATE)
+        sign_args+=("${intermediates[@]}")
+    fi
+    mcpb "${sign_args[@]}" "$bundle"
+    mcpb verify "$bundle"
+else
+    echo "build-mcpb: bundle is unsigned; set MCPB_SIGN_CERT and MCPB_SIGN_KEY to produce a signed MCPB" >&2
+fi
 mcpb info "$bundle"
 cp "$bundle" "$stable_bundle"
 cmp -s "$bundle" "$stable_bundle" || {
