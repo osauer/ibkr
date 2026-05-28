@@ -6,6 +6,8 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
+[Project site](https://osauer.dev/ibkr/) · [IBKR MCP setup](https://osauer.dev/ibkr/ibkr-mcp/) · [Claude portfolio review](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/) · [MCP tools](https://osauer.dev/ibkr/reference/mcp-tools.html)
+
 **Agentic portfolio analysis and trading-research workflows for IBKR / TWS.**
 
 `ibkr` turns your local IB Gateway or TWS session into structured account and market context for the terminal, Claude Desktop, Claude Code, Cursor, Continue, Zed, and other MCP hosts. It supports portfolio review, exposure mapping, options diagnostics, market-regime checks, scanner-driven research, watchlist monitoring, and position-sizing math.
