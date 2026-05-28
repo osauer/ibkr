@@ -31,6 +31,7 @@ func TestMCPToolCallTimeoutBudgets(t *testing.T) {
 		{name: "ibkr_chain", args: json.RawMessage(`{"symbol":"BB","expiry":"2026-07-17"}`), want: mcpLongToolTimeout},
 		{name: "ibkr_technical", args: json.RawMessage(`{"symbols":["ASTS","IREN"]}`), want: mcpScannerToolTimeout},
 		{name: "ibkr_regime", want: mcpRegimeToolTimeout},
+		{name: "ibkr_canary", want: mcpRegimeToolTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+" "+string(tc.args), func(t *testing.T) {
