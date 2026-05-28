@@ -6,11 +6,11 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-**Use your IBKR account from the terminal or an AI assistant without giving it trading access.**
+**Agentic portfolio analysis and trading-research workflows for IBKR / TWS.**
 
-`ibkr` answers account and market questions against your local IB Gateway or TWS session. It shows positions, exposure, live market data, official market calendars, option Greeks, market breadth, risk regime, and position size. It cannot place, modify, or cancel orders.
+`ibkr` turns your local IB Gateway or TWS session into structured account and market context for the terminal, Claude Desktop, Claude Code, Cursor, Continue, Zed, and other MCP hosts. It supports portfolio review, exposure mapping, options diagnostics, market-regime checks, scanner-driven research, watchlist monitoring, and position-sizing math.
 
-For MCP users, `ibkr mcp` is a local read-only IBKR MCP server for Claude Desktop, Claude Code, Cursor, Continue, Zed, and other stdio MCP hosts. It works with both Interactive Brokers Trader Workstation (TWS) and IB Gateway.
+For MCP users, `ibkr mcp` is a local IBKR workflow layer for semi-professional retail traders who want agentic portfolio and trading-research analysis on live broker data. The bundled MCP surface is deliberately read-side only: it can analyze and size plans, but it cannot place, modify, or cancel orders.
 
 Use it from a shell:
 
@@ -28,6 +28,8 @@ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP host and ask:
 
 > "What's in my IBKR account?"
+>
+> "Review my portfolio and rank the risks I should look at today."
 >
 > "Show my AAPL exposure, including option deltas."
 >
@@ -84,6 +86,8 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 
 For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [IBKR Claude Desktop MCP setup guide](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/), [best IBKR MCP server for Claude Code guide](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
+
+For a ready-to-run portfolio review prompt, see [examples/ibkr_portfolio_analysis_prompt.md](examples/ibkr_portfolio_analysis_prompt.md).
 
 ## Pick your path
 

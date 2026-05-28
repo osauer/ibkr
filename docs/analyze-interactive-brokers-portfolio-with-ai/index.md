@@ -1,8 +1,8 @@
 # Analyze an Interactive Brokers portfolio with AI
 
-Updated: 2026-05-27 22:39 CEST
+Updated: 2026-05-28 06:45 CEST
 
-`ibkr` lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls `ibkr mcp`; `ibkr` reads IB Gateway or TWS; the assistant receives structured read-only responses.
+`ibkr` lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls `ibkr mcp`; `ibkr` reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.
 
 This page is for searches such as "analyze Interactive Brokers portfolio with AI", "AI assistant for IBKR portfolio analysis", "Claude IBKR positions options analysis", and "natural language TWS API portfolio analysis".
 
@@ -16,7 +16,7 @@ This page is for searches such as "analyze Interactive Brokers portfolio with AI
 - "What are the next option expiries and implied moves for my top holdings?"
 - "How does today's risk regime affect this portfolio?"
 
-The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, and risk-regime context.
+The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, and risk-regime context. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, and plan sizing without exposing order-entry tools.
 
 ## Why this is better than copy-paste analysis
 
@@ -49,6 +49,8 @@ Expected answer shape:
 - stale, frozen, delayed, or closed-market quote warnings
 - current risk-regime context when relevant
 
+For a fuller semi-professional portfolio-review workflow, use the prompt in [examples/ibkr_portfolio_analysis_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md).
+
 ## Install
 
 ```sh
@@ -75,7 +77,7 @@ For other MCP hosts:
 }
 ```
 
-## Read-only by design
+## Controlled execution boundary
 
 The bundled CLI and MCP server do not expose order placement, order modification, or order cancellation. The sizing tool performs math against net liquidation value; it does not submit an order ticket.
 
