@@ -71,6 +71,7 @@ func run(args []string) error {
 		"https://osauer.dev/ibkr/claude-desktop-interactive-brokers/",
 		"https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/",
 		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
+		"https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/",
 		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
 		"https://osauer.dev/ibkr/read-only-mcp-server/",
 	} {
