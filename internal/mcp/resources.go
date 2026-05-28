@@ -174,8 +174,14 @@ func (s *Server) handleResourcesRead(ctx context.Context, id, params json.RawMes
 		TimeoutMs:        int(snapshotReadTimeout.Milliseconds()),
 		IncludeLiquidity: true,
 	}
+	daemonConn, closeConn, err := s.toolConn(readCtx)
+	if err != nil {
+		s.writeError(id, codeInternalError, err.Error())
+		return
+	}
+	defer closeConn()
 	var quote rpc.Quote
-	if err := s.conn.Call(readCtx, rpc.MethodQuoteSnapshot, snapParams, &quote); err != nil {
+	if err := daemonConn.Call(readCtx, rpc.MethodQuoteSnapshot, snapParams, &quote); err != nil {
 		s.writeError(id, codeInternalError, err.Error())
 		return
 	}
@@ -205,7 +211,7 @@ func (s *Server) handleResourcesRead(ctx context.Context, id, params json.RawMes
 // when the daemon closes the stream (gateway lost, daemon shutdown, …)
 // the goroutine emits a final terminal-error notification and exits. The
 // MCP client decides whether to retry.
-func (s *Server) handleResourcesSubscribe(id, params json.RawMessage) {
+func (s *Server) handleResourcesSubscribe(ctx context.Context, id, params json.RawMessage) {
 	var p resourceSubscribeParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		s.writeError(id, codeInvalidParams, err.Error())
@@ -233,7 +239,7 @@ func (s *Server) handleResourcesSubscribe(id, params json.RawMessage) {
 	// Open a dedicated daemon conn for this subscription so it doesn't
 	// contend with unary tools/call traffic on the shared conn. dial.Conn
 	// holds the per-conn mutex for the stream's whole lifetime.
-	daemonConn, err := s.dialer()
+	daemonConn, err := s.dial(ctx)
 	if err != nil {
 		s.writeError(id, codeInternalError, fmt.Sprintf("dial daemon: %v", err))
 		return

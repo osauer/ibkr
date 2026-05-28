@@ -1,6 +1,7 @@
 package dial
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -39,10 +40,24 @@ const AutospawnTimeout = 5 * time.Second
 // surface the "stuck daemon" error when the PID stays alive through the
 // full budget.
 func AutospawnAndConnect(socketPath string) (*Conn, error) {
+	return AutospawnAndConnectContext(context.Background(), socketPath)
+}
+
+// AutospawnAndConnectContext is AutospawnAndConnect with a caller-owned
+// cancellation signal. It is used by stdio MCP so protocol shutdown can abort a
+// pending daemon startup instead of leaving the server around after its host is
+// gone.
+func AutospawnAndConnectContext(ctx context.Context, socketPath string) (*Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	lockPath := LockPath(socketPath)
 	if pid := LockHolderPID(lockPath); pid > 0 && IsProcessAlive(pid) {
-		if conn, ok := waitForSocketOrPIDDeath(socketPath, pid, AutospawnTimeout); ok {
+		if conn, ok := waitForSocketOrPIDDeath(ctx, socketPath, pid, AutospawnTimeout); ok {
 			return conn, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		// Either the PID died during the wait (graceful shutdown finished
 		// — fall through to spawn) or the budget ran out with the PID
@@ -58,12 +73,18 @@ func AutospawnAndConnect(socketPath string) (*Conn, error) {
 		// PID died — fall through to spawn.
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := spawnDaemon(); err != nil {
 		return nil, fmt.Errorf("failed to start daemon: %w", err)
 	}
-	conn, waitErr := WaitForSocket(socketPath, AutospawnTimeout)
+	conn, waitErr := WaitForSocketContext(ctx, socketPath, AutospawnTimeout)
 	if waitErr == nil {
 		return conn, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	pid := LockHolderPID(lockPath)
@@ -83,16 +104,23 @@ func AutospawnAndConnect(socketPath string) (*Conn, error) {
 // (return nil, false). On budget exhaustion returns (nil, false) too —
 // callers distinguish stuck-but-alive from genuinely-dead by probing
 // IsProcessAlive again after the call.
-func waitForSocketOrPIDDeath(socketPath string, pid int, timeout time.Duration) (*Conn, bool) {
+func waitForSocketOrPIDDeath(ctx context.Context, socketPath string, pid int, timeout time.Duration) (*Conn, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return nil, false
+		}
 		if conn, err := Connect(socketPath); err == nil {
 			return conn, true
 		}
 		if !IsProcessAlive(pid) {
 			return nil, false
 		}
-		time.Sleep(75 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(75 * time.Millisecond):
+		}
 	}
 	return nil, false
 }

@@ -144,7 +144,7 @@ func TestWaitForSocketOrPIDDeathFallsThroughOnPIDExit(t *testing.T) {
 	// decided by PID death, not by a successful Connect.
 	missing := shortSocketPath(t)
 	start := time.Now()
-	conn, ok := waitForSocketOrPIDDeath(missing, pid, 1*time.Second)
+	conn, ok := waitForSocketOrPIDDeath(context.Background(), missing, pid, 1*time.Second)
 	elapsed := time.Since(start)
 
 	if ok || conn != nil {
@@ -155,6 +155,18 @@ func TestWaitForSocketOrPIDDeathFallsThroughOnPIDExit(t *testing.T) {
 	}
 	if IsProcessAlive(pid) {
 		t.Errorf("test invariant broken: PID %d still alive at end of wait", pid)
+	}
+}
+
+func TestAutospawnAndConnectContextHonorsCanceledContextBeforeSpawn(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := AutospawnAndConnectContext(ctx, shortSocketPath(t))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AutospawnAndConnectContext with canceled ctx = %v, want context.Canceled", err)
 	}
 }
 
