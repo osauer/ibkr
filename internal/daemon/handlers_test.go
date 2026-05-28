@@ -749,7 +749,7 @@ func TestGroupByUnderlying(t *testing.T) {
 		{Symbol: "AAPL", Right: "C", Strike: 215, Expiry: "20260619", Quantity: 5, MarketValue: 4700, UnrealizedPnL: 1290},
 		{Symbol: "TSLA", Right: "P", Strike: 200, Expiry: "20260516", Quantity: 2, MarketValue: 800, UnrealizedPnL: -90},
 	}
-	groups := groupByUnderlying(stocks, options)
+	groups := groupByUnderlying(stocks, options, "", nil)
 	if len(groups) != 3 {
 		t.Fatalf("expected 3 groups, got %d", len(groups))
 	}

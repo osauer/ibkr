@@ -13,8 +13,7 @@ import (
 )
 
 // TestFillFXRatesAppliesToNonBase: a USD position in a EUR account
-// should get FXRate + MarketValueCcy filled; an EUR position should
-// be left alone.
+// should get FXRate filled; an EUR position should be left alone.
 func TestFillFXRatesAppliesToNonBase(t *testing.T) {
 	rows := []rpc.PositionView{
 		{Symbol: "AAPL", Currency: "USD", MarketValue: 10000},
@@ -28,9 +27,6 @@ func TestFillFXRatesAppliesToNonBase(t *testing.T) {
 
 	if rows[0].FXRate == nil || math.Abs(*rows[0].FXRate-0.9214) > 1e-9 {
 		t.Errorf("AAPL FXRate = %v, want 0.9214", rows[0].FXRate)
-	}
-	if rows[0].MarketValueCcy == nil || math.Abs(*rows[0].MarketValueCcy-10000) > 1e-9 {
-		t.Errorf("AAPL MarketValueCcy = %v, want 10000", rows[0].MarketValueCcy)
 	}
 	if rows[1].FXRate != nil {
 		t.Errorf("SAP FXRate should be nil (same-currency), got %v", *rows[1].FXRate)
@@ -46,6 +42,140 @@ func TestFillFXRatesEmptyLedger(t *testing.T) {
 	fillFXRates(rows, nil, "EUR")
 	if rows[0].FXRate != nil {
 		t.Errorf("FXRate should be nil with empty ledger, got %v", *rows[0].FXRate)
+	}
+}
+
+func TestFillBaseValuesConvertsKnownRows(t *testing.T) {
+	daily := 25.0
+	rows := []rpc.PositionView{
+		{Symbol: "AAPL", Currency: "USD", MarketValue: 10000, UnrealizedPnL: 1000, RealizedPnL: -50, DailyPnL: &daily, FXRate: new(0.86)},
+		{Symbol: "SAP", Currency: "EUR", MarketValue: 7500, UnrealizedPnL: 250, RealizedPnL: 0},
+		{Symbol: "VOD", Currency: "GBP", MarketValue: 3000, UnrealizedPnL: 200},
+	}
+	fillBaseValues(rows, "EUR")
+
+	if rows[0].MarketValueBase == nil || math.Abs(*rows[0].MarketValueBase-8600) > 1e-9 {
+		t.Errorf("AAPL MarketValueBase = %v, want 8600", rows[0].MarketValueBase)
+	}
+	if rows[0].UnrealizedPnLBase == nil || math.Abs(*rows[0].UnrealizedPnLBase-860) > 1e-9 {
+		t.Errorf("AAPL UnrealizedPnLBase = %v, want 860", rows[0].UnrealizedPnLBase)
+	}
+	if rows[0].RealizedPnLBase == nil || math.Abs(*rows[0].RealizedPnLBase-(-43)) > 1e-9 {
+		t.Errorf("AAPL RealizedPnLBase = %v, want -43", rows[0].RealizedPnLBase)
+	}
+	if rows[0].DailyPnLBase == nil || math.Abs(*rows[0].DailyPnLBase-21.5) > 1e-9 {
+		t.Errorf("AAPL DailyPnLBase = %v, want 21.5", rows[0].DailyPnLBase)
+	}
+	if rows[1].MarketValueBase == nil || math.Abs(*rows[1].MarketValueBase-7500) > 1e-9 {
+		t.Errorf("SAP MarketValueBase = %v, want same-currency 7500", rows[1].MarketValueBase)
+	}
+	if rows[2].MarketValueBase != nil {
+		t.Errorf("VOD MarketValueBase should be nil without FX rate, got %v", *rows[2].MarketValueBase)
+	}
+}
+
+func TestPortfolioBaseAggregatesRequireCompleteFX(t *testing.T) {
+	stocks := []rpc.PositionView{
+		{Symbol: "AAPL", SecType: "STK", Quantity: 100, Mark: 200, Currency: "USD", FXRate: new(0.86)},
+		{Symbol: "SAP", SecType: "STK", Quantity: 50, Mark: 150, Currency: "EUR"},
+	}
+	got := buildPortfolioAggregatesWithBase(stocks, nil, "EUR")
+	want := 100*200*0.86 + 50*150
+	if got.DollarDeltaBase == nil || math.Abs(*got.DollarDeltaBase-want) > 1e-9 {
+		t.Errorf("DollarDeltaBase = %v, want %v", got.DollarDeltaBase, want)
+	}
+	if got.DollarDeltaBaseCurrency != "EUR" {
+		t.Errorf("DollarDeltaBaseCurrency = %q, want EUR", got.DollarDeltaBaseCurrency)
+	}
+
+	stocks = append(stocks, rpc.PositionView{Symbol: "VOD", SecType: "STK", Quantity: 10, Mark: 100, Currency: "GBP"})
+	got = buildPortfolioAggregatesWithBase(stocks, nil, "EUR")
+	if got.DollarDeltaBase != nil {
+		t.Errorf("DollarDeltaBase should be nil when one contributing currency lacks FX, got %v", *got.DollarDeltaBase)
+	}
+}
+
+func TestPortfolioDailyThetaBaseRequiresCompleteFX(t *testing.T) {
+	options := []rpc.PositionView{
+		{Symbol: "AAPL", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "USD", Theta: new(-0.10), FXRate: new(0.86)},
+		{Symbol: "SAP", SecType: rpc.SecTypeOption, Quantity: 2, Currency: "EUR", Theta: new(-0.05)},
+	}
+	got := buildPortfolioAggregatesWithBase(nil, options, "EUR")
+	want := -0.10*100*0.86 + 2*-0.05*100
+	if got.DailyThetaBase == nil || math.Abs(*got.DailyThetaBase-want) > 1e-9 {
+		t.Errorf("DailyThetaBase = %v, want %v", got.DailyThetaBase, want)
+	}
+	if got.DailyThetaBaseCurrency != "EUR" {
+		t.Errorf("DailyThetaBaseCurrency = %q, want EUR", got.DailyThetaBaseCurrency)
+	}
+
+	options = append(options, rpc.PositionView{Symbol: "VOD", SecType: rpc.SecTypeOption, Quantity: 1, Currency: "GBP", Theta: new(-0.02)})
+	got = buildPortfolioAggregatesWithBase(nil, options, "EUR")
+	if got.DailyThetaBase != nil {
+		t.Errorf("DailyThetaBase should be nil when one theta currency lacks FX, got %v", *got.DailyThetaBase)
+	}
+}
+
+func TestGroupByUnderlyingAddsBaseExposure(t *testing.T) {
+	daily := 20.0
+	nlv := 100000.0
+	stocks := []rpc.PositionView{
+		{Symbol: "AAPL", Quantity: 100, Mark: 200, Currency: "USD", MarketValue: 20000, UnrealizedPnL: 1000, DailyPnL: &daily, FXRate: new(0.86)},
+	}
+	options := []rpc.PositionView{
+		{Symbol: "AAPL", Currency: "USD", Quantity: 1, MarketValue: 500, UnrealizedPnL: -100, Delta: new(0.5), Underlying: new(float64(200)), FXRate: new(0.86)},
+		{Symbol: "SAP", Currency: "EUR", Quantity: 10, Mark: 150, MarketValue: 1500, UnrealizedPnL: 100},
+	}
+	groups := groupByUnderlying(stocks, options, "EUR", &nlv)
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2", len(groups))
+	}
+	byName := map[string]rpc.PositionGroup{}
+	for _, g := range groups {
+		byName[g.Underlying] = g
+	}
+	aapl := byName["AAPL"]
+	wantMV := (20000 + 500) * 0.86
+	if aapl.GroupMarketValueBase == nil || math.Abs(*aapl.GroupMarketValueBase-wantMV) > 1e-9 {
+		t.Errorf("AAPL GroupMarketValueBase = %v, want %v", aapl.GroupMarketValueBase, wantMV)
+	}
+	if aapl.GroupMarketValuePctNLV == nil || math.Abs(*aapl.GroupMarketValuePctNLV-(wantMV/nlv*100)) > 1e-9 {
+		t.Errorf("AAPL GroupMarketValuePctNLV = %v", aapl.GroupMarketValuePctNLV)
+	}
+	if aapl.GroupEffectiveDelta == nil || math.Abs(*aapl.GroupEffectiveDelta-150) > 1e-9 {
+		t.Errorf("AAPL GroupEffectiveDelta = %v, want 150", aapl.GroupEffectiveDelta)
+	}
+	if aapl.GroupDollarDeltaBase == nil || math.Abs(*aapl.GroupDollarDeltaBase-(30000*0.86)) > 1e-9 {
+		t.Errorf("AAPL GroupDollarDeltaBase = %v, want %v", aapl.GroupDollarDeltaBase, 30000*0.86)
+	}
+	if aapl.GroupDailyPnLBase == nil || math.Abs(*aapl.GroupDailyPnLBase-17.2) > 1e-9 {
+		t.Errorf("AAPL GroupDailyPnLBase = %v, want 17.2", aapl.GroupDailyPnLBase)
+	}
+
+	p := &rpc.PositionsPortfolio{}
+	addPortfolioBaseContext(p, groups, "EUR", &nlv)
+	if len(p.ExposureBase) != 2 || p.ExposureBase[0].Underlying != "AAPL" {
+		t.Fatalf("ExposureBase = %+v, want AAPL first", p.ExposureBase)
+	}
+	if p.NetLiquidationBase == nil || *p.NetLiquidationBase != nlv {
+		t.Errorf("NetLiquidationBase = %v, want %v", p.NetLiquidationBase, nlv)
+	}
+}
+
+func TestFlagOptionMarkOutsideBidAsk(t *testing.T) {
+	rows := []rpc.PositionView{
+		{Symbol: "AAPL", Expiry: "20260619", Right: "C", Strike: 215, Mark: 8.50, OptionBid: new(9.00), OptionAsk: new(10.00)},
+		{Symbol: "MSFT", Expiry: "20260619", Right: "P", Strike: 300, Mark: 3.50, OptionBid: new(3.00), OptionAsk: new(4.00)},
+	}
+	flagOptionMarkOutsideBidAsk(rows)
+	if !rows[0].MarkOutsideBidAsk {
+		t.Fatal("AAPL MarkOutsideBidAsk = false, want true")
+	}
+	if len(rows[0].WarningDetails) != 1 || rows[0].WarningDetails[0].Code != "mark_outside_bid_ask" {
+		t.Fatalf("AAPL warnings = %+v, want mark_outside_bid_ask", rows[0].WarningDetails)
+	}
+	if rows[1].MarkOutsideBidAsk || len(rows[1].WarningDetails) != 0 {
+		t.Fatalf("MSFT should be clean, got %+v", rows[1])
 	}
 }
 

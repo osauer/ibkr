@@ -164,21 +164,25 @@ $ ibkr positions --json
 {
   "data_type": "live",
   "as_of": "2026-05-09T14:32:09Z",
-  "stocks": [
-    {"symbol": "AAPL", "sec_type": "STOCK", "multiplier": 1,
-     "quantity": 100, "avg_cost": 192.40, "mark": 207.88,
-     "unrealized_pnl": 1548.0, "realized_pnl": 0}
-  ],
-  "options": [
-    {"symbol": "AAPL", "sec_type": "OPTION", "multiplier": 100,
-     "right": "C", "expiry": "20260619", "strike": 215,
-     "quantity": 5, "avg_cost": 682.0, "mark": 9.40, "unrealized_pnl": 1290}
-  ],
-  "by_underlying": [
-    {"underlying": "AAPL", "stock": {...}, "options": [...],
-     "group_market_value": 25400.0, "group_unrealized_pnl": 2838.0}
-  ]
-}
+	  "stocks": [
+	    {"symbol": "AAPL", "sec_type": "STOCK", "multiplier": 1,
+	     "quantity": 100, "avg_cost": 192.40, "mark": 207.88,
+	     "market_value_ccy": 20788.0, "market_value_base": 20788.0,
+	     "unrealized_pnl_ccy": 1548.0, "unrealized_pnl_base": 1548.0}
+	  ],
+	  "options": [
+	    {"symbol": "AAPL", "sec_type": "OPTION", "multiplier": 100,
+	     "right": "C", "expiry": "20260619", "strike": 215,
+	     "quantity": 5, "avg_cost": 682.0, "mark": 9.40,
+	     "market_value_ccy": 4700.0, "unrealized_pnl_ccy": 1290.0}
+	  ],
+	  "by_underlying": [
+	    {"underlying": "AAPL", "stock": {...}, "options": [...],
+	     "group_market_value_base": 25488.0,
+	     "group_market_value_pct_nlv": 25.5,
+	     "group_dollar_delta_base": 326584.5}
+	  ]
+	}
 ```
 
 Render to the user as two compact tables (stocks, options) with money formatted
@@ -191,20 +195,27 @@ reach for the `by_underlying` grouping.
 is always per-share) divide by `multiplier`: a $6.82 premium call comes
 off the wire as `avg_cost: 682.0` with `multiplier: 100`. The CLI's text
 renderer does this division on the AVG COST column; if you're parsing
-JSON yourself, do it too. `market_value` and `unrealized_pnl` already
-have the multiplier applied — don't double-multiply.
+JSON yourself, do it too. `market_value_ccy`, `market_value_base`,
+`unrealized_pnl_ccy`, and `unrealized_pnl_base` already have the multiplier
+applied — don't double-multiply.
 
 Option rows carry per-leg `delta`/`gamma`/`theta`/`vega` when the gateway
 delivered a model-computation tick within budget. The `portfolio` block sums
-these into share-equivalent `effective_delta`, `dollar_delta` (in
-`dollar_delta_currency` — typically USD for an option book), `daily_theta`
-(IBKR reports theta as daily decay), `gamma`, `vega`, and tracks
+these into share-equivalent `effective_delta`, `dollar_delta_ccy` (in
+`dollar_delta_ccy_currency` — typically USD for an option book),
+`dollar_delta_base`, `daily_theta_ccy`, `daily_theta_base` when every
+theta-bearing leg has an FX path, `gamma`, `vega`, and tracks
 `greeks_coverage` / `greeks_total` so you can flag partial coverage. When the
 user asks "what's my net delta?" or "how much theta am I bleeding per day?",
-read the `portfolio` block directly — never sum the legs yourself.
+read the `portfolio` block directly; for multi-currency books prefer
+`portfolio.exposure_base` and per-underlying `group_*_base` fields over
+cross-symbol share-equivalent totals.
 
-For multi-currency accounts, non-base positions carry `fx_rate`
-(base-per-CCY) and `market_value_ccy` (in the contract currency).
+For multi-currency accounts, every position's local money fields use a `_ccy`
+suffix; base-normalized fields use `_base`. Non-base positions carry `fx_rate`
+(base-per-CCY). `portfolio.exposure_base` is the clean exposure table sorted by
+absolute base-currency market value, with `market_value_pct_nlv`,
+`dollar_delta_base`, and base P&L fields already filled when FX is known.
 `portfolio.fx_sensitivity_per_pct` answers "how much €P&L moves on a 1%
 USD/EUR change?" — Σ (non-base NetLiq in CCY × FX × 0.01). It's exposure
 × notional, not historical attribution; see SKILL note on `iv_status`

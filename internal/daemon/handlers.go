@@ -259,17 +259,26 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// is where OptionPrevClose is read from the per-leg tick stream.
 	fillOptionDayChangeMoney(res.Options)
 
-	// FX decoration: prefer the per-currency snapshot maintained by the
-	// daemon's reqAccountUpdates subscription. If that startup cache lacks a
-	// held non-base currency, take one bounded account-summary refresh before
-	// filling MarketValueCcy / FXRate; otherwise downstream math would use a
-	// partial ledger.
-	baseCcy := normCcy(s.cachedBaseCurrency())
+	// FX/base-currency decoration: prefer the per-currency snapshot
+	// maintained by the daemon's reqAccountUpdates subscription. If that
+	// startup cache lacks account-base, NLV, or a held non-base currency,
+	// take one bounded account-summary refresh before filling FXRate /
+	// *_base fields; otherwise downstream math would use a partial ledger.
+	rawAccount := c.AccountSummaryRaw()
+	baseCcy := normCcy(baseCurrencyFromRaw(rawAccount))
+	netLiquidationBase := netLiquidationBaseFromRaw(rawAccount, baseCcy)
 	ledger := repairCurrencyLedgerFXRates(ctx, c, c.CurrencyLedgerSnapshot(), baseCcy)
-	if missing := missingPositionFXCurrencies(res.Stocks, res.Options, ledger, baseCcy); len(missing) > 0 {
+	missing := missingPositionFXCurrencies(res.Stocks, res.Options, ledger, baseCcy)
+	if baseCcy == "" || netLiquidationBase == nil || len(missing) > 0 {
 		if raw, err := c.RequestAccountSummary(ctx, 3*time.Second); err == nil {
 			if baseCcy == "" {
 				baseCcy = normCcy(raw.Currency)
+			}
+			if baseCcy == "" {
+				baseCcy = normCcy(baseCurrencyFromRaw(raw.Raw))
+			}
+			if netLiquidationBase == nil {
+				netLiquidationBase = raw.NetLiquidation
 			}
 			freshLedger := repairCurrencyLedgerFXRates(ctx, c, raw.CurrencyLedger, baseCcy)
 			ledger = mergeCurrencyLedgers(freshLedger, ledger)
@@ -288,9 +297,13 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// "DBL_MAX sentinel" — never zero-substituted.
 	s.fillDailyPnL(c, res.Stocks, conIDByPositionKey)
 	s.fillDailyPnL(c, res.Options, conIDByPositionKey)
+	fillBaseValues(res.Stocks, baseCcy)
+	fillBaseValues(res.Options, baseCcy)
+	flagOptionMarkOutsideBidAsk(res.Options)
 
-	res.ByUnderlying = groupByUnderlying(res.Stocks, res.Options)
-	res.Portfolio = buildPortfolioAggregates(res.Stocks, res.Options)
+	res.ByUnderlying = groupByUnderlying(res.Stocks, res.Options, baseCcy, netLiquidationBase)
+	res.Portfolio = buildPortfolioAggregatesWithBase(res.Stocks, res.Options, baseCcy)
+	addPortfolioBaseContext(res.Portfolio, res.ByUnderlying, baseCcy, netLiquidationBase)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
 	return res, nil
 }
@@ -544,19 +557,6 @@ func (s *Server) cachedAccount() string {
 	return ""
 }
 
-// cachedBaseCurrency returns the account's base currency, derived from
-// the gateway's continuously-fresh accountSummary map. Empty string when
-// unknown; callers fall back to treating every currency as non-base,
-// which surfaces an exposure row but no sensitivity (the safer "I don't
-// know yet" answer).
-func (s *Server) cachedBaseCurrency() string {
-	c := s.gatewayConnector()
-	if c == nil {
-		return ""
-	}
-	return baseCurrencyFromRaw(c.AccountSummaryRaw())
-}
-
 // baseCurrencyFromRaw resolves the account's base currency by scanning
 // the raw accountSummary map. The bare "Currency" tag IBKR emits carries
 // the literal string "BASE" (the pseudo-currency name, not the actual
@@ -630,6 +630,49 @@ func accountValueCurrencySuffix(raw map[string]string, tag string) string {
 		}
 	}
 	return best
+}
+
+func netLiquidationBaseFromRaw(raw map[string]string, baseCcy string) *float64 {
+	if v, ok := parseRawFloat(raw, "NetLiquidation"); ok {
+		return &v
+	}
+	baseCcy = normCcy(baseCcy)
+	if baseCcy != "" {
+		if v, ok := parseRawFloat(raw, "NetLiquidation_"+baseCcy); ok {
+			return &v
+		}
+		return nil
+	}
+	var out *float64
+	const prefix = "NetLiquidation_"
+	for k := range raw {
+		ccy, ok := strings.CutPrefix(k, prefix)
+		if !ok || normCcy(ccy) == "BASE" {
+			continue
+		}
+		v, ok := parseRawFloat(raw, k)
+		if !ok {
+			continue
+		}
+		if out != nil {
+			return nil
+		}
+		vv := v
+		out = &vv
+	}
+	return out
+}
+
+func parseRawFloat(raw map[string]string, key string) (float64, bool) {
+	v, ok := raw[key]
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 const fxRepairQuoteBudget = 1200 * time.Millisecond
@@ -774,9 +817,8 @@ func missingPositionFXCurrencies(stocks, options []rpc.PositionView, ledger map[
 }
 
 // fillFXRates copies the per-currency ExchangeRate into each non-base
-// position's FXRate field and labels MarketValueCcy when we know the
-// rate. Same-currency rows (Currency == baseCcy) keep both pointers nil
-// — exposure surfacing applies only to non-base.
+// position's FXRate field. Same-currency rows keep it nil because the
+// conversion is implicitly 1.0.
 func fillFXRates(rows []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedger, baseCcy string) {
 	for i := range rows {
 		p := &rows[i]
@@ -790,13 +832,83 @@ func fillFXRates(rows []rpc.PositionView, ledger map[string]ibkrlib.CurrencyLedg
 		}
 		fx := entry.ExchangeRate
 		p.FXRate = &fx
-		// Position.MarketValue, populated by msgPortfolioValue, is the
-		// contract-currency market value (qty * marketPrice * multiplier).
-		// So MarketValueCcy IS p.MarketValue — we just label it
-		// explicitly so JSON consumers don't have to infer.
-		mvc := p.MarketValue
-		p.MarketValueCcy = &mvc
 	}
+}
+
+func fillBaseValues(rows []rpc.PositionView, baseCcy string) {
+	for i := range rows {
+		p := &rows[i]
+		rate, ok := positionBaseRate(*p, baseCcy)
+		if !ok {
+			continue
+		}
+		marketValueBase := p.MarketValue * rate
+		p.MarketValueBase = &marketValueBase
+		unrealizedBase := p.UnrealizedPnL * rate
+		p.UnrealizedPnLBase = &unrealizedBase
+		realizedBase := p.RealizedPnL * rate
+		p.RealizedPnLBase = &realizedBase
+		if p.DailyPnL != nil {
+			dailyBase := *p.DailyPnL * rate
+			p.DailyPnLBase = &dailyBase
+		}
+	}
+}
+
+func positionBaseRate(p rpc.PositionView, baseCcy string) (float64, bool) {
+	baseCcy = normCcy(baseCcy)
+	ccy := normCcy(p.Currency)
+	if baseCcy == "" || ccy == "" {
+		return 0, false
+	}
+	if ccy == baseCcy {
+		return 1, true
+	}
+	if p.FXRate != nil && *p.FXRate > 0 {
+		return *p.FXRate, true
+	}
+	return 0, false
+}
+
+func flagOptionMarkOutsideBidAsk(options []rpc.PositionView) {
+	for i := range options {
+		p := &options[i]
+		if p.OptionBid == nil || p.OptionAsk == nil {
+			continue
+		}
+		bid, ask := *p.OptionBid, *p.OptionAsk
+		if bid < 0 || ask <= 0 || bid > ask {
+			continue
+		}
+		const eps = 1e-9
+		if p.Mark+eps >= bid && p.Mark-eps <= ask {
+			continue
+		}
+		p.MarkOutsideBidAsk = true
+		scope := optionWarningScope(*p)
+		p.WarningDetails = append(p.WarningDetails, rpc.DataWarning{
+			Code:     "mark_outside_bid_ask",
+			Scope:    scope,
+			Severity: "data_quality",
+			Message:  "Option valuation mark is outside the bid/ask range.",
+			Impact:   "The account mark may be stale, model-derived, or not currently executable.",
+			Action:   "Refresh during the regular option session and compare option_bid/option_ask before using the mark.",
+		})
+	}
+}
+
+func optionWarningScope(p rpc.PositionView) string {
+	parts := []string{normSym(p.Symbol)}
+	if p.Expiry != "" {
+		parts = append(parts, p.Expiry)
+	}
+	if p.Right != "" {
+		parts = append(parts, strings.ToUpper(p.Right))
+	}
+	if p.Strike > 0 {
+		parts = append(parts, strconv.FormatFloat(p.Strike, 'f', -1, 64))
+	}
+	return strings.Join(parts, " ")
 }
 
 // addFXSensitivity computes the portfolio-wide 1%-FX-move sensitivity
@@ -1114,12 +1226,18 @@ func optionGreeksKey(p rpc.PositionView) string {
 // Always returns a non-nil result (the renderer relies on this), but
 // individual pointer fields stay nil when their inputs were absent.
 func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.PositionsPortfolio {
+	return buildPortfolioAggregatesWithBase(stocks, options, "")
+}
+
+func buildPortfolioAggregatesWithBase(stocks, options []rpc.PositionView, baseCcy string) *rpc.PositionsPortfolio {
 	p := &rpc.PositionsPortfolio{}
+	baseCcy = normCcy(baseCcy)
 
 	// Greeks aggregation: only option positions contribute Greeks
 	// directly; stocks fold in as raw share equivalents below.
-	var effDelta, dollarDelta, daily, gamma, vega float64
-	var haveDelta, haveDollarDelta, haveTheta, haveGamma, haveVega bool
+	var effDelta, dollarDelta, dollarDeltaBase, daily, dailyThetaBase, gamma, vega float64
+	var haveDelta, haveDollarDelta, haveDollarDeltaBase, missingDollarDeltaBase bool
+	var haveTheta, haveThetaBase, missingThetaBase, haveGamma, haveVega bool
 	greeksCovered := 0
 	// Per-aggregate currency tracking. dollarCcy/thetaCcy follow the same
 	// "single ISO when every contributor agrees, MIX otherwise" rule.
@@ -1149,8 +1267,15 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 				spot = *o.PrevClose
 			}
 			if spot > 0 {
-				dollarDelta += *o.Delta * o.Quantity * float64(mult) * spot
+				localDollarDelta := *o.Delta * o.Quantity * float64(mult) * spot
+				dollarDelta += localDollarDelta
 				haveDollarDelta = true
+				if rate, ok := positionBaseRate(o, baseCcy); ok {
+					dollarDeltaBase += localDollarDelta * rate
+					haveDollarDeltaBase = true
+				} else {
+					missingDollarDeltaBase = true
+				}
 				if dollarCcy == "" {
 					dollarCcy = legCcy
 				} else if legCcy != dollarCcy {
@@ -1159,8 +1284,15 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 			}
 		}
 		if o.Theta != nil {
-			daily += *o.Theta * o.Quantity * float64(mult)
+			localTheta := *o.Theta * o.Quantity * float64(mult)
+			daily += localTheta
 			haveTheta = true
+			if rate, ok := positionBaseRate(o, baseCcy); ok {
+				dailyThetaBase += localTheta * rate
+				haveThetaBase = true
+			} else {
+				missingThetaBase = true
+			}
 			if thetaCcy == "" {
 				thetaCcy = legCcy
 			} else if legCcy != thetaCcy {
@@ -1195,8 +1327,15 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		}
 		effDelta += st.Quantity
 		haveDelta = true
-		dollarDelta += st.Quantity * st.Mark
+		localDollarDelta := st.Quantity * st.Mark
+		dollarDelta += localDollarDelta
 		haveDollarDelta = true
+		if rate, ok := positionBaseRate(st, baseCcy); ok {
+			dollarDeltaBase += localDollarDelta * rate
+			haveDollarDeltaBase = true
+		} else {
+			missingDollarDeltaBase = true
+		}
 		ccy := normCcy(st.Currency)
 		if dollarCcy == "" {
 			dollarCcy = ccy
@@ -1218,6 +1357,11 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 			p.DollarDeltaCurrency = dollarCcy
 		}
 	}
+	if haveDollarDeltaBase && !missingDollarDeltaBase {
+		v := dollarDeltaBase
+		p.DollarDeltaBase = &v
+		p.DollarDeltaBaseCurrency = baseCcy
+	}
 	if haveTheta {
 		v := daily
 		p.DailyTheta = &v
@@ -1226,6 +1370,11 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 		} else {
 			p.DailyThetaCurrency = thetaCcy
 		}
+	}
+	if haveThetaBase && !missingThetaBase {
+		v := dailyThetaBase
+		p.DailyThetaBase = &v
+		p.DailyThetaBaseCurrency = baseCcy
 	}
 	if haveGamma {
 		v := gamma
@@ -1259,7 +1408,7 @@ func optionMultiplier(p rpc.PositionView) int {
 // groupByUnderlying produces one PositionGroup per underlying symbol present
 // in either the stocks or options slice. Stock + option totals contribute to
 // GroupMarketValue / GroupUnrealizedPnL; the stock leg is optional.
-func groupByUnderlying(stocks, options []rpc.PositionView) []rpc.PositionGroup {
+func groupByUnderlying(stocks, options []rpc.PositionView, baseCcy string, netLiquidationBase *float64) []rpc.PositionGroup {
 	groups := map[string]*rpc.PositionGroup{}
 	getOrInit := func(under string) *rpc.PositionGroup {
 		g, ok := groups[under]
@@ -1286,9 +1435,166 @@ func groupByUnderlying(stocks, options []rpc.PositionView) []rpc.PositionGroup {
 	}
 	out := make([]rpc.PositionGroup, 0, len(groups))
 	for _, g := range groups {
+		finalizePositionGroup(g, baseCcy, netLiquidationBase)
 		out = append(out, *g)
 	}
 	slices.SortStableFunc(out, func(a, b rpc.PositionGroup) int { return cmp.Compare(a.Underlying, b.Underlying) })
+	return out
+}
+
+type convertedSum struct {
+	sum     float64
+	any     bool
+	missing bool
+}
+
+func (s *convertedSum) add(value float64, row rpc.PositionView, baseCcy string) {
+	rate, ok := positionBaseRate(row, baseCcy)
+	if !ok {
+		s.missing = true
+		return
+	}
+	s.sum += value * rate
+	s.any = true
+}
+
+func (s convertedSum) ptr() *float64 {
+	if !s.any || s.missing {
+		return nil
+	}
+	v := s.sum
+	return &v
+}
+
+func finalizePositionGroup(g *rpc.PositionGroup, baseCcy string, netLiquidationBase *float64) {
+	if g == nil {
+		return
+	}
+	baseCcy = normCcy(baseCcy)
+	var marketBase, unrealizedBase, dailyBase, dollarDeltaBase convertedSum
+	var effectiveDelta, dollarDelta float64
+	var haveEffectiveDelta, haveDollarDelta bool
+	dollarCcy := ""
+	dollarMixed := false
+
+	visit := func(row rpc.PositionView, isOption bool) {
+		marketBase.add(row.MarketValue, row, baseCcy)
+		unrealizedBase.add(row.UnrealizedPnL, row, baseCcy)
+		if row.DailyPnL != nil {
+			dailyBase.add(*row.DailyPnL, row, baseCcy)
+		}
+		if isOption {
+			if row.Delta != nil {
+				effectiveDelta += *row.Delta * row.Quantity * float64(optionMultiplier(row))
+				haveEffectiveDelta = true
+			}
+		} else if row.Mark > 0 {
+			effectiveDelta += row.Quantity
+			haveEffectiveDelta = true
+		}
+		localDollarDelta, ok := positionDollarDelta(row, isOption)
+		if !ok {
+			return
+		}
+		dollarDelta += localDollarDelta
+		haveDollarDelta = true
+		dollarDeltaBase.add(localDollarDelta, row, baseCcy)
+		ccy := normCcy(row.Currency)
+		if dollarCcy == "" {
+			dollarCcy = ccy
+		} else if ccy != dollarCcy {
+			dollarMixed = true
+		}
+	}
+
+	if g.Stock != nil {
+		visit(*g.Stock, false)
+	}
+	for _, opt := range g.Options {
+		visit(opt, true)
+	}
+
+	if v := marketBase.ptr(); v != nil {
+		g.GroupMarketValueBase = v
+		if netLiquidationBase != nil && *netLiquidationBase != 0 {
+			pct := *v / *netLiquidationBase * 100
+			g.GroupMarketValuePctNLV = &pct
+		}
+	}
+	g.GroupUnrealizedPnLBase = unrealizedBase.ptr()
+	g.GroupDailyPnLBase = dailyBase.ptr()
+	if haveEffectiveDelta {
+		v := effectiveDelta
+		g.GroupEffectiveDelta = &v
+	}
+	if haveDollarDelta {
+		v := dollarDelta
+		g.GroupDollarDelta = &v
+		if dollarMixed {
+			g.GroupDollarDeltaCurrency = "MIX"
+		} else {
+			g.GroupDollarDeltaCurrency = dollarCcy
+		}
+		g.GroupDollarDeltaBase = dollarDeltaBase.ptr()
+	}
+}
+
+func positionDollarDelta(row rpc.PositionView, isOption bool) (float64, bool) {
+	if isOption {
+		if row.Delta == nil {
+			return 0, false
+		}
+		spot := 0.0
+		if row.Underlying != nil && *row.Underlying > 0 {
+			spot = *row.Underlying
+		} else if row.PrevClose != nil && *row.PrevClose > 0 {
+			spot = *row.PrevClose
+		}
+		if spot <= 0 {
+			return 0, false
+		}
+		return *row.Delta * row.Quantity * float64(optionMultiplier(row)) * spot, true
+	}
+	if row.Mark <= 0 {
+		return 0, false
+	}
+	return row.Quantity * row.Mark, true
+}
+
+func addPortfolioBaseContext(p *rpc.PositionsPortfolio, groups []rpc.PositionGroup, baseCcy string, netLiquidationBase *float64) {
+	if p == nil {
+		return
+	}
+	baseCcy = normCcy(baseCcy)
+	p.BaseCurrency = baseCcy
+	p.NetLiquidationBase = netLiquidationBase
+	p.ExposureBase = buildUnderlyingExposureBase(groups, baseCcy)
+}
+
+func buildUnderlyingExposureBase(groups []rpc.PositionGroup, baseCcy string) []rpc.UnderlyingExposure {
+	baseCcy = normCcy(baseCcy)
+	out := make([]rpc.UnderlyingExposure, 0, len(groups))
+	for _, g := range groups {
+		if g.GroupMarketValueBase == nil {
+			continue
+		}
+		out = append(out, rpc.UnderlyingExposure{
+			Underlying:        g.Underlying,
+			MarketValueBase:   *g.GroupMarketValueBase,
+			MarketValuePctNLV: g.GroupMarketValuePctNLV,
+			EffectiveDelta:    g.GroupEffectiveDelta,
+			DollarDeltaBase:   g.GroupDollarDeltaBase,
+			UnrealizedPnLBase: g.GroupUnrealizedPnLBase,
+			DailyPnLBase:      g.GroupDailyPnLBase,
+			BaseCurrency:      baseCcy,
+		})
+	}
+	slices.SortStableFunc(out, func(a, b rpc.UnderlyingExposure) int {
+		if c := cmp.Compare(math.Abs(b.MarketValueBase), math.Abs(a.MarketValueBase)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Underlying, b.Underlying)
+	})
 	return out
 }
 

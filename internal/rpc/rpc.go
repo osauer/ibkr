@@ -1796,9 +1796,9 @@ type WatchlistHolding struct {
 	Quantity      float64  `json:"quantity"`
 	AvgCost       float64  `json:"avg_cost"`
 	Mark          float64  `json:"mark"`
-	MarketValue   float64  `json:"market_value"`
-	UnrealizedPnL float64  `json:"unrealized_pnl"`
-	DailyPnL      *float64 `json:"daily_pnl,omitempty"`
+	MarketValue   float64  `json:"market_value_ccy"`
+	UnrealizedPnL float64  `json:"unrealized_pnl_ccy"`
+	DailyPnL      *float64 `json:"daily_pnl_ccy,omitempty"`
 	Exchange      string   `json:"exchange,omitempty"`
 	Currency      string   `json:"currency,omitempty"`
 }
@@ -1842,11 +1842,16 @@ type FrameError struct {
 // The daemon caches close anchors per underlying so the first call pre-warms
 // and subsequent ones are instant — no fabrication.
 //
-// MarketValueCcy and FXRate carry the contract-currency view: MarketValue
-// remains in account base currency for back-compat, but for a USD position
-// in a EUR account MarketValueCcy is the USD figure and FXRate is the
-// gateway-reported BASE/CCY conversion. Both nil/zero on same-currency
-// books — no synthesis.
+// MarketValue is serialized as market_value_ccy: the position value in the
+// contract currency (qty × mark × multiplier), matching the row's Mark and
+// Currency fields.
+// MarketValueBase / UnrealizedPnLBase / RealizedPnLBase / DailyPnLBase are
+// populated when the daemon knows the account base currency and either the row
+// is already in base currency or FXRate is available. nil = conversion
+// unavailable, never zero-substituted.
+//
+// FXRate is the gateway-reported BASE/CCY conversion. It stays nil on
+// same-currency books because the conversion is implicitly 1.0.
 //
 // Delta/Gamma/Theta/Vega populate on option positions when the daemon
 // captured a valid model-computation tick within budget. nil = unavailable
@@ -1913,12 +1918,14 @@ type PositionView struct {
 	// SessionContext explains the trading-calendar state behind PriceAt.
 	// Populated when the quote context needs interpretation (closed,
 	// pre-market, frozen/stale/missing), matching Quote.SessionContext.
-	SessionContext *MarketSession `json:"session_context,omitempty"`
-	MarketValue    float64        `json:"market_value"`
-	MarketValueCcy *float64       `json:"market_value_ccy,omitempty"`
-	FXRate         *float64       `json:"fx_rate,omitempty"`
-	UnrealizedPnL  float64        `json:"unrealized_pnl"`
-	RealizedPnL    float64        `json:"realized_pnl"`
+	SessionContext    *MarketSession `json:"session_context,omitempty"`
+	MarketValue       float64        `json:"market_value_ccy"`
+	MarketValueBase   *float64       `json:"market_value_base,omitempty"`
+	FXRate            *float64       `json:"fx_rate,omitempty"`
+	UnrealizedPnL     float64        `json:"unrealized_pnl_ccy"`
+	UnrealizedPnLBase *float64       `json:"unrealized_pnl_base,omitempty"`
+	RealizedPnL       float64        `json:"realized_pnl_ccy"`
+	RealizedPnLBase   *float64       `json:"realized_pnl_base,omitempty"`
 
 	// DailyPnL is the start-of-trading-day to now P&L for this single
 	// contract, sourced from IBKR's reqPnLSingle stream (TWS msg 95).
@@ -1929,7 +1936,8 @@ type PositionView struct {
 	// can swing dramatically on small underlying moves; consumers
 	// rendering a per-leg value should pair it with the option's
 	// effective delta to interpret responsibly.
-	DailyPnL *float64 `json:"daily_pnl,omitempty"`
+	DailyPnL     *float64 `json:"daily_pnl_ccy,omitempty"`
+	DailyPnLBase *float64 `json:"daily_pnl_base,omitempty"`
 
 	// Option-only fields (zero values when not applicable).
 	Expiry string  `json:"expiry,omitempty"`
@@ -1952,10 +1960,11 @@ type PositionView struct {
 	// underlying's PrevClose above); required for option-level daily P&L
 	// without the underlying-vs-option confusion the agent-feedback flagged.
 	// IV is the model-computation implied volatility for this leg.
-	OptionBid       *float64 `json:"option_bid,omitempty"`
-	OptionAsk       *float64 `json:"option_ask,omitempty"`
-	OptionPrevClose *float64 `json:"option_prev_close,omitempty"`
-	IV              *float64 `json:"iv,omitempty"`
+	OptionBid         *float64 `json:"option_bid,omitempty"`
+	OptionAsk         *float64 `json:"option_ask,omitempty"`
+	OptionPrevClose   *float64 `json:"option_prev_close,omitempty"`
+	IV                *float64 `json:"iv,omitempty"`
+	MarkOutsideBidAsk bool     `json:"mark_outside_bid_ask,omitempty"`
 
 	// Underlying is the model-computation underlying spot IBKR sent alongside
 	// the Greeks (msg 21 tickType 13). The portfolio aggregator pairs delta
@@ -2017,15 +2026,22 @@ type PositionsResult struct {
 // over the total — useful for the renderer to flag partial coverage
 // when the model tick didn't arrive for some legs.
 type PositionsPortfolio struct {
-	EffectiveDelta      *float64 `json:"effective_delta,omitempty"`
-	DollarDelta         *float64 `json:"dollar_delta,omitempty"`
-	DollarDeltaCurrency string   `json:"dollar_delta_currency,omitempty"`
-	DailyTheta          *float64 `json:"daily_theta,omitempty"`
-	DailyThetaCurrency  string   `json:"daily_theta_currency,omitempty"`
-	Gamma               *float64 `json:"gamma,omitempty"`
-	Vega                *float64 `json:"vega,omitempty"`
-	GreeksCoverage      int      `json:"greeks_coverage"`
-	GreeksTotal         int      `json:"greeks_total"`
+	EffectiveDelta          *float64             `json:"effective_delta,omitempty"`
+	DollarDelta             *float64             `json:"dollar_delta_ccy,omitempty"`
+	DollarDeltaCurrency     string               `json:"dollar_delta_ccy_currency,omitempty"`
+	DollarDeltaBase         *float64             `json:"dollar_delta_base,omitempty"`
+	DollarDeltaBaseCurrency string               `json:"dollar_delta_base_currency,omitempty"`
+	DailyTheta              *float64             `json:"daily_theta_ccy,omitempty"`
+	DailyThetaCurrency      string               `json:"daily_theta_ccy_currency,omitempty"`
+	DailyThetaBase          *float64             `json:"daily_theta_base,omitempty"`
+	DailyThetaBaseCurrency  string               `json:"daily_theta_base_currency,omitempty"`
+	Gamma                   *float64             `json:"gamma,omitempty"`
+	Vega                    *float64             `json:"vega,omitempty"`
+	GreeksCoverage          int                  `json:"greeks_coverage"`
+	GreeksTotal             int                  `json:"greeks_total"`
+	BaseCurrency            string               `json:"base_currency,omitempty"`
+	NetLiquidationBase      *float64             `json:"net_liquidation_base,omitempty"`
+	ExposureBase            []UnderlyingExposure `json:"exposure_base,omitempty"`
 
 	// FXSensitivityPerPct estimates the change in base-currency P&L for a 1%
 	// move in the non-base contract currency, holding everything else
@@ -2036,13 +2052,40 @@ type PositionsPortfolio struct {
 }
 
 // PositionGroup aggregates the stock leg (if any) and option legs per
-// underlying. GroupUnrealizedPnL/GroupMarketValue are sums across all legs.
+// underlying. GroupUnrealizedPnL/GroupMarketValue are serialized with *_ccy
+// names because they are local/security-currency sums across all legs. *_base
+// fields are filled only when every contributing row can be converted to the
+// account base currency. GroupEffectiveDelta / GroupDollarDelta are coherent
+// per-underlying exposures (unlike portfolio-level share-equivalent sums
+// across unrelated symbols).
 type PositionGroup struct {
-	Underlying         string         `json:"underlying"`
-	Stock              *PositionView  `json:"stock,omitempty"`
-	Options            []PositionView `json:"options"`
-	GroupMarketValue   float64        `json:"group_market_value"`
-	GroupUnrealizedPnL float64        `json:"group_unrealized_pnl"`
+	Underlying               string         `json:"underlying"`
+	Stock                    *PositionView  `json:"stock,omitempty"`
+	Options                  []PositionView `json:"options"`
+	GroupMarketValue         float64        `json:"group_market_value_ccy"`
+	GroupMarketValueBase     *float64       `json:"group_market_value_base,omitempty"`
+	GroupMarketValuePctNLV   *float64       `json:"group_market_value_pct_nlv,omitempty"`
+	GroupUnrealizedPnL       float64        `json:"group_unrealized_pnl_ccy"`
+	GroupUnrealizedPnLBase   *float64       `json:"group_unrealized_pnl_base,omitempty"`
+	GroupDailyPnLBase        *float64       `json:"group_daily_pnl_base,omitempty"`
+	GroupEffectiveDelta      *float64       `json:"group_effective_delta,omitempty"`
+	GroupDollarDelta         *float64       `json:"group_dollar_delta_ccy,omitempty"`
+	GroupDollarDeltaCurrency string         `json:"group_dollar_delta_ccy_currency,omitempty"`
+	GroupDollarDeltaBase     *float64       `json:"group_dollar_delta_base,omitempty"`
+}
+
+// UnderlyingExposure is the compact base-currency exposure table embedded in
+// PositionsPortfolio. Rows are sorted by absolute MarketValueBase descending
+// so agents can read the dominant exposures without re-aggregating.
+type UnderlyingExposure struct {
+	Underlying        string   `json:"underlying"`
+	MarketValueBase   float64  `json:"market_value_base"`
+	MarketValuePctNLV *float64 `json:"market_value_pct_nlv,omitempty"`
+	EffectiveDelta    *float64 `json:"effective_delta,omitempty"`
+	DollarDeltaBase   *float64 `json:"dollar_delta_base,omitempty"`
+	UnrealizedPnLBase *float64 `json:"unrealized_pnl_base,omitempty"`
+	DailyPnLBase      *float64 `json:"daily_pnl_base,omitempty"`
+	BaseCurrency      string   `json:"base_currency,omitempty"`
 }
 
 // AccountResult is the wire shape of MethodAccountSummary.

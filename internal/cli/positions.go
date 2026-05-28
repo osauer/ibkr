@@ -320,12 +320,7 @@ func formatOptionBidAsk(p rpc.PositionView) string {
 }
 
 func formatPositionValue(p rpc.PositionView) string {
-	value := p.MarketValue
-	ccy := p.Currency
-	if p.MarketValueCcy != nil {
-		value = *p.MarketValueCcy
-	}
-	return formatMoneyCcy(value, ccy)
+	return formatMoneyCcy(p.MarketValue, p.Currency)
 }
 
 func formatPositionData(env *Env, p rpc.PositionView) string {
