@@ -437,6 +437,19 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_canary",
+		Title:       "IBKR Portfolio Canary",
+		Description: "Portfolio stress canary for scheduled checks every few minutes. Use when the user asks whether to hold, watch, significantly de-leverage, or liquidate portfolio risk under strong market stress. Returns a compact ordered table of concrete action rows backed by account margin, current positions/exposures, and the risk-regime snapshot. High-precision policy: severe actions require independent confirmation across market clusters or immediate account-margin danger; degraded or computing gamma/breadth becomes an explicit ambiguity row, not a false safe/false red signal. Works pre-market and after hours by relying on the regime rows' freshness/status metadata and by refusing to escalate solely on incomplete computed surfaces. This tool recommends actions but is read-only and does NOT place, preview, submit, modify, or cancel orders. NOT for detailed diagnostics — use `ibkr_regime`, `ibkr_positions`, or `ibkr_account` when you need the underlying evidence.",
+		JSONSchema:  schemaObject(nil, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+			res, err := cli.FetchCanary(ctx, conn)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Title:       "IBKR Position Size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
