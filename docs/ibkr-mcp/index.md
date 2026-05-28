@@ -1,6 +1,6 @@
 # IBKR MCP server
 
-Updated: 2026-05-28 04:47 CEST
+Updated: 2026-05-28 06:10 CEST
 
 `ibkr mcp` is a local, read-only MCP server for Interactive Brokers account and market data. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
@@ -64,5 +64,6 @@ The bundled CLI and MCP server are read-only. They do not expose tools for placi
 - [Claude Desktop Interactive Brokers setup](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/) for the Claude MCPB path.
 - [IBKR Claude Desktop MCP setup](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/) for the exact IBKR Claude Desktop MCP query.
 - [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/) for Claude Desktop and Claude Code setup.
+- [Best IBKR MCP server for Claude Code](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/) for the Claude Code comparison and safety query.
 - [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/) for agent-first portfolio questions.
 - [Read-only MCP server](https://osauer.dev/ibkr/read-only-mcp-server/) for the safety boundary.

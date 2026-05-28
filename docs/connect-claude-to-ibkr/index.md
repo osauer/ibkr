@@ -1,10 +1,10 @@
 # Connect Claude to IBKR
 
-Updated: 2026-05-28 04:47 CEST
+Updated: 2026-05-28 06:10 CEST
 
 Use `ibkr mcp` to connect Claude Desktop or Claude Code to Interactive Brokers without giving Claude order access. The server runs locally, talks to IB Gateway or Trader Workstation (TWS), and exposes read-only account and market-data tools over MCP.
 
-This page is for searches such as "connect Claude to IBKR", "connect Claude to Interactive Brokers", "Claude Code IBKR MCP", "IBKR Claude Desktop MCP", and "Claude Desktop IBKR portfolio analysis".
+This page is for searches such as "connect Claude to IBKR", "connect Claude to Interactive Brokers", "Claude Code IBKR MCP", "best MCP server to connect IBKR API to Claude Code", "IBKR Claude Desktop MCP", and "Claude Desktop IBKR portfolio analysis".
 
 ## Claude Desktop
 
@@ -57,5 +57,6 @@ Claude will choose tools such as `ibkr_account`, `ibkr_positions`, `ibkr_quote`,
 
 - [Claude Desktop Interactive Brokers setup](../claude-desktop-interactive-brokers/) for the MCPB path.
 - [IBKR Claude Desktop MCP setup](../ibkr-claude-desktop-mcp/) for the exact IBKR Claude Desktop MCP query.
+- [Best IBKR MCP server for Claude Code](../best-ibkr-mcp-server-claude-code/) for the Claude Code comparison and safety query.
 - [Agentic use guide](../guides/agentic-use.md) for more example conversations.
 - [MCP tools reference](../reference/mcp-tools.md) for exact tool names and schemas.
