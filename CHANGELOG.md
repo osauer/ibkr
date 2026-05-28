@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.3.2 — 2026-05-28 23:15 CEST
+
+### What's new
+
+- MCP stdio sessions now clean up stale daemon processes more reliably, preventing old broker context from lingering behind a fresh client session.
+- Changelog release hygiene is stricter, so public entries stay reader-facing and malformed release notes fail earlier.
+- The portfolio-analysis prompt is clearer about where option delta and portfolio delta scope come from.
+
+### Changed
+
+- Hardened changelog stub and validation scripts so maintainer-process text and template leakage are caught before release.
+- Clarified the portfolio-analysis prompt's portfolio delta wording to keep contract-currency and account-base interpretation explicit.
+
+### Fixed
+
+- Fixed stale MCP process lifecycle handling across autospawn, dial, resource, and server shutdown paths.
+
 ## v1.3.1 — 2026-05-28 07:55 CEST
 
 ### What's new
