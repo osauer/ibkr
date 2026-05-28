@@ -52,7 +52,7 @@ Every GitHub release from v1.0.0 onward ships signed checksums for the published
 
 The MCP Registry publish metadata for an MCPB release also includes the versioned bundle URL and `fileSha256`. That registry hash is a discovery/install integrity hint; the signed `SHA256SUMS` file remains the release-level trust anchor.
 
-The MCPB container itself is not yet code-signed. Do not treat the `.mcpb` file as signed unless `mcpb verify ibkr-vX.Y.Z.mcpb` succeeds. TODO: add trusted MCPB signing once a CA-backed code-signing key or compatible signing API can be wired into `mcpb sign`; self-signed bundles are not a trust upgrade.
+The MCPB container itself is not yet code-signed. Do not treat the `.mcpb` file as signed unless `mcpb verify ibkr-vX.Y.Z.mcpb` succeeds. Signed checksums and the MCP Registry hash are the current integrity mechanisms for MCPB releases; self-signed bundles are not a trust upgrade.
 
 ### The maintainer's release-signing key
 
