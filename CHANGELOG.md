@@ -2,14 +2,6 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-Entries tier by audience:
-
-- **`### What's new`** — plain-English TL;DR for CLI/MCP users. Three bullets max. Mark user-action items with `**Action required:**`; mark Go-library-only breakage with `**Breaking (Go library):**`. The GitHub release body's "What's new in vX.Y.Z" section is mechanically derived from this section by `make release-publish`.
-- **`### Added / Changed / Deprecated / Removed / Fixed / Security`** — Keep-a-Changelog bullets for Go importers and power users. One user-visible change per bullet, framed as the consumer-visible effect — what the API caller / CLI user / MCP consumer notices — not the internal mechanism. No internal finding IDs (`F-NN`, lint-enforced); no bare "step N" without naming the workflow and what the step tests; no internal symbol-drops without a reader-value gloss; no relative dates or session-internal references.
-- **`### Engineering notes`** *(optional, omit unless earned)* — short multi-release context, ≤ 15 lines, self-contained. No internal finding IDs without an inline definition, no bare "step N" tokens, no relative dates or session-internal references. If a fact fits a one-line bullet, it belongs in Changed/Fixed instead.
-
-Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
-
 ## v1.3.1 — 2026-05-28 07:55 CEST
 
 ### What's new
@@ -151,6 +143,7 @@ Shape is enforced by `make changelog-lint`; scaffold a new entry with `make chan
 - Watchlist snapshots no longer stop too early on mark or previous-close ticks when a frozen last trade can still arrive shortly afterward.
 - Historical close timestamps now resolve to the exchange close instant, avoiding date-only daily bars appearing as midnight UTC or the prior local evening.
 - Xetra watchlist rows now reuse SMART/IBIS/EUR routing for both quote and historical enrichment, so 52-week range and average-volume fields can populate for German held positions.
+
 ## v1.1.0 — 2026-05-25 14:09 CEST
 
 ### What's new
