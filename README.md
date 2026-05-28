@@ -83,7 +83,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 
-For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
+For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [IBKR Claude Desktop MCP setup guide](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
 
 ## Pick your path
 
