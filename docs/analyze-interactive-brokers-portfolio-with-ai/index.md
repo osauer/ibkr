@@ -1,6 +1,6 @@
 # Analyze an Interactive Brokers portfolio with AI
 
-Updated: 2026-05-28 06:45 CEST
+Updated: 2026-05-28 07:07 CEST
 
 `ibkr` lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls `ibkr mcp`; `ibkr` reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.
 
@@ -22,7 +22,7 @@ The assistant does not need screenshots or copied tables. It can call MCP tools 
 
 Manual portfolio analysis usually means pasting account balances, positions, and option chains into a chat. That is slow, stale, and easy to redact incorrectly. `ibkr mcp` keeps the broker connection local and returns only the data requested for the current question.
 
-The host still receives account-sensitive data when you ask it to analyze your account. Use a host and model policy you trust. The `ibkr` side of the connection is local and read-only.
+The host still receives account-sensitive data when you ask it to analyze your account. Use a host and model policy you trust. The `ibkr` side of the broker connection stays local, and the current public MCP surface is limited to analysis and sizing.
 
 ## Example assistant flow
 
@@ -50,6 +50,8 @@ Expected answer shape:
 - current risk-regime context when relevant
 
 For a fuller semi-professional portfolio-review workflow, use the prompt in [examples/ibkr_portfolio_analysis_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md).
+
+For the Claude-specific workflow, including a sanitized sample review and a shorter paste-ready prompt, see [Portfolio review with Claude and IBKR](../portfolio-review-with-claude-ibkr/).
 
 ## Install
 

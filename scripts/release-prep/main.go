@@ -38,6 +38,7 @@ func run(args []string) error {
 		"server.json",
 		"docs/mcp-server.json",
 		"docs/.well-known/mcp/server.json",
+		"docs/.well-known/mcp/server-card.json",
 	} {
 		fileChanged, err := replaceExactlyOne(path, versionFieldRE, version)
 		if err != nil {
@@ -73,6 +74,7 @@ func run(args []string) error {
 		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
 		"https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/",
 		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",
 		"https://osauer.dev/ibkr/read-only-mcp-server/",
 	} {
 		fileChanged, err := replaceExactlyOne("docs/sitemap.xml", sitemapLastmodRE(url), today)

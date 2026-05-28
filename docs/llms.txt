@@ -1,6 +1,6 @@
 # ibkr
 
-Updated: 2026-05-28 06:10 CEST
+Updated: 2026-05-28 07:07 CEST
 
 `ibkr` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
 
@@ -27,6 +27,7 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 - [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/)
 - [Best IBKR MCP server for Claude Code](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/)
 - [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/)
+- [Portfolio review with Claude and IBKR](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/)
 - [Read-only MCP server for Interactive Brokers](https://osauer.dev/ibkr/read-only-mcp-server/)
 - [GitHub repository](https://github.com/osauer/ibkr)
 - [Install instructions](https://github.com/osauer/ibkr#install)
@@ -50,6 +51,9 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 - best MCP server to connect IBKR API to Claude Code
 - best IBKR MCP server for Claude Code
 - analyze Interactive Brokers portfolio with AI
+- portfolio review with Claude and IBKR
+- Claude IBKR portfolio review
+- Interactive Brokers portfolio review AI
 - AI assistant IBKR portfolio analysis
 - agentic IBKR portfolio analysis
 - Interactive Brokers trading research AI

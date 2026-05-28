@@ -1,21 +1,21 @@
 # Marketplace readiness
 
-Last reviewed: 2026-05-27 06:32 CEST
+Last reviewed: 2026-05-28 07:07 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
 ## Positioning
 
-`ibkr` is a local, read-only Interactive Brokers integration for users who already run IB Gateway or TWS. The clearest marketplace description is:
+`ibkr` is a local Interactive Brokers integration for traders who already run IB Gateway or TWS and want agentic portfolio analysis, trading research, risk checks, and market workflow support on live broker data. The clearest marketplace description is:
 
-> Read-only Interactive Brokers access for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server.
+> Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server connected to IB Gateway or TWS.
 
 Always include these qualifiers:
 
 - Requires IB Gateway or TWS running locally.
 - Requires an IBKR Pro account; IBKR Lite does not include TWS API access.
 - The plugin/skill does not ship the binary; users install `ibkr` separately.
-- The tool is read-only and cannot place, cancel, or modify orders.
+- Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface. If an approval-gated execution layer ships, update this sentence and the safety metadata before promotion.
 - Data returned by MCP tools can include account-sensitive balances, positions, and P&L.
 
 ## Anthropic / Claude Code
@@ -24,7 +24,7 @@ Current package:
 
 - `.claude-plugin/plugin.json` describes the plugin.
 - `.claude-plugin/marketplace.json` exposes the self-hosted marketplace.
-- `skills/ibkr/SKILL.md` teaches Claude the read-only CLI workflow.
+- `skills/ibkr/SKILL.md` teaches Claude the current analysis and sizing workflow.
 - `hooks/hooks.json` blocks trading-verb Bash calls and starts the install/version warning hook.
 - `settings/ibkr.settings.json` is the optional global allow/deny template.
 
@@ -122,11 +122,41 @@ Submission blockers to clear:
 Submission materials:
 
 - Server name: `ibkr`.
-- Tagline: "Read-only Interactive Brokers account and market context for Claude Desktop."
-- Description: emphasize local-only operation, IB Gateway/TWS prerequisite, IBKR Pro requirement, no order placement/modification/cancellation, and account-sensitive outputs.
+- Tagline: "Agentic Interactive Brokers portfolio analysis and trading research for Claude Desktop."
+- Description: emphasize local-only operation, IB Gateway/TWS prerequisite, IBKR Pro requirement, portfolio review, options diagnostics, market-regime context, current no-order-entry boundary, and account-sensitive outputs.
 - Documentation: README install section, [agentic use](./agentic-use.md), [configuration reference](../reference/config.md), and [privacy policy](../../PRIVACY.md).
 - Support: GitHub issues; security through GitHub Private Vulnerability Reporting.
-- Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, sizing math, S&P 500 breadth, dealer gamma, risk regime; no prompts; quote resource read/subscribe.
+- Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, portfolio review workflows, sizing math, S&P 500 breadth, dealer gamma, risk regime; no built-in prompts; quote resource read/subscribe.
+
+## External MCP directories
+
+Some directory surfaces are crawler-driven and some still require a maintainer account or manual form. Keep the repo metadata current first, then use the submission pack below for account-gated channels.
+
+Prepared assets:
+
+- `server.json` for the official MCP Registry release path.
+- `docs/mcp-server.json` and `docs/.well-known/mcp/server.json` for public metadata on the project site.
+- `docs/.well-known/mcp/server-card.json` for directories that crawl static server-card metadata when they cannot execute a local stdio server.
+- `glama.json` to identify the authorized Glama maintainer.
+- [Portfolio review with Claude and IBKR](../portfolio-review-with-claude-ibkr/) as the human intent page for portfolio-review traffic.
+
+Directory notes:
+
+- PulseMCP: prioritize official MCP Registry publication and public sitemap freshness; PulseMCP-style crawlers can then pick up registry and repo metadata.
+- Glama: keep `glama.json` present, then claim or refresh the GitHub-backed server entry from a maintainer account.
+- Smithery: hosted URL publishing is built around remote transports; for this local stdio project, use the static server-card metadata and manual listing text unless a hosted bridge is added.
+- MCP.so, MCPMarket, MCPpedia, and similar directories: use the submission pack below; most need a maintainer login, GitHub URL, public docs URL, and concise safety language.
+
+Submission pack:
+
+- Name: `ibkr`.
+- Title: `IBKR MCP Server`.
+- Tagline: "Agentic Interactive Brokers portfolio analysis and trading research through local TWS or IB Gateway."
+- Short description: "Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, and risk-regime context."
+- Requirements: IB Gateway 10.37+ or TWS running locally; IBKR Pro account with TWS API access; macOS or Linux binary for the bundled path.
+- Current boundary: current public CLI and MCP releases expose analysis and sizing tools, but no order placement, modification, or cancellation interface.
+- Target users: semi-professional retail traders using IBKR as capital-markets infrastructure who want agent-assisted review and research on broker-native data.
+- Links: <https://osauer.dev/ibkr/>, <https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/>, <https://osauer.dev/ibkr/reference/mcp-tools.html>, <https://github.com/osauer/ibkr>, <https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>.
 
 Publish sequence:
 

@@ -1,6 +1,6 @@
 # IBKR MCP server
 
-Updated: 2026-05-28 06:10 CEST
+Updated: 2026-05-28 07:07 CEST
 
 `ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
@@ -52,9 +52,9 @@ Generic MCP configuration:
 
 The full schema is in the [MCP tools reference](../reference/mcp-tools.md) and [MCP resources reference](../reference/mcp-resources.md).
 
-## Safety boundary
+## Current execution boundary
 
-The bundled CLI and MCP server are read-only. They do not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If a host asks to buy or sell securities through this MCP server, the correct answer is that the server has no order-entry interface.
+The current bundled CLI and MCP server expose analysis and sizing tools. They do not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If a host asks to buy or sell securities through this MCP server, the correct answer is that the current public server has no order-entry interface.
 
 ## Related pages
 
@@ -66,4 +66,5 @@ The bundled CLI and MCP server are read-only. They do not expose tools for placi
 - [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/) for Claude Desktop and Claude Code setup.
 - [Best IBKR MCP server for Claude Code](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/) for the Claude Code comparison and safety query.
 - [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/) for agent-first portfolio questions.
-- [Read-only MCP server](https://osauer.dev/ibkr/read-only-mcp-server/) for the safety boundary.
+- [Portfolio review with Claude and IBKR](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/) for a prompt-driven portfolio review workflow.
+- [Read-only MCP server](https://osauer.dev/ibkr/read-only-mcp-server/) for the current safety boundary.

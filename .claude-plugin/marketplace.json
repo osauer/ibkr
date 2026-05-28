@@ -1,6 +1,6 @@
 {
   "name": "ibkr",
-  "description": "Self-hosted marketplace for the ibkr Claude Code plugin (read-only Interactive Brokers integration).",
+  "description": "Self-hosted marketplace for the ibkr Claude Code plugin (Interactive Brokers portfolio analysis and trading research).",
   "owner": {
     "name": "osauer",
     "url": "https://github.com/osauer"
@@ -9,7 +9,7 @@
     {
       "name": "ibkr",
       "source": "./",
-      "description": "Read-only Interactive Brokers integration: account, positions, snapshot + streaming stock/ETF quotes, official market calendars, option chains, daily history, market scans, fixed-fractional position sizing, S&P 500 breadth, combined SPY+SPX dealer gamma, and an eight-row risk-regime dashboard. Requires the `ibkr` binary on PATH; see the project README for install and update instructions."
+      "description": "Interactive Brokers portfolio analysis and trading research: account, positions, snapshot + streaming stock/ETF quotes, official market calendars, option chains, daily history, market scans, fixed-fractional position sizing, S&P 500 breadth, combined SPY+SPX dealer gamma, and an eight-row risk-regime dashboard. The current bundled tool surface is limited to analysis and sizing. Requires the `ibkr` binary on PATH; see the project README for install and update instructions."
     }
   ]
 }
