@@ -35,7 +35,7 @@ RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-lint changelog-stub discovery-check release-prep indexnow-submit
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check release-prep indexnow-submit
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -75,7 +75,7 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # is recoverable because the schema is small and changes go through PR
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
-check: $(CHECK_DEPS) modernize-check docs-check discovery-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + discovery-check (binding pre-commit gate)
+check: $(CHECK_DEPS) modernize-check docs-check changelog-check discovery-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + discovery-check (binding pre-commit gate)
 	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths
 	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
 	@# .gitignore by listing tracked + untracked-but-not-ignored files —
@@ -468,6 +468,9 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 	awk -v ver='$(RELEASE_VERSION)' '/^## v[0-9]/{ in_section = ($$0 ~ "^## " ver " "); skip=0; if(in_section){ next } } in_section && /^### What.s new$$/{ skip=1; next } in_section && skip && /^### /{ skip=0 } in_section && !skip' CHANGELOG.md >> $$notes && \
 	title="$${MESSAGE:-$(RELEASE_VERSION)}" && \
 	gh release create $(RELEASE_VERSION) --notes-file $$notes --title "$$title" --latest $(DIST_DIR)/*.tar.gz $(DIST_DIR)/*.mcpb $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
+
+changelog-check: ## Verify CHANGELOG.md has no template or maintainer-process leakage
+	@./scripts/check-changelog-public.sh
 
 changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
 	@if [ -z "$(RELEASE_VERSION)" ]; then \

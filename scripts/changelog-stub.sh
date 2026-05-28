@@ -37,61 +37,9 @@ cat <<'STUB_EOF'
 
 ### What's new
 
-<!--
-  Three bullets max. Plain English. No symbol names or file paths.
-  Answer for the reader:
-    - Did anything I run differently? (CLI / MCP / config)
-    - Do I need to reinstall or reconfigure?
-    - Did MCP tool names, fields, or wire formats change?
-  Mark user-action items with **Action required:**.
-  Mark Go-library-only breaking changes with **Breaking (Go library):**.
--->
-
 ### Changed
 
-<!--
-  One user-visible change per bullet. Frame each as the consumer-visible
-  effect — what the API caller / CLI user / MCP consumer notices — not
-  the internal mechanism that produced it.
-  Rules (apply to all KaC sections — Added/Changed/Fixed/...):
-    - No internal finding IDs (F-NN, F#NN, finding-N). They belong in
-      commit messages, not the CHANGELOG. (Lint-enforced.)
-    - No bare "step N" references. If you name a workflow step, name
-      the workflow on the same line AND say what the step tests
-      (e.g. "release-verify step 7 (regime call-sequence drop check)").
-    - No internal symbol-drops without a reader-value gloss. Mention
-      `internalHelper` only if it's part of the surface the reader
-      touches (an exported API, a wire field, a CLI flag). Otherwise
-      describe the user-visible effect; put the symbol in commits.
-    - No relative dates or session-internal references ("yesterday",
-      "the YYYY-MM-DD failure"). Use "this release" or version refs.
-    - Mark Go-library-only breakage **Breaking (Go library):**.
--->
-
 ### Fixed
-
-<!--
-  One user-visible bug per bullet. "X no longer happens" / "Y now
-  works as documented" / "Z is honoured" framing. Same rules as Changed.
--->
-
-<!--
-  Optional ### Engineering notes section. Defaults to OMITTED.
-  Add ONLY if you have one of:
-    - Multi-release bug-class lineage (briefly link prior versions)
-    - Why-this-way rationale that isn't visible from the code
-    - Cross-cutting context that doesn't fit a one-line bullet
-  Rules:
-    - Short: <= 15 lines of content. If you need more, you're duplicating
-      Changed/Fixed bullets above — move it there instead.
-    - Self-contained. NO internal finding IDs (F-NN) unless defined
-      inline; NO bare "step N" without naming the workflow it belongs
-      to; NO relative dates ("yesterday", "the YYYY-MM-DD failure") or
-      session-internal references. A reader six months from now must be
-      able to follow it without external context.
-    - Not a duplicate. If a fact fits a one-line bullet, it belongs in
-      Changed/Fixed, not here.
--->
 STUB_EOF
 } >"$stub_file"
 
@@ -107,3 +55,13 @@ mv "$tmp" CHANGELOG.md
 
 echo "changelog-stub: prepended skeleton for $ver"
 echo "                edit CHANGELOG.md and fill in ### What's new + ### Changed/### Fixed"
+cat <<'GUIDANCE_EOF'
+
+Guidance:
+  - Keep CHANGELOG.md source public; do not leave template comments or maintainer notes in it.
+  - ### What's new: three bullets max, plain English, user-visible impact.
+  - Keep-a-Changelog bullets: one user-visible change per bullet.
+  - No internal finding IDs, session notes, bare workflow-step numbers, or internal symbol drops without reader value.
+  - Use **Action required:** for user action and **Breaking (Go library):** for Go-library-only breakage.
+  - Omit ### Engineering notes unless short cross-release context is genuinely needed.
+GUIDANCE_EOF

@@ -13,6 +13,8 @@ ver=${RELEASE_VERSION:-}
 
 cd "$(dirname "$0")/.."
 
+./scripts/check-changelog-public.sh
+
 # 1) Topmost ## v entry must match RELEASE_VERSION with a timestamp suffix.
 head=$(grep -m1 '^## v' CHANGELOG.md || true)
 case "$head" in
