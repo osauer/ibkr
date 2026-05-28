@@ -1,6 +1,6 @@
 # IBKR Portfolio Analysis — Agentic MCP Workflow
 
-Last updated: 2026-05-28 07:50 CEST
+Last updated: 2026-05-28 11:32 CEST
 
 Use the IBKR MCP tools to produce a professional portfolio review from the user's live Interactive Brokers / TWS context. The goal is not generic personal-finance advice; it is an agentic desk-style workflow for semi-professional retail users who care about exposure, market regime, option risk, data freshness, and what to review next. Produce analysis and plans only. The available MCP interface is read-only and cannot place, preview, modify, or cancel orders.
 
@@ -47,7 +47,7 @@ Build the portfolio map from `ibkr_account` and `ibkr_positions` before adding a
 Deliver these diagnostics:
 
 - **Capital base:** NLV, cash, buying power, margin usage, daily P&L, base currency.
-- **Exposure map:** use `portfolio.exposure_base` first; otherwise use `by_underlying` base fields. Rank top underlyings by `market_value_base`, `% NLV`, `dollar_delta_base`, effective delta, unrealized P&L base, and daily P&L base where available.
+- **Exposure map:** use `portfolio.exposure_base` first; otherwise use `by_underlying` base fields. Rank top underlyings by `market_value_base`, `% NLV`, `dollar_delta_base`, per-underlying share-equivalent effective delta, unrealized P&L base, and daily P&L base where available. Treat top-level `portfolio.effective_delta` as a coverage/debug field, not as a coherent cross-symbol account exposure.
 - **Options map:** underlyings with option legs, net delta/gamma/theta/vega, near-term expiries, and whether Greeks are missing or partial.
 - **Currency map:** non-base-currency exposure, FX conversion source, and where P&L attribution may mix security movement and FX. Row money fields ending in `_ccy` are contract-currency values; fields ending in `_base` are account-base values.
 - **Data map:** stale, delayed, frozen, previous-close-only, wide, or missing quote rows; positions with null daily P&L; `mark_outside_bid_ask` option rows.
@@ -92,7 +92,7 @@ Use compact Markdown. Lead with the answer.
 
    | Area | Status | Evidence | What to watch |
    | --- | --- | --- | --- |
-   | Concentration | green/yellow/red | top exposures and %/delta where available | trigger or review point |
+   | Concentration | green/yellow/red | top exposures, % NLV, and per-underlying share-equivalent delta where available | trigger or review point |
    | Options | green/yellow/red | Greeks, expiries, IV/chain caveats | next expiry/Greek risk |
    | Liquidity/Data | green/yellow/red | quote quality, spreads, stale fields | what needs fresh data |
    | Regime | green/yellow/red | `ibkr_regime` punch line, breadth/gamma caveats | what would change the call |
@@ -102,7 +102,7 @@ Use compact Markdown. Lead with the answer.
    - 3-7 ranked findings. Each finding must include evidence, implication, confidence, and the specific data limitation if any.
 
 4. **Position Review**
-   - Compact table by underlying: base-currency market value, % NLV, effective delta/dollar delta base, P&L base, option Greeks when present, quote quality, and note.
+   - Compact table by underlying: base-currency market value, % NLV, per-underlying share-equivalent effective delta, dollar delta base, P&L base, option Greeks when present, quote quality, and note.
 
 5. **Actionable Next Reviews**
    - Concrete review tasks, not orders: "refresh option chain during U.S. option RTH," "stress-test SPY -2% / -5% exposure," "ask for a sizing check if reducing AAPL to X% NLV," "monitor XYZ expiry risk before Friday."
