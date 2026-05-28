@@ -37,11 +37,11 @@ type Server struct {
 	mu  sync.Mutex // serializes writes to out
 	out *bufio.Writer
 
-	// dialer is the function used to open additional daemon connections
-	// for streaming resource subscriptions. Set via SetDialer; nil means
-	// resources/subscribe is unsupported on this server (returns an
-	// internal-error response).
-	dialer func() (*dial.Conn, error)
+	// dialer is the function used to open daemon connections for tools and
+	// resources. Set via SetDialer or SetContextDialer; nil means operations
+	// requiring the daemon fall back to conn when present, otherwise return an
+	// internal-error response.
+	dialer func(context.Context) (*dial.Conn, error)
 
 	// subs tracks active resource subscriptions, keyed by URI string. The
 	// CancelFunc tears down the per-subscription goroutine and the
@@ -58,8 +58,10 @@ type Server struct {
 	serveCtx context.Context
 }
 
-// NewServer wires the MCP server to a live daemon connection and the version
-// string the binary was built with (stamped via -ldflags).
+// NewServer wires the MCP server to an optional daemon connection and the
+// version string the binary was built with (stamped via -ldflags). Production
+// stdio uses SetContextDialer instead of a long-lived conn so an idle MCP
+// process does not keep the daemon alive.
 func NewServer(conn *dial.Conn, version string) *Server {
 	return &Server{
 		conn:    conn,
@@ -68,18 +70,30 @@ func NewServer(conn *dial.Conn, version string) *Server {
 	}
 }
 
-// SetDialer wires the function used to open additional daemon connections
-// for streaming resource subscriptions. Required for resources/subscribe to
-// work. Without it, the server still serves tools and resources/read but
-// reports streaming as unsupported.
+// SetDialer wires the function used to open daemon connections for tools and
+// resources. It is kept for tests and integrations that do not need
+// context-aware dialing; production stdio should use SetContextDialer.
 func (s *Server) SetDialer(d func() (*dial.Conn, error)) {
+	if d == nil {
+		s.dialer = nil
+		return
+	}
+	s.dialer = func(context.Context) (*dial.Conn, error) {
+		return d()
+	}
+}
+
+// SetContextDialer wires the function used to open daemon connections with the
+// current request/server context. Prefer this in production paths so shutdown
+// can abort autospawn waits promptly.
+func (s *Server) SetContextDialer(d func(context.Context) (*dial.Conn, error)) {
 	s.dialer = d
 }
 
-// Serve runs the MCP loop until in returns io.EOF (client disconnect) or
-// ctx is cancelled. Returns nil on clean shutdown. Active resource
-// subscriptions are cancelled before return so per-sub goroutines unwind
-// and the daemon-side refcount decrements promptly.
+// Serve runs the MCP loop until in returns io.EOF (client disconnect), ctx is
+// cancelled, or the client sends the MCP shutdown/exit lifecycle. Returns nil
+// on clean shutdown. Active resource subscriptions are cancelled before return
+// so per-sub goroutines unwind and the daemon-side refcount decrements promptly.
 //
 // The scan loop runs in a goroutine because bufScan.Scan() is a blocking
 // read on stdin and on darwin os.Stdin uses a blocking syscall.read (not
@@ -142,7 +156,9 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			// Each request is handled inline. Tools call the daemon, which may
 			// take seconds; that's fine — MCP clients send one request at a
 			// time over stdio and wait for the response.
-			s.handle(ctx, line)
+			if s.handle(ctx, line) {
+				return nil
+			}
 		}
 	}
 }
@@ -177,15 +193,17 @@ const (
 	codeInternalError  = -32603
 )
 
-func (s *Server) handle(ctx context.Context, line []byte) {
+// handle dispatches one MCP JSON-RPC message. It returns true when the
+// protocol lifecycle has ended and Serve should exit after this message.
+func (s *Server) handle(ctx context.Context, line []byte) bool {
 	var req rpcRequest
 	if err := json.Unmarshal(line, &req); err != nil {
 		s.writeError(nil, codeParseError, err.Error())
-		return
+		return false
 	}
 	if req.JSONRPC != "2.0" {
 		s.writeError(req.ID, codeInvalidRequest, "jsonrpc must be \"2.0\"")
-		return
+		return false
 	}
 
 	// Notifications carry no id and expect no response.
@@ -196,7 +214,7 @@ func (s *Server) handle(ctx context.Context, line []byte) {
 		s.handleInitialize(req.ID, req.Params)
 	case "initialized", "notifications/initialized":
 		// Client confirms readiness; no response required.
-		return
+		return false
 	case "tools/list":
 		s.handleToolsList(req.ID)
 	case "tools/call":
@@ -208,18 +226,24 @@ func (s *Server) handle(ctx context.Context, line []byte) {
 	case "resources/read":
 		s.handleResourcesRead(ctx, req.ID, req.Params)
 	case "resources/subscribe":
-		s.handleResourcesSubscribe(req.ID, req.Params)
+		s.handleResourcesSubscribe(ctx, req.ID, req.Params)
 	case "resources/unsubscribe":
 		s.handleResourcesUnsubscribe(req.ID, req.Params)
 	case "ping":
 		s.writeResult(req.ID, json.RawMessage(`{}`))
 	case "shutdown":
-		s.writeResult(req.ID, json.RawMessage(`{}`))
+		if !isNotification {
+			s.writeResult(req.ID, json.RawMessage(`{}`))
+		}
+		return true
+	case "exit":
+		return true
 	default:
 		if !isNotification {
 			s.writeError(req.ID, codeMethodNotFound, "method not found: "+req.Method)
 		}
 	}
+	return false
 }
 
 // initializeResult is the MCP server-info payload. Capabilities advertise the
@@ -325,7 +349,7 @@ func (s *Server) handleToolsCall(ctx context.Context, id, params json.RawMessage
 		callCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	conn, closeConn, err := s.toolConn()
+	conn, closeConn, err := s.toolConn(callCtx)
 	if err != nil {
 		s.writeToolError(id, err)
 		return
@@ -346,9 +370,9 @@ func (s *Server) handleToolsCall(ctx context.Context, id, params json.RawMessage
 	s.writeResult(id, b)
 }
 
-func (s *Server) toolConn() (*dial.Conn, func(), error) {
+func (s *Server) toolConn(ctx context.Context) (*dial.Conn, func(), error) {
 	if s.dialer != nil {
-		conn, err := s.dialer()
+		conn, err := s.dial(ctx)
 		if err != nil {
 			return nil, func() {}, err
 		}
@@ -358,6 +382,31 @@ func (s *Server) toolConn() (*dial.Conn, func(), error) {
 		return nil, func() {}, errors.New("daemon connection required")
 	}
 	return s.conn, func() {}, nil
+}
+
+func (s *Server) dial(ctx context.Context) (*dial.Conn, error) {
+	if s.dialer == nil {
+		return nil, errors.New("daemon connection required")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	conn, err := s.dialer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if conn == nil {
+		return nil, errors.New("daemon dialer returned nil connection")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+	return conn, nil
 }
 
 func toolCallTimedOut(ctx context.Context, err error) bool {

@@ -106,8 +106,17 @@ func (c *Conn) DaemonVersion(ctx context.Context) (string, error) {
 // WaitForSocket polls until the socket appears or the deadline expires, then
 // dials it.
 func WaitForSocket(path string, timeout time.Duration) (*Conn, error) {
+	return WaitForSocketContext(context.Background(), path, timeout)
+}
+
+// WaitForSocketContext polls until the socket appears, ctx is cancelled, or
+// the deadline expires, then dials it.
+func WaitForSocketContext(ctx context.Context, path string, timeout time.Duration) (*Conn, error) {
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		c, err := Connect(path)
 		if err == nil {
 			return c, nil
@@ -118,7 +127,11 @@ func WaitForSocket(path string, timeout time.Duration) (*Conn, error) {
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("daemon socket did not appear within %s", timeout)
 		}
-		time.Sleep(75 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(75 * time.Millisecond):
+		}
 	}
 }
 
