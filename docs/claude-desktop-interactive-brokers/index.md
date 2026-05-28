@@ -1,10 +1,12 @@
 # Claude Desktop Interactive Brokers setup
 
-Updated: 2026-05-27 22:28 CEST
+Updated: 2026-05-28 04:47 CEST
 
 Claude Desktop can read Interactive Brokers account and market context through the local `ibkr` MCP server. The recommended path is the MCP Bundle (`.mcpb`) release asset, which packages the `ibkr` binary for Claude Desktop and runs it locally through stdio.
 
-This page is for searches such as "Claude Desktop Interactive Brokers", "Claude Desktop IBKR MCP", and "connect Claude to IBKR".
+This page is for searches such as "Claude Desktop Interactive Brokers", "Claude Desktop IBKR MCP", "IBKR Claude Desktop MCP", and "connect Claude to IBKR".
+
+If search results show Interactive Brokers' IBKR Desktop trading platform, that is a different product. This page is about Claude Desktop using the local `ibkr mcp` server through IB Gateway or TWS.
 
 ## Fast path: MCP Bundle
 
@@ -48,5 +50,6 @@ Restart Claude Desktop after upgrading the binary. MCP hosts cache the spawned s
 ## References
 
 - [IBKR MCP server](https://osauer.dev/ibkr/ibkr-mcp/) for the exact local MCP server overview.
+- [IBKR Claude Desktop MCP setup](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/) for the exact IBKR Claude Desktop MCP query.
 - [Interactive Brokers MCP server](https://osauer.dev/ibkr/interactive-brokers-mcp-server/) for the full project setup page.
 - [MCP tools reference](../reference/mcp-tools.md) for the tool schema Claude routes against.
