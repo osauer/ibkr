@@ -92,11 +92,13 @@ Field meanings:
       "avg_volume": 58900000,
       "price_at": "2026-05-09T14:31:58-04:00",
       "price_as_of": "As of: May 9 at 02:31:58 PM EDT",
-      "market_value": 57426.00,
       "market_value_ccy": 57426.00,
+      "market_value_base": 62148.66,
       "fx_rate": 1.0823,
-      "unrealized_pnl": 7964.40,
-      "realized_pnl": 0
+      "unrealized_pnl_ccy": 7964.40,
+      "unrealized_pnl_base": 8619.86,
+      "realized_pnl_ccy": 0,
+      "realized_pnl_base": 0
     }
   ],
   "options": [
@@ -108,9 +110,12 @@ Field meanings:
       "multiplier": 100,
       "avg_cost": 682.0,
       "mark": 9.40,
-      "market_value": 4700.00,
-      "unrealized_pnl": 1290.0,
-      "realized_pnl": 0,
+      "market_value_ccy": 4700.00,
+      "market_value_base": 5086.81,
+      "unrealized_pnl_ccy": 1290.0,
+      "unrealized_pnl_base": 1396.17,
+      "realized_pnl_ccy": 0,
+      "realized_pnl_base": 0,
       "expiry": "20260619",
       "strike": 215.0,
       "right": "C",
@@ -126,14 +131,30 @@ Field meanings:
   ],
   "portfolio": {
     "effective_delta": 1847.0,
-    "dollar_delta": 326584.5,
-    "dollar_delta_currency": "USD",
-    "daily_theta": -42.18,
-    "daily_theta_currency": "USD",
+    "dollar_delta_ccy": 326584.5,
+    "dollar_delta_ccy_currency": "USD",
+    "dollar_delta_base": 353467.01,
+    "dollar_delta_base_currency": "EUR",
+    "daily_theta_ccy": -42.18,
+    "daily_theta_ccy_currency": "USD",
+    "daily_theta_base": -45.65,
+    "daily_theta_base_currency": "EUR",
     "gamma": 12.4,
     "vega": 1205.0,
     "greeks_coverage": 5,
     "greeks_total": 5,
+    "base_currency": "EUR",
+    "net_liquidation_base": 100000.0,
+    "exposure_base": [
+      {
+        "underlying": "AAPL",
+        "market_value_base": 27489.2,
+        "market_value_pct_nlv": 27.49,
+        "dollar_delta_base": 353467.01,
+        "unrealized_pnl_base": 10016.03,
+        "base_currency": "EUR"
+      }
+    ],
     "fx_sensitivity_per_pct": -854.32,
     "fx_base_currency": "EUR"
   },
@@ -142,8 +163,14 @@ Field meanings:
       "underlying": "AAPL",
       "stock": { "...": "STOCK row, same shape as stocks[]" },
       "options": [ { "...": "OPTION row, same shape as options[]" } ],
-      "group_market_value": 25400.0,
-      "group_unrealized_pnl": 2838.0
+      "group_market_value_ccy": 25400.0,
+      "group_market_value_base": 27489.2,
+      "group_market_value_pct_nlv": 27.49,
+      "group_unrealized_pnl_ccy": 9254.4,
+      "group_unrealized_pnl_base": 10016.03,
+      "group_dollar_delta_ccy": 326584.5,
+      "group_dollar_delta_ccy_currency": "USD",
+      "group_dollar_delta_base": 353467.01
     }
   ]
 }
@@ -164,9 +191,9 @@ and `expiry` / `strike` / `right` together identify the contract.
 - `avg_cost` — **per-share** for stocks, **per-contract** (multiplier-
   inclusive) for options. To get the per-share premium on options divide
   by `multiplier`. The CLI does this automatically on the rendered AVG
-  COST column; JSON output stays IBKR-faithful. `market_value` and
-  `unrealized_pnl` are already in account-currency dollars with the
-  multiplier applied.
+  COST column; JSON output stays IBKR-faithful. `market_value_ccy`,
+  `market_value_base`, `unrealized_pnl_ccy`, and `unrealized_pnl_base`
+  are already multiplier-applied.
 - `prev_close`, `day_change`, `day_change_pct` — populated on STOCK rows
   via the daemon's prev-close prewarm. `null` when the gateway hasn't
   delivered tick 9 (rare on the happy path; usually pre-market).
@@ -177,10 +204,13 @@ and `expiry` / `strike` / `right` together identify the contract.
   mean the gateway did not deliver that tick within the short prewarm
   window. `price_as_of` is display-ready text; `price_at` is the typed
   timestamp.
-- `market_value_ccy`, `fx_rate` — only set on non-base-currency positions.
-  `market_value` remains in account base for back-compat; `market_value_ccy`
-  is the contract-currency view, `fx_rate` the gateway-reported BASE/CCY
-  conversion. Both nil/zero on same-currency books — no synthesis.
+- `market_value_ccy`, `unrealized_pnl_ccy`, `realized_pnl_ccy`,
+  `daily_pnl_ccy` — contract-currency row values.
+- `market_value_base`, `unrealized_pnl_base`, `realized_pnl_base`,
+  `daily_pnl_base` — account-base conversions. Present when the account
+  base currency is known and either the row is already in base currency or
+  `fx_rate` is available. `fx_rate` is gateway-reported BASE/CCY and is
+  omitted on same-currency rows where the conversion is implicitly 1.0.
 - `delta`, `gamma`, `theta`, `vega` — option-only, populated when the
   daemon captured a model-computation tick (msg 21 tickType 13) within
   budget. `null` = unavailable (illiquid leg, OOH model abstention, busy
@@ -188,6 +218,9 @@ and `expiry` / `strike` / `right` together identify the contract.
 - `option_bid`, `option_ask`, `option_prev_close`, `iv` — option-only,
   populated from the per-leg market-data subscription the daemon already
   opens for Greeks. `iv` is a decimal fraction (0.284 = 28.4%).
+- `mark_outside_bid_ask` — option-only boolean plus a structured
+  `warning_details` entry when the account valuation mark is outside the
+  captured bid/ask range. Treat as data-quality risk, especially off-hours.
 - `portfolio` — daemon-computed aggregate block. Present when at least
   one option leg captured Greeks OR any non-base currency exposure has a
   known FX rate. Inner fields are nil when their inputs were unavailable
@@ -195,16 +228,23 @@ and `expiry` / `strike` / `right` together identify the contract.
   - `effective_delta` — sum of per-leg signed share-equivalents (stocks
     contribute signed quantity; options contribute
     delta × signed_qty × multiplier).
-  - `dollar_delta` / `dollar_delta_currency` — share-equivalents
-    multiplied by each leg's contract-currency spot. Currency named
-    separately for client-side conversion.
-  - `daily_theta` / `daily_theta_currency` — Σ (theta × signed_qty ×
+  - `dollar_delta_ccy` / `dollar_delta_ccy_currency` — share-equivalents
+    multiplied by each leg's contract-currency spot. Currency is "MIX"
+    when contributors span currencies.
+  - `dollar_delta_base` / `dollar_delta_base_currency` — same exposure
+    converted to account base when every contributing leg has an FX path.
+  - `daily_theta_ccy` / `daily_theta_ccy_currency` — Σ (theta × signed_qty ×
     multiplier). IBKR reports theta as daily decay, so the sum is the
     daily P&L from time decay assuming everything else holds. The
     currency follows the same single-ccy-or-"MIX" convention as
-    `dollar_delta_currency`: an ISO code when every contributing option
+    `dollar_delta_ccy_currency`: an ISO code when every contributing option
     leg agrees, "MIX" when the book mixes currencies (in which case
     the sum is genuinely undefined — render it without a single symbol).
+  - `daily_theta_base` / `daily_theta_base_currency` — theta bleed converted
+    to account base when every theta-bearing leg has an FX path.
+  - `exposure_base[]` — compact per-underlying exposure table sorted by
+    absolute `market_value_base`. Use this for multi-currency portfolio
+    maps instead of asking the model to aggregate rows manually.
   - `greeks_coverage` / `greeks_total` — count of option legs whose
     Greeks were captured / total option legs. Render partial-coverage
     explicitly to the user.
@@ -213,8 +253,9 @@ and `expiry` / `strike` / `right` together identify the contract.
     `fx_base_currency`.
 - `by_underlying[]` — groups stock leg (optional) + option legs by
   underlying. Always populated regardless of the `--by underlying` flag,
-  which only affects the text view. `group_*` totals sum every leg in
-  the group.
+  which only affects the text view. `group_*_ccy` totals sum every leg in
+  local/security currency; `group_*_base` fields are base-currency totals
+  when all contributing rows have a conversion path.
 
 ## watch
 
@@ -285,9 +326,9 @@ views, with quote rows enabled by default.
         "quantity": 25,
         "avg_cost": 176.50,
         "mark": 190.12,
-        "market_value": 4753.00,
-        "unrealized_pnl": 340.50,
-        "daily_pnl": 48.00,
+        "market_value_ccy": 4753.00,
+        "unrealized_pnl_ccy": 340.50,
+        "daily_pnl_ccy": 48.00,
         "exchange": "NASDAQ",
         "currency": "USD"
       }

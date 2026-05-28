@@ -10,6 +10,25 @@ Entries tier by audience:
 
 Shape is enforced by `make changelog-lint`; scaffold a new entry with `make changelog-stub RELEASE_VERSION=vX.Y.Z`.
 
+## v1.3.1 — 2026-05-28 07:55 CEST
+
+### What's new
+
+- Portfolio analysis output now includes a base-currency exposure map directly in `ibkr_positions`, so multi-currency account reviews no longer need external aggregation.
+- Position JSON now uses explicit `_ccy` and `_base` money fields, making contract-currency versus account-base values unambiguous for agents.
+- Option position rows now flag valuation marks that sit outside the captured bid/ask range.
+
+### Added
+
+- Added per-row `market_value_base`, `unrealized_pnl_base`, `realized_pnl_base`, and `daily_pnl_base` fields when the account base currency and FX conversion are known.
+- Added `portfolio.exposure_base`, `portfolio.dollar_delta_base`, `portfolio.daily_theta_base`, and per-underlying base fields including `group_market_value_base`, `group_market_value_pct_nlv`, `group_dollar_delta_base`, `group_unrealized_pnl_base`, and `group_daily_pnl_base`.
+- Added `mark_outside_bid_ask` plus structured `warning_details` on option rows when the account valuation mark is outside the captured bid/ask range.
+
+### Changed
+
+- Position JSON money fields that are in the security currency now use `_ccy` names (`market_value_ccy`, `unrealized_pnl_ccy`, `realized_pnl_ccy`, `daily_pnl_ccy`, `dollar_delta_ccy`, and `daily_theta_ccy`) instead of ambiguous names.
+- The portfolio-analysis prompt now directs agents to use `portfolio.exposure_base` and per-underlying base fields before doing any manual aggregation.
+
 ## v1.3.0 — 2026-05-27 22:05 CEST
 
 ### What's new

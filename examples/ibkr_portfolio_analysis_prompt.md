@@ -1,6 +1,6 @@
 # IBKR Portfolio Analysis — Agentic MCP Workflow
 
-Last updated: 2026-05-28 06:45 CEST
+Last updated: 2026-05-28 07:50 CEST
 
 Use the IBKR MCP tools to produce a professional portfolio review from the user's live Interactive Brokers / TWS context. The goal is not generic personal-finance advice; it is an agentic desk-style workflow for semi-professional retail users who care about exposure, market regime, option risk, data freshness, and what to review next. Produce analysis and plans only. The available MCP interface is read-only and cannot place, preview, modify, or cancel orders.
 
@@ -24,9 +24,11 @@ Run this first. If a hard gate fails, stop with a readiness report that names th
 
 1. `ibkr_status`: require a connected gateway and account discovery. Read `subsystems` before deciding which follow-up tools are reliable.
 2. `ibkr_account`: capture net liquidation value, buying power, cash, margin, base currency, daily P&L, and currency exposure.
-3. `ibkr_positions`: capture stocks, options, per-underlying grouping, portfolio-level Greeks, daily P&L fields, quote freshness, and FX fields.
+3. `ibkr_positions`: capture stocks, options, `portfolio.exposure_base`, per-underlying grouping, portfolio-level Greeks, daily P&L fields, quote freshness, and FX/base-currency fields.
 
 Hard stop when the gateway is disconnected, the wrong account is clearly selected, or `ibkr_positions` cannot return holdings. If market-data subsystems are unavailable but positions are present, continue with a partial portfolio review and label quote-dependent conclusions as blocked.
+
+`daily_pnl_ccy` / `daily_pnl_base` are populated from per-contract `reqPnLSingle` subscriptions that the first positions call may only pre-warm. If the daemon was just started and daily P&L is important to the review, rerun `ibkr_positions` once after the readiness gate before treating missing daily P&L as unavailable.
 
 ### 2. Market And Session Context
 
@@ -45,10 +47,10 @@ Build the portfolio map from `ibkr_account` and `ibkr_positions` before adding a
 Deliver these diagnostics:
 
 - **Capital base:** NLV, cash, buying power, margin usage, daily P&L, base currency.
-- **Exposure map:** top underlyings by market value, dollar delta, effective delta, unrealized P&L, and daily P&L where available.
+- **Exposure map:** use `portfolio.exposure_base` first; otherwise use `by_underlying` base fields. Rank top underlyings by `market_value_base`, `% NLV`, `dollar_delta_base`, effective delta, unrealized P&L base, and daily P&L base where available.
 - **Options map:** underlyings with option legs, net delta/gamma/theta/vega, near-term expiries, and whether Greeks are missing or partial.
-- **Currency map:** non-base-currency exposure, FX conversion source, and where P&L attribution may mix security movement and FX.
-- **Data map:** stale, delayed, frozen, previous-close-only, wide, or missing quote rows; positions with null daily P&L; option marks away from bid/ask.
+- **Currency map:** non-base-currency exposure, FX conversion source, and where P&L attribution may mix security movement and FX. Row money fields ending in `_ccy` are contract-currency values; fields ending in `_base` are account-base values.
+- **Data map:** stale, delayed, frozen, previous-close-only, wide, or missing quote rows; positions with null daily P&L; `mark_outside_bid_ask` option rows.
 
 Do not infer sector, factor, beta, correlation, tax status, or user intent unless the data or the user's instructions provide it. If those dimensions matter, put them in "Open Questions."
 
@@ -100,7 +102,7 @@ Use compact Markdown. Lead with the answer.
    - 3-7 ranked findings. Each finding must include evidence, implication, confidence, and the specific data limitation if any.
 
 4. **Position Review**
-   - Compact table by underlying: market value, effective delta/dollar delta, P&L, option Greeks when present, quote quality, and note.
+   - Compact table by underlying: base-currency market value, % NLV, effective delta/dollar delta base, P&L base, option Greeks when present, quote quality, and note.
 
 5. **Actionable Next Reviews**
    - Concrete review tasks, not orders: "refresh option chain during U.S. option RTH," "stress-test SPY -2% / -5% exposure," "ask for a sizing check if reducing AAPL to X% NLV," "monitor XYZ expiry risk before Friday."
