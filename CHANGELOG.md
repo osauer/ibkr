@@ -6,12 +6,13 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### What's new
 
-- Portfolio analysis output now includes a base-currency exposure map directly in `ibkr_positions`, so multi-currency account reviews no longer need external aggregation.
+- Added the `IBKR Portfolio Analysis — Agentic MCP Workflow` prompt, backed by a base-currency exposure map in `ibkr_positions` so multi-currency account reviews no longer need external aggregation.
 - Position JSON now uses explicit `_ccy` and `_base` money fields, making contract-currency versus account-base values unambiguous for agents.
 - Option position rows now flag valuation marks that sit outside the captured bid/ask range.
 
 ### Added
 
+- Added `examples/ibkr_portfolio_analysis_prompt.md` as a named portfolio-review workflow for producing live, read-only IBKR portfolio reviews with exposure, options, regime, FX, margin, and data-quality checks.
 - Added per-row `market_value_base`, `unrealized_pnl_base`, `realized_pnl_base`, and `daily_pnl_base` fields when the account base currency and FX conversion are known.
 - Added `portfolio.exposure_base`, `portfolio.dollar_delta_base`, `portfolio.daily_theta_base`, and per-underlying base fields including `group_market_value_base`, `group_market_value_pct_nlv`, `group_dollar_delta_base`, `group_unrealized_pnl_base`, and `group_daily_pnl_base`.
 - Added `mark_outside_bid_ask` plus structured `warning_details` on option rows when the account valuation mark is outside the captured bid/ask range.
