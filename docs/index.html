@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>IBKR MCP Server | Interactive Brokers TWS, IB Gateway & Claude Desktop</title>
-  <meta name="description" content="Local read-only IBKR MCP server for Interactive Brokers TWS and IB Gateway. Connect Claude Desktop, Claude Code, Cursor, and Zed to account and market data.">
+  <title>IBKR MCP Server | Agentic Interactive Brokers Portfolio & Trading Research</title>
+  <meta name="description" content="Agentic IBKR portfolio analysis and trading-research workflows on live TWS or IB Gateway data. Connect Claude Desktop, Claude Code, Cursor, and Zed to account and market context.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="IBKR MCP server for Interactive Brokers">
-  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts through a local read-only MCP server.">
+  <meta property="og:title" content="IBKR MCP server for agentic portfolio workflows">
+  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts for portfolio analysis, risk checks, and trading research.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="IBKR MCP server for Interactive Brokers">
-  <meta name="twitter:description" content="A local read-only IBKR MCP server for Claude Desktop, TWS, and IB Gateway.">
+  <meta name="twitter:title" content="IBKR MCP server for agentic portfolio workflows">
+  <meta name="twitter:description" content="Agentic IBKR portfolio analysis and trading research on live TWS or IB Gateway data.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
   <script type="application/ld+json">
@@ -35,7 +35,7 @@
           "Best IBKR MCP server for Claude Code"
         ],
         "url": "https://osauer.dev/ibkr/",
-        "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account, calendar, and market analysis.",
+        "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.",
         "applicationCategory": "FinanceApplication",
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
@@ -54,13 +54,14 @@
           "https://pkg.go.dev/github.com/osauer/ibkr"
         ],
         "isAccessibleForFree": true,
-        "keywords": "IBKR MCP, Interactive Brokers MCP server, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
+        "keywords": "IBKR MCP, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
         "featureList": [
-          "Read-only stdio MCP server",
+          "Agentic portfolio analysis workflow layer",
           "Interactive Brokers TWS and IB Gateway support",
           "Account and positions tools",
           "Stock and ETF quote resources",
-          "Options, scanners, breadth, gamma, and risk-regime tools"
+          "Options, scanners, breadth, gamma, risk-regime, and sizing tools",
+          "Read-side MCP boundary with no order-entry tools"
         ]
       },
       {
@@ -80,7 +81,7 @@
             "name": "What is the IBKR MCP server?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "ibkr mcp is a local read-only Model Context Protocol server that lets Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts read Interactive Brokers account and market data through IB Gateway or TWS."
+              "text": "ibkr mcp is a local Model Context Protocol server that lets Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts analyze Interactive Brokers account and market data through IB Gateway or TWS."
             }
           },
           {
@@ -577,10 +578,10 @@
   <main>
     <section class="wrap hero" aria-labelledby="hero-title">
       <div>
-        <p class="eyebrow">IBKR MCP server</p>
-        <h1 id="hero-title">IBKR MCP server for Interactive Brokers account research</h1>
-        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Read live portfolio, calendars, options, quotes, scanners, breadth, gamma, and risk-regime data from one local tool.</p>
-        <p class="safety">The bundled CLI and MCP server expose account and market data, but no order-entry interface.</p>
+        <p class="eyebrow">Agentic IBKR workflows</p>
+        <h1 id="hero-title">IBKR MCP server for portfolio analysis and trading research</h1>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Turn live portfolio, options, quotes, scanners, breadth, gamma, and risk-regime data into agentic review workflows.</p>
+        <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="#install">Install</a>
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
@@ -603,8 +604,8 @@
           <span>Runs as a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
         </div>
         <div class="trust-item">
-          <strong>Trading research</strong>
-          <span>Portfolio, calendars, options, quotes, scanners, breadth, gamma, and regime context in one tool.</span>
+          <strong>Workflow depth</strong>
+          <span>Portfolio review, options diagnostics, scanners, risk checks, gamma, breadth, and regime context in one tool.</span>
         </div>
         <div class="trust-item">
           <strong>Go binary</strong>
@@ -643,6 +644,7 @@
         <p>The MCP descriptions are written for agent routing, so assistants can pick the right tool without you naming commands.</p>
       </div>
       <ul class="questions">
+        <li>Review my portfolio and rank the risks I should look at today.</li>
         <li>What is in my IBKR account?</li>
         <li>Show my SPY exposure, including option deltas.</li>
         <li>How does the market regime look today?</li>

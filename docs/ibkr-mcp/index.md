@@ -2,16 +2,16 @@
 
 Updated: 2026-05-28 06:10 CEST
 
-`ibkr mcp` is a local, read-only MCP server for Interactive Brokers account and market data. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
+`ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
-Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, and risk-regime tools without exposing order entry.
+Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review and size plans without receiving order-entry tools.
 
 ## Best fit
 
 - You want an IBKR MCP server that works locally through stdio.
-- You already run IB Gateway or TWS and want Claude or another agent to read account and market context.
+- You already run IB Gateway or TWS and want Claude or another agent to analyze account and market context.
 - You want a single Go binary instead of a Python bridge, Java jar, hosted broker proxy, or remote custody layer.
-- You want account and market analysis, not automated order placement.
+- You want portfolio intelligence, market research, risk checks, and controlled trading-workflow analysis before any separate execution step.
 
 ## Install
 

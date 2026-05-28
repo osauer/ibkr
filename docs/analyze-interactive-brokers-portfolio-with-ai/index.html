@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-27T22:39:00+02:00",
+    "dateModified": "2026-05-28T06:45:00+02:00",
     "description": "ibkr lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed,...",
     "headline": "Analyze an Interactive Brokers portfolio with AI",
     "isPartOf": {
@@ -157,8 +157,8 @@
   </header>
   <main class="wrap doc">
 <h1 id="analyze-an-interactive-brokers-portfolio-with-ai">Analyze an Interactive Brokers portfolio with AI</h1>
-<p>Updated: 2026-05-27 22:39 CEST</p>
-<p><code>ibkr</code> lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls <code>ibkr mcp</code>; <code>ibkr</code> reads IB Gateway or TWS; the assistant receives structured read-only responses.</p>
+<p>Updated: 2026-05-28 06:45 CEST</p>
+<p><code>ibkr</code> lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls <code>ibkr mcp</code>; <code>ibkr</code> reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.</p>
 <p>This page is for searches such as &#34;analyze Interactive Brokers portfolio with AI&#34;, &#34;AI assistant for IBKR portfolio analysis&#34;, &#34;Claude IBKR positions options analysis&#34;, and &#34;natural language TWS API portfolio analysis&#34;.</p>
 <h2 id="portfolio-questions-it-handles">Portfolio questions it handles</h2>
 <ul>
@@ -170,7 +170,7 @@
 <li>&#34;What are the next option expiries and implied moves for my top holdings?&#34;</li>
 <li>&#34;How does today&#39;s risk regime affect this portfolio?&#34;</li>
 </ul>
-<p>The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, and risk-regime context.</p>
+<p>The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, and risk-regime context. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, and plan sizing without exposing order-entry tools.</p>
 <h2 id="why-this-is-better-than-copy-paste-analysis">Why this is better than copy-paste analysis</h2>
 <p>Manual portfolio analysis usually means pasting account balances, positions, and option chains into a chat. That is slow, stale, and easy to redact incorrectly. <code>ibkr mcp</code> keeps the broker connection local and returns only the data requested for the current question.</p>
 <p>The host still receives account-sensitive data when you ask it to analyze your account. Use a host and model policy you trust. The <code>ibkr</code> side of the connection is local and read-only.</p>
@@ -190,6 +190,7 @@ ibkr_regime</code></pre>
 <li>stale, frozen, delayed, or closed-market quote warnings</li>
 <li>current risk-regime context when relevant</li>
 </ul>
+<p>For a fuller semi-professional portfolio-review workflow, use the prompt in <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md">examples/ibkr_portfolio_analysis_prompt.md</a>.</p>
 <h2 id="install">Install</h2>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr status</code></pre>
@@ -204,7 +205,7 @@ ibkr status</code></pre>
     }
   }
 }</code></pre>
-<h2 id="read-only-by-design">Read-only by design</h2>
+<h2 id="controlled-execution-boundary">Controlled execution boundary</h2>
 <p>The bundled CLI and MCP server do not expose order placement, order modification, or order cancellation. The sizing tool performs math against net liquidation value; it does not submit an order ticket.</p>
 <h2 id="references">References</h2>
 <ul>
