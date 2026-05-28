@@ -1,7 +1,7 @@
 {
   "name": "ibkr",
   "title": "IBKR MCP Server",
-  "description": "Local read-only Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for account and market analysis through IB Gateway or TWS.",
+  "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
   "homepage": "https://osauer.dev/ibkr/",
   "repository": "https://github.com/osauer/ibkr",
   "license": "MIT",
@@ -36,6 +36,9 @@
     "option chains",
     "daily historical bars",
     "market scanners",
+    "portfolio review workflow",
+    "agentic trading research",
+    "risk checks",
     "fixed-fractional position sizing",
     "S&P 500 breadth",
     "SPY+SPX dealer gamma",
@@ -47,7 +50,7 @@
     "can_place_orders": false,
     "can_modify_orders": false,
     "can_cancel_orders": false,
-    "summary": "The bundled CLI and MCP server expose account and market data, but no order-entry interface."
+    "summary": "Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface."
   },
   "keywords": [
     "Interactive Brokers",
@@ -60,6 +63,13 @@
     "TWS MCP server",
     "IB Gateway MCP",
     "Claude Desktop Interactive Brokers",
+    "Interactive Brokers portfolio analysis AI",
+    "Claude IBKR portfolio review",
+    "agentic IBKR portfolio analysis",
+    "agentic trading research",
+    "portfolio review workflow",
+    "risk checks",
+    "controlled execution boundary",
     "Claude Desktop",
     "Claude Code",
     "Cursor",

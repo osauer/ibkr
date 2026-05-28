@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -20,6 +21,8 @@ const (
 	rootServerPath     = "server.json"
 	docsMCPPath        = "docs/mcp-server.json"
 	wellKnownMCPPath   = "docs/.well-known/mcp/server.json"
+	serverCardPath     = "docs/.well-known/mcp/server-card.json"
+	glamaPath          = "glama.json"
 	docsSitemapPath    = "docs/sitemap.xml"
 	docsLLMSPath       = "docs/llms.txt"
 	indexNowKeyPath    = "docs/indexnow.txt"
@@ -45,6 +48,7 @@ var (
 		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
 		"https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/",
 		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",
 		"https://osauer.dev/ibkr/read-only-mcp-server/",
 		"https://osauer.dev/ibkr/guides/agentic-use.html",
 		"https://osauer.dev/ibkr/reference/mcp-tools.html",
@@ -62,6 +66,7 @@ var (
 		"https://osauer.dev/ibkr/connect-claude-to-ibkr/",
 		"https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/",
 		"https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/",
+		"https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",
 		"https://osauer.dev/ibkr/read-only-mcp-server/",
 		"https://github.com/osauer/ibkr",
 		"https://osauer.dev/ibkr/reference/mcp-tools.html",
@@ -93,6 +98,7 @@ func run() error {
 	checkJSONLDVersions(&problems, version)
 	checkSitemap(&problems)
 	checkLLMS(&problems)
+	checkDirectoryMetadata(&problems, version)
 	checkIndexNowKey(&problems)
 
 	if len(problems) > 0 {
@@ -101,6 +107,72 @@ func run() error {
 
 	fmt.Printf("discovery-check: version %s across public discovery surfaces\n", version)
 	return nil
+}
+
+func checkDirectoryMetadata(problems *[]string, version string) {
+	glama, err := readJSONObject(glamaPath)
+	if err != nil {
+		*problems = append(*problems, err.Error())
+	} else {
+		checkStringValue(problems, glamaPath, glama, "$schema", "https://glama.ai/mcp/schemas/server.json")
+		maintainers, ok := stringArray(glama["maintainers"])
+		if !ok || !slices.Contains(maintainers, "osauer") {
+			*problems = append(*problems, glamaPath+` maintainers must include "osauer"`)
+		}
+	}
+
+	card, err := readJSONObject(serverCardPath)
+	if err != nil {
+		*problems = append(*problems, err.Error())
+		return
+	}
+	serverInfo, ok := card["serverInfo"].(map[string]any)
+	if !ok {
+		*problems = append(*problems, serverCardPath+" serverInfo must be an object")
+	} else {
+		checkStringValue(problems, serverCardPath+" serverInfo", serverInfo, "name", "ibkr")
+		checkStringValue(problems, serverCardPath+" serverInfo", serverInfo, "version", version)
+		checkStringValue(problems, serverCardPath+" serverInfo", serverInfo, "homepage", "https://osauer.dev/ibkr/")
+		checkStringValue(problems, serverCardPath+" serverInfo", serverInfo, "repository", "https://github.com/osauer/ibkr")
+	}
+
+	auth, ok := card["authentication"].(map[string]any)
+	if !ok {
+		*problems = append(*problems, serverCardPath+" authentication must be an object")
+	} else if required, ok := auth["required"].(bool); !ok || required {
+		*problems = append(*problems, serverCardPath+" authentication.required must be false")
+	}
+
+	tools, ok := card["tools"].([]any)
+	if !ok {
+		*problems = append(*problems, serverCardPath+" tools must be an array")
+	} else {
+		toolNames := objectNames(tools)
+		for _, name := range []string{"ibkr_account", "ibkr_positions", "ibkr_chain", "ibkr_regime", "ibkr_size"} {
+			if !slices.Contains(toolNames, name) {
+				*problems = append(*problems, serverCardPath+" tools missing "+name)
+			}
+		}
+	}
+
+	links, ok := card["links"].(map[string]any)
+	if !ok {
+		*problems = append(*problems, serverCardPath+" links must be an object")
+	} else {
+		checkStringValue(problems, serverCardPath+" links", links, "portfolioReview", "https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/")
+		checkStringValue(problems, serverCardPath+" links", links, "mcpTools", "https://osauer.dev/ibkr/reference/mcp-tools.html")
+	}
+
+	safety, ok := card["safety"].(map[string]any)
+	if !ok {
+		*problems = append(*problems, serverCardPath+" safety must be an object")
+		return
+	}
+	for _, field := range []string{"orderEntrySurface", "canPlaceOrders", "canModifyOrders", "canCancelOrders"} {
+		if value, ok := safety[field].(bool); !ok || value {
+			*problems = append(*problems, fmt.Sprintf("%s safety.%s must be false", serverCardPath, field))
+		}
+	}
 }
 
 func checkIndexNowKey(problems *[]string) {
@@ -332,6 +404,37 @@ func checkStringValue(problems *[]string, path string, obj map[string]any, field
 	if got != want {
 		*problems = append(*problems, fmt.Sprintf("%s %s = %q, want %q", path, field, got, want))
 	}
+}
+
+func stringArray(value any) ([]string, bool) {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		text, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, text)
+	}
+	return out, true
+}
+
+func objectNames(items []any) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, ok := obj["name"].(string)
+		if ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func collectStringKey(value any, key string, out *[]string) {
