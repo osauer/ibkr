@@ -27,7 +27,7 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 	if res.Decision != canaryDecisionWatch {
 		t.Fatalf("decision = %s, want WATCH for ambiguous all-unranked market", res.Decision)
 	}
-	if !rowContains(res.Rows, "Data quality gate", "wait for at least four ranked") {
+	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
 		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
 	}
 }
@@ -72,6 +72,40 @@ func TestComputeCanaryImmediateMarginDangerLiquidatesDespiteAmbiguousMarket(t *t
 	})
 	if res.Decision != canaryDecisionLiquidate {
 		t.Fatalf("decision = %s, want LIQUIDATE on margin cushion below 10%%", res.Decision)
+	}
+}
+
+func TestComputeCanaryZeroExcessLiquidityLiquidatesWhenMarginContextPresent(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.Cushion = 0
+	acct.ExcessLiquidity = 0
+	acct.MaintenanceMargin = 80_000
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+	})
+	if res.Decision != canaryDecisionLiquidate {
+		t.Fatalf("decision = %s, want LIQUIDATE when active margin account has zero cushion", res.Decision)
+	}
+	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "cushion 0%") {
+		t.Fatalf("expected zero-cushion evidence, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryLookAheadMarginDangerLiquidates(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.LookAheadExcess = 8_000
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+	})
+	if res.Decision != canaryDecisionLiquidate {
+		t.Fatalf("decision = %s, want LIQUIDATE when look-ahead cushion is below 10%%", res.Decision)
+	}
+	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "look-ahead cushion 8%") {
+		t.Fatalf("expected look-ahead cushion evidence, rows: %+v", res.Rows)
 	}
 }
 
@@ -134,6 +168,47 @@ func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryGrossDollarDeltaCatchesOffsettingOptionBook(t *testing.T) {
+	t.Parallel()
+	net := 0.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+			DollarDeltaBase: &net,
+			ExposureBase: []rpc.UnderlyingExposure{
+				{Underlying: "AAPL", DollarDeltaBase: new(90_000.0)},
+				{Underlying: "MSFT", DollarDeltaBase: new(-90_000.0)},
+			},
+		}},
+		Regime: redVolCreditRegimeWithComputingSlowRows(),
+	})
+	if res.Decision != canaryDecisionLiquidate {
+		t.Fatalf("decision = %s, want LIQUIDATE on 180%% gross delta in confirmed stress", res.Decision)
+	}
+	if !rowContainsEvidence(res.Rows, "US equity/options exposure", "gross delta 180% NLV") {
+		t.Fatalf("expected gross delta evidence, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *testing.T) {
+	t.Parallel()
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+			ExposureBase: []rpc.UnderlyingExposure{
+				{Underlying: "AAPL", DollarDeltaBase: new(45_000.0)},
+			},
+		}},
+		Regime: healthyCanaryRegime(),
+	})
+	if res.Decision != canaryDecisionWatch {
+		t.Fatalf("decision = %s, want WATCH on largest dollar-delta concentration", res.Decision)
+	}
+	if !rowContainsEvidence(res.Rows, "Largest concentration", "AAPL delta 45% NLV") {
+		t.Fatalf("expected largest-delta evidence, rows: %+v", res.Rows)
+	}
+}
+
 func TestComputeCanaryStandaloneVIXSpikeWatches(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -153,6 +228,31 @@ func TestComputeCanaryStandaloneVIXSpikeWatches(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Decision != canaryDecisionWatch {
+		t.Fatalf("decision = %s, want WATCH when ranked market data is stale", res.Decision)
+	}
+	if got := strings.Join(res.Market.StaleClusters, ","); got != "vol" {
+		t.Fatalf("stale clusters = %q, want vol", got)
+	}
+	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
+		t.Fatalf("expected stale-data ambiguity row, rows: %+v", res.Rows)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "stale clusters: vol") {
+		t.Fatalf("expected stale-cluster warning, warnings: %+v", res.Warnings)
+	}
+	if res.Confidence != "medium-low" {
+		t.Fatalf("confidence = %q, want medium-low for stale data", res.Confidence)
+	}
+}
+
 func TestComputeCanaryGreenClustersAreNotAmbiguous(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -166,6 +266,23 @@ func TestComputeCanaryGreenClustersAreNotAmbiguous(t *testing.T) {
 	})
 	if got := strings.Join(res.Market.AmbiguousClusters, ","); got != "breadth" {
 		t.Fatalf("ambiguous clusters = %q, want breadth only", got)
+	}
+}
+
+func TestComputeCanaryCarriesSourceTimestamps(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.AsOf = time.Date(2026, 5, 29, 13, 1, 0, 0, time.UTC)
+	posAsOf := time.Date(2026, 5, 29, 13, 2, 0, 0, time.UTC)
+	regime := healthyCanaryRegime()
+	regime.AsOf = time.Date(2026, 5, 29, 13, 3, 0, 0, time.UTC)
+	res := ComputeCanary(CanaryInput{
+		Account:   acct,
+		Positions: rpc.PositionsResult{AsOf: posAsOf},
+		Regime:    regime,
+	})
+	if !res.SourceAsOf.Account.Equal(acct.AsOf) || !res.SourceAsOf.Positions.Equal(posAsOf) || !res.SourceAsOf.Regime.Equal(regime.AsOf) {
+		t.Fatalf("source_as_of = %+v, want account=%s positions=%s regime=%s", res.SourceAsOf, acct.AsOf, posAsOf, regime.AsOf)
 	}
 }
 
@@ -356,6 +473,15 @@ func redVolCreditRegimeWithComputingSlowRows() rpc.RegimeSnapshotResult {
 func rowContains(rows []CanaryRow, title, text string) bool {
 	for _, row := range rows {
 		if row.Title == title && strings.Contains(row.Action, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func rowContainsEvidence(rows []CanaryRow, title, text string) bool {
+	for _, row := range rows {
+		if row.Title == title && strings.Contains(row.Evidence, text) {
 			return true
 		}
 	}

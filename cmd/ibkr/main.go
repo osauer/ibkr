@@ -146,7 +146,7 @@ func main() {
 	// timeout from cancelling the in-flight request.
 	if !isStreamingInvocation(cmd, rest) {
 		budget := 60 * time.Second
-		if cmd == "scan" || cmd == "technical" {
+		if cmd == "scan" || cmd == "technical" || cmd == "canary" {
 			budget = 90 * time.Second
 		}
 		var dlCancel context.CancelFunc
