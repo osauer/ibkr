@@ -163,6 +163,8 @@ func shouldRefreshOnStartup(snap *Snapshot, now time.Time) bool {
 // engine retries on the next tick. A transient gateway disconnect
 // shouldn't take the daily cadence offline.
 func (e *Engine) Run(ctx context.Context) {
+	defer e.setRetryPending(false)
+
 	retries := 0
 	lastErrored := false
 	doRefresh := func(reason string) error {
@@ -185,14 +187,17 @@ func (e *Engine) Run(ctx context.Context) {
 		switch {
 		case converged:
 			retries = 0
+			e.setRetryPending(false)
 		case retries < maxBelowThresholdRetries:
 			retries++
+			e.setRetryPending(true)
 		default:
 			// Burned through the retry budget without converging.
 			// Reset and fall back to the daily cadence — the
 			// operator should investigate (the warnf in finalise
 			// already logged each below-threshold result).
 			retries = 0
+			e.setRetryPending(false)
 		}
 	}
 
@@ -222,6 +227,8 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		if !lastErrored {
 			updateRetryState()
+		} else {
+			e.setRetryPending(false)
 		}
 	}
 }

@@ -1989,8 +1989,9 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 }
 
 // backgroundTasks returns the set of daemon-internal long-running
-// computes that are running RIGHT NOW. Always returns a non-nil slice
-// (possibly empty) so consumers can rely on len()==0 to mean idle.
+// computes that are running or waiting for a scheduled retry. Always
+// returns a non-nil slice (possibly empty) so consumers can rely on
+// len()==0 to mean idle.
 //
 // This is the single source of truth for "what background work is in
 // flight." Three callers ride it: isBusy() (idle-watcher gate),
@@ -2001,13 +2002,12 @@ func (s *Server) runIdleWatcher(ctx context.Context) {
 //
 // Distinct from activeConns: those track open client sockets, but the
 // engine-style background tasks run without any client connection held
-// open. The breadth bootstrap takes ~60 min against IBKR's historical-
-// data pacing limit (60 reqs/10 min sliding window) and gamma compute
-// runs ~1–2 min — both can outlive a CLI invocation that triggered
-// them.
+// open. The breadth bootstrap can span multiple retry waits while
+// IBKR's contract-details bucket refills, and gamma compute runs
+// ~1–2 min — both can outlive a CLI invocation that triggered them.
 func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	tasks := []rpc.BackgroundTaskStatus{}
-	if s.breadth != nil && s.breadth.IsRefreshing() {
+	if s.breadth != nil && s.breadth.IsBusy() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "breadth-spx", Status: "computing"})
 	}
 	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {

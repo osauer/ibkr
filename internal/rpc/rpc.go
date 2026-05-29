@@ -2406,18 +2406,18 @@ type ScanPresetSummary struct {
 }
 
 // BackgroundTaskStatus names a daemon-internal long-running task that
-// is currently executing. Used by `ibkr status` to surface activity
-// that would otherwise be invisible — a fresh autospawned daemon
-// mid-bootstrap looks identical to an idle one from outside. The
-// surface deliberately carries no state enum: presence in the
-// HealthResult.BackgroundTasks list IS the state ("this task is
-// running right now"). Tasks that are idle/ready/cold are omitted
-// entirely, keeping the wire payload bounded and the user-facing
-// rendering compact.
+// is currently executing or waiting for a scheduled retry. Used by
+// `ibkr status` to surface activity that would otherwise be invisible
+// — a fresh autospawned daemon mid-bootstrap looks identical to an
+// idle one from outside. The surface deliberately carries no required
+// state enum: presence in the HealthResult.BackgroundTasks list IS
+// the state ("this task is still active"). Tasks that are
+// idle/ready/cold are omitted entirely, keeping the wire payload
+// bounded and the user-facing rendering compact.
 //
 // Current task names:
 //   - "breadth-spx" — the SPX 50-DMA breadth engine is running a
-//     refresh (cold-start bootstrap or daily post-close refresh).
+//     refresh or waiting for a below-threshold bootstrap retry.
 //   - "gamma-zero" — the SPX zero-gamma compute is fanning out
 //     across option legs.
 //
@@ -2485,10 +2485,10 @@ type HealthResult struct {
 	ServerVersion int       `json:"server_version,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
 	// BackgroundTasks lists daemon-internal long-running computes that
-	// are running RIGHT NOW. Empty when nothing's running. Always
-	// present on the wire (never omitted) so consumers can rely on
-	// `len(result.background_tasks) == 0` to mean "idle" without
-	// inferring from absence.
+	// are running or waiting for a scheduled retry. Empty when nothing
+	// is active. Always present on the wire (never omitted) so
+	// consumers can rely on `len(result.background_tasks) == 0` to
+	// mean "idle" without inferring from absence.
 	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
 	Subsystems      []SubsystemHealth      `json:"subsystems,omitempty"`
 	// Members carries the runtime SPX-membership state: source

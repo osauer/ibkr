@@ -529,6 +529,111 @@ func TestRunIdleWatcherDefersShutdownWhileBreadthRefreshing(t *testing.T) {
 	}
 }
 
+// runIdleWatcher must also defer shutdown between breadth bootstrap
+// attempts. A below-threshold refresh persists partial windows, then Run
+// sleeps for the IBKR bucket-refill delay before retrying. That sleep is
+// active bootstrap work; if the daemon exits there, breadth may never
+// converge on a fresh autospawn.
+func TestRunIdleWatcherDefersShutdownWhileBreadthRetryPending(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Resolved{}
+	cfg.Daemon.SetIdleTimeout(40 * time.Millisecond)
+
+	now := time.Date(2026, 5, 18, 21, 0, 0, 0, time.UTC)
+	series := func(start float64) []spx.Bar {
+		bars := make([]spx.Bar, spx.WindowSize)
+		for i := range bars {
+			date := now.AddDate(0, 0, -(spx.WindowSize - 1 - i))
+			bars[i] = spx.Bar{Date: date.Format("2006-01-02"), Close: start + float64(i)}
+		}
+		return bars
+	}
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "F1", "F2", "F3", "F4", "F5"}
+	fetcher := &spx.FakeBarFetcher{
+		Bars: map[string][]spx.Bar{
+			"OK1": series(100),
+			"OK2": series(110),
+			"OK3": series(120),
+			"OK4": series(130),
+			"OK5": series(140),
+		},
+		Errors: map[string]error{
+			"F1": errors.New("gateway: pacing"),
+			"F2": errors.New("gateway: pacing"),
+			"F3": errors.New("gateway: pacing"),
+			"F4": errors.New("gateway: pacing"),
+			"F5": errors.New("gateway: pacing"),
+		},
+	}
+	engine := spx.New(spx.NewStore(t.TempDir()), fetcher, spx.Options{
+		Clock:   func() time.Time { return now },
+		Workers: 4,
+	})
+	engine.SetMembers(members)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		engine.Run(runCtx)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		cov, mc := engine.LastRefreshCoverage()
+		if cov == 5 && mc == 10 && !engine.IsRefreshing() {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	cov, mc := engine.LastRefreshCoverage()
+	if cov != 5 || mc != 10 {
+		cancelRun()
+		<-runDone
+		t.Fatalf("bootstrap coverage: want (5, 10), got (%d, %d)", cov, mc)
+	}
+	if !engine.IsBusy() {
+		cancelRun()
+		<-runDone
+		t.Fatal("engine should stay busy while below-threshold retry is pending")
+	}
+
+	srv := &Server{
+		cfg:      cfg,
+		streams:  map[string]context.CancelFunc{},
+		idleStop: make(chan struct{}),
+		logger:   NewLogger(&bytes.Buffer{}, "error"),
+		breadth:  engine,
+	}
+
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		srv.runIdleWatcher(context.Background())
+	}()
+
+	select {
+	case <-watcherDone:
+		cancelRun()
+		<-runDone
+		t.Fatal("runIdleWatcher returned while breadth retry was pending")
+	case <-time.After(120 * time.Millisecond):
+	}
+
+	cancelRun()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("breadth Run did not exit after cancel")
+	}
+	select {
+	case <-watcherDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runIdleWatcher did not return after breadth retry state cleared")
+	}
+}
+
 // TestIsBusyIncludesGammaCompute pins v0.27.4: the idle-watcher's busy
 // predicate must observe gamma compute as well as breadth refresh. At
 // v0.27.3 only breadth was checked; gamma is faster than the 5-min
