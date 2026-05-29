@@ -1,6 +1,6 @@
 # Portfolio review with Claude and IBKR
 
-Updated: 2026-05-29 12:28 CEST
+Updated: 2026-05-29 12:46 CEST
 
 `ibkr mcp` lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.
 
@@ -53,7 +53,7 @@ place or imply orders.
 
 For a deeper review, use the full example prompt and let Claude decide which MCP calls are needed before it writes the answer.
 
-For a scheduled canary check that returns only `Go`, `Watch`, `De-lever`, or `Liquidate` action rows, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
+For a scheduled canary check that preserves the top `Go`, `Watch`, `De-lever`, or `Liquidate` stage plus confidence, action rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
 
 ## What a useful answer looks like
 
