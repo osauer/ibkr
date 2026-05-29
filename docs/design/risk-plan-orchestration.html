@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Risk-plan orchestration | ibkr</title>
-  <meta name="description" content="Status: Draft implementation design. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 20:52 CEST Owner: osauer Related: internal/cli/canary.go,...">
+  <meta name="description" content="Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 21:01 CEST Owner: osauer Related: internal/cli/canary.go,...">
   <link rel="canonical" href="https://osauer.dev/ibkr/design/risk-plan-orchestration.html">
   <script type="application/ld+json">
 {
@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "description": "Status: Draft implementation design. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 20:52 CEST Owner: osauer Related: internal/cli/canary.go,...",
+    "description": "Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 21:01 CEST Owner: osauer Related: internal/cli/canary.go,...",
     "headline": "Risk-plan orchestration",
     "isPartOf": {
       "@type": "SoftwareApplication",
@@ -156,467 +156,221 @@
   </header>
   <main class="wrap doc">
 <h1 id="risk-plan-orchestration">Risk-plan orchestration</h1>
-<p><strong>Status:</strong> Draft implementation design. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-29 20:52 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
-<h2 id="summary">Summary</h2>
-<p><code>risk-plan</code> is the proposed bridge between read-only portfolio risk evidence and a future approval-gated order workflow.</p>
-<p>The overall process is:</p>
+<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-29 21:01 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<h2 id="purpose">Purpose</h2>
+<p><code>risk-plan</code> is the bridge between portfolio risk evidence and a future approval-gated order workflow.</p>
+<p>The system should work like this:</p>
 <ol>
-<li>Gather evidence from <code>account</code>, <code>positions</code>, <code>regime</code>, and <code>canary</code>.</li>
-<li>Convert evidence into a typed <code>risk_plan.v1</code> artifact containing candidate reductions or optional hedges.</li>
-<li>Preview selected candidates through broker-side order preview.</li>
-<li>Present previewed impact to the user or agent.</li>
-<li>Submit only through a future explicitly approved execution path that validates the preview hash, artifact freshness, account identity, and user confirmation.</li>
+<li>Read current account, positions, regime, and canary evidence.</li>
+<li>Produce a short list of candidate risk reductions or optional hedges.</li>
+<li>Preview selected candidates through the broker what-if/order-preview path.</li>
+<li>Show the previewed impact to the user or agent.</li>
+<li>Submit only through a separate future execution command with explicit user confirmation.</li>
 </ol>
-<p><code>canary</code> and <code>regime</code> must not emit concrete trades. They are evidence surfaces. <code>risk-plan</code> is the first layer allowed to produce order drafts, and even those drafts are not executable until <code>order-preview</code> accepts them.</p>
-<p>The current public CLI/MCP boundary remains read-only. Any order-submission path belongs behind a separate, explicit execution capability.</p>
-<h2 id="current-inputs">Current Inputs</h2>
-<p>The project already has the evidence surfaces needed for a first implementation:</p>
+<p>The important boundary: <code>canary</code> and <code>regime</code> are evidence tools. They must not emit concrete trades. <code>risk-plan</code> is the first layer allowed to turn evidence into repositioning candidates, and those candidates still require preview before any execution path may see them.</p>
+<h2 id="small-tool-boundaries">Small Tool Boundaries</h2>
+<p>The existing tools stay small:</p>
 <ul>
-<li><code>account</code>: account ID, base currency, net liquidation, cash, buying power, current margin cushion, look-ahead margin cushion, available funds, and margin context.</li>
-<li><code>positions</code>: exact stock and option holdings, grouped exposure by underlying, base-currency market value, base-currency dollar delta, option greeks coverage, option bid/ask context, and warning details.</li>
-<li><code>regime</code>: market-stress evidence across volatility, credit, funding, FX, dealer gamma, and breadth.</li>
-<li><code>canary</code>: portfolio risk posture using account, positions, and regime evidence. It returns <code>HOLD</code>, <code>WATCH</code>, <code>DELEVER</code>, or <code>LIQUIDATE</code>, with confidence, source timestamps, portfolio summary, market summary, row-level actions, and warnings.</li>
-<li><code>quote</code> and <code>chain</code>: marketability checks for candidate stock/ETF or option legs.</li>
-<li><code>order-preview</code>: in-progress broker what-if layer. This design assumes it can validate draft orders without transmitting them.</li>
+<li><code>account</code>: margin, cash, current cushion, and look-ahead margin.</li>
+<li><code>positions</code>: exact holdings, grouped exposure, option legs, greeks, and bid/ask warnings.</li>
+<li><code>regime</code>: market-stress evidence.</li>
+<li><code>canary</code>: portfolio risk state.</li>
+<li><code>chain</code>: option liquidity and candidate option-leg context.</li>
+<li><code>quote</code>: executable-ish stock/ETF reference prices.</li>
+<li><code>risk-plan</code>: policy engine that consumes the evidence tools and proposes repositioning candidates.</li>
+<li><code>order-preview</code>: broker what-if, margin, commission, and rejection validator.</li>
 </ul>
-<h2 id="design-decision">Design Decision</h2>
-<p><code>canary</code> does not need concrete reposition instructions for <code>risk-plan</code> to work. It should remain a classifier and evidence summary. It may add machine-readable risk signals later, but those signals should still be facts such as &#34;gross delta is above target&#34;, not trades such as &#34;sell 2 contracts&#34;.</p>
-<p><code>risk-plan</code> should orchestrate the evidence tools internally. Piping remains useful for replay and debugging, but the canonical live path should refresh its own account, positions, regime, and canary snapshots so the plan is built from coherent state.</p>
-<p>The LLM agent is an operator and explainer. Deterministic tools own source data, numeric calculations, candidate construction, preview validation, hashing, expiration, and hard stops.</p>
-<h2 id="why-canary-and-regime-must-not-propose-trades">Why Canary And Regime Must Not Propose Trades</h2>
-<p><code>regime</code> is market-context only. It can report that the tape is stressed, but it does not know the user&#39;s positions, account constraints, option liquidity, or margin impact.</p>
-<p><code>canary</code> is portfolio-aware, but it is still not an order planner. A concrete reposition requires:</p>
-<ul>
-<li>exact current holdings and quantities</li>
-<li>whether a proposed order is closing or opening exposure</li>
-<li>option bid/ask and spread quality</li>
-<li>chain liquidity and tradability</li>
-<li>greeks coverage for delta/gamma/theta/vega estimates</li>
-<li>account currency and FX conversion</li>
-<li>current and look-ahead margin impact</li>
-<li>broker-side rejection, commission, and what-if results</li>
-</ul>
-<p>If <code>canary</code> emits specific trades, it silently becomes a planner, chain screener, liquidity checker, margin preflight, and order-drafting layer. That would make the risk alarm harder to test and easier for agents to misuse.</p>
-<p>The safe contract is:</p>
+<p><code>risk-plan</code> does not replace the small tools. It is the only layer allowed to compose their outputs into a repositioning proposal.</p>
+<h2 id="why-canary-and-regime-do-not-propose-trades">Why Canary And Regime Do Not Propose Trades</h2>
+<p><code>regime</code> only knows the market backdrop. It does not know account constraints, held positions, option liquidity, or margin impact.</p>
+<p><code>canary</code> is portfolio-aware, but it is still a risk alarm, not an order planner. A concrete trade needs exact holdings, closing/opening semantics, current bid/ask quality, chain liquidity, greeks coverage, FX conversion, margin impact, and broker preview. If <code>canary</code> starts saying &#34;sell 2 NOW calls&#34;, it becomes a planner, chain screener, and pre-trade validator in disguise.</p>
+<p>The clean contract is:</p>
 <ul>
 <li><code>regime</code>: &#34;What is the market backdrop?&#34;</li>
 <li><code>canary</code>: &#34;What risk state is this portfolio in?&#34;</li>
 <li><code>risk-plan</code>: &#34;What candidate changes would reduce the detected risks?&#34;</li>
-<li><code>order-preview</code>: &#34;Would the broker accept these candidates, and what is the account impact?&#34;</li>
-<li>execution layer: &#34;Has the user explicitly approved this exact previewed action?&#34;</li>
+<li><code>order-preview</code>: &#34;Would the broker accept those candidates and what is the account impact?&#34;</li>
+<li>future execution: &#34;Has the user approved this exact previewed action?&#34;</li>
 </ul>
-<h2 id="actors-and-authority">Actors And Authority</h2>
-<h3 id="user">User</h3>
-<p>The user owns risk policy and approval:</p>
-<ul>
-<li>whether to generate reductions only or allow hedges</li>
-<li>maximum hedge premium</li>
-<li>maximum single-name exposure</li>
-<li>maximum net and gross delta</li>
-<li>whether covered option sells are allowed</li>
-<li>which candidates to preview</li>
-<li>whether any future previewed order may be submitted</li>
-</ul>
-<h3 id="agent">Agent</h3>
+<h2 id="agent-contract">Agent Contract</h2>
+<p>The LLM agent operates the workflow. It does not become the workflow.</p>
 <p>The agent may:</p>
 <ul>
-<li>invoke CLI or MCP tools</li>
 <li>ask the user for missing policy choices</li>
-<li>summarize evidence</li>
-<li>explain candidate tradeoffs</li>
+<li>invoke CLI or MCP tools</li>
+<li>summarize evidence and tradeoffs</li>
 <li>select candidates for preview only from IDs emitted by <code>risk-plan</code></li>
 <li>present previewed broker impact</li>
 </ul>
 <p>The agent must not:</p>
 <ul>
 <li>hand-write order drafts</li>
-<li>invent quantities, strikes, expiries, prices, or hashes</li>
+<li>invent quantities, strikes, expiries, prices, hashes, or preview results</li>
 <li>convert <code>canary</code> prose into orders</li>
-<li>bypass stale-data, preview, or account guards</li>
-<li>submit orders without an explicit future submit command and confirmation flow</li>
+<li>bypass stale-data, account, preview, or approval gates</li>
+<li>submit orders without a future explicit submit command and confirmation flow</li>
 </ul>
-<p>The agent operates the checklist. It is not the checklist.</p>
-<h3 id="deterministic-tools">Deterministic Tools</h3>
-<p>The tools own the stateful and numeric work:</p>
-<ul>
-<li><code>account</code> supplies hard account constraints.</li>
-<li><code>positions</code> supplies the reduction surface.</li>
-<li><code>regime</code> supplies market-stress context.</li>
-<li><code>canary</code> classifies portfolio risk state.</li>
-<li><code>quote</code> and <code>chain</code> validate marketability.</li>
-<li><code>risk-plan</code> computes target breaches, candidate quantities, and candidate risk effects.</li>
-<li><code>order-preview</code> validates broker-side impact.</li>
-<li>a future submitter validates preview hash, expiry, account identity, user confirmation, and kill switches.</li>
-</ul>
-<h2 id="live-workflow">Live Workflow</h2>
-<h3 id="cli">CLI</h3>
-<p>Default live planning:</p>
-<pre><code>ibkr risk-plan --json</code></pre>
-<p>Preview every candidate that is previewable:</p>
+<p>Deterministic code owns calculations, freshness checks, candidate construction, preview validation, hashes, expiration, and hard stops.</p>
+<h2 id="core-flow">Core Flow</h2>
+<p>Default live CLI path:</p>
+<pre><code>ibkr risk-plan --json
+ibkr order-preview --input risk-plan.json --select reduce-now-1 --json</code></pre>
+<p>Pipeline path:</p>
 <pre><code>ibkr risk-plan --json \
-  | ibkr order-preview --input - --json</code></pre>
-<p>Preview only selected candidates:</p>
-<pre><code>ibkr risk-plan --json &gt; risk-plan.json
-ibkr order-preview --input risk-plan.json --select reduce-now-1,hedge-spy-1 --json</code></pre>
-<p>Diagnostic replay from saved evidence:</p>
-<pre><code>ibkr canary --json &gt; canary.json
-ibkr risk-plan --from-canary canary.json --refresh account,positions,regime --json</code></pre>
-<p>The <code>--refresh</code> behavior is load-bearing. A stale <code>canary</code> file must not be combined with fresh option chains and current margin as if all inputs came from one snapshot.</p>
-<h3 id="mcp">MCP</h3>
-<p>The first MCP exposure should be read-only:</p>
+  | ibkr order-preview --input - --select reduce-now-1 --json</code></pre>
+<p>The live path should let <code>risk-plan</code> refresh its own inputs. Piping stale evidence into fresh chains and margin state is unsafe. Replay/debug modes can be added later, after the live path is stable.</p>
+<p>MCP should start read-only:</p>
 <ul>
-<li><code>ibkr_risk_plan</code>: returns a <code>risk_plan.v1</code> artifact.</li>
-<li><code>ibkr_order_preview</code>: only if preview is read-only and cannot transmit.</li>
+<li><code>ibkr_risk_plan</code>: returns candidate plans.</li>
+<li><code>ibkr_order_preview</code>: acceptable only if it cannot transmit orders.</li>
+<li>No MCP order-submission tool in the first release.</li>
 </ul>
-<p>There should be no MCP order-submission tool in the first release of this workflow.</p>
-<h3 id="scheduled-monitoring">Scheduled Monitoring</h3>
-<p>Scheduled monitoring may run <code>canary</code> frequently because it is a compact risk alarm. It should not preview or submit by itself.</p>
-<p>Recommended policy:</p>
+<h2 id="risk-plan-mvp">Risk-Plan MVP</h2>
+<p>First implementation should be intentionally narrow:</p>
 <ol>
-<li>Run <code>ibkr canary --json</code>.</li>
-<li>If <code>decision=HOLD</code>, log and stop.</li>
-<li>If <code>decision=WATCH</code>, optionally run <code>risk-plan</code> and stage candidates, but do not preview unless policy says so.</li>
-<li>If <code>decision=DELEVER</code> or <code>decision=LIQUIDATE</code>, run <code>risk-plan</code>, present highest-priority candidates, and ask for preview approval.</li>
-<li>If margin danger is immediate, <code>risk-plan</code> prioritizes closing existing exposure and raising liquidity before optional hedges.</li>
-<li>If sources are stale, degraded, computing, delayed, or below required confidence, report the blocker and ask whether to wait, refresh, or run diagnostics.</li>
+<li>Fetch fresh <code>account</code>, <code>positions</code>, <code>regime</code>, and <code>canary</code>.</li>
+<li>Check source freshness and account identity.</li>
+<li>Identify target breaches from current data:</li>
 </ol>
-<h2 id="risk-plan-responsibilities">Risk-Plan Responsibilities</h2>
-<p><code>risk-plan</code> owns policy composition and candidate generation:</p>
 <ul>
-<li>Fetch a coherent live snapshot from account, positions, regime, and canary.</li>
-<li>Hash each source payload.</li>
-<li>Enforce source freshness.</li>
-<li>Reject account-ID mismatches.</li>
-<li>Convert risk posture into target breaches: margin, gross exposure, net delta, gross delta, largest single-name market value, largest single-name delta, and option-greeks quality.</li>
-<li>Generate candidate reductions from existing positions first.</li>
-<li>Generate optional hedges only when the user or policy explicitly allows hedges.</li>
-<li>Query quotes/chains only for candidates that need executable market context.</li>
-<li>Reject candidates with stale quotes, missing bid/ask, untradable chains, excessive spreads, missing greeks, or ambiguous closing/opening semantics.</li>
+<li>margin cushion and look-ahead cushion</li>
+<li>gross exposure</li>
+<li>net dollar delta</li>
+<li>gross dollar delta</li>
+<li>largest single-name market exposure</li>
+<li>largest single-name dollar-delta exposure</li>
+<li>missing or stale option greeks</li>
+</ul>
+<ol>
+<li>Generate existing-position reductions only.</li>
+<li>Estimate before/after risk effects.</li>
 <li>Emit stable candidate IDs.</li>
-<li>Emit estimated before/after risk effects.</li>
-<li>Mark every candidate as preview-required.</li>
-<li>Set <code>expires_at</code> on the plan.</li>
-</ul>
-<p><code>risk-plan</code> does not submit orders.</p>
-<h2 id="candidate-ordering">Candidate Ordering</h2>
-<p>Candidate priority should be deterministic and conservative:</p>
-<ol>
-<li>Immediate margin safety: close exposure that improves current or look-ahead margin.</li>
-<li>Concentration: reduce the largest single-name dollar-delta or market-value concentration.</li>
-<li>Gross dollar delta: reduce offsetting option books that still carry large gross risk.</li>
-<li>Net dollar delta: reduce broad directional exposure.</li>
-<li>Optional hedges: add debit-only index hedges when reductions are insufficient or user policy prefers hedging.</li>
+<li>Require order preview for every candidate.</li>
 </ol>
-<p>Existing-position reductions should be preferred before opening new hedges. Closing known risk is easier to preview, easier to explain, and less likely to introduce new expiry, volatility, or liquidity risk.</p>
-<h2 id="account-role">Account Role</h2>
-<p><code>account</code> is the hard constraint source. <code>risk-plan</code> should read:</p>
+<p>Optional hedges come after the reduction-only MVP works. Hedges should be opt-in, debit-only at first, premium-capped, and rejected when chains are stale, wide, or untradable.</p>
+<h2 id="candidate-ordering">Candidate Ordering</h2>
+<p>Candidate priority should be deterministic:</p>
+<ol>
+<li>Immediate margin relief.</li>
+<li>Largest single-name concentration.</li>
+<li>Gross dollar-delta reduction.</li>
+<li>Net dollar-delta reduction.</li>
+<li>Optional debit hedges.</li>
+</ol>
+<p>Existing-position reductions should rank before new hedges. Closing known exposure is easier to preview, explain, and audit.</p>
+<h2 id="plan-artifact">Plan Artifact</h2>
+<p>Avoid over-specifying the JSON shape before implementation. For pickup, the plan only needs to carry these concepts:</p>
 <ul>
 <li>account ID</li>
-<li>base currency</li>
-<li>net liquidation</li>
-<li>current cushion</li>
-<li>look-ahead cushion</li>
-<li>available funds</li>
-<li>excess liquidity</li>
-<li>buying power</li>
-<li>maintenance margin</li>
-<li>initial margin</li>
-<li>account type</li>
+<li>generation time and expiration time</li>
+<li>source timestamps and source hashes</li>
+<li>policy settings used for the run</li>
+<li>detected risk breaches</li>
+<li>candidate IDs</li>
+<li>candidate rationale</li>
+<li>draft order intent for each candidate</li>
+<li>estimated risk effect before and after</li>
+<li>warnings and blocked reasons</li>
 </ul>
-<p>If margin is dangerous, margin relief outranks every other objective. A hedge that costs premium or increases margin should not outrank closing existing exposure during margin stress.</p>
-<h2 id="positions-role">Positions Role</h2>
-<p><code>positions</code> supplies the actual reduction surface:</p>
+<p>Do not use raw <code>canary</code> or <code>regime</code> JSON as an order-preview input. <code>order-preview</code> should accept only a typed risk-plan artifact.</p>
+<h3 id="versioning">Versioning</h3>
+<p>Do not bake <code>.v1</code> into command names, headings, or every sentence in the design doc. It adds noise and makes the design look more final than it is.</p>
+<p>Because plans may be piped, stored, hashed, or accepted by MCP, the artifact should still carry a small identity field. Use versioning inside the artifact, not in the user-facing workflow:</p>
+<pre><code>{ &#34;kind&#34;: &#34;risk_plan.v1&#34; }
+{ &#34;kind&#34;: &#34;order_preview.v1&#34; }</code></pre>
+<p>The exact Go/RPC structs are implementation-owned. This document describes required semantics, not a frozen JSON schema.</p>
+<h2 id="order-preview-and-future-execution">Order Preview And Future Execution</h2>
+<p><code>order-preview</code> consumes a risk plan and selected candidate IDs. It validates broker impact without submitting:</p>
 <ul>
-<li>stock quantities</li>
-<li>option quantities</li>
-<li>option expiry, strike, right, and multiplier</li>
-<li>market value in account base currency</li>
-<li>per-underlying dollar delta in account base currency</li>
-<li>greeks and greeks coverage</li>
-<li>option bid/ask and mark warnings</li>
-<li>grouped exposure by underlying</li>
+<li>order validity</li>
+<li>broker rejection details</li>
+<li>current and post-trade margin</li>
+<li>current and post-trade look-ahead margin</li>
+<li>estimated commission</li>
+<li>relevant warnings</li>
 </ul>
-<p>Candidate reductions must be derived from current positions, not from canary text. Closing sides must be explicit:</p>
+<p>A future submit command should accept only a previewed artifact, not raw orders. It must validate:</p>
 <ul>
-<li>long stock: <code>SELL</code></li>
-<li>short stock: <code>BUY_TO_COVER</code></li>
-<li>long option: <code>SELL_TO_CLOSE</code></li>
-<li>short option: <code>BUY_TO_CLOSE</code></li>
+<li>trading-capable build or runtime permission</li>
+<li>current account ID</li>
+<li>preview source hash</li>
+<li>plan and preview freshness</li>
+<li>candidate IDs named in the confirmation string</li>
+<li>current positions still match closing orders</li>
+<li>market data and margin state have not materially drifted</li>
 </ul>
-<p>Opening hedges must be marked as opening and must require explicit hedge permission.</p>
-<h2 id="canary-contract">Canary Contract</h2>
-<p>The current canary output is sufficient for a first <code>risk-plan</code> implementation because it already carries:</p>
+<p>Any mismatch blocks submission.</p>
+<h2 id="canary-changes">Canary Changes</h2>
+<p>No order-level fields belong in <code>canary</code>.</p>
+<p>The current canary output is enough for the reduction-only MVP because it already reports:</p>
 <ul>
 <li>source timestamps</li>
-<li>overall decision and confidence</li>
-<li>account cushion</li>
-<li>look-ahead cushion</li>
+<li>decision and confidence</li>
+<li>cushion and look-ahead cushion</li>
 <li>gross exposure</li>
-<li>net delta</li>
-<li>gross delta</li>
-<li>largest market concentration</li>
-<li>largest delta concentration</li>
+<li>net delta and gross delta</li>
+<li>largest market and delta concentrations</li>
 <li>market-regime summary</li>
 <li>warnings</li>
 </ul>
-<p>No order-level fields belong in <code>canary</code>.</p>
-<p>Optional future additions can make planning more deterministic:</p>
-<pre><code>{
-  &#34;policy_version&#34;: &#34;canary.v1&#34;,
-  &#34;plan_hint&#34;: &#34;stage_reductions&#34;,
-  &#34;risk_signals&#34;: [
-    {
-      &#34;code&#34;: &#34;gross_delta_high&#34;,
-      &#34;severity&#34;: &#34;watch&#34;,
-      &#34;value_pct_nlv&#34;: 391,
-      &#34;soft_target_pct_nlv&#34;: 250,
-      &#34;hard_target_pct_nlv&#34;: 150
-    },
-    {
-      &#34;code&#34;: &#34;largest_delta_concentration&#34;,
-      &#34;underlying&#34;: &#34;NOW&#34;,
-      &#34;severity&#34;: &#34;watch&#34;,
-      &#34;value_pct_nlv&#34;: 118,
-      &#34;soft_target_pct_nlv&#34;: 75,
-      &#34;hard_target_pct_nlv&#34;: 35
-    }
-  ]
-}</code></pre>
-<p>These are still risk facts, not trades. If <code>risk_signals</code> disagree with fresh account or positions data, <code>risk-plan</code> should prefer fresh account and positions data and report the mismatch.</p>
-<h2 id="risk-plan-artifact">Risk Plan Artifact</h2>
-<p>The first implementation needs one planner artifact.</p>
-<pre><code>{
-  &#34;kind&#34;: &#34;risk_plan.v1&#34;,
-  &#34;generated_at&#34;: &#34;2026-05-29T20:52:00+02:00&#34;,
-  &#34;expires_at&#34;: &#34;2026-05-29T20:57:00+02:00&#34;,
-  &#34;account_id&#34;: &#34;DU123456&#34;,
-  &#34;decision&#34;: &#34;WATCH&#34;,
-  &#34;confidence&#34;: &#34;medium-low&#34;,
-  &#34;source_as_of&#34;: {
-    &#34;account&#34;: &#34;2026-05-29T18:45:10+02:00&#34;,
-    &#34;positions&#34;: &#34;2026-05-29T20:45:10+02:00&#34;,
-    &#34;regime&#34;: &#34;2026-05-29T20:45:18+02:00&#34;,
-    &#34;canary&#34;: &#34;2026-05-29T20:45:18+02:00&#34;
-  },
-  &#34;source_hashes&#34;: {
-    &#34;account&#34;: &#34;sha256:...&#34;,
-    &#34;positions&#34;: &#34;sha256:...&#34;,
-    &#34;regime&#34;: &#34;sha256:...&#34;,
-    &#34;canary&#34;: &#34;sha256:...&#34;
-  },
-  &#34;policy&#34;: {
-    &#34;mode&#34;: &#34;reductions_only&#34;,
-    &#34;allow_hedges&#34;: false,
-    &#34;allow_option_sells&#34;: &#34;closing_only&#34;,
-    &#34;max_hedge_premium_pct_nlv&#34;: 0.75,
-    &#34;max_single_name_delta_pct_nlv&#34;: 75,
-    &#34;max_net_delta_pct_nlv&#34;: 150,
-    &#34;max_gross_delta_pct_nlv&#34;: 250
-  },
-  &#34;breaches&#34;: [
-    {
-      &#34;code&#34;: &#34;gross_delta_high&#34;,
-      &#34;value_pct_nlv&#34;: 391,
-      &#34;target_pct_nlv&#34;: 250
-    },
-    {
-      &#34;code&#34;: &#34;largest_delta_concentration&#34;,
-      &#34;underlying&#34;: &#34;NOW&#34;,
-      &#34;value_pct_nlv&#34;: 118,
-      &#34;target_pct_nlv&#34;: 75
-    }
-  ],
-  &#34;candidates&#34;: [
-    {
-      &#34;id&#34;: &#34;reduce-now-1&#34;,
-      &#34;priority&#34;: 1,
-      &#34;intent&#34;: &#34;reduce_single_name_delta&#34;,
-      &#34;scope&#34;: &#34;existing_position&#34;,
-      &#34;rationale&#34;: &#34;NOW is the largest dollar-delta concentration.&#34;,
-      &#34;estimated_effect&#34;: {
-        &#34;largest_delta_pct_nlv_before&#34;: 118,
-        &#34;largest_delta_pct_nlv_after&#34;: 75,
-        &#34;gross_delta_pct_nlv_before&#34;: 391,
-        &#34;gross_delta_pct_nlv_after&#34;: 348
-      },
-      &#34;order_drafts&#34;: [
-        {
-          &#34;side&#34;: &#34;SELL_TO_CLOSE&#34;,
-          &#34;sec_type&#34;: &#34;OPT&#34;,
-          &#34;symbol&#34;: &#34;NOW&#34;,
-          &#34;expiry&#34;: &#34;YYYY-MM-DD&#34;,
-          &#34;strike&#34;: 0,
-          &#34;right&#34;: &#34;C&#34;,
-          &#34;quantity&#34;: 1,
-          &#34;order_type&#34;: &#34;LMT&#34;,
-          &#34;limit_policy&#34;: &#34;passive_mid&#34;
-        }
-      ],
-      &#34;gates&#34;: [
-        &#34;existing_position_matched&#34;,
-        &#34;closing_only&#34;,
-        &#34;requires_preview&#34;,
-        &#34;requires_user_approval&#34;
-      ]
-    }
-  ],
-  &#34;blocked_reasons&#34;: [],
-  &#34;warnings&#34;: [
-    &#34;gamma cluster degraded; plan is based on portfolio exposure and available market evidence&#34;
-  ]
-}</code></pre>
-<p>The example uses placeholder strike and expiry values. Real implementation must populate them from <code>positions</code>, never from canary prose or agent text.</p>
-<h2 id="order-preview-artifact">Order Preview Artifact</h2>
-<p><code>order-preview</code> consumes <code>risk_plan.v1</code> and a set of selected candidate IDs. It returns a preview artifact.</p>
-<pre><code>{
-  &#34;kind&#34;: &#34;order_preview.v1&#34;,
-  &#34;generated_at&#34;: &#34;2026-05-29T20:53:00+02:00&#34;,
-  &#34;expires_at&#34;: &#34;2026-05-29T20:58:00+02:00&#34;,
-  &#34;account_id&#34;: &#34;DU123456&#34;,
-  &#34;source_plan_hash&#34;: &#34;sha256:...&#34;,
-  &#34;selected_candidates&#34;: [&#34;reduce-now-1&#34;],
-  &#34;accepted_candidates&#34;: [&#34;reduce-now-1&#34;],
-  &#34;rejected_candidates&#34;: [],
-  &#34;margin_impact&#34;: {
-    &#34;current_excess_liquidity&#34;: 0,
-    &#34;post_trade_excess_liquidity&#34;: 0,
-    &#34;current_look_ahead_excess_liquidity&#34;: 0,
-    &#34;post_trade_look_ahead_excess_liquidity&#34;: 0
-  },
-  &#34;cost_impact&#34;: {
-    &#34;estimated_commission&#34;: 0,
-    &#34;estimated_slippage&#34;: 0
-  },
-  &#34;submit_allowed&#34;: false,
-  &#34;warnings&#34;: []
-}</code></pre>
-<p><code>submit_allowed=false</code> is intentional for the first preview implementation. A future order-capable build can add an approval artifact, but preview should remain non-submitting.</p>
-<h2 id="future-execution-connection">Future Execution Connection</h2>
-<p>If order submission is added, it should not accept raw order JSON. It should accept only an approved preview artifact:</p>
-<pre><code>ibkr order-submit --input order-preview.json --confirm &#34;SUBMIT reduce-now-1&#34;</code></pre>
-<p>The submitter must validate:</p>
+<p>Optional future improvement: add machine-readable <code>risk_signals</code> and a <code>plan_hint</code>, but keep them as facts, not trades. Example signal names:</p>
 <ul>
-<li>trading-capable build or runtime permission is enabled</li>
-<li>account ID matches current gateway account</li>
-<li>preview hash matches the selected plan</li>
-<li>preview has not expired</li>
-<li>plan has not expired</li>
-<li>market data is not delayed unless policy explicitly allows delayed data</li>
-<li>selected candidates were accepted by preview</li>
-<li>order drafts still match current positions for closing orders</li>
-<li>current margin is not worse than preview assumptions beyond tolerance</li>
-<li>user confirmation string names the exact candidate IDs</li>
+<li><code>gross_delta_high</code></li>
+<li><code>net_delta_high</code></li>
+<li><code>largest_delta_concentration</code></li>
+<li><code>margin_cushion_low</code></li>
+<li><code>look_ahead_margin_cushion_low</code></li>
+<li><code>market_data_degraded</code></li>
 </ul>
-<p>Any mismatch blocks submission.</p>
-<h2 id="reliability-invariants">Reliability Invariants</h2>
-<p>These invariants are required before this workflow is safe for a large account:</p>
-<ul>
-<li>Typed artifacts only: <code>order-preview</code> refuses raw <code>canary</code>, raw <code>regime</code>, and arbitrary agent-written JSON.</li>
-<li>Freshness gates: live planning requires all source timestamps inside configured tolerances.</li>
-<li>Preview gate: every candidate must pass broker preview before any future submission path can see it.</li>
-<li>Hash gate: preview and future submission artifacts carry the source plan hash.</li>
-<li>Expiry gate: stale plans and stale previews are rejected.</li>
-<li>Scope gate: closing orders must match an existing position; opening hedges must be explicitly marked as opening.</li>
-<li>Permission gate: hedges, covered option sells, and any future submit action require explicit user policy.</li>
-<li>Kill switch: any gateway disconnect, account mismatch, delayed data, or margin-preview rejection blocks execution.</li>
-<li>Audit trail: every artifact includes generated time, source hashes, policy, candidates, rejections, and warnings.</li>
-</ul>
-<h2 id="defaults">Defaults</h2>
-<p>First implementation defaults:</p>
-<ul>
-<li>reductions only</li>
-<li>no naked short options</li>
-<li>no opening option trade unless <code>--allow-hedges</code> is set</li>
-<li>debit hedges only when enabled</li>
-<li>maximum hedge premium defaults to <code>0.75%</code> of net liquidation</li>
-<li>no candidate from stale option quotes or untradable chains</li>
-<li>no submission path</li>
-</ul>
-<h2 id="command-surface">Command Surface</h2>
-<p>Minimal CLI:</p>
-<pre><code>ibkr risk-plan [--json]
-               [--allow-hedges]
-               [--max-hedge-premium-pct-nlv N]
-               [--max-single-name-delta-pct-nlv N]
-               [--max-net-delta-pct-nlv N]
-               [--max-gross-delta-pct-nlv N]
-               [--from-canary PATH|-]
-               [--refresh account,positions,regime]
-
-ibkr order-preview --input PATH|-
-                   [--select candidate-id[,candidate-id]]
-                   [--json]</code></pre>
-<p>Future order-capable CLI:</p>
-<pre><code>ibkr order-submit --input PATH
-                  --confirm &#34;SUBMIT candidate-id[,candidate-id]&#34;</code></pre>
+<p><code>risk-plan</code> should still recompute from fresh account and positions data and treat canary signals as a consistency check.</p>
 <h2 id="naming-canary-versus-risk">Naming: Canary Versus Risk</h2>
-<p>The current <code>canary</code> name is defensible but not perfect.</p>
-<p>Pros of keeping <code>canary</code>:</p>
+<p>Keep <code>canary</code> for now.</p>
+<p>Reasons to keep it:</p>
 <ul>
-<li>It accurately describes an early-warning alarm rather than an execution engine.</li>
-<li>It avoids over-promising comprehensive portfolio risk management.</li>
-<li>It is already implemented in CLI, MCP docs, examples, tests, generated references, and likely screenshots.</li>
-<li>It distinguishes the compact scheduled monitor from the broader future <code>risk-plan</code> planner.</li>
-<li>It reduces churn while order preview and risk-plan are still being designed.</li>
+<li>It describes an early-warning alarm, not a full risk system.</li>
+<li>It avoids implying VaR, factor models, stress scenarios, or execution advice.</li>
+<li>It is already present in CLI, MCP docs, examples, generated references, tests, and likely screenshots.</li>
+<li>It cleanly separates the compact monitor from the future <code>risk-plan</code> planner.</li>
 </ul>
-<p>Cons of keeping <code>canary</code>:</p>
+<p>Reasons to dislike it:</p>
 <ul>
-<li>It is metaphorical; users and LLM tool routers may not immediately know it means portfolio risk alarm.</li>
-<li>It does not group naturally with <code>risk-plan</code>.</li>
-<li>It can sound less institutional than <code>risk</code>.</li>
-<li>Users may ask for &#34;risk&#34; and not discover <code>canary</code> unless docs and tool descriptions bridge the wording.</li>
-</ul>
-<p>Pros of renaming to <code>risk</code>:</p>
-<ul>
-<li>Clearer top-level concept for users: <code>ibkr risk</code>, <code>ibkr risk plan</code>, <code>ibkr risk check</code>.</li>
-<li>Better match for agent prompts like &#34;check portfolio risk&#34;.</li>
-<li>More extensible if the product becomes a risk workflow suite.</li>
-</ul>
-<p>Cons of renaming to <code>risk</code>:</p>
-<ul>
-<li><code>risk</code> is too broad for the current canary behavior. It may imply VaR, stress scenarios, factor exposure, tax, margin simulation, and execution advice.</li>
-<li>It risks conflating three different layers: risk alarm, risk planner, and order preview.</li>
-<li>It would require CLI aliasing or breaking changes.</li>
-<li>It would churn generated MCP docs, public docs, examples, screenshots, plugin descriptions, tests, preview fixtures, and any external user automation.</li>
-<li>A full rename would need deprecation messaging, compatibility aliases, docs redirects, and screenshot regeneration.</li>
+<li>It is metaphorical.</li>
+<li>Users may search for &#34;risk&#34; and miss it.</li>
+<li>It does not naturally group with <code>risk-plan</code>.</li>
 </ul>
 <p>Recommendation:</p>
 <ul>
-<li>Keep <code>canary</code> as the stable command and MCP tool for the compact alarm.</li>
-<li>Introduce <code>risk-plan</code> as the planner.</li>
-<li>Optionally add a future alias such as <code>ibkr risk check</code> that renders the same payload as <code>ibkr canary</code>, while keeping <code>ibkr canary</code> indefinitely.</li>
-<li>Avoid a full docs/screenshots rename until there is a broader <code>risk</code> namespace with at least <code>risk check</code> and <code>risk plan</code>.</li>
+<li>Keep <code>ibkr canary</code> as the stable command.</li>
+<li>Add <code>risk-plan</code> as the planner.</li>
+<li>Later, if a broader risk namespace exists, add <code>ibkr risk check</code> as an alias for <code>ibkr canary</code>.</li>
+<li>Avoid a full rename until docs, examples, screenshots, plugin descriptions, tests, and external automation can be migrated deliberately.</li>
 </ul>
-<p>This gives clearer future UX without breaking the existing early-warning surface.</p>
 <h2 id="implementation-sequence">Implementation Sequence</h2>
 <ol>
-<li>Add <code>risk_plan.v1</code> and <code>order_preview.v1</code> RPC/CLI types.</li>
-<li>Add deterministic policy defaults and freshness thresholds.</li>
-<li>Implement <code>ibkr risk-plan --json</code> using fresh internal calls to account, positions, regime, and canary.</li>
-<li>Generate existing-position reduction candidates only.</li>
-<li>Add chain/quote gates for option candidates.</li>
+<li>Add <code>risk-plan</code> CLI with reduction-only candidates.</li>
+<li>Add source freshness, account identity, and expiration checks.</li>
+<li>Add a minimal typed artifact with <code>kind</code>, stable candidate IDs, and estimated before/after risk effects.</li>
+<li>Wire <code>order-preview --input</code> to accept only risk-plan artifacts.</li>
+<li>Add quote/chain gates for option candidate marketability.</li>
 <li>Add optional debit hedge generation behind <code>--allow-hedges</code>.</li>
-<li>Wire <code>ibkr order-preview --input</code> to accept only <code>risk_plan.v1</code>.</li>
-<li>Add MCP <code>ibkr_risk_plan</code> only after CLI behavior is stable.</li>
-<li>Add docs and examples for agent operation.</li>
-<li>Defer any order-submission work until preview artifacts, hash gates, expiry gates, account gates, and user-confirmation gates are implemented.</li>
+<li>Add read-only MCP <code>ibkr_risk_plan</code> after CLI behavior is stable.</li>
+<li>Defer all order-submission work until preview, hash, expiry, account, and confirmation gates exist.</li>
 </ol>
 <h2 id="non-goals">Non-goals</h2>
 <ul>
 <li>No automatic trading.</li>
 <li>No direct <code>canary | order-preview</code> path.</li>
 <li>No MCP order submission.</li>
-<li>No optimizer that tries to find a mathematically perfect portfolio.</li>
+<li>No optimizer for a mathematically perfect portfolio.</li>
 <li>No tax-lot optimization in the first version.</li>
 <li>No naked short-option strategy generation.</li>
 </ul>
 <h2 id="open-questions">Open Questions</h2>
 <ul>
-<li>Should default risk targets be configured by flags, config file, or both?</li>
-<li>Should <code>risk-plan</code> persist the last generated artifact by default, or rely on explicit shell redirection?</li>
-<li>Should <code>risk-plan --select</code> exist, or should selection live only in <code>order-preview --select</code>?</li>
-<li>Should hedge candidates initially support SPY only, or SPY and QQQ?</li>
-<li>Should SPX hedge candidates wait until SPX chain readiness is consistently robust?</li>
+<li>Should default risk targets live in flags, config, or both?</li>
+<li>Should <code>risk-plan</code> persist the last generated plan by default?</li>
+<li>Should candidate selection live in <code>risk-plan</code> or only in <code>order-preview</code>?</li>
+<li>Should the first hedge implementation support SPY only, or SPY and QQQ?</li>
 </ul>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
