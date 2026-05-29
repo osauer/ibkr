@@ -422,3 +422,9 @@ func (s *Server) shutdownSubscriptions() {
 		c()
 	}
 }
+
+func (s *Server) hasActiveSubscriptions() bool {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	return len(s.subs) > 0
+}

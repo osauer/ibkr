@@ -19,7 +19,10 @@ import (
 	"github.com/osauer/ibkr/internal/mcp"
 )
 
-const mcpParentPollInterval = 2 * time.Second
+const (
+	mcpParentPollInterval = 2 * time.Second
+	mcpIdleTimeout        = 5 * time.Minute
+)
 
 func runMCP(args []string) int {
 	// MCP servers take no flags today. Reject extras explicitly so a
@@ -46,7 +49,7 @@ func runMCP(args []string) int {
 	srv.SetContextDialer(func(ctx context.Context) (*dial.Conn, error) {
 		return dialMCPDaemon(ctx, socketPath)
 	})
-	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
+	if err := srv.ServeWithOptions(ctx, os.Stdin, os.Stdout, mcp.ServeOptions{IdleTimeout: mcpIdleTimeout}); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "ibkr mcp: %v\n", err)
 		return 1
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -51,6 +52,79 @@ func TestServeExitNotificationTerminatesWithoutInputEOF(t *testing.T) {
 	if got := strings.TrimSpace(out.String()); got != "" {
 		t.Fatalf("exit notification should not produce a response, got %q", got)
 	}
+}
+
+func TestServeIdleTimeoutTerminatesWithoutInputEOF(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	srv := NewServer(nil, "test")
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.ServeWithOptions(context.Background(), reader, &out, ServeOptions{IdleTimeout: 20 * time.Millisecond})
+	}()
+
+	if err := waitServeDone(t, done); err != nil {
+		t.Fatalf("ServeWithOptions: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("idle timeout should not produce output, got %q", got)
+	}
+}
+
+func TestServeIdleTimeoutResetsAfterRequest(t *testing.T) {
+	t.Parallel()
+
+	var out lockedBuffer
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	srv := NewServer(nil, "test")
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.ServeWithOptions(context.Background(), reader, &out, ServeOptions{IdleTimeout: 80 * time.Millisecond})
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("ServeWithOptions exited before activity reset idle timer: %v", err)
+	default:
+	}
+
+	writeMCPLine(t, writer, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	waitForOutputContains(t, &out, `"id":1`)
+
+	time.Sleep(40 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("ServeWithOptions exited too soon after activity reset idle timer: %v", err)
+	default:
+	}
+
+	if err := waitServeDone(t, done); err != nil {
+		t.Fatalf("ServeWithOptions: %v", err)
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type pipeCloser struct {
@@ -102,4 +176,16 @@ func waitServeDone(t *testing.T, done <-chan error) error {
 		t.Fatal("Serve did not exit after MCP lifecycle message while stdin stayed open")
 		return nil
 	}
+}
+
+func waitForOutputContains(t *testing.T, out interface{ String() string }, want string) {
+	t.Helper()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("output did not contain %q:\n%s", want, out.String())
 }

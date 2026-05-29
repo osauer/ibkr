@@ -1,6 +1,6 @@
 # Portfolio review with Claude and IBKR
 
-Updated: 2026-05-28 07:07 CEST
+Updated: 2026-05-29 08:47 CEST
 
 `ibkr mcp` lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.
 
@@ -32,6 +32,7 @@ A good portfolio review needs more than balances and positions. Through `ibkr mc
 - `ibkr_chain` for option expiries, IV, expected move, strikes, deltas, and open interest
 - `ibkr_watch` and `ibkr_scan` for watchlist and market-discovery context
 - `ibkr_breadth`, `ibkr_gamma`, and `ibkr_regime` for market background
+- `ibkr_canary` for scheduled `Go` / `Watch` / `De-lever` / `Liquidate` stress checks
 - `ibkr_size` for fixed-fractional position sizing math
 
 The assistant should not treat any single tool result as a trade signal. The value is in combining the evidence, naming uncertainty, and showing which follow-up checks would change the decision.

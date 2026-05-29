@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-28T07:07:00+02:00",
+    "dateModified": "2026-05-29T08:47:00+02:00",
     "description": "ibkr mcp lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a...",
     "headline": "Portfolio review with Claude and IBKR",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="portfolio-review-with-claude-and-ibkr">Portfolio review with Claude and IBKR</h1>
-<p>Updated: 2026-05-28 07:07 CEST</p>
+<p>Updated: 2026-05-29 08:47 CEST</p>
 <p><code>ibkr mcp</code> lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.</p>
 <p>This page is for searches such as &#34;portfolio review with Claude and IBKR&#34;, &#34;Claude IBKR portfolio review&#34;, &#34;Interactive Brokers portfolio review AI&#34;, and &#34;IBKR portfolio analysis prompt&#34;.</p>
 <h2 id="who-this-is-for">Who this is for</h2>
@@ -182,6 +182,7 @@
 <li><code>ibkr_chain</code> for option expiries, IV, expected move, strikes, deltas, and open interest</li>
 <li><code>ibkr_watch</code> and <code>ibkr_scan</code> for watchlist and market-discovery context</li>
 <li><code>ibkr_breadth</code>, <code>ibkr_gamma</code>, and <code>ibkr_regime</code> for market background</li>
+<li><code>ibkr_canary</code> for scheduled <code>Go</code> / <code>Watch</code> / <code>De-lever</code> / <code>Liquidate</code> stress checks</li>
 <li><code>ibkr_size</code> for fixed-fractional position sizing math</li>
 </ul>
 <p>The assistant should not treat any single tool result as a trade signal. The value is in combining the evidence, naming uncertainty, and showing which follow-up checks would change the decision.</p>
