@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/internal/risk"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -18,6 +20,8 @@ const (
 	canaryDecisionDelever   = "DE-LEVER"
 	canaryDecisionLiquidate = "LIQUIDATE"
 )
+
+var canaryPolicy = risk.DefaultPolicy()
 
 // CanaryInput is the pure decision input shared by the CLI and MCP tool.
 // It deliberately consumes existing daemon snapshots instead of adding a
@@ -34,16 +38,25 @@ type CanaryInput struct {
 // from portfolio-level decision to supporting gates so an agent can print the
 // table directly without composing prose.
 type CanaryResult struct {
-	AsOf         time.Time              `json:"as_of"`
-	SourceAsOf   CanarySourceAsOf       `json:"source_as_of,omitzero"`
-	Decision     string                 `json:"decision"`
-	Action       string                 `json:"action"`
-	Confidence   string                 `json:"confidence"`
-	Rows         []CanaryRow            `json:"rows"`
-	Portfolio    CanaryPortfolioSummary `json:"portfolio"`
-	Market       CanaryMarketSummary    `json:"market"`
-	Warnings     []string               `json:"warnings,omitempty"`
-	NotExecution string                 `json:"not_execution"`
+	AsOf              time.Time              `json:"as_of"`
+	SourceAsOf        CanarySourceAsOf       `json:"source_as_of,omitzero"`
+	Policy            string                 `json:"policy,omitempty"`
+	Decision          string                 `json:"decision"`
+	Direction         risk.SignalDirection   `json:"direction,omitempty"`
+	Severity          risk.SignalSeverity    `json:"severity,omitempty"`
+	Action            string                 `json:"action"`
+	Confidence        string                 `json:"confidence"`
+	DataConfidence    string                 `json:"data_confidence,omitempty"`
+	SignalConfidence  string                 `json:"signal_confidence,omitempty"`
+	ActionReadiness   string                 `json:"action_readiness,omitempty"`
+	ConfidenceReasons []string               `json:"confidence_reasons,omitempty"`
+	PrimaryDrivers    []risk.SignalID        `json:"primary_drivers,omitempty"`
+	Signals           []risk.Signal          `json:"signals,omitempty"`
+	Rows              []CanaryRow            `json:"rows"`
+	Portfolio         CanaryPortfolioSummary `json:"portfolio"`
+	Market            CanaryMarketSummary    `json:"market"`
+	Warnings          []string               `json:"warnings,omitempty"`
+	NotExecution      string                 `json:"not_execution"`
 }
 
 type CanarySourceAsOf struct {
@@ -122,6 +135,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	res := CanaryResult{
 		AsOf:         now,
 		SourceAsOf:   CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf},
+		Policy:       canaryPolicy.Name,
 		Portfolio:    summarizeCanaryPortfolio(in.Account, in.Positions),
 		Market:       summarizeCanaryMarket(in.Regime),
 		NotExecution: "Read-only recommendation; no orders are placed by ibkr.",
@@ -129,6 +143,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 
 	rows := []CanaryRow{
 		canaryMarginRow(res.Portfolio),
+		canaryPnLShockRow(res.Portfolio),
 		canaryTapeShockRow(res.Portfolio, res.Market),
 		canaryMarketRow(res.Market),
 		canaryExposureRow(res.Portfolio, res.Market),
@@ -140,7 +155,12 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	res.Rows = append([]CanaryRow{overall}, rows...)
 	res.Decision = overall.Decision
 	res.Action = overall.Action
+	res.Signals = canarySignals(res.Portfolio, in.Positions, res.Market, in.Regime)
+	res.Direction = canarySignalDirection(res.Signals)
+	res.Severity = canarySignalSeverity(res.Decision, res.Signals)
+	res.PrimaryDrivers = canaryPrimaryDrivers(res.Signals)
 	res.Confidence = canaryConfidence(res.Decision, res.Market)
+	res.DataConfidence, res.SignalConfidence, res.ActionReadiness, res.ConfidenceReasons = canaryConfidenceProfile(res.Decision, res.Portfolio, res.Market, res.Signals)
 	res.Warnings = canaryWarnings(res.Market, in.Regime)
 	return res
 }
@@ -360,16 +380,38 @@ func canaryMarginRow(p CanaryPortfolioSummary) CanaryRow {
 	cushion := canaryWorstCushionPct(p)
 	if cushion != nil {
 		switch {
-		case *cushion < 10:
-			return CanaryRow{"Immediate margin safety", canaryDecisionLiquidate, "Move to cash-heavy / near-flat now; margin cushion is below 10%.", canaryCushionEvidence(p)}
-		case *cushion < 20:
-			return CanaryRow{"Immediate margin safety", canaryDecisionDelever, "Cut gross and net exposure until cushion is back above 25%.", canaryCushionEvidence(p)}
-		case *cushion < 35:
-			return CanaryRow{"Immediate margin safety", canaryDecisionWatch, "Do not add risk; prepare a reduction plan if cushion falls below 25%.", canaryCushionEvidence(p)}
+		case *cushion < canaryPolicy.MarginUrgentPct:
+			return CanaryRow{"Immediate margin safety", canaryDecisionLiquidate, fmt.Sprintf("Move to cash-heavy / near-flat now; margin cushion is below %.0f%%.", canaryPolicy.MarginUrgentPct), canaryCushionEvidence(p)}
+		case *cushion < canaryPolicy.MarginActPct:
+			return CanaryRow{"Immediate margin safety", canaryDecisionDelever, fmt.Sprintf("Cut gross and net exposure until cushion is back above %.0f%%.", canaryPolicy.MarginTargetPct), canaryCushionEvidence(p)}
+		case *cushion < canaryPolicy.MarginWatchPct:
+			return CanaryRow{"Immediate margin safety", canaryDecisionWatch, fmt.Sprintf("Do not add risk; prepare a reduction plan if cushion falls below %.0f%%.", canaryPolicy.MarginTargetPct), canaryCushionEvidence(p)}
 		}
 		return CanaryRow{"Immediate margin safety", canaryDecisionHold, "No forced margin action.", canaryCushionEvidence(p)}
 	}
 	return CanaryRow{"Immediate margin safety", canaryDecisionWatch, "No forced margin action, but confirm account cushion before sizing new risk.", "cushion unavailable"}
+}
+
+func canaryPnLShockRow(p CanaryPortfolioSummary) CanaryRow {
+	if p.DailyPnLPct == nil {
+		return CanaryRow{"Portfolio P&L shock", canaryDecisionHold, "No daily P&L shock signal.", "daily P&L unavailable"}
+	}
+	pct := *p.DailyPnLPct
+	absPct := math.Abs(pct)
+	evidence := fmt.Sprintf("daily P&L %+.1f%% NLV", pct)
+	if absPct >= canaryPolicy.DailyPnLActPct {
+		if pct < 0 {
+			return CanaryRow{"Portfolio P&L shock", canaryDecisionDelever, "Large daily loss; run a defensive risk plan and protect liquidity.", evidence}
+		}
+		return CanaryRow{"Portfolio P&L shock", canaryDecisionWatch, "Large daily gain; protect gains and avoid accidental chase-risk.", evidence}
+	}
+	if absPct >= canaryPolicy.DailyPnLWatchPct {
+		if pct < 0 {
+			return CanaryRow{"Portfolio P&L shock", canaryDecisionWatch, "Daily loss is large enough to review risk before adding exposure.", evidence}
+		}
+		return CanaryRow{"Portfolio P&L shock", canaryDecisionWatch, "Daily gain is large enough to review sizing and opportunity deliberately.", evidence}
+	}
+	return CanaryRow{"Portfolio P&L shock", canaryDecisionHold, "No daily P&L shock signal.", evidence}
 }
 
 func canaryMarketRow(m CanaryMarketSummary) CanaryRow {
@@ -393,11 +435,11 @@ func canaryTapeShockRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryR
 	if m.SPYChangePct == nil && m.VIXChangePct == nil {
 		return CanaryRow{"Index tape shock", canaryDecisionWatch, "Direct SPY/VIX tape is unavailable; do not treat quiet regime clusters as complete overnight coverage.", evidence}
 	}
-	spyDrop := pctAtMost(m.SPYChangePct, -1.5)
-	spyHardDrop := pctAtMost(m.SPYChangePct, -2.5)
-	spyCrash := pctAtMost(m.SPYChangePct, -4)
-	vixSpike := pctAtLeast(m.VIXChangePct, 10)
-	vixHardSpike := pctAtLeast(m.VIXChangePct, 20)
+	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
+	spyHardDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYHardDropPct)
+	spyCrash := pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct)
+	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
+	vixHardSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct)
 	confirmed := (spyDrop && vixSpike) || m.RedClusters >= 1 || canaryMarginPressure(p)
 	switch {
 	case spyCrash && confirmed:
@@ -422,11 +464,11 @@ func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRo
 	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV; gross delta %.0f%% NLV", gross, delta, grossDelta)
 	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
 	switch {
-	case (gross >= 150 || delta >= 125 || grossDelta >= 150) && stressed:
+	case (gross >= canaryPolicy.GrossExposureStressUrgentPct || delta >= canaryPolicy.NetDeltaStressUrgentPct || grossDelta >= canaryPolicy.GrossDeltaStressUrgentPct) && stressed:
 		return CanaryRow{"US equity/options exposure", canaryDecisionLiquidate, "Go near-flat on broad equity beta; close or hedge option delta first.", evidence}
-	case (gross >= 100 || delta >= 80 || grossDelta >= 100) && stressed:
+	case (gross >= canaryPolicy.GrossExposureStressActPct || delta >= canaryPolicy.NetDeltaStressActPct || grossDelta >= canaryPolicy.GrossDeltaStressActPct) && stressed:
 		return CanaryRow{"US equity/options exposure", canaryDecisionDelever, "Cut 30-50% of net equity delta and avoid adding long gamma-dollar exposure.", evidence}
-	case gross >= 150 || delta >= 125 || grossDelta >= 150:
+	case gross >= canaryPolicy.GrossExposureWatchPct || delta >= canaryPolicy.NetDeltaWatchPct || grossDelta >= canaryPolicy.GrossDeltaWatchPct:
 		return CanaryRow{"US equity/options exposure", canaryDecisionWatch, "Exposure is high; pre-stage reductions but wait for confirmed market stress.", evidence}
 	default:
 		return CanaryRow{"US equity/options exposure", canaryDecisionHold, "No exposure-based de-risking trigger.", evidence}
@@ -440,10 +482,10 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 	pct := math.Abs(derefPct(p.LargestExposurePct))
 	deltaPct := derefPct(p.LargestDeltaPctNLV)
 	evidence := canaryConcentrationEvidence(p)
-	if (pct >= 35 || deltaPct >= 35) && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
-		return CanaryRow{"Largest concentration", canaryDecisionDelever, "Trim this concentration before smaller positions; cap it below 25% NLV in stress.", evidence}
+	if (pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct) && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
+		return CanaryRow{"Largest concentration", canaryDecisionDelever, fmt.Sprintf("Trim this concentration before smaller positions; cap it below %.0f%% NLV in stress.", canaryPolicy.SingleNameTargetPct), evidence}
 	}
-	if pct >= 35 || deltaPct >= 35 {
+	if pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct {
 		return CanaryRow{"Largest concentration", canaryDecisionWatch, "Pre-stage a trim for this concentration if a second stress cluster confirms.", evidence}
 	}
 	return CanaryRow{"Largest concentration", canaryDecisionHold, "No concentration trim required by the canary.", evidence}
@@ -455,8 +497,8 @@ func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m Canar
 	}
 	coverage := float64(pos.Portfolio.GreeksCoverage) / float64(pos.Portfolio.GreeksTotal) * 100
 	evidence := fmt.Sprintf("greeks %.0f%% covered (%s)", coverage, p.OptionGreeks)
-	if coverage < 80 {
-		return CanaryRow{"Options convexity", canaryDecisionWatch, "Do not escalate options-specific actions until greeks coverage is at least 80%.", evidence}
+	if coverage < canaryPolicy.OptionGreeksMinCoveragePct {
+		return CanaryRow{"Options convexity", canaryDecisionWatch, fmt.Sprintf("Do not escalate options-specific actions until greeks coverage is at least %.0f%%.", canaryPolicy.OptionGreeksMinCoveragePct), evidence}
 	}
 	if pos.Portfolio.Gamma != nil && *pos.Portfolio.Gamma < 0 && m.RedClusters >= 2 {
 		return CanaryRow{"Options convexity", canaryDecisionDelever, "Reduce negative-gamma structures first; prefer defined-risk or hedged residuals.", evidence}
@@ -518,12 +560,12 @@ func canarySeverityFromDecision(decision string) canarySeverity {
 
 func canaryImmediateDanger(p CanaryPortfolioSummary) bool {
 	cushion := canaryWorstCushionPct(p)
-	return cushion != nil && *cushion < 10
+	return cushion != nil && *cushion < canaryPolicy.MarginUrgentPct
 }
 
 func canaryMarginPressure(p CanaryPortfolioSummary) bool {
 	cushion := canaryWorstCushionPct(p)
-	return cushion != nil && *cushion < 20
+	return cushion != nil && *cushion < canaryPolicy.MarginActPct
 }
 
 func canaryOverallAction(decision string) string {
@@ -550,6 +592,441 @@ func canaryConfidence(decision string, m CanaryMarketSummary) string {
 		return "medium-low"
 	}
 	return "medium"
+}
+
+func canaryConfidenceProfile(decision string, p CanaryPortfolioSummary, m CanaryMarketSummary, signals []risk.Signal) (string, string, string, []string) {
+	dataConfidence := "high"
+	var reasons []string
+	if m.UnrankedClusters > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, fmt.Sprintf("%d regime cluster(s) unranked", m.UnrankedClusters))
+	}
+	if len(m.DegradedClusters) > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+	}
+	if len(m.StaleClusters) > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, "stale clusters: "+strings.Join(m.StaleClusters, ","))
+	}
+	if len(m.AmbiguousClusters) > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, "ambiguous clusters: "+strings.Join(m.AmbiguousClusters, ","))
+	}
+	if len(m.PartialClusters) > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, "partial clusters: "+strings.Join(m.PartialClusters, ","))
+	}
+	if len(m.ComputingClusters) > 0 {
+		dataConfidence = "medium-low"
+		reasons = append(reasons, "computing clusters: "+strings.Join(m.ComputingClusters, ","))
+	}
+
+	signalConfidence := "medium"
+	hasPortfolioSignal := false
+	for _, s := range signals {
+		if s.Direction == risk.DirectionDataQuality {
+			continue
+		}
+		if s.Confidence == "high" {
+			hasPortfolioSignal = true
+			break
+		}
+	}
+	if hasPortfolioSignal {
+		signalConfidence = "high"
+	}
+	if signalConfidence == "medium" && len(signals) == 0 {
+		signalConfidence = "medium"
+	}
+	if decision == canaryDecisionWatch && !canaryMarginPressure(p) && !canaryConfirmedTapeStress(m) && m.RedClusters < 2 {
+		reasons = append(reasons, "portfolio breach lacks independent market-stress confirmation")
+	}
+
+	readiness := "none"
+	switch decision {
+	case canaryDecisionLiquidate, canaryDecisionDelever:
+		if dataConfidence == "medium-low" && !canaryImmediateDanger(p) {
+			readiness = "needs_confirmation"
+		} else {
+			readiness = "ready_for_risk_plan"
+		}
+	case canaryDecisionWatch:
+		if len(signals) > 0 {
+			readiness = "prestage_risk_plan"
+		} else {
+			readiness = "watch"
+		}
+	}
+	return dataConfidence, signalConfidence, readiness, reasons
+}
+
+func canarySignals(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []risk.Signal {
+	signals := []risk.Signal{}
+	signals = append(signals, canaryMarginSignals(p)...)
+	signals = append(signals, canaryPnLSignals(p)...)
+	signals = append(signals, canaryTapeSignals(p, m)...)
+	signals = append(signals, canaryRegimeSignals(m)...)
+	signals = append(signals, canaryExposureSignals(p, m)...)
+	signals = append(signals, canaryConcentrationSignals(p, m)...)
+	signals = append(signals, canaryOptionSignals(pos, m)...)
+	signals = append(signals, canaryDataQualitySignals(m, r)...)
+	return signals
+}
+
+func canaryMarginSignals(p CanaryPortfolioSummary) []risk.Signal {
+	out := []risk.Signal{}
+	addCushion := func(id risk.SignalID, metric string, observed *float64) {
+		if observed == nil {
+			return
+		}
+		severity, threshold, ok := canaryCushionSeverity(*observed)
+		if !ok {
+			return
+		}
+		out = append(out, risk.Signal{
+			ID:         id,
+			Direction:  risk.DirectionDefensive,
+			Severity:   severity,
+			Metric:     metric,
+			Observed:   observed,
+			Threshold:  new(threshold),
+			Unit:       "pct_nlv",
+			Evidence:   pctEvidence(metric, *observed),
+			Confidence: "high",
+		})
+		if severity == risk.SeverityAct || severity == risk.SeverityUrgent {
+			out[len(out)-1].Target = new(canaryPolicy.MarginTargetPct)
+		}
+	}
+	addCushion(risk.SignalMarginCushionLow, "cushion", p.CushionPct)
+	addCushion(risk.SignalLookAheadCushionLow, "lookahead_cushion", p.LookAheadCushionPct)
+	return out
+}
+
+func canaryCushionSeverity(v float64) (risk.SignalSeverity, float64, bool) {
+	switch {
+	case v < canaryPolicy.MarginUrgentPct:
+		return risk.SeverityUrgent, canaryPolicy.MarginUrgentPct, true
+	case v < canaryPolicy.MarginActPct:
+		return risk.SeverityAct, canaryPolicy.MarginActPct, true
+	case v < canaryPolicy.MarginWatchPct:
+		return risk.SeverityWatch, canaryPolicy.MarginWatchPct, true
+	default:
+		return "", 0, false
+	}
+}
+
+func canaryPnLSignals(p CanaryPortfolioSummary) []risk.Signal {
+	if p.DailyPnLPct == nil {
+		return nil
+	}
+	pct := *p.DailyPnLPct
+	absPct := math.Abs(pct)
+	if absPct < canaryPolicy.DailyPnLWatchPct {
+		return nil
+	}
+	direction := risk.DirectionDefensive
+	severity := risk.SeverityWatch
+	threshold := canaryPolicy.DailyPnLWatchPct
+	confidenceImpact := ""
+	if pct < 0 && absPct >= canaryPolicy.DailyPnLActPct {
+		severity = risk.SeverityAct
+		threshold = canaryPolicy.DailyPnLActPct
+	} else if pct > 0 && absPct >= canaryPolicy.DailyPnLActPct {
+		threshold = canaryPolicy.DailyPnLActPct
+		confidenceImpact = "protect gains; not deployable without clean risk budget"
+	}
+	return []risk.Signal{{
+		ID:               risk.SignalPortfolioPnLShock,
+		Direction:        direction,
+		Severity:         severity,
+		Metric:           "daily_pnl_pct_nlv",
+		Observed:         new(pct),
+		Threshold:        new(threshold),
+		Unit:             "pct_nlv",
+		Evidence:         fmt.Sprintf("daily P&L %+.1f%% NLV", pct),
+		Confidence:       "high",
+		ConfidenceImpact: confidenceImpact,
+	}}
+}
+
+func canaryTapeSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
+	out := []risk.Signal{}
+	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
+	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
+	confirmedDrop := (spyDrop && vixSpike) || m.RedClusters >= 1 || canaryMarginPressure(p)
+	confirmedVIXSpike := spyDrop || m.RedClusters >= 1
+	if m.SPYChangePct != nil {
+		switch {
+		case *m.SPYChangePct <= canaryPolicy.SPYCrashPct:
+			severity, blockedBy := confirmedSignalSeverity(confirmedDrop)
+			out = append(out, tapeSignal(risk.SignalMarketSelloffViolent, risk.DirectionDefensive, severity, "spy_change_pct", *m.SPYChangePct, canaryPolicy.SPYCrashPct, blockedBy...))
+		case *m.SPYChangePct <= canaryPolicy.SPYHardDropPct:
+			severity, blockedBy := confirmedSignalSeverity(confirmedDrop)
+			out = append(out, tapeSignal(risk.SignalMarketSelloffViolent, risk.DirectionDefensive, severity, "spy_change_pct", *m.SPYChangePct, canaryPolicy.SPYHardDropPct, blockedBy...))
+		case *m.SPYChangePct <= canaryPolicy.SPYDropPct:
+			out = append(out, tapeSignal(risk.SignalMarketSelloffViolent, risk.DirectionDefensive, risk.SeverityWatch, "spy_change_pct", *m.SPYChangePct, canaryPolicy.SPYDropPct))
+		case *m.SPYChangePct >= canaryPolicy.SPYHardRallyPct:
+			out = append(out, tapeSignal(risk.SignalMarketRallyViolent, risk.DirectionConstructive, risk.SeverityAct, "spy_change_pct", *m.SPYChangePct, canaryPolicy.SPYHardRallyPct))
+		case *m.SPYChangePct >= canaryPolicy.SPYRallyPct:
+			out = append(out, tapeSignal(risk.SignalMarketRallyViolent, risk.DirectionConstructive, risk.SeverityWatch, "spy_change_pct", *m.SPYChangePct, canaryPolicy.SPYRallyPct))
+		}
+	}
+	if m.VIXChangePct != nil {
+		switch {
+		case *m.VIXChangePct >= canaryPolicy.VIXHardSpikePct:
+			severity, blockedBy := confirmedSignalSeverity(confirmedVIXSpike)
+			out = append(out, tapeSignal(risk.SignalVolSpikeConfirmed, risk.DirectionDefensive, severity, "vix_change_pct", *m.VIXChangePct, canaryPolicy.VIXHardSpikePct, blockedBy...))
+		case *m.VIXChangePct >= canaryPolicy.VIXSpikePct:
+			out = append(out, tapeSignal(risk.SignalVolSpikeConfirmed, risk.DirectionDefensive, risk.SeverityWatch, "vix_change_pct", *m.VIXChangePct, canaryPolicy.VIXSpikePct))
+		case *m.VIXChangePct <= canaryPolicy.VIXHardCrushPct:
+			out = append(out, tapeSignal(risk.SignalVolCrushConfirmed, risk.DirectionConstructive, risk.SeverityAct, "vix_change_pct", *m.VIXChangePct, canaryPolicy.VIXHardCrushPct))
+		case *m.VIXChangePct <= canaryPolicy.VIXCrushPct:
+			out = append(out, tapeSignal(risk.SignalVolCrushConfirmed, risk.DirectionConstructive, risk.SeverityWatch, "vix_change_pct", *m.VIXChangePct, canaryPolicy.VIXCrushPct))
+		}
+	}
+	return out
+}
+
+func confirmedSignalSeverity(confirmed bool) (risk.SignalSeverity, []string) {
+	if confirmed {
+		return risk.SeverityAct, nil
+	}
+	return risk.SeverityWatch, []string{"confirmation"}
+}
+
+func tapeSignal(id risk.SignalID, direction risk.SignalDirection, severity risk.SignalSeverity, metric string, observed, threshold float64, blockedBy ...string) risk.Signal {
+	sig := risk.Signal{
+		ID:         id,
+		Direction:  direction,
+		Severity:   severity,
+		Metric:     metric,
+		Observed:   new(observed),
+		Threshold:  new(threshold),
+		Unit:       "pct",
+		Evidence:   fmt.Sprintf("%s %+.2f%%", metric, observed),
+		Confidence: "medium",
+	}
+	if len(blockedBy) > 0 {
+		sig.BlockedBy = append([]string(nil), blockedBy...)
+		sig.ConfidenceImpact = "requires independent confirmation before action"
+	}
+	return sig
+}
+
+func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
+	out := []risk.Signal{}
+	switch {
+	case m.RedClusters >= 2 && m.RankedClusters >= 3:
+		observed := float64(m.RedClusters)
+		threshold := 2.0
+		out = append(out, risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
+	case m.RedClusters == 1 && m.YellowClusters >= 1:
+		observed := float64(m.RedClusters)
+		threshold := 1.0
+		out = append(out, risk.Signal{ID: risk.SignalRegimeStressEarly, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
+	}
+	if slices.Contains(m.RedClusterNames, "gamma") {
+		observed := 1.0
+		out = append(out, risk.Signal{ID: risk.SignalGammaRed, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Subject: "gamma", Metric: "red_cluster", Observed: &observed, Evidence: "gamma cluster red", Confidence: "medium", ConfidenceImpact: "lower when gamma is degraded"})
+	}
+	return out
+}
+
+func canaryExposureSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
+	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
+	out := []risk.Signal{}
+	out = appendExposureSignal(out, risk.SignalGrossExposureHigh, "gross_exposure_pct_nlv", p.GrossExposurePctNLV, canaryPolicy.GrossExposureWatchPct, canaryPolicy.GrossExposureStressActPct, canaryPolicy.GrossExposureStressUrgentPct, stressed)
+	out = appendExposureSignal(out, risk.SignalNetDeltaHigh, "net_delta_pct_nlv", p.NetDeltaPctNLV, canaryPolicy.NetDeltaWatchPct, canaryPolicy.NetDeltaStressActPct, canaryPolicy.NetDeltaStressUrgentPct, stressed)
+	out = appendExposureSignal(out, risk.SignalGrossDeltaHigh, "gross_delta_pct_nlv", p.GrossDeltaPctNLV, canaryPolicy.GrossDeltaWatchPct, canaryPolicy.GrossDeltaStressActPct, canaryPolicy.GrossDeltaStressUrgentPct, stressed)
+	return out
+}
+
+func appendExposureSignal(out []risk.Signal, id risk.SignalID, metric string, observed *float64, watchThreshold, stressActThreshold, stressUrgentThreshold float64, stressed bool) []risk.Signal {
+	if observed == nil {
+		return out
+	}
+	threshold := watchThreshold
+	severity := risk.SeverityWatch
+	if stressed {
+		switch {
+		case *observed >= stressUrgentThreshold:
+			severity = risk.SeverityUrgent
+			threshold = stressUrgentThreshold
+		case *observed >= stressActThreshold:
+			severity = risk.SeverityAct
+			threshold = stressActThreshold
+		case *observed >= watchThreshold:
+			severity = risk.SeverityWatch
+		default:
+			return out
+		}
+	} else if *observed < watchThreshold {
+		return out
+	}
+	return append(out, risk.Signal{
+		ID:         id,
+		Direction:  risk.DirectionDefensive,
+		Severity:   severity,
+		Metric:     metric,
+		Observed:   observed,
+		Threshold:  new(threshold),
+		Unit:       "pct_nlv",
+		Evidence:   fmt.Sprintf("%s %.0f%% NLV", metric, *observed),
+		Confidence: "high",
+	})
+}
+
+func canaryConcentrationSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
+	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
+	severity := risk.SeverityWatch
+	if stressed {
+		severity = risk.SeverityAct
+	}
+	out := []risk.Signal{}
+	if p.LargestExposurePct != nil && math.Abs(*p.LargestExposurePct) >= canaryPolicy.SingleNameExposureWatchPct {
+		observed := math.Abs(*p.LargestExposurePct)
+		out = append(out, risk.Signal{ID: risk.SignalSingleNameExposureHigh, Direction: risk.DirectionDefensive, Severity: severity, Subject: p.LargestExposure, Metric: "market_value_pct_nlv", Observed: &observed, Threshold: new(canaryPolicy.SingleNameExposureWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s market %.0f%% NLV", p.LargestExposure, observed), Confidence: "high"})
+	}
+	if p.LargestDeltaPctNLV != nil && *p.LargestDeltaPctNLV >= canaryPolicy.SingleNameDeltaWatchPct {
+		out = append(out, risk.Signal{ID: risk.SignalSingleNameDeltaHigh, Direction: risk.DirectionDefensive, Severity: severity, Subject: p.LargestDeltaExposure, Metric: "delta_pct_nlv", Observed: p.LargestDeltaPctNLV, Threshold: new(canaryPolicy.SingleNameDeltaWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV), Confidence: "high"})
+	}
+	return out
+}
+
+func canaryOptionSignals(pos rpc.PositionsResult, m CanaryMarketSummary) []risk.Signal {
+	if pos.Portfolio == nil || pos.Portfolio.GreeksTotal == 0 {
+		return nil
+	}
+	out := []risk.Signal{}
+	coverage := float64(pos.Portfolio.GreeksCoverage) / float64(pos.Portfolio.GreeksTotal) * 100
+	if coverage < canaryPolicy.OptionGreeksMinCoveragePct {
+		out = append(out, risk.Signal{ID: risk.SignalOptionGreeksDegraded, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Metric: "option_greeks_coverage_pct", Observed: new(coverage), Threshold: new(canaryPolicy.OptionGreeksMinCoveragePct), Unit: "pct", Evidence: fmt.Sprintf("greeks %.0f%% covered", coverage), Confidence: "medium-low", ConfidenceImpact: "blocks option-specific planning"})
+	}
+	if pos.Portfolio.Gamma != nil && *pos.Portfolio.Gamma < 0 && m.RedClusters >= 2 {
+		out = append(out, risk.Signal{ID: risk.SignalShortConvexityHigh, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "portfolio_gamma", Observed: pos.Portfolio.Gamma, Evidence: "negative portfolio gamma in confirmed market stress", Confidence: "medium"})
+	}
+	return out
+}
+
+func canaryDataQualitySignals(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []risk.Signal {
+	out := []risk.Signal{}
+	blockedBy := []string{}
+	for _, part := range [][]string{m.AmbiguousClusters, m.PartialClusters, m.DegradedClusters, m.ComputingClusters} {
+		blockedBy = append(blockedBy, part...)
+	}
+	if len(blockedBy) > 0 || m.UnrankedClusters > 0 {
+		observed := float64(len(blockedBy) + m.UnrankedClusters)
+		out = append(out, risk.Signal{ID: risk.SignalRiskDataDegraded, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Metric: "degraded_inputs", Observed: &observed, Evidence: canaryAmbiguityEvidence(m), Confidence: "medium-low", ConfidenceImpact: "requires confirmation before severe action", BlockedBy: blockedBy})
+	}
+	if len(m.StaleClusters) > 0 {
+		observed := float64(len(m.StaleClusters))
+		out = append(out, risk.Signal{ID: risk.SignalMarketDataStale, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Metric: "stale_clusters", Observed: &observed, Evidence: "stale " + strings.Join(m.StaleClusters, ","), Confidence: "medium-low", ConfidenceImpact: "requires fresh data", BlockedBy: m.StaleClusters})
+	}
+	for _, w := range r.WarningDetails {
+		if strings.TrimSpace(w.Scope) != "" && strings.Contains(strings.ToLower(w.Severity), "data") {
+			out = append(out, risk.Signal{ID: risk.SignalRiskDataDegraded, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Subject: w.Scope, Evidence: canaryWarningLine(w), Confidence: "medium-low", ConfidenceImpact: "source warning"})
+		}
+	}
+	return out
+}
+
+func canarySignalDirection(signals []risk.Signal) risk.SignalDirection {
+	sawDefensive, sawConstructive, sawData := false, false, false
+	for _, s := range signals {
+		switch s.Direction {
+		case risk.DirectionDefensive:
+			sawDefensive = true
+		case risk.DirectionConstructive:
+			sawConstructive = true
+		case risk.DirectionDataQuality:
+			sawData = true
+		}
+	}
+	switch {
+	case sawDefensive && sawConstructive:
+		return risk.DirectionMixed
+	case sawDefensive:
+		return risk.DirectionDefensive
+	case sawConstructive:
+		return risk.DirectionConstructive
+	case sawData:
+		return risk.DirectionDataQuality
+	default:
+		return ""
+	}
+}
+
+func canarySignalSeverity(decision string, signals []risk.Signal) risk.SignalSeverity {
+	severity := canarySeverityFromDecision(decision).signalSeverity()
+	for _, s := range signals {
+		if signalSeverityRank(s.Severity) > signalSeverityRank(severity) {
+			severity = s.Severity
+		}
+	}
+	return severity
+}
+
+func (s canarySeverity) signalSeverity() risk.SignalSeverity {
+	switch s {
+	case canarySeverityLiquidate:
+		return risk.SeverityUrgent
+	case canarySeverityDelever:
+		return risk.SeverityAct
+	case canarySeverityWatch:
+		return risk.SeverityWatch
+	default:
+		return risk.SeverityObserve
+	}
+}
+
+func signalSeverityRank(s risk.SignalSeverity) int {
+	switch s {
+	case risk.SeverityUrgent:
+		return 3
+	case risk.SeverityAct:
+		return 2
+	case risk.SeverityWatch:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func canaryPrimaryDrivers(signals []risk.Signal) []risk.SignalID {
+	type rankedSignal struct {
+		id   risk.SignalID
+		rank int
+	}
+	ranked := []rankedSignal{}
+	for _, s := range signals {
+		if s.Direction == risk.DirectionDataQuality {
+			continue
+		}
+		ranked = append(ranked, rankedSignal{id: s.ID, rank: signalSeverityRank(s.Severity)})
+	}
+	if len(ranked) == 0 {
+		for _, s := range signals {
+			ranked = append(ranked, rankedSignal{id: s.ID, rank: signalSeverityRank(s.Severity)})
+		}
+	}
+	slices.SortStableFunc(ranked, func(a, b rankedSignal) int {
+		return cmp.Compare(b.rank, a.rank)
+	})
+	out := []risk.SignalID{}
+	seen := map[risk.SignalID]bool{}
+	for _, s := range ranked {
+		if seen[s.id] {
+			continue
+		}
+		seen[s.id] = true
+		out = append(out, s.id)
+		if len(out) == 5 {
+			break
+		}
+	}
+	return out
 }
 
 func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []string {
@@ -647,10 +1124,10 @@ func canaryTapeEvidence(m CanaryMarketSummary) string {
 }
 
 func canaryConfirmedTapeStress(m CanaryMarketSummary) bool {
-	spyDrop := pctAtMost(m.SPYChangePct, -1.5)
-	spyHardDrop := pctAtMost(m.SPYChangePct, -2.5)
-	vixSpike := pctAtLeast(m.VIXChangePct, 10)
-	vixHardSpike := pctAtLeast(m.VIXChangePct, 20)
+	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
+	spyHardDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYHardDropPct)
+	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
+	vixHardSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct)
 	return (spyHardDrop && (vixSpike || m.RedClusters >= 1)) ||
 		(vixHardSpike && (spyDrop || m.RedClusters >= 1)) ||
 		(spyDrop && vixSpike && m.RedClusters >= 1)
@@ -828,8 +1305,15 @@ func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %-10s %s\n", "Stage", canaryDecisionBadge(env, r.Decision, true))
 	fmt.Fprintf(out, "  %-10s %s\n", "Confidence", canaryConfidenceLabel(env, r.Confidence))
+	if r.DataConfidence != "" || r.SignalConfidence != "" {
+		fmt.Fprintf(out, "  %-10s data %s · signals %s · readiness %s\n", "Quality",
+			canaryConfidenceLabel(env, r.DataConfidence), canaryConfidenceLabel(env, r.SignalConfidence), displayOrDash(r.ActionReadiness))
+	}
 	fmt.Fprintf(out, "  %-10s %s\n", "Action", env.bold(r.Action))
 	fmt.Fprintf(out, "  %-10s %s\n", "Escalate", canaryStageLadder(env, r.Decision))
+	if len(r.PrimaryDrivers) > 0 {
+		fmt.Fprintf(out, "  %-10s %s\n", "Drivers", strings.Join(signalIDStrings(r.PrimaryDrivers), ", "))
+	}
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %-28s %-10s %s\n", "Title", "Stage", "Action")
 	fmt.Fprintf(out, "  %-28s %-10s %s\n", strings.Repeat("-", 28), strings.Repeat("-", 10), strings.Repeat("-", 54))
@@ -847,6 +1331,21 @@ func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {
 		}
 	}
 	return 0
+}
+
+func signalIDStrings(ids []risk.SignalID) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
+}
+
+func displayOrDash(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "-"
+	}
+	return v
 }
 
 func canaryStageLadder(env *Env, decision string) string {
