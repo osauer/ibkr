@@ -26,8 +26,11 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 		},
 		Now: time.Date(2026, 5, 28, 21, 55, 0, 0, time.UTC),
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH for ambiguous all-unranked market", res.Decision)
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch for ambiguous all-unranked market", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
 	}
 	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
 		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
@@ -51,8 +54,11 @@ func TestComputeCanaryConfirmedStressWithIncompleteGammaBreadthStillDelevers(t *
 		}},
 		Regime: redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Decision != canaryDecisionDelever {
-		t.Fatalf("decision = %s, want DE-LEVER on confirmed vol+credit stress with high exposure", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
+		t.Fatalf("state = %s/%s, want defensive/act on confirmed vol+credit stress with high exposure", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("planner = %s/%s, want defend/blocked until degraded inputs are confirmed", res.PlannerModeHint, res.PlannerReadiness)
 	}
 	if !rowContains(res.Rows, "Ambiguity filter", "do not suppress confirmed independent red signals") {
 		t.Fatalf("expected ambiguity filter disclosure, rows: %+v", res.Rows)
@@ -72,8 +78,11 @@ func TestComputeCanaryImmediateMarginDangerLiquidatesDespiteAmbiguousMarket(t *t
 			},
 		},
 	})
-	if res.Decision != canaryDecisionLiquidate {
-		t.Fatalf("decision = %s, want LIQUIDATE on margin cushion below 10%%", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
+		t.Fatalf("state = %s/%s, want defensive/urgent on margin cushion below 10%%", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner = %s/%s, want defend/ready for immediate margin danger", res.PlannerModeHint, res.PlannerReadiness)
 	}
 }
 
@@ -87,8 +96,8 @@ func TestComputeCanaryZeroExcessLiquidityLiquidatesWhenMarginContextPresent(t *t
 		Account: acct,
 		Regime:  healthyCanaryRegime(),
 	})
-	if res.Decision != canaryDecisionLiquidate {
-		t.Fatalf("decision = %s, want LIQUIDATE when active margin account has zero cushion", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
+		t.Fatalf("state = %s/%s, want defensive/urgent when active margin account has zero cushion", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "cushion 0%") {
 		t.Fatalf("expected zero-cushion evidence, rows: %+v", res.Rows)
@@ -103,8 +112,8 @@ func TestComputeCanaryLookAheadMarginDangerLiquidates(t *testing.T) {
 		Account: acct,
 		Regime:  healthyCanaryRegime(),
 	})
-	if res.Decision != canaryDecisionLiquidate {
-		t.Fatalf("decision = %s, want LIQUIDATE when look-ahead cushion is below 10%%", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
+		t.Fatalf("state = %s/%s, want defensive/urgent when look-ahead cushion is below 10%%", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "look-ahead cushion 8%") {
 		t.Fatalf("expected look-ahead cushion evidence, rows: %+v", res.Rows)
@@ -122,8 +131,11 @@ func TestComputeCanaryEarlyStressRequiresSecondIndependentCluster(t *testing.T) 
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH for one red cluster plus yellow", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch for one red cluster plus yellow", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeStage {
+		t.Fatalf("planner_mode_hint = %s, want stage", res.PlannerModeHint)
 	}
 	if !rowContains(res.Rows, "Early stress filtered", "second independent red cluster") {
 		t.Fatalf("expected early-stress filter row, rows: %+v", res.Rows)
@@ -141,8 +153,11 @@ func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH for unconfirmed premarket SPY drop", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch for unconfirmed premarket SPY drop", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeStage {
+		t.Fatalf("planner_mode_hint = %s, want stage", res.PlannerModeHint)
 	}
 	if !rowContains(res.Rows, "Index tape shock", "second pass") {
 		t.Fatalf("expected direct tape second-pass row, rows: %+v", res.Rows)
@@ -169,8 +184,11 @@ func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Decision != canaryDecisionDelever {
-		t.Fatalf("decision = %s, want DE-LEVER for confirmed SPY/VIX shock plus red cluster", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
+		t.Fatalf("state = %s/%s, want defensive/act for confirmed SPY/VIX shock plus red cluster", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner = %s/%s, want defend/ready", res.PlannerModeHint, res.PlannerReadiness)
 	}
 	if !rowContains(res.Rows, "Index tape shock", "direct SPY stress is confirmed") {
 		t.Fatalf("expected confirmed direct tape row, rows: %+v", res.Rows)
@@ -198,8 +216,8 @@ func TestComputeCanaryGrossDollarDeltaCatchesOffsettingOptionBook(t *testing.T) 
 		}},
 		Regime: redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Decision != canaryDecisionLiquidate {
-		t.Fatalf("decision = %s, want LIQUIDATE on 180%% gross delta in confirmed stress", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
+		t.Fatalf("state = %s/%s, want defensive/urgent on 180%% gross delta in confirmed stress", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "US equity/options exposure", "gross delta 180% NLV") {
 		t.Fatalf("expected gross delta evidence, rows: %+v", res.Rows)
@@ -214,8 +232,8 @@ func TestComputeCanaryStressedExposureDeleverHasMatchingSignal(t *testing.T) {
 		Account: acct,
 		Regime:  redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Decision != canaryDecisionDelever {
-		t.Fatalf("decision = %s, want DE-LEVER on stressed gross exposure", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
+		t.Fatalf("state = %s/%s, want defensive/act on stressed gross exposure", res.Direction, res.Severity)
 	}
 	sig, ok := findSignal(res.Signals, risk.SignalGrossExposureHigh)
 	if !ok {
@@ -237,8 +255,8 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 		}},
 		Regime: healthyCanaryRegime(),
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH on largest dollar-delta concentration", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch on largest dollar-delta concentration", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "Largest concentration", "AAPL delta 45% NLV") {
 		t.Fatalf("expected largest-delta evidence, rows: %+v", res.Rows)
@@ -276,8 +294,11 @@ func TestComputeCanarySignalsExposureAndConfidenceReasons(t *testing.T) {
 	if res.Direction != risk.DirectionDefensive {
 		t.Fatalf("direction = %q, want defensive", res.Direction)
 	}
-	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.ActionReadiness != "prestage_risk_plan" {
-		t.Fatalf("confidence profile = data %q signals %q readiness %q", res.DataConfidence, res.SignalConfidence, res.ActionReadiness)
+	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.PlannerReadiness != risk.PlannerReadinessPrestage {
+		t.Fatalf("confidence profile = data %q signals %q readiness %q", res.DataConfidence, res.SignalConfidence, res.PlannerReadiness)
+	}
+	if res.PlannerModeHint != risk.PlannerModeStage {
+		t.Fatalf("planner_mode_hint = %s, want stage", res.PlannerModeHint)
 	}
 	if !strings.Contains(strings.Join(res.ConfidenceReasons, "\n"), "portfolio breach lacks independent market-stress confirmation") {
 		t.Fatalf("missing confidence reason, got %+v", res.ConfidenceReasons)
@@ -339,8 +360,8 @@ func TestComputeCanaryStandaloneVIXSpikeWatches(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH for standalone VIX spike", res.Decision)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch for standalone VIX spike", res.Direction, res.Severity)
 	}
 	if !rowContains(res.Rows, "Index tape shock", "flashing early stress") {
 		t.Fatalf("expected early VIX tape row, rows: %+v", res.Rows)
@@ -355,8 +376,11 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Decision != canaryDecisionWatch {
-		t.Fatalf("decision = %s, want WATCH when ranked market data is stale", res.Decision)
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch when ranked market data is stale", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
 	}
 	if got := strings.Join(res.Market.StaleClusters, ","); got != "vol" {
 		t.Fatalf("stale clusters = %q, want vol", got)
@@ -482,7 +506,7 @@ func TestCanaryWarningsPolishUnrankedImpact(t *testing.T) {
 	}
 }
 
-func TestRenderCanaryTextShowsEscalationLadder(t *testing.T) {
+func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
@@ -493,10 +517,10 @@ func TestRenderCanaryTextShowsEscalationLadder(t *testing.T) {
 	renderCanaryText(&Env{}, &out, &res)
 	got := out.String()
 	for _, want := range []string{
-		"Stage      [De-lever]",
-		"Confidence High",
-		"Escalate   Go > Watch > [De-lever] > Liquidate",
-		"Title                        Stage",
+		"Risk state [Defensive / Act]",
+		"Next step  Confirm data before defend",
+		"Confidence Medium-low",
+		"Title                        Risk state",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("render missing %q:\n%s", want, got)
@@ -507,20 +531,24 @@ func TestRenderCanaryTextShowsEscalationLadder(t *testing.T) {
 func TestRenderCanaryTextColorsCurrentStage(t *testing.T) {
 	t.Parallel()
 	res := CanaryResult{
-		AsOf:     time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
-		Decision: canaryDecisionWatch,
-		Action:   "Freeze new risk.",
+		AsOf:             time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
+		Direction:        risk.DirectionDefensive,
+		Severity:         risk.SeverityWatch,
+		PlannerModeHint:  risk.PlannerModeStage,
+		PlannerReadiness: risk.PlannerReadinessPrestage,
+		Summary:          "Freeze new risk.",
 		Rows: []CanaryRow{{
-			Title:    "Portfolio canary",
-			Decision: canaryDecisionWatch,
-			Action:   "Freeze new risk.",
+			Title:     "Portfolio canary",
+			Direction: risk.DirectionDefensive,
+			Severity:  risk.SeverityWatch,
+			Guidance:  "Freeze new risk.",
 		}},
 	}
 	var out bytes.Buffer
 	renderCanaryText(&Env{Color: true}, &out, &res)
 	got := out.String()
-	if !strings.Contains(got, ansiBold+ansiYellow+"[Watch]"+ansiReset+ansiReset) {
-		t.Fatalf("current WATCH stage is not bold yellow:\n%q", got)
+	if !strings.Contains(got, ansiBold+ansiYellow+"[Defensive / Watch]"+ansiReset+ansiReset) {
+		t.Fatalf("current defensive/watch state is not bold yellow:\n%q", got)
 	}
 	if strings.Contains(got, "CURRENT") {
 		t.Fatalf("render should not repeat CURRENT:\n%q", got)
@@ -591,7 +619,7 @@ func redVolCreditRegimeWithComputingSlowRows() rpc.RegimeSnapshotResult {
 
 func rowContains(rows []CanaryRow, title, text string) bool {
 	for _, row := range rows {
-		if row.Title == title && strings.Contains(row.Action, text) {
+		if row.Title == title && strings.Contains(row.Guidance, text) {
 			return true
 		}
 	}

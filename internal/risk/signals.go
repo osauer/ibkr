@@ -18,6 +18,27 @@ const (
 	SeverityUrgent  SignalSeverity = "urgent"
 )
 
+type PlannerMode string
+
+const (
+	PlannerModeNone        PlannerMode = "none"
+	PlannerModeStage       PlannerMode = "stage"
+	PlannerModeDefend      PlannerMode = "defend"
+	PlannerModeRebalance   PlannerMode = "rebalance"
+	PlannerModeDeploy      PlannerMode = "deploy"
+	PlannerModeConfirmData PlannerMode = "confirm_data"
+)
+
+type PlannerReadiness string
+
+const (
+	PlannerReadinessNone     PlannerReadiness = "none"
+	PlannerReadinessWatch    PlannerReadiness = "watch"
+	PlannerReadinessPrestage PlannerReadiness = "prestage"
+	PlannerReadinessReady    PlannerReadiness = "ready"
+	PlannerReadinessBlocked  PlannerReadiness = "blocked"
+)
+
 type SignalID string
 
 const (

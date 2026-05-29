@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-29 22:07 CEST
+**Last update:** 2026-05-29 22:27 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -69,14 +69,26 @@ It should emit:
 
 - alert direction: defensive, constructive, mixed, or data-quality
 - severity: observe, watch, act, or urgent
+- planner mode hint: none, stage, defend, rebalance, deploy, or confirm-data
+- planner readiness: none, watch, prestage, ready, or blocked
+- compact human summary
 - fired shared signal IDs
 - observed values and thresholds for those signals
-- split confidence: data confidence, signal confidence, and action readiness
+- split confidence: data confidence and signal confidence
 - source timestamps and policy profile/version
 - compact account, portfolio, and regime context
 - explicit ambiguity and stale-data warnings
 
 It must not emit order drafts, trade quantities, strikes, expiries, or previewable intents. A canary alert answers: "Do we need to pay attention now, and why?"
+
+The legacy `GO` / `WATCH` / `DE-LEVER` / `LIQUIDATE` ladder is no longer part of the machine contract. It was readable, but too trade-shaped for a sentinel. Human UX should instead show:
+
+```text
+Risk state  Defensive / Watch
+Next step   Stage risk-plan
+Guidance    Freeze new risk and stage a risk plan; wait for confirmation before major action.
+Drivers     margin_cushion_low, net_delta_high, gamma_red
+```
 
 ## Risk-Plan Contract
 
@@ -84,7 +96,7 @@ Risk-plan answers: "Given the alert and current portfolio, what candidate respon
 
 Every live run should:
 
-1. Resolve response mode from the user request or canary alert: defend, rebalance, deploy, or stage.
+1. Resolve response mode from the user request or canary alert: defend, rebalance, deploy, stage, or confirm-data.
 2. Refresh account, positions, regime, and canary.
 3. Rebuild the portfolio risk ledger.
 4. Re-evaluate shared policy criteria from fresh data.
@@ -97,6 +109,7 @@ Response modes:
 - `rebalance`: bring the portfolio back inside accepted policy bounds.
 - `deploy`: use available risk budget when constructive conditions and portfolio constraints allow it.
 - `stage`: prepare candidates without implying immediate execution.
+- `confirm-data`: refresh or verify degraded inputs before planning major action.
 
 The MVP can implement defensive reductions first, but the design should not bake in "risk-plan only sells." A live sentinel should also support disciplined opportunity response when the policy says risk budget can be used.
 
@@ -158,11 +171,11 @@ Build the shared policy and signal vocabulary first, then wire canary and risk-p
 Suggested order:
 
 1. Define shared signal IDs, severity, direction, and policy profiles.
-2. Add machine-readable fired signals to canary.
+2. Add machine-readable fired signals, planner mode hint, and planner readiness to canary.
 3. Build a reusable risk ledger from account, positions, and regime.
 4. Implement defensive risk-plan candidates for existing positions.
 5. Add typed plan artifacts and order-preview consumption.
-6. Extend exposure axes for asset class, market, and currency buckets.
+6. Extend exposure axes for asset class and market buckets before currency buckets.
 7. Add deploy/stage modes once defensive planning is trustworthy.
 
 ## Non-Goals
@@ -176,7 +189,6 @@ Suggested order:
 
 ## Open Questions
 
-- How should legacy canary `decision` map to planner `response_mode` once direction and severity are first-class?
-- Which asset-class and market buckets are required first?
-- What makes a constructive signal deployable rather than merely euphoric?
+- What exact thresholds should the first asset-class and market buckets use?
+- What exact clean-risk-budget criteria make a constructive signal deployable rather than merely euphoric?
 - Should monitor trigger context be flags, a small artifact, or both?
