@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.4.2 — 2026-05-29 12:46 CEST
+
+### What's new
+
+- The scheduled portfolio-canary prompt now keeps the overall canary recommendation, confidence, and top action before the row table, matching the useful CLI-level summary.
+
+### Changed
+
+- `examples/ibkr_portfolio_canary_prompt.md` now returns a compact report with `Stage`, `Confidence`, `Action`, action rows, and warning bullets instead of a row-only table.
+
 ## v1.4.1 — 2026-05-29 12:28 CEST
 
 ### What's new
