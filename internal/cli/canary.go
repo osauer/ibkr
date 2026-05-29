@@ -35,6 +35,7 @@ type CanaryInput struct {
 // table directly without composing prose.
 type CanaryResult struct {
 	AsOf         time.Time              `json:"as_of"`
+	SourceAsOf   CanarySourceAsOf       `json:"source_as_of,omitzero"`
 	Decision     string                 `json:"decision"`
 	Action       string                 `json:"action"`
 	Confidence   string                 `json:"confidence"`
@@ -45,6 +46,12 @@ type CanaryResult struct {
 	NotExecution string                 `json:"not_execution"`
 }
 
+type CanarySourceAsOf struct {
+	Account   time.Time `json:"account,omitzero"`
+	Positions time.Time `json:"positions,omitzero"`
+	Regime    time.Time `json:"regime,omitzero"`
+}
+
 type CanaryRow struct {
 	Title    string `json:"title"`
 	Decision string `json:"decision"`
@@ -53,15 +60,19 @@ type CanaryRow struct {
 }
 
 type CanaryPortfolioSummary struct {
-	BaseCurrency        string   `json:"base_currency,omitempty"`
-	NetLiquidation      float64  `json:"net_liquidation,omitempty"`
-	CushionPct          *float64 `json:"cushion_pct,omitempty"`
-	GrossExposurePctNLV *float64 `json:"gross_exposure_pct_nlv,omitempty"`
-	NetDeltaPctNLV      *float64 `json:"net_delta_pct_nlv,omitempty"`
-	LargestExposure     string   `json:"largest_exposure,omitempty"`
-	LargestExposurePct  *float64 `json:"largest_exposure_pct_nlv,omitempty"`
-	DailyPnLPct         *float64 `json:"daily_pnl_pct,omitempty"`
-	OptionGreeks        string   `json:"option_greeks,omitempty"`
+	BaseCurrency         string   `json:"base_currency,omitempty"`
+	NetLiquidation       float64  `json:"net_liquidation,omitempty"`
+	CushionPct           *float64 `json:"cushion_pct,omitempty"`
+	LookAheadCushionPct  *float64 `json:"look_ahead_cushion_pct,omitempty"`
+	GrossExposurePctNLV  *float64 `json:"gross_exposure_pct_nlv,omitempty"`
+	NetDeltaPctNLV       *float64 `json:"net_delta_pct_nlv,omitempty"`
+	GrossDeltaPctNLV     *float64 `json:"gross_delta_pct_nlv,omitempty"`
+	LargestExposure      string   `json:"largest_exposure,omitempty"`
+	LargestExposurePct   *float64 `json:"largest_exposure_pct_nlv,omitempty"`
+	LargestDeltaExposure string   `json:"largest_delta_exposure,omitempty"`
+	LargestDeltaPctNLV   *float64 `json:"largest_delta_pct_nlv,omitempty"`
+	DailyPnLPct          *float64 `json:"daily_pnl_pct,omitempty"`
+	OptionGreeks         string   `json:"option_greeks,omitempty"`
 }
 
 type CanaryMarketSummary struct {
@@ -76,6 +87,7 @@ type CanaryMarketSummary struct {
 	PartialClusters    []string `json:"partial_clusters,omitempty"`
 	ComputingClusters  []string `json:"computing_clusters,omitempty"`
 	DegradedClusters   []string `json:"degraded_clusters,omitempty"`
+	StaleClusters      []string `json:"stale_clusters,omitempty"`
 	SPYChangePct       *float64 `json:"spy_change_pct,omitempty"`
 	VIXChangePct       *float64 `json:"vix_change_pct,omitempty"`
 }
@@ -109,6 +121,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	}
 	res := CanaryResult{
 		AsOf:         now,
+		SourceAsOf:   CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf},
 		Portfolio:    summarizeCanaryPortfolio(in.Account, in.Positions),
 		Market:       summarizeCanaryMarket(in.Regime),
 		NotExecution: "Read-only recommendation; no orders are placed by ibkr.",
@@ -138,14 +151,8 @@ func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult) C
 		NetLiquidation: acct.NetLiquidation,
 	}
 	if acct.NetLiquidation > 0 {
-		cushion := acct.Cushion
-		if cushion == 0 && acct.ExcessLiquidity > 0 {
-			cushion = acct.ExcessLiquidity / acct.NetLiquidation
-		}
-		if cushion > 0 {
-			pct := cushion * 100
-			out.CushionPct = &pct
-		}
+		out.CushionPct = canaryCurrentCushionPct(acct)
+		out.LookAheadCushionPct = canaryLookAheadCushionPct(acct)
 		if acct.GrossPositionValue > 0 {
 			pct := acct.GrossPositionValue / acct.NetLiquidation * 100
 			out.GrossExposurePctNLV = &pct
@@ -164,17 +171,66 @@ func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult) C
 			out.OptionGreeks = fmt.Sprintf("%d/%d legs", pos.Portfolio.GreeksCoverage, pos.Portfolio.GreeksTotal)
 		}
 		for _, e := range pos.Portfolio.ExposureBase {
-			if e.MarketValuePctNLV == nil {
+			if e.MarketValuePctNLV != nil {
+				if out.LargestExposurePct == nil || math.Abs(*e.MarketValuePctNLV) > math.Abs(*out.LargestExposurePct) {
+					pct := *e.MarketValuePctNLV
+					out.LargestExposurePct = &pct
+					out.LargestExposure = strings.ToUpper(e.Underlying)
+				}
+			}
+			if e.DollarDeltaBase == nil || acct.NetLiquidation <= 0 {
 				continue
 			}
-			if out.LargestExposurePct == nil || math.Abs(*e.MarketValuePctNLV) > math.Abs(*out.LargestExposurePct) {
-				pct := *e.MarketValuePctNLV
-				out.LargestExposurePct = &pct
-				out.LargestExposure = strings.ToUpper(e.Underlying)
+			pct := math.Abs(*e.DollarDeltaBase) / acct.NetLiquidation * 100
+			gross := pct
+			if out.GrossDeltaPctNLV != nil {
+				gross += *out.GrossDeltaPctNLV
+			}
+			out.GrossDeltaPctNLV = &gross
+			if out.LargestDeltaPctNLV == nil || pct > *out.LargestDeltaPctNLV {
+				out.LargestDeltaPctNLV = &pct
+				out.LargestDeltaExposure = strings.ToUpper(e.Underlying)
 			}
 		}
 	}
 	return out
+}
+
+func canaryCurrentCushionPct(acct rpc.AccountResult) *float64 {
+	if acct.NetLiquidation <= 0 {
+		return nil
+	}
+	switch {
+	case acct.Cushion != 0:
+		return new(acct.Cushion * 100)
+	case acct.ExcessLiquidity != 0:
+		return new(acct.ExcessLiquidity / acct.NetLiquidation * 100)
+	case canaryHasActiveMarginContext(acct):
+		return new(0.0)
+	default:
+		return nil
+	}
+}
+
+func canaryLookAheadCushionPct(acct rpc.AccountResult) *float64 {
+	if acct.NetLiquidation <= 0 {
+		return nil
+	}
+	switch {
+	case acct.LookAheadExcess != 0:
+		return new(acct.LookAheadExcess / acct.NetLiquidation * 100)
+	case acct.LookAheadMaintMargin > 0 || acct.LookAheadInitMargin > 0 || acct.LookAheadAvailable < 0:
+		return new(0.0)
+	default:
+		return nil
+	}
+}
+
+func canaryHasActiveMarginContext(acct rpc.AccountResult) bool {
+	return acct.ExcessLiquidity < 0 ||
+		acct.AvailableFunds < 0 ||
+		acct.MaintenanceMargin > 0 ||
+		acct.InitialMargin > 0
 }
 
 func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
@@ -215,6 +271,9 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		if status == rpc.RegimeStatusComputing {
 			out.ComputingClusters = append(out.ComputingClusters, name)
 		}
+		if status == rpc.RegimeStatusStale {
+			out.StaleClusters = append(out.StaleClusters, name)
+		}
 		if clusterBand == "" {
 			out.AmbiguousClusters = append(out.AmbiguousClusters, name)
 		} else if status == rpc.RegimeStatusError || status == rpc.RegimeStatusUnavailable || status == rpc.RegimeStatusComputing {
@@ -230,6 +289,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 	slices.Sort(out.PartialClusters)
 	slices.Sort(out.ComputingClusters)
 	slices.Sort(out.DegradedClusters)
+	slices.Sort(out.StaleClusters)
 	if out.RedClusters == 0 && len(out.RedClusterNames) > 0 {
 		out.RedClusters = len(out.RedClusterNames)
 	}
@@ -248,6 +308,7 @@ func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
 
 func weakestStatus(statuses []string) string {
 	var sawComputing, sawUnavailable, sawError bool
+	var sawStale bool
 	for _, status := range statuses {
 		switch strings.ToLower(strings.TrimSpace(status)) {
 		case rpc.RegimeStatusError:
@@ -256,6 +317,8 @@ func weakestStatus(statuses []string) string {
 			sawUnavailable = true
 		case rpc.RegimeStatusComputing:
 			sawComputing = true
+		case rpc.RegimeStatusStale:
+			sawStale = true
 		}
 	}
 	switch {
@@ -265,6 +328,8 @@ func weakestStatus(statuses []string) string {
 		return rpc.RegimeStatusUnavailable
 	case sawComputing:
 		return rpc.RegimeStatusComputing
+	case sawStale:
+		return rpc.RegimeStatusStale
 	default:
 		return rpc.RegimeStatusOK
 	}
@@ -292,16 +357,17 @@ func strongestBand(bands []string) string {
 }
 
 func canaryMarginRow(p CanaryPortfolioSummary) CanaryRow {
-	if p.CushionPct != nil {
+	cushion := canaryWorstCushionPct(p)
+	if cushion != nil {
 		switch {
-		case *p.CushionPct < 10:
-			return CanaryRow{"Immediate margin safety", canaryDecisionLiquidate, "Move to cash-heavy / near-flat now; margin cushion is below 10%.", pctEvidence("cushion", *p.CushionPct)}
-		case *p.CushionPct < 20:
-			return CanaryRow{"Immediate margin safety", canaryDecisionDelever, "Cut gross and net exposure until cushion is back above 25%.", pctEvidence("cushion", *p.CushionPct)}
-		case *p.CushionPct < 35:
-			return CanaryRow{"Immediate margin safety", canaryDecisionWatch, "Do not add risk; prepare a reduction plan if cushion falls below 25%.", pctEvidence("cushion", *p.CushionPct)}
+		case *cushion < 10:
+			return CanaryRow{"Immediate margin safety", canaryDecisionLiquidate, "Move to cash-heavy / near-flat now; margin cushion is below 10%.", canaryCushionEvidence(p)}
+		case *cushion < 20:
+			return CanaryRow{"Immediate margin safety", canaryDecisionDelever, "Cut gross and net exposure until cushion is back above 25%.", canaryCushionEvidence(p)}
+		case *cushion < 35:
+			return CanaryRow{"Immediate margin safety", canaryDecisionWatch, "Do not add risk; prepare a reduction plan if cushion falls below 25%.", canaryCushionEvidence(p)}
 		}
-		return CanaryRow{"Immediate margin safety", canaryDecisionHold, "No forced margin action.", pctEvidence("cushion", *p.CushionPct)}
+		return CanaryRow{"Immediate margin safety", canaryDecisionHold, "No forced margin action.", canaryCushionEvidence(p)}
 	}
 	return CanaryRow{"Immediate margin safety", canaryDecisionWatch, "No forced margin action, but confirm account cushion before sizing new risk.", "cushion unavailable"}
 }
@@ -352,14 +418,15 @@ func canaryTapeShockRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryR
 func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
 	gross := derefPct(p.GrossExposurePctNLV)
 	delta := derefPct(p.NetDeltaPctNLV)
-	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV", gross, delta)
+	grossDelta := derefPct(p.GrossDeltaPctNLV)
+	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV; gross delta %.0f%% NLV", gross, delta, grossDelta)
 	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
 	switch {
-	case (gross >= 150 || delta >= 125) && stressed:
+	case (gross >= 150 || delta >= 125 || grossDelta >= 150) && stressed:
 		return CanaryRow{"US equity/options exposure", canaryDecisionLiquidate, "Go near-flat on broad equity beta; close or hedge option delta first.", evidence}
-	case (gross >= 100 || delta >= 80) && stressed:
+	case (gross >= 100 || delta >= 80 || grossDelta >= 100) && stressed:
 		return CanaryRow{"US equity/options exposure", canaryDecisionDelever, "Cut 30-50% of net equity delta and avoid adding long gamma-dollar exposure.", evidence}
-	case gross >= 150 || delta >= 125:
+	case gross >= 150 || delta >= 125 || grossDelta >= 150:
 		return CanaryRow{"US equity/options exposure", canaryDecisionWatch, "Exposure is high; pre-stage reductions but wait for confirmed market stress.", evidence}
 	default:
 		return CanaryRow{"US equity/options exposure", canaryDecisionHold, "No exposure-based de-risking trigger.", evidence}
@@ -367,15 +434,16 @@ func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRo
 }
 
 func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
-	if p.LargestExposurePct == nil || p.LargestExposure == "" {
+	if (p.LargestExposurePct == nil || p.LargestExposure == "") && (p.LargestDeltaPctNLV == nil || p.LargestDeltaExposure == "") {
 		return CanaryRow{"Largest concentration", canaryDecisionHold, "No concentration action from available base-currency exposure map.", "no dominant exposure"}
 	}
-	pct := math.Abs(*p.LargestExposurePct)
-	evidence := fmt.Sprintf("%s %.0f%% NLV", p.LargestExposure, pct)
-	if pct >= 35 && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
+	pct := math.Abs(derefPct(p.LargestExposurePct))
+	deltaPct := derefPct(p.LargestDeltaPctNLV)
+	evidence := canaryConcentrationEvidence(p)
+	if (pct >= 35 || deltaPct >= 35) && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
 		return CanaryRow{"Largest concentration", canaryDecisionDelever, "Trim this concentration before smaller positions; cap it below 25% NLV in stress.", evidence}
 	}
-	if pct >= 35 {
+	if pct >= 35 || deltaPct >= 35 {
 		return CanaryRow{"Largest concentration", canaryDecisionWatch, "Pre-stage a trim for this concentration if a second stress cluster confirms.", evidence}
 	}
 	return CanaryRow{"Largest concentration", canaryDecisionHold, "No concentration trim required by the canary.", evidence}
@@ -397,8 +465,11 @@ func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m Canar
 }
 
 func canaryDataQualityRow(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) CanaryRow {
-	if (len(m.AmbiguousClusters) > 0 || len(m.PartialClusters) > 0 || len(m.DegradedClusters) > 0) && (m.RedClusters > 0 || m.YellowClusters > 0) {
+	if canaryHasMarketDataIssue(m) && (m.RedClusters > 0 || m.YellowClusters > 0) {
 		return CanaryRow{"Ambiguity filter", canaryDecisionWatch, "Treat this as unresolved or degraded stress: verify weak clusters, but do not suppress confirmed independent red signals.", canaryAmbiguityEvidence(m)}
+	}
+	if canaryHasMarketDataIssue(m) {
+		return CanaryRow{"Ambiguity filter", canaryDecisionWatch, "Market inputs are incomplete or stale; keep the canary on Watch until coverage and freshness recover.", canaryAmbiguityEvidence(m)}
 	}
 	if m.RankedClusters < 4 {
 		return CanaryRow{"Data quality gate", canaryDecisionWatch, "Do not liquidate on market data alone; wait for at least four ranked regime clusters.", canaryMarketEvidence(m)}
@@ -446,11 +517,13 @@ func canarySeverityFromDecision(decision string) canarySeverity {
 }
 
 func canaryImmediateDanger(p CanaryPortfolioSummary) bool {
-	return p.CushionPct != nil && *p.CushionPct < 10
+	cushion := canaryWorstCushionPct(p)
+	return cushion != nil && *cushion < 10
 }
 
 func canaryMarginPressure(p CanaryPortfolioSummary) bool {
-	return p.CushionPct != nil && *p.CushionPct < 20
+	cushion := canaryWorstCushionPct(p)
+	return cushion != nil && *cushion < 20
 }
 
 func canaryOverallAction(decision string) string {
@@ -473,7 +546,7 @@ func canaryConfidence(decision string, m CanaryMarketSummary) string {
 		}
 		return "medium"
 	}
-	if m.UnrankedClusters > 0 || len(m.AmbiguousClusters) > 0 || len(m.PartialClusters) > 0 || len(m.DegradedClusters) > 0 {
+	if m.UnrankedClusters > 0 || canaryHasMarketDataIssue(m) {
 		return "medium-low"
 	}
 	return "medium"
@@ -492,6 +565,9 @@ func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []string 
 	}
 	if len(m.DegradedClusters) > 0 {
 		warnings = append(warnings, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+	}
+	if len(m.StaleClusters) > 0 {
+		warnings = append(warnings, "stale clusters: "+strings.Join(m.StaleClusters, ","))
 	}
 	for _, w := range r.WarningDetails {
 		line := canaryWarningLine(w)
@@ -590,6 +666,9 @@ func pctAtLeast(v *float64, threshold float64) bool {
 
 func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
 	parts := []string{canaryMarketEvidence(m)}
+	if len(m.StaleClusters) > 0 {
+		parts = append(parts, "stale "+strings.Join(m.StaleClusters, ","))
+	}
 	if len(m.AmbiguousClusters) > 0 {
 		parts = append(parts, "ambiguous "+strings.Join(m.AmbiguousClusters, ","))
 	}
@@ -606,8 +685,53 @@ func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
 }
 
 func canaryPortfolioEvidence(p CanaryPortfolioSummary) string {
-	return fmt.Sprintf("cushion %.0f%%, gross %.0f%% NLV, net delta %.0f%% NLV",
-		derefPct(p.CushionPct), derefPct(p.GrossExposurePctNLV), derefPct(p.NetDeltaPctNLV))
+	return fmt.Sprintf("%s, gross %.0f%% NLV, net delta %.0f%% NLV, gross delta %.0f%% NLV",
+		canaryCushionEvidence(p), derefPct(p.GrossExposurePctNLV), derefPct(p.NetDeltaPctNLV), derefPct(p.GrossDeltaPctNLV))
+}
+
+func canaryHasMarketDataIssue(m CanaryMarketSummary) bool {
+	return len(m.AmbiguousClusters) > 0 ||
+		len(m.PartialClusters) > 0 ||
+		len(m.DegradedClusters) > 0 ||
+		len(m.ComputingClusters) > 0 ||
+		len(m.StaleClusters) > 0
+}
+
+func canaryWorstCushionPct(p CanaryPortfolioSummary) *float64 {
+	switch {
+	case p.CushionPct != nil && p.LookAheadCushionPct != nil:
+		v := min(*p.CushionPct, *p.LookAheadCushionPct)
+		return &v
+	case p.CushionPct != nil:
+		return p.CushionPct
+	default:
+		return p.LookAheadCushionPct
+	}
+}
+
+func canaryCushionEvidence(p CanaryPortfolioSummary) string {
+	parts := []string{}
+	if p.CushionPct != nil {
+		parts = append(parts, pctEvidence("cushion", *p.CushionPct))
+	}
+	if p.LookAheadCushionPct != nil {
+		parts = append(parts, pctEvidence("look-ahead cushion", *p.LookAheadCushionPct))
+	}
+	if len(parts) == 0 {
+		return "cushion unavailable"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func canaryConcentrationEvidence(p CanaryPortfolioSummary) string {
+	parts := []string{}
+	if p.LargestExposurePct != nil && p.LargestExposure != "" {
+		parts = append(parts, fmt.Sprintf("%s market %.0f%% NLV", p.LargestExposure, math.Abs(*p.LargestExposurePct)))
+	}
+	if p.LargestDeltaPctNLV != nil && p.LargestDeltaExposure != "" {
+		parts = append(parts, fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func pctEvidence(label string, pct float64) string {

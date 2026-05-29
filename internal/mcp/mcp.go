@@ -508,8 +508,10 @@ func mcpToolCallTimeout(name string, args json.RawMessage) time.Duration {
 		return mcpLongToolTimeout
 	case "ibkr_technical":
 		return mcpScannerToolTimeout
-	case "ibkr_regime", "ibkr_canary":
+	case "ibkr_regime":
 		return mcpRegimeToolTimeout
+	case "ibkr_canary":
+		return mcpScannerToolTimeout
 	default:
 		return mcpDefaultToolTimeout
 	}
