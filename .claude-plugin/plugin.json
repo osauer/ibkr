@@ -1,6 +1,6 @@
 {
   "name": "ibkr",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Interactive Brokers (IBKR) integration for Claude Code and MCP clients: agentic portfolio analysis, trading research, account/positions, snapshot + streaming quotes, official calendars, option chains, daily history, market scans, sizing, risk-regime, and canary stress context via the local ibkr CLI. The current bundled tool surface is limited to analysis and sizing.",
   "author": {
     "name": "osauer",
