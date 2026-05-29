@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.4.1 — 2026-05-29 12:28 CEST
+
+### What's new
+
+- The scheduled portfolio-canary prompt now renders the user-facing `Go`, `Watch`, `De-lever`, and `Liquidate` stages directly, so automation output matches the CLI canary UX.
+
+### Changed
+
+- Tightened `examples/ibkr_portfolio_canary_prompt.md` to require exactly one `ibkr_canary` call, preserve tool action text, avoid fallback recomputation with separate tools, and fail visibly when a stale MCP host does not expose `ibkr_canary`.
+- Linked the canary prompt from the public MCP, agentic-use, portfolio-analysis, and portfolio-review pages.
+- MCP initialize instructions now mention the portfolio stress canary alongside account, market-data, gamma, breadth, and regime tools.
+
 ## v1.4.0 — 2026-05-29 08:47 CEST
 
 ### What's new
