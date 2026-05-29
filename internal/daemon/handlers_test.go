@@ -414,6 +414,38 @@ func TestChainSummariesSurfaceTradabilityAndLiquidity(t *testing.T) {
 	}
 }
 
+func TestChainSummariesTreatClosedSessionBidAskAsStaleContext(t *testing.T) {
+	t.Parallel()
+	cb, ca := 2.00, 2.20
+	pb, pa := 1.50, 2.10
+	res := &rpc.ChainResult{
+		Symbol:       "ASTS",
+		Spot:         55,
+		Expiry:       "2026-09-18",
+		DataType:     rpc.MarketDataClosed,
+		SessionState: rpc.SessionClosed.String(),
+		Strikes: []rpc.ChainStrike{{
+			Strike: 55, IsATM: true,
+			CallBid: &cb, CallAsk: &ca, CallDataStatus: "quoted",
+			PutBid: &pb, PutAsk: &pa, PutDataStatus: "quoted",
+		}},
+	}
+
+	tradable, liquidity := chainSummaries(res, true, true)
+	if tradable.OptionsTradable || tradable.LiveBidAskLegs != 0 {
+		t.Fatalf("closed-session bid/ask must not be executable: %+v", tradable)
+	}
+	if tradable.StaleLegs != 2 || tradable.FeedGap != "stale_close_only" {
+		t.Fatalf("tradable summary = %+v, want 2 stale legs and stale_close_only", tradable)
+	}
+	if liquidity.LiquidityGrade != "untradable" || liquidity.RecommendedStructureHint != "untradable_chain" {
+		t.Fatalf("liquidity = %+v, want untradable closed-session context", liquidity)
+	}
+	if liquidity.NearestLiveCall != nil || liquidity.NearestLivePut != nil || liquidity.MinSpreadLiveStrike != nil {
+		t.Fatalf("closed-session quotes must not populate live leg summaries: %+v", liquidity)
+	}
+}
+
 func TestChainSummariesClassifyUntradableChain(t *testing.T) {
 	t.Parallel()
 	prev := 0.90

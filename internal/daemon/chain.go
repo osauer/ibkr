@@ -1005,6 +1005,7 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 		return nil, nil
 	}
 	tradable := &rpc.ChainTradableSummary{}
+	closedSession := res.DataType == rpc.MarketDataClosed || res.SessionState == rpc.SessionClosed.String()
 	var nearestCall, nearestPut, minSpread, atmLive *rpc.ChainLegSummary
 	nearestCallDist, nearestPutDist, minSpreadPct := math.MaxFloat64, math.MaxFloat64, math.MaxFloat64
 
@@ -1014,6 +1015,10 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 			tradable.OICoveredLegs++
 		}
 		switch dataStatus {
+		case "quoted":
+			if closedSession {
+				tradable.StaleLegs++
+			}
 		case "prev_close":
 			tradable.StaleLegs++
 		case "model_only":
@@ -1026,6 +1031,9 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 
 		hasBid := bid != nil && *bid > 0
 		hasAsk := ask != nil && *ask > 0
+		if closedSession {
+			return
+		}
 		if hasBid != hasAsk {
 			tradable.OneSidedLiveLegs++
 		}
@@ -1079,10 +1087,10 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 	if tradable.TotalLegs > 0 {
 		tradable.OICoveragePct = float64(tradable.OICoveredLegs) / float64(tradable.TotalLegs)
 	}
-	tradable.OptionsTradable = tradable.LiveBidAskLegs > 0
+	tradable.OptionsTradable = !closedSession && tradable.LiveBidAskLegs > 0
 	if !tradable.OptionsTradable {
 		switch {
-		case res.DataType == rpc.MarketDataClosed || res.SessionState == rpc.SessionClosed.String():
+		case closedSession:
 			tradable.FeedGap = "stale_close_only"
 		case tradable.SubscribeErrorLegs > 0:
 			tradable.FeedGap = "unknown_feed_gap"

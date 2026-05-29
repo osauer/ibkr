@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -176,6 +177,34 @@ func TestFlagOptionMarkOutsideBidAsk(t *testing.T) {
 	}
 	if rows[1].MarkOutsideBidAsk || len(rows[1].WarningDetails) != 0 {
 		t.Fatalf("MSFT should be clean, got %+v", rows[1])
+	}
+}
+
+func TestFlagClosedOptionSessionAnnotatesOptionRows(t *testing.T) {
+	rows := []rpc.PositionView{{
+		Symbol: "AAPL", Expiry: "20260619", Right: "C", Strike: 215,
+		OptionBid: new(8.00), OptionAsk: new(8.50),
+	}}
+	closed := time.Date(2026, 5, 29, 6, 15, 0, 0, time.FixedZone("CEST", 2*60*60))
+
+	flagClosedOptionSession(rows, closed)
+
+	if len(rows[0].WarningDetails) != 1 || rows[0].WarningDetails[0].Code != "options_closed" {
+		t.Fatalf("warnings = %+v, want options_closed", rows[0].WarningDetails)
+	}
+	if !strings.Contains(rows[0].WarningDetails[0].Impact, "not executable quotes") {
+		t.Fatalf("warning impact should explain executability: %+v", rows[0].WarningDetails[0])
+	}
+}
+
+func TestFlagClosedOptionSessionSkipsOptionRTH(t *testing.T) {
+	rows := []rpc.PositionView{{Symbol: "AAPL", Expiry: "20260619", Right: "C", Strike: 215}}
+	rth := time.Date(2026, 5, 29, 10, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
+
+	flagClosedOptionSession(rows, rth)
+
+	if len(rows[0].WarningDetails) != 0 {
+		t.Fatalf("warnings = %+v, want none during option RTH", rows[0].WarningDetails)
 	}
 }
 

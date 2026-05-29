@@ -299,6 +299,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	s.fillDailyPnL(c, res.Options, conIDByPositionKey)
 	fillBaseValues(res.Stocks, baseCcy)
 	fillBaseValues(res.Options, baseCcy)
+	flagClosedOptionSession(res.Options, res.AsOf)
 	flagOptionMarkOutsideBidAsk(res.Options)
 
 	res.ByUnderlying = groupByUnderlying(res.Stocks, res.Options, baseCcy, netLiquidationBase)
@@ -870,6 +871,26 @@ func positionBaseRate(p rpc.PositionView, baseCcy string) (float64, bool) {
 	return 0, false
 }
 
+func flagClosedOptionSession(options []rpc.PositionView, now time.Time) {
+	if len(options) == 0 || rpc.IsOptionRTH(now) {
+		return
+	}
+	for i := range options {
+		p := &options[i]
+		if positionWarningHasCode(p.WarningDetails, "options_closed") {
+			continue
+		}
+		p.WarningDetails = append(p.WarningDetails, rpc.DataWarning{
+			Code:     "options_closed",
+			Scope:    optionWarningScope(*p),
+			Severity: "info",
+			Message:  "U.S. listed options are outside regular trading hours.",
+			Impact:   "Option bid/ask, previous close, IV, and Greeks are closed-session context, not executable quotes.",
+			Action:   "Use the account mark for held-position valuation; retry during 09:30-16:00 ET for executable option quotes.",
+		})
+	}
+}
+
 func flagOptionMarkOutsideBidAsk(options []rpc.PositionView) {
 	for i := range options {
 		p := &options[i]
@@ -895,6 +916,15 @@ func flagOptionMarkOutsideBidAsk(options []rpc.PositionView) {
 			Action:   "Refresh during the regular option session and compare option_bid/option_ask before using the mark.",
 		})
 	}
+}
+
+func positionWarningHasCode(warnings []rpc.DataWarning, code string) bool {
+	for _, w := range warnings {
+		if w.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func optionWarningScope(p rpc.PositionView) string {

@@ -1,6 +1,6 @@
 # IBKR Portfolio Analysis — Agentic MCP Workflow
 
-Last updated: 2026-05-28 11:32 CEST
+Last updated: 2026-05-29 06:36 CEST
 
 Use the IBKR MCP tools to produce a professional portfolio review from the user's live Interactive Brokers / TWS context. The goal is not generic personal-finance advice; it is an agentic desk-style workflow for semi-professional retail users who care about exposure, market regime, option risk, data freshness, and what to review next. Produce analysis and plans only. The available MCP interface is read-only and cannot place, preview, modify, or cancel orders.
 
@@ -62,7 +62,7 @@ Add only the enrichment that changes the portfolio diagnosis.
 - `ibkr_watch`: use when the user asks for watchlist overlap, monitoring candidates, or "what should I watch next?" Set `include_positions:true` unless the user asks only for the saved symbol list.
 - `ibkr_technical`: batch up to 10 held or watchlist symbols when trend, relative strength, ATR, or liquidity would change the action list. Drop rows with `data_quality!="ok"` and label partial rows.
 - `ibkr_history`: use sparingly for one-symbol deep dives when a chart-level question cannot be answered by `ibkr_technical`.
-- `ibkr_chain`: use for 1-3 important option underlyings. First omit `expiry` with `min_dte` / `max_dte` or `target_dte` to get IV and implied move; then fetch a strike grid only when live option context is needed. Treat `options_tradable:false`, stale/model-only legs, missing bid/ask, missing IV, and closed option sessions as hard limits for executable option conclusions.
+- `ibkr_chain`: use for 1-3 important option underlyings when you need option selection, expiry IV, implied moves, or a live strike grid. Do not use chain IV as the held-option valuation source; `ibkr_positions` already carries held option marks, option previous close, captured bid/ask context, IV, Greeks, and row warnings. First omit `expiry` with `min_dte` / `max_dte` or `target_dte` to get IV and implied move when live option readiness matters; then fetch a strike grid only when live option context is needed. Treat `options_tradable:false`, stale/model-only legs, missing bid/ask, missing IV, `live_option_iv_unavailable`, and closed option sessions as hard limits for executable option conclusions.
 - `ibkr_gamma`: use when SPY/SPX dealer positioning directly affects the portfolio, hedging, or index-option exposure and `ibkr_regime` did not already provide enough detail.
 - `ibkr_size`: use only for explicit what-if plans with entry, stop, and optional target. It is sizing math against NLV, not a recommendation or order ticket.
 
