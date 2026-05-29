@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Risk-plan orchestration | ibkr</title>
+  <meta name="description" content="Status: Draft for later pickup. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 20:46 CEST Owner: osauer Related: internal/cli/canary.go,...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/design/risk-plan-orchestration.html">
+  <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "author": {
+      "@type": "Person",
+      "name": "Oliver Sauer",
+      "url": "https://github.com/osauer"
+    },
+    "description": "Status: Draft for later pickup. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 20:46 CEST Owner: osauer Related: internal/cli/canary.go,...",
+    "headline": "Risk-plan orchestration",
+    "isPartOf": {
+      "@type": "SoftwareApplication",
+      "name": "ibkr",
+      "url": "https://osauer.dev/ibkr/"
+    },
+    "url": "https://osauer.dev/ibkr/design/risk-plan-orchestration.html"
+  }
+  </script>
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="../guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="risk-plan-orchestration">Risk-plan orchestration</h1>
+<p><strong>Status:</strong> Draft for later pickup. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-29 20:46 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<h2 id="decision">Decision</h2>
+<p><code>canary</code> does not need to become more specific about concrete repositions for <code>risk-plan</code> to generate a plan. It needs to remain a risk-state classifier: margin state, exposure state, concentration state, regime state, confidence, source timestamps, and warnings.</p>
+<p><code>risk-plan</code> should be the first component that proposes concrete position changes. It should call the existing evidence tools internally, build candidate reductions or hedges, and hand only reviewed order drafts to the order-preview layer. Piping remains supported for audit and replay, but raw <code>canary</code> or <code>regime</code> JSON must not be accepted as order input.</p>
+<p>For a production account, the LLM is an operator and explainer, not the authority for portfolio math or order construction. The agent may interview the user, invoke tools, rank and explain tool-produced candidates, and ask for approval. It must not hand-write orders, override stale-data gates, or convert prose recommendations into tickets.</p>
+<h2 id="why-canary-should-not-propose-trades">Why canary should not propose trades</h2>
+<p><code>regime</code> is market evidence only. It knows the tape, not the portfolio.</p>
+<p><code>canary</code> knows the portfolio risk state, but not enough to safely name a trade. A concrete reposition requires exact open lots, option-leg availability, live bid/ask, spread quality, chain liquidity, margin impact, account currency, and closing/opening semantics. If <code>canary</code> emits &#34;sell 50 BB calls&#34;, it silently becomes a planner, chain screener, liquidity gate, and execution preflight. That makes the canary harder to test and easier to misuse.</p>
+<p>The canary&#39;s contract should stay: &#34;given current account, positions, and regime evidence, what risk posture are we in?&#34; It may say <code>WATCH</code>, <code>DELEVER</code>, or <code>LIQUIDATE</code>, and why. It should not say which contract to trade.</p>
+<h2 id="minimal-actors">Minimal actors</h2>
+<ul>
+<li>User: chooses policy, hedge permissions, and final selection.</li>
+<li>Agent: interviews the user, explains tradeoffs, invokes CLI/MCP tools, and never bypasses preview or approval gates.</li>
+<li>Evidence tools: <code>account</code>, <code>positions</code>, <code>regime</code>, <code>canary</code>, <code>quote</code>, and <code>chain</code>; each remains narrow and independently useful.</li>
+<li>Risk planner: <code>risk-plan</code>; the only component that composes evidence into candidate repositions.</li>
+<li>Broker validator: <code>order-preview</code>; computes broker-side what-if, margin, cost, and rejection details without submitting.</li>
+<li>Execution layer: out of scope for this design; if added later, it must accept only approved preview artifacts.</li>
+</ul>
+<h2 id="production-agent-contract">Production agent contract</h2>
+<p>The agent can reliably operate the workflow only if its powers are narrow:</p>
+<ul>
+<li>It may choose which command to invoke next.</li>
+<li>It may ask the user for policy inputs: reduction-only vs hedges, premium cap, target exposure, and whether covered option sells are allowed.</li>
+<li>It may summarize evidence and candidate tradeoffs.</li>
+<li>It may select candidates for preview only from IDs emitted by <code>risk-plan</code>.</li>
+<li>It must not fabricate order drafts, quantities, strikes, expiries, hashes, or preview results.</li>
+<li>It must stop on missing, stale, degraded, or low-confidence inputs unless the user explicitly chooses a replay or diagnostic mode.</li>
+<li>It must surface every hard gate failure instead of &#34;working around&#34; it with another instrument.</li>
+</ul>
+<p>The deterministic tools own all stateful and numeric work:</p>
+<ul>
+<li><code>canary</code> classifies risk state.</li>
+<li><code>risk-plan</code> computes target breaches, candidate quantities, and candidate risk effects.</li>
+<li><code>chain</code> and <code>quote</code> validate marketability.</li>
+<li><code>order-preview</code> validates broker-side impact.</li>
+<li>A future submitter, if added, validates preview hash, expiry, user confirmation, and account guardrails.</li>
+</ul>
+<p>In other words: the agent is allowed to operate the checklist; it is not allowed to become the checklist.</p>
+<h2 id="reduced-orchestration-flow">Reduced orchestration flow</h2>
+<p>Default CLI flow:</p>
+<pre><code>ibkr risk-plan --json \
+  | ibkr order-preview --input - --json</code></pre>
+<p>Interactive CLI flow:</p>
+<pre><code>ibkr risk-plan
+ibkr order-preview --input risk-plan.json</code></pre>
+<p>Agent flow:</p>
+<ol>
+<li>Agent asks the user for policy choices only when defaults are insufficient: reduction-only vs hedges, maximum hedge premium, maximum single-name exposure, and whether option sells are allowed.</li>
+<li>Agent invokes <code>ibkr risk-plan --json</code> or the equivalent read-only MCP planner.</li>
+<li><code>risk-plan</code> refreshes account, positions, regime, and canary itself.</li>
+<li><code>risk-plan</code> builds candidate reductions from existing positions first.</li>
+<li>If hedges are explicitly allowed, <code>risk-plan</code> queries chains/quotes and adds debit-only hedge candidates that pass liquidity gates.</li>
+<li>Agent presents the ranked plan and asks the user which candidates to preview.</li>
+<li>Agent invokes <code>order-preview</code> for the selected candidates.</li>
+<li>Agent presents preview impact and stops. Submission is a separate future approval path.</li>
+</ol>
+<p>Scheduled monitoring flow:</p>
+<ol>
+<li>Scheduler or agent invokes <code>ibkr canary --json</code>.</li>
+<li>If the decision is <code>HOLD</code>, log the artifact and stop.</li>
+<li>If the decision is <code>WATCH</code>, generate a staged <code>risk-plan</code> but do not preview unless the user or policy asks for it.</li>
+<li>If the decision is <code>DELEVER</code> or <code>LIQUIDATE</code>, generate a <code>risk-plan</code>, present the highest-priority candidates, and ask for preview approval.</li>
+<li>If margin danger is immediate, <code>risk-plan</code> prioritizes closing existing exposure and raising liquidity before any hedge candidate.</li>
+<li>If any source is stale, degraded, computing, or below required confidence, the agent reports the blocker and asks whether to wait, refresh, or run a diagnostic. It does not invent a substitute signal.</li>
+</ol>
+<p>External piping from evidence tools remains a diagnostic path, not the canonical path:</p>
+<pre><code>ibkr canary --json \
+  | ibkr risk-plan --from-canary - --refresh account,positions,regime --json</code></pre>
+<p>The refresh is load-bearing. It prevents a stale canary file from being combined with fresh chains and current account margin.</p>
+<h2 id="risk-plan-responsibilities">Risk-plan responsibilities</h2>
+<p><code>risk-plan</code> owns policy and composition:</p>
+<ul>
+<li>Fetch a coherent snapshot from account, positions, regime, and canary.</li>
+<li>Enforce source freshness and reject incompatible timestamps unless the user passes an explicit replay flag.</li>
+<li>Prefer reducing existing exposure before opening new hedges.</li>
+<li>Convert canary findings into target breaches, for example gross delta, net delta, and largest single-name delta.</li>
+<li>Generate candidate intents with estimated risk effects.</li>
+<li>Query quotes/chains only for candidates that need executable market context.</li>
+<li>Reject candidates with stale quotes, missing bid/ask, untradable chains, excessive spreads, or missing greeks needed for the estimate.</li>
+<li>Mark every candidate as preview-required.</li>
+</ul>
+<p>It does not submit orders.</p>
+<p>It should also emit enough metadata for an agent to operate safely:</p>
+<ul>
+<li><code>source_hashes</code> for account, positions, regime, and canary inputs.</li>
+<li><code>policy</code> values used for thresholds, hedge permissions, spread limits, and premium caps.</li>
+<li><code>blocked_reasons</code> when no candidate can be produced.</li>
+<li><code>candidate_ids</code> that are stable within one artifact and unique across candidates.</li>
+<li><code>expires_at</code> so an old plan cannot be previewed as if it were fresh.</li>
+<li><code>requires_user_approval</code> on every candidate.</li>
+</ul>
+<h2 id="account-and-positions-roles">Account and positions roles</h2>
+<p><code>account</code> sets hard constraints:</p>
+<ul>
+<li>net liquidation</li>
+<li>base currency</li>
+<li>current cushion</li>
+<li>look-ahead cushion</li>
+<li>available funds</li>
+<li>buying power</li>
+<li>account type and margin context</li>
+</ul>
+<p>If margin is dangerous, margin relief outranks concentration cleanup and hedge elegance.</p>
+<p><code>positions</code> supplies the actual reduction surface:</p>
+<ul>
+<li>exact stock and option quantities</li>
+<li>closing side (<code>SELL</code> long stock, <code>BUY_TO_CLOSE</code> short option, <code>SELL_TO_CLOSE</code> long option)</li>
+<li>per-underlying market value</li>
+<li>per-underlying dollar delta</li>
+<li>option greeks and greeks coverage</li>
+<li>option bid/ask, marks, and warnings</li>
+<li>grouped exposure by underlying</li>
+</ul>
+<p>Candidate reductions should be derived from current positions, not from canary prose.</p>
+<h2 id="canary-contract-changes">Canary contract changes</h2>
+<p>No order-level fields belong in <code>canary</code>.</p>
+<p>The current canary output is sufficient for a first <code>risk-plan</code> implementation because it already carries the core planner inputs: source timestamps, margin cushion, look-ahead cushion, gross exposure, net delta, gross delta, largest market concentration, largest delta concentration, market confidence, and warnings.</p>
+<p>Small additions can make <code>risk-plan</code> simpler and more deterministic:</p>
+<pre><code>{
+  &#34;policy_version&#34;: &#34;canary.v1&#34;,
+  &#34;plan_hint&#34;: &#34;stage_reductions&#34;,
+  &#34;risk_signals&#34;: [
+    {
+      &#34;code&#34;: &#34;gross_delta_high&#34;,
+      &#34;severity&#34;: &#34;watch&#34;,
+      &#34;value_pct_nlv&#34;: 391,
+      &#34;soft_target_pct_nlv&#34;: 250,
+      &#34;hard_target_pct_nlv&#34;: 150
+    },
+    {
+      &#34;code&#34;: &#34;largest_delta_concentration&#34;,
+      &#34;underlying&#34;: &#34;NOW&#34;,
+      &#34;severity&#34;: &#34;watch&#34;,
+      &#34;value_pct_nlv&#34;: 118,
+      &#34;soft_target_pct_nlv&#34;: 75,
+      &#34;hard_target_pct_nlv&#34;: 35
+    }
+  ]
+}</code></pre>
+<p>These are still risk facts and planner hints, not trades. <code>risk-plan</code> remains free to recompute the same facts from account and positions and should treat canary signals as an input consistency check.</p>
+<p>If <code>risk_signals</code> disagree with fresh account or positions data, <code>risk-plan</code> should prefer the fresh account and positions data and report the mismatch as a warning. Canary is a classifier, not a source of executable truth.</p>
+<h2 id="reliability-invariants">Reliability invariants</h2>
+<p>These invariants are required before this workflow is safe for a large account:</p>
+<ul>
+<li>Typed artifacts only: <code>order-preview</code> refuses raw <code>canary</code>, raw <code>regime</code>, and arbitrary agent-written JSON.</li>
+<li>Freshness gates: live planning requires all source timestamps inside configured tolerances.</li>
+<li>Preview gate: every candidate must pass broker preview before any future submission path can see it.</li>
+<li>Hash gate: preview and future submission artifacts carry the source plan hash.</li>
+<li>Expiry gate: stale plans and stale previews are rejected.</li>
+<li>Scope gate: closing orders must match an existing position; opening hedges must be explicitly marked as opening.</li>
+<li>Permission gate: hedges, covered option sells, and any future submit action require explicit user policy.</li>
+<li>Kill-switch: any gateway disconnect, account mismatch, delayed data, or margin-preview rejection blocks execution.</li>
+<li>Audit trail: every artifact includes generated time, source hashes, policy, candidates, rejections, and warnings.</li>
+</ul>
+<h2 id="minimal-json-artifacts">Minimal JSON artifacts</h2>
+<p>Only two artifacts are required for the first implementation.</p>
+<p><code>risk_plan.v1</code>:</p>
+<pre><code>{
+  &#34;kind&#34;: &#34;risk_plan.v1&#34;,
+  &#34;generated_at&#34;: &#34;2026-05-29T20:43:00+02:00&#34;,
+  &#34;decision&#34;: &#34;WATCH&#34;,
+  &#34;confidence&#34;: &#34;medium-low&#34;,
+  &#34;source_as_of&#34;: {
+    &#34;account&#34;: &#34;2026-05-29T17:45:10Z&#34;,
+    &#34;positions&#34;: &#34;2026-05-29T19:45:10+02:00&#34;,
+    &#34;regime&#34;: &#34;2026-05-29T19:45:18+02:00&#34;
+  },
+  &#34;targets&#34;: {
+    &#34;gross_delta_pct_nlv&#34;: 250,
+    &#34;net_delta_pct_nlv&#34;: 150,
+    &#34;single_name_delta_pct_nlv&#34;: 75
+  },
+  &#34;candidates&#34;: [
+    {
+      &#34;id&#34;: &#34;reduce-now-1&#34;,
+      &#34;intent&#34;: &#34;reduce_single_name_delta&#34;,
+      &#34;priority&#34;: 1,
+      &#34;scope&#34;: &#34;existing_position&#34;,
+      &#34;rationale&#34;: &#34;NOW is the largest dollar-delta concentration.&#34;,
+      &#34;estimated_effect&#34;: {
+        &#34;largest_delta_pct_nlv_after&#34;: 75
+      },
+      &#34;order_drafts&#34;: [
+        {
+          &#34;side&#34;: &#34;SELL_TO_CLOSE&#34;,
+          &#34;sec_type&#34;: &#34;OPT&#34;,
+          &#34;symbol&#34;: &#34;NOW&#34;,
+          &#34;expiry&#34;: &#34;YYYY-MM-DD&#34;,
+          &#34;strike&#34;: 0,
+          &#34;right&#34;: &#34;C&#34;,
+          &#34;quantity&#34;: 1,
+          &#34;order_type&#34;: &#34;LMT&#34;,
+          &#34;limit_policy&#34;: &#34;passive_mid&#34;
+        }
+      ],
+      &#34;requires_preview&#34;: true
+    }
+  ]
+}</code></pre>
+<p><code>order_preview.v1</code>:</p>
+<pre><code>{
+  &#34;kind&#34;: &#34;order_preview.v1&#34;,
+  &#34;source_plan_hash&#34;: &#34;sha256:...&#34;,
+  &#34;accepted_candidates&#34;: [&#34;reduce-now-1&#34;],
+  &#34;rejected_candidates&#34;: [],
+  &#34;margin_impact&#34;: {
+    &#34;current_excess_liquidity&#34;: 0,
+    &#34;post_trade_excess_liquidity&#34;: 0
+  },
+  &#34;submit_allowed&#34;: false
+}</code></pre>
+<h2 id="defaults">Defaults</h2>
+<p>First implementation defaults should be conservative:</p>
+<ul>
+<li>reductions only</li>
+<li>no naked short options</li>
+<li>no option-opening hedge unless <code>--allow-hedges</code> is set</li>
+<li>debit hedges only when enabled</li>
+<li>maximum hedge premium defaults to <code>0.75%</code> of NLV</li>
+<li>no candidate from stale option quotes or untradable chains</li>
+<li>no submission path</li>
+</ul>
+<h2 id="non-goals">Non-goals</h2>
+<ul>
+<li>No automatic trading.</li>
+<li>No direct <code>canary | order-preview</code> path.</li>
+<li>No MCP order submission.</li>
+<li>No optimizer that tries to find a mathematically perfect portfolio.</li>
+<li>No tax-lot optimization in the first version.</li>
+<li>No naked short-option strategy generation.</li>
+</ul>
+<h2 id="open-questions">Open questions</h2>
+<ul>
+<li>Should <code>risk-plan</code> default targets be user-configurable in config, flags, or both?</li>
+<li>Should candidate selection happen inside <code>risk-plan --select</code> or only in <code>order-preview --select</code>?</li>
+<li>Should hedge candidates use SPY only initially, or allow SPY/QQQ/SPX once SPX chain readiness is robust?</li>
+<li>Should <code>risk-plan</code> persist the last generated artifact for replay, or rely on explicit shell redirection?</li>
+</ul>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>
