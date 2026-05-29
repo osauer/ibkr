@@ -94,6 +94,65 @@ func TestComputeCanaryEarlyStressRequiresSecondIndependentCluster(t *testing.T) 
 	}
 }
 
+func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	spyPct := -2.7
+	vixPct := 2.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Decision != canaryDecisionWatch {
+		t.Fatalf("decision = %s, want WATCH for unconfirmed premarket SPY drop", res.Decision)
+	}
+	if !rowContains(res.Rows, "Index tape shock", "second pass") {
+		t.Fatalf("expected direct tape second-pass row, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
+	r.GammaZero.Band = "red"
+	spyPct := -2.6
+	vixPct := 12.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Decision != canaryDecisionDelever {
+		t.Fatalf("decision = %s, want DE-LEVER for confirmed SPY/VIX shock plus red cluster", res.Decision)
+	}
+	if !rowContains(res.Rows, "Index tape shock", "direct SPY stress is confirmed") {
+		t.Fatalf("expected confirmed direct tape row, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryStandaloneVIXSpikeWatches(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	spyPct := -0.2
+	vixPct := 18.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Decision != canaryDecisionWatch {
+		t.Fatalf("decision = %s, want WATCH for standalone VIX spike", res.Decision)
+	}
+	if !rowContains(res.Rows, "Index tape shock", "flashing early stress") {
+		t.Fatalf("expected early VIX tape row, rows: %+v", res.Rows)
+	}
+}
+
 func TestComputeCanaryGreenClustersAreNotAmbiguous(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
