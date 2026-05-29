@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-29 08:47 CEST
+Updated: 2026-05-29 12:28 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -35,6 +35,8 @@ Claude composes an answer that names which indicators are in which band, calls o
 Returns a compact ordered action table for scheduled portfolio stress checks. The canary combines account cushion, current exposures, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates into `Go`, `Watch`, `De-lever`, or `Liquidate` rows.
 
 The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `Watch`, while severe actions require confirmation from another stress channel or immediate margin danger. Missing, stale, degraded, or computing regime inputs become explicit ambiguity rows instead of being treated as safe.
+
+For a scheduler-friendly prompt that returns only the action table, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
 
 ### "Show me my SPY positions and any options on them."
 

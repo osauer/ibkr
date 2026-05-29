@@ -1,6 +1,6 @@
 # IBKR MCP server
 
-Updated: 2026-05-29 08:47 CEST
+Updated: 2026-05-29 12:28 CEST
 
 `ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
@@ -51,6 +51,8 @@ Generic MCP configuration:
 - Streaming stock and ETF quote resources through `ibkr://quote/{symbol}`.
 
 The full schema is in the [MCP tools reference](../reference/mcp-tools.md) and [MCP resources reference](../reference/mcp-resources.md).
+
+For a scheduled canary workflow that returns only concrete stress-check action rows, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
 
 ## Current execution boundary
 

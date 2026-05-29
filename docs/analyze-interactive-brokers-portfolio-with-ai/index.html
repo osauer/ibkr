@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-29T08:47:00+02:00",
+    "dateModified": "2026-05-29T12:28:00+02:00",
     "description": "ibkr lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed,...",
     "headline": "Analyze an Interactive Brokers portfolio with AI",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="analyze-an-interactive-brokers-portfolio-with-ai">Analyze an Interactive Brokers portfolio with AI</h1>
-<p>Updated: 2026-05-29 08:47 CEST</p>
+<p>Updated: 2026-05-29 12:28 CEST</p>
 <p><code>ibkr</code> lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls <code>ibkr mcp</code>; <code>ibkr</code> reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.</p>
 <p>This page is for searches such as &#34;analyze Interactive Brokers portfolio with AI&#34;, &#34;AI assistant for IBKR portfolio analysis&#34;, &#34;Claude IBKR positions options analysis&#34;, and &#34;natural language TWS API portfolio analysis&#34;.</p>
 <h2 id="portfolio-questions-it-handles">Portfolio questions it handles</h2>
@@ -193,6 +193,7 @@ ibkr_canary</code></pre>
 <li>current risk-regime context when relevant</li>
 </ul>
 <p>For a fuller semi-professional portfolio-review workflow, use the prompt in <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md">examples/ibkr_portfolio_analysis_prompt.md</a>.</p>
+<p>For scheduled stress monitoring, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
 <p>For the Claude-specific workflow, including a sanitized sample review and a shorter paste-ready prompt, see <a href="../portfolio-review-with-claude-ibkr/index.html">Portfolio review with Claude and IBKR</a>.</p>
 <h2 id="install">Install</h2>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
