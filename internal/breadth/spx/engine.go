@@ -101,6 +101,12 @@ type Engine struct {
 	// take mu.RLock to inspect — distinct from refreshMu so a poller
 	// during a long refresh doesn't block on the fetch loop.
 	refreshing bool
+	// retryPending is set while Run is sleeping between below-threshold
+	// bootstrap/catch-up refresh attempts. No fetch is in flight during
+	// that wait, but the scheduler is still actively trying to converge
+	// the withheld snapshot; daemon idle shutdown must not kill the
+	// process in that gap.
+	retryPending bool
 }
 
 // New constructs an Engine. Loads any persisted state from store
@@ -198,6 +204,26 @@ func (e *Engine) IsRefreshing() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.refreshing
+}
+
+// IsBusy reports whether the engine has refresh work in progress or a
+// scheduled below-threshold retry that should keep the owning daemon alive.
+//
+// A breadth cold-start often converges over multiple refresh attempts as
+// IBKR's contract-details bucket refills. The refresh itself may finish
+// quickly, then Run sleeps belowThresholdRetryDelay before continuing. From
+// the daemon's lifecycle point of view that sleep is still active bootstrap
+// work, even though IsRefreshing is false.
+func (e *Engine) IsBusy() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.refreshing || e.retryPending
+}
+
+func (e *Engine) setRetryPending(pending bool) {
+	e.mu.Lock()
+	e.retryPending = pending
+	e.mu.Unlock()
 }
 
 // MarkPendingBootstrap pre-sets refreshing=true if Run() would fire a

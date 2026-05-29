@@ -3467,9 +3467,9 @@ func (s *Server) subsystemHealth(connected bool) []rpc.SubsystemHealth {
 	}
 	out = append(out, gamma)
 	breadth := rpc.SubsystemHealth{Name: "breadth", Status: gatewayStatus}
-	if s.breadth != nil && s.breadth.IsRefreshing() {
+	if s.breadth != nil && s.breadth.IsBusy() {
 		breadth.Status = "computing"
-		breadth.Message = "S&P 500 breadth refresh is running"
+		breadth.Message = "S&P 500 breadth refresh is running or waiting to retry"
 	}
 	out = append(out, breadth)
 	return out
@@ -3680,8 +3680,8 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 	}
 
 	snap, ok := s.breadth.Get()
-	refreshing := s.breadth.IsRefreshing()
-	res.State = classifyBreadthState(ok, refreshing)
+	active := s.breadth.IsBusy()
+	res.State = classifyBreadthState(ok, active)
 
 	if ok {
 		res.PctAbove50DMA = snap.PctAbove50DMA
@@ -3707,22 +3707,24 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 }
 
 // classifyBreadthState projects the engine's (snapshot exists, refresh
-// in flight) pair onto the wire-visible BreadthState. This is the
+// active) pair onto the wire-visible BreadthState. This is the
 // single source of truth — handleBreadthSPX and any future consumer
 // must derive State the same way. The four states:
 //
-//   - ready: snapshot exists and no refresh is in flight
-//   - computing: a refresh is in flight (snapshot may or may not exist)
-//   - cold: no snapshot AND not refreshing — rare; only seen briefly
-//     between daemon Start and postConnectSetup launching the engine,
-//     or after a coverage-threshold-failed refresh
+//   - ready: snapshot exists and no refresh is active
+//   - computing: a refresh is in flight or waiting to retry (snapshot
+//     may or may not exist)
+//   - cold: no snapshot AND no active refresh/retry — rare; only seen
+//     briefly between daemon Start and postConnectSetup launching the
+//     engine, or after a coverage-threshold-failed refresh exhausts
+//     its retry budget
 //   - degraded: reserved; v0.27.3 engine refuses to persist below
 //     threshold so this state isn't currently produced. The enum
 //     defines it so a future schema can adopt it without a contract
 //     bump.
-func classifyBreadthState(snapshotExists, refreshing bool) rpc.BreadthState {
+func classifyBreadthState(snapshotExists, active bool) rpc.BreadthState {
 	switch {
-	case refreshing:
+	case active:
 		return rpc.BreadthStateComputing
 	case snapshotExists:
 		return rpc.BreadthStateReady

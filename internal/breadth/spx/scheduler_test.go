@@ -237,6 +237,65 @@ func TestRunBootstrapBelowThresholdSchedulesRetry(t *testing.T) {
 	}
 }
 
+// TestRunBootstrapBelowThresholdStaysBusyDuringRetryBackoff pins the
+// daemon-lifecycle contract: a below-threshold bootstrap is not idle just
+// because the current Refresh call finished. Run is sleeping for
+// belowThresholdRetryDelay so IBKR's buckets can refill, and idle shutdown
+// must not kill the daemon in that gap.
+func TestRunBootstrapBelowThresholdStaysBusyDuringRetryBackoff(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 18, 17, 0, 0, 0, loc)
+	members := []string{"OK1", "OK2", "OK3", "OK4", "OK5", "F1", "F2", "F3", "F4", "F5"}
+	fake := &FakeBarFetcher{
+		Bars: map[string][]Bar{
+			"OK1": makeSeries(100, 1, WindowSize, now),
+			"OK2": makeSeries(50, 1, WindowSize, now),
+			"OK3": makeSeries(75, 1, WindowSize, now),
+			"OK4": makeSeries(60, 1, WindowSize, now),
+			"OK5": makeSeries(80, 1, WindowSize, now),
+		},
+		Errors: map[string]error{
+			"F1": errors.New("gateway: pacing"),
+			"F2": errors.New("gateway: pacing"),
+			"F3": errors.New("gateway: pacing"),
+			"F4": errors.New("gateway: pacing"),
+			"F5": errors.New("gateway: pacing"),
+		},
+	}
+	e := New(NewStore(t.TempDir()), fake, Options{Clock: frozenClock(now), Workers: 4})
+	e.members = members
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		cov, mc := e.LastRefreshCoverage()
+		if cov == 5 && mc == 10 && !e.IsRefreshing() {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	cov, mc := e.LastRefreshCoverage()
+	if cov != 5 || mc != 10 {
+		t.Fatalf("bootstrap coverage: want (5, 10), got (%d, %d)", cov, mc)
+	}
+	if e.IsRefreshing() {
+		t.Fatal("refresh should have finished before checking retry-backoff state")
+	}
+	if !e.IsBusy() {
+		t.Fatal("below-threshold retry backoff should keep breadth engine busy")
+	}
+}
+
 // TestNextWaitErroredOverridesRetries pins the v0.30.1 Bug 3 fix: a
 // transport error from Refresh must take precedence over the
 // below-threshold retry state. Otherwise a startup-time gateway
