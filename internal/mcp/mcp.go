@@ -90,10 +90,24 @@ func (s *Server) SetContextDialer(d func(context.Context) (*dial.Conn, error)) {
 	s.dialer = d
 }
 
+// ServeOptions controls optional lifecycle guards for the stdio server.
+type ServeOptions struct {
+	// IdleTimeout exits the server after this much time without an MCP
+	// request. Active resource subscriptions suppress the timeout because
+	// the server is still doing useful work even if stdin is quiet.
+	IdleTimeout time.Duration
+}
+
 // Serve runs the MCP loop until in returns io.EOF (client disconnect), ctx is
 // cancelled, or the client sends the MCP shutdown/exit lifecycle. Returns nil
 // on clean shutdown. Active resource subscriptions are cancelled before return
 // so per-sub goroutines unwind and the daemon-side refcount decrements promptly.
+func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	return s.ServeWithOptions(ctx, in, out, ServeOptions{})
+}
+
+// ServeWithOptions is Serve with explicit lifecycle controls for production
+// stdio hosts. Tests and in-process integrations usually call Serve directly.
 //
 // The scan loop runs in a goroutine because bufScan.Scan() is a blocking
 // read on stdin and on darwin os.Stdin uses a blocking syscall.read (not
@@ -103,7 +117,7 @@ func (s *Server) SetContextDialer(d func(context.Context) (*dial.Conn, error)) {
 // reader goroutine stays parked on the kernel read and is reaped when the
 // process exits. Without this, SIGTERM was a no-op on the MCP server and
 // only SIGKILL terminated it.
-func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+func (s *Server) ServeWithOptions(ctx context.Context, in io.Reader, out io.Writer, opts ServeOptions) error {
 	s.out = bufio.NewWriter(out)
 	s.serveCtx = ctx
 	defer s.out.Flush()
@@ -135,10 +149,41 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		}
 	}()
 
+	var idleTimer *time.Timer
+	var idle <-chan time.Time
+	stopIdleTimer := func() {
+		if idleTimer == nil {
+			return
+		}
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idle = nil
+	}
+	resetIdleTimer := func() {
+		if opts.IdleTimeout <= 0 {
+			return
+		}
+		stopIdleTimer()
+		idleTimer = time.NewTimer(opts.IdleTimeout)
+		idle = idleTimer.C
+	}
+	defer stopIdleTimer()
+	resetIdleTimer()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-idle:
+			if s.hasActiveSubscriptions() {
+				resetIdleTimer()
+				continue
+			}
+			return nil
 		case line, ok := <-lines:
 			if !ok {
 				select {
@@ -159,6 +204,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			if s.handle(ctx, line) {
 				return nil
 			}
+			resetIdleTimer()
 		}
 	}
 }

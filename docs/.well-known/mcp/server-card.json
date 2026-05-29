@@ -2,7 +2,7 @@
   "serverInfo": {
     "name": "ibkr",
     "title": "IBKR MCP Server",
-    "version": "1.3.2",
+    "version": "1.4.0",
     "description": "Local Interactive Brokers MCP server for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
     "homepage": "https://osauer.dev/ibkr/",
     "repository": "https://github.com/osauer/ibkr",
@@ -212,6 +212,11 @@
       "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
     },
     {
+      "name": "ibkr_canary",
+      "description": "Portfolio stress canary for scheduled Go, Watch, De-lever, or Liquidate action checks.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    },
+    {
       "name": "ibkr_size",
       "description": "Fixed-fractional position sizing math against live net liquidation value; never an order ticket.",
       "inputSchema": {
@@ -261,6 +266,7 @@
     "Claude IBKR portfolio review",
     "Interactive Brokers portfolio analysis AI",
     "agentic IBKR portfolio analysis",
+    "portfolio stress canary",
     "agentic trading research",
     "TWS MCP server",
     "IB Gateway MCP",

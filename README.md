@@ -20,6 +20,7 @@ Use it from a shell:
 ibkr status
 ibkr positions --by underlying
 ibkr regime
+ibkr canary
 ibkr watch IBM --add
 ibkr watch
 ibkr calendar --market us --date 2026-05-25
@@ -36,6 +37,8 @@ Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP 
 > "Show my AAPL exposure, including option deltas."
 >
 > "How does the market regime look today?"
+>
+> "Should I hold, watch, de-lever, or liquidate risk?"
 >
 > "Is Xetra open on Whit Monday?"
 >
@@ -84,18 +87,19 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 - **Market breadth.** S&P 500 participation from constituent daily bars: percent above 50-DMA, percent above 200-DMA, and fresh 52-week highs/lows. A fresh cache is instant; first-ever cold start can take about an hour because of IBKR pacing.
 - **Dealer gamma.** Best-effort SPY+SPX zero-gamma and concentration view, with scope controls and entitlement-graceful fallback to SPY when SPX data is unavailable. Treat the signed level as a regime hint, not a precise trading level.
 - **Risk regime.** One call returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
+- **Portfolio canary.** `ibkr canary` and MCP `ibkr_canary` produce a compact `Go` / `Watch` / `De-lever` / `Liquidate` table from margin cushion, exposure, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates for scheduled stress checks.
 
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 
 For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [IBKR Claude Desktop MCP setup guide](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/), [best IBKR MCP server for Claude Code guide](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [portfolio review with Claude and IBKR guide](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
 
-For a ready-to-run portfolio review prompt, see [examples/ibkr_portfolio_analysis_prompt.md](examples/ibkr_portfolio_analysis_prompt.md).
+For ready-to-run prompts, see [examples/ibkr_portfolio_analysis_prompt.md](examples/ibkr_portfolio_analysis_prompt.md) for portfolio review and [examples/ibkr_portfolio_canary_prompt.md](examples/ibkr_portfolio_canary_prompt.md) for scheduled stress checks.
 
 ## Pick your path
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, and regime tools that the CLI exposes as JSON. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, regime, and canary tools that the CLI exposes as JSON. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -163,6 +167,7 @@ $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, price: .price, chg: .ch
 $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
 $ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
+$ ibkr canary --json | jq '.decision, .rows[] | {title, decision, action}'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```

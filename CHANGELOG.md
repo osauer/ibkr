@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.4.0 — 2026-05-29 08:47 CEST
+
+### What's new
+
+- Added `ibkr canary` and MCP `ibkr_canary`, a compact portfolio stress canary for scheduled checks that recommends `Go`, `Watch`, `De-lever`, or `Liquidate` actions from account margin, current exposures, concentration, options risk, market regime, and data-quality ambiguity.
+- The canary is designed for pre-market, after-hours, and regular-session monitoring: it separates degraded or incomplete gamma, breadth, funding, and credit inputs from true stress signals instead of silently treating missing data as safe.
+- Direct SPY/VIX tape-shock coverage now catches pre-market or after-hours SPY drawdowns and VIX spikes through the canary's `Index tape shock` row, with high-precision escalation that requires confirmation before `De-lever`.
+- Option context is clearer outside U.S. listed-option regular hours: held options now carry `options_closed` warnings, and option-chain guidance distinguishes closed-session reference data from executable quotes.
+
+### Added
+
+- Added the `ibkr canary [--json]` CLI command.
+- Added MCP tool `ibkr_canary` for fast scheduled portfolio stress checks.
+- Added `examples/ibkr_portfolio_canary_prompt.md` as a ready-to-run scheduled MCP prompt.
+- Added canary rows for immediate margin safety, index tape shock, market stress, equity/options exposure, largest concentration, options convexity, and ambiguity/data-quality gating.
+
+### Changed
+
+- Improved canary text output with a simpler hero, visible escalation ladder, highlighted active stage, confidence label, concrete action row titles, and a terminal progress message while IBKR data populates.
+- Canary confidence now drops when regime inputs are ambiguous, partial, degraded, or unranked, without escalating solely because data is incomplete.
+- MCP descriptions now steer agents more clearly between held-option valuation via `ibkr_positions`, option-chain selection via `ibkr_chain`, stress monitoring via `ibkr_canary`, and the underlying regime evidence via `ibkr_regime`.
+- MCP stdio sessions now exit after a five-minute idle window when there are no active resource subscriptions, reducing stale local server processes in desktop clients.
+
+### Fixed
+
+- Closed U.S. option sessions no longer make frozen option bid/ask data look tradable in chain summaries.
+- Held option rows now explicitly warn when option quote/model fields are closed-session context rather than executable liquidity.
+
 ## v1.3.2 — 2026-05-28 23:15 CEST
 
 ### What's new

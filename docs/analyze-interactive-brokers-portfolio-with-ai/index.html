@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-28T07:07:00+02:00",
+    "dateModified": "2026-05-29T08:47:00+02:00",
     "description": "ibkr lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed,...",
     "headline": "Analyze an Interactive Brokers portfolio with AI",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="analyze-an-interactive-brokers-portfolio-with-ai">Analyze an Interactive Brokers portfolio with AI</h1>
-<p>Updated: 2026-05-28 07:07 CEST</p>
+<p>Updated: 2026-05-29 08:47 CEST</p>
 <p><code>ibkr</code> lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls <code>ibkr mcp</code>; <code>ibkr</code> reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.</p>
 <p>This page is for searches such as &#34;analyze Interactive Brokers portfolio with AI&#34;, &#34;AI assistant for IBKR portfolio analysis&#34;, &#34;Claude IBKR positions options analysis&#34;, and &#34;natural language TWS API portfolio analysis&#34;.</p>
 <h2 id="portfolio-questions-it-handles">Portfolio questions it handles</h2>
@@ -169,8 +169,9 @@
 <li>&#34;What is my SPY exposure after options?&#34;</li>
 <li>&#34;What are the next option expiries and implied moves for my top holdings?&#34;</li>
 <li>&#34;How does today&#39;s risk regime affect this portfolio?&#34;</li>
+<li>&#34;Should I hold, watch, de-lever, or liquidate risk if stress is evident?&#34;</li>
 </ul>
-<p>The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, and risk-regime context. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, and plan sizing without exposing order-entry tools.</p>
+<p>The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, risk-regime context, and the portfolio canary. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, stress checks, and plan sizing without exposing order-entry tools.</p>
 <h2 id="why-this-is-better-than-copy-paste-analysis">Why this is better than copy-paste analysis</h2>
 <p>Manual portfolio analysis usually means pasting account balances, positions, and option chains into a chat. That is slow, stale, and easy to redact incorrectly. <code>ibkr mcp</code> keeps the broker connection local and returns only the data requested for the current question.</p>
 <p>The host still receives account-sensitive data when you ask it to analyze your account. Use a host and model policy you trust. The <code>ibkr</code> side of the broker connection stays local, and the current public MCP surface is limited to analysis and sizing.</p>
@@ -181,7 +182,8 @@
 <pre><code>ibkr_account
 ibkr_positions
 ibkr_watch
-ibkr_regime</code></pre>
+ibkr_regime
+ibkr_canary</code></pre>
 <p>Expected answer shape:</p>
 <ul>
 <li>account-level cash, buying power, margin, and daily P&amp;L</li>
