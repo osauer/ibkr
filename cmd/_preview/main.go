@@ -17,6 +17,7 @@
 //	go run cmd/_preview/main.go scan
 //	go run cmd/_preview/main.go size
 //	go run cmd/_preview/main.go status
+//	go run cmd/_preview/main.go canary
 //
 // Color is forced on so a tee'd capture (`… | tee /tmp/preview.txt`) keeps
 // the ANSI escapes that screenshot tools like freezer.dev / ray.so /
@@ -50,8 +51,9 @@ func main() {
 		"size":           func() { cli.PreviewRenderSize(env, fixtureSize()) },
 		"status":         func() { cli.PreviewRenderStatus(env, fixtureStatus()) },
 		"regime":         func() { cli.PreviewRenderRegime(env, fixtureRegime()) },
+		"canary":         func() { cli.PreviewRenderCanary(env, fixtureCanary()) },
 	}
-	order := []string{"status", "account", "positions", "positions-flat", "chain", "chain-strikes", "quote", "history", "scan", "size", "regime"}
+	order := []string{"status", "account", "positions", "positions-flat", "chain", "chain-strikes", "quote", "history", "scan", "size", "regime", "canary"}
 
 	if which == "all" {
 		for i, key := range order {
@@ -65,7 +67,7 @@ func main() {
 	fn, ok := screens[which]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown preview: %q\n", which)
-		fmt.Fprintln(os.Stderr, "screens: account | positions | positions-flat | chain | chain-strikes | quote | history | scan | size | status | regime | all")
+		fmt.Fprintln(os.Stderr, "screens: account | positions | positions-flat | chain | chain-strikes | quote | history | scan | size | status | regime | canary | all")
 		os.Exit(2)
 	}
 	fn()
@@ -381,6 +383,56 @@ func fixtureStatus() *rpc.HealthResult {
 		// reqID feed type to honestly report). Renderer falls back to
 		// MarketDataLive when empty.
 	}
+}
+
+func fixtureCanary() *cli.CanaryResult {
+	acct := *fixtureAccount()
+	pos := fixturePositions()
+	regime := *fixtureRegime()
+	regime.AsOf = time.Date(2026, 5, 29, 12, 40, 0, 0, time.UTC)
+	regime.Composite = rpc.RegimeComposite{
+		Verdict:              "Stress signal present",
+		GreenCount:           3,
+		YellowCount:          3,
+		RedCount:             2,
+		RankedCount:          8,
+		ClusterGreenCount:    2,
+		ClusterYellowCount:   2,
+		ClusterRedCount:      2,
+		ClusterRankedCount:   6,
+		ClusterUnrankedCount: 0,
+	}
+	regime.VIXTermStructure.Status = rpc.RegimeStatusOK
+	regime.VIXTermStructure.Band = "red"
+	regime.VIXTermStructure.VIXChangePct = f64(18.4)
+	regime.HYGSPYDivergence.Status = rpc.RegimeStatusOK
+	regime.HYGSPYDivergence.Band = "red"
+	regime.HYGSPYDivergence.SPYChangePct = f64(-2.1)
+	regime.CreditSpreads.Status = rpc.RegimeStatusOK
+	regime.CreditSpreads.Band = "yellow"
+	regime.FundingStress.Status = rpc.RegimeStatusOK
+	regime.FundingStress.Band = "green"
+	regime.USDJPY.Band = "green"
+	regime.GammaZero.Status = rpc.RegimeStatusOK
+	regime.GammaZero.Band = "yellow"
+	regime.Breadth.Band = "yellow"
+	regime.Breadth.Status = rpc.RegimeStatusOK
+
+	nlv := acct.NetLiquidation
+	pos.Portfolio.DollarDeltaBase = f64(nlv * 0.72)
+	pos.Portfolio.ExposureBase = []rpc.UnderlyingExposure{
+		{Underlying: "AAPL", MarketValueBase: nlv * 0.30, MarketValuePctNLV: f64(30), BaseCurrency: "EUR"},
+		{Underlying: "NVDA", MarketValueBase: nlv * 0.22, MarketValuePctNLV: f64(22), BaseCurrency: "EUR"},
+		{Underlying: "SPY", MarketValueBase: nlv * 0.10, MarketValuePctNLV: f64(10), BaseCurrency: "EUR"},
+	}
+
+	res := cli.ComputeCanary(cli.CanaryInput{
+		Account:   acct,
+		Positions: *pos,
+		Regime:    regime,
+		Now:       time.Date(2026, 5, 29, 12, 42, 0, 0, time.UTC),
+	})
+	return &res
 }
 
 func fixtureChain() *rpc.ChainExpiriesResult {

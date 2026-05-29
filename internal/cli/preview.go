@@ -53,3 +53,7 @@ func PreviewRenderStatus(env *Env, h *rpc.HealthResult) {
 func PreviewRenderRegime(env *Env, r *rpc.RegimeSnapshotResult) {
 	renderRegimeText(env, r)
 }
+
+func PreviewRenderCanary(env *Env, r *CanaryResult) {
+	renderCanaryText(env, env.Stdout, r)
+}

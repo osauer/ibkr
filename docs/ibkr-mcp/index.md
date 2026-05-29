@@ -1,10 +1,10 @@
 # IBKR MCP server
 
-Updated: 2026-05-29 12:28 CEST
+Updated: 2026-05-29 12:46 CEST
 
 `ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
-Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review and size plans without receiving order-entry tools.
+Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.
 
 ## Best fit
 
@@ -52,7 +52,7 @@ Generic MCP configuration:
 
 The full schema is in the [MCP tools reference](../reference/mcp-tools.md) and [MCP resources reference](../reference/mcp-resources.md).
 
-For a scheduled canary workflow that returns only concrete stress-check action rows, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
+For a scheduled canary workflow that returns the top stage, confidence, action, row table, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The first version is intentionally narrow: it gives the decision surface, while circuit breakers, notifications, and escalation policy can live in the host scheduler or a later `ibkr` release.
 
 ## Current execution boundary
 

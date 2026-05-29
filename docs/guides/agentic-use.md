@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-29 12:28 CEST
+Updated: 2026-05-29 12:46 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -36,7 +36,7 @@ Returns a compact ordered action table for scheduled portfolio stress checks. Th
 
 The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `Watch`, while severe actions require confirmation from another stress channel or immediate margin danger. Missing, stale, degraded, or computing regime inputs become explicit ambiguity rows instead of being treated as safe.
 
-For a scheduler-friendly prompt that returns only the action table, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
+For a scheduler-friendly prompt that preserves the top stage, confidence, action, table rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
 
 ### "Show me my SPY positions and any options on them."
 

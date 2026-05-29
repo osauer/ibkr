@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-29T12:28:00+02:00",
+    "dateModified": "2026-05-29T12:46:00+02:00",
     "description": "ibkr mcp makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same...",
     "headline": "Agentic use",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="agentic-use">Agentic use</h1>
-<p>Updated: 2026-05-29 12:28 CEST</p>
+<p>Updated: 2026-05-29 12:46 CEST</p>
 <p><code>ibkr mcp</code> makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.</p>
 <p>This page is for the human installing the plugin and wondering <em>&#34;what can I actually ask Claude with this?&#34;</em> For exact tool parameters and JSON envelopes, see the auto-generated <a href="../reference/mcp-tools.html">MCP tools reference</a>. For protocol mechanics, see the upstream <a href="https://modelcontextprotocol.io/">Model Context Protocol spec</a>.</p>
 <h2 id="setup">Setup</h2>
@@ -174,7 +174,7 @@
 <p>→ Claude invokes <code>ibkr_canary</code>.</p>
 <p>Returns a compact ordered action table for scheduled portfolio stress checks. The canary combines account cushion, current exposures, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates into <code>Go</code>, <code>Watch</code>, <code>De-lever</code>, or <code>Liquidate</code> rows.</p>
 <p>The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise <code>Watch</code>, while severe actions require confirmation from another stress channel or immediate margin danger. Missing, stale, degraded, or computing regime inputs become explicit ambiguity rows instead of being treated as safe.</p>
-<p>For a scheduler-friendly prompt that returns only the action table, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
+<p>For a scheduler-friendly prompt that preserves the top stage, confidence, action, table rows, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>. The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.</p>
 <h3 id="show-me-my-spy-positions-and-any-options-on-them">&#34;Show me my SPY positions and any options on them.&#34;</h3>
 <p>→ Claude invokes <code>ibkr_positions</code> with <code>{&#34;symbol&#34;: &#34;SPY&#34;}</code>.</p>
 <p>Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (delta/gamma/theta/vega) for the options, plus a <code>portfolio</code> block aggregating effective_delta in share-equivalents. Claude typically renders the stock holding alongside an aggregate Greek line (&#34;you&#39;re net long ~1,500 SPY-deltas after the options&#34;). Daily P&amp;L is included from IBKR&#39;s reqPnLSingle stream — <code>null</code> when the daemon hasn&#39;t pre-warmed that contract, never zero-substituted.</p>
