@@ -76,6 +76,8 @@ type CanaryMarketSummary struct {
 	PartialClusters    []string `json:"partial_clusters,omitempty"`
 	ComputingClusters  []string `json:"computing_clusters,omitempty"`
 	DegradedClusters   []string `json:"degraded_clusters,omitempty"`
+	SPYChangePct       *float64 `json:"spy_change_pct,omitempty"`
+	VIXChangePct       *float64 `json:"vix_change_pct,omitempty"`
 }
 
 type canarySeverity int
@@ -114,6 +116,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 
 	rows := []CanaryRow{
 		canaryMarginRow(res.Portfolio),
+		canaryTapeShockRow(res.Portfolio, res.Market),
 		canaryMarketRow(res.Market),
 		canaryExposureRow(res.Portfolio, res.Market),
 		canaryConcentrationRow(res.Portfolio, res.Market),
@@ -181,6 +184,8 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		YellowClusters:   r.Composite.ClusterYellowCount,
 		RankedClusters:   r.Composite.ClusterRankedCount,
 		UnrankedClusters: r.Composite.ClusterUnrankedCount,
+		SPYChangePct:     r.HYGSPYDivergence.SPYChangePct,
+		VIXChangePct:     r.VIXTermStructure.VIXChangePct,
 	}
 	clusters := map[string][]string{
 		"vol":     {r.VIXTermStructure.Band, r.VolOfVol.Band},
@@ -317,11 +322,38 @@ func canaryMarketRow(m CanaryMarketSummary) CanaryRow {
 	}
 }
 
+func canaryTapeShockRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
+	evidence := canaryTapeEvidence(m)
+	if m.SPYChangePct == nil && m.VIXChangePct == nil {
+		return CanaryRow{"Index tape shock", canaryDecisionWatch, "Direct SPY/VIX tape is unavailable; do not treat quiet regime clusters as complete overnight coverage.", evidence}
+	}
+	spyDrop := pctAtMost(m.SPYChangePct, -1.5)
+	spyHardDrop := pctAtMost(m.SPYChangePct, -2.5)
+	spyCrash := pctAtMost(m.SPYChangePct, -4)
+	vixSpike := pctAtLeast(m.VIXChangePct, 10)
+	vixHardSpike := pctAtLeast(m.VIXChangePct, 20)
+	confirmed := (spyDrop && vixSpike) || m.RedClusters >= 1 || canaryMarginPressure(p)
+	switch {
+	case spyCrash && confirmed:
+		return CanaryRow{"Index tape shock", canaryDecisionDelever, "Cut broad equity beta now; SPY is in a severe direct tape drawdown with confirmation.", evidence}
+	case spyHardDrop && confirmed:
+		return CanaryRow{"Index tape shock", canaryDecisionDelever, "Cut marginal longs and pre-hedge remaining beta; direct SPY stress is confirmed.", evidence}
+	case vixHardSpike && (spyDrop || m.RedClusters >= 1):
+		return CanaryRow{"Index tape shock", canaryDecisionDelever, "Reduce short-vol and high-beta exposure; direct VIX stress is confirmed.", evidence}
+	case spyHardDrop || vixHardSpike || (spyDrop && vixSpike):
+		return CanaryRow{"Index tape shock", canaryDecisionWatch, "Freeze new risk and run a second pass; direct overnight tape stress needs confirmation before major liquidation.", evidence}
+	case spyDrop || vixSpike:
+		return CanaryRow{"Index tape shock", canaryDecisionWatch, "Freeze new risk; direct SPY/VIX tape is flashing early stress but not enough for de-leveraging alone.", evidence}
+	default:
+		return CanaryRow{"Index tape shock", canaryDecisionHold, "No direct SPY/VIX overnight tape shock.", evidence}
+	}
+}
+
 func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
 	gross := derefPct(p.GrossExposurePctNLV)
 	delta := derefPct(p.NetDeltaPctNLV)
 	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV", gross, delta)
-	stressed := m.RedClusters >= 2
+	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
 	switch {
 	case (gross >= 150 || delta >= 125) && stressed:
 		return CanaryRow{"US equity/options exposure", canaryDecisionLiquidate, "Go near-flat on broad equity beta; close or hedge option delta first.", evidence}
@@ -340,7 +372,7 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 	}
 	pct := math.Abs(*p.LargestExposurePct)
 	evidence := fmt.Sprintf("%s %.0f%% NLV", p.LargestExposure, pct)
-	if pct >= 35 && m.RedClusters >= 2 {
+	if pct >= 35 && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
 		return CanaryRow{"Largest concentration", canaryDecisionDelever, "Trim this concentration before smaller positions; cap it below 25% NLV in stress.", evidence}
 	}
 	if pct >= 35 {
@@ -388,7 +420,7 @@ func canaryOverallRow(rows []CanaryRow, m CanaryMarketSummary, p CanaryPortfolio
 	if sev == canarySeverityLiquidate && len(m.AmbiguousClusters) > 2 && !canaryImmediateDanger(p) {
 		sev = canarySeverityDelever
 	}
-	if sev == canarySeverityDelever && m.RedClusters == 0 && !canaryMarginPressure(p) {
+	if sev == canarySeverityDelever && m.RedClusters == 0 && !canaryMarginPressure(p) && !canaryConfirmedTapeStress(m) {
 		sev = canarySeverityWatch
 	}
 	decision := sev.decision()
@@ -515,8 +547,45 @@ func canaryMarketEvidence(m CanaryMarketSummary) string {
 	if yellow == "" {
 		yellow = "none"
 	}
-	return fmt.Sprintf("%d red clusters (%s), %d yellow (%s), %d/%d ranked",
+	out := fmt.Sprintf("%d red clusters (%s), %d yellow (%s), %d/%d ranked",
 		m.RedClusters, red, m.YellowClusters, yellow, m.RankedClusters, m.RankedClusters+m.UnrankedClusters)
+	if m.SPYChangePct != nil || m.VIXChangePct != nil {
+		out += "; " + canaryTapeEvidence(m)
+	}
+	return out
+}
+
+func canaryTapeEvidence(m CanaryMarketSummary) string {
+	parts := []string{}
+	if m.SPYChangePct != nil {
+		parts = append(parts, fmt.Sprintf("SPY %+.2f%%", *m.SPYChangePct))
+	} else {
+		parts = append(parts, "SPY change unavailable")
+	}
+	if m.VIXChangePct != nil {
+		parts = append(parts, fmt.Sprintf("VIX %+.2f%%", *m.VIXChangePct))
+	} else {
+		parts = append(parts, "VIX change unavailable")
+	}
+	return strings.Join(parts, "; ")
+}
+
+func canaryConfirmedTapeStress(m CanaryMarketSummary) bool {
+	spyDrop := pctAtMost(m.SPYChangePct, -1.5)
+	spyHardDrop := pctAtMost(m.SPYChangePct, -2.5)
+	vixSpike := pctAtLeast(m.VIXChangePct, 10)
+	vixHardSpike := pctAtLeast(m.VIXChangePct, 20)
+	return (spyHardDrop && (vixSpike || m.RedClusters >= 1)) ||
+		(vixHardSpike && (spyDrop || m.RedClusters >= 1)) ||
+		(spyDrop && vixSpike && m.RedClusters >= 1)
+}
+
+func pctAtMost(v *float64, threshold float64) bool {
+	return v != nil && *v <= threshold
+}
+
+func pctAtLeast(v *float64, threshold float64) bool {
+	return v != nil && *v >= threshold
 }
 
 func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
