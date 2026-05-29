@@ -131,6 +131,9 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	if !rowContains(res.Rows, "Ambiguity filter", "verify weak clusters") {
 		t.Fatalf("expected degraded-gamma disclosure row, rows: %+v", res.Rows)
 	}
+	if res.Confidence != "medium-low" {
+		t.Fatalf("confidence = %q, want medium-low for degraded gamma", res.Confidence)
+	}
 }
 
 func TestComputeCanarySeparatesPartialFromAmbiguousClusters(t *testing.T) {
@@ -195,8 +198,9 @@ func TestRenderCanaryTextShowsEscalationLadder(t *testing.T) {
 	renderCanaryText(&Env{}, &out, &res)
 	got := out.String()
 	for _, want := range []string{
-		"Escalation   GO > WATCH > [DE-LEVER] CURRENT > LIQUIDATE",
-		"Current      [DE-LEVER] CURRENT",
+		"Stage      [De-lever]",
+		"Confidence High",
+		"Escalate   Go > Watch > [De-lever] > Liquidate",
 		"Title                        Stage",
 	} {
 		if !strings.Contains(got, want) {
@@ -220,8 +224,11 @@ func TestRenderCanaryTextColorsCurrentStage(t *testing.T) {
 	var out bytes.Buffer
 	renderCanaryText(&Env{Color: true}, &out, &res)
 	got := out.String()
-	if !strings.Contains(got, ansiBold+ansiYellow+"[WATCH]"+ansiReset+ansiReset+" CURRENT") {
+	if !strings.Contains(got, ansiBold+ansiYellow+"[Watch]"+ansiReset+ansiReset) {
 		t.Fatalf("current WATCH stage is not bold yellow:\n%q", got)
+	}
+	if strings.Contains(got, "CURRENT") {
+		t.Fatalf("render should not repeat CURRENT:\n%q", got)
 	}
 }
 

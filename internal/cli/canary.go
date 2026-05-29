@@ -441,7 +441,7 @@ func canaryConfidence(decision string, m CanaryMarketSummary) string {
 		}
 		return "medium"
 	}
-	if m.UnrankedClusters > 2 {
+	if m.UnrankedClusters > 0 || len(m.AmbiguousClusters) > 0 || len(m.PartialClusters) > 0 || len(m.DegradedClusters) > 0 {
 		return "medium-low"
 	}
 	return "medium"
@@ -561,6 +561,15 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() > 0 {
 		return fail(env, "canary: takes no positional args (got %v)", fs.Args())
 	}
+	if !*jsonOut && isTerminal(env.Stdout) {
+		stop := startCanarySpinner(env)
+		res, err := FetchCanary(ctx, env.Conn)
+		stop()
+		if err != nil {
+			return fail(env, "canary: %v", err)
+		}
+		return renderCanaryText(env, env.Stdout, &res)
+	}
 	res, err := FetchCanary(ctx, env.Conn)
 	if err != nil {
 		return fail(env, "canary: %v", err)
@@ -569,6 +578,33 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 		return printJSON(env, res)
 	}
 	return renderCanaryText(env, env.Stdout, &res)
+}
+
+func startCanarySpinner(env *Env) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				fmt.Fprint(env.Stdout, "\r\x1b[K")
+				return
+			case <-ticker.C:
+				fmt.Fprintf(env.Stdout, "\r\x1b[K%s %s",
+					env.dim("Populating canary: account, positions, regime, gamma, breadth"), frames[i])
+				i = (i + 1) % len(frames)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 // FetchCanary reads the three existing snapshots needed by ComputeCanary.
@@ -594,9 +630,13 @@ func FetchCanary(ctx context.Context, conn interface {
 }
 
 func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {
-	renderCommandHero(env, out, "Portfolio Canary", r.AsOf.Format("2006-01-02 15:04 MST"), canaryDecisionBadge(env, r.Decision, true), r.Action)
-	fmt.Fprintf(out, "  %-12s %s\n", "Escalation", canaryStageLadder(env, r.Decision))
-	fmt.Fprintf(out, "  %-12s %s\n", "Current", canaryDecisionBadge(env, r.Decision, true))
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Portfolio Canary  ·  %s\n", r.AsOf.Format("2006-01-02 15:04 MST"))
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %-10s %s\n", "Stage", canaryDecisionBadge(env, r.Decision, true))
+	fmt.Fprintf(out, "  %-10s %s\n", "Confidence", canaryConfidenceLabel(env, r.Confidence))
+	fmt.Fprintf(out, "  %-10s %s\n", "Action", env.bold(r.Action))
+	fmt.Fprintf(out, "  %-10s %s\n", "Escalate", canaryStageLadder(env, r.Decision))
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %-28s %-10s %s\n", "Title", "Stage", "Action")
 	fmt.Fprintf(out, "  %-28s %-10s %s\n", strings.Repeat("-", 28), strings.Repeat("-", 10), strings.Repeat("-", 54))
@@ -645,16 +685,37 @@ func canaryDecisionBadge(env *Env, decision string, current bool) string {
 	}
 	if current {
 		label = env.bold(label)
-		if !strings.Contains(label, "CURRENT") {
-			label += " CURRENT"
-		}
 	}
 	return label
 }
 
-func canaryDisplayDecision(decision string) string {
-	if decision == canaryDecisionHold {
-		return "GO"
+func canaryConfidenceLabel(env *Env, confidence string) string {
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "high":
+		return env.green("High")
+	case "medium-low", "low":
+		return env.yellow("Medium-low")
+	case "medium":
+		return "Medium"
+	default:
+		if confidence == "" {
+			return "Unknown"
+		}
+		return confidence
 	}
-	return decision
+}
+
+func canaryDisplayDecision(decision string) string {
+	switch decision {
+	case canaryDecisionHold:
+		return "Go"
+	case canaryDecisionWatch:
+		return "Watch"
+	case canaryDecisionDelever:
+		return "De-lever"
+	case canaryDecisionLiquidate:
+		return "Liquidate"
+	default:
+		return decision
+	}
 }
