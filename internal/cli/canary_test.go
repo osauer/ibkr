@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/risk"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -145,6 +147,13 @@ func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	if !rowContains(res.Rows, "Index tape shock", "second pass") {
 		t.Fatalf("expected direct tape second-pass row, rows: %+v", res.Rows)
 	}
+	sig, ok := findSignal(res.Signals, risk.SignalMarketSelloffViolent)
+	if !ok {
+		t.Fatalf("missing selloff signal, signals: %+v", res.Signals)
+	}
+	if sig.Severity != risk.SeverityWatch || !containsString(sig.BlockedBy, "confirmation") {
+		t.Fatalf("selloff signal = severity %q blocked_by %+v, want watch blocked by confirmation", sig.Severity, sig.BlockedBy)
+	}
 }
 
 func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
@@ -165,6 +174,13 @@ func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 	}
 	if !rowContains(res.Rows, "Index tape shock", "direct SPY stress is confirmed") {
 		t.Fatalf("expected confirmed direct tape row, rows: %+v", res.Rows)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalMarketSelloffViolent)
+	if !ok {
+		t.Fatalf("missing selloff signal, signals: %+v", res.Signals)
+	}
+	if sig.Severity != risk.SeverityAct || len(sig.BlockedBy) > 0 {
+		t.Fatalf("selloff signal = severity %q blocked_by %+v, want act without blocked_by", sig.Severity, sig.BlockedBy)
 	}
 }
 
@@ -190,6 +206,26 @@ func TestComputeCanaryGrossDollarDeltaCatchesOffsettingOptionBook(t *testing.T) 
 	}
 }
 
+func TestComputeCanaryStressedExposureDeleverHasMatchingSignal(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.GrossPositionValue = 110_000
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  redVolCreditRegimeWithComputingSlowRows(),
+	})
+	if res.Decision != canaryDecisionDelever {
+		t.Fatalf("decision = %s, want DE-LEVER on stressed gross exposure", res.Decision)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalGrossExposureHigh)
+	if !ok {
+		t.Fatalf("missing gross exposure signal, signals: %+v", res.Signals)
+	}
+	if sig.Severity != risk.SeverityAct || sig.Threshold == nil || *sig.Threshold != canaryPolicy.GrossExposureStressActPct {
+		t.Fatalf("gross exposure signal = severity %q threshold %v, want act at stress threshold", sig.Severity, sig.Threshold)
+	}
+}
+
 func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *testing.T) {
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{
@@ -206,6 +242,89 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	}
 	if !rowContainsEvidence(res.Rows, "Largest concentration", "AAPL delta 45% NLV") {
 		t.Fatalf("expected largest-delta evidence, rows: %+v", res.Rows)
+	}
+	if !hasSignal(res.Signals, risk.SignalSingleNameDeltaHigh) {
+		t.Fatalf("expected single-name delta signal, signals: %+v", res.Signals)
+	}
+	if res.SignalConfidence != "high" {
+		t.Fatalf("signal_confidence = %q, want high", res.SignalConfidence)
+	}
+}
+
+func TestComputeCanarySignalsExposureAndConfidenceReasons(t *testing.T) {
+	t.Parallel()
+	delta := 140_000.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+			DollarDeltaBase: &delta,
+			ExposureBase: []rpc.UnderlyingExposure{{
+				Underlying: "NOW", MarketValueBase: 40_000, MarketValuePctNLV: new(40.0), DollarDeltaBase: new(140_000.0),
+			}},
+		}},
+		Regime: healthyCanaryRegime(),
+	})
+	for _, want := range []risk.SignalID{
+		risk.SignalNetDeltaHigh,
+		risk.SignalSingleNameExposureHigh,
+		risk.SignalSingleNameDeltaHigh,
+	} {
+		if !hasSignal(res.Signals, want) {
+			t.Fatalf("missing signal %s in %+v", want, res.Signals)
+		}
+	}
+	if res.Direction != risk.DirectionDefensive {
+		t.Fatalf("direction = %q, want defensive", res.Direction)
+	}
+	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.ActionReadiness != "prestage_risk_plan" {
+		t.Fatalf("confidence profile = data %q signals %q readiness %q", res.DataConfidence, res.SignalConfidence, res.ActionReadiness)
+	}
+	if !strings.Contains(strings.Join(res.ConfidenceReasons, "\n"), "portfolio breach lacks independent market-stress confirmation") {
+		t.Fatalf("missing confidence reason, got %+v", res.ConfidenceReasons)
+	}
+}
+
+func TestComputeCanaryPositivePnLShockProtectsGains(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	daily := 12_000.0
+	acct.DailyPnL = &daily
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+	})
+	sig, ok := findSignal(res.Signals, risk.SignalPortfolioPnLShock)
+	if !ok {
+		t.Fatalf("missing P&L shock signal, signals: %+v", res.Signals)
+	}
+	if sig.Direction != risk.DirectionDefensive || sig.Severity != risk.SeverityWatch {
+		t.Fatalf("P&L signal = direction %q severity %q, want defensive/watch", sig.Direction, sig.Severity)
+	}
+	if sig.ConfidenceImpact == "" {
+		t.Fatalf("P&L signal should explain why a gain is not directly deployable: %+v", sig)
+	}
+	if res.Direction != risk.DirectionDefensive {
+		t.Fatalf("direction = %q, want defensive", res.Direction)
+	}
+}
+
+func TestComputeCanaryWatchMarginSignalDoesNotPublishLowerTarget(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.30
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+	})
+	sig, ok := findSignal(res.Signals, risk.SignalMarginCushionLow)
+	if !ok {
+		t.Fatalf("missing margin signal, signals: %+v", res.Signals)
+	}
+	if sig.Severity != risk.SeverityWatch {
+		t.Fatalf("margin signal severity = %q, want watch", sig.Severity)
+	}
+	if sig.Target != nil {
+		t.Fatalf("watch margin signal target = %v, want nil because target would be below watch threshold", *sig.Target)
 	}
 }
 
@@ -486,4 +605,22 @@ func rowContainsEvidence(rows []CanaryRow, title, text string) bool {
 		}
 	}
 	return false
+}
+
+func hasSignal(signals []risk.Signal, id risk.SignalID) bool {
+	_, ok := findSignal(signals, id)
+	return ok
+}
+
+func findSignal(signals []risk.Signal, id risk.SignalID) (risk.Signal, bool) {
+	for _, sig := range signals {
+		if sig.ID == id {
+			return sig, true
+		}
+	}
+	return risk.Signal{}, false
+}
+
+func containsString(values []string, want string) bool {
+	return slices.Contains(values, want)
 }

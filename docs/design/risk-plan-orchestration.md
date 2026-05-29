@@ -1,259 +1,182 @@
-# Risk-plan orchestration
+# Canary-driven risk response
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-29 21:01 CEST
+**Last update:** 2026-05-29 22:07 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
-## Purpose
+## Thesis
 
-`risk-plan` is the bridge between portfolio risk evidence and a future approval-gated order workflow.
+`canary` is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger, portfolio overexposure, data failure, and unusual opportunity.
 
-The system should work like this:
+`risk-plan` is the response planner. It does not decide that the world is dangerous by itself, and it does not execute. It receives an alert context, refreshes live account and portfolio state, rebuilds the risk ledger, and proposes candidate actions.
 
-1. Read current account, positions, regime, and canary evidence.
-2. Produce a short list of candidate risk reductions or optional hedges.
-3. Preview selected candidates through the broker what-if/order-preview path.
-4. Show the previewed impact to the user or agent.
-5. Submit only through a separate future execution command with explicit user confirmation.
+No single input should dominate blindly. In monitor-triggered runs, the canary alert is the reason `risk-plan` wakes up. The source of truth for action is the refreshed portfolio ledger evaluated against the same policy that canary used to alert.
 
-The important boundary: `canary` and `regime` are evidence tools. They must not emit concrete trades. `risk-plan` is the first layer allowed to turn evidence into repositioning candidates, and those candidates still require preview before any execution path may see them.
-
-## Small Tool Boundaries
-
-The existing tools stay small:
-
-- `account`: margin, cash, current cushion, and look-ahead margin.
-- `positions`: exact holdings, grouped exposure, option legs, greeks, and bid/ask warnings.
-- `regime`: market-stress evidence.
-- `canary`: portfolio risk state.
-- `chain`: option liquidity and candidate option-leg context.
-- `quote`: executable-ish stock/ETF reference prices.
-- `risk-plan`: policy engine that consumes the evidence tools and proposes repositioning candidates.
-- `order-preview`: broker what-if, margin, commission, and rejection validator.
-
-`risk-plan` does not replace the small tools. It is the only layer allowed to compose their outputs into a repositioning proposal.
-
-## Why Canary And Regime Do Not Propose Trades
-
-`regime` only knows the market backdrop. It does not know account constraints, held positions, option liquidity, or margin impact.
-
-`canary` is portfolio-aware, but it is still a risk alarm, not an order planner. A concrete trade needs exact holdings, closing/opening semantics, current bid/ask quality, chain liquidity, greeks coverage, FX conversion, margin impact, and broker preview. If `canary` starts saying "sell 2 NOW calls", it becomes a planner, chain screener, and pre-trade validator in disguise.
-
-The clean contract is:
-
-- `regime`: "What is the market backdrop?"
-- `canary`: "What risk state is this portfolio in?"
-- `risk-plan`: "What candidate changes would reduce the detected risks?"
-- `order-preview`: "Would the broker accept those candidates and what is the account impact?"
-- future execution: "Has the user approved this exact previewed action?"
-
-## Agent Contract
-
-The LLM agent operates the workflow. It does not become the workflow.
-
-The agent may:
-
-- ask the user for missing policy choices
-- invoke CLI or MCP tools
-- summarize evidence and tradeoffs
-- select candidates for preview only from IDs emitted by `risk-plan`
-- present previewed broker impact
-
-The agent must not:
-
-- hand-write order drafts
-- invent quantities, strikes, expiries, prices, hashes, or preview results
-- convert `canary` prose into orders
-- bypass stale-data, account, preview, or approval gates
-- submit orders without a future explicit submit command and confirmation flow
-
-Deterministic code owns calculations, freshness checks, candidate construction, preview validation, hashes, expiration, and hard stops.
-
-## Core Flow
-
-Default live CLI path:
-
-```sh
-ibkr risk-plan --json
-ibkr order-preview --input risk-plan.json --select reduce-now-1 --json
+```text
+live account + positions + regime
+              |
+              v
+        shared risk policy
+              |
+      +-------+--------+
+      |                |
+      v                v
+ canary alert      risk-plan
+ sentinel          planner
+      |                |
+      +-------> plan -> preview -> approval -> execution -> post-check
 ```
 
-Pipeline path:
+## Shared Policy
 
-```sh
-ibkr risk-plan --json \
-  | ibkr order-preview --input - --select reduce-now-1 --json
-```
+Canary and risk-plan need shared criteria. Canary should not only say "something is wrong"; it should say which policy criteria fired, in machine-readable form. Risk-plan should not parse canary prose; it should re-evaluate those same criteria from fresh data.
 
-The live path should let `risk-plan` refresh its own inputs. Piping stale evidence into fresh chains and margin state is unsafe. Replay/debug modes can be added later, after the live path is stable.
+The shared policy should cover both defense and opportunity:
 
-MCP should start read-only:
+| Area | Example signals | Planner implication |
+| --- | --- | --- |
+| Margin danger | `margin_cushion_low`, `lookahead_cushion_low` | Cut or liquidate risk first. |
+| Violent downside | `market_selloff_violent`, `vol_spike_confirmed`, `regime_stress_confirmed` | Defend capital, reduce fragile exposure, consider hedges. |
+| Violent upside or enthusiasm | `market_rally_violent`, `vol_crush_confirmed` | Check underinvestment while guarding against chase-risk; possibly deploy or rebalance. |
+| Portfolio P&L shock | `portfolio_pnl_shock` | Protect liquidity or gains; a gain is not deployable by itself. |
+| Single-title concentration | `single_name_exposure_high`, `single_name_delta_high` | Reduce the largest title risk before smaller issues. |
+| Portfolio exposure | `gross_exposure_high`, `net_delta_high`, `gross_delta_high` | Defend, rebalance, or stage reductions before stress worsens. |
+| Option quality and convexity | `option_greeks_degraded`, `short_convexity_high`, `gamma_red` | Block or prioritize option-specific actions. |
+| Data quality | `risk_data_degraded`, `market_data_stale` | Block action or force human review. |
 
-- `ibkr_risk_plan`: returns candidate plans.
-- `ibkr_order_preview`: acceptable only if it cannot transmit orders.
-- No MCP order-submission tool in the first release.
+The exact thresholds and buckets are implementation details. The important design point is that the signal vocabulary and thresholds are shared, while order construction remains owned by risk-plan and preview.
 
-## Risk-Plan MVP
+Current signal payloads carry:
 
-First implementation should be intentionally narrow:
+- `id`: stable signal name from the shared vocabulary.
+- `direction`: `defensive`, `constructive`, `mixed`, or `data_quality`.
+- `severity`: `observe`, `watch`, `act`, or `urgent`.
+- `subject`: optional symbol, cluster, or bucket.
+- `metric`, `observed`, `threshold`, `target`, and `unit`.
+- `evidence`: compact human-readable evidence.
+- `confidence` and `confidence_impact`.
+- `blocked_by`: missing or degraded inputs that prevent stronger action.
 
-1. Fetch fresh `account`, `positions`, `regime`, and `canary`.
-2. Check source freshness and account identity.
-3. Identify target breaches from current data:
-   - margin cushion and look-ahead cushion
-   - gross exposure
-   - net dollar delta
-   - gross dollar delta
-   - largest single-name market exposure
-   - largest single-name dollar-delta exposure
-   - missing or stale option greeks
-4. Generate existing-position reductions only.
-5. Estimate before/after risk effects.
-6. Emit stable candidate IDs.
-7. Require order preview for every candidate.
+Targets must mean post-action targets. If a signal is only a watch-level early warning and the nearest action floor is below the current watch threshold, omit `target` rather than asking the planner to solve toward a weaker state.
 
-Optional hedges come after the reduction-only MVP works. Hedges should be opt-in, debit-only at first, premium-capped, and rejected when chains are stale, wide, or untradable.
+## Canary Contract
 
-## Candidate Ordering
+Canary is a high-frequency alerting tool, not a planner.
 
-Candidate priority should be deterministic:
+It should emit:
 
-1. Immediate margin relief.
-2. Largest single-name concentration.
-3. Gross dollar-delta reduction.
-4. Net dollar-delta reduction.
-5. Optional debit hedges.
+- alert direction: defensive, constructive, mixed, or data-quality
+- severity: observe, watch, act, or urgent
+- fired shared signal IDs
+- observed values and thresholds for those signals
+- split confidence: data confidence, signal confidence, and action readiness
+- source timestamps and policy profile/version
+- compact account, portfolio, and regime context
+- explicit ambiguity and stale-data warnings
 
-Existing-position reductions should rank before new hedges. Closing known exposure is easier to preview, explain, and audit.
+It must not emit order drafts, trade quantities, strikes, expiries, or previewable intents. A canary alert answers: "Do we need to pay attention now, and why?"
 
-## Plan Artifact
+## Risk-Plan Contract
 
-Avoid over-specifying the JSON shape before implementation. For pickup, the plan only needs to carry these concepts:
+Risk-plan answers: "Given the alert and current portfolio, what candidate response should be previewed?"
 
-- account ID
-- generation time and expiration time
-- source timestamps and source hashes
-- policy settings used for the run
-- detected risk breaches
-- candidate IDs
-- candidate rationale
-- draft order intent for each candidate
-- estimated risk effect before and after
-- warnings and blocked reasons
+Every live run should:
 
-Do not use raw `canary` or `regime` JSON as an order-preview input. `order-preview` should accept only a typed risk-plan artifact.
+1. Resolve response mode from the user request or canary alert: defend, rebalance, deploy, or stage.
+2. Refresh account, positions, regime, and canary.
+3. Rebuild the portfolio risk ledger.
+4. Re-evaluate shared policy criteria from fresh data.
+5. Generate candidate actions that address the largest active risk or opportunity.
+6. Emit a typed plan artifact for preview.
 
-### Versioning
+Response modes:
 
-Do not bake `.v1` into command names, headings, or every sentence in the design doc. It adds noise and makes the design look more final than it is.
+- `defend`: reduce, hedge, or liquidate risk under stress or margin danger.
+- `rebalance`: bring the portfolio back inside accepted policy bounds.
+- `deploy`: use available risk budget when constructive conditions and portfolio constraints allow it.
+- `stage`: prepare candidates without implying immediate execution.
 
-Because plans may be piped, stored, hashed, or accepted by MCP, the artifact should still carry a small identity field. Use versioning inside the artifact, not in the user-facing workflow:
+The MVP can implement defensive reductions first, but the design should not bake in "risk-plan only sells." A live sentinel should also support disciplined opportunity response when the policy says risk budget can be used.
 
-```json
-{ "kind": "risk_plan.v1" }
-{ "kind": "order_preview.v1" }
-```
+## Process Flow
 
-The exact Go/RPC structs are implementation-owned. This document describes required semantics, not a frozen JSON schema.
+### Monitor-triggered response
 
-## Order Preview And Future Execution
+1. A scheduler runs canary, for example every 10 minutes.
+2. Canary emits alert direction, severity, and fired shared signals.
+3. Monitor policy decides whether to call risk-plan.
+4. Risk-plan refreshes live state and rechecks the same policy criteria.
+5. If the alert resolved, the plan says no action is currently required.
+6. If action pressure remains, risk-plan emits candidate responses.
+7. Order preview validates selected candidate IDs.
+8. Execution, when implemented, requires explicit approval and fresh validation.
+9. Canary runs again after action to confirm the portfolio state.
 
-`order-preview` consumes a risk plan and selected candidate IDs. It validates broker impact without submitting:
+### User-requested response
 
-- order validity
-- broker rejection details
-- current and post-trade margin
-- current and post-trade look-ahead margin
-- estimated commission
-- relevant warnings
+The user can call risk-plan directly without waiting for canary:
 
-A future submit command should accept only a previewed artifact, not raw orders. It must validate:
+- "Bring risk back inside limits" maps to `rebalance`.
+- "What should I cut if this gets worse?" maps to `stage`.
+- "Can I put cash to work under this regime?" maps to `deploy`.
+- "Reduce harm now" maps to `defend`.
 
-- trading-capable build or runtime permission
-- current account ID
-- preview source hash
-- plan and preview freshness
-- candidate IDs named in the confirmation string
-- current positions still match closing orders
-- market data and margin state have not materially drifted
+Risk-plan still uses the same shared policy and refreshed ledger.
 
-Any mismatch blocks submission.
+## Candidate Priority
 
-## Canary Changes
+Default priority should be simple:
 
-No order-level fields belong in `canary`.
+1. Prevent margin or liquidity harm.
+2. Address the largest active breach or opportunity.
+3. Prefer simple changes to complex ones.
+4. Prefer closing or resizing known exposure before opening new exposure.
+5. Require preview for every candidate.
 
-The current canary output is enough for the reduction-only MVP because it already reports:
+For defensive runs, the largest active issue may be margin, single-title concentration, short convexity, or market beta. For deployment runs, it may be unused risk budget, missing target exposure, or a constructive market regime. The policy decides which opportunities are valid; risk-plan should not chase enthusiasm without constraints.
 
-- source timestamps
-- decision and confidence
-- cushion and look-ahead cushion
-- gross exposure
-- net delta and gross delta
-- largest market and delta concentrations
-- market-regime summary
-- warnings
+## Artifact Boundary
 
-Optional future improvement: add machine-readable `risk_signals` and a `plan_hint`, but keep them as facts, not trades. Example signal names:
+Risk-plan emits a typed artifact. Order preview consumes that artifact and selected candidate IDs. Raw canary output and agent-authored orders are not preview inputs.
 
-- `gross_delta_high`
-- `net_delta_high`
-- `largest_delta_concentration`
-- `margin_cushion_low`
-- `look_ahead_margin_cushion_low`
-- `market_data_degraded`
+The artifact should carry:
 
-`risk-plan` should still recompute from fresh account and positions data and treat canary signals as a consistency check.
+- kind, account ID, policy profile, and response mode
+- source timestamps and hashes
+- alert context and fired shared signals
+- refreshed risk-ledger summary
+- candidate IDs, rationale, and draft intent
+- estimated before/after effects
+- warnings, blocked reasons, and expiration
 
-## Naming: Canary Versus Risk
+## Implementation Direction
 
-Keep `canary` for now.
+Build the shared policy and signal vocabulary first, then wire canary and risk-plan to it.
 
-Reasons to keep it:
+Suggested order:
 
-- It describes an early-warning alarm, not a full risk system.
-- It avoids implying VaR, factor models, stress scenarios, or execution advice.
-- It is already present in CLI, MCP docs, examples, generated references, tests, and likely screenshots.
-- It cleanly separates the compact monitor from the future `risk-plan` planner.
+1. Define shared signal IDs, severity, direction, and policy profiles.
+2. Add machine-readable fired signals to canary.
+3. Build a reusable risk ledger from account, positions, and regime.
+4. Implement defensive risk-plan candidates for existing positions.
+5. Add typed plan artifacts and order-preview consumption.
+6. Extend exposure axes for asset class, market, and currency buckets.
+7. Add deploy/stage modes once defensive planning is trustworthy.
 
-Reasons to dislike it:
+## Non-Goals
 
-- It is metaphorical.
-- Users may search for "risk" and miss it.
-- It does not naturally group with `risk-plan`.
-
-Recommendation:
-
-- Keep `ibkr canary` as the stable command.
-- Add `risk-plan` as the planner.
-- Later, if a broader risk namespace exists, add `ibkr risk check` as an alias for `ibkr canary`.
-- Avoid a full rename until docs, examples, screenshots, plugin descriptions, tests, and external automation can be migrated deliberately.
-
-## Implementation Sequence
-
-1. Add `risk-plan` CLI with reduction-only candidates.
-2. Add source freshness, account identity, and expiration checks.
-3. Add a minimal typed artifact with `kind`, stable candidate IDs, and estimated before/after risk effects.
-4. Wire `order-preview --input` to accept only risk-plan artifacts.
-5. Add quote/chain gates for option candidate marketability.
-6. Add optional debit hedge generation behind `--allow-hedges`.
-7. Add read-only MCP `ibkr_risk_plan` after CLI behavior is stable.
-8. Defer all order-submission work until preview, hash, expiry, account, and confirmation gates exist.
-
-## Non-goals
-
+- No scheduler inside risk-plan.
 - No automatic trading.
-- No direct `canary | order-preview` path.
+- No order-level fields in canary.
+- No direct canary-to-preview path.
 - No MCP order submission.
-- No optimizer for a mathematically perfect portfolio.
-- No tax-lot optimization in the first version.
-- No naked short-option strategy generation.
+- No optimizer, tax-lot engine, or naked short-option strategy generation in the first version.
 
 ## Open Questions
 
-- Should default risk targets live in flags, config, or both?
-- Should `risk-plan` persist the last generated plan by default?
-- Should candidate selection live in `risk-plan` or only in `order-preview`?
-- Should the first hedge implementation support SPY only, or SPY and QQQ?
+- How should legacy canary `decision` map to planner `response_mode` once direction and severity are first-class?
+- Which asset-class and market buckets are required first?
+- What makes a constructive signal deployable rather than merely euphoric?
+- Should monitor trigger context be flags, a small artifact, or both?
