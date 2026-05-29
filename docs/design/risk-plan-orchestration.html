@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Canary-driven risk response | ibkr</title>
-  <meta name="description" content="Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 22:07 CEST Owner: osauer Related: internal/cli/canary.go,...">
+  <meta name="description" content="Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 22:27 CEST Owner: osauer Related: internal/cli/canary.go,...">
   <link rel="canonical" href="https://osauer.dev/ibkr/design/risk-plan-orchestration.html">
   <script type="application/ld+json">
 {
@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "description": "Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 22:07 CEST Owner: osauer Related: internal/cli/canary.go,...",
+    "description": "Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-29 22:27 CEST Owner: osauer Related: internal/cli/canary.go,...",
     "headline": "Canary-driven risk response",
     "isPartOf": {
       "@type": "SoftwareApplication",
@@ -156,7 +156,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="canary-driven-risk-response">Canary-driven risk response</h1>
-<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-29 22:07 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-29 22:27 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
 <h2 id="thesis">Thesis</h2>
 <p><code>canary</code> is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger, portfolio overexposure, data failure, and unusual opportunity.</p>
 <p><code>risk-plan</code> is the response planner. It does not decide that the world is dangerous by itself, and it does not execute. It receives an alert context, refreshes live account and portfolio state, rebuilds the risk ledger, and proposes candidate actions.</p>
@@ -208,19 +208,27 @@
 <ul>
 <li>alert direction: defensive, constructive, mixed, or data-quality</li>
 <li>severity: observe, watch, act, or urgent</li>
+<li>planner mode hint: none, stage, defend, rebalance, deploy, or confirm-data</li>
+<li>planner readiness: none, watch, prestage, ready, or blocked</li>
+<li>compact human summary</li>
 <li>fired shared signal IDs</li>
 <li>observed values and thresholds for those signals</li>
-<li>split confidence: data confidence, signal confidence, and action readiness</li>
+<li>split confidence: data confidence and signal confidence</li>
 <li>source timestamps and policy profile/version</li>
 <li>compact account, portfolio, and regime context</li>
 <li>explicit ambiguity and stale-data warnings</li>
 </ul>
 <p>It must not emit order drafts, trade quantities, strikes, expiries, or previewable intents. A canary alert answers: &#34;Do we need to pay attention now, and why?&#34;</p>
+<p>The legacy <code>GO</code> / <code>WATCH</code> / <code>DE-LEVER</code> / <code>LIQUIDATE</code> ladder is no longer part of the machine contract. It was readable, but too trade-shaped for a sentinel. Human UX should instead show:</p>
+<pre><code>Risk state  Defensive / Watch
+Next step   Stage risk-plan
+Guidance    Freeze new risk and stage a risk plan; wait for confirmation before major action.
+Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <h2 id="risk-plan-contract">Risk-Plan Contract</h2>
 <p>Risk-plan answers: &#34;Given the alert and current portfolio, what candidate response should be previewed?&#34;</p>
 <p>Every live run should:</p>
 <ol>
-<li>Resolve response mode from the user request or canary alert: defend, rebalance, deploy, or stage.</li>
+<li>Resolve response mode from the user request or canary alert: defend, rebalance, deploy, stage, or confirm-data.</li>
 <li>Refresh account, positions, regime, and canary.</li>
 <li>Rebuild the portfolio risk ledger.</li>
 <li>Re-evaluate shared policy criteria from fresh data.</li>
@@ -233,6 +241,7 @@
 <li><code>rebalance</code>: bring the portfolio back inside accepted policy bounds.</li>
 <li><code>deploy</code>: use available risk budget when constructive conditions and portfolio constraints allow it.</li>
 <li><code>stage</code>: prepare candidates without implying immediate execution.</li>
+<li><code>confirm-data</code>: refresh or verify degraded inputs before planning major action.</li>
 </ul>
 <p>The MVP can implement defensive reductions first, but the design should not bake in &#34;risk-plan only sells.&#34; A live sentinel should also support disciplined opportunity response when the policy says risk budget can be used.</p>
 <h2 id="process-flow">Process Flow</h2>
@@ -284,11 +293,11 @@
 <p>Suggested order:</p>
 <ol>
 <li>Define shared signal IDs, severity, direction, and policy profiles.</li>
-<li>Add machine-readable fired signals to canary.</li>
+<li>Add machine-readable fired signals, planner mode hint, and planner readiness to canary.</li>
 <li>Build a reusable risk ledger from account, positions, and regime.</li>
 <li>Implement defensive risk-plan candidates for existing positions.</li>
 <li>Add typed plan artifacts and order-preview consumption.</li>
-<li>Extend exposure axes for asset class, market, and currency buckets.</li>
+<li>Extend exposure axes for asset class and market buckets before currency buckets.</li>
 <li>Add deploy/stage modes once defensive planning is trustworthy.</li>
 </ol>
 <h2 id="non-goals">Non-Goals</h2>
@@ -302,9 +311,8 @@
 </ul>
 <h2 id="open-questions">Open Questions</h2>
 <ul>
-<li>How should legacy canary <code>decision</code> map to planner <code>response_mode</code> once direction and severity are first-class?</li>
-<li>Which asset-class and market buckets are required first?</li>
-<li>What makes a constructive signal deployable rather than merely euphoric?</li>
+<li>What exact thresholds should the first asset-class and market buckets use?</li>
+<li>What exact clean-risk-budget criteria make a constructive signal deployable rather than merely euphoric?</li>
 <li>Should monitor trigger context be flags, a small artifact, or both?</li>
 </ul>
   </main>
