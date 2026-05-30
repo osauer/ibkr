@@ -235,6 +235,13 @@ type Server struct {
 	// autospawns the daemon and walks away, the idle watcher could
 	// previously fire mid-prewarm.
 	regimePrewarming atomic.Bool
+	// lastRegimeQuality latches the cluster-level data-quality summary
+	// from the most recent regime snapshot. status.health reads this
+	// without re-running the regime fan-out, so `ibkr status` can disclose
+	// stale ranked clusters after regime/canary has observed them while
+	// staying a cheap health call.
+	lastRegimeQualityMu sync.Mutex
+	lastRegimeQuality   []rpc.DataQualityHealth
 	// postConnectSetupDone latches true at the end of the first
 	// successful postConnectSetup. Gates the Connected field of
 	// handleStatusHealth so an `ibkr status` that lands between

@@ -34,7 +34,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_status",
 		Title:       "IBKR Status",
-		Description: "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, and per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own.",
+		Description: "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\", \"are downstream risk reads stale?\"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.HealthResult

@@ -84,6 +84,9 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if len(res.Subsystems) > 0 {
 		statusRow(env, out, "Subsystems", formatSubsystemsValue(env, res.Subsystems))
 	}
+	if len(res.DataQuality) > 0 {
+		statusRow(env, out, "Data quality", env.yellow(formatDataQualityValue(res.DataQuality)))
+	}
 	if members := formatMembersValue(res.Members); members != "" {
 		statusRow(env, out, "SPX members", members)
 	}
@@ -129,7 +132,7 @@ func statusVerdict(res rpc.HealthResult, cliVersion string) statusConcern {
 		return statusConcern{Text: "STARTING", Level: statusConcernNotice}
 	case !res.Connected:
 		return statusConcern{Text: "OFFLINE", Level: statusConcernBad}
-	case concern.Level == statusConcernWarn || concern.Level == statusConcernBad:
+	case (concern.Level == statusConcernWarn || concern.Level == statusConcernBad) && !isDataQualityConcern(concern):
 		return statusConcern{Text: "ATTENTION", Level: statusConcernWarn}
 	default:
 		return statusConcern{Text: "READY", Level: statusConcernNone}
@@ -183,11 +186,17 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		}
 	case membersRefreshNeedsAttention(res.Members):
 		return statusConcern{Text: "SPX members refresh " + res.Members.RefreshState, Level: statusConcernWarn}
+	case len(res.DataQuality) > 0:
+		return statusConcern{Text: "Data quality: " + formatDataQualityValue(res.DataQuality), Level: statusConcernWarn}
 	case len(res.BackgroundTasks) > 0:
 		return statusConcern{Text: "Background work: " + formatBackgroundTasks(res.BackgroundTasks), Level: statusConcernNotice}
 	default:
 		return statusConcern{Text: "None", Level: statusConcernNone}
 	}
+}
+
+func isDataQualityConcern(c statusConcern) bool {
+	return c.Level == statusConcernWarn && strings.HasPrefix(c.Text, "Data quality:")
 }
 
 func daemonVersionDrift(daemonVersion, cliVersion string) bool {
@@ -310,6 +319,26 @@ func formatSubsystemsValue(env *Env, subs []rpc.SubsystemHealth) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func formatDataQualityValue(items []rpc.DataQualityHealth) string {
+	parts := make([]string, 0, len(items))
+	for _, q := range items {
+		surface := strings.TrimSpace(q.Surface)
+		summary := strings.TrimSpace(q.Summary)
+		if surface == "" {
+			continue
+		}
+		if summary == "" {
+			summary = strings.TrimSpace(q.Status)
+		}
+		if summary == "" {
+			parts = append(parts, surface)
+			continue
+		}
+		parts = append(parts, surface+" "+summary)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func membersRefreshNeedsAttention(m rpc.MembersHealth) bool {

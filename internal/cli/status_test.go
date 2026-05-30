@@ -291,6 +291,36 @@ func TestRenderStatus_VersionDrift(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_DataQualityKeepsGatewayReady(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.HealthResult{
+		DaemonVersion: "v1.0.0",
+		UptimeSeconds: 1842,
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   7496,
+		ClientID:      15,
+		Connected:     true,
+		ServerVersion: 203,
+		DataQuality: []rpc.DataQualityHealth{
+			{Surface: "gamma", Status: "degraded", Summary: "degraded: SPX excluded", DegradedClusters: []string{"gamma"}},
+			{Surface: "regime", Status: "stale", Summary: "stale: vol, credit", StaleClusters: []string{"vol", "credit"}},
+		},
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Gateway  READY",
+		"Data quality   gamma degraded: SPX excluded; regime stale: vol, credit",
+		"Next concern   Data quality: gamma degraded: SPX excluded; regime stale: vol, credit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestNextConcernPriority(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -344,6 +374,15 @@ func TestNextConcernPriority(t *testing.T) {
 				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
 			},
 			want: "Background work: computing dealer zero-gamma",
+		},
+		{
+			name: "data quality before background work",
+			in: rpc.HealthResult{
+				Connected:       true,
+				DataQuality:     []rpc.DataQualityHealth{{Surface: "regime", Status: "stale", Summary: "stale: vol, credit"}},
+				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
+			},
+			want: "Data quality: regime stale: vol, credit",
 		},
 		{
 			name: "none",

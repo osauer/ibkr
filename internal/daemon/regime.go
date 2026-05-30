@@ -69,6 +69,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res.Composite = buildRegimeComposite(res)
 	res.Summary = buildRegimeSummary(res)
 	res.WarningDetails = buildRegimeWarnings(res)
+	s.updateRegimeStatusQuality(res)
 	return res, nil
 }
 
