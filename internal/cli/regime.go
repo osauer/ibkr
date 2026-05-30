@@ -1352,87 +1352,76 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 }
 
 // ----------------------------------------------------------------------------
-// --explain block: dim the section header + indent each row's notes
-// under its name. Used for full methodology disclosure when the user
-// passes --explain. The notes content comes verbatim from the daemon,
-// which already embeds the spec's threshold language.
+// --explain block: compact audit notes for humans. The daemon still carries
+// long methodology prose, but the terminal view should explain thresholds,
+// provenance, and reading posture without becoming a wall of dim text.
+
+type regimeExplainQuality struct {
+	name string
+	q    *rpc.Quality
+}
+
+type regimeExplainEntry struct {
+	name       string
+	thresholds *rpc.RegimeThresholds
+	band       string
+	bandReason string
+	missing    []string
+	quals      []regimeExplainQuality
+}
 
 func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
-	type qField struct {
-		name string
-		q    *rpc.Quality
-	}
-	type entry struct {
-		name, notes string
-		missing     []string
-		quals       []qField
-	}
-	entries := []entry{
-		{"VIX/VIX3M", r.VIXTermStructure.Notes, r.VIXTermStructure.FieldsMissing, []qField{
+	entries := []regimeExplainEntry{
+		{"VIX/VIX3M", r.VIXTermStructure.Thresholds, r.VIXTermStructure.Band, r.VIXTermStructure.BandReason, r.VIXTermStructure.FieldsMissing, []regimeExplainQuality{
 			{"VIX", r.VIXTermStructure.VIXQuality},
 			{"VIX3M", r.VIXTermStructure.VIX3MQuality},
 		}},
-		{"VVIX", r.VolOfVol.Notes, nil, []qField{
+		{"VVIX", r.VolOfVol.Thresholds, r.VolOfVol.Band, r.VolOfVol.BandReason, nil, []regimeExplainQuality{
 			{"VVIX", r.VolOfVol.ValueQuality},
 		}},
-		{"HYG vs SPY", r.HYGSPYDivergence.Notes, r.HYGSPYDivergence.FieldsMissing, []qField{
+		{"HYG vs SPY", r.HYGSPYDivergence.Thresholds, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.BandReason, r.HYGSPYDivergence.FieldsMissing, []regimeExplainQuality{
 			{"HYG", r.HYGSPYDivergence.HYGQuality},
 			{"HYG_50DMA", r.HYGSPYDivergence.HYG50DMAQuality},
 			{"SPY", r.HYGSPYDivergence.SPYQuality},
 			{"SPY_52w_high", r.HYGSPYDivergence.SPY52WHighQuality},
 		}},
-		{"HY/IG OAS", r.CreditSpreads.Notes, r.CreditSpreads.FieldsMissing, []qField{
+		{"HY/IG OAS", r.CreditSpreads.Thresholds, r.CreditSpreads.Band, r.CreditSpreads.BandReason, r.CreditSpreads.FieldsMissing, []regimeExplainQuality{
 			{"HY_OAS", r.CreditSpreads.HYOASQuality},
 			{"IG_OAS", r.CreditSpreads.IGOASQuality},
 			{"HY-IG_spread", r.CreditSpreads.SpreadQuality},
 		}},
-		{"funding spread", r.FundingStress.Notes, r.FundingStress.FieldsMissing, []qField{
+		{"funding spread", r.FundingStress.Thresholds, r.FundingStress.Band, r.FundingStress.BandReason, r.FundingStress.FieldsMissing, []regimeExplainQuality{
 			{"CP_3m", r.FundingStress.CP3MQuality},
 			{"TBill_3m", r.FundingStress.TBill3MQuality},
 			{"CP-TBill", r.FundingStress.SpreadQuality},
 		}},
-		{"USD/JPY", r.USDJPY.Notes, r.USDJPY.FieldsMissing, []qField{
+		{"USD/JPY", r.USDJPY.Thresholds, r.USDJPY.Band, r.USDJPY.BandReason, r.USDJPY.FieldsMissing, []regimeExplainQuality{
 			{"Last", r.USDJPY.LastQuality},
 			{"Close_7d_ago", r.USDJPY.Close7DAgoQuality},
 		}},
-		{gammaRowLabel(r.GammaZero), r.GammaZero.Notes, r.GammaZero.FieldsMissing, []qField{
+		{gammaRowLabel(r.GammaZero), r.GammaZero.Thresholds, r.GammaZero.Band, r.GammaZero.BandReason, r.GammaZero.FieldsMissing, []regimeExplainQuality{
 			{"Zero_gamma", r.GammaZero.ZeroGammaQuality},
 			{"|Gamma|.OI_sum", r.GammaZero.GammaTotalAbsQuality},
 		}},
-		{"SPX breadth", r.Breadth.Notes, r.Breadth.FieldsMissing, []qField{
+		{"SPX breadth", r.Breadth.Thresholds, r.Breadth.Band, r.Breadth.BandReason, r.Breadth.FieldsMissing, []regimeExplainQuality{
 			{"Value", r.Breadth.ValueQuality},
 		}},
 	}
-	fmt.Fprintln(out, env.dim("  Spec thresholds + methodology (see "+r.SpecDoc+" for full disclosure):"))
+	fmt.Fprintf(out, "  %s\n", env.bold("Explain"))
+	if r.SpecDoc != "" {
+		renderExplainKV(env, out, "Full methodology", r.SpecDoc, nil)
+	}
 	fmt.Fprintln(out)
 	for _, e := range entries {
 		fmt.Fprintf(out, "  %s\n", env.bold(e.name))
-		// Per-scalar provenance block. Each field shows freshness +
-		// confidence + age + source so the reader can audit any number
-		// they're about to act on. Nil-Quality fields are silently
-		// skipped — keeps legacy daemons / fixtures working.
-		for _, qf := range e.quals {
-			if qf.q == nil {
-				continue
-			}
-			age := r.AsOf.Sub(qf.q.AsOf)
-			ageStr := ""
-			if age > time.Second {
-				switch {
-				case age >= 48*time.Hour:
-					ageStr = fmt.Sprintf(" · age %dd", int(age.Hours()/24))
-				case age >= time.Hour:
-					ageStr = fmt.Sprintf(" · age %dh", int(age.Hours()))
-				default:
-					ageStr = fmt.Sprintf(" · age %ds", int(age.Seconds()))
-				}
-			}
-			src := ""
-			if qf.q.Source != "" {
-				src = " · " + qf.q.Source
-			}
-			fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf("%-15s %s %s%s%s",
-				qf.name, qf.q.Confidence, qf.q.FreshnessClass, ageStr, src)))
+		if bandLine := explainBandLine(e.band, e.bandReason); bandLine != "" {
+			renderExplainKV(env, out, "Band", bandLine, styleRegimeExplainBand(env, e.band))
+		}
+		if thresholdLine := explainThresholdLine(e.thresholds); thresholdLine != "" {
+			renderExplainKV(env, out, "Bands", thresholdLine, nil)
+		}
+		if qualityLine := explainQualityLine(r.AsOf, e.quals); qualityLine != "" {
+			renderExplainKV(env, out, "Quality", qualityLine, nil)
 		}
 		// The gamma row gets two extra surfaces specific to its
 		// modelled-output nature: a BS-IV-derived disclosure when the
@@ -1443,19 +1432,132 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 				if denom == 0 {
 					denom = res.LegCount
 				}
-				fmt.Fprintf(out, "    %s\n", env.dim(fmt.Sprintf(
-					"compute used %d/%d priced legs with BS-IV from option quote/close fallback (model engine idle)",
-					res.DerivedIVLegs, denom)))
+				renderExplainKV(env, out, "Model note", fmt.Sprintf(
+					"%d/%d priced legs used BS-IV from option quote/close fallback because the model engine was idle.",
+					res.DerivedIVLegs, denom), nil)
 			}
 		}
-		fmt.Fprintf(out, "  %s\n", env.dim(e.notes))
-		if e.name == gammaRowLabel(r.GammaZero) {
-			fmt.Fprintf(out, "  %s\n", env.dim("The γ-zero level is where dealer net gamma crosses zero. Above γ-zero, dealer hedging dampens moves (stabilizing regime). Below, dealer hedging amplifies moves (volatile regime). Within ±2% the regime can flip on a single session. When the sweep shows no crossing inside ±15%, the row bands on the signed profile: long-γ (well above γ-zero, stable) or short-γ (well below, amplifying)."))
+		if read := explainReadNote(e.name); read != "" {
+			renderExplainKV(env, out, "Read", read, nil)
 		}
 		if len(e.missing) > 0 {
-			fmt.Fprintf(out, "  %s\n", env.dim("(missing: "+strings.Join(e.missing, ", ")+")"))
+			renderExplainKV(env, out, "Missing", strings.Join(e.missing, ", "), env.yellow)
 		}
 		fmt.Fprintln(out)
+	}
+}
+
+func renderExplainKV(env *Env, out io.Writer, label, value string, style func(string) string) {
+	const maxWidth = 106
+	prefix := "    " + label + ": "
+	available := max(maxWidth-visibleLen(prefix), 32)
+	for i, line := range wrapVisibleText(value, available) {
+		if style != nil {
+			line = style(line)
+		}
+		if i == 0 {
+			fmt.Fprintf(out, "    %s %s\n", env.yellow(label+":"), line)
+			continue
+		}
+		fmt.Fprintf(out, "%s%s\n", strings.Repeat(" ", visibleLen(prefix)), line)
+	}
+}
+
+func explainBandLine(band, reason string) string {
+	switch {
+	case band != "" && reason != "":
+		return band + " · " + reason
+	case band != "":
+		return band
+	case reason != "":
+		return reason
+	default:
+		return ""
+	}
+}
+
+func explainThresholdLine(t *rpc.RegimeThresholds) string {
+	if t == nil {
+		return ""
+	}
+	parts := []string{}
+	if t.Green != "" {
+		parts = append(parts, "green "+t.Green)
+	}
+	if t.Yellow != "" {
+		parts = append(parts, "yellow "+t.Yellow)
+	}
+	if t.Red != "" {
+		parts = append(parts, "red "+t.Red)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func explainQualityLine(now time.Time, fields []regimeExplainQuality) string {
+	parts := []string{}
+	for _, field := range fields {
+		if field.q == nil {
+			continue
+		}
+		part := field.name + " " + field.q.Confidence + "/" + field.q.FreshnessClass
+		if age := compactQualityAge(now.Sub(field.q.AsOf)); age != "" {
+			part += ", " + age
+		}
+		if field.q.Source != "" {
+			part += " (" + field.q.Source + ")"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func compactQualityAge(age time.Duration) string {
+	if age <= time.Second {
+		return ""
+	}
+	switch {
+	case age >= 48*time.Hour:
+		return fmt.Sprintf("%dd old", int(age.Hours()/24))
+	case age >= time.Hour:
+		return fmt.Sprintf("%dh old", int(age.Hours()))
+	default:
+		return fmt.Sprintf("%ds old", int(age.Seconds()))
+	}
+}
+
+func styleRegimeExplainBand(env *Env, band string) func(string) string {
+	switch band {
+	case "green":
+		return env.green
+	case "yellow":
+		return env.yellow
+	case "red":
+		return env.red
+	default:
+		return nil
+	}
+}
+
+func explainReadNote(name string) string {
+	switch {
+	case strings.HasPrefix(name, "VIX/"):
+		return "Volatility term structure. Sustained inversion matters; one-day spikes are noise."
+	case name == "VVIX":
+		return "Vol-of-vol demand. Use beside VIX term structure because the two can diverge."
+	case strings.HasPrefix(name, "HYG"):
+		return "ETF credit proxy versus SPY. Watch sustained HYG weakness, especially while SPY stays near highs."
+	case strings.Contains(name, "OAS"):
+		return "Official cash-credit close. Slower than HYG, but cleaner spread evidence."
+	case strings.Contains(name, "funding"):
+		return "Short-term funding pressure. A wider CP/T-bill spread means more funding stress."
+	case strings.HasPrefix(name, "USD"):
+		return "FX carry proxy. Yen strengthening can flag carry-unwind pressure."
+	case strings.Contains(name, "γ-zero"):
+		return "Dealer-gamma model. Above γ-zero tends to dampen moves (stabilizing); below it tends to amplify (amplifying). No crossing means the row bands on profile sign."
+	case strings.Contains(name, "breadth"):
+		return "SPX participation. Weak breadth means fewer names are carrying the index."
+	default:
+		return ""
 	}
 }
 

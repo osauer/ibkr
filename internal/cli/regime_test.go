@@ -258,11 +258,10 @@ func TestRenderRegime_NoSpecDocLine(t *testing.T) {
 	}
 }
 
-// TestRenderRegime_ExplainModeIncludesNotes pins the --explain footer:
-// when explain=true, the renderer appends the daemon's per-indicator
-// notes prose verbatim. Default mode (explain=false) omits them, with
-// a one-line hint about --explain instead.
-func TestRenderRegime_ExplainModeIncludesNotes(t *testing.T) {
+// TestRenderRegime_ExplainModeUsesCompactAuditNotes pins the --explain
+// footer: it renders compact thresholds/provenance/read notes instead
+// of dumping the daemon's long methodology prose verbatim.
+func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
@@ -270,9 +269,20 @@ func TestRenderRegime_ExplainModeIncludesNotes(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"VIX/VIX3M notes", "HYG/SPY notes", "USD/JPY notes", "gamma notes", "breadth notes"} {
+	for _, want := range []string{"Explain", "Full methodology", "Read:", "Volatility term structure", "Dealer-gamma model"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"VIX/VIX3M notes", "HYG/SPY notes", "USD/JPY notes", "gamma notes", "breadth notes"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("--explain should not dump fixture note %q:\n%s", notWant, out)
+		}
+	}
+	explain := out[strings.Index(out, "  Explain"):]
+	for line := range strings.SplitSeq(explain, "\n") {
+		if got := visibleLen(line); got > 112 {
+			t.Fatalf("--explain line too wide (%d):\n%s\n\nfull output:\n%s", got, line, out)
 		}
 	}
 }
