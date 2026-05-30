@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -218,6 +219,25 @@ func TestGammaScopeForRequestDefaultsToCombined(t *testing.T) {
 	}
 	if got != rpc.GammaZeroScopeCombined {
 		t.Errorf("empty scope: got %q, want %q", got, rpc.GammaZeroScopeCombined)
+	}
+}
+
+func TestSummarizeSPXFailureClassifiesCancellationAndTimeout(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"context_canceled", context.Canceled, "fetch_canceled"},
+		{"deadline", context.DeadlineExceeded, "timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summarizeSPXFailure(tc.err); got != tc.want {
+				t.Fatalf("summarizeSPXFailure(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

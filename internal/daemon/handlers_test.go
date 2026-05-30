@@ -1062,9 +1062,10 @@ func assertGatewayUnavailable(t *testing.T, err error) {
 //
 // The classification was a v0.27.3 fix: prior versions side-channelled
 // "refreshing" via fetchRegimeBreadth, which was prone to drift between
-// the breadth handler and the regime fetcher. This test pins the single
-// source of truth so any future surface added to the daemon must call
-// the same helper.
+// the breadth handler and the regime fetcher. A warm refresh must keep
+// the last good snapshot rankable; Refreshing is the side-band progress
+// bit. This test pins the single source of truth so any future surface
+// added to the daemon must call the same helper.
 func TestClassifyBreadthState(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1073,7 +1074,7 @@ func TestClassifyBreadthState(t *testing.T) {
 		want       rpc.BreadthState
 	}{
 		{"snapshot exists, no refresh in flight -> ready", true, false, rpc.BreadthStateReady},
-		{"snapshot exists, refresh in flight     -> computing", true, true, rpc.BreadthStateComputing},
+		{"snapshot exists, refresh in flight     -> ready", true, true, rpc.BreadthStateReady},
 		{"no snapshot, refresh in flight         -> computing", false, true, rpc.BreadthStateComputing},
 		{"no snapshot, no refresh                -> cold", false, false, rpc.BreadthStateCold},
 	}

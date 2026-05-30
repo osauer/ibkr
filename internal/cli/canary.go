@@ -1042,16 +1042,16 @@ func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []string 
 		warnings = append(warnings, fmt.Sprintf("%d regime cluster(s) unranked; severe market actions require independent confirmation", m.UnrankedClusters))
 	}
 	if len(m.AmbiguousClusters) > 0 {
-		warnings = append(warnings, "ambiguous clusters: "+strings.Join(m.AmbiguousClusters, ","))
+		warnings = append(warnings, "ambiguous clusters: "+canaryClusterList(m.AmbiguousClusters))
 	}
 	if len(m.PartialClusters) > 0 {
-		warnings = append(warnings, "partial clusters: "+strings.Join(m.PartialClusters, ","))
+		warnings = append(warnings, "partial clusters: "+canaryClusterList(m.PartialClusters))
 	}
 	if len(m.DegradedClusters) > 0 {
-		warnings = append(warnings, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+		warnings = append(warnings, "degraded clusters: "+canaryClusterList(m.DegradedClusters))
 	}
 	if len(m.StaleClusters) > 0 {
-		warnings = append(warnings, "stale clusters: "+strings.Join(m.StaleClusters, ","))
+		warnings = append(warnings, "stale clusters: "+canaryClusterList(m.StaleClusters))
 	}
 	for _, w := range r.WarningDetails {
 		line := canaryWarningLine(w)
@@ -1151,19 +1151,19 @@ func pctAtLeast(v *float64, threshold float64) bool {
 func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
 	parts := []string{canaryMarketEvidence(m)}
 	if len(m.StaleClusters) > 0 {
-		parts = append(parts, "stale "+strings.Join(m.StaleClusters, ","))
+		parts = append(parts, "stale "+canaryClusterList(m.StaleClusters))
 	}
 	if len(m.AmbiguousClusters) > 0 {
-		parts = append(parts, "ambiguous "+strings.Join(m.AmbiguousClusters, ","))
+		parts = append(parts, "ambiguous "+canaryClusterList(m.AmbiguousClusters))
 	}
 	if len(m.PartialClusters) > 0 {
-		parts = append(parts, "partial "+strings.Join(m.PartialClusters, ","))
+		parts = append(parts, "partial "+canaryClusterList(m.PartialClusters))
 	}
 	if len(m.DegradedClusters) > 0 {
-		parts = append(parts, "degraded "+strings.Join(m.DegradedClusters, ","))
+		parts = append(parts, "degraded "+canaryClusterList(m.DegradedClusters))
 	}
 	if len(m.ComputingClusters) > 0 {
-		parts = append(parts, "computing "+strings.Join(m.ComputingClusters, ","))
+		parts = append(parts, "computing "+canaryClusterList(m.ComputingClusters))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -1307,45 +1307,397 @@ func FetchCanary(ctx context.Context, conn interface {
 }
 
 func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {
+	width := outputColumns(out)
+	if width == 0 {
+		width = 120
+	}
+	return renderCanaryTextWidth(env, out, r, width)
+}
+
+func renderCanaryTextWidth(env *Env, out io.Writer, r *CanaryResult, width int) int {
+	if width < 40 {
+		width = 80
+	}
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "Portfolio Canary  ·  %s\n", r.AsOf.Format("2006-01-02 15:04 MST"))
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %-10s %s\n", "Risk state", canaryRiskStateLabel(env, r.Direction, r.Severity, true))
-	fmt.Fprintf(out, "  %-10s %s\n", "Next step", canaryPlannerStepLabel(env, r.PlannerModeHint, r.PlannerReadiness))
-	fmt.Fprintf(out, "  %-10s %s\n", "Confidence", canaryConfidenceLabel(env, r.Confidence))
+	renderCanaryKV(out, "Risk state", canaryRiskStateText(r.Direction, r.Severity), width, func(s string) string {
+		return canaryRiskStateLabel(env, r.Direction, r.Severity, true)
+	})
+	renderCanaryKV(out, "Guidance", r.Summary, width, env.bold)
+	if len(r.PrimaryDrivers) > 0 {
+		renderCanaryKV(out, "Drivers", strings.Join(signalDisplayStrings(r.PrimaryDrivers), ", "), width, nil)
+	}
+	renderCanaryConfidenceKV(env, out, r, width)
 	if r.DataConfidence != "" || r.SignalConfidence != "" {
 		fmt.Fprintf(out, "  %-10s data %s · signals %s\n", "Quality",
 			canaryConfidenceLabel(env, r.DataConfidence), canaryConfidenceLabel(env, r.SignalConfidence))
 	}
-	fmt.Fprintf(out, "  %-10s %s\n", "Guidance", env.bold(r.Summary))
-	if len(r.PrimaryDrivers) > 0 {
-		fmt.Fprintf(out, "  %-10s %s\n", "Drivers", strings.Join(signalIDStrings(r.PrimaryDrivers), ", "))
+	if why := canaryConfidenceExplanation(r); why != "" {
+		renderCanaryKV(out, "Why", why, width, env.dim)
 	}
+	renderCanaryKV(out, "Next step", canaryPlannerStepText(r.PlannerModeHint, r.PlannerReadiness), width, func(s string) string {
+		return canaryPlannerStepLabel(env, r.PlannerModeHint, r.PlannerReadiness)
+	})
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %-28s %-22s %s\n", "Title", "Risk state", "Guidance")
-	fmt.Fprintf(out, "  %-28s %-22s %s\n", strings.Repeat("-", 28), strings.Repeat("-", 22), strings.Repeat("-", 54))
-	for _, row := range r.Rows {
-		state := padRightVisible(canaryRiskStateLabel(env, row.Direction, row.Severity, false), 22)
-		fmt.Fprintf(out, "  %-28s %s %s\n", row.Title, state, row.Guidance)
-		if row.Evidence != "" {
-			fmt.Fprintf(out, "  %-28s %-22s %s\n", "", "", env.dim(row.Evidence))
-		}
+	if width < 116 {
+		renderCanaryRowsStacked(env, out, r.Rows, width)
+	} else {
+		renderCanaryRowsTable(env, out, r.Rows, width)
 	}
-	if len(r.Warnings) > 0 {
-		fmt.Fprintln(out)
-		for _, w := range r.Warnings {
-			fmt.Fprintf(out, "  %s %s\n", env.dim("warning:"), w)
-		}
-	}
+	renderCanaryWarnings(env, out, r.Warnings, width)
 	return 0
 }
 
-func signalIDStrings(ids []risk.SignalID) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, string(id))
+func renderCanaryConfidenceKV(env *Env, out io.Writer, r *CanaryResult, width int) {
+	label := canaryConfidenceText(r.Confidence)
+	value := label
+	if why := canaryInlineConfidenceReason(r.ConfidenceReasons); why != "" {
+		value += " (" + why + ")"
+	}
+	const labelW = 10
+	available := max(width-2-labelW-1, 24)
+	for i, line := range wrapVisibleText(value, available) {
+		if i == 0 && strings.HasPrefix(line, label) {
+			line = canaryConfidenceLabel(env, r.Confidence) + strings.TrimPrefix(line, label)
+		}
+		if i == 0 {
+			fmt.Fprintf(out, "  %-*s %s\n", labelW, "Confidence", line)
+		} else {
+			fmt.Fprintf(out, "  %-*s %s\n", labelW, "", line)
+		}
+	}
+}
+
+func canaryInlineConfidenceReason(reasons []string) string {
+	var data []string
+	confirmationMissing := false
+	var other []string
+	for _, reason := range reasons {
+		short, kind := canaryShortConfidenceReason(reason)
+		if short == "" {
+			continue
+		}
+		switch kind {
+		case "data":
+			data = append(data, short)
+		case "confirmation":
+			confirmationMissing = true
+		default:
+			other = append(other, short)
+		}
+	}
+	parts := []string{}
+	if len(data) > 0 {
+		parts = append(parts, "data: "+strings.Join(data, ", "))
+	}
+	if confirmationMissing {
+		parts = append(parts, "confirmation missing")
+	}
+	parts = append(parts, other...)
+	return strings.Join(parts, "; ")
+}
+
+func canaryConfidenceExplanation(r *CanaryResult) string {
+	reasons := canaryShortConfidenceSentences(r.ConfidenceReasons)
+	if len(reasons) == 0 {
+		return ""
+	}
+	return strings.Join(reasons, "; ") + "."
+}
+
+func canaryShortConfidenceSentences(reasons []string) []string {
+	out := make([]string, 0, len(reasons))
+	seen := map[string]bool{}
+	for _, reason := range reasons {
+		text, kind := canaryShortConfidenceReason(reason)
+		if text == "" || seen[text] {
+			continue
+		}
+		if kind == "confirmation" {
+			text = "portfolio breach lacks independent market-stress confirmation"
+		}
+		seen[text] = true
+		out = append(out, text)
 	}
 	return out
+}
+
+func canaryShortConfidenceReason(reason string) (string, string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "", ""
+	}
+	key, value, ok := strings.Cut(reason, ":")
+	if ok {
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "degraded clusters":
+			return humanList(value) + " degraded", "data"
+		case "stale clusters":
+			return humanList(value) + " stale", "data"
+		case "ambiguous clusters":
+			return humanList(value) + " ambiguous", "data"
+		case "partial clusters":
+			return humanList(value) + " partial", "data"
+		case "computing clusters":
+			return humanList(value) + " computing", "data"
+		}
+	}
+	if strings.Contains(reason, "regime cluster(s) unranked") {
+		return reason, "data"
+	}
+	if reason == "portfolio breach lacks independent market-stress confirmation" {
+		return "confirmation missing", "confirmation"
+	}
+	return reason, "other"
+}
+
+func humanList(value string) string {
+	clean := []string{}
+	for part := range strings.SplitSeq(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		clean = append(clean, canaryClusterDisplayName(part))
+	}
+	if len(clean) == 0 {
+		return strings.TrimSpace(value)
+	}
+	if len(clean) == 1 {
+		return clean[0]
+	}
+	if len(clean) == 2 {
+		return clean[0] + " and " + clean[1]
+	}
+	return strings.Join(clean[:len(clean)-1], ", ") + ", and " + clean[len(clean)-1]
+}
+
+func canaryClusterList(clusters []string) string {
+	return humanList(strings.Join(clusters, ","))
+}
+
+func canaryClusterDisplayName(cluster string) string {
+	switch strings.ToLower(strings.TrimSpace(cluster)) {
+	case "fx":
+		return "FX"
+	default:
+		return strings.TrimSpace(cluster)
+	}
+}
+
+func renderCanaryKV(out io.Writer, label, value string, width int, color func(string) string) {
+	const labelW = 10
+	available := max(width-2-labelW-1, 24)
+	lines := wrapVisibleText(value, available)
+	for i, line := range lines {
+		if color != nil {
+			line = color(line)
+		}
+		if i == 0 {
+			fmt.Fprintf(out, "  %-*s %s\n", labelW, label, line)
+		} else {
+			fmt.Fprintf(out, "  %-*s %s\n", labelW, "", line)
+		}
+	}
+}
+
+func renderCanaryRowsTable(env *Env, out io.Writer, rows []CanaryRow, width int) {
+	const titleW = 28
+	const stateW = 22
+	guidanceW := width - 2 - titleW - 1 - stateW - 1
+	if guidanceW < 40 {
+		renderCanaryRowsStacked(env, out, rows, width)
+		return
+	}
+	fmt.Fprintf(out, "  %-*s %-*s %s\n", titleW, "Title", stateW, "Risk state", "Guidance")
+	fmt.Fprintf(out, "  %-*s %-*s %s\n", titleW, strings.Repeat("-", titleW), stateW, strings.Repeat("-", stateW), strings.Repeat("-", guidanceW))
+	for _, row := range rows {
+		state := padRightVisible(canaryRiskStateLabel(env, row.Direction, row.Severity, false), stateW)
+		guidance := wrapVisibleText(row.Guidance, guidanceW)
+		for i, line := range guidance {
+			title := ""
+			stateCell := strings.Repeat(" ", stateW)
+			if i == 0 {
+				title = row.Title
+				stateCell = state
+			}
+			fmt.Fprintf(out, "  %-*s %s %s\n", titleW, title, stateCell, line)
+		}
+		if row.Evidence != "" {
+			for _, line := range wrapVisibleText(row.Evidence, guidanceW) {
+				fmt.Fprintf(out, "  %-*s %-*s %s\n", titleW, "", stateW, "", env.dim(line))
+			}
+		}
+	}
+}
+
+func renderCanaryRowsStacked(env *Env, out io.Writer, rows []CanaryRow, width int) {
+	fmt.Fprintln(out, "  Details")
+	for _, row := range rows {
+		state := canaryRiskStateLabel(env, row.Direction, row.Severity, false)
+		fmt.Fprintf(out, "  %s · %s\n", row.Title, state)
+		renderCanaryIndented(out, "guidance", row.Guidance, width, nil)
+		if row.Evidence != "" {
+			renderCanaryIndented(out, "evidence", row.Evidence, width, env.dim)
+		}
+	}
+}
+
+func renderCanaryIndented(out io.Writer, label, value string, width int, color func(string) string) {
+	const labelW = 9
+	available := max(width-4-labelW-1, 24)
+	for i, line := range wrapVisibleText(value, available) {
+		if color != nil {
+			line = color(line)
+		}
+		if i == 0 {
+			fmt.Fprintf(out, "    %-*s %s\n", labelW, label, line)
+		} else {
+			fmt.Fprintf(out, "    %-*s %s\n", labelW, "", line)
+		}
+	}
+}
+
+func renderCanaryWarnings(env *Env, out io.Writer, warnings []string, width int) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  Warnings")
+	for _, warning := range warnings {
+		label, text := canaryWarningLabel(warning)
+		labelText := label + ":"
+		available := max(width-4-visibleLen(labelText)-1, 24)
+		lines := wrapVisibleText(text, available)
+		labelText = canaryWarningLabelColor(env, label, labelText)
+		for i, line := range lines {
+			if i == 0 {
+				fmt.Fprintf(out, "    %s %s\n", labelText, line)
+			} else {
+				fmt.Fprintf(out, "    %s %s\n", strings.Repeat(" ", visibleLen(label)+1), line)
+			}
+		}
+	}
+}
+
+func signalDisplayStrings(ids []risk.SignalID) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, signalDisplayString(id))
+	}
+	return out
+}
+
+func signalDisplayString(id risk.SignalID) string {
+	switch id {
+	case risk.SignalMarginCushionLow:
+		return "margin cushion"
+	case risk.SignalLookAheadCushionLow:
+		return "look-ahead cushion"
+	case risk.SignalPortfolioPnLShock:
+		return "P&L shock"
+	case risk.SignalGammaRed:
+		return "gamma red"
+	case risk.SignalSingleNameExposureHigh:
+		return "title exposure"
+	case risk.SignalSingleNameDeltaHigh:
+		return "title delta"
+	case risk.SignalGrossExposureHigh:
+		return "gross exposure"
+	case risk.SignalNetDeltaHigh:
+		return "net delta"
+	case risk.SignalGrossDeltaHigh:
+		return "gross delta"
+	case risk.SignalRiskDataDegraded:
+		return "data degraded"
+	case risk.SignalMarketDataStale:
+		return "market data stale"
+	case risk.SignalOptionGreeksDegraded:
+		return "option greeks"
+	default:
+		return string(id)
+	}
+}
+
+func wrapVisibleText(text string, width int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return []string{""}
+	}
+	if width <= 0 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	lines := []string{}
+	line := ""
+	for _, word := range words {
+		for visibleLen(word) > width {
+			head, tail := splitVisibleWord(word, width)
+			if line != "" {
+				lines = append(lines, line)
+				line = ""
+			}
+			lines = append(lines, head)
+			word = tail
+		}
+		if line == "" {
+			line = word
+			continue
+		}
+		if visibleLen(line)+1+visibleLen(word) <= width {
+			line += " " + word
+			continue
+		}
+		lines = append(lines, line)
+		line = word
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func splitVisibleWord(word string, width int) (string, string) {
+	if width <= 0 {
+		return word, ""
+	}
+	used := 0
+	for i := range word {
+		if used == width {
+			return word[:i], word[i:]
+		}
+		used++
+	}
+	return word, ""
+}
+
+func canaryWarningLabel(warning string) (string, string) {
+	lower := strings.ToLower(warning)
+	switch {
+	case strings.Contains(lower, "stale") || strings.Contains(lower, "frozen"):
+		return "info", warning
+	case strings.Contains(lower, "computing") || strings.Contains(lower, "ambiguous") || strings.Contains(lower, "unranked"):
+		return "pending", warning
+	case strings.Contains(lower, "error"):
+		return "error", warning
+	default:
+		return "warning", warning
+	}
+}
+
+func canaryWarningLabelColor(env *Env, label, text string) string {
+	switch label {
+	case "info":
+		return env.dim(text)
+	case "pending":
+		return env.yellow(text)
+	case "error":
+		return env.red(text)
+	default:
+		return env.yellow(text)
+	}
 }
 
 func canaryRiskStateLabel(env *Env, direction risk.SignalDirection, severity risk.SignalSeverity, current bool) string {
@@ -1439,11 +1791,23 @@ func canaryPlannerStepText(mode risk.PlannerMode, readiness risk.PlannerReadines
 }
 
 func canaryConfidenceLabel(env *Env, confidence string) string {
+	label := canaryConfidenceText(confidence)
 	switch strings.ToLower(strings.TrimSpace(confidence)) {
 	case "high":
-		return env.green("High")
+		return env.green(label)
 	case "medium-low", "low":
-		return env.yellow("Medium-low")
+		return env.yellow(label)
+	default:
+		return label
+	}
+}
+
+func canaryConfidenceText(confidence string) string {
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "high":
+		return "High"
+	case "medium-low", "low":
+		return "Medium-low"
 	case "medium":
 		return "Medium"
 	default:

@@ -605,8 +605,10 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		}
 	case strings.HasPrefix(code, "spx_unavailable:"):
 		d.Severity = "data_quality"
-		d.Message = renderSPXUnavailableMessage(strings.TrimPrefix(code, "spx_unavailable:"))
+		reason := strings.TrimPrefix(code, "spx_unavailable:")
+		d.Message = renderSPXUnavailableMessage(reason)
 		d.Impact = "Showing SPY only; SPX gamma is not included."
+		d.Action = spxUnavailableAction(reason)
 	case code == "all_iv_derived":
 		d.Severity = "data_quality"
 		d.Message = "All implied volatilities were back-solved instead of supplied by the gateway model tick."
@@ -810,29 +812,30 @@ func computeMedian(xs []float64) float64 {
 
 // renderGammaSkippedBanner surfaces an entitlement-degraded banner at
 // the top of the output when the daemon's combined-mode compute
-// degraded to SPY-only (SPX 354 / 200 / timeout / etc). The banner
-// is read from warning_details on the wire, with a Warnings fallback
-// for in-process tests.
+// degraded to SPY-only (SPX 354 / 200 / timeout / etc). The banner is
+// built from warning_details on the wire, with a Warnings fallback for
+// legacy/in-process payloads. Keep this as prose, not raw daemon tokens:
+// users need to know whether the likely issue is entitlement, session
+// timing, pacing, or a fetch cancellation before deciding what to do next.
 //
 // Cases (per design §8.2):
 //   - spx_unavailable:354     — entitlement gap, most common
 //   - spx_unavailable:200     — contract not found / SPX chain restricted
 //   - spx_unavailable:no_data — fan-out landed 0 legs in 30s
-//   - spx_unavailable:<short> — other (timeout, gateway error)
+//   - spx_unavailable:<short> — other (timeout, gateway error, cancellation)
 //
 // No banner when warnings list is empty or contains only non-skip
 // codes. The "decoupled" warning is surfaced separately via the
 // headline badge — kept distinct from entitlement-degraded states.
 func renderGammaSkippedBanner(env *Env, c *rpc.GammaZeroComputed) bool {
 	out := env.Stdout
-	if reason, ok := spxUnavailableReason(c); ok {
-		detail := renderSPXUnavailableMessage(reason)
-		fmt.Fprintf(out, "  ⚠ SPX skipped — %s. Showing SPY only.\n", detail)
-		if reason == "354" {
-			fmt.Fprintln(out, env.dim("    Re-run with --only=spy to suppress this banner, or check your"))
-			fmt.Fprintln(out, env.dim("    CBOE OPRA subscription in IBKR's Market Data Subscriptions."))
-		} else {
-			fmt.Fprintln(out, env.dim("    Retry later, or re-run with --only=spy to suppress this banner."))
+	if notice, ok := spxUnavailableNotice(c); ok {
+		fmt.Fprintf(out, "  ⚠ SPX skipped — %s. Showing SPY only.\n", trimSentencePeriod(notice.Message))
+		if notice.Context != "" {
+			renderGammaNoticeField(env, "Context", notice.Context)
+		}
+		if notice.Action != "" {
+			renderGammaNoticeField(env, "Action", notice.Action)
 		}
 		fmt.Fprintln(out)
 		return true
@@ -840,38 +843,253 @@ func renderGammaSkippedBanner(env *Env, c *rpc.GammaZeroComputed) bool {
 	return false
 }
 
-func spxUnavailableReason(c *rpc.GammaZeroComputed) (string, bool) {
+type gammaSPXUnavailableNotice struct {
+	Reason  string
+	Message string
+	Context string
+	Action  string
+}
+
+func renderGammaNoticeField(env *Env, label, text string) {
+	const maxWidth = 96
+	prefix := label + ": "
+	indent := strings.Repeat(" ", visibleLen(prefix))
+	for i, line := range wrapVisibleText(text, maxWidth-visibleLen(prefix)) {
+		if i == 0 {
+			fmt.Fprintln(env.Stdout, env.dim("    "+prefix+line))
+			continue
+		}
+		fmt.Fprintln(env.Stdout, env.dim("    "+indent+line))
+	}
+}
+
+func spxUnavailableNotice(c *rpc.GammaZeroComputed) (gammaSPXUnavailableNotice, bool) {
 	if c == nil {
-		return "", false
+		return gammaSPXUnavailableNotice{}, false
 	}
 	for _, d := range c.WarningDetails {
-		if after, ok := strings.CutPrefix(d.Code, "spx_unavailable:"); ok {
-			return after, true
+		if reason, ok := strings.CutPrefix(d.Code, "spx_unavailable:"); ok {
+			notice := gammaSPXNoticeForReason(c, reason)
+			if msg := spxUnavailableMessageFromDetail(d, reason); msg != "" {
+				notice.Message = msg
+			}
+			if action := spxUnavailableActionFromDetail(d, reason); action != "" {
+				notice.Action = action
+			}
+			return notice, true
 		}
 	}
 	for _, w := range c.Warnings {
-		if after, ok := strings.CutPrefix(w, "spx_unavailable:"); ok {
-			return after, true
+		if reason, ok := strings.CutPrefix(w, "spx_unavailable:"); ok {
+			return gammaSPXNoticeForReason(c, reason), true
 		}
 	}
-	return "", false
+	return gammaSPXUnavailableNotice{}, false
+}
+
+func gammaSPXNoticeForReason(c *rpc.GammaZeroComputed, reason string) gammaSPXUnavailableNotice {
+	return gammaSPXUnavailableNotice{
+		Reason:  normalizeSPXUnavailableReason(reason),
+		Message: renderSPXUnavailableMessage(reason),
+		Context: spxUnavailableContext(c, reason),
+		Action:  spxUnavailableAction(reason),
+	}
+}
+
+func spxUnavailableMessageFromDetail(d rpc.GammaWarningDetail, reason string) string {
+	msg := strings.TrimSpace(d.Message)
+	msg = strings.TrimPrefix(msg, "SPX option chain was skipped: ")
+	msg = strings.TrimPrefix(msg, "SPX option-chain fetch skipped: ")
+	msg = trimSentencePeriod(msg)
+	if msg == "" || spxUnavailableMessageIsRaw(msg, reason) {
+		return renderSPXUnavailableMessage(reason)
+	}
+	return msg
+}
+
+func spxUnavailableActionFromDetail(d rpc.GammaWarningDetail, reason string) string {
+	action := trimSentencePeriod(strings.TrimSpace(d.Action))
+	if action == "" || spxUnavailableActionIsTooGeneric(action, reason) {
+		return spxUnavailableAction(reason)
+	}
+	return qualifyGammaAction(action)
+}
+
+func spxUnavailableMessageIsRaw(msg, reason string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	if lower == "" {
+		return true
+	}
+	switch normalizeSPXUnavailableReason(reason) {
+	case "fetch_canceled":
+		return strings.Contains(lower, "context canceled") ||
+			strings.Contains(lower, "context cancelled") ||
+			strings.Contains(lower, "context deadline exceeded")
+	case "timeout":
+		return strings.Contains(lower, "context deadline exceeded")
+	}
+	return lower == strings.ToLower(strings.TrimSpace(reason))
+}
+
+func spxUnavailableActionIsTooGeneric(action, reason string) bool {
+	if normalizeSPXUnavailableReason(reason) != "fetch_canceled" &&
+		normalizeSPXUnavailableReason(reason) != "timeout" &&
+		normalizeSPXUnavailableReason(reason) != "no_data" {
+		return false
+	}
+	lower := strings.ToLower(action)
+	return lower == "retry later or run --only=spy" ||
+		lower == "retry later, or re-run with --only=spy to suppress this banner" ||
+		lower == "retry later or run --only=spy to suppress this banner"
+}
+
+func qualifyGammaAction(action string) string {
+	replacements := []struct {
+		from string
+		to   string
+	}{
+		{"run --only=spy", "run `ibkr gamma --only=spy`"},
+		{"run --only=spx --force", "run `ibkr gamma --only=spx --force`"},
+		{"re-run with --only=spy", "run `ibkr gamma --only=spy`"},
+	}
+	for _, r := range replacements {
+		action = strings.ReplaceAll(action, r.from, r.to)
+	}
+	return action
 }
 
 func renderSPXUnavailableMessage(reason string) string {
-	switch reason {
+	switch normalizeSPXUnavailableReason(reason) {
 	case "354":
-		return "entitlement missing (IBKR error 354)"
+		return "missing CBOE OPRA/SPX option market-data entitlement (IBKR error 354)"
 	case "200":
 		return "SPX option contract resolution rejected (IBKR error 200)"
 	case "no_data":
-		return "no option data landed within the window"
+		return "no SPX option rows returned usable IV/OI before the fetch window ended"
 	case "throttled":
 		return "gateway throttled the SPX fan-out"
 	case "zero_magnitude":
 		return "landed legs produced zero usable gamma magnitude"
+	case "fetch_canceled":
+		return "the SPX option-chain fetch was canceled before usable data landed"
+	case "timeout":
+		return "the SPX option-chain fetch timed out before usable data landed"
 	default:
-		return reason
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return "SPX option-chain data was unavailable"
+		}
+		return "SPX option-chain data was unavailable (" + reason + ")"
 	}
+}
+
+func spxUnavailableAction(reason string) string {
+	switch normalizeSPXUnavailableReason(reason) {
+	case "354":
+		return "Check the CBOE OPRA/SPX option data subscription in IBKR, or run `ibkr gamma --only=spy` to suppress the banner."
+	case "200":
+		return "Retry later; if it repeats, run `ibkr gamma --only=spx --force` for diagnostics or `ibkr gamma --only=spy` to suppress the fallback banner."
+	case "no_data", "fetch_canceled", "timeout":
+		return "Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spy`."
+	case "throttled":
+		return "Wait a few minutes and retry without --force; use `ibkr gamma --only=spy` if you only want the SPY surface."
+	case "zero_magnitude":
+		return "Retry during 09:30-16:00 ET, or run `ibkr gamma --only=spx --force` for SPX-only diagnostics."
+	default:
+		return "Retry later; if it repeats, check the daemon log and TWS market-data farm messages, or run `ibkr gamma --only=spy`."
+	}
+}
+
+func spxUnavailableContext(c *rpc.GammaZeroComputed, reason string) string {
+	switch normalizeSPXUnavailableReason(reason) {
+	case "354":
+		return "IBKR error 354 points to a missing market-data entitlement, not an after-hours condition."
+	case "200":
+		return "IBKR error 200 is a contract-resolution/routing rejection; it is not enough by itself to blame after-hours."
+	case "throttled":
+		return "Gateway pacing limited the SPX fan-out; repeated forced runs can make this worse."
+	case "zero_magnitude":
+		return "SPX rows landed, but not enough usable gamma magnitude survived the quality gates."
+	}
+
+	at, hasTime := gammaSPXReferenceTime(c)
+	session := rpc.ClassifySession(at)
+	sessionLabel := gammaSessionLabel(session)
+	when := "Current timestamp"
+	if hasTime {
+		when = "Compute timestamp"
+	}
+	prefix := fmt.Sprintf("%s %s is %s.", when, gammaSPXSessionStamp(at), sessionLabel)
+	switch normalizeSPXUnavailableReason(reason) {
+	case "no_data", "fetch_canceled", "timeout":
+		if session == rpc.SessionRTH {
+			return prefix + " During regular option hours this is more likely a gateway/fetch failure unless daemon logs show IBKR 354/200."
+		}
+		return prefix + " Outside regular U.S. option hours, SPX option/model/OI ticks can be sparse; that may be a contributor, not a confirmed root cause."
+	default:
+		return prefix + " The warning does not by itself identify entitlement vs gateway vs session timing."
+	}
+}
+
+func gammaSPXReferenceTime(c *rpc.GammaZeroComputed) (time.Time, bool) {
+	if c != nil {
+		if !c.AsOf.IsZero() {
+			return c.AsOf, true
+		}
+		if !c.SpotAt.IsZero() {
+			return c.SpotAt, true
+		}
+	}
+	return time.Now(), false
+}
+
+func gammaSPXSessionStamp(t time.Time) string {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return t.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return t.In(loc).Format("2006-01-02 15:04 MST")
+}
+
+func gammaSessionLabel(session rpc.SessionClass) string {
+	switch session {
+	case rpc.SessionPre:
+		return "pre-market, outside regular U.S. option hours"
+	case rpc.SessionRTH:
+		return "regular U.S. option hours"
+	case rpc.SessionPost:
+		return "post-market, outside regular U.S. option hours"
+	default:
+		return "closed, outside regular U.S. option hours"
+	}
+}
+
+func normalizeSPXUnavailableReason(reason string) string {
+	r := strings.ToLower(strings.TrimSpace(reason))
+	r = strings.ReplaceAll(r, "_", " ")
+	r = strings.ReplaceAll(r, "-", " ")
+	switch {
+	case r == "354", strings.Contains(r, "error 354"):
+		return "354"
+	case r == "200", strings.Contains(r, "error 200"), strings.Contains(r, "no security definition"):
+		return "200"
+	case r == "no data", strings.Contains(r, "no option data landed"):
+		return "no_data"
+	case strings.Contains(r, "throttl"):
+		return "throttled"
+	case strings.Contains(r, "zero magnitude"), strings.Contains(r, "no usable gex"):
+		return "zero_magnitude"
+	case r == "context canceled", r == "context cancelled", r == "canceled", r == "cancelled", r == "fetch canceled", r == "fetch cancelled":
+		return "fetch_canceled"
+	case r == "context deadline exceeded", r == "deadline exceeded", strings.Contains(r, "timeout"), strings.Contains(r, "timed out"):
+		return "timeout"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
+func trimSentencePeriod(s string) string {
+	return strings.TrimRight(strings.TrimSpace(s), ".")
 }
 
 // formatRegimeAgreement renders the RegimeAgreement classifier into a

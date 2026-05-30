@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -28,5 +29,25 @@ func TestGammaZeroStatusAndRegimeUsesGapForCrossing(t *testing.T) {
 				t.Fatalf("regime = %q, want %q", regime, tc.want)
 			}
 		})
+	}
+}
+
+func TestSPXUnavailableWarningTextFetchCanceledIsUserFacing(t *testing.T) {
+	t.Parallel()
+	message, impact, action := spxUnavailableWarningText("fetch_canceled")
+	for _, got := range []string{message, impact, action} {
+		if strings.Contains(got, "context canceled") {
+			t.Fatalf("warning text leaked raw context error: message=%q impact=%q action=%q", message, impact, action)
+		}
+	}
+	for _, want := range []string{
+		"canceled before usable data landed",
+		"Showing SPY only",
+		"09:30-16:00 ET",
+		"--only=spy",
+	} {
+		if !strings.Contains(message+" "+impact+" "+action, want) {
+			t.Fatalf("warning text missing %q: message=%q impact=%q action=%q", want, message, impact, action)
+		}
 	}
 }

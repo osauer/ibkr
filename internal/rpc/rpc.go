@@ -550,11 +550,10 @@ type BreadthDailyValue struct {
 //     "indicator not yet available" — typically only seen during the
 //     ~few-second window between daemon start and postConnectSetup
 //     launching the scheduler.
-//   - computing: a refresh is in flight. The Value/History fields may
-//     reflect a prior snapshot (warm refresh) or be empty (cold-start
-//     bootstrap). Renderers show a loading state.
-//   - ready: a snapshot exists, no refresh in flight. Value/History
-//     are authoritative.
+//   - computing: no snapshot exists yet and a refresh is in flight. Renderers
+//     show a loading state.
+//   - ready: a snapshot exists. Value/History are authoritative enough to
+//     rank; Refreshing says whether a newer snapshot is being computed.
 //   - degraded: a snapshot exists but its coverage is below the
 //     engine's threshold (e.g. partial fan-out completed). Value is
 //     present but should be rendered with a warning — the underlying
@@ -593,6 +592,9 @@ type BreadthSPXResult struct {
 	// should branch on this, not on (value==0 && history==[]) heuristics.
 	// See BreadthState docs for semantics.
 	State BreadthState `json:"state"`
+	// Refreshing is true when a newer breadth run is in flight or waiting to
+	// retry while this envelope serves the last good snapshot.
+	Refreshing bool `json:"refreshing,omitempty"`
 	// PctAbove50DMA is the current fast-window reading: percentage of
 	// S&P 500 constituents trading above their own 50-day SMA. 0-100;
 	// 50 is the symmetric midpoint. Spec rule of thumb: > 55 healthy,

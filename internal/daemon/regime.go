@@ -915,10 +915,8 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	// State on the envelope is the single source of truth — replaces
 	// the pre-v0.27.3 side-channel that called s.breadth.IsRefreshing()
 	// separately and tried to disambiguate (value==0 AND history==[])
-	// heuristically. That heuristic mis-classified a poisoned
-	// Coverage=0 snapshot (history len 1, value 0) as "ok" — the bug
-	// that produced three patch releases in one day. Reading
-	// envelope.State directly makes the classification mechanical.
+	// heuristically. A warm refresh keeps the last good snapshot ranked
+	// as ready and exposes progress through envelope.Refreshing.
 	switch envelope.State {
 	case rpc.BreadthStateComputing:
 		out.Status = rpc.RegimeStatusComputing
