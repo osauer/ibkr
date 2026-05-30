@@ -253,6 +253,7 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		r.AsOf.Format("2006-01-02 15:04 MST"),
 		"",
 		"")
+	fmt.Fprintln(out)
 
 	// Hero summary: a color-coded regime label plus a plain-English
 	// evidence balance. The table below remains the audit trail; this
@@ -261,7 +262,11 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	if indicatorEvidence := c.indicatorEvidence(); indicatorEvidence != c.evidence() {
 		fmt.Fprintf(out, "  %s\n", env.dim("Indicators: "+indicatorEvidence))
 	}
-	fmt.Fprintf(out, "  Punch line: %s\n", regimePunchLine(rows))
+	fmt.Fprintln(out)
+	renderRegimeSummaryLine(out, "Punch line:", regimePunchLine(rows), nil)
+	if len(r.DataQuality) > 0 {
+		renderRegimeSummaryLine(out, "Data quality:", formatDataQualityValue(r.DataQuality), env.yellow)
+	}
 	fmt.Fprintln(out)
 
 	if headline := renderRegimeHeadline(env, r); headline != "" {
@@ -273,9 +278,10 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	// columns. Dim-colored so the band rows stay visually dominant. The
 	// rule width matches the widest row layout (glyph + name + value +
 	// band + note), recomputed once here so it tracks layout changes.
-	fmt.Fprintln(out, renderRegimeHeader(env))
+	layout := regimeTableLayout(rows)
+	fmt.Fprintln(out, renderRegimeHeader(env, layout))
 	for _, row := range rows {
-		fmt.Fprintln(out, renderRow(env, row))
+		fmt.Fprintln(out, renderRow(env, row, layout))
 	}
 
 	fmt.Fprintln(out)
@@ -287,23 +293,59 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	return 0
 }
 
+func renderRegimeSummaryLine(out io.Writer, label, value string, color func(string) string) {
+	const maxWidth = 104
+	prefix := "  " + label + " "
+	available := max(maxWidth-visibleLen(prefix), 40)
+	lines := wrapVisibleText(value, available)
+	for i, line := range lines {
+		if color != nil {
+			line = color(line)
+		}
+		if i == 0 {
+			labelText := label
+			if color != nil {
+				labelText = color(labelText)
+			}
+			fmt.Fprintf(out, "  %s %s\n", labelText, line)
+			continue
+		}
+		fmt.Fprintf(out, "%s%s\n", strings.Repeat(" ", visibleLen(prefix)), line)
+	}
+}
+
 // renderRegimeHeader returns the dim column-header line displayed above
 // the indicator rows. Aligned with renderRow's column widths so labels
 // land directly over their cells. Reads as a key for the reader without
 // needing to consult docs.
-func renderRegimeHeader(env *Env) string {
-	const (
-		nameW  = 17
-		valueW = 30
-		asOfW  = 12
-		bandW  = 7
-	)
+type regimeTableWidths struct {
+	nameW  int
+	valueW int
+	asOfW  int
+	bandW  int
+}
+
+func regimeTableLayout(rows []regimeRow) regimeTableWidths {
+	w := regimeTableWidths{nameW: 17, valueW: 30, asOfW: 12, bandW: 7}
+	for _, row := range rows {
+		w.nameW = max(w.nameW, visibleLen(row.name))
+		value := row.value
+		if row.stateNote != "" {
+			value = row.stateNote
+		}
+		w.valueW = max(w.valueW, visibleLen(value))
+		w.asOfW = max(w.asOfW, visibleLen(ifNonEmpty(row.asOf, "—")))
+	}
+	return w
+}
+
+func renderRegimeHeader(env *Env, w regimeTableWidths) string {
 	// "  " = 2-space indent + " " = where the glyph sits + 2 spaces.
 	header := fmt.Sprintf("     %s  %s  %s  %s  %s",
-		padRightVisible("INDICATOR", nameW),
-		padRightVisible("VALUE", valueW),
-		padRightVisible("AS OF", asOfW),
-		padRightVisible("BAND", bandW),
+		padRightVisible("INDICATOR", w.nameW),
+		padRightVisible("VALUE", w.valueW),
+		padRightVisible("AS OF", w.asOfW),
+		padRightVisible("BAND", w.bandW),
 		"NOTE")
 	return env.dim(header)
 }
@@ -315,21 +357,15 @@ func renderRegimeHeader(env *Env) string {
 // ("day 3"), optional quality/stale suffix. The band-word color is
 // applied AFTER padding so column alignment stays correct under ANSI
 // escapes — same trick as the account renderer's padLeftVisible.
-func renderRow(env *Env, r regimeRow) string {
-	const (
-		nameW  = 17
-		valueW = 30
-		asOfW  = 12
-		bandW  = 7
-	)
+func renderRow(env *Env, r regimeRow, w regimeTableWidths) string {
 	value := r.value
 	if r.stateNote != "" {
 		value = r.stateNote
 	}
 	bandWord, colorFn := r.band.label()
-	bandCell := padRightVisible(bandWord, bandW)
+	bandCell := padRightVisible(bandWord, w.bandW)
 	if colorFn != nil {
-		bandCell = padRightVisible(colorFn(env, bandWord), bandW)
+		bandCell = padRightVisible(colorFn(env, bandWord), w.bandW)
 	}
 	// In default view, NOTE = the reason string verbatim (no surrounding
 	// parens, no quality clock). The reader sees a clean column with
@@ -339,8 +375,8 @@ func renderRow(env *Env, r regimeRow) string {
 	// provenance.
 	note := env.dim(r.reason)
 	return fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
-		r.glyph(env), padRightVisible(r.name, nameW), padRightVisible(value, valueW),
-		padRightVisible(ifNonEmpty(r.asOf, "—"), asOfW), bandCell, note)
+		r.glyph(env), padRightVisible(r.name, w.nameW), padRightVisible(value, w.valueW),
+		padRightVisible(ifNonEmpty(r.asOf, "—"), w.asOfW), bandCell, note)
 }
 
 // streakMarker formats a *rpc.StreakInfo into the compact "day N"
