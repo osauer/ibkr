@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.4.3 — 2026-05-30 11:01 CEST
+
+### What's new
+
+- `ibkr status` now surfaces decision-critical data-quality issues, including degraded gamma and stale regime clusters, instead of reporting a clean health snapshot while downstream market views are degraded.
+
+### Changed
+
+- `ibkr regime` now aligns the gamma-zero row with the rest of the table and labels expected off-hours stale regime data without hiding it.
+- `ibkr regime --explain` now renders compact threshold, data-quality, and read notes with wrapping and emphasis instead of long dim methodology paragraphs.
+- `ibkr status` no longer shows the ambiguous `Next concern` line.
+
 ## v1.4.2 — 2026-05-29 12:46 CEST
 
 ### What's new
