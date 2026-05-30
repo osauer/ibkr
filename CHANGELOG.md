@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.4.4 — 2026-05-30 17:33 CEST
+
+### What's new
+
+- Claude Desktop and other MCP hosts can now keep `ibkr mcp` open across long idle chat pauses without losing the next tool response.
+
+### Changed
+
+- `ibkr mcp` now leaves stdio process lifetime to the MCP host while daemon cleanup remains handled by short-lived per-request sockets and the daemon's own idle timeout.
+
+### Fixed
+
+- Fixed MCP sessions exiting after an idle window even though the host kept stdin open, which could leave later Claude tool calls waiting on a vanished server.
+
 ## v1.4.3 — 2026-05-30 11:01 CEST
 
 ### What's new
