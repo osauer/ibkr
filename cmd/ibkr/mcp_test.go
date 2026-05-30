@@ -28,6 +28,15 @@ func TestWatchMCPParentCancelsWhenParentChanges(t *testing.T) {
 	}
 }
 
+func TestMCPServeOptionsDoNotIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	opts := mcpServeOptions()
+	if opts.IdleTimeout != 0 {
+		t.Fatalf("MCP stdio server must not idle-exit while the host keeps stdin open; IdleTimeout=%s", opts.IdleTimeout)
+	}
+}
+
 func TestDialMCPDaemonHonorsCanceledContextBeforeAutospawn(t *testing.T) {
 	t.Parallel()
 

@@ -75,6 +75,35 @@ func TestServeIdleTimeoutTerminatesWithoutInputEOF(t *testing.T) {
 	}
 }
 
+func TestServeWithoutIdleTimeoutSurvivesQuietHostSession(t *testing.T) {
+	t.Parallel()
+
+	var out lockedBuffer
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	srv := NewServer(nil, "test")
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.ServeWithOptions(context.Background(), reader, &out, ServeOptions{})
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("ServeWithOptions exited while stdin stayed open and idle timeout was disabled: %v", err)
+	default:
+	}
+
+	writeMCPLine(t, writer, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	waitForOutputContains(t, &out, `"id":1`)
+
+	writer.Close()
+	if err := waitServeDone(t, done); err != nil {
+		t.Fatalf("ServeWithOptions after EOF: %v", err)
+	}
+}
+
 func TestServeIdleTimeoutResetsAfterRequest(t *testing.T) {
 	t.Parallel()
 

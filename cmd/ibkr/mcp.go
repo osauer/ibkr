@@ -2,8 +2,8 @@
 // Protocol) server that exposes the daemon's read-only surface to local
 // MCP clients (Claude Desktop, Cursor, Continue, etc.). Tool/resource requests
 // lazily dial — and autospawn if needed — the same Unix socket the CLI uses, so
-// a single daemon serves both surfaces without an idle MCP process holding it
-// open.
+// a single daemon serves both surfaces without an idle MCP process holding the
+// daemon open.
 package main
 
 import (
@@ -21,7 +21,6 @@ import (
 
 const (
 	mcpParentPollInterval = 2 * time.Second
-	mcpIdleTimeout        = 5 * time.Minute
 )
 
 func runMCP(args []string) int {
@@ -49,11 +48,19 @@ func runMCP(args []string) int {
 	srv.SetContextDialer(func(ctx context.Context) (*dial.Conn, error) {
 		return dialMCPDaemon(ctx, socketPath)
 	})
-	if err := srv.ServeWithOptions(ctx, os.Stdin, os.Stdout, mcp.ServeOptions{IdleTimeout: mcpIdleTimeout}); err != nil && !errors.Is(err, context.Canceled) {
+	if err := srv.ServeWithOptions(ctx, os.Stdin, os.Stdout, mcpServeOptions()); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "ibkr mcp: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func mcpServeOptions() mcp.ServeOptions {
+	// The MCP host owns the stdio process lifetime. Do not exit merely
+	// because a chat sat idle: Claude may send the next tool call hours
+	// later on the same process. Daemon cleanup is handled separately by
+	// per-request sockets plus the daemon's own idle timeout/autospawn path.
+	return mcp.ServeOptions{}
 }
 
 func mcpLifecycleContext() (context.Context, context.CancelFunc) {
