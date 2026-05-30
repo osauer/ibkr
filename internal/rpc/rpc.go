@@ -2462,6 +2462,20 @@ type SubsystemHealth struct {
 	Progress    int       `json:"progress,omitempty"`
 }
 
+// DataQualityHealth is a compact status.health diagnostic for decision
+// surfaces that can serve a snapshot while carrying degraded or stale inputs.
+// It is intentionally higher-level than regime.warning_details or
+// gamma.warning_details: status answers whether downstream reads need extra
+// caution, not every low-level row that caused it.
+type DataQualityHealth struct {
+	Surface          string    `json:"surface"`
+	Status           string    `json:"status"`
+	Summary          string    `json:"summary,omitempty"`
+	StaleClusters    []string  `json:"stale_clusters,omitempty"`
+	DegradedClusters []string  `json:"degraded_clusters,omitempty"`
+	AsOf             time.Time `json:"as_of,omitzero"`
+}
+
 // HealthResult is the response to MethodStatusHealth.
 //
 // PortOrigin / TLSOrigin record how the daemon arrived at the values
@@ -2493,6 +2507,7 @@ type HealthResult struct {
 	// mean "idle" without inferring from absence.
 	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
 	Subsystems      []SubsystemHealth      `json:"subsystems,omitempty"`
+	DataQuality     []DataQualityHealth    `json:"data_quality,omitempty"`
 	// Members carries the runtime SPX-membership state: source
 	// (cache vs embedded), count, as-of timestamp, refresh health.
 	// Populated unconditionally — even when the daemon falls back

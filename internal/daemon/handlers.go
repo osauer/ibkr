@@ -3445,6 +3445,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	// contention message ride, so the three surfaces never diverge.
 	res.BackgroundTasks = s.backgroundTasks()
 	res.Subsystems = s.subsystemHealth(res.Connected)
+	res.DataQuality = s.statusDataQuality()
 	res.Members = s.membersHealth()
 	return res
 }

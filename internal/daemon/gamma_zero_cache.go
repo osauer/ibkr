@@ -727,6 +727,17 @@ func (c *gammaZeroCache) snapshotCombinedSlice(scope string, nowFn func() time.T
 	return env, true
 }
 
+func (c *gammaZeroCache) snapshotCurrent(scope string, nowFn func() time.Time) rpc.GammaZeroSPXResult {
+	c.mu.Lock()
+	slot := c.slots[scope]
+	var job *gammaComputation
+	if slot != nil {
+		job = slot.current
+	}
+	c.mu.Unlock()
+	return c.snapshotForScope(scope, job, nowFn)
+}
+
 func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, nowFn func() time.Time) rpc.GammaZeroSPXResult {
 	if g == nil {
 		env := rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
