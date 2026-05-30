@@ -90,6 +90,59 @@ func TestGammaStatusQualityReportsSPXExcluded(t *testing.T) {
 	}
 }
 
+func TestRegimeSnapshotDataQualityCombinesGammaAndRegime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
+	res := &rpc.RegimeSnapshotResult{
+		AsOf: now,
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusStale,
+		},
+		VolOfVol: rpc.RegimeVolOfVol{
+			Status: rpc.RegimeStatusOK,
+		},
+		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
+			Status: rpc.RegimeStatusOK,
+		},
+		CreditSpreads: rpc.RegimeCreditSpreads{
+			Status: rpc.RegimeStatusOK,
+		},
+		FundingStress: rpc.RegimeFundingStress{
+			Status: rpc.RegimeStatusOK,
+		},
+		USDJPY: rpc.RegimeUSDJPY{
+			Status: rpc.RegimeStatusOK,
+		},
+		GammaZero: rpc.RegimeGammaZero{
+			Status: rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+				Result: &rpc.GammaZeroComputed{
+					AsOf:    now,
+					Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+					WarningDetails: []rpc.GammaWarningDetail{{
+						Code: "spx_unavailable:354",
+					}},
+				},
+			},
+		},
+		Breadth: rpc.RegimeBreadth{
+			Status: rpc.RegimeStatusOK,
+		},
+	}
+
+	got := regimeSnapshotDataQuality(res)
+	if len(got) != 2 {
+		t.Fatalf("regimeSnapshotDataQuality len=%d, want 2: %+v", len(got), got)
+	}
+	if got[0].Surface != "gamma" || got[0].Summary != "degraded: SPX excluded" {
+		t.Fatalf("first quality = %+v, want gamma degraded", got[0])
+	}
+	if got[1].Surface != "regime" || got[1].Summary != "stale: vol" {
+		t.Fatalf("second quality = %+v, want regime stale vol", got[1])
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

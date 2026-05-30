@@ -257,11 +257,13 @@ func TestRenderStatus_FlightDeckShape(t *testing.T) {
 		"Daemon         v1.0.0, up 30m42s",
 		"TWS            API server 178",
 		"SPX members    cache:2026-05-22, 503 names",
-		"Next concern   None",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "Next concern") {
+		t.Fatalf("clean status should omit Next concern:\n%s", got)
 	}
 }
 
@@ -312,12 +314,16 @@ func TestRenderStatus_DataQualityKeepsGatewayReady(t *testing.T) {
 	got := stdout.String()
 	for _, want := range []string{
 		"IBKR Gateway  READY",
-		"Data quality   gamma degraded: SPX excluded; regime stale: vol, credit",
-		"Next concern   Data quality: gamma degraded: SPX excluded; regime stale: vol, credit",
+		"Data quality   gamma degraded",
+		"SPX excluded",
+		"regime stale",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "Next concern") {
+		t.Fatalf("data-quality-only status should not duplicate Next concern:\n%s", got)
 	}
 }
 
@@ -376,13 +382,13 @@ func TestNextConcernPriority(t *testing.T) {
 			want: "Background work: computing dealer zero-gamma",
 		},
 		{
-			name: "data quality before background work",
+			name: "data quality does not mask background work",
 			in: rpc.HealthResult{
 				Connected:       true,
 				DataQuality:     []rpc.DataQualityHealth{{Surface: "regime", Status: "stale", Summary: "stale: vol, credit"}},
 				BackgroundTasks: []rpc.BackgroundTaskStatus{{Name: "gamma-zero"}},
 			},
-			want: "Data quality: regime stale: vol, credit",
+			want: "Background work: computing dealer zero-gamma",
 		},
 		{
 			name: "none",
@@ -397,6 +403,22 @@ func TestNextConcernPriority(t *testing.T) {
 				t.Fatalf("nextConcern(%+v) = %q, want %q", tc.in, got.Text, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatDataQualityValueParenthesizesOffHoursContext(t *testing.T) {
+	t.Parallel()
+	closed := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
+	rth := time.Date(2026, time.June, 1, 15, 0, 0, 0, time.UTC)
+	items := []rpc.DataQualityHealth{
+		{Surface: "gamma", Status: "degraded", Summary: "degraded: SPX excluded", DegradedClusters: []string{"gamma"}},
+		{Surface: "regime", Status: "stale", Summary: "stale: vol, credit", StaleClusters: []string{"vol", "credit"}},
+	}
+	if got, want := formatDataQualityValueAt(items, closed), "gamma degraded (SPX excluded); regime stale (off-hours: vol, credit)"; got != want {
+		t.Fatalf("closed format = %q, want %q", got, want)
+	}
+	if got, want := formatDataQualityValueAt(items, rth), "gamma degraded (SPX excluded); regime stale: vol, credit"; got != want {
+		t.Fatalf("RTH format = %q, want %q", got, want)
 	}
 }
 

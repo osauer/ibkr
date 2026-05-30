@@ -27,6 +27,18 @@ func (s *Server) updateRegimeStatusQuality(r *rpc.RegimeSnapshotResult) {
 	s.lastRegimeQualityMu.Unlock()
 }
 
+func regimeSnapshotDataQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
+	if r == nil {
+		return nil
+	}
+	out := []rpc.DataQualityHealth{}
+	if q, ok := gammaStatusQuality(r.GammaZero.Envelope); ok {
+		out = append(out, q)
+	}
+	out = append(out, regimeStatusQuality(r)...)
+	return out
+}
+
 func regimeStatusQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
 	if r == nil {
 		return nil

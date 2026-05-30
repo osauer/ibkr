@@ -135,6 +135,29 @@ func TestRenderRegime_TapeSitsBetweenDescriptionAndIndicators(t *testing.T) {
 	}
 }
 
+func TestRenderRegime_DataQualityLine(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	fix.DataQuality = []rpc.DataQualityHealth{
+		{Surface: "gamma", Status: "degraded", Summary: "degraded: SPX excluded", DegradedClusters: []string{"gamma"}},
+		{Surface: "regime", Status: "stale", Summary: "stale: vol, credit", StaleClusters: []string{"vol", "credit"}},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeText(env, fix); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"Data quality:", "gamma degraded", "SPX excluded", "regime stale"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("regime output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "Punch line:") > strings.Index(out, "Data quality:") {
+		t.Fatalf("data-quality line should follow the punch line:\n%s", out)
+	}
+}
+
 // TestRenderRegime_RowsFitOneLineEach pins the compressed layout: each
 // of the eight indicators occupies exactly one row in the rendered body
 // (excluding header, composite, blank, and footer lines). The old

@@ -90,7 +90,9 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if members := formatMembersValue(res.Members); members != "" {
 		statusRow(env, out, "SPX members", members)
 	}
-	statusRow(env, out, "Next concern", env.concernText(nextConcern(*res, cliVersion)))
+	if concern := nextConcern(*res, cliVersion); concern.Level != statusConcernNone {
+		statusRow(env, out, "Next concern", env.concernText(concern))
+	}
 
 	if isHandshakeInFlight(*res) {
 		fmt.Fprintln(out)
@@ -186,8 +188,6 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		}
 	case membersRefreshNeedsAttention(res.Members):
 		return statusConcern{Text: "SPX members refresh " + res.Members.RefreshState, Level: statusConcernWarn}
-	case len(res.DataQuality) > 0:
-		return statusConcern{Text: "Data quality: " + formatDataQualityValue(res.DataQuality), Level: statusConcernWarn}
 	case len(res.BackgroundTasks) > 0:
 		return statusConcern{Text: "Background work: " + formatBackgroundTasks(res.BackgroundTasks), Level: statusConcernNotice}
 	default:
@@ -322,6 +322,10 @@ func formatSubsystemsValue(env *Env, subs []rpc.SubsystemHealth) string {
 }
 
 func formatDataQualityValue(items []rpc.DataQualityHealth) string {
+	return formatDataQualityValueAt(items, time.Now())
+}
+
+func formatDataQualityValueAt(items []rpc.DataQualityHealth, now time.Time) string {
 	parts := make([]string, 0, len(items))
 	for _, q := range items {
 		surface := strings.TrimSpace(q.Surface)
@@ -329,16 +333,41 @@ func formatDataQualityValue(items []rpc.DataQualityHealth) string {
 		if surface == "" {
 			continue
 		}
-		if summary == "" {
+		if len(q.DegradedClusters) > 0 {
+			summary = formatDataQualityDegraded(q)
+		} else if len(q.StaleClusters) > 0 {
+			summary = formatDataQualityStale(q, now)
+		} else if summary == "" {
 			summary = strings.TrimSpace(q.Status)
 		}
-		if summary == "" {
+		if strings.TrimSpace(summary) == "" {
 			parts = append(parts, surface)
 			continue
 		}
 		parts = append(parts, surface+" "+summary)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func formatDataQualityDegraded(q rpc.DataQualityHealth) string {
+	if len(q.DegradedClusters) == 1 && q.DegradedClusters[0] == "gamma" && strings.Contains(q.Summary, "SPX excluded") {
+		return "degraded (SPX excluded)"
+	}
+	if q.Summary != "" {
+		return q.Summary
+	}
+	return "degraded: " + strings.Join(q.DegradedClusters, ", ")
+}
+
+func formatDataQualityStale(q rpc.DataQualityHealth, now time.Time) string {
+	clusters := strings.Join(q.StaleClusters, ", ")
+	if clusters == "" {
+		return q.Summary
+	}
+	if rpc.ClassifySession(now) != rpc.SessionRTH {
+		return "stale (off-hours: " + clusters + ")"
+	}
+	return "stale: " + clusters
 }
 
 func membersRefreshNeedsAttention(m rpc.MembersHealth) bool {

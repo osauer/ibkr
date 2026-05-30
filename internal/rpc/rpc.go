@@ -1627,6 +1627,11 @@ type RegimeSnapshotResult struct {
 	// each warning states what happened, what it changes in the composite,
 	// and the next useful action.
 	WarningDetails []RegimeWarning `json:"warning_details,omitempty"`
+	// DataQuality carries the same high-level data-quality summary used by
+	// status.health: degraded gamma and stale regime clusters. It is coarser
+	// than WarningDetails by design, so humans and agents can decide whether
+	// to interpret the regime read carefully without walking every row.
+	DataQuality []DataQualityHealth `json:"data_quality,omitempty"`
 	// SpecDoc points consumers (especially LLM-driven ones) at the
 	// canonical methodology + threshold reference so they don't
 	// hallucinate band edges. Same path on every response.
