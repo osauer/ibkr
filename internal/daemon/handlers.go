@@ -3682,6 +3682,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 	snap, ok := s.breadth.Get()
 	active := s.breadth.IsBusy()
 	res.State = classifyBreadthState(ok, active)
+	res.Refreshing = ok && active
 
 	if ok {
 		res.PctAbove50DMA = snap.PctAbove50DMA
@@ -3711,9 +3712,10 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 // single source of truth — handleBreadthSPX and any future consumer
 // must derive State the same way. The four states:
 //
-//   - ready: snapshot exists and no refresh is active
-//   - computing: a refresh is in flight or waiting to retry (snapshot
-//     may or may not exist)
+//   - ready: snapshot exists; Refreshing reports whether a newer refresh
+//     is active
+//   - computing: no snapshot exists and a refresh is in flight or waiting
+//     to retry
 //   - cold: no snapshot AND no active refresh/retry — rare; only seen
 //     briefly between daemon Start and postConnectSetup launching the
 //     engine, or after a coverage-threshold-failed refresh exhausts
@@ -3724,10 +3726,10 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 //     bump.
 func classifyBreadthState(snapshotExists, active bool) rpc.BreadthState {
 	switch {
-	case active:
-		return rpc.BreadthStateComputing
 	case snapshotExists:
 		return rpc.BreadthStateReady
+	case active:
+		return rpc.BreadthStateComputing
 	default:
 		return rpc.BreadthStateCold
 	}

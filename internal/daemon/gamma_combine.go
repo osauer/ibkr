@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -290,7 +291,8 @@ func computeGammaCombined(
 //
 //	354       → entitlement gap (most common)
 //	200       → contract not found / SPX chain restricted
-//	timeout   → 30s early-abort with no legs
+//	fetch_canceled → compute context was cancelled before SPX landed
+//	timeout        → deadline / timeout before SPX landed
 //	zero_magnitude → legs landed but all gamma magnitude was zero
 //	<other>   → truncated error message, ≤ 60 chars
 func summarizeSPXFailure(err error) string {
@@ -298,11 +300,17 @@ func summarizeSPXFailure(err error) string {
 		return "unknown"
 	}
 	msg := err.Error()
+	lower := strings.ToLower(msg)
 	switch {
 	case strings.Contains(msg, "354"):
 		return "354"
 	case strings.Contains(msg, " 200 ") || strings.Contains(msg, "no security definition"):
 		return "200"
+	case errors.Is(err, context.Canceled), strings.Contains(lower, "context canceled"), strings.Contains(lower, "context cancelled"):
+		return "fetch_canceled"
+	case errors.Is(err, context.DeadlineExceeded), strings.Contains(lower, "context deadline exceeded"),
+		strings.Contains(lower, "timeout"), strings.Contains(lower, "timed out"):
+		return "timeout"
 	case strings.Contains(msg, "no option data landed"):
 		return "no_data"
 	case strings.Contains(msg, "throttled"):

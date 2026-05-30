@@ -12,11 +12,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/internal/dial"
 	"github.com/osauer/ibkr/internal/rpc"
+	"golang.org/x/sys/unix"
 )
 
 // Env is the per-invocation context shared by every subcommand.
@@ -108,6 +111,24 @@ func isValueFlag(name string) bool {
 		return true
 	}
 	return false
+}
+
+func outputColumns(w io.Writer) int {
+	if raw := strings.TrimSpace(os.Getenv("COLUMNS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err == nil && n >= 40 {
+			return n
+		}
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws == nil || ws.Col < 40 {
+		return 0
+	}
+	return int(ws.Col)
 }
 
 // Command bundles a subcommand's name, one-line summary, optional usage

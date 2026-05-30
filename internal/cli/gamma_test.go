@@ -99,6 +99,75 @@ func TestRenderGammaSkippedBannerUsesWarningDetailsAfterJSONRoundTrip(t *testing
 	}
 }
 
+func TestRenderGammaSkippedBannerExplainsContextCanceledWithSessionContext(t *testing.T) {
+	t.Parallel()
+	wire := &rpc.GammaZeroComputed{
+		Scope: rpc.GammaZeroScopeSPY,
+		AsOf:  time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC), // Sunday 10:00 EDT, closed.
+		WarningDetails: []rpc.GammaWarningDetail{
+			{
+				Code:    "spx_unavailable:context canceled",
+				Scope:   "SPX",
+				Message: "SPX option chain was skipped: context canceled.",
+				Impact:  "Showing SPY only; SPX gamma is not included.",
+				Action:  "Retry later or run --only=spy.",
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if !renderGammaSkippedBanner(env, wire) {
+		t.Fatal("expected SPX skipped banner from warning_details")
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"SPX skipped",
+		"fetch was canceled before usable data landed",
+		"outside regular U.S. option hours",
+		"not a confirmed root cause",
+		"ibkr gamma --only=spy",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("banner missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "context canceled") {
+		t.Fatalf("banner should not leak raw context error:\n%s", out)
+	}
+}
+
+func TestRenderGammaSkippedBannerFramesEntitlementAsNotAfterHours(t *testing.T) {
+	t.Parallel()
+	wire := &rpc.GammaZeroComputed{
+		Scope: rpc.GammaZeroScopeSPY,
+		WarningDetails: []rpc.GammaWarningDetail{
+			{
+				Code:    "spx_unavailable:354",
+				Scope:   "SPX",
+				Message: "SPX option chain was skipped: missing CBOE OPRA entitlement (IBKR 354).",
+				Impact:  "Showing SPY only; SPX gamma is not included.",
+				Action:  "Subscribe to the required market data or run --only=spy to suppress this banner.",
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if !renderGammaSkippedBanner(env, wire) {
+		t.Fatal("expected SPX skipped banner from warning_details")
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"missing CBOE OPRA entitlement",
+		"not an after-hours",
+		"condition",
+		"ibkr gamma --only=spy",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("entitlement banner missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderGamma_HeroHasTitleTimestampAnchor pins the shared hero
 // shape applied to gamma: a title on the same line as a timestamp
 // (joined with "  ·  "), followed by an indented SPY spot anchor.

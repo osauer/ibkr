@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -518,17 +519,112 @@ func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"Risk state [Defensive / Act]",
+		"Guidance   Refresh or confirm degraded inputs before planning major portfolio changes.",
+		"Confidence Medium-low (data:",
+		"breadth and gamma computing",
 		"Next step  Confirm data before defend",
-		"Confidence Medium-low",
 		"Title                        Risk state",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("render missing %q:\n%s", want, got)
 		}
 	}
+	if strings.Index(got, "Guidance") > strings.Index(got, "Confidence") {
+		t.Fatalf("guidance should render before confidence:\n%s", got)
+	}
+	if strings.Index(got, "Why") > strings.Index(got, "Next step") {
+		t.Fatalf("next step should render below why:\n%s", got)
+	}
 }
 
-func TestRenderCanaryTextColorsCurrentStage(t *testing.T) {
+func TestCanaryConfidenceExplanationHumanizesReasons(t *testing.T) {
+	t.Parallel()
+	got := canaryConfidenceExplanation(&CanaryResult{
+		Confidence:       "medium-low",
+		DataConfidence:   "medium-low",
+		SignalConfidence: "high",
+		ConfidenceReasons: []string{
+			"degraded clusters: gamma",
+			"stale clusters: credit,fx,vol",
+			"portfolio breach lacks independent market-stress confirmation",
+		},
+	})
+	for _, want := range []string{
+		"gamma degraded",
+		"credit, FX, and vol stale",
+		"portfolio breach lacks independent market-stress confirmation",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("explanation missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestCanaryInlineConfidenceReasonSeparatesDataAndConfirmation(t *testing.T) {
+	t.Parallel()
+	got := canaryInlineConfidenceReason([]string{
+		"degraded clusters: gamma",
+		"stale clusters: credit,fx,vol",
+		"portfolio breach lacks independent market-stress confirmation",
+	})
+	want := "data: gamma degraded, credit, FX, and vol stale; confirmation missing"
+	if got != want {
+		t.Fatalf("inline confidence reason = %q, want %q", got, want)
+	}
+}
+
+func TestRenderCanaryTextWrapsAtCommonTerminalWidths(t *testing.T) {
+	t.Parallel()
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  redVolCreditRegimeWithComputingSlowRows(),
+		Now:     time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
+	})
+	res.Warnings = append(res.Warnings,
+		"vix_term_structure: volatility term structure stale",
+		"breadth: breadth is still computing.",
+		"long_detail: "+strings.Repeat("after-hours-market-data-limitation ", 5),
+	)
+
+	for _, width := range []int{80, 100, 120} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			for _, color := range []bool{false, true} {
+				var out bytes.Buffer
+				renderCanaryTextWidth(&Env{Color: color}, &out, &res, width)
+				for i, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+					if got := visibleLen(line); got > width {
+						t.Fatalf("line %d visible width = %d, want <= %d:\n%s\nfull output:\n%s", i+1, got, width, line, out.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRenderCanaryTextUsesStackedRowsBelowWideTerminals(t *testing.T) {
+	t.Parallel()
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  redVolCreditRegimeWithComputingSlowRows(),
+		Now:     time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
+	})
+	var narrow bytes.Buffer
+	renderCanaryTextWidth(&Env{}, &narrow, &res, 100)
+	if !strings.Contains(narrow.String(), "  Details\n") {
+		t.Fatalf("narrow canary render should use stacked details:\n%s", narrow.String())
+	}
+	if strings.Contains(narrow.String(), "Title                        Risk state") {
+		t.Fatalf("narrow canary render should not use wide table:\n%s", narrow.String())
+	}
+
+	var wide bytes.Buffer
+	renderCanaryTextWidth(&Env{}, &wide, &res, 120)
+	if !strings.Contains(wide.String(), "Title                        Risk state") {
+		t.Fatalf("wide canary render should use table:\n%s", wide.String())
+	}
+}
+
+func TestRenderCanaryTextColorsCurrentState(t *testing.T) {
 	t.Parallel()
 	res := CanaryResult{
 		AsOf:             time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),

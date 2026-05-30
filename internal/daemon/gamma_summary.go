@@ -361,6 +361,14 @@ func spxUnavailableWarningText(reason string) (message, impact, action string) {
 		return "SPX option chain was skipped: no option data landed within the window.",
 			"Showing SPY only; SPX gamma is not included.",
 			"Retry during regular trading hours or run --only=spy."
+	case "fetch_canceled", "context canceled", "context_canceled":
+		return "SPX option-chain fetch was canceled before usable data landed.",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
+	case "timeout", "context deadline exceeded":
+		return "SPX option-chain fetch timed out before usable data landed.",
+			"Showing SPY only; SPX gamma is not included.",
+			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
 	case "throttled":
 		return "SPX option chain was skipped after gateway throttling.",
 			"Showing SPY only; SPX gamma is not included.",
