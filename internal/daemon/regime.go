@@ -350,6 +350,8 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 //
 // If the goroutine times out it leaks until it returns naturally;
 // callers map zero values to a row-level "no spot tick" status.
+var boundedSnapshotSlack = time.Second
+
 func boundedSnapshot(ctx context.Context, deps *regimeDeps, sym string, budget time.Duration) (price, prevClose float64, dataType string) {
 	type r struct {
 		price, prevClose float64
@@ -360,7 +362,7 @@ func boundedSnapshot(ctx context.Context, deps *regimeDeps, sym string, budget t
 		p, pc, d := deps.snapshot(ctx, sym, budget)
 		resCh <- r{p, pc, d}
 	}()
-	// One-second slack over budget so deps.snapshot has a chance to
+	// Slack over budget so deps.snapshot has a chance to
 	// return its own deadline error before we bail. The slack matters
 	// when the inner code DOES honour ctx — without it, we'd race the
 	// inner deadline and lose, returning zeros instead of the inner
@@ -368,7 +370,7 @@ func boundedSnapshot(ctx context.Context, deps *regimeDeps, sym string, budget t
 	select {
 	case got := <-resCh:
 		return got.price, got.prevClose, got.dt
-	case <-time.After(budget + time.Second):
+	case <-time.After(budget + boundedSnapshotSlack):
 		return 0, 0, ""
 	case <-ctx.Done():
 		return 0, 0, ""
@@ -390,7 +392,7 @@ func boundedSnapshotWith52WHigh(ctx context.Context, deps *regimeDeps, sym strin
 	select {
 	case got := <-resCh:
 		return got.price, got.prevClose, got.week52High, got.dt
-	case <-time.After(budget + time.Second):
+	case <-time.After(budget + boundedSnapshotSlack):
 		return 0, 0, 0, ""
 	case <-ctx.Done():
 		return 0, 0, 0, ""

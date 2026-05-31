@@ -27,8 +27,11 @@
 # Environment hooks:
 #   IBKR_TEST_PORT          — gateway port to probe (default: 7496 TWS live)
 #   IBKR_TEST_HOST          — gateway host (default: 127.0.0.1)
-#   IBKR_SMOKE_TIMEOUT      — per-command wall-clock timeout in seconds (default: 30)
+#   IBKR_SMOKE_CLIENT_ID    — primary client ID for the isolated smoke daemon
+#                             (default: process-derived ID in the 200-799 range)
+#   IBKR_SMOKE_TIMEOUT      — per-command wall-clock timeout in seconds (default: 60)
 #   IBKR_SMOKE_STRICT       — 1 = FAIL on no-gateway instead of SKIP (release path)
+#   IBKR_SMOKE_STOP_EXISTING — 1 = stop existing ibkr daemons before smoke
 #   SPX_EXPECTED_REACHABLE  — 1 (default in `make smoke`) = `ibkr gamma --only=spx`
 #                             must return real SPX data; banner-seen FAILS the run.
 #                             0 = banner-seen is a clean skip (CI / accounts without
@@ -63,6 +66,12 @@ if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 
     echo "wire-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
     exit 2
 fi
+SMOKE_CLIENT_ID="${IBKR_SMOKE_CLIENT_ID:-$((200 + ($$ % 600)))}"
+if [[ ! "$SMOKE_CLIENT_ID" =~ ^[0-9]+$ ]] || (( SMOKE_CLIENT_ID < 1 || SMOKE_CLIENT_ID > 998 )); then
+    echo "wire-smoke: invalid IBKR_SMOKE_CLIENT_ID: $SMOKE_CLIENT_ID" >&2
+    exit 2
+fi
+BREADTH_CLIENT_ID=$((SMOKE_CLIENT_ID + 1))
 # 60s default. The chain fetch can legitimately take ~30s when 22 legs
 # need contract resolution from a cold cache (observed 2026-05-18:
 # chain SPY --width 5 → 30018ms wall clock). 30s was too tight; 60s
@@ -96,9 +105,20 @@ SOCKET="$SMOKE_DIR/ibkr.sock"
 LOG="$SMOKE_DIR/ibkr-daemon.log"
 LOCK="$SMOKE_DIR/ibkr.lock"
 WIRE_LOG="$SMOKE_DIR/wire.jsonl"
+CONFIG="$SMOKE_DIR/config.toml"
+
+cat > "$CONFIG" <<EOF
+[gateway]
+host = "$GATEWAY_HOST"
+port = $GATEWAY_PORT
+client_id = $SMOKE_CLIENT_ID
+breadth_client_id = $BREADTH_CLIENT_ID
+tls = false
+EOF
 
 export IBKR_SOCKET="$SOCKET"
 export IBKR_LOG="$LOG"
+export IBKR_CONFIG="$CONFIG"
 export IBKR_WIRE_INTERCEPTOR=1
 export IBKR_WIRE_LOG_PATH="$WIRE_LOG"
 export IBKR_WIRE_RING_SIZE=4096
@@ -126,8 +146,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# See scripts/lib-daemon-control.sh for the client-ID slot rationale.
-stop_existing_daemons wire-smoke
+# Normal local smoke runs use a unique client ID and leave the user's daemon
+# alone. The old stop-all behavior remains opt-in for diagnosing client-ID
+# slot retention on a specific gateway.
+if [[ "${IBKR_SMOKE_STOP_EXISTING:-0}" == "1" ]]; then
+    stop_existing_daemons wire-smoke
+fi
 
 # Run a CLI command with a deadline; on failure, print the command +
 # output. Sets $LAST_CMD_OUTPUT and $LAST_CMD_EXIT for the caller.
@@ -167,6 +191,7 @@ assert_wire() {
 
 echo "wire-smoke: isolated daemon → $SOCKET"
 echo "wire-smoke: wire log → $WIRE_LOG"
+echo "wire-smoke: client IDs → primary=$SMOKE_CLIENT_ID breadth=$BREADTH_CLIENT_ID"
 
 # 4. Boot the daemon by issuing a status call (which autospawns one at
 # the isolated socket). Wait for the gateway to be connected — give it

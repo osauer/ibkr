@@ -1001,10 +1001,10 @@ func TestReconnectFlow_RepublishesEndpointOnNewProbeWinner(t *testing.T) {
 		logger:   NewLogger(&bytes.Buffer{}, "error"),
 	}
 
-	// Use a context tight enough that the connector.Start tail unwinds
-	// quickly. We don't need it to succeed; we only need s.endpoint
-	// updated before the connect attempt.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Use a context tight enough that the connector.Start tail unwinds quickly.
+	// We don't need it to succeed; we only need s.endpoint updated before the
+	// connect attempt.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
 	srv.reconnectFlow(ctx)

@@ -335,20 +335,21 @@ func TestLifecycle_CLIDoesNotHangOnDeafDaemon(t *testing.T) {
 		"IBKR_SOCKET="+socketPath,
 		"IBKR_LOG="+logPath,
 	)
-	// CLI's per-call deadline is 60s; the test gives 90s of slack and
-	// fails (via runCLI) if the CLI ever exceeds that.
+	// TestMain builds the CLI with a shrunken per-call deadline; the
+	// production binary keeps the 60s default, but this end-to-end gate
+	// only needs to prove that the linked deadline is applied.
 	start := time.Now()
-	out, code := runCLI(t, env, 90*time.Second, "status")
+	out, code := runCLI(t, env, 10*time.Second, "status")
 	elapsed := time.Since(start)
 
 	if code == 0 {
 		t.Fatalf("status against deaf daemon should fail, got exit=0\n%s", out)
 	}
-	if elapsed > 70*time.Second {
-		t.Fatalf("CLI took %s — the 60s per-call deadline appears to not be applied", elapsed)
+	if elapsed > integrationCLIUnaryTimeout+2*time.Second {
+		t.Fatalf("CLI took %s — the %s per-call deadline appears to not be applied", elapsed, integrationCLIUnaryTimeout)
 	}
-	if elapsed < 50*time.Second {
-		t.Logf("note: CLI exited in %s (expected ~60s) — deadline may have been shorter than intended", elapsed)
+	if elapsed < integrationCLIUnaryTimeout/2 {
+		t.Logf("note: CLI exited in %s (expected around %s) — deadline may have been shorter than intended", elapsed, integrationCLIUnaryTimeout)
 	}
 }
 

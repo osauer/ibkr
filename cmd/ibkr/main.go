@@ -28,6 +28,11 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+
+	// String vars so integration tests can shrink CLI wall-clock budgets with
+	// `go build -ldflags -X ...` while production builds keep the defaults.
+	cliUnaryTimeout     = "60s"
+	cliLongUnaryTimeout = "90s"
 )
 
 func main() {
@@ -154,10 +159,7 @@ func main() {
 	// classified daemon error reaches the user instead of a raw socket
 	// timeout from cancelling the in-flight request.
 	if !isStreamingInvocation(cmd, rest) {
-		budget := 60 * time.Second
-		if cmd == "scan" || cmd == "technical" || cmd == "canary" {
-			budget = 90 * time.Second
-		}
+		budget := unaryInvocationBudget(cmd)
 		var dlCancel context.CancelFunc
 		ctx, dlCancel = context.WithTimeout(ctx, budget)
 		defer dlCancel()
@@ -165,6 +167,21 @@ func main() {
 
 	env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Conn: conn, Version: runtimeVersion, Color: color}
 	os.Exit(cli.Run(ctx, env, cmd, rest))
+}
+
+func unaryInvocationBudget(cmd string) time.Duration {
+	if cmd == "scan" || cmd == "technical" || cmd == "canary" {
+		return parseDurationOr(cliLongUnaryTimeout, 90*time.Second)
+	}
+	return parseDurationOr(cliUnaryTimeout, 60*time.Second)
+}
+
+func parseDurationOr(raw string, fallback time.Duration) time.Duration {
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 // warnIfDaemonVersionMismatch fires a tight-timeout status.health call

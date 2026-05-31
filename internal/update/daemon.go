@@ -41,8 +41,10 @@ func IsDaemonRunning() (int, bool) {
 // a manual `pkill -f "ibkr daemon"`. Returns nil immediately if the
 // PID is already gone (e.g. daemon exited between IsDaemonRunning and
 // this call).
-const restartTimeout = 5 * time.Second
-const restartPoll = 100 * time.Millisecond
+var (
+	restartTimeout = 5 * time.Second
+	restartPoll    = 100 * time.Millisecond
+)
 
 func RestartDaemon(pid int) error {
 	if pid <= 0 {
