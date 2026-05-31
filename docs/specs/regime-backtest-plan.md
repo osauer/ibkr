@@ -1,10 +1,22 @@
-# Regime Backtest Plan
+# Regime and Canary Backtest Plan
 
-**Updated:** 2026-05-24 12:50 CEST
+**Updated:** 2026-05-31 09:08 CEST
 
-This plan defines the calibration work required before `ibkr regime` may expose
-forecast probabilities. Until then, the dashboard should continue to report
-evidence balance, risk score, confidence, bands, and scoped warnings only.
+This plan defines the calibration work required before `ibkr regime` or
+`ibkr canary` may expose forecast probabilities. Until then, regime should
+continue to report evidence balance, risk score, confidence, bands, and scoped
+warnings only; canary should continue to report monitor state, planner
+readiness, and data-quality blocks without pretending to forecast markets.
+
+The minimal implementation path is two-stage:
+
+1. Backtest regime as a market-state classifier.
+2. Replay canary over point-in-time regime rows plus synthetic portfolio
+   overlays.
+
+The stages are related but not interchangeable. Regime answers "what is the
+market state?" Canary answers "given this portfolio and market state, should a
+scheduled monitor stay quiet, watch, act, or block on data quality?"
 
 ## Historical Inputs
 
@@ -30,6 +42,30 @@ would have been observable at that day's decision time.
   until the live sourcing question is solved; never fill it with ETF/futures
   proxies.
 
+## Canary Replay Inputs
+
+Canary backtests should consume the same live contracts the monitor uses:
+
+- `account`: `rpc.AccountResult`, including current and look-ahead margin
+  cushion, net liquidation, gross exposure, and daily P&L when available.
+- `positions`: `rpc.PositionsResult`, especially `portfolio.exposure_base`,
+  dollar delta, gross dollar delta, option greeks coverage, and gamma.
+- `regime`: `rpc.RegimeSnapshotResult`, compacted to the fields visible in
+  `ibkr regime --json`; row bands, statuses, warning details, data quality, and
+  composite cluster counts must be present or derived consistently from row
+  bands.
+- `target`: labelled forward stress window for evaluation, not for model input.
+
+The first committed harness is intentionally small:
+
+```bash
+ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
+```
+
+Each JSONL line is one point-in-time observation. The runner calls the pure
+`ComputeCanary` function directly, so it does not require TWS, the daemon, or
+market-data entitlements.
+
 ## Target Stress Definitions
 
 Test several targets rather than tune to one story:
@@ -44,10 +80,32 @@ Test several targets rather than tune to one story:
   USD/JPY yen-strengthening shock occur inside the target window. MOVE can be
   evaluated as a candidate target only after a licensed point-in-time source is
   available.
+- Portfolio stress: margin-danger windows, single-name squeeze exposure,
+  option-greeks/negative-gamma fragility, and concentration shocks that may
+  happen while broad SPY/VIX regime remains calm.
 
 Targets must be evaluated from the timestamp at which the dashboard would have
 been read; do not let later official revisions change the historical feature
 row used for that read.
+
+## Market Behavior Clusters
+
+Report every metric by market-behavior cluster so the canary is not calibrated
+to one decade's dominant microstructure:
+
+- 2016-early 2018 low-vol / short-vol carry and the February 2018 Volmageddon
+  break.
+- Q4 2018 Fed-tightening / liquidity shock.
+- March-April 2020 COVID crash and fast policy rebound.
+- 2020-2021 retail, Reddit, meme-stock, short-squeeze, and options-flow
+  participation. These can be single-name portfolio events with calm SPY/VIX.
+- 2022 inflation/rates bear market, where equity and bond stress can persist
+  without a COVID-style volatility profile.
+- 2023 banking/funding stress and later soft-landing rally.
+- 2023-2026 AI mega-cap concentration and narrow breadth.
+- August 2024 yen carry unwind, where the stress impulse was fast and then
+  stabilized quickly.
+- 2025-2026 elevated valuation, crowded leverage, and AI sentiment risk.
 
 ## Walk-Forward Calibration
 
@@ -102,10 +160,64 @@ Test cluster logic separately from row thresholds:
 Promote a learned weight only if it improves out-of-sample utility without
 making stale/unavailable critical rows look safer than they are.
 
+## Canary Scoring
+
+Score canary separately from regime:
+
+- Severity distribution: observe / watch / act / urgent.
+- Defensive watch recall: any defensive or mixed canary state at `watch` or
+  above against labelled stress windows.
+- Defensive act precision/recall: `act` and `urgent` are severity filters, not
+  the only success gate.
+- False defensive watches and false defensive acts on non-stress windows.
+- Data-quality watches and blocked planner states, tracked separately from
+  false positives.
+- Primary drivers and rows that caused the alert.
+- Average lead time when the labelled window carries `days_to_stress`.
+
+Use synthetic portfolio overlays to isolate policy behavior:
+
+- 1x diversified SPY/QQQ style exposure.
+- Levered broad beta.
+- Mag7 / AI mega-cap concentration.
+- Meme / retail squeeze concentration.
+- Negative-gamma or options-heavy book.
+- Diversified low-beta book.
+- EU/FX-exposed book.
+
+Backtest output should be read as "how the monitor behaves," not as "how the
+market is predicted."
+
+## Weaknesses To Watch
+
+This pass should surface these issues but not fix them:
+
+- Regime thresholds remain heuristic and pending backtest.
+- Hand-built regime fixtures can lie unless composite cluster counts match row
+  bands; the canary reads both.
+- Historical gamma is fragile because method versions, OI/IV availability,
+  0DTE growth, covered-call/autocall flow, and sign conventions changed.
+- Breadth can mean different things in broad bear markets versus narrow
+  mega-cap rallies.
+- Meme/retail squeezes may bypass broad-market regime and only show up through
+  portfolio concentration.
+- Fingerprints are alert identities, not historical datasets; raw classified
+  rows must be stored separately.
+
+## Documentation Cleanup
+
+Keep this document as the canonical source for both regime and canary backtest
+methodology. Later, retire or collapse duplicate canary/regime prose in
+agentic-use guides, MCP marketing pages, and older design docs into short
+links here. Generated `.html` companions remain generated artifacts, not source
+documents.
+
 ## Current Recommendation
 
 Keep the present threshold labels marked `heuristic: true` and
-`pending_backtest: true`. Do not add forecast probabilities. The next useful
-implementation step is a point-in-time data builder that writes one compact
-daily JSONL row matching the live `ibkr regime --json` shape, followed by a
-separate notebook/script that evaluates the targets above.
+`pending_backtest: true`. Do not add forecast probabilities.
+
+The next useful implementation step after the minimal canary replay harness is
+a point-in-time data builder that writes one compact daily JSONL row matching
+the live `ibkr regime --json` shape, followed by a strict walk-forward scorer
+for the targets above.

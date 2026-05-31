@@ -605,11 +605,12 @@ func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractPar
 // template ibkr://quote/{symbol} gated by TestStreamingParity in
 // resources_test.go.
 var ExcludedCLI = map[string]string{
-	"version": "info-only CLI verb; not useful as a tool call",
-	"mcp":     "transport server mode; the MCP host starts this process, no LLM should call it as a tool",
-	"daemon":  "local background service mode; autospawned by CLI/MCP clients and not an agent operation",
-	"setup":   "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
-	"update":  "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
+	"version":  "info-only CLI verb; not useful as a tool call",
+	"mcp":      "transport server mode; the MCP host starts this process, no LLM should call it as a tool",
+	"daemon":   "local background service mode; autospawned by CLI/MCP clients and not an agent operation",
+	"setup":    "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
+	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
+	"backtest": "offline research harness over local JSONL fixtures; not a live broker/MCP operation",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {
