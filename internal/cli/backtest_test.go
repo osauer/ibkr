@@ -21,29 +21,38 @@ func TestCanaryBacktestSampleProducesSignalMetrics(t *testing.T) {
 	if got, want := res.Metrics.TargetStress, 5; got != want {
 		t.Fatalf("target_stress = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchTruePositive, 5; got != want {
+	if got, want := res.Metrics.SignalTruePositive, 5; got != want {
+		t.Fatalf("signal_true_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.SignalFalsePositive, 2; got != want {
+		t.Fatalf("signal_false_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.WatchTruePositive, 4; got != want {
 		t.Fatalf("watch_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchMiss, 0; got != want {
+	if got, want := res.Metrics.WatchMiss, 1; got != want {
 		t.Fatalf("watch_miss = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchFalsePositive, 2; got != want {
+	if got, want := res.Metrics.WatchFalsePositive, 0; got != want {
 		t.Fatalf("watch_false_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.ActTruePositive, 3; got != want {
+	if got, want := res.Metrics.ActTruePositive, 4; got != want {
 		t.Fatalf("act_true_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.RebalanceWatch, 3; got != want {
+		t.Fatalf("rebalance_watch = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.DataQualityWatch, 1; got != want {
 		t.Fatalf("data_quality_watch = %d, want %d", got, want)
 	}
-	if res.Metrics.WatchRecall == nil || *res.Metrics.WatchRecall != 1 {
-		t.Fatalf("watch_recall = %v, want 1", res.Metrics.WatchRecall)
+	if res.Metrics.SignalRecall == nil || *res.Metrics.SignalRecall != 1 {
+		t.Fatalf("signal_recall = %v, want 1", res.Metrics.SignalRecall)
 	}
-	if !strings.Contains(strings.Join(res.Findings, "\n"), "Watch-level defensive alerts caught every labelled stress row") {
-		t.Fatalf("findings did not record watch-level coverage: %+v", res.Findings)
+	if !strings.Contains(strings.Join(res.Findings, "\n"), "Watch-level canary signals caught every labelled stress row") {
+		t.Fatalf("findings did not record signal-level coverage: %+v", res.Findings)
 	}
-	if !clusterHasWatchFalsePositive(res, "2023-2026 AI mega-cap concentration") {
-		t.Fatalf("AI concentration cluster should expose a watch false positive: %+v", res.Clusters)
+	if !clusterHasRebalanceWatch(res, "2023-2026 AI mega-cap concentration") {
+		t.Fatalf("AI concentration cluster should expose a rebalance watch: %+v", res.Clusters)
 	}
 }
 
@@ -60,7 +69,9 @@ func TestRunBacktestCanaryRendersText(t *testing.T) {
 		"Canary Backtest",
 		"10 observations",
 		"precision 71%",
+		"Defensive    precision 100%",
 		"2024 yen carry unwind",
+		"Risk budget",
 		"data-quality watch",
 	} {
 		if !strings.Contains(out, want) {
@@ -91,9 +102,9 @@ func backtestFixturePath(t *testing.T) string {
 	return filepath.Join("testdata", "canary_backtest_sample.jsonl")
 }
 
-func clusterHasWatchFalsePositive(res CanaryBacktestResult, name string) bool {
+func clusterHasRebalanceWatch(res CanaryBacktestResult, name string) bool {
 	for _, cluster := range res.Clusters {
-		if cluster.Name == name && cluster.Metrics.WatchFalsePositive > 0 {
+		if cluster.Name == name && cluster.Metrics.RebalanceWatch > 0 {
 			return true
 		}
 	}

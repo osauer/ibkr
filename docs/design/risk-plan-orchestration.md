@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-31 08:21 CEST
+**Last update:** 2026-05-31 11:01 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -48,6 +48,7 @@ The shared policy should cover both defense and opportunity:
 | Margin danger | `margin_cushion_low`, `lookahead_cushion_low` | Cut or liquidate risk first. |
 | Violent downside | `market_selloff_violent`, `vol_spike_confirmed`, `regime_stress_confirmed` | Defend capital, reduce fragile exposure, consider hedges. |
 | Violent upside or enthusiasm | `market_rally_violent`, `vol_crush_confirmed` | Check underinvestment while guarding against chase-risk; possibly deploy or rebalance. |
+| Fast carry unwind | `fx_carry_unwind` | Defend when FX stress is confirmed by tape or breadth deterioration. |
 | Portfolio P&L shock | `portfolio_pnl_shock` | Protect liquidity or gains; a gain is not deployable by itself. |
 | Single-title concentration | `single_name_exposure_high`, `single_name_delta_high` | Reduce the largest title risk before smaller issues. |
 | Portfolio exposure | `gross_exposure_high`, `net_delta_high`, `gross_delta_high` | Defend, rebalance, or stage reductions before stress worsens. |
@@ -59,7 +60,7 @@ The exact thresholds and buckets are implementation details. The important desig
 Current signal payloads carry:
 
 - `id`: stable signal name from the shared vocabulary.
-- `direction`: `defensive`, `constructive`, `mixed`, or `data_quality`.
+- `direction`: `defensive`, `constructive`, `rebalance`, `mixed`, or `data_quality`.
 - `severity`: `observe`, `watch`, `act`, or `urgent`.
 - `subject`: optional symbol, cluster, or bucket.
 - `metric`, `observed`, `threshold`, `target`, and `unit`.
@@ -75,7 +76,7 @@ Canary is a high-frequency alerting tool, not a planner.
 
 It should emit:
 
-- alert direction: defensive, constructive, mixed, or data-quality
+- alert direction: defensive, constructive, rebalance, mixed, or data-quality
 - severity: observe, watch, act, or urgent
 - planner mode hint: none, stage, defend, rebalance, deploy, or confirm-data
 - planner readiness: none, watch, prestage, ready, or blocked
