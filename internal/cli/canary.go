@@ -335,6 +335,8 @@ func canaryMarketRow(m CanaryMarketSummary) CanaryRow {
 		return canaryRow("Confirmed market stress", risk.DirectionDefensive, risk.SeverityAct, "Reduce equity beta materially; reserve urgent action for margin or exposure rows.", evidence)
 	case m.RedClusters >= 2 && m.RankedClusters >= 3:
 		return canaryRow("Confirmed market stress", risk.DirectionDefensive, risk.SeverityAct, "Cut marginal longs and short-convexity exposure; keep only intentional hedged risk.", evidence)
+	case canaryFastCarryUnwind(m):
+		return canaryRow("Fast carry unwind", risk.DirectionDefensive, risk.SeverityAct, "Reduce fragile beta and short-vol exposure; FX stress is confirmed by tape or breadth.", evidence)
 	case m.RedClusters == 1 && m.YellowClusters >= 1:
 		return canaryRow("Early stress filtered", risk.DirectionDefensive, risk.SeverityWatch, "Wait for a second independent red cluster before major de-risking.", evidence)
 	case m.YellowClusters >= 3:
@@ -383,7 +385,7 @@ func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRo
 	case (gross >= canaryPolicy.GrossExposureStressActPct || delta >= canaryPolicy.NetDeltaStressActPct || grossDelta >= canaryPolicy.GrossDeltaStressActPct) && stressed:
 		return canaryRow("US equity/options exposure", risk.DirectionDefensive, risk.SeverityAct, "Cut 30-50% of net equity delta and avoid adding long gamma-dollar exposure.", evidence)
 	case gross >= canaryPolicy.GrossExposureWatchPct || delta >= canaryPolicy.NetDeltaWatchPct || grossDelta >= canaryPolicy.GrossDeltaWatchPct:
-		return canaryRow("US equity/options exposure", risk.DirectionDefensive, risk.SeverityWatch, "Exposure is high; pre-stage reductions but wait for confirmed market stress.", evidence)
+		return canaryRow("US equity/options exposure", risk.DirectionRebalance, risk.SeverityWatch, "Exposure is high; rebalance toward risk limits without treating this as confirmed market stress.", evidence)
 	default:
 		return canaryRow("US equity/options exposure", "", risk.SeverityObserve, "No exposure-based de-risking trigger.", evidence)
 	}
@@ -400,7 +402,7 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 		return canaryRow("Largest concentration", risk.DirectionDefensive, risk.SeverityAct, fmt.Sprintf("Trim this concentration before smaller positions; cap it below %.0f%% NLV in stress.", canaryPolicy.SingleNameTargetPct), evidence)
 	}
 	if pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct {
-		return canaryRow("Largest concentration", risk.DirectionDefensive, risk.SeverityWatch, "Pre-stage a trim for this concentration if a second stress cluster confirms.", evidence)
+		return canaryRow("Largest concentration", risk.DirectionRebalance, risk.SeverityWatch, "Concentration is above risk limits; rebalance this title without treating it as confirmed market stress.", evidence)
 	}
 	return canaryRow("Largest concentration", "", risk.SeverityObserve, "No concentration trim required by the canary.", evidence)
 }
@@ -567,6 +569,12 @@ func canaryConfidenceProfile(severity risk.SignalSeverity, p CanaryPortfolioSumm
 func canaryPlannerMode(direction risk.SignalDirection, severity risk.SignalSeverity, dataConfidence string, p CanaryPortfolioSummary, m CanaryMarketSummary, signals []risk.Signal) risk.PlannerMode {
 	if direction == risk.DirectionDataQuality {
 		return risk.PlannerModeConfirmData
+	}
+	if direction == risk.DirectionRebalance {
+		if severityRankAtLeast(severity, risk.SeverityWatch) {
+			return risk.PlannerModeRebalance
+		}
+		return risk.PlannerModeNone
 	}
 	if direction == risk.DirectionDefensive || direction == risk.DirectionMixed {
 		if severityRankAtLeast(severity, risk.SeverityAct) {
@@ -769,6 +777,10 @@ func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
 		observed := float64(m.RedClusters)
 		threshold := 2.0
 		out = append(out, risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
+	case canaryFastCarryUnwind(m):
+		observed := 1.0
+		threshold := 1.0
+		out = append(out, risk.Signal{ID: risk.SignalFXCarryUnwind, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Subject: "fx", Metric: "red_fx_cluster_with_tape_confirmation", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
 	case m.RedClusters == 1 && m.YellowClusters >= 1:
 		observed := float64(m.RedClusters)
 		threshold := 1.0
@@ -796,7 +808,9 @@ func appendExposureSignal(out []risk.Signal, id risk.SignalID, metric string, ob
 	}
 	threshold := watchThreshold
 	severity := risk.SeverityWatch
+	direction := risk.DirectionRebalance
 	if stressed {
+		direction = risk.DirectionDefensive
 		switch {
 		case *observed >= stressUrgentThreshold:
 			severity = risk.SeverityUrgent
@@ -814,7 +828,7 @@ func appendExposureSignal(out []risk.Signal, id risk.SignalID, metric string, ob
 	}
 	return append(out, risk.Signal{
 		ID:         id,
-		Direction:  risk.DirectionDefensive,
+		Direction:  direction,
 		Severity:   severity,
 		Metric:     metric,
 		Observed:   observed,
@@ -828,16 +842,18 @@ func appendExposureSignal(out []risk.Signal, id risk.SignalID, metric string, ob
 func canaryConcentrationSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
 	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
 	severity := risk.SeverityWatch
+	direction := risk.DirectionRebalance
 	if stressed {
 		severity = risk.SeverityAct
+		direction = risk.DirectionDefensive
 	}
 	out := []risk.Signal{}
 	if p.LargestExposurePct != nil && math.Abs(*p.LargestExposurePct) >= canaryPolicy.SingleNameExposureWatchPct {
 		observed := math.Abs(*p.LargestExposurePct)
-		out = append(out, risk.Signal{ID: risk.SignalSingleNameExposureHigh, Direction: risk.DirectionDefensive, Severity: severity, Subject: p.LargestExposure, Metric: "market_value_pct_nlv", Observed: &observed, Threshold: new(canaryPolicy.SingleNameExposureWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s market %.0f%% NLV", p.LargestExposure, observed), Confidence: "high"})
+		out = append(out, risk.Signal{ID: risk.SignalSingleNameExposureHigh, Direction: direction, Severity: severity, Subject: p.LargestExposure, Metric: "market_value_pct_nlv", Observed: &observed, Threshold: new(canaryPolicy.SingleNameExposureWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s market %.0f%% NLV", p.LargestExposure, observed), Confidence: "high"})
 	}
 	if p.LargestDeltaPctNLV != nil && *p.LargestDeltaPctNLV >= canaryPolicy.SingleNameDeltaWatchPct {
-		out = append(out, risk.Signal{ID: risk.SignalSingleNameDeltaHigh, Direction: risk.DirectionDefensive, Severity: severity, Subject: p.LargestDeltaExposure, Metric: "delta_pct_nlv", Observed: p.LargestDeltaPctNLV, Threshold: new(canaryPolicy.SingleNameDeltaWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV), Confidence: "high"})
+		out = append(out, risk.Signal{ID: risk.SignalSingleNameDeltaHigh, Direction: direction, Severity: severity, Subject: p.LargestDeltaExposure, Metric: "delta_pct_nlv", Observed: p.LargestDeltaPctNLV, Threshold: new(canaryPolicy.SingleNameDeltaWatchPct), Target: new(canaryPolicy.SingleNameTargetPct), Unit: "pct_nlv", Evidence: fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV), Confidence: "high"})
 	}
 	return out
 }
@@ -880,13 +896,15 @@ func canaryDataQualitySignals(m CanaryMarketSummary, r rpc.RegimeSnapshotResult)
 }
 
 func canaryOverallDirection(rows []CanaryRow, signals []risk.Signal) risk.SignalDirection {
-	sawDefensive, sawConstructive, sawData := false, false, false
+	sawDefensive, sawConstructive, sawRebalance, sawData := false, false, false, false
 	for _, row := range rows {
 		switch row.Direction {
 		case risk.DirectionDefensive:
 			sawDefensive = true
 		case risk.DirectionConstructive:
 			sawConstructive = true
+		case risk.DirectionRebalance:
+			sawRebalance = true
 		case risk.DirectionDataQuality:
 			sawData = true
 		}
@@ -897,6 +915,8 @@ func canaryOverallDirection(rows []CanaryRow, signals []risk.Signal) risk.Signal
 			sawDefensive = true
 		case risk.DirectionConstructive:
 			sawConstructive = true
+		case risk.DirectionRebalance:
+			sawRebalance = true
 		case risk.DirectionDataQuality:
 			sawData = true
 		}
@@ -908,6 +928,8 @@ func canaryOverallDirection(rows []CanaryRow, signals []risk.Signal) risk.Signal
 		return risk.DirectionDefensive
 	case sawConstructive:
 		return risk.DirectionConstructive
+	case sawRebalance:
+		return risk.DirectionRebalance
 	case sawData:
 		return risk.DirectionDataQuality
 	default:
@@ -1068,7 +1090,18 @@ func canaryConfirmedTapeStress(m CanaryMarketSummary) bool {
 	vixHardSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct)
 	return (spyHardDrop && (vixSpike || m.RedClusters >= 1)) ||
 		(vixHardSpike && (spyDrop || m.RedClusters >= 1)) ||
-		(spyDrop && vixSpike && m.RedClusters >= 1)
+		(spyDrop && vixSpike && m.RedClusters >= 1) ||
+		canaryFastCarryUnwind(m)
+}
+
+func canaryFastCarryUnwind(m CanaryMarketSummary) bool {
+	if !slices.Contains(m.RedClusterNames, "fx") {
+		return false
+	}
+	return pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
+		pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct) ||
+		slices.Contains(m.YellowClusterNames, "breadth") ||
+		slices.Contains(m.RedClusterNames, "breadth")
 }
 
 func pctAtMost(v *float64, threshold float64) bool {
@@ -1532,6 +1565,8 @@ func signalDisplayString(id risk.SignalID) string {
 		return "look-ahead cushion"
 	case risk.SignalPortfolioPnLShock:
 		return "P&L shock"
+	case risk.SignalFXCarryUnwind:
+		return "FX carry unwind"
 	case risk.SignalGammaRed:
 		return "gamma red"
 	case risk.SignalSingleNameExposureHigh:
@@ -1668,6 +1703,8 @@ func canaryDirectionLabel(direction risk.SignalDirection) string {
 		return "Defensive"
 	case risk.DirectionConstructive:
 		return "Constructive"
+	case risk.DirectionRebalance:
+		return "Rebalance"
 	case risk.DirectionMixed:
 		return "Mixed"
 	case risk.DirectionDataQuality:

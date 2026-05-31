@@ -5,6 +5,7 @@ type SignalDirection string
 const (
 	DirectionDefensive    SignalDirection = "defensive"
 	DirectionConstructive SignalDirection = "constructive"
+	DirectionRebalance    SignalDirection = "rebalance"
 	DirectionMixed        SignalDirection = "mixed"
 	DirectionDataQuality  SignalDirection = "data_quality"
 )
@@ -50,6 +51,7 @@ const (
 	SignalVolCrushConfirmed      SignalID = "vol_crush_confirmed"
 	SignalRegimeStressConfirmed  SignalID = "regime_stress_confirmed"
 	SignalRegimeStressEarly      SignalID = "regime_stress_early"
+	SignalFXCarryUnwind          SignalID = "fx_carry_unwind"
 	SignalGammaRed               SignalID = "gamma_red"
 	SignalGrossExposureHigh      SignalID = "gross_exposure_high"
 	SignalNetDeltaHigh           SignalID = "net_delta_high"

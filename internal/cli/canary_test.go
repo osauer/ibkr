@@ -257,14 +257,21 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 		}},
 		Regime: healthyCanaryRegime(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
-		t.Fatalf("state = %s/%s, want defensive/watch on largest dollar-delta concentration", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionRebalance || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want rebalance/watch on largest dollar-delta concentration", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeRebalance || res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner = %s/%s, want rebalance/ready", res.PlannerModeHint, res.PlannerReadiness)
 	}
 	if !rowContainsEvidence(res.Rows, "Largest concentration", "AAPL delta 45% NLV") {
 		t.Fatalf("expected largest-delta evidence, rows: %+v", res.Rows)
 	}
 	if !hasSignal(res.Signals, risk.SignalSingleNameDeltaHigh) {
 		t.Fatalf("expected single-name delta signal, signals: %+v", res.Signals)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalSingleNameDeltaHigh)
+	if !ok || sig.Direction != risk.DirectionRebalance {
+		t.Fatalf("single-name delta signal = %+v, want rebalance direction", sig)
 	}
 	if res.SignalConfidence != "high" {
 		t.Fatalf("signal_confidence = %q, want high", res.SignalConfidence)
@@ -293,17 +300,46 @@ func TestComputeCanarySignalsExposureAndConfidenceReasons(t *testing.T) {
 			t.Fatalf("missing signal %s in %+v", want, res.Signals)
 		}
 	}
-	if res.Direction != risk.DirectionDefensive {
-		t.Fatalf("direction = %q, want defensive", res.Direction)
+	if res.Direction != risk.DirectionRebalance {
+		t.Fatalf("direction = %q, want rebalance", res.Direction)
 	}
-	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.PlannerReadiness != risk.PlannerReadinessPrestage {
+	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.PlannerReadiness != risk.PlannerReadinessReady {
 		t.Fatalf("confidence profile = data %q signals %q readiness %q", res.DataConfidence, res.SignalConfidence, res.PlannerReadiness)
 	}
-	if res.PlannerModeHint != risk.PlannerModeStage {
-		t.Fatalf("planner_mode_hint = %s, want stage", res.PlannerModeHint)
+	if res.PlannerModeHint != risk.PlannerModeRebalance {
+		t.Fatalf("planner_mode_hint = %s, want rebalance", res.PlannerModeHint)
 	}
 	if !strings.Contains(strings.Join(res.ConfidenceReasons, "\n"), "portfolio breach lacks independent market-stress confirmation") {
 		t.Fatalf("missing confidence reason, got %+v", res.ConfidenceReasons)
+	}
+}
+
+func TestComputeCanaryFastCarryUnwindActs(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterRedCount: 1, ClusterYellowCount: 2, ClusterGreenCount: 3, ClusterRankedCount: 6}
+	r.USDJPY.Band = "red"
+	r.VIXTermStructure.Band = "yellow"
+	r.Breadth.Band = "yellow"
+	spyPct := -2.0
+	vixPct := 16.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
+		t.Fatalf("state = %s/%s, want defensive/act for FX carry unwind with tape confirmation", res.Direction, res.Severity)
+	}
+	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner = %s/%s, want defend/ready", res.PlannerModeHint, res.PlannerReadiness)
+	}
+	if !rowContains(res.Rows, "Fast carry unwind", "FX stress is confirmed") {
+		t.Fatalf("expected fast-carry market row, rows: %+v", res.Rows)
+	}
+	if !hasSignal(res.Signals, risk.SignalFXCarryUnwind) {
+		t.Fatalf("missing FX carry unwind signal, signals: %+v", res.Signals)
 	}
 }
 

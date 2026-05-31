@@ -63,35 +63,46 @@ type CanaryBacktestRowResult struct {
 	DataConfidence   string                `json:"data_confidence,omitempty"`
 	SignalConfidence string                `json:"signal_confidence,omitempty"`
 	PrimaryDrivers   []risk.SignalID       `json:"primary_drivers,omitempty"`
+	SignalWatch      bool                  `json:"signal_watch"`
 	DefensiveWatch   bool                  `json:"defensive_watch"`
 	DefensiveAct     bool                  `json:"defensive_act"`
+	RebalanceWatch   bool                  `json:"rebalance_watch"`
 	DataQualityWatch bool                  `json:"data_quality_watch"`
 	Blocked          bool                  `json:"blocked"`
 	Canary           *rpc.CanaryResult     `json:"canary,omitempty"`
 }
 
 type CanaryBacktestMetrics struct {
-	Observations        int      `json:"observations"`
-	TargetStress        int      `json:"target_stress"`
-	NonStress           int      `json:"non_stress"`
-	DefensiveWatch      int      `json:"defensive_watch"`
-	DefensiveAct        int      `json:"defensive_act"`
-	DataQualityWatch    int      `json:"data_quality_watch"`
-	Blocked             int      `json:"blocked"`
-	WatchTruePositive   int      `json:"watch_true_positive"`
-	WatchFalsePositive  int      `json:"watch_false_positive"`
-	WatchMiss           int      `json:"watch_miss"`
-	WatchPrecision      *float64 `json:"watch_precision,omitempty"`
-	WatchRecall         *float64 `json:"watch_recall,omitempty"`
-	WatchFalseAlarmRate *float64 `json:"watch_false_alarm_rate,omitempty"`
-	WatchAvgLeadDays    *float64 `json:"watch_avg_lead_days,omitempty"`
-	ActTruePositive     int      `json:"act_true_positive"`
-	ActFalsePositive    int      `json:"act_false_positive"`
-	ActMiss             int      `json:"act_miss"`
-	ActPrecision        *float64 `json:"act_precision,omitempty"`
-	ActRecall           *float64 `json:"act_recall,omitempty"`
-	ActFalseAlarmRate   *float64 `json:"act_false_alarm_rate,omitempty"`
-	ActAvgLeadDays      *float64 `json:"act_avg_lead_days,omitempty"`
+	Observations         int      `json:"observations"`
+	TargetStress         int      `json:"target_stress"`
+	NonStress            int      `json:"non_stress"`
+	SignalWatch          int      `json:"signal_watch"`
+	DefensiveWatch       int      `json:"defensive_watch"`
+	DefensiveAct         int      `json:"defensive_act"`
+	RebalanceWatch       int      `json:"rebalance_watch"`
+	DataQualityWatch     int      `json:"data_quality_watch"`
+	Blocked              int      `json:"blocked"`
+	SignalTruePositive   int      `json:"signal_true_positive"`
+	SignalFalsePositive  int      `json:"signal_false_positive"`
+	SignalMiss           int      `json:"signal_miss"`
+	SignalPrecision      *float64 `json:"signal_precision,omitempty"`
+	SignalRecall         *float64 `json:"signal_recall,omitempty"`
+	SignalFalseAlarmRate *float64 `json:"signal_false_alarm_rate,omitempty"`
+	SignalAvgLeadDays    *float64 `json:"signal_avg_lead_days,omitempty"`
+	WatchTruePositive    int      `json:"watch_true_positive"`
+	WatchFalsePositive   int      `json:"watch_false_positive"`
+	WatchMiss            int      `json:"watch_miss"`
+	WatchPrecision       *float64 `json:"watch_precision,omitempty"`
+	WatchRecall          *float64 `json:"watch_recall,omitempty"`
+	WatchFalseAlarmRate  *float64 `json:"watch_false_alarm_rate,omitempty"`
+	WatchAvgLeadDays     *float64 `json:"watch_avg_lead_days,omitempty"`
+	ActTruePositive      int      `json:"act_true_positive"`
+	ActFalsePositive     int      `json:"act_false_positive"`
+	ActMiss              int      `json:"act_miss"`
+	ActPrecision         *float64 `json:"act_precision,omitempty"`
+	ActRecall            *float64 `json:"act_recall,omitempty"`
+	ActFalseAlarmRate    *float64 `json:"act_false_alarm_rate,omitempty"`
+	ActAvgLeadDays       *float64 `json:"act_avg_lead_days,omitempty"`
 }
 
 type CanaryBacktestClusterMetrics struct {
@@ -100,11 +111,13 @@ type CanaryBacktestClusterMetrics struct {
 }
 
 type canaryBacktestAccumulator struct {
-	metrics        CanaryBacktestMetrics
-	watchLeadDays  int
-	watchLeadCount int
-	actLeadDays    int
-	actLeadCount   int
+	metrics         CanaryBacktestMetrics
+	signalLeadDays  int
+	signalLeadCount int
+	watchLeadDays   int
+	watchLeadCount  int
+	actLeadDays     int
+	actLeadCount    int
 }
 
 func runBacktest(_ context.Context, env *Env, args []string) int {
@@ -208,8 +221,10 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 	canary := ComputeCanary(input)
 	watch := canaryBacktestDefensiveAtLeast(canary, risk.SeverityWatch)
 	act := canaryBacktestDefensiveAtLeast(canary, risk.SeverityAct)
+	rebalance := canaryBacktestRebalanceAtLeast(canary, risk.SeverityWatch)
 	dataQuality := canary.Direction == risk.DirectionDataQuality && severityRankAtLeast(canary.Severity, risk.SeverityWatch)
 	blocked := canary.PlannerReadiness == risk.PlannerReadinessBlocked
+	signalWatch := watch || rebalance
 	return CanaryBacktestRowResult{
 		Date:             backtestDateLabel(obs, asOf),
 		Case:             obs.Case,
@@ -225,8 +240,10 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 		DataConfidence:   canary.DataConfidence,
 		SignalConfidence: canary.SignalConfidence,
 		PrimaryDrivers:   canary.PrimaryDrivers,
+		SignalWatch:      signalWatch,
 		DefensiveWatch:   watch,
 		DefensiveAct:     act,
+		RebalanceWatch:   rebalance,
 		DataQualityWatch: dataQuality,
 		Blocked:          blocked,
 		Canary:           &canary,
@@ -363,6 +380,13 @@ func canaryBacktestDefensiveAtLeast(res CanaryResult, severity risk.SignalSeveri
 	return res.Direction == risk.DirectionDefensive || res.Direction == risk.DirectionMixed
 }
 
+func canaryBacktestRebalanceAtLeast(res CanaryResult, severity risk.SignalSeverity) bool {
+	if !severityRankAtLeast(res.Severity, severity) {
+		return false
+	}
+	return res.Direction == risk.DirectionRebalance
+}
+
 func (a *canaryBacktestAccumulator) add(row CanaryBacktestRowResult) {
 	a.metrics.Observations++
 	if row.TargetStress {
@@ -370,11 +394,17 @@ func (a *canaryBacktestAccumulator) add(row CanaryBacktestRowResult) {
 	} else {
 		a.metrics.NonStress++
 	}
+	if row.SignalWatch {
+		a.metrics.SignalWatch++
+	}
 	if row.DefensiveWatch {
 		a.metrics.DefensiveWatch++
 	}
 	if row.DefensiveAct {
 		a.metrics.DefensiveAct++
+	}
+	if row.RebalanceWatch {
+		a.metrics.RebalanceWatch++
 	}
 	if row.DataQualityWatch {
 		a.metrics.DataQualityWatch++
@@ -382,8 +412,24 @@ func (a *canaryBacktestAccumulator) add(row CanaryBacktestRowResult) {
 	if row.Blocked {
 		a.metrics.Blocked++
 	}
+	a.addSignal(row)
 	a.addWatch(row)
 	a.addAct(row)
+}
+
+func (a *canaryBacktestAccumulator) addSignal(row CanaryBacktestRowResult) {
+	switch {
+	case row.TargetStress && row.SignalWatch:
+		a.metrics.SignalTruePositive++
+		if row.DaysToStress != nil {
+			a.signalLeadDays += *row.DaysToStress
+			a.signalLeadCount++
+		}
+	case row.TargetStress:
+		a.metrics.SignalMiss++
+	case row.SignalWatch:
+		a.metrics.SignalFalsePositive++
+	}
 }
 
 func (a *canaryBacktestAccumulator) addWatch(row CanaryBacktestRowResult) {
@@ -418,6 +464,10 @@ func (a *canaryBacktestAccumulator) addAct(row CanaryBacktestRowResult) {
 
 func (a *canaryBacktestAccumulator) result() CanaryBacktestMetrics {
 	m := a.metrics
+	m.SignalPrecision = ratioPtr(m.SignalTruePositive, m.SignalTruePositive+m.SignalFalsePositive)
+	m.SignalRecall = ratioPtr(m.SignalTruePositive, m.TargetStress)
+	m.SignalFalseAlarmRate = ratioPtr(m.SignalFalsePositive, m.NonStress)
+	m.SignalAvgLeadDays = avgPtr(a.signalLeadDays, a.signalLeadCount)
 	m.WatchPrecision = ratioPtr(m.WatchTruePositive, m.WatchTruePositive+m.WatchFalsePositive)
 	m.WatchRecall = ratioPtr(m.WatchTruePositive, m.TargetStress)
 	m.WatchFalseAlarmRate = ratioPtr(m.WatchFalsePositive, m.NonStress)
@@ -453,6 +503,17 @@ func canaryBacktestFindings(res CanaryBacktestResult) []string {
 	var findings []string
 	if m.TargetStress == 0 {
 		findings = append(findings, "No target stress rows were present; add labelled forward windows before reading precision or recall.")
+	} else if m.SignalMiss == 0 {
+		findings = append(findings, "Watch-level canary signals caught every labelled stress row in this panel.")
+	} else {
+		findings = append(findings, fmt.Sprintf("Watch-level canary signals missed %d labelled stress row(s).", m.SignalMiss))
+	}
+	if m.SignalFalsePositive > 0 {
+		findings = append(findings, fmt.Sprintf("Watch-level canary signals fired on %d non-stress row(s); inspect risk-budget false positives before tightening policy.", m.SignalFalsePositive))
+	}
+	if m.TargetStress == 0 {
+		// Already covered above; keep the defensive-specific finding quiet when
+		// there is no stress label base rate.
 	} else if m.WatchMiss == 0 {
 		findings = append(findings, "Watch-level defensive alerts caught every labelled stress row in this panel.")
 	} else {
@@ -466,6 +527,9 @@ func canaryBacktestFindings(res CanaryBacktestResult) []string {
 	}
 	if m.DataQualityWatch > 0 {
 		findings = append(findings, fmt.Sprintf("%d data-quality watch row(s) were tracked separately from defensive false positives.", m.DataQualityWatch))
+	}
+	if m.RebalanceWatch > 0 {
+		findings = append(findings, fmt.Sprintf("%d rebalance watch row(s) were tracked separately from defensive alerts.", m.RebalanceWatch))
 	}
 	for _, cluster := range res.Clusters {
 		cm := cluster.Metrics
@@ -485,7 +549,14 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %-12s %d stress / %d non-stress\n", "Targets", r.Metrics.TargetStress, r.Metrics.NonStress)
 	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false alarms %s · avg lead %s\n",
-		"Watch",
+		"Signal",
+		formatBacktestRate(r.Metrics.SignalPrecision),
+		formatBacktestRate(r.Metrics.SignalRecall),
+		formatBacktestRate(r.Metrics.SignalFalseAlarmRate),
+		formatBacktestNumber(r.Metrics.SignalAvgLeadDays),
+	)
+	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false alarms %s · avg lead %s\n",
+		"Defensive",
 		formatBacktestRate(r.Metrics.WatchPrecision),
 		formatBacktestRate(r.Metrics.WatchRecall),
 		formatBacktestRate(r.Metrics.WatchFalseAlarmRate),
@@ -498,22 +569,24 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 		formatBacktestRate(r.Metrics.ActFalseAlarmRate),
 		formatBacktestNumber(r.Metrics.ActAvgLeadDays),
 	)
+	fmt.Fprintf(out, "  %-12s %d rebalance watch row(s)\n", "Risk budget", r.Metrics.RebalanceWatch)
 	fmt.Fprintf(out, "  %-12s %d data-quality watch · %d blocked planner row(s)\n", "Quality", r.Metrics.DataQualityWatch, r.Metrics.Blocked)
 	fmt.Fprintln(out)
 
 	if len(r.Clusters) > 0 {
-		header := fmt.Sprintf("  %-28s %4s %6s %9s %9s %9s %9s",
-			"CLUSTER", "OBS", "STRESS", "WATCH TP", "WATCH FP", "ACT TP", "BLOCKED")
+		header := fmt.Sprintf("  %-28s %4s %6s %6s %6s %6s %6s %7s",
+			"CLUSTER", "OBS", "STRESS", "DEF TP", "DEF FP", "REBAL", "ACT TP", "BLOCKED")
 		fmt.Fprintln(out, env.dim(header))
 		fmt.Fprintln(out, env.dim(strings.Repeat("-", visibleLen(header))))
 		for _, cluster := range r.Clusters {
 			m := cluster.Metrics
-			fmt.Fprintf(out, "  %-28s %4d %6d %9d %9d %9d %9d\n",
+			fmt.Fprintf(out, "  %-28s %4d %6d %6d %6d %6d %6d %7d\n",
 				truncateVisible(cluster.Name, 28),
 				m.Observations,
 				m.TargetStress,
 				m.WatchTruePositive,
 				m.WatchFalsePositive,
+				m.RebalanceWatch,
 				m.ActTruePositive,
 				m.Blocked,
 			)
