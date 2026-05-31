@@ -1,6 +1,6 @@
 # Regime and Canary Backtest Plan
 
-**Updated:** 2026-05-31 11:34 CEST
+**Updated:** 2026-05-31 12:12 CEST
 
 This plan defines the calibration work required before `ibkr regime` or
 `ibkr canary` may expose forecast probabilities. Until then, regime should
@@ -61,12 +61,15 @@ The first committed harnesses are intentionally small:
 ```bash
 ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
 ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl
+ibkr backtest opportunity --input internal/cli/testdata/opportunity_backtest_sample.jsonl
 ```
 
 Each JSONL line is one point-in-time observation. The runner calls the pure
 `ComputeCanary` function for canary rows and scores compact
-`rpc.RegimeSnapshotResult` rows directly for regime rows, so neither harness
-requires TWS, the daemon, or market-data entitlements.
+`rpc.RegimeSnapshotResult` rows directly for regime rows. Opportunity rows
+score market-only signal/outcome fixtures and do not use account capacity,
+position sizing, margin, or order-placement assumptions. These harnesses do not
+require TWS, the daemon, or market-data entitlements.
 
 ## Target Stress Definitions
 
@@ -130,6 +133,9 @@ Use expanding or rolling walk-forward windows:
 - Recompute rolling windows from data available up to the read timestamp.
 - Treat gamma as absent before the method existed unless historical option
   chains, OI, IV, and the exact method version can be reconstructed.
+- Run regime scoring in `ex-gamma` mode first. Add `with-gamma` only for rows
+  with trusted point-in-time gamma snapshots carrying source, method version,
+  coverage, and warning metadata.
 - Keep source outages and entitlement gaps as `unavailable`; do not forward-fill
   a missing critical row into a fake green/yellow/red reading.
 
@@ -210,11 +216,35 @@ Use synthetic portfolio overlays to isolate policy behavior:
 Backtest output should be read as "how the monitor behaves," not as "how the
 market is predicted."
 
-Opportunity posture is not scored in the first regime pass. Opportunity needs a
-separate target definition, for example forward rebound or volatility crush
-conditional on clean risk budget and deployable portfolio capacity. Until that
-exists, the harness should log constructive/opportunity posture but not tune
-against it.
+## Opportunity Scoring
+
+Score market opportunity separately from regime and canary. Opportunity
+backtests answer "did the market produce a detectable opportunity, and what
+happened to a standardized trade if the signal fired?" They must not use the
+user's historical account capacity, position sizing, margin, or order choice;
+those belong to risk-manager and order-entry.
+
+Minimal opportunity rows carry:
+
+- `signal.fired`, `signal.kind`, and optional signal confidence.
+- `trade.instrument`, entry rule, horizon, and benchmark.
+- `outcome.forward_return_pct`, benchmark return, excess return, max adverse
+  excursion, and max favorable excursion.
+- `target.opportunity`, scope, and kind.
+
+Minimal opportunity metrics:
+
+- Signal precision and recall against labelled opportunity windows.
+- False opportunity rate on labelled non-opportunity/chase-risk windows.
+- Hit rate: fired signals with positive excess return versus benchmark.
+- Average forward return, benchmark return, excess return, max adverse
+  excursion, and max favorable excursion for fired signals.
+
+AI infrastructure should be split into two cohorts: `AI mega-cap fragility`
+for narrow breadth, valuation, and chase-risk, and `AI infrastructure
+opportunity` for semis, data-center power/cooling, grid construction, energy,
+and networking. Prefer baskets or explicitly declared as-of universes for
+later data-builder work to reduce survivor bias.
 
 ## Weaknesses To Watch
 
