@@ -29,6 +29,7 @@ type CanaryResult struct {
 	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
 	Policy             string                   `json:"policy,omitempty"`
 	Direction          risk.SignalDirection     `json:"direction,omitempty"`
+	PortfolioPosture   risk.PortfolioPosture    `json:"portfolio_posture,omitempty"`
 	Severity           risk.SignalSeverity      `json:"severity"`
 	PlannerModeHint    risk.PlannerMode         `json:"planner_mode_hint,omitempty"`
 	PlannerReadiness   risk.PlannerReadiness    `json:"planner_readiness,omitempty"`

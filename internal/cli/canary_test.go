@@ -31,6 +31,9 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want data_quality/watch for ambiguous all-unranked market", res.Direction, res.Severity)
 	}
+	if res.PortfolioPosture != risk.PortfolioPostureConfirmData {
+		t.Fatalf("portfolio_posture = %s, want confirm_data", res.PortfolioPosture)
+	}
 	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
 		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
 	}
@@ -260,6 +263,9 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	if res.Direction != risk.DirectionRebalance || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want rebalance/watch on largest dollar-delta concentration", res.Direction, res.Severity)
 	}
+	if res.PortfolioPosture != risk.PortfolioPostureRebalance {
+		t.Fatalf("portfolio_posture = %s, want rebalance", res.PortfolioPosture)
+	}
 	if res.PlannerModeHint != risk.PlannerModeRebalance || res.PlannerReadiness != risk.PlannerReadinessReady {
 		t.Fatalf("planner = %s/%s, want rebalance/ready", res.PlannerModeHint, res.PlannerReadiness)
 	}
@@ -270,8 +276,8 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 		t.Fatalf("expected single-name delta signal, signals: %+v", res.Signals)
 	}
 	sig, ok := findSignal(res.Signals, risk.SignalSingleNameDeltaHigh)
-	if !ok || sig.Direction != risk.DirectionRebalance {
-		t.Fatalf("single-name delta signal = %+v, want rebalance direction", sig)
+	if !ok || sig.Direction != risk.DirectionRebalance || sig.Posture != risk.PortfolioPostureRebalance {
+		t.Fatalf("single-name delta signal = %+v, want rebalance direction/posture", sig)
 	}
 	if res.SignalConfidence != "high" {
 		t.Fatalf("signal_confidence = %q, want high", res.SignalConfidence)
@@ -332,6 +338,9 @@ func TestComputeCanaryFastCarryUnwindActs(t *testing.T) {
 	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
 		t.Fatalf("state = %s/%s, want defensive/act for FX carry unwind with tape confirmation", res.Direction, res.Severity)
 	}
+	if res.PortfolioPosture != risk.PortfolioPostureThreat {
+		t.Fatalf("portfolio_posture = %s, want threat", res.PortfolioPosture)
+	}
 	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
 		t.Fatalf("planner = %s/%s, want defend/ready", res.PlannerModeHint, res.PlannerReadiness)
 	}
@@ -340,6 +349,30 @@ func TestComputeCanaryFastCarryUnwindActs(t *testing.T) {
 	}
 	if !hasSignal(res.Signals, risk.SignalFXCarryUnwind) {
 		t.Fatalf("missing FX carry unwind signal, signals: %+v", res.Signals)
+	}
+}
+
+func TestComputeCanaryConstructiveTapeShowsOpportunityPosture(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.HYGSPYDivergence.SPYChangePct = new(3.0)
+	r.VIXTermStructure.VIXChangePct = new(-25.0)
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Direction != risk.DirectionConstructive || res.Severity != risk.SeverityAct {
+		t.Fatalf("state = %s/%s, want constructive/act", res.Direction, res.Severity)
+	}
+	if res.PortfolioPosture != risk.PortfolioPostureOpportunity {
+		t.Fatalf("portfolio_posture = %s, want opportunity", res.PortfolioPosture)
+	}
+	if res.PlannerModeHint != risk.PlannerModeDeploy || res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner = %s/%s, want deploy/ready", res.PlannerModeHint, res.PlannerReadiness)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalMarketRallyViolent)
+	if !ok || sig.Posture != risk.PortfolioPostureOpportunity {
+		t.Fatalf("market rally signal = %+v, want opportunity posture", sig)
 	}
 }
 
@@ -503,10 +536,21 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatalf("re-decode: %v", err)
 	}
-	for _, key := range []string{"fingerprint", "source_fingerprints", "direction", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
+	for _, key := range []string{"fingerprint", "source_fingerprints", "direction", "portfolio_posture", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
 		if _, ok := wire[key]; !ok {
 			t.Fatalf("canary JSON missing %s: %s", key, b)
 		}
+	}
+	if wire["portfolio_posture"] != string(risk.PortfolioPostureThreat) {
+		t.Fatalf("portfolio_posture = %#v, want threat", wire["portfolio_posture"])
+	}
+	signals, ok := wire["signals"].([]any)
+	if !ok || len(signals) == 0 {
+		t.Fatalf("signals missing/malformed: %#v", wire["signals"])
+	}
+	firstSignal, ok := signals[0].(map[string]any)
+	if !ok || firstSignal["posture"] == "" {
+		t.Fatalf("signal posture missing: %#v", wire["signals"])
 	}
 	fp, ok := wire["fingerprint"].(map[string]any)
 	if !ok || fp["version"] != rpc.CanaryFingerprintVersion || fp["key"] == "" {
@@ -654,6 +698,7 @@ func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"Risk state [Defensive / Act]",
+		"Posture    Threat",
 		"Alert ID   canary-fp-v1 sha256:",
 		"Guidance   Refresh or confirm degraded inputs before planning major portfolio changes.",
 		"Confidence Medium-low (data:",

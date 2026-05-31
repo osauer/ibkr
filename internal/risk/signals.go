@@ -10,6 +10,17 @@ const (
 	DirectionDataQuality  SignalDirection = "data_quality"
 )
 
+type PortfolioPosture string
+
+const (
+	PortfolioPostureNeutral           PortfolioPosture = "neutral"
+	PortfolioPostureThreat            PortfolioPosture = "threat"
+	PortfolioPostureRebalance         PortfolioPosture = "rebalance"
+	PortfolioPostureOpportunity       PortfolioPosture = "opportunity"
+	PortfolioPostureThreatOpportunity PortfolioPosture = "threat_opportunity"
+	PortfolioPostureConfirmData       PortfolioPosture = "confirm_data"
+)
+
 type SignalSeverity string
 
 const (
@@ -66,17 +77,18 @@ const (
 )
 
 type Signal struct {
-	ID               SignalID        `json:"id"`
-	Direction        SignalDirection `json:"direction"`
-	Severity         SignalSeverity  `json:"severity"`
-	Subject          string          `json:"subject,omitempty"`
-	Metric           string          `json:"metric,omitempty"`
-	Observed         *float64        `json:"observed,omitempty"`
-	Threshold        *float64        `json:"threshold,omitempty"`
-	Target           *float64        `json:"target,omitempty"`
-	Unit             string          `json:"unit,omitempty"`
-	Evidence         string          `json:"evidence,omitempty"`
-	Confidence       string          `json:"confidence,omitempty"`
-	ConfidenceImpact string          `json:"confidence_impact,omitempty"`
-	BlockedBy        []string        `json:"blocked_by,omitempty"`
+	ID               SignalID         `json:"id"`
+	Direction        SignalDirection  `json:"direction"`
+	Posture          PortfolioPosture `json:"posture,omitempty"`
+	Severity         SignalSeverity   `json:"severity"`
+	Subject          string           `json:"subject,omitempty"`
+	Metric           string           `json:"metric,omitempty"`
+	Observed         *float64         `json:"observed,omitempty"`
+	Threshold        *float64         `json:"threshold,omitempty"`
+	Target           *float64         `json:"target,omitempty"`
+	Unit             string           `json:"unit,omitempty"`
+	Evidence         string           `json:"evidence,omitempty"`
+	Confidence       string           `json:"confidence,omitempty"`
+	ConfidenceImpact string           `json:"confidence_impact,omitempty"`
+	BlockedBy        []string         `json:"blocked_by,omitempty"`
 }

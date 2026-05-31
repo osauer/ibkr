@@ -488,6 +488,7 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 		},
 		Policy:           "canary-default",
 		Direction:        risk.DirectionDefensive,
+		PortfolioPosture: risk.PortfolioPostureThreat,
 		Severity:         risk.SeverityWatch,
 		PlannerModeHint:  risk.PlannerModeStage,
 		PlannerReadiness: risk.PlannerReadinessPrestage,
@@ -496,7 +497,7 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 		DataConfidence:   "high",
 		SignalConfidence: "medium",
 		PrimaryDrivers:   []risk.SignalID{risk.SignalMarginCushionLow},
-		Signals:          []risk.Signal{{ID: risk.SignalMarginCushionLow, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch}},
+		Signals:          []risk.Signal{{ID: risk.SignalMarginCushionLow, Direction: risk.DirectionDefensive, Posture: risk.PortfolioPostureThreat, Severity: risk.SeverityWatch}},
 		Rows:             []rpc.CanaryRow{{Title: "Portfolio canary", Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Guidance: "Freeze new risk."}},
 		Portfolio:        rpc.CanaryPortfolioSummary{BaseCurrency: "USD", NetLiquidation: 100_000},
 		Market:           rpc.CanaryMarketSummary{RegimeVerdict: "Normal regime", RankedClusters: 6},
@@ -516,6 +517,7 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 		"source_fingerprints",
 		"policy",
 		"direction",
+		"portfolio_posture",
 		"severity",
 		"planner_mode_hint",
 		"planner_readiness",
@@ -533,6 +535,9 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 	fp, ok := wire["fingerprint"].(map[string]any)
 	if !ok || fp["version"] != rpc.CanaryFingerprintVersion || fp["key"] == "" {
 		t.Fatalf("fingerprint missing or malformed: %#v", wire["fingerprint"])
+	}
+	if wire["portfolio_posture"] != string(risk.PortfolioPostureThreat) {
+		t.Fatalf("portfolio_posture = %#v, want threat", wire["portfolio_posture"])
 	}
 	sources, ok := wire["source_fingerprints"].(map[string]any)
 	if !ok {

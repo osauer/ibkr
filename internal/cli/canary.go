@@ -40,7 +40,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		Policy:             canaryPolicy.Name,
 		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions),
 		Market:             summarizeCanaryMarket(in.Regime),
-		NotExecution:       "Read-only recommendation; no orders are placed by ibkr.",
+		NotExecution:       "Read-only canary posture; no orders are placed by ibkr.",
 	}
 
 	rows := []CanaryRow{
@@ -55,7 +55,8 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	}
 	res.Signals = canarySignals(res.Portfolio, in.Positions, res.Market, in.Regime)
 	res.Direction = canaryOverallDirection(rows, res.Signals)
-	res.Severity = canaryOverallSeverity(rows, res.Signals, res.Market, res.Portfolio)
+	res.Severity = canaryOverallSeverity(rows, res.Signals, res.Market, res.Portfolio, res.Direction)
+	res.PortfolioPosture = canaryPortfolioPosture(res.Direction, res.Severity)
 	res.PrimaryDrivers = canaryPrimaryDrivers(res.Signals)
 	res.DataConfidence, res.SignalConfidence, res.ConfidenceReasons = canaryConfidenceProfile(res.Severity, res.Portfolio, res.Market, res.Signals)
 	res.PlannerModeHint = canaryPlannerMode(res.Direction, res.Severity, res.DataConfidence, res.Portfolio, res.Market, res.Signals)
@@ -442,7 +443,7 @@ func canaryOverallRow(direction risk.SignalDirection, severity risk.SignalSeveri
 	return canaryRow("Portfolio canary", direction, severity, summary, fmt.Sprintf("%s; %s", canaryMarketEvidence(m), canaryPortfolioEvidence(p)))
 }
 
-func canaryOverallSeverity(rows []CanaryRow, signals []risk.Signal, m CanaryMarketSummary, p CanaryPortfolioSummary) risk.SignalSeverity {
+func canaryOverallSeverity(rows []CanaryRow, signals []risk.Signal, m CanaryMarketSummary, p CanaryPortfolioSummary, direction risk.SignalDirection) risk.SignalSeverity {
 	severity := risk.SeverityObserve
 	for _, row := range rows {
 		if signalSeverityRank(row.Severity) > signalSeverityRank(severity) {
@@ -460,7 +461,8 @@ func canaryOverallSeverity(rows []CanaryRow, signals []risk.Signal, m CanaryMark
 	if severity == risk.SeverityUrgent && len(m.AmbiguousClusters) > 2 && !canaryImmediateDanger(p) {
 		severity = risk.SeverityAct
 	}
-	if severity == risk.SeverityAct && m.RedClusters == 0 && !canaryMarginPressure(p) && !canaryConfirmedTapeStress(m) {
+	defensiveDirection := direction == risk.DirectionDefensive || direction == risk.DirectionMixed
+	if severity == risk.SeverityAct && defensiveDirection && m.RedClusters == 0 && !canaryMarginPressure(p) && !canaryConfirmedTapeStress(m) {
 		severity = risk.SeverityWatch
 	}
 	return severity
@@ -626,6 +628,11 @@ func canarySignals(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMa
 	signals = append(signals, canaryConcentrationSignals(p, m)...)
 	signals = append(signals, canaryOptionSignals(pos, m)...)
 	signals = append(signals, canaryDataQualitySignals(m, r)...)
+	for i := range signals {
+		if signals[i].Posture == "" {
+			signals[i].Posture = canarySignalPosture(signals[i].Direction)
+		}
+	}
 	return signals
 }
 
@@ -934,6 +941,30 @@ func canaryOverallDirection(rows []CanaryRow, signals []risk.Signal) risk.Signal
 		return risk.DirectionDataQuality
 	default:
 		return ""
+	}
+}
+
+func canaryPortfolioPosture(direction risk.SignalDirection, severity risk.SignalSeverity) risk.PortfolioPosture {
+	if !severityRankAtLeast(severity, risk.SeverityWatch) {
+		return risk.PortfolioPostureNeutral
+	}
+	return canarySignalPosture(direction)
+}
+
+func canarySignalPosture(direction risk.SignalDirection) risk.PortfolioPosture {
+	switch direction {
+	case risk.DirectionDefensive:
+		return risk.PortfolioPostureThreat
+	case risk.DirectionConstructive:
+		return risk.PortfolioPostureOpportunity
+	case risk.DirectionRebalance:
+		return risk.PortfolioPostureRebalance
+	case risk.DirectionMixed:
+		return risk.PortfolioPostureThreatOpportunity
+	case risk.DirectionDataQuality:
+		return risk.PortfolioPostureConfirmData
+	default:
+		return risk.PortfolioPostureNeutral
 	}
 }
 
@@ -1287,6 +1318,13 @@ func renderCanaryTextWidth(env *Env, out io.Writer, r *CanaryResult, width int) 
 	fmt.Fprintln(out)
 	renderCanaryKV(out, "Risk state", canaryRiskStateText(r.Direction, r.Severity), width, func(s string) string {
 		return canaryRiskStateLabel(env, r.Direction, r.Severity, true)
+	})
+	posture := r.PortfolioPosture
+	if posture == "" {
+		posture = canaryPortfolioPosture(r.Direction, r.Severity)
+	}
+	renderCanaryKV(out, "Posture", canaryPostureText(posture), width, func(s string) string {
+		return canaryPostureLabel(env, posture)
 	})
 	if r.Fingerprint.Key != "" {
 		renderCanaryKV(out, "Alert ID", r.Fingerprint.Version+" "+r.Fingerprint.Key, width, env.dim)
@@ -1711,6 +1749,37 @@ func canaryDirectionLabel(direction risk.SignalDirection) string {
 		return "Data quality"
 	default:
 		return ""
+	}
+}
+
+func canaryPostureLabel(env *Env, posture risk.PortfolioPosture) string {
+	label := canaryPostureText(posture)
+	switch posture {
+	case risk.PortfolioPostureThreat:
+		return env.red(label)
+	case risk.PortfolioPostureRebalance, risk.PortfolioPostureThreatOpportunity, risk.PortfolioPostureConfirmData:
+		return env.yellow(label)
+	case risk.PortfolioPostureOpportunity, risk.PortfolioPostureNeutral:
+		return env.green(label)
+	default:
+		return label
+	}
+}
+
+func canaryPostureText(posture risk.PortfolioPosture) string {
+	switch posture {
+	case risk.PortfolioPostureThreat:
+		return "Threat"
+	case risk.PortfolioPostureRebalance:
+		return "Rebalance"
+	case risk.PortfolioPostureOpportunity:
+		return "Opportunity"
+	case risk.PortfolioPostureThreatOpportunity:
+		return "Threat + opportunity"
+	case risk.PortfolioPostureConfirmData:
+		return "Confirm data"
+	default:
+		return "Neutral"
 	}
 }
 
