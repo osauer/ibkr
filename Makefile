@@ -593,6 +593,7 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	$(MAKE) release-publish RELEASE_VERSION=$(RELEASE_VERSION) MESSAGE="$$msg"
 	$(MAKE) registry-publish RELEASE_VERSION=$(RELEASE_VERSION)
+	$(MAKE) public-discovery-check
 	@echo
 	@echo "Released $(RELEASE_VERSION):"
 	@echo "  https://github.com/osauer/ibkr/releases/tag/$(RELEASE_VERSION)"
