@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -430,6 +431,104 @@ func TestComputeCanaryCarriesSourceTimestamps(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryCarriesSemanticFingerprints(t *testing.T) {
+	t.Parallel()
+	regime := healthyCanaryRegime()
+	regime.Fingerprint = rpc.BuildRegimeFingerprint(&regime)
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.30
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  regime,
+	})
+	if res.Fingerprint.Version != rpc.CanaryFingerprintVersion || res.Fingerprint.Key == "" {
+		t.Fatalf("canary fingerprint = %+v, want populated %s", res.Fingerprint, rpc.CanaryFingerprintVersion)
+	}
+	if res.SourceFingerprints.Regime == nil || *res.SourceFingerprints.Regime != regime.Fingerprint {
+		t.Fatalf("source regime fingerprint = %+v, want %+v", res.SourceFingerprints.Regime, regime.Fingerprint)
+	}
+}
+
+func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
+	t.Parallel()
+	regime := healthyCanaryRegime()
+	regime.Fingerprint = rpc.BuildRegimeFingerprint(&regime)
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.30
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  regime,
+	})
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	for _, key := range []string{"fingerprint", "source_fingerprints", "direction", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
+		if _, ok := wire[key]; !ok {
+			t.Fatalf("canary JSON missing %s: %s", key, b)
+		}
+	}
+	fp, ok := wire["fingerprint"].(map[string]any)
+	if !ok || fp["version"] != rpc.CanaryFingerprintVersion || fp["key"] == "" {
+		t.Fatalf("fingerprint missing/malformed: %#v", wire["fingerprint"])
+	}
+	sources, ok := wire["source_fingerprints"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_fingerprints missing/malformed: %#v", wire["source_fingerprints"])
+	}
+	regimeFP, ok := sources["regime"].(map[string]any)
+	if !ok || regimeFP["version"] != rpc.RegimeFingerprintVersion || regimeFP["key"] != regime.Fingerprint.Key {
+		t.Fatalf("source_fingerprints.regime = %#v, want %+v", sources["regime"], regime.Fingerprint)
+	}
+}
+
+func TestComputeCanaryFingerprintIgnoresTimestampsAndRawValuesInsideBucket(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.30
+	regime := healthyCanaryRegime()
+	first := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  regime,
+		Now:     time.Date(2026, 5, 31, 8, 30, 0, 0, time.UTC),
+	})
+
+	acct.AsOf = time.Date(2026, 5, 31, 8, 35, 0, 0, time.UTC)
+	acct.Cushion = 0.29
+	regime.AsOf = time.Date(2026, 5, 31, 8, 36, 0, 0, time.UTC)
+	second := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  regime,
+		Now:     time.Date(2026, 5, 31, 8, 37, 0, 0, time.UTC),
+	})
+	if first.Fingerprint != second.Fingerprint {
+		t.Fatalf("fingerprint changed inside same margin bucket: %v != %v", first.Fingerprint, second.Fingerprint)
+	}
+
+	acct.Cushion = 0.19
+	third := ComputeCanary(CanaryInput{Account: acct, Regime: regime})
+	if first.Fingerprint == third.Fingerprint {
+		t.Fatal("fingerprint did not change after crossing margin severity bucket")
+	}
+}
+
+func TestComputeCanaryFingerprintIncludesSourceRegimeFingerprint(t *testing.T) {
+	t.Parallel()
+	regime := healthyCanaryRegime()
+	regime.Fingerprint = rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:a"}
+	first := ComputeCanary(CanaryInput{Account: baseCanaryAccount(), Regime: regime})
+
+	regime.Fingerprint = rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:b"}
+	second := ComputeCanary(CanaryInput{Account: baseCanaryAccount(), Regime: regime})
+	if first.Fingerprint == second.Fingerprint {
+		t.Fatal("canary fingerprint did not change when source regime fingerprint changed")
+	}
+}
+
 func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -519,6 +618,7 @@ func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"Risk state [Defensive / Act]",
+		"Alert ID   canary-fp-v1 sha256:",
 		"Guidance   Refresh or confirm degraded inputs before planning major portfolio changes.",
 		"Confidence Medium-low (data:",
 		"breadth and gamma computing",

@@ -385,7 +385,7 @@ func fixtureStatus() *rpc.HealthResult {
 	}
 }
 
-func fixtureCanary() *cli.CanaryResult {
+func fixtureCanary() *rpc.CanaryResult {
 	acct := *fixtureAccount()
 	pos := fixturePositions()
 	regime := *fixtureRegime()

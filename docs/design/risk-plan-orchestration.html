@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Canary-driven risk response | ibkr</title>
-  <meta name="description" content="Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-30 08:18 CEST Owner: osauer Related: internal/cli/canary.go,...">
+  <meta name="description" content="canary is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger,...">
   <link rel="canonical" href="https://osauer.dev/ibkr/design/risk-plan-orchestration.html">
   <script type="application/ld+json">
 {
@@ -15,7 +15,8 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "description": "Status: Draft implementation brief. Created: 2026-05-29 20:43 CEST Last update: 2026-05-30 08:18 CEST Owner: osauer Related: internal/cli/canary.go,...",
+    "dateModified": "2026-05-31T08:21:00+02:00",
+    "description": "canary is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger,...",
     "headline": "Canary-driven risk response",
     "isPartOf": {
       "@type": "SoftwareApplication",
@@ -156,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="canary-driven-risk-response">Canary-driven risk response</h1>
-<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-30 08:18 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-31 08:21 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
 <h2 id="thesis">Thesis</h2>
 <p><code>canary</code> is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger, portfolio overexposure, data failure, and unusual opportunity.</p>
 <p><code>risk-plan</code> is the response planner. It does not decide that the world is dangerous by itself, it does not authorize execution, and it does not execute. It receives an alert context, refreshes live account and portfolio state, rebuilds the risk ledger, and proposes candidate actions for expert review.</p>
@@ -258,8 +259,8 @@ Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <h3 id="monitor-triggered-response">Monitor-triggered response</h3>
 <ol>
 <li>A scheduler runs canary, for example every 10 minutes.</li>
-<li>Canary emits alert direction, severity, and fired shared signals.</li>
-<li>Monitor policy decides whether to call risk-plan.</li>
+<li>Canary emits <code>fingerprint</code>, <code>source_fingerprints.regime</code>, alert direction, severity, and fired shared signals.</li>
+<li>Monitor policy dedupes by <code>canary.fingerprint.key</code> and decides whether to call risk-plan.</li>
 <li>Risk-plan refreshes live state and rechecks the same policy criteria.</li>
 <li>Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.</li>
 <li>If the alert resolved, the plan says no action is currently required.</li>
@@ -269,6 +270,14 @@ Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <li>Execution, when implemented, is owned by trading/order-entry and requires explicit approval plus fresh validation.</li>
 <li>Canary runs again after action to confirm the portfolio state.</li>
 </ol>
+<p>The monitor must not recompute its own hash over raw JSON. <code>canary.fingerprint</code> is the semantic alert identity; <code>source_fingerprints.regime</code> records which classified regime snapshot the canary consumed. A repeated unchanged fingerprint updates <code>last_seen</code> but does not create another alert. A changed fingerprint, recovery to observe/no-action, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.</p>
+<p>Three opt-in monitor shapes stay intentionally outside the daemon:</p>
+<ul>
+<li>Agentic scheduled MCP loop: a scheduler calls <code>ibkr_canary</code> once, preserves the fingerprint, and wakes a human/risk-plan workflow only on transitions.</li>
+<li>Workflow/cron CLI loop: <code>ibkr canary --json</code> writes a small state file and sends a webhook/local notification only when the fingerprint changes or recovery occurs.</li>
+<li>Small code loop later: <code>ibkr monitor canary --every 5m --notify webhook:...</code> can standardize state, signing, retries, and repeat TTLs without adding daemon push/subscriber state.</li>
+</ul>
+<p>Webhook delivery is an alert boundary, not execution authority. A receiver may verify the webhook, dedupe by fingerprint, fetch fresh account/positions/regime/canary, and open a human or risk-plan review. The webhook must not carry order drafts, quantities, strikes, expiries, preview tokens, nonces, broker order IDs, or submit eligibility.</p>
 <h3 id="user-requested-response">User-requested response</h3>
 <p>The user can call risk-plan directly without waiting for canary:</p>
 <ul>
@@ -397,7 +406,6 @@ Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <ul>
 <li>What exact thresholds should the first asset-class and market buckets use?</li>
 <li>What exact clean-risk-budget criteria make a constructive signal deployable rather than merely euphoric?</li>
-<li>Should monitor trigger context be flags, a small artifact, or both?</li>
 <li>How long should recent candidate history be retained for duplicate suppression?</li>
 <li>What evidence should let an expert reviewer mark a stale plan safe to rerun instead of creating a new candidate?</li>
 </ul>

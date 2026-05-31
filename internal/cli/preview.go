@@ -54,6 +54,6 @@ func PreviewRenderRegime(env *Env, r *rpc.RegimeSnapshotResult) {
 	renderRegimeText(env, r)
 }
 
-func PreviewRenderCanary(env *Env, r *CanaryResult) {
+func PreviewRenderCanary(env *Env, r *rpc.CanaryResult) {
 	renderCanaryText(env, env.Stdout, r)
 }
