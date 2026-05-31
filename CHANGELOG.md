@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.5.0 — 2026-05-31 21:35 CEST
+
+### What's new
+
+- `ibkr regime` and `ibkr canary` now emit stress-lifecycle states for downstream risk-plan orchestration: quiet, early warning, confirmed stress, panic or forced defense, stabilization, opportunity, and data-quality blocking.
+- Canary now carries portfolio-aware source health and semantic source fingerprints for account, positions, and consumed regime state, so schedulers can dedupe alerts and preserve provenance without hashing raw JSON.
+- The backtest harness now reports before/after metrics, event-level metrics, early-warning lead time, lifecycle precision and recall, canary category slices, and canary lift over regime-only portfolio stress detection.
+
+### Added
+
+- Added lifecycle, evidence, readiness, timing, confidence, and `not_execution` fields to regime and canary outputs.
+- Added semantic account, positions, regime, canary, and lifecycle fingerprints that avoid churn from timestamps and tiny raw-value movement inside the same signal bucket.
+- Added source-health reporting for regime clusters and canary account/positions/regime inputs, including stale/degraded/partial status, confidence, cadence max-age, and fingerprint-stability semantics.
+- Added canary backtest category reporting for market-driven, portfolio-driven, concentration-driven, margin-driven, options-driven, and data-quality cases.
+
+### Changed
+
+- `ibkr regime` now keeps isolated red evidence visible while requiring severity, tape, or independent cluster confirmation before it dominates the broad-market stress trigger.
+- `ibkr canary` now separates lifecycle stage from planner readiness, keeping data-quality blocks explicit even when stress evidence is real.
+- CLI help, MCP tool descriptions, plugin metadata, skill docs, protocol docs, and public site pages now describe the lifecycle/source-health contract instead of the older binary stress ladder.
+
+### Fixed
+
+- Fixed MCP and skill documentation drift around canary fingerprints, source health, readiness, and the read-only no-execution boundary.
+
 ## v1.4.4 — 2026-05-30 17:33 CEST
 
 ### What's new
