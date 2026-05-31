@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Risk Regime Dashboard — Build Spec | ibkr</title>
-  <meta name="description" content="A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is evidence balance,...">
+  <title>Risk Regime Dashboard Contract | ibkr</title>
+  <meta name="description" content="ibkr regime reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system,...">
   <link rel="canonical" href="https://osauer.dev/ibkr/specs/risk-regime-dashboard.html">
   <script type="application/ld+json">
 {
@@ -15,9 +15,8 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-24T12:50:00+02:00",
-    "description": "A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is evidence balance,...",
-    "headline": "Risk Regime Dashboard — Build Spec",
+    "description": "ibkr regime reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system,...",
+    "headline": "Risk Regime Dashboard Contract",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
@@ -156,408 +155,96 @@
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="risk-regime-dashboard-build-spec">Risk Regime Dashboard — Build Spec</h1>
-<p><strong>Updated:</strong> 2026-05-24 12:50 CEST — dashboard rows now expose compact <code>as_of</code>, band, threshold, and provenance metadata; MOVE/rates-vol is removed from the release surface until a verified licensed source exists.</p>
-<p>A single-page daily-check dashboard for a retail trader to detect when market dynamics shift from stabilizing to amplifying. The goal is <strong>evidence balance, not prediction.</strong> Multiple indicators flashing together is the real signal; any one alone is noise.</p>
-<p>-----</p>
-<h2 id="what-to-build">What to Build</h2>
-<p>A single-page web dashboard (HTML or React) showing eight indicator rows, grouped into six evidence clusters so related signals do not double-count:</p>
+<h1 id="risk-regime-dashboard-contract">Risk Regime Dashboard Contract</h1>
+<p><code>ibkr regime</code> reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system, or investment recommendation.</p>
+<p>Use it to answer one question: are several independent market-risk indicators confirming each other, or is the market still broadly calm?</p>
+<p>Canary may consume this output, but canary owns account and portfolio action. A portfolio concentration problem can be real even while the broad market regime is calm.</p>
+<h2 id="output-shape">Output Shape</h2>
+<p>Each row should show:</p>
 <ul>
-<li>Current value and recent trend (sparkline, ~30 days)</li>
-<li>Compact freshness/as-of badge per row: <code>live</code>, <code>15m delayed</code>, <code>close D-1</code>,</li>
+<li>current value;</li>
+<li>band: <code>green</code>, <code>yellow</code>, <code>red</code>, or unranked;</li>
+<li>status: <code>ok</code>, <code>stale</code>, <code>computing</code>, <code>unavailable</code>, or <code>error</code>;</li>
+<li>source and as-of information;</li>
+<li>a short band reason;</li>
+<li>the threshold set used for that row.</li>
 </ul>
-<p><code>2d old</code>, <code>cached 11:42</code>, <code>computing</code>, or <code>unavailable</code></p>
-<ul>
-<li>Status light: <strong>green</strong> (normal), <strong>yellow</strong> (watch), <strong>red</strong> (warning),</li>
-</ul>
-<p>or unranked when the data path is missing</p>
-<ul>
-<li>One-line plain-English interpretation under each</li>
-<li>A composite regime label at the top based on cluster counts, plus a raw</li>
-</ul>
-<p>indicator-row count for transparency</p>
-<ul>
-<li>Data refresh: daily is sufficient. No need for real-time.</li>
-</ul>
-<p>-----</p>
-<h2 id="indicator-rows-and-evidence-clusters">Indicator Rows and Evidence Clusters</h2>
-<p>Clusters:</p>
-<ul>
-<li>Equity volatility: VIX/VIX3M and VVIX</li>
-<li>Credit: HYG/SPY and official HY/IG OAS</li>
-<li>Funding: 90-day AA financial commercial paper minus 3-month T-bill</li>
-<li>FX carry: USD/JPY</li>
-<li>Dealer gamma: SPY+SPX zero-gamma</li>
-<li>Breadth: S&amp;P 500 breadth</li>
-</ul>
-<p>Within a cluster, use the worst ranked band (red &gt; yellow &gt; green). This keeps equity-vol or credit from counting twice while still showing disagreement in the row table.</p>
-<p>All threshold sets below are <strong>heuristics pending backtest</strong>. The dashboard reports a risk score / confidence / evidence balance, not a forecast probability. A probability field should not be added until the calibration framework in <a href="regime-backtest-plan.html">regime-backtest-plan.md</a> has produced out-of-sample reliability evidence.</p>
-<h3 id="1-vix-term-structure">1. VIX Term Structure</h3>
-<p><strong>What it is:</strong> Ratio of VIX (30-day implied vol) to VIX3M (3-month implied vol). Tells you whether short-term fear is greater than longer-term fear.</p>
-<p><strong>Source:</strong> vixcentral.com (free, scrapeable) or CBOE direct.</p>
-<p><strong>Thresholds:</strong></p>
-<ul>
-<li>Green: VIX/VIX3M &lt; 0.92 (healthy contango)</li>
-<li>Yellow: 0.92–1.00 (flattening)</li>
-<li>Red: &gt; 1.00 (backwardation — acute stress pricing)</li>
-</ul>
-<p><strong>Observation window:</strong> Watch for <strong>sustained inversion over 2–3 days</strong>, not single spikes. A one-day flip on a Fed day means nothing. A flip that holds for a week is the real signal.</p>
-<p>-----</p>
-<h3 id="2-vvix-vol-of-vol">2. VVIX Vol-of-Vol</h3>
-<p><strong>What it is:</strong> Cboe VVIX, the expected volatility of VIX. It is a convexity demand / vol-of-vol stress input and can rise before VIX/VIX3M fully inverts.</p>
-<p><strong>Source:</strong> Cboe official VVIX daily time series.</p>
-<p><strong>Thresholds (heuristic):</strong></p>
-<ul>
-<li>Green: &lt; 90</li>
-<li>Yellow: 90–110</li>
-<li>Red: &gt; 110</li>
-</ul>
-<p><strong>Observation window:</strong> Treat as confirmation or disagreement inside the equity-vol cluster. Do not read it as a standalone forecast.</p>
-<p>-----</p>
-<h3 id="3-hyg-vs-spx-divergence">3. HYG vs SPX Divergence</h3>
-<p><strong>What it is:</strong> High-yield corporate bond ETF (HYG) compared to S&amp;P 500 (SPY). Credit markets often crack before equities.</p>
-<p><strong>Source:</strong> Any broker, TradingView, Yahoo Finance.</p>
-<p><strong>Metric:</strong> Compute 20-day rolling correlation, and track whether HYG is above/below its 50-day moving average while SPY is near 52-week highs.</p>
-<p><strong>Thresholds:</strong></p>
-<ul>
-<li>Green: HYG and SPY both trending up together</li>
-<li>Yellow: HYG breaks 50-day MA while SPY is not near highs, or the 52-week-high context is incomplete</li>
-<li>Red: HYG below 50-day MA while SPY is still within 3% of highs; use the row streak to distinguish an early one-session divergence from a sustained 5+ session credit downtrend</li>
-</ul>
-<p><strong>Observation window:</strong> Divergence over <strong>2–4 weeks</strong> is meaningful. Single-day moves are noise.</p>
-<p>-----</p>
-<h3 id="4-official-hyig-credit-spreads">4. Official HY/IG Credit Spreads</h3>
-<p><strong>What it is:</strong> ICE BofA high-yield and investment-grade corporate option-adjusted spreads. This is the official cash-credit companion to the faster HYG/SPY ETF proxy.</p>
-<p><strong>Source:</strong> FRED/St. Louis Fed CSV endpoints for ICE BofA OAS series: <code>BAMLH0A0HYM2</code> (HY OAS) and <code>BAMLC0A0CM</code> (IG OAS).</p>
-<p><strong>Thresholds (heuristic, percentage points):</strong></p>
-<ul>
-<li>Green: HY OAS &lt; 4.0 and not widening quickly</li>
-<li>Yellow: HY OAS 4.0–5.5, or HY OAS widening &gt; 0.50 pp over ~20 observations</li>
-<li>Red: HY OAS &gt; 5.5, or HY OAS widening &gt; 1.00 pp over ~20 observations</li>
-</ul>
-<p><strong>Observation window:</strong> Daily close. The signal is slower but more official than ETF price action.</p>
-<p>-----</p>
-<h3 id="5-funding-stress-spread">5. Funding Stress Spread</h3>
-<p><strong>What it is:</strong> 90-day AA financial commercial paper rate minus 3-month Treasury bill secondary-market rate, an OFR-style U.S. funding spread.</p>
-<p><strong>Source:</strong> FRED/St. Louis Fed official Federal Reserve series <code>RIFSPPFAAD90NB</code> and <code>DTB3</code>.</p>
-<p><strong>Thresholds (heuristic, basis points):</strong></p>
-<ul>
-<li>Green: &lt; 25 bp</li>
-<li>Yellow: 25–75 bp</li>
-<li>Red: &gt; 75 bp</li>
-</ul>
-<p><strong>Observation window:</strong> Daily. This is a slow funding/liquidity check, not an intraday funding-stress detector.</p>
-<p>-----</p>
-<h3 id="6-usdjpy">6. USD/JPY</h3>
-<p><strong>What it is:</strong> Dollar-Yen exchange rate. A proxy for global carry trade leverage — when yen rallies hard (USD/JPY falls), leveraged risk positions are being unwound globally.</p>
-<p><strong>Source:</strong> Any broker, Yahoo Finance (<code>JPY=X</code>).</p>
-<p><strong>Thresholds:</strong></p>
-<ul>
-<li>Green: Stable or moving &lt; 1% per week</li>
-<li>Yellow: Falling 1–2% in a week (yen strengthening)</li>
-<li>Red: Falling &gt; 2% in 3 days, or &gt; 3% in a week</li>
-</ul>
-<p><strong>Observation window:</strong> This can be <strong>acute and fast</strong> — August 2024 unwound in three sessions. Check daily. Speed of move matters more than absolute level.</p>
-<p>-----</p>
-<h3 id="7-dealer-zero-gamma-level-spyspx">7. Dealer Zero-Gamma Level (SPY+SPX)</h3>
-<p><strong>What it is:</strong> The S&amp;P 500 price level where market-maker hedging flips from dampening volatility to amplifying it. Above the level, dealers buy dips and sell rips. Below it, they sell into selloffs and buy into rallies — the dangerous regime.</p>
-<p><strong>Underlying:</strong> The compute uses SPY (the S&amp;P 500 ETF), not SPX (the index). SPY trades extended hours on SMART/ARCA with continuous market-maker quotes, has a single trading class, and IBKR pushes IV ticks for its options pre-market. SPX has no spot trading outside RTH and its option IV ticks aren&#39;t computed by the gateway pre-market, which made the SPX-based compute consistently fail to land a single leg off-hours. SPY dealer gamma tracks SPX dealer gamma closely (both are dominated by the same dealer-positioning regime) — the regime signal is unchanged, only the absolute level is SPY-scale (~SPX/10).</p>
-<p><strong>Source:</strong> Computed locally from IBKR&#39;s SPY option chain via the Perfiliev BS-sweep (<code>ibkr_gamma</code>, <code>gamma.zero_spx</code>).</p>
-<p><strong>Thresholds:</strong></p>
-<ul>
-<li>Green: SPY &gt; 2% above zero-gamma level</li>
-<li>Yellow: SPY within 2% of zero-gamma</li>
-<li>Red: SPY trading below zero-gamma level</li>
-</ul>
-<p><strong>Observation window:</strong> The <strong>flip itself is the event.</strong> Once SPY closes below zero-gamma, the regime has shifted; no waiting period needed.</p>
-<p>-----</p>
-<h3 id="8-market-breadth-of-spx-stocks-above-50-day-ma">8. Market Breadth — % of SPX Stocks Above 50-Day MA</h3>
-<p><strong>What it is:</strong> Tells you whether the rally is broad or carried by a few mega-caps. Narrow rallies are fragile.</p>
-<p><strong>Source:</strong> indexindicators.com, stockcharts.com (<code>$SPXA50R</code>), barchart.com — all free.</p>
-<p><strong>Thresholds:</strong></p>
-<ul>
-<li>Green: &gt; 55% and trending sideways/up</li>
-<li>Yellow: 40–55%, or falling while SPX still near highs</li>
-<li>Red: &lt; 40% while SPX within 3% of 52-week highs (classic divergence)</li>
-</ul>
-<p><strong>Observation window:</strong> <strong>2–4 weeks of declining breadth</strong> while the index holds up is the textbook late-cycle warning. Day-to-day moves are noise.</p>
-<p>-----</p>
-<h2 id="composite-logic">Composite Logic</h2>
-<p>Display at the top of the dashboard:</p>
+<p>Missing, stale, computing, and degraded data must stay visible. A quiet reading with missing critical inputs is not the same thing as a confirmed calm regime.</p>
+<h2 id="clusters">Clusters</h2>
+<p>A cluster is a group of related indicators. The composite regime counts clusters, not raw rows, so one market theme cannot vote twice.</p>
+<p>Within each cluster, the worst ranked row wins: red beats yellow, yellow beats green. Unavailable, computing, and error rows are unranked.</p>
+<h3 id="equity-volatility">Equity Volatility</h3>
+<p>This cluster watches option-market fear. VIX/VIX3M asks whether near-term fear is priced above longer-term fear. VVIX asks whether traders are paying up for large volatility moves. When both worsen, equity stress is usually becoming more urgent.</p>
 <table>
-<thead><tr><th>Cluster reds</th><th>Cluster yellows</th><th>Interpretation</th></tr></thead>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
 <tbody>
-<tr><td>0</td><td>0–2</td><td>Normal regime</td></tr>
-<tr><td>0</td><td>3+</td><td>Elevated stress watch</td></tr>
-<tr><td>1–2</td><td>any</td><td>Stress signal present</td></tr>
-<tr><td>3+</td><td>any</td><td>Broad stress regime</td></tr>
-<tr><td>all ranked clusters red</td><td>—</td><td>Full risk-off conditions</td></tr>
+<tr><td>VIX/VIX3M</td><td>&lt; 0.92</td><td>0.92-1.00</td><td>&gt; 1.00</td></tr>
+<tr><td>VVIX</td><td>&lt; 90</td><td>90-110</td><td>&gt; 110</td></tr>
 </tbody>
 </table>
-<p>Show raw indicator evidence beside or below the cluster evidence. Example: <code>Normal regime · 5 green clusters / 1 unranked cluster</code> followed by <code>Indicators: 6 green / 2 unranked</code>.</p>
-<p><strong>Critical:</strong> the dashboard should not tell you what to do. It should tell you what conditions are. Action rules must be pre-committed by the user before the moment arrives.</p>
-<p>-----</p>
-<h2 id="honest-caveats-display-at-footer">Honest Caveats (display at footer)</h2>
-<ul>
-<li>These indicators produce <strong>false signals regularly.</strong> Most “yellow” readings resolve back to green without anything happening.</li>
-<li>The cost of acting on every signal is real — you will underperform a buy-and-hold in calm markets.</li>
-<li>This dashboard is most useful as input to <strong>rules you’ve decided in advance</strong> (e.g., “I reduce equity exposure 30% when 3+ indicators are red for 2 consecutive sessions”).</li>
-<li>No combination of indicators caught August 2024 in advance with more than a few days of warning. Tails are tails.</li>
-<li>Free data sources lag. Don’t trade intraday off this.</li>
-</ul>
-<p>-----</p>
-<h2 id="glossary">Glossary</h2>
-<p><strong>Backwardation</strong> — When the front-month future trades higher than later-dated futures. In VIX, this means traders are paying more for protection now than later — a stress signal.</p>
-<p><strong>Breadth</strong> — How many stocks in an index are participating in a move. Narrow breadth = a few stocks carrying the rally.</p>
-<p><strong>Carry trade</strong> — Borrowing in a low-yield currency (yen) to invest in higher-yielding assets elsewhere. Unwinds violently when funding currency strengthens.</p>
-<p><strong>Contango</strong> — Normal state for VIX futures: later months priced higher than near months. Means the market expects calm now, more uncertainty later.</p>
-<p><strong>Dealer / Market Maker</strong> — Firm that quotes both buy and sell prices for options and hedges by trading the underlying stock. Their hedging flow can stabilize or amplify markets depending on positioning.</p>
-<p><strong>Delta</strong> — How much an option’s price changes for a $1 move in the underlying stock. Used by dealers to size their stock hedge.</p>
-<p><strong>Gamma</strong> — How much an option’s delta changes as the underlying moves. Short-gamma dealers must trade <em>in the direction of the move</em> to stay hedged — buying as price rises, selling as it falls. This amplifies volatility.</p>
-<p><strong>HYG</strong> — iShares iBoxx High Yield Corporate Bond ETF. Most-watched proxy for high-yield credit health.</p>
-<p><strong>Implied volatility (IV)</strong> — The market’s expectation of future volatility, embedded in option prices. VIX is the SPX 30-day IV.</p>
-<p><strong>Zero-gamma level</strong> — The SPX price where aggregate dealer gamma flips sign. Above it: dealers dampen moves. Below it: dealers amplify moves.</p>
-<p>-----</p>
-<h2 id="build-notes-for-the-builder-agent">Build Notes for the Builder Agent</h2>
-<ul>
-<li>Prefer free data sources where possible; mark indicators that require paid API.</li>
-<li>Cache aggressively; data only needs to update once per trading day after close.</li>
-<li>Make thresholds <strong>configurable</strong> via a settings panel — the user may want to tune them.</li>
-<li>Mobile-readable layout; user will check this on phone.</li>
-<li>No login, no account, no telemetry. Local-only state.</li>
-<li>Optional: email/push alert if composite state changes color overnight.</li>
-</ul>
-<p>-----</p>
-<h2 id="daemon-api-regimesnapshot-v0210">Daemon API — <code>regime.snapshot</code> (v0.21.0+)</h2>
-<p><code>ibkr regime</code> / <code>ibkr_regime</code> / <code>regime.snapshot</code> returns all eight indicator rows in one JSON envelope. The daemon derives default bands only for persisted streaks and the compact composite; raw measurements remain available so consumers can apply their own thresholds. Each indicator row on the response carries:</p>
-<ul>
-<li>raw measurement(s) — pointers so &#34;not arrived yet&#34; vs &#34;exactly</li>
-</ul>
-<p>zero&#34; stays distinguishable;</p>
-<ul>
-<li>a <code>status</code> field — <code>ok</code>, <code>stale</code> (gateway delivered a frozen or</li>
-</ul>
-<p>delayed tick), <code>computing</code> (gamma&#39;s background compute), <code>unavailable</code> (no data source), or <code>error</code>;</p>
-<ul>
-<li>a <code>notes</code> field in <code>--explain</code> / expanded JSON — the spec&#39;s threshold</li>
-</ul>
-<p>bands embedded verbatim, so an LLM consumer doesn&#39;t need to consult this document.</p>
-<p>A <code>spec_doc</code> field on the envelope points back here for deep-linking.</p>
-<p><strong>Live-test result on 2026-05-17 (frozen weekend data)</strong>:</p>
-<p>Read this as the <em>normal</em> weekend response — several rows stale or unavailable. Live-market behavior populates <code>ratio</code> + <code>last</code> fields on the stale-during-weekend rows and surfaces gamma as <code>computing</code> on the first call of the NY session.</p>
-<pre><code>{
-  &#34;vix_term_structure&#34;: { &#34;vix&#34;: 18.43, &#34;vix3m&#34;: 21.36, &#34;ratio&#34;: 0.863, &#34;status&#34;: &#34;stale&#34; },
-  &#34;hyg_spy_divergence&#34;: { &#34;hyg_price&#34;: 79.55, &#34;spy_price&#34;: 737.34, &#34;status&#34;: &#34;stale&#34; },
-  &#34;usd_jpy&#34;:            { &#34;last&#34;: 158.7285, &#34;status&#34;: &#34;stale&#34; },
-  &#34;gamma_zero&#34;:         { &#34;status&#34;: &#34;error&#34;, &#34;envelope&#34;: { &#34;error&#34;: &#34;no SPX spot available&#34; } },
-  &#34;breadth&#34;:            { &#34;status&#34;: &#34;ok&#34;, &#34;envelope&#34;: { &#34;state&#34;: &#34;ready&#34;, &#34;value&#34;: 61.8 } }
-}</code></pre>
-<p>Read this as: weekend hours, gateway in frozen mode. VIX ratio 0.863 applied against the spec gives <strong>green</strong> (&lt;0.92 is healthy contango). Gamma errored because SPX is not delivering any tick over weekend nights — expected; rerun during market hours. Breadth is served from the daemon&#39;s persisted cache (last weekday&#39;s post-close refresh — see Indicator 8 below for how the local engine computes the metric).</p>
-<h2 id="daemon-methodology-what-the-ibkr-daemon-actually-computes">Daemon methodology — what the IBKR daemon actually computes</h2>
-<p>This section documents how the daemon sources and labels the rows. VIX/VIX3M, HYG/SPY, and USD/JPY use standard IBKR quote/history endpoints; VVIX, official OAS, and funding spreads use official Cboe/FRED daily files. USD/JPY routes through native CASH/IDEALPRO FX. MOVE/rates-vol is intentionally absent until a verified IBKR contract or licensed official connector exists.</p>
-<p>Every indicator row exposes compact metadata in default JSON/MCP:</p>
-<ul>
-<li><code>status</code>: <code>ok</code>, <code>stale</code>, <code>computing</code>, <code>unavailable</code>, or <code>error</code></li>
-<li><code>band</code>: <code>green</code>, <code>yellow</code>, <code>red</code>, or <code>unranked</code></li>
-<li><code>band_reason</code>: one short threshold explanation for the current row</li>
-<li><code>thresholds</code>: <code>{label, green, yellow, red, heuristic, pending_backtest}</code></li>
-<li><code>as_of</code>: <code>{label, freshness, source, time/date, age_seconds}</code> where</li>
-</ul>
-<p><code>label</code> is the CLI column value</p>
-<p>Text output prints <code>AS OF</code> between <code>VALUE</code> and <code>BAND</code>; JSON/MCP keeps the same data under each row for agents.</p>
-<h3 id="indicator-8-market-breadth-breadthspx-ibkrbreadth">Indicator 8 — Market Breadth (<code>breadth.spx</code>, <code>ibkr_breadth</code>)</h3>
-<p><strong>Source.</strong> S&amp;P Dow Jones Indices publishes the <code>S5FI</code> (% above 50-day SMA) and <code>S5TH</code> (% above 200-day SMA) index family plus the new-52w-highs/lows count. IBKR does not redistribute these on retail subscriptions (verified via <code>reqContractDetails</code> — see <code>pkg/ibkr/symbols.go</code>), so the daemon computes the equivalents locally from the 500 constituent daily closes pulled via IBKR&#39;s historical-bar feed (HMDS). Method token: <code>constituent-fanout-50/200dma-hl</code>.</p>
-<p><strong>Three readings, one refresh.</strong> The compute walks each constituent&#39;s daily bars once and returns:</p>
-<ul>
-<li><code>pct_above_50dma</code> — the tactical signal. Spec bands: &gt;55 green /</li>
-</ul>
-<p>40-55 yellow / &lt;40 with SPX within 3% of 52-week high red.</p>
-<ul>
-<li><code>pct_above_200dma</code> — the slow companion that catches cyclical</li>
-</ul>
-<p>tops cleanly. Locked-plan bands: &gt;60 green / 40-60 yellow / &lt;40 red (calibrated to the post-Mag-7 era; the StockCharts 70/30 default fires red far too often in this concentration regime).</p>
-<ul>
-<li><code>new_highs_today</code> / <code>new_lows_today</code> — constituent counts of names</li>
-</ul>
-<p>making fresh 252-bar highs/lows (≈ &#34;52 weeks&#34;). The derived <code>net_new_highs_pct = (highs − lows) / coverage × 100</code>. The narrow-rally pattern is SPX at/near highs with <code>net_new_highs_pct</code> near zero or negative — a small set of mega- caps carrying the index while the median name rolls over. September 2025 was a textbook example: SPX at ATH with only 4.6% of names at 52-week highs.</p>
-<p><strong>Update cadence.</strong> Once-daily refresh post-close at 16:35 ET. The scheduler waits until both the regular session and the S&amp;P DJI publication window have settled, then slides each constituent&#39;s 200-bar window forward and updates the 252-bar rolling max/min trackers. Readers see a cached snapshot, never a multi-minute fan-out on the read path.</p>
-<p><strong>Cold start.</strong> ~60 minutes of wall-clock — unchanged from v1. IBKR&#39;s historical-data pacing limit is per-request, not per-bar, so pulling 200 bars per constituent instead of 50 doesn&#39;t cost more requests. The cap at 60 requests per 10-min sliding window means sustained throughput ≈ 6 names/min for the ~500-name fan-out. The v2 cap on the per-constituent close window grew from 50 to 200 entries; v1 on-disk caches trigger a graceful rebuild because their windows are too short to seed the 200-day reading honestly.</p>
-<p><strong>History.</strong> A best-effort fetch of trailing daily points carrying all three readings — the renderer charts each as its own sparkline.</p>
-<p><strong>Coverage safety.</strong> If a refresh completes with fewer than the engine&#39;s minimum coverage fraction (0.80 of the constituent set on the 50-day reading), the new snapshot is rejected and the previous good value continues to serve under <code>state: &#34;degraded&#34;</code>. The 200-day and new-highs/lows readings carry their own coverage denominators (smaller, because more names need to clear the higher history bar); a recent IPO contributes to the 50-DMA reading but not yet to the 200-DMA or new-52w-highs count.</p>
-<p><strong>Limitations.</strong></p>
-<ul>
-<li>Constituent list is snapshotted from the index membership file;</li>
-</ul>
-<p>S&amp;P additions/removals between updates are not reflected until the next refresh of that file.</p>
-<ul>
-<li>SMA windows are computed on regular-session closes only — no</li>
-</ul>
-<p>pre/post-market adjustment.</p>
-<ul>
-<li>When the gateway&#39;s data type on a constituent&#39;s bar isn&#39;t live,</li>
-</ul>
-<p>the daemon still includes it; the headline <code>data_type</code> reflects the worst-case across the contributing bars.</p>
-<ul>
-<li>The rolling 252-bar max/min is exact once the engine has observed</li>
-</ul>
-<p>a full year of bars per constituent; before that, the count surfaces under <code>coverage_highs_lows</code> so a renderer can flag under-covered days.</p>
-<h3 id="indicator-4-dealer-zero-gamma-gammazerospx-ibkrgamma">Indicator 4 — Dealer Zero-Gamma (<code>gamma.zero_spx</code>, <code>ibkr_gamma</code>)</h3>
-<p>The daemon estimates the SPX price level at which aggregate market-maker gamma exposure crosses zero. Above the level dealer hedging is mean-reverting (dampens vol); below it, momentum-following (amplifies vol). <strong>Treat this as a regime hint, not a precise level.</strong></p>
-<p>**Methodology token: <code>perfiliev-bs-sweep-v2-stickymoneyness</code>**</p>
-<p>(Renamed from <code>perfiliev-bs-sweep-v1</code> — see the &#34;Methodology v2 additions&#34; subsection at the end of this section for the changes.)</p>
-<p>The compute follows the <a href="https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/">Perfiliev recipe</a>, endorsed by Harel Jacobson (BNP options) and the basis for several public open-source GEX calculators:</p>
-<ol>
-<li><strong>Snapshot SPX spot.</strong> Refused if the gateway&#39;s data type is</li>
-</ol>
-<p>anything other than &#34;live&#34; or &#34;&#34; (no notice yet).</p>
-<ol>
-<li><strong>Enumerate option chain.</strong> All listed expirations and strikes via</li>
-</ol>
-<p>one <code>reqSecDefOptParams</code> round-trip. Both AM-settled SPX and PM-settled SPXW contracts arrive (the trading-class merge is automatic at this layer and is pinned by a regression test).</p>
-<ol>
-<li><strong>Select 6 nearest expirations,</strong> dropping any 0DTE that&#39;s already</li>
-</ol>
-<p>past the 16:15 ET conservative settlement cutoff.</p>
-<ol>
-<li><strong>Filter strikes</strong> to ATM ± 10 % per expiry.</li>
-<li><strong>Fan-out per-leg subscriptions</strong> at 4 concurrent (the documented</li>
-</ol>
-<p>safe gateway throttle). Each leg waits up to 5 s for OI and IV ticks; gateway-computed gamma (if delivered) is captured for the snapshot aggregation.</p>
-<ol>
-<li><strong>Aggregate at spot:</strong> `Σ sign(right) × Γ × OI × 100 × spot² ×</li>
-</ol>
-<p>0.01`. Sign convention is the 2018-era Perfiliev default: **calls long, puts short**.</p>
-<ol>
-<li><strong>Sweep spot ∈ [0.85, 1.15] × snapshot_spot in 60 steps.</strong> For</li>
-</ol>
-<p>each scenario spot, recompute Γ per leg via Black-Scholes with the leg&#39;s captured IV and DTE. Hold IV fixed across the sweep — a documented v1 limitation (see below).</p>
-<ol>
-<li><strong>Linear interpolation</strong> between the bracketing points of the</li>
-</ol>
-<p>first zero crossing gives the headline <code>zero_gamma</code> price.</p>
-<ol>
-<li><strong>Magnitude signal:</strong> alongside the signed value, the daemon</li>
-</ol>
-<p>returns <code>gamma_total_abs</code> and <code>top_strikes</code> ranked by <code>|Γ| × OI</code>. This signal is sign-agnostic — robust to the dealer-positioning assumption — and is the more reliable input when covered-call ETF flow or autocall barrier proximity is likely to invert the naive sign.</p>
-<p><strong>Known limitations of the v1 methodology</strong> — keep these visible in the dashboard&#39;s footer or tooltip:</p>
-<ul>
-<li><strong>Dealer sign assumption (the biggest one).</strong> &#34;Long calls, short</li>
-</ul>
-<p>puts&#34; was right in the 2010s when retail bought calls and institutions bought puts. Today the flows fight back:</p>
-<ul>
-<li>Covered-call ETFs (JEPQ ~$37 B, QYLD ~$8 B, XYLD ~$3 B) sell</li>
-</ul>
-<p>index calls → dealers long calls (agrees with Perfiliev).</p>
-<ul>
-<li>Autocallables (~$500 B+ outstanding) flip sign as spot</li>
-</ul>
-<p>approaches barriers — can swamp the baseline near specific events.</p>
-<ul>
-<li>Retail 0DTE flow is mixed.</li>
-</ul>
-<p>Net: the convention is a defensible baseline on most days but can be wrong by sign near covered-call-ETF concentration or autocall barriers. That&#39;s why the daemon ships the magnitude signal alongside.</p>
-<ul>
-<li><strong>Sticky IV across the sweep.</strong> Each leg&#39;s IV is captured once at</li>
-</ul>
-<p>snapshot spot and reused for every scenario spot. The skew is real: SPX puts ~10 % OTM have IV that&#39;s materially higher than ATM. Holding IV fixed biases <code>zero_gamma</code> upward by ~30–80 SPX points typical, more in stress. Renderers should round the displayed value to the nearest 25 SPX points to signal the precision the methodology can defensibly claim. Sticky-strike skew handling is on the backlog for v2.</p>
-<ul>
-<li><strong>End-of-day Open Interest.</strong> IBKR delivers OI as of the previous</li>
-</ul>
-<p>trading day&#39;s close (OCC tape). <a href="https://spotgamma.com/spx-gamma-model-positioning-adjustments/">SpotGamma</a> pays for intraday OI inference from OPRA print aggressor-tagging; that&#39;s not accessible from IBKR&#39;s API. The daemon&#39;s number is ≥ 24 hours stale on the OI side. Acceptable for daily-refresh regime detection; not acceptable for tick-rate decisions.</p>
-<ul>
-<li><strong>No proprietary positioning model.</strong> This is intentional. Vendors</li>
-</ul>
-<p>(SpotGamma, Tier1Alpha) add proprietary OI/volume adjustments that we cannot replicate from IBKR alone. Cross-check against their public posts during the calibration ritual below.</p>
-<ul>
-<li><strong>AM vs PM-settled overlap at 3rd Fridays.</strong> On the third Friday</li>
-</ul>
-<p>of each month both <code>SPX</code> (AM-settled) and <code>SPXW</code> (PM-settled) contracts exist with the same date. IBKR&#39;s contract resolver picks one — usually the higher-OI variant. Most expiries don&#39;t have this overlap; the corner case is documented and intentional for v1.</p>
-<ul>
-<li><strong>Reference precision.</strong> <code>zero_gamma</code> is returned to two decimal</li>
-</ul>
-<p>places on the wire so the renderer can choose its own rounding. The compute&#39;s effective precision (after the limitations above) is ≈ ±25 SPX points.</p>
-<h4 id="methodology-v2-additions-2026-05-20">Methodology v2 additions (2026-05-20)</h4>
-<p>The v1 → v2 cutover replaces the sticky-IV recipe with sticky-moneyness and adds two complementary outputs that broaden the regime view without changing the headline contract.</p>
-<ul>
-<li><strong>Sticky-moneyness sweep.</strong> The sweep now fits a quadratic skew</li>
-</ul>
-<p>curve in log-moneyness per expiry at snapshot time (<code>σ(m) = A + B·m + C·m²</code>, with <code>m = ln(K/S)</code>) and looks up σ at each scenario-spot&#39;s moneyness during the sweep instead of holding the captured snapshot IV fixed. Calls and puts are pooled (put-call parity makes them lie on the same surface). The fit clamps evaluations to the observed moneyness range — extrapolating a parabola outside the fitted window would imply IVs the data doesn&#39;t support. Curves that fail to fit (&lt; 3 IV samples, degenerate solve) fall back to sticky-IV for that expiry only; surface as <code>skew_fallback:YYYYMMDD</code> warnings on the envelope. The expected effect: <code>zero_gamma</code> shifts ~30-80 SPX points relative to v1 and tracks SpotGamma&#39;s posted numbers materially better. <strong>Revert criterion:</strong> if four-week sign-agreement vs SpotGamma&#39;s Friday recap drops below the v1 baseline, revert to the prior recipe.</p>
-<ul>
-<li><strong>0DTE / weekly / term split.</strong> The sweep now produces separate</li>
-</ul>
-<p>per-index γ-zero readings for 0DTE (<code>DTE == 0</code>), 1-7 DTE, and term (<code>DTE &gt; 7</code>) buckets. 0DTE, end-of-week, and monthly-OPEX dynamics behave differently; aggregating them hides the highest-information case where the readings disagree. The regime row&#39;s <code>horizon_agreement</code> field names the relation for single-underlying gamma envelopes; in the default SPY+SPX view the horizon buckets live under each <code>per_index</code> result because there is no combined price scale. Wire fields: <code>zero_gamma_0dte</code>, <code>zero_gamma_1to7</code>, <code>zero_gamma_term</code>, the matching <code>profile_*</code> and <code>gamma_sign_*</code> fields, and <code>leg_count_*</code>. Buckets with zero usable GEX legs surface as nil plus scoped <code>warning_details</code>.</p>
-<ul>
-<li><strong>Per-indicator streak counter.</strong> Every regime row now carries a</li>
-</ul>
-<p><code>streak: {band, sessions, since}</code> field counting how many consecutive NY trading sessions the indicator has been in its current band. Daemon-classified using the spec&#39;s default thresholds for streak purposes — a slight violation of the &#34;daemon doesn&#39;t derive bands&#34; posture, accepted because streak persistence requires a stable daemon-side classification. Renderers with custom thresholds read the raw value cell and ignore the streak&#39;s classification. Persisted at <code>$XDG_CACHE_HOME/ibkr/regime-streaks.json</code> across daemon restarts; computing/unavailable/error states freeze the counter rather than reset it (a stale data point shouldn&#39;t end a streak).</p>
-<h3 id="calibration-ritual-first-4-weeks-after-launch">Calibration ritual (first 4 weeks after launch)</h3>
-<p>The methodology has known biases. The only honest way to know whether those biases matter for <em>your</em> dashboard is to cross-check against a known public reference. For the first 4 weeks after enabling <code>gamma.zero_spx</code> in production:</p>
-<ol>
-<li><strong>Each Friday after close</strong>, fetch the daemon&#39;s <code>zero_gamma</code> and</li>
-</ol>
-<p>compare to SpotGamma&#39;s free Friday recap post on X/Twitter (typically published 4-5 PM ET).</p>
-<ol>
-<li><strong>Log the delta:</strong></li>
-</ol>
-<ul>
-<li>Sign agreement (both above spot? both below?). Sign</li>
-</ul>
-<p>disagreement is the loudest signal that the dealer-positioning assumption is wrong for the day.</p>
-<ul>
-<li>Magnitude delta in SPX points. Expect ≤ 50 points typical for</li>
-</ul>
-<p>calm days; &gt; 100 points on autocall-heavy weeks.</p>
-<ol>
-<li><strong>After 4 weeks</strong>, review the log:</li>
-</ol>
-<ul>
-<li>If sign agreement is &lt; 70 %, revisit the convention (file a</li>
-</ul>
-<p>v2 issue to parameterise).</p>
-<ul>
-<li>If magnitude delta is consistently &gt; 100 SPX points, widen the</li>
-</ul>
-<p>dashboard&#39;s &#34;within 2 % of zero-gamma&#34; yellow band to 3 %.</p>
-<ul>
-<li>If both numbers look healthy, the calibration ritual ends.</li>
-</ul>
-<p>This is a human ritual, not an automated check — the references it compares against are publicly-posted opinions, not API feeds.</p>
-<p><strong>Tooling.</strong> <code>ibkr regime --log &lt;path&gt;</code> appends one JSON line to a file each time it&#39;s invoked: <code>{timestamp, regime}</code> with the full envelope inline. Run from cron (e.g. weekday 16:40 ET) for the four weeks. We suggest filenames like <code>regime-v1.jsonl</code> so a future schema change can use a new filename rather than break the parser. Plain JSONL — <code>jq</code> and pandas both read it; analyse the <code>gamma_zero.envelope.result.zero_gamma</code> field against SpotGamma&#39;s posted value.</p>
-<h3 id="composite-score-honesty">Composite-score honesty</h3>
-<p>The dashboard composite is cluster-aware and uses the worst ranked band within each cluster, so a red equity-vol or credit sub-signal cannot be hidden by a larger number of green rows. The raw indicator counts remain visible for transparency.</p>
-<p>Stale ranked rows still contribute a band, but they lower summary confidence and appear in <code>warning_details</code>; unavailable/error/computing rows stay unranked, lower coverage, and affect the punch line. This is especially important for daily official files and cached gamma/breadth snapshots: a Friday close on Sunday is not the same freshness as a live SPY tick.</p>
-<p>The dashboard composite still does <em>not</em> claim statistical independence across clusters. Empirically:</p>
-<ul>
-<li>Zero-gamma flips correlate ~0.6+ with VIX backwardation (Indicator 1).</li>
-<li>Breadth collapse correlates with HYG/SPX divergence (Indicator 2).</li>
-</ul>
-<p>A &#34;4-red&#34; event may therefore reflect ~2.5 independent factors shouted four ways. Renderers should consider showing a cluster breakdown alongside the raw count.</p>
-<h3 id="deferred-backlog">Deferred backlog</h3>
-<p>These are deliberately out of scope for v1; they are tracked items for future versions:</p>
-<ul>
-<li>Sticky-strike or sticky-delta IV across the sweep (resolves</li>
-</ul>
-<p>the sticky-IV limitation above).</p>
-<ul>
-<li>Intraday OI inference from OPRA prints (would require a separate</li>
-</ul>
-<p>data subscription; out of IBKR scope).</p>
-<ul>
-<li>Parameterised dealer convention (current: hardcoded Perfiliev;</li>
-</ul>
-<p>v2 could expose both signs and surface the spread as a regime- uncertainty signal).</p>
-<ul>
-<li>Holiday-aware cache TTL (current: hardcoded NY date rollover at</li>
-</ul>
-<p>midnight; correct except on early-close days).</p>
-<ul>
-<li>Re-add ICE BofA MOVE/rates-vol only after a verified IBKR contract or</li>
-</ul>
-<p>licensed official data connector exists; do not proxy it with ETFs or futures.</p>
-<ul>
-<li>Backtest-derived calibration for threshold sets and cluster weights</li>
-</ul>
-<p>(see <code>docs/specs/regime-backtest-plan.md</code>).</p>
+<h3 id="credit">Credit</h3>
+<p>This cluster watches whether corporate credit is weakening before or alongside stocks. HYG/SPY is the faster market proxy. HY/IG OAS is the slower official cash-credit read. Credit stress matters because equity rallies are less sturdy when lenders are already demanding more compensation for risk.</p>
+<p>HYG/SPY can still show a red row by itself. For the cluster count, that single proxy red is treated as a yellow watch unless cash credit is also red or another independent cluster is red. The row stays visible; it just does not get to call broad stress alone.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>HYG/SPY</td><td>HYG healthy</td><td>HYG below 50-DMA</td><td>HYG weak while SPY is near highs</td></tr>
+<tr><td>HY OAS</td><td>&lt; 4.0 and not widening</td><td>4.0-5.5 or widening &gt; 0.50 pp</td><td>&gt; 5.5 or widening &gt; 1.00 pp</td></tr>
+</tbody>
+</table>
+<h3 id="funding">Funding</h3>
+<p>This cluster watches whether short-term money markets are becoming stressed. The spread between 90-day AA financial commercial paper and 3-month T-bills is a simple check on whether financial borrowers are paying unusually high short- term funding costs.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>CP 90-day AA financial minus 3-month T-bill</td><td>&lt; 25 bp</td><td>25-75 bp</td><td>&gt; 75 bp</td></tr>
+</tbody>
+</table>
+<h3 id="fx-carry">FX Carry</h3>
+<p>This cluster watches USD/JPY as a proxy for global carry-trade pressure. When the yen strengthens quickly, leveraged risk trades can unwind at the same time. That does not predict every selloff, but it is useful confirmation when other clusters are also deteriorating.</p>
+<p>USD/JPY can still show a red row by itself. For the cluster count, an isolated FX red is treated as a yellow watch until another independent cluster confirms stress. Canary may still act on a fast carry unwind when direct SPY/VIX tape or breadth confirms the move.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>USD/JPY weekly change</td><td>yen move &lt; 1%</td><td>yen strengthens 1-2%</td><td>yen strengthens &gt; 2%</td></tr>
+</tbody>
+</table>
+<h3 id="dealer-gamma">Dealer Gamma</h3>
+<p>This cluster watches whether dealer hedging is more likely to dampen or amplify index moves. Above zero-gamma, hedging flows are usually more stabilizing. Below zero-gamma, hedging can chase the market lower or higher and make moves sharper. Treat this as a regime hint, not a precise tradable level.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>SPY+SPX zero-gamma</td><td>spot &gt; 2% above zero-gamma</td><td>within +/-2%</td><td>spot below zero-gamma</td></tr>
+</tbody>
+</table>
+<h3 id="breadth">Breadth</h3>
+<p>This cluster watches how many S&amp;P 500 stocks are participating. A rally led by many stocks is healthier than a rally carried by a few mega-caps. Weak breadth near index highs warns that the headline index may be hiding fragility.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>S&amp;P 500 breadth</td><td>&gt; 55% above 50-DMA</td><td>40-55%, or weakening near highs</td><td>&lt; 40%, especially while SPX is near highs</td></tr>
+</tbody>
+</table>
+<h2 id="composite-logic">Composite Logic</h2>
+<table>
+<thead><tr><th>Cluster state</th><th>Regime label</th></tr></thead>
+<tbody>
+<tr><td>0 red and 0-2 yellow</td><td>Normal regime</td></tr>
+<tr><td>0 red and 3+ yellow</td><td>Elevated stress watch</td></tr>
+<tr><td>1-2 red</td><td>Stress signal present</td></tr>
+<tr><td>3+ red</td><td>Broad stress regime</td></tr>
+<tr><td>all ranked clusters red</td><td>Full risk-off conditions</td></tr>
+</tbody>
+</table>
+<p>The output may also show raw indicator counts for transparency. Cluster counts are the primary signal because related rows, such as VIX and VVIX, are not fully independent votes.</p>
+<p>An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row details, but it is counted as yellow at the cluster level. This keeps fast proxies useful without letting one fragile proxy dominate the broad-market read.</p>
+<p>The expanded Tier 1 backtest shows that isolated red equity-volatility clusters are also the main source of repeated false alarms. They should not be deleted: major stress often starts in volatility before credit, funding, or FX confirms. The remaining decision is whether an isolated red volatility cluster should stay stress-level only when severity is high enough, and otherwise count as a watch.</p>
+<h2 id="method-notes">Method Notes</h2>
+<p>Breadth is computed locally from S&amp;P 500 constituent daily bars because the retail IBKR feed does not provide the official S&amp;P breadth series directly. The daemon caches the post-close result; reads should not trigger a 500-name fanout.</p>
+<p>Dealer gamma is a best-effort SPY+SPX zero-gamma estimate from IBKR option chain data. Historical backtests should exclude gamma unless the row has a trusted point-in-time gamma snapshot with method, source, coverage, and timestamp.</p>
+<p>MOVE/rates-vol is outside the live surface until a verified IBKR contract or licensed official connector exists. Do not proxy it with ETFs or futures.</p>
+<h2 id="backtesting">Backtesting</h2>
+<p>The active backtest sequence, tuning gates, and source-data backlog live in <a href="regime-backtest-plan.html">Regime and Canary Backtest Runbook</a>. Keep this file as the product contract for <code>ibkr regime</code>; do not use it as a second tuning backlog.</p>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>

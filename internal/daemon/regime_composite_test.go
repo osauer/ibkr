@@ -97,10 +97,10 @@ func TestBuildRegimeComposite_MixedClusterDisagreementUsesWorstBand(t *testing.T
 	r.HYGSPYDivergence.SPYPrice = &spy
 	r.HYGSPYDivergence.SPY52WHigh = &spy52
 	c := buildRegimeComposite(r)
-	if c.ClusterRedCount != 1 {
-		t.Fatalf("credit cluster should be red even with green OAS companion, got %+v", c)
+	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
+		t.Fatalf("unconfirmed HYG/SPY proxy red should be cluster yellow with green OAS companion, got %+v", c)
 	}
-	if c.Verdict != "Stress signal present" {
+	if c.Verdict != "Normal regime" {
 		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
@@ -141,8 +141,73 @@ func TestBuildRegimeComposite_HYGSPYNearHighCountsRed(t *testing.T) {
 	if c.RedCount != 1 {
 		t.Errorf("HYG/SPY current divergence should count as one red row, got %d", c.RedCount)
 	}
-	if c.Verdict != "Stress signal present" {
+	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
+		t.Fatalf("unconfirmed HYG/SPY proxy red should be cluster yellow, got %+v", c)
+	}
+	if c.Verdict != "Normal regime" {
 		t.Errorf("verdict: got %q", c.Verdict)
+	}
+}
+
+func TestBuildRegimeComposite_HYGSPYRedRequiresConfirmation(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	hyg := 79.0
+	hyg50 := 80.0
+	spy := 737.0
+	spy52 := 740.0
+	r.HYGSPYDivergence.HYGPrice = &hyg
+	r.HYGSPYDivergence.HYG50DMA = &hyg50
+	r.HYGSPYDivergence.SPYPrice = &spy
+	r.HYGSPYDivergence.SPY52WHigh = &spy52
+
+	c := buildRegimeComposite(r)
+	if c.RedCount != 1 {
+		t.Fatalf("indicator red count = %d, want HYG/SPY row still red", c.RedCount)
+	}
+	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
+		t.Fatalf("cluster counts = red %d yellow %d, want 0/1 for unconfirmed proxy red", c.ClusterRedCount, c.ClusterYellowCount)
+	}
+	if c.Verdict != "Normal regime" {
+		t.Fatalf("verdict = %q, want normal until an independent cluster confirms", c.Verdict)
+	}
+
+	ratio := 1.05
+	r.VIXTermStructure.Ratio = &ratio
+	c = buildRegimeComposite(r)
+	if c.ClusterRedCount != 2 {
+		t.Fatalf("confirmed proxy red should count once vol is also red, got %+v", c)
+	}
+	if c.Verdict != "Stress signal present" {
+		t.Fatalf("verdict = %q, want stress signal with confirmed proxy red", c.Verdict)
+	}
+}
+
+func TestBuildRegimeComposite_USDJPYRedRequiresConfirmation(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	weekly := -2.5
+	r.USDJPY.WeeklyChange = &weekly
+
+	c := buildRegimeComposite(r)
+	if c.RedCount != 1 {
+		t.Fatalf("indicator red count = %d, want USD/JPY row still red", c.RedCount)
+	}
+	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
+		t.Fatalf("cluster counts = red %d yellow %d, want 0/1 for unconfirmed FX proxy red", c.ClusterRedCount, c.ClusterYellowCount)
+	}
+	if c.Verdict != "Normal regime" {
+		t.Fatalf("verdict = %q, want normal until an independent cluster confirms", c.Verdict)
+	}
+
+	breadth := 35.0
+	r.Breadth.Envelope.PctAbove50DMA = breadth
+	c = buildRegimeComposite(r)
+	if c.ClusterRedCount != 2 {
+		t.Fatalf("confirmed FX red should count once breadth is also red, got %+v", c)
+	}
+	if c.Verdict != "Stress signal present" {
+		t.Fatalf("verdict = %q, want stress signal with confirmed FX red", c.Verdict)
 	}
 }
 

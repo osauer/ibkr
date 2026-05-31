@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Regime and Canary Backtest Plan | ibkr</title>
-  <meta name="description" content="This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...">
+  <title>Regime and Canary Backtest Runbook | ibkr</title>
+  <meta name="description" content="This is the single umbrella for proving and tuning ibkr regime and ibkr canary. Keep the work here. Do not add another experiment plan, tuning plan, or...">
   <link rel="canonical" href="https://osauer.dev/ibkr/specs/regime-backtest-plan.html">
   <script type="application/ld+json">
 {
@@ -15,9 +15,9 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T12:12:00+02:00",
-    "description": "This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...",
-    "headline": "Regime and Canary Backtest Plan",
+    "dateModified": "2026-05-31T19:24:00+02:00",
+    "description": "This is the single umbrella for proving and tuning ibkr regime and ibkr canary. Keep the work here. Do not add another experiment plan, tuning plan, or...",
+    "headline": "Regime and Canary Backtest Runbook",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
@@ -156,270 +156,208 @@
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="regime-and-canary-backtest-plan">Regime and Canary Backtest Plan</h1>
-<p><strong>Updated:</strong> 2026-05-31 12:12 CEST</p>
-<p>This plan defines the calibration work required before <code>ibkr regime</code> or <code>ibkr canary</code> may expose forecast probabilities. Until then, regime should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only; canary should continue to report monitor state, planner readiness, and data-quality blocks without pretending to forecast markets.</p>
-<p>The minimal implementation path is two-stage:</p>
+<h1 id="regime-and-canary-backtest-runbook">Regime and Canary Backtest Runbook</h1>
+<p><strong>Updated:</strong> 2026-05-31 19:24 CEST</p>
+<p>This is the single umbrella for proving and tuning <code>ibkr regime</code> and <code>ibkr canary</code>. Keep the work here. Do not add another experiment plan, tuning plan, or backtest framework unless this runbook says to.</p>
+<p>The goal is simple: prove that regime and canary produce useful stress detection without overfitting to named events.</p>
+<h2 id="plain-definitions">Plain Definitions</h2>
+<ul>
+<li>A panel is a JSONL table: one row per date, using only information that would</li>
+</ul>
+<p>have been known on that date.</p>
+<ul>
+<li>A target label is for scoring only. It must not feed the signal.</li>
+<li><code>regime</code> answers: what is the broad market state?</li>
+<li><code>canary</code> answers: given account, positions, and regime, should the monitor</li>
+</ul>
+<p>stay quiet, watch, act, rebalance, or block on data quality?</p>
+<ul>
+<li>Portfolio-only stress belongs to canary. Regime can keep those rows for</li>
+</ul>
+<p>context, but they are out-of-scope for market-regime precision and recall.</p>
+<h2 id="artifact-map">Artifact Map</h2>
+<p>All backtest artifacts live in one of these places:</p>
+<table>
+<thead><tr><th>Path</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>docs/specs/regime-backtest-plan.md</code></td><td>This runbook: sequencing, gates, stop rules, and current backlog.</td></tr>
+<tr><td><code>docs/specs/risk-regime-dashboard.md</code></td><td>Product contract for live <code>ibkr regime</code>; not a tuning backlog.</td></tr>
+<tr><td><code>scripts/backtest/</code></td><td>Reproducible data-build and comparison scripts only.</td></tr>
+<tr><td><code>internal/cli/testdata/backtest_sources*.jsonl</code></td><td>Source ledgers: URLs, checksums, gaps, and retrieval status.</td></tr>
+<tr><td><code>internal/cli/testdata/regime_pit_panel*.jsonl</code></td><td>Point-in-time market rows consumed by <code>build-regime</code>.</td></tr>
+<tr><td><code>internal/cli/testdata/regime_backtest*.jsonl</code></td><td>Compact regime replay rows consumed by <code>backtest regime</code>.</td></tr>
+<tr><td><code>internal/cli/testdata/canary_backtest*.jsonl</code></td><td>Canary replay rows with account and position overlays.</td></tr>
+</tbody>
+</table>
+<p>Do not hand-edit generated compact regime rows when the point-in-time panel is the source of truth. Rebuild them.</p>
+<h2 id="command-sequence">Command Sequence</h2>
+<p>Small smoke fixtures:</p>
+<pre><code>ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl
+ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl</code></pre>
+<p>Curated sourced fixtures:</p>
+<pre><code>ibkr backtest regime --input internal/cli/testdata/regime_backtest_sourced_tuning.jsonl
+ibkr backtest canary --input internal/cli/testdata/canary_backtest_sourced_tuning.jsonl
+ibkr backtest regime --input internal/cli/testdata/regime_backtest_sourced_holdout.jsonl
+ibkr backtest canary --input internal/cli/testdata/canary_backtest_sourced_holdout.jsonl</code></pre>
+<p>Point-in-time regime builder:</p>
+<pre><code>ibkr backtest build-regime --input internal/cli/testdata/regime_pit_panel_sample.jsonl \
+  &gt; /tmp/regime_backtest_rows.jsonl
+ibkr backtest regime --input /tmp/regime_backtest_rows.jsonl</code></pre>
+<p>That is two passes only when starting from raw point-in-time market rows. If the input is already compact regime JSONL, run <code>ibkr backtest regime</code> directly.</p>
+<p>Tier 1 expanded panel:</p>
+<pre><code>python3 scripts/backtest/build-tier1-regime-panel.py --no-fetch
+ibkr backtest build-regime --input internal/cli/testdata/regime_pit_panel_tier1.jsonl \
+  &gt; internal/cli/testdata/regime_backtest_tier1.jsonl
+ibkr backtest regime --input internal/cli/testdata/regime_backtest_tier1.jsonl
+python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
+<h2 id="data-tiers">Data Tiers</h2>
+<p>Tier 0: smoke fixtures.</p>
+<ul>
+<li>Purpose: keep CLI contracts stable.</li>
+<li>Gate: tiny samples continue to run and render.</li>
+</ul>
+<p>Tier 1: expanded volatility/calm/event panel.</p>
+<ul>
+<li>Sources: Cboe VIX/VIX3M/VVIX, Nasdaq ETF OHLC, FRED funding/FX/credit where</li>
+</ul>
+<p>available.</p>
+<ul>
+<li>Current artifact: <code>regime_pit_panel_tier1.jsonl</code>.</li>
+<li>Source ledger: <code>backtest_sources_tier1.jsonl</code>.</li>
+<li>Primary label: 5-session market stress.</li>
+<li>Secondary feature: 20-session drawdown for early-warning analysis.</li>
+<li>Known gap: gamma and breadth are explicitly unavailable.</li>
+</ul>
+<p>Tier 2: confirmation proxy panel.</p>
+<ul>
+<li>Purpose: test whether noisy isolated red volatility can be confirmed or</li>
+</ul>
+<p>downgraded without losing major stress events.</p>
+<ul>
+<li>Allowed sources: reproducible public or IBKR/Nasdaq/FRED daily data.</li>
+<li>Candidate proxies: <code>RSP/SPY</code>, <code>IWM/SPY</code>, <code>QQQE/QQQ</code> or <code>QQQ/SPY</code>,</li>
+</ul>
+<p><code>HYG/LQD</code>, <code>HYG/IEF</code>, <code>LQD/TLT</code>, <code>TLT/IEF</code>, <code>SHY/IEF</code>, and FRED rates/curve series.</p>
+<ul>
+<li>Label these as proxies. They are not official S&amp;P 500 breadth, official MOVE,</li>
+</ul>
+<p>or reconstructed gamma.</p>
+<ul>
+<li><code>LQD/TLT</code> is context-only for now because it mixes credit spread, duration,</li>
+</ul>
+<p>and rates effects. Do not use it as an active confirmation input.</p>
+<h2 id="current-findings">Current Findings</h2>
+<ul>
+<li>Curated sourced regime holdout still has good recall and only a few false</li>
+</ul>
+<p>positives.</p>
+<ul>
+<li>Curated canary holdout catches labelled stress at watch level.</li>
+<li>Tier 1 exposes the broader problem: current <code>any red cluster</code> stress signals</li>
+</ul>
+<p>catch stress rows but fire too often in non-stress volatility regimes.</p>
+<ul>
+<li>A pure confirmation rule cuts false alarms but gives up too much recall.</li>
+<li>Therefore the next tuning target is narrow: isolated red volatility.</li>
+<li>Tier 2 source access is usable for a bounded proxy pass. The current build</li>
+</ul>
+<p>fetched all required Nasdaq ETF histories and recorded checksums. The first 14 rows have unavailable proxy windows because the 20-session lookback is not mature yet.</p>
+<ul>
+<li>Tier 2 stress-label scoring moves the current holdout baseline out of the</li>
+</ul>
+<p>10.8% Tier 1 forward-label noise zone: current <code>any red cluster</code> is 34.2% precision and 69.1% recall on the 2024+ observable-stress target.</p>
+<ul>
+<li>The best tested Tier 2 confirmation rule improves holdout stress precision to</li>
+</ul>
+<p>45.1% and cuts false alarms from 17.2% to 9.2%, but recall falls to 58.2%. This is a promising candidate, not yet a production rule.</p>
+<h2 id="next-pass">Next Pass</h2>
+<p>Run this sequence and stop at the first failed gate:</p>
 <ol>
-<li>Backtest regime as a market-state classifier.</li>
-<li>Replay canary over point-in-time regime rows plus synthetic portfolio</li>
+<li>Validate Tier 2 proxy sources and record them in the source ledger.</li>
+<li>Build a Tier 2 point-in-time panel by extending Tier 1 with confirmation</li>
 </ol>
-<p>overlays.</p>
-<p>The stages are related but not interchangeable. Regime answers &#34;what is the market state?&#34; Canary answers &#34;given this portfolio and market state, should a scheduled monitor stay quiet, watch, act, or block on data quality?&#34;</p>
-<h2 id="historical-inputs">Historical Inputs</h2>
-<p>Build a daily panel with one row per U.S. trading day, using only data that would have been observable at that day&#39;s decision time.</p>
+<p>proxy features.</p>
+<ol>
+<li>Split labels into:</li>
+</ol>
 <ul>
-<li>VIX and VIX3M closes, plus any available intraday/frozen labels if the study</li>
+<li><code>watch</code>: early warning / elevated risk.</li>
+<li><code>stress</code>: observable market damage or strongly confirmed broad stress.</li>
 </ul>
-<p>evaluates intraday reads.</p>
+<ol>
+<li>Compare exactly three stress-signal rules:</li>
+</ol>
 <ul>
-<li>Cboe VVIX official close and publication availability date.</li>
-<li>HYG and SPY daily OHLC, HYG 50-DMA, SPY 52-week high, and HYG/SPY divergence</li>
+<li>current: any red cluster is stress.</li>
+<li>confirmation-only: isolated red volatility is not stress.</li>
+<li>severity split: isolated red volatility is watch unless severity or</li>
 </ul>
-<p>streak state.</p>
+<p>independent confirmation is strong enough.</p>
+<ol>
+<li>Tune only the severity split, and only on the tuning split.</li>
+<li>Score holdout once the tuning behavior is stable.</li>
+</ol>
+<p>Current candidate to continue evaluating:</p>
 <ul>
-<li>FRED/ICE BofA HY OAS and IG OAS vintages, including release dates and any</li>
+<li>Keep red-cluster watch behavior visible.</li>
+<li>Count a red-cluster stress signal only when there is current tape damage,</li>
 </ul>
-<p>source revisions.</p>
+<p>severe volatility, or an active Tier 2 proxy group confirming stress.</p>
 <ul>
-<li>FRED CP 90-day AA financial and 3-month T-bill vintages, including release</li>
+<li>Do not apply this directly to live <code>ibkr regime</code> until the live equivalent is</li>
 </ul>
-<p>dates and revisions.</p>
+<p>explicit. Tier 2 proxy groups are backtest features unless promoted into the live contract.</p>
+<h2 id="data-gates">Data Gates</h2>
+<p>Tier 2 data is green only if all are true:</p>
 <ul>
-<li>USD/JPY daily midpoint/close, 7-trading-day change, and missing-market days.</li>
-<li>Dealer gamma snapshots, with method version, input option universe, data</li>
+<li>Every proxy has a reproducible source, retrieval status, and checksum.</li>
+<li>Missing data stays unavailable; no fabricated green/yellow/red values.</li>
+<li>The source ledger names every source gap plainly.</li>
+<li>Gamma remains excluded unless a method-stamped point-in-time source exists.</li>
+<li>Official S&amp;P 500 breadth and MOVE are excluded unless a clean licensed or</li>
 </ul>
-<p>coverage, warning details, and cache timestamp.</p>
+<p>public source is proven.</p>
 <ul>
-<li>SPX breadth snapshots, with constituent universe as of that day, coverage,</li>
+<li>The point-in-time panel can rebuild the compact replay file deterministically.</li>
 </ul>
-<p>50/200-DMA percentages, new-high/new-low counts, and cache timestamp.</p>
+<p>If these fail, do not tune. Fix data or stop.</p>
+<h2 id="tuning-gates">Tuning Gates</h2>
+<p>A tuning change is allowed only if all are true:</p>
 <ul>
-<li>Candidate future input: ICE BofA MOVE official daily or intraday series from</li>
+<li>Watch recall remains high on major broad-market stress events.</li>
+<li>Stress precision materially beats the Tier 1 holdout baseline of 10.8%.</li>
+<li>Stress recall does not collapse on holdout.</li>
+<li>Major events are not hidden: Volmageddon, COVID, 2022 bear-market stress,</li>
 </ul>
-<p>a licensed point-in-time source. Keep it outside the production feature set until the live sourcing question is solved; never fill it with ETF/futures proxies.</p>
-<h2 id="canary-replay-inputs">Canary Replay Inputs</h2>
-<p>Canary backtests should consume the same live contracts the monitor uses:</p>
+<p>yen carry unwind, and tariff shock remain visible at least at watch level.</p>
 <ul>
-<li><code>account</code>: <code>rpc.AccountResult</code>, including current and look-ahead margin</li>
+<li>Calm/rally controls get quieter or the remaining false alarms are explainable.</li>
+<li>Portfolio-only stress is evaluated by canary, not counted as regime failure.</li>
+<li>Data-quality warnings are separate from stress false positives.</li>
 </ul>
-<p>cushion, net liquidation, gross exposure, and daily P&amp;L when available.</p>
+<p>If Tier 2 cannot materially improve precision without destroying recall, stop tuning and revisit the product definition. Do not add more indicators just to force convergence.</p>
+<h2 id="verification-gates">Verification Gates</h2>
+<p>Before calling a pass done:</p>
+<pre><code>go test ./...
+make check
+make smoke</code></pre>
+<p>After CLI or daemon changes, also install and smoke the actual binary:</p>
+<pre><code>pkill -f &#39;ibkr daemon&#39; || true
+make install
+ibkr status
+ibkr backtest build-regime --input internal/cli/testdata/regime_pit_panel_sample.jsonl \
+  &gt; /tmp/ibkr-build-regime-smoke.jsonl
+ibkr backtest regime --input /tmp/ibkr-build-regime-smoke.jsonl</code></pre>
+<h2 id="not-doing">Not Doing</h2>
 <ul>
-<li><code>positions</code>: <code>rpc.PositionsResult</code>, especially <code>portfolio.exposure_base</code>,</li>
+<li>No forecast probabilities.</li>
+<li>No learned cluster weights.</li>
+<li>No automated experiment store.</li>
+<li>No combined <code>backtest loop</code> command.</li>
+<li>No gamma reconstruction from current or later data.</li>
+<li>No official S&amp;P 500 breadth without point-in-time constituent coverage.</li>
+<li>No MOVE/rates-vol input without a clean source.</li>
 </ul>
-<p>dollar delta, gross dollar delta, option greeks coverage, and gamma.</p>
-<ul>
-<li><code>regime</code>: <code>rpc.RegimeSnapshotResult</code>, compacted to the fields visible in</li>
-</ul>
-<p><code>ibkr regime --json</code>; row bands, statuses, warning details, data quality, and composite cluster counts must be present or derived consistently from row bands.</p>
-<ul>
-<li><code>target</code>: labelled forward stress window for evaluation, not for model input.</li>
-</ul>
-<p>The first committed harnesses are intentionally small:</p>
-<pre><code>ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
-ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl
-ibkr backtest opportunity --input internal/cli/testdata/opportunity_backtest_sample.jsonl</code></pre>
-<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function for canary rows and scores compact <code>rpc.RegimeSnapshotResult</code> rows directly for regime rows. Opportunity rows score market-only signal/outcome fixtures and do not use account capacity, position sizing, margin, or order-placement assumptions. These harnesses do not require TWS, the daemon, or market-data entitlements.</p>
-<h2 id="target-stress-definitions">Target Stress Definitions</h2>
-<p>Test several targets rather than tune to one story:</p>
-<ul>
-<li>Forward SPX drawdown: max close-to-close drawdown over 5, 10, and 20 trading</li>
-</ul>
-<p>days exceeding 3%, 5%, and 8%.</p>
-<ul>
-<li>Volatility shock: VIX close or intraday high crossing 25/30, or VIX 5-day</li>
-</ul>
-<p>change exceeding a fixed percentile of its trailing distribution.</p>
-<ul>
-<li>Credit stress: HY OAS widening by at least 50 bp or 100 bp over the next 20</li>
-</ul>
-<p>observations.</p>
-<ul>
-<li>Cross-asset stress: any two of SPX drawdown, VIX shock, HY OAS widening, or</li>
-</ul>
-<p>USD/JPY yen-strengthening shock occur inside the target window. MOVE can be evaluated as a candidate target only after a licensed point-in-time source is available.</p>
-<ul>
-<li>Portfolio stress: margin-danger windows, single-name squeeze exposure,</li>
-</ul>
-<p>option-greeks/negative-gamma fragility, and concentration shocks that may happen while broad SPY/VIX regime remains calm.</p>
-<p>Targets must be evaluated from the timestamp at which the dashboard would have been read; do not let later official revisions change the historical feature row used for that read.</p>
-<h2 id="market-behavior-clusters">Market Behavior Clusters</h2>
-<p>Report every metric by market-behavior cluster so the canary is not calibrated to one decade&#39;s dominant microstructure:</p>
-<ul>
-<li>2016-early 2018 low-vol / short-vol carry and the February 2018 Volmageddon</li>
-</ul>
-<p>break.</p>
-<ul>
-<li>Q4 2018 Fed-tightening / liquidity shock.</li>
-<li>March-April 2020 COVID crash and fast policy rebound.</li>
-<li>2020-2021 retail, Reddit, meme-stock, short-squeeze, and options-flow</li>
-</ul>
-<p>participation. These can be single-name portfolio events with calm SPY/VIX.</p>
-<ul>
-<li>2022 inflation/rates bear market, where equity and bond stress can persist</li>
-</ul>
-<p>without a COVID-style volatility profile.</p>
-<ul>
-<li>2023 banking/funding stress and later soft-landing rally.</li>
-<li>2023-2026 AI mega-cap concentration and narrow breadth.</li>
-<li>August 2024 yen carry unwind, where the stress impulse was fast and then</li>
-</ul>
-<p>stabilized quickly.</p>
-<ul>
-<li>2025-2026 elevated valuation, crowded leverage, and AI sentiment risk.</li>
-</ul>
-<h2 id="walk-forward-calibration">Walk-Forward Calibration</h2>
-<p>Use expanding or rolling walk-forward windows:</p>
-<ul>
-<li>Fit thresholds/weights on an initial window, for example 2006-2015.</li>
-<li>Validate on the next block, then roll forward yearly or quarterly.</li>
-<li>Freeze all threshold decisions before scoring the next out-of-sample block.</li>
-<li>Report discrimination (AUROC/PR), calibration (Brier/reliability only if a</li>
-</ul>
-<p>probability model is actually fitted), false-alarm rate, missed-stress rate, and average lead time.</p>
-<ul>
-<li>Compare simple baselines: VIX-only, VIX/VIX3M-only, equal-weight row count,</li>
-</ul>
-<p>cluster worst-band count, and any proposed cluster weighting.</p>
-<h2 id="look-ahead-controls">Look-Ahead Controls</h2>
-<ul>
-<li>Use point-in-time FRED vintages; when unavailable, lag official series by a</li>
-</ul>
-<p>conservative publication delay and label that assumption.</p>
-<ul>
-<li>Use only constituent membership known on the date for breadth.</li>
-<li>Recompute rolling windows from data available up to the read timestamp.</li>
-<li>Treat gamma as absent before the method existed unless historical option</li>
-</ul>
-<p>chains, OI, IV, and the exact method version can be reconstructed.</p>
-<ul>
-<li>Run regime scoring in <code>ex-gamma</code> mode first. Add <code>with-gamma</code> only for rows</li>
-</ul>
-<p>with trusted point-in-time gamma snapshots carrying source, method version, coverage, and warning metadata.</p>
-<ul>
-<li>Keep source outages and entitlement gaps as <code>unavailable</code>; do not forward-fill</li>
-</ul>
-<p>a missing critical row into a fake green/yellow/red reading.</p>
-<h2 id="missing-rows-and-revisions">Missing Rows and Revisions</h2>
-<p>Score each historical row with the same contract as live JSON:</p>
-<ul>
-<li><code>status</code></li>
-<li><code>band</code></li>
-<li><code>as_of</code></li>
-<li><code>source</code></li>
-<li><code>warning_details</code></li>
-<li>row-level confidence/freshness</li>
-</ul>
-<p>Evaluate both the predictive signal and the coverage signal. A model that looks good only after dropping unavailable gamma/breadth/official-file days is not a valid live dashboard model.</p>
-<h2 id="cluster-weight-evaluation">Cluster Weight Evaluation</h2>
-<p>Test cluster logic separately from row thresholds:</p>
-<ul>
-<li>Worst-band cluster tally, current production behavior.</li>
-<li>Equal-weight rows, to show the over-counting baseline.</li>
-<li>Equal-weight clusters.</li>
-<li>Learned cluster weights with shrinkage and strict walk-forward validation.</li>
-<li>Red-dominance rule: any red cluster forces at least a &#34;Stress signal present&#34;</li>
-</ul>
-<p>label, regardless of green row count.</p>
-<p>Promote a learned weight only if it improves out-of-sample utility without making stale/unavailable critical rows look safer than they are.</p>
-<h2 id="regime-scoring">Regime Scoring</h2>
-<p>Score regime before canary tuning:</p>
-<ul>
-<li>Watch recall: any <code>Elevated stress watch</code>, <code>Stress signal present</code>, or worse</li>
-</ul>
-<p>before labelled market stress.</p>
-<ul>
-<li>Red-cluster stress precision and recall: any red cluster with sufficient</li>
-</ul>
-<p>ranked coverage before labelled market stress.</p>
-<ul>
-<li>False-alarm rate on labelled non-stress market windows.</li>
-<li>Miss rate on labelled market-stress windows.</li>
-<li>Average lead time when the labelled window carries <code>days_to_stress</code>.</li>
-<li>Coverage and data-quality watches: insufficient ranked clusters, stale rows,</li>
-</ul>
-<p>computing rows, unavailable rows, degraded gamma, and warning details.</p>
-<p>Rows with <code>target.scope</code> outside broad market or cross-asset stress, for example single-name meme squeezes or portfolio-only concentration shocks, are reported as out-of-scope for regime precision/recall. They still belong in the panel so post-2020 retail/crowding behavior is visible, but they should be owned by canary/portfolio logic rather than counted as regime misses.</p>
-<h2 id="canary-scoring">Canary Scoring</h2>
-<p>Score canary separately from regime:</p>
-<ul>
-<li>Severity distribution: observe / watch / act / urgent.</li>
-<li>Defensive watch recall: any defensive or mixed canary state at <code>watch</code> or</li>
-</ul>
-<p>above against labelled stress windows.</p>
-<ul>
-<li>Defensive act precision/recall: <code>act</code> and <code>urgent</code> are severity filters, not</li>
-</ul>
-<p>the only success gate.</p>
-<ul>
-<li>False defensive watches and false defensive acts on non-stress windows.</li>
-<li>Data-quality watches and blocked planner states, tracked separately from</li>
-</ul>
-<p>false positives.</p>
-<ul>
-<li>Primary drivers and rows that caused the alert.</li>
-<li>Average lead time when the labelled window carries <code>days_to_stress</code>.</li>
-</ul>
-<p>Use synthetic portfolio overlays to isolate policy behavior:</p>
-<ul>
-<li>1x diversified SPY/QQQ style exposure.</li>
-<li>Levered broad beta.</li>
-<li>Mag7 / AI mega-cap concentration.</li>
-<li>Meme / retail squeeze concentration.</li>
-<li>Negative-gamma or options-heavy book.</li>
-<li>Diversified low-beta book.</li>
-<li>EU/FX-exposed book.</li>
-</ul>
-<p>Backtest output should be read as &#34;how the monitor behaves,&#34; not as &#34;how the market is predicted.&#34;</p>
-<h2 id="opportunity-scoring">Opportunity Scoring</h2>
-<p>Score market opportunity separately from regime and canary. Opportunity backtests answer &#34;did the market produce a detectable opportunity, and what happened to a standardized trade if the signal fired?&#34; They must not use the user&#39;s historical account capacity, position sizing, margin, or order choice; those belong to risk-manager and order-entry.</p>
-<p>Minimal opportunity rows carry:</p>
-<ul>
-<li><code>signal.fired</code>, <code>signal.kind</code>, and optional signal confidence.</li>
-<li><code>trade.instrument</code>, entry rule, horizon, and benchmark.</li>
-<li><code>outcome.forward_return_pct</code>, benchmark return, excess return, max adverse</li>
-</ul>
-<p>excursion, and max favorable excursion.</p>
-<ul>
-<li><code>target.opportunity</code>, scope, and kind.</li>
-</ul>
-<p>Minimal opportunity metrics:</p>
-<ul>
-<li>Signal precision and recall against labelled opportunity windows.</li>
-<li>False opportunity rate on labelled non-opportunity/chase-risk windows.</li>
-<li>Hit rate: fired signals with positive excess return versus benchmark.</li>
-<li>Average forward return, benchmark return, excess return, max adverse</li>
-</ul>
-<p>excursion, and max favorable excursion for fired signals.</p>
-<p>AI infrastructure should be split into two cohorts: <code>AI mega-cap fragility</code> for narrow breadth, valuation, and chase-risk, and <code>AI infrastructure opportunity</code> for semis, data-center power/cooling, grid construction, energy, and networking. Prefer baskets or explicitly declared as-of universes for later data-builder work to reduce survivor bias.</p>
-<h2 id="weaknesses-to-watch">Weaknesses To Watch</h2>
-<p>This pass should surface these issues but not fix them:</p>
-<ul>
-<li>Regime thresholds remain heuristic and pending backtest.</li>
-<li>Hand-built regime fixtures can lie unless composite cluster counts match row</li>
-</ul>
-<p>bands; the canary reads both.</p>
-<ul>
-<li>Historical gamma is fragile because method versions, OI/IV availability,</li>
-</ul>
-<p>0DTE growth, covered-call/autocall flow, and sign conventions changed.</p>
-<ul>
-<li>Breadth can mean different things in broad bear markets versus narrow</li>
-</ul>
-<p>mega-cap rallies.</p>
-<ul>
-<li>Meme/retail squeezes may bypass broad-market regime and only show up through</li>
-</ul>
-<p>portfolio concentration.</p>
-<ul>
-<li>Fingerprints are alert identities, not historical datasets; raw classified</li>
-</ul>
-<p>rows must be stored separately.</p>
-<h2 id="documentation-cleanup">Documentation Cleanup</h2>
-<p>Keep this document as the canonical source for both regime and canary backtest methodology. Later, retire or collapse duplicate canary/regime prose in agentic-use guides, MCP marketing pages, and older design docs into short links here. Generated <code>.html</code> companions remain generated artifacts, not source documents.</p>
-<h2 id="current-recommendation">Current Recommendation</h2>
-<p>Keep the present threshold labels marked <code>heuristic: true</code> and <code>pending_backtest: true</code>. Do not add forecast probabilities.</p>
-<p>The next useful implementation step after the minimal canary and regime replay harnesses is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a strict walk-forward scorer for the targets above.</p>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>

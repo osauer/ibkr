@@ -540,7 +540,7 @@ func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
 	if r == nil {
 		return nil
 	}
-	return []string{
+	raw := []string{
 		worstBand(bandForVIX(r.VIXTermStructure), bandForVolOfVol(r.VolOfVol)),
 		worstBand(bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads)),
 		worstBand(bandForFundingStress(r.FundingStress)),
@@ -548,6 +548,31 @@ func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
 		worstBand(bandForGamma(r.GammaZero)),
 		worstBand(bandForBreadth(r.Breadth)),
 	}
+	return confirmedRegimeClusterBands(raw, bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads), bandForUSDJPY(r.USDJPY))
+}
+
+func confirmedRegimeClusterBands(raw []string, hygSPYBand, creditBand, usdJPYBand string) []string {
+	out := append([]string(nil), raw...)
+	const (
+		creditCluster = 1
+		fxCluster     = 3
+	)
+	if hygSPYBand == "red" && creditBand != "red" && !hasIndependentRedCluster(raw, creditCluster) {
+		out[creditCluster] = "yellow"
+	}
+	if usdJPYBand == "red" && !hasIndependentRedCluster(raw, fxCluster) {
+		out[fxCluster] = "yellow"
+	}
+	return out
+}
+
+func hasIndependentRedCluster(bands []string, self int) bool {
+	for i, band := range bands {
+		if i != self && band == "red" {
+			return true
+		}
+	}
+	return false
 }
 
 func worstBand(bands ...string) string {

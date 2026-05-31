@@ -31,6 +31,7 @@ type CanaryBacktestObservation struct {
 type CanaryBacktestTarget struct {
 	Stress            bool     `json:"stress"`
 	Kind              string   `json:"kind,omitempty"`
+	Scope             string   `json:"scope,omitempty"`
 	WindowDays        int      `json:"window_days,omitempty"`
 	DaysToStress      *int     `json:"days_to_stress,omitempty"`
 	MaxSPYDrawdownPct *float64 `json:"max_spy_drawdown_pct,omitempty"`
@@ -54,6 +55,7 @@ type CanaryBacktestRowResult struct {
 	MarketCluster    string                `json:"market_cluster,omitempty"`
 	TargetStress     bool                  `json:"target_stress"`
 	TargetKind       string                `json:"target_kind,omitempty"`
+	TargetScope      string                `json:"target_scope,omitempty"`
 	WindowDays       int                   `json:"window_days,omitempty"`
 	DaysToStress     *int                  `json:"days_to_stress,omitempty"`
 	Direction        risk.SignalDirection  `json:"direction,omitempty"`
@@ -330,8 +332,8 @@ func runBacktest(_ context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	rest := fs.Args()
-	if len(rest) != 1 || (rest[0] != "canary" && rest[0] != "regime" && rest[0] != "opportunity") {
-		return fail(env, "backtest: usage: ibkr backtest canary|regime|opportunity --input PATH [--json]")
+	if len(rest) != 1 || (rest[0] != "canary" && rest[0] != "regime" && rest[0] != "opportunity" && rest[0] != "build-regime") {
+		return fail(env, "backtest: usage: ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]")
 	}
 	if strings.TrimSpace(*inputPath) == "" {
 		return fail(env, "backtest: --input is required")
@@ -341,6 +343,21 @@ func runBacktest(_ context.Context, env *Env, args []string) int {
 		return fail(env, "backtest: open %s: %v", *inputPath, err)
 	}
 	defer f.Close()
+
+	if rest[0] == "build-regime" {
+		rows, err := readRegimePointInTimeRows(f)
+		if err != nil {
+			return fail(env, "backtest: %v", err)
+		}
+		observations := buildRegimeBacktestObservations(rows)
+		if *jsonOut {
+			return printJSON(env, observations)
+		}
+		if err := writeRegimeBacktestObservationsJSONL(env.Stdout, observations); err != nil {
+			return fail(env, "backtest: encode regime jsonl: %v", err)
+		}
+		return 0
+	}
 
 	if rest[0] == "regime" {
 		observations, err := readRegimeBacktestObservations(f)
@@ -586,6 +603,7 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 		MarketCluster:    cleanBacktestCluster(obs.MarketCluster),
 		TargetStress:     obs.Target.Stress,
 		TargetKind:       obs.Target.Kind,
+		TargetScope:      cleanBacktestTargetScope(obs.Target.Scope),
 		WindowDays:       obs.Target.WindowDays,
 		DaysToStress:     obs.Target.DaysToStress,
 		Direction:        canary.Direction,
@@ -752,6 +770,15 @@ func cleanBacktestTargetScope(scope string) string {
 	return scope
 }
 
+func canaryBacktestPortfolioScope(scope string) bool {
+	switch cleanBacktestTargetScope(scope) {
+	case "portfolio", "portfolio_only", "account", "account_only", "idiosyncratic":
+		return true
+	default:
+		return false
+	}
+}
+
 func regimeBacktestScoredScope(scope string) bool {
 	switch cleanBacktestTargetScope(scope) {
 	case "market", "broad_market", "cross_asset":
@@ -828,14 +855,7 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 			r.Composite.UnrankedCount++
 		}
 	}
-	clusterBands := []string{
-		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
-		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
-		strongestBand([]string{r.FundingStress.Band}),
-		strongestBand([]string{r.USDJPY.Band}),
-		strongestBand([]string{r.GammaZero.Band}),
-		strongestBand([]string{r.Breadth.Band}),
-	}
+	clusterBands := backtestRegimeClusterBands(*r)
 	for _, band := range clusterBands {
 		switch band {
 		case "green":
@@ -852,6 +872,42 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 		}
 	}
 	r.Composite.Verdict = backtestRegimeVerdict(r.Composite, len(clusterBands))
+}
+
+func backtestRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
+	raw := []string{
+		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
+		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
+		strongestBand([]string{r.FundingStress.Band}),
+		strongestBand([]string{r.USDJPY.Band}),
+		strongestBand([]string{r.GammaZero.Band}),
+		strongestBand([]string{r.Breadth.Band}),
+	}
+	return backtestConfirmedRegimeClusterBands(raw, r.HYGSPYDivergence.Band, r.CreditSpreads.Band, r.USDJPY.Band)
+}
+
+func backtestConfirmedRegimeClusterBands(raw []string, hygSPYBand, creditBand, usdJPYBand string) []string {
+	out := append([]string(nil), raw...)
+	const (
+		creditCluster = 1
+		fxCluster     = 3
+	)
+	if hygSPYBand == "red" && creditBand != "red" && !backtestHasIndependentRedCluster(raw, creditCluster) {
+		out[creditCluster] = "yellow"
+	}
+	if usdJPYBand == "red" && !backtestHasIndependentRedCluster(raw, fxCluster) {
+		out[fxCluster] = "yellow"
+	}
+	return out
+}
+
+func backtestHasIndependentRedCluster(bands []string, self int) bool {
+	for i, band := range bands {
+		if i != self && band == "red" {
+			return true
+		}
+	}
+	return false
 }
 
 func backtestRegimeVerdict(c rpc.RegimeComposite, clusterCount int) string {
@@ -881,10 +937,20 @@ func canaryBacktestDefensiveAtLeast(res CanaryResult, severity risk.SignalSeveri
 }
 
 func canaryBacktestRebalanceAtLeast(res CanaryResult, severity risk.SignalSeverity) bool {
-	if !severityRankAtLeast(res.Severity, severity) {
-		return false
+	if severityRankAtLeast(res.Severity, severity) && res.Direction == risk.DirectionRebalance {
+		return true
 	}
-	return res.Direction == risk.DirectionRebalance
+	for _, row := range res.Rows {
+		if row.Direction == risk.DirectionRebalance && severityRankAtLeast(row.Severity, severity) {
+			return true
+		}
+	}
+	for _, signal := range res.Signals {
+		if signal.Direction == risk.DirectionRebalance && severityRankAtLeast(signal.Severity, severity) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *canaryBacktestAccumulator) add(row CanaryBacktestRowResult) {
@@ -933,8 +999,9 @@ func (a *canaryBacktestAccumulator) addSignal(row CanaryBacktestRowResult) {
 }
 
 func (a *canaryBacktestAccumulator) addWatch(row CanaryBacktestRowResult) {
+	watch := canaryBacktestAcceptableWatch(row)
 	switch {
-	case row.TargetStress && row.DefensiveWatch:
+	case row.TargetStress && watch:
 		a.metrics.WatchTruePositive++
 		if row.DaysToStress != nil {
 			a.watchLeadDays += *row.DaysToStress
@@ -945,6 +1012,13 @@ func (a *canaryBacktestAccumulator) addWatch(row CanaryBacktestRowResult) {
 	case row.DefensiveWatch:
 		a.metrics.WatchFalsePositive++
 	}
+}
+
+func canaryBacktestAcceptableWatch(row CanaryBacktestRowResult) bool {
+	if row.DefensiveWatch {
+		return true
+	}
+	return row.TargetStress && canaryBacktestPortfolioScope(row.TargetScope) && row.RebalanceWatch
 }
 
 func (a *canaryBacktestAccumulator) addAct(row CanaryBacktestRowResult) {
@@ -1136,9 +1210,9 @@ func canaryBacktestFindings(res CanaryBacktestResult) []string {
 		// Already covered above; keep the defensive-specific finding quiet when
 		// there is no stress label base rate.
 	} else if m.WatchMiss == 0 {
-		findings = append(findings, "Watch-level defensive alerts caught every labelled stress row in this panel.")
+		findings = append(findings, "Portfolio-aware watch alerts caught every labelled stress row in this panel.")
 	} else {
-		findings = append(findings, fmt.Sprintf("Watch-level defensive alerts missed %d labelled stress row(s).", m.WatchMiss))
+		findings = append(findings, fmt.Sprintf("Portfolio-aware watch alerts missed %d labelled stress row(s).", m.WatchMiss))
 	}
 	if m.WatchFalsePositive > 0 {
 		findings = append(findings, fmt.Sprintf("Watch-level defensive alerts fired on %d non-stress row(s); inspect cluster false positives before tightening policy.", m.WatchFalsePositive))
@@ -1251,7 +1325,7 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 		formatBacktestNumber(r.Metrics.SignalAvgLeadDays),
 	)
 	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false alarms %s · avg lead %s\n",
-		"Defensive",
+		"Watch",
 		formatBacktestRate(r.Metrics.WatchPrecision),
 		formatBacktestRate(r.Metrics.WatchRecall),
 		formatBacktestRate(r.Metrics.WatchFalseAlarmRate),
@@ -1270,7 +1344,7 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 
 	if len(r.Clusters) > 0 {
 		header := fmt.Sprintf("  %-28s %4s %6s %6s %6s %6s %6s %7s",
-			"CLUSTER", "OBS", "STRESS", "DEF TP", "DEF FP", "REBAL", "ACT TP", "BLOCKED")
+			"CLUSTER", "OBS", "STRESS", "WAT TP", "DEF FP", "REBAL", "ACT TP", "BLOCKED")
 		fmt.Fprintln(out, env.dim(header))
 		fmt.Fprintln(out, env.dim(strings.Repeat("-", visibleLen(header))))
 		for _, cluster := range r.Clusters {
