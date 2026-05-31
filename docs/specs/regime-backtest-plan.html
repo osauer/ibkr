@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Regime Backtest Plan | ibkr</title>
-  <meta name="description" content="Updated: 2026-05-24 12:50 CEST">
+  <title>Regime and Canary Backtest Plan | ibkr</title>
+  <meta name="description" content="This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...">
   <link rel="canonical" href="https://osauer.dev/ibkr/specs/regime-backtest-plan.html">
   <script type="application/ld+json">
 {
@@ -15,8 +15,9 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "description": "Updated: 2026-05-24 12:50 CEST",
-    "headline": "Regime Backtest Plan",
+    "dateModified": "2026-05-31T09:08:00+02:00",
+    "description": "This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...",
+    "headline": "Regime and Canary Backtest Plan",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
@@ -155,9 +156,16 @@
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="regime-backtest-plan">Regime Backtest Plan</h1>
-<p><strong>Updated:</strong> 2026-05-24 12:50 CEST</p>
-<p>This plan defines the calibration work required before <code>ibkr regime</code> may expose forecast probabilities. Until then, the dashboard should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only.</p>
+<h1 id="regime-and-canary-backtest-plan">Regime and Canary Backtest Plan</h1>
+<p><strong>Updated:</strong> 2026-05-31 09:08 CEST</p>
+<p>This plan defines the calibration work required before <code>ibkr regime</code> or <code>ibkr canary</code> may expose forecast probabilities. Until then, regime should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only; canary should continue to report monitor state, planner readiness, and data-quality blocks without pretending to forecast markets.</p>
+<p>The minimal implementation path is two-stage:</p>
+<ol>
+<li>Backtest regime as a market-state classifier.</li>
+<li>Replay canary over point-in-time regime rows plus synthetic portfolio</li>
+</ol>
+<p>overlays.</p>
+<p>The stages are related but not interchangeable. Regime answers &#34;what is the market state?&#34; Canary answers &#34;given this portfolio and market state, should a scheduled monitor stay quiet, watch, act, or block on data quality?&#34;</p>
 <h2 id="historical-inputs">Historical Inputs</h2>
 <p>Build a daily panel with one row per U.S. trading day, using only data that would have been observable at that day&#39;s decision time.</p>
 <ul>
@@ -190,6 +198,26 @@
 <li>Candidate future input: ICE BofA MOVE official daily or intraday series from</li>
 </ul>
 <p>a licensed point-in-time source. Keep it outside the production feature set until the live sourcing question is solved; never fill it with ETF/futures proxies.</p>
+<h2 id="canary-replay-inputs">Canary Replay Inputs</h2>
+<p>Canary backtests should consume the same live contracts the monitor uses:</p>
+<ul>
+<li><code>account</code>: <code>rpc.AccountResult</code>, including current and look-ahead margin</li>
+</ul>
+<p>cushion, net liquidation, gross exposure, and daily P&amp;L when available.</p>
+<ul>
+<li><code>positions</code>: <code>rpc.PositionsResult</code>, especially <code>portfolio.exposure_base</code>,</li>
+</ul>
+<p>dollar delta, gross dollar delta, option greeks coverage, and gamma.</p>
+<ul>
+<li><code>regime</code>: <code>rpc.RegimeSnapshotResult</code>, compacted to the fields visible in</li>
+</ul>
+<p><code>ibkr regime --json</code>; row bands, statuses, warning details, data quality, and composite cluster counts must be present or derived consistently from row bands.</p>
+<ul>
+<li><code>target</code>: labelled forward stress window for evaluation, not for model input.</li>
+</ul>
+<p>The first committed harness is intentionally small:</p>
+<pre><code>ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl</code></pre>
+<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function directly, so it does not require TWS, the daemon, or market-data entitlements.</p>
 <h2 id="target-stress-definitions">Target Stress Definitions</h2>
 <p>Test several targets rather than tune to one story:</p>
 <ul>
@@ -208,7 +236,36 @@
 <li>Cross-asset stress: any two of SPX drawdown, VIX shock, HY OAS widening, or</li>
 </ul>
 <p>USD/JPY yen-strengthening shock occur inside the target window. MOVE can be evaluated as a candidate target only after a licensed point-in-time source is available.</p>
+<ul>
+<li>Portfolio stress: margin-danger windows, single-name squeeze exposure,</li>
+</ul>
+<p>option-greeks/negative-gamma fragility, and concentration shocks that may happen while broad SPY/VIX regime remains calm.</p>
 <p>Targets must be evaluated from the timestamp at which the dashboard would have been read; do not let later official revisions change the historical feature row used for that read.</p>
+<h2 id="market-behavior-clusters">Market Behavior Clusters</h2>
+<p>Report every metric by market-behavior cluster so the canary is not calibrated to one decade&#39;s dominant microstructure:</p>
+<ul>
+<li>2016-early 2018 low-vol / short-vol carry and the February 2018 Volmageddon</li>
+</ul>
+<p>break.</p>
+<ul>
+<li>Q4 2018 Fed-tightening / liquidity shock.</li>
+<li>March-April 2020 COVID crash and fast policy rebound.</li>
+<li>2020-2021 retail, Reddit, meme-stock, short-squeeze, and options-flow</li>
+</ul>
+<p>participation. These can be single-name portfolio events with calm SPY/VIX.</p>
+<ul>
+<li>2022 inflation/rates bear market, where equity and bond stress can persist</li>
+</ul>
+<p>without a COVID-style volatility profile.</p>
+<ul>
+<li>2023 banking/funding stress and later soft-landing rally.</li>
+<li>2023-2026 AI mega-cap concentration and narrow breadth.</li>
+<li>August 2024 yen carry unwind, where the stress impulse was fast and then</li>
+</ul>
+<p>stabilized quickly.</p>
+<ul>
+<li>2025-2026 elevated valuation, crowded leverage, and AI sentiment risk.</li>
+</ul>
 <h2 id="walk-forward-calibration">Walk-Forward Calibration</h2>
 <p>Use expanding or rolling walk-forward windows:</p>
 <ul>
@@ -259,8 +316,65 @@
 </ul>
 <p>label, regardless of green row count.</p>
 <p>Promote a learned weight only if it improves out-of-sample utility without making stale/unavailable critical rows look safer than they are.</p>
+<h2 id="canary-scoring">Canary Scoring</h2>
+<p>Score canary separately from regime:</p>
+<ul>
+<li>Severity distribution: observe / watch / act / urgent.</li>
+<li>Defensive watch recall: any defensive or mixed canary state at <code>watch</code> or</li>
+</ul>
+<p>above against labelled stress windows.</p>
+<ul>
+<li>Defensive act precision/recall: <code>act</code> and <code>urgent</code> are severity filters, not</li>
+</ul>
+<p>the only success gate.</p>
+<ul>
+<li>False defensive watches and false defensive acts on non-stress windows.</li>
+<li>Data-quality watches and blocked planner states, tracked separately from</li>
+</ul>
+<p>false positives.</p>
+<ul>
+<li>Primary drivers and rows that caused the alert.</li>
+<li>Average lead time when the labelled window carries <code>days_to_stress</code>.</li>
+</ul>
+<p>Use synthetic portfolio overlays to isolate policy behavior:</p>
+<ul>
+<li>1x diversified SPY/QQQ style exposure.</li>
+<li>Levered broad beta.</li>
+<li>Mag7 / AI mega-cap concentration.</li>
+<li>Meme / retail squeeze concentration.</li>
+<li>Negative-gamma or options-heavy book.</li>
+<li>Diversified low-beta book.</li>
+<li>EU/FX-exposed book.</li>
+</ul>
+<p>Backtest output should be read as &#34;how the monitor behaves,&#34; not as &#34;how the market is predicted.&#34;</p>
+<h2 id="weaknesses-to-watch">Weaknesses To Watch</h2>
+<p>This pass should surface these issues but not fix them:</p>
+<ul>
+<li>Regime thresholds remain heuristic and pending backtest.</li>
+<li>Hand-built regime fixtures can lie unless composite cluster counts match row</li>
+</ul>
+<p>bands; the canary reads both.</p>
+<ul>
+<li>Historical gamma is fragile because method versions, OI/IV availability,</li>
+</ul>
+<p>0DTE growth, covered-call/autocall flow, and sign conventions changed.</p>
+<ul>
+<li>Breadth can mean different things in broad bear markets versus narrow</li>
+</ul>
+<p>mega-cap rallies.</p>
+<ul>
+<li>Meme/retail squeezes may bypass broad-market regime and only show up through</li>
+</ul>
+<p>portfolio concentration.</p>
+<ul>
+<li>Fingerprints are alert identities, not historical datasets; raw classified</li>
+</ul>
+<p>rows must be stored separately.</p>
+<h2 id="documentation-cleanup">Documentation Cleanup</h2>
+<p>Keep this document as the canonical source for both regime and canary backtest methodology. Later, retire or collapse duplicate canary/regime prose in agentic-use guides, MCP marketing pages, and older design docs into short links here. Generated <code>.html</code> companions remain generated artifacts, not source documents.</p>
 <h2 id="current-recommendation">Current Recommendation</h2>
-<p>Keep the present threshold labels marked <code>heuristic: true</code> and <code>pending_backtest: true</code>. Do not add forecast probabilities. The next useful implementation step is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a separate notebook/script that evaluates the targets above.</p>
+<p>Keep the present threshold labels marked <code>heuristic: true</code> and <code>pending_backtest: true</code>. Do not add forecast probabilities.</p>
+<p>The next useful implementation step after the minimal canary replay harness is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a strict walk-forward scorer for the targets above.</p>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>

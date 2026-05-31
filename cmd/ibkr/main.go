@@ -95,6 +95,15 @@ func main() {
 		os.Exit(cli.Run(ctx, env, cmd, rest))
 	}
 
+	// Offline research harnesses consume local JSONL fixtures and should not
+	// autospawn or depend on a live gateway.
+	if cmd == "backtest" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Color: color}
+		os.Exit(cli.Run(ctx, env, cmd, rest))
+	}
+
 	// `ibkr <cmd> --help` should not spawn the daemon — render help and exit.
 	for _, a := range rest {
 		if a == "--help" || a == "-h" || a == "-help" {

@@ -106,7 +106,7 @@ func isValueFlag(name string) bool {
 		"type", "sort", "days", "by", "lookback-days",
 		"entry", "stop", "target", "risk-pct", "lot", "fx",
 		"only", "market", "exchange", "primary", "currency", "instrument", "log",
-		"date", "next", "min-price", "min-volume", "min-dollar-volume",
+		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
 		"min-dte", "max-dte", "target-dte":
 		return true
 	}
@@ -163,6 +163,7 @@ func init() {
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--json]", runGamma},
 		{"regime", "Risk-regime snapshot: 9 rows across vol, rates, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Portfolio stress canary with concrete de-risking actions", "ibkr canary [--json]", runCanary},
+		{"backtest", "Offline canary/regime backtest harness from JSONL snapshots", "ibkr backtest canary --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
