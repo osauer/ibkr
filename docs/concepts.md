@@ -1,6 +1,6 @@
 # Concepts
 
-Updated: 2026-05-25 11:44 CEST
+Updated: 2026-05-31 21:23 CEST
 
 What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
@@ -26,7 +26,7 @@ Calendars are embedded official schedules, not IBKR overlays. The official excha
 
 ## Regime
 
-The eight-row risk-regime dashboard summarises *the market's current posture* in one snapshot. It is for a 30-second daily check, not a continuous monitor. Each row measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
+The eight-row risk-regime dashboard summarises *the market's current posture* in one snapshot. It emits a broad-market lifecycle stage (`quiet`, `early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`, or `data_quality`) plus source health and semantic fingerprints for monitors. Each row measures a different stress channel; together they distinguish "ordinary chop" from "regime shift in progress."
 
 The rows:
 
@@ -39,7 +39,7 @@ The rows:
 7. **Dealer zero-gamma** (SPY + SPX combined). Whether the dealer book stabilises or amplifies day-over-day moves. See the [Gamma](#gamma) section.
 8. **S&P 500 breadth**. Whether the index's strength is broad or carried by a handful of mega-caps. See the [Breadth](#breadth) section.
 
-Each row carries raw measurements plus a `notes` field embedding the spec's threshold bands verbatim — green / yellow / red derivation is intentionally left to the consumer because every trader has a different risk tolerance. Each row also carries a `streak` field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one.
+Each row carries raw measurements, status/as-of metadata, green / yellow / red banding, and a `streak` field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one. The lifecycle layer keeps weak or unconfirmed red evidence visible while preventing a single noisy proxy from dominating the broad-market trigger.
 
 Two failure modes worth flagging on the wire:
 

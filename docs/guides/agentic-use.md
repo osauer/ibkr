@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-29 12:46 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -24,19 +24,19 @@ These are the kinds of questions the tool handles. Each shows the user's message
 
 → Claude invokes `ibkr_regime`.
 
-Returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, dealer zero-gamma, and S&P breadth. Each row carries raw measurements, compact band/as-of metadata, scoped warnings when data is stale or unavailable, and a `streak` field when the row is rankable.
+Returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, dealer zero-gamma, and S&P breadth. Each row carries raw measurements, compact band/as-of metadata, scoped warnings when data is stale or unavailable, and a `streak` field when the row is rankable. The top-level envelope also carries lifecycle stage, readiness, source health, and semantic fingerprints for monitor dedupe.
 
 Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is *information*, not a verdict — the user's risk tolerance determines what to do with it. See [Concepts → Regime](../concepts.md#regime).
 
-### "Should I hold, watch, de-lever, or liquidate risk?"
+### "Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?"
 
 → Claude invokes `ibkr_canary`.
 
-Returns a compact ordered action table for scheduled portfolio stress checks. The canary combines account cushion, current exposures, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates into `Go`, `Watch`, `De-lever`, or `Liquidate` rows.
+Returns a compact lifecycle and risk-state table for scheduled portfolio stress checks. The canary combines account cushion, current exposures, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates into lifecycle stages such as `quiet`, `early_warning`, `confirmed_stress`, `panic`, `forced_defense`, `stabilization`, `opportunity`, or `data_quality`.
 
 The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `Watch`, while severe actions require confirmation from another stress channel or immediate margin danger. Missing, stale, degraded, or computing regime inputs become explicit ambiguity rows instead of being treated as safe.
 
-For a scheduler-friendly prompt that preserves the top stage, confidence, action, table rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
+For a scheduler-friendly prompt that preserves lifecycle stage, readiness, confidence, source health, fingerprints, table rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
 
 ### "Show me my SPY positions and any options on them."
 
@@ -107,7 +107,7 @@ A few prompt patterns that work well, learned from observing real conversations:
 - **Ask the question, don't name the tool.** "How does my portfolio look?" works better than "Run ibkr_positions." Claude picks the right tool based on the question; naming the tool just adds friction.
 - **Chain follow-ups freely.** Each tool call is cheap (cached when possible). "And what about gamma for those?" or "How did that look yesterday?" generate natural follow-up tool calls.
 - **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
-- **For scheduled stress checks, ask for the canary.** "Should I hold, watch, de-lever, or liquidate risk?" triggers `ibkr_canary`, which returns concrete action rows without requiring the assistant to compose its own escalation ladder.
+- **For scheduled stress checks, ask for the canary.** "Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?" triggers `ibkr_canary`, which returns lifecycle, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
 - **For sizing, give Claude the full plan.** "I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV" lets `ibkr_size` return the R-multiple, breakeven win rate, and share count in one round-trip.
 
 ## Reference

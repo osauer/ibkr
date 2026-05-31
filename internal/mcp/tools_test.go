@@ -377,6 +377,19 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	res := rpc.RegimeSnapshotResult{
 		AsOf:        now,
 		Fingerprint: rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime"},
+		Lifecycle: rpc.LifecycleState{
+			Stage:       rpc.LifecycleEarlyWarning,
+			Severity:    string(risk.SeverityWatch),
+			Readiness:   string(risk.PlannerReadinessWatch),
+			Timing:      rpc.LifecycleTimingForwardWarning,
+			Confidence:  "medium",
+			Evidence:    []rpc.LifecycleEvidence{{Source: "vol", Signal: "cluster", Bucket: "yellow", Timing: rpc.LifecycleTimingForwardWarning, Severity: string(risk.SeverityWatch)}},
+			Fingerprint: rpc.Fingerprint{Version: "lifecycle-fp-v1", Key: "sha256:lifecycle"},
+		},
+		SourceHealth: []rpc.SourceHealth{{
+			Source: "vol", Status: "ok", AsOf: now, Confidence: "high",
+			FingerprintStability: rpc.FingerprintStabilitySemanticBuckets,
+		}},
 		VIXTermStructure: rpc.RegimeVIXTerm{
 			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
 				Band:       "green",
@@ -428,6 +441,12 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	fp, ok := wire["fingerprint"].(map[string]any)
 	if !ok || fp["version"] != rpc.RegimeFingerprintVersion || fp["key"] == "" {
 		t.Fatalf("fingerprint missing or malformed: %#v", wire["fingerprint"])
+	}
+	if _, ok := wire["lifecycle"].(map[string]any); !ok {
+		t.Fatalf("lifecycle missing from regime envelope: %s", b)
+	}
+	if sources, ok := wire["source_health"].([]any); !ok || len(sources) == 0 {
+		t.Fatalf("source_health missing from regime envelope: %#v", wire["source_health"])
 	}
 	// Top-level composite key + nested verdict — agents read this
 	// path to display the headline.
@@ -484,9 +503,17 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 		AsOf:        time.Date(2026, 5, 31, 8, 45, 0, 0, time.UTC),
 		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:canary"},
 		SourceFingerprints: rpc.CanarySourceFingerprints{
-			Regime: &rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime"},
+			Account:   &rpc.Fingerprint{Version: rpc.AccountFingerprintVersion, Key: "sha256:account"},
+			Positions: &rpc.Fingerprint{Version: rpc.PositionsFingerprintVersion, Key: "sha256:positions"},
+			Regime:    &rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime"},
+		},
+		SourceHealth: []rpc.SourceHealth{
+			{Source: "account", Status: "ok", Confidence: "high", FingerprintStability: rpc.FingerprintStabilitySemanticBuckets},
+			{Source: "positions", Status: "ok", Confidence: "high", FingerprintStability: rpc.FingerprintStabilitySemanticBuckets},
+			{Source: "regime", Status: "stale", Confidence: "medium-low", FingerprintStability: rpc.FingerprintStabilitySemanticBuckets},
 		},
 		Policy:           "canary-default",
+		Lifecycle:        rpc.LifecycleState{Stage: rpc.LifecycleEarlyWarning, Severity: string(risk.SeverityWatch), Readiness: string(risk.PlannerReadinessPrestage), Timing: rpc.LifecycleTimingForwardWarning, Confidence: "medium", Fingerprint: rpc.Fingerprint{Version: "lifecycle-fp-v1", Key: "sha256:lifecycle"}},
 		Direction:        risk.DirectionDefensive,
 		PortfolioPosture: risk.PortfolioPostureThreat,
 		Severity:         risk.SeverityWatch,
@@ -515,7 +542,9 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 	for _, key := range []string{
 		"fingerprint",
 		"source_fingerprints",
+		"source_health",
 		"policy",
+		"lifecycle",
 		"direction",
 		"portfolio_posture",
 		"severity",
@@ -546,5 +575,11 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 	regime, ok := sources["regime"].(map[string]any)
 	if !ok || regime["version"] != rpc.RegimeFingerprintVersion || regime["key"] == "" {
 		t.Fatalf("source_fingerprints.regime missing or malformed: %#v", sources["regime"])
+	}
+	for _, key := range []string{"account", "positions"} {
+		source, ok := sources[key].(map[string]any)
+		if !ok || source["key"] == "" {
+			t.Fatalf("source_fingerprints.%s missing or malformed: %#v", key, sources[key])
+		}
 	}
 }

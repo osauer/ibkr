@@ -82,3 +82,33 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 		t.Fatal("fingerprint did not change when warning semantic severity changed")
 	}
 }
+
+func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.T) {
+	t.Parallel()
+	spyDrop := -2.0
+	base := RegimeSnapshotResult{
+		Composite: RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterYellowCount: 1, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
+		VIXTermStructure: RegimeVIXTerm{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "red"},
+		},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "green"},
+			SPYChangePct:        &spyDrop,
+		},
+	}
+	early := BuildRegimeLifecycle(&base)
+	if early.Stage != LifecycleEarlyWarning || early.Severity != "watch" {
+		t.Fatalf("early lifecycle = %+v, want early_warning/watch", early)
+	}
+
+	confirmed := base
+	confirmed.Composite.ClusterRedCount = 2
+	confirmed.CreditSpreads.RegimeIndicatorMeta.Band = "red"
+	got := BuildRegimeLifecycle(&confirmed)
+	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" {
+		t.Fatalf("confirmed lifecycle = %+v, want confirmed_stress/act", got)
+	}
+	if early.Fingerprint == got.Fingerprint {
+		t.Fatal("lifecycle fingerprint did not change across semantic stage transition")
+	}
+}

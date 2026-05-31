@@ -263,6 +263,9 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		fmt.Fprintf(out, "  %s\n", env.dim("Indicators: "+indicatorEvidence))
 	}
 	fmt.Fprintln(out)
+	if lifecycle := lifecycleSummaryText(r.Lifecycle); lifecycle != "" {
+		renderRegimeSummaryLine(out, "Lifecycle:", lifecycle, nil)
+	}
 	renderRegimeSummaryLine(out, "Punch line:", regimePunchLine(rows), nil)
 	if len(r.DataQuality) > 0 {
 		renderRegimeSummaryLine(out, "Data quality:", formatDataQualityValue(r.DataQuality), env.yellow)

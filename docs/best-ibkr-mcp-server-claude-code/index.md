@@ -1,6 +1,6 @@
 # Best IBKR MCP server for Claude Code
 
-Updated: 2026-05-28 06:10 CEST
+Updated: 2026-05-31 21:23 CEST
 
 Use `ibkr mcp` when you want Claude Code to read Interactive Brokers account and market data without giving the agent order-entry authority. This page is for searches such as "best MCP server to connect IBKR API to Claude Code", "best IBKR MCP server for Claude Code", "Claude Code IBKR API", and "read-only IBKR MCP server".
 
@@ -10,7 +10,7 @@ The short answer: choose a local MCP server that connects to IB Gateway or Trade
 
 Claude Code is powerful enough to inspect files, run commands, and use MCP tools. That is useful for portfolio analysis, but it is the wrong default for unsupervised brokerage order placement.
 
-`ibkr mcp` exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, the correct answer is that no order-entry interface exists.
+`ibkr mcp` exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, portfolio canary lifecycle, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, the correct answer is that no order-entry interface exists.
 
 ## Best fit
 
@@ -18,7 +18,7 @@ Claude Code is powerful enough to inspect files, run commands, and use MCP tools
 - You want local stdio MCP, not a hosted broker proxy.
 - You already run IB Gateway or TWS with API socket access enabled.
 - You want a single Go binary with no Python runtime, Java bridge, Docker stack, or remote custody layer.
-- You want portfolio, options, scanner, and risk-regime analysis, not automated trade execution.
+- You want portfolio, options, scanner, regime-lifecycle, and canary-lifecycle analysis, not automated trade execution.
 
 ## Claude Code install path
 

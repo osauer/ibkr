@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-27T22:28:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "ibkr can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code,...",
     "headline": "TWS MCP server for Interactive Brokers",
     "isPartOf": {
@@ -157,14 +157,14 @@
   </header>
   <main class="wrap doc">
 <h1 id="tws-mcp-server-for-interactive-brokers">TWS MCP server for Interactive Brokers</h1>
-<p>Updated: 2026-05-27 22:28 CEST</p>
+<p>Updated: 2026-05-31 21:23 CEST</p>
 <p><code>ibkr</code> can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code, Cursor, Zed, Continue, and other MCP clients talk to <code>ibkr mcp</code> over stdio; <code>ibkr</code> talks to TWS through the local TWS API port. If your exact search was &#34;ibkr mcp tws&#34;, the <a href="../ibkr-mcp-tws/index.html">IBKR MCP TWS setup</a> page is the shortest path.</p>
 <p>This is useful when you keep TWS open for trading, charting, or manual supervision and want an assistant to read account and market context from the same local session.</p>
 <h2 id="how-the-connection-works">How the connection works</h2>
 <pre><code>MCP host -&gt; ibkr mcp -&gt; local ibkr daemon -&gt; TWS API socket -&gt; Interactive Brokers account data</code></pre>
 <p><code>ibkr</code> auto-discovers the standard local ports, including TWS paper and live ports. You can also pin host, port, client ID, account, and TLS settings in the local config file when auto-discovery is not what you want.</p>
 <h2 id="tws-versus-ib-gateway">TWS versus IB Gateway</h2>
-<p>Use TWS when you already want the desktop platform open. Use IB Gateway when you want a lighter background process for API access. The MCP surface is the same either way: read-only account, positions, quotes, calendars, option chains, scanners, sizing, breadth, gamma, and regime tools.</p>
+<p>Use TWS when you already want the desktop platform open. Use IB Gateway when you want a lighter background process for API access. The MCP surface is the same either way: read-only account, positions, quotes, calendars, option chains, scanners, sizing, breadth, gamma, broad-market regime lifecycle, and portfolio canary lifecycle tools.</p>
 <h2 id="install-for-an-mcp-host">Install for an MCP host</h2>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr status

@@ -1,6 +1,6 @@
 # Analyze an Interactive Brokers portfolio with AI
 
-Updated: 2026-05-29 12:46 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr` lets an AI assistant analyze an Interactive Brokers portfolio from live local account and market data. Claude Desktop, Claude Code, Cursor, Zed, Continue, or another MCP host calls `ibkr mcp`; `ibkr` reads IB Gateway or TWS; the assistant receives structured responses for portfolio review, exposure mapping, options diagnostics, market-regime checks, and next-review workflows.
 
@@ -15,9 +15,9 @@ This page is for searches such as "analyze Interactive Brokers portfolio with AI
 - "What is my SPY exposure after options?"
 - "What are the next option expiries and implied moves for my top holdings?"
 - "How does today's risk regime affect this portfolio?"
-- "Should I hold, watch, de-lever, or liquidate risk if stress is evident?"
+- "Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?"
 
-The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, risk-regime context, and the portfolio canary. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, stress checks, and plan sizing without exposing order-entry tools.
+The assistant does not need screenshots or copied tables. It can call MCP tools and receive JSON for account, positions, quotes, calendars, option chains, history, scanners, breadth, gamma, broad-market regime lifecycle, and the portfolio canary lifecycle. The current bundled MCP surface is read-side only, which makes it suitable for analysis, review, stress checks, and plan sizing without exposing order-entry tools.
 
 ## Why this is better than copy-paste analysis
 
@@ -49,11 +49,11 @@ Expected answer shape:
 - largest position and underlying exposures
 - option Greeks rolled up by underlying where available
 - stale, frozen, delayed, or closed-market quote warnings
-- current risk-regime context when relevant
+- current regime lifecycle and canary readiness when relevant
 
 For a fuller semi-professional portfolio-review workflow, use the prompt in [examples/ibkr_portfolio_analysis_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md).
 
-For scheduled stress monitoring, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). It keeps the canary's top stage, confidence, action, table rows, and warnings intact so a scheduler or alerting layer does not have to reinterpret raw tool output.
+For scheduled stress monitoring, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). It keeps the canary lifecycle stage, readiness, confidence, source health, fingerprints, table rows, and warnings intact so a scheduler or alerting layer does not have to reinterpret raw tool output.
 
 For the Claude-specific workflow, including a sanitized sample review and a shorter paste-ready prompt, see [Portfolio review with Claude and IBKR](../portfolio-review-with-claude-ibkr/).
 

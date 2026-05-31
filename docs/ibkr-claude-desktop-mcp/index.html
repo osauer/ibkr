@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-28T04:47:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "Use ibkr mcp to connect Claude Desktop to Interactive Brokers (IBKR) through a local read-only MCP server. This page is for searches such as \"IBKR Claude...",
     "headline": "IBKR Claude Desktop MCP setup",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="ibkr-claude-desktop-mcp-setup">IBKR Claude Desktop MCP setup</h1>
-<p>Updated: 2026-05-28 04:47 CEST</p>
+<p>Updated: 2026-05-31 21:23 CEST</p>
 <p>Use <code>ibkr mcp</code> to connect Claude Desktop to Interactive Brokers (IBKR) through a local read-only MCP server. This page is for searches such as &#34;IBKR Claude Desktop MCP&#34;, &#34;ibkr claude desktop&#34;, &#34;Claude Desktop IBKR MCP&#34;, and &#34;connect Claude Desktop to IBKR&#34;.</p>
 <p><code>ibkr</code> talks to the local IB Gateway or Trader Workstation (TWS) session that is already logged in on your machine. Claude Desktop receives account and market data through stdio MCP tools; it does not receive tools for placing, modifying, or cancelling Interactive Brokers orders.</p>
 <h2 id="ibkr-desktop-vs-claude-desktop">IBKR Desktop vs Claude Desktop</h2>
@@ -190,7 +190,7 @@
 ibkr setup claude-desktop</code></pre>
 <p>Restart Claude Desktop after upgrading the binary. MCP hosts cache the spawned server process until the host exits.</p>
 <h2 id="safety-boundary">Safety boundary</h2>
-<p><code>ibkr mcp</code> is read-only. It exposes Interactive Brokers account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, and position-sizing context. It has no order-entry interface and cannot place, modify, or cancel trades.</p>
+<p><code>ibkr mcp</code> is read-only. It exposes Interactive Brokers account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, portfolio canary lifecycle, and position-sizing context. It has no order-entry interface and cannot place, modify, or cancel trades.</p>
 <h2 id="related-pages">Related pages</h2>
 <ul>
 <li><a href="../claude-desktop-interactive-brokers/index.html">Claude Desktop Interactive Brokers setup</a> for the broader Claude Desktop setup path.</li>

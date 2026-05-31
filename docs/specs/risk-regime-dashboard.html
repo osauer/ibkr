@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Risk Regime Dashboard Contract | ibkr</title>
-  <meta name="description" content="ibkr regime reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system,...">
+  <meta name="description" content="ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...">
   <link rel="canonical" href="https://osauer.dev/ibkr/specs/risk-regime-dashboard.html">
   <script type="application/ld+json">
 {
@@ -15,7 +15,8 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "description": "ibkr regime reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system,...",
+    "dateModified": "2026-05-31T21:23:00+02:00",
+    "description": "ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...",
     "headline": "Risk Regime Dashboard Contract",
     "isPartOf": {
       "@type": "SoftwareApplication",
@@ -156,7 +157,8 @@
   </header>
   <main class="wrap doc">
 <h1 id="risk-regime-dashboard-contract">Risk Regime Dashboard Contract</h1>
-<p><code>ibkr regime</code> reports whether broad market conditions look normal, watch-level, or stressed. It is an evidence-balance read, not a prediction, trading system, or investment recommendation.</p>
+<p><strong>Updated:</strong> 2026-05-31 21:23 CEST</p>
+<p><code>ibkr regime</code> reports the broad-market stress lifecycle: <code>quiet</code>, <code>early_warning</code>, <code>confirmed_stress</code>, <code>panic</code>, <code>stabilization</code>, <code>opportunity</code>, or <code>data_quality</code>. It is an evidence-balance read, not a prediction, trading system, portfolio planner, or investment recommendation.</p>
 <p>Use it to answer one question: are several independent market-risk indicators confirming each other, or is the market still broadly calm?</p>
 <p>Canary may consume this output, but canary owns account and portfolio action. A portfolio concentration problem can be real even while the broad market regime is calm.</p>
 <h2 id="output-shape">Output Shape</h2>
@@ -168,6 +170,18 @@
 <li>source and as-of information;</li>
 <li>a short band reason;</li>
 <li>the threshold set used for that row.</li>
+</ul>
+<p>The top-level envelope should also show:</p>
+<ul>
+<li><code>lifecycle</code>: stage, severity, readiness, timing, confidence, evidence,</li>
+</ul>
+<p>confirmed sources, unconfirmed sources, a semantic lifecycle fingerprint, and an explicit no-execution statement;</p>
+<ul>
+<li><code>source_health</code>: per-cluster <code>as_of</code>, status, age/freshness, confidence, and</li>
+</ul>
+<p>fingerprint-stability semantics;</p>
+<ul>
+<li><code>fingerprint</code>: semantic identity for the classified broad-market state.</li>
 </ul>
 <p>Missing, stale, computing, and degraded data must stay visible. A quiet reading with missing critical inputs is not the same thing as a confirmed calm regime.</p>
 <h2 id="clusters">Clusters</h2>
@@ -238,6 +252,20 @@
 </tbody>
 </table>
 <p>The output may also show raw indicator counts for transparency. Cluster counts are the primary signal because related rows, such as VIX and VVIX, are not fully independent votes.</p>
+<p>Lifecycle is a second layer on top of the row and cluster evidence:</p>
+<table>
+<thead><tr><th>Lifecycle stage</th><th>Broad-market meaning</th></tr></thead>
+<tbody>
+<tr><td><code>quiet</code></td><td>Enough data is ranked and no material stress or recovery/opportunity evidence is present.</td></tr>
+<tr><td><code>early_warning</code></td><td>Weak, isolated, or forward-looking evidence is visible, but independent confirmation is not yet present.</td></tr>
+<tr><td><code>confirmed_stress</code></td><td>At least two independent stress clusters, or one severe cluster plus confirming SPY/VIX tape, are active.</td></tr>
+<tr><td><code>panic</code></td><td>Stress is broad or tape is severe enough that the regime should be treated as acute.</td></tr>
+<tr><td><code>stabilization</code></td><td>Stress evidence is easing, but this is not yet a deployable opportunity by itself.</td></tr>
+<tr><td><code>opportunity</code></td><td>Constructive tape and low stress evidence are present; this is broad-market context only, not a trade instruction.</td></tr>
+<tr><td><code>data_quality</code></td><td>Missing, stale, computing, or degraded inputs prevent a confident lifecycle read.</td></tr>
+</tbody>
+</table>
+<p>The lifecycle layer must keep unconfirmed red evidence visible without letting a single fragile proxy dominate the trigger. <code>readiness</code> should be <code>blocked</code> or degraded when critical source health is stale, partial, computing, or degraded.</p>
 <p>An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row details, but it is counted as yellow at the cluster level. This keeps fast proxies useful without letting one fragile proxy dominate the broad-market read.</p>
 <p>The expanded Tier 1 backtest shows that isolated red equity-volatility clusters are also the main source of repeated false alarms. They should not be deleted: major stress often starts in volatility before credit, funding, or FX confirms. The live rule therefore keeps VIX/VIX3M inversion as stress, but downgrades an isolated moderate VVIX-only red to yellow unless the already-visible SPY/VIX tape or another cluster confirms it.</p>
 <h2 id="method-notes">Method Notes</h2>

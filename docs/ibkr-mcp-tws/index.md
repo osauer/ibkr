@@ -1,6 +1,6 @@
 # IBKR MCP TWS setup
 
-Updated: 2026-05-31 08:48 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr mcp` is a local IBKR MCP TWS bridge: Claude Desktop, Claude Code, Cursor, Zed, Continue, or another stdio MCP host talks to `ibkr mcp`, and `ibkr` reads account and market data from the Trader Workstation (TWS) API socket on the same machine.
 
@@ -12,7 +12,7 @@ Many IBKR MCP search results are small wrappers around a few TWS API calls. `ibk
 
 - A single Go binary with a local daemon, CLI, stdio MCP server, Claude Desktop MCPB, Claude Code plugin, and Go TWS protocol library.
 - Persistent local connection management instead of reconnecting for every assistant request.
-- Account, positions, quotes, calendars, options, scanners, sizing, breadth, dealer gamma, risk-regime, and portfolio-canary tools.
+- Account, positions, quotes, calendars, options, scanners, sizing, breadth, dealer gamma, broad-market stress-lifecycle regime, and portfolio-aware canary lifecycle tools.
 - Read-only MCP boundary in the published server: no order placement, order modification, or order cancellation tools.
 - JSON-friendly CLI output for non-MCP agent SDKs and shell automation.
 
@@ -76,7 +76,7 @@ The published `ibkr mcp` server does not need TWS order entry permissions becaus
 - "What expiries are listed for NVDA and what is the implied move?"
 - "Quote AAPL and MSFT and warn me if the data is delayed or stale."
 - "How does the market regime look today?"
-- "Run the portfolio canary and tell me whether this is Go, Watch, De-lever, or Liquidate."
+- "Run the portfolio canary and tell me whether this is quiet, watch, act, rebalance, opportunity, or blocked on data quality."
 - "If I enter AAPL at 207.50 with a stop at 202.50 and risk 1%, what size fits?"
 
 ## TWS or IB Gateway?

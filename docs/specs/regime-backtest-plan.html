@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T20:08:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "This is the single umbrella for proving and tuning ibkr regime and ibkr canary. Keep the work here. Do not add another experiment plan, tuning plan, or...",
     "headline": "Regime and Canary Backtest Runbook",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="regime-and-canary-backtest-runbook">Regime and Canary Backtest Runbook</h1>
-<p><strong>Updated:</strong> 2026-05-31 20:08 CEST</p>
+<p><strong>Updated:</strong> 2026-05-31 21:23 CEST</p>
 <p>This is the single umbrella for proving and tuning <code>ibkr regime</code> and <code>ibkr canary</code>. Keep the work here. Do not add another experiment plan, tuning plan, or backtest framework unless this runbook says to.</p>
 <p>The goal is simple: prove that regime and canary produce useful stress detection without overfitting to named events.</p>
 <h2 id="plain-definitions">Plain Definitions</h2>
@@ -170,7 +170,7 @@
 <li><code>regime</code> answers: what is the broad market state?</li>
 <li><code>canary</code> answers: given account, positions, and regime, should the monitor</li>
 </ul>
-<p>stay quiet, watch, act, rebalance, or block on data quality?</p>
+<p>stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?</p>
 <ul>
 <li>Portfolio-only stress belongs to canary. Regime can keep those rows for</li>
 </ul>
@@ -263,11 +263,30 @@ python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
 <p>No Tier 2 ETF proxy is promoted into live <code>ibkr regime</code> in this pass. The production change is narrower: isolated red <code>VVIX</code> is treated as an unconfirmed equity-volatility warning unless severity or already-visible tape confirms it. The red row remains visible in <code>ibkr regime</code>; only the cluster vote is downgraded from stress to watch.</p>
 <h2 id="current-findings">Current Findings</h2>
 <ul>
-<li>Curated sourced regime holdout still has good recall and only a few false</li>
+<li>Curated sourced regime holdout materially improves confirmed-stress precision</li>
 </ul>
-<p>positives.</p>
+<p>while preserving watch-level visibility: before 67% precision / 100% recall / 13% false alarms, after 100% precision / 100% recall / 0% false alarms.</p>
 <ul>
-<li>Curated canary holdout catches labelled stress at watch level.</li>
+<li>Curated sourced regime tuning improves precision from 68% to 75% and false</li>
+</ul>
+<p>alarms from 32% to 21%; recall falls from 93% to 86%, which is a monitoring item but not a collapse.</p>
+<ul>
+<li>Curated canary holdout catches labelled stress at watch level: watch</li>
+</ul>
+<p>precision 73%, recall 100%; act precision 86%, recall 75%, false alarms 6%.</p>
+<ul>
+<li>Canary adds portfolio-specific lift beyond regime alone: sourced holdout</li>
+</ul>
+<p>portfolio-stress recall moves from 75% regime-only to 100% canary, with one additional portfolio true positive.</p>
+<ul>
+<li>Canary lifecycle metrics are now first-class: early-warning recall of later</li>
+</ul>
+<p>confirmed stress is 100% on the sourced holdout, median lead is 1.0 day, panic/forced-defense recall is 100%, and stabilization/opportunity false starts are 0.</p>
+<ul>
+<li>Category reporting is split for market-driven, portfolio-driven,</li>
+</ul>
+<p>concentration-driven, margin-driven, options-driven, and data-quality cases. Current sourced holdout has no options-driven rows, so that slice is instrumented but not yet proven.</p>
+<ul>
 <li>Tier 1 exposes the broader problem: current <code>any red cluster</code> stress signals</li>
 </ul>
 <p>catch stress rows but fire too often in non-stress volatility regimes.</p>
@@ -370,8 +389,7 @@ python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
 <p>If Tier 2 cannot materially improve precision without destroying recall, stop tuning and revisit the product definition. Do not add more indicators just to force convergence.</p>
 <h2 id="verification-gates">Verification Gates</h2>
 <p>Before calling a pass done:</p>
-<pre><code>go test ./...
-make check
+<pre><code>make check
 make smoke</code></pre>
 <p>After CLI or daemon changes, also install and smoke the actual binary:</p>
 <pre><code>pkill -f &#39;ibkr daemon&#39; || true

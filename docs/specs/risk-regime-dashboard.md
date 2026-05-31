@@ -1,8 +1,11 @@
 # Risk Regime Dashboard Contract
 
-`ibkr regime` reports whether broad market conditions look normal, watch-level,
-or stressed. It is an evidence-balance read, not a prediction, trading system,
-or investment recommendation.
+**Updated:** 2026-05-31 21:23 CEST
+
+`ibkr regime` reports the broad-market stress lifecycle: `quiet`,
+`early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`,
+or `data_quality`. It is an evidence-balance read, not a prediction, trading
+system, portfolio planner, or investment recommendation.
 
 Use it to answer one question: are several independent market-risk indicators
 confirming each other, or is the market still broadly calm?
@@ -21,6 +24,15 @@ Each row should show:
 - source and as-of information;
 - a short band reason;
 - the threshold set used for that row.
+
+The top-level envelope should also show:
+
+- `lifecycle`: stage, severity, readiness, timing, confidence, evidence,
+  confirmed sources, unconfirmed sources, a semantic lifecycle fingerprint, and
+  an explicit no-execution statement;
+- `source_health`: per-cluster `as_of`, status, age/freshness, confidence, and
+  fingerprint-stability semantics;
+- `fingerprint`: semantic identity for the classified broad-market state.
 
 Missing, stale, computing, and degraded data must stay visible. A quiet reading
 with missing critical inputs is not the same thing as a confirmed calm regime.
@@ -130,6 +142,22 @@ near index highs warns that the headline index may be hiding fragility.
 The output may also show raw indicator counts for transparency. Cluster counts
 are the primary signal because related rows, such as VIX and VVIX, are not
 fully independent votes.
+
+Lifecycle is a second layer on top of the row and cluster evidence:
+
+| Lifecycle stage | Broad-market meaning |
+| --- | --- |
+| `quiet` | Enough data is ranked and no material stress or recovery/opportunity evidence is present. |
+| `early_warning` | Weak, isolated, or forward-looking evidence is visible, but independent confirmation is not yet present. |
+| `confirmed_stress` | At least two independent stress clusters, or one severe cluster plus confirming SPY/VIX tape, are active. |
+| `panic` | Stress is broad or tape is severe enough that the regime should be treated as acute. |
+| `stabilization` | Stress evidence is easing, but this is not yet a deployable opportunity by itself. |
+| `opportunity` | Constructive tape and low stress evidence are present; this is broad-market context only, not a trade instruction. |
+| `data_quality` | Missing, stale, computing, or degraded inputs prevent a confident lifecycle read. |
+
+The lifecycle layer must keep unconfirmed red evidence visible without letting a
+single fragile proxy dominate the trigger. `readiness` should be `blocked` or
+degraded when critical source health is stale, partial, computing, or degraded.
 
 An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row
 details, but it is counted as yellow at the cluster level. This keeps fast

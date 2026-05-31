@@ -70,6 +70,8 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res.Summary = buildRegimeSummary(res)
 	res.WarningDetails = buildRegimeWarnings(res)
 	res.DataQuality = regimeSnapshotDataQuality(res)
+	res.SourceHealth = rpc.BuildRegimeSourceHealth(res, res.AsOf)
+	res.Lifecycle = rpc.BuildRegimeLifecycle(res)
 	res.Fingerprint = rpc.BuildRegimeFingerprint(res)
 	s.updateRegimeStatusQuality(res)
 	return res, nil

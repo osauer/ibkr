@@ -44,35 +44,51 @@ type CanaryBacktestResult struct {
 	Policy       string                         `json:"policy"`
 	Observations []CanaryBacktestRowResult      `json:"observations"`
 	Metrics      CanaryBacktestMetrics          `json:"metrics"`
+	RegimeOnly   CanaryBacktestMetrics          `json:"regime_only"`
+	Lifecycle    BacktestLifecycleMetrics       `json:"lifecycle"`
+	Events       BacktestEventMetrics           `json:"events"`
+	Categories   []CanaryBacktestClusterMetrics `json:"categories,omitempty"`
+	RegimeLift   CanaryBacktestRegimeLift       `json:"regime_lift,omitzero"`
 	Clusters     []CanaryBacktestClusterMetrics `json:"clusters,omitempty"`
 	Findings     []string                       `json:"findings,omitempty"`
 	NotAdvice    string                         `json:"not_advice"`
 }
 
 type CanaryBacktestRowResult struct {
-	Date             string                `json:"date,omitempty"`
-	Case             string                `json:"case,omitempty"`
-	MarketCluster    string                `json:"market_cluster,omitempty"`
-	TargetStress     bool                  `json:"target_stress"`
-	TargetKind       string                `json:"target_kind,omitempty"`
-	TargetScope      string                `json:"target_scope,omitempty"`
-	WindowDays       int                   `json:"window_days,omitempty"`
-	DaysToStress     *int                  `json:"days_to_stress,omitempty"`
-	Direction        risk.SignalDirection  `json:"direction,omitempty"`
-	PortfolioPosture risk.PortfolioPosture `json:"portfolio_posture,omitempty"`
-	Severity         risk.SignalSeverity   `json:"severity"`
-	PlannerMode      risk.PlannerMode      `json:"planner_mode,omitempty"`
-	PlannerReadiness risk.PlannerReadiness `json:"planner_readiness,omitempty"`
-	DataConfidence   string                `json:"data_confidence,omitempty"`
-	SignalConfidence string                `json:"signal_confidence,omitempty"`
-	PrimaryDrivers   []risk.SignalID       `json:"primary_drivers,omitempty"`
-	SignalWatch      bool                  `json:"signal_watch"`
-	DefensiveWatch   bool                  `json:"defensive_watch"`
-	DefensiveAct     bool                  `json:"defensive_act"`
-	RebalanceWatch   bool                  `json:"rebalance_watch"`
-	DataQualityWatch bool                  `json:"data_quality_watch"`
-	Blocked          bool                  `json:"blocked"`
-	Canary           *rpc.CanaryResult     `json:"canary,omitempty"`
+	Date              string                `json:"date,omitempty"`
+	Case              string                `json:"case,omitempty"`
+	MarketCluster     string                `json:"market_cluster,omitempty"`
+	TargetStress      bool                  `json:"target_stress"`
+	TargetKind        string                `json:"target_kind,omitempty"`
+	TargetScope       string                `json:"target_scope,omitempty"`
+	WindowDays        int                   `json:"window_days,omitempty"`
+	DaysToStress      *int                  `json:"days_to_stress,omitempty"`
+	MaxSPYDrawdownPct *float64              `json:"max_spy_drawdown_pct,omitempty"`
+	VIXShockPct       *float64              `json:"vix_shock_pct,omitempty"`
+	Direction         risk.SignalDirection  `json:"direction,omitempty"`
+	PortfolioPosture  risk.PortfolioPosture `json:"portfolio_posture,omitempty"`
+	Severity          risk.SignalSeverity   `json:"severity"`
+	PlannerMode       risk.PlannerMode      `json:"planner_mode,omitempty"`
+	PlannerReadiness  risk.PlannerReadiness `json:"planner_readiness,omitempty"`
+	DataConfidence    string                `json:"data_confidence,omitempty"`
+	SignalConfidence  string                `json:"signal_confidence,omitempty"`
+	PrimaryDrivers    []risk.SignalID       `json:"primary_drivers,omitempty"`
+	LifecycleStage    string                `json:"lifecycle_stage,omitempty"`
+	SignalWatch       bool                  `json:"signal_watch"`
+	DefensiveWatch    bool                  `json:"defensive_watch"`
+	DefensiveAct      bool                  `json:"defensive_act"`
+	RebalanceWatch    bool                  `json:"rebalance_watch"`
+	DataQualityWatch  bool                  `json:"data_quality_watch"`
+	Blocked           bool                  `json:"blocked"`
+	EarlyWarning      bool                  `json:"early_warning"`
+	ConfirmedStress   bool                  `json:"confirmed_stress"`
+	Panic             bool                  `json:"panic"`
+	ForcedDefense     bool                  `json:"forced_defense"`
+	Stabilization     bool                  `json:"stabilization"`
+	Opportunity       bool                  `json:"opportunity"`
+	RegimeOnlyWatch   bool                  `json:"regime_only_watch"`
+	RegimeOnlyAct     bool                  `json:"regime_only_act"`
+	Canary            *rpc.CanaryResult     `json:"canary,omitempty"`
 }
 
 type CanaryBacktestMetrics struct {
@@ -139,31 +155,44 @@ type RegimeBacktestResult struct {
 	Policy       string                         `json:"policy"`
 	Observations []RegimeBacktestRowResult      `json:"observations"`
 	Metrics      RegimeBacktestMetrics          `json:"metrics"`
+	Baseline     RegimeBacktestMetrics          `json:"baseline"`
+	Lifecycle    BacktestLifecycleMetrics       `json:"lifecycle"`
+	Events       BacktestEventMetrics           `json:"events"`
 	Clusters     []RegimeBacktestClusterMetrics `json:"clusters,omitempty"`
 	Findings     []string                       `json:"findings,omitempty"`
 	NotAdvice    string                         `json:"not_advice"`
 }
 
 type RegimeBacktestRowResult struct {
-	Date             string                    `json:"date,omitempty"`
-	Case             string                    `json:"case,omitempty"`
-	MarketCluster    string                    `json:"market_cluster,omitempty"`
-	TargetStress     bool                      `json:"target_stress"`
-	TargetKind       string                    `json:"target_kind,omitempty"`
-	TargetScope      string                    `json:"target_scope,omitempty"`
-	Scored           bool                      `json:"scored"`
-	WindowDays       int                       `json:"window_days,omitempty"`
-	DaysToStress     *int                      `json:"days_to_stress,omitempty"`
-	Verdict          string                    `json:"verdict,omitempty"`
-	RedClusters      int                       `json:"red_clusters"`
-	YellowClusters   int                       `json:"yellow_clusters"`
-	RankedClusters   int                       `json:"ranked_clusters"`
-	UnrankedClusters int                       `json:"unranked_clusters"`
-	RedClusterNames  []string                  `json:"red_cluster_names,omitempty"`
-	StressWatch      bool                      `json:"stress_watch"`
-	StressSignal     bool                      `json:"stress_signal"`
-	DataQualityWatch bool                      `json:"data_quality_watch"`
-	Regime           *rpc.RegimeSnapshotResult `json:"regime,omitempty"`
+	Date              string                    `json:"date,omitempty"`
+	Case              string                    `json:"case,omitempty"`
+	MarketCluster     string                    `json:"market_cluster,omitempty"`
+	TargetStress      bool                      `json:"target_stress"`
+	TargetKind        string                    `json:"target_kind,omitempty"`
+	TargetScope       string                    `json:"target_scope,omitempty"`
+	Scored            bool                      `json:"scored"`
+	WindowDays        int                       `json:"window_days,omitempty"`
+	DaysToStress      *int                      `json:"days_to_stress,omitempty"`
+	MaxSPYDrawdownPct *float64                  `json:"max_spy_drawdown_pct,omitempty"`
+	VIXShockPct       *float64                  `json:"vix_shock_pct,omitempty"`
+	Verdict           string                    `json:"verdict,omitempty"`
+	RedClusters       int                       `json:"red_clusters"`
+	YellowClusters    int                       `json:"yellow_clusters"`
+	RankedClusters    int                       `json:"ranked_clusters"`
+	UnrankedClusters  int                       `json:"unranked_clusters"`
+	RedClusterNames   []string                  `json:"red_cluster_names,omitempty"`
+	LifecycleStage    string                    `json:"lifecycle_stage,omitempty"`
+	StressWatch       bool                      `json:"stress_watch"`
+	StressSignal      bool                      `json:"stress_signal"`
+	DataQualityWatch  bool                      `json:"data_quality_watch"`
+	EarlyWarning      bool                      `json:"early_warning"`
+	ConfirmedStress   bool                      `json:"confirmed_stress"`
+	Panic             bool                      `json:"panic"`
+	Stabilization     bool                      `json:"stabilization"`
+	Opportunity       bool                      `json:"opportunity"`
+	BaselineWatch     bool                      `json:"baseline_watch"`
+	BaselineStress    bool                      `json:"baseline_stress"`
+	Regime            *rpc.RegimeSnapshotResult `json:"regime,omitempty"`
 }
 
 type RegimeBacktestMetrics struct {
@@ -194,6 +223,65 @@ type RegimeBacktestMetrics struct {
 type RegimeBacktestClusterMetrics struct {
 	Name    string                `json:"name"`
 	Metrics RegimeBacktestMetrics `json:"metrics"`
+}
+
+type BacktestLifecycleMetrics struct {
+	Observations                        int      `json:"observations"`
+	TargetStress                        int      `json:"target_stress"`
+	NonStress                           int      `json:"non_stress"`
+	LaterConfirmedStress                int      `json:"later_confirmed_stress"`
+	MajorStress                         int      `json:"major_stress"`
+	EarlyWarning                        int      `json:"early_warning"`
+	EarlyWarningTruePositive            int      `json:"early_warning_true_positive"`
+	EarlyWarningFalsePositive           int      `json:"early_warning_false_positive"`
+	EarlyWarningMiss                    int      `json:"early_warning_miss"`
+	EarlyWarningPrecision               *float64 `json:"early_warning_precision,omitempty"`
+	EarlyWarningRecall                  *float64 `json:"early_warning_recall,omitempty"`
+	EarlyWarningFalseCalmRally          int      `json:"early_warning_false_calm_rally"`
+	EarlyWarningMedianLeadDays          *float64 `json:"early_warning_median_lead_days,omitempty"`
+	ConfirmedStress                     int      `json:"confirmed_stress"`
+	ConfirmedStressTruePositive         int      `json:"confirmed_stress_true_positive"`
+	ConfirmedStressFalsePositive        int      `json:"confirmed_stress_false_positive"`
+	ConfirmedStressMiss                 int      `json:"confirmed_stress_miss"`
+	ConfirmedStressPrecision            *float64 `json:"confirmed_stress_precision,omitempty"`
+	ConfirmedStressRecall               *float64 `json:"confirmed_stress_recall,omitempty"`
+	PanicOrForcedDefense                int      `json:"panic_or_forced_defense"`
+	PanicOrForcedDefenseTruePositive    int      `json:"panic_or_forced_defense_true_positive"`
+	PanicOrForcedDefenseMiss            int      `json:"panic_or_forced_defense_miss"`
+	PanicOrForcedDefenseRecall          *float64 `json:"panic_or_forced_defense_recall,omitempty"`
+	Stabilization                       int      `json:"stabilization"`
+	Opportunity                         int      `json:"opportunity"`
+	StabilizationOpportunityFalseStarts int      `json:"stabilization_opportunity_false_starts"`
+	DataQualityBlocked                  int      `json:"data_quality_blocked"`
+}
+
+type BacktestEventMetrics struct {
+	Events                       int      `json:"events"`
+	TargetStressEvents           int      `json:"target_stress_events"`
+	NonStressEvents              int      `json:"non_stress_events"`
+	WatchEvents                  int      `json:"watch_events"`
+	WatchTruePositiveEvents      int      `json:"watch_true_positive_events"`
+	WatchFalsePositiveEvents     int      `json:"watch_false_positive_events"`
+	WatchMissEvents              int      `json:"watch_miss_events"`
+	WatchPrecision               *float64 `json:"watch_precision,omitempty"`
+	WatchRecall                  *float64 `json:"watch_recall,omitempty"`
+	ConfirmedStressEvents        int      `json:"confirmed_stress_events"`
+	ConfirmedStressTruePositive  int      `json:"confirmed_stress_true_positive_events"`
+	ConfirmedStressFalsePositive int      `json:"confirmed_stress_false_positive_events"`
+	ConfirmedStressMiss          int      `json:"confirmed_stress_miss_events"`
+	ConfirmedStressPrecision     *float64 `json:"confirmed_stress_precision,omitempty"`
+	ConfirmedStressRecall        *float64 `json:"confirmed_stress_recall,omitempty"`
+	PanicOrForcedDefenseEvents   int      `json:"panic_or_forced_defense_events"`
+	PanicOrForcedDefenseRecall   *float64 `json:"panic_or_forced_defense_recall,omitempty"`
+}
+
+type CanaryBacktestRegimeLift struct {
+	PortfolioStressRows         int      `json:"portfolio_stress_rows"`
+	RegimeOnlyWatchTruePositive int      `json:"regime_only_watch_true_positive"`
+	CanaryWatchTruePositive     int      `json:"canary_watch_true_positive"`
+	CanaryAddedTruePositive     int      `json:"canary_added_true_positive"`
+	RegimeOnlyRecall            *float64 `json:"regime_only_recall,omitempty"`
+	CanaryRecall                *float64 `json:"canary_recall,omitempty"`
 }
 
 type OpportunityBacktestObservation struct {
@@ -496,18 +584,31 @@ func runCanaryBacktest(observations []CanaryBacktestObservation, runAt time.Time
 		NotAdvice: "Backtest diagnostic only; not investment advice or a trade recommendation.",
 	}
 	total := &canaryBacktestAccumulator{}
+	regimeOnly := &canaryBacktestAccumulator{}
 	byCluster := map[string]*canaryBacktestAccumulator{}
+	byCategory := map[string]*canaryBacktestAccumulator{}
 	for _, obs := range observations {
 		row := runCanaryBacktestObservation(obs)
 		res.Observations = append(res.Observations, row)
 		total.add(row)
+		regimeOnly.add(canaryRegimeOnlyBacktestRow(row))
 		cluster := cleanBacktestCluster(row.MarketCluster)
 		if byCluster[cluster] == nil {
 			byCluster[cluster] = &canaryBacktestAccumulator{}
 		}
 		byCluster[cluster].add(row)
+		for _, category := range canaryBacktestCategories(row) {
+			if byCategory[category] == nil {
+				byCategory[category] = &canaryBacktestAccumulator{}
+			}
+			byCategory[category].add(row)
+		}
 	}
 	res.Metrics = total.result()
+	res.RegimeOnly = regimeOnly.result()
+	res.Lifecycle = canaryBacktestLifecycleMetrics(res.Observations)
+	res.Events = canaryBacktestEventMetrics(res.Observations)
+	res.RegimeLift = canaryBacktestRegimeLift(res.Observations)
 	names := make([]string, 0, len(byCluster))
 	for name := range byCluster {
 		names = append(names, name)
@@ -515,6 +616,14 @@ func runCanaryBacktest(observations []CanaryBacktestObservation, runAt time.Time
 	slices.Sort(names)
 	for _, name := range names {
 		res.Clusters = append(res.Clusters, CanaryBacktestClusterMetrics{Name: name, Metrics: byCluster[name].result()})
+	}
+	categoryNames := make([]string, 0, len(byCategory))
+	for name := range byCategory {
+		categoryNames = append(categoryNames, name)
+	}
+	slices.Sort(categoryNames)
+	for _, name := range categoryNames {
+		res.Categories = append(res.Categories, CanaryBacktestClusterMetrics{Name: name, Metrics: byCategory[name].result()})
 	}
 	res.Findings = canaryBacktestFindings(res)
 	return res
@@ -530,11 +639,13 @@ func runRegimeBacktest(observations []RegimeBacktestObservation, runAt time.Time
 		NotAdvice: "Backtest diagnostic only; not investment advice or a trade recommendation.",
 	}
 	total := &regimeBacktestAccumulator{}
+	baseline := &regimeBacktestAccumulator{}
 	byCluster := map[string]*regimeBacktestAccumulator{}
 	for _, obs := range observations {
 		row := runRegimeBacktestObservation(obs)
 		res.Observations = append(res.Observations, row)
 		total.add(row)
+		baseline.add(regimeBaselineBacktestRow(row))
 		cluster := cleanBacktestCluster(row.MarketCluster)
 		if byCluster[cluster] == nil {
 			byCluster[cluster] = &regimeBacktestAccumulator{}
@@ -542,6 +653,9 @@ func runRegimeBacktest(observations []RegimeBacktestObservation, runAt time.Time
 		byCluster[cluster].add(row)
 	}
 	res.Metrics = total.result()
+	res.Baseline = baseline.result()
+	res.Lifecycle = regimeBacktestLifecycleMetrics(res.Observations)
+	res.Events = regimeBacktestEventMetrics(res.Observations)
 	names := make([]string, 0, len(byCluster))
 	for name := range byCluster {
 		names = append(names, name)
@@ -597,30 +711,43 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 	dataQuality := canary.Direction == risk.DirectionDataQuality && severityRankAtLeast(canary.Severity, risk.SeverityWatch)
 	blocked := canary.PlannerReadiness == risk.PlannerReadinessBlocked
 	signalWatch := watch || rebalance
+	regimeWatch := regimeBacktestStressWatch(input.Regime)
+	regimeAct := regimeBacktestStressSignal(input.Regime)
 	return CanaryBacktestRowResult{
-		Date:             backtestDateLabel(obs.Date, asOf),
-		Case:             obs.Case,
-		MarketCluster:    cleanBacktestCluster(obs.MarketCluster),
-		TargetStress:     obs.Target.Stress,
-		TargetKind:       obs.Target.Kind,
-		TargetScope:      cleanBacktestTargetScope(obs.Target.Scope),
-		WindowDays:       obs.Target.WindowDays,
-		DaysToStress:     obs.Target.DaysToStress,
-		Direction:        canary.Direction,
-		PortfolioPosture: canary.PortfolioPosture,
-		Severity:         canary.Severity,
-		PlannerMode:      canary.PlannerModeHint,
-		PlannerReadiness: canary.PlannerReadiness,
-		DataConfidence:   canary.DataConfidence,
-		SignalConfidence: canary.SignalConfidence,
-		PrimaryDrivers:   canary.PrimaryDrivers,
-		SignalWatch:      signalWatch,
-		DefensiveWatch:   watch,
-		DefensiveAct:     act,
-		RebalanceWatch:   rebalance,
-		DataQualityWatch: dataQuality,
-		Blocked:          blocked,
-		Canary:           &canary,
+		Date:              backtestDateLabel(obs.Date, asOf),
+		Case:              obs.Case,
+		MarketCluster:     cleanBacktestCluster(obs.MarketCluster),
+		TargetStress:      obs.Target.Stress,
+		TargetKind:        obs.Target.Kind,
+		TargetScope:       cleanBacktestTargetScope(obs.Target.Scope),
+		WindowDays:        obs.Target.WindowDays,
+		DaysToStress:      obs.Target.DaysToStress,
+		MaxSPYDrawdownPct: obs.Target.MaxSPYDrawdownPct,
+		VIXShockPct:       obs.Target.VIXShockPct,
+		Direction:         canary.Direction,
+		PortfolioPosture:  canary.PortfolioPosture,
+		Severity:          canary.Severity,
+		PlannerMode:       canary.PlannerModeHint,
+		PlannerReadiness:  canary.PlannerReadiness,
+		DataConfidence:    canary.DataConfidence,
+		SignalConfidence:  canary.SignalConfidence,
+		PrimaryDrivers:    canary.PrimaryDrivers,
+		LifecycleStage:    canary.Lifecycle.Stage,
+		SignalWatch:       signalWatch,
+		DefensiveWatch:    watch,
+		DefensiveAct:      act,
+		RebalanceWatch:    rebalance,
+		DataQualityWatch:  dataQuality,
+		Blocked:           blocked,
+		EarlyWarning:      canary.Lifecycle.Stage == rpc.LifecycleEarlyWarning,
+		ConfirmedStress:   canary.Lifecycle.Stage == rpc.LifecycleConfirmedStress,
+		Panic:             canary.Lifecycle.Stage == rpc.LifecyclePanic,
+		ForcedDefense:     canary.Lifecycle.Stage == rpc.LifecycleForcedDefense,
+		Stabilization:     canary.Lifecycle.Stage == rpc.LifecycleStabilization,
+		Opportunity:       canary.Lifecycle.Stage == rpc.LifecycleOpportunity,
+		RegimeOnlyWatch:   regimeWatch,
+		RegimeOnlyAct:     regimeAct,
+		Canary:            &canary,
 	}
 }
 
@@ -630,26 +757,37 @@ func runRegimeBacktestObservation(obs RegimeBacktestObservation) RegimeBacktestR
 	stressWatch := regimeBacktestStressWatch(regime)
 	stressSignal := regimeBacktestStressSignal(regime)
 	dataQuality := regimeBacktestDataQualityWatch(regime)
+	stage := regime.Lifecycle.Stage
 	return RegimeBacktestRowResult{
-		Date:             backtestDateLabel(obs.Date, asOf),
-		Case:             obs.Case,
-		MarketCluster:    cleanBacktestCluster(obs.MarketCluster),
-		TargetStress:     obs.Target.Stress,
-		TargetKind:       obs.Target.Kind,
-		TargetScope:      cleanBacktestTargetScope(obs.Target.Scope),
-		Scored:           regimeBacktestScoredScope(obs.Target.Scope),
-		WindowDays:       obs.Target.WindowDays,
-		DaysToStress:     obs.Target.DaysToStress,
-		Verdict:          regime.Composite.Verdict,
-		RedClusters:      regime.Composite.ClusterRedCount,
-		YellowClusters:   regime.Composite.ClusterYellowCount,
-		RankedClusters:   regime.Composite.ClusterRankedCount,
-		UnrankedClusters: regime.Composite.ClusterUnrankedCount,
-		RedClusterNames:  market.RedClusterNames,
-		StressWatch:      stressWatch,
-		StressSignal:     stressSignal,
-		DataQualityWatch: dataQuality,
-		Regime:           &regime,
+		Date:              backtestDateLabel(obs.Date, asOf),
+		Case:              obs.Case,
+		MarketCluster:     cleanBacktestCluster(obs.MarketCluster),
+		TargetStress:      obs.Target.Stress,
+		TargetKind:        obs.Target.Kind,
+		TargetScope:       cleanBacktestTargetScope(obs.Target.Scope),
+		Scored:            regimeBacktestScoredScope(obs.Target.Scope),
+		WindowDays:        obs.Target.WindowDays,
+		DaysToStress:      obs.Target.DaysToStress,
+		MaxSPYDrawdownPct: obs.Target.MaxSPYDrawdownPct,
+		VIXShockPct:       obs.Target.VIXShockPct,
+		Verdict:           regime.Composite.Verdict,
+		RedClusters:       regime.Composite.ClusterRedCount,
+		YellowClusters:    regime.Composite.ClusterYellowCount,
+		RankedClusters:    regime.Composite.ClusterRankedCount,
+		UnrankedClusters:  regime.Composite.ClusterUnrankedCount,
+		RedClusterNames:   market.RedClusterNames,
+		LifecycleStage:    stage,
+		StressWatch:       stressWatch,
+		StressSignal:      stressSignal,
+		DataQualityWatch:  dataQuality,
+		EarlyWarning:      stage == rpc.LifecycleEarlyWarning,
+		ConfirmedStress:   stage == rpc.LifecycleConfirmedStress,
+		Panic:             stage == rpc.LifecyclePanic,
+		Stabilization:     stage == rpc.LifecycleStabilization,
+		Opportunity:       stage == rpc.LifecycleOpportunity,
+		BaselineWatch:     legacyRegimeBacktestStressWatch(regime),
+		BaselineStress:    legacyRegimeBacktestStressSignal(regime),
+		Regime:            &regime,
 	}
 }
 
@@ -789,6 +927,24 @@ func regimeBacktestScoredScope(scope string) bool {
 }
 
 func regimeBacktestStressWatch(r rpc.RegimeSnapshotResult) bool {
+	stage := r.Lifecycle.Stage
+	if stage != "" {
+		return stage == rpc.LifecycleEarlyWarning ||
+			stage == rpc.LifecycleConfirmedStress ||
+			stage == rpc.LifecyclePanic
+	}
+	return legacyRegimeBacktestStressWatch(r)
+}
+
+func regimeBacktestStressSignal(r rpc.RegimeSnapshotResult) bool {
+	stage := r.Lifecycle.Stage
+	if stage != "" {
+		return stage == rpc.LifecycleConfirmedStress || stage == rpc.LifecyclePanic
+	}
+	return legacyRegimeBacktestStressSignal(r)
+}
+
+func legacyRegimeBacktestStressWatch(r rpc.RegimeSnapshotResult) bool {
 	c := r.Composite
 	if c.ClusterRankedCount < verdictFloor {
 		return false
@@ -796,7 +952,7 @@ func regimeBacktestStressWatch(r rpc.RegimeSnapshotResult) bool {
 	return c.ClusterRedCount >= 1 || c.ClusterYellowCount >= 3
 }
 
-func regimeBacktestStressSignal(r rpc.RegimeSnapshotResult) bool {
+func legacyRegimeBacktestStressSignal(r rpc.RegimeSnapshotResult) bool {
 	c := r.Composite
 	return c.ClusterRankedCount >= verdictFloor && c.ClusterRedCount >= 1
 }
@@ -872,6 +1028,8 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 		}
 	}
 	r.Composite.Verdict = backtestRegimeVerdict(r.Composite, len(clusterBands))
+	r.SourceHealth = rpc.BuildRegimeSourceHealth(r, r.AsOf)
+	r.Lifecycle = rpc.BuildRegimeLifecycle(r)
 }
 
 const (
@@ -1197,6 +1355,355 @@ func (a *opportunityBacktestAccumulator) result() OpportunityBacktestMetrics {
 	return m
 }
 
+func regimeBaselineBacktestRow(row RegimeBacktestRowResult) RegimeBacktestRowResult {
+	out := row
+	out.StressWatch = row.BaselineWatch
+	out.StressSignal = row.BaselineStress
+	return out
+}
+
+func canaryRegimeOnlyBacktestRow(row CanaryBacktestRowResult) CanaryBacktestRowResult {
+	out := row
+	out.SignalWatch = row.RegimeOnlyWatch
+	out.DefensiveWatch = row.RegimeOnlyWatch
+	out.DefensiveAct = row.RegimeOnlyAct
+	out.RebalanceWatch = false
+	out.DataQualityWatch = false
+	out.Blocked = false
+	return out
+}
+
+func regimeBacktestLifecycleMetrics(rows []RegimeBacktestRowResult) BacktestLifecycleMetrics {
+	acc := lifecycleMetricAccumulator{}
+	for _, row := range rows {
+		if !row.Scored {
+			continue
+		}
+		acc.add(lifecycleMetricInput{
+			targetStress:       row.TargetStress,
+			targetKind:         row.TargetKind,
+			targetScope:        row.TargetScope,
+			daysToStress:       row.DaysToStress,
+			earlyWarning:       row.EarlyWarning,
+			confirmedStress:    row.ConfirmedStress || row.Panic,
+			panicForcedDefense: row.Panic,
+			stabilization:      row.Stabilization,
+			opportunity:        row.Opportunity,
+			dataQualityBlocked: row.LifecycleStage == rpc.LifecycleDataQuality,
+			maxSPYDrawdownPct:  row.MaxSPYDrawdownPct,
+			vixShockPct:        row.VIXShockPct,
+		})
+	}
+	return acc.result()
+}
+
+func canaryBacktestLifecycleMetrics(rows []CanaryBacktestRowResult) BacktestLifecycleMetrics {
+	acc := lifecycleMetricAccumulator{}
+	for _, row := range rows {
+		acc.add(lifecycleMetricInput{
+			targetStress:       row.TargetStress,
+			targetKind:         row.TargetKind,
+			targetScope:        row.TargetScope,
+			daysToStress:       row.DaysToStress,
+			earlyWarning:       row.EarlyWarning,
+			confirmedStress:    row.ConfirmedStress || row.Panic || row.ForcedDefense,
+			panicForcedDefense: row.Panic || row.ForcedDefense,
+			stabilization:      row.Stabilization,
+			opportunity:        row.Opportunity,
+			dataQualityBlocked: row.Blocked || row.LifecycleStage == rpc.LifecycleDataQuality,
+			maxSPYDrawdownPct:  row.MaxSPYDrawdownPct,
+			vixShockPct:        row.VIXShockPct,
+		})
+	}
+	return acc.result()
+}
+
+type lifecycleMetricInput struct {
+	targetStress       bool
+	targetKind         string
+	targetScope        string
+	daysToStress       *int
+	earlyWarning       bool
+	confirmedStress    bool
+	panicForcedDefense bool
+	stabilization      bool
+	opportunity        bool
+	dataQualityBlocked bool
+	maxSPYDrawdownPct  *float64
+	vixShockPct        *float64
+}
+
+type lifecycleMetricAccumulator struct {
+	metrics       BacktestLifecycleMetrics
+	earlyLeadDays []int
+}
+
+func (a *lifecycleMetricAccumulator) add(row lifecycleMetricInput) {
+	a.metrics.Observations++
+	if row.targetStress {
+		a.metrics.TargetStress++
+	} else {
+		a.metrics.NonStress++
+	}
+	laterStress := row.targetStress && row.daysToStress != nil && *row.daysToStress > 0
+	if laterStress {
+		a.metrics.LaterConfirmedStress++
+	}
+	majorStress := row.targetStress && majorStressTarget(row.targetKind, row.maxSPYDrawdownPct, row.vixShockPct)
+	if majorStress {
+		a.metrics.MajorStress++
+	}
+	if row.earlyWarning {
+		a.metrics.EarlyWarning++
+	}
+	if row.confirmedStress {
+		a.metrics.ConfirmedStress++
+	}
+	if row.panicForcedDefense {
+		a.metrics.PanicOrForcedDefense++
+	}
+	if row.stabilization {
+		a.metrics.Stabilization++
+	}
+	if row.opportunity {
+		a.metrics.Opportunity++
+	}
+	if row.dataQualityBlocked {
+		a.metrics.DataQualityBlocked++
+	}
+	switch {
+	case laterStress && row.earlyWarning:
+		a.metrics.EarlyWarningTruePositive++
+		a.earlyLeadDays = append(a.earlyLeadDays, *row.daysToStress)
+	case laterStress:
+		a.metrics.EarlyWarningMiss++
+	case row.earlyWarning:
+		a.metrics.EarlyWarningFalsePositive++
+		if calmRallyTarget(row.targetKind) {
+			a.metrics.EarlyWarningFalseCalmRally++
+		}
+	}
+	switch {
+	case row.targetStress && row.confirmedStress:
+		a.metrics.ConfirmedStressTruePositive++
+	case row.targetStress:
+		a.metrics.ConfirmedStressMiss++
+	case row.confirmedStress:
+		a.metrics.ConfirmedStressFalsePositive++
+	}
+	switch {
+	case majorStress && row.panicForcedDefense:
+		a.metrics.PanicOrForcedDefenseTruePositive++
+	case majorStress:
+		a.metrics.PanicOrForcedDefenseMiss++
+	}
+	if row.targetStress && (row.stabilization || row.opportunity) {
+		a.metrics.StabilizationOpportunityFalseStarts++
+	}
+}
+
+func (a *lifecycleMetricAccumulator) result() BacktestLifecycleMetrics {
+	m := a.metrics
+	m.EarlyWarningPrecision = ratioPtr(m.EarlyWarningTruePositive, m.EarlyWarningTruePositive+m.EarlyWarningFalsePositive)
+	m.EarlyWarningRecall = ratioPtr(m.EarlyWarningTruePositive, m.LaterConfirmedStress)
+	m.EarlyWarningMedianLeadDays = medianIntPtr(a.earlyLeadDays)
+	m.ConfirmedStressPrecision = ratioPtr(m.ConfirmedStressTruePositive, m.ConfirmedStressTruePositive+m.ConfirmedStressFalsePositive)
+	m.ConfirmedStressRecall = ratioPtr(m.ConfirmedStressTruePositive, m.TargetStress)
+	m.PanicOrForcedDefenseRecall = ratioPtr(m.PanicOrForcedDefenseTruePositive, m.MajorStress)
+	return m
+}
+
+func regimeBacktestEventMetrics(rows []RegimeBacktestRowResult) BacktestEventMetrics {
+	events := map[string]*eventMetricAccumulator{}
+	for _, row := range rows {
+		if !row.Scored {
+			continue
+		}
+		key := backtestEventKey(row.MarketCluster, row.Case)
+		if events[key] == nil {
+			events[key] = &eventMetricAccumulator{}
+		}
+		events[key].add(row.TargetStress, row.EarlyWarning || row.ConfirmedStress || row.Panic, row.ConfirmedStress || row.Panic, row.Panic, majorStressTarget(row.TargetKind, row.MaxSPYDrawdownPct, row.VIXShockPct))
+	}
+	return eventMetricsResult(events)
+}
+
+func canaryBacktestEventMetrics(rows []CanaryBacktestRowResult) BacktestEventMetrics {
+	events := map[string]*eventMetricAccumulator{}
+	for _, row := range rows {
+		key := backtestEventKey(row.MarketCluster, row.Case)
+		if events[key] == nil {
+			events[key] = &eventMetricAccumulator{}
+		}
+		watch := row.EarlyWarning || row.ConfirmedStress || row.Panic || row.ForcedDefense || row.DefensiveWatch || row.RebalanceWatch
+		confirmed := row.ConfirmedStress || row.Panic || row.ForcedDefense
+		events[key].add(row.TargetStress, watch, confirmed, row.Panic || row.ForcedDefense, majorStressTarget(row.TargetKind, row.MaxSPYDrawdownPct, row.VIXShockPct))
+	}
+	return eventMetricsResult(events)
+}
+
+type eventMetricAccumulator struct {
+	targetStress       bool
+	watch              bool
+	confirmedStress    bool
+	panicForcedDefense bool
+	majorStress        bool
+}
+
+func (e *eventMetricAccumulator) add(targetStress, watch, confirmedStress, panicForcedDefense, majorStress bool) {
+	e.targetStress = e.targetStress || targetStress
+	e.watch = e.watch || watch
+	e.confirmedStress = e.confirmedStress || confirmedStress
+	e.panicForcedDefense = e.panicForcedDefense || panicForcedDefense
+	e.majorStress = e.majorStress || majorStress
+}
+
+func eventMetricsResult(events map[string]*eventMetricAccumulator) BacktestEventMetrics {
+	var m BacktestEventMetrics
+	for _, e := range events {
+		m.Events++
+		if e.targetStress {
+			m.TargetStressEvents++
+		} else {
+			m.NonStressEvents++
+		}
+		if e.watch {
+			m.WatchEvents++
+		}
+		if e.confirmedStress {
+			m.ConfirmedStressEvents++
+		}
+		if e.panicForcedDefense {
+			m.PanicOrForcedDefenseEvents++
+		}
+		switch {
+		case e.targetStress && e.watch:
+			m.WatchTruePositiveEvents++
+		case e.targetStress:
+			m.WatchMissEvents++
+		case e.watch:
+			m.WatchFalsePositiveEvents++
+		}
+		switch {
+		case e.targetStress && e.confirmedStress:
+			m.ConfirmedStressTruePositive++
+		case e.targetStress:
+			m.ConfirmedStressMiss++
+		case e.confirmedStress:
+			m.ConfirmedStressFalsePositive++
+		}
+	}
+	m.WatchPrecision = ratioPtr(m.WatchTruePositiveEvents, m.WatchTruePositiveEvents+m.WatchFalsePositiveEvents)
+	m.WatchRecall = ratioPtr(m.WatchTruePositiveEvents, m.TargetStressEvents)
+	m.ConfirmedStressPrecision = ratioPtr(m.ConfirmedStressTruePositive, m.ConfirmedStressTruePositive+m.ConfirmedStressFalsePositive)
+	m.ConfirmedStressRecall = ratioPtr(m.ConfirmedStressTruePositive, m.TargetStressEvents)
+	panicTP := 0
+	majorEvents := 0
+	for _, e := range events {
+		if !e.targetStress || !e.majorStress {
+			continue
+		}
+		majorEvents++
+		if e.panicForcedDefense {
+			panicTP++
+		}
+	}
+	m.PanicOrForcedDefenseRecall = ratioPtr(panicTP, majorEvents)
+	return m
+}
+
+func backtestEventKey(cluster, fallback string) string {
+	cluster = cleanBacktestCluster(cluster)
+	if cluster != "unclassified" {
+		return cluster
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return cluster
+}
+
+func canaryBacktestCategories(row CanaryBacktestRowResult) []string {
+	categories := []string{}
+	scope := cleanBacktestTargetScope(row.TargetScope)
+	kind := strings.ToLower(row.TargetKind + " " + row.Case + " " + row.MarketCluster)
+	if scope == "market" || strings.Contains(kind, "market") || strings.Contains(kind, "shock") || strings.Contains(kind, "selloff") || strings.Contains(kind, "crash") || strings.Contains(kind, "rates") || strings.Contains(kind, "carry") || strings.Contains(kind, "bank") {
+		categories = append(categories, "market-driven")
+	}
+	if canaryBacktestPortfolioScope(scope) {
+		categories = append(categories, "portfolio-driven")
+	}
+	if strings.Contains(kind, "concentration") || strings.Contains(kind, "squeeze") || hasAnySignal(row.PrimaryDrivers, risk.SignalSingleNameExposureHigh, risk.SignalSingleNameDeltaHigh) {
+		categories = append(categories, "concentration-driven")
+	}
+	if strings.Contains(kind, "margin") || hasAnySignal(row.PrimaryDrivers, risk.SignalMarginCushionLow, risk.SignalLookAheadCushionLow) {
+		categories = append(categories, "margin-driven")
+	}
+	if strings.Contains(kind, "option") || strings.Contains(kind, "convex") || hasAnySignal(row.PrimaryDrivers, risk.SignalShortConvexityHigh, risk.SignalOptionGreeksDegraded) {
+		categories = append(categories, "options-driven")
+	}
+	if strings.Contains(kind, "coverage") || strings.Contains(kind, "data-quality") || row.DataQualityWatch || row.Blocked || row.LifecycleStage == rpc.LifecycleDataQuality {
+		categories = append(categories, "data-quality")
+	}
+	if len(categories) == 0 {
+		categories = append(categories, "other")
+	}
+	slices.Sort(categories)
+	return slices.Compact(categories)
+}
+
+func canaryBacktestRegimeLift(rows []CanaryBacktestRowResult) CanaryBacktestRegimeLift {
+	var out CanaryBacktestRegimeLift
+	for _, row := range rows {
+		if !row.TargetStress || !canaryBacktestPortfolioScope(row.TargetScope) {
+			continue
+		}
+		out.PortfolioStressRows++
+		if row.RegimeOnlyWatch {
+			out.RegimeOnlyWatchTruePositive++
+		}
+		if canaryBacktestAcceptableWatch(row) {
+			out.CanaryWatchTruePositive++
+		}
+		if !row.RegimeOnlyWatch && canaryBacktestAcceptableWatch(row) {
+			out.CanaryAddedTruePositive++
+		}
+	}
+	out.RegimeOnlyRecall = ratioPtr(out.RegimeOnlyWatchTruePositive, out.PortfolioStressRows)
+	out.CanaryRecall = ratioPtr(out.CanaryWatchTruePositive, out.PortfolioStressRows)
+	return out
+}
+
+func majorStressTarget(kind string, maxSPYDrawdownPct, vixShockPct *float64) bool {
+	k := strings.ToLower(kind)
+	if maxSPYDrawdownPct != nil && *maxSPYDrawdownPct <= -4 {
+		return true
+	}
+	if vixShockPct != nil && *vixShockPct >= 20 {
+		return true
+	}
+	for _, token := range []string{"crash", "liquidity", "shock", "selloff", "volmageddon", "rates", "bank", "funding", "tariff", "carry"} {
+		if strings.Contains(k, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func calmRallyTarget(kind string) bool {
+	k := strings.ToLower(kind)
+	return strings.Contains(k, "calm") || strings.Contains(k, "rally") || strings.Contains(k, "control") || strings.Contains(k, "recovered")
+}
+
+func hasAnySignal(got []risk.SignalID, wants ...risk.SignalID) bool {
+	for _, id := range got {
+		if slices.Contains(wants, id) {
+			return true
+		}
+	}
+	return false
+}
+
 func ratioPtr(num, denom int) *float64 {
 	if denom == 0 {
 		return nil
@@ -1218,6 +1725,22 @@ func avgFloatPtr(sum float64, count int) *float64 {
 		return nil
 	}
 	v := sum / float64(count)
+	return &v
+}
+
+func medianIntPtr(values []int) *float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+	mid := len(sorted) / 2
+	var v float64
+	if len(sorted)%2 == 1 {
+		v = float64(sorted[mid])
+	} else {
+		v = float64(sorted[mid-1]+sorted[mid]) / 2
+	}
 	return &v
 }
 
@@ -1250,6 +1773,15 @@ func canaryBacktestFindings(res CanaryBacktestResult) []string {
 	}
 	if m.ActMiss > 0 && m.TargetStress > 0 {
 		findings = append(findings, fmt.Sprintf("Act-level alerts caught %d/%d stress rows; treat act recall as a severity filter, not the only success gate.", m.ActTruePositive, m.TargetStress))
+	}
+	if res.RegimeLift.PortfolioStressRows > 0 {
+		findings = append(findings, fmt.Sprintf("Portfolio lift: canary watch caught %d/%d portfolio stress row(s) vs %d/%d for regime-only.",
+			res.RegimeLift.CanaryWatchTruePositive, res.RegimeLift.PortfolioStressRows,
+			res.RegimeLift.RegimeOnlyWatchTruePositive, res.RegimeLift.PortfolioStressRows))
+	}
+	if res.Lifecycle.EarlyWarning > 0 {
+		findings = append(findings, fmt.Sprintf("Early-warning lifecycle rows: %d total, %d calm/rally false episode(s), median lead %s.",
+			res.Lifecycle.EarlyWarning, res.Lifecycle.EarlyWarningFalseCalmRally, formatBacktestNumber(res.Lifecycle.EarlyWarningMedianLeadDays)))
 	}
 	if m.DataQualityWatch > 0 {
 		findings = append(findings, fmt.Sprintf("%d data-quality watch row(s) were tracked separately from defensive false positives.", m.DataQualityWatch))
@@ -1293,6 +1825,14 @@ func regimeBacktestFindings(res RegimeBacktestResult) []string {
 	}
 	if m.StressFalsePositive > 0 {
 		findings = append(findings, fmt.Sprintf("Red-cluster stress signals fired on %d scored non-stress row(s).", m.StressFalsePositive))
+	}
+	if res.Baseline.StressPrecision != nil && m.StressPrecision != nil {
+		findings = append(findings, fmt.Sprintf("Confirmed-stress precision moved from %s before to %s after lifecycle confirmation.",
+			formatBacktestRate(res.Baseline.StressPrecision), formatBacktestRate(m.StressPrecision)))
+	}
+	if res.Lifecycle.EarlyWarning > 0 {
+		findings = append(findings, fmt.Sprintf("Early-warning lifecycle rows: %d total, %d calm/rally false episode(s), median lead %s.",
+			res.Lifecycle.EarlyWarning, res.Lifecycle.EarlyWarningFalseCalmRally, formatBacktestNumber(res.Lifecycle.EarlyWarningMedianLeadDays)))
 	}
 	if m.DataQualityWatch > 0 {
 		findings = append(findings, fmt.Sprintf("%d scored data-quality watch row(s) were tracked separately from stress false positives.", m.DataQualityWatch))
@@ -1369,6 +1909,33 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 		formatBacktestRate(r.Metrics.ActFalseAlarmRate),
 		formatBacktestNumber(r.Metrics.ActAvgLeadDays),
 	)
+	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false calm/rally %d · median lead %s\n",
+		"Early",
+		formatBacktestRate(r.Lifecycle.EarlyWarningPrecision),
+		formatBacktestRate(r.Lifecycle.EarlyWarningRecall),
+		r.Lifecycle.EarlyWarningFalseCalmRally,
+		formatBacktestNumber(r.Lifecycle.EarlyWarningMedianLeadDays),
+	)
+	fmt.Fprintf(out, "  %-12s precision %s · recall %s · panic/forced recall %s · false starts %d\n",
+		"Lifecycle",
+		formatBacktestRate(r.Lifecycle.ConfirmedStressPrecision),
+		formatBacktestRate(r.Lifecycle.ConfirmedStressRecall),
+		formatBacktestRate(r.Lifecycle.PanicOrForcedDefenseRecall),
+		r.Lifecycle.StabilizationOpportunityFalseStarts,
+	)
+	fmt.Fprintf(out, "  %-12s watch precision %s · recall %s · confirmed precision %s · recall %s\n",
+		"Events",
+		formatBacktestRate(r.Events.WatchPrecision),
+		formatBacktestRate(r.Events.WatchRecall),
+		formatBacktestRate(r.Events.ConfirmedStressPrecision),
+		formatBacktestRate(r.Events.ConfirmedStressRecall),
+	)
+	fmt.Fprintf(out, "  %-12s regime-only recall %s · canary recall %s · added portfolio TP %d\n",
+		"Lift",
+		formatBacktestRate(r.RegimeLift.RegimeOnlyRecall),
+		formatBacktestRate(r.RegimeLift.CanaryRecall),
+		r.RegimeLift.CanaryAddedTruePositive,
+	)
 	fmt.Fprintf(out, "  %-12s %d rebalance watch row(s)\n", "Risk budget", r.Metrics.RebalanceWatch)
 	fmt.Fprintf(out, "  %-12s %d data-quality watch · %d blocked planner row(s)\n", "Quality", r.Metrics.DataQualityWatch, r.Metrics.Blocked)
 	fmt.Fprintln(out)
@@ -1382,6 +1949,26 @@ func renderCanaryBacktestText(env *Env, out io.Writer, r *CanaryBacktestResult) 
 			m := cluster.Metrics
 			fmt.Fprintf(out, "  %-28s %4d %6d %6d %6d %6d %6d %7d\n",
 				truncateVisible(cluster.Name, 28),
+				m.Observations,
+				m.TargetStress,
+				m.WatchTruePositive,
+				m.WatchFalsePositive,
+				m.RebalanceWatch,
+				m.ActTruePositive,
+				m.Blocked,
+			)
+		}
+		fmt.Fprintln(out)
+	}
+	if len(r.Categories) > 0 {
+		header := fmt.Sprintf("  %-28s %4s %6s %6s %6s %6s %6s %7s",
+			"CATEGORY", "OBS", "STRESS", "WAT TP", "DEF FP", "REBAL", "ACT TP", "BLOCKED")
+		fmt.Fprintln(out, env.dim(header))
+		fmt.Fprintln(out, env.dim(strings.Repeat("-", visibleLen(header))))
+		for _, category := range r.Categories {
+			m := category.Metrics
+			fmt.Fprintf(out, "  %-28s %4d %6d %6d %6d %6d %6d %7d\n",
+				truncateVisible(category.Name, 28),
 				m.Observations,
 				m.TargetStress,
 				m.WatchTruePositive,
@@ -1425,6 +2012,31 @@ func renderRegimeBacktestText(env *Env, out io.Writer, r *RegimeBacktestResult) 
 		formatBacktestRate(r.Metrics.StressRecall),
 		formatBacktestRate(r.Metrics.StressFalseAlarmRate),
 		formatBacktestNumber(r.Metrics.StressAvgLeadDays),
+	)
+	fmt.Fprintf(out, "  %-12s stress precision %s · recall %s · false alarms %s\n",
+		"Before",
+		formatBacktestRate(r.Baseline.StressPrecision),
+		formatBacktestRate(r.Baseline.StressRecall),
+		formatBacktestRate(r.Baseline.StressFalseAlarmRate),
+	)
+	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false calm/rally %d · median lead %s\n",
+		"Early",
+		formatBacktestRate(r.Lifecycle.EarlyWarningPrecision),
+		formatBacktestRate(r.Lifecycle.EarlyWarningRecall),
+		r.Lifecycle.EarlyWarningFalseCalmRally,
+		formatBacktestNumber(r.Lifecycle.EarlyWarningMedianLeadDays),
+	)
+	fmt.Fprintf(out, "  %-12s panic recall %s · stabilization/opportunity false starts %d\n",
+		"Lifecycle",
+		formatBacktestRate(r.Lifecycle.PanicOrForcedDefenseRecall),
+		r.Lifecycle.StabilizationOpportunityFalseStarts,
+	)
+	fmt.Fprintf(out, "  %-12s watch precision %s · recall %s · confirmed precision %s · recall %s\n",
+		"Events",
+		formatBacktestRate(r.Events.WatchPrecision),
+		formatBacktestRate(r.Events.WatchRecall),
+		formatBacktestRate(r.Events.ConfirmedStressPrecision),
+		formatBacktestRate(r.Events.ConfirmedStressRecall),
 	)
 	fmt.Fprintf(out, "  %-12s %d data-quality watch row(s)\n", "Quality", r.Metrics.DataQualityWatch)
 	fmt.Fprintln(out)

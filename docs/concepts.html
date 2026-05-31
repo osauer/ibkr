@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-25T11:44:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in docs/specs/; this...",
     "headline": "Concepts",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="concepts">Concepts</h1>
-<p>Updated: 2026-05-25 11:44 CEST</p>
+<p>Updated: 2026-05-31 21:23 CEST</p>
 <p>What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in <a href="https://github.com/osauer/ibkr/tree/main/docs/specs"><code>docs/specs/</code></a>; this page is the user&#39;s mental model.</p>
 <hr>
 <h2 id="market-calendars">Market Calendars</h2>
@@ -173,7 +173,7 @@
 <p><code>ibkr quote</code> adds a <code>session_context</code> block only when it helps explain stale/frozen/missing data. During an ordinary live regular session with prices present, quote output stays quiet.</p>
 <hr>
 <h2 id="regime">Regime</h2>
-<p>The eight-row risk-regime dashboard summarises <em>the market&#39;s current posture</em> in one snapshot. It is for a 30-second daily check, not a continuous monitor. Each row measures a different stress channel; together they distinguish &#34;ordinary chop&#34; from &#34;regime shift in progress.&#34;</p>
+<p>The eight-row risk-regime dashboard summarises <em>the market&#39;s current posture</em> in one snapshot. It emits a broad-market lifecycle stage (<code>quiet</code>, <code>early_warning</code>, <code>confirmed_stress</code>, <code>panic</code>, <code>stabilization</code>, <code>opportunity</code>, or <code>data_quality</code>) plus source health and semantic fingerprints for monitors. Each row measures a different stress channel; together they distinguish &#34;ordinary chop&#34; from &#34;regime shift in progress.&#34;</p>
 <p>The rows:</p>
 <ol>
 <li><strong>VIX term structure</strong> (VIX vs VIX3M). Backwardation — short-dated vol pricing above 3-month vol — is the stress fingerprint. The deeper and more sustained the inversion, the bigger the dislocation.</li>
@@ -185,7 +185,7 @@
 <li><strong>Dealer zero-gamma</strong> (SPY + SPX combined). Whether the dealer book stabilises or amplifies day-over-day moves. See the <a href="#gamma">Gamma</a> section.</li>
 <li><strong>S&amp;P 500 breadth</strong>. Whether the index&#39;s strength is broad or carried by a handful of mega-caps. See the <a href="#breadth">Breadth</a> section.</li>
 </ol>
-<p>Each row carries raw measurements plus a <code>notes</code> field embedding the spec&#39;s threshold bands verbatim — green / yellow / red derivation is intentionally left to the consumer because every trader has a different risk tolerance. Each row also carries a <code>streak</code> field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one.</p>
+<p>Each row carries raw measurements, status/as-of metadata, green / yellow / red banding, and a <code>streak</code> field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one. The lifecycle layer keeps weak or unconfirmed red evidence visible while preventing a single noisy proxy from dominating the broad-market trigger.</p>
 <p>Two failure modes worth flagging on the wire:</p>
 <ul>
 <li>Gamma and breadth are heavy computes. On the first call of an NY trading day, gamma may return <code>status: &#34;computing&#34;</code> with an ETA; on a fresh daemon, breadth returns <code>state: &#34;computing&#34;</code> while the constituent fan-out runs (~60 min cold).</li>

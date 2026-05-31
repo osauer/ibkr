@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-29T12:46:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "ibkr mcp lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a...",
     "headline": "Portfolio review with Claude and IBKR",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="portfolio-review-with-claude-and-ibkr">Portfolio review with Claude and IBKR</h1>
-<p>Updated: 2026-05-29 12:46 CEST</p>
+<p>Updated: 2026-05-31 21:23 CEST</p>
 <p><code>ibkr mcp</code> lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.</p>
 <p>This page is for searches such as &#34;portfolio review with Claude and IBKR&#34;, &#34;Claude IBKR portfolio review&#34;, &#34;Interactive Brokers portfolio review AI&#34;, and &#34;IBKR portfolio analysis prompt&#34;.</p>
 <h2 id="who-this-is-for">Who this is for</h2>
@@ -181,8 +181,8 @@
 <li><code>ibkr_calendar</code> for official session, holiday, and early-close context</li>
 <li><code>ibkr_chain</code> for option expiries, IV, expected move, strikes, deltas, and open interest</li>
 <li><code>ibkr_watch</code> and <code>ibkr_scan</code> for watchlist and market-discovery context</li>
-<li><code>ibkr_breadth</code>, <code>ibkr_gamma</code>, and <code>ibkr_regime</code> for market background</li>
-<li><code>ibkr_canary</code> for scheduled <code>Go</code> / <code>Watch</code> / <code>De-lever</code> / <code>Liquidate</code> stress checks</li>
+<li><code>ibkr_breadth</code>, <code>ibkr_gamma</code>, and <code>ibkr_regime</code> for market background and broad-market lifecycle</li>
+<li><code>ibkr_canary</code> for portfolio-aware lifecycle, readiness, source-health, and stress checks</li>
 <li><code>ibkr_size</code> for fixed-fractional position sizing math</li>
 </ul>
 <p>The assistant should not treat any single tool result as a trade signal. The value is in combining the evidence, naming uncertainty, and showing which follow-up checks would change the decision.</p>
@@ -191,11 +191,11 @@
 <p>Short version to paste into Claude:</p>
 <pre><code>Review my IBKR portfolio using the ibkr MCP tools. Start with account state,
 positions grouped by underlying, options Greeks, quote freshness, and the current
-risk-regime dashboard. Rank the risks I should inspect today, explain the evidence
+risk-regime lifecycle. Rank the risks I should inspect today, explain the evidence
 behind each one, and separate observations from possible next actions. Do not
 place or imply orders.</code></pre>
 <p>For a deeper review, use the full example prompt and let Claude decide which MCP calls are needed before it writes the answer.</p>
-<p>For a scheduled canary check that preserves the top <code>Go</code>, <code>Watch</code>, <code>De-lever</code>, or <code>Liquidate</code> stage plus confidence, action rows, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
+<p>For a scheduled canary check that preserves lifecycle stage, planner readiness, source health, fingerprints, confidence, rows, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
 <h2 id="what-a-useful-answer-looks-like">What a useful answer looks like</h2>
 <p>A strong review is compact, evidence-led, and explicit about missing data. It should read like a desk note, not a stream of tool output.</p>
 <p>Sanitized sample:</p>
