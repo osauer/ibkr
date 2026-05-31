@@ -548,20 +548,39 @@ func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
 		worstBand(bandForGamma(r.GammaZero)),
 		worstBand(bandForBreadth(r.Breadth)),
 	}
-	return confirmedRegimeClusterBands(raw, bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads), bandForUSDJPY(r.USDJPY))
+	return confirmedRegimeClusterBands(r, raw)
 }
 
-func confirmedRegimeClusterBands(raw []string, hygSPYBand, creditBand, usdJPYBand string) []string {
+const (
+	regimeClusterEquityVol = iota
+	regimeClusterCredit
+	regimeClusterFunding
+	regimeClusterFX
+	regimeClusterGamma
+	regimeClusterBreadth
+)
+
+const (
+	isolatedVVIXStressLevel = 120.0
+	isolatedVIXStressChange = 20.0
+	isolatedSPYStressMove   = -1.0
+)
+
+func confirmedRegimeClusterBands(r *rpc.RegimeSnapshotResult, raw []string) []string {
 	out := append([]string(nil), raw...)
-	const (
-		creditCluster = 1
-		fxCluster     = 3
-	)
-	if hygSPYBand == "red" && creditBand != "red" && !hasIndependentRedCluster(raw, creditCluster) {
-		out[creditCluster] = "yellow"
+	if r == nil {
+		return out
 	}
-	if usdJPYBand == "red" && !hasIndependentRedCluster(raw, fxCluster) {
-		out[fxCluster] = "yellow"
+	hygSPYBand := bandForHYGSPY(r.HYGSPYDivergence)
+	creditBand := bandForCreditSpreads(r.CreditSpreads)
+	if hygSPYBand == "red" && creditBand != "red" && !hasIndependentRedCluster(raw, regimeClusterCredit) {
+		out[regimeClusterCredit] = "yellow"
+	}
+	if bandForUSDJPY(r.USDJPY) == "red" && !hasIndependentRedCluster(raw, regimeClusterFX) {
+		out[regimeClusterFX] = "yellow"
+	}
+	if len(out) > regimeClusterEquityVol && out[regimeClusterEquityVol] == "red" && !hasIndependentRedCluster(out, regimeClusterEquityVol) && !isolatedEquityVolConfirmed(r) {
+		out[regimeClusterEquityVol] = "yellow"
 	}
 	return out
 }
@@ -573,6 +592,22 @@ func hasIndependentRedCluster(bands []string, self int) bool {
 		}
 	}
 	return false
+}
+
+func isolatedEquityVolConfirmed(r *rpc.RegimeSnapshotResult) bool {
+	if r == nil {
+		return false
+	}
+	if bandForVIX(r.VIXTermStructure) == "red" {
+		return true
+	}
+	if r.VolOfVol.Last != nil && *r.VolOfVol.Last >= isolatedVVIXStressLevel {
+		return true
+	}
+	if r.VIXTermStructure.VIXChangePct != nil && *r.VIXTermStructure.VIXChangePct >= isolatedVIXStressChange {
+		return true
+	}
+	return r.HYGSPYDivergence.SPYChangePct != nil && *r.HYGSPYDivergence.SPYChangePct <= isolatedSPYStressMove
 }
 
 func worstBand(bands ...string) string {

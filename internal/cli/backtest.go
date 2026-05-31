@@ -826,7 +826,7 @@ func regimeBacktestDataQualityWatch(r rpc.RegimeSnapshotResult) bool {
 }
 
 func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
-	if r == nil || r.Composite.ClusterRankedCount+r.Composite.ClusterUnrankedCount > 0 {
+	if r == nil {
 		return
 	}
 	r.Composite = rpc.RegimeComposite{}
@@ -855,7 +855,7 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 			r.Composite.UnrankedCount++
 		}
 	}
-	clusterBands := backtestRegimeClusterBands(*r)
+	clusterBands := regimeClusterBandStrings(*r)
 	for _, band := range clusterBands {
 		switch band {
 		case "green":
@@ -874,8 +874,28 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 	r.Composite.Verdict = backtestRegimeVerdict(r.Composite, len(clusterBands))
 }
 
-func backtestRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
-	raw := []string{
+const (
+	regimeClusterEquityVol = iota
+	regimeClusterCredit
+	regimeClusterFunding
+	regimeClusterFX
+	regimeClusterGamma
+	regimeClusterBreadth
+)
+
+const (
+	isolatedVVIXStressLevel = 120.0
+	isolatedVIXStressChange = 20.0
+	isolatedSPYStressMove   = -1.0
+)
+
+func regimeClusterBandStrings(r rpc.RegimeSnapshotResult) []string {
+	raw := rawRegimeClusterBands(r)
+	return confirmedRegimeClusterBands(r, raw)
+}
+
+func rawRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
+	return []string{
 		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
 		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
 		strongestBand([]string{r.FundingStress.Band}),
@@ -883,31 +903,42 @@ func backtestRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
 		strongestBand([]string{r.GammaZero.Band}),
 		strongestBand([]string{r.Breadth.Band}),
 	}
-	return backtestConfirmedRegimeClusterBands(raw, r.HYGSPYDivergence.Band, r.CreditSpreads.Band, r.USDJPY.Band)
 }
 
-func backtestConfirmedRegimeClusterBands(raw []string, hygSPYBand, creditBand, usdJPYBand string) []string {
+func confirmedRegimeClusterBands(r rpc.RegimeSnapshotResult, raw []string) []string {
 	out := append([]string(nil), raw...)
-	const (
-		creditCluster = 1
-		fxCluster     = 3
-	)
-	if hygSPYBand == "red" && creditBand != "red" && !backtestHasIndependentRedCluster(raw, creditCluster) {
-		out[creditCluster] = "yellow"
+	if r.HYGSPYDivergence.Band == "red" && r.CreditSpreads.Band != "red" && !hasIndependentRegimeRedCluster(raw, regimeClusterCredit) {
+		out[regimeClusterCredit] = "yellow"
 	}
-	if usdJPYBand == "red" && !backtestHasIndependentRedCluster(raw, fxCluster) {
-		out[fxCluster] = "yellow"
+	if r.USDJPY.Band == "red" && !hasIndependentRegimeRedCluster(raw, regimeClusterFX) {
+		out[regimeClusterFX] = "yellow"
+	}
+	if len(out) > regimeClusterEquityVol && out[regimeClusterEquityVol] == "red" && !hasIndependentRegimeRedCluster(out, regimeClusterEquityVol) && !isolatedEquityVolConfirmed(r) {
+		out[regimeClusterEquityVol] = "yellow"
 	}
 	return out
 }
 
-func backtestHasIndependentRedCluster(bands []string, self int) bool {
+func hasIndependentRegimeRedCluster(bands []string, self int) bool {
 	for i, band := range bands {
 		if i != self && band == "red" {
 			return true
 		}
 	}
 	return false
+}
+
+func isolatedEquityVolConfirmed(r rpc.RegimeSnapshotResult) bool {
+	if r.VIXTermStructure.Band == "red" {
+		return true
+	}
+	if r.VolOfVol.Last != nil && *r.VolOfVol.Last >= isolatedVVIXStressLevel {
+		return true
+	}
+	if r.VIXTermStructure.VIXChangePct != nil && *r.VIXTermStructure.VIXChangePct >= isolatedVIXStressChange {
+		return true
+	}
+	return r.HYGSPYDivergence.SPYChangePct != nil && *r.HYGSPYDivergence.SPYChangePct <= isolatedSPYStressMove
 }
 
 func backtestRegimeVerdict(c rpc.RegimeComposite, clusterCount int) string {

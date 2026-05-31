@@ -40,6 +40,13 @@ is priced above longer-term fear. VVIX asks whether traders are paying up for
 large volatility moves. When both worsen, equity stress is usually becoming
 more urgent.
 
+VIX/VIX3M backwardation is stress-level evidence by itself. An isolated VVIX
+red between 110 and 120 is noisier: the VVIX row remains red and visible, but
+the equity-volatility cluster counts as yellow unless VVIX is at least 120, VIX
+is up at least 20% on the day, SPY is down at least 1% on the day, or another
+independent cluster is red. This keeps volatility warnings visible without
+letting a standalone vol-of-vol pop dominate the broad-market read.
+
 | Row | Green | Yellow | Red |
 | --- | --- | --- | --- |
 | VIX/VIX3M | < 0.92 | 0.92-1.00 | > 1.00 |
@@ -132,8 +139,9 @@ read.
 The expanded Tier 1 backtest shows that isolated red equity-volatility clusters
 are also the main source of repeated false alarms. They should not be deleted:
 major stress often starts in volatility before credit, funding, or FX confirms.
-The remaining decision is whether an isolated red volatility cluster should stay
-stress-level only when severity is high enough, and otherwise count as a watch.
+The live rule therefore keeps VIX/VIX3M inversion as stress, but downgrades an
+isolated moderate VVIX-only red to yellow unless the already-visible SPY/VIX
+tape or another cluster confirms it.
 
 ## Method Notes
 

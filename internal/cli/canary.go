@@ -168,15 +168,8 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		SPYChangePct:     r.HYGSPYDivergence.SPYChangePct,
 		VIXChangePct:     r.VIXTermStructure.VIXChangePct,
 	}
-	rawBands := []string{
-		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
-		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
-		strongestBand([]string{r.FundingStress.Band}),
-		strongestBand([]string{r.USDJPY.Band}),
-		strongestBand([]string{r.GammaZero.Band}),
-		strongestBand([]string{r.Breadth.Band}),
-	}
-	bands := backtestConfirmedRegimeClusterBands(rawBands, r.HYGSPYDivergence.Band, r.CreditSpreads.Band, r.USDJPY.Band)
+	rawBands := rawRegimeClusterBands(r)
+	bands := confirmedRegimeClusterBands(r, rawBands)
 	clusterBands := map[string]string{}
 	for i, name := range []string{"vol", "credit", "funding", "fx", "gamma", "breadth"} {
 		clusterBands[name] = bands[i]
@@ -223,12 +216,8 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 	slices.Sort(out.ComputingClusters)
 	slices.Sort(out.DegradedClusters)
 	slices.Sort(out.StaleClusters)
-	if out.RedClusters == 0 && len(out.RedClusterNames) > 0 {
-		out.RedClusters = len(out.RedClusterNames)
-	}
-	if out.YellowClusters == 0 && len(out.YellowClusterNames) > 0 {
-		out.YellowClusters = len(out.YellowClusterNames)
-	}
+	out.RedClusters = len(out.RedClusterNames)
+	out.YellowClusters = len(out.YellowClusterNames)
 	return out
 }
 
