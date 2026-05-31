@@ -194,6 +194,106 @@ type RegimeBacktestClusterMetrics struct {
 	Metrics RegimeBacktestMetrics `json:"metrics"`
 }
 
+type OpportunityBacktestObservation struct {
+	Date          string                     `json:"date,omitempty"`
+	AsOf          time.Time                  `json:"as_of,omitzero"`
+	Case          string                     `json:"case,omitempty"`
+	MarketCluster string                     `json:"market_cluster,omitempty"`
+	Theme         string                     `json:"theme,omitempty"`
+	Signal        OpportunityBacktestSignal  `json:"signal"`
+	Trade         OpportunityBacktestTrade   `json:"trade"`
+	Outcome       OpportunityBacktestOutcome `json:"outcome"`
+	Target        OpportunityBacktestTarget  `json:"target"`
+	Notes         string                     `json:"notes,omitempty"`
+}
+
+type OpportunityBacktestSignal struct {
+	Fired      bool   `json:"fired"`
+	Kind       string `json:"kind,omitempty"`
+	Confidence string `json:"confidence,omitempty"`
+}
+
+type OpportunityBacktestTrade struct {
+	Instrument  string `json:"instrument,omitempty"`
+	EntryRule   string `json:"entry_rule,omitempty"`
+	HorizonDays int    `json:"horizon_days,omitempty"`
+	Benchmark   string `json:"benchmark,omitempty"`
+}
+
+type OpportunityBacktestOutcome struct {
+	EntryDate                string   `json:"entry_date,omitempty"`
+	ExitDate                 string   `json:"exit_date,omitempty"`
+	EntryPrice               *float64 `json:"entry_price,omitempty"`
+	ExitPrice                *float64 `json:"exit_price,omitempty"`
+	ForwardReturnPct         float64  `json:"forward_return_pct"`
+	BenchmarkReturnPct       float64  `json:"benchmark_return_pct"`
+	ExcessReturnPct          float64  `json:"excess_return_pct"`
+	MaxAdverseExcursionPct   float64  `json:"max_adverse_excursion_pct"`
+	MaxFavorableExcursionPct float64  `json:"max_favorable_excursion_pct"`
+}
+
+type OpportunityBacktestTarget struct {
+	Opportunity bool   `json:"opportunity"`
+	Scope       string `json:"scope,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Notes       string `json:"notes,omitempty"`
+}
+
+type OpportunityBacktestResult struct {
+	RunAt        time.Time                           `json:"run_at"`
+	Policy       string                              `json:"policy"`
+	Observations []OpportunityBacktestRowResult      `json:"observations"`
+	Metrics      OpportunityBacktestMetrics          `json:"metrics"`
+	Clusters     []OpportunityBacktestClusterMetrics `json:"clusters,omitempty"`
+	Findings     []string                            `json:"findings,omitempty"`
+	NotAdvice    string                              `json:"not_advice"`
+}
+
+type OpportunityBacktestRowResult struct {
+	Date              string                     `json:"date,omitempty"`
+	Case              string                     `json:"case,omitempty"`
+	MarketCluster     string                     `json:"market_cluster,omitempty"`
+	Theme             string                     `json:"theme,omitempty"`
+	TargetOpportunity bool                       `json:"target_opportunity"`
+	TargetKind        string                     `json:"target_kind,omitempty"`
+	TargetScope       string                     `json:"target_scope,omitempty"`
+	SignalFired       bool                       `json:"signal_fired"`
+	SignalKind        string                     `json:"signal_kind,omitempty"`
+	SignalConfidence  string                     `json:"signal_confidence,omitempty"`
+	TruePositive      bool                       `json:"true_positive"`
+	FalsePositive     bool                       `json:"false_positive"`
+	Miss              bool                       `json:"miss"`
+	PositiveExcess    bool                       `json:"positive_excess"`
+	Trade             OpportunityBacktestTrade   `json:"trade"`
+	Outcome           OpportunityBacktestOutcome `json:"outcome"`
+}
+
+type OpportunityBacktestMetrics struct {
+	Observations                int      `json:"observations"`
+	TargetOpportunity           int      `json:"target_opportunity"`
+	NonOpportunity              int      `json:"non_opportunity"`
+	SignalFired                 int      `json:"signal_fired"`
+	TruePositive                int      `json:"true_positive"`
+	FalsePositive               int      `json:"false_positive"`
+	Miss                        int      `json:"miss"`
+	Precision                   *float64 `json:"precision,omitempty"`
+	Recall                      *float64 `json:"recall,omitempty"`
+	FalseAlarmRate              *float64 `json:"false_alarm_rate,omitempty"`
+	PositiveExcess              int      `json:"positive_excess"`
+	NegativeExcess              int      `json:"negative_excess"`
+	ExcessHitRate               *float64 `json:"excess_hit_rate,omitempty"`
+	AvgForwardReturnPct         *float64 `json:"avg_forward_return_pct,omitempty"`
+	AvgBenchmarkReturnPct       *float64 `json:"avg_benchmark_return_pct,omitempty"`
+	AvgExcessReturnPct          *float64 `json:"avg_excess_return_pct,omitempty"`
+	AvgMaxAdverseExcursionPct   *float64 `json:"avg_max_adverse_excursion_pct,omitempty"`
+	AvgMaxFavorableExcursionPct *float64 `json:"avg_max_favorable_excursion_pct,omitempty"`
+}
+
+type OpportunityBacktestClusterMetrics struct {
+	Name    string                     `json:"name"`
+	Metrics OpportunityBacktestMetrics `json:"metrics"`
+}
+
 type canaryBacktestAccumulator struct {
 	metrics         CanaryBacktestMetrics
 	signalLeadDays  int
@@ -212,6 +312,16 @@ type regimeBacktestAccumulator struct {
 	stressLeadCount int
 }
 
+type opportunityBacktestAccumulator struct {
+	metrics            OpportunityBacktestMetrics
+	forwardReturn      float64
+	benchmarkReturn    float64
+	excessReturn       float64
+	adverseExcursion   float64
+	favorableExcursion float64
+	outcomeCount       int
+}
+
 func runBacktest(_ context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "backtest")
 	inputPath := fs.String("input", "", "JSONL point-in-time observations")
@@ -220,8 +330,8 @@ func runBacktest(_ context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	rest := fs.Args()
-	if len(rest) != 1 || (rest[0] != "canary" && rest[0] != "regime") {
-		return fail(env, "backtest: usage: ibkr backtest canary|regime --input PATH [--json]")
+	if len(rest) != 1 || (rest[0] != "canary" && rest[0] != "regime" && rest[0] != "opportunity") {
+		return fail(env, "backtest: usage: ibkr backtest canary|regime|opportunity --input PATH [--json]")
 	}
 	if strings.TrimSpace(*inputPath) == "" {
 		return fail(env, "backtest: --input is required")
@@ -242,6 +352,17 @@ func runBacktest(_ context.Context, env *Env, args []string) int {
 			return printJSON(env, res)
 		}
 		return renderRegimeBacktestText(env, env.Stdout, &res)
+	}
+	if rest[0] == "opportunity" {
+		observations, err := readOpportunityBacktestObservations(f)
+		if err != nil {
+			return fail(env, "backtest: %v", err)
+		}
+		res := runOpportunityBacktest(observations, time.Now())
+		if *jsonOut {
+			return printJSON(env, res)
+		}
+		return renderOpportunityBacktestText(env, env.Stdout, &res)
 	}
 
 	observations, err := readCanaryBacktestObservations(f)
@@ -298,6 +419,37 @@ func readRegimeBacktestObservations(r io.Reader) ([]RegimeBacktestObservation, e
 			continue
 		}
 		var row RegimeBacktestObservation
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+		}
+		if row.Date == "" && row.AsOf.IsZero() {
+			return nil, fmt.Errorf("line %d: date or as_of is required", lineNo)
+		}
+		if row.Date != "" {
+			if _, err := time.Parse("2006-01-02", row.Date); err != nil {
+				return nil, fmt.Errorf("line %d: invalid date %q: %w", lineNo, row.Date, err)
+			}
+		}
+		out = append(out, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func readOpportunityBacktestObservations(r io.Reader) ([]OpportunityBacktestObservation, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	var out []OpportunityBacktestObservation
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var row OpportunityBacktestObservation
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
@@ -385,6 +537,40 @@ func runRegimeBacktest(observations []RegimeBacktestObservation, runAt time.Time
 	return res
 }
 
+func runOpportunityBacktest(observations []OpportunityBacktestObservation, runAt time.Time) OpportunityBacktestResult {
+	if runAt.IsZero() {
+		runAt = time.Now()
+	}
+	res := OpportunityBacktestResult{
+		RunAt:     runAt,
+		Policy:    "market-opportunity-outcome",
+		NotAdvice: "Backtest diagnostic only; not investment advice or a trade recommendation.",
+	}
+	total := &opportunityBacktestAccumulator{}
+	byCluster := map[string]*opportunityBacktestAccumulator{}
+	for _, obs := range observations {
+		row := runOpportunityBacktestObservation(obs)
+		res.Observations = append(res.Observations, row)
+		total.add(row)
+		cluster := cleanBacktestCluster(row.MarketCluster)
+		if byCluster[cluster] == nil {
+			byCluster[cluster] = &opportunityBacktestAccumulator{}
+		}
+		byCluster[cluster].add(row)
+	}
+	res.Metrics = total.result()
+	names := make([]string, 0, len(byCluster))
+	for name := range byCluster {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		res.Clusters = append(res.Clusters, OpportunityBacktestClusterMetrics{Name: name, Metrics: byCluster[name].result()})
+	}
+	res.Findings = opportunityBacktestFindings(res)
+	return res
+}
+
 func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestRowResult {
 	input, asOf := canaryBacktestInput(obs)
 	canary := ComputeCanary(input)
@@ -449,6 +635,30 @@ func runRegimeBacktestObservation(obs RegimeBacktestObservation) RegimeBacktestR
 	}
 }
 
+func runOpportunityBacktestObservation(obs OpportunityBacktestObservation) OpportunityBacktestRowResult {
+	asOf := opportunityBacktestAsOf(obs)
+	target := obs.Target.Opportunity
+	fired := obs.Signal.Fired
+	return OpportunityBacktestRowResult{
+		Date:              backtestDateLabel(obs.Date, asOf),
+		Case:              obs.Case,
+		MarketCluster:     cleanBacktestCluster(obs.MarketCluster),
+		Theme:             strings.TrimSpace(obs.Theme),
+		TargetOpportunity: target,
+		TargetKind:        obs.Target.Kind,
+		TargetScope:       cleanBacktestTargetScope(obs.Target.Scope),
+		SignalFired:       fired,
+		SignalKind:        obs.Signal.Kind,
+		SignalConfidence:  obs.Signal.Confidence,
+		TruePositive:      target && fired,
+		FalsePositive:     !target && fired,
+		Miss:              target && !fired,
+		PositiveExcess:    obs.Outcome.ExcessReturnPct > 0,
+		Trade:             obs.Trade,
+		Outcome:           obs.Outcome,
+	}
+}
+
 func canaryBacktestInput(obs CanaryBacktestObservation) (CanaryInput, time.Time) {
 	asOf := canaryBacktestAsOf(obs)
 	acct := obs.Account
@@ -493,6 +703,18 @@ func canaryBacktestAsOf(obs CanaryBacktestObservation) time.Time {
 }
 
 func regimeBacktestAsOf(obs RegimeBacktestObservation) time.Time {
+	if !obs.AsOf.IsZero() {
+		return obs.AsOf
+	}
+	if obs.Date != "" {
+		if t, err := time.Parse("2006-01-02", obs.Date); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func opportunityBacktestAsOf(obs OpportunityBacktestObservation) time.Time {
 	if !obs.AsOf.IsZero() {
 		return obs.AsOf
 	}
@@ -825,6 +1047,51 @@ func (a *regimeBacktestAccumulator) result() RegimeBacktestMetrics {
 	return m
 }
 
+func (a *opportunityBacktestAccumulator) add(row OpportunityBacktestRowResult) {
+	a.metrics.Observations++
+	if row.TargetOpportunity {
+		a.metrics.TargetOpportunity++
+	} else {
+		a.metrics.NonOpportunity++
+	}
+	if row.SignalFired {
+		a.metrics.SignalFired++
+		if row.PositiveExcess {
+			a.metrics.PositiveExcess++
+		} else {
+			a.metrics.NegativeExcess++
+		}
+		a.forwardReturn += row.Outcome.ForwardReturnPct
+		a.benchmarkReturn += row.Outcome.BenchmarkReturnPct
+		a.excessReturn += row.Outcome.ExcessReturnPct
+		a.adverseExcursion += row.Outcome.MaxAdverseExcursionPct
+		a.favorableExcursion += row.Outcome.MaxFavorableExcursionPct
+		a.outcomeCount++
+	}
+	switch {
+	case row.TruePositive:
+		a.metrics.TruePositive++
+	case row.FalsePositive:
+		a.metrics.FalsePositive++
+	case row.Miss:
+		a.metrics.Miss++
+	}
+}
+
+func (a *opportunityBacktestAccumulator) result() OpportunityBacktestMetrics {
+	m := a.metrics
+	m.Precision = ratioPtr(m.TruePositive, m.TruePositive+m.FalsePositive)
+	m.Recall = ratioPtr(m.TruePositive, m.TargetOpportunity)
+	m.FalseAlarmRate = ratioPtr(m.FalsePositive, m.NonOpportunity)
+	m.ExcessHitRate = ratioPtr(m.PositiveExcess, m.SignalFired)
+	m.AvgForwardReturnPct = avgFloatPtr(a.forwardReturn, a.outcomeCount)
+	m.AvgBenchmarkReturnPct = avgFloatPtr(a.benchmarkReturn, a.outcomeCount)
+	m.AvgExcessReturnPct = avgFloatPtr(a.excessReturn, a.outcomeCount)
+	m.AvgMaxAdverseExcursionPct = avgFloatPtr(a.adverseExcursion, a.outcomeCount)
+	m.AvgMaxFavorableExcursionPct = avgFloatPtr(a.favorableExcursion, a.outcomeCount)
+	return m
+}
+
 func ratioPtr(num, denom int) *float64 {
 	if denom == 0 {
 		return nil
@@ -838,6 +1105,14 @@ func avgPtr(sum, count int) *float64 {
 		return nil
 	}
 	v := float64(sum) / float64(count)
+	return &v
+}
+
+func avgFloatPtr(sum float64, count int) *float64 {
+	if count == 0 {
+		return nil
+	}
+	v := sum / float64(count)
 	return &v
 }
 
@@ -924,6 +1199,40 @@ func regimeBacktestFindings(res RegimeBacktestResult) []string {
 		}
 		if cm.WatchFalsePositive > 0 {
 			findings = append(findings, fmt.Sprintf("%s: %d watch false positive(s).", cluster.Name, cm.WatchFalsePositive))
+		}
+	}
+	return findings
+}
+
+func opportunityBacktestFindings(res OpportunityBacktestResult) []string {
+	m := res.Metrics
+	if m.Observations == 0 {
+		return []string{"No observations were loaded."}
+	}
+	var findings []string
+	if m.TargetOpportunity == 0 {
+		findings = append(findings, "No target opportunity rows were present; add labelled windows before reading precision or recall.")
+	} else if m.Miss == 0 {
+		findings = append(findings, "Opportunity signals caught every labelled opportunity row in this panel.")
+	} else {
+		findings = append(findings, fmt.Sprintf("Opportunity signals missed %d labelled opportunity row(s).", m.Miss))
+	}
+	if m.FalsePositive > 0 {
+		findings = append(findings, fmt.Sprintf("Opportunity signals fired on %d non-opportunity row(s); inspect chase-risk before tuning.", m.FalsePositive))
+	}
+	if m.SignalFired > 0 {
+		findings = append(findings, fmt.Sprintf("%d/%d fired signal row(s) had positive excess return versus benchmark.", m.PositiveExcess, m.SignalFired))
+	}
+	if m.AvgMaxAdverseExcursionPct != nil {
+		findings = append(findings, fmt.Sprintf("Average fired-signal adverse excursion was %s before the horizon exit.", formatBacktestPercentValue(*m.AvgMaxAdverseExcursionPct)))
+	}
+	for _, cluster := range res.Clusters {
+		cm := cluster.Metrics
+		if cm.Miss > 0 {
+			findings = append(findings, fmt.Sprintf("%s: %d missed opportunity row(s).", cluster.Name, cm.Miss))
+		}
+		if cm.FalsePositive > 0 {
+			findings = append(findings, fmt.Sprintf("%s: %d false opportunity row(s).", cluster.Name, cm.FalsePositive))
 		}
 	}
 	return findings
@@ -1050,11 +1359,78 @@ func renderRegimeBacktestText(env *Env, out io.Writer, r *RegimeBacktestResult) 
 	return 0
 }
 
+func renderOpportunityBacktestText(env *Env, out io.Writer, r *OpportunityBacktestResult) int {
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Opportunity Backtest  ·  %d observations  ·  policy %s\n", r.Metrics.Observations, r.Policy)
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %-12s %d opportunity / %d non-opportunity\n", "Targets", r.Metrics.TargetOpportunity, r.Metrics.NonOpportunity)
+	fmt.Fprintf(out, "  %-12s precision %s · recall %s · false alarms %s\n",
+		"Signal",
+		formatBacktestRate(r.Metrics.Precision),
+		formatBacktestRate(r.Metrics.Recall),
+		formatBacktestRate(r.Metrics.FalseAlarmRate),
+	)
+	fmt.Fprintf(out, "  %-12s hit %s · avg fwd %s · avg excess %s · avg adverse %s · avg favorable %s\n",
+		"Outcome",
+		formatBacktestRate(r.Metrics.ExcessHitRate),
+		formatBacktestPercent(r.Metrics.AvgForwardReturnPct),
+		formatBacktestPercent(r.Metrics.AvgExcessReturnPct),
+		formatBacktestPercent(r.Metrics.AvgMaxAdverseExcursionPct),
+		formatBacktestPercent(r.Metrics.AvgMaxFavorableExcursionPct),
+	)
+	fmt.Fprintln(out)
+
+	if len(r.Clusters) > 0 {
+		header := fmt.Sprintf("  %-28s %4s %4s %5s %4s %4s %4s %4s %8s",
+			"CLUSTER", "OBS", "OPP", "FIRED", "TP", "FP", "MISS", "HIT", "AVG EX")
+		fmt.Fprintln(out, env.dim(header))
+		fmt.Fprintln(out, env.dim(strings.Repeat("-", visibleLen(header))))
+		for _, cluster := range r.Clusters {
+			m := cluster.Metrics
+			fmt.Fprintf(out, "  %-28s %4d %4d %5d %4d %4d %4d %4d %8s\n",
+				truncateVisible(cluster.Name, 28),
+				m.Observations,
+				m.TargetOpportunity,
+				m.SignalFired,
+				m.TruePositive,
+				m.FalsePositive,
+				m.Miss,
+				m.PositiveExcess,
+				formatBacktestPercent(m.AvgExcessReturnPct),
+			)
+		}
+		fmt.Fprintln(out)
+	}
+	if len(r.Findings) > 0 {
+		fmt.Fprintln(out, "Findings")
+		for _, finding := range r.Findings {
+			fmt.Fprintf(out, "  - %s\n", finding)
+		}
+		fmt.Fprintln(out)
+	}
+	if r.NotAdvice != "" {
+		fmt.Fprintln(out, env.dim("  "+r.NotAdvice))
+		fmt.Fprintln(out)
+	}
+	return 0
+}
+
 func formatBacktestRate(v *float64) string {
 	if v == nil || math.IsNaN(*v) {
 		return "--"
 	}
 	return fmt.Sprintf("%.0f%%", *v*100)
+}
+
+func formatBacktestPercent(v *float64) string {
+	if v == nil || math.IsNaN(*v) {
+		return "--"
+	}
+	return formatBacktestPercentValue(*v)
+}
+
+func formatBacktestPercentValue(v float64) string {
+	return fmt.Sprintf("%+.1f%%", v)
 }
 
 func formatBacktestNumber(v *float64) string {

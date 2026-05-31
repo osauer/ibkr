@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,76 @@ func TestRunBacktestRegimeRendersText(t *testing.T) {
 	}
 }
 
+func TestOpportunityBacktestSampleProducesMarketOutcomeMetrics(t *testing.T) {
+	t.Parallel()
+	rows := readOpportunityBacktestFixture(t)
+	res := runOpportunityBacktest(rows, time.Date(2026, 5, 31, 12, 5, 0, 0, time.UTC))
+
+	if got, want := res.Metrics.Observations, 8; got != want {
+		t.Fatalf("observations = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.TargetOpportunity, 5; got != want {
+		t.Fatalf("target_opportunity = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.SignalFired, 6; got != want {
+		t.Fatalf("signal_fired = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.TruePositive, 4; got != want {
+		t.Fatalf("true_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.FalsePositive, 2; got != want {
+		t.Fatalf("false_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.Miss, 1; got != want {
+		t.Fatalf("miss = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.PositiveExcess, 4; got != want {
+		t.Fatalf("positive_excess = %d, want %d", got, want)
+	}
+	if res.Metrics.Recall == nil || *res.Metrics.Recall != 0.8 {
+		t.Fatalf("recall = %v, want 0.8", res.Metrics.Recall)
+	}
+	if res.Metrics.AvgExcessReturnPct == nil || math.Abs(*res.Metrics.AvgExcessReturnPct-64.25) > 0.01 {
+		t.Fatalf("avg_excess_return_pct = %v, want about 64.25", res.Metrics.AvgExcessReturnPct)
+	}
+	findings := strings.Join(res.Findings, "\n")
+	for _, want := range []string{
+		"missed 1 labelled opportunity",
+		"fired on 2 non-opportunity",
+		"4/6 fired signal row(s) had positive excess return",
+	} {
+		if !strings.Contains(findings, want) {
+			t.Fatalf("findings missing %q: %+v", want, res.Findings)
+		}
+	}
+}
+
+func TestRunBacktestOpportunityRendersText(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	code := Run(context.Background(), env, "backtest", []string{"opportunity", "--input", opportunityBacktestFixturePath(t)})
+	if code != 0 {
+		t.Fatalf("Run backtest returned %d, stderr:\n%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Opportunity Backtest",
+		"8 observations",
+		"Signal       precision 67%",
+		"Outcome      hit 67%",
+		"AI infrastructure opportunity",
+		"AI mega-cap fragility",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("opportunity backtest output missing %q:\n%s", want, out)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr should be empty, got:\n%s", stderr.String())
+	}
+}
+
 func readBacktestFixture(t *testing.T) []CanaryBacktestObservation {
 	t.Helper()
 	f, err := os.Open(backtestFixturePath(t))
@@ -184,6 +255,20 @@ func readRegimeBacktestFixture(t *testing.T) []RegimeBacktestObservation {
 	return rows
 }
 
+func readOpportunityBacktestFixture(t *testing.T) []OpportunityBacktestObservation {
+	t.Helper()
+	f, err := os.Open(opportunityBacktestFixturePath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rows, err := readOpportunityBacktestObservations(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
 func backtestFixturePath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join("testdata", "canary_backtest_sample.jsonl")
@@ -192,6 +277,11 @@ func backtestFixturePath(t *testing.T) string {
 func regimeBacktestFixturePath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join("testdata", "regime_backtest_sample.jsonl")
+}
+
+func opportunityBacktestFixturePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("testdata", "opportunity_backtest_sample.jsonl")
 }
 
 func clusterHasRebalanceWatch(res CanaryBacktestResult, name string) bool {

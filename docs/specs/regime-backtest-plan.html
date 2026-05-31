@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T11:34:00+02:00",
+    "dateModified": "2026-05-31T12:12:00+02:00",
     "description": "This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...",
     "headline": "Regime and Canary Backtest Plan",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="regime-and-canary-backtest-plan">Regime and Canary Backtest Plan</h1>
-<p><strong>Updated:</strong> 2026-05-31 11:34 CEST</p>
+<p><strong>Updated:</strong> 2026-05-31 12:12 CEST</p>
 <p>This plan defines the calibration work required before <code>ibkr regime</code> or <code>ibkr canary</code> may expose forecast probabilities. Until then, regime should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only; canary should continue to report monitor state, planner readiness, and data-quality blocks without pretending to forecast markets.</p>
 <p>The minimal implementation path is two-stage:</p>
 <ol>
@@ -217,8 +217,9 @@
 </ul>
 <p>The first committed harnesses are intentionally small:</p>
 <pre><code>ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
-ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl</code></pre>
-<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function for canary rows and scores compact <code>rpc.RegimeSnapshotResult</code> rows directly for regime rows, so neither harness requires TWS, the daemon, or market-data entitlements.</p>
+ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl
+ibkr backtest opportunity --input internal/cli/testdata/opportunity_backtest_sample.jsonl</code></pre>
+<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function for canary rows and scores compact <code>rpc.RegimeSnapshotResult</code> rows directly for regime rows. Opportunity rows score market-only signal/outcome fixtures and do not use account capacity, position sizing, margin, or order-placement assumptions. These harnesses do not require TWS, the daemon, or market-data entitlements.</p>
 <h2 id="target-stress-definitions">Target Stress Definitions</h2>
 <p>Test several targets rather than tune to one story:</p>
 <ul>
@@ -291,6 +292,10 @@ ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl<
 <li>Treat gamma as absent before the method existed unless historical option</li>
 </ul>
 <p>chains, OI, IV, and the exact method version can be reconstructed.</p>
+<ul>
+<li>Run regime scoring in <code>ex-gamma</code> mode first. Add <code>with-gamma</code> only for rows</li>
+</ul>
+<p>with trusted point-in-time gamma snapshots carrying source, method version, coverage, and warning metadata.</p>
 <ul>
 <li>Keep source outages and entitlement gaps as <code>unavailable</code>; do not forward-fill</li>
 </ul>
@@ -366,7 +371,27 @@ ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl<
 <li>EU/FX-exposed book.</li>
 </ul>
 <p>Backtest output should be read as &#34;how the monitor behaves,&#34; not as &#34;how the market is predicted.&#34;</p>
-<p>Opportunity posture is not scored in the first regime pass. Opportunity needs a separate target definition, for example forward rebound or volatility crush conditional on clean risk budget and deployable portfolio capacity. Until that exists, the harness should log constructive/opportunity posture but not tune against it.</p>
+<h2 id="opportunity-scoring">Opportunity Scoring</h2>
+<p>Score market opportunity separately from regime and canary. Opportunity backtests answer &#34;did the market produce a detectable opportunity, and what happened to a standardized trade if the signal fired?&#34; They must not use the user&#39;s historical account capacity, position sizing, margin, or order choice; those belong to risk-manager and order-entry.</p>
+<p>Minimal opportunity rows carry:</p>
+<ul>
+<li><code>signal.fired</code>, <code>signal.kind</code>, and optional signal confidence.</li>
+<li><code>trade.instrument</code>, entry rule, horizon, and benchmark.</li>
+<li><code>outcome.forward_return_pct</code>, benchmark return, excess return, max adverse</li>
+</ul>
+<p>excursion, and max favorable excursion.</p>
+<ul>
+<li><code>target.opportunity</code>, scope, and kind.</li>
+</ul>
+<p>Minimal opportunity metrics:</p>
+<ul>
+<li>Signal precision and recall against labelled opportunity windows.</li>
+<li>False opportunity rate on labelled non-opportunity/chase-risk windows.</li>
+<li>Hit rate: fired signals with positive excess return versus benchmark.</li>
+<li>Average forward return, benchmark return, excess return, max adverse</li>
+</ul>
+<p>excursion, and max favorable excursion for fired signals.</p>
+<p>AI infrastructure should be split into two cohorts: <code>AI mega-cap fragility</code> for narrow breadth, valuation, and chase-risk, and <code>AI infrastructure opportunity</code> for semis, data-center power/cooling, grid construction, energy, and networking. Prefer baskets or explicitly declared as-of universes for later data-builder work to reduce survivor bias.</p>
 <h2 id="weaknesses-to-watch">Weaknesses To Watch</h2>
 <p>This pass should surface these issues but not fix them:</p>
 <ul>
