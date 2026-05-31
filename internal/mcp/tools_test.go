@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/internal/risk"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -374,7 +375,8 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	ratio := 0.91
 	vix := 14.5
 	res := rpc.RegimeSnapshotResult{
-		AsOf: now,
+		AsOf:        now,
+		Fingerprint: rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime"},
 		VIXTermStructure: rpc.RegimeVIXTerm{
 			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
 				Band:       "green",
@@ -423,6 +425,10 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatalf("re-decode: %v", err)
 	}
+	fp, ok := wire["fingerprint"].(map[string]any)
+	if !ok || fp["version"] != rpc.RegimeFingerprintVersion || fp["key"] == "" {
+		t.Fatalf("fingerprint missing or malformed: %#v", wire["fingerprint"])
+	}
 	// Top-level composite key + nested verdict — agents read this
 	// path to display the headline.
 	comp, ok := wire["composite"].(map[string]any)
@@ -469,5 +475,71 @@ func TestIbkrRegimeResponseHasCompositeStreaksQuality(t *testing.T) {
 		if _, ok := vixRow[key]; !ok {
 			t.Errorf("vix_term_structure.%s missing (agent compact metadata)", key)
 		}
+	}
+}
+
+func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
+	t.Parallel()
+	res := rpc.CanaryResult{
+		AsOf:        time.Date(2026, 5, 31, 8, 45, 0, 0, time.UTC),
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:canary"},
+		SourceFingerprints: rpc.CanarySourceFingerprints{
+			Regime: &rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime"},
+		},
+		Policy:           "canary-default",
+		Direction:        risk.DirectionDefensive,
+		Severity:         risk.SeverityWatch,
+		PlannerModeHint:  risk.PlannerModeStage,
+		PlannerReadiness: risk.PlannerReadinessPrestage,
+		Summary:          "Freeze new risk.",
+		Confidence:       "medium",
+		DataConfidence:   "high",
+		SignalConfidence: "medium",
+		PrimaryDrivers:   []risk.SignalID{risk.SignalMarginCushionLow},
+		Signals:          []risk.Signal{{ID: risk.SignalMarginCushionLow, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch}},
+		Rows:             []rpc.CanaryRow{{Title: "Portfolio canary", Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Guidance: "Freeze new risk."}},
+		Portfolio:        rpc.CanaryPortfolioSummary{BaseCurrency: "USD", NetLiquidation: 100_000},
+		Market:           rpc.CanaryMarketSummary{RegimeVerdict: "Normal regime", RankedClusters: 6},
+		Warnings:         []string{"stale clusters: vol"},
+		NotExecution:     "Read-only recommendation; no orders are placed by ibkr.",
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	for _, key := range []string{
+		"fingerprint",
+		"source_fingerprints",
+		"policy",
+		"direction",
+		"severity",
+		"planner_mode_hint",
+		"planner_readiness",
+		"primary_drivers",
+		"signals",
+		"portfolio",
+		"market",
+		"warnings",
+		"not_execution",
+	} {
+		if _, ok := wire[key]; !ok {
+			t.Errorf("canary JSON missing %s: %s", key, b)
+		}
+	}
+	fp, ok := wire["fingerprint"].(map[string]any)
+	if !ok || fp["version"] != rpc.CanaryFingerprintVersion || fp["key"] == "" {
+		t.Fatalf("fingerprint missing or malformed: %#v", wire["fingerprint"])
+	}
+	sources, ok := wire["source_fingerprints"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_fingerprints missing: %s", b)
+	}
+	regime, ok := sources["regime"].(map[string]any)
+	if !ok || regime["version"] != rpc.RegimeFingerprintVersion || regime["key"] == "" {
+		t.Fatalf("source_fingerprints.regime missing or malformed: %#v", sources["regime"])
 	}
 }

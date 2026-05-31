@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-30 08:18 CEST
+**Last update:** 2026-05-31 08:21 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -130,8 +130,8 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 ### Monitor-triggered response
 
 1. A scheduler runs canary, for example every 10 minutes.
-2. Canary emits alert direction, severity, and fired shared signals.
-3. Monitor policy decides whether to call risk-plan.
+2. Canary emits `fingerprint`, `source_fingerprints.regime`, alert direction, severity, and fired shared signals.
+3. Monitor policy dedupes by `canary.fingerprint.key` and decides whether to call risk-plan.
 4. Risk-plan refreshes live state and rechecks the same policy criteria.
 5. Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.
 6. If the alert resolved, the plan says no action is currently required.
@@ -140,6 +140,16 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 9. Order preview validates selected candidate IDs against the current trading gate and order-entry capability.
 10. Execution, when implemented, is owned by trading/order-entry and requires explicit approval plus fresh validation.
 11. Canary runs again after action to confirm the portfolio state.
+
+The monitor must not recompute its own hash over raw JSON. `canary.fingerprint` is the semantic alert identity; `source_fingerprints.regime` records which classified regime snapshot the canary consumed. A repeated unchanged fingerprint updates `last_seen` but does not create another alert. A changed fingerprint, recovery to observe/no-action, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.
+
+Three opt-in monitor shapes stay intentionally outside the daemon:
+
+- Agentic scheduled MCP loop: a scheduler calls `ibkr_canary` once, preserves the fingerprint, and wakes a human/risk-plan workflow only on transitions.
+- Workflow/cron CLI loop: `ibkr canary --json` writes a small state file and sends a webhook/local notification only when the fingerprint changes or recovery occurs.
+- Small code loop later: `ibkr monitor canary --every 5m --notify webhook:...` can standardize state, signing, retries, and repeat TTLs without adding daemon push/subscriber state.
+
+Webhook delivery is an alert boundary, not execution authority. A receiver may verify the webhook, dedupe by fingerprint, fetch fresh account/positions/regime/canary, and open a human or risk-plan review. The webhook must not carry order drafts, quantities, strikes, expiries, preview tokens, nonces, broker order IDs, or submit eligibility.
 
 ### User-requested response
 
@@ -295,6 +305,5 @@ Suggested order:
 
 - What exact thresholds should the first asset-class and market buckets use?
 - What exact clean-risk-budget criteria make a constructive signal deployable rather than merely euphoric?
-- Should monitor trigger context be flags, a small artifact, or both?
 - How long should recent candidate history be retained for duplicate suppression?
 - What evidence should let an expert reviewer mark a stale plan safe to rerun instead of creating a new candidate?

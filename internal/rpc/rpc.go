@@ -230,6 +230,14 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+// Fingerprint is a semantic identity for alert/dedupe surfaces. The Key is a
+// stable sha256 over classified state, not raw prices, timestamps, or rendered
+// prose. Monitors should use it to suppress duplicate alerts.
+type Fingerprint struct {
+	Version string `json:"version"`
+	Key     string `json:"key"`
+}
+
 // Error implements the error interface so callers can return *Error.
 func (e *Error) Error() string {
 	if e == nil {
@@ -1607,6 +1615,7 @@ type RegimeSnapshotParams struct{}
 // distinguishable.
 type RegimeSnapshotResult struct {
 	AsOf             time.Time              `json:"as_of"`
+	Fingerprint      Fingerprint            `json:"fingerprint"`
 	Summary          RegimeSummary          `json:"summary"`
 	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
 	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`

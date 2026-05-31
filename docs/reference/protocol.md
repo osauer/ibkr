@@ -1,10 +1,22 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-05-25 13:40 CEST
+Last reviewed: 2026-05-31 08:21 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
 Order-writing methods exist only for wire-format completeness and downstream forks. Default builds return `pkg/ibkr.ErrTradingDisabled` before any order write reaches the socket; intentionally order-capable forks must rebuild with `-tags trading`. The shipped daemon, CLI, MCP server, and Claude plugin expose no order interface.
+
+## Semantic fingerprints
+
+Decision surfaces that are useful to monitors expose a semantic `fingerprint` object:
+
+```json
+{"version": "canary-fp-v1", "key": "sha256:..."}
+```
+
+The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.
+
+`regime.snapshot` emits `regime-fp-v1` from indicator bands/statuses, composite counts, warning codes/scopes/severities, high-level data quality, and gamma/breadth semantic state. `canary` emits `canary-fp-v1` from policy, direction, severity, planner mode/readiness, confidence classes, primary drivers, signal semantics, classified market state, row titles/states, and `source_fingerprints.regime`.
 
 | Capability | Wire opcodes | Library entry point | Status |
 |---|---|---|---|
