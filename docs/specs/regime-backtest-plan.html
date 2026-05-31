@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T09:08:00+02:00",
+    "dateModified": "2026-05-31T11:34:00+02:00",
     "description": "This plan defines the calibration work required before ibkr regime or ibkr canary may expose forecast probabilities. Until then, regime should continue to...",
     "headline": "Regime and Canary Backtest Plan",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="regime-and-canary-backtest-plan">Regime and Canary Backtest Plan</h1>
-<p><strong>Updated:</strong> 2026-05-31 09:08 CEST</p>
+<p><strong>Updated:</strong> 2026-05-31 11:34 CEST</p>
 <p>This plan defines the calibration work required before <code>ibkr regime</code> or <code>ibkr canary</code> may expose forecast probabilities. Until then, regime should continue to report evidence balance, risk score, confidence, bands, and scoped warnings only; canary should continue to report monitor state, planner readiness, and data-quality blocks without pretending to forecast markets.</p>
 <p>The minimal implementation path is two-stage:</p>
 <ol>
@@ -215,9 +215,10 @@
 <ul>
 <li><code>target</code>: labelled forward stress window for evaluation, not for model input.</li>
 </ul>
-<p>The first committed harness is intentionally small:</p>
-<pre><code>ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl</code></pre>
-<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function directly, so it does not require TWS, the daemon, or market-data entitlements.</p>
+<p>The first committed harnesses are intentionally small:</p>
+<pre><code>ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
+ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl</code></pre>
+<p>Each JSONL line is one point-in-time observation. The runner calls the pure <code>ComputeCanary</code> function for canary rows and scores compact <code>rpc.RegimeSnapshotResult</code> rows directly for regime rows, so neither harness requires TWS, the daemon, or market-data entitlements.</p>
 <h2 id="target-stress-definitions">Target Stress Definitions</h2>
 <p>Test several targets rather than tune to one story:</p>
 <ul>
@@ -316,6 +317,24 @@
 </ul>
 <p>label, regardless of green row count.</p>
 <p>Promote a learned weight only if it improves out-of-sample utility without making stale/unavailable critical rows look safer than they are.</p>
+<h2 id="regime-scoring">Regime Scoring</h2>
+<p>Score regime before canary tuning:</p>
+<ul>
+<li>Watch recall: any <code>Elevated stress watch</code>, <code>Stress signal present</code>, or worse</li>
+</ul>
+<p>before labelled market stress.</p>
+<ul>
+<li>Red-cluster stress precision and recall: any red cluster with sufficient</li>
+</ul>
+<p>ranked coverage before labelled market stress.</p>
+<ul>
+<li>False-alarm rate on labelled non-stress market windows.</li>
+<li>Miss rate on labelled market-stress windows.</li>
+<li>Average lead time when the labelled window carries <code>days_to_stress</code>.</li>
+<li>Coverage and data-quality watches: insufficient ranked clusters, stale rows,</li>
+</ul>
+<p>computing rows, unavailable rows, degraded gamma, and warning details.</p>
+<p>Rows with <code>target.scope</code> outside broad market or cross-asset stress, for example single-name meme squeezes or portfolio-only concentration shocks, are reported as out-of-scope for regime precision/recall. They still belong in the panel so post-2020 retail/crowding behavior is visible, but they should be owned by canary/portfolio logic rather than counted as regime misses.</p>
 <h2 id="canary-scoring">Canary Scoring</h2>
 <p>Score canary separately from regime:</p>
 <ul>
@@ -347,6 +366,7 @@
 <li>EU/FX-exposed book.</li>
 </ul>
 <p>Backtest output should be read as &#34;how the monitor behaves,&#34; not as &#34;how the market is predicted.&#34;</p>
+<p>Opportunity posture is not scored in the first regime pass. Opportunity needs a separate target definition, for example forward rebound or volatility crush conditional on clean risk budget and deployable portfolio capacity. Until that exists, the harness should log constructive/opportunity posture but not tune against it.</p>
 <h2 id="weaknesses-to-watch">Weaknesses To Watch</h2>
 <p>This pass should surface these issues but not fix them:</p>
 <ul>
@@ -374,7 +394,7 @@
 <p>Keep this document as the canonical source for both regime and canary backtest methodology. Later, retire or collapse duplicate canary/regime prose in agentic-use guides, MCP marketing pages, and older design docs into short links here. Generated <code>.html</code> companions remain generated artifacts, not source documents.</p>
 <h2 id="current-recommendation">Current Recommendation</h2>
 <p>Keep the present threshold labels marked <code>heuristic: true</code> and <code>pending_backtest: true</code>. Do not add forecast probabilities.</p>
-<p>The next useful implementation step after the minimal canary replay harness is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a strict walk-forward scorer for the targets above.</p>
+<p>The next useful implementation step after the minimal canary and regime replay harnesses is a point-in-time data builder that writes one compact daily JSONL row matching the live <code>ibkr regime --json</code> shape, followed by a strict walk-forward scorer for the targets above.</p>
   </main>
   <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>
