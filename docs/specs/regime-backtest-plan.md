@@ -1,6 +1,6 @@
 # Regime and Canary Backtest Plan
 
-**Updated:** 2026-05-31 09:08 CEST
+**Updated:** 2026-05-31 11:34 CEST
 
 This plan defines the calibration work required before `ibkr regime` or
 `ibkr canary` may expose forecast probabilities. Until then, regime should
@@ -56,15 +56,17 @@ Canary backtests should consume the same live contracts the monitor uses:
   bands.
 - `target`: labelled forward stress window for evaluation, not for model input.
 
-The first committed harness is intentionally small:
+The first committed harnesses are intentionally small:
 
 ```bash
 ibkr backtest canary --input internal/cli/testdata/canary_backtest_sample.jsonl
+ibkr backtest regime --input internal/cli/testdata/regime_backtest_sample.jsonl
 ```
 
 Each JSONL line is one point-in-time observation. The runner calls the pure
-`ComputeCanary` function directly, so it does not require TWS, the daemon, or
-market-data entitlements.
+`ComputeCanary` function for canary rows and scores compact
+`rpc.RegimeSnapshotResult` rows directly for regime rows, so neither harness
+requires TWS, the daemon, or market-data entitlements.
 
 ## Target Stress Definitions
 
@@ -160,6 +162,26 @@ Test cluster logic separately from row thresholds:
 Promote a learned weight only if it improves out-of-sample utility without
 making stale/unavailable critical rows look safer than they are.
 
+## Regime Scoring
+
+Score regime before canary tuning:
+
+- Watch recall: any `Elevated stress watch`, `Stress signal present`, or worse
+  before labelled market stress.
+- Red-cluster stress precision and recall: any red cluster with sufficient
+  ranked coverage before labelled market stress.
+- False-alarm rate on labelled non-stress market windows.
+- Miss rate on labelled market-stress windows.
+- Average lead time when the labelled window carries `days_to_stress`.
+- Coverage and data-quality watches: insufficient ranked clusters, stale rows,
+  computing rows, unavailable rows, degraded gamma, and warning details.
+
+Rows with `target.scope` outside broad market or cross-asset stress, for
+example single-name meme squeezes or portfolio-only concentration shocks, are
+reported as out-of-scope for regime precision/recall. They still belong in the
+panel so post-2020 retail/crowding behavior is visible, but they should be
+owned by canary/portfolio logic rather than counted as regime misses.
+
 ## Canary Scoring
 
 Score canary separately from regime:
@@ -187,6 +209,12 @@ Use synthetic portfolio overlays to isolate policy behavior:
 
 Backtest output should be read as "how the monitor behaves," not as "how the
 market is predicted."
+
+Opportunity posture is not scored in the first regime pass. Opportunity needs a
+separate target definition, for example forward rebound or volatility crush
+conditional on clean risk budget and deployable portfolio capacity. Until that
+exists, the harness should log constructive/opportunity posture but not tune
+against it.
 
 ## Weaknesses To Watch
 
@@ -217,7 +245,7 @@ documents.
 Keep the present threshold labels marked `heuristic: true` and
 `pending_backtest: true`. Do not add forecast probabilities.
 
-The next useful implementation step after the minimal canary replay harness is
-a point-in-time data builder that writes one compact daily JSONL row matching
-the live `ibkr regime --json` shape, followed by a strict walk-forward scorer
-for the targets above.
+The next useful implementation step after the minimal canary and regime replay
+harnesses is a point-in-time data builder that writes one compact daily JSONL
+row matching the live `ibkr regime --json` shape, followed by a strict
+walk-forward scorer for the targets above.
