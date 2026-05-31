@@ -3,16 +3,17 @@ name: ibkr
 description: Query Interactive Brokers via the local `ibkr` CLI. Use when the user asks
   about their IBKR account, positions, P&L, market quotes, option chains (incl. per-leg
   open interest), official market calendars, local watchlist, daily price history, technical/relative-strength screens, running a market scan, sizing a planned trade by
-  fixed-fractional risk, or checking the market's risk regime (S&P 500 breadth, combined
-  SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the eight-row
-  regime dashboard). Read-only — never attempts to place orders.
+  fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
+  SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
+  regime dashboard), or checking portfolio-aware canary stress lifecycle. Read-only —
+  never attempts to place orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr status*) Bash(ibkr version*)
+  Bash(ibkr canary*) Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-26 20:12 CEST
+Updated: 2026-05-31 21:23 CEST
 
 ## When to use
 
@@ -24,9 +25,15 @@ If the user asks about the *market environment* — "is the market risky today?"
 "what's the regime?", "where's dealer gamma?", "how broad is the rally?" — reach
 for `ibkr regime` (all eight indicator rows in one call), `ibkr breadth` (S&P 500
 stocks-above-50DMA), or `ibkr gamma` (combined SPY+SPX dealer zero-gamma, with
-per-index detail under `per_index`). The threshold bands are intentionally not
-green/yellow/red-coded on the wire; the consumer applies the spec's tunable
-cuts.
+per-index detail under `per_index`). `ibkr regime` is broad-market only; it emits
+row bands, source health, semantic fingerprints, and a lifecycle stage rather
+than portfolio advice.
+
+If the user asks whether *their portfolio* needs attention under the current
+account, positions, exposures, regime, margin, concentration, options, or data
+quality state, run `ibkr canary --json`. Canary answers quiet/watch/act/
+rebalance/opportunity/data-quality posture and readiness for downstream
+risk-plan orchestration. It does not choose hedges, size trades, or execute.
 
 If the user asks anything that implies *placing* an order (buy, sell, cancel,
 "close my position"), refuse and explain that `ibkr` is read-only in this
@@ -77,7 +84,8 @@ release. Do not invent or simulate trade execution.
 | `ibkr size --symbol SYM --entry F --stop F` | Fixed-fractional position sizing pegged to live NLV | [schemas.md#size](schemas.md#size) |
 | `ibkr breadth` | S&P 500 stocks-above-50DMA reading (the S5FI metric, computed locally) | [schemas.md#breadth](schemas.md#breadth) |
 | `ibkr gamma` | SPY+SPX combined dealer zero-gamma estimate (heavy compute; first call per NY trading day kicks a background job) | [schemas.md#gamma](schemas.md#gamma) |
-| `ibkr regime` | Risk-regime snapshot: equity vol, credit, funding, FX carry, SPY+SPX gamma, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
+| `ibkr regime` | Broad-market stress lifecycle: equity vol, credit, funding, FX carry, SPY+SPX gamma, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
+| `ibkr canary` | Portfolio-aware stress lifecycle, source health, fingerprints, and planner readiness | [schemas.md#canary](schemas.md#canary) |
 | `ibkr version` | Print version, commit, build date, binary path | — |
 
 Add `--json` to any command for parseable output. Flags can come after positional
@@ -111,9 +119,12 @@ symbols — the CLI hoists them automatically.
 - `ibkr gamma [--only=spy|spx] [--no-wait] [--force] [--explain] [--json] [--profiles]` — dealer-gamma market-structure snapshot for SPY, SPX, or the default SPY+SPX view. The ready JSON leads with `result.summary.primary_statement`, `zero_gamma_status`, `regime`, `confidence`, `not_advice`, and `summary.per_index`. In combined scope there is **no top-level combined zero-gamma price** because SPY and SPX use different price scales; read `summary.per_index.SPY` and `summary.per_index.SPX` for per-underlying spot, zero, swept range, and regime. `leg_count` means legs with non-zero OI-weighted GEX; `priced_leg_count` means legs that priced/fit IV but may not have usable OI. Non-fatal issues are in `warning_details` with scoped prose, not raw warning tokens. `gamma_total_abs` and `top_strikes` are sign-agnostic concentration/magnitude diagnostics. The signed zero-gamma convention is a regime hint, not advice or a trade level. Compute is heavy — the first NY-session call may return `status: "computing"` with ETA/progress; later calls return cached.
   - **MCP params** (CLI flags map to the same JSON keys when calling `ibkr_gamma` via MCP): `scope` (`"spy" | "spx" | "spy+spx"`; default `"spy+spx"`); `wait_ms` (integer ms, default 0); `force` (boolean; diagnostics); `include_profiles` (boolean; default false, include sweep arrays only for charting).
   - **CLI-only flags**: `--explain` (methodology + horizon breakdown), `--no-wait` (CLI sugar for `wait_ms: 0`), `--only` (CLI alias for `scope`), `--profiles` (include profile arrays in `--json`; default JSON strips them).
-- `ibkr regime [--explain] [--watch [--rate 5m]] [--log PATH] [--json]` — single-call risk-regime dashboard: eight rows across equity vol (VIX/VIX3M + VVIX), credit (HYG/SPY + official HY/IG OAS), funding stress (CP/T-bill spread), USD/JPY, combined SPY+SPX dealer zero-gamma, and SPX breadth. Text leads with `summary.label`, cluster evidence, raw indicator evidence, and a punch line, then the eight-row audit table with an `AS OF` column (`live`, `15m delayed`, `close D-1`, `cached 11:42`, `unavailable`). Default JSON/MCP is compact: it keeps `summary`, `composite` raw + cluster counts, raw measurements, per-row `band`, `band_reason`, `thresholds`, `as_of`, `streak`, `*_quality`, and `warning_details`, but omits long methodology `notes` and breadth history. Use `--explain` for the full text methodology view, or `--json --explain` when a JSON consumer explicitly needs notes. `warning_details` is the agent-preferred failure path with scoped `{message, impact, action}` prose. Per-indicator rows carry `streak: {band, sessions, since}` only when the current row is rankable; unavailable/computing/error rows freeze the store internally but do not expose a stale prior-band streak. Expect these failure modes on a fresh daemon: gamma may return `status: "computing"` with `eta_seconds`; breadth can do the same during the IBKR-paced cold start; official Cboe/FRED daily rows can be temporarily unavailable when those sites are unreachable. MOVE/rates-vol is absent until a verified IBKR contract or licensed official connector exists, and must not be proxied with ETFs or futures. `--watch` re-polls every 5 minutes by default. `--log PATH` appends each fetched snapshot to a JSONL file at `<path>`.
+- `ibkr regime [--explain] [--watch [--rate 5m]] [--log PATH] [--json]` — single-call broad-market stress-lifecycle dashboard: eight rows across equity vol (VIX/VIX3M + VVIX), credit (HYG/SPY + official HY/IG OAS), funding stress (CP/T-bill spread), USD/JPY, combined SPY+SPX dealer zero-gamma, and SPX breadth. Text leads with `summary.label`, cluster evidence, lifecycle stage/readiness, and a punch line, then the eight-row audit table with an `AS OF` column (`live`, `15m delayed`, `close D-1`, `cached 11:42`, `unavailable`). Default JSON/MCP is compact: it keeps `fingerprint`, `lifecycle`, `source_health`, `summary`, `composite` raw + cluster counts, raw measurements, per-row `band`, `band_reason`, `thresholds`, `as_of`, `streak`, `*_quality`, `data_quality`, and `warning_details`, but omits long methodology `notes` and breadth history. Use `--explain` for the full text methodology view, or `--json --explain` when a JSON consumer explicitly needs notes. `warning_details` is the agent-preferred failure path with scoped `{message, impact, action}` prose. Per-indicator rows carry `streak: {band, sessions, since}` only when the current row is rankable; unavailable/computing/error rows freeze the store internally but do not expose a stale prior-band streak. Expect these failure modes on a fresh daemon: gamma may return `status: "computing"` with `eta_seconds`; breadth can do the same during the IBKR-paced cold start; official Cboe/FRED daily rows can be temporarily unavailable when those sites are unreachable. MOVE/rates-vol is absent until a verified IBKR contract or licensed official connector exists, and must not be proxied with ETFs or futures. `--watch` re-polls every 5 minutes by default. `--log PATH` appends each fetched snapshot to a JSONL file at `<path>`.
   - **MCP params**: none (the `ibkr_regime` MCP tool takes no arguments — the envelope always carries all eight indicator rows).
   - **CLI-only flags**: `--explain` (per-row streak/quality/methodology in the text view), `--watch` / `--rate` (auto-poll), `--log` (append JSONL trace).
+- `ibkr canary [--json]` — portfolio-aware stress lifecycle for scheduled or manual risk checks. It consumes live account, positions, exposures, concentration, option-Greek coverage, margin, daily P&L, and `ibkr regime`, then emits `lifecycle`, `direction`, `portfolio_posture`, `severity`, `planner_mode_hint`, `planner_readiness`, `signals[]`, `source_health[]`, `source_fingerprints`, and stable `fingerprint`. Use `planner_readiness: "blocked"` and data-quality signals as hard gates before asking any downstream risk-plan to propose major actions. `source_fingerprints.account`, `.positions`, and `.regime` are semantic-bucket hashes for monitor dedupe and orchestration provenance. `lifecycle.stage` can be `quiet`, `early_warning`, `confirmed_stress`, `panic`, `forced_defense`, `stabilization`, `opportunity`, or `data_quality`. This command is read-only: it does not select hedges, size trades, preview orders, or execute.
+  - **MCP params**: none (the `ibkr_canary` MCP tool fetches account, positions, and regime itself).
+  - **CLI-only flags**: `--json`.
 - `ibkr size --symbol SYM --entry F --stop F [--target F] [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]` — fixed-fractional sizing. Reads NLV from `account.summary` so `risk_pct` is pegged to the live account. `--fx` converts the base-currency risk budget into the trade's quote currency (e.g. `--fx 1.085` for a USD trade against an EUR account); default `1.0` is correct for same-currency trades. `--lot` rounds shares down (use `100` for one option contract's worth of stock). `--target` is optional: when set, the response also carries `r` (reward-to-risk multiple = `|target − entry| / |entry − stop|`; the standard "is this trade worth taking" filter, ≥ 2R typical), `reward_quote`, `reward_base`, and `breakeven_win_rate` (= `1 / (1 + R)`). Output `status` is `ok` | `tight_risk` (budget < per-share risk × lot — widen the stop or raise risk-pct) | `exceeds_buying_power`. The CLI never derives entry/stop/target from quotes — those are the user's trade plan; if the user asks "and what about the current price?" run `ibkr quote SYM --json` separately.
 
 ## Errors

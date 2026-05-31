@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-29T12:46:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "ibkr mcp is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed,...",
     "headline": "IBKR MCP server",
     "isPartOf": {
@@ -157,9 +157,9 @@
   </header>
   <main class="wrap doc">
 <h1 id="ibkr-mcp-server">IBKR MCP server</h1>
-<p>Updated: 2026-05-29 12:46 CEST</p>
+<p>Updated: 2026-05-31 21:23 CEST</p>
 <p><code>ibkr mcp</code> is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).</p>
-<p>Use this page when you searched for &#34;IBKR MCP&#34;, &#34;ibkr mcp server&#34;, or &#34;Interactive Brokers MCP&#34;. If your exact query was &#34;ibkr mcp tws&#34;, use the <a href="../ibkr-mcp-tws/index.html">IBKR MCP TWS setup</a> page. The short version: install the <code>ibkr</code> binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.</p>
+<p>Use this page when you searched for &#34;IBKR MCP&#34;, &#34;ibkr mcp server&#34;, or &#34;Interactive Brokers MCP&#34;. If your exact query was &#34;ibkr mcp tws&#34;, use the <a href="../ibkr-mcp-tws/index.html">IBKR MCP TWS setup</a> page. The short version: install the <code>ibkr</code> binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, portfolio canary lifecycle, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.</p>
 <h2 id="best-fit">Best fit</h2>
 <ul>
 <li>You want an IBKR MCP server that works locally through stdio.</li>
@@ -188,11 +188,11 @@ ibkr setup claude-desktop</code></pre>
 <li>Snapshot stock and ETF quotes, daily history, previous close, and quote freshness.</li>
 <li>Official market calendars for US equities, US listed options, and Xetra.</li>
 <li>Option expiries, implied volatility, expected moves, strike grids, deltas, and open interest.</li>
-<li>Market scanners, fixed-fractional position sizing, S&amp;P 500 breadth, SPY+SPX dealer gamma, an eight-row risk-regime dashboard, and the <code>ibkr_canary</code> scheduled stress-check tool.</li>
+<li>Market scanners, fixed-fractional position sizing, S&amp;P 500 breadth, SPY+SPX dealer gamma, broad-market regime lifecycle, and the <code>ibkr_canary</code> portfolio-aware stress-lifecycle tool.</li>
 <li>Streaming stock and ETF quote resources through <code>ibkr://quote/{symbol}</code>.</li>
 </ul>
 <p>The full schema is in the <a href="../reference/mcp-tools.html">MCP tools reference</a> and <a href="../reference/mcp-resources.html">MCP resources reference</a>.</p>
-<p>For a scheduled canary workflow that returns the top stage, confidence, action, row table, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>. The first version is intentionally narrow: it gives the decision surface, while circuit breakers, notifications, and escalation policy can live in the host scheduler or a later <code>ibkr</code> release.</p>
+<p>For a scheduled canary workflow that returns lifecycle stage, readiness, confidence, source health, fingerprints, row table, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>. The first version is intentionally narrow: it gives the decision surface, while circuit breakers, notifications, and escalation policy can live in the host scheduler or a later <code>ibkr</code> release.</p>
 <h2 id="current-execution-boundary">Current execution boundary</h2>
 <p>The current bundled CLI and MCP server expose analysis and sizing tools. They do not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If a host asks to buy or sell securities through this MCP server, the correct answer is that the current public server has no order-entry interface.</p>
 <h2 id="related-pages">Related pages</h2>

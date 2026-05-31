@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	RegimeFingerprintVersion = "regime-fp-v1"
-	CanaryFingerprintVersion = "canary-fp-v1"
+	RegimeFingerprintVersion    = "regime-fp-v1"
+	AccountFingerprintVersion   = "account-fp-v1"
+	PositionsFingerprintVersion = "positions-fp-v1"
+	CanaryFingerprintVersion    = "canary-fp-v1"
 )
 
 // BuildRegimeFingerprint returns the semantic identity of a regime snapshot.
@@ -51,6 +53,8 @@ func BuildRegimeFingerprint(r *RegimeSnapshotResult) Fingerprint {
 		},
 		Gamma:       buildRegimeGammaFingerprint(r.GammaZero),
 		Breadth:     buildRegimeBreadthFingerprint(r.Breadth),
+		Lifecycle:   lifecycleFingerprintProjectionFromState(r.Lifecycle),
+		Sources:     sourceHealthFingerprints(r.SourceHealth),
 		Warnings:    regimeWarningFingerprints(r.WarningDetails),
 		DataQuality: dataQualityFingerprints(r.DataQuality),
 	}
@@ -90,6 +94,14 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 			DegradedClusters:   cleanSorted(r.Market.DegradedClusters),
 			StaleClusters:      cleanSorted(r.Market.StaleClusters),
 		},
+		Lifecycle: lifecycleFingerprintProjectionFromState(r.Lifecycle),
+		Sources:   sourceHealthFingerprints(r.SourceHealth),
+	}
+	if r.SourceFingerprints.Account != nil {
+		projection.Source.Account = *r.SourceFingerprints.Account
+	}
+	if r.SourceFingerprints.Positions != nil {
+		projection.Source.Positions = *r.SourceFingerprints.Positions
 	}
 	if r.SourceFingerprints.Regime != nil {
 		projection.Source.Regime = *r.SourceFingerprints.Regime
@@ -97,13 +109,130 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 	return semanticFingerprint(CanaryFingerprintVersion, projection)
 }
 
+// BuildAccountFingerprint hashes only canary-relevant account buckets. It is
+// stable across tiny NLV, cushion, or P&L movement until a risk bucket changes.
+func BuildAccountFingerprint(a *AccountResult) Fingerprint {
+	if a == nil {
+		return semanticFingerprint(AccountFingerprintVersion, nil)
+	}
+	policy := risk.DefaultPolicy()
+	projection := struct {
+		BaseCurrency      string `json:"base_currency,omitempty"`
+		AccountType       string `json:"account_type,omitempty"`
+		MarginCushion     string `json:"margin_cushion,omitempty"`
+		LookAheadCushion  string `json:"lookahead_cushion,omitempty"`
+		GrossExposure     string `json:"gross_exposure,omitempty"`
+		DailyPnL          string `json:"daily_pnl,omitempty"`
+		HasMarginContext  bool   `json:"has_margin_context,omitempty"`
+		HasNetLiquidation bool   `json:"has_net_liquidation,omitempty"`
+	}{
+		BaseCurrency:      cleanString(a.BaseCurrency),
+		AccountType:       cleanString(a.AccountType),
+		HasMarginContext:  accountHasMarginContext(*a),
+		HasNetLiquidation: a.NetLiquidation > 0,
+	}
+	if cushion := accountCushionPct(*a); cushion != nil {
+		projection.MarginCushion = riskBucket(*cushion, policy.MarginUrgentPct, policy.MarginActPct, policy.MarginWatchPct, true)
+	}
+	if cushion := accountLookAheadCushionPct(*a); cushion != nil {
+		projection.LookAheadCushion = riskBucket(*cushion, policy.MarginUrgentPct, policy.MarginActPct, policy.MarginWatchPct, true)
+	}
+	if a.NetLiquidation > 0 && a.GrossPositionValue > 0 {
+		grossPct := a.GrossPositionValue / a.NetLiquidation * 100
+		projection.GrossExposure = riskBucket(grossPct, policy.GrossExposureStressUrgentPct, policy.GrossExposureStressActPct, policy.GrossExposureWatchPct, false)
+	}
+	if a.NetLiquidation > 0 && a.DailyPnL != nil {
+		pnlPct := *a.DailyPnL / a.NetLiquidation * 100
+		projection.DailyPnL = pnlBucket(pnlPct, policy.DailyPnLActPct, policy.DailyPnLWatchPct)
+	}
+	return semanticFingerprint(AccountFingerprintVersion, projection)
+}
+
+// BuildPositionsFingerprint hashes portfolio exposure buckets, not raw marks.
+func BuildPositionsFingerprint(p *PositionsResult, netLiquidation float64) Fingerprint {
+	if p == nil {
+		return semanticFingerprint(PositionsFingerprintVersion, nil)
+	}
+	policy := risk.DefaultPolicy()
+	projection := struct {
+		HasPortfolio      bool   `json:"has_portfolio,omitempty"`
+		NetDelta          string `json:"net_delta,omitempty"`
+		GrossDelta        string `json:"gross_delta,omitempty"`
+		LargestExposure   string `json:"largest_exposure,omitempty"`
+		LargestExposureID string `json:"largest_exposure_id,omitempty"`
+		LargestDelta      string `json:"largest_delta,omitempty"`
+		LargestDeltaID    string `json:"largest_delta_id,omitempty"`
+		Gamma             string `json:"gamma,omitempty"`
+		GreeksCoverage    string `json:"greeks_coverage,omitempty"`
+		Stocks            string `json:"stocks,omitempty"`
+		Options           string `json:"options,omitempty"`
+	}{
+		HasPortfolio: p.Portfolio != nil,
+		Stocks:       countBucket(len(p.Stocks)),
+		Options:      countBucket(len(p.Options)),
+	}
+	if p.Portfolio == nil {
+		return semanticFingerprint(PositionsFingerprintVersion, projection)
+	}
+	if p.Portfolio.DollarDeltaBase != nil && netLiquidation > 0 {
+		pct := absFloat(*p.Portfolio.DollarDeltaBase) / netLiquidation * 100
+		projection.NetDelta = riskBucket(pct, policy.NetDeltaStressUrgentPct, policy.NetDeltaStressActPct, policy.NetDeltaWatchPct, false)
+	}
+	var grossDelta float64
+	var largestExposure, largestDelta float64
+	for _, e := range p.Portfolio.ExposureBase {
+		if e.MarketValuePctNLV != nil && absFloat(*e.MarketValuePctNLV) > largestExposure {
+			largestExposure = absFloat(*e.MarketValuePctNLV)
+			projection.LargestExposureID = cleanString(e.Underlying)
+		}
+		if e.DollarDeltaBase != nil && netLiquidation > 0 {
+			pct := absFloat(*e.DollarDeltaBase) / netLiquidation * 100
+			grossDelta += pct
+			if pct > largestDelta {
+				largestDelta = pct
+				projection.LargestDeltaID = cleanString(e.Underlying)
+			}
+		}
+	}
+	if grossDelta > 0 {
+		projection.GrossDelta = riskBucket(grossDelta, policy.GrossDeltaStressUrgentPct, policy.GrossDeltaStressActPct, policy.GrossDeltaWatchPct, false)
+	}
+	if largestExposure > 0 {
+		projection.LargestExposure = riskBucket(largestExposure, policy.SingleNameExposureWatchPct*2, policy.SingleNameExposureWatchPct, policy.SingleNameExposureWatchPct, false)
+	}
+	if largestDelta > 0 {
+		projection.LargestDelta = riskBucket(largestDelta, policy.SingleNameDeltaWatchPct*2, policy.SingleNameDeltaWatchPct, policy.SingleNameDeltaWatchPct, false)
+	}
+	if p.Portfolio.Gamma != nil {
+		switch {
+		case *p.Portfolio.Gamma < 0:
+			projection.Gamma = "negative"
+		case *p.Portfolio.Gamma > 0:
+			projection.Gamma = "positive"
+		default:
+			projection.Gamma = "flat"
+		}
+	}
+	if p.Portfolio.GreeksTotal > 0 {
+		coverage := float64(p.Portfolio.GreeksCoverage) / float64(p.Portfolio.GreeksTotal) * 100
+		if coverage < policy.OptionGreeksMinCoveragePct {
+			projection.GreeksCoverage = "degraded"
+		} else {
+			projection.GreeksCoverage = "ok"
+		}
+	}
+	return semanticFingerprint(PositionsFingerprintVersion, projection)
+}
+
 type regimeFingerprintProjection struct {
-	Composite   regimeCompositeFingerprint   `json:"composite"`
-	Indicators  []regimeIndicatorFingerprint `json:"indicators"`
-	Gamma       regimeGammaFingerprint       `json:"gamma,omitzero"`
-	Breadth     regimeBreadthFingerprint     `json:"breadth,omitzero"`
-	Warnings    []regimeWarningFingerprint   `json:"warnings,omitempty"`
-	DataQuality []dataQualityFingerprint     `json:"data_quality,omitempty"`
+	Composite   regimeCompositeFingerprint     `json:"composite"`
+	Indicators  []regimeIndicatorFingerprint   `json:"indicators"`
+	Gamma       regimeGammaFingerprint         `json:"gamma,omitzero"`
+	Breadth     regimeBreadthFingerprint       `json:"breadth,omitzero"`
+	Lifecycle   lifecycleFingerprintProjection `json:"lifecycle,omitzero"`
+	Sources     []sourceHealthFingerprint      `json:"sources,omitempty"`
+	Warnings    []regimeWarningFingerprint     `json:"warnings,omitempty"`
+	DataQuality []dataQualityFingerprint       `json:"data_quality,omitempty"`
 }
 
 type regimeCompositeFingerprint struct {
@@ -154,23 +283,47 @@ type dataQualityFingerprint struct {
 }
 
 type canaryFingerprintProjection struct {
-	Policy           string                    `json:"policy,omitempty"`
-	Direction        risk.SignalDirection      `json:"direction,omitempty"`
-	PortfolioPosture risk.PortfolioPosture     `json:"portfolio_posture,omitempty"`
-	Severity         risk.SignalSeverity       `json:"severity,omitempty"`
-	PlannerModeHint  risk.PlannerMode          `json:"planner_mode_hint,omitempty"`
-	PlannerReadiness risk.PlannerReadiness     `json:"planner_readiness,omitempty"`
-	DataConfidence   string                    `json:"data_confidence,omitempty"`
-	SignalConfidence string                    `json:"signal_confidence,omitempty"`
-	PrimaryDrivers   []string                  `json:"primary_drivers,omitempty"`
-	Signals          []canarySignalFingerprint `json:"signals,omitempty"`
-	Rows             []canaryRowFingerprint    `json:"rows,omitempty"`
-	Market           canaryMarketFingerprint   `json:"market"`
-	Source           canarySourceFingerprint   `json:"source,omitzero"`
+	Policy           string                         `json:"policy,omitempty"`
+	Direction        risk.SignalDirection           `json:"direction,omitempty"`
+	PortfolioPosture risk.PortfolioPosture          `json:"portfolio_posture,omitempty"`
+	Severity         risk.SignalSeverity            `json:"severity,omitempty"`
+	PlannerModeHint  risk.PlannerMode               `json:"planner_mode_hint,omitempty"`
+	PlannerReadiness risk.PlannerReadiness          `json:"planner_readiness,omitempty"`
+	DataConfidence   string                         `json:"data_confidence,omitempty"`
+	SignalConfidence string                         `json:"signal_confidence,omitempty"`
+	PrimaryDrivers   []string                       `json:"primary_drivers,omitempty"`
+	Signals          []canarySignalFingerprint      `json:"signals,omitempty"`
+	Rows             []canaryRowFingerprint         `json:"rows,omitempty"`
+	Market           canaryMarketFingerprint        `json:"market"`
+	Lifecycle        lifecycleFingerprintProjection `json:"lifecycle,omitzero"`
+	Sources          []sourceHealthFingerprint      `json:"sources,omitempty"`
+	Source           canarySourceFingerprint        `json:"source,omitzero"`
 }
 
 type canarySourceFingerprint struct {
-	Regime Fingerprint `json:"regime,omitzero"`
+	Account   Fingerprint `json:"account,omitzero"`
+	Positions Fingerprint `json:"positions,omitzero"`
+	Regime    Fingerprint `json:"regime,omitzero"`
+}
+
+type lifecycleFingerprintProjection struct {
+	Stage       string              `json:"stage,omitempty"`
+	Severity    string              `json:"severity,omitempty"`
+	Readiness   string              `json:"readiness,omitempty"`
+	Timing      string              `json:"timing,omitempty"`
+	Confidence  string              `json:"confidence,omitempty"`
+	Evidence    []LifecycleEvidence `json:"evidence,omitempty"`
+	ConfirmedBy []string            `json:"confirmed_by,omitempty"`
+	Unconfirmed []string            `json:"unconfirmed,omitempty"`
+	Suppressed  []string            `json:"suppressed,omitempty"`
+	RejectedBy  []string            `json:"rejected_by,omitempty"`
+}
+
+type sourceHealthFingerprint struct {
+	Source               string `json:"source"`
+	Status               string `json:"status"`
+	Confidence           string `json:"confidence,omitempty"`
+	FingerprintStability string `json:"fingerprint_stability,omitempty"`
 }
 
 type canaryMarketFingerprint struct {
@@ -287,6 +440,75 @@ func dataQualityFingerprints(values []DataQualityHealth) []dataQualityFingerprin
 	return out
 }
 
+func lifecycleFingerprintProjectionFromState(state LifecycleState) lifecycleFingerprintProjection {
+	return lifecycleFingerprintProjection{
+		Stage:       cleanString(state.Stage),
+		Severity:    cleanString(state.Severity),
+		Readiness:   cleanString(state.Readiness),
+		Timing:      cleanString(state.Timing),
+		Confidence:  cleanString(state.Confidence),
+		Evidence:    lifecycleEvidenceFingerprints(state.Evidence),
+		ConfirmedBy: cleanSorted(state.ConfirmedBy),
+		Unconfirmed: cleanSorted(state.Unconfirmed),
+		Suppressed:  cleanSorted(state.Suppressed),
+		RejectedBy:  cleanSorted(state.RejectedBy),
+	}
+}
+
+func lifecycleEvidenceFingerprints(values []LifecycleEvidence) []LifecycleEvidence {
+	out := make([]LifecycleEvidence, 0, len(values))
+	for _, v := range values {
+		fp := LifecycleEvidence{
+			Source:    cleanString(v.Source),
+			Signal:    cleanString(v.Signal),
+			Bucket:    cleanString(v.Bucket),
+			Timing:    cleanString(v.Timing),
+			Severity:  cleanString(v.Severity),
+			Confirmed: v.Confirmed,
+		}
+		if fp.Source == "" && fp.Signal == "" && fp.Bucket == "" && fp.Timing == "" && fp.Severity == "" && !fp.Confirmed {
+			continue
+		}
+		out = append(out, fp)
+	}
+	slices.SortFunc(out, func(a, b LifecycleEvidence) int {
+		return cmp.Or(
+			cmp.Compare(a.Source, b.Source),
+			cmp.Compare(a.Signal, b.Signal),
+			cmp.Compare(a.Bucket, b.Bucket),
+			cmp.Compare(a.Timing, b.Timing),
+			cmp.Compare(a.Severity, b.Severity),
+			cmp.Compare(boolFingerprint(a.Confirmed), boolFingerprint(b.Confirmed)),
+		)
+	})
+	return out
+}
+
+func sourceHealthFingerprints(values []SourceHealth) []sourceHealthFingerprint {
+	out := make([]sourceHealthFingerprint, 0, len(values))
+	for _, v := range values {
+		fp := sourceHealthFingerprint{
+			Source:               cleanString(v.Source),
+			Status:               cleanString(v.Status),
+			Confidence:           cleanString(v.Confidence),
+			FingerprintStability: cleanString(v.FingerprintStability),
+		}
+		if fp.Source == "" && fp.Status == "" && fp.Confidence == "" {
+			continue
+		}
+		out = append(out, fp)
+	}
+	slices.SortFunc(out, func(a, b sourceHealthFingerprint) int {
+		return cmp.Or(
+			cmp.Compare(a.Source, b.Source),
+			cmp.Compare(a.Status, b.Status),
+			cmp.Compare(a.Confidence, b.Confidence),
+			cmp.Compare(a.FingerprintStability, b.FingerprintStability),
+		)
+	})
+	return out
+}
+
 func canarySignalFingerprints(signals []risk.Signal) []canarySignalFingerprint {
 	out := make([]canarySignalFingerprint, 0, len(signals))
 	for _, s := range signals {
@@ -382,4 +604,113 @@ func fingerprintFloat(v *float64) string {
 		return ""
 	}
 	return strconv.FormatFloat(*v, 'g', -1, 64)
+}
+
+func accountCushionPct(a AccountResult) *float64 {
+	if a.NetLiquidation <= 0 {
+		return nil
+	}
+	switch {
+	case a.Cushion != 0:
+		v := a.Cushion * 100
+		return &v
+	case a.ExcessLiquidity != 0:
+		v := a.ExcessLiquidity / a.NetLiquidation * 100
+		return &v
+	case accountHasMarginContext(a):
+		v := 0.0
+		return &v
+	default:
+		return nil
+	}
+}
+
+func accountLookAheadCushionPct(a AccountResult) *float64 {
+	if a.NetLiquidation <= 0 {
+		return nil
+	}
+	switch {
+	case a.LookAheadExcess != 0:
+		v := a.LookAheadExcess / a.NetLiquidation * 100
+		return &v
+	case a.LookAheadMaintMargin > 0 || a.LookAheadInitMargin > 0 || a.LookAheadAvailable < 0:
+		v := 0.0
+		return &v
+	default:
+		return nil
+	}
+}
+
+func accountHasMarginContext(a AccountResult) bool {
+	return a.ExcessLiquidity < 0 ||
+		a.AvailableFunds < 0 ||
+		a.MaintenanceMargin > 0 ||
+		a.InitialMargin > 0
+}
+
+func riskBucket(v, urgent, act, watch float64, lowerIsWorse bool) string {
+	if lowerIsWorse {
+		switch {
+		case v < urgent:
+			return "urgent"
+		case v < act:
+			return "act"
+		case v < watch:
+			return "watch"
+		default:
+			return "ok"
+		}
+	}
+	switch {
+	case v >= urgent:
+		return "urgent"
+	case v >= act:
+		return "act"
+	case v >= watch:
+		return "watch"
+	default:
+		return "ok"
+	}
+}
+
+func pnlBucket(v, act, watch float64) string {
+	switch {
+	case v <= -act:
+		return "loss_act"
+	case v <= -watch:
+		return "loss_watch"
+	case v >= act:
+		return "gain_act"
+	case v >= watch:
+		return "gain_watch"
+	default:
+		return "ok"
+	}
+}
+
+func countBucket(n int) string {
+	switch {
+	case n == 0:
+		return "zero"
+	case n <= 5:
+		return "small"
+	case n <= 25:
+		return "medium"
+	default:
+		return "large"
+	}
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func boolFingerprint(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }

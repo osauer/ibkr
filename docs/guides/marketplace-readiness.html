@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-28T07:07:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "This page is the maintainer checklist for presenting ibkr in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user...",
     "headline": "Marketplace readiness",
     "isPartOf": {
@@ -157,11 +157,11 @@
   </header>
   <main class="wrap doc">
 <h1 id="marketplace-readiness">Marketplace readiness</h1>
-<p>Last reviewed: 2026-05-28 07:07 CEST</p>
+<p>Last reviewed: 2026-05-31 21:23 CEST</p>
 <p>This page is the maintainer checklist for presenting <code>ibkr</code> in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.</p>
 <h2 id="positioning">Positioning</h2>
 <p><code>ibkr</code> is a local Interactive Brokers integration for traders who already run IB Gateway or TWS and want agentic portfolio analysis, trading research, risk checks, and market workflow support on live broker data. The clearest marketplace description is:</p>
-<blockquote><p>Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&amp;P 500 breadth, SPY+SPX dealer gamma, and an eight-row risk-regime dashboard through a local CLI/MCP server connected to IB Gateway or TWS.</p></blockquote>
+<blockquote><p>Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&amp;P 500 breadth, SPY+SPX dealer gamma, a broad-market stress-lifecycle regime dashboard, and a portfolio-aware canary lifecycle through a local CLI/MCP server connected to IB Gateway or TWS.</p></blockquote>
 <p>Always include these qualifiers:</p>
 <ul>
 <li>Requires IB Gateway or TWS running locally.</li>
@@ -192,7 +192,7 @@ make check</code></pre>
 <li>a privacy policy URL pointing at <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">PRIVACY.md</a></li>
 <li>a safety statement that no order placement, cancellation, or modification exists</li>
 <li>setup text covering IB Gateway/TWS prerequisites and the local binary install</li>
-<li>screenshots or a short demo focused on the risk-regime and portfolio workflows</li>
+<li>screenshots or a short demo focused on the regime lifecycle, canary lifecycle, and portfolio workflows</li>
 </ul>
 <p>OpenAI&#39;s Apps SDK help says app submissions are open, apps are built on MCP, and developers should prepare for safety, privacy, and functionality review, including a clear privacy policy. The current help article is at &lt;https://help.openai.com/en/articles/12515353-build-with-the-apps-sdk&gt;.</p>
 <h2 id="documentation-that-must-stay-in-sync">Documentation That Must Stay In Sync</h2>
@@ -253,7 +253,7 @@ make smoke</code></pre>
 <li>Description: emphasize local-only operation, IB Gateway/TWS prerequisite, IBKR Pro requirement, portfolio review, options diagnostics, market-regime context, current no-order-entry boundary, and account-sensitive outputs.</li>
 <li>Documentation: README install section, <a href="agentic-use.html">agentic use</a>, <a href="../reference/config.html">configuration reference</a>, and <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">privacy policy</a>.</li>
 <li>Support: GitHub issues; security through GitHub Private Vulnerability Reporting.</li>
-<li>Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, portfolio review workflows, sizing math, S&amp;P 500 breadth, dealer gamma, risk regime; no built-in prompts; quote resource read/subscribe.</li>
+<li>Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, portfolio review workflows, sizing math, S&amp;P 500 breadth, dealer gamma, broad-market regime lifecycle, portfolio canary lifecycle; no built-in prompts; quote resource read/subscribe.</li>
 </ul>
 <h2 id="external-mcp-directories">External MCP directories</h2>
 <p>Some directory surfaces are crawler-driven and some still require a maintainer account or manual form. Keep the repo metadata current first, then use the submission pack below for account-gated channels.</p>
@@ -277,7 +277,7 @@ make smoke</code></pre>
 <li>Name: <code>ibkr</code>.</li>
 <li>Title: <code>IBKR MCP Server</code>.</li>
 <li>Tagline: &#34;Agentic Interactive Brokers portfolio analysis and trading research through local TWS or IB Gateway.&#34;</li>
-<li>Short description: &#34;Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, and risk-regime context.&#34;</li>
+<li>Short description: &#34;Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, broad-market regime lifecycle, and portfolio canary lifecycle.&#34;</li>
 <li>Requirements: IB Gateway 10.37+ or TWS running locally; IBKR Pro account with TWS API access; macOS or Linux binary for the bundled path.</li>
 <li>Current boundary: current public CLI and MCP releases expose analysis and sizing tools, but no order placement, modification, or cancellation interface.</li>
 <li>Target users: semi-professional retail traders using IBKR as capital-markets infrastructure who want agent-assisted review and research on broker-native data.</li>

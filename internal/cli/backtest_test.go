@@ -104,7 +104,7 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	if got, want := res.Metrics.WatchTruePositive, 6; got != want {
 		t.Fatalf("watch_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchFalsePositive, 1; got != want {
+	if got, want := res.Metrics.WatchFalsePositive, 2; got != want {
 		t.Fatalf("watch_false_positive = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.StressTruePositive, 5; got != want {
@@ -119,11 +119,20 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	if res.Metrics.WatchRecall == nil || *res.Metrics.WatchRecall != 1 {
 		t.Fatalf("watch_recall = %v, want 1", res.Metrics.WatchRecall)
 	}
+	if res.Baseline.StressPrecision == nil || *res.Baseline.StressPrecision != 1 {
+		t.Fatalf("baseline stress precision = %v, want 1", res.Baseline.StressPrecision)
+	}
+	if got, want := res.Lifecycle.EarlyWarning, 3; got != want {
+		t.Fatalf("early_warning = %d, want %d", got, want)
+	}
+	if got, want := res.Lifecycle.EarlyWarningFalseCalmRally, 2; got != want {
+		t.Fatalf("early_warning_false_calm_rally = %d, want %d", got, want)
+	}
 	findings := strings.Join(res.Findings, "\n")
 	for _, want := range []string{
 		"out-of-scope row(s) were excluded",
 		"Regime watch caught every scored market-stress row",
-		"Regime watch fired on 1 scored non-stress row",
+		"Regime watch fired on 2 scored non-stress row",
 	} {
 		if !strings.Contains(findings, want) {
 			t.Fatalf("findings missing %q: %+v", want, res.Findings)
@@ -169,8 +178,11 @@ func TestRunBacktestRegimeRendersText(t *testing.T) {
 	for _, want := range []string{
 		"Regime Backtest",
 		"17 observations",
-		"Watch        precision 86%",
+		"Watch        precision 75%",
 		"Stress       precision 100%",
+		"Before       stress precision",
+		"Early        precision",
+		"Events       watch precision",
 		"2020-2021 retail/reddit squ.",
 		"out-of-scope",
 	} {

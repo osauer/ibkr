@@ -536,7 +536,7 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatalf("re-decode: %v", err)
 	}
-	for _, key := range []string{"fingerprint", "source_fingerprints", "direction", "portfolio_posture", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
+	for _, key := range []string{"fingerprint", "source_fingerprints", "source_health", "lifecycle", "direction", "portfolio_posture", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
 		if _, ok := wire[key]; !ok {
 			t.Fatalf("canary JSON missing %s: %s", key, b)
 		}
@@ -560,9 +560,23 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("source_fingerprints missing/malformed: %#v", wire["source_fingerprints"])
 	}
+	for _, key := range []string{"account", "positions", "regime"} {
+		fp, ok := sources[key].(map[string]any)
+		if !ok || fp["key"] == "" {
+			t.Fatalf("source_fingerprints.%s missing/malformed: %#v", key, sources[key])
+		}
+	}
 	regimeFP, ok := sources["regime"].(map[string]any)
 	if !ok || regimeFP["version"] != rpc.RegimeFingerprintVersion || regimeFP["key"] != regime.Fingerprint.Key {
 		t.Fatalf("source_fingerprints.regime = %#v, want %+v", sources["regime"], regime.Fingerprint)
+	}
+	lifecycle, ok := wire["lifecycle"].(map[string]any)
+	if !ok || lifecycle["stage"] == "" || lifecycle["fingerprint"] == nil {
+		t.Fatalf("lifecycle missing/malformed: %#v", wire["lifecycle"])
+	}
+	sourceHealth, ok := wire["source_health"].([]any)
+	if !ok || len(sourceHealth) != 3 {
+		t.Fatalf("source_health missing/malformed: %#v", wire["source_health"])
 	}
 }
 

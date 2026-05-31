@@ -1,10 +1,10 @@
 # IBKR MCP server
 
-Updated: 2026-05-29 12:46 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
-Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". If your exact query was "ibkr mcp tws", use the [IBKR MCP TWS setup](../ibkr-mcp-tws/) page. The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.
+Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". If your exact query was "ibkr mcp tws", use the [IBKR MCP TWS setup](../ibkr-mcp-tws/) page. The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, portfolio canary lifecycle, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.
 
 ## Best fit
 
@@ -47,12 +47,12 @@ Generic MCP configuration:
 - Snapshot stock and ETF quotes, daily history, previous close, and quote freshness.
 - Official market calendars for US equities, US listed options, and Xetra.
 - Option expiries, implied volatility, expected moves, strike grids, deltas, and open interest.
-- Market scanners, fixed-fractional position sizing, S&P 500 breadth, SPY+SPX dealer gamma, an eight-row risk-regime dashboard, and the `ibkr_canary` scheduled stress-check tool.
+- Market scanners, fixed-fractional position sizing, S&P 500 breadth, SPY+SPX dealer gamma, broad-market regime lifecycle, and the `ibkr_canary` portfolio-aware stress-lifecycle tool.
 - Streaming stock and ETF quote resources through `ibkr://quote/{symbol}`.
 
 The full schema is in the [MCP tools reference](../reference/mcp-tools.md) and [MCP resources reference](../reference/mcp-resources.md).
 
-For a scheduled canary workflow that returns the top stage, confidence, action, row table, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The first version is intentionally narrow: it gives the decision surface, while circuit breakers, notifications, and escalation policy can live in the host scheduler or a later `ibkr` release.
+For a scheduled canary workflow that returns lifecycle stage, readiness, confidence, source health, fingerprints, row table, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The first version is intentionally narrow: it gives the decision surface, while circuit breakers, notifications, and escalation policy can live in the host scheduler or a later `ibkr` release.
 
 ## Current execution boundary
 

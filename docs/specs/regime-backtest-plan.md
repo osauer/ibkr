@@ -1,6 +1,6 @@
 # Regime and Canary Backtest Runbook
 
-**Updated:** 2026-05-31 20:08 CEST
+**Updated:** 2026-05-31 21:23 CEST
 
 This is the single umbrella for proving and tuning `ibkr regime` and
 `ibkr canary`. Keep the work here. Do not add another experiment plan, tuning
@@ -16,7 +16,7 @@ detection without overfitting to named events.
 - A target label is for scoring only. It must not feed the signal.
 - `regime` answers: what is the broad market state?
 - `canary` answers: given account, positions, and regime, should the monitor
-  stay quiet, watch, act, rebalance, or block on data quality?
+  stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?
 - Portfolio-only stress belongs to canary. Regime can keep those rows for
   context, but they are out-of-scope for market-regime precision and recall.
 
@@ -129,9 +129,25 @@ is downgraded from stress to watch.
 
 ## Current Findings
 
-- Curated sourced regime holdout still has good recall and only a few false
-  positives.
-- Curated canary holdout catches labelled stress at watch level.
+- Curated sourced regime holdout materially improves confirmed-stress precision
+  while preserving watch-level visibility: before 67% precision / 100% recall /
+  13% false alarms, after 100% precision / 100% recall / 0% false alarms.
+- Curated sourced regime tuning improves precision from 68% to 75% and false
+  alarms from 32% to 21%; recall falls from 93% to 86%, which is a monitoring
+  item but not a collapse.
+- Curated canary holdout catches labelled stress at watch level: watch
+  precision 73%, recall 100%; act precision 86%, recall 75%, false alarms 6%.
+- Canary adds portfolio-specific lift beyond regime alone: sourced holdout
+  portfolio-stress recall moves from 75% regime-only to 100% canary, with one
+  additional portfolio true positive.
+- Canary lifecycle metrics are now first-class: early-warning recall of later
+  confirmed stress is 100% on the sourced holdout, median lead is 1.0 day,
+  panic/forced-defense recall is 100%, and stabilization/opportunity false
+  starts are 0.
+- Category reporting is split for market-driven, portfolio-driven,
+  concentration-driven, margin-driven, options-driven, and data-quality cases.
+  Current sourced holdout has no options-driven rows, so that slice is
+  instrumented but not yet proven.
 - Tier 1 exposes the broader problem: current `any red cluster` stress signals
   catch stress rows but fire too often in non-stress volatility regimes.
 - A pure confirmation rule cuts false alarms but gives up too much recall.
@@ -220,7 +236,6 @@ force convergence.
 Before calling a pass done:
 
 ```bash
-go test ./...
 make check
 make smoke
 ```

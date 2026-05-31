@@ -29,6 +29,8 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	accountFingerprint := rpc.BuildAccountFingerprint(&in.Account)
+	positionsFingerprint := rpc.BuildPositionsFingerprint(&in.Positions, in.Account.NetLiquidation)
 	regimeFingerprint := in.Regime.Fingerprint
 	if regimeFingerprint.Key == "" {
 		regimeFingerprint = rpc.BuildRegimeFingerprint(&in.Regime)
@@ -36,7 +38,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	res := CanaryResult{
 		AsOf:               now,
 		SourceAsOf:         CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf},
-		SourceFingerprints: CanarySourceFingerprints{Regime: &regimeFingerprint},
+		SourceFingerprints: CanarySourceFingerprints{Account: &accountFingerprint, Positions: &positionsFingerprint, Regime: &regimeFingerprint},
 		Policy:             canaryPolicy.Name,
 		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions),
 		Market:             summarizeCanaryMarket(in.Regime),
@@ -66,6 +68,8 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	overall := canaryOverallRow(res.Direction, res.Severity, res.Summary, res.Market, res.Portfolio)
 	res.Rows = append([]CanaryRow{overall}, rows...)
 	res.Warnings = canaryWarnings(res.Market, in.Regime)
+	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, res.DataConfidence, res.Market)
+	res.Lifecycle = canaryLifecycle(res)
 	res.Fingerprint = rpc.BuildCanaryFingerprint(&res)
 	return res
 }
@@ -1044,6 +1048,218 @@ func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []string 
 	return warnings
 }
 
+func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) []rpc.SourceHealth {
+	return []rpc.SourceHealth{
+		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
+		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
+		canaryRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, dataConfidence, m),
+	}
+}
+
+func canaryTimedSourceHealth(source string, asOf, now time.Time, fp rpc.Fingerprint, status, confidence string) rpc.SourceHealth {
+	maxAge := canarySourceMaxAgeSeconds(now)
+	age := canarySourceAgeSeconds(now, asOf)
+	if !asOf.IsZero() && age > maxAge && status == rpc.RegimeStatusOK {
+		status = rpc.RegimeStatusStale
+		if confidence == "high" {
+			confidence = "medium"
+		}
+	}
+	return rpc.SourceHealth{
+		Source:               source,
+		Status:               status,
+		AsOf:                 asOf,
+		AgeSeconds:           age,
+		MaxAgeSeconds:        maxAge,
+		Confidence:           confidence,
+		Fingerprint:          &fp,
+		FingerprintStability: rpc.FingerprintStabilitySemanticBuckets,
+	}
+}
+
+func canaryRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) rpc.SourceHealth {
+	status := rpc.RegimeStatusOK
+	notes := []string{}
+	switch {
+	case len(m.StaleClusters) > 0:
+		status = rpc.RegimeStatusStale
+		notes = append(notes, "stale clusters: "+strings.Join(m.StaleClusters, ","))
+	case len(m.DegradedClusters) > 0:
+		status = "degraded"
+		notes = append(notes, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+	case len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 || m.UnrankedClusters > 0:
+		status = "partial"
+		notes = append(notes, canaryAmbiguityEvidence(m))
+	}
+	health := canaryTimedSourceHealth("regime", asOf, now, fp, status, dataConfidence)
+	health.Notes = notes
+	return health
+}
+
+func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
+	if acct.NetLiquidation <= 0 {
+		return "partial"
+	}
+	if canarySourceAgeSeconds(now, acct.AsOf) > canarySourceMaxAgeSeconds(now) {
+		return rpc.RegimeStatusStale
+	}
+	return rpc.RegimeStatusOK
+}
+
+func canaryAccountSourceConfidence(acct rpc.AccountResult) string {
+	if acct.NetLiquidation <= 0 {
+		return "medium-low"
+	}
+	return "high"
+}
+
+func canaryPositionsSourceStatus(pos rpc.PositionsResult, now time.Time) string {
+	if canarySourceAgeSeconds(now, pos.AsOf) > canarySourceMaxAgeSeconds(now) {
+		return rpc.RegimeStatusStale
+	}
+	return rpc.RegimeStatusOK
+}
+
+func canaryPositionsSourceConfidence(pos rpc.PositionsResult) string {
+	return "high"
+}
+
+func canarySourceAgeSeconds(now, asOf time.Time) int64 {
+	if now.IsZero() || asOf.IsZero() {
+		return 0
+	}
+	age := now.Sub(asOf)
+	if age < 0 {
+		return 0
+	}
+	return int64(age.Seconds())
+}
+
+func canarySourceMaxAgeSeconds(now time.Time) int64 {
+	switch rpc.ClassifySession(now) {
+	case rpc.SessionPre, rpc.SessionRTH:
+		return int64((10 * time.Minute).Seconds())
+	default:
+		return int64((90 * time.Minute).Seconds())
+	}
+}
+
+func canaryLifecycle(res CanaryResult) rpc.LifecycleState {
+	state := rpc.LifecycleState{
+		Severity:     string(res.Severity),
+		Readiness:    string(res.PlannerReadiness),
+		Confidence:   res.Confidence,
+		Evidence:     canaryLifecycleEvidence(res),
+		ConfirmedBy:  canaryLifecycleConfirmedBy(res),
+		Unconfirmed:  append([]string(nil), res.Market.UnconfirmedRedClusterNames...),
+		NotExecution: res.NotExecution,
+	}
+	switch {
+	case res.Direction == risk.DirectionDataQuality:
+		state.Stage = rpc.LifecycleDataQuality
+		state.Timing = rpc.LifecycleTimingDataQuality
+	case canaryImmediateDanger(res.Portfolio):
+		state.Stage = rpc.LifecycleForcedDefense
+		state.Timing = rpc.LifecycleTimingContemporary
+	case res.Direction == risk.DirectionDefensive || res.Direction == risk.DirectionMixed:
+		switch {
+		case res.Severity == risk.SeverityUrgent:
+			if res.Market.RedClusters >= 3 || canaryConfirmedTapeStress(res.Market) {
+				state.Stage = rpc.LifecyclePanic
+			} else {
+				state.Stage = rpc.LifecycleForcedDefense
+			}
+			state.Timing = rpc.LifecycleTimingContemporary
+		case severityRankAtLeast(res.Severity, risk.SeverityAct) && canaryLifecyclePanicMarket(res.Market):
+			state.Stage = rpc.LifecyclePanic
+			state.Timing = rpc.LifecycleTimingContemporary
+		case severityRankAtLeast(res.Severity, risk.SeverityAct):
+			state.Stage = rpc.LifecycleConfirmedStress
+			state.Timing = rpc.LifecycleTimingContemporary
+		default:
+			state.Stage = rpc.LifecycleEarlyWarning
+			state.Timing = rpc.LifecycleTimingForwardWarning
+		}
+	case res.Direction == risk.DirectionConstructive:
+		if res.PlannerModeHint == risk.PlannerModeDeploy && res.PlannerReadiness == risk.PlannerReadinessReady {
+			state.Stage = rpc.LifecycleOpportunity
+		} else {
+			state.Stage = rpc.LifecycleStabilization
+		}
+		state.Timing = rpc.LifecycleTimingRecovery
+	case res.Direction == risk.DirectionRebalance:
+		state.Stage = rpc.LifecycleEarlyWarning
+		state.Timing = rpc.LifecycleTimingForwardWarning
+	default:
+		state.Stage = rpc.LifecycleQuiet
+		state.Timing = "current"
+	}
+	if len(state.Unconfirmed) > 0 && state.Stage != rpc.LifecycleEarlyWarning && state.Stage != rpc.LifecycleConfirmedStress && state.Stage != rpc.LifecyclePanic {
+		state.Suppressed = append(state.Suppressed, state.Unconfirmed...)
+	}
+	state.Fingerprint = rpc.BuildLifecycleFingerprint(state)
+	return state
+}
+
+func canaryLifecyclePanicMarket(m CanaryMarketSummary) bool {
+	return m.RedClusters >= 3 ||
+		pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct) ||
+		(pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct) && m.RedClusters >= 1)
+}
+
+func canaryLifecycleEvidence(res CanaryResult) []rpc.LifecycleEvidence {
+	out := make([]rpc.LifecycleEvidence, 0, len(res.Signals))
+	for _, sig := range res.Signals {
+		timing := rpc.LifecycleTimingForwardWarning
+		confirmed := severityRankAtLeast(sig.Severity, risk.SeverityAct) && len(sig.BlockedBy) == 0
+		if confirmed {
+			timing = rpc.LifecycleTimingContemporary
+		}
+		out = append(out, rpc.LifecycleEvidence{
+			Source:    canaryLifecycleSource(sig.ID),
+			Signal:    string(sig.ID),
+			Bucket:    string(sig.Severity),
+			Timing:    timing,
+			Severity:  string(sig.Severity),
+			Confirmed: confirmed,
+		})
+	}
+	return out
+}
+
+func canaryLifecycleSource(id risk.SignalID) string {
+	switch id {
+	case risk.SignalMarginCushionLow, risk.SignalLookAheadCushionLow:
+		return "margin"
+	case risk.SignalGrossExposureHigh, risk.SignalNetDeltaHigh, risk.SignalGrossDeltaHigh:
+		return "portfolio_exposure"
+	case risk.SignalSingleNameExposureHigh, risk.SignalSingleNameDeltaHigh:
+		return "concentration"
+	case risk.SignalOptionGreeksDegraded, risk.SignalShortConvexityHigh:
+		return "options"
+	case risk.SignalRiskDataDegraded, risk.SignalMarketDataStale:
+		return "data_quality"
+	case risk.SignalRegimeStressConfirmed, risk.SignalRegimeStressEarly, risk.SignalFXCarryUnwind, risk.SignalGammaRed:
+		return "regime"
+	default:
+		return "market_tape"
+	}
+}
+
+func canaryLifecycleConfirmedBy(res CanaryResult) []string {
+	confirmed := []string{}
+	if res.Market.RedClusters > 0 {
+		confirmed = append(confirmed, res.Market.RedClusterNames...)
+	}
+	for _, sig := range res.Signals {
+		if severityRankAtLeast(sig.Severity, risk.SeverityAct) && len(sig.BlockedBy) == 0 && sig.Direction != risk.DirectionDataQuality {
+			confirmed = append(confirmed, string(sig.ID))
+		}
+	}
+	slices.Sort(confirmed)
+	return slices.Compact(confirmed)
+}
+
 func canaryWarningLine(w rpc.RegimeWarning) string {
 	scope := strings.TrimSpace(w.Scope)
 	if scope == "" {
@@ -1328,6 +1544,9 @@ func renderCanaryTextWidth(env *Env, out io.Writer, r *CanaryResult, width int) 
 	renderCanaryKV(out, "Posture", canaryPostureText(posture), width, func(s string) string {
 		return canaryPostureLabel(env, posture)
 	})
+	if lifecycle := lifecycleSummaryText(r.Lifecycle); lifecycle != "" {
+		renderCanaryKV(out, "Lifecycle", lifecycle, width, nil)
+	}
 	if r.Fingerprint.Key != "" {
 		renderCanaryKV(out, "Alert ID", r.Fingerprint.Version+" "+r.Fingerprint.Key, width, env.dim)
 	}
@@ -1339,6 +1558,9 @@ func renderCanaryTextWidth(env *Env, out io.Writer, r *CanaryResult, width int) 
 	if r.DataConfidence != "" || r.SignalConfidence != "" {
 		fmt.Fprintf(out, "  %-10s data %s · signals %s\n", "Quality",
 			canaryConfidenceLabel(env, r.DataConfidence), canaryConfidenceLabel(env, r.SignalConfidence))
+	}
+	if sources := sourceHealthSummaryText(r.SourceHealth); sources != "" {
+		renderCanaryKV(out, "Sources", sources, width, env.dim)
 	}
 	if why := canaryConfidenceExplanation(r); why != "" {
 		renderCanaryKV(out, "Why", why, width, env.dim)
@@ -1354,6 +1576,54 @@ func renderCanaryTextWidth(env *Env, out io.Writer, r *CanaryResult, width int) 
 	}
 	renderCanaryWarnings(env, out, r.Warnings, width)
 	return 0
+}
+
+func lifecycleSummaryText(state rpc.LifecycleState) string {
+	if state.Stage == "" {
+		return ""
+	}
+	parts := []string{humanLifecycleToken(string(state.Stage))}
+	if state.Severity != "" {
+		parts = append(parts, string(state.Severity))
+	}
+	if state.Readiness != "" {
+		parts = append(parts, string(state.Readiness))
+	}
+	if state.Timing != "" {
+		parts = append(parts, humanLifecycleToken(state.Timing))
+	}
+	if state.Confidence != "" {
+		parts = append(parts, state.Confidence+" confidence")
+	}
+	if len(state.ConfirmedBy) > 0 {
+		parts = append(parts, "confirmed by "+strings.Join(state.ConfirmedBy, ", "))
+	}
+	if len(state.Unconfirmed) > 0 {
+		parts = append(parts, "unconfirmed "+strings.Join(state.Unconfirmed, ", "))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func humanLifecycleToken(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), "_", " ")
+}
+
+func sourceHealthSummaryText(health []rpc.SourceHealth) string {
+	if len(health) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(health))
+	for _, h := range health {
+		if h.Source == "" || h.Status == "" {
+			continue
+		}
+		part := h.Source + " " + h.Status
+		if h.Confidence != "" && h.Confidence != "high" {
+			part += "/" + h.Confidence
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func renderCanaryConfidenceKV(env *Env, out io.Writer, r *CanaryResult, width int) {

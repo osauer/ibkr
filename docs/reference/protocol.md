@@ -1,6 +1,6 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-05-31 08:21 CEST
+Last reviewed: 2026-05-31 21:23 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
@@ -16,7 +16,22 @@ Decision surfaces that are useful to monitors expose a semantic `fingerprint` ob
 
 The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.
 
-`regime.snapshot` emits `regime-fp-v1` from indicator bands/statuses, composite counts, warning codes/scopes/severities, high-level data quality, and gamma/breadth semantic state. `canary` emits `canary-fp-v1` from policy, direction, severity, planner mode/readiness, confidence classes, primary drivers, signal semantics, classified market state, row titles/states, and `source_fingerprints.regime`.
+`regime.snapshot` emits `regime-fp-v1` from indicator bands/statuses,
+composite counts, lifecycle stage/severity/readiness buckets, warning
+codes/scopes/severities, high-level data quality, source-health buckets, and
+gamma/breadth semantic state.
+
+`canary` emits `canary-fp-v1` from policy, direction, severity, planner
+mode/readiness, lifecycle stage/severity/readiness buckets, confidence classes,
+primary drivers, signal semantics, classified market state, source-health
+buckets, row titles/states, and `source_fingerprints.account`,
+`source_fingerprints.positions`, and `source_fingerprints.regime`.
+
+Both surfaces also expose a nested `lifecycle.fingerprint` for consumers that
+dedupe by lifecycle transition rather than by full alert posture. Source
+fingerprints and source-health entries use semantic buckets only; timestamps,
+tiny raw-value movement inside a bucket, and prose changes must not churn the
+hash.
 
 | Capability | Wire opcodes | Library entry point | Status |
 |---|---|---|---|

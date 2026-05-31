@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T08:21:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "pkg/ibkr is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls...",
     "headline": "TWS protocol coverage",
     "isPartOf": {
@@ -157,14 +157,16 @@
   </header>
   <main class="wrap doc">
 <h1 id="tws-protocol-coverage">TWS protocol coverage</h1>
-<p>Last reviewed: 2026-05-31 08:21 CEST</p>
+<p>Last reviewed: 2026-05-31 21:23 CEST</p>
 <p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the <code>ibkr</code> binary, daemon, CLI, and MCP server need.</p>
 <p>Order-writing methods exist only for wire-format completeness and downstream forks. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket; intentionally order-capable forks must rebuild with <code>-tags trading</code>. The shipped daemon, CLI, MCP server, and Claude plugin expose no order interface.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
 <p>Decision surfaces that are useful to monitors expose a semantic <code>fingerprint</code> object:</p>
 <pre><code>{&#34;version&#34;: &#34;canary-fp-v1&#34;, &#34;key&#34;: &#34;sha256:...&#34;}</code></pre>
 <p>The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.</p>
-<p><code>regime.snapshot</code> emits <code>regime-fp-v1</code> from indicator bands/statuses, composite counts, warning codes/scopes/severities, high-level data quality, and gamma/breadth semantic state. <code>canary</code> emits <code>canary-fp-v1</code> from policy, direction, severity, planner mode/readiness, confidence classes, primary drivers, signal semantics, classified market state, row titles/states, and <code>source_fingerprints.regime</code>.</p>
+<p><code>regime.snapshot</code> emits <code>regime-fp-v1</code> from indicator bands/statuses, composite counts, lifecycle stage/severity/readiness buckets, warning codes/scopes/severities, high-level data quality, source-health buckets, and gamma/breadth semantic state.</p>
+<p><code>canary</code> emits <code>canary-fp-v1</code> from policy, direction, severity, planner mode/readiness, lifecycle stage/severity/readiness buckets, confidence classes, primary drivers, signal semantics, classified market state, source-health buckets, row titles/states, and <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, and <code>source_fingerprints.regime</code>.</p>
+<p>Both surfaces also expose a nested <code>lifecycle.fingerprint</code> for consumers that dedupe by lifecycle transition rather than by full alert posture. Source fingerprints and source-health entries use semantic buckets only; timestamps, tiny raw-value movement inside a bucket, and prose changes must not churn the hash.</p>
 <table>
 <thead><tr><th>Capability</th><th>Wire opcodes</th><th>Library entry point</th><th>Status</th></tr></thead>
 <tbody>

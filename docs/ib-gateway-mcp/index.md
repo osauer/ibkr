@@ -1,6 +1,6 @@
 # IB Gateway MCP server
 
-Updated: 2026-05-27 22:28 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr mcp` is an IB Gateway MCP server for users who want a local, headless Interactive Brokers data bridge for AI assistants. It uses the same local socket API that IB Gateway exposes for ordinary TWS API clients, then presents the read-only data surface as MCP tools.
 
@@ -47,7 +47,7 @@ Other MCP hosts can launch:
 - Stock and ETF quotes, quote freshness, and daily history.
 - Official market calendars and stale-quote session context.
 - Option chains, expiries, expected moves, deltas, and open interest.
-- Market scanners, sizing math, S&P 500 breadth, dealer gamma, and risk-regime context.
+- Market scanners, sizing math, S&P 500 breadth, dealer gamma, broad-market regime lifecycle, and portfolio canary lifecycle.
 
 See the [agentic use guide](../guides/agentic-use.md) for example questions and [MCP tools reference](../reference/mcp-tools.md) for the exact schema.
 

@@ -1616,6 +1616,7 @@ type RegimeSnapshotParams struct{}
 type RegimeSnapshotResult struct {
 	AsOf             time.Time              `json:"as_of"`
 	Fingerprint      Fingerprint            `json:"fingerprint"`
+	Lifecycle        LifecycleState         `json:"lifecycle,omitzero"`
 	Summary          RegimeSummary          `json:"summary"`
 	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
 	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`
@@ -1641,6 +1642,10 @@ type RegimeSnapshotResult struct {
 	// than WarningDetails by design, so humans and agents can decide whether
 	// to interpret the regime read carefully without walking every row.
 	DataQuality []DataQualityHealth `json:"data_quality,omitempty"`
+	// SourceHealth is the orchestration-facing freshness/readiness summary
+	// for each broad-market source cluster. It avoids timestamp-sensitive
+	// alert churn: fingerprints hash the classified status, not age.
+	SourceHealth []SourceHealth `json:"source_health,omitempty"`
 	// SpecDoc points consumers (especially LLM-driven ones) at the
 	// canonical methodology + threshold reference so they don't
 	// hallucinate band edges. Same path on every response.

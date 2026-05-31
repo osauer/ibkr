@@ -1,6 +1,6 @@
 # Portfolio review with Claude and IBKR
 
-Updated: 2026-05-29 12:46 CEST
+Updated: 2026-05-31 21:23 CEST
 
 `ibkr mcp` lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.
 
@@ -31,8 +31,8 @@ A good portfolio review needs more than balances and positions. Through `ibkr mc
 - `ibkr_calendar` for official session, holiday, and early-close context
 - `ibkr_chain` for option expiries, IV, expected move, strikes, deltas, and open interest
 - `ibkr_watch` and `ibkr_scan` for watchlist and market-discovery context
-- `ibkr_breadth`, `ibkr_gamma`, and `ibkr_regime` for market background
-- `ibkr_canary` for scheduled `Go` / `Watch` / `De-lever` / `Liquidate` stress checks
+- `ibkr_breadth`, `ibkr_gamma`, and `ibkr_regime` for market background and broad-market lifecycle
+- `ibkr_canary` for portfolio-aware lifecycle, readiness, source-health, and stress checks
 - `ibkr_size` for fixed-fractional position sizing math
 
 The assistant should not treat any single tool result as a trade signal. The value is in combining the evidence, naming uncertainty, and showing which follow-up checks would change the decision.
@@ -46,14 +46,14 @@ Short version to paste into Claude:
 ```text
 Review my IBKR portfolio using the ibkr MCP tools. Start with account state,
 positions grouped by underlying, options Greeks, quote freshness, and the current
-risk-regime dashboard. Rank the risks I should inspect today, explain the evidence
+risk-regime lifecycle. Rank the risks I should inspect today, explain the evidence
 behind each one, and separate observations from possible next actions. Do not
 place or imply orders.
 ```
 
 For a deeper review, use the full example prompt and let Claude decide which MCP calls are needed before it writes the answer.
 
-For a scheduled canary check that preserves the top `Go`, `Watch`, `De-lever`, or `Liquidate` stage plus confidence, action rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
+For a scheduled canary check that preserves lifecycle stage, planner readiness, source health, fingerprints, confidence, rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md).
 
 ## What a useful answer looks like
 

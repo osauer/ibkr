@@ -27,7 +27,9 @@ type CanaryResult struct {
 	SourceAsOf         CanarySourceAsOf         `json:"source_as_of,omitzero"`
 	Fingerprint        Fingerprint              `json:"fingerprint"`
 	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
+	SourceHealth       []SourceHealth           `json:"source_health,omitempty"`
 	Policy             string                   `json:"policy,omitempty"`
+	Lifecycle          LifecycleState           `json:"lifecycle,omitzero"`
 	Direction          risk.SignalDirection     `json:"direction,omitempty"`
 	PortfolioPosture   risk.PortfolioPosture    `json:"portfolio_posture,omitempty"`
 	Severity           risk.SignalSeverity      `json:"severity"`
@@ -54,7 +56,9 @@ type CanarySourceAsOf struct {
 }
 
 type CanarySourceFingerprints struct {
-	Regime *Fingerprint `json:"regime,omitempty"`
+	Account   *Fingerprint `json:"account,omitempty"`
+	Positions *Fingerprint `json:"positions,omitempty"`
+	Regime    *Fingerprint `json:"regime,omitempty"`
 }
 
 type CanaryRow struct {

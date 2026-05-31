@@ -1,6 +1,6 @@
 # IBKR Portfolio Canary — Scheduled MCP Workflow
 
-Updated: 2026-05-31 08:21 CEST
+Updated: 2026-05-31 21:23 CEST
 
 You are running a high-precision portfolio stress canary for a US-equity/options-heavy IBKR portfolio with some EU exposure. Use the read-only `ibkr_canary` MCP tool exactly once. Do not call order, execution, preview, modification, cancellation, or broker-submission tools.
 
@@ -10,10 +10,12 @@ Return a compact canary report in this shape:
 Portfolio Canary · <as_of>
 
 Alert ID   <fingerprint.version> <fingerprint.key>
+Lifecycle  <lifecycle.stage> / <lifecycle.severity> / <lifecycle.readiness>
 Risk state [<direction> / <severity>]
 Confidence <confidence> (data <data_confidence>, signals <signal_confidence>)
 Next step  <planner_mode_hint> / <planner_readiness>
 Guidance   <summary>
+Sources    <source_health summary>
 
 | Title | Risk state | Guidance |
 |---|---|---|
@@ -25,9 +27,10 @@ Warnings
 
 Rules:
 
-- The top summary is required. It must use `ibkr_canary.fingerprint`, `ibkr_canary.direction`, `ibkr_canary.severity`, `ibkr_canary.confidence`, `ibkr_canary.planner_mode_hint`, `ibkr_canary.planner_readiness`, and `ibkr_canary.summary`.
+- The top summary is required. It must use `ibkr_canary.fingerprint`, `ibkr_canary.lifecycle.stage`, `ibkr_canary.lifecycle.severity`, `ibkr_canary.lifecycle.readiness`, `ibkr_canary.direction`, `ibkr_canary.severity`, `ibkr_canary.confidence`, `ibkr_canary.planner_mode_hint`, `ibkr_canary.planner_readiness`, and `ibkr_canary.summary`.
 - Preserve and display `ibkr_canary.fingerprint` exactly. This is the monitor dedupe key.
-- Preserve `ibkr_canary.source_fingerprints.regime` when handing the result to another workflow or alert destination.
+- Preserve `ibkr_canary.lifecycle.fingerprint`, `ibkr_canary.source_fingerprints.account`, `ibkr_canary.source_fingerprints.positions`, and `ibkr_canary.source_fingerprints.regime` when handing the result to another workflow or alert destination.
+- Display `source_health[]` compactly and treat stale/degraded/partial statuses as readiness evidence.
 - Preserve the tool's row order and wording.
 - Include every row returned by `ibkr_canary.rows`.
 - For each row, display `title`, `<direction> / <severity>`, and `guidance`.

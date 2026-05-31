@@ -1,6 +1,6 @@
 # IBKR Claude Desktop MCP setup
 
-Updated: 2026-05-28 04:47 CEST
+Updated: 2026-05-31 21:23 CEST
 
 Use `ibkr mcp` to connect Claude Desktop to Interactive Brokers (IBKR) through a local read-only MCP server. This page is for searches such as "IBKR Claude Desktop MCP", "ibkr claude desktop", "Claude Desktop IBKR MCP", and "connect Claude Desktop to IBKR".
 
@@ -53,7 +53,7 @@ Restart Claude Desktop after upgrading the binary. MCP hosts cache the spawned s
 
 ## Safety boundary
 
-`ibkr mcp` is read-only. It exposes Interactive Brokers account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, and position-sizing context. It has no order-entry interface and cannot place, modify, or cancel trades.
+`ibkr mcp` is read-only. It exposes Interactive Brokers account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, portfolio canary lifecycle, and position-sizing context. It has no order-entry interface and cannot place, modify, or cancel trades.
 
 ## Related pages
 

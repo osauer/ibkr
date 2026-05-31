@@ -15,7 +15,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T11:21:00+02:00",
+    "dateModified": "2026-05-31T21:23:00+02:00",
     "description": "canary is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger,...",
     "headline": "Canary-driven risk response",
     "isPartOf": {
@@ -157,7 +157,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="canary-driven-risk-response">Canary-driven risk response</h1>
-<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-31 11:21 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-31 21:23 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
 <h2 id="thesis">Thesis</h2>
 <p><code>canary</code> is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger, portfolio overexposure, data failure, and unusual opportunity.</p>
 <p><code>risk-plan</code> is the response planner. It does not decide that the world is dangerous by itself, it does not authorize execution, and it does not execute. It receives an alert context, refreshes live account and portfolio state, rebuilds the risk ledger, and proposes candidate actions for expert review.</p>
@@ -216,6 +216,10 @@
 <p>Canary is a high-frequency alerting tool, not a planner.</p>
 <p>It should emit:</p>
 <ul>
+<li>stress lifecycle stage: quiet, early-warning, confirmed-stress, panic,</li>
+</ul>
+<p>forced-defense, stabilization, opportunity, or data-quality</p>
+<ul>
 <li>alert direction: defensive, constructive, rebalance, mixed, or data-quality</li>
 <li>portfolio posture: threat, rebalance, opportunity, threat-opportunity, confirm-data, or neutral</li>
 <li>severity: observe, watch, act, or urgent</li>
@@ -225,6 +229,11 @@
 <li>fired shared signal IDs</li>
 <li>observed values and thresholds for those signals</li>
 <li>split confidence: data confidence and signal confidence</li>
+<li>source fingerprints for account, positions, and consumed regime</li>
+<li>source health for account, positions, and regime, including <code>as_of</code>,</li>
+</ul>
+<p>stale/degraded/partial status, max-age cadence, confidence, and semantic-bucket fingerprint stability</p>
+<ul>
 <li>source timestamps and policy profile/version</li>
 <li>compact account, portfolio, and regime context</li>
 <li>explicit ambiguity and stale-data warnings</li>
@@ -263,7 +272,10 @@ Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <h3 id="monitor-triggered-response">Monitor-triggered response</h3>
 <ol>
 <li>A scheduler runs canary, for example every 10 minutes.</li>
-<li>Canary emits <code>fingerprint</code>, <code>source_fingerprints.regime</code>, alert direction, portfolio posture, severity, and fired shared signals.</li>
+<li>Canary emits <code>fingerprint</code>, <code>lifecycle</code>, <code>source_fingerprints.account</code>,</li>
+</ol>
+<p><code>source_fingerprints.positions</code>, <code>source_fingerprints.regime</code>, <code>source_health</code>, alert direction, portfolio posture, severity, and fired shared signals.</p>
+<ol>
 <li>Monitor policy dedupes by <code>canary.fingerprint.key</code> and decides whether to call risk-plan.</li>
 <li>Risk-plan refreshes live state and rechecks the same policy criteria.</li>
 <li>Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.</li>
@@ -274,7 +286,7 @@ Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
 <li>Execution, when implemented, is owned by trading/order-entry and requires explicit approval plus fresh validation.</li>
 <li>Canary runs again after action to confirm the portfolio state.</li>
 </ol>
-<p>The monitor must not recompute its own hash over raw JSON. <code>canary.fingerprint</code> is the semantic alert identity; <code>source_fingerprints.regime</code> records which classified regime snapshot the canary consumed. A repeated unchanged fingerprint updates <code>last_seen</code> but does not create another alert. A changed fingerprint, recovery to observe/no-action, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.</p>
+<p>The monitor must not recompute its own hash over raw JSON. <code>canary.fingerprint</code> is the semantic alert identity; <code>lifecycle.fingerprint</code> is the semantic lifecycle-transition identity; <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, and <code>source_fingerprints.regime</code> record which classified input buckets the canary consumed. A repeated unchanged fingerprint updates <code>last_seen</code> but does not create another alert. A changed fingerprint, recovery to observe/no-action, stale/degraded source-health transition, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.</p>
 <p>Three opt-in monitor shapes stay intentionally outside the daemon:</p>
 <ul>
 <li>Agentic scheduled MCP loop: a scheduler calls <code>ibkr_canary</code> once, preserves the fingerprint, and wakes a human/risk-plan workflow only on transitions.</li>

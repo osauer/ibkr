@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-31 11:21 CEST
+**Last update:** 2026-05-31 21:23 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -77,6 +77,8 @@ Canary is a high-frequency alerting tool, not a planner.
 
 It should emit:
 
+- stress lifecycle stage: quiet, early-warning, confirmed-stress, panic,
+  forced-defense, stabilization, opportunity, or data-quality
 - alert direction: defensive, constructive, rebalance, mixed, or data-quality
 - portfolio posture: threat, rebalance, opportunity, threat-opportunity, confirm-data, or neutral
 - severity: observe, watch, act, or urgent
@@ -86,6 +88,10 @@ It should emit:
 - fired shared signal IDs
 - observed values and thresholds for those signals
 - split confidence: data confidence and signal confidence
+- source fingerprints for account, positions, and consumed regime
+- source health for account, positions, and regime, including `as_of`,
+  stale/degraded/partial status, max-age cadence, confidence, and
+  semantic-bucket fingerprint stability
 - source timestamps and policy profile/version
 - compact account, portfolio, and regime context
 - explicit ambiguity and stale-data warnings
@@ -134,7 +140,10 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 ### Monitor-triggered response
 
 1. A scheduler runs canary, for example every 10 minutes.
-2. Canary emits `fingerprint`, `source_fingerprints.regime`, alert direction, portfolio posture, severity, and fired shared signals.
+2. Canary emits `fingerprint`, `lifecycle`, `source_fingerprints.account`,
+   `source_fingerprints.positions`, `source_fingerprints.regime`,
+   `source_health`, alert direction, portfolio posture, severity, and fired
+   shared signals.
 3. Monitor policy dedupes by `canary.fingerprint.key` and decides whether to call risk-plan.
 4. Risk-plan refreshes live state and rechecks the same policy criteria.
 5. Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.
@@ -145,7 +154,15 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 10. Execution, when implemented, is owned by trading/order-entry and requires explicit approval plus fresh validation.
 11. Canary runs again after action to confirm the portfolio state.
 
-The monitor must not recompute its own hash over raw JSON. `canary.fingerprint` is the semantic alert identity; `source_fingerprints.regime` records which classified regime snapshot the canary consumed. A repeated unchanged fingerprint updates `last_seen` but does not create another alert. A changed fingerprint, recovery to observe/no-action, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.
+The monitor must not recompute its own hash over raw JSON. `canary.fingerprint`
+is the semantic alert identity; `lifecycle.fingerprint` is the semantic
+lifecycle-transition identity; `source_fingerprints.account`,
+`source_fingerprints.positions`, and `source_fingerprints.regime` record which
+classified input buckets the canary consumed. A repeated unchanged fingerprint
+updates `last_seen` but does not create another alert. A changed fingerprint,
+recovery to observe/no-action, stale/degraded source-health transition, or
+unchanged urgent state past a configured repeat TTL are monitor policy
+decisions outside the daemon.
 
 Three opt-in monitor shapes stay intentionally outside the daemon:
 

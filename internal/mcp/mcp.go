@@ -318,7 +318,7 @@ func (s *Server) handleInitialize(id, _ json.RawMessage) {
 			Name:    "ibkr",
 			Version: s.version,
 		},
-		Instructions: "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), combined SPY+SPX dealer zero-gamma, an eight-row risk-regime dashboard, and a portfolio stress canary. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol}).",
+		Instructions: "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), combined SPY+SPX dealer zero-gamma, a broad-market stress-lifecycle regime dashboard, and a portfolio-aware stress-lifecycle canary. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol}).",
 	}
 	b, _ := json.Marshal(res)
 	s.writeResult(id, b)

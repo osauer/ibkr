@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-26 20:12 CEST
+Updated: 2026-05-31 21:23 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -1316,8 +1316,8 @@ methodology lives in `docs/specs/risk-regime-dashboard.md`.
 
 ## regime
 
-`ibkr regime --json` — single-call risk-regime dashboard: all eight
-indicator rows in one compact JSON envelope. The default JSON/MCP shape
+`ibkr regime --json` — single-call broad-market stress-lifecycle dashboard:
+all eight indicator rows in one compact JSON envelope. The default JSON/MCP shape
 leads with `summary`, `composite`, and `warning_details`, then raw
 measurements, streaks, and quality provenance. Long methodology `notes`
 and breadth history are omitted by default; use `ibkr regime --json
@@ -1334,6 +1334,21 @@ all eight indicator rows.
 ```json
 {
   "as_of": "2026-05-09T14:32:09Z",
+  "fingerprint": {"version": "regime-fp-v1", "key": "sha256:..."},
+  "lifecycle": {
+    "stage": "early_warning",
+    "severity": "watch",
+    "readiness": "watch",
+    "timing": "forward_warning",
+    "confidence": "medium",
+    "evidence": [
+      {"source": "vol", "signal": "cluster", "bucket": "yellow",
+       "timing": "forward_warning", "severity": "watch"}
+    ],
+    "confirmed_by": [],
+    "fingerprint": {"version": "lifecycle-fp-v1", "key": "sha256:..."},
+    "not_execution": "Regime read only; no orders are placed by ibkr."
+  },
   "summary": {
     "label": "Normal regime",
     "evidence": "4 green clusters / 1 yellow cluster / 1 unranked cluster",
@@ -1342,6 +1357,11 @@ all eight indicator rows.
     "confidence": "medium",
     "not_advice": "Regime read only; not investment advice or a trade recommendation."
   },
+  "source_health": [
+    {"source": "vol", "status": "ok", "as_of": "2026-05-09T14:32:09Z",
+     "age_seconds": 4, "confidence": "high",
+     "fingerprint_stability": "semantic_buckets_only"}
+  ],
   "vix_term_structure": {
     "status": "ok",
     "band": "green",
@@ -1467,6 +1487,19 @@ Field meanings:
   balance, `indicator_evidence` is the raw row balance, `punch_line`
   explains the current read in one sentence, and `confidence` reflects
   evidence coverage rather than forecast certainty.
+- `lifecycle` is the orchestration-facing broad-market state. `stage` is
+  one of `quiet`, `early_warning`, `confirmed_stress`, `panic`,
+  `stabilization`, `opportunity`, or `data_quality`; `timing` separates
+  forward warning from contemporaneous confirmation or recovery; `evidence`
+  keeps weak or unconfirmed red inputs visible; `confirmed_by` lists the
+  independent confirming sources. `not_execution` is always a read-only
+  boundary.
+- `source_health[]` reports each broad-market source cluster's `as_of`,
+  status (`ok`, `stale`, `partial`, `degraded`, `computing`,
+  `unavailable`, or `error`), confidence, optional age/max-age values, and
+  `fingerprint_stability: "semantic_buckets_only"`.
+- `fingerprint` and `lifecycle.fingerprint` are semantic hashes for monitor
+  dedupe; do not recompute them from raw JSON.
 - Each indicator row carries a `status` field:
   `"ok"` (real fresh measurement) | `"stale"` (gateway labeled it
   delayed/frozen) | `"computing"` (heavy compute in flight; poll
@@ -1518,3 +1551,109 @@ Field meanings:
 Use `ibkr regime --explain` to get the spec's per-indicator threshold
 prose printed alongside each row, or `ibkr regime --json --explain` for
 the full JSON methodology payload.
+
+## canary
+
+`ibkr canary --json` — portfolio-aware stress lifecycle for monitor loops and
+downstream risk-plan orchestration. It reads account, positions, and the current
+regime, then emits posture/readiness/evidence only. It never selects trades,
+sizes hedges, previews orders, or executes.
+
+**MCP params** (`ibkr_canary`): none — the tool fetches account, positions, and
+regime itself.
+
+```json
+{
+  "as_of": "2026-05-31T21:11:20+02:00",
+  "source_as_of": {
+    "account": "2026-05-31T19:11:04Z",
+    "positions": "2026-05-31T21:11:04+02:00",
+    "regime": "2026-05-31T21:11:20+02:00"
+  },
+  "fingerprint": {"version": "canary-fp-v1", "key": "sha256:..."},
+  "source_fingerprints": {
+    "account": {"version": "account-fp-v1", "key": "sha256:..."},
+    "positions": {"version": "positions-fp-v1", "key": "sha256:..."},
+    "regime": {"version": "regime-fp-v1", "key": "sha256:..."}
+  },
+  "source_health": [
+    {"source": "account", "status": "ok", "age_seconds": 15,
+     "max_age_seconds": 5400, "confidence": "high",
+     "fingerprint_stability": "semantic_buckets_only"},
+    {"source": "positions", "status": "ok", "age_seconds": 15,
+     "max_age_seconds": 5400, "confidence": "high",
+     "fingerprint_stability": "semantic_buckets_only"},
+    {"source": "regime", "status": "stale", "confidence": "medium-low",
+     "notes": ["stale clusters: breadth,credit,vol"],
+     "fingerprint_stability": "semantic_buckets_only"}
+  ],
+  "policy": "canary-default",
+  "lifecycle": {
+    "stage": "forced_defense",
+    "severity": "urgent",
+    "readiness": "blocked",
+    "timing": "contemporaneous",
+    "confidence": "medium-low",
+    "evidence": [
+      {"source": "portfolio_exposure", "signal": "net_delta_high",
+       "bucket": "urgent", "timing": "contemporaneous",
+       "severity": "urgent", "confirmed": true}
+    ],
+    "confirmed_by": ["net_delta_high"],
+    "fingerprint": {"version": "lifecycle-fp-v1", "key": "sha256:..."},
+    "not_execution": "Read-only canary posture; no orders are placed by ibkr."
+  },
+  "direction": "defensive",
+  "portfolio_posture": "threat",
+  "severity": "urgent",
+  "planner_mode_hint": "defend",
+  "planner_readiness": "blocked",
+  "summary": "Refresh or confirm degraded inputs before planning major portfolio changes.",
+  "confidence": "medium-low",
+  "data_confidence": "medium-low",
+  "signal_confidence": "high",
+  "primary_drivers": ["net_delta_high", "regime_stress_confirmed"],
+  "signals": [
+    {"id": "net_delta_high", "direction": "defensive", "posture": "threat",
+     "severity": "urgent", "metric": "net_delta_pct_nlv", "observed": 250.4,
+     "threshold": 125, "unit": "pct_nlv", "evidence": "net_delta_pct_nlv 250% NLV",
+     "confidence": "high"}
+  ],
+  "rows": [
+    {"title": "Portfolio canary", "direction": "defensive", "severity": "urgent",
+     "guidance": "Refresh or confirm degraded inputs before planning major portfolio changes.",
+     "evidence": "2 red clusters; net delta 250% NLV"}
+  ],
+  "portfolio": {"base_currency": "EUR", "net_liquidation": 273014,
+                "net_delta_pct_nlv": 250.4, "option_greeks": "8/8 legs"},
+  "market": {"regime_verdict": "Stress signal present", "red_clusters": 2,
+             "red_cluster_names": ["credit", "gamma"]},
+  "warnings": ["stale clusters: breadth, credit, and vol"],
+  "not_execution": "Read-only canary posture; no orders are placed by ibkr."
+}
+```
+
+Field meanings:
+
+- `lifecycle.stage` is one of `quiet`, `early_warning`,
+  `confirmed_stress`, `panic`, `forced_defense`, `stabilization`,
+  `opportunity`, or `data_quality`. It is the high-level stress-lifecycle
+  bucket; use `readiness` to decide whether a downstream planner should act,
+  prestage, watch, or block on data.
+- `planner_mode_hint` and `planner_readiness` are the risk-plan handoff. They
+  are intentionally not orders or trade recommendations.
+- `signals[]` is the canonical machine evidence. Use `id`, `direction`,
+  `posture`, `severity`, `observed`, `threshold`, `target`, `confidence`, and
+  `blocked_by`; do not parse `rows[].guidance` for automation.
+- `source_fingerprints` identifies the semantic account, positions, and regime
+  buckets consumed by the canary run. `fingerprint` identifies the whole alert
+  posture; `lifecycle.fingerprint` identifies just the lifecycle transition.
+- `source_health[]` is the freshness/readiness surface for orchestration. During
+  regular trading/pre-market, sources are expected to be fresh on a roughly
+  five-minute cadence; outside trading, the max-age window is wider. Always
+  respect `status`, `confidence`, and `planner_readiness`.
+- `portfolio` and `market` are compact context blocks for rendering and quick
+  diagnostics. Use `ibkr account`, `ibkr positions`, and `ibkr regime` for
+  full underlying evidence.
+- `not_execution` is part of the contract. Canary does not place, preview,
+  submit, modify, cancel, draft, size, or select orders.
