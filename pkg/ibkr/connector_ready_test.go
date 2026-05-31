@@ -1,9 +1,9 @@
 package ibkr
 
 import (
+	"bufio"
 	"context"
 	"testing"
-	"time"
 )
 
 // Ensure EnsureMarketDataSubscription defers requests until connector is ready
@@ -21,15 +21,23 @@ func TestEnsureMarketDataSubscription_NotReady(t *testing.T) {
 		t.Fatalf("expected not ready error, got ok=%v err=%v", ok, err)
 	}
 
-	// Now mark ready and expect it to proceed to request path, but since no writer is attached,
-	// the send will fail; we only verify that we no longer get the not-ready error here.
+	// Now mark ready and seed enough contract/writer state for the request path
+	// to run immediately. This test is about the readiness predicate, not the
+	// production contract-detail fallback budgets.
 	c.ready = true
-	if ok, err := c.EnsureMarketDataSubscription(context.Background(), "SPY", nil, 0); err == nil && !ok {
-		t.Fatalf("expected either request attempt or error, got ok=%v err=%v", ok, err)
+	c.contractCache["SPY"] = ContractDetailsLite{
+		Symbol:       "SPY",
+		Exchange:     "SMART",
+		PrimaryExch:  "ARCA",
+		ConID:        12345,
+		LocalSymbol:  "SPY",
+		TradingClass: "SPY",
 	}
-
-	// Prevent flakiness
-	_ = time.Now()
+	var out safeBuffer
+	conn.writer = bufio.NewWriter(&out)
+	if ok, err := c.EnsureMarketDataSubscription(context.Background(), "SPY", nil, 0); err != nil || !ok {
+		t.Fatalf("expected request path to run once ready, got ok=%v err=%v", ok, err)
+	}
 }
 
 // IsConnected and IsReady can diverge: a connector with a live TCP socket

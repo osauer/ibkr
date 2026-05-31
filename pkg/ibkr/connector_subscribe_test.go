@@ -314,23 +314,31 @@ func TestUnsubscribeMarketData_CaseInsensitive(t *testing.T) {
 	}
 }
 
-// When a subscription has not yet been observed, Unsubscribe should not attempt
-// to call CancelMarketData (which would panic in this test because the underlying
-// connection has no writer). This guards against 300 spam during shutdown.
-func TestUnsubscribeMarketData_NoCancelWhenNotObserved(t *testing.T) {
+// Even when a subscription has not yet been observed, Unsubscribe must send
+// CancelMarketData so the local market-data slot is released. Option
+// subscriptions can receive only model-computation ticks, so Observed is not a
+// reliable proxy for "safe to cancel".
+func TestUnsubscribeMarketData_CancelsUnobservedToReleaseSlot(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
-	// Create a fake subscription with a non-zero reqID but not observed
-	c.subscriptions["SPY"] = &Subscription{Symbol: "SPY", ReqID: 123, Observed: false}
-	// Attach a connection that appears connected but lacks a writer; if
-	// CancelMarketData were called, it would panic due to nil writer.
+	var out safeBuffer
 	conn := NewConnection(nil)
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(&out)
+	if err := conn.acquireMarketDataSlot(conn.ctx, 123); err != nil {
+		t.Fatalf("acquire slot: %v", err)
+	}
 	c.conn = conn
+	c.subscriptions["SPY"] = &Subscription{Symbol: "SPY", ReqID: 123, Observed: false}
 
-	// This should not panic
 	if err := c.UnsubscribeMarketData("SPY"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if count := conn.rateLimiter.marketDataSubs.Count(); count != 0 {
+		t.Fatalf("expected unsubscribe to release market-data slot, got %d", count)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected cancel request to be written")
 	}
 }
 

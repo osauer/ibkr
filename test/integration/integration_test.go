@@ -43,6 +43,12 @@ var (
 	sharedSkipped bool
 )
 
+const (
+	integrationCLIUnaryTimeout     = 2 * time.Second
+	integrationCLIUnaryTimeoutText = "2s"
+	integrationCLILongTimeoutText  = "3s"
+)
+
 // TestMain probes the IB Gateway, builds the single ibkr binary, and
 // launches one daemon (`ibkr daemon --foreground`) shared by every test
 // in this package. Per-test daemons are too slow (each handshake is
@@ -156,7 +162,8 @@ func buildBin() (string, error) {
 		return "", err
 	}
 	out := filepath.Join(dir, "ibkr")
-	cmd := exec.Command("go", "build", "-o", out, "../../cmd/ibkr")
+	ldflags := fmt.Sprintf("-X main.cliUnaryTimeout=%s -X main.cliLongUnaryTimeout=%s", integrationCLIUnaryTimeoutText, integrationCLILongTimeoutText)
+	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "../../cmd/ibkr")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

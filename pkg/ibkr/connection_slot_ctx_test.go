@@ -67,10 +67,10 @@ func TestRequestMarketDataWithContract_HonoursCallerCtxOnSlotSaturation(t *testi
 		LocalSymbol: "SPY",
 	}
 
-	// 1 s ctx deadline — the structural fix should surface this here, not
+	// Tight ctx deadline — the structural fix should surface this here, not
 	// the Connection.ctx (which is Background in this test setup and would
 	// hang forever pre-fix).
-	ctx, cancel := context.WithTimeout(bg, 1*time.Second)
+	ctx, cancel := context.WithTimeout(bg, 100*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -83,15 +83,15 @@ func TestRequestMarketDataWithContract_HonoursCallerCtxOnSlotSaturation(t *testi
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected wrapped context.DeadlineExceeded, got %v", err)
 	}
-	// Should fire roughly at the ctx deadline. Generous upper bound for
-	// CI jitter; the critical invariant is that we did NOT wait
-	// indefinitely on Connection.ctx, which is the pre-F-26 behaviour.
-	if elapsed > 2*time.Second {
-		t.Fatalf("acquire took %v with 1s ctx deadline — caller ctx not honoured (regression of F-26)", elapsed)
+	// Should fire roughly at the ctx deadline. Generous upper bound for CI
+	// jitter; the critical invariant is that we did NOT wait indefinitely on
+	// Connection.ctx, which is the pre-F-26 behaviour.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("acquire took %v with 100ms ctx deadline — caller ctx not honoured (regression of F-26)", elapsed)
 	}
 	// Symmetric lower bound: should not return suspiciously early, which
 	// would suggest the ctx deadline was bypassed entirely.
-	if elapsed < 800*time.Millisecond {
-		t.Fatalf("acquire returned in %v — suspiciously fast for a 1s ctx", elapsed)
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("acquire returned in %v — suspiciously fast for a 100ms ctx", elapsed)
 	}
 }

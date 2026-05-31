@@ -73,13 +73,21 @@ func TestRestartDaemon_SignalDelivered(t *testing.T) {
 // fires when the target process refuses SIGTERM. We can't easily
 // build a SIGTERM-trapping subprocess in a portable test; instead we
 // rely on a custom test wrapper that catches the signal with a
-// shell `trap`. The wrapper traps TERM, sleeps 6s anyway, then exits.
+// shell `trap`. The wrapper traps TERM, sleeps past the shortened test
+// timeout anyway, then exits.
 func TestRestartDaemon_Timeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in short mode (subprocess fork)")
 	}
-	t.Parallel()
-	cmd := exec.Command("sh", "-c", `trap '' TERM; sleep 6`)
+	savedTimeout, savedPoll := restartTimeout, restartPoll
+	restartTimeout = 200 * time.Millisecond
+	restartPoll = 10 * time.Millisecond
+	t.Cleanup(func() {
+		restartTimeout = savedTimeout
+		restartPoll = savedPoll
+	})
+
+	cmd := exec.Command("sh", "-c", `trap '' TERM; sleep 1`)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start trap-sleep: %v", err)
 	}

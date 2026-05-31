@@ -35,7 +35,7 @@ RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check public-discovery-check release-prep indexnow-submit
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check public-discovery-check release-prep indexnow-submit
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -60,7 +60,10 @@ uninstall: ## Remove ibkr from $(PREFIX)/bin
 	rm -f $(PREFIX)/bin/ibkr
 	@echo "Removed ibkr from $(PREFIX)/bin"
 
-test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integration tests (-race)
+TEST_JOBS ?= 3
+TEST_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(TEST_JOBS),)
+test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overlapped by default
+	$(MAKE) $(TEST_MAKEFLAGS) check test-pkg test-daemon
 
 # Binding pre-commit gate: formatting + go vet + staticcheck + govulncheck +
 # plugin manifest validation. Fails on stdlib vulnerabilities too — keep Go
@@ -75,7 +78,13 @@ test: check test-pkg test-daemon ## Full gate: check + pkg tests + daemon/integr
 # is recoverable because the schema is small and changes go through PR
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
-check: $(CHECK_DEPS) modernize-check docs-check changelog-check discovery-check ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + discovery-check (binding pre-commit gate)
+CHECK_JOBS ?= 8
+CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check discovery-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
+check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + discovery-check (binding pre-commit gate)
+	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
+
+gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
 	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths
 	@# (Claude Code agent worktrees, /dist, etc.). `git ls-files` respects
 	@# .gitignore by listing tracked + untracked-but-not-ignored files —
@@ -95,8 +104,14 @@ check: $(CHECK_DEPS) modernize-check docs-check changelog-check discovery-check 
 		echo "fix with: make fmt"; \
 		exit 1; \
 	fi
+
+vet-check: ## Run go vet
 	go vet ./...
+
+staticcheck-check: ## Run staticcheck
 	go tool staticcheck ./...
+
+govulncheck-check: ## Run govulncheck
 	go tool govulncheck ./...
 
 # Validate the Claude Code plugin + marketplace manifests with the official
