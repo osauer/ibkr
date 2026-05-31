@@ -16,31 +16,31 @@ func TestCanaryBacktestSampleProducesSignalMetrics(t *testing.T) {
 	rows := readBacktestFixture(t)
 	res := runCanaryBacktest(rows, time.Date(2026, 5, 31, 9, 8, 0, 0, time.UTC))
 
-	if got, want := res.Metrics.Observations, 10; got != want {
+	if got, want := res.Metrics.Observations, 18; got != want {
 		t.Fatalf("observations = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.TargetStress, 5; got != want {
+	if got, want := res.Metrics.TargetStress, 9; got != want {
 		t.Fatalf("target_stress = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.SignalTruePositive, 5; got != want {
+	if got, want := res.Metrics.SignalTruePositive, 9; got != want {
 		t.Fatalf("signal_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.SignalFalsePositive, 2; got != want {
+	if got, want := res.Metrics.SignalFalsePositive, 4; got != want {
 		t.Fatalf("signal_false_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchTruePositive, 4; got != want {
+	if got, want := res.Metrics.WatchTruePositive, 9; got != want {
 		t.Fatalf("watch_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchMiss, 1; got != want {
+	if got, want := res.Metrics.WatchMiss, 0; got != want {
 		t.Fatalf("watch_miss = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchFalsePositive, 0; got != want {
+	if got, want := res.Metrics.WatchFalsePositive, 1; got != want {
 		t.Fatalf("watch_false_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.ActTruePositive, 4; got != want {
+	if got, want := res.Metrics.ActTruePositive, 6; got != want {
 		t.Fatalf("act_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.RebalanceWatch, 3; got != want {
+	if got, want := res.Metrics.RebalanceWatch, 7; got != want {
 		t.Fatalf("rebalance_watch = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.DataQualityWatch, 1; got != want {
@@ -68,9 +68,9 @@ func TestRunBacktestCanaryRendersText(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Canary Backtest",
-		"10 observations",
-		"precision 71%",
-		"Defensive    precision 100%",
+		"18 observations",
+		"precision 69%",
+		"Watch        precision 90%",
 		"2024 yen carry unwind",
 		"Risk budget",
 		"data-quality watch",
@@ -89,19 +89,19 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	rows := readRegimeBacktestFixture(t)
 	res := runRegimeBacktest(rows, time.Date(2026, 5, 31, 11, 40, 0, 0, time.UTC))
 
-	if got, want := res.Metrics.Observations, 10; got != want {
+	if got, want := res.Metrics.Observations, 17; got != want {
 		t.Fatalf("observations = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.ScoredObservations, 9; got != want {
+	if got, want := res.Metrics.ScoredObservations, 14; got != want {
 		t.Fatalf("scored_observations = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.OutOfScope, 1; got != want {
+	if got, want := res.Metrics.OutOfScope, 3; got != want {
 		t.Fatalf("out_of_scope = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.TargetStress, 5; got != want {
+	if got, want := res.Metrics.TargetStress, 6; got != want {
 		t.Fatalf("target_stress = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchTruePositive, 5; got != want {
+	if got, want := res.Metrics.WatchTruePositive, 6; got != want {
 		t.Fatalf("watch_true_positive = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.WatchFalsePositive, 1; got != want {
@@ -131,6 +131,32 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	}
 }
 
+func TestCanaryBacktestPortfolioStressAcceptsRebalanceWatch(t *testing.T) {
+	t.Parallel()
+	acc := &canaryBacktestAccumulator{}
+	acc.add(CanaryBacktestRowResult{
+		TargetStress:   true,
+		TargetScope:    "portfolio",
+		SignalWatch:    true,
+		RebalanceWatch: true,
+	})
+	if got, want := acc.metrics.WatchTruePositive, 1; got != want {
+		t.Fatalf("watch_true_positive = %d, want %d", got, want)
+	}
+	if got := acc.metrics.WatchMiss; got != 0 {
+		t.Fatalf("watch_miss = %d, want 0", got)
+	}
+
+	acc = &canaryBacktestAccumulator{}
+	acc.add(CanaryBacktestRowResult{
+		TargetStress:   false,
+		RebalanceWatch: true,
+	})
+	if got := acc.metrics.WatchFalsePositive; got != 0 {
+		t.Fatalf("rebalance-only nonstress row should not count as defensive false positive, got %d", got)
+	}
+}
+
 func TestRunBacktestRegimeRendersText(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
@@ -142,8 +168,8 @@ func TestRunBacktestRegimeRendersText(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Regime Backtest",
-		"10 observations",
-		"Watch        precision 83%",
+		"17 observations",
+		"Watch        precision 86%",
 		"Stress       precision 100%",
 		"2020-2021 retail/reddit squ.",
 		"out-of-scope",
@@ -154,6 +180,105 @@ func TestRunBacktestRegimeRendersText(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr should be empty, got:\n%s", stderr.String())
+	}
+}
+
+func TestRegimeBacktestBuilderEmitsExGammaRows(t *testing.T) {
+	t.Parallel()
+	f, err := os.Open(regimePointInTimeFixturePath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rows, err := readRegimePointInTimeRows(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := buildRegimeBacktestObservations(rows)
+	if got, want := len(observations), 2; got != want {
+		t.Fatalf("observations = %d, want %d", got, want)
+	}
+	first := observations[0].Regime
+	if first.GammaZero.Status != "unavailable" {
+		t.Fatalf("gamma status = %q, want unavailable", first.GammaZero.Status)
+	}
+	if first.GammaZero.Band != "" {
+		t.Fatalf("gamma band = %q, want unranked", first.GammaZero.Band)
+	}
+	if len(first.WarningDetails) != 1 || first.WarningDetails[0].Code != "gamma_zero_point_in_time_unavailable" {
+		t.Fatalf("warning_details = %+v, want gamma PIT warning", first.WarningDetails)
+	}
+	if len(first.DataQuality) != 1 || first.DataQuality[0].Surface != "gamma" || first.DataQuality[0].Status != "degraded" {
+		t.Fatalf("data_quality = %+v, want degraded gamma", first.DataQuality)
+	}
+	if got, want := first.Composite.ClusterUnrankedCount, 1; got != want {
+		t.Fatalf("cluster_unranked_count = %d, want %d", got, want)
+	}
+	if got, want := first.Composite.ClusterRedCount, 5; got != want {
+		t.Fatalf("cluster_red_count = %d, want %d", got, want)
+	}
+	res := runRegimeBacktest(observations, time.Date(2026, 5, 31, 12, 18, 0, 0, time.UTC))
+	if got, want := res.Metrics.DataQualityWatch, 2; got != want {
+		t.Fatalf("data_quality_watch = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.StressTruePositive, 1; got != want {
+		t.Fatalf("stress_true_positive = %d, want %d", got, want)
+	}
+	if got, want := res.Metrics.StressFalsePositive, 0; got != want {
+		t.Fatalf("stress_false_positive = %d, want %d", got, want)
+	}
+}
+
+func TestRunBacktestBuildRegimeEmitsJSONL(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	code := Run(context.Background(), env, "backtest", []string{"build-regime", "--input", regimePointInTimeFixturePath(t)})
+	if code != 0 {
+		t.Fatalf("Run backtest build-regime returned %d, stderr:\n%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr should be empty, got:\n%s", stderr.String())
+	}
+	rows, err := readRegimeBacktestObservations(strings.NewReader(stdout.String()))
+	if err != nil {
+		t.Fatalf("generated JSONL should feed regime backtest: %v\n%s", err, stdout.String())
+	}
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("generated rows = %d, want %d", got, want)
+	}
+	if !strings.Contains(stdout.String(), `"gamma_zero_point_in_time_unavailable"`) {
+		t.Fatalf("generated rows missing gamma unavailable warning:\n%s", stdout.String())
+	}
+}
+
+func TestRegimeBacktestBuilderPreservesTapeChangeFields(t *testing.T) {
+	t.Parallel()
+	rows := []RegimePointInTimeRow{{
+		Date: "2026-05-29",
+		VIXTermStructure: RegimePointInTimeVIXTerm{
+			VIX:          new(30.0),
+			VIX3M:        new(24.0),
+			VIXPrevClose: new(20.0),
+		},
+		HYGSPYDivergence: RegimePointInTimeHYGSPY{
+			HYGPrice:     new(78.0),
+			HYG50DMA:     new(79.0),
+			SPYPrice:     new(95.0),
+			SPY52WHigh:   new(110.0),
+			SPYPrevClose: new(100.0),
+		},
+	}}
+	observations := buildRegimeBacktestObservations(rows)
+	got := observations[0].Regime
+	if got.VIXTermStructure.VIXChangePct == nil || *got.VIXTermStructure.VIXChangePct != 50.0 {
+		t.Fatalf("vix_change_pct = %v, want 50.0", got.VIXTermStructure.VIXChangePct)
+	}
+	if got.HYGSPYDivergence.SPYChange == nil || *got.HYGSPYDivergence.SPYChange != -5.0 {
+		t.Fatalf("spy_change = %v, want -5.0", got.HYGSPYDivergence.SPYChange)
+	}
+	if got.HYGSPYDivergence.SPYChangePct == nil || *got.HYGSPYDivergence.SPYChangePct != -5.0 {
+		t.Fatalf("spy_change_pct = %v, want -5.0", got.HYGSPYDivergence.SPYChangePct)
 	}
 }
 
@@ -277,6 +402,11 @@ func backtestFixturePath(t *testing.T) string {
 func regimeBacktestFixturePath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join("testdata", "regime_backtest_sample.jsonl")
+}
+
+func regimePointInTimeFixturePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("testdata", "regime_pit_panel_sample.jsonl")
 }
 
 func opportunityBacktestFixturePath(t *testing.T) string {

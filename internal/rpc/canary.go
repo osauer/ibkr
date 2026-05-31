@@ -82,18 +82,19 @@ type CanaryPortfolioSummary struct {
 }
 
 type CanaryMarketSummary struct {
-	RegimeVerdict      string   `json:"regime_verdict,omitempty"`
-	RedClusters        int      `json:"red_clusters"`
-	YellowClusters     int      `json:"yellow_clusters"`
-	RankedClusters     int      `json:"ranked_clusters"`
-	UnrankedClusters   int      `json:"unranked_clusters"`
-	RedClusterNames    []string `json:"red_cluster_names,omitempty"`
-	YellowClusterNames []string `json:"yellow_cluster_names,omitempty"`
-	AmbiguousClusters  []string `json:"ambiguous_clusters,omitempty"`
-	PartialClusters    []string `json:"partial_clusters,omitempty"`
-	ComputingClusters  []string `json:"computing_clusters,omitempty"`
-	DegradedClusters   []string `json:"degraded_clusters,omitempty"`
-	StaleClusters      []string `json:"stale_clusters,omitempty"`
-	SPYChangePct       *float64 `json:"spy_change_pct,omitempty"`
-	VIXChangePct       *float64 `json:"vix_change_pct,omitempty"`
+	RegimeVerdict              string   `json:"regime_verdict,omitempty"`
+	RedClusters                int      `json:"red_clusters"`
+	YellowClusters             int      `json:"yellow_clusters"`
+	RankedClusters             int      `json:"ranked_clusters"`
+	UnrankedClusters           int      `json:"unranked_clusters"`
+	RedClusterNames            []string `json:"red_cluster_names,omitempty"`
+	YellowClusterNames         []string `json:"yellow_cluster_names,omitempty"`
+	UnconfirmedRedClusterNames []string `json:"unconfirmed_red_cluster_names,omitempty"`
+	AmbiguousClusters          []string `json:"ambiguous_clusters,omitempty"`
+	PartialClusters            []string `json:"partial_clusters,omitempty"`
+	ComputingClusters          []string `json:"computing_clusters,omitempty"`
+	DegradedClusters           []string `json:"degraded_clusters,omitempty"`
+	StaleClusters              []string `json:"stale_clusters,omitempty"`
+	SPYChangePct               *float64 `json:"spy_change_pct,omitempty"`
+	VIXChangePct               *float64 `json:"vix_change_pct,omitempty"`
 }

@@ -168,13 +168,21 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		SPYChangePct:     r.HYGSPYDivergence.SPYChangePct,
 		VIXChangePct:     r.VIXTermStructure.VIXChangePct,
 	}
-	clusters := map[string][]string{
-		"vol":     {r.VIXTermStructure.Band, r.VolOfVol.Band},
-		"credit":  {r.HYGSPYDivergence.Band, r.CreditSpreads.Band},
-		"funding": {r.FundingStress.Band},
-		"fx":      {r.USDJPY.Band},
-		"gamma":   {r.GammaZero.Band},
-		"breadth": {r.Breadth.Band},
+	rawBands := []string{
+		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
+		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
+		strongestBand([]string{r.FundingStress.Band}),
+		strongestBand([]string{r.USDJPY.Band}),
+		strongestBand([]string{r.GammaZero.Band}),
+		strongestBand([]string{r.Breadth.Band}),
+	}
+	bands := backtestConfirmedRegimeClusterBands(rawBands, r.HYGSPYDivergence.Band, r.CreditSpreads.Band, r.USDJPY.Band)
+	clusterBands := map[string]string{}
+	for i, name := range []string{"vol", "credit", "funding", "fx", "gamma", "breadth"} {
+		clusterBands[name] = bands[i]
+		if rawBands[i] == "red" && bands[i] != "red" {
+			out.UnconfirmedRedClusterNames = append(out.UnconfirmedRedClusterNames, name)
+		}
 	}
 	statuses := map[string][]string{
 		"vol":     {r.VIXTermStructure.Status, r.VolOfVol.Status},
@@ -184,8 +192,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		"gamma":   {r.GammaZero.Status},
 		"breadth": {r.Breadth.Status},
 	}
-	for name, bands := range clusters {
-		clusterBand := strongestBand(bands)
+	for name, clusterBand := range clusterBands {
 		switch clusterBand {
 		case "red":
 			out.RedClusterNames = append(out.RedClusterNames, name)
@@ -210,6 +217,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 	}
 	slices.Sort(out.RedClusterNames)
 	slices.Sort(out.YellowClusterNames)
+	slices.Sort(out.UnconfirmedRedClusterNames)
 	slices.Sort(out.AmbiguousClusters)
 	slices.Sort(out.PartialClusters)
 	slices.Sort(out.ComputingClusters)
@@ -1085,6 +1093,7 @@ func canaryWarningLine(w rpc.RegimeWarning) string {
 func canaryMarketEvidence(m CanaryMarketSummary) string {
 	red := strings.Join(m.RedClusterNames, ",")
 	yellow := strings.Join(m.YellowClusterNames, ",")
+	unconfirmedRed := strings.Join(m.UnconfirmedRedClusterNames, ",")
 	if red == "" {
 		red = "none"
 	}
@@ -1093,6 +1102,9 @@ func canaryMarketEvidence(m CanaryMarketSummary) string {
 	}
 	out := fmt.Sprintf("%d red clusters (%s), %d yellow (%s), %d/%d ranked",
 		m.RedClusters, red, m.YellowClusters, yellow, m.RankedClusters, m.RankedClusters+m.UnrankedClusters)
+	if unconfirmedRed != "" {
+		out += "; unconfirmed red " + unconfirmedRed
+	}
 	if m.SPYChangePct != nil || m.VIXChangePct != nil {
 		out += "; " + canaryTapeEvidence(m)
 	}
@@ -1126,7 +1138,8 @@ func canaryConfirmedTapeStress(m CanaryMarketSummary) bool {
 }
 
 func canaryFastCarryUnwind(m CanaryMarketSummary) bool {
-	if !slices.Contains(m.RedClusterNames, "fx") {
+	fxRed := slices.Contains(m.RedClusterNames, "fx") || slices.Contains(m.UnconfirmedRedClusterNames, "fx")
+	if !fxRed {
 		return false
 	}
 	return pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
