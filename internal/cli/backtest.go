@@ -57,6 +57,7 @@ type CanaryBacktestRowResult struct {
 	WindowDays       int                   `json:"window_days,omitempty"`
 	DaysToStress     *int                  `json:"days_to_stress,omitempty"`
 	Direction        risk.SignalDirection  `json:"direction,omitempty"`
+	PortfolioPosture risk.PortfolioPosture `json:"portfolio_posture,omitempty"`
 	Severity         risk.SignalSeverity   `json:"severity"`
 	PlannerMode      risk.PlannerMode      `json:"planner_mode,omitempty"`
 	PlannerReadiness risk.PlannerReadiness `json:"planner_readiness,omitempty"`
@@ -234,6 +235,7 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 		WindowDays:       obs.Target.WindowDays,
 		DaysToStress:     obs.Target.DaysToStress,
 		Direction:        canary.Direction,
+		PortfolioPosture: canary.PortfolioPosture,
 		Severity:         canary.Severity,
 		PlannerMode:      canary.PlannerModeHint,
 		PlannerReadiness: canary.PlannerReadiness,

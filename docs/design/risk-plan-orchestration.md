@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-31 11:01 CEST
+**Last update:** 2026-05-31 11:21 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -61,6 +61,7 @@ Current signal payloads carry:
 
 - `id`: stable signal name from the shared vocabulary.
 - `direction`: `defensive`, `constructive`, `rebalance`, `mixed`, or `data_quality`.
+- `posture`: portfolio-relative interpretation: `threat`, `rebalance`, `opportunity`, `threat_opportunity`, `confirm_data`, or `neutral`.
 - `severity`: `observe`, `watch`, `act`, or `urgent`.
 - `subject`: optional symbol, cluster, or bucket.
 - `metric`, `observed`, `threshold`, `target`, and `unit`.
@@ -77,6 +78,7 @@ Canary is a high-frequency alerting tool, not a planner.
 It should emit:
 
 - alert direction: defensive, constructive, rebalance, mixed, or data-quality
+- portfolio posture: threat, rebalance, opportunity, threat-opportunity, confirm-data, or neutral
 - severity: observe, watch, act, or urgent
 - planner mode hint: none, stage, defend, rebalance, deploy, or confirm-data
 - planner readiness: none, watch, prestage, ready, or blocked
@@ -94,6 +96,7 @@ The legacy `GO` / `WATCH` / `DE-LEVER` / `LIQUIDATE` ladder is no longer part of
 
 ```text
 Risk state  Defensive / Watch
+Posture     Threat
 Next step   Stage risk-plan
 Guidance    Freeze new risk and stage a risk plan; wait for confirmation before major action.
 Drivers     margin_cushion_low, net_delta_high, gamma_red
@@ -131,7 +134,7 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 ### Monitor-triggered response
 
 1. A scheduler runs canary, for example every 10 minutes.
-2. Canary emits `fingerprint`, `source_fingerprints.regime`, alert direction, severity, and fired shared signals.
+2. Canary emits `fingerprint`, `source_fingerprints.regime`, alert direction, portfolio posture, severity, and fired shared signals.
 3. Monitor policy dedupes by `canary.fingerprint.key` and decides whether to call risk-plan.
 4. Risk-plan refreshes live state and rechecks the same policy criteria.
 5. Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.

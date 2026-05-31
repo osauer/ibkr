@@ -67,6 +67,7 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 	projection := canaryFingerprintProjection{
 		Policy:           cleanString(r.Policy),
 		Direction:        r.Direction,
+		PortfolioPosture: r.PortfolioPosture,
 		Severity:         r.Severity,
 		PlannerModeHint:  r.PlannerModeHint,
 		PlannerReadiness: r.PlannerReadiness,
@@ -155,6 +156,7 @@ type dataQualityFingerprint struct {
 type canaryFingerprintProjection struct {
 	Policy           string                    `json:"policy,omitempty"`
 	Direction        risk.SignalDirection      `json:"direction,omitempty"`
+	PortfolioPosture risk.PortfolioPosture     `json:"portfolio_posture,omitempty"`
 	Severity         risk.SignalSeverity       `json:"severity,omitempty"`
 	PlannerModeHint  risk.PlannerMode          `json:"planner_mode_hint,omitempty"`
 	PlannerReadiness risk.PlannerReadiness     `json:"planner_readiness,omitempty"`
@@ -189,6 +191,7 @@ type canaryMarketFingerprint struct {
 type canarySignalFingerprint struct {
 	ID               string   `json:"id"`
 	Direction        string   `json:"direction,omitempty"`
+	Posture          string   `json:"posture,omitempty"`
 	Severity         string   `json:"severity,omitempty"`
 	Subject          string   `json:"subject,omitempty"`
 	Metric           string   `json:"metric,omitempty"`
@@ -290,6 +293,7 @@ func canarySignalFingerprints(signals []risk.Signal) []canarySignalFingerprint {
 		fp := canarySignalFingerprint{
 			ID:               cleanString(string(s.ID)),
 			Direction:        cleanString(string(s.Direction)),
+			Posture:          cleanString(string(s.Posture)),
 			Severity:         cleanString(string(s.Severity)),
 			Subject:          cleanString(s.Subject),
 			Metric:           cleanString(s.Metric),
@@ -309,6 +313,7 @@ func canarySignalFingerprints(signals []risk.Signal) []canarySignalFingerprint {
 		return cmp.Or(
 			cmp.Compare(a.ID, b.ID),
 			cmp.Compare(a.Direction, b.Direction),
+			cmp.Compare(a.Posture, b.Posture),
 			cmp.Compare(a.Severity, b.Severity),
 			cmp.Compare(a.Subject, b.Subject),
 			cmp.Compare(a.Metric, b.Metric),
