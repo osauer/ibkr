@@ -1,6 +1,6 @@
 # Regime and Canary Backtest Runbook
 
-**Updated:** 2026-05-31 19:24 CEST
+**Updated:** 2026-05-31 20:08 CEST
 
 This is the single umbrella for proving and tuning `ibkr regime` and
 `ibkr canary`. Keep the work here. Do not add another experiment plan, tuning
@@ -106,6 +106,27 @@ Tier 2: confirmation proxy panel.
 - `LQD/TLT` is context-only for now because it mixes credit spread, duration,
   and rates effects. Do not use it as an active confirmation input.
 
+### Tier 2 Input Classification
+
+The Tier 2 inputs are not all product indicators. This is the final
+classification for the current pass:
+
+| Series | Classification | Runtime decision |
+| --- | --- | --- |
+| `RSP/SPY` | Historical proxy for missing breadth/participation. | Do not promote. Live `ibkr regime` already has first-class constituent breadth. |
+| `QQQE/QQQ` | Historical proxy for Nasdaq mega-cap concentration/participation. | Do not promote into broad regime. Keep as backtest context unless a separate concentration surface is designed. |
+| `IWM/SPY` | Context-only risk appetite/size rotation. | Do not promote; it is not S&P breadth and can fire during benign leadership shifts. |
+| `HYG/LQD`, `HYG/IEF` | Historical credit-confirmation proxies. | Do not promote now. Runtime already exposes HYG/SPY and official HY OAS; add another live credit ETF row only if HY OAS proves persistently unavailable. |
+| `LQD/TLT` | Context-only. | Excluded from active confirmation because it mixes credit, duration, and rates effects. |
+| `TLT/IEF`, `SHY/IEF` | Context-only rates/duration stress proxies. | Do not promote; they are not MOVE/rates vol and produced calm/rally false alarms. |
+| FRED rates/curve series | Context or source-data support. | Do not promote as new regime indicators without a separate product definition and point-in-time source gate. |
+
+No Tier 2 ETF proxy is promoted into live `ibkr regime` in this pass. The
+production change is narrower: isolated red `VVIX` is treated as an
+unconfirmed equity-volatility warning unless severity or already-visible tape
+confirms it. The red row remains visible in `ibkr regime`; only the cluster vote
+is downgraded from stress to watch.
+
 ## Current Findings
 
 - Curated sourced regime holdout still has good recall and only a few false
@@ -124,7 +145,14 @@ Tier 2: confirmation proxy panel.
   precision and 69.1% recall on the 2024+ observable-stress target.
 - The best tested Tier 2 confirmation rule improves holdout stress precision to
   45.1% and cuts false alarms from 17.2% to 9.2%, but recall falls to 58.2%.
-  This is a promising candidate, not yet a production rule.
+- This remains a diagnostic proxy result, not a production rule, because it
+  relies on ETF proxy groups that are not live regime indicators.
+- The promoted runtime-visible severity split improves Tier 2 holdout stress
+  precision from 34.2% to 43.9%, keeps recall at 65.5% versus the 69.1%
+  current baseline, and cuts false alarms from 17.2% to 10.8%.
+- Tier 1 primary holdout, which is intentionally noisy forward-label scoring,
+  improves from 10.8% precision / 66.7% recall / 21.5% false alarms to 14.6% /
+  66.7% / 15.2%.
 
 ## Next Pass
 
@@ -144,14 +172,17 @@ Run this sequence and stop at the first failed gate:
 5. Tune only the severity split, and only on the tuning split.
 6. Score holdout once the tuning behavior is stable.
 
-Current candidate to continue evaluating:
+Final promoted rule:
 
-- Keep red-cluster watch behavior visible.
-- Count a red-cluster stress signal only when there is current tape damage,
-  severe volatility, or an active Tier 2 proxy group confirming stress.
-- Do not apply this directly to live `ibkr regime` until the live equivalent is
-  explicit. Tier 2 proxy groups are backtest features unless promoted into the
-  live contract.
+- Keep red indicator rows visible.
+- Keep VIX/VIX3M backwardation as stress-level equity volatility.
+- Treat isolated `VVIX` red as stress only when `VVIX >= 120`, VIX is up at
+  least 20% on the day, SPY is down at least 1% on the day, or another
+  independent cluster is red.
+- Otherwise count the equity-volatility cluster as yellow while leaving the
+  `VVIX` row red and auditable.
+- Do not use Tier 2 ETF proxy groups in runtime behavior until they are
+  promoted into the live contract.
 
 ## Data Gates
 

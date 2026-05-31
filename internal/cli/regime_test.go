@@ -445,6 +445,30 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 	}
 }
 
+func TestRegimeComposite_IsolatedVVIXRedCountsClusterYellow(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	vvix := 112.0
+	fix.VolOfVol = rpc.RegimeVolOfVol{Status: rpc.RegimeStatusOK, Last: &vvix}
+	rows := []regimeRow{
+		{name: "VIX/VIX3M", cluster: "equity_vol", band: bandGreen},
+		{name: "VVIX", cluster: "equity_vol", band: bandRed},
+		{name: "HYG vs SPY", cluster: "credit", band: bandGreen},
+		{name: "HY/IG OAS", cluster: "credit", band: bandGreen},
+		{name: "funding spread", cluster: "funding", band: bandGreen},
+		{name: "USD/JPY", cluster: "fx_carry", band: bandGreen},
+		{name: "γ-zero (SPY+SPX)", cluster: "dealer_gamma", band: bandGreen},
+		{name: "SPX breadth", cluster: "breadth", band: bandGreen},
+	}
+	c := tallyCompositeFromSnapshot(fix, rows)
+	if c.red != 1 {
+		t.Fatalf("indicator red count = %d, want isolated VVIX row still red", c.red)
+	}
+	if c.clusterRed != 0 || c.clusterYellow != 1 {
+		t.Fatalf("isolated non-severe VVIX red should be a yellow cluster, got %+v", c)
+	}
+}
+
 // TestRegimeRow_VIXBands pins the VIX/VIX3M row's threshold mapping
 // against the spec's three-band split (<0.92 green; 0.92-1.00 yellow;
 // >1.00 red). The renderer's defaults track the spec verbatim.

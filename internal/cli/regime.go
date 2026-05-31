@@ -242,7 +242,7 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		rowGamma(now, r.GammaZero),
 		rowBreadth(now, r.Breadth),
 	}
-	c := tallyComposite(rows)
+	c := tallyCompositeFromSnapshot(r, rows)
 
 	// Shared hero: only the title + timestamp live here. The regime
 	// renderer keeps its own flow below so the verdict/punch-line block
@@ -570,6 +570,77 @@ func tallyComposite(rows []regimeRow) regimeComposite {
 		}
 	}
 	return c
+}
+
+func tallyCompositeFromSnapshot(r *rpc.RegimeSnapshotResult, rows []regimeRow) regimeComposite {
+	c := tallyComposite(rows)
+	if r == nil {
+		return c
+	}
+	rendered := renderedBandSnapshot(*r, rows)
+	bands := confirmedRegimeClusterBands(rendered, rawRegimeClusterBands(rendered))
+	c.clusterGreen = 0
+	c.clusterYellow = 0
+	c.clusterRed = 0
+	c.clusterRanked = 0
+	c.clusterUnranked = 0
+	c.clusterTotal = len(bands)
+	for _, band := range bands {
+		switch band {
+		case "green":
+			c.clusterGreen++
+			c.clusterRanked++
+		case "yellow":
+			c.clusterYellow++
+			c.clusterRanked++
+		case "red":
+			c.clusterRed++
+			c.clusterRanked++
+		default:
+			c.clusterUnranked++
+		}
+	}
+	return c
+}
+
+func renderedBandSnapshot(r rpc.RegimeSnapshotResult, rows []regimeRow) rpc.RegimeSnapshotResult {
+	for _, row := range rows {
+		band := row.band.string()
+		switch row.name {
+		case "VIX/VIX3M":
+			r.VIXTermStructure.Band = band
+		case "VVIX":
+			r.VolOfVol.Band = band
+		case "HYG vs SPY":
+			r.HYGSPYDivergence.Band = band
+		case "HY/IG OAS":
+			r.CreditSpreads.Band = band
+		case "funding spread":
+			r.FundingStress.Band = band
+		case "USD/JPY":
+			r.USDJPY.Band = band
+		case "SPX breadth":
+			r.Breadth.Band = band
+		default:
+			if strings.Contains(row.name, "γ-zero") {
+				r.GammaZero.Band = band
+			}
+		}
+	}
+	return r
+}
+
+func (b regimeBand) string() string {
+	switch b {
+	case bandGreen:
+		return "green"
+	case bandYellow:
+		return "yellow"
+	case bandRed:
+		return "red"
+	default:
+		return ""
+	}
 }
 
 func worstRegimeBand(a, b regimeBand) regimeBand {

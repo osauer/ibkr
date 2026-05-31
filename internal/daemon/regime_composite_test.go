@@ -85,6 +85,23 @@ func TestBuildRegimeComposite_RedClusterCannotBeHiddenByGreenRows(t *testing.T) 
 	}
 }
 
+func TestBuildRegimeComposite_IsolatedVVIXRedStaysVisibleButClusterIsWatch(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	vvix := 112.0
+	r.VolOfVol.Last = &vvix
+	c := buildRegimeComposite(r)
+	if c.RedCount != 1 {
+		t.Fatalf("indicator red count = %d, want isolated VVIX row still red", c.RedCount)
+	}
+	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
+		t.Fatalf("isolated non-severe VVIX red should count as cluster yellow, got %+v", c)
+	}
+	if c.Verdict != "Normal regime" {
+		t.Fatalf("verdict = %q, want normal with a single unconfirmed vol watch", c.Verdict)
+	}
+}
+
 func TestBuildRegimeComposite_MixedClusterDisagreementUsesWorstBand(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()

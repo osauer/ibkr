@@ -73,14 +73,12 @@ def is_severe_isolated_vol(row: dict, pit: dict, bands: list[str]) -> bool:
     vvix = regime.get("vol_of_vol", {}).get("last")
     vix_change = regime.get("vix_term_structure", {}).get("vix_change_pct")
     spy_change = features.get("daily_spy_change_pct")
-    spy_low = features.get("same_day_spy_low_change_pct")
     return any(
         [
-            number_at_least(vix_ratio, 1.10),
-            number_at_least(vvix, 150.0),
-            number_at_least(vix_change, 40.0),
-            number_at_most(spy_change, -3.0),
-            number_at_most(spy_low, -4.0),
+            number_at_least(vix_ratio, 1.00),
+            number_at_least(vvix, 120.0),
+            number_at_least(vix_change, 20.0),
+            number_at_most(spy_change, -1.0),
         ]
     )
 
@@ -218,7 +216,7 @@ def print_metrics(title: str, rows: list[tuple[dict, dict, list[str]]], target_f
         ("watch_any_red_or_3_yellow", signal_watch),
         ("current_any_red_cluster", signal_current),
         ("confirm_only_no_isolated_vol", signal_confirm_only),
-        ("severity_split_vol", signal_severity_split),
+        ("runtime_visible_severity_split", signal_severity_split),
     ]
     if any("tier2_features" in pit for _row, pit, _bands in rows):
         rules.append(("tier2_proxy_severity_split", signal_tier2_severity_split))
