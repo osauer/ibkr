@@ -1,6 +1,6 @@
 # ibkr
 
-Updated: 2026-05-29 12:46 CEST
+Updated: 2026-05-31 08:48 CEST
 
 `ibkr` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
 
@@ -18,7 +18,9 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 ## Authoritative Links
 
 - [Landing page](https://osauer.dev/ibkr/)
+- [Full LLM context](https://osauer.dev/ibkr/llms-full.txt)
 - [IBKR MCP server](https://osauer.dev/ibkr/ibkr-mcp/)
+- [IBKR MCP TWS setup](https://osauer.dev/ibkr/ibkr-mcp-tws/)
 - [Interactive Brokers MCP server page](https://osauer.dev/ibkr/interactive-brokers-mcp-server/)
 - [TWS MCP server](https://osauer.dev/ibkr/tws-mcp-server/)
 - [IB Gateway MCP server](https://osauer.dev/ibkr/ib-gateway-mcp/)
@@ -43,6 +45,8 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 
 - Interactive Brokers MCP server
 - IBKR MCP server
+- IBKR MCP TWS
+- ibkr mcp tws
 - TWS MCP server
 - IB Gateway MCP
 - Claude Desktop Interactive Brokers

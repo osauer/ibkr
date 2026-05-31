@@ -25,11 +25,15 @@ const (
 	glamaPath          = "glama.json"
 	docsSitemapPath    = "docs/sitemap.xml"
 	docsLLMSPath       = "docs/llms.txt"
+	docsLLMSFullPath   = "docs/llms-full.txt"
 	indexNowKeyPath    = "docs/indexnow.txt"
 )
 
 var (
 	serverNamePattern = regexp.MustCompile(`^[a-z0-9.-]+/[A-Za-z0-9._-]+$`)
+	linkTagRE         = regexp.MustCompile(`(?is)<link\b[^>]*>`)
+	canonicalRelRE    = regexp.MustCompile(`(?is)\brel=["'][^"']*\bcanonical\b[^"']*["']`)
+	hrefAttrRE        = regexp.MustCompile(`(?is)\bhref=["']([^"']+)["']`)
 	jsonLDScriptRE    = regexp.MustCompile(`(?is)<script\b[^>]*type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
 
 	jsonLDPages = []string{
@@ -40,6 +44,7 @@ var (
 	requiredSitemapURLs = []string{
 		"https://osauer.dev/ibkr/",
 		"https://osauer.dev/ibkr/ibkr-mcp/",
+		"https://osauer.dev/ibkr/ibkr-mcp-tws/",
 		"https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
 		"https://osauer.dev/ibkr/tws-mcp-server/",
 		"https://osauer.dev/ibkr/ib-gateway-mcp/",
@@ -58,6 +63,7 @@ var (
 	requiredLLMSURLs = []string{
 		"https://osauer.dev/ibkr/",
 		"https://osauer.dev/ibkr/ibkr-mcp/",
+		"https://osauer.dev/ibkr/ibkr-mcp-tws/",
 		"https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
 		"https://osauer.dev/ibkr/tws-mcp-server/",
 		"https://osauer.dev/ibkr/ib-gateway-mcp/",
@@ -69,6 +75,7 @@ var (
 		"https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",
 		"https://osauer.dev/ibkr/read-only-mcp-server/",
 		"https://github.com/osauer/ibkr",
+		"https://osauer.dev/ibkr/llms-full.txt",
 		"https://osauer.dev/ibkr/reference/mcp-tools.html",
 		"https://osauer.dev/ibkr/reference/mcp-resources.html",
 	}
@@ -98,6 +105,7 @@ func run() error {
 	checkJSONLDVersions(&problems, version)
 	checkSitemap(&problems)
 	checkLLMS(&problems)
+	checkLLMSFull(&problems)
 	checkDirectoryMetadata(&problems, version)
 	checkIndexNowKey(&problems)
 
@@ -344,6 +352,14 @@ func checkSitemap(problems *[]string) {
 	seen := make(map[string]bool, len(sitemap.URLs))
 	for _, entry := range sitemap.URLs {
 		loc := strings.TrimSpace(entry.Loc)
+		if loc == "" {
+			*problems = append(*problems, docsSitemapPath+" contains empty loc")
+			continue
+		}
+		if seen[loc] {
+			*problems = append(*problems, docsSitemapPath+" contains duplicate loc "+loc)
+			continue
+		}
 		seen[loc] = true
 		checkPublicURLFile(problems, docsSitemapPath, loc)
 	}
@@ -352,6 +368,7 @@ func checkSitemap(problems *[]string) {
 			*problems = append(*problems, docsSitemapPath+" missing "+url)
 		}
 	}
+	checkSitemapCanonicalCoverage(problems, seen)
 }
 
 func checkLLMS(problems *[]string) {
@@ -367,6 +384,81 @@ func checkLLMS(problems *[]string) {
 		}
 		checkPublicURLFile(problems, docsLLMSPath, url)
 	}
+}
+
+func checkLLMSFull(problems *[]string) {
+	data, err := os.ReadFile(docsLLMSFullPath)
+	if err != nil {
+		*problems = append(*problems, err.Error())
+		return
+	}
+	text := string(data)
+	for _, want := range []string{
+		"# ibkr full context",
+		"read-only",
+		"no order-entry interface",
+		"https://osauer.dev/ibkr/",
+		"https://osauer.dev/ibkr/ibkr-mcp-tws/",
+		"https://github.com/osauer/ibkr",
+		"IBKR MCP TWS",
+		"ibkr_account",
+		"ibkr_positions",
+		"ibkr_chain",
+		"ibkr_regime",
+		"ibkr_size",
+	} {
+		if !strings.Contains(text, want) {
+			*problems = append(*problems, docsLLMSFullPath+" missing "+want)
+		}
+	}
+	checkPublicURLFile(problems, docsLLMSFullPath, "https://osauer.dev/ibkr/llms-full.txt")
+}
+
+func checkSitemapCanonicalCoverage(problems *[]string, sitemapURLs map[string]bool) {
+	if err := filepath.WalkDir("docs", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(path), ".html") {
+			return nil
+		}
+		canonical, err := htmlCanonical(path)
+		if err != nil {
+			*problems = append(*problems, err.Error())
+			return nil
+		}
+		if canonical == "" {
+			*problems = append(*problems, path+" has no canonical link")
+			return nil
+		}
+		if !strings.HasPrefix(canonical, "https://osauer.dev/ibkr/") {
+			return nil
+		}
+		if !sitemapURLs[canonical] {
+			*problems = append(*problems, docsSitemapPath+" missing canonical URL from "+path+": "+canonical)
+		}
+		return nil
+	}); err != nil {
+		*problems = append(*problems, err.Error())
+	}
+}
+
+func htmlCanonical(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, tag := range linkTagRE.FindAll(data, -1) {
+		if !canonicalRelRE.Match(tag) {
+			continue
+		}
+		match := hrefAttrRE.FindSubmatch(tag)
+		if len(match) != 2 {
+			return "", fmt.Errorf("%s canonical link has no href", path)
+		}
+		return strings.TrimSpace(string(match[1])), nil
+	}
+	return "", nil
 }
 
 func checkPublicURLFile(problems *[]string, source string, rawURL string) {

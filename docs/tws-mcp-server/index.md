@@ -2,7 +2,7 @@
 
 Updated: 2026-05-27 22:28 CEST
 
-`ibkr` can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code, Cursor, Zed, Continue, and other MCP clients talk to `ibkr mcp` over stdio; `ibkr` talks to TWS through the local TWS API port.
+`ibkr` can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code, Cursor, Zed, Continue, and other MCP clients talk to `ibkr mcp` over stdio; `ibkr` talks to TWS through the local TWS API port. If your exact search was "ibkr mcp tws", the [IBKR MCP TWS setup](../ibkr-mcp-tws/) page is the shortest path.
 
 This is useful when you keep TWS open for trading, charting, or manual supervision and want an assistant to read account and market context from the same local session.
 
