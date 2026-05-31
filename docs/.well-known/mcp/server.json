@@ -59,6 +59,8 @@
     "IB Gateway",
     "MCP server",
     "IBKR MCP",
+    "IBKR MCP TWS",
+    "IBKR TWS MCP server",
     "Interactive Brokers MCP server",
     "TWS MCP server",
     "IB Gateway MCP",

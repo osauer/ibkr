@@ -35,7 +35,7 @@ RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check release-prep indexnow-submit
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check public-discovery-check release-prep indexnow-submit
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -203,6 +203,9 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 
 discovery-check: ## Verify public discovery metadata, sitemap, llms.txt, and JSON-LD stay in sync
 	go run ./scripts/discovery-check
+
+public-discovery-check: ## Verify deployed robots.txt and public discovery files after GitHub Pages deploys
+	go run ./scripts/public-discovery-check
 
 indexnow-submit: ## Submit public sitemap URLs to IndexNow after GitHub Pages deploys
 	go run ./scripts/submit-indexnow

@@ -4,7 +4,7 @@ Updated: 2026-05-29 12:46 CEST
 
 `ibkr mcp` is a local MCP server for agentic Interactive Brokers portfolio analysis and trading research. It connects Claude Desktop, Claude Code, Cursor, Zed, Continue, and other stdio MCP hosts to the machine already running IB Gateway or Trader Workstation (TWS).
 
-Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.
+Use this page when you searched for "IBKR MCP", "ibkr mcp server", or "Interactive Brokers MCP". If your exact query was "ibkr mcp tws", use the [IBKR MCP TWS setup](../ibkr-mcp-tws/) page. The short version: install the `ibkr` binary, run it beside your local IBKR session, and expose account, positions, quotes, calendars, options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing context to an AI workflow. The bundled MCP surface is read-side only, so agents can review, monitor, and size plans without receiving order-entry tools.
 
 ## Best fit
 
@@ -61,6 +61,7 @@ The current bundled CLI and MCP server expose analysis and sizing tools. They do
 ## Related pages
 
 - [Interactive Brokers MCP server](https://osauer.dev/ibkr/interactive-brokers-mcp-server/) for the broader setup guide.
+- [IBKR MCP TWS setup](https://osauer.dev/ibkr/ibkr-mcp-tws/) for the exact "ibkr mcp tws" search path.
 - [TWS MCP server](https://osauer.dev/ibkr/tws-mcp-server/) for Trader Workstation-specific setup notes.
 - [IB Gateway MCP server](https://osauer.dev/ibkr/ib-gateway-mcp/) for headless Gateway-oriented setup.
 - [Claude Desktop Interactive Brokers setup](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/) for the Claude MCPB path.

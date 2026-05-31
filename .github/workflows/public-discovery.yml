@@ -1,0 +1,29 @@
+name: public discovery
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-discovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-discovery-check:
+    name: make public-discovery-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make public-discovery-check
+        run: make public-discovery-check

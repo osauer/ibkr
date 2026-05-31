@@ -220,12 +220,13 @@ func documentTitle(source, markdownPath string) string {
 func documentTimestamp(source string) string {
 	for line := range strings.SplitSeq(source, "\n") {
 		trimmed := strings.TrimSpace(line)
-		for _, prefix := range []string{"Updated: ", "Last reviewed: "} {
-			if value, ok := strings.CutPrefix(trimmed, prefix); ok {
+		plain := cleanMetaText(trimmed)
+		for _, prefix := range []string{"Updated:", "Last reviewed:"} {
+			if value, ok := strings.CutPrefix(plain, prefix); ok {
 				return schemaTimestamp(value)
 			}
 		}
-		if _, after, ok := strings.Cut(trimmed, "Last update: "); ok {
+		if _, after, ok := strings.Cut(plain, "Last update:"); ok {
 			return schemaTimestamp(after)
 		}
 	}
@@ -254,7 +255,14 @@ func documentDescription(source string) string {
 	lines := strings.Split(source, "\n")
 	for i := 0; i < len(lines); {
 		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "Updated: ") || isRule(trimmed) {
+		if isMetadataLine(trimmed) {
+			i++
+			for i < len(lines) && strings.TrimSpace(lines[i]) != "" && !startsBlock(lines, i) {
+				i++
+			}
+			continue
+		}
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "|") || isRule(trimmed) {
 			i++
 			continue
 		}
@@ -281,6 +289,24 @@ func documentDescription(source string) string {
 		}
 	}
 	return ""
+}
+
+func isMetadataLine(line string) bool {
+	plain := cleanMetaText(line)
+	for _, prefix := range []string{
+		"Updated:",
+		"Last reviewed:",
+		"Status:",
+		"Created:",
+		"Last update:",
+		"Owner:",
+		"Related:",
+	} {
+		if strings.HasPrefix(plain, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanMetaText(text string) string {

@@ -1,0 +1,164 @@
+# ibkr full context
+
+Updated: 2026-05-31 08:48 CEST
+
+`ibkr` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, and Claude Code plugin.
+
+The public project home is https://osauer.dev/ibkr/. The source repository is https://github.com/osauer/ibkr.
+
+## Boundary
+
+The shipped CLI and MCP server are read-only. They expose account and market data, diagnostics, sizing math, and analysis workflows, but no order-entry interface. Do not describe the bundled project as an automated trading system, trade execution system, order placement tool, order modification tool, or order cancellation tool.
+
+The underlying Go protocol package includes disabled order-writing primitives for wire-format completeness and downstream forks. Default builds return an error before any order write reaches the socket; order-capable forks require an explicit trading build tag and are not the published CLI, daemon, MCP server, MCPB, or Claude plugin surface.
+
+## Who It Is For
+
+Use `ibkr` when a user already runs Interactive Brokers Trader Workstation (TWS) or IB Gateway locally and wants an AI assistant, script, or terminal workflow to read account and market context without giving the assistant order authority.
+
+Primary host environments:
+
+- Claude Desktop through the `ibkr.mcpb` Desktop Extension package.
+- Claude Code through the bundled plugin.
+- Cursor, Continue, Zed, and other local stdio MCP hosts.
+- Shell workflows through the `ibkr` CLI.
+- Go services through `pkg/ibkr`.
+
+## Requirements
+
+- IB Gateway 10.37+ or TWS running on the same machine.
+- IBKR Pro account with TWS API access enabled.
+- Local API socket access on the standard paper/live Gateway or TWS ports, unless configured otherwise.
+
+The daemon auto-discovers common ports, detects the managed account, caches expensive data where appropriate, and exposes local Unix-socket RPC to CLI commands.
+
+## Install
+
+Main install command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+```
+
+Claude Desktop MCPB package:
+
+https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb
+
+Claude Desktop legacy setup command:
+
+```sh
+ibkr setup claude-desktop
+```
+
+Claude Code plugin path:
+
+```text
+/plugin marketplace add osauer/ibkr
+/plugin install ibkr@ibkr
+```
+
+## Main Public Pages
+
+- Landing page: https://osauer.dev/ibkr/
+- IBKR MCP server: https://osauer.dev/ibkr/ibkr-mcp/
+- IBKR MCP TWS setup: https://osauer.dev/ibkr/ibkr-mcp-tws/
+- Interactive Brokers MCP server: https://osauer.dev/ibkr/interactive-brokers-mcp-server/
+- TWS MCP server: https://osauer.dev/ibkr/tws-mcp-server/
+- IB Gateway MCP server: https://osauer.dev/ibkr/ib-gateway-mcp/
+- Claude Desktop Interactive Brokers setup: https://osauer.dev/ibkr/claude-desktop-interactive-brokers/
+- IBKR Claude Desktop MCP setup: https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/
+- Connect Claude to IBKR: https://osauer.dev/ibkr/connect-claude-to-ibkr/
+- Best IBKR MCP server for Claude Code: https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/
+- Analyze Interactive Brokers portfolio with AI: https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/
+- Portfolio review with Claude and IBKR: https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/
+- Read-only MCP server: https://osauer.dev/ibkr/read-only-mcp-server/
+
+## Reference Pages
+
+- Agentic use guide: https://osauer.dev/ibkr/guides/agentic-use.html
+- Updating guide: https://osauer.dev/ibkr/guides/updating.html
+- MCP tools reference: https://osauer.dev/ibkr/reference/mcp-tools.html
+- MCP resources reference: https://osauer.dev/ibkr/reference/mcp-resources.html
+- Configuration reference: https://osauer.dev/ibkr/reference/config.html
+- TWS protocol coverage: https://osauer.dev/ibkr/reference/protocol.html
+- Concepts: https://osauer.dev/ibkr/concepts.html
+- XML sitemap: https://osauer.dev/ibkr/sitemap.xml
+- Short LLM index: https://osauer.dev/ibkr/llms.txt
+- MCP discovery JSON: https://osauer.dev/ibkr/.well-known/mcp/server.json
+
+## Core MCP Tools
+
+The MCP server is exposed by running:
+
+```sh
+ibkr mcp
+```
+
+Important tools:
+
+- `ibkr_status`: daemon, gateway, account, and subsystem health for troubleshooting data freshness or connectivity.
+- `ibkr_account`: account net liquidation, buying power, cash, margin, daily P&L, and currency exposure.
+- `ibkr_positions`: open positions, option legs, Greeks, quote context, and exposure grouped by underlying.
+- `ibkr_quote`: stock and ETF snapshot quotes with freshness, spread, session, and liquidity context. Not for options.
+- `ibkr_watch`: saved local watchlist symbols with optional enriched quotes and held-position context.
+- `ibkr_calendar`: official market-session calendars for supported US equity, US option, and Xetra markets.
+- `ibkr_chain`: option expiries, strike grids, deltas, implied volatility, open interest, expected move, and liquidity gates.
+- `ibkr_history`: daily equity or ETF OHLCV bars for lookback and moving-average analysis.
+- `ibkr_technical`: trend, moving average, relative strength, ATR, and liquidity screen for stocks and ETFs.
+- `ibkr_scan`: IBKR market scanners such as most active, top gainers, and top losers.
+- `ibkr_regime`: risk-regime dashboard across volatility, credit/funding, breadth, momentum, dealer gamma, currency stress, and freshness.
+- `ibkr_breadth`: S&P 500 breadth, moving-average participation, and new high/new low context.
+- `ibkr_gamma`: SPY and SPX dealer gamma context with zero-gamma estimates and cache provenance.
+- `ibkr_canary`: portfolio stress canary that combines account, positions, market, and regime context into a watch/warn/critical status.
+- `ibkr_size`: fixed-fractional position sizing from entry, stop, account equity, and configured risk rules.
+
+See the canonical tool schema and parameter descriptions at https://osauer.dev/ibkr/reference/mcp-tools.html.
+
+## MCP Resources
+
+`ibkr://quote/{symbol}` is a live stock and ETF quote resource. It supports one-off reads and subscriptions through MCP resource APIs. Option contract streaming is not exposed as an MCP resource today; use `ibkr_chain` or CLI option quote paths for option snapshots.
+
+See https://osauer.dev/ibkr/reference/mcp-resources.html.
+
+## Common User Intents
+
+Good user requests for `ibkr`:
+
+- "Connect Claude Desktop to Interactive Brokers."
+- "Review my IBKR portfolio for concentration, option exposure, and market regime risk."
+- "Get account summary and positions from IB Gateway."
+- "Quote AAPL and MSFT with freshness and spread warnings."
+- "Show option chain context for SPY."
+- "Check whether the market regime is favorable or defensive."
+- "Run a read-only risk canary on my portfolio."
+- "Calculate position size for a trade with an entry and stop."
+- "Find the best local MCP server for Interactive Brokers and Claude Code."
+
+Bad or out-of-bound descriptions:
+
+- Do not say `ibkr` places trades.
+- Do not say `ibkr` modifies or cancels orders.
+- Do not say Claude receives order authority through the published MCP server.
+- Do not imply broker credentials are sent to a remote SaaS service; the published workflows use a local TWS or IB Gateway session.
+
+## Search Phrases
+
+- Interactive Brokers MCP server
+- IBKR MCP server
+- IBKR MCP TWS
+- ibkr mcp tws
+- IBKR TWS MCP server
+- TWS MCP server
+- IB Gateway MCP
+- Claude Desktop Interactive Brokers
+- IBKR Claude Desktop MCP
+- connect Claude to IBKR
+- best MCP server to connect IBKR API to Claude Code
+- best IBKR MCP server for Claude Code
+- analyze Interactive Brokers portfolio with AI
+- portfolio review with Claude and IBKR
+- read-only IBKR MCP server
+- Claude Code IBKR
+- Cursor MCP Interactive Brokers
+- Go TWS API
+- Interactive Brokers Go API

@@ -1,4 +1,4 @@
-# ibkr
+# ibkr - IBKR MCP server for TWS and IB Gateway
 
 [![ci](https://github.com/osauer/ibkr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/osauer/ibkr/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/osauer/ibkr?display_name=tag&sort=semver)](https://github.com/osauer/ibkr/releases/latest)
@@ -6,11 +6,11 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[Project site](https://osauer.dev/ibkr/) · [IBKR MCP setup](https://osauer.dev/ibkr/ibkr-mcp/) · [Claude portfolio review](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/) · [MCP tools](https://osauer.dev/ibkr/reference/mcp-tools.html)
+[Project site](https://osauer.dev/ibkr/) · [IBKR MCP TWS setup](https://osauer.dev/ibkr/ibkr-mcp-tws/) · [IBKR MCP setup](https://osauer.dev/ibkr/ibkr-mcp/) · [Claude portfolio review](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/) · [MCP tools](https://osauer.dev/ibkr/reference/mcp-tools.html)
 
-**Agentic portfolio analysis and trading-research workflows for IBKR / TWS.**
+**Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
-`ibkr` turns your local IB Gateway or TWS session into structured account and market context for the terminal, Claude Desktop, Claude Code, Cursor, Continue, Zed, and other MCP hosts. It supports portfolio review, exposure mapping, options diagnostics, market-regime checks, scanner-driven research, watchlist monitoring, and position-sizing math.
+`ibkr` turns your local IB Gateway or TWS session into structured account and market context for the terminal, Claude Desktop, Claude Code, Cursor, Continue, Zed, and other MCP hosts. It is the local `ibkr mcp` TWS bridge for portfolio review, exposure mapping, options diagnostics, market-regime checks, scanner-driven research, watchlist monitoring, and position-sizing math.
 
 For MCP users, `ibkr mcp` is a local IBKR workflow layer for semi-professional retail traders who want agentic portfolio and trading-research analysis on live broker data. The bundled MCP surface is deliberately read-side only: it can analyze and size plans, but it cannot place, modify, or cancel orders.
 
