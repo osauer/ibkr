@@ -3714,6 +3714,10 @@ func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int,
 // treated as context.Background() for historical callers that don't
 // carry one. See RequestMarketData's docstring for F-26 lineage.
 func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
+	return c.requestMarketDataWithContract(ctx, contract, genericTicks, snapshot, regulatorySnap, nil)
+}
+
+func (c *Connection) requestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool, beforeSend func(reqID int) func()) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -3745,11 +3749,18 @@ func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract
 	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
+	var cleanup func()
+	if beforeSend != nil {
+		cleanup = beforeSend(reqID)
+	}
 
 	marketLogger.Infof("Requesting market data for %s (ReqID: %d, SecType: %s, Exchange: %s, Primary: %s, ConID: %d)",
 		contractCopy.Symbol, reqID, contractCopy.SecType, contractCopy.Exchange, contractCopy.PrimaryExch, contractCopy.ConID)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
 		c.releaseMarketDataSlot(reqID)
 		return 0, fmt.Errorf("failed to request market data: %w", err)
 	}
@@ -4305,7 +4316,7 @@ func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Con
 
 	var selected *ContractDetailsLite
 	prefer := func(candidate ContractDetailsLite) bool {
-		if candidate.ConID == 0 {
+		if !optionDetailMatchesRequest(candidate, contract) {
 			return false
 		}
 		if selected == nil {
@@ -4340,6 +4351,17 @@ func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Con
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func optionDetailMatchesRequest(candidate ContractDetailsLite, contract Contract) bool {
+	if candidate.ConID == 0 {
+		return false
+	}
+	requestedClass := strings.TrimSpace(contract.TradingClass)
+	if requestedClass != "" && !strings.EqualFold(candidate.TradingClass, requestedClass) {
+		return false
+	}
+	return true
 }
 
 // PrewarmOptionChainResult reports per-expiry outcome of a bulk prewarm:

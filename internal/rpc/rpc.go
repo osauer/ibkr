@@ -305,10 +305,11 @@ type PositionsListParams struct {
 
 // ChainFetchParams selects strikes around the spot price for an expiry.
 type ChainFetchParams struct {
-	Symbol string `json:"symbol"`
-	Expiry string `json:"expiry"` // YYYY-MM-DD
-	Width  int    `json:"width"`  // ATM ± width
-	Side   string `json:"side"`   // calls | puts | both
+	Symbol       string `json:"symbol"`
+	Expiry       string `json:"expiry"`                  // YYYY-MM-DD
+	Width        int    `json:"width"`                   // ATM ± width
+	Side         string `json:"side"`                    // calls | puts | both
+	TradingClass string `json:"trading_class,omitempty"` // SPX | SPXW for multi-class index chains; empty = auto
 }
 
 // ScanRunParams runs a scanner. Two modes:
@@ -648,6 +649,10 @@ type BreadthSPXResult struct {
 	Method string `json:"method"`
 	// AsOf is the daemon's wall-clock when the result was assembled.
 	AsOf time.Time `json:"as_of"`
+	// SessionKey is the US-equity session date represented by the
+	// computed daily bars. It may differ from AsOf on weekends,
+	// holidays, and before the current session's close is settled.
+	SessionKey string `json:"session_key,omitempty"`
 	// SpotAt is the gateway-observation timestamp for the headline,
 	// distinct from AsOf which covers history + headline.
 	SpotAt time.Time `json:"spot_at,omitzero"`
@@ -691,11 +696,11 @@ const (
 	GammaZeroStatusError = "error"
 )
 
-// Scope values for GammaZeroSPXParams.Scope. Discriminator for the
-// SPY+SPX coverage arc: today's SPY-only path is "spy"; SPX-only and
-// combined arrive in the same coverage arc. Empty Scope defaults to
-// "spy+spx" (combined when both reachable, SPY-only otherwise) once
-// step 7+8 land; until then it falls back to "spy".
+// Scope values for GammaZeroSPXParams.Scope. Empty Scope defaults to
+// "spy+spx". The combined scope prefers fresh SPY+SPX; when a fresh SPX
+// slice is unavailable it may compose fresh/cached SPY with the last
+// successful SPX slice and mark the result degraded. If no usable SPX
+// slice exists, combined degrades to SPY-only with a structured warning.
 const (
 	GammaZeroScopeSPY      = "spy"
 	GammaZeroScopeSPX      = "spx"
@@ -712,9 +717,10 @@ type GammaZeroSPXParams struct {
 	// have." A non-zero value is capped daemon-side to keep the RPC
 	// under the per-method deadline.
 	WaitMs int `json:"wait_ms,omitempty"`
-	// Force, when true, ignores a cached result for the current session
-	// and kicks a fresh compute. Useful for diagnostics; the dashboard
-	// generator should leave this off and let the daily cache handle
+	// Force, when true, starts a fresh diagnostic compute. If a good
+	// cached result is already serving, the daemon keeps serving it and
+	// promotes the forced compute only on success. Useful for diagnostics;
+	// dashboards should leave this off and let the daily cache handle
 	// freshness.
 	Force bool `json:"force,omitempty"`
 	// Scope selects which underlying(s) to compute. One of GammaZeroScopeSPY
@@ -1060,8 +1066,10 @@ type GammaZeroComputed struct {
 	SkewFitQuality map[string]SkewFitInfo `json:"skew_fit_quality,omitempty"`
 
 	// Params echoes the v1 calibration window so a renderer can show
-	// "computed over 6 expirations within ATM ± 10%" without consulting
-	// out-of-band documentation.
+	// "computed over 6 expirations inside ATM ± 10%" without consulting
+	// out-of-band documentation. The daemon caps the live fan-out to
+	// the nearest 80 listed strikes per expiry; warning_details includes
+	// strike_budget_capped when the candidate window exceeded that cap.
 	Params GammaZeroParams `json:"params"`
 	// Source identifies the data provenance for the headline numbers.
 	Source string `json:"source"`
@@ -1093,7 +1101,7 @@ type GammaZeroComputed struct {
 	//   "spx"     — SPX-only (--only=spx); PerIndex is nil
 	//   "spy+spx" — combined; price-level fields stay under PerIndex
 	//               because there is no meaningful combined price scale.
-	// Empty is treated as Scope="spy" by renderers.
+	// Empty is treated as Scope="spy" by legacy renderers only.
 	Scope string `json:"scope,omitempty"`
 
 	// PerIndex carries the per-underlying detail when Scope="spy+spx".
@@ -2344,6 +2352,7 @@ type ChainLiquiditySummary struct {
 // selected price.
 type ChainResult struct {
 	Symbol           string                 `json:"symbol"`
+	TradingClass     string                 `json:"trading_class,omitempty"`
 	Spot             float64                `json:"spot"`
 	SpotSource       string                 `json:"spot_source,omitempty"`
 	SpotAsOf         time.Time              `json:"spot_as_of,omitzero"`
@@ -2496,6 +2505,18 @@ type DataQualityHealth struct {
 	AsOf             time.Time `json:"as_of,omitzero"`
 }
 
+// DataFarmHealth is emitted on status.health only for data farms that
+// currently need operator attention. Healthy farms are intentionally omitted
+// to keep the normal status surface quiet.
+type DataFarmHealth struct {
+	Name    string    `json:"name"`
+	Type    string    `json:"type,omitempty"`
+	Status  string    `json:"status"`
+	Code    int       `json:"code,omitempty"`
+	Message string    `json:"message,omitempty"`
+	AsOf    time.Time `json:"as_of,omitzero"`
+}
+
 // HealthResult is the response to MethodStatusHealth.
 //
 // PortOrigin / TLSOrigin record how the daemon arrived at the values
@@ -2528,6 +2549,7 @@ type HealthResult struct {
 	BackgroundTasks []BackgroundTaskStatus `json:"background_tasks"`
 	Subsystems      []SubsystemHealth      `json:"subsystems,omitempty"`
 	DataQuality     []DataQualityHealth    `json:"data_quality,omitempty"`
+	DataFarms       []DataFarmHealth       `json:"data_farms,omitempty"`
 	// Members carries the runtime SPX-membership state: source
 	// (cache vs embedded), count, as-of timestamp, refresh health.
 	// Populated unconditionally — even when the daemon falls back

@@ -126,6 +126,70 @@ func TestHandleTickPrice_DelayedPriceUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleTickPrice_OptionReqUpdatesQuoteCacheAndSubscription(t *testing.T) {
+	connector := NewConnector(&ConnectorConfig{})
+	key := "SPY_260601C758"
+	connector.subMu.Lock()
+	connector.reqIDMap[42] = key
+	connector.subscriptions[key] = &Subscription{Symbol: key}
+	connector.subMu.Unlock()
+	connector.optMu.Lock()
+	connector.optReqIDs[42] = key
+	connector.optMu.Unlock()
+
+	connector.handleTickPrice([]string{"1", "2", "42", "1", "1.46"})
+	connector.handleTickPrice([]string{"1", "2", "42", "2", "1.47"})
+	connector.handleTickPrice([]string{"1", "2", "42", "4", "1.46"})
+	connector.handleTickPrice([]string{"1", "2", "42", "9", "1.45"})
+
+	bid, ask, ok := connector.GetOptionQuoteBidAsk(key)
+	if !ok || bid != 1.46 || ask != 1.47 {
+		t.Fatalf("option quote cache = %.2f x %.2f ok=%v, want 1.46 x 1.47 ok=true", bid, ask, ok)
+	}
+	if prev, ok := connector.GetOptionPrevClose(key); !ok || prev != 1.45 {
+		t.Fatalf("option prev close = %.2f ok=%v, want 1.45 ok=true", prev, ok)
+	}
+
+	md := connector.GetMarketData()[key]
+	if md == nil {
+		t.Fatalf("market data missing for option key %s", key)
+	}
+	if md.Bid != 1.46 || md.Ask != 1.47 || md.Last != 1.46 || md.Close != 1.45 {
+		t.Fatalf("option subscription quote = bid %.2f ask %.2f last %.2f close %.2f, want 1.46 1.47 1.46 1.45",
+			md.Bid, md.Ask, md.Last, md.Close)
+	}
+}
+
+func TestHandleTickPrice_OptionDelayedTicksUpdateQuoteCacheAndSubscription(t *testing.T) {
+	connector := NewConnector(&ConnectorConfig{})
+	key := "SPY_260601P758"
+	connector.subMu.Lock()
+	connector.reqIDMap[42] = key
+	connector.subscriptions[key] = &Subscription{Symbol: key}
+	connector.subMu.Unlock()
+	connector.optMu.Lock()
+	connector.optReqIDs[42] = key
+	connector.optMu.Unlock()
+
+	connector.handleTickPrice([]string{"1", "2", "42", "66", "2.84"})
+	connector.handleTickPrice([]string{"1", "2", "42", "67", "2.86"})
+	connector.handleTickPrice([]string{"1", "2", "42", "68", "2.85"})
+	connector.handleTickPrice([]string{"1", "2", "42", "75", "2.80"})
+
+	bid, ask, ok := connector.GetOptionQuoteBidAsk(key)
+	if !ok || bid != 2.84 || ask != 2.86 {
+		t.Fatalf("delayed option quote cache = %.2f x %.2f ok=%v, want 2.84 x 2.86 ok=true", bid, ask, ok)
+	}
+	md := connector.GetMarketData()[key]
+	if md == nil {
+		t.Fatalf("market data missing for option key %s", key)
+	}
+	if md.Bid != 2.84 || md.Ask != 2.86 || md.Last != 2.85 || md.Close != 2.80 {
+		t.Fatalf("delayed option subscription quote = bid %.2f ask %.2f last %.2f close %.2f, want 2.84 2.86 2.85 2.80",
+			md.Bid, md.Ask, md.Last, md.Close)
+	}
+}
+
 // TestHandleTickPrice_InvalidParsing tests that malformed price strings are handled gracefully.
 func TestHandleTickPrice_InvalidParsing(t *testing.T) {
 	connector := NewConnector(&ConnectorConfig{})

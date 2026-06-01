@@ -446,6 +446,36 @@ func TestChainSummariesTreatClosedSessionBidAskAsStaleContext(t *testing.T) {
 	}
 }
 
+func TestChainSummariesCountsExtendedSessionBidAskWhenFeedIsLive(t *testing.T) {
+	t.Parallel()
+	cb, ca := 2.00, 2.20
+	pb, pa := 1.50, 2.10
+	res := &rpc.ChainResult{
+		Symbol:       "SPY",
+		Spot:         55,
+		Expiry:       "2026-06-01",
+		DataType:     rpc.MarketDataClosed,
+		FeedType:     rpc.MarketDataLive,
+		SessionState: rpc.SessionPre.String(),
+		Strikes: []rpc.ChainStrike{{
+			Strike: 55, IsATM: true,
+			CallBid: &cb, CallAsk: &ca, CallDataStatus: "quoted",
+			PutBid: &pb, PutAsk: &pa, PutDataStatus: "quoted",
+		}},
+	}
+
+	tradable, liquidity := chainSummaries(res, true, true)
+	if !tradable.OptionsTradable || tradable.LiveBidAskLegs != 2 {
+		t.Fatalf("extended-session bid/ask should count as live: %+v", tradable)
+	}
+	if tradable.FeedGap != "" || tradable.StaleLegs != 0 {
+		t.Fatalf("extended-session summary should not report stale feed gap: %+v", tradable)
+	}
+	if liquidity.NearestLiveCall == nil || liquidity.NearestLivePut == nil || liquidity.MinSpreadLiveStrike == nil {
+		t.Fatalf("extended-session live leg summaries missing: %+v", liquidity)
+	}
+}
+
 func TestChainSummariesClassifyUntradableChain(t *testing.T) {
 	t.Parallel()
 	prev := 0.90
@@ -1419,6 +1449,58 @@ func TestQuoteMarketForStockContract(t *testing.T) {
 				t.Fatalf("quoteMarketForStockContract(%+v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestQuoteSessionMarketForContractSkipsCashFX(t *testing.T) {
+	t.Parallel()
+	if got, ok := quoteSessionMarketForContract(rpc.ContractParams{
+		Symbol:   "USD",
+		SecType:  "CASH",
+		Exchange: "IDEALPRO",
+		Currency: "JPY",
+	}); ok || got != "" {
+		t.Fatalf("quoteSessionMarketForContract(CASH) = %q, %t; want no regular-session calendar", got, ok)
+	}
+	got, ok := quoteSessionMarketForContract(rpc.ContractParams{Symbol: "SPY", SecType: "STK"})
+	if !ok || got != marketcal.MarketUSEquity {
+		t.Fatalf("quoteSessionMarketForContract(STK) = %q, %t; want %q, true", got, ok, marketcal.MarketUSEquity)
+	}
+}
+
+func TestDecorateCashFXQuoteDoesNotUseEquitySession(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	bid, ask, last := 159.455, 159.458, 159.46
+	q := &rpc.Quote{
+		Symbol: "USD.JPY",
+		Contract: rpc.ContractParams{
+			Symbol:   "USD",
+			SecType:  "CASH",
+			Exchange: "IDEALPRO",
+			Currency: "JPY",
+		},
+		Bid:      &bid,
+		Ask:      &ask,
+		Last:     &last,
+		DataType: rpc.MarketDataLive,
+		AsOf:     time.Date(2026, 6, 1, 1, 30, 0, 0, mustLocation(t, "America/New_York")),
+	}
+	srv.decorateQuote(q, "")
+
+	if q.SessionContext != nil {
+		t.Fatalf("SessionContext = %+v, want nil for CASH FX", q.SessionContext)
+	}
+	if q.QuoteQuality != "firm" {
+		t.Fatalf("QuoteQuality = %q, want firm", q.QuoteQuality)
+	}
+	if q.Indicative {
+		t.Fatal("live CASH FX quote must not be marked indicative because U.S. equities are closed")
+	}
+	for _, w := range q.WarningDetails {
+		if w.Code == "off_hours_quote" {
+			t.Fatalf("WarningDetails = %+v, must not include equity off-hours warning for CASH FX", q.WarningDetails)
+		}
 	}
 }
 

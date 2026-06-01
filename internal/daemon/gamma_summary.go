@@ -192,7 +192,11 @@ func gammaResultConfidence(c *rpc.GammaZeroComputed) string {
 		switch {
 		case w == "throttled", w == "all_iv_derived", w == "cache_stale_off_hours", w == "oi_missing":
 			return "degraded"
+		case strings.HasPrefix(w, "spy_unavailable:"):
+			return "degraded"
 		case strings.HasPrefix(w, "spx_unavailable:"):
+			return "degraded"
+		case strings.HasPrefix(w, "spx_cache_fallback"):
 			return "degraded"
 		case strings.HasPrefix(w, "skew_fallback:"):
 			return "degraded"
@@ -328,13 +332,23 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Severity = "data_quality"
 		d.Message = "All implied volatilities were back-solved instead of supplied by the gateway model tick."
 		d.Impact = "The result is more model-dependent, often because the option market was not actively quoting."
+	case code == "strike_budget_capped":
+		d.Severity = "methodology"
+		d.Message = "The strike fan-out was capped to the nearest 80 listed strikes per expiry."
+		d.Impact = "Farther out-of-money strikes inside the ±10% candidate window were skipped to keep the gateway request budget bounded."
 	case code == "cache_stale_off_hours":
 		d.Severity = "data_quality"
 		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
 		d.Impact = "The daemon served the last persisted snapshot rather than recomputing against a closed market."
+	case strings.HasPrefix(code, "spy_unavailable:"):
+		d.Severity = "data_quality"
+		d.Message, d.Impact, d.Action = spyUnavailableWarningText(strings.TrimPrefix(code, "spy_unavailable:"))
 	case strings.HasPrefix(code, "spx_unavailable:"):
 		d.Severity = "data_quality"
 		d.Message, d.Impact, d.Action = spxUnavailableWarningText(strings.TrimPrefix(code, "spx_unavailable:"))
+	case strings.HasPrefix(code, "spx_cache_fallback"):
+		d.Severity = "data_quality"
+		d.Message, d.Impact, d.Action = spxCacheFallbackWarningText(strings.TrimPrefix(code, "spx_cache_fallback"))
 	case strings.HasPrefix(code, "skew_fallback:"):
 		d.Severity = "methodology"
 		expiry := strings.TrimPrefix(code, "skew_fallback:")
@@ -345,6 +359,43 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Message = code
 	}
 	return d
+}
+
+func spyUnavailableWarningText(reason string) (message, impact, action string) {
+	switch reason {
+	case "354":
+		return "SPY option chain was skipped: missing OPRA option market-data entitlement (IBKR 354).",
+			"Showing SPX only; SPY gamma is not included.",
+			"Check the U.S. options data subscription in IBKR, or run --only=spx to request the SPX surface directly."
+	case "200":
+		return "SPY option chain was skipped: contract resolution was rejected (IBKR 200).",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry later or run --only=spx if SPY is not available on this gateway."
+	case "no_data":
+		return "SPY option chain was skipped: no option data landed within the window.",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry during 09:30-16:00 ET or run --only=spx."
+	case "fetch_canceled", "context canceled", "context_canceled":
+		return "SPY option-chain fetch was canceled before usable data landed.",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
+	case "timeout", "context deadline exceeded":
+		return "SPY option-chain fetch timed out before usable data landed.",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
+	case "throttled":
+		return "SPY option chain was skipped after gateway throttling.",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry later; avoid repeated forced runs."
+	case "zero_magnitude":
+		return "SPY option chain was skipped because landed legs produced zero usable gamma magnitude.",
+			"Showing SPX only; SPY gamma is not included because the SPY slice was not reliable enough to classify.",
+			"Retry during regular trading hours or run --only=spy --force for diagnostics."
+	default:
+		return "SPY option chain was skipped: " + reason + ".",
+			"Showing SPX only; SPY gamma is not included.",
+			"Retry later or run --only=spx."
+	}
 }
 
 func spxUnavailableWarningText(reason string) (message, impact, action string) {
@@ -384,8 +435,35 @@ func spxUnavailableWarningText(reason string) (message, impact, action string) {
 	}
 }
 
+func spxCacheFallbackWarningText(reason string) (message, impact, action string) {
+	reason = strings.TrimPrefix(reason, ":")
+	if reason == "" {
+		reason = "previous_success"
+	}
+	switch reason {
+	case "fetch_canceled", "context canceled", "context_canceled":
+		message = "SPX live refresh was canceled; using the last successful cached SPX slice."
+	case "timeout", "context deadline exceeded":
+		message = "SPX live refresh timed out; using the last successful cached SPX slice."
+	case "throttled":
+		message = "SPX live refresh was throttled; using the last successful cached SPX slice."
+	case "354":
+		message = "SPX live refresh hit an entitlement error; using the last successful cached SPX slice."
+	case "200":
+		message = "SPX live refresh hit a contract-resolution error; using the last successful cached SPX slice."
+	default:
+		message = "SPX live refresh was unavailable; using the last successful cached SPX slice."
+	}
+	return message,
+		"SPX is included but may be stale; treat the combined gamma regime as degraded.",
+		"Refresh during 09:30-16:00 ET and inspect the SPX per-index as_of before relying on the combined gamma row."
+}
+
 func gammaWarningScope(c *rpc.GammaZeroComputed, code string) string {
-	if strings.HasPrefix(code, "spx_unavailable:") {
+	if strings.HasPrefix(code, "spy_unavailable:") {
+		return "SPY"
+	}
+	if strings.HasPrefix(code, "spx_unavailable:") || strings.HasPrefix(code, "spx_cache_fallback") {
 		return "SPX"
 	}
 	return gammaUnderlyingLabel(c)

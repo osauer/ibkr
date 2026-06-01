@@ -1020,6 +1020,55 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 	}
 }
 
+func TestRenderRegime_ExplainSurfacesGammaSPXCacheFallback(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	fix := regimeFixture()
+	fix.AsOf = now
+	fix.GammaZero.Status = rpc.RegimeStatusOK
+	fix.GammaZero.Envelope = rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope:           rpc.GammaZeroScopeCombined,
+			GammaTotalAbs:   3.0e9,
+			RegimeAgreement: "disagree",
+			PerIndex: map[string]*rpc.GammaZeroComputed{
+				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive", GammaTotalAbs: 1.0e9},
+				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", GammaTotalAbs: 2.0e9},
+			},
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code:    "spx_cache_fallback:context canceled",
+				Scope:   "SPX",
+				Message: "SPX live refresh was canceled; using the last successful cached SPX slice.",
+				Impact:  "SPX is included but may be stale; treat the combined gamma regime as degraded.",
+				Action:  "Refresh during 09:30-16:00 ET and inspect the SPX per-index as_of before relying on the combined gamma row.",
+			}},
+		},
+	}
+	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
+		AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
+		Source: "bs-gamma-profile-v3-stickymoneyness-0dte-split",
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeTextTo(env, &stdout, fix, true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Data note:",
+		"SPX live refresh was canceled",
+		"cached SPX slice",
+		"Action: Refresh during",
+		"09:30-16:00 ET",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain output missing gamma SPX fallback note %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestAppendRegimeLog_WritesJSONLEntry pins the JSONL append contract:
 // one object per call, top-level keys {timestamp, regime}, trailing
 // newline, valid JSON in isolation. Concurrent writers aren't in scope

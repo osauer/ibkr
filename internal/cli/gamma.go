@@ -14,7 +14,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "gamma")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	noWait := fs.Bool("no-wait", false, "return immediately with current status; don't block on the compute")
-	force := fs.Bool("force", false, "ignore the cached result and start a fresh compute (diagnostics)")
+	force := fs.Bool("force", false, "start a diagnostic refresh; preserve a good served cache unless the refresh succeeds")
 	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable)")
 	explain := fs.Bool("explain", false, "show methodology, citations, skew/source/compute metadata, per-bucket breakdown")
 	profiles := fs.Bool("profiles", false, "include full gamma-profile arrays in --json output")
@@ -544,7 +544,9 @@ func gammaWarningDetailsForRender(c *rpc.GammaZeroComputed) []rpc.GammaWarningDe
 			out = append(out, gammaWarningDetailsForRender(c.PerIndex[key])...)
 		}
 		for _, d := range warningDetailsOrFallback(c) {
-			if strings.HasPrefix(d.Code, "spx_unavailable:") ||
+			if strings.HasPrefix(d.Code, "spy_unavailable:") ||
+				strings.HasPrefix(d.Code, "spx_unavailable:") ||
+				strings.HasPrefix(d.Code, "spx_cache_fallback") ||
 				d.Code == "cache_stale_off_hours" {
 				out = append(out, d)
 			}
@@ -572,6 +574,9 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 	scope := gammaSpotLabelForScope(c)
 	if c != nil && c.Scope == rpc.GammaZeroScopeCombined {
 		scope = "SPY+SPX"
+	}
+	if strings.HasPrefix(code, "spy_unavailable:") {
+		scope = "SPY"
 	}
 	if strings.HasPrefix(code, "spx_unavailable:") {
 		scope = "SPX"
@@ -612,13 +617,65 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 	case code == "all_iv_derived":
 		d.Severity = "data_quality"
 		d.Message = "All implied volatilities were back-solved instead of supplied by the gateway model tick."
+	case code == "strike_budget_capped":
+		d.Severity = "methodology"
+		d.Message = "The strike fan-out was capped to the nearest 80 listed strikes per expiry."
+		d.Impact = "Farther out-of-money strikes inside the ±10% candidate window were skipped to keep the gateway request budget bounded."
 	case code == "cache_stale_off_hours":
 		d.Severity = "data_quality"
 		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
+	case strings.HasPrefix(code, "spy_unavailable:"):
+		d.Severity = "data_quality"
+		reason := strings.TrimPrefix(code, "spy_unavailable:")
+		d.Message = renderSPYUnavailableMessage(reason)
+		d.Impact = "Showing SPX only; SPY gamma is not included."
+		d.Action = spyUnavailableAction(reason)
 	default:
 		d.Message = code
 	}
 	return d
+}
+
+func renderSPYUnavailableMessage(reason string) string {
+	switch normalizeSPXUnavailableReason(reason) {
+	case "354":
+		return "missing OPRA option market-data entitlement for SPY options (IBKR error 354)"
+	case "200":
+		return "SPY option contract resolution rejected (IBKR error 200)"
+	case "no_data":
+		return "no SPY option rows returned usable IV/OI before the fetch window ended"
+	case "throttled":
+		return "gateway throttled the SPY fan-out"
+	case "zero_magnitude":
+		return "landed legs produced zero usable gamma magnitude"
+	case "fetch_canceled":
+		return "the SPY option-chain fetch was canceled before usable data landed"
+	case "timeout":
+		return "the SPY option-chain fetch timed out before usable data landed"
+	default:
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return "SPY option-chain data was unavailable"
+		}
+		return "SPY option-chain data was unavailable (" + reason + ")"
+	}
+}
+
+func spyUnavailableAction(reason string) string {
+	switch normalizeSPXUnavailableReason(reason) {
+	case "354":
+		return "Check the U.S. options market-data subscription in IBKR, or run `ibkr gamma --only=spx` to suppress this note."
+	case "200":
+		return "Retry later; if it repeats, run `ibkr gamma --only=spy --force` for diagnostics or `ibkr gamma --only=spx` to suppress this note."
+	case "no_data", "fetch_canceled", "timeout":
+		return "Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spx`."
+	case "throttled":
+		return "Wait a few minutes and retry without --force; use `ibkr gamma --only=spx` if you only want the SPX surface."
+	case "zero_magnitude":
+		return "Retry during 09:30-16:00 ET, or run `ibkr gamma --only=spy --force` for SPY-only diagnostics."
+	default:
+		return "Retry later; if it repeats, check the daemon log and TWS market-data farm messages, or run `ibkr gamma --only=spx`."
+	}
 }
 
 // renderGammaExplain writes the --explain disclosure: per-bucket
@@ -647,7 +704,7 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Scope       %s · ±%.0f%% strikes · %d expirations\n",
+	fmt.Fprintf(out, "  Scope       %s · ±%.0f%% candidate window · up to 80 strikes/expiry · %d expirations\n",
 		gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations))
 	if c.PricedLegCount > 0 && c.PricedLegCount != c.LegCount {
 		fmt.Fprintf(out, "  Leg count   %d GEX legs (%d priced) across %d expirations\n",

@@ -1529,10 +1529,13 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		if qualityLine := explainQualityLine(r.AsOf, e.quals); qualityLine != "" {
 			renderExplainKV(env, out, "Quality", qualityLine, nil)
 		}
-		// The gamma row gets two extra surfaces specific to its
-		// modelled-output nature: a BS-IV-derived disclosure when the
-		// fallback fired, and a plain-English read of what γ-zero means.
+		// The gamma row gets extra surfaces specific to its modelled
+		// output: data-quality notes, BS-IV fallback disclosure, and a
+		// plain-English read of what γ-zero means.
 		if e.name == gammaRowLabel(r.GammaZero) {
+			if note := regimeGammaDataNote(r.GammaZero.Envelope.Result); note != "" {
+				renderExplainKV(env, out, "Data note", note, nil)
+			}
 			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
 				denom := res.PricedLegCount
 				if denom == 0 {
@@ -1551,6 +1554,44 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		}
 		fmt.Fprintln(out)
 	}
+}
+
+func regimeGammaDataNote(c *rpc.GammaZeroComputed) string {
+	details := gammaWarningDetailsForRender(c)
+	for _, prefix := range []string{"spx_cache_fallback", "spx_unavailable:"} {
+		for _, d := range details {
+			if strings.HasPrefix(d.Code, prefix) {
+				return formatRegimeGammaDataNote(d)
+			}
+		}
+	}
+	for _, d := range details {
+		if d.Code == "cache_stale_off_hours" {
+			return formatRegimeGammaDataNote(d)
+		}
+	}
+	return ""
+}
+
+func formatRegimeGammaDataNote(d rpc.GammaWarningDetail) string {
+	msg := strings.TrimSpace(d.Message)
+	if msg == "" {
+		msg = d.Code
+	}
+	scope := strings.TrimSpace(d.Scope)
+	lowerMsg := strings.ToLower(msg)
+	lowerScope := strings.ToLower(scope)
+	if scope != "" && !strings.HasPrefix(lowerMsg, lowerScope+" ") && !strings.HasPrefix(lowerMsg, lowerScope+":") {
+		msg = scope + ": " + msg
+	}
+	parts := []string{msg}
+	if impact := strings.TrimSpace(d.Impact); impact != "" {
+		parts = append(parts, impact)
+	}
+	if action := strings.TrimSpace(d.Action); action != "" {
+		parts = append(parts, "Action: "+action)
+	}
+	return strings.Join(parts, " ")
 }
 
 func renderExplainKV(env *Env, out io.Writer, label, value string, style func(string) string) {

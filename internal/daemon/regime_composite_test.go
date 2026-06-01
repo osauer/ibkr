@@ -32,6 +32,26 @@ func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	}
 }
 
+func TestBreadthEnvelopeStaleUsesSessionKey(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := &rpc.BreadthSPXResult{
+		SessionKey: "2026-05-29",
+		AsOf:       time.Date(2026, 5, 29, 17, 0, 0, 0, loc),
+	}
+	weekend := time.Date(2026, 5, 31, 23, 55, 0, 0, loc)
+	if breadthEnvelopeStale(envelope, weekend) {
+		t.Fatal("Friday breadth should remain current through the weekend")
+	}
+	mondayPostClose := time.Date(2026, 6, 1, 17, 0, 0, 0, loc)
+	if !breadthEnvelopeStale(envelope, mondayPostClose) {
+		t.Fatal("Friday breadth should be stale after Monday's post-close refresh window")
+	}
+}
+
 // TestBuildRegimeComposite_ThreeRedTriggersRegimeShift pins the spec
 // interpretation table: ≥3 red bands surface as a broad stress label.
 func TestBuildRegimeComposite_ThreeRedTriggersRegimeShift(t *testing.T) {

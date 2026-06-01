@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,12 +77,50 @@ type Connector struct {
 	historicalReqs    map[int]*historicalRequest
 	historicalBackoff map[string]int
 
+	// dataFarms records the latest IBKR data-farm notice per farm. The
+	// status endpoint surfaces only unhealthy entries, but keeping the
+	// healthy notices here lets a later "OK" clear an earlier break.
+	dataFarmMu sync.RWMutex
+	dataFarms  map[string]DataFarmStatus
+
 	// pnl holds account-level and per-conId Daily P&L subscription state.
 	// The cache is on the Connector (not the Connection) so a Connection
 	// rebuild (reconnect) restarts the subscription cleanly — the daemon's
 	// post-connect setup re-issues reqPnL and per-position calls re-issue
 	// reqPnLSingle as needed. Never nil after NewConnector.
 	pnl *pnlCache
+}
+
+// DataFarmStatus is the latest IBKR farm notice tracked by the connector.
+// Status is one of "ok", "inactive", "disconnected", or "broken".
+type DataFarmStatus struct {
+	Name    string
+	Type    string
+	Status  string
+	Code    int
+	Message string
+	AsOf    time.Time
+}
+
+// DataFarmStatuses returns a stable snapshot of all farm notices currently
+// tracked by the connector. Callers decide which statuses are actionable.
+func (c *Connector) DataFarmStatuses() []DataFarmStatus {
+	if c == nil {
+		return nil
+	}
+	c.dataFarmMu.RLock()
+	out := make([]DataFarmStatus, 0, len(c.dataFarms))
+	for _, farm := range c.dataFarms {
+		out = append(out, farm)
+	}
+	c.dataFarmMu.RUnlock()
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 // ConnectorConfig holds configuration for the IBKR connector. The Connector
@@ -494,6 +533,7 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 	if note == nil {
 		return
 	}
+	c.recordDataFarmNotice(note.code, note.message, note.timestamp)
 	symbol := strings.ToUpper(strings.TrimSpace(alias.symbol))
 	inactiveKey := inactiveKeyForAlias(alias)
 	if inactiveKey == "" {
@@ -523,6 +563,109 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 	case 366:
 		c.registerInactiveCandidate(inactiveKey, note.message)
 	}
+}
+
+func (c *Connector) recordDataFarmNotice(code int, message string, asOf time.Time) {
+	farm, ok := dataFarmStatusFromNotice(code, message, asOf)
+	if !ok {
+		return
+	}
+	c.dataFarmMu.Lock()
+	if c.dataFarms == nil {
+		c.dataFarms = make(map[string]DataFarmStatus)
+	}
+	if farm.Status == "ok" {
+		delete(c.dataFarms, dataFarmKey("connectivity", "tws-server"))
+	}
+	c.dataFarms[dataFarmKey(farm.Type, farm.Name)] = farm
+	c.dataFarmMu.Unlock()
+}
+
+func dataFarmStatusFromNotice(code int, message string, asOf time.Time) (DataFarmStatus, bool) {
+	farmType, ok := dataFarmTypeForCode(code, message)
+	if !ok {
+		return DataFarmStatus{}, false
+	}
+	status := dataFarmStatusForCode(code)
+	if status == "" {
+		return DataFarmStatus{}, false
+	}
+	name := dataFarmNameFromMessage(message)
+	if name == "" {
+		switch farmType {
+		case "connectivity":
+			name = "tws-server"
+		case "security_definition":
+			name = "secdef"
+		default:
+			name = farmType
+		}
+	}
+	if asOf.IsZero() {
+		asOf = time.Now()
+	}
+	return DataFarmStatus{
+		Name:    name,
+		Type:    farmType,
+		Status:  status,
+		Code:    code,
+		Message: message,
+		AsOf:    asOf,
+	}, true
+}
+
+func dataFarmTypeForCode(code int, message string) (string, bool) {
+	switch code {
+	case 2103, 2104, 2108, 2119:
+		return "market", true
+	case 2105, 2106, 2107:
+		return "historical", true
+	case 2157, 2158:
+		return "security_definition", true
+	case 2110:
+		return "connectivity", true
+	}
+	msg := strings.ToLower(message)
+	switch {
+	case strings.Contains(msg, "hmds") || strings.Contains(msg, "historical data farm"):
+		return "historical", true
+	case strings.Contains(msg, "sec-def") || strings.Contains(msg, "security definition data farm"):
+		return "security_definition", true
+	case strings.Contains(msg, "market data farm"):
+		return "market", true
+	case strings.Contains(msg, "connectivity between tws"):
+		return "connectivity", true
+	default:
+		return "", false
+	}
+}
+
+func dataFarmStatusForCode(code int) string {
+	switch code {
+	case 2104, 2106, 2119, 2158:
+		return "ok"
+	case 2107, 2108:
+		return "inactive"
+	case 2103, 2105, 2157:
+		return "disconnected"
+	case 2110:
+		return "broken"
+	default:
+		return ""
+	}
+}
+
+func dataFarmNameFromMessage(message string) string {
+	if idx := strings.LastIndex(message, ":"); idx >= 0 && idx+1 < len(message) {
+		name := strings.TrimSpace(message[idx+1:])
+		name = strings.Trim(name, ".")
+		return name
+	}
+	return ""
+}
+
+func dataFarmKey(farmType, name string) string {
+	return strings.ToLower(strings.TrimSpace(farmType)) + "\x00" + strings.ToLower(strings.TrimSpace(name))
 }
 
 func (c *Connector) dropSubscription(symbol string) {
@@ -2223,7 +2366,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	if upperClass == "" {
 		upperClass = upperUnderlying
 	}
-	key := OptionMarketDataKey(upperUnderlying, expiryYMD, right, strike)
+	key := optionMarketDataKeyForClass(upperUnderlying, upperClass, expiryYMD, right, strike)
 
 	c.subMu.RLock()
 	if existing, ok := c.subscriptions[key]; ok {
@@ -2273,28 +2416,50 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	// subscriptions[…].IV for per-strike values. We still ask for 106
 	// because it's harmless and the gateway occasionally fills it on
 	// recently-traded contracts, but GetOptionIV is the source of truth.
-	reqID, err := conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106", false, false)
+	// OI ticks can be one-shot and arrive immediately after reqMktData.
+	// Register the reqID before the wire send so ticks 27/28 cannot race
+	// ahead of the connector routing maps.
+	reqID, err := conn.requestMarketDataWithContract(ctx, contract, "100,101,104,106", false, false, func(reqID int) func() {
+		c.subMu.Lock()
+		c.reqIDMap[reqID] = key
+		c.subscriptions[key] = &Subscription{
+			Symbol:   key,
+			ReqID:    reqID,
+			LastTime: time.Now(),
+			RejectCh: make(chan SubscriptionRejection, 1),
+		}
+		c.subMu.Unlock()
+		// Route option-computation ticks (msg 21, tick types 10/11/13) for this
+		// reqID into optIV / optQuoteMid keyed by the OPRA chain key. This is the
+		// same handler path SubscribeOptionIV uses for ATM IV; per-strike chain
+		// renders just need a different key so multiple strikes coexist.
+		c.optMu.Lock()
+		c.optReqIDs[reqID] = key
+		c.optMu.Unlock()
+		return func() {
+			c.removePreparedOptionSubscription(key, reqID)
+		}
+	})
 	if err != nil {
 		return "", 0, err
 	}
+	return key, reqID, nil
+}
 
+func (c *Connector) removePreparedOptionSubscription(key string, reqID int) {
 	c.subMu.Lock()
-	c.reqIDMap[reqID] = key
-	c.subscriptions[key] = &Subscription{
-		Symbol:   key,
-		ReqID:    reqID,
-		LastTime: time.Now(),
-		RejectCh: make(chan SubscriptionRejection, 1),
+	if c.reqIDMap[reqID] == key {
+		delete(c.reqIDMap, reqID)
+	}
+	if sub, ok := c.subscriptions[key]; ok && sub.ReqID == reqID {
+		delete(c.subscriptions, key)
 	}
 	c.subMu.Unlock()
-	// Route option-computation ticks (msg 21, tick types 10/11/13) for this
-	// reqID into optIV / optQuoteMid keyed by the OPRA chain key. This is the
-	// same handler path SubscribeOptionIV uses for ATM IV; per-strike chain
-	// renders just need a different key so multiple strikes coexist.
 	c.optMu.Lock()
-	c.optReqIDs[reqID] = key
+	if c.optReqIDs[reqID] == key {
+		delete(c.optReqIDs, reqID)
+	}
 	c.optMu.Unlock()
-	return key, reqID, nil
 }
 
 // OptionMarketDataKey returns the stable cache key used for per-contract
@@ -2308,6 +2473,16 @@ func OptionMarketDataKey(underlying, expiryYMD, right string, strike float64) st
 		expiryKey = expiryKey[len(expiryKey)-6:]
 	}
 	return fmt.Sprintf("%s_%s%s%.0f", upperUnderlying, expiryKey, upperRight, strike)
+}
+
+func optionMarketDataKeyForClass(underlying, tradingClass, expiryYMD, right string, strike float64) string {
+	base := OptionMarketDataKey(underlying, expiryYMD, right, strike)
+	upperUnderlying := strings.ToUpper(strings.TrimSpace(underlying))
+	upperClass := strings.ToUpper(strings.TrimSpace(tradingClass))
+	if upperClass == "" || upperClass == upperUnderlying {
+		return base
+	}
+	return upperUnderlying + "_" + upperClass + strings.TrimPrefix(base, upperUnderlying)
 }
 
 // PrewarmOptionChain bulk-resolves an option chain for (symbol, tradingClass)
@@ -2616,20 +2791,43 @@ func (c *Connector) handleTickPrice(fields []string) {
 		tickTypeName = fmt.Sprintf("tick_%d", tickType)
 	}
 
-	// If this tick belongs to an option reqID, capture option quote mid and do not update underlying subscription
+	// If this tick belongs to an option reqID, capture the option quote
+	// caches and the option subscription snapshot. Do not fall through to
+	// the regular path: gamma fan-outs can touch thousands of option legs,
+	// and the regular path logs every important bid/ask tick.
 	c.optMu.RLock()
 	optSym, isOptionReq := c.optReqIDs[reqID]
 	c.optMu.RUnlock()
 	if isOptionReq {
-		// Validate option prices same as regular prices
+		c.subMu.Lock()
+		if sub, ok := c.subscriptions[optSym]; ok {
+			sub.LastTime = time.Now()
+			if price > 0 {
+				sub.Observed = true
+				switch tickType {
+				case 1, 66:
+					sub.Bid = price
+				case 2, 67:
+					sub.Ask = price
+				case 4, 68:
+					sub.LastPrice = price
+				case 9, 75:
+					sub.PrevClose = price
+				case 37:
+					sub.MarkPrice = price
+				}
+			}
+		}
+		c.subMu.Unlock()
+
 		if price > 0 {
 			c.optMu.Lock()
 			switch tickType {
-			case 1:
+			case 1, 66:
 				c.optQuoteBid[optSym] = price
-			case 2:
+			case 2, 67:
 				c.optQuoteAsk[optSym] = price
-			case 9:
+			case 9, 75:
 				// Per-contract previous close (the option's own prior settle,
 				// NOT the underlying's). Used for option-level daily P&L
 				// attribution; without this, callers fall back to the
@@ -2987,6 +3185,7 @@ func (c *Connector) handleIBKRError(fields []string) {
 	if len(fields) > 4 {
 		rawMsg = fields[4]
 	}
+	c.recordDataFarmNotice(code, rawMsg, time.Now())
 	upperMsg := strings.ToUpper(rawMsg)
 	upperSymbol := strings.ToUpper(symbol)
 	if symbol != "" && symbol != upperSymbol {

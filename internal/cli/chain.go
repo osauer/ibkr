@@ -23,6 +23,7 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	expiry := fs.String("expiry", "", "expiry YYYY-MM-DD (omit to list available expiries)")
 	width := fs.Int("width", 5, "ATM ± width strikes")
 	side := fs.String("side", "both", "calls | puts | both")
+	tradingClass := fs.String("class", "", "option trading class for multi-class chains (SPX or SPXW; default auto)")
 	// ATM IV per expiry is on by default now — it's the answer to "which
 	// expiry should I pick" and pays its own way via the daemon-side
 	// cache. --no-iv returns the fast skeleton when the user just wants
@@ -38,7 +39,7 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		return fail(env, "chain: usage: ibkr chain SYM [--expiry YYYY-MM-DD]")
+		return fail(env, "chain: usage: ibkr chain SYM [--expiry YYYY-MM-DD [--class SPX|SPXW]]")
 	}
 	symbol := strings.ToUpper(rest[0])
 
@@ -83,6 +84,7 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	if sideValue != "calls" && sideValue != "puts" && sideValue != "both" {
 		return fail(env, "chain: --side must be calls, puts, or both (got %q)", *side)
 	}
+	classValue := strings.ToUpper(strings.TrimSpace(*tradingClass))
 
 	// Format-validate --expiry locally so a typo like "tomorrow" or
 	// "2099-99-99" fails fast instead of burning the full RPC deadline
@@ -92,10 +94,11 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 	}
 
 	params := rpc.ChainFetchParams{
-		Symbol: symbol,
-		Expiry: *expiry,
-		Width:  *width,
-		Side:   sideValue,
+		Symbol:       symbol,
+		Expiry:       *expiry,
+		Width:        *width,
+		Side:         sideValue,
+		TradingClass: classValue,
 	}
 	var res rpc.ChainResult
 	if err := env.Conn.Call(ctx, rpc.MethodChainFetch, params, &res); err != nil {
@@ -111,8 +114,12 @@ func runChain(ctx context.Context, env *Env, args []string) int {
 func renderChainText(env *Env, c *rpc.ChainResult) int {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "%s  spot %s%s  ·  expiry %s  ·  %d DTE%s\n",
-		c.Symbol, formatMoney(c.Spot), fmtChainSpotSource(c.SpotSource), c.Expiry, c.DTE, env.suffixBadge(c.DataType))
+	classLabel := ""
+	if c.TradingClass != "" {
+		classLabel = "  ·  class " + c.TradingClass
+	}
+	fmt.Fprintf(out, "%s  spot %s%s  ·  expiry %s%s  ·  %d DTE%s\n",
+		c.Symbol, formatMoney(c.Spot), fmtChainSpotSource(c.SpotSource), c.Expiry, classLabel, c.DTE, env.suffixBadge(c.DataType))
 	fmt.Fprintln(out)
 	renderChainDecisionSummary(env, c)
 	// Two-line header: line 1 spans CALLS over the five call columns and

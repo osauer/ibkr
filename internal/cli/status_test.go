@@ -327,6 +327,38 @@ func TestRenderStatus_DataQualityKeepsGatewayReady(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_DataFarmsIssueGetsAttention(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.HealthResult{
+		DaemonVersion: "v1.0.0",
+		UptimeSeconds: 1842,
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   7496,
+		ClientID:      15,
+		Connected:     true,
+		ServerVersion: 203,
+		DataFarms: []rpc.DataFarmHealth{{
+			Name:   "usopt",
+			Type:   "market",
+			Status: "disconnected",
+			Code:   2103,
+		}},
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Gateway  ATTENTION",
+		"Data farms     market:usopt disconnected (IBKR 2103)",
+		"Next concern   Data farm issue: market:usopt disconnected (IBKR 2103)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestNextConcernPriority(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -355,6 +387,20 @@ func TestNextConcernPriority(t *testing.T) {
 			},
 			cli:  "v1.2.4",
 			want: "CLI version v1.2.4 differs from daemon v1.2.3; restart daemon to pick up the new binary",
+		},
+		{
+			name: "data farm before market data",
+			in: rpc.HealthResult{
+				Connected: true,
+				DataType:  rpc.MarketDataFrozen,
+				DataFarms: []rpc.DataFarmHealth{{
+					Name:   "ushmds",
+					Type:   "historical",
+					Status: "disconnected",
+					Code:   2105,
+				}},
+			},
+			want: "Data farm issue: historical:ushmds disconnected (IBKR 2105)",
 		},
 		{
 			name: "market data before members",
@@ -422,6 +468,28 @@ func TestFormatDataQualityValueParenthesizesOffHoursContext(t *testing.T) {
 	}
 }
 
+func TestFormatDataQualityValueKeepsSPXCacheFallback(t *testing.T) {
+	t.Parallel()
+	items := []rpc.DataQualityHealth{
+		{Surface: "gamma", Status: "degraded", Summary: "degraded: SPX cache fallback", DegradedClusters: []string{"gamma"}},
+	}
+	if got, want := formatDataQualityValueAt(items, time.Date(2026, time.June, 1, 6, 0, 0, 0, time.UTC)), "gamma degraded: SPX cache fallback"; got != want {
+		t.Fatalf("format = %q, want %q", got, want)
+	}
+}
+
+func TestFormatDataFarmsValue(t *testing.T) {
+	t.Parallel()
+	farms := []rpc.DataFarmHealth{
+		{Name: "usopt", Type: "market", Status: "disconnected", Code: 2103},
+		{Name: "tws-server", Type: "connectivity", Status: "broken", Code: 2110},
+	}
+	want := "market:usopt disconnected (IBKR 2103), connectivity:tws-server broken (IBKR 2110)"
+	if got := formatDataFarmsValue(farms); got != want {
+		t.Fatalf("formatDataFarmsValue = %q, want %q", got, want)
+	}
+}
+
 func TestStatusVerdict(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -452,6 +520,18 @@ func TestStatusVerdict(t *testing.T) {
 		{
 			name: "market data warning",
 			in:   rpc.HealthResult{Connected: true, DataType: rpc.MarketDataDelayed},
+			want: "ATTENTION",
+		},
+		{
+			name: "data farm warning",
+			in: rpc.HealthResult{
+				Connected: true,
+				DataFarms: []rpc.DataFarmHealth{{
+					Name:   "usopt",
+					Type:   "market",
+					Status: "disconnected",
+				}},
+			},
 			want: "ATTENTION",
 		},
 		{

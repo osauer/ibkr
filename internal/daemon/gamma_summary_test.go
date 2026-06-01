@@ -51,3 +51,44 @@ func TestSPXUnavailableWarningTextFetchCanceledIsUserFacing(t *testing.T) {
 		}
 	}
 }
+
+func TestSPYUnavailableWarningTextZeroMagnitudeIsUserFacing(t *testing.T) {
+	t.Parallel()
+	message, impact, action := spyUnavailableWarningText("zero_magnitude")
+	for _, want := range []string{
+		"SPY option chain was skipped",
+		"Showing SPX only",
+		"regular trading hours",
+		"--only=spy --force",
+	} {
+		if !strings.Contains(message+" "+impact+" "+action, want) {
+			t.Fatalf("warning text missing %q: message=%q impact=%q action=%q", want, message, impact, action)
+		}
+	}
+}
+
+func TestGammaWarningDetailSPYUnavailableScopesToSPY(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{Scope: rpc.GammaZeroScopeSPX}, "spy_unavailable:zero_magnitude")
+	if got.Severity != "data_quality" || got.Scope != "SPY" {
+		t.Fatalf("warning detail = %+v, want SPY data_quality warning", got)
+	}
+	for _, want := range []string{"Showing SPX only", "SPY gamma is not included"} {
+		if !strings.Contains(got.Message+" "+got.Impact, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestGammaWarningDetailStrikeBudgetCapped(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{Scope: rpc.GammaZeroScopeSPX}, "strike_budget_capped")
+	if got.Severity != "methodology" || got.Scope != "SPX" {
+		t.Fatalf("warning detail = %+v, want SPX methodology warning", got)
+	}
+	for _, want := range []string{"nearest 80", "gateway request budget"} {
+		if !strings.Contains(got.Message+" "+got.Impact, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
