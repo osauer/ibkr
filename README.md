@@ -6,7 +6,7 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[Project site](https://osauer.dev/ibkr/) · [IBKR MCP TWS setup](https://osauer.dev/ibkr/ibkr-mcp-tws/) · [IBKR MCP setup](https://osauer.dev/ibkr/ibkr-mcp/) · [Claude portfolio review](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/) · [MCP tools](https://osauer.dev/ibkr/reference/mcp-tools.html)
+[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Agentic use](docs/guides/agentic-use.md)
 
 **Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
@@ -91,7 +91,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 
 Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
 
-For schemas and edge cases, see the [IBKR MCP server page](https://osauer.dev/ibkr/ibkr-mcp/), [IBKR Claude Desktop MCP setup guide](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/), [best IBKR MCP server for Claude Code guide](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/), [connect Claude to IBKR guide](https://osauer.dev/ibkr/connect-claude-to-ibkr/), [Interactive Brokers portfolio with AI guide](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/), [portfolio review with Claude and IBKR guide](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/), [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), and [concept docs](docs/concepts.md).
+For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), [MCP resources reference](docs/reference/mcp-resources.md), [configuration reference](docs/reference/config.md), and [concept docs](docs/concepts.md).
 
 For ready-to-run prompts, see [examples/ibkr_portfolio_analysis_prompt.md](examples/ibkr_portfolio_analysis_prompt.md) for portfolio review and [examples/ibkr_portfolio_canary_prompt.md](examples/ibkr_portfolio_canary_prompt.md) for scheduled stress checks.
 

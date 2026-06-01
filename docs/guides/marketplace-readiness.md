@@ -135,16 +135,15 @@ Some directory surfaces are crawler-driven and some still require a maintainer a
 Prepared assets:
 
 - `server.json` for the official MCP Registry release path.
-- `docs/mcp-server.json` and `docs/.well-known/mcp/server.json` for public metadata on the project site.
-- `docs/.well-known/mcp/server-card.json` for directories that crawl static server-card metadata when they cannot execute a local stdio server.
+- `.claude-plugin/plugin.json` for Claude Code plugin metadata.
 - `glama.json` to identify the authorized Glama maintainer.
-- [Portfolio review with Claude and IBKR](../portfolio-review-with-claude-ibkr/) as the human intent page for portfolio-review traffic.
+- GitHub README, docs, privacy policy, and releases as the product-owned public surfaces.
 
 Directory notes:
 
-- PulseMCP: prioritize official MCP Registry publication and public sitemap freshness; PulseMCP-style crawlers can then pick up registry and repo metadata.
+- PulseMCP: prioritize official MCP Registry publication and repo metadata.
 - Glama: keep `glama.json` present, then claim or refresh the GitHub-backed server entry from a maintainer account.
-- Smithery: hosted URL publishing is built around remote transports; for this local stdio project, use the static server-card metadata and manual listing text unless a hosted bridge is added.
+- Smithery: hosted URL publishing is built around remote transports; for this local stdio project, use the official registry metadata and manual listing text unless a hosted bridge is added.
 - MCP.so, MCPMarket, MCPpedia, and similar directories: use the submission pack below; most need a maintainer login, GitHub URL, public docs URL, and concise safety language.
 
 Submission pack:
@@ -156,7 +155,7 @@ Submission pack:
 - Requirements: IB Gateway 10.37+ or TWS running locally; IBKR Pro account with TWS API access; macOS or Linux binary for the bundled path.
 - Current boundary: current public CLI and MCP releases expose analysis and sizing tools, but no order placement, modification, or cancellation interface.
 - Target users: semi-professional retail traders using IBKR as capital-markets infrastructure who want agent-assisted review and research on broker-native data.
-- Links: <https://osauer.dev/ibkr/>, <https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/>, <https://osauer.dev/ibkr/reference/mcp-tools.html>, <https://github.com/osauer/ibkr>, <https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>.
+- Links: <https://github.com/osauer/ibkr>, <https://github.com/osauer/ibkr/blob/main/docs/reference/mcp-tools.md>, <https://github.com/osauer/ibkr/blob/main/docs/guides/agentic-use.md>, <https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>.
 
 Publish sequence:
 
