@@ -92,6 +92,21 @@ func TestOptionMarketDataKeyDistinguishesExpiries(t *testing.T) {
 	}
 }
 
+func TestOptionMarketDataKeyForClassDistinguishesSPXW(t *testing.T) {
+	t.Parallel()
+	spx := optionMarketDataKeyForClass("SPX", "SPX", "20260619", "C", 5400)
+	spxw := optionMarketDataKeyForClass("SPX", "SPXW", "20260619", "C", 5400)
+	if spx == spxw {
+		t.Fatalf("SPX and SPXW option keys collide: %q", spx)
+	}
+	if spx != "SPX_260619C5400" {
+		t.Fatalf("SPX key = %q, want SPX_260619C5400", spx)
+	}
+	if spxw != "SPX_SPXW_260619C5400" {
+		t.Fatalf("SPXW key = %q, want SPX_SPXW_260619C5400", spxw)
+	}
+}
+
 func TestKeyedOptionIVRoutesSameUnderlyingToSeparateSlots(t *testing.T) {
 	c := NewConnector(nil)
 	const (

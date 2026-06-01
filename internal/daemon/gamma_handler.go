@@ -28,8 +28,9 @@ import (
 //     gateway slot pool.
 //   - Callers after the compute finishes get Status="ready" with the
 //     cached payload until the next NY midnight, regardless of WaitMs.
-//   - Force=true on the request supersedes the cached/in-flight result
-//     and starts fresh. Diagnostics only; the cache handles freshness.
+//   - Force=true starts a fresh diagnostic compute. If a good cached value
+//     already exists, the cache keeps serving it and promotes the forced run
+//     only on success; otherwise force supersedes the in-flight/error state.
 //
 // Methodology lives in docs/specs/risk-regime-dashboard.md. The result
 // envelope's Method field is "bs-gamma-profile-v3-stickymoneyness-0dte-split";
@@ -50,14 +51,20 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 	// (--only=spy / --only=spx) first reuse the combined cache's
 	// matching per-index slice when available so drill-down matches the
 	// default gamma/regime view. Force=true bypasses that canonical
-	// slice and runs the requested single-underlying diagnostic compute.
+	// slice for the diagnostic run, but an existing good served cache is
+	// promoted over only if the forced run succeeds.
 	scope, scopeErr := gammaScopeForRequest(p.Scope)
 	if scopeErr != nil {
 		return nil, fmt.Errorf("zero-gamma: %w", scopeErr)
 	}
 
 	if !p.Force {
-		if env, ok := s.zeroGamma.snapshotCombinedSlice(scope, time.Now); ok {
+		now := time.Now()
+		if env, ok := s.zeroGamma.snapshotCombinedSlice(scope, func() time.Time { return now }); ok {
+			own := s.zeroGamma.snapshotCurrent(scope, func() time.Time { return now })
+			if preferOwnGammaSnapshot(env, own) {
+				return &own, nil
+			}
 			return &env, nil
 		}
 	}
@@ -135,4 +142,11 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 
 	env := s.zeroGamma.snapshotForScope(scope, job, time.Now)
 	return &env, nil
+}
+
+func preferOwnGammaSnapshot(canonical, own rpc.GammaZeroSPXResult) bool {
+	return own.Status == rpc.GammaZeroStatusReady &&
+		own.Result != nil &&
+		canonical.Result != nil &&
+		own.Result.AsOf.After(canonical.Result.AsOf)
 }

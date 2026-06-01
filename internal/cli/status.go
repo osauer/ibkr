@@ -69,6 +69,9 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 
 	statusRow(env, out, "Session", formatSessionValue(*res))
 	statusRow(env, out, "Market data", formatMarketDataValue(env, *res))
+	if len(res.DataFarms) > 0 {
+		statusRow(env, out, "Data farms", env.yellow(formatDataFarmsValue(res.DataFarms)))
+	}
 	statusRow(env, out, "Daemon", formatDaemonValue(*res))
 	switch {
 	case res.Connected:
@@ -179,6 +182,8 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 			Text:  fmt.Sprintf("CLI version %s differs from daemon %s; restart daemon to pick up the new binary", cliVersion, res.DaemonVersion),
 			Level: statusConcernWarn,
 		}
+	case len(res.DataFarms) > 0:
+		return statusConcern{Text: "Data farm issue: " + formatDataFarmsValue(res.DataFarms), Level: statusConcernWarn}
 	case res.Connected && !rpc.IsLiveDataType(res.DataType):
 		return statusConcern{Text: "Market data is " + dataTypeLabel(res.DataType), Level: statusConcernWarn}
 	case res.Connected && res.GatewayTLS != res.NegotiatedTLS:
@@ -232,6 +237,32 @@ func formatMarketDataValue(env *Env, res rpc.HealthResult) string {
 		return env.yellow(label + " ⚠")
 	}
 	return label
+}
+
+func formatDataFarmsValue(farms []rpc.DataFarmHealth) string {
+	parts := make([]string, 0, len(farms))
+	for _, farm := range farms {
+		name := strings.TrimSpace(farm.Name)
+		if name == "" {
+			name = strings.TrimSpace(farm.Type)
+		}
+		if name == "" {
+			name = "unknown"
+		}
+		if farm.Type != "" {
+			name = farm.Type + ":" + name
+		}
+		status := strings.TrimSpace(farm.Status)
+		if status == "" {
+			status = "unhealthy"
+		}
+		part := name + " " + status
+		if farm.Code != 0 {
+			part += fmt.Sprintf(" (IBKR %d)", farm.Code)
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func dataTypeLabel(dt string) string {

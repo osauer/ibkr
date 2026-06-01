@@ -405,7 +405,7 @@ func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connecto
 	if err != nil {
 		return rpc.Quote{}, false
 	}
-	sessionMarket := quoteMarketForStockContract(echoedContract)
+	sessionMarket, hasSessionMarket := quoteSessionMarketForContract(echoedContract)
 	sym := echoedContract.Symbol
 
 	pollKey := sym
@@ -448,10 +448,12 @@ func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connecto
 		return rpc.Quote{}, false
 	}
 	q.AsOf = time.Now()
-	if quoteNeedsHistoricalContext(&q, sessionMarket) {
+	if quoteNeedsHistoryForSession(&q, sessionMarket, hasSessionMarket) {
 		s.fillQuoteHistoricalFallback(ctx, c, &q, sessionMarket, timeout)
 	}
-	s.attachQuoteSessionContext(&q, sessionMarket)
+	if hasSessionMarket {
+		s.attachQuoteSessionContext(&q, sessionMarket)
+	}
 	s.decorateQuote(&q, sessionMarket)
 	return q, true
 }
@@ -884,9 +886,9 @@ func flagClosedOptionSession(options []rpc.PositionView, now time.Time) {
 			Code:     "options_closed",
 			Scope:    optionWarningScope(*p),
 			Severity: "info",
-			Message:  "U.S. listed options are outside regular trading hours.",
-			Impact:   "Option bid/ask, previous close, IV, and Greeks are closed-session context, not executable quotes.",
-			Action:   "Use the account mark for held-position valuation; retry during 09:30-16:00 ET for executable option quotes.",
+			Message:  "The regular U.S. listed-options data surface is outside RTH.",
+			Impact:   "Option bid/ask, previous close, IV, and Greeks are closed-session context, not executable quotes, unless live fields landed; SPX/VIX extended sessions do not guarantee a complete API surface.",
+			Action:   "Use the account mark for held-position valuation; retry during 09:30-16:00 ET for the most complete quote/OI/IV surface.",
 		})
 	}
 }
@@ -1657,7 +1659,6 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	if err != nil {
 		return nil, err
 	}
-	sessionMarket := quoteMarketForStockContract(echoedContract)
 	sym := echoedContract.Symbol
 	q := &rpc.Quote{
 		Symbol:   sym,
@@ -1675,6 +1676,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		q.Contract.Exchange = "IDEALPRO"
 		q.Contract.Currency = quote
 	}
+	sessionMarket, hasSessionMarket := quoteSessionMarketForContract(q.Contract)
 
 	pollKey := sym
 	var releaseSub func()
@@ -1731,13 +1733,15 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	}
 	q.AsOf = time.Now()
 	var historicalBars []ibkrlib.HistoricalBar
-	if quoteNeedsHistoricalContext(q, sessionMarket) {
+	if quoteNeedsHistoryForSession(q, sessionMarket, hasSessionMarket) {
 		historicalBars = s.fillQuoteHistoricalFallback(ctx, c, q, sessionMarket, timeout)
 	}
 	if p.IncludeLiquidity && strings.EqualFold(q.Contract.SecType, "STK") {
 		s.fillQuoteLiquidity(ctx, c, q, sessionMarket, timeout, historicalBars)
 	}
-	s.attachQuoteSessionContext(q, sessionMarket)
+	if hasSessionMarket {
+		s.attachQuoteSessionContext(q, sessionMarket)
+	}
 	s.decorateQuote(q, sessionMarket)
 
 	return q, nil
@@ -1844,7 +1848,11 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 	}
 	defer releaseUnder()
 
-	key, _, err := c.SubscribeOption(ctx, sym, sym, contract.Expiry, contract.Strike, contract.Right)
+	tradingClass := strings.TrimSpace(contract.TradingClass)
+	if tradingClass == "" {
+		tradingClass = sym
+	}
+	key, _, err := c.SubscribeOption(ctx, sym, tradingClass, contract.Expiry, contract.Strike, contract.Right)
 	if err != nil {
 		return nil, err
 	}
@@ -1896,6 +1904,18 @@ func quoteMarketForStockContract(c rpc.ContractParams) marketcal.Market {
 	default:
 		return marketcal.MarketUSEquity
 	}
+}
+
+func quoteSessionMarketForContract(c rpc.ContractParams) (marketcal.Market, bool) {
+	if !quoteHasRegularSessionCalendar(c) {
+		return "", false
+	}
+	return quoteMarketForStockContract(c), true
+}
+
+func quoteHasRegularSessionCalendar(c rpc.ContractParams) bool {
+	secType := strings.ToUpper(strings.TrimSpace(c.SecType))
+	return secType == "" || secType == "STK" || secType == "ETF"
 }
 
 func (s *Server) attachQuoteSessionContext(q *rpc.Quote, market marketcal.Market) {
@@ -2124,6 +2144,13 @@ func quoteNeedsHistoricalContext(q *rpc.Quote, market marketcal.Market) bool {
 		q.Week52High == nil ||
 		q.Week52Low == nil ||
 		q.AvgVolume == nil
+}
+
+func quoteNeedsHistoryForSession(q *rpc.Quote, market marketcal.Market, hasSessionMarket bool) bool {
+	if !hasSessionMarket {
+		return quoteNeedsHistoricalFallback(q)
+	}
+	return quoteNeedsHistoricalContext(q, market)
 }
 
 func (s *Server) fillQuoteHistoricalFallback(ctx context.Context, c *ibkrlib.Connector, q *rpc.Quote, market marketcal.Market, timeout time.Duration) []ibkrlib.HistoricalBar {
@@ -3434,6 +3461,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		res.Connected = c.IsReady() && s.postConnectSetupDone.Load()
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
+		res.DataFarms = statusDataFarms(c.DataFarmStatuses())
 	}
 
 	// BackgroundTasks lists daemon-internal long-running computes
@@ -3692,6 +3720,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 		res.NewLowsToday = snap.NewLowsToday
 		res.NetNewHighsPct = snap.NetNewHighsPct
 		res.AsOf = snap.AsOf
+		res.SessionKey = snap.SessionKey
 
 		history := s.breadth.History(historyDays)
 		res.History = make([]rpc.BreadthDailyValue, 0, len(history))

@@ -249,10 +249,11 @@ func dedupeStrings(in []string) []string {
 // acquires. This bounds market-data subscription footprint to one
 // underlying at a time.
 //
-// Entitlement-graceful degradation (per design §8.2): on SPX-phase
-// failure (354 entitlement, 200 contract, 30s no-data, etc.) the
-// function returns the SPY-only result with a structured warning
-// rather than failing the run.
+// Availability-graceful degradation (per design §8.2): if one side
+// fails because the gateway could not produce a usable OI/IV/GEX slice
+// (354 entitlement, 200 contract, no-data, zero magnitude, etc.) but
+// the other side succeeds, return the successful side with a structured
+// warning rather than failing the whole default/regime gamma row.
 func computeGammaCombined(
 	bgCtx context.Context,
 	s *Server,
@@ -262,7 +263,15 @@ func computeGammaCombined(
 ) (*rpc.GammaZeroComputed, error) {
 	spyRes, err := runUnderlyingPhase(bgCtx, s, c, "SPY", params, prog, 0)
 	if err != nil {
-		return nil, fmt.Errorf("zero-gamma: SPY phase: %w", err)
+		if s != nil && s.logger != nil {
+			s.logger.Warnf("gamma.combine.spy_unavailable err=%v (trying SPX-only)", err)
+		}
+		spxRes, spxErr := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
+		if spxErr != nil {
+			return nil, fmt.Errorf("zero-gamma: SPY phase: %w; SPX phase: %w", err, spxErr)
+		}
+		spxRes.Warnings = append(spxRes.Warnings, "spy_unavailable:"+summarizeGammaPhaseFailure(err))
+		return hydrateGammaComputed(spxRes), nil
 	}
 
 	spxRes, spxErr := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
@@ -270,7 +279,7 @@ func computeGammaCombined(
 		if s != nil && s.logger != nil {
 			s.logger.Warnf("gamma.combine.spx_unavailable err=%v (degrading to SPY-only)", spxErr)
 		}
-		spyRes.Warnings = append(spyRes.Warnings, "spx_unavailable:"+summarizeSPXFailure(spxErr))
+		spyRes.Warnings = append(spyRes.Warnings, "spx_unavailable:"+summarizeGammaPhaseFailure(spxErr))
 		return hydrateGammaComputed(spyRes), nil
 	}
 
@@ -296,6 +305,10 @@ func computeGammaCombined(
 //	zero_magnitude → legs landed but all gamma magnitude was zero
 //	<other>   → truncated error message, ≤ 60 chars
 func summarizeSPXFailure(err error) string {
+	return summarizeGammaPhaseFailure(err)
+}
+
+func summarizeGammaPhaseFailure(err error) string {
 	if err == nil {
 		return "unknown"
 	}

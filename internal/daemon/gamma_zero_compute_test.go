@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -512,6 +514,31 @@ func TestFilterStrikesAroundSpot(t *testing.T) {
 	}
 }
 
+func TestCapStrikesATMOutwardBoundsSPXFanout(t *testing.T) {
+	var strikes []float64
+	for i := range 101 {
+		strikes = append(strikes, 5000+float64(i))
+	}
+	capped, ok := capStrikesATMOutward(strikes, 80)
+	if !ok {
+		t.Fatal("expected cap to report true")
+	}
+	if len(capped) != 80 {
+		t.Fatalf("len(capped)=%d, want 80", len(capped))
+	}
+	if capped[0] != 5000 || capped[79] != 5079 {
+		t.Fatalf("cap should keep nearest already-ordered strikes, got first=%v last=%v", capped[0], capped[79])
+	}
+
+	uncapped, ok := capStrikesATMOutward(strikes[:80], 80)
+	if ok {
+		t.Fatal("exactly-at-budget strikes should not report capped")
+	}
+	if len(uncapped) != 80 {
+		t.Fatalf("len(uncapped)=%d, want 80", len(uncapped))
+	}
+}
+
 // TestCompactExpiry round-trips YYYY-MM-DD into the YYYYMMDD form
 // SubscribeOption expects, with best-effort behaviour on malformed
 // input.
@@ -971,6 +998,31 @@ func TestPrepareGEXLegsRequiresOpenInterest(t *testing.T) {
 	}
 	if total <= 0 {
 		t.Fatalf("leg with OI should produce positive absolute GEX, got %v", total)
+	}
+}
+
+func TestWaitForOptionOpenInterestCapturesLateTick(t *testing.T) {
+	t.Parallel()
+
+	var oi atomic.Int64
+	time.AfterFunc(20*time.Millisecond, func() {
+		oi.Store(4321)
+	})
+
+	got := waitForOptionOpenInterest(context.Background(), time.Now().Add(500*time.Millisecond), oi.Load)
+	if got != 4321 {
+		t.Fatalf("OpenInterest = %d, want late tick value 4321", got)
+	}
+}
+
+func TestWaitForOptionOpenInterestReturnsZeroWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	got := waitForOptionOpenInterest(context.Background(), time.Now().Add(10*time.Millisecond), func() int64 {
+		return 0
+	})
+	if got != 0 {
+		t.Fatalf("OpenInterest = %d, want 0 when no tick lands", got)
 	}
 }
 

@@ -112,9 +112,9 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 			Code:     "live_option_iv_unavailable",
 			Scope:    sym,
 			Severity: "data_quality",
-			Message:  "Live option IV is unavailable because U.S. listed options are outside regular trading hours.",
-			Impact:   "Expiry IV and 1-sigma implied moves are not reliable enough for option strike selection.",
-			Action:   "Retry during 09:30-16:00 ET, or omit require_live_iv for an off-hours/test run.",
+			Message:  "Live option IV is unavailable because the regular U.S. option-data surface is outside RTH.",
+			Impact:   "Products such as SPX may have extended sessions, but expiry IV and 1-sigma moves need a broad live quote/model surface.",
+			Action:   "Retry during 09:30-16:00 ET for the most complete quote/OI/IV surface, or omit require_live_iv for an off-hours/test run.",
 		})
 		return res, nil
 	}
@@ -562,13 +562,19 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	}
 	step := strikeStep(spot.Price)
 	atm := math.Round(spot.Price/step) * step
+	requestedClass := strings.ToUpper(strings.TrimSpace(p.TradingClass))
+	surface, err := selectChainFetchSurface(c, sym, expiryYMD, requestedClass, spot.Price, p.Width, time.Now())
+	if err != nil {
+		return nil, err
+	}
 
 	res := &rpc.ChainResult{
-		Symbol:       strings.ToUpper(p.Symbol),
+		Symbol:       sym,
+		TradingClass: surface.tradingClass,
 		Spot:         spot.Price,
 		SpotSource:   spot.Source,
 		SpotAsOf:     spot.AsOf,
-		Expiry:       expiryYMD[:4] + "-" + expiryYMD[4:6] + "-" + expiryYMD[6:8],
+		Expiry:       displayExpiry(expiryYMD),
 		DTE:          dte,
 		DataType:     spot.DataType,
 		FeedType:     spot.FeedType,
@@ -592,11 +598,9 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	// the documented safe gateway throttle (v0.2 backlog notes); the
 	// gateway-side rate limiter (AcquireMarketDataSlot) serialises
 	// further if we'd exceed the entitled slot count.
-	n := 2*p.Width + 1
-	res.Strikes = make([]rpc.ChainStrike, n)
-	for i := -p.Width; i <= p.Width; i++ {
-		idx := i + p.Width
-		res.Strikes[idx] = rpc.ChainStrike{Strike: atm + float64(i)*step, IsATM: i == 0}
+	res.Strikes = surface.strikes
+	if len(res.Strikes) == 0 {
+		res.Strikes = heuristicChainRows(atm, step, p.Width)
 	}
 
 	type job struct {
@@ -604,7 +608,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		right string
 	}
 	var jobs []job
-	for idx := range n {
+	for idx := range res.Strikes {
 		if wantCalls {
 			jobs = append(jobs, job{idx: idx, right: "C"})
 		}
@@ -625,7 +629,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		}
 		var local rpc.ChainStrike
 		local.Strike = res.Strikes[j.idx].Strike
-		fillOptionLeg(ctx, c, &local, p.Symbol, expiryYMD, local.Strike, j.right)
+		fillOptionLeg(ctx, c, &local, sym, surface.tradingClass, expiryYMD, local.Strike, j.right)
 		mergeMu.Lock()
 		mergeStrikeSide(&res.Strikes[j.idx], &local, j.right)
 		mergeMu.Unlock()
@@ -635,7 +639,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 		return nil, err
 	}
 	res.TradableSummary, res.LiquiditySummary = chainSummaries(res, wantCalls, wantPuts)
-	res.WarningDetails = chainWarningDetails(res, wantCalls, wantPuts)
+	res.WarningDetails = append(surface.warnings, chainWarningDetails(res, wantCalls, wantPuts)...)
 	return res, nil
 }
 
@@ -789,6 +793,275 @@ func chainHistoricalSpotFromBars(bars []ibkrlib.HistoricalBar) (float64, string)
 	return 0, ""
 }
 
+type chainFetchSurface struct {
+	tradingClass string
+	strikes      []rpc.ChainStrike
+	warnings     []rpc.DataWarning
+}
+
+func selectChainFetchSurface(c *ibkrlib.Connector, symbol, expiryYMD, requestedClass string, spot float64, width int, now time.Time) (chainFetchSurface, error) {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	class := strings.ToUpper(strings.TrimSpace(requestedClass))
+	if class == "" {
+		class = sym
+	}
+
+	if sym != "SPX" {
+		classed, err := c.FetchOptionExpiryStrikesClassed(sym, 10*time.Second)
+		if err != nil {
+			step := strikeStep(spot)
+			atm := math.Round(spot/step) * step
+			return chainFetchSurface{
+				tradingClass: class,
+				strikes:      heuristicChainRows(atm, step, width),
+				warnings: []rpc.DataWarning{{
+					Code:     "classed_chain_unavailable",
+					Scope:    sym,
+					Severity: "data_quality",
+					Message:  "Option-chain strike enumeration was unavailable; falling back to a generic strike grid.",
+					Impact:   "The displayed strikes may skip actively listed contracts near the money.",
+					Action:   "Retry after the security-definition farm recovers; compare the strike grid against TWS.",
+				}},
+			}, nil
+		}
+		expiryDate := displayExpiry(expiryYMD)
+		entries := normalisedSPXChainEntries(classed[expiryDate], sym)
+		if len(entries) == 0 {
+			return chainFetchSurface{}, errBadRequest(fmt.Sprintf("expiry %s is not listed for %s", expiryDate, sym))
+		}
+		entry, auto, err := selectDefaultChainEntry(sym, entries, class, requestedClass != "", expiryDate)
+		if err != nil {
+			return chainFetchSurface{}, err
+		}
+		out := chainFetchSurface{
+			tradingClass: entry.TradingClass,
+			strikes:      chainRowsFromListedStrikes(entry.Strikes, spot, width),
+		}
+		if auto {
+			out.warnings = append(out.warnings, rpc.DataWarning{
+				Code:     "trading_class_auto",
+				Scope:    sym,
+				Severity: "info",
+				Message:  fmt.Sprintf("%s expiry %s lists multiple trading classes; selected %s automatically.", sym, expiryDate, entry.TradingClass),
+				Impact:   "Trading classes can have different listed strikes or session behavior on the same date.",
+				Action:   "Pass trading_class (MCP) or --class (CLI) when you need a specific class.",
+			})
+		}
+		return chainFetchSurface{
+			tradingClass: out.tradingClass,
+			strikes:      out.strikes,
+			warnings:     out.warnings,
+		}, nil
+	}
+
+	expiryDate := displayExpiry(expiryYMD)
+	classed, err := c.FetchOptionExpiryStrikesClassed(sym, 10*time.Second)
+	if err != nil {
+		step := strikeStep(spot)
+		atm := math.Round(spot/step) * step
+		return chainFetchSurface{
+			tradingClass: class,
+			strikes:      heuristicChainRows(atm, step, width),
+			warnings: []rpc.DataWarning{{
+				Code:     "spx_classed_chain_unavailable",
+				Scope:    sym,
+				Severity: "data_quality",
+				Message:  "SPX classed option-chain enumeration was unavailable; falling back to the generic strike grid.",
+				Impact:   "SPX/SPXW contract selection may be wrong for daily, weekly, or same-date classed expiries.",
+				Action:   "Retry after the security-definition farm recovers; compare the selected trading_class against TWS.",
+			}},
+		}, nil
+	}
+
+	entries := normalisedSPXChainEntries(classed[expiryDate], sym)
+	if len(entries) == 0 {
+		return chainFetchSurface{}, errBadRequest(fmt.Sprintf("expiry %s is not listed for %s", expiryDate, sym))
+	}
+	entry, auto, err := selectSPXChainEntry(entries, class, requestedClass != "", expiryDate, now)
+	if err != nil {
+		return chainFetchSurface{}, err
+	}
+	out := chainFetchSurface{
+		tradingClass: entry.TradingClass,
+		strikes:      chainRowsFromListedStrikes(entry.Strikes, spot, width),
+	}
+	if auto {
+		out.warnings = append(out.warnings, rpc.DataWarning{
+			Code:     "spx_trading_class_auto",
+			Scope:    sym,
+			Severity: "info",
+			Message:  fmt.Sprintf("SPX expiry %s lists multiple trading classes; selected %s automatically.", expiryDate, entry.TradingClass),
+			Impact:   "SPX and SPXW can have different settlement conventions and ConIDs on the same date.",
+			Action:   "Pass trading_class (MCP) or --class (CLI) when you need a specific SPX class.",
+		})
+	}
+	return out, nil
+}
+
+func selectDefaultChainEntry(symbol string, entries []ibkrlib.ExpiryClassedStrikes, class string, explicit bool, expiryDate string) (ibkrlib.ExpiryClassedStrikes, bool, error) {
+	if explicit {
+		for _, entry := range entries {
+			if entry.TradingClass == class {
+				return entry, false, nil
+			}
+		}
+		return ibkrlib.ExpiryClassedStrikes{}, false, errBadRequest(fmt.Sprintf("trading_class %s is not listed for %s expiry %s; available classes: %s", class, symbol, expiryDate, strings.Join(spxChainClasses(entries), ", ")))
+	}
+	if entry, ok := spxChainEntryByClass(entries, class); ok {
+		return entry, false, nil
+	}
+	if entry, ok := spxChainEntryByClass(entries, symbol); ok {
+		return entry, false, nil
+	}
+	if len(entries) == 1 {
+		return entries[0], false, nil
+	}
+	return entries[0], true, nil
+}
+
+func normalisedSPXChainEntries(entries []ibkrlib.ExpiryClassedStrikes, fallbackClass string) []ibkrlib.ExpiryClassedStrikes {
+	out := make([]ibkrlib.ExpiryClassedStrikes, 0, len(entries))
+	for _, entry := range entries {
+		class := strings.ToUpper(strings.TrimSpace(entry.TradingClass))
+		if class == "" {
+			class = fallbackClass
+		}
+		strikes := dedupeSortedPositiveFloats(entry.Strikes)
+		if len(strikes) == 0 {
+			continue
+		}
+		out = append(out, ibkrlib.ExpiryClassedStrikes{
+			TradingClass: class,
+			Strikes:      strikes,
+		})
+	}
+	slices.SortFunc(out, func(a, b ibkrlib.ExpiryClassedStrikes) int {
+		return strings.Compare(a.TradingClass, b.TradingClass)
+	})
+	return out
+}
+
+func selectSPXChainEntry(entries []ibkrlib.ExpiryClassedStrikes, class string, explicit bool, expiryDate string, now time.Time) (ibkrlib.ExpiryClassedStrikes, bool, error) {
+	if explicit {
+		for _, entry := range entries {
+			if entry.TradingClass == class {
+				return entry, false, nil
+			}
+		}
+		return ibkrlib.ExpiryClassedStrikes{}, false, errBadRequest(fmt.Sprintf("trading_class %s is not listed for SPX expiry %s; available classes: %s", class, expiryDate, strings.Join(spxChainClasses(entries), ", ")))
+	}
+	if len(entries) == 1 {
+		return entries[0], false, nil
+	}
+
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.UTC
+	}
+	if day, parseErr := time.ParseInLocation("2006-01-02", expiryDate, loc); parseErr == nil && now.In(loc).Format("2006-01-02") == expiryDate {
+		spxCutoff := classSettlementInstant("SPX", day.Year(), day.Month(), day.Day(), loc).Add(classSettlementBuffer)
+		if now.In(loc).After(spxCutoff) {
+			if entry, ok := spxChainEntryByClass(entries, "SPXW"); ok {
+				return entry, true, nil
+			}
+		}
+	}
+	if entry, ok := spxChainEntryByClass(entries, "SPX"); ok {
+		return entry, true, nil
+	}
+	if entry, ok := spxChainEntryByClass(entries, "SPXW"); ok {
+		return entry, true, nil
+	}
+	return entries[0], true, nil
+}
+
+func spxChainEntryByClass(entries []ibkrlib.ExpiryClassedStrikes, class string) (ibkrlib.ExpiryClassedStrikes, bool) {
+	for _, entry := range entries {
+		if entry.TradingClass == class {
+			return entry, true
+		}
+	}
+	return ibkrlib.ExpiryClassedStrikes{}, false
+}
+
+func spxChainClasses(entries []ibkrlib.ExpiryClassedStrikes) []string {
+	classes := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		classes = append(classes, entry.TradingClass)
+	}
+	return classes
+}
+
+func heuristicChainRows(atm, step float64, width int) []rpc.ChainStrike {
+	n := 2*width + 1
+	rows := make([]rpc.ChainStrike, n)
+	for i := range n {
+		offset := i - width
+		rows[i] = rpc.ChainStrike{Strike: atm + float64(offset)*step, IsATM: offset == 0}
+	}
+	return rows
+}
+
+func chainRowsFromListedStrikes(strikes []float64, spot float64, width int) []rpc.ChainStrike {
+	clean := dedupeSortedPositiveFloats(strikes)
+	if len(clean) == 0 {
+		return nil
+	}
+	center := closestStrikeIndex(clean, spot)
+	count := min(2*width+1, len(clean))
+	start := max(center-width, 0)
+	end := start + count
+	if end > len(clean) {
+		end = len(clean)
+		start = max(0, end-count)
+	}
+	rows := make([]rpc.ChainStrike, 0, end-start)
+	for idx := start; idx < end; idx++ {
+		rows = append(rows, rpc.ChainStrike{Strike: clean[idx], IsATM: idx == center})
+	}
+	return rows
+}
+
+func closestStrikeIndex(strikes []float64, spot float64) int {
+	best := 0
+	bestDist := math.Abs(strikes[0] - spot)
+	for i, strike := range strikes[1:] {
+		d := math.Abs(strike - spot)
+		if d < bestDist {
+			best = i + 1
+			bestDist = d
+		}
+	}
+	return best
+}
+
+func dedupeSortedPositiveFloats(in []float64) []float64 {
+	out := make([]float64, 0, len(in))
+	for _, v := range in {
+		if v > 0 {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.Sort(out)
+	dst := out[:0]
+	for _, v := range out {
+		if len(dst) == 0 || dst[len(dst)-1] != v {
+			dst = append(dst, v)
+		}
+	}
+	return dst
+}
+
+func displayExpiry(expiryYMD string) string {
+	if len(expiryYMD) == 8 {
+		return expiryYMD[:4] + "-" + expiryYMD[4:6] + "-" + expiryYMD[6:8]
+	}
+	return expiryYMD
+}
+
 // mergeStrikeSide copies the side-specific fields (call or put)
 // populated by a worker into the shared row. Disjoint by construction
 // — the C worker only writes Call*, the P worker only writes Put* —
@@ -821,13 +1094,8 @@ func mergeStrikeSide(dst, src *rpc.ChainStrike, right string) {
 	dst.PutOIStatus = src.PutOIStatus
 }
 
-func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStrike, symbol, expiryYMD string, strike float64, right string) {
-	// Trading class defaults to the symbol for single-class chain
-	// callers (chain.go fetches one underlying at a time and doesn't
-	// today distinguish SPX vs SPXW; SubscribeOption's empty-class
-	// normalisation matches the SPY pattern). SPX classed enumeration
-	// would extend this in step 6 of the gamma SPX coverage arc.
-	key, _, err := c.SubscribeOption(ctx, symbol, symbol, expiryYMD, strike, right)
+func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStrike, symbol, tradingClass, expiryYMD string, strike float64, right string) {
+	key, _, err := c.SubscribeOption(ctx, symbol, tradingClass, expiryYMD, strike, right)
 	if err != nil {
 		setOptionLegUnavailable(row, right, "subscribe_error")
 		return
@@ -1005,7 +1273,9 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 		return nil, nil
 	}
 	tradable := &rpc.ChainTradableSummary{}
-	closedSession := res.DataType == rpc.MarketDataClosed || res.SessionState == rpc.SessionClosed.String()
+	regularOptionsClosed := res.DataType == rpc.MarketDataClosed
+	feedLooksLive := res.FeedType == rpc.MarketDataLive || (res.FeedType == "" && res.DataType == rpc.MarketDataLive)
+	forceStaleQuotes := res.SessionState == rpc.SessionClosed.String() && !feedLooksLive
 	var nearestCall, nearestPut, minSpread, atmLive *rpc.ChainLegSummary
 	nearestCallDist, nearestPutDist, minSpreadPct := math.MaxFloat64, math.MaxFloat64, math.MaxFloat64
 
@@ -1016,7 +1286,7 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 		}
 		switch dataStatus {
 		case "quoted":
-			if closedSession {
+			if forceStaleQuotes {
 				tradable.StaleLegs++
 			}
 		case "prev_close":
@@ -1031,7 +1301,7 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 
 		hasBid := bid != nil && *bid > 0
 		hasAsk := ask != nil && *ask > 0
-		if closedSession {
+		if forceStaleQuotes {
 			return
 		}
 		if hasBid != hasAsk {
@@ -1087,10 +1357,10 @@ func chainSummaries(res *rpc.ChainResult, wantCalls, wantPuts bool) (*rpc.ChainT
 	if tradable.TotalLegs > 0 {
 		tradable.OICoveragePct = float64(tradable.OICoveredLegs) / float64(tradable.TotalLegs)
 	}
-	tradable.OptionsTradable = !closedSession && tradable.LiveBidAskLegs > 0
+	tradable.OptionsTradable = tradable.LiveBidAskLegs > 0
 	if !tradable.OptionsTradable {
 		switch {
-		case closedSession:
+		case regularOptionsClosed || forceStaleQuotes:
 			tradable.FeedGap = "stale_close_only"
 		case tradable.SubscribeErrorLegs > 0:
 			tradable.FeedGap = "unknown_feed_gap"
@@ -1143,9 +1413,9 @@ func chainWarningDetails(res *rpc.ChainResult, wantCalls, wantPuts bool) []rpc.D
 			Code:     "options_closed",
 			Scope:    res.Symbol,
 			Severity: "info",
-			Message:  "U.S. listed options are outside regular trading hours.",
-			Impact:   "Bid/ask/last and open interest may be unavailable; model IV can still populate from IBKR's option model.",
-			Action:   "Retry during 09:30-16:00 ET for executable option quotes.",
+			Message:  "The regular U.S. listed-options data surface is outside RTH.",
+			Impact:   "SPX/VIX extended or curb trading may still exist, but this response should be treated as closed-session context unless live bid/ask, OI, and IV fields landed.",
+			Action:   "Retry during 09:30-16:00 ET for the most complete executable quote/OI/IV surface; compare TWS if you expect extended-session quotes.",
 		})
 	}
 	if res.TradableSummary != nil && !res.TradableSummary.OptionsTradable {

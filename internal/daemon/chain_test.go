@@ -61,6 +61,9 @@ func TestChainWarningDetailsSummarizesUnavailableLegs(t *testing.T) {
 	if !strings.Contains(warningMessage(got, "oi_unavailable"), "3 option legs") {
 		t.Fatalf("oi warning should summarize all requested legs: %+v", got)
 	}
+	if !strings.Contains(warningImpact(got, "options_closed"), "extended or curb trading may still exist") {
+		t.Fatalf("options_closed should distinguish regular-hours surface from SPX/VIX extended trading: %+v", got)
+	}
 }
 
 func TestChainSpotFromSnapshotLabelsPreviousClose(t *testing.T) {
@@ -176,6 +179,15 @@ func warningMessage(warnings []rpc.DataWarning, code string) string {
 	for _, w := range warnings {
 		if w.Code == code {
 			return w.Message
+		}
+	}
+	return ""
+}
+
+func warningImpact(warnings []rpc.DataWarning, code string) string {
+	for _, w := range warnings {
+		if w.Code == code {
+			return w.Impact
 		}
 	}
 	return ""

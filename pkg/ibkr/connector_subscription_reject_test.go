@@ -3,6 +3,8 @@ package ibkr
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -67,6 +69,175 @@ func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connectio
 		t.Fatalf("expected non-zero reqID")
 	}
 	return c, conn, subKey, reqID
+}
+
+type immediateMktDataTickWriter struct {
+	conn  *Connection
+	onReq func(reqID int)
+	buf   []byte
+	fired bool
+}
+
+func (w *immediateMktDataTickWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for !w.fired && len(w.buf) >= 4 {
+		n := int(binary.BigEndian.Uint32(w.buf[:4]))
+		if len(w.buf) < 4+n {
+			break
+		}
+		msg := w.buf[4 : 4+n]
+		fields := w.conn.decodeMessage(msg)
+		w.buf = w.buf[4+n:]
+		if len(fields) < 3 || fields[0] != strconv.Itoa(reqMktData) {
+			continue
+		}
+		reqID, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		w.fired = true
+		if w.onReq != nil {
+			w.onReq(reqID)
+		}
+	}
+	return len(p), nil
+}
+
+func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	t.Cleanup(func() { conn.rateLimiter.Stop() })
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+
+	writer := &immediateMktDataTickWriter{conn: conn}
+	writer.onReq = func(reqID int) {
+		c.handleTickSize([]string{"2", "6", strconv.Itoa(reqID), "27", "4321"})
+	}
+	conn.writer = bufio.NewWriter(writer)
+
+	contract := Contract{
+		Symbol:       "SPY",
+		SecType:      "OPT",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		Expiry:       "20250620",
+		Strike:       500,
+		Right:        "C",
+		Multiplier:   100,
+		TradingClass: "SPY",
+	}
+	cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
+	conn.optionContractMu.Lock()
+	conn.optionContractCache[cacheKey] = ContractDetailsLite{
+		ConID:        99999,
+		Symbol:       "SPY",
+		Exchange:     "SMART",
+		PrimaryExch:  "CBOE",
+		LocalSymbol:  "SPY   250620C00500000",
+		TradingClass: "SPY",
+	}
+	conn.optionContractMu.Unlock()
+
+	subKey, reqID, err := c.SubscribeOption(context.Background(), "SPY", "SPY", "20250620", 500, "C")
+	if err != nil {
+		t.Fatalf("SubscribeOption: %v", err)
+	}
+	if reqID == 0 {
+		t.Fatalf("expected non-zero reqID")
+	}
+	if !writer.fired {
+		t.Fatalf("test writer did not observe outbound reqMktData")
+	}
+
+	md := c.GetMarketData()
+	if md[subKey] == nil {
+		t.Fatalf("GetMarketData missing entry for %q", subKey)
+	}
+	if md[subKey].OpenInt != 4321 {
+		t.Fatalf("OpenInt = %d, want 4321", md[subKey].OpenInt)
+	}
+}
+
+type failingMktDataWriter struct{}
+
+func (failingMktDataWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("synthetic write failure")
+}
+
+func TestSubscribeOptionCleansPreparedStateOnSendFailure(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	t.Cleanup(func() { conn.rateLimiter.Stop() })
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVersionRequired)
+	conn.writer = bufio.NewWriter(failingMktDataWriter{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+
+	contract := Contract{
+		Symbol:       "SPY",
+		SecType:      "OPT",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		Expiry:       "20250620",
+		Strike:       500,
+		Right:        "C",
+		Multiplier:   100,
+		TradingClass: "SPY",
+	}
+	cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
+	conn.optionContractMu.Lock()
+	conn.optionContractCache[cacheKey] = ContractDetailsLite{
+		ConID:        99999,
+		Symbol:       "SPY",
+		Exchange:     "SMART",
+		PrimaryExch:  "CBOE",
+		LocalSymbol:  "SPY   250620C00500000",
+		TradingClass: "SPY",
+	}
+	conn.optionContractMu.Unlock()
+
+	key := optionMarketDataKeyForClass("SPY", "SPY", "20250620", "C", 500)
+	if _, _, err := c.SubscribeOption(context.Background(), "SPY", "SPY", "20250620", 500, "C"); err == nil {
+		t.Fatalf("SubscribeOption succeeded with failing writer")
+	}
+
+	c.subMu.RLock()
+	_, subExists := c.subscriptions[key]
+	var reqMapped bool
+	for _, mapped := range c.reqIDMap {
+		if mapped == key {
+			reqMapped = true
+		}
+	}
+	c.subMu.RUnlock()
+	if subExists || reqMapped {
+		t.Fatalf("prepared subscription state survived send failure: sub=%v reqMapped=%v", subExists, reqMapped)
+	}
+
+	c.optMu.RLock()
+	var optMapped bool
+	for _, mapped := range c.optReqIDs {
+		if mapped == key {
+			optMapped = true
+		}
+	}
+	c.optMu.RUnlock()
+	if optMapped {
+		t.Fatalf("prepared option routing state survived send failure")
+	}
+
+	conn.marketDataSlotsMu.Lock()
+	slots := len(conn.marketDataSlots)
+	conn.marketDataSlotsMu.Unlock()
+	if slots != 0 {
+		t.Fatalf("market-data slot leaked after send failure: %d", slots)
+	}
 }
 
 // TestSubscriptionRejection_FastAbortOnCode200 ensures that an

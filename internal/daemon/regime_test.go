@@ -735,6 +735,37 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 		}
 	})
 
+	t.Run("fx_tick_missing_uses_midpoint_history_fallback", func(t *testing.T) {
+		bars := make([]ibkrlib.HistoricalBar, 10)
+		for i := range 10 {
+			bars[i] = ibkrlib.HistoricalBar{Date: fmt.Sprintf("202605%02d", 18+i), Close: float64(150 + i)}
+		}
+		deps := (&fakeDeps{
+			bars: map[string]fakeHistory{
+				"USD.JPY": {bars: bars},
+			},
+		}).build()
+		got := fetchRegimeUSDJPY(ctx, deps)
+		if got.Status != rpc.RegimeStatusStale {
+			t.Fatalf("status=%q, want stale midpoint fallback", got.Status)
+		}
+		if got.Last == nil || *got.Last != 159.0 {
+			t.Fatalf("Last=%v, want latest midpoint close 159", got.Last)
+		}
+		if got.Close7DAgo == nil || *got.Close7DAgo != 152.0 {
+			t.Fatalf("Close7DAgo=%v, want 152", got.Close7DAgo)
+		}
+		if got.WeeklyChange == nil || *got.WeeklyChange < 4.60 || *got.WeeklyChange > 4.61 {
+			t.Fatalf("WeeklyChange=%v, want ≈4.605", got.WeeklyChange)
+		}
+		if got.DataType != regimeFreshnessDailyClose {
+			t.Fatalf("DataType=%q, want %q", got.DataType, regimeFreshnessDailyClose)
+		}
+		if got.LastQuality == nil || !strings.Contains(got.LastQuality.Source, "fallback") {
+			t.Fatalf("LastQuality=%+v, want fallback provenance", got.LastQuality)
+		}
+	})
+
 	t.Run("stale_data_type", func(t *testing.T) {
 		bars := make([]ibkrlib.HistoricalBar, 10)
 		for i := range 10 {
@@ -830,7 +861,7 @@ func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 		}
 	})
 
-	t.Run("usdjpy_drops_on_call_2_flips_ok_to_unavailable", func(t *testing.T) {
+	t.Run("usdjpy_drops_on_call_2_uses_history_fallback_without_carryover", func(t *testing.T) {
 		deps := &fakeDeps{
 			snapshots: map[string]fakeQuote{
 				"USD.JPY": {price: 149.5, dataType: rpc.MarketDataLive},
@@ -850,11 +881,11 @@ func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 		delete(deps.snapshots, "USD.JPY")
 
 		second := fetchRegimeUSDJPY(ctx, built)
-		if second.Status != rpc.RegimeStatusUnavailable {
-			t.Errorf("call 2 status=%q, want unavailable (rule 12: FX-tick miss must surface honestly)", second.Status)
+		if second.Status != rpc.RegimeStatusStale {
+			t.Errorf("call 2 status=%q, want stale HMDS fallback", second.Status)
 		}
-		if second.Last != nil {
-			t.Errorf("call 2 last=%v, want nil (rule 12: must not carry over)", *second.Last)
+		if second.Last == nil || *second.Last != 149.0 {
+			t.Errorf("call 2 last=%v, want latest midpoint close 149.0 (no carry-over from live tick)", second.Last)
 		}
 	})
 

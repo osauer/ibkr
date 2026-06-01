@@ -562,16 +562,17 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	return job, true
 }
 
-// force unconditionally starts a fresh compute for the current NY
-// session, superseding any in-flight job for the same key. The
-// previous job's context is cancelled — its result (if any) is
-// discarded; the new job becomes c.current. Use sparingly: this
-// throws away work and competes for the gateway's market-data slots
-// against the cancelled job's last few in-flight subscriptions.
+// force starts a fresh compute for the current NY session. With no
+// successful cached value it supersedes the current job. With a successful
+// cached value already serving, it runs as a diagnostic refresh behind that
+// value and promotes only on success; failed diagnostics must not poison the
+// cache callers rely on outside market hours.
+//
+// An in-flight current job is still cancelled and superseded: there is no
+// stable value to preserve, and the caller explicitly requested force.
 //
 // Any in-flight soft-TTL refresh is also cancelled and discarded —
-// force always lands as the canonical current, not as a refresh
-// behind a stale value.
+// force is the active diagnostic attempt for this scope.
 func (c *gammaZeroCache) force(parent context.Context, scope string, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
 	key := nySessionKey(now)
 
@@ -579,6 +580,10 @@ func (c *gammaZeroCache) force(parent context.Context, scope string, now time.Ti
 	defer c.mu.Unlock()
 
 	slot := c.getOrCreateSlotLocked(scope)
+	preserveCurrent := slot.current != nil &&
+		slot.current.isDone() &&
+		slot.current.err == nil &&
+		slot.current.result != nil
 	if slot.current != nil && !slot.current.isDone() {
 		// Cancel the superseded compute — it stops fanning out and the
 		// next time the gateway responds to one of its in-flight legs
@@ -592,7 +597,29 @@ func (c *gammaZeroCache) force(parent context.Context, scope string, now time.Ti
 		slot.refresh.cancel()
 	}
 	slot.refresh = nil
+	if preserveCurrent {
+		job := c.spawnJob(parent, scope, key, now, etaSeconds, compute)
+		slot.refresh = job
+		c.promoteRefreshOnDone(scope, key, job)
+		return job
+	}
 	return c.startLocked(parent, scope, key, now, etaSeconds, compute)
+}
+
+func (c *gammaZeroCache) promoteRefreshOnDone(scope, key string, job *gammaComputation) {
+	go func() {
+		<-job.done
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		slot := c.slots[scope]
+		if slot == nil || slot.refresh != job {
+			return
+		}
+		if job.err == nil && job.result != nil && job.sessionKey == key {
+			slot.current = job
+		}
+		slot.refresh = nil
+	}()
 }
 
 // spawnJob allocates a fresh computation and launches its background
@@ -778,6 +805,8 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 			hydrateGammaComputed(&r)
 			env.Result = &r
 		}
+		env = c.withCachedSPXFallback(scope, env, now)
+		env = c.withLatestSingleScopeSlices(scope, env, now)
 		// Clear stale prior-error context for this scope — a successful
 		// compute means the previous failure is no longer informative.
 		c.mu.Lock()
@@ -806,6 +835,249 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 	}
 	c.mu.Unlock()
 	return env
+}
+
+func (c *gammaZeroCache) withLatestSingleScopeSlices(scope string, env rpc.GammaZeroSPXResult, now time.Time) rpc.GammaZeroSPXResult {
+	if scope != rpc.GammaZeroScopeCombined || env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+		return env
+	}
+
+	origSPY := gammaSliceForLabel(env.Result, "SPY")
+	origSPX := gammaSliceForLabel(env.Result, "SPX")
+	spy := newestGammaSlice(origSPY, c.readySingleScopeSlice(rpc.GammaZeroScopeSPY, now))
+	spx := newestGammaSlice(origSPX, c.readySingleScopeSlice(rpc.GammaZeroScopeSPX, now))
+	if spy == nil || spx == nil {
+		return env
+	}
+	if env.Result.Scope == rpc.GammaZeroScopeCombined && spy == origSPY && spx == origSPX {
+		return env
+	}
+
+	spyCopy := cloneGammaComputed(spy)
+	spxCopy := cloneGammaComputed(spx)
+	stripSPYUnavailableWarning(spxCopy)
+	stripSPXUnavailableWarning(spyCopy)
+
+	combined := combineGammaResults(spyCopy, spxCopy)
+	if combined == nil {
+		return env
+	}
+	env.Result = hydrateGammaComputed(combined)
+	return env
+}
+
+func (c *gammaZeroCache) readySingleScopeSlice(scope string, now time.Time) *rpc.GammaZeroComputed {
+	if scope != rpc.GammaZeroScopeSPY && scope != rpc.GammaZeroScopeSPX {
+		return nil
+	}
+	c.mu.Lock()
+	slot := c.slots[scope]
+	var job *gammaComputation
+	if slot != nil {
+		job = slot.current
+	}
+	c.mu.Unlock()
+	if job == nil || !job.isDone() || job.err != nil || job.result == nil {
+		return nil
+	}
+	if job.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
+		return nil
+	}
+	return job.result
+}
+
+func gammaSliceForLabel(c *rpc.GammaZeroComputed, label string) *rpc.GammaZeroComputed {
+	if c == nil {
+		return nil
+	}
+	switch label {
+	case "SPY":
+		return gammaSPYForFallback(c)
+	case "SPX":
+		return gammaSPXForFallback(c)
+	default:
+		return nil
+	}
+}
+
+func newestGammaSlice(a, b *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	if b.AsOf.After(a.AsOf) {
+		return b
+	}
+	return a
+}
+
+func (c *gammaZeroCache) withCachedSPXFallback(scope string, env rpc.GammaZeroSPXResult, now time.Time) rpc.GammaZeroSPXResult {
+	if scope != rpc.GammaZeroScopeCombined || env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+		return env
+	}
+	if env.Result.Scope == rpc.GammaZeroScopeCombined && env.Result.PerIndex["SPX"] != nil {
+		return env
+	}
+
+	spy := gammaSPYForFallback(env.Result)
+	if spy == nil {
+		return env
+	}
+
+	c.mu.Lock()
+	slot := c.slots[rpc.GammaZeroScopeSPX]
+	var spxJob *gammaComputation
+	if slot != nil {
+		spxJob = slot.current
+	}
+	c.mu.Unlock()
+	if spxJob == nil {
+		return env
+	}
+	if spxJob.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
+		return env
+	}
+
+	spxEnv := c.snapshotForScope(rpc.GammaZeroScopeSPX, spxJob, func() time.Time { return now })
+	if spxEnv.Status != rpc.GammaZeroStatusReady || spxEnv.Result == nil {
+		return env
+	}
+
+	spyCopy := cloneGammaComputed(spy)
+	spxCopy := cloneGammaComputed(spxEnv.Result)
+	stripSPXUnavailableWarning(spyCopy)
+
+	reason := spxFallbackReason(env.Result)
+	warning := "spx_cache_fallback"
+	if reason != "" {
+		warning += ":" + reason
+	}
+	spxCopy.Warnings = dedupeStrings(append(spxCopy.Warnings, warning))
+
+	combined := combineGammaResults(spyCopy, spxCopy)
+	if combined == nil {
+		return env
+	}
+	combined.Warnings = dedupeStrings(append(combined.Warnings, warning))
+	combined.Source = "computed from IBKR SPY option chain plus cached IBKR SPX option chain fallback"
+	if !spyCopy.AsOf.IsZero() && !spxCopy.AsOf.IsZero() && spxCopy.AsOf.Before(spyCopy.AsOf) {
+		combined.AsOf = spxCopy.AsOf
+	}
+	env.Result = hydrateGammaComputed(combined)
+	return env
+}
+
+func gammaSPYForFallback(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
+	if c == nil {
+		return nil
+	}
+	if c.Scope == rpc.GammaZeroScopeSPY {
+		return c
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined && c.PerIndex != nil {
+		return c.PerIndex["SPY"]
+	}
+	return nil
+}
+
+func gammaSPXForFallback(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
+	if c == nil {
+		return nil
+	}
+	if c.Scope == rpc.GammaZeroScopeSPX {
+		return c
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined && c.PerIndex != nil {
+		return c.PerIndex["SPX"]
+	}
+	return nil
+}
+
+func cloneGammaComputed(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Warnings = append([]string(nil), c.Warnings...)
+	out.WarningDetails = append([]rpc.GammaWarningDetail(nil), c.WarningDetails...)
+	out.Expirations = append([]string(nil), c.Expirations...)
+	out.TopStrikes = append([]rpc.StrikeConcentration(nil), c.TopStrikes...)
+	out.Profile = append([]rpc.GammaProfilePoint(nil), c.Profile...)
+	if c.PerIndex != nil {
+		out.PerIndex = make(map[string]*rpc.GammaZeroComputed, len(c.PerIndex))
+		for k, v := range c.PerIndex {
+			out.PerIndex[k] = cloneGammaComputed(v)
+		}
+	}
+	return &out
+}
+
+func stripSPYUnavailableWarning(c *rpc.GammaZeroComputed) {
+	if c == nil {
+		return
+	}
+	c.Warnings = filterGammaWarnings(c.Warnings, func(code string) bool {
+		return !strings.HasPrefix(code, "spy_unavailable:")
+	})
+	if len(c.WarningDetails) > 0 {
+		out := c.WarningDetails[:0]
+		for _, d := range c.WarningDetails {
+			if !strings.HasPrefix(d.Code, "spy_unavailable:") {
+				out = append(out, d)
+			}
+		}
+		c.WarningDetails = out
+	}
+}
+
+func stripSPXUnavailableWarning(c *rpc.GammaZeroComputed) {
+	if c == nil {
+		return
+	}
+	c.Warnings = filterGammaWarnings(c.Warnings, func(code string) bool {
+		return !strings.HasPrefix(code, "spx_unavailable:")
+	})
+	if len(c.WarningDetails) > 0 {
+		out := c.WarningDetails[:0]
+		for _, d := range c.WarningDetails {
+			if !strings.HasPrefix(d.Code, "spx_unavailable:") {
+				out = append(out, d)
+			}
+		}
+		c.WarningDetails = out
+	}
+}
+
+func filterGammaWarnings(in []string, keep func(string) bool) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := in[:0]
+	for _, code := range in {
+		if keep(code) {
+			out = append(out, code)
+		}
+	}
+	return out
+}
+
+func spxFallbackReason(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	for _, code := range c.Warnings {
+		if reason, ok := strings.CutPrefix(code, "spx_unavailable:"); ok {
+			return reason
+		}
+	}
+	for _, d := range c.WarningDetails {
+		if reason, ok := strings.CutPrefix(d.Code, "spx_unavailable:"); ok {
+			return reason
+		}
+	}
+	return "previous_success"
 }
 
 // summarizeGammaErr compresses a compute error to a single-line summary

@@ -1,6 +1,6 @@
 # Risk Regime Dashboard Contract
 
-**Updated:** 2026-06-01 06:01 CEST
+**Updated:** 2026-06-01 08:53 CEST
 
 `ibkr regime` reports the broad-market stress lifecycle: `quiet`,
 `early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`,
@@ -221,9 +221,10 @@ retail IBKR feed does not provide the official S&P breadth series directly. The
 daemon caches the post-close result; reads should not trigger a 500-name fanout.
 
 Dealer gamma is a best-effort SPY+SPX zero-gamma estimate from IBKR option
-chain data. Historical backtests should exclude gamma unless the row has a
-trusted point-in-time gamma snapshot with method, source, coverage, and
-timestamp.
+chain data. The live sweep uses the nearest 80 listed strikes per expiry inside
+the +/-10% candidate window to keep the IBKR fan-out bounded, especially for
+SPX/SPXW. Historical backtests should exclude gamma unless the row has a trusted
+point-in-time gamma snapshot with method, source, coverage, and timestamp.
 
 MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.

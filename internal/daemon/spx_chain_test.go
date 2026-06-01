@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,122 @@ func TestSelectSPXExpirationsClassedKeepsBothPreSettle(t *testing.T) {
 	if picked[0].TradingClass != "SPX" || picked[1].TradingClass != "SPXW" {
 		t.Errorf("class order: got [%s, %s], want [SPX, SPXW]",
 			picked[0].TradingClass, picked[1].TradingClass)
+	}
+}
+
+func TestSelectSPXChainEntryUsesOnlyListedClass(t *testing.T) {
+	t.Parallel()
+	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{{
+		TradingClass: "SPXW",
+		Strikes:      []float64{7585, 7575, 7580},
+	}}, "SPX")
+
+	entry, auto, err := selectSPXChainEntry(entries, "SPX", false, "2026-06-01", time.Now())
+	if err != nil {
+		t.Fatalf("selectSPXChainEntry: %v", err)
+	}
+	if auto {
+		t.Fatalf("single listed class should not be marked auto")
+	}
+	if entry.TradingClass != "SPXW" {
+		t.Fatalf("TradingClass = %q, want SPXW", entry.TradingClass)
+	}
+
+	rows := chainRowsFromListedStrikes(entry.Strikes, 7581, 1)
+	got := make([]float64, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.Strike)
+	}
+	want := []float64{7575, 7580, 7585}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listed strike grid = %v, want %v", got, want)
+	}
+	if !rows[1].IsATM {
+		t.Fatalf("nearest listed strike should be marked ATM: %+v", rows)
+	}
+}
+
+func TestSelectSPXChainEntryRejectsMissingExplicitClass(t *testing.T) {
+	t.Parallel()
+	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{{
+		TradingClass: "SPXW",
+		Strikes:      []float64{7580},
+	}}, "SPX")
+
+	_, _, err := selectSPXChainEntry(entries, "SPX", true, "2026-06-01", time.Now())
+	if err == nil {
+		t.Fatalf("expected missing explicit class to fail")
+	}
+	if !strings.Contains(err.Error(), "available classes: SPXW") {
+		t.Fatalf("error should list available class, got %v", err)
+	}
+}
+
+func TestSelectDefaultChainEntryPrefersSymbolClass(t *testing.T) {
+	t.Parallel()
+	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{
+		{TradingClass: "2SPY", Strikes: []float64{639}},
+		{TradingClass: "SPY", Strikes: []float64{755, 756, 757, 758, 759, 760, 761, 762}},
+	}, "SPY")
+
+	entry, auto, err := selectDefaultChainEntry("SPY", entries, "SPY", false, "2026-06-01")
+	if err != nil {
+		t.Fatalf("selectDefaultChainEntry: %v", err)
+	}
+	if auto {
+		t.Fatalf("symbol-class match should not be marked auto")
+	}
+	if entry.TradingClass != "SPY" {
+		t.Fatalf("TradingClass = %q, want SPY", entry.TradingClass)
+	}
+
+	rows := chainRowsFromListedStrikes(entry.Strikes, 757.96, 2)
+	got := make([]float64, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.Strike)
+	}
+	want := []float64{756, 757, 758, 759, 760}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listed SPY strike grid = %v, want %v", got, want)
+	}
+}
+
+func TestSelectDefaultChainEntryRejectsMissingExplicitClass(t *testing.T) {
+	t.Parallel()
+	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{{
+		TradingClass: "SPY",
+		Strikes:      []float64{758},
+	}}, "SPY")
+
+	_, _, err := selectDefaultChainEntry("SPY", entries, "2SPY", true, "2026-06-01")
+	if err == nil {
+		t.Fatalf("expected missing explicit class to fail")
+	}
+	if !strings.Contains(err.Error(), "available classes: SPY") {
+		t.Fatalf("error should list available class, got %v", err)
+	}
+}
+
+func TestSelectSPXChainEntryPrefersSPXWhenAmbiguousBeforeSettle(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{
+		{TradingClass: "SPXW", Strikes: []float64{7580}},
+		{TradingClass: "SPX", Strikes: []float64{7580}},
+	}, "SPX")
+
+	entry, auto, err := selectSPXChainEntry(entries, "SPX", false, "2026-06-17", time.Date(2026, 6, 1, 4, 0, 0, 0, loc))
+	if err != nil {
+		t.Fatalf("selectSPXChainEntry: %v", err)
+	}
+	if !auto {
+		t.Fatalf("ambiguous classes should be marked auto")
+	}
+	if entry.TradingClass != "SPX" {
+		t.Fatalf("TradingClass = %q, want SPX", entry.TradingClass)
 	}
 }
 

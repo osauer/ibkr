@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/internal/breadth/spx"
 	"github.com/osauer/ibkr/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
@@ -771,7 +772,7 @@ func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeF
 	return out
 }
 
-const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier; the row surfaces Status=unavailable when the gateway has no FX ticks (typically: account lacks IDEALPRO market-data subscription, or markets closed with no frozen tick to fall back on)."
+const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier. If the gateway has no live/frozen FX tick, the row falls back to the latest HMDS MIDPOINT daily close and reports Status=stale; it is unavailable only when both the tick and midpoint history are unusable."
 
 // USDJPYLookbackDays is the calendar-day window passed to the HMDS
 // history fetch when computing the 7-trading-day close for USD/JPY.
@@ -792,31 +793,31 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 
 	// briefSnapshotPrice routes "USD.JPY" through pkg/ibkr.classifySymbol
 	// to CASH/IDEALPRO/JPY (see commit 6ac583c). A 0 result here means
-	// either the gateway has no FX entitlement for this account or
-	// there's no frozen tick to fall back on; either way, surface as
-	// unavailable rather than faking a value.
+	// either the gateway has no FX entitlement for this account or there
+	// is no frozen tick to fall back on. Do not fabricate a live value;
+	// if HMDS can provide daily MIDPOINT history below, rank from that as
+	// stale daily context instead.
 	last, _, dt := boundedSnapshot(ctx, deps, "USD.JPY", 5*time.Second)
-	if last <= 0 {
-		out.Status = rpc.RegimeStatusUnavailable
-		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick (check IDEALPRO entitlement)"
-		return out
-	}
-	out.Last = new(last)
-	out.LastQuality = firmTickQuality(now, dt, "USD.JPY CASH tick (IDEALPRO)")
-	out.DataType = dt
 
-	// 7-trading-days-ago close. FX history uses MIDPOINT bars
+	// Latest and 7-trading-days-ago close. FX history uses MIDPOINT bars
 	// (defaultHistoricalWhat for CASH). See USDJPYLookbackDays for
 	// the calendar-day window's holiday-clipping rationale.
 	hctx, hcancel := context.WithTimeout(ctx, 20*time.Second)
 	bars, err := deps.history(hctx, "USD.JPY", USDJPYLookbackDays)
 	hcancel()
+	var latestHistoryClose float64
+	var latestHistoryQuality *rpc.Quality
 	switch {
 	case err != nil:
 		warnDeps(deps, "regime: USD.JPY history fetch failed: %v", err)
 	case len(bars) < 8:
 		warnDeps(deps, "regime: USD.JPY history insufficient bars: got %d, need 8", len(bars))
 	default:
+		latest := bars[len(bars)-1]
+		if latest.Close > 0 {
+			latestHistoryClose = latest.Close
+			latestHistoryQuality = derivedQuality(historyBarAsOf(latest, now), "USD.JPY latest MIDPOINT daily close fallback")
+		}
 		// bars are oldest-first; pick the close from 7 trading days
 		// before the most recent close.
 		idx := len(bars) - 8
@@ -824,14 +825,31 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 			c7 := bars[idx].Close
 			if c7 > 0 {
 				out.Close7DAgo = new(c7)
-				out.Close7DAgoQuality = derivedQuality(now, "USD.JPY MIDPOINT bar t-7")
-				chg := (last - c7) / c7 * 100
-				out.WeeklyChange = &chg
+				out.Close7DAgoQuality = derivedQuality(historyBarAsOf(bars[idx], now), "USD.JPY MIDPOINT bar t-7")
 			}
 		}
 	}
 
-	if rpc.IsLiveDataType(dt) {
+	if last > 0 {
+		out.Last = new(last)
+		out.LastQuality = firmTickQuality(now, dt, "USD.JPY CASH tick (IDEALPRO)")
+		out.DataType = dt
+	} else if latestHistoryClose > 0 {
+		out.Last = new(latestHistoryClose)
+		out.LastQuality = latestHistoryQuality
+		out.DataType = regimeFreshnessDailyClose
+	} else {
+		out.Status = rpc.RegimeStatusUnavailable
+		out.ErrorMessage = "USD.JPY: gateway delivered no FX tick and HMDS midpoint fallback was unavailable"
+		return out
+	}
+
+	if out.Close7DAgo != nil && out.Last != nil {
+		chg := (*out.Last - *out.Close7DAgo) / *out.Close7DAgo * 100
+		out.WeeklyChange = &chg
+	}
+
+	if last > 0 && rpc.IsLiveDataType(dt) {
 		out.Status = rpc.RegimeStatusOK
 	} else {
 		out.Status = rpc.RegimeStatusStale
@@ -845,7 +863,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are reported as separate per-index γ-zero readings because their price scales differ; the combined top level intentionally has no spot, zero_gamma, gap_pct, or gamma_sign. Regime thresholds are applied to each per_index entry: spot >2% above γ-zero is green/stabilizing, within ±2% is yellow/transition, and below γ-zero is red/amplifying; when no crossing exists, a wholly long-γ sweep is green and a wholly short-γ sweep is red. The combined row uses per-index agreement and exposure weighting: both green => green, both red => red, a mixed book is red when the dominant/equal gamma exposure is red and yellow otherwise, no usable per-index profile => unranked. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × ±10% strikes. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit fall back to sticky-IV for that expiry only and appear in `warning_details`. Each per-index envelope carries 0DTE, 1-7 DTE, and term γ-zero buckets because 0DTE flow can mask weekly/monthly positioning. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is a sign-convention agnostic gross gamma concentration read and is the more robust surface when customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). When the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's bid/ask mid or prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's summary, per_index, gamma_total_abs, and top_strikes are the primary agent/tooling surface."
+const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are reported as separate per-index γ-zero readings because their price scales differ; the combined top level intentionally has no spot, zero_gamma, gap_pct, or gamma_sign. Regime thresholds are applied to each per_index entry: spot >2% above γ-zero is green/stabilizing, within ±2% is yellow/transition, and below γ-zero is red/amplifying; when no crossing exists, a wholly long-γ sweep is green and a wholly short-γ sweep is red. The combined row uses per-index agreement and exposure weighting: both green => green, both red => red, a mixed book is red when the dominant/equal gamma exposure is red and yellow otherwise, no usable per-index profile => unranked. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × the nearest 80 listed strikes per expiry inside the ±10% candidate window. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit fall back to sticky-IV for that expiry only and appear in `warning_details`. Each per-index envelope carries 0DTE, 1-7 DTE, and term γ-zero buckets because 0DTE flow can mask weekly/monthly positioning. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is a sign-convention agnostic gross gamma concentration read and is the more robust surface when customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). When the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's bid/ask mid or prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's summary, per_index, gamma_total_abs, and top_strikes are the primary agent/tooling surface."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
@@ -905,7 +923,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	return out
 }
 
-const breadthNotes = "S&P 500 breadth — the daemon computes two SMA readings and the new-52-week-highs/lows count locally from the 500 constituent daily closes (IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions). Refresh runs once per US trading day post-close (16:35 ET). Method token: constituent-fanout-50/200dma+nh-v2. The 50-day reading (`pct_above_50dma`) keeps the spec's bands: >55 green / 40-55 yellow / <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). The 200-day reading (`pct_above_200dma`) uses 60/40 bands calibrated to the post-Mag-7 era: >60 green / 40-60 yellow / <40 red (the StockCharts 70/30 default fires red far too often in this regime). New-highs/lows surface as a sub-signal: when SPX is near highs and `net_new_highs_pct` is near zero or negative, that's the classic narrow-rally pattern — a small set of mega-caps carrying the index while the median name is rolling over."
+const breadthNotes = "S&P 500 breadth — the daemon computes two SMA readings and the new-52-week-highs/lows count locally from the 500 constituent daily closes (IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions). Refresh runs once per US trading day after the equity-session close plus a 35-minute settle pad (normally 16:35 ET). Method token: constituent-fanout-50/200dma+nh-v2. The 50-day reading (`pct_above_50dma`) keeps the spec's bands: >55 green / 40-55 yellow / <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). The 200-day reading (`pct_above_200dma`) uses 60/40 bands calibrated to the post-Mag-7 era: >60 green / 40-60 yellow / <40 red (the StockCharts 70/30 default fires red far too often in this regime). New-highs/lows surface as a sub-signal: when SPX is near highs and `net_new_highs_pct` is near zero or negative, that's the classic narrow-rally pattern — a small set of mega-caps carrying the index while the median name is rolling over."
 
 func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	out := rpc.RegimeBreadth{Notes: breadthNotes}
@@ -948,13 +966,24 @@ func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	out.NewLowsToday = envelope.NewLowsToday
 	out.NetNewHighsPct = envelope.NetNewHighsPct
 	out.Status = rpc.RegimeStatusOK
-	// "Stale" only applies once we're a full session past the AsOf
-	// stamp — the engine refreshes daily, so anything more than ~30 h
-	// old is a missed cycle worth flagging.
-	if time.Since(envelope.AsOf) > 30*time.Hour {
+	// Staleness is session-based. A Friday close remains current
+	// through the weekend and until Monday's post-close refresh window;
+	// the wall-clock AsOf is only a fallback for older envelopes that
+	// predate SessionKey on the wire.
+	if breadthEnvelopeStale(envelope, time.Now()) {
 		out.Status = rpc.RegimeStatusStale
 	}
 	return out
+}
+
+func breadthEnvelopeStale(envelope *rpc.BreadthSPXResult, now time.Time) bool {
+	if envelope == nil {
+		return true
+	}
+	if envelope.SessionKey != "" {
+		return envelope.SessionKey != spx.CompletedSessionKey(now)
+	}
+	return now.Sub(envelope.AsOf) > 30*time.Hour
 }
 
 // ----------------------------------------------------------------------------
@@ -1038,6 +1067,19 @@ func derivedQuality(at time.Time, source string) *rpc.Quality {
 		Confidence:     rpc.ConfidenceEstimate,
 		Source:         source,
 	}
+}
+
+func historyBarAsOf(bar ibkrlib.HistoricalBar, fallback time.Time) time.Time {
+	if !bar.Time.IsZero() {
+		return bar.Time
+	}
+	raw := strings.TrimSpace(bar.Date)
+	for _, layout := range []string{"2006-01-02", "20060102"} {
+		if t, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return t
+		}
+	}
+	return fallback
 }
 
 // modelledQuality builds a Quality for a value produced by a model

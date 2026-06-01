@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
@@ -69,6 +70,26 @@ func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 	}
 }
 
+func TestStatusDataFarmsKeepsOnlyUnhealthyFarms(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)
+	got := statusDataFarms([]ibkrlib.DataFarmStatus{
+		{Name: "usopt", Type: "market", Status: "ok", Code: 2104, AsOf: now},
+		{Name: "euhmds", Type: "historical", Status: "inactive", Code: 2107, AsOf: now},
+		{Name: "secdefeu", Type: "security_definition", Status: "disconnected", Code: 2157, Message: "Sec-def data farm connection is broken:secdefeu", AsOf: now},
+		{Name: "tws-server", Type: "connectivity", Status: "broken", Code: 2110, Message: "Connectivity between TWS and server is broken", AsOf: now},
+	})
+	if len(got) != 2 {
+		t.Fatalf("data farms len=%d, want 2: %+v", len(got), got)
+	}
+	if got[0].Name != "secdefeu" || got[0].Status != "disconnected" {
+		t.Fatalf("first farm = %+v, want secdefeu disconnected", got[0])
+	}
+	if got[1].Name != "tws-server" || got[1].Status != "broken" {
+		t.Fatalf("second farm = %+v, want tws-server broken", got[1])
+	}
+}
+
 func TestGammaStatusQualityReportsSPXExcluded(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
@@ -87,6 +108,79 @@ func TestGammaStatusQualityReportsSPXExcluded(t *testing.T) {
 	}
 	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: SPX excluded" {
 		t.Fatalf("quality = %+v, want gamma degraded SPX excluded", got)
+	}
+}
+
+func TestGammaStatusQualityReportsSPYExcluded(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			AsOf:    now,
+			Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code: "spy_unavailable:zero_magnitude",
+			}},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: SPY excluded" {
+		t.Fatalf("quality = %+v, want gamma degraded SPY excluded", got)
+	}
+}
+
+func TestGammaStatusQualityReportsSPXCacheFallbackWithoutSummary(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			AsOf: now,
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code: "spx_cache_fallback:timeout",
+			}},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: SPX cache fallback" {
+		t.Fatalf("quality = %+v, want gamma degraded SPX cache fallback", got)
+	}
+}
+
+func TestGammaStatusQualityReportsPartialOptionOI(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeCombined,
+			AsOf:  now,
+			Summary: &rpc.GammaZeroSummary{
+				Confidence: "degraded",
+			},
+			PerIndex: map[string]*rpc.GammaZeroComputed{
+				"SPY": {
+					Scope: rpc.GammaZeroScopeSPY,
+					WarningDetails: []rpc.GammaWarningDetail{{
+						Code: "oi_missing",
+					}},
+				},
+				"SPX": {
+					Scope: rpc.GammaZeroScopeSPX,
+				},
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI" {
+		t.Fatalf("quality = %+v, want gamma degraded partial option OI", got)
 	}
 }
 

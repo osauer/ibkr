@@ -649,6 +649,40 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 4, ClusterRedCount: 1, ClusterRankedCount: 6}
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.GammaZero.Band = "red"
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+	}
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	var regimeHealth *rpc.SourceHealth
+	for i := range res.SourceHealth {
+		if res.SourceHealth[i].Source == "regime" {
+			regimeHealth = &res.SourceHealth[i]
+			break
+		}
+	}
+	if regimeHealth == nil {
+		t.Fatalf("missing regime source health: %+v", res.SourceHealth)
+	}
+	if regimeHealth.Status != "degraded" {
+		t.Fatalf("regime source status = %q, want degraded", regimeHealth.Status)
+	}
+	notes := strings.Join(regimeHealth.Notes, "\n")
+	for _, want := range []string{"stale clusters: vol", "degraded clusters: gamma"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("regime source notes = %q, want %q", notes, want)
+		}
+	}
+}
+
 func TestComputeCanarySeparatesPartialFromAmbiguousClusters(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()

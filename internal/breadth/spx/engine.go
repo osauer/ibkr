@@ -317,14 +317,14 @@ type fetchPlan struct {
 // planFetches walks the membership list and decides what to fetch
 // for each name based on the cached window. A name absent from the
 // cache or with no closes triggers a cold fetch (ColdLookbackDays);
-// a name whose latest bar is today is skipped entirely; everything
-// else gets the warm two-bar increment.
+// a name whose latest bar is the latest completed US-equity session is
+// skipped entirely; everything else gets the warm two-bar increment.
 //
-// Date comparison uses NY session keying so the daemon doesn't
-// re-fetch every name when its host clock drifts across UTC midnight
-// but the US session hasn't rolled over yet.
+// Date comparison uses calendar-backed session keying so weekends,
+// holidays, pre-close hours, and UTC-midnight drift don't trigger a
+// same-data fanout under a new wall-clock date.
 func (e *Engine) planFetches(members []string, cached map[string]ConstituentWindow) []fetchPlan {
-	today := nySessionKey(e.clock())
+	targetSession := CompletedSessionKey(e.clock())
 	plan := make([]fetchPlan, 0, len(members))
 	for _, sym := range members {
 		w, ok := cached[sym]
@@ -332,8 +332,8 @@ func (e *Engine) planFetches(members []string, cached map[string]ConstituentWind
 			plan = append(plan, fetchPlan{Symbol: sym, LookbackDays: e.coldLookback})
 			continue
 		}
-		if w.LastBarAt == today {
-			// Already have today's close — nothing to fetch.
+		if w.LastBarAt == targetSession {
+			// Already have the latest completed close — nothing to fetch.
 			continue
 		}
 		plan = append(plan, fetchPlan{Symbol: sym, LookbackDays: e.warmLookback})
@@ -411,7 +411,7 @@ dispatch:
 // finished — whether convergence happened is a separate signal."
 func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow) error {
 	now := e.clock()
-	sessionKey := nySessionKey(now)
+	sessionKey := CompletedSessionKey(now)
 	snap := Compute(members, windows, sessionKey, now)
 
 	minCoverage := int(MinCoverageFraction * float64(snap.MemberCount))

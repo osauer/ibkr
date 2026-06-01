@@ -129,6 +129,10 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if len(yellowNames) > 0 && state.Stage == LifecycleQuiet {
 		state.RejectedBy = append(state.RejectedBy, yellowNames...)
 	}
+	if state.Readiness == "ready" && regimeLifecycleHasDegradedInputs(*r) {
+		state.Readiness = "degraded"
+		state.Confidence = capLifecycleConfidence(state.Confidence)
+	}
 	state.Fingerprint = lifecycleFingerprint(state)
 	return state
 }
@@ -246,6 +250,25 @@ func regimeLifecycleConfidence(c RegimeComposite) string {
 		return "medium"
 	default:
 		return "high"
+	}
+}
+
+func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult) bool {
+	for _, item := range r.DataQuality {
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case RegimeStatusStale, "degraded", "partial":
+			return true
+		}
+	}
+	return false
+}
+
+func capLifecycleConfidence(confidence string) string {
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "", "high":
+		return "medium"
+	default:
+		return confidence
 	}
 }
 

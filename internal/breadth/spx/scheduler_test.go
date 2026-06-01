@@ -59,6 +59,66 @@ func TestNextRefreshAtCrossesMidnight(t *testing.T) {
 	}
 }
 
+func TestNextRefreshAtSkipsWeekend(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 29, 17, 0, 0, 0, loc) // Fri after close
+	got := nextRefreshAt(now)
+	want := time.Date(2026, 6, 1, refreshHourET, refreshMinuteET, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("weekend skip: want %v, got %v", want, got)
+	}
+}
+
+func TestNextRefreshAtSkipsHoliday(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 22, 17, 0, 0, 0, loc) // Fri before Memorial Day
+	got := nextRefreshAt(now)
+	want := time.Date(2026, 5, 26, refreshHourET, refreshMinuteET, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("holiday skip: want %v, got %v", want, got)
+	}
+}
+
+func TestNextRefreshAtUsesEarlyClose(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 11, 27, 11, 0, 0, 0, loc) // day after Thanksgiving
+	got := nextRefreshAt(now)
+	want := time.Date(2026, 11, 27, 13, 35, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("early close: want %v, got %v", want, got)
+	}
+}
+
+func TestCompletedSessionKeyClosedDaysUsePreviousSession(t *testing.T) {
+	loc := nyLocation()
+	cases := []struct {
+		name string
+		now  time.Time
+		want string
+	}{
+		{
+			name: "weekend",
+			now:  time.Date(2026, 5, 31, 23, 55, 0, 0, loc), // Sun evening
+			want: "2026-05-29",
+		},
+		{
+			name: "holiday",
+			now:  time.Date(2026, 5, 25, 12, 0, 0, 0, loc), // Memorial Day
+			want: "2026-05-22",
+		},
+		{
+			name: "pre close",
+			now:  time.Date(2026, 6, 1, 9, 0, 0, 0, loc), // Mon morning
+			want: "2026-05-29",
+		},
+	}
+	for _, tc := range cases {
+		if got := CompletedSessionKey(tc.now); got != tc.want {
+			t.Errorf("%s: want %s, got %s", tc.name, tc.want, got)
+		}
+	}
+}
+
 // TestShouldRefreshOnStartupNoSnapshot is the cold-install case: no
 // cache exists, so a catch-up is always wanted regardless of clock.
 func TestShouldRefreshOnStartupNoSnapshot(t *testing.T) {
@@ -100,6 +160,47 @@ func TestShouldRefreshOnStartupCaughtBeforeWindow(t *testing.T) {
 	}
 	if shouldRefreshOnStartup(snap, now) {
 		t.Error("Mon morning startup with post-tick Fri snapshot should wait, not refresh")
+	}
+}
+
+func TestShouldRefreshOnStartupWeekendWithFridaySnapshotDoesNotRefresh(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 31, 23, 55, 0, 0, loc) // Sun evening ET
+	snap := &Snapshot{
+		SessionKey: "2026-05-29",
+		AsOf:       time.Date(2026, 5, 29, 17, 0, 0, 0, loc),
+	}
+	if shouldRefreshOnStartup(snap, now) {
+		t.Error("weekend startup with post-close Friday snapshot should wait, not refresh")
+	}
+}
+
+func TestShouldRefreshOnStartupHolidayWithPriorSessionSnapshotDoesNotRefresh(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 25, 12, 0, 0, 0, loc) // Memorial Day
+	snap := &Snapshot{
+		SessionKey: "2026-05-22",
+		AsOf:       time.Date(2026, 5, 22, 17, 0, 0, 0, loc),
+	}
+	if shouldRefreshOnStartup(snap, now) {
+		t.Error("holiday startup with post-close prior-session snapshot should wait, not refresh")
+	}
+}
+
+func TestPlanFetchesWeekendUsesCompletedSession(t *testing.T) {
+	loc := nyLocation()
+	now := time.Date(2026, 5, 31, 23, 55, 0, 0, loc) // Sun evening ET
+	e := New(NewStore(t.TempDir()), &FakeBarFetcher{}, Options{Clock: frozenClock(now)})
+	members := []string{"CURRENT", "STALE"}
+	plan := e.planFetches(members, map[string]ConstituentWindow{
+		"CURRENT": {Symbol: "CURRENT", Closes: []float64{100}, LastBarAt: "2026-05-29"},
+		"STALE":   {Symbol: "STALE", Closes: []float64{100}, LastBarAt: "2026-05-28"},
+	})
+	if len(plan) != 1 {
+		t.Fatalf("plan length: want 1 stale symbol, got %+v", plan)
+	}
+	if plan[0].Symbol != "STALE" || plan[0].LookbackDays != e.warmLookback {
+		t.Fatalf("plan: want STALE warm fetch, got %+v", plan[0])
 	}
 }
 

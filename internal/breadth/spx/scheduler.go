@@ -3,17 +3,26 @@ package spx
 import (
 	"context"
 	"time"
+
+	"github.com/osauer/ibkr/internal/marketcal"
 )
 
-// refreshHourET and refreshMinuteET name the daily wakeup time
-// (16:35 America/New_York). 16:00 is the NYSE close; the 35-minute
-// pad gives the gateway time to settle late prints and busted
-// trades before we sample the daily-bar feed. S&P DJI publishes
-// S5FI post-close as well, so an earlier wake would either miss
-// today's data or race the gateway.
+// refreshHourET and refreshMinuteET name the regular-session fallback
+// wakeup time (16:35 America/New_York). Calendar-backed scheduling
+// uses session close + refreshSettleDelay, so known early closes wake
+// earlier. The 35-minute pad gives the gateway time to settle late
+// prints and busted trades before we sample the daily-bar feed. S&P
+// DJI publishes S5FI post-close as well, so an earlier wake would
+// either miss today's data or race the gateway.
 const (
 	refreshHourET   = 16
 	refreshMinuteET = 35
+)
+
+const (
+	refreshSettleDelay       = 35 * time.Minute
+	calendarLookbackSessions = 10
+	calendarLookaheadDays    = 14
 )
 
 // belowThresholdRetryDelay is how long the scheduler waits before
@@ -64,13 +73,28 @@ func nyLocation() *time.Location {
 	return time.UTC
 }
 
-// nextRefreshAt returns the next NY-tz refresh wakeup at or after
-// `now`. If `now` is before today's 16:35 ET, the result is today's
-// 16:35 ET; otherwise tomorrow's. Weekends and US market holidays
-// are not skipped here — the engine's planner detects a no-new-bars
-// session via the LastBarAt comparison and the refresh is a cheap
-// no-op on non-trading days.
+// nextRefreshAt returns the next US-equity session close plus the
+// settlement pad. Weekends, holidays, and known early closes come
+// from the embedded official calendar so the scheduler does not wake
+// every closed day just to discover there are no new bars.
 func nextRefreshAt(now time.Time) time.Time {
+	cal := marketcal.NewWithClock(func() time.Time { return now })
+	res, err := cal.Query(marketcal.Query{Market: marketcal.MarketUSEquity, At: now, Days: calendarLookaheadDays})
+	if err == nil {
+		for _, session := range res.Sessions {
+			if !isBreadthSession(session) {
+				continue
+			}
+			refreshAt := breadthRefreshAt(session)
+			if refreshAt.After(now) {
+				return refreshAt
+			}
+		}
+	}
+	return fallbackNextRefreshAt(now)
+}
+
+func fallbackNextRefreshAt(now time.Time) time.Time {
 	loc := nyLocation()
 	localNow := now.In(loc)
 	candidate := time.Date(
@@ -80,7 +104,81 @@ func nextRefreshAt(now time.Time) time.Time {
 	if !candidate.After(localNow) {
 		candidate = candidate.AddDate(0, 0, 1)
 	}
+	for candidate.Weekday() == time.Saturday || candidate.Weekday() == time.Sunday {
+		candidate = candidate.AddDate(0, 0, 1)
+	}
 	return candidate
+}
+
+// CompletedSessionKey returns the latest US-equity session whose close
+// plus the breadth settlement pad has passed at now. During weekends,
+// holidays, and pre-close trading hours this stays on the previous
+// completed session, which is the only daily-bar set the breadth cache
+// can publish without racing partial data.
+func CompletedSessionKey(now time.Time) string {
+	if key, ok := completedSessionKeyFromCalendar(now); ok {
+		return key
+	}
+	return fallbackCompletedSessionKey(now)
+}
+
+func completedSessionKeyFromCalendar(now time.Time) (string, bool) {
+	loc := nyLocation()
+	localNow := now.In(loc)
+	cal := marketcal.NewWithClock(func() time.Time { return now })
+	for daysBack := range calendarLookbackSessions {
+		day := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 12, 0, 0, 0, loc).AddDate(0, 0, -daysBack)
+		res, err := cal.Query(marketcal.Query{Market: marketcal.MarketUSEquity, Date: day.Format("2006-01-02"), Days: 1})
+		if err != nil {
+			return "", false
+		}
+		if !isBreadthSession(res.Session) {
+			continue
+		}
+		if !breadthRefreshAt(res.Session).After(now) {
+			return res.Session.Date, true
+		}
+	}
+	return "", false
+}
+
+func fallbackCompletedSessionKey(now time.Time) string {
+	loc := nyLocation()
+	localNow := now.In(loc)
+	candidate := time.Date(
+		localNow.Year(), localNow.Month(), localNow.Day(),
+		refreshHourET, refreshMinuteET, 0, 0, loc,
+	)
+	if candidate.After(localNow) {
+		candidate = candidate.AddDate(0, 0, -1)
+	}
+	for candidate.Weekday() == time.Saturday || candidate.Weekday() == time.Sunday {
+		candidate = candidate.AddDate(0, 0, -1)
+	}
+	return candidate.Format("2006-01-02")
+}
+
+func sessionRefreshAt(sessionKey string) (time.Time, bool) {
+	cal := marketcal.New()
+	res, err := cal.Query(marketcal.Query{Market: marketcal.MarketUSEquity, Date: sessionKey, Days: 1})
+	if err == nil && isBreadthSession(res.Session) {
+		return breadthRefreshAt(res.Session), true
+	}
+
+	loc := nyLocation()
+	day, err := time.ParseInLocation("2006-01-02", sessionKey, loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(day.Year(), day.Month(), day.Day(), refreshHourET, refreshMinuteET, 0, 0, loc), true
+}
+
+func breadthRefreshAt(session marketcal.Session) time.Time {
+	return session.Close.Add(refreshSettleDelay)
+}
+
+func isBreadthSession(session marketcal.Session) bool {
+	return session.State == marketcal.StateRegular || session.State == marketcal.StateEarlyClose
 }
 
 // shouldRefreshOnStartup reports whether the engine should run a
@@ -88,58 +186,26 @@ func nextRefreshAt(now time.Time) time.Time {
 // daily cadence. The conditions are:
 //
 //  1. No snapshot has ever been computed (cold install). Always run.
-//  2. The cached snapshot's AsOf wall-clock predates the most recent
-//     past 16:35 ET weekday tick. Catches the case where the daemon
-//     was down across yesterday's scheduled tick AND the cached
-//     snapshot was a mid-session refresh from before yesterday's
-//     close (SessionKey matches yesterday but data is pre-close
-//     partial). Without this clause the scheduler would sit on the
-//     stale partial-day snapshot until today's 16:35 ET.
-//  3. The cached snapshot is for an older NY session AND today's
-//     16:35 ET refresh window has already passed. We missed today's
-//     scheduled wake-up (daemon was down or just installed) — run
-//     now rather than wait until tomorrow.
+//  2. The cached snapshot is for an older completed US-equity session.
+//     We missed at least one tradable post-close refresh while the
+//     daemon was down — run now rather than wait for the next close.
+//  3. The cached snapshot has the current session key but its AsOf
+//     predates that session's close-plus-pad. This catches the rare
+//     pre-close partial snapshot that would otherwise look current
+//     by date alone.
 //
-// When none of these hold, the scheduler sleeps until the next 16:35
-// ET tick.
-//
-// Weekends and US market holidays: lastTick rolls back over Sat/Sun
-// so a Friday-close snapshot examined on Monday morning satisfies
-// "AsOf ≥ last weekday tick" and does not force a refresh. Holidays
-// aren't enumerated here — the engine's planner detects a no-new-bars
-// session and the refresh is a cheap no-op anyway (per the file
-// header at the refreshHourET constant).
+// When none of these hold, the scheduler sleeps until the next
+// tradable close plus settlement pad.
 func shouldRefreshOnStartup(snap *Snapshot, now time.Time) bool {
 	if snap == nil {
 		return true
 	}
-	loc := nyLocation()
-	localNow := now.In(loc)
-	todays := time.Date(
-		localNow.Year(), localNow.Month(), localNow.Day(),
-		refreshHourET, refreshMinuteET, 0, 0, loc,
-	)
-
-	// Most recent past weekday 16:35 ET tick. Today's window if already
-	// passed; otherwise yesterday's, rolling back across weekends.
-	lastTick := todays
-	if !lastTick.Before(localNow) {
-		lastTick = lastTick.AddDate(0, 0, -1)
-	}
-	for lastTick.Weekday() == time.Saturday || lastTick.Weekday() == time.Sunday {
-		lastTick = lastTick.AddDate(0, 0, -1)
-	}
-	if snap.AsOf.Before(lastTick) {
+	targetSession := CompletedSessionKey(now)
+	if snap.SessionKey != targetSession {
 		return true
 	}
-
-	if localNow.Before(todays) {
-		// We haven't reached today's window yet — yesterday's data is
-		// still authoritative (and the AsOf check above confirmed it
-		// post-dates the last weekday tick). No catch-up needed.
-		return false
-	}
-	return snap.SessionKey != nySessionKey(now)
+	refreshAt, ok := sessionRefreshAt(targetSession)
+	return ok && snap.AsOf.Before(refreshAt)
 }
 
 // Run starts the engine's scheduler. Returns when ctx is cancelled.

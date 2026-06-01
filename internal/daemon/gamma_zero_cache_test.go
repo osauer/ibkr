@@ -218,6 +218,168 @@ func TestGammaZeroCache_SnapshotCombinedSliceUsesCanonicalPerIndex(t *testing.T)
 	}
 }
 
+func TestPreferOwnGammaSnapshotUsesFresherForcedScope(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	canonical := rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeSPX,
+			AsOf:  now.Add(-5 * time.Minute),
+		},
+	}
+	own := rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeSPX,
+			AsOf:  now,
+		},
+	}
+
+	if !preferOwnGammaSnapshot(canonical, own) {
+		t.Fatalf("fresh forced SPX scope should win over older canonical combined slice")
+	}
+	if preferOwnGammaSnapshot(own, canonical) {
+		t.Fatalf("older own scope must not replace fresher canonical slice")
+	}
+}
+
+func TestGammaZeroCache_CombinedSnapshotUsesCachedSPXFallback(t *testing.T) {
+	c := newGammaZeroCache()
+	// Saturday, when the cache must not kick a fresh option fan-out.
+	now := time.Date(2026, 5, 30, 14, 0, 0, 0, time.UTC)
+	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
+	}
+	spyAsOf := now.Add(-18 * time.Hour)
+	spxAsOf := now.Add(-20 * time.Hour)
+
+	spyOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 756.34,
+		GammaSign:      "positive",
+		GammaTotalAbs:  1.2e9,
+		LegCount:       120,
+		AsOf:           spyAsOf,
+		Warnings:       []string{"oi_missing", "spx_unavailable:fetch_canceled"},
+	}
+	spxOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7511.55,
+		GammaSign:      "negative",
+		GammaTotalAbs:  5.6e9,
+		LegCount:       300,
+		AsOf:           spxAsOf,
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(spyOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPX:      {current: newPersistedComputation(spxOnly, rpc.GammaZeroScopeSPX, now)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil || got.Scope != rpc.GammaZeroScopeCombined {
+		t.Fatalf("Result scope = %+v, want combined", got)
+	}
+	if got.PerIndex["SPY"] == nil || got.PerIndex["SPX"] == nil {
+		t.Fatalf("fallback result missing per-index slices: %+v", got.PerIndex)
+	}
+	if got.RegimeAgreement != "disagree" {
+		t.Fatalf("RegimeAgreement = %q, want disagree", got.RegimeAgreement)
+	}
+	if !got.AsOf.Equal(spxAsOf) {
+		t.Fatalf("combined AsOf = %v, want older SPX fallback as_of %v", got.AsOf, spxAsOf)
+	}
+	if got.Summary == nil || got.Summary.Confidence != "degraded" {
+		t.Fatalf("summary confidence = %+v, want degraded", got.Summary)
+	}
+	if !hasGammaWarning(got.WarningDetails, "spx_cache_fallback:fetch_canceled") {
+		t.Fatalf("top-level warning_details missing SPX cache fallback: %+v", got.WarningDetails)
+	}
+	if hasGammaWarning(got.WarningDetails, "spx_unavailable:fetch_canceled") {
+		t.Fatalf("fallback result should not say SPX is excluded: %+v", got.WarningDetails)
+	}
+	if hasGammaWarning(got.PerIndex["SPY"].WarningDetails, "spx_unavailable:fetch_canceled") {
+		t.Fatalf("SPY child should not retain SPX-unavailable warning: %+v", got.PerIndex["SPY"].WarningDetails)
+	}
+	if !hasGammaWarning(got.PerIndex["SPY"].WarningDetails, "oi_missing") {
+		t.Fatalf("SPY child lost its own warning: %+v", got.PerIndex["SPY"].WarningDetails)
+	}
+}
+
+func TestGammaZeroCache_CombinedSnapshotRebuildsFromNewerSingleScopes(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 6, 1, 14, 0, 0, 0, time.UTC)
+	oldAsOf := now.Add(-10 * time.Minute)
+	newAsOf := now.Add(-time.Minute)
+
+	oldSPXOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7580,
+		GammaSign:      "negative",
+		GammaTotalAbs:  8.6e8,
+		LegCount:       37,
+		AsOf:           oldAsOf,
+		Warnings:       []string{"oi_missing", "spy_unavailable:zero_magnitude"},
+	}
+	spyOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 758,
+		GammaSign:      "negative",
+		GammaTotalAbs:  2.3e7,
+		LegCount:       3,
+		AsOf:           newAsOf,
+		Warnings:       []string{"oi_missing"},
+	}
+	spxOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7581,
+		GammaSign:      "negative",
+		GammaTotalAbs:  9.1e8,
+		LegCount:       37,
+		AsOf:           newAsOf,
+		Warnings:       []string{"oi_missing"},
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(oldSPXOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPY:      {current: newPersistedComputation(spyOnly, rpc.GammaZeroScopeSPY, now)},
+		rpc.GammaZeroScopeSPX:      {current: newPersistedComputation(spxOnly, rpc.GammaZeroScopeSPX, now)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil || got.Scope != rpc.GammaZeroScopeCombined {
+		t.Fatalf("Result = %+v, want rebuilt combined", got)
+	}
+	if got.PerIndex["SPY"] == nil || got.PerIndex["SPX"] == nil {
+		t.Fatalf("rebuilt result missing per-index slices: %+v", got.PerIndex)
+	}
+	if hasGammaWarning(got.WarningDetails, "spy_unavailable:zero_magnitude") {
+		t.Fatalf("rebuilt combined must not keep stale SPY-excluded warning: %+v", got.WarningDetails)
+	}
+	if got.LegCount != spyOnly.LegCount+spxOnly.LegCount {
+		t.Fatalf("LegCount = %d, want fresh single-scope sum %d", got.LegCount, spyOnly.LegCount+spxOnly.LegCount)
+	}
+	if got.Summary == nil || got.Summary.PerIndex["SPY"].LegCount != spyOnly.LegCount {
+		t.Fatalf("summary did not include fresh SPY slice: %+v", got.Summary)
+	}
+}
+
+func hasGammaWarning(details []rpc.GammaWarningDetail, code string) bool {
+	for _, d := range details {
+		if d.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 // TestGammaZeroCache_RetriesErrorAfterTTL pins the no-poison
 // invariant: a transient compute error must NOT stick in cache for
 // the rest of the NY trading session. Before this fix the cache
@@ -1031,6 +1193,77 @@ func TestGammaZeroCache_OffHoursForceErrorStaysVisible(t *testing.T) {
 	}
 	if !strings.Contains(env.Error, computeErr.Error()) {
 		t.Fatalf("snapshot error = %q, want %q", env.Error, computeErr.Error())
+	}
+}
+
+func TestGammaZeroCache_ForceFailureDoesNotPoisonCachedSuccess(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
+	cached := &rpc.GammaZeroComputed{Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5010, AsOf: now.Add(-2 * time.Hour)}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeSPX: {current: newPersistedComputation(cached, rpc.GammaZeroScopeSPX, now)},
+	}
+	computeErr := errors.New("zero-gamma: no usable GEX legs")
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		return nil, computeErr
+	}
+
+	forced := c.force(context.Background(), rpc.GammaZeroScopeSPX, now, 300, compute)
+	<-forced.done
+	if forced.err == nil || !strings.Contains(forced.err.Error(), computeErr.Error()) {
+		t.Fatalf("forced diagnostic err = %v, want %v", forced.err, computeErr)
+	}
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeSPX, now.Add(time.Minute), 300, compute)
+	if fresh {
+		t.Fatalf("poll after failed diagnostic must not kick a fresh compute")
+	}
+	if job == forced {
+		t.Fatalf("failed diagnostic became the served cache")
+	}
+	if job.result == nil || job.result.SpotUnderlying != cached.SpotUnderlying {
+		t.Fatalf("served job = %+v, want cached success %+v", job.result, cached)
+	}
+}
+
+func TestGammaZeroCache_ForceSuccessPromotesOverCachedSuccess(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
+	cached := &rpc.GammaZeroComputed{Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5010, AsOf: now.Add(-2 * time.Hour)}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeSPX: {current: newPersistedComputation(cached, rpc.GammaZeroScopeSPX, now)},
+	}
+	block := make(chan struct{})
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		<-block
+		return &rpc.GammaZeroComputed{Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5050, AsOf: now}, nil
+	}
+
+	forced := c.force(context.Background(), rpc.GammaZeroScopeSPX, now, 300, compute)
+	job, fresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeSPX, now, 300, compute)
+	if fresh {
+		t.Fatalf("poll while diagnostic refresh is running must not kick a fresh compute")
+	}
+	if job == forced {
+		t.Fatalf("diagnostic refresh should not replace the served cache until it succeeds")
+	}
+	if job.result == nil || job.result.SpotUnderlying != cached.SpotUnderlying {
+		t.Fatalf("served job while force is running = %+v, want cached success", job.result)
+	}
+
+	close(block)
+	<-forced.done
+	deadline := time.After(time.Second)
+	for {
+		job, _ = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeSPX, now.Add(time.Minute), 300, compute)
+		if job == forced && job.result != nil && job.result.SpotUnderlying == 5050 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("forced success never promoted; served job=%p result=%+v forced=%p", job, job.result, forced)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 

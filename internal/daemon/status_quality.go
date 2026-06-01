@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 func (s *Server) statusDataQuality() []rpc.DataQualityHealth {
@@ -25,6 +26,33 @@ func (s *Server) updateRegimeStatusQuality(r *rpc.RegimeSnapshotResult) {
 	s.lastRegimeQualityMu.Lock()
 	s.lastRegimeQuality = q
 	s.lastRegimeQualityMu.Unlock()
+}
+
+func statusDataFarms(farms []ibkrlib.DataFarmStatus) []rpc.DataFarmHealth {
+	out := make([]rpc.DataFarmHealth, 0, len(farms))
+	for _, farm := range farms {
+		if !dataFarmNeedsAttention(farm.Status) {
+			continue
+		}
+		out = append(out, rpc.DataFarmHealth{
+			Name:    farm.Name,
+			Type:    farm.Type,
+			Status:  farm.Status,
+			Code:    farm.Code,
+			Message: farm.Message,
+			AsOf:    farm.AsOf,
+		})
+	}
+	return out
+}
+
+func dataFarmNeedsAttention(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "broken", "disconnected":
+		return true
+	default:
+		return false
+	}
 }
 
 func regimeSnapshotDataQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
@@ -65,8 +93,14 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 		return rpc.DataQualityHealth{}, false
 	}
 	summary := "degraded"
-	if gammaHasSPXUnavailable(env.Result) {
+	if gammaHasSPYUnavailable(env.Result) {
+		summary = "degraded: SPY excluded"
+	} else if gammaHasSPXUnavailable(env.Result) {
 		summary = "degraded: SPX excluded"
+	} else if gammaHasSPXCacheFallback(env.Result) {
+		summary = "degraded: SPX cache fallback"
+	} else if gammaHasOIMissing(env.Result) {
+		summary = "degraded: partial option OI"
 	}
 	return rpc.DataQualityHealth{
 		Surface:          "gamma",
@@ -84,7 +118,24 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c.Summary != nil && strings.EqualFold(c.Summary.Confidence, "degraded") {
 		return true
 	}
-	return gammaHasSPXUnavailable(c)
+	return gammaHasSPYUnavailable(c) || gammaHasSPXUnavailable(c) || gammaHasSPXCacheFallback(c)
+}
+
+func gammaHasSPYUnavailable(c *rpc.GammaZeroComputed) bool {
+	if c == nil {
+		return false
+	}
+	for _, w := range c.WarningDetails {
+		if strings.HasPrefix(w.Code, "spy_unavailable:") {
+			return true
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if gammaHasSPYUnavailable(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func gammaHasSPXUnavailable(c *rpc.GammaZeroComputed) bool {
@@ -98,6 +149,40 @@ func gammaHasSPXUnavailable(c *rpc.GammaZeroComputed) bool {
 	}
 	for _, sub := range c.PerIndex {
 		if gammaHasSPXUnavailable(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func gammaHasSPXCacheFallback(c *rpc.GammaZeroComputed) bool {
+	if c == nil {
+		return false
+	}
+	for _, w := range c.WarningDetails {
+		if strings.HasPrefix(w.Code, "spx_cache_fallback") {
+			return true
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if gammaHasSPXCacheFallback(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func gammaHasOIMissing(c *rpc.GammaZeroComputed) bool {
+	if c == nil {
+		return false
+	}
+	for _, w := range c.WarningDetails {
+		if w.Code == "oi_missing" {
+			return true
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if gammaHasOIMissing(sub) {
 			return true
 		}
 	}

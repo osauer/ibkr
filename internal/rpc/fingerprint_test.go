@@ -112,3 +112,24 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 		t.Fatal("lifecycle fingerprint did not change across semantic stage transition")
 	}
 }
+
+func TestRegimeLifecycleDegradesReadinessForDataQuality(t *testing.T) {
+	t.Parallel()
+	base := RegimeSnapshotResult{
+		Summary:   RegimeSummary{Confidence: "high"},
+		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
+		DataQuality: []DataQualityHealth{
+			{Surface: "regime", Status: "stale", StaleClusters: []string{"breadth"}},
+		},
+	}
+	got := BuildRegimeLifecycle(&base)
+	if got.Stage != LifecycleQuiet {
+		t.Fatalf("stage: want quiet, got %+v", got)
+	}
+	if got.Readiness != "degraded" {
+		t.Fatalf("readiness: want degraded, got %+v", got)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence: want medium cap, got %+v", got)
+	}
+}

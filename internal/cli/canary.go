@@ -1080,16 +1080,22 @@ func canaryTimedSourceHealth(source string, asOf, now time.Time, fp rpc.Fingerpr
 func canaryRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) rpc.SourceHealth {
 	status := rpc.RegimeStatusOK
 	notes := []string{}
-	switch {
-	case len(m.StaleClusters) > 0:
-		status = rpc.RegimeStatusStale
+	if len(m.StaleClusters) > 0 {
 		notes = append(notes, "stale clusters: "+strings.Join(m.StaleClusters, ","))
-	case len(m.DegradedClusters) > 0:
-		status = "degraded"
+	}
+	if len(m.DegradedClusters) > 0 {
 		notes = append(notes, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+	}
+	if len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 || m.UnrankedClusters > 0 {
+		notes = append(notes, canaryAmbiguityEvidence(m))
+	}
+	switch {
 	case len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 || m.UnrankedClusters > 0:
 		status = "partial"
-		notes = append(notes, canaryAmbiguityEvidence(m))
+	case len(m.DegradedClusters) > 0:
+		status = "degraded"
+	case len(m.StaleClusters) > 0:
+		status = rpc.RegimeStatusStale
 	}
 	health := canaryTimedSourceHealth("regime", asOf, now, fp, status, dataConfidence)
 	health.Notes = notes

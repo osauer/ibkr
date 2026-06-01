@@ -16,9 +16,10 @@ import (
 
 // Default calibration window for the zero-gamma compute. Tuned for
 // the trader-side review: 6 expirations beats the SpotGamma 4-expiry
-// default in nominal coverage; ±10 % strike width keeps the leg count
-// reasonable; ±15 % sweep range comfortably brackets the typical zero
-// crossing without inflating the profile point count.
+// default in nominal coverage; ±10 % strike width defines the candidate
+// window and the nearest-80-strikes cap keeps the leg count reasonable;
+// ±15 % sweep range comfortably brackets the typical zero crossing
+// without inflating the profile point count.
 //
 // WorkerCount 4 matches the documented safe gateway throttle elsewhere
 // in this package (handleChainFetch, around handlers.go:1628). Bumping
@@ -29,6 +30,14 @@ const (
 	defaultStrikeWidthPct = 0.10
 	defaultSweepRangePct  = 0.15
 	defaultWorkerCount    = 4
+
+	// maxGammaStrikesPerExpiry caps the listed strikes walked for each
+	// expiry after the ±StrikeWidthPct filter and ATM-outward ordering.
+	// This keeps the default fan-out at 6 × 80 × 2 = 960 option legs,
+	// matching the compute budget below. It is especially important for
+	// SPX/SPXW, where 5-point strike grids inside ±10% can otherwise
+	// expand to 3k+ subscriptions outside RTH with little extra signal.
+	maxGammaStrikesPerExpiry = 80
 
 	// Horizon bucket boundaries in fractional years.
 	//
@@ -93,6 +102,14 @@ const (
 	// ticks the compute needs, and the right thing is to fail fast
 	// with an actionable error instead of grinding for minutes.
 	earlyAbortAfter = 30 * time.Second
+
+	// optionOpenInterestGrace is the short post-IV wait before a gamma
+	// worker unsubscribes an option leg. IV/model ticks can arrive before
+	// the one-shot OI tick (27/28); reading OI immediately after IV lands
+	// turns a healthy subscription into a zero-OI leg. Keep this non-
+	// gating and short so missing OI remains a data-quality warning, not
+	// a new fan-out bottleneck.
+	optionOpenInterestGrace = 250 * time.Millisecond
 
 	// gammaMethodToken is the stable wire token consumers (renderers,
 	// cache method-mismatch gate) compare against to confirm the
@@ -379,18 +396,21 @@ func productionLegFetcher(
 		return legResult{}
 	}
 
-	// Opportunistic OI read. May be 0 for strikes the gateway never
-	// pushed a 27/28 tick for — that's fine, the leg still lands.
-	var oi int64
-	if d, ok := c.GetMarketData()[key]; ok {
-		oi = d.OpenInt
-	}
-
 	if iv > 0 {
+		// Opportunistic OI read. May be 0 for strikes the gateway never
+		// pushed a 27/28 tick for — that's fine, the leg still lands.
+		//
+		// Do not read only once: IV/model ticks often arrive before the
+		// one-shot OI tick. A short grace materially improves OI capture
+		// without making OI a hard gate.
+		oi := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() int64 {
+			return optionOpenInterest(c, key)
+		})
 		return legResult{OI: oi, IV: iv, Gamma: gamma, OK: true}
 	}
 	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
+	oi := optionOpenInterest(c, key)
 	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
 	var price float64
 	if hasQuote && bid > 0 && ask > 0 {
@@ -399,6 +419,28 @@ func productionLegFetcher(
 		price = px
 	}
 	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, price)
+}
+
+func optionOpenInterest(c *ibkrlib.Connector, key string) int64 {
+	if c == nil || key == "" {
+		return 0
+	}
+	if d, ok := c.GetMarketData()[key]; ok {
+		return d.OpenInt
+	}
+	return 0
+}
+
+func waitForOptionOpenInterest(ctx context.Context, deadline time.Time, read func() int64) int64 {
+	if read == nil {
+		return 0
+	}
+	var oi int64
+	_ = pollUntil(ctx, deadline, func() bool {
+		oi = read()
+		return oi > 0
+	})
+	return oi
 }
 
 // bsIVFallback assembles a leg result from Black-Scholes back-solving when
@@ -470,8 +512,9 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 //     on any expiry day, we drop it.
 //
 //  4. Per expiry, filter listed strikes to those within ±StrikeWidthPct
-//     of spot. Far-OTM strikes contribute negligibly to dealer GEX
-//     and just inflate the leg count.
+//     of spot, then cap to the nearest strikes by moneyness. Far-OTM
+//     strikes contribute negligibly to dealer GEX and just inflate the
+//     leg count / gateway pressure.
 //
 //  5. Fan-out per-leg subscriptions at WorkerCount concurrency. Each
 //     worker captures OI + IV + gateway-Γ for one (expiry, strike,
@@ -588,9 +631,14 @@ func computeGammaZeroFor(
 		tradingClass string // SPY for single-class; "SPX" / "SPXW" on the SPX classed path
 	}
 	var jobs []legSpec
+	strikeBudgetCapped := false
 	for _, p := range picked {
 		strikes := filterStrikesAroundSpot(p.strikes, spot, params.StrikeWidthPct)
 		ordered := sortStrikesATMOutward(strikes, spot)
+		if capped, ok := capStrikesATMOutward(ordered, maxGammaStrikesPerExpiry); ok {
+			ordered = capped
+			strikeBudgetCapped = true
+		}
 		for _, k := range ordered {
 			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "C", tradingClass: p.tradingClass})
 			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "P", tradingClass: p.tradingClass})
@@ -891,6 +939,9 @@ func computeGammaZeroFor(
 	}
 	if len(gexLegs) < len(legs) {
 		warnings = append(warnings, "oi_missing")
+	}
+	if strikeBudgetCapped {
+		warnings = append(warnings, "strike_budget_capped")
 	}
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")
@@ -1379,6 +1430,13 @@ func sortStrikesATMOutward(strikes []float64, spot float64) []float64 {
 		return math.Abs(out[i]-spot) < math.Abs(out[j]-spot)
 	})
 	return out
+}
+
+func capStrikesATMOutward(strikes []float64, maxCount int) ([]float64, bool) {
+	if maxCount <= 0 || len(strikes) <= maxCount {
+		return strikes, false
+	}
+	return strikes[:maxCount], true
 }
 
 // filterStrikesAroundSpot returns the subset of listed strikes within
