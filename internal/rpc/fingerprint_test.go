@@ -100,6 +100,9 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 	if early.Stage != LifecycleEarlyWarning || early.Severity != "watch" {
 		t.Fatalf("early lifecycle = %+v, want early_warning/watch", early)
 	}
+	if len(early.ConfirmedBy) != 0 {
+		t.Fatalf("early confirmed_by = %+v, want none until broad stress is confirmed", early.ConfirmedBy)
+	}
 
 	confirmed := base
 	confirmed.Composite.ClusterRedCount = 2
@@ -107,6 +110,9 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 	got := BuildRegimeLifecycle(&confirmed)
 	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" {
 		t.Fatalf("confirmed lifecycle = %+v, want confirmed_stress/act", got)
+	}
+	if len(got.ConfirmedBy) == 0 {
+		t.Fatalf("confirmed_by empty for confirmed stress: %+v", got)
 	}
 	if early.Fingerprint == got.Fingerprint {
 		t.Fatal("lifecycle fingerprint did not change across semantic stage transition")

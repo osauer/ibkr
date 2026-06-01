@@ -89,7 +89,6 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 		Timing:       "",
 		Confidence:   confidence,
 		Evidence:     evidence,
-		ConfirmedBy:  confirmedNames,
 		Unconfirmed:  unconfirmed,
 		NotExecution: "Regime read only; no orders are placed by ibkr.",
 	}
@@ -128,6 +127,9 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	}
 	if len(yellowNames) > 0 && state.Stage == LifecycleQuiet {
 		state.RejectedBy = append(state.RejectedBy, yellowNames...)
+	}
+	if state.Stage == LifecycleConfirmedStress || state.Stage == LifecyclePanic {
+		state.ConfirmedBy = confirmedNames
 	}
 	if state.Readiness == "ready" && regimeLifecycleHasDegradedInputs(*r) {
 		state.Readiness = "degraded"

@@ -601,13 +601,17 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		d.Impact = "Coverage may be incomplete; treat this slice as lower confidence."
 		d.Action = "Retry later or during regular trading hours; avoid repeated forced runs."
 	case code == "oi_missing":
-		d.Severity = "data_quality"
+		session := gammaWarningSessionForCLI(c)
+		if session == rpc.SessionRTH {
+			d.Severity = "data_quality"
+		}
 		if c != nil && c.PricedLegCount > 0 {
 			d.Message = fmt.Sprintf("Open interest was missing or zero for %d priced legs.", max(c.PricedLegCount-c.LegCount, 0))
 			d.Impact = fmt.Sprintf("%d priced legs landed, but only %d contributed to dealer GEX.", c.PricedLegCount, c.LegCount)
 		} else {
 			d.Message = "Some priced legs had no usable open interest."
 		}
+		d.Action = gammaOIMissingActionForCLI(session)
 	case strings.HasPrefix(code, "spx_unavailable:"):
 		d.Severity = "data_quality"
 		reason := strings.TrimPrefix(code, "spx_unavailable:")
@@ -634,6 +638,28 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		d.Message = code
 	}
 	return d
+}
+
+func gammaWarningSessionForCLI(c *rpc.GammaZeroComputed) rpc.SessionClass {
+	asOf := time.Now()
+	if c != nil && !c.AsOf.IsZero() {
+		asOf = c.AsOf
+	}
+	return rpc.ClassifySession(asOf)
+}
+
+func gammaOIMissingActionForCLI(session rpc.SessionClass) string {
+	prefix := "The option request already asks IBKR for generic tick 101 (call/put open interest). "
+	switch session {
+	case rpc.SessionRTH:
+		return prefix + "This happened during regular U.S. option hours, when OI should normally be available if TWS has it; check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
+	case rpc.SessionPre:
+		return prefix + "This happened pre-market, outside regular U.S. option hours, so sparse OI is expected for the regular option-data surface; retry during 09:30-16:00 ET. SPX may still trade in Global Trading Hours, so compare TWS when SPX shows OI but the API does not."
+	case rpc.SessionPost:
+		return prefix + "This happened post-market, outside regular U.S. option hours, so sparse OI is expected for the regular option-data surface; retry during 09:30-16:00 ET. SPX curb/session nuances can differ from ETF options, so compare TWS when SPX shows OI but the API does not."
+	default:
+		return prefix + "This happened while the regular U.S. option-data surface is closed, so sparse OI is expected; retry during 09:30-16:00 ET. SPX global-hours nuances can differ from ETF options, so compare TWS when SPX shows OI but the API does not."
+	}
 }
 
 func renderSPYUnavailableMessage(reason string) string {

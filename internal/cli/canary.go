@@ -1254,7 +1254,7 @@ func canaryLifecycleSource(id risk.SignalID) string {
 
 func canaryLifecycleConfirmedBy(res CanaryResult) []string {
 	confirmed := []string{}
-	if res.Market.RedClusters > 0 {
+	if res.Market.RedClusters >= 2 {
 		confirmed = append(confirmed, res.Market.RedClusterNames...)
 	}
 	for _, sig := range res.Signals {
@@ -1315,9 +1315,6 @@ func canaryMarketEvidence(m CanaryMarketSummary) string {
 		m.RedClusters, red, m.YellowClusters, yellow, m.RankedClusters, m.RankedClusters+m.UnrankedClusters)
 	if unconfirmedRed != "" {
 		out += "; unconfirmed red " + unconfirmedRed
-	}
-	if m.SPYChangePct != nil || m.VIXChangePct != nil {
-		out += "; " + canaryTapeEvidence(m)
 	}
 	return out
 }
