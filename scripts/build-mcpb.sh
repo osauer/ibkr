@@ -100,8 +100,8 @@ cat > "$stage/manifest.json" <<JSON
     "type": "git",
     "url": "https://github.com/osauer/ibkr"
   },
-  "homepage": "https://osauer.dev/ibkr/",
-  "documentation": "https://osauer.dev/ibkr/guides/agentic-use.html",
+  "homepage": "https://github.com/osauer/ibkr",
+  "documentation": "https://github.com/osauer/ibkr/blob/main/docs/guides/agentic-use.md",
   "support": "https://github.com/osauer/ibkr/issues",
   "server": {
     "type": "binary",

@@ -35,7 +35,7 @@ RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub discovery-check public-discovery-check release-prep indexnow-submit
+.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -79,9 +79,9 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check discovery-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + discovery-check (binding pre-commit gate)
+check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
@@ -191,7 +191,6 @@ modernize: ## Apply go fix + modernize rewrites in place
 docs-regen: ## Regenerate docs/reference/*.md from generators
 	go run ./scripts/docgen/config-ref
 	go run ./scripts/docgen/mcp-tools
-	go run ./scripts/docgen/site-html
 
 # docs-check is the CI gate: regenerate to a tempfile, diff against the
 # checked-in copy, fail if they differ. Catches the "I changed a struct
@@ -213,24 +212,7 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 			fail=1; \
 		fi; \
 	done; \
-	go run ./scripts/docgen/site-html -check || fail=1; \
 	exit $$fail
-
-discovery-check: ## Verify public discovery metadata, sitemap, llms.txt, and JSON-LD stay in sync
-	go run ./scripts/discovery-check
-
-public-discovery-check: ## Verify deployed robots.txt and public discovery files after GitHub Pages deploys
-	go run ./scripts/public-discovery-check
-
-indexnow-submit: ## Submit public sitemap URLs to IndexNow after GitHub Pages deploys
-	go run ./scripts/submit-indexnow
-
-release-prep: ## Update public discovery metadata before release; needs RELEASE_VERSION=vX.Y.Z
-	@if [ -z "$(RELEASE_VERSION)" ]; then \
-		echo "release-prep: RELEASE_VERSION is required, e.g. make release-prep RELEASE_VERSION=v1.0.9" >&2; \
-		exit 1; \
-	fi
-	go run ./scripts/release-prep $(RELEASE_VERSION)
 
 # Pull the current S&P-500 membership list from Wikipedia and rewrite
 # internal/breadth/spx/members_data.go. Invoked by `make release` so a
@@ -608,7 +590,6 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	$(MAKE) release-publish RELEASE_VERSION=$(RELEASE_VERSION) MESSAGE="$$msg"
 	$(MAKE) registry-publish RELEASE_VERSION=$(RELEASE_VERSION)
-	$(MAKE) public-discovery-check
 	@echo
 	@echo "Released $(RELEASE_VERSION):"
 	@echo "  https://github.com/osauer/ibkr/releases/tag/$(RELEASE_VERSION)"

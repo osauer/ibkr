@@ -4,7 +4,7 @@
   "title": "IBKR MCP Server",
   "description": "IBKR MCP server for agentic portfolio analysis and trading research via TWS/IB Gateway.",
   "version": "1.5.0",
-  "websiteUrl": "https://osauer.dev/ibkr/",
+  "websiteUrl": "https://github.com/osauer/ibkr",
   "repository": {
     "url": "https://github.com/osauer/ibkr",
     "source": "github",
