@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -88,6 +89,42 @@ func TestGammaWarningDetailStrikeBudgetCapped(t *testing.T) {
 	}
 	for _, want := range []string{"nearest 80", "gateway request budget"} {
 		if !strings.Contains(got.Message+" "+got.Impact, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestGammaWarningDetailOIMissingNamesAPIDiagnostic(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		AsOf:           time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), // 08:00 ET pre-market
+		PricedLegCount: 751,
+		LegCount:       2,
+	}, "oi_missing")
+	if got.Severity != "info" || got.Scope != "SPY" {
+		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
+	}
+	for _, want := range []string{"749 priced legs", "only 2 legs", "generic tick 101", "pre-market", "sparse OI is expected", "09:30-16:00 ET"} {
+		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestGammaWarningDetailOIMissingIsDataQualityDuringRTH(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		AsOf:           time.Date(2026, time.June, 1, 15, 0, 0, 0, time.UTC), // 11:00 ET RTH
+		PricedLegCount: 911,
+		LegCount:       346,
+	}, "oi_missing")
+	if got.Severity != "data_quality" || got.Scope != "SPX" {
+		t.Fatalf("warning detail = %+v, want SPX data_quality warning during RTH", got)
+	}
+	for _, want := range []string{"565 priced legs", "regular U.S. option hours", "should normally be available", "data-farm health"} {
+		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
 			t.Fatalf("warning detail missing %q: %+v", want, got)
 		}
 	}

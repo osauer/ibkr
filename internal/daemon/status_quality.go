@@ -100,7 +100,11 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	} else if gammaHasSPXCacheFallback(env.Result) {
 		summary = "degraded: SPX cache fallback"
 	} else if gammaHasOIMissing(env.Result) {
-		summary = "degraded: partial option OI"
+		if gammaHasRTHOIMissing(env.Result, env.Result.AsOf) {
+			summary = "degraded: partial option OI (unexpected: sampled during RTH)"
+		} else {
+			summary = "degraded: partial option OI (expected: sampled outside RTH)"
+		}
 	}
 	return rpc.DataQualityHealth{
 		Surface:          "gamma",
@@ -183,6 +187,30 @@ func gammaHasOIMissing(c *rpc.GammaZeroComputed) bool {
 	}
 	for _, sub := range c.PerIndex {
 		if gammaHasOIMissing(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func gammaHasRTHOIMissing(c *rpc.GammaZeroComputed, inheritedAsOf time.Time) bool {
+	if c == nil {
+		return false
+	}
+	asOf := inheritedAsOf
+	if !c.AsOf.IsZero() {
+		asOf = c.AsOf
+	}
+	for _, w := range c.WarningDetails {
+		if w.Code == "oi_missing" {
+			if asOf.IsZero() {
+				asOf = time.Now()
+			}
+			return rpc.ClassifySession(asOf) == rpc.SessionRTH
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if gammaHasRTHOIMissing(sub, asOf) {
 			return true
 		}
 	}

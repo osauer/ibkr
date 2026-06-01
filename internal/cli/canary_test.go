@@ -147,6 +147,34 @@ func TestComputeCanaryEarlyStressRequiresSecondIndependentCluster(t *testing.T) 
 	}
 }
 
+func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
+	r.GammaZero.Band = "red"
+	spyPct := -0.1
+	vixPct := 5.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if len(res.Lifecycle.ConfirmedBy) != 0 {
+		t.Fatalf("confirmed_by = %+v, want none for one red gamma cluster", res.Lifecycle.ConfirmedBy)
+	}
+	if !hasSignal(res.Signals, risk.SignalGammaRed) {
+		t.Fatalf("missing gamma red watch signal, signals: %+v", res.Signals)
+	}
+	marketEvidence := canaryMarketEvidence(res.Market)
+	if strings.Contains(marketEvidence, "SPY") || strings.Contains(marketEvidence, "VIX") {
+		t.Fatalf("market cluster evidence should not mix tape indicators: %q", marketEvidence)
+	}
+	if got := canaryTapeEvidence(res.Market); !strings.Contains(got, "SPY") || !strings.Contains(got, "VIX") {
+		t.Fatalf("tape evidence should remain separately available, got %q", got)
+	}
+}
+
 func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
