@@ -269,7 +269,22 @@ func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Explain", "Full methodology", "Read:", "Volatility term structure", "Dealer-gamma model"} {
+	for _, want := range []string{
+		"Explain",
+		"Full methodology",
+		"Inputs:",
+		"Source:",
+		"VIX is Cboe's 30-day",
+		"HYG is a high-yield corporate bond ETF",
+		"BAMLH0A0HYM2",
+		"RIFSPPFAAD90NB",
+		"IDEALPRO",
+		"IBKR SPY/SPX option chains",
+		"No single live symbol",
+		"Read:",
+		"Volatility term structure",
+		"Dealer-gamma model",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
 		}

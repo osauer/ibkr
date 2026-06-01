@@ -638,7 +638,8 @@ type BreadthSPXResult struct {
 	// Free-form; renderers display verbatim.
 	Source string `json:"source"`
 	// Method is a short token naming the computation path so renderers
-	// can disclose methodology. v2 token: "constituent-fanout-50/200dma-hl"
+	// can disclose methodology. Current token:
+	// "constituent-fanout-50/200dma+nh-v2"
 	// (50-DMA + 200-DMA + new highs/lows over 252-bar rolling
 	// max/min — all computed locally from constituent daily closes
 	// pulled via IBKR's historical-bar feed, since IBKR doesn't

@@ -34,6 +34,10 @@ import "time"
 // engine reports state=ready with zeroed new fields).
 const methodConstituentFanout = "constituent-fanout-50/200dma+nh-v2"
 
+// MethodConstituentFanout is the exported form of the current breadth
+// methodology token for daemon wire envelopes and documentation.
+const MethodConstituentFanout = methodConstituentFanout
+
 // MinCoverageFraction is the minimum fraction of MemberCount that a
 // refresh must cover before the engine will persist its result.
 // Refreshes below this threshold are treated as "did not converge"
