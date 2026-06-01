@@ -3624,7 +3624,7 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 // own 50-day SMA, in [0, 100]. The dashboard generator uses this as
 // Indicator 5 of the risk-regime panel.
 //
-// Methodology — "constituent-fanout-50/200dma-hl": we compute S5FI locally
+// Methodology — spx.MethodConstituentFanout: we compute S5FI locally
 // from constituent daily closes pulled via IBKR's HMDS feed. IBKR
 // does not redistribute S&P DJI's S5FI index on retail subscriptions
 // (verified via reqContractDetails — see pkg/ibkr/symbols.go), so the
@@ -3676,7 +3676,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 
 	res := &rpc.BreadthSPXResult{
 		Source: "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
-		Method: "constituent-fanout-50/200dma-hl",
+		Method: spx.MethodConstituentFanout,
 		AsOf:   time.Now(),
 	}
 

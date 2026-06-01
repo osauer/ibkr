@@ -1440,46 +1440,72 @@ type regimeExplainEntry struct {
 	thresholds *rpc.RegimeThresholds
 	band       string
 	bandReason string
+	inputs     string
+	source     string
 	missing    []string
 	quals      []regimeExplainQuality
 }
 
 func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 	entries := []regimeExplainEntry{
-		{"VIX/VIX3M", r.VIXTermStructure.Thresholds, r.VIXTermStructure.Band, r.VIXTermStructure.BandReason, r.VIXTermStructure.FieldsMissing, []regimeExplainQuality{
-			{"VIX", r.VIXTermStructure.VIXQuality},
-			{"VIX3M", r.VIXTermStructure.VIX3MQuality},
-		}},
-		{"VVIX", r.VolOfVol.Thresholds, r.VolOfVol.Band, r.VolOfVol.BandReason, nil, []regimeExplainQuality{
-			{"VVIX", r.VolOfVol.ValueQuality},
-		}},
-		{"HYG vs SPY", r.HYGSPYDivergence.Thresholds, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.BandReason, r.HYGSPYDivergence.FieldsMissing, []regimeExplainQuality{
-			{"HYG", r.HYGSPYDivergence.HYGQuality},
-			{"HYG_50DMA", r.HYGSPYDivergence.HYG50DMAQuality},
-			{"SPY", r.HYGSPYDivergence.SPYQuality},
-			{"SPY_52w_high", r.HYGSPYDivergence.SPY52WHighQuality},
-		}},
-		{"HY/IG OAS", r.CreditSpreads.Thresholds, r.CreditSpreads.Band, r.CreditSpreads.BandReason, r.CreditSpreads.FieldsMissing, []regimeExplainQuality{
-			{"HY_OAS", r.CreditSpreads.HYOASQuality},
-			{"IG_OAS", r.CreditSpreads.IGOASQuality},
-			{"HY-IG_spread", r.CreditSpreads.SpreadQuality},
-		}},
-		{"funding spread", r.FundingStress.Thresholds, r.FundingStress.Band, r.FundingStress.BandReason, r.FundingStress.FieldsMissing, []regimeExplainQuality{
-			{"CP_3m", r.FundingStress.CP3MQuality},
-			{"TBill_3m", r.FundingStress.TBill3MQuality},
-			{"CP-TBill", r.FundingStress.SpreadQuality},
-		}},
-		{"USD/JPY", r.USDJPY.Thresholds, r.USDJPY.Band, r.USDJPY.BandReason, r.USDJPY.FieldsMissing, []regimeExplainQuality{
-			{"Last", r.USDJPY.LastQuality},
-			{"Close_7d_ago", r.USDJPY.Close7DAgoQuality},
-		}},
-		{gammaRowLabel(r.GammaZero), r.GammaZero.Thresholds, r.GammaZero.Band, r.GammaZero.BandReason, r.GammaZero.FieldsMissing, []regimeExplainQuality{
-			{"Zero_gamma", r.GammaZero.ZeroGammaQuality},
-			{"|Gamma|.OI_sum", r.GammaZero.GammaTotalAbsQuality},
-		}},
-		{"SPX breadth", r.Breadth.Thresholds, r.Breadth.Band, r.Breadth.BandReason, r.Breadth.FieldsMissing, []regimeExplainQuality{
-			{"Value", r.Breadth.ValueQuality},
-		}},
+		{"VIX/VIX3M", r.VIXTermStructure.Thresholds, r.VIXTermStructure.Band, r.VIXTermStructure.BandReason,
+			"VIX is Cboe's 30-day S&P 500 implied-volatility index; VIX3M is the roughly three-month version.",
+			"IBKR index market data for Cboe VIX and VIX3M; historical replay uses Cboe official CSVs.",
+			r.VIXTermStructure.FieldsMissing, []regimeExplainQuality{
+				{"VIX", r.VIXTermStructure.VIXQuality},
+				{"VIX3M", r.VIXTermStructure.VIX3MQuality},
+			}},
+		{"VVIX", r.VolOfVol.Thresholds, r.VolOfVol.Band, r.VolOfVol.BandReason,
+			"VVIX is Cboe's VIX-of-VIX index: expected volatility of VIX itself.",
+			"Cboe official daily VVIX time series.",
+			nil, []regimeExplainQuality{
+				{"VVIX", r.VolOfVol.ValueQuality},
+			}},
+		{"HYG vs SPY", r.HYGSPYDivergence.Thresholds, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.BandReason,
+			"HYG is a high-yield corporate bond ETF; SPY is the large S&P 500 ETF used as the stock-market comparison.",
+			"IBKR HYG/SPY quotes plus HMDS daily bars; SPY 52-week high uses Misc Stats tick 165 or daily-bar fallback.",
+			r.HYGSPYDivergence.FieldsMissing, []regimeExplainQuality{
+				{"HYG", r.HYGSPYDivergence.HYGQuality},
+				{"HYG_50DMA", r.HYGSPYDivergence.HYG50DMAQuality},
+				{"SPY", r.HYGSPYDivergence.SPYQuality},
+				{"SPY_52w_high", r.HYGSPYDivergence.SPY52WHighQuality},
+			}},
+		{"HY/IG OAS", r.CreditSpreads.Thresholds, r.CreditSpreads.Band, r.CreditSpreads.BandReason,
+			"HY OAS is high-yield corporate spread; IG OAS is investment-grade corporate spread. OAS is extra yield over Treasuries after option adjustment.",
+			"FRED/St. Louis Fed CSVs for ICE BofA series BAMLH0A0HYM2 and BAMLC0A0CM.",
+			r.CreditSpreads.FieldsMissing, []regimeExplainQuality{
+				{"HY_OAS", r.CreditSpreads.HYOASQuality},
+				{"IG_OAS", r.CreditSpreads.IGOASQuality},
+				{"HY-IG_spread", r.CreditSpreads.SpreadQuality},
+			}},
+		{"funding spread", r.FundingStress.Thresholds, r.FundingStress.Band, r.FundingStress.BandReason,
+			"90-day AA financial commercial paper is short-term financial-company borrowing; 3-month T-bills are short-term U.S. Treasury borrowing.",
+			"FRED/St. Louis Fed daily Federal Reserve series RIFSPPFAAD90NB and DTB3.",
+			r.FundingStress.FieldsMissing, []regimeExplainQuality{
+				{"CP_3m", r.FundingStress.CP3MQuality},
+				{"TBill_3m", r.FundingStress.TBill3MQuality},
+				{"CP-TBill", r.FundingStress.SpreadQuality},
+			}},
+		{"USD/JPY", r.USDJPY.Thresholds, r.USDJPY.Band, r.USDJPY.BandReason,
+			"USD/JPY is yen per U.S. dollar; a falling pair means yen strengthening, the carry-unwind direction.",
+			"IBKR CASH/IDEALPRO USD.JPY tick plus HMDS midpoint bars; Tier 1 replay uses FRED DEXJPUS.",
+			r.USDJPY.FieldsMissing, []regimeExplainQuality{
+				{"Last", r.USDJPY.LastQuality},
+				{"Close_7d_ago", r.USDJPY.Close7DAgoQuality},
+			}},
+		{gammaRowLabel(r.GammaZero), r.GammaZero.Thresholds, r.GammaZero.Band, r.GammaZero.BandReason,
+			"SPY is the S&P 500 ETF; SPX is the S&P 500 index. Their option books are read separately and combined.",
+			"IBKR SPY/SPX option chains, open interest, option quotes/model ticks, and the daemon's gamma cache.",
+			r.GammaZero.FieldsMissing, []regimeExplainQuality{
+				{"Zero_gamma", r.GammaZero.ZeroGammaQuality},
+				{"|Gamma|.OI_sum", r.GammaZero.GammaTotalAbsQuality},
+			}},
+		{"SPX breadth", r.Breadth.Thresholds, r.Breadth.Band, r.Breadth.BandReason,
+			"No single live symbol is used; this counts individual S&P 500 member stocks above their own moving averages.",
+			"Local daemon compute from IBKR HMDS constituent daily bars and the generated S&P 500 membership list.",
+			r.Breadth.FieldsMissing, []regimeExplainQuality{
+				{"Value", r.Breadth.ValueQuality},
+			}},
 	}
 	fmt.Fprintf(out, "  %s\n", env.bold("Explain"))
 	if r.SpecDoc != "" {
@@ -1493,6 +1519,12 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		}
 		if thresholdLine := explainThresholdLine(e.thresholds); thresholdLine != "" {
 			renderExplainKV(env, out, "Bands", thresholdLine, nil)
+		}
+		if e.inputs != "" {
+			renderExplainKV(env, out, "Inputs", e.inputs, nil)
+		}
+		if e.source != "" {
+			renderExplainKV(env, out, "Source", e.source, nil)
 		}
 		if qualityLine := explainQualityLine(r.AsOf, e.quals); qualityLine != "" {
 			renderExplainKV(env, out, "Quality", qualityLine, nil)

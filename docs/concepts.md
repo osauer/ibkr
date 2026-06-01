@@ -80,7 +80,7 @@ S&P 500 breadth answers a question the index level alone can't: *is this rally b
 
 The daemon also reports 52-week new-highs / new-lows counts and the derived `net_new_highs_pct`. The "SPX near highs with net_new_highs_pct near zero or negative" pattern is the most reliable narrow-rally fingerprint.
 
-IBKR doesn't redistribute S&P DJI's official breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (methodology token: `constituent-fanout-50/200dma-hl`). A once-daily post-close refresh (16:35 ET) slides each name's window forward.
+IBKR doesn't redistribute S&P DJI's official breadth indices on retail subscriptions, so the daemon computes all three locally from the 500 constituent daily closes pulled via IBKR's historical-bar feed (methodology token: `constituent-fanout-50/200dma+nh-v2`). A once-daily post-close refresh (16:35 ET) slides each name's window forward.
 
 **Cold-start budget**: the first request against a fresh daemon takes ~60 minutes — IBKR's historical-data pacing caps the constituent fan-out at ~6 names/min sustained. The response carries `state: "computing"` until done; after cold-start, the cache persists across daemon restarts and every subsequent call is instant.
 
