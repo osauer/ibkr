@@ -212,7 +212,9 @@ func TestGammaZeroCache_SnapshotCombinedSliceUsesCanonicalPerIndex(t *testing.T)
 	}
 
 	priorSession := now.Add(-24 * time.Hour)
-	c.slots[rpc.GammaZeroScopeCombined].current = newPersistedComputation(combined, rpc.GammaZeroScopeCombined, priorSession)
+	priorCombined := cloneGammaComputed(combined)
+	priorCombined.AsOf = priorSession
+	c.slots[rpc.GammaZeroScopeCombined].current = newPersistedComputation(priorCombined, rpc.GammaZeroScopeCombined, now)
 	if _, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now }); ok {
 		t.Fatal("prior-session combined slice should not satisfy an open-session single-scope request")
 	}
@@ -368,6 +370,130 @@ func TestGammaZeroCache_CombinedSnapshotRebuildsFromNewerSingleScopes(t *testing
 	}
 	if got.Summary == nil || got.Summary.PerIndex["SPY"].LegCount != spyOnly.LegCount {
 		t.Fatalf("summary did not include fresh SPY slice: %+v", got.Summary)
+	}
+}
+
+func TestGammaZeroCache_CurrentSPYFailureDoesNotBackfillStaleSPY(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 6, 2, 14, 12, 0, 0, time.UTC)
+	staleSPYAsOf := now.Add(-24 * time.Hour)
+	freshSPXAsOf := now.Add(-time.Minute)
+
+	staleSPY := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 760,
+		GammaSign:      "negative",
+		GammaTotalAbs:  2.3e7,
+		LegCount:       2,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPY", Strike: 760, Right: "P", AbsGEX: 1.4e7, Expiry: "2026-06-05"},
+			{Underlying: "SPY", Strike: 758, Right: "P", AbsGEX: 9e6, Expiry: "2026-06-05"},
+		},
+		AsOf:   staleSPYAsOf,
+		Method: gammaMethodToken,
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityBlocked,
+			RankabilityReason: "freshness: computed for prior session",
+		},
+	}
+	freshSPXOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7600,
+		GammaSign:      "negative",
+		GammaTotalAbs:  9.1e8,
+		LegCount:       395,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPX", TradingClass: "SPXW", Strike: 7600, Right: "P", AbsGEX: 9.1e8, Expiry: "2026-06-05"},
+		},
+		AsOf:     freshSPXAsOf,
+		Method:   gammaMethodToken,
+		Warnings: []string{"spy_unavailable:zero_magnitude"},
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(freshSPXOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPY:      {current: newPersistedComputation(staleSPY, rpc.GammaZeroScopeSPY, now)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil {
+		t.Fatal("Result is nil")
+	}
+	if got.Scope != rpc.GammaZeroScopeSPX {
+		t.Fatalf("scope = %q, want current SPX-only degraded result", got.Scope)
+	}
+	if got.PerIndex["SPY"] != nil {
+		t.Fatalf("current SPY failure was backfilled from stale cache: %+v", got.PerIndex["SPY"])
+	}
+	if got.LegCount != freshSPXOnly.LegCount || got.GammaTotalAbs != freshSPXOnly.GammaTotalAbs {
+		t.Fatalf("combined metrics included stale SPY: leg_count=%d gamma_total_abs=%v", got.LegCount, got.GammaTotalAbs)
+	}
+	for _, top := range got.TopStrikes {
+		if top.Underlying == "SPY" {
+			t.Fatalf("top_strikes included stale SPY leg after current SPY failure: %+v", got.TopStrikes)
+		}
+	}
+	if !hasGammaWarning(got.WarningDetails, "spy_unavailable:zero_magnitude") {
+		t.Fatalf("current SPY failure diagnostic missing: %+v", got.WarningDetails)
+	}
+}
+
+func TestGammaZeroCache_CurrentSPYFailureDoesNotBackfillBlockedSPY(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 6, 2, 14, 12, 0, 0, time.UTC)
+	asOf := now.Add(-time.Minute)
+
+	blockedSPY := &rpc.GammaZeroComputed{
+		Scope:         rpc.GammaZeroScopeSPY,
+		GammaSign:     "negative",
+		GammaTotalAbs: 2.3e7,
+		LegCount:      2,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPY", Strike: 760, Right: "P", AbsGEX: 1.4e7, Expiry: "2026-06-05"},
+		},
+		AsOf:   asOf,
+		Method: gammaMethodToken,
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityBlocked,
+			RankabilityReason: "oi_observed_coverage: OI observed on 0.3% of priced legs",
+		},
+	}
+	freshSPXOnly := &rpc.GammaZeroComputed{
+		Scope:         rpc.GammaZeroScopeSPX,
+		GammaSign:     "negative",
+		GammaTotalAbs: 9.1e8,
+		LegCount:      395,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPX", TradingClass: "SPXW", Strike: 7600, Right: "P", AbsGEX: 9.1e8, Expiry: "2026-06-05"},
+		},
+		AsOf:     asOf,
+		Method:   gammaMethodToken,
+		Warnings: []string{"spy_unavailable:zero_magnitude"},
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(freshSPXOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPY:      {current: newPersistedComputation(blockedSPY, rpc.GammaZeroScopeSPY, now)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil {
+		t.Fatal("Result is nil")
+	}
+	if got.Scope != rpc.GammaZeroScopeSPX {
+		t.Fatalf("scope = %q, want current SPX-only degraded result", got.Scope)
+	}
+	if got.PerIndex["SPY"] != nil {
+		t.Fatalf("current SPY failure was backfilled from blocked cache: %+v", got.PerIndex["SPY"])
+	}
+	if got.LegCount != freshSPXOnly.LegCount || got.GammaTotalAbs != freshSPXOnly.GammaTotalAbs {
+		t.Fatalf("combined metrics included blocked SPY: leg_count=%d gamma_total_abs=%v", got.LegCount, got.GammaTotalAbs)
 	}
 }
 
@@ -669,8 +795,27 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	// Error — separate cache to avoid same-session singleflight reuse.
 	c2 := newGammaZeroCache()
 	bonk := errors.New("compute failed: gateway disconnected")
+	diagnostic := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 5000,
+		AsOf:           now,
+		PricedLegCount: 60,
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{PricedLegs: 60},
+		},
+		CollectionDiagnostics: []rpc.GammaCollectionDiagnostic{{
+			Underlying:             "SPX",
+			TradingClass:           "SPXW",
+			Expiry:                 "2026-06-02",
+			RequestedLegs:          60,
+			PricedLegs:             60,
+			OIMissingLegs:          60,
+			OISourceStatus:         gammaOISourceMissing,
+			OIGenericTickRequested: true,
+		}},
+	}
 	errCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		return nil, bonk
+		return diagnostic, bonk
 	}
 	errJob, _ := c2.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, now, 300, errCompute)
 	<-errJob.done
@@ -680,6 +825,12 @@ func TestGammaZeroCache_SnapshotStates(t *testing.T) {
 	}
 	if env.Error != bonk.Error() {
 		t.Errorf("error message not propagated: got %q, want %q", env.Error, bonk.Error())
+	}
+	if env.DiagnosticResult == nil {
+		t.Fatalf("error diagnostic_result missing")
+	}
+	if env.DiagnosticResult.PricedLegCount != 60 || len(env.DiagnosticResult.CollectionDiagnostics) != 1 {
+		t.Fatalf("error diagnostic_result did not preserve source funnel: %+v", env.DiagnosticResult)
 	}
 }
 
@@ -1204,8 +1355,27 @@ func TestGammaZeroCache_ForceFailureDoesNotPoisonCachedSuccess(t *testing.T) {
 		rpc.GammaZeroScopeSPX: {current: newPersistedComputation(cached, rpc.GammaZeroScopeSPX, now)},
 	}
 	computeErr := errors.New("zero-gamma: no usable GEX legs")
+	diagnostic := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 5020,
+		AsOf:           now,
+		PricedLegCount: 60,
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{PricedLegs: 60},
+		},
+		CollectionDiagnostics: []rpc.GammaCollectionDiagnostic{{
+			Underlying:             "SPX",
+			TradingClass:           "SPXW",
+			Expiry:                 "2026-06-02",
+			RequestedLegs:          60,
+			PricedLegs:             60,
+			OIMissingLegs:          60,
+			OISourceStatus:         gammaOISourceMissing,
+			OIGenericTickRequested: true,
+		}},
+	}
 	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
-		return nil, computeErr
+		return diagnostic, computeErr
 	}
 
 	forced := c.force(context.Background(), rpc.GammaZeroScopeSPX, now, 300, compute)
@@ -1222,6 +1392,18 @@ func TestGammaZeroCache_ForceFailureDoesNotPoisonCachedSuccess(t *testing.T) {
 	}
 	if job.result == nil || job.result.SpotUnderlying != cached.SpotUnderlying {
 		t.Fatalf("served job = %+v, want cached success %+v", job.result, cached)
+	}
+	env := c.snapshotForScope(rpc.GammaZeroScopeSPX, job, func() time.Time { return now.Add(time.Minute) })
+	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil || env.Result.SpotUnderlying != cached.SpotUnderlying {
+		t.Fatalf("served envelope = %+v, want cached ready result", env)
+	}
+	if env.DiagnosticResult == nil {
+		t.Fatalf("failed force diagnostic_result missing from preserved ready envelope")
+	}
+	if env.DiagnosticResult.SpotUnderlying != diagnostic.SpotUnderlying ||
+		len(env.DiagnosticResult.CollectionDiagnostics) != 1 ||
+		env.DiagnosticResult.CollectionDiagnostics[0].OIMissingLegs != 60 {
+		t.Fatalf("diagnostic_result did not preserve failed refresh source evidence: %+v", env.DiagnosticResult)
 	}
 }
 

@@ -827,6 +827,7 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	if c.DurationMS > 0 {
 		fmt.Fprintf(out, "  Compute     %s\n", formatDuration(int(c.DurationMS/1000)))
 	}
+	renderGammaSourceDiagnostics(env, c)
 
 	if len(c.MethodologyCitations) > 0 {
 		fmt.Fprintln(out)
@@ -850,6 +851,89 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))
 	fmt.Fprintln(out, env.dim("  autocall hedging the sign can invert; treat it as a regime hint, not"))
 	fmt.Fprintln(out, env.dim("  a trade level. The magnitude signal above is sign-convention agnostic."))
+}
+
+func renderGammaSourceDiagnostics(env *Env, c *rpc.GammaZeroComputed) {
+	if c == nil || len(c.CollectionDiagnostics) == 0 {
+		return
+	}
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, env.dim("  Source diagnostics"))
+	for _, row := range c.CollectionDiagnostics {
+		label := row.Underlying
+		if row.TradingClass != "" {
+			label = label + "/" + row.TradingClass
+		}
+		if row.Expiry != "" {
+			label = label + " " + row.Expiry
+		}
+		fmt.Fprintf(out, "    %s  q%d req%d priced%d · OI live%d carry%d pos%d miss%d",
+			label, row.QualifiedContracts, row.RequestedLegs, row.PricedLegs,
+			row.OILiveObservedLegs, row.OICarriedForwardLegs, row.OIPositiveLegs, row.OIMissingLegs)
+		if row.MarketDataGenericTicks != "" {
+			fmt.Fprintf(out, " · tick101 %s · ticks %s", formatBool(row.OIGenericTickRequested), row.MarketDataGenericTicks)
+		}
+		if row.OISourceStatus != "" {
+			fmt.Fprintf(out, " · %s", row.OISourceStatus)
+		}
+		if row.CollectionDurationMS > 0 {
+			fmt.Fprintf(out, " · %s", formatDuration(int(row.CollectionDurationMS/1000)))
+		}
+		fmt.Fprintln(out)
+		if failures := gammaCollectionFailureSummary(row); failures != "" {
+			fmt.Fprintf(out, "      failures %s\n", failures)
+		}
+		if caps := gammaCollectionCapSummary(row); caps != "" {
+			fmt.Fprintf(out, "      caps     %s\n", caps)
+		}
+		if row.CarriedForwardSource != "" || row.CarriedForwardObservedAt != "" {
+			fmt.Fprintf(out, "      carried  %s observed %s\n",
+				ifNonEmpty(row.CarriedForwardSource, "unknown"), ifNonEmpty(row.CarriedForwardObservedAt, "unknown"))
+		}
+	}
+}
+
+func gammaCollectionFailureSummary(row rpc.GammaCollectionDiagnostic) string {
+	var parts []string
+	if row.ContractMissingLegs > 0 {
+		parts = append(parts, fmt.Sprintf("contract_missing=%d", row.ContractMissingLegs))
+	}
+	if row.Timeouts > 0 {
+		parts = append(parts, fmt.Sprintf("timeout=%d", row.Timeouts))
+	}
+	if row.PacingErrors > 0 {
+		parts = append(parts, fmt.Sprintf("pacing=%d", row.PacingErrors))
+	}
+	if row.FarmErrors > 0 {
+		parts = append(parts, fmt.Sprintf("farm=%d", row.FarmErrors))
+	}
+	if row.EntitlementErrors > 0 {
+		parts = append(parts, fmt.Sprintf("entitlement=%d", row.EntitlementErrors))
+	}
+	if row.SubscriptionRejects > 0 {
+		parts = append(parts, fmt.Sprintf("subscription_reject=%d", row.SubscriptionRejects))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func gammaCollectionCapSummary(row rpc.GammaCollectionDiagnostic) string {
+	var parts []string
+	if row.StrikeCandidates > 0 || row.StrikeSelected > 0 {
+		capText := ""
+		if row.StrikeCap > 0 {
+			capText = fmt.Sprintf(" cap %d", row.StrikeCap)
+		}
+		trunc := ""
+		if row.StrikeCapTruncated {
+			trunc = " truncated"
+		}
+		parts = append(parts, fmt.Sprintf("strikes %d/%d%s%s", row.StrikeSelected, row.StrikeCandidates, capText, trunc))
+	}
+	if row.ExpiryCapTruncated {
+		parts = append(parts, "expiry cap truncated")
+	}
+	return strings.Join(parts, " · ")
 }
 
 func renderGammaQualityExplain(env *Env, c *rpc.GammaZeroComputed) {

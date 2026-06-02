@@ -163,6 +163,34 @@ func TestBuildRegimeComposite_UnrankedDoesntCountTowardBand(t *testing.T) {
 	}
 }
 
+func TestBuildRegimeComposite_GammaRequiresExplicitRankableQuality(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		quality *rpc.GammaSignalQuality
+	}{
+		{name: "nil_quality"},
+		{name: "blocked_quality", quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityBlocked, RankabilityReason: "OI coverage blocked"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := mkAllGreenRegime()
+			r.GammaZero.Envelope.Result.Quality = tc.quality
+
+			c := buildRegimeComposite(r)
+			if c.GreenCount != 7 || c.RankedCount != 7 || c.UnrankedCount != 1 {
+				t.Fatalf("indicator counts = green %d ranked %d unranked %d, want 7/7/1", c.GreenCount, c.RankedCount, c.UnrankedCount)
+			}
+			if c.ClusterGreenCount != 5 || c.ClusterRankedCount != 5 || c.ClusterUnrankedCount != 1 {
+				t.Fatalf("cluster counts = green %d ranked %d unranked %d, want 5/5/1", c.ClusterGreenCount, c.ClusterRankedCount, c.ClusterUnrankedCount)
+			}
+			if got := bandForGamma(r.GammaZero); got != "" {
+				t.Fatalf("bandForGamma = %q, want unranked", got)
+			}
+		})
+	}
+}
+
 func TestBuildRegimeComposite_HYGSPYNearHighCountsRed(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
@@ -423,6 +451,7 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 					SpotUnderlying: 580.0,
 					ZeroGamma:      &zg,
 					GapPct:         &gap,
+					Quality:        rankableGammaQuality(),
 				},
 			},
 		},
@@ -434,6 +463,10 @@ func mkAllGreenRegime() *rpc.RegimeSnapshotResult {
 			},
 		},
 	}
+}
+
+func rankableGammaQuality() *rpc.GammaSignalQuality {
+	return &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable}
 }
 
 func containsAll(s string, needles ...string) bool {

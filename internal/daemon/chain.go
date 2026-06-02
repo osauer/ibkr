@@ -1165,8 +1165,16 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	// Zero OI is still a real observed value when OpenIntObserved=true;
 	// nil means the OI tick did not arrive.
 	var oi *int64
-	if d, ok := c.GetMarketData()[key]; ok && d.OpenIntObserved {
-		v := d.OpenInt
+	oiDeadline := time.Now().Add(optionOpenInterestGrace)
+	if oiDeadline.After(deadline) {
+		oiDeadline = deadline
+	}
+	if v, observed := waitForOptionOpenInterest(ctx, oiDeadline, func() (int64, bool) {
+		if d, ok := c.GetMarketData()[key]; ok && d.OpenIntObserved {
+			return d.OpenInt, true
+		}
+		return 0, false
+	}); observed {
 		oi = &v
 	}
 	dataStatus := optionLegDataStatus(bid, ask, last, prevClose, iv, delta)

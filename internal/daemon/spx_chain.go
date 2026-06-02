@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
@@ -18,6 +19,7 @@ type pickedExpiration struct {
 	expiryYMD    string // YYYYMMDD
 	tradingClass string
 	strikes      []float64
+	capTruncated bool
 }
 
 // buildPickedExpirations enumerates the expirations + strikes to compute
@@ -39,7 +41,9 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 		if len(classed) == 0 {
 			return nil, fmt.Errorf("gateway returned no SPX expirations")
 		}
-		specs := selectSPXExpirationsClassed(classed, spotAt, expiryCount)
+		candidates := classedSPXCandidateSpecs(classed, spotAt)
+		specs := pickSPXExpirationSlots(candidates, spotAt.In(newYorkLocation()), expiryCount)
+		expiryCapTruncated := expiryCount > 0 && len(candidates) > len(specs)
 		out := make([]pickedExpiration, 0, len(specs))
 		for _, s := range specs {
 			out = append(out, pickedExpiration{
@@ -47,6 +51,7 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 				expiryYMD:    compactExpiry(s.Date),
 				tradingClass: s.TradingClass,
 				strikes:      s.Strikes,
+				capTruncated: expiryCapTruncated,
 			})
 		}
 		return out, nil
@@ -63,7 +68,9 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 	if len(allStrikes) == 0 {
 		return nil, fmt.Errorf("gateway returned no %s expirations", sym)
 	}
-	pickedDates := selectExpirations(allStrikes, "", spotAt, expiryCount)
+	candidates := selectExpirationCandidates(allStrikes, "", spotAt)
+	pickedDates := pickExpirationSlots(candidates, spotAt.In(newYorkLocation()), expiryCount)
+	expiryCapTruncated := expiryCount > 0 && len(candidates) > len(pickedDates)
 	out := make([]pickedExpiration, 0, len(pickedDates))
 	for _, d := range pickedDates {
 		out = append(out, pickedExpiration{
@@ -71,6 +78,7 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 			expiryYMD:    compactExpiry(d),
 			tradingClass: sym,
 			strikes:      allStrikes[d],
+			capTruncated: expiryCapTruncated,
 		})
 	}
 	return out, nil
@@ -109,24 +117,40 @@ type spxExpirySpec struct {
 	Strikes      []float64
 }
 
-// selectSPXExpirationsClassed picks the nearest N (date, tradingClass)
-// pairs that are NOT past their class-specific settlement window. The
-// 6-expiry budget is global across classes — each (date, class)
-// counts as a distinct listing because SPX-class third-Friday and
-// SPXW-class third-Friday are economically distinct contracts (AM SET
-// vs PM close, different ConIDs).
+// selectSPXExpirationsClassed picks up to N (date, tradingClass) pairs
+// that are NOT past their class-specific settlement window. The budget is
+// global across classes — each (date, class) counts as a distinct listing
+// because SPX-class AM-settled contracts and SPXW-class PM-settled
+// contracts have different ConIDs and settlement instants.
 //
-// Sorting is by date ascending, with SPX class winning ties before
-// SPXW to keep the leg order deterministic. The 6-cap is then applied
-// in that order — so on a Monday with both an SPX-class quarterly
-// and SPXW weeklies, we pick the quarterly + 5 nearest weeklies, not
-// all weeklies, which reflects the user-facing "6 expirations" budget
-// honestly.
+// SPX needs a class-aware slot policy instead of "nearest N": daily SPXW
+// listings can otherwise consume the whole basket and miss the SPX AM
+// monthly/quarterly contracts that dominate term dealer exposure. IBKR/TWS
+// exposes those SPX AM contracts by the Thursday last-trade date before the
+// third Friday; the anchor below targets the actual chain dates rather than
+// projecting a third-Friday calendar onto IBKR's wire shape.
+//
+// Slots: nearest/0DTE, next nearest, this week's Friday/EOW, next SPX AM
+// monthly, next SPX AM quarterly, then nearest unused fill. The returned
+// slice is sorted date/class ascending for deterministic downstream fanout.
 //
 // classed is the per-date per-class strike grid emitted by
 // FetchOptionExpiryStrikesClassed. now is the wall-clock reference
 // for the settlement cutoff. count caps the returned slice.
 func selectSPXExpirationsClassed(classed map[string][]ibkrlib.ExpiryClassedStrikes, now time.Time, count int) []spxExpirySpec {
+	candidates := classedSPXCandidateSpecs(classed, now)
+	return pickSPXExpirationSlots(candidates, now.In(newYorkLocation()), count)
+}
+
+func newYorkLocation() *time.Location {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+func classedSPXCandidateSpecs(classed map[string][]ibkrlib.ExpiryClassedStrikes, now time.Time) []spxExpirySpec {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		loc = time.UTC
@@ -136,21 +160,23 @@ func selectSPXExpirationsClassed(classed map[string][]ibkrlib.ExpiryClassedStrik
 
 	var candidates []spxExpirySpec
 	for date, entries := range classed {
-		if date < today {
-			continue // pre-today is always expired regardless of class
-		}
 		for _, entry := range entries {
 			// Class-specific settlement cutoff. SPX-class third-Friday
-			// settles at 09:30 ET; SPXW and any other class settle at
-			// 16:00 ET. The 15-minute buffer mirrors selectExpirations'
-			// PM convention for symmetry.
+			// settles at 09:30 ET, but IBKR keys the standard AM monthlies
+			// by their Thursday last-trade date. classSettlementInstant
+			// normalises that Thursday key to Friday 09:30. SPXW and any
+			// other class settle at 16:00 ET. The 15-minute buffer mirrors
+			// selectExpirations' PM convention for symmetry.
 			day, parseErr := time.ParseInLocation("2006-01-02", date, loc)
 			if parseErr != nil {
 				continue
 			}
 			cutoff := classSettlementInstant(entry.TradingClass, day.Year(), day.Month(), day.Day(), loc).Add(classSettlementBuffer)
-			if date == today && nyNow.After(cutoff) {
-				continue // 0DTE post-settle for this specific class
+			if nyNow.After(cutoff) {
+				continue // post-settle for this specific class
+			}
+			if date < today && !strings.EqualFold(entry.TradingClass, "SPX") {
+				continue
 			}
 			candidates = append(candidates, spxExpirySpec{
 				Date:         date,
@@ -170,8 +196,67 @@ func selectSPXExpirationsClassed(classed map[string][]ibkrlib.ExpiryClassedStrik
 		return candidates[i].TradingClass < candidates[j].TradingClass
 	})
 
-	if len(candidates) > count {
-		candidates = candidates[:count]
-	}
 	return candidates
+}
+
+func pickSPXExpirationSlots(candidates []spxExpirySpec, nyNow time.Time, count int) []spxExpirySpec {
+	if count <= 0 || len(candidates) == 0 {
+		return nil
+	}
+	used := make(map[string]struct{}, count)
+	picks := make([]spxExpirySpec, 0, count)
+	attempt := func(predicate func(spxExpirySpec) bool) bool {
+		if len(picks) >= count {
+			return false
+		}
+		for _, spec := range candidates {
+			key := spxExpirySpecKey(spec)
+			if _, ok := used[key]; ok {
+				continue
+			}
+			if !predicate(spec) {
+				continue
+			}
+			used[key] = struct{}{}
+			picks = append(picks, spec)
+			return true
+		}
+		return false
+	}
+
+	always := func(spxExpirySpec) bool { return true }
+	attempt(always)
+	attempt(always)
+	thisFri := thisWeekFriday(nyNow)
+	attempt(func(spec spxExpirySpec) bool {
+		return spec.Date == thisFri && !strings.EqualFold(spec.TradingClass, "SPX")
+	})
+	attempt(func(spec spxExpirySpec) bool {
+		return strings.EqualFold(spec.TradingClass, "SPX") && isSPXAMMonthlyLastTradeDate(spec.Date)
+	})
+	attempt(func(spec spxExpirySpec) bool {
+		return strings.EqualFold(spec.TradingClass, "SPX") && isSPXAMQuarterlyLastTradeDate(spec.Date)
+	})
+	for _, spec := range candidates {
+		if len(picks) >= count {
+			break
+		}
+		key := spxExpirySpecKey(spec)
+		if _, ok := used[key]; ok {
+			continue
+		}
+		used[key] = struct{}{}
+		picks = append(picks, spec)
+	}
+	sort.SliceStable(picks, func(i, j int) bool {
+		if picks[i].Date != picks[j].Date {
+			return picks[i].Date < picks[j].Date
+		}
+		return picks[i].TradingClass < picks[j].TradingClass
+	})
+	return picks
+}
+
+func spxExpirySpecKey(spec spxExpirySpec) string {
+	return spec.Date + "|" + spec.TradingClass
 }

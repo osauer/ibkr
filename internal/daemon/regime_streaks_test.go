@@ -205,10 +205,11 @@ func TestClassifyBands(t *testing.T) {
 			t.Errorf("no crossing + no_data = %q, want empty", got)
 		}
 		combined := &rpc.GammaZeroComputed{
-			Scope: rpc.GammaZeroScopeCombined,
+			Scope:   rpc.GammaZeroScopeCombined,
+			Quality: rankableGammaQuality(),
 			PerIndex: map[string]*rpc.GammaZeroComputed{
-				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive"},
-				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative"},
+				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive", Quality: rankableGammaQuality()},
+				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", Quality: rankableGammaQuality()},
 			},
 		}
 		if got := classifyGammaComputedBand(combined); got != "red" {
@@ -235,6 +236,40 @@ func TestClassifyBands(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestGammaStreaksRequireExplicitRankableQuality(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		quality *rpc.GammaSignalQuality
+	}{
+		{name: "nil_quality"},
+		{name: "blocked_quality", quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityBlocked}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gap := 5.0
+			res := &rpc.RegimeSnapshotResult{
+				GammaZero: rpc.RegimeGammaZero{
+					Status: rpc.RegimeStatusOK,
+					Envelope: rpc.GammaZeroSPXResult{
+						Status: rpc.GammaZeroStatusReady,
+						Result: &rpc.GammaZeroComputed{
+							ZeroGamma: new(580.0),
+							GapPct:    &gap,
+							Quality:   tc.quality,
+						},
+					},
+				},
+			}
+
+			band, _ := gammaZeroStreaks{}.bandAndValue(res)
+			if band != "" {
+				t.Fatalf("bandAndValue band = %q, want frozen/unranked", band)
+			}
+		})
+	}
 }
 
 func mustParseNY(t *testing.T, s string) time.Time {

@@ -93,6 +93,7 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		PricedLegCount:          spy.PricedLegCount + spx.PricedLegCount,
 		DerivedIVLegs:           spy.DerivedIVLegs + spx.DerivedIVLegs,
 		LegDiagnostics:          combineGammaLegDiagnostics(spy.LegDiagnostics, spx.LegDiagnostics),
+		CollectionDiagnostics:   append(append([]rpc.GammaCollectionDiagnostic{}, spy.CollectionDiagnostics...), spx.CollectionDiagnostics...),
 		Expirations:             dedupeStrings(append(append([]string{}, spy.Expirations...), spx.Expirations...)),
 		Params:                  params,
 		Source:                  "computed from IBKR SPY+SPX option chains",
@@ -397,7 +398,7 @@ func runUnderlyingPhase(
 	if s != nil {
 		logger = s.logger
 	}
-	return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, innerProg, logger)
+	return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, innerProg, logger, s.gammaOI)
 }
 
 // gammaScopeForRequest maps the requested scope onto the actual

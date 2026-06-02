@@ -509,6 +509,14 @@ func TestParseTickSize_NormalizesDecimalEncodedVolume(t *testing.T) {
 		t.Fatalf("small integer volume = %d, want 166", got)
 	}
 
+	got, ok = parseTickSize(minServerVerSizeRules, 8, "30362805.851506")
+	if !ok {
+		t.Fatal("parseTickSize dotted volume returned !ok")
+	}
+	if got != 30362805 {
+		t.Fatalf("dotted Decimal volume = %d, want 30362805", got)
+	}
+
 	got, ok = parseTickSize(minServerVerSizeRules-1, 8, "9876543")
 	if !ok {
 		t.Fatal("parseTickSize legacy returned !ok")
@@ -572,6 +580,28 @@ func TestHandleTickSize_OpenInterest(t *testing.T) {
 				t.Errorf("MarketData.OpenIntObserved: want true")
 			}
 		})
+	}
+}
+
+func TestHandleTickSize_OpenInterestAcceptsDecimalPayload(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	key := "SPY 20260602 758 P"
+	c.subMu.Lock()
+	c.reqIDMap[11] = key
+	c.subscriptions[key] = &Subscription{Symbol: key}
+	c.subMu.Unlock()
+
+	c.handleTickSize([]string{"2", "6", "11", "28", "2180.0"})
+
+	md := c.GetMarketData()
+	if md[key] == nil {
+		t.Fatalf("GetMarketData missing entry for %q", key)
+	}
+	if md[key].OpenInt != 2180 {
+		t.Fatalf("decimal OpenInt = %d, want 2180", md[key].OpenInt)
+	}
+	if !md[key].OpenIntObserved {
+		t.Fatalf("decimal OpenInt should be observed")
 	}
 }
 

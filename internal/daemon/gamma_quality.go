@@ -334,6 +334,8 @@ func gammaQualityCoverage(c *rpc.GammaZeroComputed) rpc.GammaQualityCoverage {
 		priced = c.LegCount
 	}
 	oiObserved := c.LegCount
+	oiLiveObserved := c.LegCount
+	oiCarried := 0
 	oiPositive := c.LegCount
 	gexLegs := c.LegCount
 	if c.LegDiagnostics != nil {
@@ -341,6 +343,11 @@ func gammaQualityCoverage(c *rpc.GammaZeroComputed) rpc.GammaQualityCoverage {
 			priced = c.LegDiagnostics.Total.PricedLegs
 		}
 		oiObserved = max(c.LegDiagnostics.Total.OpenInterestObservedLegs, c.LegDiagnostics.Total.OpenInterestLegs)
+		oiLiveObserved = c.LegDiagnostics.Total.OILiveObservedLegs
+		oiCarried = c.LegDiagnostics.Total.OICarriedForwardLegs
+		if oiLiveObserved == 0 && oiCarried == 0 {
+			oiLiveObserved = oiObserved
+		}
 		oiPositive = c.LegDiagnostics.Total.OpenInterestLegs
 		if c.LegDiagnostics.Total.AbsGEXLegs > 0 {
 			gexLegs = c.LegDiagnostics.Total.AbsGEXLegs
@@ -355,12 +362,20 @@ func gammaQualityCoverage(c *rpc.GammaZeroComputed) rpc.GammaQualityCoverage {
 			hasTerm = hasTerm || sc.HasTerm
 		}
 		out := gammaQualityCoverageNumbers(c, priced, oiObserved, oiPositive, gexLegs)
+		out.OILiveObservedLegs = oiLiveObserved
+		out.OICarriedForwardLegs = oiCarried
+		out.OILiveObservedPct = percent(float64(oiLiveObserved), float64(priced))
+		out.OICarriedForwardPct = percent(float64(oiCarried), float64(priced))
 		out.Has0DTE = has0
 		out.Has1To7DTE = has1to7
 		out.HasTerm = hasTerm
 		return out
 	}
 	out := gammaQualityCoverageNumbers(c, priced, oiObserved, oiPositive, gexLegs)
+	out.OILiveObservedLegs = oiLiveObserved
+	out.OICarriedForwardLegs = oiCarried
+	out.OILiveObservedPct = percent(float64(oiLiveObserved), float64(priced))
+	out.OICarriedForwardPct = percent(float64(oiCarried), float64(priced))
 	out.Has0DTE = c.LegCount0DTE > 0 || c.ZeroGamma0DTE != nil || gammaSignUsable(c.GammaSign0DTE)
 	out.Has1To7DTE = c.LegCount1to7 > 0 || c.ZeroGamma1to7 != nil || gammaSignUsable(c.GammaSign1to7)
 	out.HasTerm = c.LegCountTerm > 0 || c.ZeroGammaTerm != nil || gammaSignUsable(c.GammaSignTerm)

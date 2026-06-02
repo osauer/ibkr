@@ -216,6 +216,52 @@ func TestComputeCanaryContextOnlyGammaDoesNotConfirmStress(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryGammaRequiresExplicitRankableQuality(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		status         string
+		envelopeStatus string
+		quality        *rpc.GammaSignalQuality
+	}{
+		{name: "nil_quality", status: rpc.RegimeStatusOK, envelopeStatus: rpc.GammaZeroStatusReady},
+		{name: "blocked_quality", status: rpc.RegimeStatusOK, envelopeStatus: rpc.GammaZeroStatusReady, quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityBlocked, RankabilityReason: "OI coverage blocked"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := healthyCanaryRegime()
+			r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
+			r.GammaZero.Band = "red"
+			r.GammaZero.Status = tc.status
+			r.GammaZero.Envelope.Status = tc.envelopeStatus
+			r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+				Quality: tc.quality,
+			}
+
+			res := ComputeCanary(CanaryInput{
+				Account: baseCanaryAccount(),
+				Regime:  r,
+			})
+
+			if slices.Contains(res.Market.RedClusterNames, "gamma") {
+				t.Fatalf("red clusters = %+v, want gamma excluded", res.Market.RedClusterNames)
+			}
+			if res.Market.RankedClusters != 5 || res.Market.UnrankedClusters != 1 {
+				t.Fatalf("cluster coverage = ranked %d unranked %d, want 5/1", res.Market.RankedClusters, res.Market.UnrankedClusters)
+			}
+			if !slices.Contains(res.Market.AmbiguousClusters, "gamma") {
+				t.Fatalf("ambiguous clusters = %+v, want gamma ambiguous", res.Market.AmbiguousClusters)
+			}
+			if !slices.Contains(res.Market.DegradedClusters, "gamma") {
+				t.Fatalf("degraded clusters = %+v, want gamma degraded", res.Market.DegradedClusters)
+			}
+			if hasSignal(res.Signals, risk.SignalGammaRed) {
+				t.Fatalf("signals include gamma_red despite non-rankable gamma: %+v", res.Signals)
+			}
+		})
+	}
+}
+
 func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -728,6 +774,7 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
 	r.GammaZero.Band = "red"
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality: rankableCanaryGammaQuality(),
 		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
 	}
 	res := ComputeCanary(CanaryInput{
@@ -755,6 +802,7 @@ func TestComputeCanaryDetectsWarningOnlyDegradedGamma(t *testing.T) {
 	r.HYGSPYDivergence.Band = "red"
 	r.GammaZero.Band = "red"
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality:        rankableCanaryGammaQuality(),
 		WarningDetails: []rpc.GammaWarningDetail{{Code: "oi_missing", Severity: "data_quality"}},
 	}
 	res := ComputeCanary(CanaryInput{
@@ -783,6 +831,7 @@ func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T)
 	r.VIXTermStructure.Status = rpc.RegimeStatusStale
 	r.GammaZero.Band = "red"
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality: rankableCanaryGammaQuality(),
 		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
 	}
 	res := ComputeCanary(CanaryInput{
@@ -1069,12 +1118,22 @@ func healthyCanaryRegime() rpc.RegimeSnapshotResult {
 		GammaZero: rpc.RegimeGammaZero{
 			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{Band: "green"},
 			Status:              rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+				Result: &rpc.GammaZeroComputed{
+					Quality: rankableCanaryGammaQuality(),
+				},
+			},
 		},
 		Breadth: rpc.RegimeBreadth{
 			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{Band: "green"},
 			Status:              rpc.RegimeStatusOK,
 		},
 	}
+}
+
+func rankableCanaryGammaQuality() *rpc.GammaSignalQuality {
+	return &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable}
 }
 
 func redVolCreditRegimeWithComputingSlowRows() rpc.RegimeSnapshotResult {

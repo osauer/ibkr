@@ -86,6 +86,10 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 	}
 }
 
+func rankableRegimeGammaQuality() *rpc.GammaSignalQuality {
+	return &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable}
+}
+
 // TestRenderRegime_CompositeVerdictAndCount pins the headline: bold
 // verdict line per the spec's interpretation table, dim count summary
 // naming ranked and unranked separately. The fixture has 2 green + 1
@@ -734,7 +738,7 @@ func TestRenderRegime_GammaModelledAnnotation(t *testing.T) {
 		Status: rpc.RegimeStatusOK,
 		Envelope: rpc.GammaZeroSPXResult{
 			Status: rpc.GammaZeroStatusReady,
-			Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1"},
+			Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1", Quality: rankableRegimeGammaQuality()},
 		},
 		ZeroGammaQuality: &rpc.Quality{
 			AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
@@ -770,7 +774,7 @@ func TestRenderRegime_ExplainIncludesQualityBlocks(t *testing.T) {
 	fix.GammaZero.Status = rpc.RegimeStatusOK
 	fix.GammaZero.Envelope = rpc.GammaZeroSPXResult{
 		Status: rpc.GammaZeroStatusReady,
-		Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1"},
+		Result: &rpc.GammaZeroComputed{ZeroGamma: &flip, GapPct: &gap, Method: "perfiliev-bs-sweep-v1", Quality: rankableRegimeGammaQuality()},
 	}
 	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
 		AsOf: now, FreshnessClass: rpc.FreshnessModelled, Confidence: rpc.ConfidenceProxy,
@@ -831,6 +835,7 @@ func TestRegimeRow_GammaPositiveSignBandsGreen(t *testing.T) {
 				SpotUnderlying: 737.0,
 				GammaSign:      "positive",
 				GammaTotalAbs:  2.7e9,
+				Quality:        rankableRegimeGammaQuality(),
 				// ZeroGamma / GapPct both nil — no crossing in window
 			},
 		},
@@ -859,6 +864,7 @@ func TestRegimeRow_GammaNegativeSignBandsRed(t *testing.T) {
 				SpotUnderlying: 737.0,
 				GammaSign:      "negative",
 				GammaTotalAbs:  3.1e9,
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
@@ -883,11 +889,46 @@ func TestRegimeRow_GammaNoDataStaysUnranked(t *testing.T) {
 			Result: &rpc.GammaZeroComputed{
 				SpotUnderlying: 737.0,
 				GammaSign:      "no_data",
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
 	if row.band != bandUnranked {
 		t.Errorf("no_data sign should stay unranked, got %v", row.band)
+	}
+}
+
+func TestRegimeRow_GammaRequiresExplicitRankableQuality(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		quality *rpc.GammaSignalQuality
+	}{
+		{name: "nil_quality"},
+		{name: "blocked_quality", quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityBlocked, RankabilityReason: "OI coverage blocked"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := rowGamma(now, rpc.RegimeGammaZero{
+				Status: rpc.RegimeStatusOK,
+				Envelope: rpc.GammaZeroSPXResult{
+					Status: rpc.GammaZeroStatusReady,
+					Result: &rpc.GammaZeroComputed{
+						SpotUnderlying: 737.0,
+						GammaSign:      "negative",
+						GammaTotalAbs:  3.1e9,
+						Quality:        tc.quality,
+					},
+				},
+			})
+			if row.band != bandUnranked {
+				t.Fatalf("row band = %v, want unranked", row.band)
+			}
+			if !strings.Contains(row.value, "short-γ") {
+				t.Fatalf("row should still display gamma as context, value=%q", row.value)
+			}
+		})
 	}
 }
 
@@ -908,6 +949,7 @@ func TestRegimeRow_GammaUsesGammaZeroLabel(t *testing.T) {
 				SpotUnderlying: 737.0,
 				ZeroGamma:      &zg,
 				GapPct:         &gap,
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
@@ -1000,6 +1042,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 			PricedLegCount: 900,
 			DerivedIVLegs:  240,
 			Method:         "perfiliev-bs-sweep-v1",
+			Quality:        rankableRegimeGammaQuality(),
 		},
 	}
 	fix.GammaZero.ZeroGammaQuality = &rpc.Quality{
@@ -1032,9 +1075,10 @@ func TestRenderRegime_ExplainSurfacesGammaSPXCacheFallback(t *testing.T) {
 			Scope:           rpc.GammaZeroScopeCombined,
 			GammaTotalAbs:   3.0e9,
 			RegimeAgreement: "disagree",
+			Quality:         rankableRegimeGammaQuality(),
 			PerIndex: map[string]*rpc.GammaZeroComputed{
-				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive", GammaTotalAbs: 1.0e9},
-				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", GammaTotalAbs: 2.0e9},
+				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive", GammaTotalAbs: 1.0e9, Quality: rankableRegimeGammaQuality()},
+				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", GammaTotalAbs: 2.0e9, Quality: rankableRegimeGammaQuality()},
 			},
 			WarningDetails: []rpc.GammaWarningDetail{{
 				Code:    "spx_cache_fallback:context canceled",
@@ -1185,6 +1229,7 @@ func TestRowGamma_UsesScopeAwareLabel(t *testing.T) {
 				SpotUnderlying: 737.0,
 				GammaSign:      "positive",
 				GammaTotalAbs:  2.7e9,
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
@@ -1210,6 +1255,7 @@ func TestRowGamma_OmitsMagnitudeWhenZero(t *testing.T) {
 				SpotUnderlying: 737.0,
 				GammaSign:      "positive",
 				GammaTotalAbs:  0, // explicit zero
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
@@ -1235,6 +1281,7 @@ func TestRowGamma_KeepsMagnitudeWhenNonZero(t *testing.T) {
 				SpotUnderlying: 737.0,
 				GammaSign:      "positive",
 				GammaTotalAbs:  2.7e9,
+				Quality:        rankableRegimeGammaQuality(),
 			},
 		},
 	})
@@ -1268,6 +1315,7 @@ func TestRowGamma_ShortReason(t *testing.T) {
 					SpotUnderlying: 737.0,
 					GammaSign:      tc.sign,
 					GammaTotalAbs:  2.7e9,
+					Quality:        rankableRegimeGammaQuality(),
 				},
 			},
 		})
@@ -1295,9 +1343,10 @@ func TestRegimeRow_GammaCombinedUsesPerIndexSummary(t *testing.T) {
 				Scope:           rpc.GammaZeroScopeCombined,
 				GammaTotalAbs:   1.8e9,
 				RegimeAgreement: "agree:long-gamma",
+				Quality:         rankableRegimeGammaQuality(),
 				PerIndex: map[string]*rpc.GammaZeroComputed{
-					"SPY": {Scope: rpc.GammaZeroScopeSPY, SpotUnderlying: 743.73, GammaSign: "positive"},
-					"SPX": {Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5430.0, GammaSign: "positive"},
+					"SPY": {Scope: rpc.GammaZeroScopeSPY, SpotUnderlying: 743.73, GammaSign: "positive", Quality: rankableRegimeGammaQuality()},
+					"SPX": {Scope: rpc.GammaZeroScopeSPX, SpotUnderlying: 5430.0, GammaSign: "positive", Quality: rankableRegimeGammaQuality()},
 				},
 			},
 		},
@@ -1327,9 +1376,10 @@ func TestRegimeRow_GammaCombinedDisagreementEscalatesDominantRed(t *testing.T) {
 				Scope:           rpc.GammaZeroScopeCombined,
 				GammaTotalAbs:   1.8e9,
 				RegimeAgreement: "disagree",
+				Quality:         rankableRegimeGammaQuality(),
 				PerIndex: map[string]*rpc.GammaZeroComputed{
-					"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive"},
-					"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative"},
+					"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "positive", Quality: rankableRegimeGammaQuality()},
+					"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", Quality: rankableRegimeGammaQuality()},
 				},
 			},
 		},
@@ -1360,6 +1410,7 @@ func TestRegimeRow_GammaSingleScopeKeepsSpotPrefix(t *testing.T) {
 					SpotUnderlying: 5430.0,
 					GammaSign:      "positive",
 					GammaTotalAbs:  4.2e9,
+					Quality:        rankableRegimeGammaQuality(),
 				},
 			},
 		})

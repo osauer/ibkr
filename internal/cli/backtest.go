@@ -1064,7 +1064,7 @@ func rawRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
 }
 
 func rankableGammaSnapshotBand(g rpc.RegimeGammaZero) string {
-	if g.Envelope.Result != nil && g.Envelope.Result.Quality != nil &&
+	if g.Envelope.Result == nil || g.Envelope.Result.Quality == nil ||
 		g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
 		return ""
 	}

@@ -45,7 +45,7 @@ import (
 //
 // Soft-TTL refresh-while-stale: when a kickOrJoin caller hits a
 // cached successful result that's either older than the current
-// session class's softTTL (60 min RTH, 30 min pre/post, ∞ closed)
+// session class's softTTL (15 min RTH, 30 min pre/post, ∞ closed)
 // OR was computed in a different active session class than now,
 // the cache serves the stale value immediately AND kicks a refresh
 // in the background. The refresh is stored in the slot's `refresh`
@@ -98,6 +98,7 @@ type gammaSlot struct {
 	lastErr        error
 	lastErrAt      time.Time
 	lastErrSummary string // shortened single-line summary for rendering
+	lastErrResult  *rpc.GammaZeroComputed
 }
 
 // getOrCreateSlotLocked returns the slot for scope, creating an empty
@@ -174,9 +175,9 @@ const gammaErrorRetryTTL = 60 * time.Second
 // caller picks up the new result.
 //
 // Per-class values:
-//   - softTTLRTH (60 min): RTH dealer positioning shifts on the order
-//     of hours; once per hour balances freshness against IBKR slot
-//     pressure during peak load.
+//   - softTTLRTH (15 min): active-session dealer gamma should be refreshed
+//     often enough for regime/canary reads to see intraday positioning changes
+//     without overlapping the several-minute option fan-out.
 //   - softTTLPrePost (30 min): pre / post-market sees thinner flow
 //     but real price moves around news and overnight events. Refresh
 //     more often than RTH so users querying around the open/close
@@ -196,7 +197,7 @@ const gammaErrorRetryTTL = 60 * time.Second
 // FAILED compute on the next call; soft-TTL rolls a SUCCESSFUL
 // compute forward while still serving the prior value.
 const (
-	softTTLRTH     = 60 * time.Minute
+	softTTLRTH     = 15 * time.Minute
 	softTTLPrePost = 30 * time.Minute
 	softTTLClosed  = time.Duration(math.MaxInt64)
 )
@@ -342,8 +343,12 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 // to a different session class than the current one (e.g. a
 // persisted pre-market value reloaded at 10:00 ET).
 func newPersistedComputation(r *rpc.GammaZeroComputed, scope string, now time.Time) *gammaComputation {
+	sessionKey := nySessionKey(now)
+	if r != nil && !r.AsOf.IsZero() {
+		sessionKey = nySessionKey(r.AsOf)
+	}
 	job := &gammaComputation{
-		sessionKey: nySessionKey(now),
+		sessionKey: sessionKey,
 		scope:      scope,
 		startedAt:  r.AsOf,
 		done:       make(chan struct{}),
@@ -468,9 +473,7 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		if slot.refresh.err == nil && slot.refresh.sessionKey == key {
 			slot.current = slot.refresh
 		} else if slot.refresh.err != nil {
-			slot.lastErr = slot.refresh.err
-			slot.lastErrAt = slot.refresh.startedAt
-			slot.lastErrSummary = summarizeGammaErr(slot.refresh.err)
+			slot.rememberError(slot.refresh)
 		}
 		slot.refresh = nil
 	}
@@ -520,9 +523,7 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 			// Retain the failure context so the next render of the
 			// "computing" row can surface "retry of <error> at HH:MM:SS"
 			// instead of silently switching to a clean Computing state.
-			slot.lastErr = slot.current.err
-			slot.lastErrAt = slot.current.startedAt
-			slot.lastErrSummary = summarizeGammaErr(slot.current.err)
+			slot.rememberError(slot.current)
 			job = c.startLocked(parent, scope, key, now, etaSeconds, compute)
 			return job, true
 		}
@@ -540,7 +541,7 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		//     RTH TTL — users expect fresh data at the open.
 		//
 		//  2. Age refresh: absolute age exceeds the per-class
-		//     softTTL — 60 min in RTH, 30 min in pre/post.
+		//     softTTL — 15 min in RTH, 30 min in pre/post.
 		//
 		// Both triggers are skipped when the current class is
 		// SessionClosed: no price input, no point refreshing. softTTL
@@ -623,9 +624,7 @@ func (c *gammaZeroCache) promoteRefreshOnDone(scope, key string, job *gammaCompu
 		if job.err == nil && job.result != nil && job.sessionKey == key {
 			slot.current = job
 		} else if job.err != nil {
-			slot.lastErr = job.err
-			slot.lastErrAt = job.startedAt
-			slot.lastErrSummary = summarizeGammaErr(job.err)
+			slot.rememberError(job)
 		}
 		slot.refresh = nil
 	}()
@@ -669,6 +668,7 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 		res, err := compute(bgCtx, &job.progress)
 		if err != nil {
 			job.err = err
+			job.result = hydrateGammaDiagnosticResult(res, time.Now())
 			gammaLogf{inner: c.log}.Warnf("gamma compute: scope=%s failed: %v", scope, err)
 			return
 		}
@@ -796,6 +796,7 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 		if g.err != nil {
 			env.Status = rpc.GammaZeroStatusError
 			env.Error = g.err.Error()
+			env.DiagnosticResult = hydrateGammaDiagnosticResult(g.result, nowFn())
 			return env
 		}
 		env.Status = rpc.GammaZeroStatusReady
@@ -824,6 +825,7 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 			if slot.lastErrAt.IsZero() || !slot.lastErrAt.After(g.startedAt) {
 				slot.lastErr = nil
 				slot.lastErrSummary = ""
+				slot.lastErrResult = nil
 			}
 		}
 		c.mu.Unlock()
@@ -844,6 +846,7 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 		retryAt := slot.lastErrAt
 		env.RetryOfErrorAt = &retryAt
 		env.RetryOfErrorSummary = slot.lastErrSummary
+		env.DiagnosticResult = hydrateGammaDiagnosticResult(slot.lastErrResult, nowFn())
 	}
 	c.mu.Unlock()
 	return env
@@ -856,12 +859,34 @@ func (c *gammaZeroCache) finalizeReadyGammaSnapshot(scope string, env rpc.GammaZ
 	result := cloneGammaComputed(env.Result)
 	if warning := c.refreshFailureWarning(scope, result); warning != "" {
 		result.Warnings = dedupeStrings(append(result.Warnings, warning))
+		env.DiagnosticResult = c.refreshFailureDiagnostic(scope, result, now)
 	}
 	hydrateGammaComputed(result)
 	annotateGammaQuality(result, now)
 	refreshGammaSummaries(result)
 	env.Result = result
 	return env
+}
+
+func (s *gammaSlot) rememberError(job *gammaComputation) {
+	if s == nil || job == nil || job.err == nil {
+		return
+	}
+	s.lastErr = job.err
+	s.lastErrAt = job.startedAt
+	s.lastErrSummary = summarizeGammaErr(job.err)
+	s.lastErrResult = cloneGammaComputed(job.result)
+}
+
+func hydrateGammaDiagnosticResult(result *rpc.GammaZeroComputed, now time.Time) *rpc.GammaZeroComputed {
+	if result == nil {
+		return nil
+	}
+	out := cloneGammaComputed(result)
+	hydrateGammaComputed(out)
+	annotateGammaQuality(out, now)
+	refreshGammaSummaries(out)
+	return out
 }
 
 func (c *gammaZeroCache) refreshFailureWarning(scope string, result *rpc.GammaZeroComputed) string {
@@ -884,15 +909,29 @@ func (c *gammaZeroCache) refreshFailureWarning(scope string, result *rpc.GammaZe
 	return "refresh_failed:" + strings.ReplaceAll(summary, " ", "_")
 }
 
+func (c *gammaZeroCache) refreshFailureDiagnostic(scope string, result *rpc.GammaZeroComputed, now time.Time) *rpc.GammaZeroComputed {
+	c.mu.Lock()
+	slot := c.slots[scope]
+	var diag *rpc.GammaZeroComputed
+	if slot != nil && slot.lastErr != nil && !slot.lastErrAt.IsZero() &&
+		(result == nil || result.AsOf.IsZero() || slot.lastErrAt.After(result.AsOf)) {
+		diag = cloneGammaComputed(slot.lastErrResult)
+	}
+	c.mu.Unlock()
+	return hydrateGammaDiagnosticResult(diag, now)
+}
+
 func (c *gammaZeroCache) withLatestSingleScopeSlices(scope string, env rpc.GammaZeroSPXResult, now time.Time) rpc.GammaZeroSPXResult {
 	if scope != rpc.GammaZeroScopeCombined || env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
 		return env
 	}
-
 	origSPY := gammaSliceForLabel(env.Result, "SPY")
 	origSPX := gammaSliceForLabel(env.Result, "SPX")
 	spy := newestGammaSlice(origSPY, c.readySingleScopeSlice(rpc.GammaZeroScopeSPY, now))
 	spx := newestGammaSlice(origSPX, c.readySingleScopeSlice(rpc.GammaZeroScopeSPX, now))
+	if gammaIndexUnavailable(env.Result, "SPY") && (spy == nil || !spy.AsOf.After(env.Result.AsOf)) {
+		return env
+	}
 	if spy == nil || spx == nil {
 		return env
 	}
@@ -913,6 +952,24 @@ func (c *gammaZeroCache) withLatestSingleScopeSlices(scope string, env rpc.Gamma
 	return env
 }
 
+func gammaIndexUnavailable(c *rpc.GammaZeroComputed, label string) bool {
+	if c == nil {
+		return false
+	}
+	prefix := strings.ToLower(label) + "_unavailable:"
+	for _, code := range c.Warnings {
+		if strings.HasPrefix(code, prefix) {
+			return true
+		}
+	}
+	for _, d := range c.WarningDetails {
+		if strings.HasPrefix(d.Code, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *gammaZeroCache) readySingleScopeSlice(scope string, now time.Time) *rpc.GammaZeroComputed {
 	if scope != rpc.GammaZeroScopeSPY && scope != rpc.GammaZeroScopeSPX {
 		return nil
@@ -930,7 +987,25 @@ func (c *gammaZeroCache) readySingleScopeSlice(scope string, now time.Time) *rpc
 	if job.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
 		return nil
 	}
+	if !gammaSliceEligibleForCombined(job.result, now) {
+		return nil
+	}
 	return job.result
+}
+
+func gammaSliceEligibleForCombined(c *rpc.GammaZeroComputed, now time.Time) bool {
+	if c == nil {
+		return false
+	}
+	if rpc.ClassifySession(now) != rpc.SessionClosed {
+		if c.AsOf.IsZero() || nySessionKey(c.AsOf) != nySessionKey(now) {
+			return false
+		}
+	}
+	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return false
+	}
+	return true
 }
 
 func gammaSliceForLabel(c *rpc.GammaZeroComputed, label string) *rpc.GammaZeroComputed {

@@ -135,6 +135,11 @@ type Server struct {
 	// RPC ctx so a client disconnect mid-compute doesn't kill the
 	// run that other pollers are waiting on.
 	zeroGamma *gammaZeroCache
+	// gammaOI persists per-contract option open interest observed by the gamma
+	// collector. Missing OI refreshes never write through this store; only live
+	// tick-101 observations update it, so pre-market/RTH recalcs can carry a
+	// known OI state without zero-substituting unknowns.
+	gammaOI *gammaOpenInterestStore
 	// gammaStarted guards the boot-time prewarm so it only fires once
 	// per Server lifetime. postConnectSetup runs once per successful
 	// candidate (including post-reconnect), so without this Once a
@@ -143,6 +148,11 @@ type Server struct {
 	// pressure for no benefit (the soft-TTL refresh in kickOrJoin
 	// already keeps the cache from going stale).
 	gammaStarted sync.Once
+	// gammaRefreshStarted guards the active-session refresh loop. The loop
+	// wakes at a short cadence but delegates actual compute decisions to the
+	// gamma cache's session-aware soft TTL, so it does not duplicate in-flight
+	// forced/user computations.
+	gammaRefreshStarted sync.Once
 
 	// breadth runs the SPX 50-DMA breadth compute. The engine owns
 	// a persisted constituent-close cache, a once-daily scheduler
@@ -329,6 +339,7 @@ func (s *Server) installGammaZeroCache() {
 		return
 	}
 	s.zeroGamma = newGammaZeroCacheWithStore(newGammaZeroStore(dir), time.Now(), s.logger)
+	s.gammaOI = newGammaOpenInterestStore(dir)
 }
 
 // installStreakStore constructs the regime-streak persistence layer.
@@ -1292,6 +1303,9 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 		s.gammaStarted.Do(func() {
 			s.prewarmZeroGamma(s.serverCtx)
 		})
+		s.gammaRefreshStarted.Do(func() {
+			go s.runGammaRefreshLoop(s.serverCtx)
+		})
 	}
 
 	// Latch the postConnectSetup-done barrier. handleStatusHealth gates
@@ -1323,12 +1337,33 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 // race against immediate disconnect shouldn't crash startup. The
 // next user-triggered kickOrJoin will kick the compute instead.
 func (s *Server) prewarmZeroGamma(ctx context.Context) {
+	s.kickZeroGamma(ctx, "startup")
+}
+
+const gammaRefreshPollInterval = time.Minute
+
+func (s *Server) runGammaRefreshLoop(ctx context.Context) {
+	ticker := time.NewTicker(gammaRefreshPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if rpc.ClassifySession(time.Now()) == rpc.SessionClosed {
+			continue
+		}
+		s.kickZeroGamma(ctx, "scheduler")
+	}
+}
+
+func (s *Server) kickZeroGamma(ctx context.Context, caller string) {
 	c := s.gatewayConnector()
 	if c == nil {
-		s.logger.Warnf("gamma prewarm: gateway connector unavailable, skipping initial compute")
+		s.logger.Warnf("gamma %s: gateway connector unavailable, skipping compute", caller)
 		return
 	}
-	s.logger.Infof("gamma prewarm: kicking initial compute (caller=startup, scope=combined)")
 	params := normalizeGammaParams(rpc.GammaZeroParams{})
 	// Startup prewarm builds the canonical combined cache so the first
 	// user-driven `ibkr gamma` (default scope) hits ready instead of
@@ -1341,7 +1376,9 @@ func (s *Server) prewarmZeroGamma(ctx context.Context) {
 	compute := func(bgCtx context.Context, prog *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		return computeGammaCombined(bgCtx, s, c, params, prog)
 	}
-	s.zeroGamma.kickOrJoin(ctx, rpc.GammaZeroScopeCombined, time.Now(), computeETA, compute)
+	if _, fresh := s.zeroGamma.kickOrJoin(ctx, rpc.GammaZeroScopeCombined, time.Now(), computeETA, compute); fresh {
+		s.logger.Infof("gamma %s: kicked compute (scope=combined)", caller)
+	}
 }
 
 // regimeSymbolSeed is the static fallback used by prewarmRegimeSymbols

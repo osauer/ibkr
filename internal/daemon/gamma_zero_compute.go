@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -107,9 +108,9 @@ const (
 	// worker unsubscribes an option leg. IV/model ticks can arrive before
 	// the one-shot OI tick (27/28); reading OI immediately after IV lands
 	// turns a healthy subscription into a zero-OI leg. Keep this non-
-	// gating and short so missing OI remains a data-quality warning, not
-	// a new fan-out bottleneck.
-	optionOpenInterestGrace = 250 * time.Millisecond
+	// gating and bounded so missing OI remains a data-quality warning,
+	// not a new fan-out bottleneck.
+	optionOpenInterestGrace = 750 * time.Millisecond
 
 	// gammaMethodToken is the stable wire token consumers (renderers,
 	// cache method-mismatch gate) compare against to confirm the
@@ -210,10 +211,21 @@ type legData struct {
 	iv           float64
 	oi           int64
 	oiObserved   bool
+	oiLive       bool
+	oiCarried    bool
+	oiObservedAt time.Time
 	// gamma is the gateway-supplied model-computation gamma at the
 	// snapshot spot; used for the at-spot aggregate. The sweep
 	// recomputes gamma via Black-Scholes for each scenario spot.
 	gammaAtSnapshot float64
+}
+
+type gammaLegSpec struct {
+	expiryYMD    string
+	expiryDate   string
+	strike       float64
+	right        string
+	tradingClass string
 }
 
 // legResult is the per-leg payload returned by a legFetcher. Bundled as
@@ -248,7 +260,21 @@ type legResult struct {
 	IVDerived  bool
 	OK         bool
 	Throttle   bool
+	Failure    string
 }
+
+const (
+	gammaLegFailureContractMissing      = "contract_missing"
+	gammaLegFailureTimeout              = "timeout"
+	gammaLegFailurePacing               = "pacing"
+	gammaLegFailureFarm                 = "farm"
+	gammaLegFailureEntitlement          = "entitlement"
+	gammaLegFailureSubscriptionRejected = "subscription_reject"
+	gammaOISourceLiveObserved           = "live_observed"
+	gammaOISourceCarriedForward         = "carried_forward"
+	gammaOISourceMissing                = "missing"
+	gammaOISourceMixed                  = "mixed"
+)
 
 // gammaLogger is the minimal logging surface computeGammaZeroFor uses to
 // emit kickoff / progress / abort lines. Defined as an interface so tests
@@ -357,9 +383,9 @@ func productionLegFetcher(
 		//     contract details": the gateway didn't respond within the
 		//     5 s budget. This IS the canonical throttle signal —
 		//     reqContractDetails is queueing.
-		msg := err.Error()
-		throttle := !strings.Contains(msg, "contract details unavailable")
-		return legResult{Throttle: throttle}
+		failure := classifyGammaLegFailure(err)
+		throttle := failure != gammaLegFailureContractMissing && failure != gammaLegFailureEntitlement
+		return legResult{Throttle: throttle, Failure: failure}
 	}
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
@@ -395,7 +421,7 @@ func productionLegFetcher(
 		// session", …). The subscription will never produce ticks.
 		// Throttle: false — gateway is being authoritative, not a sign
 		// the fan-out is overloading the wire.
-		return legResult{}
+		return legResult{Failure: classifyGammaLegFailure(err)}
 	}
 
 	if iv > 0 {
@@ -412,7 +438,6 @@ func productionLegFetcher(
 	}
 	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
-	oi, oiObserved := optionOpenInterest(c, key)
 	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
 	var price float64
 	if hasQuote && bid > 0 && ask > 0 {
@@ -420,7 +445,59 @@ func productionLegFetcher(
 	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
 		price = px
 	}
-	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, oiObserved, price)
+	oi, oiObserved := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() (int64, bool) {
+		return optionOpenInterest(c, key)
+	})
+	fallback := bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, oiObserved, price)
+	if !fallback.OK {
+		fallback.Failure = gammaLegFailureTimeout
+	}
+	return fallback
+}
+
+func classifyGammaLegFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	var rej *SubscriptionRejectedError
+	if errors.As(err, &rej) {
+		return classifyGammaRejectionCode(rej.Rejection.Code, rej.Rejection.Message)
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "contract details unavailable"), strings.Contains(msg, "no security definition"):
+		return gammaLegFailureContractMissing
+	case strings.Contains(msg, "354"), strings.Contains(msg, "entitlement"), strings.Contains(msg, "not subscribed"):
+		return gammaLegFailureEntitlement
+	case strings.Contains(msg, "pacing"), strings.Contains(msg, "rate"):
+		return gammaLegFailurePacing
+	case strings.Contains(msg, "farm"):
+		return gammaLegFailureFarm
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"):
+		return gammaLegFailureTimeout
+	default:
+		return gammaLegFailureSubscriptionRejected
+	}
+}
+
+func classifyGammaRejectionCode(code int, message string) string {
+	msg := strings.ToLower(message)
+	switch code {
+	case 200, 320, 321, 322:
+		return gammaLegFailureContractMissing
+	case 354, 10197:
+		return gammaLegFailureEntitlement
+	}
+	switch {
+	case strings.Contains(msg, "pacing"), strings.Contains(msg, "rate"):
+		return gammaLegFailurePacing
+	case strings.Contains(msg, "farm"):
+		return gammaLegFailureFarm
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"):
+		return gammaLegFailureTimeout
+	default:
+		return gammaLegFailureSubscriptionRejected
+	}
 }
 
 func optionOpenInterest(c *ibkrlib.Connector, key string) (int64, bool) {
@@ -557,6 +634,7 @@ func computeGammaZeroFor(
 	now func() time.Time,
 	progress *atomic.Int32,
 	logger gammaLogger,
+	oiStore *gammaOpenInterestStore,
 ) (*rpc.GammaZeroComputed, error) {
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
@@ -574,6 +652,11 @@ func computeGammaZeroFor(
 	log := gammaLogf{inner: logger}
 	params = normalizeGammaParams(params)
 	startWall := now()
+	oiState, oiStateErr := loadGammaOIStateForCompute(oiStore)
+	if oiStateErr != nil {
+		log.Warnf("gamma.oi_store.load err=%v", oiStateErr)
+	}
+	liveOIUpdates := map[string]gammaOIRecord{}
 	log.Infof("gamma.kickoff underlying=%s workers=%d expiry_count=%d strike_width_pct=%.2f sweep_range_pct=%.2f",
 		sym, params.WorkerCount, params.ExpiryCount, params.StrikeWidthPct, params.SweepRangePct)
 
@@ -627,24 +710,22 @@ func computeGammaZeroFor(
 	// background. With the empirical 5 % throttle threshold, this also
 	// avoids a worst-case where the first 50 attempts are all far-OTM
 	// failures and the compute aborts before ever reaching ATM.
-	type legSpec struct {
-		expiryYMD    string
-		strike       float64
-		right        string
-		tradingClass string // SPY for single-class; "SPX" / "SPXW" on the SPX classed path
-	}
-	var jobs []legSpec
+	var jobs []gammaLegSpec
+	collection := newGammaCollectionDiagnostics(sym, picked)
 	strikeBudgetCapped := false
 	for _, p := range picked {
 		strikes := filterStrikesAroundSpot(p.strikes, spot, params.StrikeWidthPct)
 		ordered := sortStrikesATMOutward(strikes, spot)
+		strikeCapped := false
 		if capped, ok := capStrikesATMOutward(ordered, maxGammaStrikesPerExpiry); ok {
 			ordered = capped
 			strikeBudgetCapped = true
+			strikeCapped = true
 		}
+		collection.noteStrikeSelection(p, len(strikes), len(ordered), strikeCapped, maxGammaStrikesPerExpiry)
 		for _, k := range ordered {
-			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "C", tradingClass: p.tradingClass})
-			jobs = append(jobs, legSpec{expiryYMD: p.expiryYMD, strike: k, right: "P", tradingClass: p.tradingClass})
+			jobs = append(jobs, gammaLegSpec{expiryYMD: p.expiryYMD, expiryDate: p.date, strike: k, right: "C", tradingClass: p.tradingClass})
+			jobs = append(jobs, gammaLegSpec{expiryYMD: p.expiryYMD, expiryDate: p.date, strike: k, right: "P", tradingClass: p.tradingClass})
 		}
 	}
 	if len(jobs) == 0 {
@@ -678,16 +759,25 @@ func computeGammaZeroFor(
 	}
 	prewarmStart := now()
 	prewarmTotal := 0
+	prewarmComplete := make(map[string]bool, len(picked))
 	for class, ymds := range expsByClass {
 		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
 		for _, r := range prewarmResults {
+			key := gammaPrewarmKey(class, r.Expiry)
+			prewarmComplete[key] = r.Err == nil && r.Dropped == 0
+			collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
 			if r.Err != nil {
-				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d elapsed=%s err=%v",
-					class, r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond), r.Err)
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
 				continue
 			}
-			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d elapsed=%s",
-				class, r.Expiry, r.Cached, r.Elapsed.Round(time.Millisecond))
+			if r.Dropped > 0 {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+				continue
+			}
+			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
+				class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
 			prewarmTotal += r.Cached
 		}
 	}
@@ -709,15 +799,25 @@ func computeGammaZeroFor(
 	// no contract exists for it on this expiry. Skip those jobs.
 	beforeFilter := len(jobs)
 	filteredJobs := jobs[:0]
+	incompletePrewarmKept := 0
 	for _, j := range jobs {
+		if !prewarmComplete[gammaPrewarmKey(j.tradingClass, j.expiryYMD)] {
+			filteredJobs = append(filteredJobs, j)
+			collection.noteRequested(j)
+			incompletePrewarmKept++
+			continue
+		}
 		if c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right) {
 			filteredJobs = append(filteredJobs, j)
+			collection.noteRequested(j)
+		} else {
+			collection.noteFailure(j, gammaLegFailureContractMissing)
 		}
 	}
 	jobs = filteredJobs
 	if len(jobs) < beforeFilter {
-		log.Infof("gamma.filter dropped=%d from=%d to=%d (strikes not in prewarm cache)",
-			beforeFilter-len(jobs), beforeFilter, len(jobs))
+		log.Infof("gamma.filter dropped=%d kept_incomplete_prewarm=%d from=%d to=%d (strikes not in complete prewarm cache)",
+			beforeFilter-len(jobs), incompletePrewarmKept, beforeFilter, len(jobs))
 	}
 	if len(jobs) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no cached option contracts after prewarm (prewarm landed %d total)",
@@ -768,7 +868,7 @@ func computeGammaZeroFor(
 	})
 	defer abortTimer.Stop()
 
-	runBounded(jobs, params.WorkerCount, func(j legSpec) {
+	runBounded(jobs, params.WorkerCount, func(j gammaLegSpec) {
 		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
 			return
 		}
@@ -787,6 +887,7 @@ func computeGammaZeroFor(
 			progress.Store(10 + int32(75*float64(d)/float64(total)))
 		}
 		if !r.OK {
+			collection.noteFailure(j, r.Failure)
 			return
 		}
 		dte := dteYears(j.expiryYMD, j.tradingClass, spotAt)
@@ -794,11 +895,21 @@ func computeGammaZeroFor(
 			// Belt-and-suspenders: skip legs whose DTE/IV degenerate
 			// after fetch (in flight expiry rollover, or a partial OI
 			// tick that snuck past the fetcher's gate).
+			collection.noteFailure(j, gammaLegFailureTimeout)
 			return
 		}
 		if r.IVDerived {
 			derivedIVs.Add(1)
 		}
+		oi, oiObserved, oiLive, oiCarried, oiObservedAt := gammaOIForLegResult(
+			sym, j.tradingClass, j.expiryYMD, j.strike, j.right, r, oiState, spotAt)
+		if oiLive {
+			key := gammaOIKey(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
+			mu.Lock()
+			liveOIUpdates[key] = gammaOIRecordForLeg(sym, j.tradingClass, j.expiryYMD, j.strike, j.right, oi, oiObservedAt)
+			mu.Unlock()
+		}
+		collection.notePriced(j, oi, oiObserved, oiLive, oiCarried, oiObservedAt)
 		mu.Lock()
 		legs = append(legs, legData{
 			expiryYMD:       j.expiryYMD,
@@ -808,8 +919,11 @@ func computeGammaZeroFor(
 			tradingClass:    j.tradingClass,
 			isCall:          j.right == "C",
 			iv:              r.IV,
-			oi:              r.OI,
-			oiObserved:      r.OIObserved,
+			oi:              oi,
+			oiObserved:      oiObserved,
+			oiLive:          oiLive,
+			oiCarried:       oiCarried,
+			oiObservedAt:    oiObservedAt,
 			gammaAtSnapshot: r.Gamma,
 		})
 		mu.Unlock()
@@ -888,12 +1002,23 @@ func computeGammaZeroFor(
 	legDiagnostics := buildGammaLegDiagnostics(sym, legs, spot)
 	gexLegs, gammaTotalAbs := prepareGEXLegs(legs, spot)
 	if len(gexLegs) == 0 {
-		return nil, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma (%s)",
+		diagnostic := gammaSourceFailureDiagnostic(
+			sym, spot, spotAt, picked, legs, derivedIVs.Load(), legDiagnostics, collection.finish(time.Since(startWall)),
+			params, startWall, now(),
+		)
+		return diagnostic, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma (%s)",
 			len(legs), formatGammaLegDiagnostics(legDiagnostics))
 	}
 
 	for _, l := range gexLegs {
+		calendarDTE, calendarOK := gammaCalendarDTE(l.expiryYMD, l.tradingClass, spotAt)
 		switch {
+		case calendarOK && calendarDTE <= 0:
+			zeroDTELegs = append(zeroDTELegs, l)
+		case calendarOK && calendarDTE <= 7:
+			oneToSevenLegs = append(oneToSevenLegs, l)
+		case calendarOK:
+			termLegs = append(termLegs, l)
 		case l.dte < zeroDTECutoffYears:
 			zeroDTELegs = append(zeroDTELegs, l)
 		case l.dte <= nearDTECutoffYears:
@@ -1035,6 +1160,7 @@ func computeGammaZeroFor(
 		PricedLegCount:          len(legs),
 		DerivedIVLegs:           derivedCount,
 		LegDiagnostics:          legDiagnostics,
+		CollectionDiagnostics:   collection.finish(time.Since(startWall)),
 		Warnings:                warnings,
 		Params:                  params,
 		Scope:                   strings.ToLower(sym),
@@ -1055,7 +1181,61 @@ func computeGammaZeroFor(
 	if err := validateGammaComputed(res); err != nil {
 		return nil, err
 	}
+	if len(liveOIUpdates) > 0 && oiStore != nil {
+		// Persist only after the compute is accepted. A rejected low-coverage
+		// or no-GEX refresh must not mutate the carried-forward OI state.
+		if err := oiStore.SaveMerged(liveOIUpdates); err != nil {
+			log.Warnf("gamma.oi_store.save live_updates=%d err=%v", len(liveOIUpdates), err)
+		} else {
+			log.Infof("gamma.oi_store.save live_updates=%d", len(liveOIUpdates))
+		}
+	}
 	return hydrateGammaComputed(res), nil
+}
+
+func gammaSourceFailureDiagnostic(
+	sym string,
+	spot float64,
+	spotAt time.Time,
+	picked []pickedExpiration,
+	legs []legData,
+	derivedIVs int32,
+	legDiagnostics *rpc.GammaLegDiagnostics,
+	collection []rpc.GammaCollectionDiagnostic,
+	params rpc.GammaZeroParams,
+	startWall time.Time,
+	asOf time.Time,
+) *rpc.GammaZeroComputed {
+	warnings := []string{"oi_missing"}
+	if derivedIVs > 0 && int(derivedIVs) == len(legs) {
+		warnings = append(warnings, "all_iv_derived")
+	}
+	out := &rpc.GammaZeroComputed{
+		SpotUnderlying:        spot,
+		SpotAt:                spotAt,
+		GammaSign:             "no_data",
+		GammaSign0DTE:         "no_data",
+		GammaSign1to7:         "no_data",
+		GammaSignTerm:         "no_data",
+		GammaTotalAbs:         0,
+		SweepLowAbs:           spot * (1 - params.SweepRangePct),
+		SweepHighAbs:          spot * (1 + params.SweepRangePct),
+		Expirations:           pickedDatesFromPicked(picked),
+		LegCount:              0,
+		PricedLegCount:        len(legs),
+		DerivedIVLegs:         int(derivedIVs),
+		LegDiagnostics:        legDiagnostics,
+		CollectionDiagnostics: collection,
+		Warnings:              warnings,
+		Params:                params,
+		Scope:                 strings.ToLower(sym),
+		Source:                fmt.Sprintf("computed from IBKR %s option chain", sym),
+		Method:                gammaMethodToken,
+		MethodologyCitations:  gammaMethodologyCitations,
+		AsOf:                  asOf,
+		DurationMS:            asOf.Sub(startWall).Milliseconds(),
+	}
+	return hydrateGammaComputed(out)
 }
 
 // buildSkewCurves groups legs by expiry, fits a quadratic
@@ -1217,17 +1397,24 @@ func isAcceptableDataType(dt string) bool {
 }
 
 // classSettlementInstant returns the NY-time settlement instant for an
-// option of the given trading class on the supplied day. SPX-class
-// monthlies are AM-settled at 09:30 ET (cash-settled against the SET
-// special opening quotation); SPXW weeklies and everything else are
-// PM-settled at 16:00 ET. Empty class is treated as the PM default for
-// back-compat with single-class callers (SPY, equities).
+// option of the given trading class on the supplied chain date. SPX-class
+// standard monthlies are AM-settled at 09:30 ET against the SET special
+// opening quotation, but IBKR/TWS keys those contracts by their Thursday
+// last-trade date; when the supplied date is that Thursday key, settlement
+// rolls to Friday 09:30. SPXW weeklies and everything else are PM-settled
+// at 16:00 ET. Empty class is treated as the PM default for back-compat
+// with single-class callers (SPY, equities).
 //
 // Used by dteYears to compute time-to-expiry under the correct
 // settlement convention, and by selectExpirations to decide whether a
 // same-day listing is already past its cash-settlement window.
 func classSettlementInstant(tradingClass string, year int, month time.Month, day int, loc *time.Location) time.Time {
 	if strings.EqualFold(strings.TrimSpace(tradingClass), "SPX") {
+		sessionDate := time.Date(year, month, day, 0, 0, 0, 0, loc)
+		if isSPXAMMonthlyLastTradeDate(sessionDate.Format("2006-01-02")) {
+			sessionDate = sessionDate.AddDate(0, 0, 1)
+			return time.Date(sessionDate.Year(), sessionDate.Month(), sessionDate.Day(), 9, 30, 0, 0, loc)
+		}
 		return time.Date(year, month, day, 9, 30, 0, 0, loc)
 	}
 	return time.Date(year, month, day, 16, 0, 0, 0, loc)
@@ -1276,10 +1463,13 @@ func selectExpirations(strikes map[string][]float64, tradingClass string, now ti
 	if count <= 0 {
 		return nil
 	}
-	loc, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		loc = time.UTC
-	}
+	nyNow := now.In(newYorkLocation())
+	candidates := selectExpirationCandidates(strikes, tradingClass, now)
+	return pickExpirationSlots(candidates, nyNow, count)
+}
+
+func selectExpirationCandidates(strikes map[string][]float64, tradingClass string, now time.Time) []string {
+	loc := newYorkLocation()
 	nyNow := now.In(loc)
 	today := nyNow.Format("2006-01-02")
 	settlementCutoff := classSettlementInstant(tradingClass, nyNow.Year(), nyNow.Month(), nyNow.Day(), loc).Add(classSettlementBuffer)
@@ -1296,7 +1486,7 @@ func selectExpirations(strikes map[string][]float64, tradingClass string, now ti
 		candidates = append(candidates, date)
 	}
 	sort.Strings(candidates)
-	return pickExpirationSlots(candidates, nyNow, count)
+	return candidates
 }
 
 // pickExpirationSlots applies the slot policy documented on
@@ -1400,6 +1590,26 @@ func isThirdFridayDate(yyyyMMdd string) bool {
 	return d >= 15 && d <= 21
 }
 
+func isSPXAMMonthlyLastTradeDate(yyyyMMdd string) bool {
+	t, err := time.Parse("2006-01-02", yyyyMMdd)
+	if err != nil || t.Weekday() != time.Thursday {
+		return false
+	}
+	return isThirdFridayDate(t.AddDate(0, 0, 1).Format("2006-01-02"))
+}
+
+func isSPXAMQuarterlyLastTradeDate(yyyyMMdd string) bool {
+	if !isSPXAMMonthlyLastTradeDate(yyyyMMdd) {
+		return false
+	}
+	t, _ := time.Parse("2006-01-02", yyyyMMdd)
+	switch t.AddDate(0, 0, 1).Month() {
+	case time.March, time.June, time.September, time.December:
+		return true
+	}
+	return false
+}
+
 // isQuarterlyThirdFridayDate reports whether a YYYY-MM-DD is the 3rd
 // Friday of a quarterly month (Mar / Jun / Sep / Dec). Used by the
 // quarterly anchor.
@@ -1473,12 +1683,265 @@ func compactExpiry(date string) string {
 	return date // best-effort
 }
 
+func gammaPrewarmKey(tradingClass, expiryYMD string) string {
+	return strings.ToUpper(strings.TrimSpace(tradingClass)) + "|" + strings.TrimSpace(expiryYMD)
+}
+
+type gammaCollectionDiagnostics struct {
+	mu         sync.Mutex
+	underlying string
+	order      []string
+	byKey      map[string]*rpc.GammaCollectionDiagnostic
+}
+
+func newGammaCollectionDiagnostics(underlying string, picked []pickedExpiration) *gammaCollectionDiagnostics {
+	out := &gammaCollectionDiagnostics{
+		underlying: strings.ToUpper(strings.TrimSpace(underlying)),
+		byKey:      make(map[string]*rpc.GammaCollectionDiagnostic, len(picked)),
+	}
+	for _, p := range picked {
+		key := gammaPrewarmKey(p.tradingClass, p.expiryYMD)
+		if _, ok := out.byKey[key]; ok {
+			continue
+		}
+		out.order = append(out.order, key)
+		out.byKey[key] = &rpc.GammaCollectionDiagnostic{
+			Underlying:             out.underlying,
+			TradingClass:           strings.ToUpper(strings.TrimSpace(p.tradingClass)),
+			Expiry:                 p.date,
+			MarketDataGenericTicks: ibkrlib.OptionSubscriptionGenericTicks,
+			OIGenericTickRequested: gammaOIGenericTickRequested(ibkrlib.OptionSubscriptionGenericTicks),
+			StrikeCap:              maxGammaStrikesPerExpiry,
+			ExpiryCapTruncated:     p.capTruncated,
+		}
+	}
+	return out
+}
+
+func (d *gammaCollectionDiagnostics) noteStrikeSelection(p pickedExpiration, strikeCandidates, strikeSelected int, capped bool, cap int) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	row := d.rowLocked(p.tradingClass, p.expiryYMD)
+	if row == nil {
+		return
+	}
+	row.StrikeCandidates = strikeCandidates
+	row.StrikeSelected = strikeSelected
+	row.StrikeCap = cap
+	row.StrikeCapTruncated = capped
+}
+
+func (d *gammaCollectionDiagnostics) notePrewarm(tradingClass, expiryYMD string, cached, dropped int, err error) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	row := d.rowLocked(tradingClass, expiryYMD)
+	if row == nil {
+		return
+	}
+	row.QualifiedContracts = cached
+	if dropped > 0 {
+		row.ContractMissingLegs += dropped
+	}
+	if err == nil {
+		return
+	}
+	switch classifyGammaLegFailure(err) {
+	case gammaLegFailureTimeout:
+		row.Timeouts++
+	case gammaLegFailurePacing:
+		row.PacingErrors++
+	case gammaLegFailureFarm:
+		row.FarmErrors++
+	case gammaLegFailureEntitlement:
+		row.EntitlementErrors++
+	case gammaLegFailureContractMissing:
+		row.ContractMissingLegs++
+	default:
+		row.SubscriptionRejects++
+	}
+}
+
+func (d *gammaCollectionDiagnostics) noteRequested(j gammaLegSpec) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if row := d.rowLocked(j.tradingClass, j.expiryYMD); row != nil {
+		row.RequestedLegs++
+	}
+}
+
+func (d *gammaCollectionDiagnostics) notePriced(j gammaLegSpec, oi int64, oiObserved, oiLive, oiCarried bool, observedAt time.Time) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	row := d.rowLocked(j.tradingClass, j.expiryYMD)
+	if row == nil {
+		return
+	}
+	row.PricedLegs++
+	switch {
+	case oiLive:
+		row.OILiveObservedLegs++
+	case oiCarried:
+		row.OICarriedForwardLegs++
+		if row.CarriedForwardSource == "" {
+			row.CarriedForwardSource = gammaOIStateFilename
+		}
+		if row.CarriedForwardObservedAt == "" && !observedAt.IsZero() {
+			row.CarriedForwardObservedAt = observedAt.Format(time.RFC3339)
+		}
+	case !oiObserved:
+		row.OIMissingLegs++
+	}
+	if oiObserved && !oiLive && !oiCarried {
+		row.OILiveObservedLegs++
+	}
+	if oi > 0 {
+		row.OIPositiveLegs++
+	}
+}
+
+func (d *gammaCollectionDiagnostics) noteFailure(j gammaLegSpec, failure string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	row := d.rowLocked(j.tradingClass, j.expiryYMD)
+	if row == nil {
+		return
+	}
+	switch failure {
+	case gammaLegFailureContractMissing:
+		row.ContractMissingLegs++
+	case gammaLegFailureTimeout, "":
+		row.Timeouts++
+	case gammaLegFailurePacing:
+		row.PacingErrors++
+	case gammaLegFailureFarm:
+		row.FarmErrors++
+	case gammaLegFailureEntitlement:
+		row.EntitlementErrors++
+	default:
+		row.SubscriptionRejects++
+	}
+}
+
+func (d *gammaCollectionDiagnostics) rowLocked(tradingClass, expiryYMD string) *rpc.GammaCollectionDiagnostic {
+	key := gammaPrewarmKey(tradingClass, expiryYMD)
+	row := d.byKey[key]
+	if row != nil {
+		return row
+	}
+	row = &rpc.GammaCollectionDiagnostic{
+		Underlying:             d.underlying,
+		TradingClass:           strings.ToUpper(strings.TrimSpace(tradingClass)),
+		Expiry:                 displayExpiry(expiryYMD),
+		MarketDataGenericTicks: ibkrlib.OptionSubscriptionGenericTicks,
+		OIGenericTickRequested: gammaOIGenericTickRequested(ibkrlib.OptionSubscriptionGenericTicks),
+		StrikeCap:              maxGammaStrikesPerExpiry,
+	}
+	d.byKey[key] = row
+	d.order = append(d.order, key)
+	return row
+}
+
+func (d *gammaCollectionDiagnostics) finish(elapsed time.Duration) []rpc.GammaCollectionDiagnostic {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.byKey) == 0 {
+		return nil
+	}
+	out := make([]rpc.GammaCollectionDiagnostic, 0, len(d.order))
+	for _, key := range d.order {
+		row := d.byKey[key]
+		if row == nil {
+			continue
+		}
+		row.CollectionDurationMS = elapsed.Milliseconds()
+		row.OISourceStatus = gammaOISourceStatus(*row)
+		out = append(out, *row)
+	}
+	return out
+}
+
+func gammaOISourceStatus(row rpc.GammaCollectionDiagnostic) string {
+	live := row.OILiveObservedLegs
+	carried := row.OICarriedForwardLegs
+	missing := row.OIMissingLegs
+	switch {
+	case live > 0 && carried == 0 && missing == 0:
+		return gammaOISourceLiveObserved
+	case live == 0 && carried > 0 && missing == 0:
+		return gammaOISourceCarriedForward
+	case live > 0 || carried > 0:
+		return gammaOISourceMixed
+	default:
+		return gammaOISourceMissing
+	}
+}
+
+func gammaOIGenericTickRequested(genericTicks string) bool {
+	for tick := range strings.SplitSeq(genericTicks, ",") {
+		if strings.TrimSpace(tick) == ibkrlib.OptionOpenInterestGenericTick {
+			return true
+		}
+	}
+	return false
+}
+
+func loadGammaOIStateForCompute(store *gammaOpenInterestStore) (map[string]gammaOIRecord, error) {
+	if store == nil {
+		return nil, nil
+	}
+	state, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func gammaOIForLegResult(
+	underlying, tradingClass, expiryYMD string,
+	strike float64,
+	right string,
+	result legResult,
+	state map[string]gammaOIRecord,
+	now time.Time,
+) (oi int64, observed, live, carried bool, observedAt time.Time) {
+	if result.OIObserved {
+		return result.OI, true, true, false, now
+	}
+	if len(state) == 0 {
+		return 0, false, false, false, time.Time{}
+	}
+	key := gammaOIKey(underlying, tradingClass, expiryYMD, strike, right)
+	rec, ok := state[key]
+	if !ok || !validCarriedGammaOI(rec, now) {
+		return 0, false, false, false, time.Time{}
+	}
+	return rec.OpenInterest, true, false, true, rec.ObservedAt
+}
+
 // dteYears computes years-to-expiry from an option's YYYYMMDD expiry
 // string under the correct settlement-instant for the option's trading
-// class. SPX-class monthlies expire at 09:30 ET (AM SET); SPXW
-// weeklies, SPY, and equities expire at 16:00 ET (PM close). Empty
-// tradingClass falls back to 16:00 ET — back-compat for the SPY-only
-// path before the SPX coverage arc.
+// class. SPX-class AM monthlies are keyed by the Thursday last-trade date
+// and settle Friday 09:30 ET; SPXW weeklies, SPY, and equities expire at
+// 16:00 ET (PM close). Empty tradingClass falls back to 16:00 ET —
+// back-compat for the SPY-only path before the SPX coverage arc.
 //
 // Zero on parse failure or non-positive deltas — the compute's per-leg
 // gate filters those out.
@@ -1503,6 +1966,25 @@ func dteYears(expiryYMD, tradingClass string, now time.Time) float64 {
 		return 0
 	}
 	return delta.Hours() / (24 * 365.0)
+}
+
+func gammaCalendarDTE(expiryYMD, tradingClass string, now time.Time) (int, bool) {
+	loc := newYorkLocation()
+	day, err := time.ParseInLocation("20060102", expiryYMD, loc)
+	if err != nil {
+		return 0, false
+	}
+	nyNow := now.In(loc)
+	today := time.Date(nyNow.Year(), nyNow.Month(), nyNow.Day(), 0, 0, 0, 0, loc)
+	expiryDay := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+	if strings.EqualFold(strings.TrimSpace(tradingClass), "SPX") {
+		settlement := classSettlementInstant(tradingClass, day.Year(), day.Month(), day.Day(), loc)
+		settlementDay := time.Date(settlement.Year(), settlement.Month(), settlement.Day(), 0, 0, 0, 0, loc)
+		if expiryDay.Before(today) && today.Equal(settlementDay) && nyNow.Before(settlement.Add(classSettlementBuffer)) {
+			return 0, true
+		}
+	}
+	return int(expiryDay.Sub(today).Hours() / 24), true
 }
 
 // sweepProfile builds the (spot, signed_gex) sweep over [1−range,

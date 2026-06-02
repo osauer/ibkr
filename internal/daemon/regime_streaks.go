@@ -399,10 +399,7 @@ func classifyGammaBand(gapPct *float64, gammaSign string) string {
 }
 
 func classifyGammaComputedBand(c *rpc.GammaZeroComputed) string {
-	if c == nil {
-		return ""
-	}
-	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if !gammaComputedExplicitlyRankable(c) {
 		return ""
 	}
 	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
@@ -411,7 +408,14 @@ func classifyGammaComputedBand(c *rpc.GammaZeroComputed) string {
 	return classifyGammaBand(c.GapPct, c.GammaSign)
 }
 
+func gammaComputedExplicitlyRankable(c *rpc.GammaZeroComputed) bool {
+	return c != nil && c.Quality != nil && c.Quality.Rankability == rpc.GammaRankabilityRankable
+}
+
 func combineGammaComputedBands(c *rpc.GammaZeroComputed) string {
+	if !gammaComputedExplicitlyRankable(c) {
+		return ""
+	}
 	type weightedBand struct {
 		band   string
 		weight float64
