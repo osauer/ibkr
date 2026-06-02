@@ -179,7 +179,7 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		return statusConcern{Text: "Gateway handshake still in progress", Level: statusConcernNotice}
 	case daemonVersionDrift(res.DaemonVersion, cliVersion):
 		return statusConcern{
-			Text:  fmt.Sprintf("CLI version %s differs from daemon %s; restart daemon to pick up the new binary", cliVersion, res.DaemonVersion),
+			Text:  fmt.Sprintf("CLI version %s differs from daemon %s; run `ibkr restart` to pick up the new binary", cliVersion, res.DaemonVersion),
 			Level: statusConcernWarn,
 		}
 	case len(res.DataFarms) > 0:

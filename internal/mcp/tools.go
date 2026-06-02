@@ -612,6 +612,7 @@ var ExcludedCLI = map[string]string{
 	"daemon":   "local background service mode; autospawned by CLI/MCP clients and not an agent operation",
 	"setup":    "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
 	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
+	"restart":  "local process-management verb (signals daemon processes); useful for humans and scripts, but not a broker-data MCP tool",
 	"backtest": "offline research harness over local JSONL fixtures; not a live broker/MCP operation",
 }
 

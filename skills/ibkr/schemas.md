@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-05-31 21:23 CEST
+Updated: 2026-06-02 06:26 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -1014,6 +1014,43 @@ Action-relevant fields:
 A full set of additional metadata fields (`alternates`, `tls_origin`,
 `server_version`, `daemon_started`) is also returned but rarely
 actionable; show them only when the user is debugging discovery.
+
+## restart
+
+`ibkr restart --json`
+
+```json
+{
+  "action": "restarted",
+  "was_running": true,
+  "started": true,
+  "forced": false,
+  "graceful": true,
+  "old_pid": 12345,
+  "new_pid": 12398,
+  "old_command": "/Users/me/.local/bin/ibkr daemon",
+  "socket_path": "/run/user/501/ibkr/ibkr.sock",
+  "lock_path": "/run/user/501/ibkr/ibkr.lock",
+  "health": {
+    "daemon_version": "v1.5.1",
+    "connected": true,
+    "gateway_host": "127.0.0.1",
+    "gateway_port": 4001,
+    "client_id": 15
+  },
+  "elapsed_ms": 842
+}
+```
+
+If no daemon was present, `action` is `"started"`, `was_running` is
+`false`, and `old_pid` / `old_command` are omitted. If `--force` was needed,
+`forced` is `true` and `graceful` is `false`.
+
+Use JSON mode for scripts, CI, and post-install checks that need to know
+whether process management succeeded independently of gateway health. The
+embedded `health` object is the same shape as `status.health`, so
+`health.connected: false` means the daemon process is running but the gateway
+is not ready.
 
 ## size
 

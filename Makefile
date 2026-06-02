@@ -25,6 +25,7 @@ LDFLAGS = $(STRIP_LDFLAGS) -X main.version=$(VERSION) -X main.commit=$(COMMIT) -
 # tools, but ibkr is an end-user CLI binary and shouldn't require Go to
 # be installed at runtime.
 PREFIX ?= $(HOME)/.local
+RESTART_TIMEOUT ?= 15s
 
 CLAUDE_DIR ?= $(HOME)/.claude
 SKILL_DIR  ?= $(CLAUDE_DIR)/skills/ibkr
@@ -35,7 +36,7 @@ RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 
-.PHONY: help build install uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -43,6 +44,7 @@ help: ## List available targets
 		$(MAKEFILE_LIST)
 	@echo
 	@echo "Common flow:  make fmt && make check && make test && make build"
+	@echo "Daemon flow:  make install restart-daemon   (FORCE=1 adds ibkr restart --force)"
 	@echo "Release flow: make release RELEASE_VERSION=vX.Y.Z   (clean tree + HEAD == origin/$(MAIN_BRANCH))"
 	@echo "              tags + pushes + cross-compiles + creates GitHub Release with binaries attached"
 
@@ -55,6 +57,10 @@ install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin)
 	install -m 0755 bin/ibkr  $(PREFIX)/bin/ibkr
 	@echo "Installed ibkr to $(PREFIX)/bin"
 	@echo "Make sure $(PREFIX)/bin is on your PATH."
+	@echo "Restart a running daemon with: $(PREFIX)/bin/ibkr restart"
+
+restart-daemon: install ## Install, then gracefully restart/start daemon (FORCE=1 escalates to --force)
+	$(PREFIX)/bin/ibkr restart --timeout $(RESTART_TIMEOUT) $(if $(FORCE),--force,)
 
 uninstall: ## Remove ibkr from $(PREFIX)/bin
 	rm -f $(PREFIX)/bin/ibkr

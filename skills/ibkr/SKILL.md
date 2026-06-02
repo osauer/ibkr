@@ -13,7 +13,7 @@ allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr canary*) Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-05-31 21:23 CEST
+Updated: 2026-06-02 06:26 CEST
 
 ## When to use
 
@@ -90,6 +90,12 @@ release. Do not invent or simulate trade execution.
 
 Add `--json` to any command for parseable output. Flags can come after positional
 symbols — the CLI hoists them automatically.
+
+Local lifecycle command: `ibkr restart [--force] [--timeout 15s] [--json]`
+gracefully restarts or starts the background daemon and reports old/new PID plus
+post-start health in JSON mode. Use it only when the user explicitly asks to
+restart the local daemon or after a documented binary/config change; it is not a
+broker-data command and is not exposed as an MCP tool.
 
 ### Per-command flags
 

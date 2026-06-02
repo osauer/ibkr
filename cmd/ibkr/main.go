@@ -89,6 +89,15 @@ func main() {
 		os.Exit(cli.RunUpdate(ctx, rest, runtimeVersion, os.Stdin, os.Stdout, os.Stderr))
 	}
 
+	// `ibkr restart` is local process management for the background daemon.
+	// It must run before the normal autospawn path; otherwise a missing
+	// daemon would be spawned first and then immediately restarted.
+	if cmd == "restart" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		os.Exit(cli.RunRestart(ctx, rest, os.Stdout, os.Stderr))
+	}
+
 	color := cli.ShouldColor(os.Stdout)
 
 	// `ibkr watch` defaults to the quote monitor, but add/remove/list/clear
@@ -209,7 +218,7 @@ func warnIfDaemonVersionMismatch(conn *dial.Conn, cliVersion string) {
 		return
 	}
 	fmt.Fprintf(os.Stderr,
-		"ibkr: warning: CLI version %s does not match daemon version %s — restart the daemon to pick up the new binary (kill the running ibkr daemon; the next CLI call will respawn it).\n",
+		"ibkr: warning: CLI version %s does not match daemon version %s — run `ibkr restart` to pick up the new binary.\n",
 		cliVersion, daemonVersion)
 }
 

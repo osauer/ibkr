@@ -285,7 +285,7 @@ func TestRenderStatus_VersionDrift(t *testing.T) {
 	for _, want := range []string{
 		"IBKR Gateway  ATTENTION",
 		"Daemon         v1.2.3, up 30m42s",
-		"Next concern   CLI version v1.2.4 differs from daemon v1.2.3; restart daemon to pick up the new binary",
+		"Next concern   CLI version v1.2.4 differs from daemon v1.2.3; run `ibkr restart` to pick up the new binary",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status missing %q:\n%s", want, got)
@@ -386,7 +386,7 @@ func TestNextConcernPriority(t *testing.T) {
 				DataType:      rpc.MarketDataFrozen,
 			},
 			cli:  "v1.2.4",
-			want: "CLI version v1.2.4 differs from daemon v1.2.3; restart daemon to pick up the new binary",
+			want: "CLI version v1.2.4 differs from daemon v1.2.3; run `ibkr restart` to pick up the new binary",
 		},
 		{
 			name: "data farm before market data",

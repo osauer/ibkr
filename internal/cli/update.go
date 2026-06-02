@@ -164,11 +164,14 @@ func runUpdateCore(ctx context.Context, opts *updateOptions, fetch fetchFunc, do
 		fmt.Fprintf(opts.out, "ibkr update: restarting daemon (pid %d)\n", pid)
 		if err := restart(pid); err != nil {
 			fmt.Fprintf(opts.err, "ibkr update: %v\n", err)
+			if errors.Is(err, update.ErrStopTimeout) {
+				fmt.Fprintln(opts.err, "ibkr update: run `ibkr restart --force` if the daemon is still stuck")
+			}
 			return 1
 		}
 		fmt.Fprintln(opts.out, "ibkr update: daemon stopped; next `ibkr` command will respawn it")
 	} else {
-		fmt.Fprintf(opts.out, "ibkr update: daemon (pid %d) is still on the old binary; restart with `pkill -f \"ibkr daemon\"` to pick up the new version\n", pid)
+		fmt.Fprintf(opts.out, "ibkr update: daemon (pid %d) is still on the old binary; run `ibkr restart` to pick up the new version\n", pid)
 	}
 	return 0
 }
