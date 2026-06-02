@@ -229,6 +229,9 @@ func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
 	if g.Envelope.Result == nil {
 		return false
 	}
+	if g.Envelope.Result.Quality != nil && g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return true
+	}
 	if g.Envelope.Result.Summary != nil && strings.EqualFold(g.Envelope.Result.Summary.Confidence, "degraded") {
 		return true
 	}

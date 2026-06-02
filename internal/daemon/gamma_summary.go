@@ -186,6 +186,16 @@ func gammaResultConfidence(c *rpc.GammaZeroComputed) string {
 	if c == nil {
 		return "unavailable"
 	}
+	if c.Quality != nil {
+		switch c.Quality.Rankability {
+		case rpc.GammaRankabilityRankable:
+			return "estimate"
+		case rpc.GammaRankabilityContextOnly, rpc.GammaRankabilityBlocked:
+			return "degraded"
+		case rpc.GammaRankabilityUnavailable:
+			return "unavailable"
+		}
+	}
 	if c.LegCount > 0 && c.GammaTotalAbs == 0 && gammaProfileAllZero(c.Profile) {
 		return "unavailable"
 	}
@@ -349,6 +359,17 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Severity = "data_quality"
 		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
 		d.Impact = "The daemon served the last persisted snapshot rather than recomputing against a closed market."
+	case strings.HasPrefix(code, "refresh_failed:"):
+		d.Severity = "data_quality"
+		summary := strings.TrimPrefix(code, "refresh_failed:")
+		summary = strings.ReplaceAll(summary, "_", " ")
+		d.Message = "The latest gamma refresh failed."
+		d.Impact = "The daemon is serving an older cached gamma snapshot; do not rank it as fresh confirmation."
+		if summary != "" {
+			d.Action = "Inspect gateway/farm state and retry after resolving: " + summary + "."
+		} else {
+			d.Action = "Inspect gateway/farm state and retry after resolving the refresh failure."
+		}
 	case strings.HasPrefix(code, "spy_unavailable:"):
 		d.Severity = "data_quality"
 		d.Message, d.Impact, d.Action = spyUnavailableWarningText(strings.TrimPrefix(code, "spy_unavailable:"))

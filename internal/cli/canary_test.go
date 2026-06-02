@@ -175,6 +175,47 @@ func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryContextOnlyGammaDoesNotConfirmStress(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
+	r.GammaZero.Band = "red"
+	r.GammaZero.Status = rpc.RegimeStatusOK
+	r.GammaZero.Envelope = rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope:         rpc.GammaZeroScopeCombined,
+			GammaSign:     "negative",
+			GammaTotalAbs: 10_000_000_000,
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityContextOnly,
+				RankabilityReason: "freshness: market is closed; cached gamma is context only",
+			},
+		},
+	}
+
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+
+	if slices.Contains(res.Market.RedClusterNames, "gamma") {
+		t.Fatalf("red clusters = %+v, want context-only gamma excluded", res.Market.RedClusterNames)
+	}
+	if !slices.Contains(res.Market.DegradedClusters, "gamma") {
+		t.Fatalf("degraded clusters = %+v, want gamma degraded", res.Market.DegradedClusters)
+	}
+	if hasSignal(res.Signals, risk.SignalGammaRed) {
+		t.Fatalf("signals include gamma_red despite context-only gamma: %+v", res.Signals)
+	}
+	if res.PlannerReadiness != risk.PlannerReadinessBlocked && res.PlannerModeHint != risk.PlannerModeConfirmData {
+		t.Fatalf("planner = %s/%s, want blocked or confirm-data posture from degraded gamma", res.PlannerModeHint, res.PlannerReadiness)
+	}
+	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
+		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
+	}
+}
+
 func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()

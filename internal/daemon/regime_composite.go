@@ -351,7 +351,33 @@ func buildRegimeWarnings(r *rpc.RegimeSnapshotResult) []rpc.RegimeWarning {
 			warnings = append(warnings, w)
 		}
 	}
+	if w, ok := warningForGammaRankability(r.GammaZero); ok {
+		warnings = append(warnings, w)
+	}
 	return warnings
+}
+
+func warningForGammaRankability(g rpc.RegimeGammaZero) (rpc.RegimeWarning, bool) {
+	c := g.Envelope.Result
+	if c == nil || c.Quality == nil || c.Quality.Rankability == rpc.GammaRankabilityRankable {
+		return rpc.RegimeWarning{}, false
+	}
+	severity := "warning"
+	if c.Quality.Rankability == rpc.GammaRankabilityContextOnly {
+		severity = "info"
+	}
+	message := "dealer gamma " + c.Quality.Rankability
+	if c.Quality.RankabilityReason != "" {
+		message += ": " + c.Quality.RankabilityReason
+	}
+	return rpc.RegimeWarning{
+		Code:     "gamma_zero_" + c.Quality.Rankability,
+		Scope:    "gamma_zero",
+		Severity: severity,
+		Message:  message,
+		Impact:   "dealer gamma is displayed as context but is not ranked or used as independent stress confirmation.",
+		Action:   "Refresh when the option-data surface is active and verify OI/skew coverage before using gamma as evidence.",
+	}, true
 }
 
 func warningForRegimeRow(row regimeEvidenceRow) (rpc.RegimeWarning, bool) {

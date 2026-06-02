@@ -152,6 +152,8 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 
 	c := r.Result
 
+	renderGammaQualityLine(env, c)
+
 	// Compact per-index lines. In combined mode, one line per index;
 	// in single-underlying mode, one line for that index. The line
 	// either reports the γ-zero crossing or the no-crossing regime
@@ -215,10 +217,22 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 
 	if explain {
 		renderGammaExplain(env, c)
+		renderGammaQualityExplain(env, c)
 	}
 
 	fmt.Fprintln(out)
 	return 0
+}
+
+func renderGammaQualityLine(env *Env, c *rpc.GammaZeroComputed) {
+	if c == nil || c.Quality == nil {
+		return
+	}
+	reason := c.Quality.RankabilityReason
+	if reason != "" {
+		reason = " · " + reason
+	}
+	fmt.Fprintf(env.Stdout, "  Rankability %s%s\n", c.Quality.Rankability, reason)
 }
 
 // gammaHeroTimestamp returns the formatted local-time stamp for the
@@ -633,6 +647,15 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 	case code == "cache_stale_off_hours":
 		d.Severity = "data_quality"
 		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
+	case strings.HasPrefix(code, "refresh_failed:"):
+		d.Severity = "data_quality"
+		summary := strings.TrimPrefix(code, "refresh_failed:")
+		summary = strings.ReplaceAll(summary, "_", " ")
+		d.Message = "The latest gamma refresh failed."
+		d.Impact = "The daemon is serving an older cached gamma snapshot; do not rank it as fresh confirmation."
+		if summary != "" {
+			d.Action = "Inspect gateway/farm state and retry after resolving: " + summary + "."
+		}
 	case strings.HasPrefix(code, "spy_unavailable:"):
 		d.Severity = "data_quality"
 		reason := strings.TrimPrefix(code, "spy_unavailable:")
@@ -827,6 +850,73 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))
 	fmt.Fprintln(out, env.dim("  autocall hedging the sign can invert; treat it as a regime hint, not"))
 	fmt.Fprintln(out, env.dim("  a trade level. The magnitude signal above is sign-convention agnostic."))
+}
+
+func renderGammaQualityExplain(env *Env, c *rpc.GammaZeroComputed) {
+	if c == nil || c.Quality == nil {
+		return
+	}
+	q := c.Quality
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, env.dim("  Signal quality"))
+	fmt.Fprintf(out, "    Rankability %s\n", q.Rankability)
+	if q.RankabilityReason != "" {
+		fmt.Fprintf(out, "    Gate        %s\n", q.RankabilityReason)
+	}
+	if q.SessionKey != "" || q.CurrentSessionKey != "" {
+		fmt.Fprintf(out, "    Session     compute %s · current %s · %s\n", ifNonEmpty(q.SessionKey, "—"), ifNonEmpty(q.CurrentSessionKey, "—"), q.Session)
+	}
+	if q.AgeSeconds > 0 || q.MaxAgeSeconds > 0 {
+		fmt.Fprintf(out, "    Age         %s", formatDuration(int(q.AgeSeconds)))
+		if q.MaxAgeSeconds > 0 {
+			fmt.Fprintf(out, " / max %s", formatDuration(int(q.MaxAgeSeconds)))
+		}
+		fmt.Fprintln(out)
+	}
+	cov := q.Coverage
+	if cov.PricedLegs > 0 {
+		fmt.Fprintf(out, "    Coverage    priced %d · OI observed %.1f%% · OI positive %.1f%% · GEX legs %d\n",
+			cov.PricedLegs, cov.OIObservedPct, cov.OIPositivePct, cov.GEXLegs)
+	}
+	fmt.Fprintf(out, "    Horizons    0DTE %s · 1-7DTE %s · term %s\n",
+		formatBool(cov.Has0DTE), formatBool(cov.Has1To7DTE), formatBool(cov.HasTerm))
+	if cov.DerivedIVPct > 0 || cov.SkewFitExpiries > 0 || cov.TopConcentrationPct > 0 {
+		fmt.Fprintf(out, "    Model       derived IV %.1f%% · top concentration %.1f%%", cov.DerivedIVPct, cov.TopConcentrationPct)
+		if cov.SkewFitExpiries > 0 {
+			fmt.Fprintf(out, " · skew median R² %.2f", cov.MedianSkewRSquared)
+		}
+		fmt.Fprintln(out)
+	}
+	if len(q.Blockers) > 0 {
+		fmt.Fprintln(out, "    Blockers")
+		for _, b := range q.Blockers {
+			fmt.Fprintf(out, "      · %s\n", b)
+		}
+	}
+	if len(q.Context) > 0 {
+		fmt.Fprintln(out, "    Context")
+		for _, item := range q.Context {
+			fmt.Fprintf(out, "      · %s\n", item)
+		}
+	}
+	if len(q.Gates) > 0 {
+		fmt.Fprintln(out, "    Gates")
+		for _, g := range q.Gates {
+			reason := g.Reason
+			if reason != "" {
+				reason = " · " + reason
+			}
+			fmt.Fprintf(out, "      · %s: %s%s\n", g.Name, g.Status, reason)
+		}
+	}
+}
+
+func formatBool(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
 }
 
 func formatDuration(seconds int) string {

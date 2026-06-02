@@ -402,6 +402,9 @@ func classifyGammaComputedBand(c *rpc.GammaZeroComputed) string {
 	if c == nil {
 		return ""
 	}
+	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return ""
+	}
 	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
 		return combineGammaComputedBands(c)
 	}

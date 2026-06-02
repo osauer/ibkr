@@ -1058,9 +1058,17 @@ func rawRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
 		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
 		strongestBand([]string{r.FundingStress.Band}),
 		strongestBand([]string{r.USDJPY.Band}),
-		strongestBand([]string{r.GammaZero.Band}),
+		strongestBand([]string{rankableGammaSnapshotBand(r.GammaZero)}),
 		strongestBand([]string{r.Breadth.Band}),
 	}
+}
+
+func rankableGammaSnapshotBand(g rpc.RegimeGammaZero) string {
+	if g.Envelope.Result != nil && g.Envelope.Result.Quality != nil &&
+		g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return ""
+	}
+	return g.Band
 }
 
 func confirmedRegimeClusterBands(r rpc.RegimeSnapshotResult, raw []string) []string {

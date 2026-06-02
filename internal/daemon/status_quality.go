@@ -147,8 +147,21 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	if !gammaResultDegraded(env.Result) {
 		return rpc.DataQualityHealth{}, false
 	}
-	summary := "degraded"
-	if gammaHasSPYUnavailable(env.Result) {
+	rankability := ""
+	if env.Result != nil && env.Result.Quality != nil {
+		rankability = env.Result.Quality.Rankability
+	}
+	status := "degraded"
+	summary := "degraded: gamma not rankable"
+	if rankability != "" {
+		summary = "degraded: gamma " + rankability
+	}
+	if rankability == rpc.GammaRankabilityBlocked || rankability == rpc.GammaRankabilityUnavailable {
+		status = "partial"
+	}
+	if env.Result != nil && env.Result.Quality != nil && env.Result.Quality.RankabilityReason != "" {
+		summary += " (" + env.Result.Quality.RankabilityReason + ")"
+	} else if gammaHasSPYUnavailable(env.Result) {
 		summary = "degraded: SPY excluded"
 	} else if gammaHasSPXUnavailable(env.Result) {
 		summary = "degraded: SPX excluded"
@@ -168,7 +181,7 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	}
 	return rpc.DataQualityHealth{
 		Surface:          "gamma",
-		Status:           "degraded",
+		Status:           status,
 		Summary:          summary,
 		DegradedClusters: []string{"gamma"},
 		AsOf:             env.Result.AsOf,
@@ -188,6 +201,9 @@ func gammaEnvelopeAsOf(env rpc.GammaZeroSPXResult) time.Time {
 func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c == nil {
 		return false
+	}
+	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return true
 	}
 	if c.Summary != nil && strings.EqualFold(c.Summary.Confidence, "degraded") {
 		return true

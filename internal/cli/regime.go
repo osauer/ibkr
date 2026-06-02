@@ -1200,6 +1200,13 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			row.stateNote = "envelope missing payload"
 			return row
 		}
+		gammaRankable := c.Quality == nil || c.Quality.Rankability == rpc.GammaRankabilityRankable
+		if c.Quality != nil {
+			row.stateNote = c.Quality.Rankability
+			if c.Quality.RankabilityReason != "" {
+				row.reason = c.Quality.RankabilityReason
+			}
+		}
 		// Gamma's two scalars are always modelled (zero_gamma via the
 		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
 		// row will carry "· modelled" regardless of ranking.
@@ -1209,7 +1216,11 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			if c.GammaTotalAbs > 0 {
 				row.value += fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
 			}
-			row.band = gammaCombinedRegimeBand(c)
+			if gammaRankable {
+				row.band = gammaCombinedRegimeBand(c)
+			} else {
+				row.band = bandUnranked
+			}
 			switch row.band {
 			case bandGreen:
 				row.reason = "SPY/SPX both stabilizing"
@@ -1228,7 +1239,9 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 					row.reason = "mixed per-index gamma bands"
 				}
 			default:
-				row.reason = "no usable per-index gamma profile"
+				if row.reason == "" {
+					row.reason = "no usable per-index gamma profile"
+				}
 			}
 			return row
 		}
@@ -1259,11 +1272,23 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			}
 			switch {
 			case *c.GapPct > gammaGapYellow:
-				row.band, row.reason = bandGreen, "spot >2% above γ-zero"
+				if gammaRankable {
+					row.band, row.reason = bandGreen, "spot >2% above γ-zero"
+				} else {
+					row.band = bandUnranked
+				}
 			case *c.GapPct >= -gammaGapYellow:
-				row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
+				if gammaRankable {
+					row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
+				} else {
+					row.band = bandUnranked
+				}
 			default:
-				row.band, row.reason = bandRed, "spot below γ-zero"
+				if gammaRankable {
+					row.band, row.reason = bandRed, "spot below γ-zero"
+				} else {
+					row.band = bandUnranked
+				}
 			}
 			return row
 		}
@@ -1282,12 +1307,20 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		switch c.GammaSign {
 		case "positive":
 			row.value = fmt.Sprintf("%slong-γ%s", spotPrefix, mag)
-			row.band = bandGreen
-			row.reason = "dealer long-γ · stabilizing"
+			if gammaRankable {
+				row.band = bandGreen
+				row.reason = "dealer long-γ · stabilizing"
+			} else {
+				row.band = bandUnranked
+			}
 		case "negative":
 			row.value = fmt.Sprintf("%sshort-γ%s", spotPrefix, mag)
-			row.band = bandRed
-			row.reason = "dealer short-γ · amplifying"
+			if gammaRankable {
+				row.band = bandRed
+				row.reason = "dealer short-γ · amplifying"
+			} else {
+				row.band = bandUnranked
+			}
 		default:
 			// "no_data" or empty: genuine no-signal case.
 			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
@@ -1302,6 +1335,9 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 }
 
 func gammaCombinedRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
+	if c != nil && c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+		return bandUnranked
+	}
 	type weightedBand struct {
 		band   regimeBand
 		weight float64
@@ -1355,6 +1391,9 @@ func gammaPerIndexWeight(key string, c *rpc.GammaZeroComputed) float64 {
 
 func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 	if c == nil {
+		return bandUnranked
+	}
+	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
 		return bandUnranked
 	}
 	if c.GapPct != nil {

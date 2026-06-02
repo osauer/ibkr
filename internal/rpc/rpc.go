@@ -814,6 +814,67 @@ type GammaLegDiagnostics struct {
 	ByTradingClass map[string]GammaLegDiagnosticCounts `json:"by_trading_class,omitempty"`
 }
 
+const (
+	GammaRankabilityRankable    = "rankable"
+	GammaRankabilityContextOnly = "context_only"
+	GammaRankabilityBlocked     = "blocked"
+	GammaRankabilityUnavailable = "unavailable"
+
+	GammaQualityGatePass    = "pass"
+	GammaQualityGateContext = "context"
+	GammaQualityGateBlock   = "block"
+)
+
+// GammaSignalQuality is the trading-grade gate for the gamma payload.
+// The signed regime and sign-agnostic magnitude can be displayed whenever
+// Result is present, but downstream regime/canary consumers must only count
+// the gamma band as market evidence when Rankability == "rankable".
+type GammaSignalQuality struct {
+	Rankability       string                        `json:"rankability"`
+	RankabilityReason string                        `json:"rankability_reason,omitempty"`
+	Freshness         string                        `json:"freshness,omitempty"`
+	Session           string                        `json:"session,omitempty"`
+	SessionKey        string                        `json:"session_key,omitempty"`
+	CurrentSessionKey string                        `json:"current_session_key,omitempty"`
+	AsOf              time.Time                     `json:"as_of,omitzero"`
+	AgeSeconds        int64                         `json:"age_seconds,omitempty"`
+	MaxAgeSeconds     int64                         `json:"max_age_seconds,omitempty"`
+	Coverage          GammaQualityCoverage          `json:"coverage"`
+	Gates             []GammaQualityGate            `json:"gates,omitempty"`
+	Blockers          []string                      `json:"blockers,omitempty"`
+	Context           []string                      `json:"context,omitempty"`
+	ByUnderlying      map[string]GammaSignalQuality `json:"by_underlying,omitempty"`
+}
+
+// GammaQualityCoverage carries the numeric diagnostics used by the quality
+// gates. Ratios are percentages in human units (95.0 means 95%).
+type GammaQualityCoverage struct {
+	PricedLegs          int     `json:"priced_legs"`
+	OIObservedLegs      int     `json:"oi_observed_legs"`
+	OIPositiveLegs      int     `json:"oi_positive_legs"`
+	GEXLegs             int     `json:"gex_legs"`
+	OIObservedPct       float64 `json:"oi_observed_pct,omitempty"`
+	OIPositivePct       float64 `json:"oi_positive_pct,omitempty"`
+	DerivedIVPct        float64 `json:"derived_iv_pct,omitempty"`
+	TopConcentrationPct float64 `json:"top_concentration_pct,omitempty"`
+	ExpirationCount     int     `json:"expiration_count,omitempty"`
+	Has0DTE             bool    `json:"has_0dte"`
+	Has1To7DTE          bool    `json:"has_1to7_dte"`
+	HasTerm             bool    `json:"has_term"`
+	SkewFitExpiries     int     `json:"skew_fit_expiries,omitempty"`
+	MedianSkewRSquared  float64 `json:"median_skew_r_squared,omitempty"`
+	MinSkewRSquared     float64 `json:"min_skew_r_squared,omitempty"`
+}
+
+// GammaQualityGate is one explicit quality decision. Status is "pass",
+// "context", or "block"; block gates prevent rankability, context gates
+// preserve the payload as context only.
+type GammaQualityGate struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // GammaWarningDetail is the human/agent-facing warning surface. The
 // daemon may use compact codes internally, but the wire carries this
 // scoped explanation so renderers do not have to decode raw tokens.
@@ -997,6 +1058,11 @@ type GammaZeroComputed struct {
 	// GEX-contribution funnel. It is especially useful when a forced
 	// off-hours run prices legs but every row has missing/zero OI.
 	LegDiagnostics *GammaLegDiagnostics `json:"leg_diagnostics,omitempty"`
+	// Quality is the explicit rankability contract for gamma as an
+	// algo-trading signal. Result can be present while Quality says
+	// "context_only" or "blocked"; regime/canary consumers must not
+	// count the gamma band unless this says "rankable".
+	Quality *GammaSignalQuality `json:"quality,omitempty"`
 	// Warnings is the daemon-internal list of non-fatal condition codes:
 	// "no_crossing_in_window", "spxw_partial_oi", "throttled",
 	// "all_iv_derived". Empty when the computation was clean. It is not

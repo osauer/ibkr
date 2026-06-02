@@ -258,6 +258,7 @@ type regimeIndicatorFingerprint struct {
 
 type regimeGammaFingerprint struct {
 	EnvelopeStatus   string `json:"envelope_status,omitempty"`
+	Rankability      string `json:"rankability,omitempty"`
 	ZeroGammaStatus  string `json:"zero_gamma_status,omitempty"`
 	Regime           string `json:"regime,omitempty"`
 	Confidence       string `json:"confidence,omitempty"`
@@ -379,6 +380,9 @@ func buildRegimeGammaFingerprint(g RegimeGammaZero) regimeGammaFingerprint {
 	}
 	if g.Envelope.Result == nil {
 		return fp
+	}
+	if g.Envelope.Result.Quality != nil {
+		fp.Rankability = cleanString(g.Envelope.Result.Quality.Rankability)
 	}
 	fp.RegimeAgreement = cleanString(g.Envelope.Result.RegimeAgreement)
 	if g.Envelope.Result.Summary != nil {
