@@ -44,16 +44,15 @@ import (
 // useful for international callers.
 //
 // Soft-TTL refresh-while-stale: when a kickOrJoin caller hits a
-// cached successful result that's either older than the current
-// session class's softTTL (15 min RTH, 30 min pre/post, ∞ closed)
-// OR was computed in a different active session class than now,
-// the cache serves the stale value immediately AND kicks a refresh
-// in the background. The refresh is stored in the slot's `refresh`
-// field, distinct from `current`, so further callers during the
-// refresh keep seeing the stable served value rather than blocking
-// on the new in-flight job. On completion the refresh promotes to
-// current; on error it's discarded so a transient compute failure
-// can't poison a known-good cached value.
+// cached successful result that's older than the current regular
+// option-data session's softTTL (15 min RTH, infinite closed), the
+// cache serves the stale value immediately AND kicks a refresh in the
+// background. The refresh is stored in the slot's `refresh` field,
+// distinct from `current`, so further callers during the refresh keep
+// seeing the stable served value rather than blocking on the new
+// in-flight job. On completion the refresh promotes to current; on
+// error it's discarded so a transient compute failure can't poison a
+// known-good cached value.
 type gammaZeroCache struct {
 	mu sync.Mutex
 	// slots holds one entry per scope. Key is the scope string
@@ -73,7 +72,7 @@ type gammaZeroCache struct {
 	log gammaLogger
 }
 
-const gammaColdCacheAction = "Run `ibkr gamma --force` for a diagnostic off-hours recompute, or call again during the next U.S. equity-options session."
+const gammaColdCacheAction = "Run `ibkr gamma --force` for a diagnostic off-hours recompute, or call again during the next regular U.S. options session."
 
 // gammaSlot is the per-scope cache cell. Mirrors the original
 // single-slot fields of gammaZeroCache: current, refresh, plus the
@@ -175,47 +174,39 @@ const gammaErrorRetryTTL = 60 * time.Second
 // caller picks up the new result.
 //
 // Per-class values:
-//   - softTTLRTH (15 min): active-session dealer gamma should be refreshed
-//     often enough for regime/canary reads to see intraday positioning changes
-//     without overlapping the several-minute option fan-out.
-//   - softTTLPrePost (30 min): pre / post-market sees thinner flow
-//     but real price moves around news and overnight events. Refresh
-//     more often than RTH so users querying around the open/close
-//     don't see a stale snapshot, but not so aggressively that we
-//     burn slots on a thin tape.
-//   - softTTLClosed (math.MaxInt64): no live price input → no point
-//     refreshing. The persisted snapshot stays canonical until the
-//     NY-midnight session-key boundary rolls. Effectively infinite
-//     (math.MaxInt64 ≈ 292 years as a time.Duration).
+//   - softTTLRTH (15 min): during the regular U.S. listed-options session,
+//     dealer gamma should be refreshed often enough for regime/canary reads
+//     to see intraday positioning changes without overlapping the
+//     several-minute option fan-out.
+//   - softTTLClosed (math.MaxInt64): outside that option-data session, a
+//     non-force refresh is not expected to improve a good last-known snapshot.
+//     The persisted result stays canonical until the next regular session.
+//     Effectively infinite (math.MaxInt64 ~= 292 years as a time.Duration).
 //
 // Class transitions trigger an additional refresh path in kickOrJoin:
-// a snapshot computed in a different active class than `now` is
-// treated as stale even if its absolute age is below softTTL — see
-// the boundary-refresh block.
+// a snapshot computed outside the regular option-data session is
+// treated as stale at the RTH open even if its absolute age is below
+// softTTL. This lets a forced pre-open diagnostic yield to a regular
+// session refresh without blocking the first caller after the open.
 //
 // Distinct from gammaErrorRetryTTL (60 s): that one re-attempts a
 // FAILED compute on the next call; soft-TTL rolls a SUCCESSFUL
 // compute forward while still serving the prior value.
 const (
-	softTTLRTH     = 15 * time.Minute
-	softTTLPrePost = 30 * time.Minute
-	softTTLClosed  = time.Duration(math.MaxInt64)
+	softTTLRTH    = 15 * time.Minute
+	softTTLClosed = time.Duration(math.MaxInt64)
 )
 
-// softTTL returns the soft-TTL appropriate for the U.S. equity-options
-// session class containing now. Caller passes the same now used for
-// the age comparison so a single instant drives both the TTL choice
-// and the age check, avoiding boundary-flap when the two sample times
-// straddle a session edge.
+// softTTL returns the soft-TTL appropriate for the regular option-data
+// session containing now. Caller passes the same now used for the age
+// comparison so a single instant drives both the TTL choice and the age
+// check, avoiding boundary-flap when the two sample times straddle a
+// session edge.
 func softTTL(now time.Time) time.Duration {
-	switch rpc.ClassifySession(now) {
-	case rpc.SessionClosed:
+	if gammaClassifySession(now) == rpc.SessionClosed {
 		return softTTLClosed
-	case rpc.SessionPre, rpc.SessionPost:
-		return softTTLPrePost
-	default:
-		return softTTLRTH
 	}
+	return softTTLRTH
 }
 
 // isDone reports whether the compute has finished (success or error).
@@ -269,7 +260,6 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 		return c
 	}
 	wrap := gammaLogf{inner: log}
-	offHours := rpc.ClassifySession(now) == rpc.SessionClosed
 	for _, scope := range knownGammaScopes {
 		slot := c.getOrCreateSlotLocked(scope)
 		persisted, err := store.Load(scope, now)
@@ -282,13 +272,13 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 			wrap.Warnf("gamma cache: load persisted scope=%s: %v (cold start for this scope)", scope, err)
 			continue
 		}
-		if persisted == nil && offHours {
-			// Off-hours fallback: today's session-key gate didn't
-			// match, but we'd rather serve yesterday's compute
-			// (flagged stale via cache_stale_off_hours when age > 24h)
-			// than force the user to wait until the next session open
-			// for any γ-zero answer. See kickOrJoin's SessionClosed
-			// gate for the serve-only-never-kick guarantee.
+		if persisted == nil {
+			// Last-known-good fallback: today's session-key gate didn't
+			// match, but serving the prior good result as explicit
+			// context is better than going cold. During regular option
+			// hours kickOrJoin refreshes behind this value; outside
+			// regular option hours it is served without a non-force
+			// refresh.
 			stale, stErr := store.LoadStale(scope)
 			if stErr != nil {
 				slot.setColdReason(
@@ -340,8 +330,8 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 // ago should be refreshed in another ~20 min under the RTH TTL,
 // not start a fresh countdown from boot time. Also lets the
 // boundary-refresh path detect cached snapshots whose AsOf belongs
-// to a different session class than the current one (e.g. a
-// persisted pre-market value reloaded at 10:00 ET).
+// to a different option-data session class than the current one (e.g.
+// a forced pre-open diagnostic reloaded at 10:00 ET).
 func newPersistedComputation(r *rpc.GammaZeroComputed, scope string, now time.Time) *gammaComputation {
 	sessionKey := nySessionKey(now)
 	if r != nil && !r.AsOf.IsZero() {
@@ -449,14 +439,14 @@ type computeFn func(ctx context.Context, progress *atomic.Int32) (*rpc.GammaZero
 // fresh kickoff. The compute reports refined progress via its
 // atomic counter.
 //
-// Soft-TTL refresh: when the served result is past the current
-// session class's softTTL or was computed in a different active
-// class (e.g. pre-market value served during RTH), kickOrJoin kicks
-// a background refresh while still returning the stale value. fresh
-// stays false for the caller (they got the cached envelope, not a
-// new in-flight job). The next caller after the refresh lands sees
-// the new value. Closed sessions never trigger refresh — see the
-// kickOrJoin body comment for the gating logic.
+// Soft-TTL refresh: when the served result is past the regular
+// option-data session's softTTL, or was computed outside RTH and is
+// first served during RTH, kickOrJoin kicks a background refresh while
+// still returning the stale value. fresh stays false for the caller
+// (they got the cached envelope, not a new in-flight job). The next
+// caller after the refresh lands sees the new value. Closed option-data
+// sessions never trigger refresh — see the kickOrJoin body comment for
+// the gating logic.
 func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now time.Time, etaSeconds int, compute computeFn) (job *gammaComputation, fresh bool) {
 	key := nySessionKey(now)
 
@@ -478,14 +468,13 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		slot.refresh = nil
 	}
 
-	// SessionClosed gate: outside U.S. equity-options trading hours
-	// we never kick a fresh compute (no fresh quotes inbound; the
-	// fan-out would either time out on dead model ticks or land
-	// garbage IVs against prior-session prices) and we serve any
-	// successful cached result we have — even one whose sessionKey
-	// belongs to a prior NY trading date. The persisted Friday-RTH
-	// result is the best answer we can give Saturday morning;
-	// freshness is the renderer's problem (snapshot stamps
+	// SessionClosed gate: outside the regular U.S. listed-options
+	// session we never kick a non-force compute. Dealer gamma needs
+	// option OI plus model/IV ticks; during closed or thin extended
+	// phases an automatic fan-out is not reliably better than a good
+	// last-known snapshot. Serve any successful cached result we have,
+	// even one whose sessionKey belongs to a prior NY trading date.
+	// Freshness is the renderer's problem (snapshot stamps
 	// cache_stale_off_hours past 24h so the user sees the age).
 	//
 	// No usable cache + closed gateway → return (nil, false) and
@@ -497,7 +486,7 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	// instead of being told Cold while the compute runs, and a completed
 	// force error must remain visible instead of collapsing back to Cold.
 	// Only fully idle + no successful/error cache returns (nil, false).
-	if rpc.ClassifySession(now) == rpc.SessionClosed {
+	if gammaClassifySession(now) == rpc.SessionClosed {
 		if slot.current != nil {
 			if !slot.current.isDone() {
 				return slot.current, false
@@ -510,6 +499,20 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 			}
 		}
 		return nil, false
+	}
+
+	// Active-session rollover with a known-good prior snapshot: keep serving
+	// last-known-good while the better same-session result computes behind it.
+	// This avoids turning a production signal into "computing" at the exact
+	// moment a cached context read is still better than no read. Errors and
+	// in-flight prior-session jobs do not get this preservation path because
+	// they are not known-good values.
+	if slot.current != nil && slot.current.sessionKey != key &&
+		slot.current.isDone() && slot.current.err == nil && slot.current.result != nil {
+		if slot.refresh == nil {
+			slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
+		}
+		return slot.current, false
 	}
 
 	if slot.current != nil && slot.current.sessionKey == key {
@@ -534,25 +537,23 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		// Two triggers, both gated on the cached value being a clean
 		// success with no refresh already in flight:
 		//
-		//  1. Boundary refresh: cached value was computed in a
-		//     different active session class than `now`. E.g. a
-		//     pre-market snapshot served at 09:31 ET would otherwise
-		//     survive the entire first hour of RTH under the 60-min
-		//     RTH TTL — users expect fresh data at the open.
+		//  1. Boundary refresh: cached value was computed outside the
+		//     regular option-data session and is first served during
+		//     RTH. E.g. a forced pre-open diagnostic served at 09:31
+		//     ET should yield to a regular-session refresh.
 		//
 		//  2. Age refresh: absolute age exceeds the per-class
-		//     softTTL — 15 min in RTH, 30 min in pre/post.
+		//     softTTL — 15 min in regular option hours.
 		//
 		// Both triggers are skipped when the current class is
-		// SessionClosed: no price input, no point refreshing. softTTL
-		// returns math.MaxInt64 for Closed so the age check can never
-		// fire there, and the explicit currentClass check below
-		// skips the boundary path so a Post→Closed transition (e.g.
-		// 20:01 ET) doesn't trigger a doomed refresh.
+		// SessionClosed: automatic refresh is not expected to improve
+		// the signal. softTTL returns math.MaxInt64 for Closed so the
+		// age check can never fire there, and the explicit
+		// currentClass check below skips the boundary path.
 		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil {
-			currentClass := rpc.ClassifySession(now)
+			currentClass := gammaClassifySession(now)
 			if currentClass != rpc.SessionClosed {
-				cachedClass := rpc.ClassifySession(slot.current.startedAt)
+				cachedClass := gammaClassifySession(slot.current.startedAt)
 				classChanged := cachedClass != currentClass
 				if classChanged || now.Sub(slot.current.startedAt) >= softTTL(now) {
 					slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
@@ -747,13 +748,12 @@ func (c *gammaZeroCache) snapshotCombinedSlice(scope string, nowFn func() time.T
 	}
 
 	now := nowFn()
-	if job.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
-		return rpc.GammaZeroSPXResult{}, false
-	}
-
 	env := c.snapshotForScope(rpc.GammaZeroScopeCombined, job, func() time.Time { return now })
 	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
 		return rpc.GammaZeroSPXResult{}, false
+	}
+	if env.Result.Scope == scope {
+		return env, true
 	}
 	sub := env.Result.PerIndex[key]
 	if sub == nil {
@@ -809,7 +809,7 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 		// to avoid mutating the shared cache pointer that other
 		// concurrent snapshots may still be reading.
 		now := nowFn()
-		if g.result != nil && rpc.ClassifySession(now) == rpc.SessionClosed && now.Sub(g.result.AsOf) > 24*time.Hour {
+		if g.result != nil && gammaClassifySession(now) == rpc.SessionClosed && now.Sub(g.result.AsOf) > 24*time.Hour {
 			r := *g.result
 			r.Warnings = dedupeStrings(append(append([]string{}, g.result.Warnings...), "cache_stale_off_hours"))
 			hydrateGammaComputed(&r)
@@ -984,7 +984,7 @@ func (c *gammaZeroCache) readySingleScopeSlice(scope string, now time.Time) *rpc
 	if job == nil || !job.isDone() || job.err != nil || job.result == nil {
 		return nil
 	}
-	if job.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
+	if job.sessionKey != nySessionKey(now) && gammaClassifySession(now) != rpc.SessionClosed {
 		return nil
 	}
 	if !gammaSliceEligibleForCombined(job.result, now) {
@@ -997,7 +997,7 @@ func gammaSliceEligibleForCombined(c *rpc.GammaZeroComputed, now time.Time) bool
 	if c == nil {
 		return false
 	}
-	if rpc.ClassifySession(now) != rpc.SessionClosed {
+	if gammaClassifySession(now) != rpc.SessionClosed {
 		if c.AsOf.IsZero() || nySessionKey(c.AsOf) != nySessionKey(now) {
 			return false
 		}
@@ -1056,9 +1056,6 @@ func (c *gammaZeroCache) withCachedSPXFallback(scope string, env rpc.GammaZeroSP
 	}
 	c.mu.Unlock()
 	if spxJob == nil {
-		return env
-	}
-	if spxJob.sessionKey != nySessionKey(now) && rpc.ClassifySession(now) != rpc.SessionClosed {
 		return env
 	}
 

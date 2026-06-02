@@ -1085,7 +1085,7 @@ func TestRenderRegime_ExplainSurfacesGammaSPXCacheFallback(t *testing.T) {
 				Scope:   "SPX",
 				Message: "SPX live refresh was canceled; using the last successful cached SPX slice.",
 				Impact:  "SPX is included but may be stale; treat the combined gamma regime as degraded.",
-				Action:  "Refresh during 09:30-16:00 ET and inspect the SPX per-index as_of before relying on the combined gamma row.",
+				Action:  "Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before relying on the combined gamma row.",
 			}},
 		},
 	}
@@ -1105,7 +1105,7 @@ func TestRenderRegime_ExplainSurfacesGammaSPXCacheFallback(t *testing.T) {
 		"SPX live refresh was canceled",
 		"cached SPX slice",
 		"Action: Refresh during",
-		"09:30-16:00 ET",
+		"09:30-16:15 ET",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing gamma SPX fallback note %q:\n%s", want, out)

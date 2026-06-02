@@ -144,6 +144,9 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	default:
 		return rpc.DataQualityHealth{}, false
 	}
+	if gammaSPXCanonicalRankable(env.Result) && gammaOnlySPYUnavailable(env.Result) {
+		return rpc.DataQualityHealth{}, false
+	}
 	if !gammaResultDegraded(env.Result) {
 		return rpc.DataQualityHealth{}, false
 	}
@@ -202,6 +205,7 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c == nil {
 		return false
 	}
+	spxCanonical := gammaSPXCanonicalRankable(c)
 	if c.Quality == nil || c.Quality.Rankability != rpc.GammaRankabilityRankable {
 		return true
 	}
@@ -213,8 +217,11 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 		switch {
 		case code == "throttled", code == "all_iv_derived", code == "cache_stale_off_hours", code == "oi_missing":
 			return true
-		case strings.HasPrefix(code, "spy_unavailable:"),
-			strings.HasPrefix(code, "spx_unavailable:"),
+		case strings.HasPrefix(code, "spy_unavailable:"):
+			if !spxCanonical {
+				return true
+			}
+		case strings.HasPrefix(code, "spx_unavailable:"),
 			strings.HasPrefix(code, "spx_cache_fallback"),
 			strings.HasPrefix(code, "skew_fallback:"):
 			return true
@@ -226,6 +233,32 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 		}
 	}
 	return false
+}
+
+func gammaSPXCanonicalRankable(c *rpc.GammaZeroComputed) bool {
+	return c != nil &&
+		c.Scope == rpc.GammaZeroScopeSPX &&
+		c.Quality != nil &&
+		c.Quality.Rankability == rpc.GammaRankabilityRankable
+}
+
+func gammaOnlySPYUnavailable(c *rpc.GammaZeroComputed) bool {
+	if c == nil {
+		return false
+	}
+	seenSPYUnavailable := false
+	for _, rawCode := range gammaWarningCodes(c) {
+		code := strings.ToLower(strings.TrimSpace(rawCode))
+		if code == "" || code == "no_crossing_in_window" || code == "strike_budget_capped" {
+			continue
+		}
+		if strings.HasPrefix(code, "spy_unavailable:") {
+			seenSPYUnavailable = true
+			continue
+		}
+		return false
+	}
+	return seenSPYUnavailable
 }
 
 func gammaHasSPYUnavailable(c *rpc.GammaZeroComputed) bool {
@@ -316,7 +349,7 @@ func gammaOIMissingSummaryClass(c *rpc.GammaZeroComputed, inheritedAsOf time.Tim
 			if scope == "SPX" {
 				return "spx"
 			}
-			if rpc.ClassifySession(asOf) == rpc.SessionRTH {
+			if gammaClassifySession(asOf) == rpc.SessionRTH {
 				return "rth"
 			}
 			if scope == "SPY" {

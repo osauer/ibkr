@@ -183,6 +183,31 @@ func TestGammaStatusQualityReportsSPYExcluded(t *testing.T) {
 	}
 }
 
+func TestGammaStatusQualityTreatsRankableSPXAsStableWithSPYExcluded(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 2, 15, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeSPX,
+			AsOf:  now,
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityRankable,
+				RankabilityReason: "all rankability gates passed",
+			},
+			Summary: &rpc.GammaZeroSummary{Confidence: "estimate"},
+			WarningDetails: []rpc.GammaWarningDetail{
+				{Code: "strike_budget_capped"},
+				{Code: "no_crossing_in_window"},
+				{Code: "spy_unavailable:throttled"},
+			},
+		},
+	})
+	if ok {
+		t.Fatalf("gammaStatusQuality = %+v, want no data-quality warning for rankable SPX canonical signal", got)
+	}
+}
+
 func TestGammaStatusQualityReportsSPXCacheFallbackWithoutSummary(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)

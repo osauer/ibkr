@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,23 +404,58 @@ func TestNewGammaZeroCacheWithStore_LoadsPersistedScopes(t *testing.T) {
 	}
 }
 
-// TestNewGammaZeroCacheWithStore_IgnoresYesterdaysSession confirms a
-// daemon that rolls over an NY midnight doesn't serve yesterday's
-// per-scope persistence as today's.
-func TestNewGammaZeroCacheWithStore_IgnoresYesterdaysSession(t *testing.T) {
+// TestNewGammaZeroCacheWithStore_LoadsYesterdaysSessionAsLKG confirms a
+// daemon that rolls over an NY midnight still loads yesterday's
+// per-scope persistence as last-known-good context, then refreshes it
+// behind the served value during regular option hours.
+func TestNewGammaZeroCacheWithStore_LoadsYesterdaysSessionAsLKG(t *testing.T) {
 	dir := t.TempDir()
 	store := newGammaZeroStore(dir)
 	loc, _ := time.LoadLocation("America/New_York")
 	yesterday := time.Date(2026, 5, 21, 10, 0, 0, 0, loc)
 	today := time.Date(2026, 5, 22, 10, 0, 0, 0, loc)
-	if err := store.Save(rpc.GammaZeroScopeCombined, nySessionKey(yesterday), helperGammaResult(yesterday)); err != nil {
+	if cls := gammaClassifySession(today); cls != rpc.SessionRTH {
+		t.Fatalf("test fixture sanity check: expected SessionRTH, got %v", cls)
+	}
+	prior := helperGammaResult(yesterday)
+	prior.LegCount = 3333
+	if err := store.Save(rpc.GammaZeroScopeCombined, nySessionKey(yesterday), prior); err != nil {
 		t.Fatalf("seed Save: %v", err)
 	}
 
 	cache := newGammaZeroCacheWithStore(store, today, nil)
-	if slot, ok := cache.slots[rpc.GammaZeroScopeCombined]; ok && slot.current != nil {
-		t.Errorf("expected cold combined slot after session rollover, got %+v", slot.current)
+	slot, ok := cache.slots[rpc.GammaZeroScopeCombined]
+	if !ok || slot.current == nil || slot.current.result == nil {
+		t.Fatal("expected combined slot to be seeded from last-known-good persisted result")
 	}
+	if slot.current.result.LegCount != 3333 {
+		t.Fatalf("combined LKG LegCount = %d, want 3333", slot.current.result.LegCount)
+	}
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		computeRuns.Add(1)
+		fresh := helperGammaResult(today)
+		fresh.LegCount = 4444
+		return fresh, nil
+	}
+	job, fresh := cache.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, today, 300, compute)
+	if fresh || job != slot.current {
+		t.Fatalf("active rollover should serve LKG while refreshing: fresh=%v job=%p want %p", fresh, job, slot.current)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		job, _ = cache.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, today, 300, compute)
+		if job.result != nil && job.result.LegCount == 4444 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := computeRuns.Load(); got != 1 {
+		t.Fatalf("compute runs = %d, want 1", got)
+	}
+	t.Fatalf("fresh persisted result never promoted; job=%+v", job.result)
 }
 
 // writeTestEnvelope writes a pre-built envelope without going through

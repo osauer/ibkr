@@ -14,20 +14,23 @@ import (
 // handleGammaZeroSPX returns the current dealer zero-gamma estimate for
 // SPX (Indicator 4 of the risk-regime dashboard). The compute is heavy
 // (multi-minute fan-out across hundreds of option legs) and runs on a
-// daemon-internal goroutine — the RPC always returns within budget,
-// carrying a Status of "computing" while the work is in flight and
-// "ready" once a same-NY-session result is cached.
+// daemon-internal goroutine. The RPC always returns within budget: it
+// serves the last known-good snapshot when one exists, starts or joins
+// a background refresh when a better same-session result is expected,
+// and reports Status="computing" only when no serveable result exists.
 //
 // Concurrency contract:
 //
-//   - The first caller of an NY trading session kicks the compute and
-//     gets Status="computing" + an EtaSeconds hint. They can either
-//     return immediately or set WaitMs > 0 to block for the result.
+//   - The first caller of an NY trading session kicks the compute. If
+//     a prior known-good snapshot exists, the caller gets that ready
+//     context while the refresh runs; otherwise they get
+//     Status="computing" + an EtaSeconds hint.
 //   - Concurrent callers within the same session share the in-flight
 //     job (singleflight) — no duplicate fan-outs against the same
 //     gateway slot pool.
 //   - Callers after the compute finishes get Status="ready" with the
-//     cached payload until the next NY midnight, regardless of WaitMs.
+//     cached payload; future calls refresh behind it when the option
+//     data session or soft TTL says a better result is likely.
 //   - Force=true starts a fresh diagnostic compute. If a good cached value
 //     already exists, the cache keeps serving it and promotes the forced run
 //     only on success; otherwise force supersedes the in-flight/error state.

@@ -52,7 +52,7 @@ same.
 | HY OAS | FRED `BAMLH0A0HYM2` for high-yield OAS and `BAMLC0A0CM` for investment-grade corporate OAS | FRED/St. Louis Fed CSVs for ICE BofA option-adjusted spread series. |
 | CP 90-day AA financial minus 3-month T-bill | FRED `RIFSPPFAAD90NB` and `DTB3` | FRED/St. Louis Fed daily Federal Reserve rate series. |
 | USD/JPY weekly change | `USD.JPY`, routed as IBKR `CASH` on `IDEALPRO` with currency `JPY` | IBKR FX tick plus HMDS midpoint history for the seven-trading-day comparison; Tier 1 historical replay uses FRED `DEXJPUS`. |
-| SPY+SPX zero-gamma | `SPY` ETF options and `SPX` index options | IBKR option chains, open interest, option quotes/model-computation ticks, and the daemon's SPY+SPX gamma cache. |
+| SPX-canonical dealer gamma | `SPX`/`SPXW` index options with `SPY` ETF options as context | IBKR option chains, open interest, option quotes/model-computation ticks, and the daemon's gamma cache. |
 | S&P 500 breadth | Current S&P 500 constituent stock tickers; there is no single breadth symbol used live | Local daemon compute from IBKR HMDS constituent daily bars and the generated S&P 500 membership list. |
 
 ## Clusters
@@ -150,13 +150,15 @@ index moves. Above zero-gamma, hedging flows are usually more stabilizing.
 Below zero-gamma, hedging can chase the market lower or higher and make moves
 sharper. Treat this as a regime hint, not a precise tradable level.
 
-SPY is the exchange-traded S&P 500 ETF, while SPX is the S&P 500 index itself.
-Their option books trade separately, so the dashboard reads both and combines
-the per-index gamma regimes.
+SPX/SPXW index options are the canonical production signal for S&P 500 dealer
+gamma. SPY is the exchange-traded S&P 500 ETF; its option book trades
+separately and is used as corroborating context when fresh and high quality.
+Missing or throttled SPY does not downgrade an otherwise fresh, rankable SPX
+gamma result. SPY-only gamma is a proxy, not the canonical S&P dealer-gamma row.
 
 | Row | Green | Yellow | Red |
 | --- | --- | --- | --- |
-| SPY+SPX zero-gamma | spot > 2% above zero-gamma | within +/-2% | spot below zero-gamma |
+| SPX zero-gamma | spot > 2% above zero-gamma | within +/-2% | spot below zero-gamma |
 
 Gamma is ranked only when `gamma_zero.envelope.result.quality.rankability` is
 `rankable`. Non-rankable gamma remains visible in the row/envelope, but it does
@@ -165,7 +167,7 @@ stress confirmation:
 
 | Rankability | Meaning |
 | --- | --- |
-| `rankable` | Fresh same-session payload with enough priced-leg, OI, horizon, skew, concentration, and cache-quality evidence to use as market evidence. |
+| `rankable` | Fresh same-session payload with enough priced-leg, OI, horizon, skew, concentration, and cache-quality evidence to use as market evidence. Rankable SPX is stable and production-ready even when SPY is unavailable and disclosed as context. |
 | `context_only` | Useful market-structure context, but not independent confirmation. |
 | `blocked` | Payload exists but a freshness, coverage, OI, model, cache, farm, entitlement, pacing, or partial-chain gate blocks ranking. |
 | `unavailable` | No usable OI-weighted gamma payload exists. |
@@ -232,11 +234,12 @@ Breadth is computed locally from S&P 500 constituent daily bars because the
 retail IBKR feed does not provide the official S&P breadth series directly. The
 daemon caches the post-close result; reads should not trigger a 500-name fanout.
 
-Dealer gamma is a best-effort SPY+SPX zero-gamma estimate from IBKR option
-chain data. The live sweep uses the nearest 80 listed strikes per expiry inside
-the +/-10% candidate window to keep the IBKR fan-out bounded, especially for
-SPX/SPXW. Historical backtests should exclude gamma unless the row has a trusted
-point-in-time gamma snapshot with method, source, coverage, and timestamp.
+Dealer gamma is an SPX/SPXW-canonical zero-gamma estimate from IBKR option
+chain data, with SPY used as additive context when usable. The live sweep uses
+the nearest 80 listed strikes per expiry inside the +/-10% candidate window to
+keep the IBKR fan-out bounded, especially for SPX/SPXW. Historical backtests
+should exclude gamma unless the row has a trusted point-in-time gamma snapshot
+with method, source, coverage, and timestamp.
 
 Open interest is a required input for OI-weighted dealer GEX, but missing OI is
 unknown, never zero. Priced legs without observed OI may still fit the IV/skew

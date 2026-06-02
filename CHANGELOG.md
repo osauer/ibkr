@@ -18,12 +18,14 @@ All notable changes to this project are documented here. The project adheres to 
 
 - Improved regime and canary data-quality phase handling so stale, degraded, and fallback-derived market signals are surfaced more consistently.
 - Stabilized gamma option open-interest sourcing and rankability checks to reduce misleading confidence when chain data is incomplete.
+- Marked SPX/SPXW dealer gamma as the stable production signal: fresh rankable SPX remains usable when SPY is throttled or unavailable, while SPY is treated as corroborating context or an explicitly labeled proxy.
 - Clarified public documentation for regime indicator sources and cleaned up generated publishing artifacts.
 
 ### Fixed
 
 - Fixed restart command output ordering so the user-facing status reflects the daemon lifecycle in a predictable sequence.
 - Hardened gamma data-quality signaling around fallback and unrankable inputs.
+- Fixed single-scope SPX reads so they reuse the freshest canonical SPX result from a degraded combined run instead of serving an older isolated cache as blocked.
 
 ## v1.5.0 — 2026-05-31 21:35 CEST
 

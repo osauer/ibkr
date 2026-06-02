@@ -406,7 +406,7 @@ func gammaWarningSession(c *rpc.GammaZeroComputed) rpc.SessionClass {
 	if c != nil && !c.AsOf.IsZero() {
 		asOf = c.AsOf
 	}
-	return rpc.ClassifySession(asOf)
+	return gammaClassifySession(asOf)
 }
 
 func gammaOIMissingUnexpected(scope string, session rpc.SessionClass) bool {
@@ -426,11 +426,11 @@ func gammaOIMissingAction(scope string, session rpc.SessionClass) string {
 	case rpc.SessionRTH:
 		return prefix + "This happened during regular U.S. option hours, when OI should normally be available if TWS has it; check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
 	case rpc.SessionPre:
-		return prefix + "This affected SPY pre-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY pre-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	case rpc.SessionPost:
-		return prefix + "This affected SPY post-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY post-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	default:
-		return prefix + "This affected SPY while the regular U.S. option-data surface is closed, so sparse SPY OI is expected; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY while the regular U.S. option-data surface is closed, so sparse SPY OI is expected; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	}
 }
 
@@ -447,15 +447,15 @@ func spyUnavailableWarningText(reason string) (message, impact, action string) {
 	case "no_data":
 		return "SPY option chain was skipped: no option data landed within the window.",
 			"Showing SPX only; SPY gamma is not included.",
-			"Retry during 09:30-16:00 ET or run --only=spx."
+			"Retry during 09:30-16:15 ET or run --only=spx."
 	case "fetch_canceled", "context canceled", "context_canceled":
 		return "SPY option-chain fetch was canceled before usable data landed.",
 			"Showing SPX only; SPY gamma is not included.",
-			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
+			"Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
 	case "timeout", "context deadline exceeded":
 		return "SPY option-chain fetch timed out before usable data landed.",
 			"Showing SPX only; SPY gamma is not included.",
-			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
+			"Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spx."
 	case "throttled":
 		return "SPY option chain was skipped after gateway throttling.",
 			"Showing SPX only; SPY gamma is not included.",
@@ -488,11 +488,11 @@ func spxUnavailableWarningText(reason string) (message, impact, action string) {
 	case "fetch_canceled", "context canceled", "context_canceled":
 		return "SPX option-chain fetch was canceled before usable data landed.",
 			"Showing SPY only; SPX gamma is not included.",
-			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
+			"Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
 	case "timeout", "context deadline exceeded":
 		return "SPX option-chain fetch timed out before usable data landed.",
 			"Showing SPY only; SPX gamma is not included.",
-			"Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
+			"Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run --only=spy."
 	case "throttled":
 		return "SPX option chain was skipped after gateway throttling.",
 			"Showing SPY only; SPX gamma is not included.",
@@ -529,7 +529,7 @@ func spxCacheFallbackWarningText(reason string) (message, impact, action string)
 	}
 	return message,
 		"SPX is included but may be stale; treat the combined gamma regime as degraded.",
-		"Refresh during 09:30-16:00 ET and inspect the SPX per-index as_of before relying on the combined gamma row."
+		"Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before relying on the combined gamma row."
 }
 
 func gammaWarningScope(c *rpc.GammaZeroComputed, code string) string {

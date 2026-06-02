@@ -44,7 +44,7 @@ func TestSPXUnavailableWarningTextFetchCanceledIsUserFacing(t *testing.T) {
 	for _, want := range []string{
 		"canceled before usable data landed",
 		"Showing SPY only",
-		"09:30-16:00 ET",
+		"09:30-16:15 ET",
 		"--only=spy",
 	} {
 		if !strings.Contains(message+" "+impact+" "+action, want) {
@@ -105,7 +105,7 @@ func TestGammaWarningDetailOIMissingNamesAPIDiagnostic(t *testing.T) {
 	if got.Severity != "info" || got.Scope != "SPY" {
 		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
 	}
-	for _, want := range []string{"749 priced legs", "2 had positive OI", "generic tick 101", "pre-market", "sparse SPY OI is expected", "unknown, not zero", "09:30-16:00 ET"} {
+	for _, want := range []string{"749 priced legs", "2 had positive OI", "generic tick 101", "regular U.S. option-data surface is closed", "sparse SPY OI is expected", "unknown, not zero", "09:30-16:15 ET"} {
 		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
 			t.Fatalf("warning detail missing %q: %+v", want, got)
 		}
