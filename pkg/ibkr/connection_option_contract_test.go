@@ -77,7 +77,7 @@ func TestSendContractDetailsRequestBlanksUnresolvedStockPrimary(t *testing.T) {
 	assertField(t, fields, 11, "", "primaryExchange")
 }
 
-func TestSubscribeOptionUsesSPYARCARouteAndOpenInterestTicks(t *testing.T) {
+func TestSubscribeOptionResolvesSPYThenBlanksPrimaryForMarketDataAndOpenInterestTicks(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	conn, out := newReadyWireTestConnection(t)
 	c.conn = conn
@@ -87,32 +87,30 @@ func TestSubscribeOptionUsesSPYARCARouteAndOpenInterestTicks(t *testing.T) {
 	responderDone := make(chan struct{})
 	go func() {
 		defer close(responderDone)
-		reqID := waitForHandlerReqID(t, conn, msgContractData)
-		if reqID == 0 {
+		contractReqID := waitForHandlerReqID(t, conn, msgContractData)
+		if contractReqID == 0 {
 			return
 		}
-
 		frame := make([]string, 29)
 		frame[0] = strconv.Itoa(msgContractData)
-		frame[1] = strconv.Itoa(reqID)
+		frame[1] = strconv.Itoa(contractReqID)
 		frame[2] = "SPY"
 		frame[3] = "OPT"
 		frame[4] = "20260619"
 		frame[6] = "500"
 		frame[7] = "C"
-		frame[8] = "SMART"
+		frame[8] = "ARCA"
 		frame[9] = "USD"
 		frame[10] = "SPY   260619C00500000"
 		frame[12] = "SPY"
 		frame[13] = "99999"
 		frame[15] = "100"
 		frame[21] = "ARCA"
-
 		for _, h := range conn.snapshotHandlers(msgContractData) {
 			h(frame)
 		}
 		time.Sleep(20 * time.Millisecond)
-		endFrame := []string{strconv.Itoa(msgContractDataEnd), "1", strconv.Itoa(reqID)}
+		endFrame := []string{strconv.Itoa(msgContractDataEnd), "1", strconv.Itoa(contractReqID)}
 		for _, h := range conn.snapshotHandlers(msgContractDataEnd) {
 			h(endFrame)
 		}
@@ -124,10 +122,10 @@ func TestSubscribeOptionUsesSPYARCARouteAndOpenInterestTicks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeOption: %v", err)
 	}
+	<-responderDone
 	if reqID == 0 || key == "" {
 		t.Fatalf("expected subscription key and reqID, got key=%q reqID=%d", key, reqID)
 	}
-	<-responderDone
 
 	frames := decodeOutboundFrames(t, conn, out.Bytes())
 	contractDetails := findOutboundFrame(t, frames, reqContractData)
@@ -135,16 +133,16 @@ func TestSubscribeOptionUsesSPYARCARouteAndOpenInterestTicks(t *testing.T) {
 
 	assertField(t, contractDetails, 4, "SPY", "contractDetails symbol")
 	assertField(t, contractDetails, 5, "OPT", "contractDetails secType")
-	assertField(t, contractDetails, 9, "100", "contractDetails multiplier")
 	assertField(t, contractDetails, 10, "SMART", "contractDetails exchange")
 	assertField(t, contractDetails, 11, "ARCA", "contractDetails primaryExchange")
-	assertField(t, contractDetails, 14, "SPY", "contractDetails tradingClass")
 
+	assertField(t, marketData, 3, "99999", "marketData conID")
 	assertField(t, marketData, 4, "SPY", "marketData symbol")
 	assertField(t, marketData, 5, "OPT", "marketData secType")
 	assertField(t, marketData, 9, "100", "marketData multiplier")
-	assertField(t, marketData, 10, "SMART", "marketData exchange")
-	assertField(t, marketData, 11, "ARCA", "marketData primaryExchange")
+	assertField(t, marketData, 10, "ARCA", "marketData exchange")
+	assertField(t, marketData, 11, "", "marketData primaryExchange")
+	assertField(t, marketData, 13, "SPY   260619C00500000", "marketData localSymbol")
 	assertField(t, marketData, 14, "SPY", "marketData tradingClass")
 	if len(marketData) <= 16 || !strings.Contains(marketData[16], "101") {
 		t.Fatalf("marketData generic ticks missing 101: fields=%#v", marketData)

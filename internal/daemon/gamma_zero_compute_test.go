@@ -605,6 +605,61 @@ func TestCompactExpiry(t *testing.T) {
 	}
 }
 
+func TestGammaKeepJobAfterPrewarm(t *testing.T) {
+	cases := []struct {
+		name            string
+		symbol          string
+		prewarmComplete bool
+		cached          bool
+		want            bool
+	}{
+		{
+			name:            "spy_incomplete_requires_cache",
+			symbol:          "SPY",
+			prewarmComplete: false,
+			cached:          false,
+			want:            false,
+		},
+		{
+			name:            "spy_incomplete_keeps_cached",
+			symbol:          "SPY",
+			prewarmComplete: false,
+			cached:          true,
+			want:            true,
+		},
+		{
+			name:            "spx_incomplete_keeps_resolution_fallback",
+			symbol:          "SPX",
+			prewarmComplete: false,
+			cached:          false,
+			want:            true,
+		},
+		{
+			name:            "complete_requires_cache",
+			symbol:          "SPX",
+			prewarmComplete: true,
+			cached:          false,
+			want:            false,
+		},
+		{
+			name:            "complete_keeps_cached",
+			symbol:          "SPX",
+			prewarmComplete: true,
+			cached:          true,
+			want:            true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gammaKeepJobAfterPrewarm(tc.symbol, tc.prewarmComplete, tc.cached)
+			if got != tc.want {
+				t.Fatalf("gammaKeepJobAfterPrewarm(%q, %v, %v)=%v, want %v",
+					tc.symbol, tc.prewarmComplete, tc.cached, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDTEYears computes years-to-expiry to 16:00 ET on the expiration
 // date, returning 0 on parse failure or non-positive deltas (the leg
 // gate filters these).

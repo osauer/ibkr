@@ -1002,7 +1002,14 @@ func gammaSliceEligibleForCombined(c *rpc.GammaZeroComputed, now time.Time) bool
 			return false
 		}
 	}
-	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+	quality := c.Quality
+	if quality == nil {
+		copy := cloneGammaComputed(c)
+		hydrateGammaComputed(copy)
+		annotateGammaQuality(copy, now)
+		quality = copy.Quality
+	}
+	if quality == nil || quality.Rankability != rpc.GammaRankabilityRankable {
 		return false
 	}
 	return true

@@ -187,7 +187,7 @@ func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
 	}
 }
 
-func TestSubscribeOptionRequestsSPYTradingClassAndOpenInterestGenericTick(t *testing.T) {
+func TestSubscribeOptionRequestsSPYTradingClassBlankPrimaryAndOpenInterestGenericTick(t *testing.T) {
 	_, conn, _, _, out := setupOptionSubscriptionFixtureWithOutput(t)
 	fields := decodeLastWireMessageFields(t, conn, out.Bytes())
 	if len(fields) < 17 {
@@ -199,7 +199,7 @@ func TestSubscribeOptionRequestsSPYTradingClassAndOpenInterestGenericTick(t *tes
 	if fields[3] != "99999" || fields[4] != "SPY" || fields[5] != "OPT" {
 		t.Fatalf("unexpected option route fields: %#v", fields)
 	}
-	if fields[10] != "SMART" || fields[11] != "ARCA" || fields[12] != "USD" || fields[14] != "SPY" {
+	if fields[10] != "SMART" || fields[11] != "" || fields[12] != "USD" || fields[14] != "SPY" {
 		t.Fatalf("unexpected SPY option contract fields: exchange=%q primary=%q currency=%q tradingClass=%q fields=%#v",
 			fields[10], fields[11], fields[12], fields[14], fields)
 	}

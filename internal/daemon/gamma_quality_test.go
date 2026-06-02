@@ -76,6 +76,63 @@ func TestGammaQualitySPXCanonicalRanksWithSPYUnavailable(t *testing.T) {
 	}
 }
 
+func TestGammaQualitySPYLivePartialOIStillRankable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.PricedLegCount = 784
+	spy.LegCount = 159
+	spy.DerivedIVLegs = 6
+	spy.TopConcentrationPct = 21.5
+	spy.LegCount0DTE = 26
+	spy.LegCount1to7 = 71
+	spy.LegCountTerm = 62
+	spy.LegDiagnostics.Total.PricedLegs = 784
+	spy.LegDiagnostics.Total.OpenInterestObservedLegs = 454
+	spy.LegDiagnostics.Total.OILiveObservedLegs = 453
+	spy.LegDiagnostics.Total.OICarriedForwardLegs = 1
+	spy.LegDiagnostics.Total.OpenInterestLegs = 159
+	spy.LegDiagnostics.Total.AbsGEXLegs = 159
+	spy.SkewFitQuality = map[string]rpc.SkewFitInfo{
+		"20260602": {Points: 150, RSquared: 0.33},
+		"20260603": {Points: 151, RSquared: 0.61},
+		"20260604": {Points: 151, RSquared: 0.75},
+		"20260605": {Points: 150, RSquared: 0.69},
+		"20260717": {Points: 152, RSquared: 0.98},
+		"20260918": {Points: 30, RSquared: 0.99},
+	}
+	spy.Warnings = []string{"oi_missing", "strike_budget_capped", "no_crossing_in_window"}
+
+	annotateGammaQuality(spy, now)
+
+	if got := spy.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("rankability = %q, want rankable SPY live partial-OI signal: %+v", got, spy.Quality)
+	}
+	if spy.Quality.Coverage.OIObservedPct < gammaMinSPYOIObservedPct {
+		t.Fatalf("test fixture should cover SPY OI threshold: %+v", spy.Quality.Coverage)
+	}
+}
+
+func TestGammaQualitySPXStillRequiresHighOIObservedCoverage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.PricedLegCount = 784
+	spx.LegCount = 159
+	spx.LegDiagnostics.Total.PricedLegs = 784
+	spx.LegDiagnostics.Total.OpenInterestObservedLegs = 454
+	spx.LegDiagnostics.Total.OILiveObservedLegs = 453
+	spx.LegDiagnostics.Total.OICarriedForwardLegs = 1
+	spx.LegDiagnostics.Total.OpenInterestLegs = 159
+	spx.LegDiagnostics.Total.AbsGEXLegs = 159
+
+	annotateGammaQuality(spx, now)
+
+	if got := spx.Quality.Rankability; got != rpc.GammaRankabilityBlocked {
+		t.Fatalf("rankability = %q, want blocked SPX under strict OI gate: %+v", got, spx.Quality)
+	}
+}
+
 func TestGammaQualityStaleActiveCacheBlocksRanking(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)

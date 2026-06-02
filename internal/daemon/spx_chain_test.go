@@ -158,6 +158,37 @@ func TestSelectDefaultChainEntryPrefersSymbolClass(t *testing.T) {
 	}
 }
 
+func TestPickDefaultClassedExpirationsDoesNotMergeSPYSiblingClasses(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	now := time.Date(2026, 6, 2, 10, 0, 0, 0, loc)
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		"2026-06-02": {
+			{TradingClass: "2SPY", Strikes: []float64{650, 651, 652}},
+			{TradingClass: "SPY", Strikes: []float64{756, 757, 758, 759, 760}},
+		},
+		"2026-06-03": {
+			{TradingClass: "SPY", Strikes: []float64{755, 756, 757, 758, 759}},
+		},
+	}
+
+	picked := pickDefaultClassedExpirations("SPY", classed, now, 2)
+	if len(picked) != 2 {
+		t.Fatalf("picked %d expirations, want 2: %+v", len(picked), picked)
+	}
+	first := picked[0]
+	if first.date != "2026-06-02" || first.tradingClass != "SPY" {
+		t.Fatalf("first pick = %+v, want 2026-06-02 class SPY", first)
+	}
+	wantStrikes := []float64{756, 757, 758, 759, 760}
+	if !reflect.DeepEqual(first.strikes, wantStrikes) {
+		t.Fatalf("SPY strikes were merged with sibling class: got %v want %v", first.strikes, wantStrikes)
+	}
+}
+
 func TestSelectDefaultChainEntryRejectsMissingExplicitClass(t *testing.T) {
 	t.Parallel()
 	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{{

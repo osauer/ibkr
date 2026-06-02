@@ -2404,15 +2404,17 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 		return "", 0, ErrIBKRUnavailable
 	}
 
-	// IBKR rejects reqMktData with code 200 ("No security definition has
-	// been found for the request") when an option Contract is sent without
-	// a resolved ConID. resolveOptionContract issues reqContractDetails,
-	// waits for contractDataEnd, picks the best exchange match, and
-	// populates ConID + TradingClass. Subsequent calls hit the option-
-	// contract cache and skip the network round-trip.
-	if err := conn.resolveOptionContract(ctx, &contract, 5*time.Second); err != nil {
-		return "", 0, fmt.Errorf("resolve option %s %s %.2f%s: %w",
-			contract.Symbol, contract.Expiry, contract.Strike, contract.Right, err)
+	if conn.applyCachedOptionContract(&contract) {
+		normalizeResolvedOptionMarketDataContract(&contract)
+	} else {
+		// Index options and other non-direct paths still resolve ConID before
+		// reqMktData. SPX/SPXW in particular needs this cache-backed path to
+		// preserve its classed contract identity.
+		if err := conn.resolveOptionContract(ctx, &contract, 5*time.Second); err != nil {
+			return "", 0, fmt.Errorf("resolve option %s %s %.2f%s: %w",
+				contract.Symbol, contract.Expiry, contract.Strike, contract.Right, err)
+		}
+		normalizeResolvedOptionMarketDataContract(&contract)
 	}
 
 	// Generic ticks mirror RequestOptionsMarketData: 100=opt volume,
