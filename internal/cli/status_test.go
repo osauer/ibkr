@@ -227,6 +227,21 @@ func TestWaitForHandshakeWritesProgressToWriter(t *testing.T) {
 	}
 }
 
+func TestWaitForStatusVerdictJSONSuppressesProgress(t *testing.T) {
+	t.Parallel()
+	fetch := func(ctx context.Context) (rpc.HealthResult, error) {
+		return rpc.HealthResult{Connected: true}, nil
+	}
+	var progress bytes.Buffer
+	res := waitForStatusVerdict(context.Background(), &progress, true, rpc.HealthResult{}, fetch)
+	if !res.Connected {
+		t.Fatalf("expected connected result after wait, got %+v", res)
+	}
+	if progress.Len() != 0 {
+		t.Fatalf("JSON status wait wrote progress output: %q", progress.String())
+	}
+}
+
 func TestRenderStatus_FlightDeckShape(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

@@ -168,6 +168,52 @@ func TestRenderGammaSkippedBannerFramesEntitlementAsNotAfterHours(t *testing.T) 
 	}
 }
 
+func TestFallbackGammaWarningDetailTreatsSPXOIMissingAsDataQualityOffHours(t *testing.T) {
+	t.Parallel()
+	got := fallbackGammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		AsOf:           time.Date(2026, time.June, 1, 22, 0, 0, 0, time.UTC),
+		PricedLegCount: 927,
+		LegCount:       335,
+	}, "oi_missing")
+	if got.Severity != "data_quality" || got.Scope != "SPX" {
+		t.Fatalf("warning detail = %+v, want SPX data_quality", got)
+	}
+	for _, want := range []string{
+		"Open-interest ticks were missing for 592 priced legs",
+		"Missing OI is unknown, not zero",
+		"SPX option OI should normally be stable",
+	} {
+		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestFallbackGammaWarningDetailCountsPositiveOIAsObservedForLegacyCache(t *testing.T) {
+	t.Parallel()
+	got := fallbackGammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		AsOf:           time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC),
+		PricedLegCount: 751,
+		LegCount:       2,
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{
+				PricedLegs:       751,
+				OpenInterestLegs: 2,
+			},
+		},
+	}, "oi_missing")
+	if got.Severity != "info" || got.Scope != "SPY" {
+		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
+	}
+	for _, want := range []string{"749 priced legs", "2 had observed OI", "2 had positive OI"} {
+		if !strings.Contains(got.Message+" "+got.Impact, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
 // TestRenderGamma_HeroHasTitleTimestampAnchor pins the shared hero
 // shape applied to gamma: a title on the same line as a timestamp
 // (joined with "  ·  "), followed by an indented SPY spot anchor.

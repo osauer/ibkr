@@ -320,9 +320,12 @@ type legFetcher func(
 //	           computed via bsGamma using the derived σ.
 //
 // Open interest (ticks 27/28) is read opportunistically from the per-
-// subscription cache at the end — never as a gate. Per-strike OI is
-// genuinely sparse off-hours (verified in TWS UI: most rows show no
-// OI value); gating on OI hard-drops legs that have real IV signal.
+// subscription cache at the end — never as a gate. Missing OI is
+// unknown, not zero: the leg can enrich IV/skew fitting, but it is
+// omitted from OI-weighted dealer GEX until an OI tick is observed.
+// SPY OI may be absent outside regular option hours; SPX OI should be
+// stable across session phases, so missing SPX OI is a data-quality
+// finding rather than expected off-hours sparsity.
 //
 // Per-leg budget is 1.5 s for the model-tick poll. Active strikes
 // produce a model tick within ~500 ms; dead deep-OTM strikes time out
@@ -370,14 +373,11 @@ func productionLegFetcher(
 	// to type=1 to chase OI ticks but suppressed model ticks system-wide
 	// for the duration of the fan-out, regressing landing rate to ~1%.
 	//
-	// OI (ticks 27/28) is intentionally NOT gated. Per-strike OI is
-	// genuinely sparse off-hours — even TWS's own option-chain widget
-	// shows OI only on actively-traded strikes (verified in TWS UI
-	// 2026-05-21). A leg with model-tick IV but no OI still contributes
-	// the right thing to dealer GEX (γ × 0 = 0) and enriches the IV
-	// surface for skew fitting; dropping it on missing OI throws away
-	// real signal. OI is read opportunistically from the per-
-	// subscription cache after the model-tick poll.
+	// OI (ticks 27/28) is intentionally NOT gated. A leg with IV but no
+	// observed OI still enriches the IV surface for skew fitting, but
+	// its dealer-GEX contribution is omitted because OI is unknown, not
+	// zero. SPY OI can be sparse outside regular option hours; missing
+	// SPX OI remains a data-quality finding.
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	var iv, gamma float64
 	err = pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
@@ -830,8 +830,8 @@ func computeGammaZeroFor(
 			// to produce a single usable leg in 30 s. With the v0.26.0
 			// BS-IV fallback the pre-market case is supposed to
 			// recover; if we land here it usually means the gateway
-			// dropped the OI ticks too (entitlement gap, feed-farm
-			// outage, or session-boundary pause).
+			// dropped model/price ticks entirely (entitlement gap,
+			// feed-farm outage, or session-boundary pause).
 			return nil, fmt.Errorf("zero-gamma: no option data landed in first %ds (neither model ticks nor prior-session prices for BS-IV fallback). Check gateway entitlement and farm-connection notices in the daemon log",
 				int(earlyAbortAfter.Seconds()))
 		case throttledAbort.Load():
@@ -842,7 +842,7 @@ func computeGammaZeroFor(
 		default:
 			log.Warnf("gamma.abort reason=no_legs landed=%d/%d elapsed=%s",
 				len(legs), len(jobs), fanoutElapsed)
-			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return OI+IV", len(jobs))
+			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return usable IV/pricing", len(jobs))
 		}
 	}
 	log.Infof("gamma.fanout.done landed=%d/%d derived_iv=%d elapsed=%s",

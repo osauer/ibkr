@@ -126,7 +126,8 @@ func gammaOIMissingCount(d *rpc.GammaLegDiagnostics) int {
 	if d == nil {
 		return 0
 	}
-	missing := d.Total.PricedLegs - d.Total.OpenInterestObservedLegs
+	observed := max(d.Total.OpenInterestObservedLegs, d.Total.OpenInterestLegs)
+	missing := d.Total.PricedLegs - observed
 	if missing < 0 {
 		return 0
 	}
