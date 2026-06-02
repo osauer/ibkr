@@ -794,7 +794,9 @@ type StrikeConcentration struct {
 // GammaLegDiagnosticCounts splits the priced-leg funnel into the
 // conditions required for dealer GEX contribution. A leg can price and
 // still fail to contribute when open interest is missing/zero, gamma is
-// degenerate, or the resulting OI-weighted absolute GEX is zero.
+// degenerate, or the resulting OI-weighted absolute GEX is zero. Missing
+// OI is unknown, not zero; OpenInterestObservedLegs keeps that distinct
+// from an observed zero-OI tick.
 type GammaLegDiagnosticCounts struct {
 	PricedLegs               int `json:"priced_legs"`
 	OpenInterestObservedLegs int `json:"oi_observed_legs,omitempty"`
@@ -975,8 +977,9 @@ type GammaZeroComputed struct {
 	Expirations []string `json:"expirations"`
 	// LegCount is the number of option legs that contributed non-zero
 	// open-interest-weighted gamma exposure to the profile. It excludes
-	// priced legs whose IV landed but whose OI was missing/zero, because
-	// those legs cannot move dealer GEX.
+	// priced legs whose IV landed but whose OI was missing/zero. Missing
+	// OI is unknown, not zero, so those legs are omitted from dealer GEX
+	// rather than zero-substituted.
 	LegCount int `json:"leg_count"`
 	// PricedLegCount is the number of option legs that delivered IV (or
 	// a BS-IV fallback) and were usable for skew fitting. It can exceed

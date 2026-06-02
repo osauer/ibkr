@@ -33,18 +33,12 @@ func runStatus(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "status: %v", err)
 	}
 
-	// On a freshly autospawned daemon the handshake hasn't landed by the
-	// time this first call returns. Wait for a definite verdict (connected
-	// or error) so the user gets a real answer instead of "retry in a few
-	// seconds." Skipped under --json: scripts want a snapshot, not a wait.
-	if !*jsonOut && isHandshakeInFlight(res) {
-		fetch := func(ctx context.Context) (rpc.HealthResult, error) {
-			var r rpc.HealthResult
-			err := env.Conn.Call(ctx, rpc.MethodStatusHealth, nil, &r)
-			return r, err
-		}
-		res = waitForHandshake(ctx, env.Stderr, fetch, res, handshakeWaitBudget, handshakePollInterval)
+	fetch := func(ctx context.Context) (rpc.HealthResult, error) {
+		var r rpc.HealthResult
+		err := env.Conn.Call(ctx, rpc.MethodStatusHealth, nil, &r)
+		return r, err
 	}
+	res = waitForStatusVerdict(ctx, env.Stderr, *jsonOut, res, fetch)
 
 	if *jsonOut {
 		return printJSON(env, res)
@@ -434,6 +428,19 @@ func backgroundTaskPhrase(token string) string {
 // daemon. Indirected so tests can drive the wait deterministically
 // without a live socket.
 type healthFetcher func(ctx context.Context) (rpc.HealthResult, error)
+
+// waitForStatusVerdict waits out the daemon's first IB Gateway handshake
+// verdict. JSON output must stay clean, so its progress UI is discarded
+// instead of being mixed into stdout.
+func waitForStatusVerdict(ctx context.Context, progress io.Writer, jsonOut bool, initial rpc.HealthResult, fetch healthFetcher) rpc.HealthResult {
+	if !isHandshakeInFlight(initial) {
+		return initial
+	}
+	if jsonOut {
+		progress = io.Discard
+	}
+	return waitForHandshake(ctx, progress, fetch, initial, handshakeWaitBudget, handshakePollInterval)
+}
 
 // waitForHandshake polls fetch until it returns a verdict (Connected, or
 // LastError set) or budget elapses.

@@ -1,6 +1,6 @@
 # Risk Regime Dashboard Contract
 
-**Updated:** 2026-06-01 08:53 CEST
+**Updated:** 2026-06-02 07:48 CEST
 
 `ibkr regime` reports the broad-market stress lifecycle: `quiet`,
 `early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`,
@@ -225,6 +225,14 @@ chain data. The live sweep uses the nearest 80 listed strikes per expiry inside
 the +/-10% candidate window to keep the IBKR fan-out bounded, especially for
 SPX/SPXW. Historical backtests should exclude gamma unless the row has a trusted
 point-in-time gamma snapshot with method, source, coverage, and timestamp.
+
+Open interest is a required input for OI-weighted dealer GEX, but missing OI is
+unknown, never zero. Priced legs without observed OI may still fit the IV/skew
+surface, but they must be omitted from OI-weighted GEX and surfaced through
+`warning_details` / `data_quality`. SPY option OI can be absent outside regular
+U.S. option hours. SPX option OI should normally be stable across session phases;
+missing SPX OI is unexpected data-quality evidence even pre-market, after-hours,
+overnight, or on closed-session cache reads.
 
 MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.

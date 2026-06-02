@@ -155,10 +155,15 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	} else if gammaHasSPXCacheFallback(env.Result) {
 		summary = "degraded: SPX cache fallback"
 	} else if gammaHasOIMissing(env.Result) {
-		if gammaHasRTHOIMissing(env.Result, env.Result.AsOf) {
+		switch gammaOIMissingSummaryClass(env.Result, env.Result.AsOf) {
+		case "spx":
+			summary = "degraded: partial SPX option OI (unexpected: SPX OI should be session-stable)"
+		case "rth":
 			summary = "degraded: partial option OI (unexpected: sampled during RTH)"
-		} else {
-			summary = "degraded: partial option OI (expected: sampled outside RTH)"
+		case "spy_off_hours":
+			summary = "degraded: partial SPY option OI (expected: sampled outside RTH)"
+		default:
+			summary = "degraded: partial option OI"
 		}
 	}
 	return rpc.DataQualityHealth{
@@ -275,9 +280,9 @@ func gammaHasOIMissing(c *rpc.GammaZeroComputed) bool {
 	return false
 }
 
-func gammaHasRTHOIMissing(c *rpc.GammaZeroComputed, inheritedAsOf time.Time) bool {
+func gammaOIMissingSummaryClass(c *rpc.GammaZeroComputed, inheritedAsOf time.Time) string {
 	if c == nil {
-		return false
+		return ""
 	}
 	asOf := inheritedAsOf
 	if !c.AsOf.IsZero() {
@@ -288,15 +293,54 @@ func gammaHasRTHOIMissing(c *rpc.GammaZeroComputed, inheritedAsOf time.Time) boo
 			if asOf.IsZero() {
 				asOf = time.Now()
 			}
-			return rpc.ClassifySession(asOf) == rpc.SessionRTH
+			scope := strings.ToUpper(strings.TrimSpace(w.Scope))
+			if scope == "" {
+				scope = strings.ToUpper(gammaStatusQualityScope(c))
+			}
+			if scope == "SPX" {
+				return "spx"
+			}
+			if rpc.ClassifySession(asOf) == rpc.SessionRTH {
+				return "rth"
+			}
+			if scope == "SPY" {
+				return "spy_off_hours"
+			}
+			return "unknown"
 		}
 	}
+	best := ""
 	for _, sub := range c.PerIndex {
-		if gammaHasRTHOIMissing(sub, asOf) {
-			return true
+		switch got := gammaOIMissingSummaryClass(sub, asOf); got {
+		case "spx":
+			return got
+		case "rth":
+			best = got
+		case "spy_off_hours":
+			if best == "" {
+				best = got
+			}
+		case "unknown":
+			if best == "" {
+				best = got
+			}
 		}
 	}
-	return false
+	return best
+}
+
+func gammaStatusQualityScope(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return ""
+	}
+	switch c.Scope {
+	case rpc.GammaZeroScopeSPX:
+		return "SPX"
+	case rpc.GammaZeroScopeCombined:
+		return "SPY+SPX"
+	default:
+		return "SPY"
+	}
 }
 
 func staleRegimeClusters(r *rpc.RegimeSnapshotResult) []string {

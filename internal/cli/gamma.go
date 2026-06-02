@@ -602,16 +602,21 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		d.Action = "Retry later or during regular trading hours; avoid repeated forced runs."
 	case code == "oi_missing":
 		session := gammaWarningSessionForCLI(c)
-		if session == rpc.SessionRTH {
+		if gammaOIMissingUnexpectedForCLI(d.Scope, session) {
 			d.Severity = "data_quality"
 		}
-		if c != nil && c.PricedLegCount > 0 {
-			d.Message = fmt.Sprintf("Open interest was missing or zero for %d priced legs.", max(c.PricedLegCount-c.LegCount, 0))
-			d.Impact = fmt.Sprintf("%d priced legs landed, but only %d contributed to dealer GEX.", c.PricedLegCount, c.LegCount)
+		missing := gammaOIMissingCountForCLI(c)
+		if missing > 0 {
+			d.Message = fmt.Sprintf("Open-interest ticks were missing for %d priced legs.", missing)
+		} else if c != nil && c.PricedLegCount > 0 {
+			d.Message = "Some priced legs had no observed open-interest tick."
 		} else {
-			d.Message = "Some priced legs had no usable open interest."
+			d.Message = "Some priced legs had no observed open-interest tick."
 		}
-		d.Action = gammaOIMissingActionForCLI(session)
+		if c != nil && c.PricedLegCount > 0 {
+			d.Impact = fmt.Sprintf("%d priced legs landed; %d had observed OI and %d had positive OI for dealer GEX. Missing OI is unknown, not zero.", c.PricedLegCount, gammaOIObservedCountForCLI(c), c.LegCount)
+		}
+		d.Action = gammaOIMissingActionForCLI(d.Scope, session)
 	case strings.HasPrefix(code, "spx_unavailable:"):
 		d.Severity = "data_quality"
 		reason := strings.TrimPrefix(code, "spx_unavailable:")
@@ -648,17 +653,52 @@ func gammaWarningSessionForCLI(c *rpc.GammaZeroComputed) rpc.SessionClass {
 	return rpc.ClassifySession(asOf)
 }
 
-func gammaOIMissingActionForCLI(session rpc.SessionClass) string {
+func gammaOIMissingCountForCLI(c *rpc.GammaZeroComputed) int {
+	if c == nil {
+		return 0
+	}
+	if c.LegDiagnostics != nil {
+		observed := max(c.LegDiagnostics.Total.OpenInterestObservedLegs, c.LegDiagnostics.Total.OpenInterestLegs)
+		return max(c.LegDiagnostics.Total.PricedLegs-observed, 0)
+	}
+	if c.PricedLegCount > 0 {
+		return max(c.PricedLegCount-c.LegCount, 0)
+	}
+	return 0
+}
+
+func gammaOIObservedCountForCLI(c *rpc.GammaZeroComputed) int {
+	if c == nil {
+		return 0
+	}
+	if c.LegDiagnostics != nil {
+		return max(c.LegDiagnostics.Total.OpenInterestObservedLegs, c.LegDiagnostics.Total.OpenInterestLegs)
+	}
+	return c.LegCount
+}
+
+func gammaOIMissingUnexpectedForCLI(scope string, session rpc.SessionClass) bool {
+	scope = strings.ToUpper(strings.TrimSpace(scope))
+	return scope == "SPX" || session == rpc.SessionRTH
+}
+
+func gammaOIMissingActionForCLI(scope string, session rpc.SessionClass) string {
 	prefix := "The option request already asks IBKR for generic tick 101 (call/put open interest). "
+	if strings.EqualFold(strings.TrimSpace(scope), "SPX") {
+		if session == rpc.SessionRTH {
+			return prefix + "This affected SPX during regular U.S. option hours, when OI should normally be available if TWS has it; check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
+		}
+		return prefix + "This affected SPX. SPX option OI should normally be stable across session phases; missing API OI is unknown, not zero. Check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
+	}
 	switch session {
 	case rpc.SessionRTH:
 		return prefix + "This happened during regular U.S. option hours, when OI should normally be available if TWS has it; check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
 	case rpc.SessionPre:
-		return prefix + "This happened pre-market, outside regular U.S. option hours, so sparse OI is expected for the regular option-data surface; retry during 09:30-16:00 ET. SPX may still trade in Global Trading Hours, so compare TWS when SPX shows OI but the API does not."
+		return prefix + "This affected SPY pre-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
 	case rpc.SessionPost:
-		return prefix + "This happened post-market, outside regular U.S. option hours, so sparse OI is expected for the regular option-data surface; retry during 09:30-16:00 ET. SPX curb/session nuances can differ from ETF options, so compare TWS when SPX shows OI but the API does not."
+		return prefix + "This affected SPY post-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
 	default:
-		return prefix + "This happened while the regular U.S. option-data surface is closed, so sparse OI is expected; retry during 09:30-16:00 ET. SPX global-hours nuances can differ from ETF options, so compare TWS when SPX shows OI but the API does not."
+		return prefix + "This affected SPY while the regular U.S. option-data surface is closed, so sparse SPY OI is expected; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
 	}
 }
 
@@ -1108,7 +1148,7 @@ func spxUnavailableContext(c *rpc.GammaZeroComputed, reason string) string {
 		if session == rpc.SessionRTH {
 			return prefix + " During regular option hours this is more likely a gateway/fetch failure unless daemon logs show IBKR 354/200."
 		}
-		return prefix + " Outside regular U.S. option hours, SPX option/model/OI ticks can be sparse; that may be a contributor, not a confirmed root cause."
+		return prefix + " Outside regular U.S. option hours this may still be a gateway, pacing, or farm issue; session timing is not a confirmed root cause. SPX option OI should be session-stable when delivered, so missing SPX OI is unknown rather than zero."
 	default:
 		return prefix + " The warning does not by itself identify entitlement vs gateway vs session timing."
 	}

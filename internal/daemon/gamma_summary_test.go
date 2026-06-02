@@ -105,7 +105,49 @@ func TestGammaWarningDetailOIMissingNamesAPIDiagnostic(t *testing.T) {
 	if got.Severity != "info" || got.Scope != "SPY" {
 		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
 	}
-	for _, want := range []string{"749 priced legs", "2 had positive OI", "generic tick 101", "pre-market", "sparse OI is expected", "09:30-16:00 ET"} {
+	for _, want := range []string{"749 priced legs", "2 had positive OI", "generic tick 101", "pre-market", "sparse SPY OI is expected", "unknown, not zero", "09:30-16:00 ET"} {
+		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestGammaWarningDetailOIMissingCountsPositiveOIAsObservedForLegacyCache(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		AsOf:           time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), // 08:00 ET pre-market
+		PricedLegCount: 751,
+		LegCount:       2,
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{
+				PricedLegs:       751,
+				OpenInterestLegs: 2,
+			},
+		},
+	}, "oi_missing")
+	if got.Severity != "info" || got.Scope != "SPY" {
+		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
+	}
+	for _, want := range []string{"749 priced legs", "2 legs had observed OI", "2 had positive OI"} {
+		if !strings.Contains(got.Message+" "+got.Impact, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
+func TestGammaWarningDetailOIMissingIsDataQualityForSPXOutsideRTH(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		AsOf:           time.Date(2026, time.June, 1, 22, 0, 0, 0, time.UTC), // 18:00 ET post-market
+		PricedLegCount: 927,
+		LegCount:       335,
+	}, "oi_missing")
+	if got.Severity != "data_quality" || got.Scope != "SPX" {
+		t.Fatalf("warning detail = %+v, want SPX data_quality warning outside RTH", got)
+	}
+	for _, want := range []string{"SPX option OI should normally be stable", "unknown, not zero", "data-farm health"} {
 		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
 			t.Fatalf("warning detail missing %q: %+v", want, got)
 		}

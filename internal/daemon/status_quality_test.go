@@ -287,8 +287,8 @@ func TestGammaStatusQualityReportsPartialOptionOI(t *testing.T) {
 	if !ok {
 		t.Fatal("gammaStatusQuality ok=false, want true")
 	}
-	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI (expected: sampled outside RTH)" {
-		t.Fatalf("quality = %+v, want gamma degraded expected outside-RTH partial option OI", got)
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial SPY option OI (expected: sampled outside RTH)" {
+		t.Fatalf("quality = %+v, want gamma degraded expected outside-RTH SPY partial option OI", got)
 	}
 }
 
@@ -313,8 +313,8 @@ func TestGammaStatusQualityReportsWarningOnlyPartialOptionOI(t *testing.T) {
 	if !ok {
 		t.Fatal("gammaStatusQuality ok=false, want true")
 	}
-	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI (expected: sampled outside RTH)" {
-		t.Fatalf("quality = %+v, want warning-only gamma degraded expected outside-RTH partial option OI", got)
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial SPY option OI (expected: sampled outside RTH)" {
+		t.Fatalf("quality = %+v, want warning-only gamma degraded expected outside-RTH SPY partial option OI", got)
 	}
 }
 
@@ -343,8 +343,32 @@ func TestGammaStatusQualityReportsUnexpectedPartialOptionOIDuringRTH(t *testing.
 	if !ok {
 		t.Fatal("gammaStatusQuality ok=false, want true")
 	}
-	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI (unexpected: sampled during RTH)" {
-		t.Fatalf("quality = %+v, want gamma degraded unexpected RTH partial option OI", got)
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial SPX option OI (unexpected: SPX OI should be session-stable)" {
+		t.Fatalf("quality = %+v, want gamma degraded unexpected SPX partial option OI", got)
+	}
+}
+
+func TestGammaStatusQualityReportsUnexpectedSPXPartialOptionOIOutsideRTH(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 22, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeSPX,
+			AsOf:  now,
+			Summary: &rpc.GammaZeroSummary{
+				Confidence: "degraded",
+			},
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code: "oi_missing",
+			}},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial SPX option OI (unexpected: SPX OI should be session-stable)" {
+		t.Fatalf("quality = %+v, want off-hours SPX partial option OI to remain unexpected", got)
 	}
 }
 

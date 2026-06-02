@@ -986,7 +986,7 @@ func TestPrepareGEXLegsRequiresOpenInterest(t *testing.T) {
 		t.Fatalf("priced legs with missing OI must not count as GEX legs: %+v", gexLegs)
 	}
 	if total != 0 {
-		t.Fatalf("priced legs with missing OI must produce zero GEX, got %v", total)
+		t.Fatalf("priced legs with missing OI must produce no OI-weighted GEX total, got %v", total)
 	}
 
 	withOI := append(append([]legData{}, pricedNoOI...), legData{
@@ -1041,7 +1041,7 @@ func TestWaitForOptionOpenInterestReturnsZeroWhenMissing(t *testing.T) {
 		return 0, false
 	})
 	if got != 0 || observed {
-		t.Fatalf("OpenInterest = %d observed=%v, want missing zero", got, observed)
+		t.Fatalf("OpenInterest = %d observed=%v, want missing/unobserved OI", got, observed)
 	}
 }
 
