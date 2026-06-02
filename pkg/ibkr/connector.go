@@ -19,6 +19,14 @@ import (
 var connectorLogger = logging.Component("IBKR Connector")
 var marketDataLogger = logging.Component("IBKR MarketData")
 
+// OptionSubscriptionGenericTicks is the generic-tick list used by
+// SubscribeOption for per-contract option market data.
+const OptionSubscriptionGenericTicks = "100,101,104,106"
+
+// OptionOpenInterestGenericTick is IBKR's open-interest generic tick for
+// option market-data subscriptions.
+const OptionOpenInterestGenericTick = "101"
+
 // ErrSymbolInactive indicates IBKR has reported the contract is unavailable (e.g., delisted).
 var ErrSymbolInactive = errors.New("symbol marked inactive")
 
@@ -2380,6 +2388,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 		Symbol:       upperUnderlying,
 		SecType:      "OPT",
 		Exchange:     "SMART",
+		PrimaryExch:  optionUnderlyingPrimaryExchangeHint(upperUnderlying),
 		Currency:     "USD",
 		Expiry:       expiryYMD,
 		Strike:       strike,
@@ -2420,7 +2429,7 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	// OI ticks can be one-shot and arrive immediately after reqMktData.
 	// Register the reqID before the wire send so ticks 27/28 cannot race
 	// ahead of the connector routing maps.
-	reqID, err := conn.requestMarketDataWithContract(ctx, contract, "100,101,104,106", false, false, func(reqID int) func() {
+	reqID, err := conn.requestMarketDataWithContract(ctx, contract, OptionSubscriptionGenericTicks, false, false, func(reqID int) func() {
 		c.subMu.Lock()
 		c.reqIDMap[reqID] = key
 		c.subscriptions[key] = &Subscription{
@@ -4313,14 +4322,18 @@ func parseTickSize(serverVersion, tickType int, raw string) (int64, bool) {
 		return 0, false
 	}
 	size, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
+	if err == nil {
+		if serverVersion >= minServerVerSizeRules && (tickType == 8 || tickType == 74) && size >= 1_000_000 {
+			return size / 1_000_000, true
+		}
+		return size, true
+	}
+	decimal, decimalErr := strconv.ParseFloat(raw, 64)
+	if decimalErr != nil || math.IsNaN(decimal) || math.IsInf(decimal, 0) || decimal < 0 {
 		marketDataLogger.Warnf("Invalid tick size for tickType %d: %q (error: %v)", tickType, raw, err)
 		return 0, false
 	}
-	if serverVersion >= minServerVerSizeRules && (tickType == 8 || tickType == 74) && size >= 1_000_000 {
-		return size / 1_000_000, true
-	}
-	return size, true
+	return int64(decimal), true
 }
 
 // handlePosition processes position updates

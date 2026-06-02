@@ -318,7 +318,7 @@ func regimeLifecycleClusterBands(r RegimeSnapshotResult) ([]string, []string) {
 }
 
 func rankableLifecycleGammaBand(g RegimeGammaZero) string {
-	if g.Envelope.Result != nil && g.Envelope.Result.Quality != nil &&
+	if g.Envelope.Result == nil || g.Envelope.Result.Quality == nil ||
 		g.Envelope.Result.Quality.Rankability != GammaRankabilityRankable {
 		return ""
 	}

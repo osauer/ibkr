@@ -25,14 +25,19 @@ const fastAbortBudget = 100 * time.Millisecond
 // key and reqID after a successful subscribe. The outbound reqMktData
 // frame is buffered in `out` — tests don't need to decode it.
 func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connection, subKey string, reqID int) {
+	c, conn, subKey, reqID, _ = setupOptionSubscriptionFixtureWithOutput(t)
+	return c, conn, subKey, reqID
+}
+
+func setupOptionSubscriptionFixtureWithOutput(t *testing.T) (c *Connector, conn *Connection, subKey string, reqID int, out *safeBuffer) {
 	t.Helper()
 	c = NewConnector(&ConnectorConfig{})
 	conn = NewConnection(nil)
 	t.Cleanup(func() { conn.rateLimiter.Stop() })
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVersionRequired)
-	var out safeBuffer
-	conn.writer = bufio.NewWriter(&out)
+	out = &safeBuffer{}
+	conn.writer = bufio.NewWriter(out)
 	c.conn = conn
 	c.running = true
 	c.ready = true
@@ -68,7 +73,27 @@ func setupOptionSubscriptionFixture(t *testing.T) (c *Connector, conn *Connectio
 	if reqID == 0 {
 		t.Fatalf("expected non-zero reqID")
 	}
-	return c, conn, subKey, reqID
+	return c, conn, subKey, reqID, out
+}
+
+func decodeLastWireMessageFields(t *testing.T, conn *Connection, payload []byte) []string {
+	t.Helper()
+	offset := 0
+	var msg []byte
+	for offset+4 <= len(payload) {
+		length := int(binary.BigEndian.Uint32(payload[offset : offset+4]))
+		start := offset + 4
+		end := start + length
+		if end > len(payload) {
+			break
+		}
+		msg = append([]byte(nil), payload[start:end]...)
+		offset = end
+	}
+	if len(msg) == 0 {
+		t.Fatalf("failed to decode last wire message from payload length %d", len(payload))
+	}
+	return conn.decodeMessage(msg)
 }
 
 type immediateMktDataTickWriter struct {
@@ -159,6 +184,28 @@ func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
 	}
 	if md[subKey].OpenInt != 4321 {
 		t.Fatalf("OpenInt = %d, want 4321", md[subKey].OpenInt)
+	}
+}
+
+func TestSubscribeOptionRequestsSPYTradingClassAndOpenInterestGenericTick(t *testing.T) {
+	_, conn, _, _, out := setupOptionSubscriptionFixtureWithOutput(t)
+	fields := decodeLastWireMessageFields(t, conn, out.Bytes())
+	if len(fields) < 17 {
+		t.Fatalf("unexpected reqMktData fields: %#v", fields)
+	}
+	if fields[0] != strconv.Itoa(reqMktData) || fields[1] != "11" {
+		t.Fatalf("expected reqMktData v11 header, got %#v", fields[:2])
+	}
+	if fields[3] != "99999" || fields[4] != "SPY" || fields[5] != "OPT" {
+		t.Fatalf("unexpected option route fields: %#v", fields)
+	}
+	if fields[10] != "SMART" || fields[11] != "ARCA" || fields[12] != "USD" || fields[14] != "SPY" {
+		t.Fatalf("unexpected SPY option contract fields: exchange=%q primary=%q currency=%q tradingClass=%q fields=%#v",
+			fields[10], fields[11], fields[12], fields[14], fields)
+	}
+	if fields[16] != OptionSubscriptionGenericTicks {
+		t.Fatalf("generic ticks = %q, want %q (must include open-interest tick %s)",
+			fields[16], OptionSubscriptionGenericTicks, OptionOpenInterestGenericTick)
 	}
 }
 

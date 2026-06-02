@@ -202,7 +202,7 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c == nil {
 		return false
 	}
-	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if c.Quality == nil || c.Quality.Rankability != rpc.GammaRankabilityRankable {
 		return true
 	}
 	if c.Summary != nil && strings.EqualFold(c.Summary.Confidence, "degraded") {

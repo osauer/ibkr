@@ -183,6 +183,24 @@ func TestGammaQualitySPXOIDegradationBlocksCombined(t *testing.T) {
 	}
 }
 
+func TestGammaQualityCoverageReportsLiveAndCarriedOI(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.LegDiagnostics.Total.OpenInterestObservedLegs = 198
+	spy.LegDiagnostics.Total.OILiveObservedLegs = 120
+	spy.LegDiagnostics.Total.OICarriedForwardLegs = 78
+
+	annotateGammaQuality(spy, now)
+	cov := spy.Quality.Coverage
+	if cov.OIObservedLegs != 198 || cov.OILiveObservedLegs != 120 || cov.OICarriedForwardLegs != 78 {
+		t.Fatalf("coverage split = %+v", cov)
+	}
+	if cov.OILiveObservedPct != 60 || cov.OICarriedForwardPct != 39 {
+		t.Fatalf("coverage percentages = live %.1f carried %.1f, want 60/39", cov.OILiveObservedPct, cov.OICarriedForwardPct)
+	}
+}
+
 func TestRegimeCompositeDoesNotRankContextOnlyGamma(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)

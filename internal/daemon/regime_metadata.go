@@ -206,7 +206,10 @@ func gammaBandReason(r rpc.RegimeGammaZero) string {
 	if c == nil {
 		return "envelope missing payload"
 	}
-	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if c.Quality == nil {
+		return "quality missing; gamma is unranked"
+	}
+	if c.Quality.Rankability != rpc.GammaRankabilityRankable {
 		if c.Quality.RankabilityReason != "" {
 			return c.Quality.Rankability + ": " + c.Quality.RankabilityReason
 		}

@@ -164,13 +164,9 @@ func canaryHasActiveMarginContext(acct rpc.AccountResult) bool {
 
 func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 	out := CanaryMarketSummary{
-		RegimeVerdict:    r.Composite.Verdict,
-		RedClusters:      r.Composite.ClusterRedCount,
-		YellowClusters:   r.Composite.ClusterYellowCount,
-		RankedClusters:   r.Composite.ClusterRankedCount,
-		UnrankedClusters: r.Composite.ClusterUnrankedCount,
-		SPYChangePct:     r.HYGSPYDivergence.SPYChangePct,
-		VIXChangePct:     r.VIXTermStructure.VIXChangePct,
+		RegimeVerdict: r.Composite.Verdict,
+		SPYChangePct:  r.HYGSPYDivergence.SPYChangePct,
+		VIXChangePct:  r.VIXTermStructure.VIXChangePct,
 	}
 	rawBands := rawRegimeClusterBands(r)
 	bands := confirmedRegimeClusterBands(r, rawBands)
@@ -195,6 +191,11 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 			out.RedClusterNames = append(out.RedClusterNames, name)
 		case "yellow":
 			out.YellowClusterNames = append(out.YellowClusterNames, name)
+		}
+		if clusterBand == "" {
+			out.UnrankedClusters++
+		} else {
+			out.RankedClusters++
 		}
 		status := weakestStatus(statuses[name])
 		if status == rpc.RegimeStatusComputing {
@@ -229,7 +230,7 @@ func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
 	if g.Envelope.Result == nil {
 		return false
 	}
-	if g.Envelope.Result.Quality != nil && g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if g.Envelope.Result.Quality == nil || g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
 		return true
 	}
 	if g.Envelope.Result.Summary != nil && strings.EqualFold(g.Envelope.Result.Summary.Confidence, "degraded") {

@@ -197,9 +197,63 @@ func TestSelectSPXChainEntryPrefersSPXWhenAmbiguousBeforeSettle(t *testing.T) {
 	}
 }
 
+func TestSelectSPXExpirationsClassedIncludesAMMonthlyAndQuarterlyThursdayKeys(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		"2026-06-02": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		"2026-06-03": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		"2026-06-04": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		"2026-06-05": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		"2026-06-08": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		"2026-06-09": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+		// IBKR/TWS keys AM-settled standard SPX monthlies by Thursday
+		// last-trade date, not by the third Friday settlement date.
+		"2026-06-18": {{TradingClass: "SPX", Strikes: []float64{7600}}},
+		"2026-07-16": {{TradingClass: "SPX", Strikes: []float64{7600}}},
+		"2026-09-17": {{TradingClass: "SPX", Strikes: []float64{7600}}},
+		// Adjacent PM-settled weekly must not satisfy the SPX AM monthly
+		// or quarterly anchors.
+		"2026-09-18": {{TradingClass: "SPXW", Strikes: []float64{7600}}},
+	}
+	now := time.Date(2026, 6, 2, 9, 30, 0, 0, loc)
+
+	picked := selectSPXExpirationsClassed(classed, now, 6)
+	got := make([]string, 0, len(picked))
+	for _, spec := range picked {
+		got = append(got, spec.Date+"|"+spec.TradingClass)
+	}
+	want := []string{
+		"2026-06-02|SPXW",
+		"2026-06-03|SPXW",
+		"2026-06-04|SPXW",
+		"2026-06-05|SPXW",
+		"2026-06-18|SPX",
+		"2026-09-17|SPX",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("picked SPX expiries:\ngot  %v\nwant %v", got, want)
+	}
+}
+
+func TestClassSettlementInstantSPXAMThursdayKeySettlesFridayMorning(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	got := classSettlementInstant("SPX", 2026, time.September, 17, loc)
+	want := time.Date(2026, time.September, 18, 9, 30, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("SPX AM settlement instant = %s, want %s", got, want)
+	}
+}
+
 // TestSelectSPXExpirationsClassedRespectsCount pins the 6-cap budget
-// across classes. With 8 candidate (date, class) entries and count=6,
-// we pick the first 6 in date-ascending / class-ascending order.
+// across classes. Anchored monthly/quarterly slots may jump forward, but
+// the final basket must still respect the requested count and stable order.
 func TestSelectSPXExpirationsClassedRespectsCount(t *testing.T) {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {

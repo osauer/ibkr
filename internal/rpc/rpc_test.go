@@ -77,6 +77,12 @@ func TestStripGammaProfilesRecursive(t *testing.T) {
 				},
 			},
 		},
+		DiagnosticResult: &GammaZeroComputed{
+			Scope: GammaZeroScopeSPX,
+			Profile: []GammaProfilePoint{
+				{Spot: 100, GEX: 6},
+			},
+		},
 	}
 	StripGammaProfiles(res)
 	if len(res.Result.Profile) != 0 || len(res.Result.Profile0DTE) != 0 ||
@@ -88,6 +94,9 @@ func TestStripGammaProfilesRecursive(t *testing.T) {
 	}
 	if res.Result.Summary == nil || res.Result.Summary.PrimaryStatement != "keep me" {
 		t.Fatalf("summary should survive profile stripping: %+v", res.Result.Summary)
+	}
+	if len(res.DiagnosticResult.Profile) != 0 {
+		t.Fatalf("diagnostic_result profile was not stripped: %+v", res.DiagnosticResult.Profile)
 	}
 }
 

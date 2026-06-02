@@ -1200,12 +1200,15 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			row.stateNote = "envelope missing payload"
 			return row
 		}
-		gammaRankable := c.Quality == nil || c.Quality.Rankability == rpc.GammaRankabilityRankable
+		gammaRankable := gammaComputedExplicitlyRankable(c)
 		if c.Quality != nil {
 			row.stateNote = c.Quality.Rankability
 			if c.Quality.RankabilityReason != "" {
 				row.reason = c.Quality.RankabilityReason
 			}
+		} else {
+			row.stateNote = "quality_missing"
+			row.reason = "gamma quality missing"
 		}
 		// Gamma's two scalars are always modelled (zero_gamma via the
 		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
@@ -1217,7 +1220,7 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 				row.value += fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
 			}
 			if gammaRankable {
-				row.band = gammaCombinedRegimeBand(c)
+				row.band = rankableGammaCombinedRegimeBand(c)
 			} else {
 				row.band = bandUnranked
 			}
@@ -1379,6 +1382,51 @@ func gammaCombinedRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 	return bandYellow
 }
 
+func rankableGammaCombinedRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
+	if !gammaComputedExplicitlyRankable(c) {
+		return bandUnranked
+	}
+	type weightedBand struct {
+		band   regimeBand
+		weight float64
+	}
+	var bands []weightedBand
+	for _, key := range []string{"SPY", "SPX"} {
+		sub := c.PerIndex[key]
+		if !gammaComputedExplicitlyRankable(sub) {
+			continue
+		}
+		b := gammaSingleRegimeBand(sub)
+		if b != bandUnranked {
+			bands = append(bands, weightedBand{band: b, weight: gammaPerIndexWeight(key, sub)})
+		}
+	}
+	if len(bands) == 0 {
+		return bandUnranked
+	}
+	first := bands[0].band
+	total := 0.0
+	redWeight := 0.0
+	for _, b := range bands[1:] {
+		if b.band != first {
+			first = bandUnranked
+		}
+	}
+	for _, b := range bands {
+		total += b.weight
+		if b.band == bandRed {
+			redWeight += b.weight
+		}
+	}
+	if first != bandUnranked {
+		return first
+	}
+	if total > 0 && redWeight/total >= 0.5 {
+		return bandRed
+	}
+	return bandYellow
+}
+
 func gammaPerIndexWeight(key string, c *rpc.GammaZeroComputed) float64 {
 	if c != nil && c.GammaTotalAbs > 0 {
 		return c.GammaTotalAbs
@@ -1414,6 +1462,10 @@ func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 	default:
 		return bandUnranked
 	}
+}
+
+func gammaComputedExplicitlyRankable(c *rpc.GammaZeroComputed) bool {
+	return c != nil && c.Quality != nil && c.Quality.Rankability == rpc.GammaRankabilityRankable
 }
 
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {

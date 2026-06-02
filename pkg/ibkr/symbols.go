@@ -181,6 +181,14 @@ func classifySymbol(symbol string) (string, string, string, string) {
 	return secType, exchange, currency, primary
 }
 
+func optionUnderlyingPrimaryExchangeHint(symbol string) string {
+	secType, _, _, primary := classifySymbol(strings.ToUpper(strings.TrimSpace(symbol)))
+	if secType != "STK" {
+		return ""
+	}
+	return primary
+}
+
 func contractDisplayHints(symbol, secType string) (string, string) {
 	switch secType {
 	case "IND":

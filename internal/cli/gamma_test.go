@@ -420,6 +420,56 @@ func TestRenderGamma_ExplainSurfacesMetadata(t *testing.T) {
 	}
 }
 
+func TestRenderGamma_ExplainSurfacesSourceDiagnostics(t *testing.T) {
+	t.Parallel()
+	fix := gammaReadyFixture()
+	fix.Result.CollectionDiagnostics = []rpc.GammaCollectionDiagnostic{{
+		Underlying:             "SPY",
+		TradingClass:           "SPY",
+		Expiry:                 "2026-06-05",
+		QualifiedContracts:     160,
+		RequestedLegs:          80,
+		PricedLegs:             75,
+		MarketDataGenericTicks: "100,101,104,106",
+		OIGenericTickRequested: true,
+		OILiveObservedLegs:     0,
+		OICarriedForwardLegs:   0,
+		OIPositiveLegs:         0,
+		OIMissingLegs:          75,
+		Timeouts:               2,
+		EntitlementErrors:      1,
+		StrikeCandidates:       100,
+		StrikeSelected:         80,
+		StrikeCap:              80,
+		StrikeCapTruncated:     true,
+		ExpiryCapTruncated:     true,
+		CollectionDurationMS:   2100,
+		OISourceStatus:         "missing",
+	}}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, fix, true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Source diagnostics",
+		"SPY/SPY 2026-06-05",
+		"q160 req80 priced75",
+		"OI live0 carry0 pos0 miss75",
+		"tick101 yes",
+		"ticks 100,101,104,106",
+		"missing",
+		"failures timeout=2 · entitlement=1",
+		"caps     strikes 80/100 cap 80 truncated · expiry cap truncated",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain source diagnostics missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderGamma_DefaultShowsPerIndexCompact pins U1.4: combined-mode
 // default render surfaces one compact line per index ("SPY  no crossing
 // · long-γ · 1052 legs") instead of the old multi-line Per-index block.

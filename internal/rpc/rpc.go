@@ -800,6 +800,8 @@ type StrikeConcentration struct {
 type GammaLegDiagnosticCounts struct {
 	PricedLegs               int `json:"priced_legs"`
 	OpenInterestObservedLegs int `json:"oi_observed_legs,omitempty"`
+	OILiveObservedLegs       int `json:"oi_live_observed_legs,omitempty"`
+	OICarriedForwardLegs     int `json:"oi_carried_forward_legs,omitempty"`
 	OpenInterestLegs         int `json:"oi_positive_legs"`
 	GammaPositiveLegs        int `json:"gamma_positive_legs"`
 	AbsGEXLegs               int `json:"abs_gex_positive_legs"`
@@ -812,6 +814,41 @@ type GammaLegDiagnostics struct {
 	Total          GammaLegDiagnosticCounts            `json:"total"`
 	ByUnderlying   map[string]GammaLegDiagnosticCounts `json:"by_underlying,omitempty"`
 	ByTradingClass map[string]GammaLegDiagnosticCounts `json:"by_trading_class,omitempty"`
+}
+
+// GammaCollectionDiagnostic exposes the source-level option-chain funnel for
+// one (underlying, trading class, expiry) slice. It separates contract
+// discovery/prewarm from option market-data and OI capture so a blocked gamma
+// result can name the source failure rather than only reporting a rankability
+// gate.
+type GammaCollectionDiagnostic struct {
+	Underlying               string `json:"underlying"`
+	TradingClass             string `json:"trading_class,omitempty"`
+	Expiry                   string `json:"expiry,omitempty"` // YYYY-MM-DD
+	QualifiedContracts       int    `json:"qualified_contracts"`
+	RequestedLegs            int    `json:"requested_legs"`
+	PricedLegs               int    `json:"priced_legs"`
+	MarketDataGenericTicks   string `json:"market_data_generic_ticks,omitempty"`
+	OIGenericTickRequested   bool   `json:"oi_generic_tick_101_requested,omitempty"`
+	OILiveObservedLegs       int    `json:"oi_live_observed_legs,omitempty"`
+	OICarriedForwardLegs     int    `json:"oi_carried_forward_legs,omitempty"`
+	OIPositiveLegs           int    `json:"oi_positive_legs,omitempty"`
+	OIMissingLegs            int    `json:"oi_missing_legs,omitempty"`
+	ContractMissingLegs      int    `json:"contract_missing_legs,omitempty"`
+	Timeouts                 int    `json:"timeouts,omitempty"`
+	PacingErrors             int    `json:"pacing_errors,omitempty"`
+	FarmErrors               int    `json:"farm_errors,omitempty"`
+	EntitlementErrors        int    `json:"entitlement_errors,omitempty"`
+	SubscriptionRejects      int    `json:"subscription_rejects,omitempty"`
+	StrikeCandidates         int    `json:"strike_candidates,omitempty"`
+	StrikeSelected           int    `json:"strike_selected,omitempty"`
+	StrikeCap                int    `json:"strike_cap,omitempty"`
+	StrikeCapTruncated       bool   `json:"strike_cap_truncated,omitempty"`
+	ExpiryCapTruncated       bool   `json:"expiry_cap_truncated,omitempty"`
+	CollectionDurationMS     int64  `json:"collection_duration_ms,omitempty"`
+	OISourceStatus           string `json:"oi_source_status,omitempty"` // live_observed | carried_forward | mixed | missing
+	CarriedForwardSource     string `json:"carried_forward_source,omitempty"`
+	CarriedForwardObservedAt string `json:"carried_forward_observed_at,omitempty"`
 }
 
 const (
@@ -849,21 +886,25 @@ type GammaSignalQuality struct {
 // GammaQualityCoverage carries the numeric diagnostics used by the quality
 // gates. Ratios are percentages in human units (95.0 means 95%).
 type GammaQualityCoverage struct {
-	PricedLegs          int     `json:"priced_legs"`
-	OIObservedLegs      int     `json:"oi_observed_legs"`
-	OIPositiveLegs      int     `json:"oi_positive_legs"`
-	GEXLegs             int     `json:"gex_legs"`
-	OIObservedPct       float64 `json:"oi_observed_pct,omitempty"`
-	OIPositivePct       float64 `json:"oi_positive_pct,omitempty"`
-	DerivedIVPct        float64 `json:"derived_iv_pct,omitempty"`
-	TopConcentrationPct float64 `json:"top_concentration_pct,omitempty"`
-	ExpirationCount     int     `json:"expiration_count,omitempty"`
-	Has0DTE             bool    `json:"has_0dte"`
-	Has1To7DTE          bool    `json:"has_1to7_dte"`
-	HasTerm             bool    `json:"has_term"`
-	SkewFitExpiries     int     `json:"skew_fit_expiries,omitempty"`
-	MedianSkewRSquared  float64 `json:"median_skew_r_squared,omitempty"`
-	MinSkewRSquared     float64 `json:"min_skew_r_squared,omitempty"`
+	PricedLegs           int     `json:"priced_legs"`
+	OIObservedLegs       int     `json:"oi_observed_legs"`
+	OILiveObservedLegs   int     `json:"oi_live_observed_legs,omitempty"`
+	OICarriedForwardLegs int     `json:"oi_carried_forward_legs,omitempty"`
+	OIPositiveLegs       int     `json:"oi_positive_legs"`
+	GEXLegs              int     `json:"gex_legs"`
+	OIObservedPct        float64 `json:"oi_observed_pct,omitempty"`
+	OILiveObservedPct    float64 `json:"oi_live_observed_pct,omitempty"`
+	OICarriedForwardPct  float64 `json:"oi_carried_forward_pct,omitempty"`
+	OIPositivePct        float64 `json:"oi_positive_pct,omitempty"`
+	DerivedIVPct         float64 `json:"derived_iv_pct,omitempty"`
+	TopConcentrationPct  float64 `json:"top_concentration_pct,omitempty"`
+	ExpirationCount      int     `json:"expiration_count,omitempty"`
+	Has0DTE              bool    `json:"has_0dte"`
+	Has1To7DTE           bool    `json:"has_1to7_dte"`
+	HasTerm              bool    `json:"has_term"`
+	SkewFitExpiries      int     `json:"skew_fit_expiries,omitempty"`
+	MedianSkewRSquared   float64 `json:"median_skew_r_squared,omitempty"`
+	MinSkewRSquared      float64 `json:"min_skew_r_squared,omitempty"`
 }
 
 // GammaQualityGate is one explicit quality decision. Status is "pass",
@@ -1058,6 +1099,12 @@ type GammaZeroComputed struct {
 	// GEX-contribution funnel. It is especially useful when a forced
 	// off-hours run prices legs but every row has missing/zero OI.
 	LegDiagnostics *GammaLegDiagnostics `json:"leg_diagnostics,omitempty"`
+	// CollectionDiagnostics exposes the source-level request funnel per
+	// underlying/tradingClass/expiry: contracts qualified, market-data legs
+	// requested, priced legs, live-vs-carried OI, timeouts, rejects, and cap
+	// truncation. This is the production diagnostic surface for deciding
+	// whether gamma is source-limited or merely gate-blocked.
+	CollectionDiagnostics []GammaCollectionDiagnostic `json:"collection_diagnostics,omitempty"`
 	// Quality is the explicit rankability contract for gamma as an
 	// algo-trading signal. Result can be present while Quality says
 	// "context_only" or "blocked"; regime/canary consumers must not
@@ -1239,6 +1286,12 @@ type GammaZeroSPXResult struct {
 	Progress int `json:"progress,omitempty"`
 	// Result is populated when Status == "ready".
 	Result *GammaZeroComputed `json:"result,omitempty"`
+	// DiagnosticResult is populated when a compute failed after collecting
+	// source-level evidence (for example priced option legs with no usable OI),
+	// or when a preserved ready cache has a newer failed diagnostic refresh.
+	// It must not be treated as a trading signal; it exists to expose the
+	// option-chain/OI source blocker that prevented Result from updating.
+	DiagnosticResult *GammaZeroComputed `json:"diagnostic_result,omitempty"`
 	// Error is populated when Status == "error".
 	Error string `json:"error,omitempty"`
 	// ColdReasonCode / ColdReason / ColdAction are populated when
@@ -1265,10 +1318,11 @@ type GammaZeroSPXResult struct {
 // top strikes. CLI JSON and MCP use this by default so agents do not receive
 // tens of kilobytes of points unless they explicitly ask for profiles.
 func StripGammaProfiles(r *GammaZeroSPXResult) {
-	if r == nil || r.Result == nil {
+	if r == nil {
 		return
 	}
 	stripGammaComputedProfiles(r.Result)
+	stripGammaComputedProfiles(r.DiagnosticResult)
 }
 
 func StripRegimeGammaProfiles(r *RegimeSnapshotResult) {

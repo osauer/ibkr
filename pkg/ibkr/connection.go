@@ -3260,11 +3260,16 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 	if contract.Strike != 0 {
 		strikeField = strconv.FormatFloat(contract.Strike, 'f', -1, 64)
 	}
+	multiplierField := ""
+	if strings.EqualFold(contract.SecType, "OPT") && contract.Multiplier != 0 {
+		multiplierField = strconv.Itoa(contract.Multiplier)
+	}
 
-	// Primary exchange must be empty during discovery (conID=0).
-	// Only populate it after we have a known conID from IBKR.
+	// Equity primary exchange must be empty during stock discovery (conID=0).
+	// For OPT discovery, the underlying primary hint is source selection:
+	// SPY/ETF options need SMART+ARCA to match TWS' SPY ARCA chain source.
 	primaryField := ""
-	if contract.ConID != 0 && contract.PrimaryExch != "" {
+	if contract.PrimaryExch != "" && (contract.ConID != 0 || strings.EqualFold(contract.SecType, "OPT")) {
 		primaryField = contract.PrimaryExch
 	}
 
@@ -3283,7 +3288,7 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 		contract.Expiry,
 		strikeField, // use empty string for stocks, actual value for options
 		contract.Right,
-		"", // multiplier as string
+		multiplierField,
 		ifEmpty(contract.Exchange, "SMART"),
 		primaryField,
 		ifEmpty(contract.Currency, "USD"),
@@ -3854,6 +3859,10 @@ func applyContractDetailLite(detail ContractDetailsLite, contract *Contract) {
 	if contract == nil {
 		return
 	}
+	optionPrimaryHint := ""
+	if strings.EqualFold(contract.SecType, "OPT") {
+		optionPrimaryHint = optionUnderlyingPrimaryExchangeHint(contract.Symbol)
+	}
 	if detail.Exchange != "" {
 		contract.Exchange = detail.Exchange
 	}
@@ -3868,6 +3877,12 @@ func applyContractDetailLite(detail ContractDetailsLite, contract *Contract) {
 	}
 	if detail.TradingClass != "" {
 		contract.TradingClass = detail.TradingClass
+	}
+	if optionPrimaryHint != "" {
+		// Cached OPT details can contain the option listing venue as
+		// PrimaryExch; for SPY-style stock options this field is the
+		// underlying chain source hint and must stay ARCA.
+		contract.PrimaryExch = optionPrimaryHint
 	}
 }
 
@@ -4124,6 +4139,9 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 	secType := "OPT"
 	exchange := "SMART"
 	primaryExchange := "CBOE"
+	if hint := optionUnderlyingPrimaryExchangeHint(symbol); hint != "" {
+		primaryExchange = hint
+	}
 	currency := "USD"
 
 	expiryFormatted := expiry
@@ -4192,49 +4210,8 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 	}
 	c.optionContractMu.RUnlock()
 
-	type attempt struct {
-		Contract Contract
-		Label    string
-	}
-	buildAttempts := func() []attempt {
-		attempts := []attempt{{Contract: *contract, Label: contract.Exchange}}
-
-		if contract.PrimaryExch != "" && !strings.EqualFold(contract.Exchange, contract.PrimaryExch) {
-			alt := *contract
-			alt.Exchange = contract.PrimaryExch
-			alt.PrimaryExch = ""
-			attempts = append(attempts, attempt{Contract: alt, Label: contract.PrimaryExch})
-		}
-
-		if !strings.EqualFold(contract.Exchange, "CBOE") {
-			alt := *contract
-			alt.Exchange = "CBOE"
-			alt.PrimaryExch = ""
-			attempts = append(attempts, attempt{Contract: alt, Label: "CBOE"})
-		}
-
-		if !strings.EqualFold(contract.Exchange, "SMART") {
-			alt := *contract
-			alt.Exchange = "SMART"
-			alt.PrimaryExch = ""
-			attempts = append(attempts, attempt{Contract: alt, Label: "SMART"})
-		}
-
-		seen := make(map[string]struct{})
-		dedup := make([]attempt, 0, len(attempts))
-		for _, att := range attempts {
-			key := strings.ToUpper(att.Contract.Exchange) + "|" + strings.ToUpper(att.Contract.PrimaryExch)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			dedup = append(dedup, att)
-		}
-		return dedup
-	}
-
 	var lastErr error
-	for _, att := range buildAttempts() {
+	for _, att := range optionContractResolutionAttempts(*contract) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -4264,6 +4241,57 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 	}
 
 	return fmt.Errorf("contract details unavailable for option %s %s %.2f%s", contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+}
+
+type optionContractRouteAttempt struct {
+	Contract Contract
+	Label    string
+}
+
+func optionContractResolutionAttempts(contract Contract) []optionContractRouteAttempt {
+	attempts := []optionContractRouteAttempt{{Contract: contract, Label: optionContractRouteLabel(contract)}}
+
+	if contract.PrimaryExch != "" && !strings.EqualFold(contract.Exchange, contract.PrimaryExch) {
+		alt := contract
+		alt.Exchange = contract.PrimaryExch
+		alt.PrimaryExch = ""
+		attempts = append(attempts, optionContractRouteAttempt{Contract: alt, Label: optionContractRouteLabel(alt)})
+	}
+
+	if !strings.EqualFold(contract.Exchange, "CBOE") {
+		alt := contract
+		alt.Exchange = "CBOE"
+		alt.PrimaryExch = ""
+		attempts = append(attempts, optionContractRouteAttempt{Contract: alt, Label: optionContractRouteLabel(alt)})
+	}
+
+	if !strings.EqualFold(contract.Exchange, "SMART") {
+		alt := contract
+		alt.Exchange = "SMART"
+		alt.PrimaryExch = ""
+		attempts = append(attempts, optionContractRouteAttempt{Contract: alt, Label: optionContractRouteLabel(alt)})
+	}
+
+	seen := make(map[string]struct{})
+	dedup := make([]optionContractRouteAttempt, 0, len(attempts))
+	for _, att := range attempts {
+		key := strings.ToUpper(att.Contract.Exchange) + "|" + strings.ToUpper(att.Contract.PrimaryExch)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		dedup = append(dedup, att)
+	}
+	return dedup
+}
+
+func optionContractRouteLabel(contract Contract) string {
+	exchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	if primary == "" {
+		return exchange
+	}
+	return exchange + "+" + primary
 }
 
 func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
@@ -4370,6 +4398,7 @@ func optionDetailMatchesRequest(candidate ContractDetailsLite, contract Contract
 type PrewarmOptionChainResult struct {
 	Expiry  string
 	Cached  int
+	Dropped int
 	Elapsed time.Duration
 	Err     error
 }
@@ -4421,10 +4450,11 @@ func (c *Connection) PrewarmOptionChain(
 			defer func() { <-sem }()
 
 			start := time.Now()
-			cached, err := c.prewarmOneExpiry(ctx, symbol, exp, tradingClass, timeout)
+			cached, dropped, err := c.prewarmOneExpiry(ctx, symbol, exp, tradingClass, timeout)
 			results[i] = PrewarmOptionChainResult{
 				Expiry:  exp,
 				Cached:  cached,
+				Dropped: dropped,
 				Elapsed: time.Since(start),
 				Err:     err,
 			}
@@ -4450,19 +4480,46 @@ func (c *Connection) prewarmOneExpiry(
 	ctx context.Context,
 	symbol, expiry, tradingClass string,
 	timeout time.Duration,
-) (int, error) {
+) (int, int, error) {
 	contract := Contract{
 		Symbol:       symbol,
 		SecType:      "OPT",
 		Expiry:       expiry,
 		Exchange:     "SMART",
+		PrimaryExch:  optionUnderlyingPrimaryExchangeHint(symbol),
 		Currency:     "USD",
 		Multiplier:   100,
 		TradingClass: tradingClass,
 	}
 
-	detailsCh := make(chan ContractDetailsLite, 1024)
+	attempts := optionContractResolutionAttempts(contract)
+	labels := make([]string, 0, len(attempts))
+	var lastErr error
+	for _, att := range attempts {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		labels = append(labels, att.Label)
+		cached, dropped, err := c.prewarmOneExpiryAttempt(ctx, att.Contract, timeout)
+		if cached > 0 || dropped > 0 {
+			return cached, dropped, err
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return 0, 0, fmt.Errorf("prewarm %s %s class=%s route attempts %s: %w",
+			symbol, expiry, tradingClass, strings.Join(labels, ","), lastErr)
+	}
+	return 0, 0, fmt.Errorf("prewarm %s %s class=%s returned zero contract details across route attempts %s",
+		symbol, expiry, tradingClass, strings.Join(labels, ","))
+}
+
+func (c *Connection) prewarmOneExpiryAttempt(ctx context.Context, contract Contract, timeout time.Duration) (int, int, error) {
+	detailsCh := make(chan ContractDetailsLite, 16_384)
 	doneCh := make(chan struct{})
+	var dropped atomic.Int32
 	serverVersion := c.serverVersion
 	reqID := c.GetNextRequestID()
 
@@ -4471,6 +4528,7 @@ func (c *Connection) prewarmOneExpiry(
 			select {
 			case detailsCh <- *lite:
 			default:
+				dropped.Add(1)
 			}
 		}
 	})
@@ -4489,7 +4547,7 @@ func (c *Connection) prewarmOneExpiry(
 	defer c.UnregisterHandler(msgContractDataEnd, endHandlerID)
 
 	if err := c.sendContractDetailsRequest(contract, reqID); err != nil {
-		return 0, fmt.Errorf("send reqContractDetails: %w", err)
+		return 0, int(dropped.Load()), fmt.Errorf("send reqContractDetails: %w", err)
 	}
 
 	timer := time.NewTimer(timeout)
@@ -4521,7 +4579,7 @@ func (c *Connection) prewarmOneExpiry(
 		// (the gateway already has a streaming subscription bound to
 		// the SMART-routed ConID for those) but does NOT work for
 		// fresh OPT subscribes off the bulk-resolved cache.
-		key := optionContractKey(symbol, d.TradingClass, expiry, d.Strike, d.Right)
+		key := optionContractKey(contract.Symbol, d.TradingClass, contract.Expiry, d.Strike, d.Right)
 		c.optionContractMu.Lock()
 		if existing, ok := c.optionContractCache[key]; ok && existing.ConID != 0 {
 			// Don't overwrite a previously-resolved entry — keeps any
@@ -4546,13 +4604,16 @@ func (c *Connection) prewarmOneExpiry(
 				case d := <-detailsCh:
 					flush(d)
 				default:
-					return cached, nil
+					if n := dropped.Load(); n > 0 {
+						return cached, int(n), fmt.Errorf("prewarm truncated after dropping %d contractData frames (cached %d)", n, cached)
+					}
+					return cached, 0, nil
 				}
 			}
 		case <-timer.C:
-			return cached, fmt.Errorf("prewarm timeout after %s (cached %d so far)", timeout, cached)
+			return cached, int(dropped.Load()), fmt.Errorf("prewarm timeout after %s (cached %d so far)", timeout, cached)
 		case <-ctx.Done():
-			return cached, ctx.Err()
+			return cached, int(dropped.Load()), ctx.Err()
 		}
 	}
 }

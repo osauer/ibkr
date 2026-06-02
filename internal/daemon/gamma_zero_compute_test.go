@@ -4,11 +4,13 @@ import (
 	"context"
 	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 // TestNormalizeGammaParams fills in defaults for unset / negative
@@ -487,6 +489,50 @@ func TestDTEYearsSPXClassUsesAMInstant(t *testing.T) {
 	// Empty class falls back to PM-settle convention (today's SPY behaviour).
 	if dteYears("20260619", "", now) <= 0 {
 		t.Errorf("empty-class dteYears must match SPXW (PM-settle) for back-compat")
+	}
+}
+
+func TestGammaCalendarDTEUsesCalendarBuckets(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	lateSession := time.Date(2026, 6, 1, 17, 0, 0, 0, loc)
+	if y := dteYears("20260602", "SPY", lateSession); y >= zeroDTECutoffYears {
+		t.Fatalf("test setup expected next-day SPY to be <24h to settlement, got %v years", y)
+	}
+
+	cases := []struct {
+		name         string
+		expiryYMD    string
+		tradingClass string
+		now          time.Time
+		want         int
+	}{
+		{name: "same_day_spy", expiryYMD: "20260601", tradingClass: "SPY", now: lateSession, want: 0},
+		{name: "next_day_spy", expiryYMD: "20260602", tradingClass: "SPY", now: lateSession, want: 1},
+		{name: "seven_dte_spy", expiryYMD: "20260608", tradingClass: "SPY", now: lateSession, want: 7},
+		{name: "term_spy", expiryYMD: "20260609", tradingClass: "SPY", now: lateSession, want: 8},
+		{
+			name:         "spx_am_thursday_key_pre_settlement_friday",
+			expiryYMD:    "20260917",
+			tradingClass: "SPX",
+			now:          time.Date(2026, 9, 18, 9, 0, 0, 0, loc),
+			want:         0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := gammaCalendarDTE(tc.expiryYMD, tc.tradingClass, tc.now)
+			if !ok || got != tc.want {
+				t.Fatalf("gammaCalendarDTE(%s, %s, %s) = %d ok=%v, want %d ok=true",
+					tc.expiryYMD, tc.tradingClass, tc.now, got, ok, tc.want)
+			}
+		})
+	}
+	if _, ok := gammaCalendarDTE("bogus", "SPY", lateSession); ok {
+		t.Fatalf("malformed expiry should return ok=false")
 	}
 }
 
@@ -1099,6 +1145,137 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted diagnostics %q missing %q", formatted, want)
 		}
+	}
+}
+
+func TestGammaLegDiagnosticsCountsLiveAndCarriedOI(t *testing.T) {
+	t.Parallel()
+	const spot = 5000.0
+	legs := []legData{
+		{expiryYMD: "20260605", dte: 0.02, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, oi: 10, oiObserved: true, oiLive: true},
+		{expiryYMD: "20260605", dte: 0.02, strike: 5010, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, oi: 20, oiObserved: true, oiCarried: true},
+		{expiryYMD: "20260605", dte: 0.02, strike: 5020, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.22},
+	}
+
+	got := buildGammaLegDiagnostics("SPX", legs, spot)
+	if got.Total.OpenInterestObservedLegs != 2 || got.Total.OILiveObservedLegs != 1 || got.Total.OICarriedForwardLegs != 1 {
+		t.Fatalf("OI split counts = %+v, want observed=2 live=1 carried=1", got.Total)
+	}
+}
+
+func TestGammaOIForLegResultPrefersLiveAndCarriesValidStoredOI(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 14, 30, 0, 0, time.UTC)
+	key := gammaOIKey("SPY", "SPY", "20260605", 760, "C")
+	state := map[string]gammaOIRecord{
+		key: gammaOIRecordForLeg("SPY", "SPY", "20260605", 760, "C", 321, now.Add(-24*time.Hour)),
+	}
+
+	oi, observed, live, carried, observedAt := gammaOIForLegResult("SPY", "SPY", "20260605", 760, "C", legResult{OI: 123, OIObserved: true}, state, now)
+	if oi != 123 || !observed || !live || carried || !observedAt.Equal(now) {
+		t.Fatalf("live OI resolution = oi=%d observed=%v live=%v carried=%v observedAt=%s", oi, observed, live, carried, observedAt)
+	}
+
+	oi, observed, live, carried, observedAt = gammaOIForLegResult("SPY", "SPY", "20260605", 760, "C", legResult{}, state, now)
+	if oi != 321 || !observed || live || !carried || !observedAt.Equal(state[key].ObservedAt) {
+		t.Fatalf("carried OI resolution = oi=%d observed=%v live=%v carried=%v observedAt=%s", oi, observed, live, carried, observedAt)
+	}
+}
+
+func TestGammaOIForLegResultRejectsExpiredCarriedOI(t *testing.T) {
+	t.Parallel()
+	loc := newYorkLocation()
+	state := map[string]gammaOIRecord{
+		gammaOIKey("SPX", "SPX", "20260917", 7600, "C"): gammaOIRecordForLeg(
+			"SPX", "SPX", "20260917", 7600, "C", 321,
+			time.Date(2026, 9, 16, 12, 0, 0, 0, loc),
+		),
+	}
+
+	oi, observed, live, carried, _ := gammaOIForLegResult(
+		"SPX", "SPX", "20260917", 7600, "C", legResult{}, state,
+		time.Date(2026, 9, 18, 9, 46, 0, 0, loc),
+	)
+	if oi != 0 || observed || live || carried {
+		t.Fatalf("expired carried OI was used: oi=%d observed=%v live=%v carried=%v", oi, observed, live, carried)
+	}
+}
+
+func TestGammaCollectionDiagnosticsReportsCapsFailuresAndOISource(t *testing.T) {
+	t.Parallel()
+	picked := []pickedExpiration{{
+		date:         "2026-06-05",
+		expiryYMD:    "20260605",
+		tradingClass: "SPXW",
+		strikes:      []float64{7590, 7600},
+		capTruncated: true,
+	}}
+	d := newGammaCollectionDiagnostics("SPX", picked)
+	d.noteStrikeSelection(picked[0], 100, 80, true, maxGammaStrikesPerExpiry)
+	d.notePrewarm("SPXW", "20260605", 160, 2, nil)
+	d.noteRequested(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7600, right: "C"})
+	d.notePriced(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7600, right: "C"}, 100, true, false, true, time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC))
+	d.noteFailure(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7610, right: "P"}, gammaLegFailureTimeout)
+
+	rows := d.finish(2 * time.Second)
+	if len(rows) != 1 {
+		t.Fatalf("diagnostic rows len=%d, want 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.QualifiedContracts != 160 || row.RequestedLegs != 1 || row.PricedLegs != 1 ||
+		row.OICarriedForwardLegs != 1 || row.Timeouts != 1 || row.ContractMissingLegs != 2 ||
+		!row.StrikeCapTruncated || !row.ExpiryCapTruncated || row.OISourceStatus != gammaOISourceCarriedForward {
+		t.Fatalf("diagnostic row = %+v", row)
+	}
+	if row.MarketDataGenericTicks != ibkrlib.OptionSubscriptionGenericTicks || !row.OIGenericTickRequested {
+		t.Fatalf("diagnostic row should expose option OI generic-tick request: %+v", row)
+	}
+	if row.CarriedForwardSource != gammaOIStateFilename || row.CarriedForwardObservedAt == "" {
+		t.Fatalf("carried provenance missing: %+v", row)
+	}
+}
+
+func TestGammaCollectionDiagnosticsConcurrentUpdates(t *testing.T) {
+	t.Parallel()
+	picked := []pickedExpiration{{
+		date:         "2026-06-05",
+		expiryYMD:    "20260605",
+		tradingClass: "SPY",
+		strikes:      []float64{750, 755},
+	}}
+	d := newGammaCollectionDiagnostics("SPY", picked)
+	j := gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPY", strike: 755, right: "C"}
+	observedAt := time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC)
+
+	const workers = 16
+	const perWorker = 20
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := range perWorker {
+				d.noteRequested(j)
+				if i%2 == 0 {
+					d.notePriced(j, 100, true, true, false, observedAt.Add(time.Duration(w*perWorker+i)*time.Millisecond))
+				} else {
+					d.noteFailure(j, gammaLegFailureTimeout)
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	rows := d.finish(2 * time.Second)
+	if len(rows) != 1 {
+		t.Fatalf("diagnostic rows len=%d, want 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	wantRequested := workers * perWorker
+	wantPriced := workers * perWorker / 2
+	if row.RequestedLegs != wantRequested || row.PricedLegs != wantPriced ||
+		row.OILiveObservedLegs != wantPriced || row.OIPositiveLegs != wantPriced ||
+		row.Timeouts != wantPriced || row.OISourceStatus != gammaOISourceLiveObserved {
+		t.Fatalf("concurrent diagnostic row = %+v, want req=%d priced/live/positive/timeouts=%d",
+			row, wantRequested, wantPriced)
 	}
 }
 

@@ -359,7 +359,20 @@ func buildRegimeWarnings(r *rpc.RegimeSnapshotResult) []rpc.RegimeWarning {
 
 func warningForGammaRankability(g rpc.RegimeGammaZero) (rpc.RegimeWarning, bool) {
 	c := g.Envelope.Result
-	if c == nil || c.Quality == nil || c.Quality.Rankability == rpc.GammaRankabilityRankable {
+	if c == nil {
+		return rpc.RegimeWarning{}, false
+	}
+	if c.Quality == nil {
+		return rpc.RegimeWarning{
+			Code:     "gamma_zero_quality_missing",
+			Scope:    "gamma_zero",
+			Severity: "warning",
+			Message:  "dealer gamma quality missing",
+			Impact:   "dealer gamma is displayed as context but is not ranked or used as independent stress confirmation.",
+			Action:   "Refresh with a gamma build that emits rankability quality before using gamma as evidence.",
+		}, true
+	}
+	if c.Quality.Rankability == rpc.GammaRankabilityRankable {
 		return rpc.RegimeWarning{}, false
 	}
 	severity := "warning"
