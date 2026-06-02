@@ -121,6 +121,14 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 		} else {
 			res.Graceful = true
 		}
+		if !opts.jsonOut {
+			mode := "gracefully"
+			if res.Forced {
+				mode = "with SIGKILL"
+			}
+			fmt.Fprintf(opts.out, "ibkr restart: stopped daemon pid %d %s\n", proc.PID, mode)
+			fmt.Fprintln(opts.out, "ibkr restart: starting daemon")
+		}
 	case errors.Is(err, update.ErrDaemonNotRunning):
 		if !opts.jsonOut {
 			fmt.Fprintln(opts.out, "ibkr restart: no daemon was running; starting daemon")
@@ -143,7 +151,7 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 	if opts.jsonOut {
 		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
 	}
-	renderRestartText(opts.out, res)
+	renderRestartStarted(opts.out, res)
 	return 0
 }
 
@@ -194,16 +202,7 @@ func waitForHandshakeQuiet(ctx context.Context, fetch healthFetcher, initial rpc
 	return res
 }
 
-func renderRestartText(w io.Writer, res restartResult) {
-	if res.WasRunning {
-		mode := "gracefully"
-		if res.Forced {
-			mode = "with SIGKILL"
-		}
-		fmt.Fprintf(w, "ibkr restart: stopped daemon pid %d %s\n", res.OldPID, mode)
-	} else {
-		fmt.Fprintln(w, "ibkr restart: no daemon was running before this command")
-	}
+func renderRestartStarted(w io.Writer, res restartResult) {
 	fmt.Fprintf(w, "ibkr restart: started daemon pid %d", res.NewPID)
 	if res.Health.DaemonVersion != "" {
 		fmt.Fprintf(w, " (%s)", res.Health.DaemonVersion)
