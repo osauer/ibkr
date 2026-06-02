@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.6.0 — 2026-06-02 14:52 CEST
+
+### What's new
+
+- `ibkr restart` now provides a first-class daemon restart command, replacing manual process cleanup with ordered stop/start/status output.
+- Regime and canary data-quality handling is tighter around stale market-data fallbacks, phase classification, gamma rankability, and option open-interest sourcing.
+- Gamma output now preserves clearer quality signals when option-chain data is incomplete or not rankable.
+
+### Added
+
+- Added the `ibkr restart` CLI command for restarting the local daemon from the same command surface as `ibkr status`.
+
+### Changed
+
+- Improved regime and canary data-quality phase handling so stale, degraded, and fallback-derived market signals are surfaced more consistently.
+- Stabilized gamma option open-interest sourcing and rankability checks to reduce misleading confidence when chain data is incomplete.
+- Clarified public documentation for regime indicator sources and cleaned up generated publishing artifacts.
+
+### Fixed
+
+- Fixed restart command output ordering so the user-facing status reflects the daemon lifecycle in a predictable sequence.
+- Hardened gamma data-quality signaling around fallback and unrankable inputs.
+
 ## v1.5.0 — 2026-05-31 21:35 CEST
 
 ### What's new
