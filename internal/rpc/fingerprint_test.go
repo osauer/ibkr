@@ -54,7 +54,7 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 			{Code: "a", Scope: "gamma", Severity: "info", Impact: "ignored"},
 		},
 		DataQuality: []DataQualityHealth{
-			{Surface: "regime", Status: "stale", StaleClusters: []string{"vol", "credit"}},
+			{Surface: "regime", Status: "partial", StaleClusters: []string{"vol", "credit"}, PartialClusters: []string{"breadth", "gamma"}},
 			{Surface: "gamma", Status: "degraded", DegradedClusters: []string{"gamma"}},
 		},
 	}
@@ -63,7 +63,7 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 	reordered.WarningDetails = []RegimeWarning{base.WarningDetails[1], base.WarningDetails[0]}
 	reordered.DataQuality = []DataQualityHealth{
 		{Surface: "gamma", Status: "degraded", DegradedClusters: []string{"gamma"}},
-		{Surface: "regime", Status: "stale", StaleClusters: []string{"credit", "vol"}},
+		{Surface: "regime", Status: "partial", StaleClusters: []string{"credit", "vol"}, PartialClusters: []string{"gamma", "breadth"}},
 	}
 	if first, second := BuildRegimeFingerprint(&base), BuildRegimeFingerprint(&reordered); first != second {
 		t.Fatalf("fingerprint should canonicalize slice ordering: %v != %v", first, second)
@@ -80,6 +80,13 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 	changedWarning.WarningDetails[0].Severity = "error"
 	if BuildRegimeFingerprint(&base) == BuildRegimeFingerprint(&changedWarning) {
 		t.Fatal("fingerprint did not change when warning semantic severity changed")
+	}
+
+	changedPartial := base
+	changedPartial.DataQuality = slices.Clone(base.DataQuality)
+	changedPartial.DataQuality[0].PartialClusters = []string{"gamma"}
+	if BuildRegimeFingerprint(&base) == BuildRegimeFingerprint(&changedPartial) {
+		t.Fatal("fingerprint did not change when partial cluster set changed")
 	}
 }
 
@@ -137,5 +144,101 @@ func TestRegimeLifecycleDegradesReadinessForDataQuality(t *testing.T) {
 	}
 	if got.Confidence != "medium" {
 		t.Fatalf("confidence: want medium cap, got %+v", got)
+	}
+}
+
+func TestRegimeLifecycleDegradesReadinessForWeakRows(t *testing.T) {
+	t.Parallel()
+	base := RegimeSnapshotResult{
+		Summary:   RegimeSummary{Confidence: "high"},
+		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
+		GammaZero: RegimeGammaZero{Status: RegimeStatusComputing},
+	}
+	got := BuildRegimeLifecycle(&base)
+	if got.Stage != LifecycleQuiet {
+		t.Fatalf("stage: want quiet, got %+v", got)
+	}
+	if got.Readiness != "degraded" {
+		t.Fatalf("readiness: want degraded for computing gamma, got %+v", got)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence: want medium cap, got %+v", got)
+	}
+}
+
+func TestRegimeSourceHealthUsesOldestClusterAsOf(t *testing.T) {
+	t.Parallel()
+	old := time.Date(2026, time.May, 29, 21, 0, 0, 0, time.UTC)
+	fresh := time.Date(2026, time.June, 1, 21, 0, 0, 0, time.UTC)
+	res := &RegimeSnapshotResult{
+		AsOf:      fresh,
+		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
+		VIXTermStructure: RegimeVIXTerm{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{
+				Band: "green",
+				AsOf: &RegimeAsOfSummary{Time: fresh},
+			},
+			Status: RegimeStatusOK,
+		},
+		VolOfVol: RegimeVolOfVol{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{
+				Band: "green",
+				AsOf: &RegimeAsOfSummary{Time: old},
+			},
+			Status: RegimeStatusOK,
+		},
+	}
+	got := BuildRegimeSourceHealth(res, fresh)
+	var vol *SourceHealth
+	for i := range got {
+		if got[i].Source == "vol" {
+			vol = &got[i]
+			break
+		}
+	}
+	if vol == nil {
+		t.Fatalf("missing vol source health: %+v", got)
+	}
+	if !vol.AsOf.Equal(old) {
+		t.Fatalf("vol as_of = %s, want oldest member timestamp %s", vol.AsOf, old)
+	}
+	if want := int64(72 * 60 * 60); vol.AgeSeconds != want {
+		t.Fatalf("vol age_seconds = %d, want %d", vol.AgeSeconds, want)
+	}
+}
+
+func TestRegimeSourceHealthUsesPartialDataQuality(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 21, 0, 0, 0, time.UTC)
+	res := &RegimeSnapshotResult{
+		AsOf:      now,
+		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
+		GammaZero: RegimeGammaZero{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{
+				Band: "green",
+				AsOf: &RegimeAsOfSummary{Time: now},
+			},
+			Status: RegimeStatusOK,
+		},
+		DataQuality: []DataQualityHealth{{
+			Surface:         "gamma",
+			Status:          "partial",
+			PartialClusters: []string{"gamma"},
+			AsOf:            now,
+		}},
+	}
+	got := BuildRegimeSourceHealth(res, now)
+	var gamma *SourceHealth
+	for i := range got {
+		if got[i].Source == "gamma" {
+			gamma = &got[i]
+			break
+		}
+	}
+	if gamma == nil {
+		t.Fatalf("missing gamma source health: %+v", got)
+	}
+	if gamma.Status != "partial" || gamma.Confidence != "medium" {
+		t.Fatalf("gamma source health = %+v, want partial/medium", gamma)
 	}
 }

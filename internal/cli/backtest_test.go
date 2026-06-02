@@ -43,7 +43,7 @@ func TestCanaryBacktestSampleProducesSignalMetrics(t *testing.T) {
 	if got, want := res.Metrics.RebalanceWatch, 7; got != want {
 		t.Fatalf("rebalance_watch = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.DataQualityWatch, 1; got != want {
+	if got, want := res.Metrics.DataQualityWatch, 3; got != want {
 		t.Fatalf("data_quality_watch = %d, want %d", got, want)
 	}
 	if res.Metrics.SignalRecall == nil || *res.Metrics.SignalRecall != 1 {

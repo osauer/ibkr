@@ -131,7 +131,7 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if state.Stage == LifecycleConfirmedStress || state.Stage == LifecyclePanic {
 		state.ConfirmedBy = confirmedNames
 	}
-	if state.Readiness == "ready" && regimeLifecycleHasDegradedInputs(*r) {
+	if state.Readiness == "ready" && (regimeLifecycleHasDegradedInputs(*r) || regimeLifecycleHasWeakSourceRows(*r)) {
 		state.Readiness = "degraded"
 		state.Confidence = capLifecycleConfidence(state.Confidence)
 	}
@@ -148,23 +148,23 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 	}
 	_, bands := regimeLifecycleClusterBands(*r)
 	rows := []struct {
-		name     string
-		band     string
-		statuses []string
-		asOf     []RegimeAsOfSummary
-		degraded bool
+		name          string
+		band          string
+		statuses      []string
+		asOf          []RegimeAsOfSummary
+		qualityStatus string
 	}{
-		{"vol", bands[0], []string{r.VIXTermStructure.Status, r.VolOfVol.Status}, []RegimeAsOfSummary{metaAsOf(r.VIXTermStructure.RegimeIndicatorMeta), metaAsOf(r.VolOfVol.RegimeIndicatorMeta)}, false},
-		{"credit", bands[1], []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}, []RegimeAsOfSummary{metaAsOf(r.HYGSPYDivergence.RegimeIndicatorMeta), metaAsOf(r.CreditSpreads.RegimeIndicatorMeta)}, false},
-		{"funding", bands[2], []string{r.FundingStress.Status}, []RegimeAsOfSummary{metaAsOf(r.FundingStress.RegimeIndicatorMeta)}, false},
-		{"fx", bands[3], []string{r.USDJPY.Status}, []RegimeAsOfSummary{metaAsOf(r.USDJPY.RegimeIndicatorMeta)}, false},
-		{"gamma", bands[4], []string{r.GammaZero.Status}, []RegimeAsOfSummary{metaAsOf(r.GammaZero.RegimeIndicatorMeta)}, regimeSourceDegraded(r.DataQuality, "gamma")},
-		{"breadth", bands[5], []string{r.Breadth.Status}, []RegimeAsOfSummary{metaAsOf(r.Breadth.RegimeIndicatorMeta)}, regimeSourceDegraded(r.DataQuality, "breadth")},
+		{"vol", bands[0], []string{r.VIXTermStructure.Status, r.VolOfVol.Status}, []RegimeAsOfSummary{metaAsOf(r.VIXTermStructure.RegimeIndicatorMeta), metaAsOf(r.VolOfVol.RegimeIndicatorMeta)}, ""},
+		{"credit", bands[1], []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}, []RegimeAsOfSummary{metaAsOf(r.HYGSPYDivergence.RegimeIndicatorMeta), metaAsOf(r.CreditSpreads.RegimeIndicatorMeta)}, ""},
+		{"funding", bands[2], []string{r.FundingStress.Status}, []RegimeAsOfSummary{metaAsOf(r.FundingStress.RegimeIndicatorMeta)}, ""},
+		{"fx", bands[3], []string{r.USDJPY.Status}, []RegimeAsOfSummary{metaAsOf(r.USDJPY.RegimeIndicatorMeta)}, ""},
+		{"gamma", bands[4], []string{r.GammaZero.Status}, []RegimeAsOfSummary{metaAsOf(r.GammaZero.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "gamma")},
+		{"breadth", bands[5], []string{r.Breadth.Status}, []RegimeAsOfSummary{metaAsOf(r.Breadth.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "breadth")},
 	}
 	out := make([]SourceHealth, 0, len(rows))
 	for _, row := range rows {
-		asOf := latestRegimeAsOf(row.asOf)
-		status := regimeSourceStatus(row.statuses, row.band, row.degraded)
+		asOf := weakestRegimeAsOf(row.asOf)
+		status := regimeSourceStatus(row.statuses, row.band, row.qualityStatus)
 		out = append(out, SourceHealth{
 			Source:               row.name,
 			Status:               status,
@@ -259,6 +259,27 @@ func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult) bool {
 	for _, item := range r.DataQuality {
 		switch strings.ToLower(strings.TrimSpace(item.Status)) {
 		case RegimeStatusStale, "degraded", "partial":
+			return true
+		}
+	}
+	return false
+}
+
+func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult) bool {
+	statuses := []string{
+		r.VIXTermStructure.Status,
+		r.VolOfVol.Status,
+		r.HYGSPYDivergence.Status,
+		r.CreditSpreads.Status,
+		r.FundingStress.Status,
+		r.USDJPY.Status,
+		r.GammaZero.Status,
+		r.Breadth.Status,
+	}
+	for _, status := range statuses {
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "", RegimeStatusOK:
+		default:
 			return true
 		}
 	}
@@ -456,6 +477,22 @@ func latestRegimeAsOf(values []RegimeAsOfSummary) time.Time {
 	return latest
 }
 
+func weakestRegimeAsOf(values []RegimeAsOfSummary) time.Time {
+	var oldest time.Time
+	for _, v := range values {
+		if v.Time.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || v.Time.Before(oldest) {
+			oldest = v.Time
+		}
+	}
+	if oldest.IsZero() {
+		return latestRegimeAsOf(values)
+	}
+	return oldest
+}
+
 func sourceAgeSeconds(now, asOf time.Time) int64 {
 	if now.IsZero() || asOf.IsZero() {
 		return 0
@@ -467,9 +504,14 @@ func sourceAgeSeconds(now, asOf time.Time) int64 {
 	return int64(age.Seconds())
 }
 
-func regimeSourceStatus(statuses []string, band string, degraded bool) string {
-	if degraded {
+func regimeSourceStatus(statuses []string, band string, qualityStatus string) string {
+	switch qualityStatus {
+	case "degraded":
 		return "degraded"
+	case "partial":
+		return "partial"
+	case RegimeStatusStale:
+		return RegimeStatusStale
 	}
 	sawBad, sawStale, sawComputing, sawError, sawUnavailable := false, false, false, false, false
 	for _, status := range statuses {
@@ -519,15 +561,32 @@ func regimeSourceConfidence(status string) string {
 	}
 }
 
-func regimeSourceDegraded(items []DataQualityHealth, source string) bool {
+func regimeSourceQualityStatus(items []DataQualityHealth, source string) string {
+	out := ""
 	for _, item := range items {
-		if item.Status != "degraded" {
-			continue
-		}
-		for _, cluster := range item.DegradedClusters {
-			if strings.EqualFold(cluster, source) {
-				return true
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if sourceInDataQualityClusters(item.DegradedClusters, source) || sourceInDataQualityClusters(item.PartialClusters, source) || sourceInDataQualityClusters(item.StaleClusters, source) {
+			switch status {
+			case "degraded":
+				return "degraded"
+			case "partial":
+				if out != "degraded" {
+					out = "partial"
+				}
+			case RegimeStatusStale:
+				if out == "" {
+					out = RegimeStatusStale
+				}
 			}
+		}
+	}
+	return out
+}
+
+func sourceInDataQualityClusters(clusters []string, source string) bool {
+	for _, cluster := range clusters {
+		if strings.EqualFold(cluster, source) {
+			return true
 		}
 	}
 	return false

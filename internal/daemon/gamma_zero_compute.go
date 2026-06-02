@@ -209,6 +209,7 @@ type legData struct {
 	isCall       bool
 	iv           float64
 	oi           int64
+	oiObserved   bool
 	// gamma is the gateway-supplied model-computation gamma at the
 	// snapshot spot; used for the at-spot aggregate. The sweep
 	// recomputes gamma via Black-Scholes for each scenario spot.
@@ -240,12 +241,13 @@ type legData struct {
 // caller so the result envelope can disclose how many legs used the
 // fallback.
 type legResult struct {
-	OI        int64
-	IV        float64
-	Gamma     float64
-	IVDerived bool
-	OK        bool
-	Throttle  bool
+	OI         int64
+	OIObserved bool
+	IV         float64
+	Gamma      float64
+	IVDerived  bool
+	OK         bool
+	Throttle   bool
 }
 
 // gammaLogger is the minimal logging surface computeGammaZeroFor uses to
@@ -403,14 +405,14 @@ func productionLegFetcher(
 		// Do not read only once: IV/model ticks often arrive before the
 		// one-shot OI tick. A short grace materially improves OI capture
 		// without making OI a hard gate.
-		oi := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() int64 {
+		oi, oiObserved := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() (int64, bool) {
 			return optionOpenInterest(c, key)
 		})
-		return legResult{OI: oi, IV: iv, Gamma: gamma, OK: true}
+		return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, OK: true}
 	}
 	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
-	oi := optionOpenInterest(c, key)
+	oi, oiObserved := optionOpenInterest(c, key)
 	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
 	var price float64
 	if hasQuote && bid > 0 && ask > 0 {
@@ -418,29 +420,30 @@ func productionLegFetcher(
 	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
 		price = px
 	}
-	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, price)
+	return bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, oiObserved, price)
 }
 
-func optionOpenInterest(c *ibkrlib.Connector, key string) int64 {
+func optionOpenInterest(c *ibkrlib.Connector, key string) (int64, bool) {
 	if c == nil || key == "" {
-		return 0
+		return 0, false
 	}
 	if d, ok := c.GetMarketData()[key]; ok {
-		return d.OpenInt
+		return d.OpenInt, d.OpenIntObserved
 	}
-	return 0
+	return 0, false
 }
 
-func waitForOptionOpenInterest(ctx context.Context, deadline time.Time, read func() int64) int64 {
+func waitForOptionOpenInterest(ctx context.Context, deadline time.Time, read func() (int64, bool)) (int64, bool) {
 	if read == nil {
-		return 0
+		return 0, false
 	}
 	var oi int64
+	var observed bool
 	_ = pollUntil(ctx, deadline, func() bool {
-		oi = read()
-		return oi > 0
+		oi, observed = read()
+		return observed
 	})
-	return oi
+	return oi, observed
 }
 
 // bsIVFallback assembles a leg result from Black-Scholes back-solving when
@@ -461,7 +464,7 @@ func waitForOptionOpenInterest(ctx context.Context, deadline time.Time, read fun
 // solving from yesterday's close at 14:00 ET on expiry day must use
 // the 09:30 ET instant (already past) and yield dte=0, not over-state
 // gamma against a 16:00 instant that doesn't apply to this class.
-func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, tradingClass string, strike float64, right string, oi int64, price float64) legResult {
+func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, tradingClass string, strike float64, right string, oi int64, oiObserved bool, price float64) legResult {
 	dte := dteYears(expiryYMD, tradingClass, snapshotAt)
 	if dte <= 0 || price <= 0 {
 		return legResult{}
@@ -471,7 +474,7 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 		return legResult{}
 	}
 	gamma := bsGamma(snapshotSpot, strike, dte, iv, 0, 0)
-	return legResult{OI: oi, IV: iv, Gamma: gamma, IVDerived: true, OK: true}
+	return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, IVDerived: true, OK: true}
 }
 
 // computeGammaZeroFor runs the full Phase 2 compute for one underlying.
@@ -806,6 +809,7 @@ func computeGammaZeroFor(
 			isCall:          j.right == "C",
 			iv:              r.IV,
 			oi:              r.OI,
+			oiObserved:      r.OIObserved,
 			gammaAtSnapshot: r.Gamma,
 		})
 		mu.Unlock()
@@ -937,7 +941,7 @@ func computeGammaZeroFor(
 	if throttledAbort.Load() {
 		warnings = append(warnings, "throttled")
 	}
-	if len(gexLegs) < len(legs) {
+	if gammaOIMissingCount(legDiagnostics) > 0 {
 		warnings = append(warnings, "oi_missing")
 	}
 	if strikeBudgetCapped {

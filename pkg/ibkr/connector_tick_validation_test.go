@@ -550,6 +550,9 @@ func TestHandleTickSize_OpenInterest(t *testing.T) {
 			if sub.OpenInt != 12345 {
 				t.Errorf("OpenInt for tick %s: want 12345, got %d", tt.tickType, sub.OpenInt)
 			}
+			if !sub.OpenIntObserved {
+				t.Errorf("OpenIntObserved for tick %s: want true", tt.tickType)
+			}
 			if !sub.Observed {
 				t.Errorf("Observed flag not set after OI tick %s", tt.tickType)
 			}
@@ -564,6 +567,9 @@ func TestHandleTickSize_OpenInterest(t *testing.T) {
 			}
 			if md[key].OpenInt != 12345 {
 				t.Errorf("MarketData.OpenInt: want 12345, got %d", md[key].OpenInt)
+			}
+			if !md[key].OpenIntObserved {
+				t.Errorf("MarketData.OpenIntObserved: want true")
 			}
 		})
 	}

@@ -166,13 +166,14 @@ type Subscription struct {
 	// OpenInt is the option open interest at this contract: tick 27
 	// (callOpenInterest) for CALL legs, tick 28 (putOpenInterest) for
 	// PUT legs. One leg subscription receives exactly one of the two —
-	// they do not race. Zero when the gateway hasn't delivered the tick
-	// yet; consumers must distinguish "not arrived" via Observed/LastTime.
-	OpenInt   int64
-	PrevClose float64
-	Open      float64
-	High      float64
-	Low       float64
+	// they do not race. OpenIntObserved distinguishes "gateway sent
+	// zero OI" from "gateway has not delivered the OI tick yet".
+	OpenInt         int64
+	OpenIntObserved bool
+	PrevClose       float64
+	Open            float64
+	High            float64
+	Low             float64
 	// Week-range highs/lows arrive via generic tick 165 (Misc Stats) as
 	// tickPrice messages with tick types 15-20. Captured here so consumers
 	// (notably scan-row enrichment, where 52w range is a standard column)
@@ -4208,6 +4209,7 @@ func (c *Connector) handleTickSize(fields []string) {
 		sub.AvgVolume = size
 	case 27, 28:
 		sub.OpenInt = size
+		sub.OpenIntObserved = true
 	}
 	sub.LastTime = time.Now()
 }
@@ -4446,29 +4448,30 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 
 	for symbol, sub := range c.subscriptions {
 		data[symbol] = &MarketData{
-			Symbol:        symbol,
-			Bid:           sub.Bid,
-			Ask:           sub.Ask,
-			Last:          sub.LastPrice,
-			MarkPrice:     sub.MarkPrice,
-			BidSize:       int(sub.BidSize),
-			AskSize:       int(sub.AskSize),
-			Volume:        sub.Volume,
-			AvgVolume:     sub.AvgVolume,
-			LastTradeTime: sub.LastTradeTime,
-			OpenInt:       sub.OpenInt,
-			Close:         sub.PrevClose,
-			Open:          sub.Open,
-			High:          sub.High,
-			Low:           sub.Low,
-			Week13Low:     sub.Week13Low,
-			Week13High:    sub.Week13High,
-			Week26Low:     sub.Week26Low,
-			Week26High:    sub.Week26High,
-			Week52Low:     sub.Week52Low,
-			Week52High:    sub.Week52High,
-			IV:            sub.IV,
-			Timestamp:     sub.LastTime,
+			Symbol:          symbol,
+			Bid:             sub.Bid,
+			Ask:             sub.Ask,
+			Last:            sub.LastPrice,
+			MarkPrice:       sub.MarkPrice,
+			BidSize:         int(sub.BidSize),
+			AskSize:         int(sub.AskSize),
+			Volume:          sub.Volume,
+			AvgVolume:       sub.AvgVolume,
+			LastTradeTime:   sub.LastTradeTime,
+			OpenInt:         sub.OpenInt,
+			OpenIntObserved: sub.OpenIntObserved,
+			Close:           sub.PrevClose,
+			Open:            sub.Open,
+			High:            sub.High,
+			Low:             sub.Low,
+			Week13Low:       sub.Week13Low,
+			Week13High:      sub.Week13High,
+			Week26Low:       sub.Week26Low,
+			Week26High:      sub.Week26High,
+			Week52Low:       sub.Week52Low,
+			Week52High:      sub.Week52High,
+			IV:              sub.IV,
+			Timestamp:       sub.LastTime,
 		}
 	}
 

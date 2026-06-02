@@ -70,6 +70,57 @@ func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 	}
 }
 
+func TestRegimeStatusQualityClustersPartialInputs(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 15, 0, 0, 0, time.UTC)
+	res := &rpc.RegimeSnapshotResult{
+		AsOf: now,
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusOK,
+		},
+		VolOfVol: rpc.RegimeVolOfVol{
+			Status: rpc.RegimeStatusStale,
+		},
+		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
+			Status: rpc.RegimeStatusOK,
+		},
+		CreditSpreads: rpc.RegimeCreditSpreads{
+			Status: rpc.RegimeStatusUnavailable,
+		},
+		FundingStress: rpc.RegimeFundingStress{
+			Status: rpc.RegimeStatusOK,
+		},
+		USDJPY: rpc.RegimeUSDJPY{
+			Status: rpc.RegimeStatusComputing,
+		},
+		GammaZero: rpc.RegimeGammaZero{
+			Status: rpc.RegimeStatusOK,
+		},
+		Breadth: rpc.RegimeBreadth{
+			Status: rpc.RegimeStatusOK,
+		},
+	}
+
+	got := regimeStatusQuality(res)
+	if len(got) != 1 {
+		t.Fatalf("regimeStatusQuality len=%d, want 1: %+v", len(got), got)
+	}
+	q := got[0]
+	if q.Surface != "regime" || q.Status != "partial" {
+		t.Fatalf("quality header = %+v, want regime/partial", q)
+	}
+	wantSummary := "partial: credit, FX; stale: vol"
+	if q.Summary != wantSummary {
+		t.Fatalf("summary = %q, want %q", q.Summary, wantSummary)
+	}
+	if got, want := q.PartialClusters, []string{"credit", "FX"}; !equalStrings(got, want) {
+		t.Fatalf("partial clusters = %#v, want %#v", got, want)
+	}
+	if got, want := q.StaleClusters, []string{"vol"}; !equalStrings(got, want) {
+		t.Fatalf("stale clusters = %#v, want %#v", got, want)
+	}
+}
+
 func TestStatusDataFarmsKeepsOnlyUnhealthyFarms(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)
@@ -152,6 +203,63 @@ func TestGammaStatusQualityReportsSPXCacheFallbackWithoutSummary(t *testing.T) {
 	}
 }
 
+func TestGammaStatusQualityReportsNonReadyAsPartial(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, time.June, 1, 15, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		env     rpc.GammaZeroSPXResult
+		summary string
+	}{
+		{
+			name: "computing",
+			env: rpc.GammaZeroSPXResult{
+				Status:    rpc.GammaZeroStatusComputing,
+				StartedAt: &started,
+			},
+			summary: "partial: gamma computing",
+		},
+		{
+			name: "cold",
+			env: rpc.GammaZeroSPXResult{
+				Status:     rpc.GammaZeroStatusCold,
+				ColdReason: "option chain cache is cold",
+			},
+			summary: "partial: option chain cache is cold",
+		},
+		{
+			name: "error",
+			env: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusError,
+				Error:  "context deadline exceeded",
+			},
+			summary: "partial: gamma error: context deadline exceeded",
+		},
+		{
+			name: "ready nil result",
+			env: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+			},
+			summary: "partial: gamma ready envelope missing result",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := gammaStatusQuality(tt.env)
+			if !ok {
+				t.Fatal("gammaStatusQuality ok=false, want true")
+			}
+			if got.Surface != "gamma" || got.Status != "partial" || got.Summary != tt.summary {
+				t.Fatalf("quality = %+v, want gamma partial %q", got, tt.summary)
+			}
+			if got.PartialClusters == nil || len(got.PartialClusters) != 1 || got.PartialClusters[0] != "gamma" {
+				t.Fatalf("partial clusters = %+v, want gamma", got.PartialClusters)
+			}
+		})
+	}
+}
+
 func TestGammaStatusQualityReportsPartialOptionOI(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
@@ -181,6 +289,32 @@ func TestGammaStatusQualityReportsPartialOptionOI(t *testing.T) {
 	}
 	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI (expected: sampled outside RTH)" {
 		t.Fatalf("quality = %+v, want gamma degraded expected outside-RTH partial option OI", got)
+	}
+}
+
+func TestGammaStatusQualityReportsWarningOnlyPartialOptionOI(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeCombined,
+			AsOf:  now,
+			PerIndex: map[string]*rpc.GammaZeroComputed{
+				"SPY": {
+					Scope: rpc.GammaZeroScopeSPY,
+					WarningDetails: []rpc.GammaWarningDetail{{
+						Code: "oi_missing",
+					}},
+				},
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "degraded" || got.Summary != "degraded: partial option OI (expected: sampled outside RTH)" {
+		t.Fatalf("quality = %+v, want warning-only gamma degraded expected outside-RTH partial option OI", got)
 	}
 }
 

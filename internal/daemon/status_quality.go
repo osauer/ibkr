@@ -72,21 +72,76 @@ func regimeStatusQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
 		return nil
 	}
 	stale := staleRegimeClusters(r)
-	if len(stale) == 0 {
+	partial := partialRegimeClusters(r)
+	if len(stale) == 0 && len(partial) == 0 {
 		return nil
 	}
-	q := rpc.DataQualityHealth{
-		Surface:       "regime",
-		Status:        "stale",
-		StaleClusters: stale,
-		AsOf:          r.AsOf,
+	status := "stale"
+	var summary []string
+	if len(partial) > 0 {
+		status = "partial"
+		summary = append(summary, "partial: "+strings.Join(partial, ", "))
 	}
-	q.Summary = "stale: " + strings.Join(stale, ", ")
+	if len(stale) > 0 {
+		summary = append(summary, "stale: "+strings.Join(stale, ", "))
+	}
+	q := rpc.DataQualityHealth{
+		Surface:         "regime",
+		Status:          status,
+		StaleClusters:   stale,
+		PartialClusters: partial,
+		AsOf:            r.AsOf,
+	}
+	q.Summary = strings.Join(summary, "; ")
 	return []rpc.DataQualityHealth{q}
 }
 
 func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool) {
-	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+	switch env.Status {
+	case rpc.GammaZeroStatusReady:
+		if env.Result == nil {
+			return rpc.DataQualityHealth{
+				Surface:         "gamma",
+				Status:          "partial",
+				Summary:         "partial: gamma ready envelope missing result",
+				PartialClusters: []string{"gamma"},
+				AsOf:            gammaEnvelopeAsOf(env),
+			}, true
+		}
+	case rpc.GammaZeroStatusComputing:
+		summary := "partial: gamma computing"
+		return rpc.DataQualityHealth{
+			Surface:         "gamma",
+			Status:          "partial",
+			Summary:         summary,
+			PartialClusters: []string{"gamma"},
+			AsOf:            gammaEnvelopeAsOf(env),
+		}, true
+	case rpc.GammaZeroStatusCold:
+		summary := "partial: gamma cold"
+		if env.ColdReason != "" {
+			summary = "partial: " + env.ColdReason
+		}
+		return rpc.DataQualityHealth{
+			Surface:         "gamma",
+			Status:          "partial",
+			Summary:         summary,
+			PartialClusters: []string{"gamma"},
+			AsOf:            gammaEnvelopeAsOf(env),
+		}, true
+	case rpc.GammaZeroStatusError:
+		summary := "partial: gamma error"
+		if strings.TrimSpace(env.Error) != "" {
+			summary = "partial: gamma error: " + strings.TrimSpace(env.Error)
+		}
+		return rpc.DataQualityHealth{
+			Surface:         "gamma",
+			Status:          "partial",
+			Summary:         summary,
+			PartialClusters: []string{"gamma"},
+			AsOf:            gammaEnvelopeAsOf(env),
+		}, true
+	default:
 		return rpc.DataQualityHealth{}, false
 	}
 	if !gammaResultDegraded(env.Result) {
@@ -115,6 +170,16 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	}, true
 }
 
+func gammaEnvelopeAsOf(env rpc.GammaZeroSPXResult) time.Time {
+	if env.Result != nil && !env.Result.AsOf.IsZero() {
+		return env.Result.AsOf
+	}
+	if env.StartedAt != nil {
+		return *env.StartedAt
+	}
+	return time.Time{}
+}
+
 func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c == nil {
 		return false
@@ -122,7 +187,24 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c.Summary != nil && strings.EqualFold(c.Summary.Confidence, "degraded") {
 		return true
 	}
-	return gammaHasSPYUnavailable(c) || gammaHasSPXUnavailable(c) || gammaHasSPXCacheFallback(c)
+	for _, rawCode := range gammaWarningCodes(c) {
+		code := strings.ToLower(strings.TrimSpace(rawCode))
+		switch {
+		case code == "throttled", code == "all_iv_derived", code == "cache_stale_off_hours", code == "oi_missing":
+			return true
+		case strings.HasPrefix(code, "spy_unavailable:"),
+			strings.HasPrefix(code, "spx_unavailable:"),
+			strings.HasPrefix(code, "spx_cache_fallback"),
+			strings.HasPrefix(code, "skew_fallback:"):
+			return true
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if gammaResultDegraded(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func gammaHasSPYUnavailable(c *rpc.GammaZeroComputed) bool {
@@ -232,6 +314,29 @@ func staleRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
 	out := []string{}
 	for _, c := range candidates {
 		if hasRegimeStatus(c.statuses, rpc.RegimeStatusStale) {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
+func partialRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
+	candidates := []struct {
+		name     string
+		statuses []string
+	}{
+		{name: "vol", statuses: []string{r.VIXTermStructure.Status, r.VolOfVol.Status}},
+		{name: "credit", statuses: []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}},
+		{name: "funding", statuses: []string{r.FundingStress.Status}},
+		{name: "FX", statuses: []string{r.USDJPY.Status}},
+		{name: "gamma", statuses: []string{r.GammaZero.Status}},
+		{name: "breadth", statuses: []string{r.Breadth.Status}},
+	}
+	out := []string{}
+	for _, c := range candidates {
+		if hasRegimeStatus(c.statuses, rpc.RegimeStatusComputing) ||
+			hasRegimeStatus(c.statuses, rpc.RegimeStatusUnavailable) ||
+			hasRegimeStatus(c.statuses, rpc.RegimeStatusError) {
 			out = append(out, c.name)
 		}
 	}
