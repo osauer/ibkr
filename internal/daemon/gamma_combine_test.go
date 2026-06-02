@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -195,6 +196,23 @@ func TestCombineGammaResultsMergesTopStrikes(t *testing.T) {
 			t.Errorf("top[%d] = %+v, want underlying=%s absGEX=%v",
 				i, combined.TopStrikes[i], w.underlying, w.absGEX)
 		}
+	}
+}
+
+func TestCombineGammaResultsUsesOldestPerIndexAsOf(t *testing.T) {
+	t.Parallel()
+
+	spyAsOf := time.Date(2026, 6, 1, 12, 58, 0, 0, time.UTC)
+	spxAsOf := time.Date(2026, 6, 1, 20, 35, 0, 0, time.UTC)
+	spy := &rpc.GammaZeroComputed{GammaSign: "negative", AsOf: spyAsOf}
+	spx := &rpc.GammaZeroComputed{GammaSign: "negative", AsOf: spxAsOf}
+
+	combined := combineGammaResults(spy, spx)
+	if combined == nil {
+		t.Fatal("combined is nil")
+	}
+	if !combined.AsOf.Equal(spyAsOf) {
+		t.Fatalf("combined AsOf = %v, want oldest per-index timestamp %v", combined.AsOf, spyAsOf)
 	}
 }
 

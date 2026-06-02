@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -152,4 +153,38 @@ func TestAccountDailyPnL_CacheRoundTrip(t *testing.T) {
 	if snap.RealizedDailyPnL == nil || *snap.RealizedDailyPnL != 285.20 {
 		t.Errorf("Realized = %v, want 285.20", snap.RealizedDailyPnL)
 	}
+}
+
+func TestWaitForAccountDailyPnL(t *testing.T) {
+	t.Parallel()
+	daily := 12.50
+	reader := fakeAccountDailyPnLReader{snap: ibkrlib.AccountDailyPnL{
+		DailyPnL: &daily,
+		AsOf:     timeNowForTest(),
+	}, ok: true}
+
+	got, ok := waitForAccountDailyPnL(context.Background(), reader, time.Now().Add(50*time.Millisecond))
+	if !ok {
+		t.Fatal("waitForAccountDailyPnL ok=false, want true")
+	}
+	if got.DailyPnL == nil || *got.DailyPnL != daily {
+		t.Fatalf("DailyPnL = %v, want %.2f", got.DailyPnL, daily)
+	}
+}
+
+func TestWaitForAccountDailyPnLTimeout(t *testing.T) {
+	t.Parallel()
+	got, ok := waitForAccountDailyPnL(context.Background(), fakeAccountDailyPnLReader{}, time.Now().Add(5*time.Millisecond))
+	if ok {
+		t.Fatalf("waitForAccountDailyPnL ok=true with empty reader: %+v", got)
+	}
+}
+
+type fakeAccountDailyPnLReader struct {
+	snap ibkrlib.AccountDailyPnL
+	ok   bool
+}
+
+func (f fakeAccountDailyPnLReader) AccountDailyPnL() (ibkrlib.AccountDailyPnL, bool) {
+	return f.snap, f.ok
 }

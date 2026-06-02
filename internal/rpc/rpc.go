@@ -796,10 +796,11 @@ type StrikeConcentration struct {
 // still fail to contribute when open interest is missing/zero, gamma is
 // degenerate, or the resulting OI-weighted absolute GEX is zero.
 type GammaLegDiagnosticCounts struct {
-	PricedLegs        int `json:"priced_legs"`
-	OpenInterestLegs  int `json:"oi_positive_legs"`
-	GammaPositiveLegs int `json:"gamma_positive_legs"`
-	AbsGEXLegs        int `json:"abs_gex_positive_legs"`
+	PricedLegs               int `json:"priced_legs"`
+	OpenInterestObservedLegs int `json:"oi_observed_legs,omitempty"`
+	OpenInterestLegs         int `json:"oi_positive_legs"`
+	GammaPositiveLegs        int `json:"gamma_positive_legs"`
+	AbsGEXLegs               int `json:"abs_gex_positive_legs"`
 }
 
 // GammaLegDiagnostics carries the leg-quality funnel for the whole
@@ -2501,6 +2502,7 @@ type DataQualityHealth struct {
 	Status           string    `json:"status"`
 	Summary          string    `json:"summary,omitempty"`
 	StaleClusters    []string  `json:"stale_clusters,omitempty"`
+	PartialClusters  []string  `json:"partial_clusters,omitempty"`
 	DegradedClusters []string  `json:"degraded_clusters,omitempty"`
 	AsOf             time.Time `json:"as_of,omitzero"`
 }

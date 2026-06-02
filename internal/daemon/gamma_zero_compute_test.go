@@ -779,7 +779,7 @@ func TestBSIVFallback_AssemblesLegFromSyntheticPrice(t *testing.T) {
 				price = callPx - spot + strike // r=q=0 parity
 			}
 
-			r := bsIVFallback(spot, now, expiryYMD, "", strike, tc.right, 123, price)
+			r := bsIVFallback(spot, now, expiryYMD, "", strike, tc.right, 123, true, price)
 
 			if !r.OK || !r.IVDerived {
 				t.Fatalf("expected OK=true IVDerived=true, got %+v", r)
@@ -819,7 +819,7 @@ func TestBSIVFallback_RefusalCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := bsIVFallback(737.0, now, tc.expiryYMD, "", 735.0, "P", 100, tc.price)
+			r := bsIVFallback(737.0, now, tc.expiryYMD, "", 735.0, "P", 100, true, tc.price)
 			if r.OK || r.IVDerived || r.OI != 0 || r.IV != 0 {
 				t.Errorf("%s should return empty legResult, got %+v", tc.why, r)
 			}
@@ -1009,20 +1009,39 @@ func TestWaitForOptionOpenInterestCapturesLateTick(t *testing.T) {
 		oi.Store(4321)
 	})
 
-	got := waitForOptionOpenInterest(context.Background(), time.Now().Add(500*time.Millisecond), oi.Load)
-	if got != 4321 {
+	got, observed := waitForOptionOpenInterest(context.Background(), time.Now().Add(500*time.Millisecond), func() (int64, bool) {
+		v := oi.Load()
+		return v, v != 0
+	})
+	if got != 4321 || !observed {
 		t.Fatalf("OpenInterest = %d, want late tick value 4321", got)
+	}
+}
+
+func TestWaitForOptionOpenInterestCapturesObservedZero(t *testing.T) {
+	t.Parallel()
+
+	var seen atomic.Bool
+	time.AfterFunc(20*time.Millisecond, func() {
+		seen.Store(true)
+	})
+
+	got, observed := waitForOptionOpenInterest(context.Background(), time.Now().Add(500*time.Millisecond), func() (int64, bool) {
+		return 0, seen.Load()
+	})
+	if got != 0 || !observed {
+		t.Fatalf("OpenInterest = %d observed=%v, want observed zero", got, observed)
 	}
 }
 
 func TestWaitForOptionOpenInterestReturnsZeroWhenMissing(t *testing.T) {
 	t.Parallel()
 
-	got := waitForOptionOpenInterest(context.Background(), time.Now().Add(10*time.Millisecond), func() int64 {
-		return 0
+	got, observed := waitForOptionOpenInterest(context.Background(), time.Now().Add(10*time.Millisecond), func() (int64, bool) {
+		return 0, false
 	})
-	if got != 0 {
-		t.Fatalf("OpenInterest = %d, want 0 when no tick lands", got)
+	if got != 0 || observed {
+		t.Fatalf("OpenInterest = %d observed=%v, want missing zero", got, observed)
 	}
 }
 
@@ -1030,9 +1049,9 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 	t.Parallel()
 	const spot = 5000.0
 	legs := []legData{
-		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, oi: 10_000},
-		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, oi: 0},
-		{expiryYMD: "20260619", dte: 0.10, strike: 5100, right: "C", tradingClass: "SPX", isCall: true, iv: 0, oi: 20_000},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, oi: 10_000, oiObserved: true},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, oi: 0, oiObserved: true},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5100, right: "C", tradingClass: "SPX", isCall: true, iv: 0, oi: 20_000, oiObserved: true},
 	}
 
 	got := buildGammaLegDiagnostics("spx", legs, spot)
@@ -1040,10 +1059,11 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 		t.Fatal("diagnostics are nil")
 	}
 	wantTotal := rpc.GammaLegDiagnosticCounts{
-		PricedLegs:        3,
-		OpenInterestLegs:  2,
-		GammaPositiveLegs: 2,
-		AbsGEXLegs:        1,
+		PricedLegs:               3,
+		OpenInterestObservedLegs: 3,
+		OpenInterestLegs:         2,
+		GammaPositiveLegs:        2,
+		AbsGEXLegs:               1,
 	}
 	if got.Total != wantTotal {
 		t.Fatalf("total counts = %+v, want %+v", got.Total, wantTotal)
@@ -1052,17 +1072,19 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 		t.Fatalf("SPX underlying counts = %+v, want %+v", got.ByUnderlying["SPX"], wantTotal)
 	}
 	wantSPXW := rpc.GammaLegDiagnosticCounts{
-		PricedLegs:        2,
-		OpenInterestLegs:  1,
-		GammaPositiveLegs: 2,
-		AbsGEXLegs:        1,
+		PricedLegs:               2,
+		OpenInterestObservedLegs: 2,
+		OpenInterestLegs:         1,
+		GammaPositiveLegs:        2,
+		AbsGEXLegs:               1,
 	}
 	if got.ByTradingClass["SPXW"] != wantSPXW {
 		t.Fatalf("SPXW class counts = %+v, want %+v", got.ByTradingClass["SPXW"], wantSPXW)
 	}
 	wantSPX := rpc.GammaLegDiagnosticCounts{
-		PricedLegs:       1,
-		OpenInterestLegs: 1,
+		PricedLegs:               1,
+		OpenInterestObservedLegs: 1,
+		OpenInterestLegs:         1,
 	}
 	if got.ByTradingClass["SPX"] != wantSPX {
 		t.Fatalf("SPX class counts = %+v, want %+v", got.ByTradingClass["SPX"], wantSPX)
@@ -1070,9 +1092,9 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 
 	formatted := formatGammaLegDiagnostics(got)
 	for _, want := range []string{
-		"total priced=3 oi>0=2 gamma>0=2 abs_gex>0=1",
-		"SPX priced=1 oi>0=1 gamma>0=0 abs_gex>0=0",
-		"SPXW priced=2 oi>0=1 gamma>0=2 abs_gex>0=1",
+		"total priced=3 oi_seen=3 oi>0=2 gamma>0=2 abs_gex>0=1",
+		"SPX priced=1 oi_seen=1 oi>0=1 gamma>0=0 abs_gex>0=0",
+		"SPXW priced=2 oi_seen=2 oi>0=1 gamma>0=2 abs_gex>0=1",
 	} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted diagnostics %q missing %q", formatted, want)

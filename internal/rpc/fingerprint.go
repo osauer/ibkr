@@ -279,6 +279,7 @@ type dataQualityFingerprint struct {
 	Surface          string   `json:"surface,omitempty"`
 	Status           string   `json:"status,omitempty"`
 	StaleClusters    []string `json:"stale_clusters,omitempty"`
+	PartialClusters  []string `json:"partial_clusters,omitempty"`
 	DegradedClusters []string `json:"degraded_clusters,omitempty"`
 }
 
@@ -422,9 +423,10 @@ func dataQualityFingerprints(values []DataQualityHealth) []dataQualityFingerprin
 			Surface:          cleanString(q.Surface),
 			Status:           cleanString(q.Status),
 			StaleClusters:    cleanSorted(q.StaleClusters),
+			PartialClusters:  cleanSorted(q.PartialClusters),
 			DegradedClusters: cleanSorted(q.DegradedClusters),
 		}
-		if fp.Surface == "" && fp.Status == "" && len(fp.StaleClusters) == 0 && len(fp.DegradedClusters) == 0 {
+		if fp.Surface == "" && fp.Status == "" && len(fp.StaleClusters) == 0 && len(fp.PartialClusters) == 0 && len(fp.DegradedClusters) == 0 {
 			continue
 		}
 		out = append(out, fp)
@@ -434,6 +436,7 @@ func dataQualityFingerprints(values []DataQualityHealth) []dataQualityFingerprin
 			cmp.Compare(a.Surface, b.Surface),
 			cmp.Compare(a.Status, b.Status),
 			cmp.Compare(strings.Join(a.StaleClusters, ","), strings.Join(b.StaleClusters, ",")),
+			cmp.Compare(strings.Join(a.PartialClusters, ","), strings.Join(b.PartialClusters, ",")),
 			cmp.Compare(strings.Join(a.DegradedClusters, ","), strings.Join(b.DegradedClusters, ",")),
 		)
 	})

@@ -91,21 +91,41 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	// connect setup skips the subscribe in auto-detect mode (ep.Account is
 	// empty until the gateway emits managedAccounts after handshake), so
 	// the first `account` call doubles as the kickoff. SubscribeAccountPnL
-	// is idempotent — subsequent calls for the same account are no-ops.
-	// Reads remain non-blocking cache lookups.
-	if account := s.cachedAccount(); account != "" {
-		if _, ok := c.AccountDailyPnL(); !ok {
+	// is idempotent — subsequent calls for the same account are no-ops. After
+	// kicking the subscription, wait briefly so cold-start canary does not
+	// falsely report missing P&L while the first frame is in flight.
+	snap, ok := c.AccountDailyPnL()
+	if !ok {
+		if account := s.cachedAccount(); account != "" {
 			if err := c.SubscribeAccountPnL(account); err != nil {
 				s.logger.Debugf("SubscribeAccountPnL(%s) failed: %v", account, err)
 			}
+			snap, ok = waitForAccountDailyPnL(ctx, c, time.Now().Add(750*time.Millisecond))
 		}
 	}
-	if snap, ok := c.AccountDailyPnL(); ok {
+	if ok {
 		res.DailyPnL = snap.DailyPnL
 		res.DailyPnLUnrealized = snap.UnrealizedDailyPnL
 		res.DailyPnLRealized = snap.RealizedDailyPnL
 	}
 	return res, nil
+}
+
+type accountDailyPnLReader interface {
+	AccountDailyPnL() (ibkrlib.AccountDailyPnL, bool)
+}
+
+func waitForAccountDailyPnL(ctx context.Context, reader accountDailyPnLReader, deadline time.Time) (ibkrlib.AccountDailyPnL, bool) {
+	if reader == nil {
+		return ibkrlib.AccountDailyPnL{}, false
+	}
+	var snap ibkrlib.AccountDailyPnL
+	var ok bool
+	_ = pollUntil(ctx, deadline, func() bool {
+		snap, ok = reader.AccountDailyPnL()
+		return ok
+	})
+	return snap, ok
 }
 
 // buildCurrencyExposure flattens RawAccountSummary.CurrencyLedger into the

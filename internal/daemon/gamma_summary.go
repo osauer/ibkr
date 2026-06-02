@@ -330,8 +330,12 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		if session == rpc.SessionRTH {
 			d.Severity = "data_quality"
 		}
-		d.Message = fmt.Sprintf("Open interest was missing or zero for %d priced legs.", max(c.PricedLegCount-c.LegCount, 0))
-		d.Impact = fmt.Sprintf("%d priced legs contributed to IV/skew fitting, but only %d legs contributed to dealer GEX.", c.PricedLegCount, c.LegCount)
+		missing := gammaOIMissingCount(c.LegDiagnostics)
+		if missing == 0 {
+			missing = max(c.PricedLegCount-c.LegCount, 0)
+		}
+		d.Message = fmt.Sprintf("Open-interest ticks were missing for %d priced legs.", missing)
+		d.Impact = fmt.Sprintf("%d priced legs contributed to IV/skew fitting; %d legs had observed OI and %d had positive OI for dealer GEX.", c.PricedLegCount, gammaOIObservedCount(c), c.LegCount)
 		d.Action = gammaOIMissingAction(session)
 	case code == "all_iv_derived":
 		d.Severity = "data_quality"
@@ -364,6 +368,16 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Message = code
 	}
 	return d
+}
+
+func gammaOIObservedCount(c *rpc.GammaZeroComputed) int {
+	if c == nil {
+		return 0
+	}
+	if c.LegDiagnostics == nil {
+		return c.LegCount
+	}
+	return c.LegDiagnostics.Total.OpenInterestObservedLegs
 }
 
 func gammaWarningSession(c *rpc.GammaZeroComputed) rpc.SessionClass {

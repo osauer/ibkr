@@ -428,6 +428,36 @@ func TestComputeCanaryPositivePnLShockProtectsGains(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryMissingDailyPnLIsDataQuality(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.DailyPnL = nil
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+	})
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch for missing daily P&L", res.Direction, res.Severity)
+	}
+	if !rowContains(res.Rows, "Portfolio P&L shock", "cannot confirm or reject") {
+		t.Fatalf("expected P&L data-quality row, rows: %+v", res.Rows)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalRiskDataDegraded)
+	if !ok || sig.Subject != "account.daily_pnl" {
+		t.Fatalf("missing daily P&L data-quality signal, got %+v", res.Signals)
+	}
+	var accountHealth *rpc.SourceHealth
+	for i := range res.SourceHealth {
+		if res.SourceHealth[i].Source == "account" {
+			accountHealth = &res.SourceHealth[i]
+			break
+		}
+	}
+	if accountHealth == nil || accountHealth.Status != "partial" || accountHealth.Confidence != "medium-low" {
+		t.Fatalf("account source health = %+v, want partial/medium-low", accountHealth)
+	}
+}
+
 func TestComputeCanaryWatchMarginSignalDoesNotPublishLowerTarget(t *testing.T) {
 	t.Parallel()
 	acct := baseCanaryAccount()
@@ -677,6 +707,34 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryDetectsWarningOnlyDegradedGamma(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterGreenCount: 4, ClusterRankedCount: 6}
+	r.HYGSPYDivergence.Band = "red"
+	r.GammaZero.Band = "red"
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		WarningDetails: []rpc.GammaWarningDetail{{Code: "oi_missing", Severity: "data_quality"}},
+	}
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if got := strings.Join(res.Market.DegradedClusters, ","); got != "gamma" {
+		t.Fatalf("degraded clusters = %q, want gamma", got)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalRegimeStressConfirmed)
+	if !ok {
+		t.Fatalf("missing regime stress signal: %+v", res.Signals)
+	}
+	if !containsString(sig.BlockedBy, "gamma") {
+		t.Fatalf("regime stress signal blocked_by = %+v, want gamma", sig.BlockedBy)
+	}
+	if containsString(res.Lifecycle.ConfirmedBy, "gamma") || containsString(res.Lifecycle.ConfirmedBy, string(risk.SignalRegimeStressConfirmed)) {
+		t.Fatalf("lifecycle confirmed_by = %+v, want degraded gamma/regime confirmation excluded", res.Lifecycle.ConfirmedBy)
+	}
+}
+
 func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -731,6 +789,25 @@ func TestComputeCanarySeparatesPartialFromAmbiguousClusters(t *testing.T) {
 	}
 	if got := strings.Join(res.Market.PartialClusters, ","); got != "credit" {
 		t.Fatalf("partial clusters = %q, want credit", got)
+	}
+}
+
+func TestComputeCanaryOptionsPresentWithoutGreeksIsDataQuality(t *testing.T) {
+	t.Parallel()
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf:    time.Now(),
+			Options: []rpc.PositionView{{Symbol: "SPY", SecType: rpc.SecTypeOption, Quantity: 1}},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if !rowContains(res.Rows, "Options convexity", "greeks coverage is unavailable") {
+		t.Fatalf("expected options data-quality row, rows: %+v", res.Rows)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalOptionGreeksDegraded)
+	if !ok || sig.Direction != risk.DirectionDataQuality {
+		t.Fatalf("missing option greeks degraded signal, signals: %+v", res.Signals)
 	}
 }
 
@@ -909,12 +986,15 @@ func TestRenderCanaryTextColorsCurrentState(t *testing.T) {
 }
 
 func baseCanaryAccount() rpc.AccountResult {
+	dailyPnL := 0.0
 	return rpc.AccountResult{
 		BaseCurrency:       "USD",
 		NetLiquidation:     100_000,
 		ExcessLiquidity:    50_000,
 		Cushion:            0.50,
 		GrossPositionValue: 60_000,
+		DailyPnL:           &dailyPnL,
+		AsOf:               time.Now(),
 	}
 }
 

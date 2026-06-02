@@ -226,10 +226,37 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 }
 
 func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
-	if g.Envelope.Result == nil || g.Envelope.Result.Summary == nil {
+	if g.Envelope.Result == nil {
 		return false
 	}
-	return strings.EqualFold(g.Envelope.Result.Summary.Confidence, "degraded")
+	if g.Envelope.Result.Summary != nil && strings.EqualFold(g.Envelope.Result.Summary.Confidence, "degraded") {
+		return true
+	}
+	return canaryGammaComputedDegraded(g.Envelope.Result)
+}
+
+func canaryGammaComputedDegraded(c *rpc.GammaZeroComputed) bool {
+	if c == nil {
+		return false
+	}
+	for _, w := range c.WarningDetails {
+		code := strings.ToLower(strings.TrimSpace(w.Code))
+		switch {
+		case code == "oi_missing", code == "all_iv_derived", code == "cache_stale_off_hours":
+			return true
+		case strings.HasPrefix(code, "spy_unavailable:"),
+			strings.HasPrefix(code, "spx_unavailable:"),
+			strings.HasPrefix(code, "spx_cache_fallback"),
+			strings.HasPrefix(code, "skew_fallback:"):
+			return true
+		}
+	}
+	for _, sub := range c.PerIndex {
+		if canaryGammaComputedDegraded(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func weakestStatus(statuses []string) string {
@@ -310,7 +337,7 @@ func canaryMarginRow(p CanaryPortfolioSummary) CanaryRow {
 
 func canaryPnLShockRow(p CanaryPortfolioSummary) CanaryRow {
 	if p.DailyPnLPct == nil {
-		return canaryRow("Portfolio P&L shock", "", risk.SeverityObserve, "No daily P&L shock signal.", "daily P&L unavailable")
+		return canaryRow("Portfolio P&L shock", risk.DirectionDataQuality, risk.SeverityWatch, "Daily P&L is unavailable; this indicator cannot confirm or reject a P&L shock.", "daily P&L unavailable")
 	}
 	pct := *p.DailyPnLPct
 	absPct := math.Abs(pct)
@@ -411,6 +438,9 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 
 func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMarketSummary) CanaryRow {
 	if pos.Portfolio == nil || pos.Portfolio.GreeksTotal == 0 {
+		if len(pos.Options) > 0 {
+			return canaryRow("Options convexity", risk.DirectionDataQuality, risk.SeverityWatch, "Option positions are present but greeks coverage is unavailable; do not escalate options-specific actions from this snapshot.", "option greeks unavailable")
+		}
 		return canaryRow("Options convexity", "", risk.SeverityObserve, "No option-greeks action from the current portfolio snapshot.", "no option greeks required")
 	}
 	coverage := float64(pos.Portfolio.GreeksCoverage) / float64(pos.Portfolio.GreeksTotal) * 100
@@ -682,7 +712,17 @@ func canaryCushionSeverity(v float64) (risk.SignalSeverity, float64, bool) {
 
 func canaryPnLSignals(p CanaryPortfolioSummary) []risk.Signal {
 	if p.DailyPnLPct == nil {
-		return nil
+		return []risk.Signal{{
+			ID:               risk.SignalRiskDataDegraded,
+			Direction:        risk.DirectionDataQuality,
+			Severity:         risk.SeverityWatch,
+			Subject:          "account.daily_pnl",
+			Metric:           "daily_pnl_pct_nlv",
+			Evidence:         "daily P&L unavailable",
+			Confidence:       "medium-low",
+			ConfidenceImpact: "P&L shock indicator unavailable",
+			BlockedBy:        []string{"account.daily_pnl"},
+		}}
 	}
 	pct := *p.DailyPnLPct
 	absPct := math.Abs(pct)
@@ -784,7 +824,12 @@ func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
 	case m.RedClusters >= 2 && m.RankedClusters >= 3:
 		observed := float64(m.RedClusters)
 		threshold := 2.0
-		out = append(out, risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
+		sig := risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"}
+		if degraded := degradedConfirmingClusters(m); len(degraded) > 0 {
+			sig.BlockedBy = degraded
+			sig.ConfidenceImpact = "confirmed stress includes degraded cluster input; verify before severe market-only action"
+		}
+		out = append(out, sig)
 	case canaryFastCarryUnwind(m):
 		observed := 1.0
 		threshold := 1.0
@@ -798,6 +843,17 @@ func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
 		observed := 1.0
 		out = append(out, risk.Signal{ID: risk.SignalGammaRed, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Subject: "gamma", Metric: "red_cluster", Observed: &observed, Evidence: "gamma cluster red", Confidence: "medium", ConfidenceImpact: "lower when gamma is degraded"})
 	}
+	return out
+}
+
+func degradedConfirmingClusters(m CanaryMarketSummary) []string {
+	out := []string{}
+	for _, cluster := range m.DegradedClusters {
+		if slices.Contains(m.RedClusterNames, cluster) {
+			out = append(out, cluster)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -868,6 +924,18 @@ func canaryConcentrationSignals(p CanaryPortfolioSummary, m CanaryMarketSummary)
 
 func canaryOptionSignals(pos rpc.PositionsResult, m CanaryMarketSummary) []risk.Signal {
 	if pos.Portfolio == nil || pos.Portfolio.GreeksTotal == 0 {
+		if len(pos.Options) > 0 {
+			return []risk.Signal{{
+				ID:               risk.SignalOptionGreeksDegraded,
+				Direction:        risk.DirectionDataQuality,
+				Severity:         risk.SeverityWatch,
+				Metric:           "option_greeks_coverage_pct",
+				Evidence:         "option greeks unavailable",
+				Confidence:       "medium-low",
+				ConfidenceImpact: "blocks option-specific planning",
+				BlockedBy:        []string{"option_greeks"},
+			}}
+		}
 		return nil
 	}
 	out := []risk.Signal{}
@@ -1106,6 +1174,9 @@ func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 	if acct.NetLiquidation <= 0 {
 		return "partial"
 	}
+	if acct.AsOf.IsZero() || acct.DailyPnL == nil {
+		return "partial"
+	}
 	if canarySourceAgeSeconds(now, acct.AsOf) > canarySourceMaxAgeSeconds(now) {
 		return rpc.RegimeStatusStale
 	}
@@ -1113,13 +1184,16 @@ func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 }
 
 func canaryAccountSourceConfidence(acct rpc.AccountResult) string {
-	if acct.NetLiquidation <= 0 {
+	if acct.NetLiquidation <= 0 || acct.AsOf.IsZero() || acct.DailyPnL == nil {
 		return "medium-low"
 	}
 	return "high"
 }
 
 func canaryPositionsSourceStatus(pos rpc.PositionsResult, now time.Time) string {
+	if pos.AsOf.IsZero() {
+		return "partial"
+	}
 	if canarySourceAgeSeconds(now, pos.AsOf) > canarySourceMaxAgeSeconds(now) {
 		return rpc.RegimeStatusStale
 	}
@@ -1127,6 +1201,9 @@ func canaryPositionsSourceStatus(pos rpc.PositionsResult, now time.Time) string 
 }
 
 func canaryPositionsSourceConfidence(pos rpc.PositionsResult) string {
+	if pos.AsOf.IsZero() {
+		return "medium-low"
+	}
 	return "high"
 }
 
@@ -1255,7 +1332,12 @@ func canaryLifecycleSource(id risk.SignalID) string {
 func canaryLifecycleConfirmedBy(res CanaryResult) []string {
 	confirmed := []string{}
 	if res.Market.RedClusters >= 2 {
-		confirmed = append(confirmed, res.Market.RedClusterNames...)
+		for _, cluster := range res.Market.RedClusterNames {
+			if slices.Contains(res.Market.DegradedClusters, cluster) {
+				continue
+			}
+			confirmed = append(confirmed, cluster)
+		}
 	}
 	for _, sig := range res.Signals {
 		if severityRankAtLeast(sig.Severity, risk.SeverityAct) && len(sig.BlockedBy) == 0 && sig.Direction != risk.DirectionDataQuality {

@@ -242,7 +242,14 @@ func runRegimeFanout(
 			res.USDJPY = rpc.RegimeUSDJPY{Symbol: "USD.JPY", Notes: usdJpyNotes, Status: rpc.RegimeStatusError, ErrorMessage: exceededMsg}
 		}
 		if !received["gamma"] {
-			res.GammaZero = rpc.RegimeGammaZero{Notes: gammaNotes, Status: rpc.RegimeStatusError}
+			res.GammaZero = rpc.RegimeGammaZero{
+				Notes:  gammaNotes,
+				Status: rpc.RegimeStatusError,
+				Envelope: rpc.GammaZeroSPXResult{
+					Status: rpc.GammaZeroStatusError,
+					Error:  exceededMsg,
+				},
+			}
 		}
 		if !received["breadth"] {
 			res.Breadth = rpc.RegimeBreadth{Notes: breadthNotes, Status: rpc.RegimeStatusError}
@@ -877,6 +884,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	})
 	if err != nil {
 		out.Status = rpc.RegimeStatusError
+		out.Envelope = rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusError, Error: err.Error()}
 		return out
 	}
 	out.Envelope = *envelope

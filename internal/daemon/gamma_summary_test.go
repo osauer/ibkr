@@ -105,7 +105,7 @@ func TestGammaWarningDetailOIMissingNamesAPIDiagnostic(t *testing.T) {
 	if got.Severity != "info" || got.Scope != "SPY" {
 		t.Fatalf("warning detail = %+v, want SPY info warning outside RTH", got)
 	}
-	for _, want := range []string{"749 priced legs", "only 2 legs", "generic tick 101", "pre-market", "sparse OI is expected", "09:30-16:00 ET"} {
+	for _, want := range []string{"749 priced legs", "2 had positive OI", "generic tick 101", "pre-market", "sparse OI is expected", "09:30-16:00 ET"} {
 		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
 			t.Fatalf("warning detail missing %q: %+v", want, got)
 		}

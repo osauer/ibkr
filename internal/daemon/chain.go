@@ -1161,13 +1161,11 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	}
 	// Opportunistic OI read off the same subscription. Tick types 27
 	// (callOpenInterest) and 28 (putOpenInterest) land on the cached
-	// MarketData.OpenInt — same pattern gamma uses
-	// (internal/daemon/gamma_zero_compute.go:352-357). May be zero off-
-	// hours or for illiquid strikes; nil-vs-zero distinction stays on
-	// the wire so renderers can differentiate "not delivered" from
-	// "genuinely no open interest".
+	// MarketData.OpenInt plus OpenIntObserved — same pattern gamma uses.
+	// Zero OI is still a real observed value when OpenIntObserved=true;
+	// nil means the OI tick did not arrive.
 	var oi *int64
-	if d, ok := c.GetMarketData()[key]; ok && d.OpenInt > 0 {
+	if d, ok := c.GetMarketData()[key]; ok && d.OpenIntObserved {
 		v := d.OpenInt
 		oi = &v
 	}

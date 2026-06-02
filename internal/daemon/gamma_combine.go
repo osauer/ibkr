@@ -68,10 +68,7 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		topConcPct = allTop[0].AbsGEX / combinedAbs * 100
 	}
 
-	asOf := spy.AsOf
-	if spx.AsOf.After(asOf) {
-		asOf = spx.AsOf
-	}
+	asOf := combinedGammaAsOf(spy.AsOf, spx.AsOf)
 	method := spy.Method
 	if method == "" {
 		method = spx.Method
@@ -120,6 +117,19 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		out.Warnings = dedupeStrings(append(out.Warnings, combinedWarnings...))
 	}
 	return out
+}
+
+func combinedGammaAsOf(spyAsOf, spxAsOf time.Time) time.Time {
+	if spyAsOf.IsZero() {
+		return spxAsOf
+	}
+	if spxAsOf.IsZero() {
+		return spyAsOf
+	}
+	if spyAsOf.Before(spxAsOf) {
+		return spyAsOf
+	}
+	return spxAsOf
 }
 
 // combineProfileBuckets sums the GEX values of two sweep profiles
