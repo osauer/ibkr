@@ -318,6 +318,33 @@ func TestPreferOwnGammaSnapshotUsesFresherForcedScope(t *testing.T) {
 	}
 }
 
+func TestPreferOwnGammaSnapshotUsesCleanScopeOverFallbackCanonical(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	canonical := rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope:    rpc.GammaZeroScopeSPX,
+			AsOf:     now,
+			Warnings: []string{"spx_cache_fallback:fetch_canceled"},
+		},
+	}
+	own := rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeSPX,
+			AsOf:  now,
+		},
+	}
+
+	if !preferOwnGammaSnapshot(canonical, own) {
+		t.Fatalf("clean own SPX scope should win over equal-time fallback canonical slice")
+	}
+	if preferOwnGammaSnapshot(own, canonical) {
+		t.Fatalf("fallback-tainted own scope must not replace equal-time clean canonical slice")
+	}
+}
+
 func TestGammaZeroCache_CombinedSnapshotUsesCachedSPXFallback(t *testing.T) {
 	c := newGammaZeroCache()
 	// Saturday, when the cache must not kick a fresh option fan-out.
@@ -463,6 +490,7 @@ func TestGammaZeroCache_CombinedSnapshotRebuildsFromNewerSingleScopes(t *testing
 		LegCount:       3,
 		AsOf:           newAsOf,
 		Warnings:       []string{"oi_missing"},
+		Quality:        &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable},
 	}
 	spxOnly := &rpc.GammaZeroComputed{
 		Scope:          rpc.GammaZeroScopeSPX,
@@ -472,6 +500,7 @@ func TestGammaZeroCache_CombinedSnapshotRebuildsFromNewerSingleScopes(t *testing
 		LegCount:       37,
 		AsOf:           newAsOf,
 		Warnings:       []string{"oi_missing"},
+		Quality:        &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable},
 	}
 	c.slots = map[string]*gammaSlot{
 		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(oldSPXOnly, rpc.GammaZeroScopeCombined, now)},
@@ -622,6 +651,62 @@ func TestGammaZeroCache_CurrentSPYFailureDoesNotBackfillBlockedSPY(t *testing.T)
 	}
 	if got.LegCount != freshSPXOnly.LegCount || got.GammaTotalAbs != freshSPXOnly.GammaTotalAbs {
 		t.Fatalf("combined metrics included blocked SPY: leg_count=%d gamma_total_abs=%v", got.LegCount, got.GammaTotalAbs)
+	}
+}
+
+func TestGammaZeroCache_CurrentSPYFailureDoesNotBackfillRawWeakSPY(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 6, 2, 14, 12, 0, 0, time.UTC)
+	asOf := now.Add(-time.Minute)
+
+	rawWeakSPY := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		GammaSign:      "negative",
+		GammaTotalAbs:  2.3e7,
+		LegCount:       2,
+		PricedLegCount: 751,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPY", Strike: 760, Right: "P", AbsGEX: 1.4e7, Expiry: "2026-06-05"},
+		},
+		AsOf:     asOf,
+		Method:   gammaMethodToken,
+		Warnings: []string{"oi_missing"},
+		// Quality intentionally nil: persisted cache entries are stored raw
+		// and annotated only on the served clone.
+	}
+	freshSPXOnly := &rpc.GammaZeroComputed{
+		Scope:         rpc.GammaZeroScopeSPX,
+		GammaSign:     "negative",
+		GammaTotalAbs: 9.1e8,
+		LegCount:      395,
+		TopStrikes: []rpc.StrikeConcentration{
+			{Underlying: "SPX", TradingClass: "SPXW", Strike: 7600, Right: "P", AbsGEX: 9.1e8, Expiry: "2026-06-05"},
+		},
+		AsOf:     asOf,
+		Method:   gammaMethodToken,
+		Warnings: []string{"spy_unavailable:throttled"},
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(freshSPXOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPY:      {current: newPersistedComputation(rawWeakSPY, rpc.GammaZeroScopeSPY, now)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil {
+		t.Fatal("Result is nil")
+	}
+	if got.Scope != rpc.GammaZeroScopeSPX {
+		t.Fatalf("scope = %q, want current SPX-only degraded result", got.Scope)
+	}
+	if got.PerIndex["SPY"] != nil {
+		t.Fatalf("current SPY failure was backfilled from raw weak cache: %+v", got.PerIndex["SPY"])
+	}
+	if got.LegCount != freshSPXOnly.LegCount || got.GammaTotalAbs != freshSPXOnly.GammaTotalAbs {
+		t.Fatalf("combined metrics included raw weak SPY: leg_count=%d gamma_total_abs=%v", got.LegCount, got.GammaTotalAbs)
 	}
 }
 

@@ -760,25 +760,29 @@ func computeGammaZeroFor(
 	prewarmStart := now()
 	prewarmTotal := 0
 	prewarmComplete := make(map[string]bool, len(picked))
-	for class, ymds := range expsByClass {
-		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
-		for _, r := range prewarmResults {
-			key := gammaPrewarmKey(class, r.Expiry)
-			prewarmComplete[key] = r.Err == nil && r.Dropped == 0
-			collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
-			if r.Err != nil {
-				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
-					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
-				continue
-			}
-			if r.Dropped > 0 {
-				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
+	if gammaDirectListedOptionMarketData(sym) {
+		log.Infof("gamma.prewarm.skip underlying=%s reason=direct_listed_option_market_data", sym)
+	} else {
+		for class, ymds := range expsByClass {
+			prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
+			for _, r := range prewarmResults {
+				key := gammaPrewarmKey(class, r.Expiry)
+				prewarmComplete[key] = r.Err == nil && r.Dropped == 0
+				collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
+				if r.Err != nil {
+					log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
+						class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
+					continue
+				}
+				if r.Dropped > 0 {
+					log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
+						class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+					continue
+				}
+				log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
 					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-				continue
+				prewarmTotal += r.Cached
 			}
-			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
-				class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-			prewarmTotal += r.Cached
 		}
 	}
 	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
@@ -801,15 +805,14 @@ func computeGammaZeroFor(
 	filteredJobs := jobs[:0]
 	incompletePrewarmKept := 0
 	for _, j := range jobs {
-		if !prewarmComplete[gammaPrewarmKey(j.tradingClass, j.expiryYMD)] {
+		complete := prewarmComplete[gammaPrewarmKey(j.tradingClass, j.expiryYMD)]
+		cached := c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
+		if gammaKeepJobAfterPrewarm(sym, complete, cached) {
 			filteredJobs = append(filteredJobs, j)
 			collection.noteRequested(j)
-			incompletePrewarmKept++
-			continue
-		}
-		if c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right) {
-			filteredJobs = append(filteredJobs, j)
-			collection.noteRequested(j)
+			if !complete {
+				incompletePrewarmKept++
+			}
 		} else {
 			collection.noteFailure(j, gammaLegFailureContractMissing)
 		}
@@ -1685,6 +1688,20 @@ func compactExpiry(date string) string {
 
 func gammaPrewarmKey(tradingClass, expiryYMD string) string {
 	return strings.ToUpper(strings.TrimSpace(tradingClass)) + "|" + strings.TrimSpace(expiryYMD)
+}
+
+func gammaKeepJobAfterPrewarm(sym string, prewarmComplete bool, cached bool) bool {
+	if prewarmComplete {
+		return cached
+	}
+	if gammaDirectListedOptionMarketData(sym) {
+		return cached
+	}
+	return true
+}
+
+func gammaDirectListedOptionMarketData(sym string) bool {
+	return strings.EqualFold(strings.TrimSpace(sym), "SPY")
 }
 
 type gammaCollectionDiagnostics struct {

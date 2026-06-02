@@ -15,11 +15,13 @@ const (
 	gammaMinPricedLegs           = 100
 	gammaMinGEXLegs              = 25
 	gammaMinSPXOIObservedPct     = 95.0
+	gammaMinSPYOIObservedPct     = 50.0
 	gammaMinDefaultOIObservedPct = 75.0
 	gammaMinOIPositivePct        = 5.0
 	gammaBlockOIPositivePct      = 1.0
 	gammaContextDerivedIVPct     = 40.0
 	gammaBlockDerivedIVPct       = 80.0
+	gammaContextSPYSkewRSquared  = 0.70
 	gammaContextConcentrationPct = 50.0
 	gammaBlockConcentrationPct   = 90.0
 	gammaContextSkewRSquared     = 0.75
@@ -249,13 +251,14 @@ func gammaQualityCommonModelGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCom
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateContext, "skew-fit diagnostics unavailable")
 		return
 	}
+	contextSkewThreshold := gammaContextSkewThreshold(c)
 	switch {
 	case cov.MedianSkewRSquared < gammaBlockSkewRSquared:
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateBlock,
 			fmt.Sprintf("median skew-fit R2 %.2f below %.2f", cov.MedianSkewRSquared, gammaBlockSkewRSquared))
-	case cov.MedianSkewRSquared < gammaContextSkewRSquared:
+	case cov.MedianSkewRSquared < contextSkewThreshold:
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateContext,
-			fmt.Sprintf("median skew-fit R2 %.2f below %.2f", cov.MedianSkewRSquared, gammaContextSkewRSquared))
+			fmt.Sprintf("median skew-fit R2 %.2f below %.2f", cov.MedianSkewRSquared, contextSkewThreshold))
 	default:
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGatePass, "skew fit quality acceptable")
 	}
@@ -441,10 +444,20 @@ func gammaQualityAddGate(q *rpc.GammaSignalQuality, name, status, reason string)
 }
 
 func gammaOIObservedThreshold(c *rpc.GammaZeroComputed) float64 {
-	if gammaQualityScope(c) == "SPX" {
+	switch gammaQualityScope(c) {
+	case "SPX":
 		return gammaMinSPXOIObservedPct
+	case "SPY":
+		return gammaMinSPYOIObservedPct
 	}
 	return gammaMinDefaultOIObservedPct
+}
+
+func gammaContextSkewThreshold(c *rpc.GammaZeroComputed) float64 {
+	if gammaQualityScope(c) == "SPY" {
+		return gammaContextSPYSkewRSquared
+	}
+	return gammaContextSkewRSquared
 }
 
 func gammaQualityScope(c *rpc.GammaZeroComputed) string {

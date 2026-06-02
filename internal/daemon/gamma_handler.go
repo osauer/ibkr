@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -148,8 +149,31 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 }
 
 func preferOwnGammaSnapshot(canonical, own rpc.GammaZeroSPXResult) bool {
-	return own.Status == rpc.GammaZeroStatusReady &&
-		own.Result != nil &&
-		canonical.Result != nil &&
-		own.Result.AsOf.After(canonical.Result.AsOf)
+	if own.Status != rpc.GammaZeroStatusReady || own.Result == nil || canonical.Result == nil {
+		return false
+	}
+	if own.Result.AsOf.After(canonical.Result.AsOf) {
+		return true
+	}
+	if own.Result.AsOf.Before(canonical.Result.AsOf) {
+		return false
+	}
+	return gammaSnapshotHasSPXCacheFallback(canonical.Result) && !gammaSnapshotHasSPXCacheFallback(own.Result)
+}
+
+func gammaSnapshotHasSPXCacheFallback(result *rpc.GammaZeroComputed) bool {
+	if result == nil {
+		return false
+	}
+	for _, code := range result.Warnings {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(code)), "spx_cache_fallback") {
+			return true
+		}
+	}
+	for _, detail := range result.WarningDetails {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(detail.Code)), "spx_cache_fallback") {
+			return true
+		}
+	}
+	return false
 }

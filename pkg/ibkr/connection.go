@@ -3880,10 +3880,25 @@ func applyContractDetailLite(detail ContractDetailsLite, contract *Contract) {
 	}
 	if optionPrimaryHint != "" {
 		// Cached OPT details can contain the option listing venue as
-		// PrimaryExch; for SPY-style stock options this field is the
-		// underlying chain source hint and must stay ARCA.
+		// PrimaryExch; during contract resolution SPY-style stock
+		// options still want the underlying chain source hint. The
+		// market-data request normalizer clears this field again once
+		// a concrete option ConID is known.
 		contract.PrimaryExch = optionPrimaryHint
 	}
+}
+
+func normalizeResolvedOptionMarketDataContract(contract *Contract) {
+	if contract == nil || !strings.EqualFold(contract.SecType, "OPT") || contract.ConID == 0 {
+		return
+	}
+	// PrimaryExch is useful while resolving stock-option contracts
+	// (SPY wants SMART+ARCA before falling back to venue routes). Once
+	// a concrete option ConID is known, carrying the underlying primary
+	// into reqMktData can make the gateway reject otherwise valid SPY
+	// contracts with code 200. The ConID + option exchange/tradingClass
+	// is the identity for the market-data request.
+	contract.PrimaryExch = ""
 }
 
 // RequestHistoricalData submits an HMDS request for historical data.
@@ -4168,6 +4183,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 	if err := c.resolveOptionContract(ctx, &contract, 5*time.Second); err != nil {
 		return 0, fmt.Errorf("resolve option contract failed: %w", err)
 	}
+	normalizeResolvedOptionMarketDataContract(&contract)
 
 	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,221", false, false)...)
 
@@ -4200,15 +4216,9 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 		ctx = context.Background()
 	}
 
-	key := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
-
-	c.optionContractMu.RLock()
-	if cached, ok := c.optionContractCache[key]; ok && cached.ConID != 0 {
-		c.optionContractMu.RUnlock()
-		applyContractDetailLite(cached, contract)
+	if c.applyCachedOptionContract(contract) {
 		return nil
 	}
-	c.optionContractMu.RUnlock()
 
 	var lastErr error
 	for _, att := range optionContractResolutionAttempts(*contract) {
@@ -4228,6 +4238,7 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 			continue
 		}
 
+		key := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 		applyContractDetailLite(*detail, contract)
 
 		c.optionContractMu.Lock()
@@ -4241,6 +4252,21 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 	}
 
 	return fmt.Errorf("contract details unavailable for option %s %s %.2f%s", contract.Symbol, contract.Expiry, contract.Strike, contract.Right)
+}
+
+func (c *Connection) applyCachedOptionContract(contract *Contract) bool {
+	if c == nil || contract == nil {
+		return false
+	}
+	key := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
+	c.optionContractMu.RLock()
+	cached, ok := c.optionContractCache[key]
+	c.optionContractMu.RUnlock()
+	if !ok || cached.ConID == 0 {
+		return false
+	}
+	applyContractDetailLite(cached, contract)
+	return true
 }
 
 type optionContractRouteAttempt struct {

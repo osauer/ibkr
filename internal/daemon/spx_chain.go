@@ -57,31 +57,62 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 		return out, nil
 	}
 
-	// Single-class path — SPY, equities. Empty trading class to
-	// selectExpirations preserves the SPY-only 16:15 ET cutoff
-	// bit-for-bit. tradingClass on each leg is the underlying symbol
-	// (matches what IBKR returns for SPY-class options).
-	allStrikes, err := c.FetchOptionExpiryStrikes(sym, 30*time.Second)
+	// SPY/equity path. Use classed secDef data here too: IBKR can list
+	// sibling classes on a date, and merging them creates false jobs that
+	// later fall into per-leg contract-detail resolution. That waterfall is
+	// exactly what trips the gateway pacing guard. The default selector
+	// mirrors `ibkr chain`: prefer the symbol class when present, otherwise
+	// use the only/first listed class for that date.
+	classed, err := c.FetchOptionExpiryStrikesClassed(sym, 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if len(allStrikes) == 0 {
+	if len(classed) == 0 {
 		return nil, fmt.Errorf("gateway returned no %s expirations", sym)
 	}
-	candidates := selectExpirationCandidates(allStrikes, "", spotAt)
+	out := pickDefaultClassedExpirations(sym, classed, spotAt, expiryCount)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("gateway returned no usable %s expirations", sym)
+	}
+	return out, nil
+}
+
+func pickDefaultClassedExpirations(sym string, classed map[string][]ibkrlib.ExpiryClassedStrikes, spotAt time.Time, expiryCount int) []pickedExpiration {
+	selected := make(map[string]ibkrlib.ExpiryClassedStrikes, len(classed))
+	selectedStrikes := make(map[string][]float64, len(classed))
+	for date, entries := range classed {
+		normalised := normalisedSPXChainEntries(entries, sym)
+		if len(normalised) == 0 {
+			continue
+		}
+		entry, _, err := selectDefaultChainEntry(sym, normalised, sym, false, date)
+		if err != nil {
+			continue
+		}
+		selected[date] = entry
+		selectedStrikes[date] = entry.Strikes
+	}
+	if len(selectedStrikes) == 0 {
+		return nil
+	}
+	candidates := selectExpirationCandidates(selectedStrikes, "", spotAt)
 	pickedDates := pickExpirationSlots(candidates, spotAt.In(newYorkLocation()), expiryCount)
 	expiryCapTruncated := expiryCount > 0 && len(candidates) > len(pickedDates)
 	out := make([]pickedExpiration, 0, len(pickedDates))
 	for _, d := range pickedDates {
+		entry, ok := selected[d]
+		if !ok {
+			continue
+		}
 		out = append(out, pickedExpiration{
 			date:         d,
 			expiryYMD:    compactExpiry(d),
-			tradingClass: sym,
-			strikes:      allStrikes[d],
+			tradingClass: entry.TradingClass,
+			strikes:      entry.Strikes,
 			capTruncated: expiryCapTruncated,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // pickedDatesFromPicked extracts the deduped, sorted set of dates from a
