@@ -219,7 +219,7 @@ func TestGammaQualityFailedRefreshBlocksServedCache(t *testing.T) {
 	}
 }
 
-func TestGammaQualitySPYOnlyDegradationMakesCombinedContextOnly(t *testing.T) {
+func TestGammaQualitySPXCanonicalRanksWhenSPYDegrades(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
 	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
@@ -243,12 +243,46 @@ func TestGammaQualitySPYOnlyDegradationMakesCombinedContextOnly(t *testing.T) {
 	combined := combineGammaResults(spy, spx)
 
 	annotateGammaQuality(combined, now)
-	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityContextOnly {
-		t.Fatalf("combined rankability = %q, want context_only: %+v", got, combined.Quality)
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("combined rankability = %q, want rankable SPX-canonical signal: %+v", got, combined.Quality)
+	}
+	for _, gate := range combined.Quality.Gates {
+		if gate.Name == "spy_coverage" && gate.Status != rpc.GammaQualityGatePass {
+			t.Fatalf("degraded SPY should be non-blocking when SPX is rankable: %+v", combined.Quality.Gates)
+		}
 	}
 	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "red" {
+		t.Fatalf("bandForGamma = %q, want SPX-ranked red band despite degraded SPY", got)
+	}
+}
+
+func TestGammaQualitySPYProxyWithSPXUnavailableIsContextOnly(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.Warnings = []string{"spx_unavailable:timeout"}
+
+	annotateGammaQuality(spy, now)
+
+	if got := spy.Quality.Rankability; got != rpc.GammaRankabilityContextOnly {
+		t.Fatalf("rankability = %q, want context_only SPY proxy when SPX is unavailable: %+v", got, spy.Quality)
+	}
+	if len(spy.Quality.Blockers) != 0 {
+		t.Fatalf("SPY proxy should be degraded but not blocked: %+v", spy.Quality)
+	}
+	var sawContext bool
+	for _, gate := range spy.Quality.Gates {
+		if gate.Name == "spx_coverage" && gate.Status == rpc.GammaQualityGateContext {
+			sawContext = true
+		}
+	}
+	if !sawContext {
+		t.Fatalf("SPY proxy should carry SPX-unavailable context gate: %+v", spy.Quality.Gates)
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: spy}}
 	if got := bandForGamma(row); got != "" {
-		t.Fatalf("bandForGamma = %q, want unranked for SPY-degraded combined gamma", got)
+		t.Fatalf("bandForGamma = %q, want unranked for SPY proxy context-only gamma", got)
 	}
 }
 

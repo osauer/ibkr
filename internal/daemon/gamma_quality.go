@@ -136,6 +136,9 @@ func gammaQualityCombinedGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 	}
 	spy := c.PerIndex["SPY"]
 	spx := c.PerIndex["SPX"]
+	spxRankable := spx != nil &&
+		spx.Quality != nil &&
+		spx.Quality.Rankability == rpc.GammaRankabilityRankable
 	switch {
 	case spx == nil:
 		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, "SPX slice missing; combined gamma cannot rank")
@@ -150,13 +153,25 @@ func gammaQualityCombinedGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 	}
 	switch {
 	case spy == nil:
-		gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY slice missing; combined view is SPX-only context")
+		if spxRankable {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY slice missing; SPX canonical signal remains usable")
+		} else {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY slice missing; combined view is SPX-only context")
+		}
 	case spy.Quality == nil:
-		gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY quality missing")
+		if spxRankable {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY quality missing; SPX canonical signal remains usable")
+		} else {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY quality missing")
+		}
 	case spy.Quality.Rankability == rpc.GammaRankabilityRankable:
 		gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY slice rankable")
 	default:
-		gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY slice is not rankable")
+		if spxRankable {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY slice is not rankable; SPX canonical signal remains usable")
+		} else {
+			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY slice is not rankable")
+		}
 	}
 	gammaQualityCommonModelGates(q, c)
 }
@@ -290,7 +305,11 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 		case strings.HasPrefix(code, "refresh_failed:"):
 			gammaQualityAddGate(q, "refresh_state", rpc.GammaQualityGateBlock, "latest refresh failed: "+strings.TrimPrefix(code, "refresh_failed:"))
 		case strings.HasPrefix(code, "spx_unavailable:"):
-			gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, "SPX option chain unavailable: "+strings.TrimPrefix(code, "spx_unavailable:"))
+			if gammaQualityScope(c) == "SPY" {
+				gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateContext, "SPX option chain unavailable; using SPY proxy: "+strings.TrimPrefix(code, "spx_unavailable:"))
+			} else {
+				gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, "SPX option chain unavailable: "+strings.TrimPrefix(code, "spx_unavailable:"))
+			}
 		case strings.HasPrefix(code, "spy_unavailable:"):
 			if gammaQualityScope(c) == "SPX" {
 				gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY option chain unavailable; SPX canonical signal remains usable: "+strings.TrimPrefix(code, "spy_unavailable:"))
