@@ -11,7 +11,6 @@ import (
 
 const (
 	gammaRankableRTHMaxAge       = 60 * time.Minute
-	gammaRankableExtendedMaxAge  = 30 * time.Minute
 	gammaContextClosedMaxAge     = 24 * time.Hour
 	gammaMinPricedLegs           = 100
 	gammaMinGEXLegs              = 25
@@ -55,7 +54,7 @@ func buildGammaSignalQuality(c *rpc.GammaZeroComputed, now time.Time) rpc.GammaS
 	q := rpc.GammaSignalQuality{
 		Rankability: rpc.GammaRankabilityRankable,
 		AsOf:        time.Time{},
-		Session:     rpc.ClassifySession(now).String(),
+		Session:     gammaClassifySession(now).String(),
 	}
 	if c == nil {
 		q.Rankability = rpc.GammaRankabilityUnavailable
@@ -87,7 +86,7 @@ func gammaQualityFreshnessGate(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 		q.Freshness = "missing"
 		return
 	}
-	session := rpc.ClassifySession(now)
+	session := gammaClassifySession(now)
 	switch session {
 	case rpc.SessionClosed:
 		q.MaxAgeSeconds = int64(gammaContextClosedMaxAge.Seconds())
@@ -102,12 +101,9 @@ func gammaQualityFreshnessGate(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 			q.Freshness = "closed_session_context"
 			gammaQualityAddGate(q, "freshness", rpc.GammaQualityGateContext, "market is closed; cached gamma is context only")
 		}
-	case rpc.SessionRTH:
+	default:
 		q.MaxAgeSeconds = int64(gammaRankableRTHMaxAge.Seconds())
 		gammaQualityActiveSessionFreshnessGate(q, c, now, gammaRankableRTHMaxAge)
-	default:
-		q.MaxAgeSeconds = int64(gammaRankableExtendedMaxAge.Seconds())
-		gammaQualityActiveSessionFreshnessGate(q, c, now, gammaRankableExtendedMaxAge)
 	}
 }
 
@@ -186,7 +182,7 @@ func gammaQualitySingleGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComputed
 	if cov.OIObservedPct < threshold {
 		status := rpc.GammaQualityGateBlock
 		reason := fmt.Sprintf("OI observed on %.1f%% of priced legs; need %.0f%%", cov.OIObservedPct, threshold)
-		if gammaQualityScope(c) == "SPY" && rpc.ClassifySession(c.AsOf) != rpc.SessionRTH && cov.GEXLegs >= gammaMinGEXLegs {
+		if gammaQualityScope(c) == "SPY" && gammaClassifySession(c.AsOf) != rpc.SessionRTH && cov.GEXLegs >= gammaMinGEXLegs {
 			status = rpc.GammaQualityGateContext
 			reason += " for rankability; sparse SPY OI can occur outside regular option hours"
 		}
@@ -285,7 +281,7 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 				if q.Coverage.OIObservedPct >= gammaMinSPXOIObservedPct {
 					gammaQualityAddGate(q, "oi_missing", rpc.GammaQualityGatePass, "SPX OI missing was within coverage tolerance")
 				}
-			} else if rpc.ClassifySession(c.AsOf) != rpc.SessionRTH {
+			} else if gammaClassifySession(c.AsOf) != rpc.SessionRTH {
 				gammaQualityAddGate(q, "oi_missing", rpc.GammaQualityGateContext, "SPY OI missing outside regular option hours")
 			}
 		case strings.HasPrefix(code, "refresh_failed:"):
@@ -293,7 +289,11 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 		case strings.HasPrefix(code, "spx_unavailable:"):
 			gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, "SPX option chain unavailable: "+strings.TrimPrefix(code, "spx_unavailable:"))
 		case strings.HasPrefix(code, "spy_unavailable:"):
-			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY option chain unavailable: "+strings.TrimPrefix(code, "spy_unavailable:"))
+			if gammaQualityScope(c) == "SPX" {
+				gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGatePass, "SPY option chain unavailable; SPX canonical signal remains usable: "+strings.TrimPrefix(code, "spy_unavailable:"))
+			} else {
+				gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY option chain unavailable: "+strings.TrimPrefix(code, "spy_unavailable:"))
+			}
 		case strings.HasPrefix(code, "spx_cache_fallback"):
 			gammaQualityAddGate(q, "spx_cache_fallback", rpc.GammaQualityGateContext, "SPX slice came from cached fallback")
 		case strings.HasPrefix(code, "skew_fallback:"):

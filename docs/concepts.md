@@ -36,7 +36,7 @@ The rows:
 4. **HY/IG OAS**. Official ICE BofA cash-credit spreads via FRED are slower than HYG but harder to dismiss as ETF noise.
 5. **Funding spread**. 90-day AA financial commercial paper minus 3-month T-bill flags slow funding/liquidity pressure.
 6. **USD/JPY weekly move**. JPY funding-pair unwinds are a recurring stress amplifier (Aug 2024, Dec 2018, Jan 2016). A >3% week is a Tier-1 signal.
-7. **Dealer zero-gamma** (SPY + SPX combined). Whether the dealer book stabilises or amplifies day-over-day moves. See the [Gamma](#gamma) section.
+7. **Dealer zero-gamma** (SPX canonical, SPY corroboration). Whether the dealer book stabilises or amplifies day-over-day moves. See the [Gamma](#gamma) section.
 8. **S&P 500 breadth**. Whether the index's strength is broad or carried by a handful of mega-caps. See the [Breadth](#breadth) section.
 
 Each row carries raw measurements, status/as-of metadata, green / yellow / red banding, and a `streak` field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one. The lifecycle layer keeps weak or unconfirmed red evidence visible while preventing a single noisy proxy from dominating the broad-market trigger.
@@ -58,7 +58,7 @@ Dealer zero-gamma is the spot price at which the aggregate options-dealer book s
 
 1. **Sticky-moneyness skew** (`bs-gamma-profile-v3-stickymoneyness-0dte-split`). The spot sweep reprices each leg's IV at the scenario-spot's *moneyness* via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Without this, the put-side skew biases zero-gamma estimates upward by 5–10%.
 
-2. **Combined SPY+SPX with regime-agreement classifier**. SPY (continuous ETF, retail flow) and SPX (index options, institutional flow) often agree on regime direction, but the useful diagnostic is **disagreement** — one book stabilising while the other amplifies. The classifier reports `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:transition-gamma"`, or `"disagree"` directly so consumers don't have to derive it. A crossing is long/transition/short based on spot's distance from the identified γ-zero, not merely the existence of a crossing.
+2. **SPX/SPXW is the production signal; SPY is corroboration**. SPX index options are the canonical dealer-gamma book for the S&P 500 regime signal. SPY (continuous ETF, retail flow) is useful context when its option surface is fresh and high quality, but missing or throttled SPY does not downgrade an otherwise fresh, rankable SPX result. When both books are usable, the diagnostic is **disagreement** — one book stabilising while the other amplifies. The classifier reports `"agree:long-gamma"`, `"agree:short-gamma"`, `"agree:transition-gamma"`, or `"disagree"` directly so consumers don't have to derive it. A crossing is long/transition/short based on spot's distance from the identified γ-zero, not merely the existence of a crossing.
 
 Two complementary outputs on every result:
 
@@ -67,7 +67,7 @@ Two complementary outputs on every result:
 
 Every ready gamma result also carries `quality.rankability`:
 
-- `rankable` — fresh and covered enough for `regime` / `canary` to count the gamma band as market evidence.
+- `rankable` — fresh and covered enough for `regime` / `canary` to count the gamma band as market evidence. A rankable SPX result is stable production signal even when SPY is unavailable and disclosed as context.
 - `context_only` — useful structure context, but not independent confirmation.
 - `blocked` / `unavailable` — do not rank gamma or confirm stress from it.
 

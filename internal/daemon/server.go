@@ -1351,7 +1351,7 @@ func (s *Server) runGammaRefreshLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		if rpc.ClassifySession(time.Now()) == rpc.SessionClosed {
+		if gammaClassifySession(time.Now()) == rpc.SessionClosed {
 			continue
 		}
 		s.kickZeroGamma(ctx, "scheduler")

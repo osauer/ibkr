@@ -361,7 +361,8 @@ func TestRenderGamma_ColdRendersFriendlyExplainer(t *testing.T) {
 	for _, want := range []string{
 		"no data yet",
 		"cold cache",
-		"first call of each NY",
+		"first call of each regular",
+		"09:30-16:15 ET",
 		"--force",
 	} {
 		if !strings.Contains(out, want) {

@@ -99,15 +99,15 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 		// No compute has run this NY session and none is in flight. This is
 		// the common off-hours state: the daemon never recomputes on a closed
 		// market, so a stale or invalidated cache leaves us with no value to
-		// serve until the next U.S. equity-options session open. Friendly
+		// serve until the next regular U.S. options session open. Friendly
 		// explainer beats a bare "without a result payload" error.
 		fmt.Fprintf(out, "  Status      no data yet (cold cache)\n")
 		if r.ColdReason != "" {
 			fmt.Fprintf(out, "  Reason      %s\n", r.ColdReason)
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, env.dim("  The compute runs automatically on the first call of each NY"))
-		fmt.Fprintln(out, env.dim("  trading session (09:30 ET, Mon-Fri). Outside session hours the"))
+		fmt.Fprintln(out, env.dim("  The compute runs automatically on the first call of each regular"))
+		fmt.Fprintln(out, env.dim("  U.S. options session (09:30-16:15 ET, Mon-Fri). Outside session hours the"))
 		fmt.Fprintln(out, env.dim("  daemon does not run heavy option-chain fans against a closed"))
 		if r.ColdAction != "" {
 			fmt.Fprintln(out, env.dim("  market. "+r.ColdAction))
@@ -717,11 +717,11 @@ func gammaOIMissingActionForCLI(scope string, session rpc.SessionClass) string {
 	case rpc.SessionRTH:
 		return prefix + "This happened during regular U.S. option hours, when OI should normally be available if TWS has it; check the same class/expiry/strike in TWS, data-farm health, and API logs before trusting the gamma magnitude."
 	case rpc.SessionPre:
-		return prefix + "This affected SPY pre-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY pre-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	case rpc.SessionPost:
-		return prefix + "This affected SPY post-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY post-market, outside regular U.S. option hours, so sparse SPY OI is expected for the regular option-data surface; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	default:
-		return prefix + "This affected SPY while the regular U.S. option-data surface is closed, so sparse SPY OI is expected; missing OI is still unknown, not zero. Retry during 09:30-16:00 ET."
+		return prefix + "This affected SPY while the regular U.S. option-data surface is closed, so sparse SPY OI is expected; missing OI is still unknown, not zero. Retry during 09:30-16:15 ET."
 	}
 }
 
@@ -757,11 +757,11 @@ func spyUnavailableAction(reason string) string {
 	case "200":
 		return "Retry later; if it repeats, run `ibkr gamma --only=spy --force` for diagnostics or `ibkr gamma --only=spx` to suppress this note."
 	case "no_data", "fetch_canceled", "timeout":
-		return "Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spx`."
+		return "Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spx`."
 	case "throttled":
 		return "Wait a few minutes and retry without --force; use `ibkr gamma --only=spx` if you only want the SPX surface."
 	case "zero_magnitude":
-		return "Retry during 09:30-16:00 ET, or run `ibkr gamma --only=spy --force` for SPY-only diagnostics."
+		return "Retry during 09:30-16:15 ET, or run `ibkr gamma --only=spy --force` for SPY-only diagnostics."
 	default:
 		return "Retry later; if it repeats, check the daemon log and TWS market-data farm messages, or run `ibkr gamma --only=spx`."
 	}
@@ -1287,11 +1287,11 @@ func spxUnavailableAction(reason string) string {
 	case "200":
 		return "Retry later; if it repeats, run `ibkr gamma --only=spx --force` for diagnostics or `ibkr gamma --only=spy` to suppress the fallback banner."
 	case "no_data", "fetch_canceled", "timeout":
-		return "Retry during 09:30-16:00 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spy`."
+		return "Retry during 09:30-16:15 ET; if it repeats during regular hours, check TWS/daemon market-data logs or run `ibkr gamma --only=spy`."
 	case "throttled":
 		return "Wait a few minutes and retry without --force; use `ibkr gamma --only=spy` if you only want the SPY surface."
 	case "zero_magnitude":
-		return "Retry during 09:30-16:00 ET, or run `ibkr gamma --only=spx --force` for SPX-only diagnostics."
+		return "Retry during 09:30-16:15 ET, or run `ibkr gamma --only=spx --force` for SPX-only diagnostics."
 	default:
 		return "Retry later; if it repeats, check the daemon log and TWS market-data farm messages, or run `ibkr gamma --only=spy`."
 	}

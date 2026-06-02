@@ -134,13 +134,12 @@ func (s *gammaZeroStore) Load(scope string, nyNow time.Time) (*rpc.GammaZeroComp
 // Version / Scope / Method gates still apply — a v1-shape file from a
 // prior methodology era is still rejected as cold.
 //
-// Used by the SessionClosed boot path: outside U.S. equity-options
-// trading hours we'd rather surface yesterday's compute (clearly
-// flagged as stale via the cache_stale_off_hours warning when age
-// exceeds 24h) than force the user to wait for the next session open
-// to see any γ-zero number at all. Inside trading hours callers must
-// use Load() — a stale value during an active session would be
-// indistinguishable from a fresh one once it lands in the cache slot.
+// Used by the cache boot path when today's session-keyed file is
+// absent. The stale value is loaded as last-known-good context:
+// during regular option hours kickOrJoin refreshes behind it, and
+// outside regular option hours it is served without a non-force
+// refresh. Freshness/quality gates make the stale age visible to
+// callers.
 func (s *gammaZeroStore) LoadStale(scope string) (*rpc.GammaZeroComputed, error) {
 	path := filepath.Join(s.dir, gammaZeroStoreFilename(scope))
 	data, err := os.ReadFile(path)

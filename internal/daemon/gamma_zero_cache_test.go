@@ -72,8 +72,8 @@ func TestGammaZeroCache_SingleflightWithinSession(t *testing.T) {
 }
 
 // TestGammaZeroCache_SessionRollover verifies a new compute kicks off
-// when the NY session date changes — yesterday's cached result must
-// not satisfy today's caller.
+// when the NY session date changes while still serving yesterday's
+// known-good result until the refresh lands.
 func TestGammaZeroCache_SessionRollover(t *testing.T) {
 	c := newGammaZeroCache()
 	day1 := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
@@ -88,14 +88,24 @@ func TestGammaZeroCache_SessionRollover(t *testing.T) {
 	job1, fresh1 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, day1, 300, compute)
 	<-job1.done
 	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, day2, 300, compute)
-	<-job2.done // wait for the second compute to record its run
-
-	if job1 == job2 {
-		t.Fatalf("session rollover not detected — got same job pointer")
+	if !fresh1 {
+		t.Errorf("day-1 should be a fresh kickoff: got fresh1=false")
 	}
-	if !fresh1 || !fresh2 {
-		t.Errorf("both day-1 and day-2 should be fresh kickoffs: got fresh1=%v fresh2=%v",
-			fresh1, fresh2)
+	if fresh2 || job2 != job1 {
+		t.Fatalf("session rollover should serve LKG while refreshing: fresh2=%v job2=%p want job1=%p", fresh2, job2, job1)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var job3 *gammaComputation
+	for time.Now().Before(deadline) {
+		job3, _ = c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, day2, 300, compute)
+		if job3 != job1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if job3 == job1 {
+		t.Fatal("session rollover refresh never promoted")
 	}
 	if got := computeRuns.Load(); got != 2 {
 		t.Errorf("expected 2 compute runs across the rollover, got %d", got)
@@ -214,9 +224,71 @@ func TestGammaZeroCache_SnapshotCombinedSliceUsesCanonicalPerIndex(t *testing.T)
 	priorSession := now.Add(-24 * time.Hour)
 	priorCombined := cloneGammaComputed(combined)
 	priorCombined.AsOf = priorSession
+	priorCombined.PerIndex["SPY"].AsOf = priorSession
+	priorCombined.PerIndex["SPX"].AsOf = priorSession
 	c.slots[rpc.GammaZeroScopeCombined].current = newPersistedComputation(priorCombined, rpc.GammaZeroScopeCombined, now)
-	if _, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now }); ok {
-		t.Fatal("prior-session combined slice should not satisfy an open-session single-scope request")
+	delete(c.slots, rpc.GammaZeroScopeSPX)
+	env, ok = c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now })
+	if !ok {
+		t.Fatal("prior-session combined slice should serve as last-known-good context")
+	}
+	if env.Result == nil || !env.Result.AsOf.Equal(priorSession) {
+		t.Fatalf("prior-session slice as_of = %+v, want %s", env.Result, priorSession)
+	}
+	if env.Result.Quality == nil || env.Result.Quality.Rankability != rpc.GammaRankabilityBlocked {
+		t.Fatalf("prior-session slice quality = %+v, want blocked freshness", env.Result.Quality)
+	}
+}
+
+func TestGammaZeroCache_SnapshotCombinedSliceUsesCanonicalDegradedScope(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
+	freshAsOf := now.Add(-time.Minute)
+	staleAsOf := now.Add(-4 * time.Hour)
+
+	freshSPX := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7506.83,
+		GammaSign:      "negative",
+		GammaTotalAbs:  38.65e9,
+		LegCount:       417,
+		PricedLegCount: 934,
+		Warnings:       []string{"spy_unavailable:throttled"},
+		AsOf:           freshAsOf,
+	}
+	staleSPXOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7473.47,
+		GammaSign:      "negative",
+		GammaTotalAbs:  16.93e9,
+		LegCount:       397,
+		PricedLegCount: 947,
+		AsOf:           staleAsOf,
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(freshSPX, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPX:      {current: newPersistedComputation(staleSPXOnly, rpc.GammaZeroScopeSPX, now)},
+	}
+
+	env, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPX, func() time.Time { return now })
+	if !ok {
+		t.Fatal("snapshotCombinedSlice returned ok=false")
+	}
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want %q", env.Status, rpc.GammaZeroStatusReady)
+	}
+	if env.Result == nil || env.Result.Scope != rpc.GammaZeroScopeSPX {
+		t.Fatalf("Result = %+v, want canonical degraded SPX result", env.Result)
+	}
+	if env.Result.AsOf != freshAsOf {
+		t.Fatalf("AsOf = %s, want fresh canonical degraded SPX as_of %s", env.Result.AsOf, freshAsOf)
+	}
+	if env.Result.GammaTotalAbs != freshSPX.GammaTotalAbs {
+		t.Fatalf("GammaTotalAbs = %.1f, want canonical degraded SPX %.1f",
+			env.Result.GammaTotalAbs, freshSPX.GammaTotalAbs)
+	}
+	if _, ok := c.snapshotCombinedSlice(rpc.GammaZeroScopeSPY, func() time.Time { return now }); ok {
+		t.Fatal("SPX-only degraded combined result must not satisfy a SPY single-scope request")
 	}
 }
 
@@ -250,7 +322,7 @@ func TestGammaZeroCache_CombinedSnapshotUsesCachedSPXFallback(t *testing.T) {
 	c := newGammaZeroCache()
 	// Saturday, when the cache must not kick a fresh option fan-out.
 	now := time.Date(2026, 5, 30, 14, 0, 0, 0, time.UTC)
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
 	}
 	spyAsOf := now.Add(-18 * time.Hour)
@@ -309,6 +381,62 @@ func TestGammaZeroCache_CombinedSnapshotUsesCachedSPXFallback(t *testing.T) {
 	}
 	if !hasGammaWarning(got.PerIndex["SPY"].WarningDetails, "oi_missing") {
 		t.Fatalf("SPY child lost its own warning: %+v", got.PerIndex["SPY"].WarningDetails)
+	}
+}
+
+func TestGammaZeroCache_CombinedSnapshotUsesPriorSPXFallbackDuringRTH(t *testing.T) {
+	c := newGammaZeroCache()
+	now := time.Date(2026, 6, 2, 14, 12, 0, 0, time.UTC)
+	if cls := gammaClassifySession(now); cls != rpc.SessionRTH {
+		t.Fatalf("test fixture sanity check: expected SessionRTH, got %v", cls)
+	}
+	spyAsOf := now.Add(-time.Minute)
+	spxAsOf := now.Add(-24 * time.Hour)
+
+	spyOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 756.34,
+		GammaSign:      "positive",
+		GammaTotalAbs:  1.2e9,
+		LegCount:       120,
+		AsOf:           spyAsOf,
+		Warnings:       []string{"spx_unavailable:timeout"},
+	}
+	spxOnly := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 7511.55,
+		GammaSign:      "negative",
+		GammaTotalAbs:  5.6e9,
+		LegCount:       300,
+		AsOf:           spxAsOf,
+	}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(spyOnly, rpc.GammaZeroScopeCombined, now)},
+		rpc.GammaZeroScopeSPX:      {current: newPersistedComputation(spxOnly, rpc.GammaZeroScopeSPX, spxAsOf)},
+	}
+
+	env := c.snapshotCurrent(rpc.GammaZeroScopeCombined, func() time.Time { return now })
+	if env.Status != rpc.GammaZeroStatusReady {
+		t.Fatalf("Status = %q, want ready", env.Status)
+	}
+	got := env.Result
+	if got == nil || got.Scope != rpc.GammaZeroScopeCombined {
+		t.Fatalf("Result scope = %+v, want combined", got)
+	}
+	if got.PerIndex["SPX"] == nil {
+		t.Fatalf("fallback result missing SPX slice: %+v", got.PerIndex)
+	}
+	if !got.AsOf.Equal(spxAsOf) {
+		t.Fatalf("combined AsOf = %v, want prior SPX fallback as_of %v", got.AsOf, spxAsOf)
+	}
+	if got.Quality == nil || got.Quality.Rankability != rpc.GammaRankabilityBlocked {
+		t.Fatalf("quality = %+v, want blocked freshness for prior SPX fallback", got.Quality)
+	}
+	if !hasGammaWarning(got.WarningDetails, "spx_cache_fallback:timeout") {
+		t.Fatalf("top-level warning_details missing SPX cache fallback: %+v", got.WarningDetails)
+	}
+	if hasGammaWarning(got.WarningDetails, "spx_unavailable:timeout") {
+		t.Fatalf("fallback result should not say SPX is excluded: %+v", got.WarningDetails)
 	}
 }
 
@@ -995,7 +1123,7 @@ func TestNYSessionKey(t *testing.T) {
 }
 
 // TestGammaZeroCache_ClosedSessionNeverRefreshes proves the closed-
-// session ∞ TTL rule: outside U.S. equity-options trading hours
+// session infinite TTL rule: outside regular U.S. option-data hours
 // (overnight + weekends) a cached successful compute is served
 // indefinitely with no background refresh, regardless of how long
 // it's been since the value was computed.
@@ -1009,7 +1137,7 @@ func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
 	c := newGammaZeroCache()
 	// Saturday 2026-05-23 10:00 EDT — weekend, SessionClosed.
 	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed for Saturday, got %v", cls)
 	}
 
@@ -1032,7 +1160,7 @@ func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
 	// 8 hours later — well past every active-session softTTL but
 	// still SessionClosed and still the same NY trading date.
 	later := now.Add(8 * time.Hour)
-	if cls := rpc.ClassifySession(later); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(later); cls != rpc.SessionClosed {
 		t.Fatalf("later instant should still be SessionClosed (Sat 18:00 EDT), got %v", cls)
 	}
 	if nySessionKey(later) != nySessionKey(now) {
@@ -1048,47 +1176,48 @@ func TestGammaZeroCache_ClosedSessionNeverRefreshes(t *testing.T) {
 	}
 }
 
-// TestGammaZeroCache_BoundaryRefreshOnClassTransition proves the
-// session-class transition trigger: a cached value computed in one
-// active session class is treated as stale on the first kickOrJoin
-// in a different active class, even when its absolute age is below
-// the per-class softTTL. Without this, a pre-market snapshot served
-// at 09:31 ET would survive the entire first hour of RTH under the
-// 60-min RTH TTL — but pre-market γ-zero is qualitatively
-// different from an RTH one (thin volume, muted dealer flow), and
-// users querying right after the open expect a fresh read.
-func TestGammaZeroCache_BoundaryRefreshOnClassTransition(t *testing.T) {
+// TestGammaZeroCache_OptionsOpenRefreshesCachedDiagnostic proves the
+// option-session boundary trigger: a cached value from outside regular
+// option hours is served once at the open but immediately refreshed
+// behind it. Non-force pre-open callers do not start a compute.
+func TestGammaZeroCache_OptionsOpenRefreshesCachedDiagnostic(t *testing.T) {
 	c := newGammaZeroCache()
-	// 09:25 ET Tuesday — five minutes before the open, SessionPre.
+	// 09:25 ET Tuesday — five minutes before regular options RTH.
 	preMarket := time.Date(2026, 5, 19, 13, 25, 0, 0, time.UTC)
-	if cls := rpc.ClassifySession(preMarket); cls != rpc.SessionPre {
-		t.Fatalf("test fixture sanity check: expected SessionPre at 09:25 ET, got %v", cls)
+	if cls := gammaClassifySession(preMarket); cls != rpc.SessionClosed {
+		t.Fatalf("test fixture sanity check: expected gamma SessionClosed at 09:25 ET, got %v", cls)
 	}
-	// 09:35 ET same Tuesday — five minutes into RTH, SessionRTH.
+	// 09:35 ET same Tuesday — five minutes into regular options RTH.
 	rth := time.Date(2026, 5, 19, 13, 35, 0, 0, time.UTC)
-	if cls := rpc.ClassifySession(rth); cls != rpc.SessionRTH {
-		t.Fatalf("test fixture sanity check: expected SessionRTH at 09:35 ET, got %v", cls)
+	if cls := gammaClassifySession(rth); cls != rpc.SessionRTH {
+		t.Fatalf("test fixture sanity check: expected gamma SessionRTH at 09:35 ET, got %v", cls)
 	}
 
 	var computeRuns atomic.Int32
 	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
 		run := computeRuns.Add(1)
-		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+		return &rpc.GammaZeroComputed{SpotUnderlying: 6000 + float64(run), AsOf: rth}, nil
 	}
 
-	job1, _ := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, preMarket, 300, compute)
-	<-job1.done
-	if job1.result == nil || job1.result.SpotUnderlying != 5001 {
-		t.Fatalf("initial pre-market compute: %+v", job1.result)
+	cached := &rpc.GammaZeroComputed{SpotUnderlying: 5001, AsOf: preMarket}
+	c.slots = map[string]*gammaSlot{
+		rpc.GammaZeroScopeCombined: {current: newPersistedComputation(cached, rpc.GammaZeroScopeCombined, preMarket)},
+	}
+	job1 := c.slots[rpc.GammaZeroScopeCombined].current
+
+	preJob, preFresh := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, preMarket, 300, compute)
+	if preFresh || preJob != job1 {
+		t.Fatalf("pre-open non-force should serve cached diagnostic without kicking: fresh=%v job=%p want %p", preFresh, preJob, job1)
+	}
+	if got := computeRuns.Load(); got != 0 {
+		t.Fatalf("pre-open non-force compute ran %d times, want 0", got)
 	}
 
-	// Cross the open. Age is 10 min — well below both softTTLPrePost
-	// (30 min) and softTTLRTH (60 min). Without the boundary path,
-	// the cached value would survive. With it, a refresh kicks
-	// behind the served stale value.
+	// Cross the open. Age is 10 min, well below softTTLRTH. The
+	// boundary path still kicks a refresh behind the served value.
 	job2, fresh2 := c.kickOrJoin(context.Background(), rpc.GammaZeroScopeCombined, rth, 300, compute)
 	if fresh2 || job2 != job1 {
-		t.Errorf("class transition: caller should still see the stale pre-market value, got fresh=%v job=%p (want job=%p)", fresh2, job2, job1)
+		t.Errorf("option-session transition: caller should still see the cached pre-open value, got fresh=%v job=%p (want job=%p)", fresh2, job2, job1)
 	}
 
 	// Poll until the refresh promotes — same idiom as the soft-TTL
@@ -1104,13 +1233,13 @@ func TestGammaZeroCache_BoundaryRefreshOnClassTransition(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if job3 == job1 {
-		t.Fatal("boundary refresh never promoted — kickOrJoin kept returning the pre-market job")
+		t.Fatal("boundary refresh never promoted — kickOrJoin kept returning the pre-open job")
 	}
-	if job3.result == nil || job3.result.SpotUnderlying != 5002 {
-		t.Errorf("boundary refresh: got %+v, want SpotUnderlying=5002 (the refreshed RTH compute)", job3.result)
+	if job3.result == nil || job3.result.SpotUnderlying != 6001 {
+		t.Errorf("boundary refresh: got %+v, want SpotUnderlying=6001 (the refreshed RTH compute)", job3.result)
 	}
-	if got := computeRuns.Load(); got != 2 {
-		t.Errorf("after boundary refresh: compute ran %d times, want 2 (initial pre + boundary RTH)", got)
+	if got := computeRuns.Load(); got != 1 {
+		t.Errorf("after boundary refresh: compute ran %d times, want 1 (boundary RTH only)", got)
 	}
 }
 
@@ -1144,6 +1273,27 @@ func TestClassifySession(t *testing.T) {
 	}
 }
 
+func TestGammaClassifySessionUsesRegularOptionsHours(t *testing.T) {
+	tests := []struct {
+		name string
+		t    time.Time
+		want rpc.SessionClass
+	}{
+		{"weekday 09:25 ET closed", time.Date(2026, 5, 19, 13, 25, 0, 0, time.UTC), rpc.SessionClosed},
+		{"weekday 09:30 ET rth", time.Date(2026, 5, 19, 13, 30, 0, 0, time.UTC), rpc.SessionRTH},
+		{"weekday 16:10 ET rth", time.Date(2026, 5, 19, 20, 10, 0, 0, time.UTC), rpc.SessionRTH},
+		{"weekday 16:16 ET closed", time.Date(2026, 5, 19, 20, 16, 0, 0, time.UTC), rpc.SessionClosed},
+		{"saturday 10:00 ET closed", time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC), rpc.SessionClosed},
+		{"holiday closed", time.Date(2026, 5, 25, 14, 0, 0, 0, time.UTC), rpc.SessionClosed},
+		{"early close after 13:00 ET closed", time.Date(2026, 11, 27, 18, 5, 0, 0, time.UTC), rpc.SessionClosed},
+	}
+	for _, tc := range tests {
+		if got := gammaClassifySession(tc.t); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestGammaZeroCache_OffHoursServesFreshCacheWithoutWarning pins the
 // SessionClosed serve-cached-no-kick contract for a fresh persisted
 // value: a daemon that's been running through a session boundary (or
@@ -1154,7 +1304,7 @@ func TestGammaZeroCache_OffHoursServesFreshCacheWithoutWarning(t *testing.T) {
 	c := newGammaZeroCache()
 	// Saturday 2026-05-23 10:00 EDT — SessionClosed, weekend.
 	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
 	}
 
@@ -1239,7 +1389,7 @@ func TestValidateGammaComputedAllowsLegsWithMagnitude(t *testing.T) {
 func TestGammaZeroCache_OffHoursStaleCacheGetsWarning(t *testing.T) {
 	c := newGammaZeroCache()
 	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC) // Sunday 10:00 EDT, SessionClosed
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
 	}
 
@@ -1458,7 +1608,7 @@ func TestGammaZeroCache_ForceSuccessPromotesOverCachedSuccess(t *testing.T) {
 func TestGammaZeroCache_OffHoursColdReturnsEmpty(t *testing.T) {
 	c := newGammaZeroCache()
 	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC) // Saturday, SessionClosed
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
 	}
 
@@ -1487,7 +1637,7 @@ func TestGammaZeroCache_OffHoursColdReportsRejectedPersistedCache(t *testing.T) 
 	dir := t.TempDir()
 	store := newGammaZeroStore(dir)
 	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC) // Sunday 10:00 EDT, SessionClosed
-	if cls := rpc.ClassifySession(now); cls != rpc.SessionClosed {
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
 		t.Fatalf("test fixture sanity check: expected SessionClosed, got %v", cls)
 	}
 	asOf := time.Date(2026, 5, 23, 21, 45, 0, 0, time.UTC)

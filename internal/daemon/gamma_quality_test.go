@@ -49,6 +49,33 @@ func TestGammaQualitySingleScopesCanRankIndependently(t *testing.T) {
 	}
 }
 
+func TestGammaQualitySPXCanonicalRanksWithSPYUnavailable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.Warnings = []string{"spy_unavailable:throttled"}
+
+	annotateGammaQuality(spx, now)
+
+	if got := spx.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("rankability = %q, want rankable canonical SPX despite SPY unavailability: %+v", got, spx.Quality)
+	}
+	for _, blocker := range append(spx.Quality.Blockers, spx.Quality.Context...) {
+		if strings.Contains(blocker, "spy_coverage") {
+			t.Fatalf("SPY unavailability should not downgrade canonical SPX quality: %+v", spx.Quality)
+		}
+	}
+	var sawPass bool
+	for _, gate := range spx.Quality.Gates {
+		if gate.Name == "spy_coverage" && gate.Status == rpc.GammaQualityGatePass {
+			sawPass = true
+		}
+	}
+	if !sawPass {
+		t.Fatalf("quality gates did not record SPY unavailability as non-blocking pass: %+v", spx.Quality.Gates)
+	}
+}
+
 func TestGammaQualityStaleActiveCacheBlocksRanking(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
