@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"sync"
@@ -466,6 +467,10 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	if slot.refresh != nil && slot.refresh.isDone() {
 		if slot.refresh.err == nil && slot.refresh.sessionKey == key {
 			slot.current = slot.refresh
+		} else if slot.refresh.err != nil {
+			slot.lastErr = slot.refresh.err
+			slot.lastErrAt = slot.refresh.startedAt
+			slot.lastErrSummary = summarizeGammaErr(slot.refresh.err)
 		}
 		slot.refresh = nil
 	}
@@ -617,6 +622,10 @@ func (c *gammaZeroCache) promoteRefreshOnDone(scope, key string, job *gammaCompu
 		}
 		if job.err == nil && job.result != nil && job.sessionKey == key {
 			slot.current = job
+		} else if job.err != nil {
+			slot.lastErr = job.err
+			slot.lastErrAt = job.startedAt
+			slot.lastErrSummary = summarizeGammaErr(job.err)
 		}
 		slot.refresh = nil
 	}()
@@ -807,12 +816,15 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 		}
 		env = c.withCachedSPXFallback(scope, env, now)
 		env = c.withLatestSingleScopeSlices(scope, env, now)
+		env = c.finalizeReadyGammaSnapshot(g.scope, env, now)
 		// Clear stale prior-error context for this scope — a successful
 		// compute means the previous failure is no longer informative.
 		c.mu.Lock()
 		if slot, ok := c.slots[g.scope]; ok {
-			slot.lastErr = nil
-			slot.lastErrSummary = ""
+			if slot.lastErrAt.IsZero() || !slot.lastErrAt.After(g.startedAt) {
+				slot.lastErr = nil
+				slot.lastErrSummary = ""
+			}
 		}
 		c.mu.Unlock()
 		return env
@@ -835,6 +847,41 @@ func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, now
 	}
 	c.mu.Unlock()
 	return env
+}
+
+func (c *gammaZeroCache) finalizeReadyGammaSnapshot(scope string, env rpc.GammaZeroSPXResult, now time.Time) rpc.GammaZeroSPXResult {
+	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+		return env
+	}
+	result := cloneGammaComputed(env.Result)
+	if warning := c.refreshFailureWarning(scope, result); warning != "" {
+		result.Warnings = dedupeStrings(append(result.Warnings, warning))
+	}
+	hydrateGammaComputed(result)
+	annotateGammaQuality(result, now)
+	refreshGammaSummaries(result)
+	env.Result = result
+	return env
+}
+
+func (c *gammaZeroCache) refreshFailureWarning(scope string, result *rpc.GammaZeroComputed) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	slot := c.slots[scope]
+	if slot == nil || slot.lastErr == nil || slot.lastErrAt.IsZero() {
+		return ""
+	}
+	if result != nil && !result.AsOf.IsZero() && !slot.lastErrAt.After(result.AsOf) {
+		return ""
+	}
+	summary := slot.lastErrSummary
+	if summary == "" {
+		summary = summarizeGammaErr(slot.lastErr)
+	}
+	if summary == "" {
+		summary = "unknown"
+	}
+	return "refresh_failed:" + strings.ReplaceAll(summary, " ", "_")
 }
 
 func (c *gammaZeroCache) withLatestSingleScopeSlices(scope string, env rpc.GammaZeroSPXResult, now time.Time) rpc.GammaZeroSPXResult {
@@ -1005,6 +1052,28 @@ func cloneGammaComputed(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 	out.Expirations = append([]string(nil), c.Expirations...)
 	out.TopStrikes = append([]rpc.StrikeConcentration(nil), c.TopStrikes...)
 	out.Profile = append([]rpc.GammaProfilePoint(nil), c.Profile...)
+	out.Profile0DTE = append([]rpc.GammaProfilePoint(nil), c.Profile0DTE...)
+	out.Profile1to7 = append([]rpc.GammaProfilePoint(nil), c.Profile1to7...)
+	out.ProfileTerm = append([]rpc.GammaProfilePoint(nil), c.ProfileTerm...)
+	if c.SkewFitQuality != nil {
+		out.SkewFitQuality = make(map[string]rpc.SkewFitInfo, len(c.SkewFitQuality))
+		maps.Copy(out.SkewFitQuality, c.SkewFitQuality)
+	}
+	if c.PartialClasses != nil {
+		out.PartialClasses = make(map[string]string, len(c.PartialClasses))
+		maps.Copy(out.PartialClasses, c.PartialClasses)
+	}
+	if c.Quality != nil {
+		q := *c.Quality
+		q.Gates = append([]rpc.GammaQualityGate(nil), c.Quality.Gates...)
+		q.Blockers = append([]string(nil), c.Quality.Blockers...)
+		q.Context = append([]string(nil), c.Quality.Context...)
+		if c.Quality.ByUnderlying != nil {
+			q.ByUnderlying = make(map[string]rpc.GammaSignalQuality, len(c.Quality.ByUnderlying))
+			maps.Copy(q.ByUnderlying, c.Quality.ByUnderlying)
+		}
+		out.Quality = &q
+	}
 	if c.PerIndex != nil {
 		out.PerIndex = make(map[string]*rpc.GammaZeroComputed, len(c.PerIndex))
 		for k, v := range c.PerIndex {

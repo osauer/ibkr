@@ -22,6 +22,9 @@ Gamma cache persistence is deliberately per-domain, not a shared generic cache l
 - A `method` token gate tied to the current gamma methodology.
 - Missing, stale, or incompatible cache files collapse to a cold cache, not a daemon startup error.
 - Persistence write failures are warnings; a successful in-memory compute still serves callers.
+- Snapshot-time `quality.rankability` separates "served for context" from
+  "rankable market evidence" so stale/degraded cache cannot confirm regime or
+  canary state.
 
 The default directory is `$XDG_CACHE_HOME/ibkr/gamma-zero`, falling back to `$HOME/.cache/ibkr/gamma-zero`.
 
@@ -63,6 +66,11 @@ Four independent gates turn a persisted file into a cold cache:
 - `method` does not match the current gamma method token
 
 The store never migrates or coerces old results. A methodology bump should recompute from IBKR data, not reinterpret prior cache contents.
+
+Closed-session stale fallback and failed-refresh fallback are serve paths, not
+rankability paths. The payload remains inspectable, but `quality.rankability`
+must be `context_only`, `blocked`, or `unavailable` until freshness and coverage
+gates recover.
 
 ## Non-goals
 

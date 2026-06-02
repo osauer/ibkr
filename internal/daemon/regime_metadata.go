@@ -206,6 +206,12 @@ func gammaBandReason(r rpc.RegimeGammaZero) string {
 	if c == nil {
 		return "envelope missing payload"
 	}
+	if c.Quality != nil && c.Quality.Rankability != rpc.GammaRankabilityRankable {
+		if c.Quality.RankabilityReason != "" {
+			return c.Quality.Rankability + ": " + c.Quality.RankabilityReason
+		}
+		return c.Quality.Rankability
+	}
 	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
 		switch bandForGamma(r) {
 		case "green":

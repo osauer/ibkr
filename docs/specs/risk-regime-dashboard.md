@@ -158,6 +158,18 @@ the per-index gamma regimes.
 | --- | --- | --- | --- |
 | SPY+SPX zero-gamma | spot > 2% above zero-gamma | within +/-2% | spot below zero-gamma |
 
+Gamma is ranked only when `gamma_zero.envelope.result.quality.rankability` is
+`rankable`. Non-rankable gamma remains visible in the row/envelope, but it does
+not contribute the gamma cluster, lifecycle `confirmed_by`, or canary market
+stress confirmation:
+
+| Rankability | Meaning |
+| --- | --- |
+| `rankable` | Fresh same-session payload with enough priced-leg, OI, horizon, skew, concentration, and cache-quality evidence to use as market evidence. |
+| `context_only` | Useful market-structure context, but not independent confirmation. |
+| `blocked` | Payload exists but a freshness, coverage, OI, model, cache, farm, entitlement, pacing, or partial-chain gate blocks ranking. |
+| `unavailable` | No usable OI-weighted gamma payload exists. |
+
 ### Breadth
 
 This cluster watches how many S&P 500 stocks are participating. A rally led by
@@ -230,9 +242,9 @@ Open interest is a required input for OI-weighted dealer GEX, but missing OI is
 unknown, never zero. Priced legs without observed OI may still fit the IV/skew
 surface, but they must be omitted from OI-weighted GEX and surfaced through
 `warning_details` / `data_quality`. SPY option OI can be absent outside regular
-U.S. option hours. SPX option OI should normally be stable across session phases;
-missing SPX OI is unexpected data-quality evidence even pre-market, after-hours,
-overnight, or on closed-session cache reads.
+U.S. option hours. SPX option OI should normally be stable across session
+phases; missing SPX OI is unexpected data-quality evidence even pre-market,
+after-hours, overnight, or on closed-session cache reads.
 
 MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.

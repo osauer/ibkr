@@ -301,7 +301,7 @@ func regimeLifecycleClusterBands(r RegimeSnapshotResult) ([]string, []string) {
 		strongestLifecycleBand(r.HYGSPYDivergence.Band, r.CreditSpreads.Band),
 		strongestLifecycleBand(r.FundingStress.Band),
 		strongestLifecycleBand(r.USDJPY.Band),
-		strongestLifecycleBand(r.GammaZero.Band),
+		strongestLifecycleBand(rankableLifecycleGammaBand(r.GammaZero)),
 		strongestLifecycleBand(r.Breadth.Band),
 	}
 	out := append([]string(nil), raw...)
@@ -315,6 +315,14 @@ func regimeLifecycleClusterBands(r RegimeSnapshotResult) ([]string, []string) {
 		out[0] = "yellow"
 	}
 	return raw, out
+}
+
+func rankableLifecycleGammaBand(g RegimeGammaZero) string {
+	if g.Envelope.Result != nil && g.Envelope.Result.Quality != nil &&
+		g.Envelope.Result.Quality.Rankability != GammaRankabilityRankable {
+		return ""
+	}
+	return g.Band
 }
 
 func regimeLifecycleEvidence(raw, confirmed []string, r RegimeSnapshotResult) []LifecycleEvidence {

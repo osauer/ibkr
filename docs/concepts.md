@@ -65,6 +65,14 @@ Two complementary outputs on every result:
 - **Signed zero-gamma**: the price level itself, plus a `gamma_sign` ("positive"/"negative") describing the dealer book's posture at current spot. The Perfiliev sign convention assumes the standard "dealers long calls, short puts" book; in regimes dominated by covered-call ETF flow or autocall hedging the sign can invert. Treat as a regime hint, not gospel.
 - **Sign-agnostic magnitude**: `gamma_total_abs` (sum of |Γ|·OI in notional terms) and `top_strikes` (the largest concentrations regardless of sign). Sign-convention agnostic — useful when the signed reading is suspect.
 
+Every ready gamma result also carries `quality.rankability`:
+
+- `rankable` — fresh and covered enough for `regime` / `canary` to count the gamma band as market evidence.
+- `context_only` — useful structure context, but not independent confirmation.
+- `blocked` / `unavailable` — do not rank gamma or confirm stress from it.
+
+The quality object records session key, age, coverage, OI observed/positive ratios, horizon coverage, derived-IV share, skew fit quality, strike concentration, and explicit blockers/context notes. Missing OI is unknown, never zero. Priced legs without observed OI may help IV/skew fitting, but they do not contribute OI-weighted GEX.
+
 Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see `status: "ready"` instantly. The cache persists across daemon restarts.
 
 Full methodology at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Cache persistence details are in [`docs/design/gamma-zero-cache-persistence.md`](./design/gamma-zero-cache-persistence.md).
