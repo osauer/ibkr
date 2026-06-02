@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -224,6 +225,70 @@ func TestLifecycle_KillThenReinvoke(t *testing.T) {
 	}
 	if !dial.IsProcessAlive(pid2) {
 		t.Fatalf("recovery daemon %d not alive", pid2)
+	}
+}
+
+func TestLifecycle_RestartStartsWhenAbsent(t *testing.T) {
+	t.Parallel()
+	env, socketPath, _, cleanup := lifecycleEnv(t)
+	defer cleanup()
+
+	out, code := runCLI(t, env, 30*time.Second, "restart", "--json")
+	if code != 0 {
+		t.Fatalf("restart --json exit=%d, want 0\n%s", code, out)
+	}
+	var res struct {
+		Action     string `json:"action"`
+		WasRunning bool   `json:"was_running"`
+		Started    bool   `json:"started"`
+		NewPID     int    `json:"new_pid"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode restart json: %v\n%s", err, out)
+	}
+	if res.Action != "started" || res.WasRunning || !res.Started || res.NewPID <= 0 {
+		t.Fatalf("restart result = %+v", res)
+	}
+	if pid := daemonPID(socketPath); pid != res.NewPID {
+		t.Fatalf("lock PID = %d, restart new_pid=%d", pid, res.NewPID)
+	}
+}
+
+func TestLifecycle_RestartReplacesRunningDaemon(t *testing.T) {
+	t.Parallel()
+	env, socketPath, _, cleanup := lifecycleEnv(t)
+	defer cleanup()
+
+	if _, code := runCLI(t, env, 30*time.Second, "status", "--json"); code != 0 {
+		t.Fatalf("seed status exit=%d", code)
+	}
+	oldPID := daemonPID(socketPath)
+	if oldPID == 0 {
+		t.Fatal("old daemon PID is 0")
+	}
+
+	out, code := runCLI(t, env, 30*time.Second, "restart", "--json")
+	if code != 0 {
+		t.Fatalf("restart --json exit=%d, want 0\n%s", code, out)
+	}
+	var res struct {
+		Action     string `json:"action"`
+		WasRunning bool   `json:"was_running"`
+		Graceful   bool   `json:"graceful"`
+		OldPID     int    `json:"old_pid"`
+		NewPID     int    `json:"new_pid"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode restart json: %v\n%s", err, out)
+	}
+	if res.Action != "restarted" || !res.WasRunning || !res.Graceful || res.OldPID != oldPID || res.NewPID <= 0 {
+		t.Fatalf("restart result = %+v, oldPID=%d", res, oldPID)
+	}
+	if res.NewPID == oldPID {
+		t.Fatalf("restart kept same PID: %d", oldPID)
+	}
+	if !dial.IsProcessAlive(res.NewPID) {
+		t.Fatalf("new daemon %d is not alive", res.NewPID)
 	}
 }
 

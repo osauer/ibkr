@@ -71,6 +71,7 @@ ibkr --help
 ibkr mcp --help
 ibkr setup --help
 ibkr update --help
+ibkr restart --help
 ibkr calendar --help
 ibkr regime --help
 make docs-regen

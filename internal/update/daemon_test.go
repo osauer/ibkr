@@ -1,13 +1,17 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/internal/dial"
 )
 
 func TestRestartDaemon_InvalidPID(t *testing.T) {
@@ -15,6 +19,42 @@ func TestRestartDaemon_InvalidPID(t *testing.T) {
 	err := RestartDaemon(0)
 	if err == nil || !strings.Contains(err.Error(), "invalid PID") {
 		t.Fatalf("err = %v, want 'invalid PID'", err)
+	}
+}
+
+func TestLooksLikeIBKRDaemon(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"plain path", "/Users/me/.local/bin/ibkr daemon", true},
+		{"foreground", "/Users/me/.local/bin/ibkr daemon --foreground", true},
+		{"bare command", "ibkr daemon", true},
+		{"mcp is not daemon", "/Users/me/.local/bin/ibkr mcp", false},
+		{"daemon word is not subcommand", "/Users/me/.local/bin/ibkr status daemon", false},
+		{"unrelated", "/bin/sleep 30", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := looksLikeIBKRDaemon(tc.line); got != tc.want {
+				t.Fatalf("looksLikeIBKRDaemon(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommandHasFlag(t *testing.T) {
+	t.Parallel()
+	if !commandHasFlag("/tmp/ibkr daemon --foreground", "foreground") {
+		t.Fatal("expected --foreground to be detected")
+	}
+	if !commandHasFlag("/tmp/ibkr daemon --foreground=true", "foreground") {
+		t.Fatal("expected --foreground=true to be detected")
+	}
+	if commandHasFlag("/tmp/ibkr daemon", "foreground") {
+		t.Fatal("did not expect foreground flag")
 	}
 }
 
@@ -100,6 +140,9 @@ func TestRestartDaemon_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("RestartDaemon returned nil for a SIGTERM-trapping process")
 	}
+	if !errors.Is(err, ErrStopTimeout) {
+		t.Fatalf("err = %v, want ErrStopTimeout", err)
+	}
 	if !strings.Contains(err.Error(), "did not exit") {
 		t.Fatalf("err = %v, want 'did not exit'", err)
 	}
@@ -126,6 +169,37 @@ func TestIsDaemonRunning_NoFile(t *testing.T) {
 	pid, running := IsDaemonRunning()
 	if running && pid <= 0 {
 		t.Fatalf("running=true but pid=%d", pid)
+	}
+}
+
+func TestFindDaemonProcess_RefusesNonDaemonPID(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := dir + "/ibkr.sock"
+	lockPath := dial.LockPath(socketPath)
+
+	savedLookup := lookupProcessCommandLine
+	lookupProcessCommandLine = func(context.Context, int) (string, error) {
+		return "/bin/sleep 30", nil
+	}
+	t.Cleanup(func() { lookupProcessCommandLine = savedLookup })
+
+	// We cannot make pid 123 alive portably, so exercise the verification
+	// branch through a real sleep process.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}()
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := FindDaemonProcess(context.Background(), socketPath)
+	if !errors.Is(err, ErrDaemonUnverified) {
+		t.Fatalf("FindDaemonProcess err = %v, want ErrDaemonUnverified", err)
 	}
 }
 

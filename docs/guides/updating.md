@@ -1,6 +1,6 @@
 # Updating
 
-Updated: 2026-05-26 22:02 CEST
+Updated: 2026-06-02 06:26 CEST
 
 Four things can affect data freshness: the **binary** (`ibkr` itself), the **Claude Desktop MCPB** when installed through Desktop Extensions, the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
 
@@ -15,6 +15,28 @@ ibkr update            # fetch latest, prompt to restart daemon
 The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on `SHA256SUMS`** against the maintainer's public key embedded in your current `ibkr` binary, then SHA-verifies the tarball and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
 
 A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.
+
+## Restarting the daemon — `ibkr restart`
+
+Use `ibkr restart` when you changed daemon-loaded config, installed a new binary outside `ibkr update`, or want to clear stale gateway connection state:
+
+```sh
+ibkr restart
+```
+
+The command verifies the pidfile holder is really an `ibkr daemon` process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. If no daemon was running, it starts one and says so.
+
+`--force` is an explicit fallback for a daemon that ignores SIGTERM:
+
+```sh
+ibkr restart --force          # escalate to SIGKILL only after graceful timeout
+ibkr restart --timeout 30s    # wait longer before failing or forcing
+ibkr restart --json           # scriptable result: old/new PID, force/graceful flags, health snapshot
+```
+
+JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed."
+
+`ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
 
 ### Release integrity
 

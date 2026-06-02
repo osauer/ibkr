@@ -243,8 +243,7 @@ make smoke
 After CLI or daemon changes, also install and smoke the actual binary:
 
 ```bash
-pkill -f 'ibkr daemon' || true
-make install
+make restart-daemon
 ibkr status
 ibkr backtest build-regime --input internal/cli/testdata/regime_pit_panel_sample.jsonl \
   > /tmp/ibkr-build-regime-smoke.jsonl

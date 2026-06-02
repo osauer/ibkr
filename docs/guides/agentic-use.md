@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-05-31 21:23 CEST
+Updated: 2026-06-02 06:28 CEST
 
 `ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 

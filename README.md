@@ -89,7 +89,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 - **Risk regime.** One call returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, SPY+SPX gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
 - **Portfolio canary.** `ibkr canary` and MCP `ibkr_canary` produce a compact `Go` / `Watch` / `De-lever` / `Liquidate` table from margin cushion, exposure, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates for scheduled stress checks.
 
-Every data command supports `--json`. Lifecycle commands such as `setup`, `update`, `mcp`, and `daemon` are for local operation and transport setup.
+Every data command supports `--json`. `ibkr restart --json` is also useful for scripts: it reports whether a daemon was already running, old/new PIDs, whether `--force` was used, and the post-start `status.health` snapshot. Lifecycle commands such as `setup`, `update`, `restart`, `mcp`, and `daemon` are for local operation and transport setup.
 
 For schemas and edge cases, see the [agent skill schema notes](skills/ibkr/schemas.md), [MCP tools reference](docs/reference/mcp-tools.md), [MCP resources reference](docs/reference/mcp-resources.md), [configuration reference](docs/reference/config.md), and [concept docs](docs/concepts.md).
 
@@ -99,7 +99,7 @@ For ready-to-run prompts, see [examples/ibkr_portfolio_analysis_prompt.md](examp
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, regime, and canary tools that the CLI exposes as JSON. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, regime, and canary tools that the CLI exposes as JSON. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -206,6 +206,8 @@ When you run a CLI command or an MCP tool, it connects to the daemon over a Unix
 CLI or MCP host -> local ibkr daemon -> IB Gateway or TWS -> your account data
 ```
 
+Use `ibkr restart` after upgrading, changing daemon-loaded config, or when you want to clear stale gateway connection state. It sends SIGTERM, waits for cleanup, starts a fresh daemon, and reports the new process. If no daemon was running, it starts one and says so. `ibkr restart --force` escalates to SIGKILL only after the graceful timeout; use it for a daemon that ignores SIGTERM. This restarts the shared daemon used by CLI and MCP tool calls; it does not restart the `ibkr mcp` stdio process itself, which is owned by the MCP host. Fully relaunch the host when you need it to respawn MCP from a new binary or bundle.
+
 This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP clients can share one IBKR connection and one client ID. Tool calls stay fast because the gateway session is already open.
 
 `pkg/ibkr` is a clean-room Go implementation of the read-side TWS protocol. Full coverage details live in [docs/reference/protocol.md](docs/reference/protocol.md), and the public package docs live in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
@@ -261,7 +263,7 @@ exchange = "STK.NASDAQ"
 limit    = 25
 ```
 
-Then `ibkr scan tech-gainers`. **Caveat:** writing **any** `[scans.*]` block makes the seven built-in defaults disappear — the `[scans]` table is replace-not-merge. Copy the defaults from [internal/config/config.go](internal/config/config.go) into your file if you want to keep them. Daemon restart (`pkill -x ibkr`; next call respawns) is required for new presets to be visible.
+Then `ibkr scan tech-gainers`. **Caveat:** writing **any** `[scans.*]` block makes the seven built-in defaults disappear — the `[scans]` table is replace-not-merge. Copy the defaults from [internal/config/config.go](internal/config/config.go) into your file if you want to keep them. Run `ibkr restart` for new presets to be visible.
 
 **Agents — use the ad-hoc form, no config write needed:**
 
@@ -300,7 +302,7 @@ Per [semver](https://semver.org/), v1.x keeps the CLI, JSON, and MCP read-only i
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 - **Manual download**: pick a tarball from the latest [release](https://github.com/osauer/ibkr/releases/latest). Each contains `ibkr` plus `LICENSE` and `README.md`. Verify `SHA256SUMS.asc` against the release-signing key, then verify the tarball against `SHA256SUMS`; see [SECURITY.md](SECURITY.md#release-integrity-v100).
 - **Local build**: `git clone … && make install`.
-- **Self-update**: `ibkr update` fetches the next stable release, verifies the PGP signature on `SHA256SUMS`, SHA-verifies the tarball, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, and how the runtime S&P-500 constituent refresh works.
+- **Self-update**: `ibkr update` fetches the next stable release, verifies the PGP signature on `SHA256SUMS`, SHA-verifies the tarball, and atomically replaces `~/.local/bin/ibkr` (prior binary stashed as `.bak` for one-step rollback). See [docs/guides/updating.md](docs/guides/updating.md) for headless flag matrix, daemon-restart semantics, `ibkr restart`, and how the runtime S&P-500 constituent refresh works.
 
 Windows is not supported — the daemon uses Unix-only primitives (setsid, flock, AF_UNIX sockets). WSL works.
 
@@ -331,7 +333,7 @@ No mock daemons. `pkg/ibkr/protocoltest/` is a wire-level encoder/decoder spec u
 
 **`use of closed network connection` during handshake.** IB Gateway rate-limits fast handshake retries. Wait ~30 seconds before restarting.
 
-**CLI vs daemon version skew warning.** `pkill -x ibkr`, then re-invoke any subcommand. The daemon autospawns from the new binary.
+**CLI vs daemon version skew warning.** Run `ibkr restart`. It stops the old daemon and starts a new one from the current binary.
 
 **Capturing the wire protocol for diagnostics.** Set `IBKR_WIRE_INTERCEPTOR=1` to enable the in-process recorder; pair with `IBKR_WIRE_LOG_PATH=/path/to/wire.jsonl` to also persist every frame as JSON-lines. `IBKR_WIRE_RING_SIZE=N` sizes the in-memory ring (default 256). For raw bytes, `IBKR_PACKET_LOG_TEMPLATE=/path/to/packets.bin` enables the lower-level packet logger. All four are off by default. Captured frames carry account-sensitive data — see [SECURITY.md §Diagnostic data sensitivity](SECURITY.md#diagnostic-data-sensitivity) before sharing logs.
 
