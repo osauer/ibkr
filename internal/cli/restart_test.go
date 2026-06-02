@@ -76,6 +76,38 @@ func TestRunRestartCoreRestartsGracefullyWithJSON(t *testing.T) {
 	}
 }
 
+func TestRunRestartCoreReportsStoppedBeforeHealthWait(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+
+	var combined bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &combined, err: &combined}
+	exit := runRestartCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			return update.DaemonProcess{PID: 15, Command: "/tmp/ibkr daemon", SocketPath: "sock", LockPath: "lock"}, nil
+		},
+		stop: func(int, time.Duration) error {
+			return nil
+		},
+		startAndHealth: func(_ context.Context, _ string, progress io.Writer, _ bool) (int, rpc.HealthResult, error) {
+			fmt.Fprintln(progress, "health wait")
+			return 16, rpc.HealthResult{DaemonVersion: "test"}, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d\n%s", exit, combined.String())
+	}
+	got := combined.String()
+	stopped := strings.Index(got, "stopped daemon pid 15 gracefully")
+	wait := strings.Index(got, "health wait")
+	started := strings.Index(got, "started daemon pid 16")
+	if stopped < 0 || wait < 0 || started < 0 {
+		t.Fatalf("missing expected output:\n%s", got)
+	}
+	if stopped > wait || wait > started {
+		t.Fatalf("output order is wrong:\n%s", got)
+	}
+}
+
 func TestRunRestartCoreForceEscalatesOnlyAfterGracefulTimeout(t *testing.T) {
 	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
 
