@@ -11,7 +11,9 @@ const state = {
   canaryDetailOpen: false,
   regimeDetailOpen: false,
   portfolioDetailOpen: false,
+  accountMenuOpen: false,
   selectedAlertID: null,
+  alertFilter: "all",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +32,11 @@ async function main() {
     }
   }
   await bootstrap();
-  setInterval(() => renderTopbar(state.snapshot || {}), 30000);
+  setInterval(() => {
+    const snap = state.snapshot || {};
+    renderTopbar(snap);
+    renderSyncStrip(snap);
+  }, 1000);
 }
 
 async function bootstrap(options = {}) {
@@ -208,16 +214,17 @@ function renderAll() {
   const canary = snap.canary || {};
   renderTopbar(snap);
   renderAccountValue(account);
-  renderSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
-  $("cushion").textContent = typeof account.cushion === "number" ? pct(account.cushion * 100) : "--";
+  renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
+  renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
   $("accountAsOf").textContent = shortTime(account.as_of);
   $("positionsAsOf").textContent = shortTime(positions.as_of);
   $("stockCount").textContent = (positions.stocks || []).length;
   $("optionCount").textContent = (positions.options || []).length;
   $("baseCurrency").textContent = account.base_currency || positions.portfolio?.base_currency || "--";
-  $("canarySeverity").textContent = canary.severity || "--";
-  $("canaryAction").textContent = (canary.action || "--").replaceAll("_", " ");
+  $("canarySeverity").textContent = labelize(canary.severity || "--");
+  $("canaryAction").textContent = canaryStageLabel(canary);
   $("canarySummary").textContent = canary.summary || "Waiting for canary snapshot.";
+  renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
   renderMarketContext(canary);
@@ -226,22 +233,48 @@ function renderAll() {
   renderSourceBanners(snap);
   renderAlertMode();
   renderAlerts();
+  renderSyncStrip(snap);
 }
 
 function renderAccountValue(account) {
-  const hasValue = typeof account.net_liquidation === "number";
+  const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
+  const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
   const value = $("netLiquidation");
   value.textContent = state.accountValueVisible || !hasValue
     ? money(account.net_liquidation, account.base_currency)
     : "******";
   value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
+  renderSensitiveText("buyingPower", money(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
+  renderSensitiveText("accountID", account.account_id || "--", Boolean(account.account_id));
 
   const button = $("accountPrivacyToggle");
   button.classList.toggle("is-visible", state.accountValueVisible);
   button.setAttribute("aria-pressed", String(state.accountValueVisible));
-  const label = state.accountValueVisible ? "Hide net liquidation" : "Show net liquidation";
+  const label = state.accountValueVisible ? "Hide account values" : "Show account values";
   button.setAttribute("aria-label", label);
   button.title = label;
+  $("accountPrivacyLabel").textContent = state.accountValueVisible ? "Hide values" : "Show values";
+  $("accountPrivacyState").textContent = state.accountValueVisible ? "Visible" : "Hidden";
+  $("accountPrivacyNote").textContent = state.accountValueVisible
+    ? "Values are visible on this device."
+    : "Values are hidden. Enable to view your account metrics.";
+  renderAccountMenu(account);
+}
+
+function renderAccountMenu(account) {
+  const panel = $("accountMenu");
+  const button = $("accountMenuToggle");
+  if (!panel || !button) return;
+
+  const hasAccountSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
+  panel.hidden = !state.accountMenuOpen;
+  button.setAttribute("aria-expanded", String(state.accountMenuOpen));
+  $("menuAccountID").textContent = account.account_id
+    ? state.accountValueVisible ? account.account_id : "******"
+    : "Not synced";
+  $("menuAccountType").textContent = account.account_type || account.type || (hasAccountSnapshot ? "IBKR" : "Local PWA");
+  $("menuBaseCurrency").textContent = account.base_currency || "Pending";
+  $("menuAccountSync").textContent = account.as_of ? shortTimeWithZone(account.as_of) : "Waiting";
 }
 
 function renderCanaryDetail(canary) {
@@ -276,6 +309,68 @@ function canaryExplanationCards(canary) {
     inputExplanation(canary),
     readinessExplanation(canary),
   ];
+}
+
+function renderCanaryStatus(canary) {
+  const cards = canaryExplanationCards(canary);
+  const indicators = canary.market_indicators || [];
+  const warningCount = (canary.warnings || []).length || cards.filter((card) => card.tone === "warn" || card.tone === "risk").length;
+  const checkCount = indicators.length > 0
+    ? `${indicators.filter((indicator) => indicatorStatusClass(indicator.status) === "green").length} / ${indicators.length}`
+    : `${cards.filter((card) => card.tone === "ok").length} / ${cards.length}`;
+  const mode = canaryModeLabel(canary);
+  const severity = String(canary.severity || "").toLowerCase();
+  const hero = $("canaryHero");
+  const pill = $("canarySeverity");
+  hero.classList.remove("severity-act", "severity-watch", "severity-observe");
+  pill.classList.remove("severity-act", "severity-watch", "severity-observe");
+  if (severity === "act") {
+    hero.classList.add("severity-act");
+    pill.classList.add("severity-act");
+  } else if (severity === "watch") {
+    hero.classList.add("severity-watch");
+    pill.classList.add("severity-watch");
+  } else if (severity === "observe") {
+    hero.classList.add("severity-observe");
+    pill.classList.add("severity-observe");
+  }
+  $("canaryMode").textContent = mode;
+  $("canaryWarningCount").textContent = String(warningCount);
+  $("canaryCheckCount").textContent = checkCount;
+  $("canaryGlyphMode").textContent = canaryRiskLabel(canary);
+}
+
+function canaryStageLabel(canary) {
+  const action = String(canary.action || "").toLowerCase();
+  if (action === "defend") return "Defend";
+  if (action === "rebalance") return "Rebalance";
+  if (action === "confirm_inputs") return "Confirm";
+  const severity = String(canary.severity || "").toLowerCase();
+  if (severity === "act") return "Defend";
+  if (severity === "watch") return "Watch";
+  if (severity === "observe") return "Steady";
+  return labelize(canary.action || "--");
+}
+
+function canaryModeLabel(canary) {
+  const inputHealth = String(canary.input_health || "").toLowerCase();
+  if (inputHealth === "ok") return "Live";
+  const severity = String(canary.severity || "").toLowerCase();
+  const action = String(canary.action || "").toLowerCase();
+  if (action) return labelize(action);
+  if (severity === "act") return "Risk action";
+  if (severity === "watch") return "Closer watch";
+  if (severity === "observe") return "Monitor";
+  return "--";
+}
+
+function canaryRiskLabel(canary) {
+  const action = String(canary.action || "").toLowerCase();
+  const severity = String(canary.severity || "").toLowerCase();
+  if (severity === "act" || action === "defend") return "High";
+  if (severity === "watch") return "Watch";
+  if (severity === "observe") return "Low";
+  return labelize(canary.action || "--");
 }
 
 function marketExplanation(canary) {
@@ -393,14 +488,79 @@ function renderCanaryTimestamp(canary) {
 function renderMarketContext(canary) {
   const market = canary.market || {};
   const indicators = canary.market_indicators || [];
+  const nasdaqPrice = firstNumber(
+    market.qqq_price,
+    market.ndx_price,
+    market.nasdaq_price,
+    market.nasdaq_100_price,
+  );
+  const nasdaqChange = firstNumber(
+    market.qqq_change_pct,
+    market.ndx_change_pct,
+    market.nasdaq_change_pct,
+    market.nasdaq_100_change_pct,
+  );
   $("marketAsOf").textContent = shortTime(canary.as_of);
   $("spyLevel").textContent = numberRead(market.spy_price);
   $("vixLevel").textContent = numberRead(market.vix);
+  $("nasdaqLevel").textContent = numberRead(nasdaqPrice);
   renderSignedPercent("spyChange", market.spy_change_pct, false);
   renderSignedPercent("vixChange", market.vix_change_pct, true);
-  $("marketRegime").textContent = cleanDetail(market.regime_verdict);
+  renderSignedPercent("nasdaqChange", nasdaqChange, false);
+  renderCloseGuide(".sparkline--spy", market.spy_prev_close, market.spy_price, market.spy_change_pct, "SPY");
+  renderCloseGuide(".sparkline--vix", market.vix_prev_close, market.vix, market.vix_change_pct, "VIX");
+  renderCloseGuide(".sparkline--nasdaq", market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "Nasdaq");
+  $("marketRegime").textContent = marketRegimeLabel(market, indicators);
+  $("marketRegimeSummary").textContent = "Latest regime read";
+  $("marketRegimeMix").textContent = latestRegimeRead(canary, indicators);
   renderMarketWeather(market, indicators);
   renderRegimeDetail(indicators);
+}
+
+function marketRegimeLabel(market, indicators) {
+  const tone = marketWeatherTone(market, indicators);
+  if (tone === "red") return "Risk-off";
+  if (tone === "green") return "Support";
+  if (tone === "amber") return "Mixed";
+  const verdict = cleanDetail(market.regime_verdict);
+  return verdict === "--" ? "--" : labelize(verdict);
+}
+
+function marketRegimeMix(market, indicators) {
+  if (indicators.length === 0) return "Waiting for market evidence";
+  const counts = indicators.reduce((out, indicator) => {
+    const status = indicatorStatusClass(indicator.status);
+    out[status] = (out[status] || 0) + 1;
+    return out;
+  }, {});
+  const risk = (counts.red || 0) + Number(market.red_clusters || 0);
+  const neutral = (counts.amber || 0) + (counts.context || 0) + (counts.na || 0);
+  const support = counts.green || 0;
+  return `${risk} Risk · ${neutral} Neutral · ${support} Support`;
+}
+
+function latestRegimeRead(canary, indicators) {
+  const sourceAsOf = canary.source_as_of || {};
+  const candidates = [
+    sourceAsOf.regime,
+    sourceAsOf.market_regime,
+    canary.regime_as_of,
+    canary.market?.regime_as_of,
+    canary.as_of,
+    ...indicators.map((indicator) => indicator.as_of),
+  ].filter(Boolean);
+  let latest = null;
+  let fallback = "";
+  for (const candidate of candidates) {
+    const parsed = parseDate(candidate);
+    if (parsed && (!latest || parsed > latest)) {
+      latest = parsed;
+      continue;
+    }
+    if (!fallback) fallback = String(candidate);
+  }
+  if (latest) return shortTimeWithZone(latest.toISOString());
+  return fallback || "Waiting for regime timestamp";
 }
 
 function renderMarketWeather(market, indicators) {
@@ -450,6 +610,21 @@ function renderSignedPercent(id, value, positiveIsRisk) {
   const isOk = positiveIsRisk ? value < 0 : value > 0;
   if (isRisk) el.classList.add("risk");
   if (isOk) el.classList.add("ok");
+}
+
+function renderCloseGuide(selector, previousClose, currentPrice, changePct, label) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const inferredPreviousClose = previousClose ?? previousCloseFromChange(currentPrice, changePct);
+  el.classList.toggle("has-close-guide", typeof inferredPreviousClose === "number");
+  el.title = typeof inferredPreviousClose === "number"
+    ? `${label} last close ${numberRead(inferredPreviousClose)}`
+    : `${label} last close unavailable`;
+}
+
+function previousCloseFromChange(currentPrice, changePct) {
+  if (typeof currentPrice !== "number" || typeof changePct !== "number" || changePct <= -100) return null;
+  return currentPrice / (1 + changePct / 100);
 }
 
 function renderRegimeDetail(indicators) {
@@ -507,23 +682,25 @@ function detailCard(card) {
 function renderPortfolioRisk(positions, account) {
   const portfolio = positions.portfolio || {};
   const baseCurrency = portfolio.base_currency || account.base_currency || "USD";
-  $("portfolioDollarDelta").textContent = money(
+  renderSensitiveText("portfolioDollarDelta", riskMoney(
     portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy,
     portfolio.dollar_delta_base_currency || portfolio.dollar_delta_ccy_currency || baseCurrency,
-  );
-  $("portfolioDailyTheta").textContent = money(
+  ), hasNumericValue(portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy));
+  renderSensitiveText("portfolioDailyTheta", riskMoney(
     portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
     portfolio.daily_theta_base_currency || portfolio.daily_theta_ccy_currency || baseCurrency,
-  );
+  ), hasNumericValue(portfolio.daily_theta_base ?? portfolio.daily_theta_ccy));
   $("portfolioGreeksCoverage").textContent = greeksCoverage(portfolio, positions);
-  $("portfolioFxSensitivity").textContent = money(
+  $("portfolioGreeksMeaning").textContent = greeksMeaning(portfolio, positions);
+  renderSensitiveText("portfolioFxSensitivity", riskMoney(
     portfolio.fx_sensitivity_per_pct,
     portfolio.fx_base_currency || baseCurrency,
-  );
+  ), hasNumericValue(portfolio.fx_sensitivity_per_pct));
   $("portfolioDetailSummary").textContent = portfolioDetailSummary(portfolio, positions);
   renderPortfolioDetail(portfolio, positions, baseCurrency);
 
   const exposures = (portfolio.exposure_base || []).slice(0, 3);
+  renderExposureVisual(exposureComposition(positions, account, portfolio, baseCurrency));
   const list = $("portfolioExposureList");
   list.hidden = exposures.length === 0;
   list.replaceChildren(...exposures.map((exposure) => {
@@ -533,11 +710,13 @@ function renderPortfolioRisk(positions, account) {
     const pctText = typeof exposure.market_value_pct_nlv === "number" ? ` ${pct(exposure.market_value_pct_nlv)}` : "";
     label.textContent = exposure.underlying + pctText;
     const value = document.createElement("b");
-    value.textContent = money(exposure.market_value_base, exposure.base_currency || baseCurrency);
+    value.textContent = state.accountValueVisible
+      ? money(exposure.market_value_base, exposure.base_currency || baseCurrency)
+      : "******";
     value.className = "exposure-value";
     row.append(label, value);
     const pnl = exposure.daily_pnl_base ?? exposure.unrealized_pnl_base;
-    if (typeof pnl === "number") {
+    if (state.accountValueVisible && typeof pnl === "number") {
       const detail = document.createElement("small");
       detail.className = signedClass(pnl);
       detail.textContent = "P/L " + money(pnl, exposure.base_currency || baseCurrency);
@@ -545,6 +724,111 @@ function renderPortfolioRisk(positions, account) {
     }
     return row;
   }));
+}
+
+function exposureComposition(positions, account, portfolio, baseCurrency) {
+  const netLiquidation = portfolio.net_liquidation_base ?? account.net_liquidation;
+  const stocks = sumAbsBase(positions.stocks || [], baseCurrency);
+  const options = sumAbsBase(positions.options || [], baseCurrency);
+  const cash = typeof account.total_cash === "number" ? Math.max(0, account.total_cash) : 0;
+  if (typeof netLiquidation === "number" && netLiquidation > 0) {
+    const raw = [
+      { label: "Equity", pct: stocks / netLiquidation * 100 },
+      { label: "Options", pct: options / netLiquidation * 100 },
+      { label: "Cash", pct: cash / netLiquidation * 100 },
+    ].filter((item) => item.pct > 0.1);
+    const used = raw.reduce((sum, item) => sum + item.pct, 0);
+    if (used < 99) raw.push({ label: "Other", pct: 100 - used, other: true });
+    return normalizeComposition(raw);
+  }
+  return normalizeComposition((portfolio.exposure_base || []).slice(0, 3).map((exposure) => ({
+    label: exposure.underlying || "--",
+    pct: Math.abs(Number(exposure.market_value_pct_nlv || 0)),
+  })));
+}
+
+function sumAbsBase(rows, baseCurrency) {
+  return rows.reduce((sum, row) => {
+    if (typeof row.market_value_base === "number") return sum + Math.abs(row.market_value_base);
+    if (row.currency === baseCurrency && typeof row.market_value_ccy === "number") return sum + Math.abs(row.market_value_ccy);
+    return sum;
+  }, 0);
+}
+
+function normalizeComposition(items) {
+  const filtered = items.filter((item) => item.pct > 0);
+  const total = filtered.reduce((sum, item) => sum + item.pct, 0);
+  if (total <= 0) return [];
+  if (total <= 100) return filtered;
+  return filtered.map((item) => ({ ...item, pct: item.pct / total * 100 }));
+}
+
+function renderExposureVisual(exposures) {
+  const visual = $("portfolioExposureVisual");
+  if (!visual) return;
+  if (exposures.length === 0) {
+    visual.hidden = true;
+    visual.replaceChildren();
+    return;
+  }
+
+  const normalized = exposures.filter((exposure) => exposure.pct > 0);
+  if (normalized.length === 0) {
+    visual.hidden = true;
+    visual.replaceChildren();
+    return;
+  }
+
+  const totalShown = normalized.reduce((sum, exposure) => sum + exposure.pct, 0);
+  const remainder = Math.max(0, 100 - totalShown);
+  const trackBase = totalShown + remainder || totalShown;
+
+  const track = document.createElement("div");
+  track.className = "exposure-visual__track";
+  for (const exposure of normalized) {
+    const segment = document.createElement("div");
+    segment.className = "exposure-visual__segment" + (exposure.other ? " exposure-visual__segment--other" : "");
+    segment.style.width = `${(exposure.pct / trackBase) * 100}%`;
+    segment.title = `${exposure.label} ${pct(exposure.pct)}`;
+    if (exposure.pct >= 5) {
+      segment.textContent = wholePct(exposure.pct);
+    }
+    track.append(segment);
+  }
+  if (remainder > 0) {
+    const other = document.createElement("div");
+    other.className = "exposure-visual__segment exposure-visual__segment--other";
+    other.style.width = `${(remainder / trackBase) * 100}%`;
+    other.title = `Other ${pct(remainder)}`;
+    track.append(other);
+  }
+
+  const legend = document.createElement("div");
+  legend.className = "exposure-visual__legend";
+  legend.replaceChildren(...normalized.map((exposure) => exposureLegendItem(exposure.label, exposure.pct)));
+  if (remainder > 0) {
+    const otherItem = exposureLegendItem("Other", remainder);
+    otherItem.classList.add("exposure-visual__item--other");
+    legend.append(otherItem);
+  }
+
+  visual.hidden = false;
+  visual.replaceChildren(track, legend);
+}
+
+function exposureLegendItem(label, value) {
+  const item = document.createElement("div");
+  item.className = "exposure-visual__item";
+  const swatch = document.createElement("span");
+  swatch.className = "exposure-visual__swatch";
+  const itemLabel = document.createElement("span");
+  itemLabel.className = "exposure-visual__label";
+  itemLabel.textContent = label;
+  const itemValue = document.createElement("span");
+  itemValue.className = "exposure-visual__value";
+  itemValue.textContent = wholePct(value);
+  item.append(swatch, itemLabel, itemValue);
+  return item;
 }
 
 function renderPortfolioDetail(portfolio, positions, baseCurrency) {
@@ -573,27 +857,33 @@ function portfolioDetailRows(portfolio, positions, baseCurrency) {
       tone: total > 0 && covered < total ? "warn" : "ok",
     },
     {
-      label: "Dollar delta",
-      title: money(
+      label: "Market risk (delta)",
+      title: sensitiveMoney(
         portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy,
         portfolio.dollar_delta_base_currency || portfolio.dollar_delta_ccy_currency || baseCurrency,
       ),
-      body: "Approximate portfolio move for a one-point move in the underlyings, converted to account base when possible.",
+      body: state.accountValueVisible
+        ? "Approximate portfolio move for a one-point move in the underlyings, converted to account base when possible."
+        : "Hidden while account privacy is on. Dollar delta estimates how fast the held book moves with the market.",
       tone: "neutral",
     },
     {
       label: "Theta/day",
-      title: money(
+      title: sensitiveMoney(
         portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
         portfolio.daily_theta_base_currency || portfolio.daily_theta_ccy_currency || baseCurrency,
       ),
-      body: "Estimated option time decay per day. Negative values mean expected decay cost.",
+      body: state.accountValueVisible
+        ? "Estimated option time decay per day. Negative values mean expected decay cost."
+        : "Hidden while account privacy is on. Theta/day estimates option time decay across the book.",
       tone: signedTone(portfolio.daily_theta_base ?? portfolio.daily_theta_ccy, true),
     },
     {
       label: "FX 1%",
-      title: money(portfolio.fx_sensitivity_per_pct, portfolio.fx_base_currency || baseCurrency),
-      body: "Estimated base-currency P/L from a 1% move in non-base contract currencies.",
+      title: sensitiveMoney(portfolio.fx_sensitivity_per_pct, portfolio.fx_base_currency || baseCurrency),
+      body: state.accountValueVisible
+        ? "Estimated base-currency P/L from a 1% move in non-base contract currencies."
+        : "Hidden while account privacy is on. FX 1% estimates currency sensitivity across non-base exposures.",
       tone: "neutral",
     },
   ];
@@ -617,10 +907,10 @@ function portfolioDetailRows(portfolio, positions, baseCurrency) {
 
 function portfolioDetailSummary(portfolio, positions) {
   if (portfolio.greeks_total > 0) {
-    return `${portfolio.greeks_coverage || 0}/${portfolio.greeks_total} greeks`;
+    return (portfolio.greeks_coverage || 0) >= portfolio.greeks_total ? "Greeks ready" : "Partial Greeks";
   }
   if ((positions.options || []).length === 0) {
-    return "no options";
+    return "No option Greeks needed";
   }
   return "details";
 }
@@ -658,66 +948,210 @@ function setBanner(bannerID, textID, text) {
 function renderTopbar(snap) {
   const label = marketSessionLabel(snap.market_calendar);
   const line = $("connectionLine");
-  line.textContent = label.text || state.connectionText;
+  line.textContent = label.side || label.text || state.connectionText;
   line.classList.remove("market-open", "market-closed", "market-warn");
   if (label.tone) {
     line.classList.add(label.tone);
   }
+  $("sessionPhase").textContent = label.phase;
+  $("sessionLabel").textContent = label.label;
+  $("sessionCountdown").textContent = label.countdown;
+  $("sessionMeta").textContent = label.meta;
+}
+
+function renderSyncStrip(snap) {
+  const strip = $("syncStrip");
+  if (!strip) return;
+  const updatedAt = parseDate(snap.updated_at);
+  if (!updatedAt) {
+    strip.hidden = true;
+    return;
+  }
+
+  const ageMinutes = Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 60000));
+  const sourceIssues = Object.values(snap.sources || {}).filter((meta) => meta?.error).length;
+  const stateLabel = !state.connectionOK
+    ? "syncing"
+    : sourceIssues > 0
+      ? "degraded"
+      : ageMinutes >= 5
+        ? "stale"
+        : "live";
+  $("syncStatusLabel").textContent = sourceIssues > 0 ? "Source issues" : "Last sync:";
+  $("syncStatusTime").textContent = `${shortTimeWithZone(snap.updated_at)} · ${state.connectionOK ? "SSE connected" : "SSE reconnecting"}`;
+  $("syncStatusState").textContent = labelize(stateLabel);
+  strip.hidden = false;
 }
 
 function marketSessionLabel(calendar) {
   const session = calendar?.session;
   if (!session) {
-    return { text: state.connectionText, tone: state.connectionOK ? "market-warn" : "market-closed" };
-  }
-  const stateText = cleanDetail(session.state);
-  if (session.is_open) {
-    const close = parseDate(session.close);
-    const timeLeft = countdownLabel(close);
     return {
-      text: timeLeft ? `US market open · closes in ${timeLeft}` : "US market open",
-      tone: "market-open",
+      text: state.connectionOK ? "Waiting for official market calendar" : "App connection offline",
+      tone: state.connectionOK ? "market-warn" : "market-closed",
+      phase: state.connectionOK ? "Syncing" : "Offline",
+      label: "Waiting",
+      countdown: "--:--:--",
+      meta: "HH:MM:SS",
+      side: state.connectionOK ? "Calendar pending" : "Offline",
     };
   }
-  const nextOpen = parseDate(session.next_open);
+  const now = Date.now();
+  const stateText = String(session.state || "").toLowerCase();
   const reason = session.reason ? ` (${session.reason})` : "";
-  const untilOpen = countdownLabel(nextOpen);
-  let prefix = "US market closed";
-  if (session.state === "holiday") {
-    prefix = "US market holiday";
-  } else if (session.state === "unknown") {
-    prefix = "US market unknown";
-  } else if (stateText !== "--" && !["regular", "early close"].includes(stateText)) {
-    prefix = `US market ${stateText}`;
+  const open = parseDate(session.open);
+  const close = parseDate(session.close);
+  const nextOpen = parseDate(session.next_open);
+  if (session.is_open) {
+    const timeLeft = countdownLabel(close);
+    const phase = stateText === "early_close" ? "US early close" : "US market open";
+    return {
+      text: session.reason || "Regular cash session",
+      tone: "market-open",
+      phase,
+      label: "Closes",
+      countdown: timeLeft || "live",
+      meta: marketClockMeta("Close", session, close),
+      side: marketSessionNow(session),
+    };
   }
+
+  if (open && now < open.getTime()) {
+    const untilOpen = countdownLabel(open);
+    return {
+      text: session.state === "early_close" ? session.reason || "Shortened session ahead" : "Regular cash session",
+      tone: "market-warn",
+      phase: "US pre-open",
+      label: "Opens",
+      countdown: untilOpen || "--:--:--",
+      meta: marketClockMeta("Open", session, open),
+      side: marketSessionNow(session),
+    };
+  }
+
+  if (close && nextOpen && now >= close.getTime()) {
+    const untilOpen = countdownLabel(nextOpen);
+    return {
+      text: session.reason || "Next regular cash session",
+      tone: "market-closed",
+      phase: stateText === "early_close" ? "US after early close" : "US after close",
+      label: "Opens",
+      countdown: untilOpen || "--:--:--",
+      meta: marketClockMeta("Next", session, nextOpen),
+      side: marketSessionNow(session),
+    };
+  }
+
+  if (stateText === "holiday") {
+    const untilOpen = countdownLabel(nextOpen);
+    return {
+      text: session.reason || "Official market holiday",
+      tone: "market-closed",
+      phase: "US holiday",
+      label: "Opens",
+      countdown: untilOpen || "--:--:--",
+      meta: marketClockMeta("Next", session, nextOpen),
+      side: marketSessionNow(session),
+    };
+  }
+
+  if (stateText === "closed") {
+    const untilOpen = countdownLabel(nextOpen);
+    return {
+      text: session.reason === "weekend" ? "Weekend closure" : `Outside regular cash session${reason}`,
+      tone: "market-closed",
+      phase: session.reason === "weekend" ? "US weekend" : "US market closed",
+      label: "Opens",
+      countdown: untilOpen || "--:--:--",
+      meta: marketClockMeta("Next", session, nextOpen),
+      side: marketSessionNow(session),
+    };
+  }
+
+  if (stateText === "unknown") {
+    const untilOpen = countdownLabel(nextOpen);
+    return {
+      text: `Calendar coverage unavailable${reason}`,
+      tone: "market-warn",
+      phase: "US market unknown",
+      label: "Next",
+      countdown: untilOpen || "--:--:--",
+      meta: marketClockMeta("Session", session, nextOpen),
+      side: marketSessionNow(session),
+    };
+  }
+
+  const untilOpen = countdownLabel(nextOpen);
   return {
-    text: untilOpen ? `${prefix}${reason} · opens in ${untilOpen}` : `${prefix}${reason}`,
-    tone: session.state === "unknown" ? "market-warn" : "market-closed",
+    text: session.reason || `Official calendar${reason}`,
+    tone: "market-warn",
+    phase: `US ${cleanDetail(session.state)}`,
+    label: "Opens",
+    countdown: untilOpen || "--:--:--",
+    meta: marketClockMeta("Open", session, nextOpen),
+    side: marketSessionNow(session),
   };
+}
+
+function marketSessionNow(session) {
+  const formatted = new Date().toLocaleString("en-US", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+    timeZone: session?.timezone || undefined,
+  }).replaceAll(",", "");
+  const parts = formatted.split(/\s+/).filter(Boolean);
+  if (parts.length >= 5) {
+    return `${parts[1]} ${parts[0].toUpperCase()} ${parts[2]} ${parts[3]} ${parts[4]}`;
+  }
+  return formatted.toUpperCase();
+}
+
+function marketClockMeta(label, session, target) {
+  if (!target) return "HH:MM:SS";
+  return "HH:MM:SS";
 }
 
 function countdownLabel(target) {
   if (!target) return "";
   const ms = target.getTime() - Date.now();
   if (ms <= 0) return "";
-  const minutes = Math.ceil(ms / 60000);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  if (hours < 24) return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
-  const days = Math.floor(hours / 24);
-  const dayHours = hours % 24;
-  return dayHours === 0 ? `${days}d` : `${days}d ${dayHours}h`;
+  const totalSeconds = Math.ceil(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const clock = [hours, minutes, seconds].map((value, index) => index === 0 ? String(value) : String(value).padStart(2, "0")).join(":");
+  return days > 0 ? `${days}d ${clock}` : clock;
 }
 
 function greeksCoverage(portfolio, positions) {
   if (portfolio.greeks_total > 0) {
-    return `${portfolio.greeks_coverage || 0}/${portfolio.greeks_total}`;
+    return `${portfolio.greeks_coverage || 0} of ${portfolio.greeks_total}`;
   }
   if ((positions.options || []).length === 0) {
-    return "none";
+    return "No options";
   }
   return "--";
+}
+
+function greeksMeaning(portfolio, positions) {
+  const total = portfolio.greeks_total || 0;
+  const covered = portfolio.greeks_coverage || 0;
+  if (total > 0 && covered >= total) {
+    return "All option legs have model Greeks for risk totals.";
+  }
+  if (total > 0) {
+    return "Some option legs are missing model Greeks; totals are partial.";
+  }
+  if ((positions.options || []).length === 0) {
+    return "No option legs need model Greeks in this snapshot.";
+  }
+  return "Model Greeks unavailable for this option snapshot.";
 }
 
 function renderAlertMode() {
@@ -728,14 +1162,19 @@ function renderAlertMode() {
 }
 
 function renderAlerts() {
-  $("alertCount").textContent = state.alerts.length;
+  const items = filteredAlertItems();
+  const allItems = alertItems();
+  $("alertCount").textContent = `${allItems.length} Active`;
   $("alertsHint").textContent = state.alerts.length === 0
-    ? "No alert history yet."
+    ? "Live canary preview; no alert history recorded yet."
     : "Tap an alert to inspect it in Canary.";
   $("clearAlertsButton").disabled = state.alerts.length === 0;
-  $("alertsList").replaceChildren(...state.alerts.map((alert) => {
+  document.querySelectorAll("[data-alert-filter]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.alertFilter === state.alertFilter);
+  });
+  $("alertsList").replaceChildren(...items.map((alert) => {
     const row = document.createElement("button");
-    row.className = "alert-row";
+    row.className = "alert-row alert-row--" + alertTone(alert);
     row.type = "button";
     row.classList.toggle("active", alert.id === state.selectedAlertID);
     row.addEventListener("click", () => {
@@ -755,16 +1194,16 @@ function renderAlerts() {
     row.append(text, at);
     return row;
   }));
-  if (state.alerts.length === 0) {
+  if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-row";
-    empty.textContent = "No canary alerts have been recorded.";
+    empty.textContent = "No matching canary alerts.";
     $("alertsList").replaceChildren(empty);
   }
 }
 
 function renderSelectedAlert() {
-  const alert = state.alerts.find((item) => item.id === state.selectedAlertID);
+  const alert = alertItems().find((item) => item.id === state.selectedAlertID);
   const panel = $("selectedAlertPanel");
   panel.hidden = !alert;
   if (!alert) return;
@@ -778,7 +1217,7 @@ async function refreshAlerts() {
     const res = await fetch("/api/alerts", { credentials: "include" });
     if (!res.ok) return;
     state.alerts = await res.json();
-    if (state.selectedAlertID && !state.alerts.some((alert) => alert.id === state.selectedAlertID)) {
+    if (state.selectedAlertID && !alertItems().some((alert) => alert.id === state.selectedAlertID)) {
       state.selectedAlertID = null;
     }
     renderAlerts();
@@ -786,6 +1225,44 @@ async function refreshAlerts() {
   } catch {
     // Alert history is secondary; SSE recovery handles app connectivity.
   }
+}
+
+function alertItems() {
+  const history = state.alerts.map((alert) => ({ ...alert, preview: false }));
+  const canary = state.snapshot?.canary || {};
+  const rows = (canary.rows || []).slice(0, 3);
+  const previews = rows.map((row, index) => ({
+    id: `preview-${index}`,
+    title: row.title || labelize(row.severity || "canary"),
+    body: [row.guidance, row.evidence].filter(Boolean).join(" ") || canary.summary || "Current canary context.",
+    created_at: canary.as_of,
+    severity: row.severity || canary.severity,
+    preview: true,
+  }));
+  if (history.length === 0) return previews;
+  const historyTitles = new Set(history.map((item) => String(item.title || "").toLowerCase()));
+  return [
+    ...history,
+    ...previews.filter((item) => !historyTitles.has(String(item.title || "").toLowerCase())),
+  ].slice(0, 3);
+}
+
+function filteredAlertItems() {
+  const items = alertItems();
+  if (state.alertFilter === "warnings") {
+    return items.filter((item) => ["risk", "warn"].includes(alertTone(item)));
+  }
+  if (state.alertFilter === "info") {
+    return items.filter((item) => alertTone(item) === "info");
+  }
+  return items;
+}
+
+function alertTone(alert) {
+  const text = `${alert.severity || ""} ${alert.title || ""} ${alert.body || ""}`.toLowerCase();
+  if (text.includes("act") || text.includes("defend") || text.includes("high") || text.includes("risk")) return "risk";
+  if (text.includes("watch") || text.includes("warn") || text.includes("spike") || text.includes("down")) return "warn";
+  return "info";
 }
 
 async function clearAlerts() {
@@ -812,12 +1289,25 @@ document.querySelectorAll("#alertSegments button").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-alert-filter]").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.alertFilter = button.dataset.alertFilter || "all";
+    renderAlerts();
+  });
+});
+
 $("enablePushButton").addEventListener("click", enablePush);
 $("retryAuthButton").addEventListener("click", bootstrap);
 $("accountPrivacyToggle").addEventListener("click", () => {
   state.accountValueVisible = !state.accountValueVisible;
   localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
-  renderAccountValue(state.snapshot?.account || {});
+  renderAll();
+});
+$("accountMenuToggle").addEventListener("click", () => {
+  state.accountMenuOpen = !state.accountMenuOpen;
+  renderAccountMenu(state.snapshot?.account || {});
 });
 $("canaryDetailToggle").addEventListener("click", () => {
   state.canaryDetailOpen = !state.canaryDetailOpen;
@@ -841,6 +1331,7 @@ $("clearAlertsButton").addEventListener("click", clearAlerts);
 document.querySelectorAll("[data-tool]").forEach((button) => {
   button.addEventListener("click", async () => {
     const res = await fetch("/api/tools/" + button.dataset.tool, { method: "POST", credentials: "include" });
+    $("toolOutput").hidden = false;
     $("toolOutput").textContent = JSON.stringify(await res.json(), null, 2);
   });
 });
@@ -959,6 +1450,51 @@ function renderSignedMoney(id, value, currency) {
   el.textContent = typeof value === "number" ? money(value, currency) : "--";
 }
 
+function renderSensitiveSignedMoney(id, value, currency) {
+  const el = $(id);
+  if (!hasNumericValue(value)) {
+    el.className = "signed";
+    el.textContent = "--";
+    return;
+  }
+  if (!state.accountValueVisible) {
+    el.className = "signed is-private";
+    el.textContent = "******";
+    return;
+  }
+  el.className = signedClass(value);
+  el.textContent = money(value, currency);
+}
+
+function renderSensitiveText(id, value, hasValue) {
+  const el = $(id);
+  if (!hasValue) {
+    el.classList.remove("is-private");
+    el.textContent = "--";
+    return;
+  }
+  if (!state.accountValueVisible) {
+    el.classList.add("is-private");
+    el.textContent = "******";
+    return;
+  }
+  el.classList.remove("is-private");
+  el.textContent = value;
+}
+
+function sensitiveMoney(value, currency) {
+  if (!hasNumericValue(value)) return "--";
+  return state.accountValueVisible ? money(value, currency) : "******";
+}
+
+function hasNumericValue(value) {
+  return typeof value === "number";
+}
+
+function firstNumber(...values) {
+  return values.find((value) => typeof value === "number");
+}
+
 function signedClass(value) {
   if (typeof value !== "number" || value === 0) return "signed";
   return "signed " + (value > 0 ? "ok" : "risk");
@@ -975,9 +1511,23 @@ function numberRead(value) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
 }
 
+function riskMoney(value, currency) {
+  if (typeof value !== "number") return "--";
+  const amount = new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  }).format(value);
+  return `${amount} ${currency || "USD"}`;
+}
+
 function pct(value) {
   if (typeof value !== "number") return "--";
   return value.toFixed(1) + "%";
+}
+
+function wholePct(value) {
+  if (typeof value !== "number") return "--";
+  return Math.round(value) + "%";
 }
 
 function signedPct(value) {
@@ -989,6 +1539,12 @@ function signedPct(value) {
 function cleanDetail(value) {
   if (!value) return "--";
   return String(value).replaceAll("_", " ");
+}
+
+function labelize(value) {
+  const words = cleanDetail(value).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "--";
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
 function ageLabel(minutes) {
@@ -1010,6 +1566,16 @@ function shortTime(value) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function shortTimeWithZone(value) {
+  if (!value) return "--";
+  return new Date(value).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 function setConnection(text, ok) {
   state.connectionText = text;
   state.connectionOK = ok;
@@ -1023,6 +1589,7 @@ function showPairing(text) {
   $("dashboard").hidden = true;
   $("alertsPanel").hidden = true;
   $("toolsPanel").hidden = true;
+  $("syncStrip").hidden = true;
   $("pairingText").textContent = text;
   setConnection("Locked", false);
 }
