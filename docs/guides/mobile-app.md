@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-06-03 17:28 CEST
+Updated: 2026-06-03 18:19 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -47,14 +47,26 @@ Override the target when the app is on a different address:
 make app-smoke APP_SMOKE_URL=http://127.0.0.1:18765
 ```
 
+To test app restart recovery without touching the default app state:
+
+```sh
+make app-lifecycle-smoke
+```
+
 The smoke script:
 
 - creates a pairing session through `/api/pairing/sessions`;
 - opens the pairing URL in Playwright;
 - optionally removes `globalThis.Notification` before page load;
+- requires a real `/api/events` SSE snapshot;
 - waits for the dashboard;
 - clicks the `Snapshot` debug tool;
 - fails on browser page errors or console errors.
+
+The lifecycle smoke starts an isolated app on `127.0.0.1:18765`, pairs without
+QR, disables WebCrypto to exercise the local HTTP fallback credential, runs
+`ibkr restart --app`, and verifies that the same browser context reauthenticates
+and returns to `Live` with an SSE subscriber.
 
 The script first tries the local Node `playwright` package, then the Codex
 bundled runtime when available. If Playwright's managed Chromium browser is not
