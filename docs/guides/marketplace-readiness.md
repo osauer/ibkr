@@ -8,7 +8,7 @@ This page is the maintainer checklist for presenting `ibkr` in AI tool marketpla
 
 `ibkr` is a local Interactive Brokers integration for traders who already run IB Gateway or TWS and want agentic portfolio analysis, trading research, risk checks, and market workflow support on live broker data. The clearest marketplace description is:
 
-> Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, a broad-market stress-lifecycle regime dashboard, and a portfolio-aware canary lifecycle through a local CLI/MCP server connected to IB Gateway or TWS.
+> Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, a broad-market stress-lifecycle regime dashboard, and a stateless portfolio canary through a local CLI/MCP server connected to IB Gateway or TWS.
 
 Always include these qualifiers:
 
@@ -48,7 +48,7 @@ Before submitting to OpenAI, add or decide:
 - a privacy policy URL pointing at [PRIVACY.md](../../PRIVACY.md)
 - a safety statement that no order placement, cancellation, or modification exists
 - setup text covering IB Gateway/TWS prerequisites and the local binary install
-- screenshots or a short demo focused on the regime lifecycle, canary lifecycle, and portfolio workflows
+- screenshots or a short demo focused on the regime lifecycle, stateless canary, and portfolio workflows
 
 OpenAI's Apps SDK help says app submissions are open, apps are built on MCP, and developers should prepare for safety, privacy, and functionality review, including a clear privacy policy. The current help article is at <https://help.openai.com/en/articles/12515353-build-with-the-apps-sdk>.
 
@@ -127,7 +127,7 @@ Submission materials:
 - Description: emphasize local-only operation, IB Gateway/TWS prerequisite, IBKR Pro requirement, portfolio review, options diagnostics, market-regime context, current no-order-entry boundary, and account-sensitive outputs.
 - Documentation: README install section, [agentic use](./agentic-use.md), [configuration reference](../reference/config.md), and [privacy policy](../../PRIVACY.md).
 - Support: GitHub issues; security through GitHub Private Vulnerability Reporting.
-- Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, portfolio review workflows, sizing math, S&P 500 breadth, dealer gamma, broad-market regime lifecycle, portfolio canary lifecycle; no built-in prompts; quote resource read/subscribe.
+- Capabilities: account, positions, quotes, watchlists, calendars, option chains, history, technical screens, scanners, portfolio review workflows, sizing math, S&P 500 breadth, dealer gamma, broad-market regime lifecycle, stateless portfolio canary; no built-in prompts; quote resource read/subscribe.
 
 ## External MCP directories
 
@@ -152,7 +152,7 @@ Submission pack:
 - Name: `ibkr`.
 - Title: `IBKR MCP Server`.
 - Tagline: "Agentic Interactive Brokers portfolio analysis and trading research through local TWS or IB Gateway."
-- Short description: "Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, broad-market regime lifecycle, and portfolio canary lifecycle."
+- Short description: "Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, broad-market regime lifecycle, and a stateless portfolio canary."
 - Requirements: IB Gateway 10.37+ or TWS running locally; IBKR Pro account with TWS API access; macOS or Linux binary for the bundled path.
 - Current boundary: current public CLI and MCP releases expose analysis and sizing tools, but no order placement, modification, or cancellation interface.
 - Target users: semi-professional retail traders using IBKR as capital-markets infrastructure who want agent-assisted review and research on broker-native data.

@@ -180,6 +180,20 @@ func TestWaitForAccountDailyPnLTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitForAccountDailyPnLIgnoresUnsetDailyPnL(t *testing.T) {
+	t.Parallel()
+	unrealized := 12.50
+	reader := fakeAccountDailyPnLReader{snap: ibkrlib.AccountDailyPnL{
+		UnrealizedDailyPnL: &unrealized,
+		AsOf:               timeNowForTest(),
+	}, ok: true}
+
+	got, ok := waitForAccountDailyPnL(context.Background(), reader, time.Now().Add(5*time.Millisecond))
+	if ok {
+		t.Fatalf("waitForAccountDailyPnL ok=true with nil DailyPnL: %+v", got)
+	}
+}
+
 type fakeAccountDailyPnLReader struct {
 	snap ibkrlib.AccountDailyPnL
 	ok   bool

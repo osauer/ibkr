@@ -55,40 +55,41 @@ type CanaryBacktestResult struct {
 }
 
 type CanaryBacktestRowResult struct {
-	Date              string                `json:"date,omitempty"`
-	Case              string                `json:"case,omitempty"`
-	MarketCluster     string                `json:"market_cluster,omitempty"`
-	TargetStress      bool                  `json:"target_stress"`
-	TargetKind        string                `json:"target_kind,omitempty"`
-	TargetScope       string                `json:"target_scope,omitempty"`
-	WindowDays        int                   `json:"window_days,omitempty"`
-	DaysToStress      *int                  `json:"days_to_stress,omitempty"`
-	MaxSPYDrawdownPct *float64              `json:"max_spy_drawdown_pct,omitempty"`
-	VIXShockPct       *float64              `json:"vix_shock_pct,omitempty"`
-	Direction         risk.SignalDirection  `json:"direction,omitempty"`
-	PortfolioPosture  risk.PortfolioPosture `json:"portfolio_posture,omitempty"`
-	Severity          risk.SignalSeverity   `json:"severity"`
-	PlannerMode       risk.PlannerMode      `json:"planner_mode,omitempty"`
-	PlannerReadiness  risk.PlannerReadiness `json:"planner_readiness,omitempty"`
-	DataConfidence    string                `json:"data_confidence,omitempty"`
-	SignalConfidence  string                `json:"signal_confidence,omitempty"`
-	PrimaryDrivers    []risk.SignalID       `json:"primary_drivers,omitempty"`
-	LifecycleStage    string                `json:"lifecycle_stage,omitempty"`
-	SignalWatch       bool                  `json:"signal_watch"`
-	DefensiveWatch    bool                  `json:"defensive_watch"`
-	DefensiveAct      bool                  `json:"defensive_act"`
-	RebalanceWatch    bool                  `json:"rebalance_watch"`
-	DataQualityWatch  bool                  `json:"data_quality_watch"`
-	Blocked           bool                  `json:"blocked"`
-	EarlyWarning      bool                  `json:"early_warning"`
-	ConfirmedStress   bool                  `json:"confirmed_stress"`
-	Panic             bool                  `json:"panic"`
-	ForcedDefense     bool                  `json:"forced_defense"`
-	Stabilization     bool                  `json:"stabilization"`
-	Opportunity       bool                  `json:"opportunity"`
-	RegimeOnlyWatch   bool                  `json:"regime_only_watch"`
-	RegimeOnlyAct     bool                  `json:"regime_only_act"`
-	Canary            *rpc.CanaryResult     `json:"canary,omitempty"`
+	Date               string                `json:"date,omitempty"`
+	Case               string                `json:"case,omitempty"`
+	MarketCluster      string                `json:"market_cluster,omitempty"`
+	TargetStress       bool                  `json:"target_stress"`
+	TargetKind         string                `json:"target_kind,omitempty"`
+	TargetScope        string                `json:"target_scope,omitempty"`
+	WindowDays         int                   `json:"window_days,omitempty"`
+	DaysToStress       *int                  `json:"days_to_stress,omitempty"`
+	MaxSPYDrawdownPct  *float64              `json:"max_spy_drawdown_pct,omitempty"`
+	VIXShockPct        *float64              `json:"vix_shock_pct,omitempty"`
+	Direction          risk.SignalDirection  `json:"direction,omitempty"`
+	Action             string                `json:"action,omitempty"`
+	MarketConfirmation string                `json:"market_confirmation,omitempty"`
+	PortfolioFit       string                `json:"portfolio_fit,omitempty"`
+	InputHealth        string                `json:"input_health,omitempty"`
+	Severity           risk.SignalSeverity   `json:"severity"`
+	PlannerMode        risk.PlannerMode      `json:"planner_mode,omitempty"`
+	PlannerReadiness   risk.PlannerReadiness `json:"planner_readiness,omitempty"`
+	PrimaryDrivers     []risk.SignalID       `json:"primary_drivers,omitempty"`
+	LifecycleStage     string                `json:"lifecycle_stage,omitempty"`
+	SignalWatch        bool                  `json:"signal_watch"`
+	DefensiveWatch     bool                  `json:"defensive_watch"`
+	DefensiveAct       bool                  `json:"defensive_act"`
+	RebalanceWatch     bool                  `json:"rebalance_watch"`
+	DataQualityWatch   bool                  `json:"data_quality_watch"`
+	Blocked            bool                  `json:"blocked"`
+	EarlyWarning       bool                  `json:"early_warning"`
+	ConfirmedStress    bool                  `json:"confirmed_stress"`
+	Panic              bool                  `json:"panic"`
+	ForcedDefense      bool                  `json:"forced_defense"`
+	Stabilization      bool                  `json:"stabilization"`
+	Opportunity        bool                  `json:"opportunity"`
+	RegimeOnlyWatch    bool                  `json:"regime_only_watch"`
+	RegimeOnlyAct      bool                  `json:"regime_only_act"`
+	Canary             *rpc.CanaryResult     `json:"canary,omitempty"`
 }
 
 type CanaryBacktestMetrics struct {
@@ -713,41 +714,61 @@ func runCanaryBacktestObservation(obs CanaryBacktestObservation) CanaryBacktestR
 	signalWatch := watch || rebalance
 	regimeWatch := regimeBacktestStressWatch(input.Regime)
 	regimeAct := regimeBacktestStressSignal(input.Regime)
+	stage := canaryBacktestStage(canary)
 	return CanaryBacktestRowResult{
-		Date:              backtestDateLabel(obs.Date, asOf),
-		Case:              obs.Case,
-		MarketCluster:     cleanBacktestCluster(obs.MarketCluster),
-		TargetStress:      obs.Target.Stress,
-		TargetKind:        obs.Target.Kind,
-		TargetScope:       cleanBacktestTargetScope(obs.Target.Scope),
-		WindowDays:        obs.Target.WindowDays,
-		DaysToStress:      obs.Target.DaysToStress,
-		MaxSPYDrawdownPct: obs.Target.MaxSPYDrawdownPct,
-		VIXShockPct:       obs.Target.VIXShockPct,
-		Direction:         canary.Direction,
-		PortfolioPosture:  canary.PortfolioPosture,
-		Severity:          canary.Severity,
-		PlannerMode:       canary.PlannerModeHint,
-		PlannerReadiness:  canary.PlannerReadiness,
-		DataConfidence:    canary.DataConfidence,
-		SignalConfidence:  canary.SignalConfidence,
-		PrimaryDrivers:    canary.PrimaryDrivers,
-		LifecycleStage:    canary.Lifecycle.Stage,
-		SignalWatch:       signalWatch,
-		DefensiveWatch:    watch,
-		DefensiveAct:      act,
-		RebalanceWatch:    rebalance,
-		DataQualityWatch:  dataQuality,
-		Blocked:           blocked,
-		EarlyWarning:      canary.Lifecycle.Stage == rpc.LifecycleEarlyWarning,
-		ConfirmedStress:   canary.Lifecycle.Stage == rpc.LifecycleConfirmedStress,
-		Panic:             canary.Lifecycle.Stage == rpc.LifecyclePanic,
-		ForcedDefense:     canary.Lifecycle.Stage == rpc.LifecycleForcedDefense,
-		Stabilization:     canary.Lifecycle.Stage == rpc.LifecycleStabilization,
-		Opportunity:       canary.Lifecycle.Stage == rpc.LifecycleOpportunity,
-		RegimeOnlyWatch:   regimeWatch,
-		RegimeOnlyAct:     regimeAct,
-		Canary:            &canary,
+		Date:               backtestDateLabel(obs.Date, asOf),
+		Case:               obs.Case,
+		MarketCluster:      cleanBacktestCluster(obs.MarketCluster),
+		TargetStress:       obs.Target.Stress,
+		TargetKind:         obs.Target.Kind,
+		TargetScope:        cleanBacktestTargetScope(obs.Target.Scope),
+		WindowDays:         obs.Target.WindowDays,
+		DaysToStress:       obs.Target.DaysToStress,
+		MaxSPYDrawdownPct:  obs.Target.MaxSPYDrawdownPct,
+		VIXShockPct:        obs.Target.VIXShockPct,
+		Direction:          canary.Direction,
+		Action:             canary.Action,
+		MarketConfirmation: canary.MarketConfirmation,
+		PortfolioFit:       canary.PortfolioFit,
+		InputHealth:        canary.InputHealth,
+		Severity:           canary.Severity,
+		PlannerMode:        canary.PlannerModeHint,
+		PlannerReadiness:   canary.PlannerReadiness,
+		PrimaryDrivers:     canary.PrimaryDrivers,
+		LifecycleStage:     stage,
+		SignalWatch:        signalWatch,
+		DefensiveWatch:     watch,
+		DefensiveAct:       act,
+		RebalanceWatch:     rebalance,
+		DataQualityWatch:   dataQuality,
+		Blocked:            blocked,
+		EarlyWarning:       stage == rpc.LifecycleEarlyWarning,
+		ConfirmedStress:    stage == rpc.LifecycleConfirmedStress,
+		Panic:              stage == rpc.LifecyclePanic,
+		ForcedDefense:      stage == rpc.LifecycleForcedDefense,
+		Stabilization:      stage == rpc.LifecycleStabilization,
+		Opportunity:        stage == rpc.LifecycleOpportunity,
+		RegimeOnlyWatch:    regimeWatch,
+		RegimeOnlyAct:      regimeAct,
+		Canary:             &canary,
+	}
+}
+
+func canaryBacktestStage(canary CanaryResult) string {
+	switch canary.Action {
+	case canaryActionConfirmInputs:
+		return rpc.LifecycleDataQuality
+	case canaryActionDefend:
+		if canary.Severity == risk.SeverityUrgent {
+			return rpc.LifecyclePanic
+		}
+		return rpc.LifecycleConfirmedStress
+	case canaryActionWatch, canaryActionRebalance:
+		return rpc.LifecycleEarlyWarning
+	case canaryActionDeploy:
+		return rpc.LifecycleOpportunity
+	default:
+		return rpc.LifecycleQuiet
 	}
 }
 

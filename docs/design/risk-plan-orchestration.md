@@ -140,9 +140,10 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 ### Monitor-triggered response
 
 1. A scheduler runs canary, for example every 10 minutes.
-2. Canary emits `fingerprint`, `lifecycle`, `source_fingerprints.account`,
+2. Canary emits `fingerprint`, `action`, `market_confirmation`,
+   `portfolio_fit`, `input_health`, `source_fingerprints.account`,
    `source_fingerprints.positions`, `source_fingerprints.regime`,
-   `source_health`, alert direction, portfolio posture, severity, and fired
+   `source_health`, alert direction, severity, planner readiness, and fired
    shared signals.
 3. Monitor policy dedupes by `canary.fingerprint.key` and decides whether to call risk-plan.
 4. Risk-plan refreshes live state and rechecks the same policy criteria.
@@ -155,8 +156,8 @@ Risk-plan must not choose or authorize the execution channel. Its artifact is ad
 11. Canary runs again after action to confirm the portfolio state.
 
 The monitor must not recompute its own hash over raw JSON. `canary.fingerprint`
-is the semantic alert identity; `lifecycle.fingerprint` is the semantic
-lifecycle-transition identity; `source_fingerprints.account`,
+is the semantic alert identity; canary itself is stateless and does not own an
+automation lifecycle. `source_fingerprints.account`,
 `source_fingerprints.positions`, and `source_fingerprints.regime` record which
 classified input buckets the canary consumed. A repeated unchanged fingerprint
 updates `last_seen` but does not create another alert. A changed fingerprint,

@@ -21,14 +21,15 @@ composite counts, lifecycle stage/severity/readiness buckets, warning
 codes/scopes/severities, high-level data quality, source-health buckets, and
 gamma/breadth semantic state.
 
-`canary` emits `canary-fp-v1` from policy, direction, severity, planner
-mode/readiness, lifecycle stage/severity/readiness buckets, confidence classes,
+`canary` emits `canary-fp-v1` from policy, action, market confirmation,
+portfolio fit, input health, direction, severity, planner mode/readiness,
 primary drivers, signal semantics, classified market state, source-health
 buckets, row titles/states, and `source_fingerprints.account`,
 `source_fingerprints.positions`, and `source_fingerprints.regime`.
 
-Both surfaces also expose a nested `lifecycle.fingerprint` for consumers that
-dedupe by lifecycle transition rather than by full alert posture. Source
+Regime also exposes a nested `lifecycle.fingerprint` for consumers that dedupe
+by broad-market lifecycle transition rather than by the full regime snapshot.
+Canary is stateless and does not expose a canary lifecycle fingerprint. Source
 fingerprints and source-health entries use semantic buckets only; timestamps,
 tiny raw-value movement inside a bucket, and prose changes must not churn the
 hash.

@@ -33,6 +33,106 @@ func TestGammaZeroStatusAndRegimeUsesGapForCrossing(t *testing.T) {
 	}
 }
 
+func TestBuildGammaSummaryCombinedNamesSPXCanonicalAndSPYContext(t *testing.T) {
+	t.Parallel()
+	zero := 5425.0
+	gap := 0.8
+	spx := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 5468.4,
+		ZeroGamma:      &zero,
+		GapPct:         &gap,
+		LegCount:       2100,
+		GammaTotalAbs:  4_200_000_000,
+	}
+	spy := &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		SpotUnderlying: 746,
+		GammaSign:      "positive",
+		SweepLowAbs:    670,
+		SweepHighAbs:   820,
+		LegCount:       900,
+		GammaTotalAbs:  1_200_000_000,
+	}
+	summary := buildGammaSummary(&rpc.GammaZeroComputed{
+		Scope:           rpc.GammaZeroScopeCombined,
+		PerIndex:        map[string]*rpc.GammaZeroComputed{"SPY": spy, "SPX": spx},
+		RegimeAgreement: "agree:long-gamma",
+	})
+
+	if summary == nil {
+		t.Fatal("summary nil")
+	}
+	for _, want := range []string{
+		"SPX canonical zero-gamma $5425.00",
+		"SPY context stayed long-gamma across $670.00-$820.00",
+		"Price levels remain per-index",
+	} {
+		if !strings.Contains(summary.PrimaryStatement, want) {
+			t.Fatalf("primary statement missing %q: %q", want, summary.PrimaryStatement)
+		}
+	}
+	for _, banned := range []string{"No combined zero", "SPY none in", "SPX none in"} {
+		if strings.Contains(summary.PrimaryStatement, banned) {
+			t.Fatalf("primary statement leaked raw phrase %q: %q", banned, summary.PrimaryStatement)
+		}
+	}
+	if summary.PerIndex["SPX"].ZeroGammaStatus != "crossing" || summary.PerIndex["SPY"].ZeroGammaStatus != "none_in_window" {
+		t.Fatalf("per-index statuses = %+v", summary.PerIndex)
+	}
+}
+
+func TestBuildGammaSummarySingleNoCrossingUsesPlainLanguage(t *testing.T) {
+	t.Parallel()
+	summary := buildGammaSummary(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		SpotUnderlying: 5468.4,
+		GammaSign:      "negative",
+		SweepLowAbs:    5000,
+		SweepHighAbs:   6000,
+		LegCount:       2100,
+		GammaTotalAbs:  4_200_000_000,
+	})
+	if summary == nil {
+		t.Fatal("summary nil")
+	}
+	for _, want := range []string{
+		"SPX stayed short-gamma across $5000.00-$6000.00",
+		"Zero-gamma:",
+	} {
+		if !strings.Contains(summary.PrimaryStatement, want) {
+			t.Fatalf("primary statement missing %q: %q", want, summary.PrimaryStatement)
+		}
+	}
+	if strings.Contains(summary.PrimaryStatement, "none in") {
+		t.Fatalf("primary statement leaked terse no-crossing wording: %q", summary.PrimaryStatement)
+	}
+}
+
+func TestBuildGammaSummaryUnavailableSliceExplainsMissingPayload(t *testing.T) {
+	t.Parallel()
+	summary := buildGammaSummary(&rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPX,
+		LegCount:       120,
+		GammaTotalAbs:  0,
+		PricedLegCount: 800,
+	})
+	if summary == nil {
+		t.Fatal("summary nil")
+	}
+	for _, want := range []string{
+		"SPX unavailable",
+		"no usable gamma magnitude from landed legs",
+	} {
+		if !strings.Contains(summary.PrimaryStatement, want) {
+			t.Fatalf("primary statement missing %q: %q", want, summary.PrimaryStatement)
+		}
+	}
+	if summary.ZeroGammaStatus != "unavailable" || summary.Confidence != "unavailable" {
+		t.Fatalf("summary = %+v, want unavailable status/confidence", summary)
+	}
+}
+
 func TestSPXUnavailableWarningTextFetchCanceledIsUserFacing(t *testing.T) {
 	t.Parallel()
 	message, impact, action := spxUnavailableWarningText("fetch_canceled")
@@ -65,6 +165,23 @@ func TestSPYUnavailableWarningTextZeroMagnitudeIsUserFacing(t *testing.T) {
 		if !strings.Contains(message+" "+impact+" "+action, want) {
 			t.Fatalf("warning text missing %q: message=%q impact=%q action=%q", want, message, impact, action)
 		}
+	}
+}
+
+func TestSPXCacheFallbackWarningTextPointsToRankability(t *testing.T) {
+	t.Parallel()
+	message, impact, action := spxCacheFallbackWarningText("timeout")
+	for _, want := range []string{
+		"using the last successful cached SPX slice",
+		"quality.rankability controls",
+		"fresh confirmation",
+	} {
+		if !strings.Contains(message+" "+impact+" "+action, want) {
+			t.Fatalf("cache fallback warning missing %q: message=%q impact=%q action=%q", want, message, impact, action)
+		}
+	}
+	if strings.Contains(message+" "+impact+" "+action, "treat the combined gamma regime as degraded") {
+		t.Fatalf("cache fallback warning should not force degraded phrasing: message=%q impact=%q action=%q", message, impact, action)
 	}
 }
 

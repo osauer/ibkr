@@ -37,7 +37,7 @@ func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
 		statuses := map[string]int{}
 		regimes := map[string]int{}
 		confidences := map[string]int{}
-		for _, key := range []string{"SPY", "SPX"} {
+		for _, key := range []string{"SPX", "SPY"} {
 			sub := c.PerIndex[key]
 			if sub == nil {
 				continue
@@ -47,7 +47,7 @@ func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
 			statuses[item.ZeroGammaStatus]++
 			regimes[item.Regime]++
 			confidences[item.Confidence]++
-			parts = append(parts, gammaIndexStatement(item))
+			parts = append(parts, gammaCombinedIndexStatement(key, item))
 		}
 		out.ZeroGammaStatus = combineSummaryStatus(statuses)
 		out.Regime = combineSummaryRegime(c.RegimeAgreement, regimes)
@@ -55,7 +55,7 @@ func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
 		if len(parts) == 0 {
 			out.PrimaryStatement = "Zero-gamma: unavailable for SPY+SPX."
 		} else {
-			out.PrimaryStatement = "Zero-gamma: " + strings.Join(parts, "; ") + ". No combined zero is computed across SPY/SPX price scales."
+			out.PrimaryStatement = "Zero-gamma: " + strings.Join(parts, "; ") + ". Price levels remain per-index because SPY and SPX use different price scales."
 		}
 		return out
 	}
@@ -87,6 +87,16 @@ func buildGammaIndexSummary(c *rpc.GammaZeroComputed, label string) rpc.GammaInd
 	}
 }
 
+func gammaCombinedIndexStatement(key string, s rpc.GammaIndexSummary) string {
+	switch key {
+	case "SPX":
+		s.Underlying = "SPX canonical"
+	case "SPY":
+		s.Underlying = "SPY context"
+	}
+	return gammaIndexStatement(s)
+}
+
 func gammaIndexStatement(s rpc.GammaIndexSummary) string {
 	label := s.Underlying
 	if label == "" {
@@ -97,20 +107,20 @@ func gammaIndexStatement(s rpc.GammaIndexSummary) string {
 		if s.ZeroGamma != nil {
 			regime := strings.ReplaceAll(s.Regime, "_", "-")
 			if regime != "" {
-				return fmt.Sprintf("%s %s (%s)", label, formatGammaSummaryPrice(*s.ZeroGamma), regime)
+				return fmt.Sprintf("%s zero-gamma %s (%s)", label, formatGammaSummaryPrice(*s.ZeroGamma), regime)
 			}
-			return fmt.Sprintf("%s %s", label, formatGammaSummaryPrice(*s.ZeroGamma))
+			return fmt.Sprintf("%s zero-gamma %s", label, formatGammaSummaryPrice(*s.ZeroGamma))
 		}
 	case "none_in_window":
 		rangeText := gammaSummaryRange(s.SweepLowAbs, s.SweepHighAbs)
 		regime := strings.ReplaceAll(s.Regime, "_", "-")
 		if rangeText != "" && regime != "" {
-			return fmt.Sprintf("%s none in %s (%s)", label, rangeText, regime)
+			return fmt.Sprintf("%s stayed %s across %s", label, regime, rangeText)
 		}
 		if regime != "" {
-			return fmt.Sprintf("%s none in swept range (%s)", label, regime)
+			return fmt.Sprintf("%s stayed %s across the swept range", label, regime)
 		}
-		return fmt.Sprintf("%s none in swept range", label)
+		return fmt.Sprintf("%s had no crossing in the swept range", label)
 	case "unavailable":
 		if s.Interpretation != "" {
 			return fmt.Sprintf("%s unavailable (%s)", label, s.Interpretation)
@@ -528,8 +538,8 @@ func spxCacheFallbackWarningText(reason string) (message, impact, action string)
 		message = "SPX live refresh was unavailable; using the last successful cached SPX slice."
 	}
 	return message,
-		"SPX is included but may be stale; treat the combined gamma regime as degraded.",
-		"Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before relying on the combined gamma row."
+		"SPX is included from cache; quality.rankability controls whether gamma can confirm regime or canary evidence.",
+		"Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before treating it as fresh confirmation."
 }
 
 func gammaWarningScope(c *rpc.GammaZeroComputed, code string) string {

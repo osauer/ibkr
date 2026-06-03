@@ -512,24 +512,23 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 			{Source: "positions", Status: "ok", Confidence: "high", FingerprintStability: rpc.FingerprintStabilitySemanticBuckets},
 			{Source: "regime", Status: "stale", Confidence: "medium-low", FingerprintStability: rpc.FingerprintStabilitySemanticBuckets},
 		},
-		Policy:           "canary-default",
-		Lifecycle:        rpc.LifecycleState{Stage: rpc.LifecycleEarlyWarning, Severity: string(risk.SeverityWatch), Readiness: string(risk.PlannerReadinessPrestage), Timing: rpc.LifecycleTimingForwardWarning, Confidence: "medium", Fingerprint: rpc.Fingerprint{Version: "lifecycle-fp-v1", Key: "sha256:lifecycle"}},
-		Direction:        risk.DirectionDefensive,
-		PortfolioPosture: risk.PortfolioPostureThreat,
-		Severity:         risk.SeverityWatch,
-		PlannerModeHint:  risk.PlannerModeStage,
-		PlannerReadiness: risk.PlannerReadinessPrestage,
-		Summary:          "Freeze new risk.",
-		Confidence:       "medium",
-		DataConfidence:   "high",
-		SignalConfidence: "medium",
-		PrimaryDrivers:   []risk.SignalID{risk.SignalMarginCushionLow},
-		Signals:          []risk.Signal{{ID: risk.SignalMarginCushionLow, Direction: risk.DirectionDefensive, Posture: risk.PortfolioPostureThreat, Severity: risk.SeverityWatch}},
-		Rows:             []rpc.CanaryRow{{Title: "Portfolio canary", Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Guidance: "Freeze new risk."}},
-		Portfolio:        rpc.CanaryPortfolioSummary{BaseCurrency: "USD", NetLiquidation: 100_000},
-		Market:           rpc.CanaryMarketSummary{RegimeVerdict: "Normal regime", RankedClusters: 6},
-		Warnings:         []string{"stale clusters: vol"},
-		NotExecution:     "Read-only recommendation; no orders are placed by ibkr.",
+		Policy:             "canary-default",
+		Action:             "watch",
+		MarketConfirmation: "partial",
+		PortfolioFit:       "high",
+		InputHealth:        "ok",
+		Direction:          risk.DirectionDefensive,
+		Severity:           risk.SeverityWatch,
+		PlannerModeHint:    risk.PlannerModeStage,
+		PlannerReadiness:   risk.PlannerReadinessPrestage,
+		Summary:            "Freeze new risk.",
+		PrimaryDrivers:     []risk.SignalID{risk.SignalMarginCushionLow},
+		Signals:            []risk.Signal{{ID: risk.SignalMarginCushionLow, Direction: risk.DirectionDefensive, Posture: risk.PortfolioPostureThreat, Severity: risk.SeverityWatch}},
+		Rows:               []rpc.CanaryRow{{Title: "Portfolio canary", Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Guidance: "Freeze new risk."}},
+		Portfolio:          rpc.CanaryPortfolioSummary{BaseCurrency: "USD", NetLiquidation: 100_000},
+		Market:             rpc.CanaryMarketSummary{RegimeVerdict: "Normal regime", RankedClusters: 6},
+		Warnings:           []string{"stale clusters: vol"},
+		NotExecution:       "Read-only recommendation; no orders are placed by ibkr.",
 	}
 	b, err := json.Marshal(res)
 	if err != nil {
@@ -544,9 +543,11 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 		"source_fingerprints",
 		"source_health",
 		"policy",
-		"lifecycle",
+		"action",
+		"market_confirmation",
+		"portfolio_fit",
+		"input_health",
 		"direction",
-		"portfolio_posture",
 		"severity",
 		"planner_mode_hint",
 		"planner_readiness",
@@ -565,8 +566,8 @@ func TestIbkrCanaryResponseHasSignalsAndFingerprints(t *testing.T) {
 	if !ok || fp["version"] != rpc.CanaryFingerprintVersion || fp["key"] == "" {
 		t.Fatalf("fingerprint missing or malformed: %#v", wire["fingerprint"])
 	}
-	if wire["portfolio_posture"] != string(risk.PortfolioPostureThreat) {
-		t.Fatalf("portfolio_posture = %#v, want threat", wire["portfolio_posture"])
+	if wire["action"] != "watch" {
+		t.Fatalf("action = %#v, want watch", wire["action"])
 	}
 	sources, ok := wire["source_fingerprints"].(map[string]any)
 	if !ok {

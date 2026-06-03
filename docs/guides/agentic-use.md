@@ -32,11 +32,11 @@ Claude composes an answer that names which indicators are in which band, calls o
 
 → Claude invokes `ibkr_canary`.
 
-Returns a compact lifecycle and risk-state table for scheduled portfolio stress checks. The canary combines account cushion, current exposures, concentration, option-greeks coverage, market-regime clusters, direct SPY/VIX tape shock, and ambiguity gates into lifecycle stages such as `quiet`, `early_warning`, `confirmed_stress`, `panic`, `forced_defense`, `stabilization`, `opportunity`, or `data_quality`.
+Returns a stateless market-context portfolio monitor for scheduled stress checks. The canary combines market-regime clusters, direct SPY/VIX tape shock, current exposures, concentration, option-greeks coverage, and input-health gates into `action`, `market_confirmation`, `portfolio_fit`, and `input_health`.
 
-The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `Watch`, while severe actions require confirmation from another stress channel or immediate margin danger. Missing, stale, degraded, or computing regime inputs become explicit ambiguity rows instead of being treated as safe.
+The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `watch`, while `defend` requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Account-only margin or P&L facts remain evidence; they do not become a canary DEFEND action by themselves. Missing, stale, degraded, warming, or computing inputs become explicit input-health rows instead of being treated as safe.
 
-For a scheduler-friendly prompt that preserves lifecycle stage, readiness, confidence, source health, fingerprints, table rows, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
+For a scheduler-friendly prompt that preserves action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
 
 ### "Show me my SPY positions and any options on them."
 
@@ -109,7 +109,7 @@ A few prompt patterns that work well, learned from observing real conversations:
 - **Ask the question, don't name the tool.** "How does my portfolio look?" works better than "Run ibkr_positions." Claude picks the right tool based on the question; naming the tool just adds friction.
 - **Chain follow-ups freely.** Each tool call is cheap (cached when possible). "And what about gamma for those?" or "How did that look yesterday?" generate natural follow-up tool calls.
 - **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
-- **For scheduled stress checks, ask for the canary.** "Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?" triggers `ibkr_canary`, which returns lifecycle, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
+- **For scheduled stress checks, ask for the canary.** "How does market weather interact with my portfolio right now?" triggers `ibkr_canary`, which returns action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
 - **For sizing, give Claude the full plan.** "I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV" lets `ibkr_size` return the R-multiple, breakeven win rate, and share count in one round-trip.
 
 ## Reference

@@ -29,6 +29,7 @@ const (
 // trigger.
 type LifecycleState struct {
 	Stage        string              `json:"stage,omitempty"`
+	Scope        string              `json:"scope,omitempty"`
 	Severity     string              `json:"severity,omitempty"`
 	Readiness    string              `json:"readiness,omitempty"`
 	Timing       string              `json:"timing,omitempty"`
@@ -71,7 +72,7 @@ type SourceHealth struct {
 // account, position, margin, or execution state.
 func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if r == nil {
-		return LifecycleState{Stage: LifecycleDataQuality, Severity: "watch", Readiness: "blocked", Timing: LifecycleTimingDataQuality, Confidence: "low"}
+		return LifecycleState{Stage: LifecycleDataQuality, Scope: "market", Severity: "watch", Readiness: "blocked", Timing: LifecycleTimingDataQuality, Confidence: "low"}
 	}
 	c := r.Composite
 	raw, confirmed := regimeLifecycleClusterBands(*r)
@@ -84,6 +85,7 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 		confidence = regimeLifecycleConfidence(c)
 	}
 	state := LifecycleState{
+		Scope:        "market",
 		Severity:     "observe",
 		Readiness:    "ready",
 		Timing:       "",
@@ -183,6 +185,7 @@ func BuildLifecycleFingerprint(state LifecycleState) Fingerprint {
 
 func lifecycleFingerprint(state LifecycleState) Fingerprint {
 	projection := struct {
+		Scope       string              `json:"scope,omitempty"`
 		Stage       string              `json:"stage,omitempty"`
 		Severity    string              `json:"severity,omitempty"`
 		Readiness   string              `json:"readiness,omitempty"`
@@ -194,6 +197,7 @@ func lifecycleFingerprint(state LifecycleState) Fingerprint {
 		Suppressed  []string            `json:"suppressed,omitempty"`
 		RejectedBy  []string            `json:"rejected_by,omitempty"`
 	}{
+		Scope:       strings.ToLower(strings.TrimSpace(state.Scope)),
 		Stage:       strings.ToLower(strings.TrimSpace(state.Stage)),
 		Severity:    strings.ToLower(strings.TrimSpace(state.Severity)),
 		Readiness:   strings.ToLower(strings.TrimSpace(state.Readiness)),

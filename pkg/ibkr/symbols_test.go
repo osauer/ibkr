@@ -164,6 +164,7 @@ func TestContractDisplayHints(t *testing.T) {
 		class  string
 	}{
 		{"SPY", "STK", "", ""},
+		{"SPY", "OPT", "", "SPY"},
 		{"VIX", "IND", "VIX", "VIX"},
 		{"VVIX", "IND", "VVIX", "VVIX"},
 		{"DXY", "IND", "DXY", "DXY"},

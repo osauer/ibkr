@@ -55,6 +55,22 @@ func TestSendContractDetailsRequestCarriesOptionPrimaryAndMultiplier(t *testing.
 	assertField(t, fields, 14, "SPY", "tradingClass")
 }
 
+func TestRequestOptionsMarketDataCarriesEquityOptionTradingClass(t *testing.T) {
+	conn, out := newReadyWireTestConnection(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := conn.RequestOptionsMarketData(ctx, "SPY", "20260619", 500, "C"); err == nil {
+		t.Fatalf("RequestOptionsMarketData succeeded without contract details response")
+	}
+
+	frames := decodeOutboundFrames(t, conn, out.Bytes())
+	contractDetails := findOutboundFrame(t, frames, reqContractData)
+	assertField(t, contractDetails, 4, "SPY", "contractDetails symbol")
+	assertField(t, contractDetails, 5, "OPT", "contractDetails secType")
+	assertField(t, contractDetails, 14, "SPY", "contractDetails tradingClass")
+}
+
 func TestSendContractDetailsRequestBlanksUnresolvedStockPrimary(t *testing.T) {
 	conn, out := newReadyWireTestConnection(t)
 

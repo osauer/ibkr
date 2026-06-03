@@ -123,9 +123,9 @@ func waitForAccountDailyPnL(ctx context.Context, reader accountDailyPnLReader, d
 	var ok bool
 	_ = pollUntil(ctx, deadline, func() bool {
 		snap, ok = reader.AccountDailyPnL()
-		return ok
+		return ok && snap.DailyPnL != nil
 	})
-	return snap, ok
+	return snap, ok && snap.DailyPnL != nil
 }
 
 // buildCurrencyExposure flattens RawAccountSummary.CurrencyLedger into the

@@ -257,15 +257,26 @@ func (c *Connector) SubscribeAccountPnL(account string) error {
 	}
 
 	reqID := conn.GetNextRequestID()
-	if err := conn.RequestPnL(reqID, account, ""); err != nil {
-		return fmt.Errorf("request PnL: %w", err)
-	}
-
 	c.pnl.mu.Lock()
+	if c.pnl.accountReqID != 0 && c.pnl.accountAcct == account {
+		c.pnl.mu.Unlock()
+		return nil
+	}
 	c.pnl.accountReqID = reqID
 	c.pnl.accountAcct = account
 	c.pnl.account = AccountDailyPnL{}
 	c.pnl.mu.Unlock()
+
+	if err := conn.RequestPnL(reqID, account, ""); err != nil {
+		c.pnl.mu.Lock()
+		if c.pnl.accountReqID == reqID {
+			c.pnl.accountReqID = 0
+			c.pnl.accountAcct = ""
+			c.pnl.account = AccountDailyPnL{}
+		}
+		c.pnl.mu.Unlock()
+		return fmt.Errorf("request PnL: %w", err)
+	}
 	return nil
 }
 
@@ -309,25 +320,29 @@ func (c *Connector) SubscribePositionDailyPnL(account string, conID int) error {
 		return ErrIBKRUnavailable
 	}
 
+	reqID := conn.GetNextRequestID()
 	c.pnl.mu.Lock()
 	if _, ok := c.pnl.positionReqIDs[conID]; ok {
 		c.pnl.mu.Unlock()
 		return nil
 	}
-	c.pnl.mu.Unlock()
-
-	reqID := conn.GetNextRequestID()
-	if err := conn.RequestPnLSingle(reqID, account, "", conID); err != nil {
-		return fmt.Errorf("request PnL single: %w", err)
-	}
-
-	c.pnl.mu.Lock()
 	c.pnl.positionReqIDs[conID] = reqID
 	c.pnl.positionByReqID[reqID] = conID
 	// Pre-populate an empty snapshot so AccountDailyPnL-style "exists
 	// but unknown" reads can disambiguate from "never subscribed".
 	c.pnl.positionSnapshot[conID] = PositionDailyPnL{}
 	c.pnl.mu.Unlock()
+
+	if err := conn.RequestPnLSingle(reqID, account, "", conID); err != nil {
+		c.pnl.mu.Lock()
+		if current, ok := c.pnl.positionReqIDs[conID]; ok && current == reqID {
+			delete(c.pnl.positionReqIDs, conID)
+			delete(c.pnl.positionByReqID, reqID)
+			delete(c.pnl.positionSnapshot, conID)
+		}
+		c.pnl.mu.Unlock()
+		return fmt.Errorf("request PnL single: %w", err)
+	}
 	return nil
 }
 

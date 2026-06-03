@@ -190,7 +190,13 @@ func optionUnderlyingPrimaryExchangeHint(symbol string) string {
 }
 
 func contractDisplayHints(symbol, secType string) (string, string) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	switch secType {
+	case "OPT":
+		// Equity/ETF options usually leave LocalSymbol empty during contract
+		// discovery, but TradingClass is still the underlying symbol. Without
+		// that hint SPY-style reqContractData calls can be rejected with code 200.
+		return "", symbol
 	case "IND":
 		switch symbol {
 		case "VIX", "VVIX", "VIX3M", "SPX", "NDX", "DJI", "DJX", "DXY":
