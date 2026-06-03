@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f7f8fa">
+    <title>ibkr app</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>ibkr</h1>
+          <p id="connectionLine">Connecting</p>
+        </div>
+        <div class="status-dot" id="statusDot" aria-label="connection status"></div>
+      </header>
+
+      <section class="pairing" id="pairingPanel" hidden>
+        <h2>Pair this device</h2>
+        <p id="pairingText">Completing secure pairing with the Mac.</p>
+        <button id="retryAuthButton" type="button">Retry</button>
+      </section>
+
+      <section class="summary-grid" id="dashboard" hidden>
+        <article class="panel hero-panel">
+          <div class="panel-head">
+            <span>Account</span>
+            <span id="accountAsOf">--</span>
+          </div>
+          <strong id="netLiquidation">--</strong>
+          <div class="split">
+            <span>Daily P/L</span>
+            <b id="dailyPnl">--</b>
+          </div>
+          <div class="split">
+            <span>Cushion</span>
+            <b id="cushion">--</b>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <span>Canary</span>
+            <span id="canarySeverity">--</span>
+          </div>
+          <strong id="canaryAction">--</strong>
+          <p id="canarySummary">Waiting for canary snapshot.</p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <span>Positions</span>
+            <span id="positionsAsOf">--</span>
+          </div>
+          <div class="metric-row">
+            <span>Stocks</span>
+            <b id="stockCount">0</b>
+          </div>
+          <div class="metric-row">
+            <span>Options</span>
+            <b id="optionCount">0</b>
+          </div>
+          <div class="metric-row">
+            <span>Base</span>
+            <b id="baseCurrency">--</b>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <span>Alerts</span>
+            <span id="pushState">push off</span>
+          </div>
+          <div class="segments" id="alertSegments">
+            <button type="button" data-mode="none">None</button>
+            <button type="button" data-mode="act_only">Act only</button>
+            <button type="button" data-mode="watch_and_act">Watch + act</button>
+          </div>
+          <button class="primary" id="enablePushButton" type="button">Enable phone alerts</button>
+        </article>
+      </section>
+
+      <section class="panel" id="alertsPanel" hidden>
+        <div class="panel-head">
+          <span>Alert history</span>
+          <span id="alertCount">0</span>
+        </div>
+        <div class="list" id="alertsList"></div>
+      </section>
+
+      <section class="panel tools" id="toolsPanel" hidden>
+        <div class="panel-head">
+          <span>Tools</span>
+          <span>debug only</span>
+        </div>
+        <div class="tool-grid">
+          <button type="button" data-tool="status">Status</button>
+          <button type="button" data-tool="snapshot">Snapshot</button>
+          <button type="button" data-tool="events">Events</button>
+          <button type="button" data-tool="auth">Auth</button>
+          <button type="button" data-tool="push">Push</button>
+          <button type="button" data-tool="relay">Relay</button>
+        </div>
+        <pre id="toolOutput">{}</pre>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

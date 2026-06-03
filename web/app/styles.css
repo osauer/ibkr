@@ -1,0 +1,240 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --text: #1d2430;
+  --muted: #6d7786;
+  --line: #dfe4ea;
+  --accent: #2563eb;
+  --ok: #0f9f6e;
+  --warn: #b7791f;
+  --risk: #c2413a;
+  --shadow: 0 10px 30px rgba(29, 36, 48, 0.08);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+}
+
+.shell {
+  width: min(960px, 100%);
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: max(18px, env(safe-area-inset-top)) 16px 28px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+
+p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.topbar p {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.status-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 4px rgba(183, 121, 31, 0.12);
+}
+
+.status-dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px rgba(15, 159, 110, 0.12);
+}
+
+.status-dot.risk {
+  background: var(--risk);
+  box-shadow: 0 0 0 4px rgba(194, 65, 58, 0.12);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.panel,
+.pairing {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.hero-panel {
+  grid-row: span 2;
+}
+
+.panel-head,
+.split,
+.metric-row,
+.alert-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-head {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.panel strong {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 25px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.split,
+.metric-row {
+  min-height: 32px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.split b,
+.metric-row b {
+  color: var(--text);
+}
+
+.segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 12px;
+  background: #eef2f7;
+  border-radius: 8px;
+}
+
+.segments button,
+.tool-grid button,
+.primary,
+.pairing button {
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.segments button.active {
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: 0 2px 8px rgba(29, 36, 48, 0.08);
+}
+
+.primary,
+.pairing button {
+  width: 100%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 650;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+}
+
+.alert-row {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  align-items: flex-start;
+}
+
+.alert-row:first-child {
+  border-top: 0;
+}
+
+.alert-row b {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.alert-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tool-grid button {
+  border-color: var(--line);
+  background: #f9fafb;
+}
+
+pre {
+  overflow: auto;
+  max-height: 360px;
+  margin: 12px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #111827;
+  color: #e5e7eb;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-panel {
+    grid-row: auto;
+  }
+
+  .panel strong {
+    font-size: 23px;
+  }
+}
