@@ -5,6 +5,8 @@ const state = {
   vapidPublicKey: "",
   eventSource: null,
   reconnectTimer: null,
+  accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
+  canaryDetailOpen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -195,7 +197,7 @@ function renderAll() {
   const account = snap.account || {};
   const positions = snap.positions || {};
   const canary = snap.canary || {};
-  $("netLiquidation").textContent = money(account.net_liquidation, account.base_currency);
+  renderAccountValue(account);
   $("dailyPnl").textContent = account.daily_pnl == null ? "--" : money(account.daily_pnl, account.base_currency);
   $("cushion").textContent = typeof account.cushion === "number" ? pct(account.cushion * 100) : "--";
   $("accountAsOf").textContent = shortTime(account.as_of);
@@ -206,10 +208,91 @@ function renderAll() {
   $("canarySeverity").textContent = canary.severity || "--";
   $("canaryAction").textContent = (canary.action || "--").replaceAll("_", " ");
   $("canarySummary").textContent = canary.summary || "Waiting for canary snapshot.";
+  renderMarketContext(canary);
+  renderCanaryDetail(canary);
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
   renderAlertMode();
   renderAlerts();
+}
+
+function renderAccountValue(account) {
+  const hasValue = typeof account.net_liquidation === "number";
+  const value = $("netLiquidation");
+  value.textContent = state.accountValueVisible || !hasValue
+    ? money(account.net_liquidation, account.base_currency)
+    : "******";
+  value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
+
+  const button = $("accountPrivacyToggle");
+  button.classList.toggle("is-visible", state.accountValueVisible);
+  button.setAttribute("aria-pressed", String(state.accountValueVisible));
+  const label = state.accountValueVisible ? "Hide net liquidation" : "Show net liquidation";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+function renderCanaryDetail(canary) {
+  const panel = $("canaryDetailPanel");
+  const button = $("canaryDetailToggle");
+  panel.hidden = !state.canaryDetailOpen;
+  button.textContent = state.canaryDetailOpen ? "Hide detail" : "Show detail";
+  button.setAttribute("aria-expanded", String(state.canaryDetailOpen));
+  if (!state.canaryDetailOpen) return;
+
+  const detailItems = [
+    ["Market", cleanDetail(canary.market_confirmation || canary.market?.regime_verdict)],
+    ["Portfolio", cleanDetail(canary.portfolio_fit || canary.portfolio?.largest_exposure)],
+    ["Inputs", cleanDetail(canary.input_health)],
+    ["Readiness", cleanDetail(canary.planner_readiness || canary.planner_mode_hint)],
+  ];
+  $("canaryDetailGrid").replaceChildren(...detailItems.map(([label, value]) => detailCard(label, value)));
+
+  const rows = (canary.rows || []).slice(0, 3);
+  $("canaryDrivers").replaceChildren(...rows.map((row) => {
+    const item = document.createElement("div");
+    item.className = "driver-row";
+    const label = document.createElement("span");
+    label.textContent = row.severity ? String(row.severity).replaceAll("_", " ") : "driver";
+    const title = document.createElement("b");
+    title.textContent = row.title || "Canary driver";
+    const body = document.createElement("p");
+    body.textContent = [row.guidance, row.evidence].filter(Boolean).join(" ");
+    item.append(label, title, body);
+    return item;
+  }));
+}
+
+function renderMarketContext(canary) {
+  const market = canary.market || {};
+  $("marketAsOf").textContent = shortTime(canary.as_of);
+  renderSignedPercent("spyChange", market.spy_change_pct, false);
+  renderSignedPercent("vixChange", market.vix_change_pct, true);
+  $("marketRegime").textContent = cleanDetail(market.regime_verdict);
+}
+
+function renderSignedPercent(id, value, positiveIsRisk) {
+  const el = $(id);
+  el.classList.remove("ok", "risk");
+  if (typeof value !== "number") {
+    el.textContent = "--";
+    return;
+  }
+  el.textContent = signedPct(value);
+  const isRisk = positiveIsRisk ? value > 0 : value < 0;
+  const isOk = positiveIsRisk ? value < 0 : value > 0;
+  if (isRisk) el.classList.add("risk");
+  if (isOk) el.classList.add("ok");
+}
+
+function detailCard(label, value) {
+  const item = document.createElement("div");
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  const valueEl = document.createElement("b");
+  valueEl.textContent = value || "--";
+  item.append(labelEl, valueEl);
+  return item;
 }
 
 function renderPortfolioRisk(positions, account) {
@@ -314,6 +397,15 @@ document.querySelectorAll("#alertSegments button").forEach((button) => {
 
 $("enablePushButton").addEventListener("click", enablePush);
 $("retryAuthButton").addEventListener("click", bootstrap);
+$("accountPrivacyToggle").addEventListener("click", () => {
+  state.accountValueVisible = !state.accountValueVisible;
+  localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
+  renderAccountValue(state.snapshot?.account || {});
+});
+$("canaryDetailToggle").addEventListener("click", () => {
+  state.canaryDetailOpen = !state.canaryDetailOpen;
+  renderCanaryDetail(state.snapshot?.canary || {});
+});
 
 document.querySelectorAll("[data-tool]").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -433,6 +525,17 @@ function money(value, currency) {
 function pct(value) {
   if (typeof value !== "number") return "--";
   return value.toFixed(1) + "%";
+}
+
+function signedPct(value) {
+  if (typeof value !== "number") return "--";
+  const sign = value > 0 ? "+" : "";
+  return sign + value.toFixed(1) + "%";
+}
+
+function cleanDetail(value) {
+  if (!value) return "--";
+  return String(value).replaceAll("_", " ");
 }
 
 function shortTime(value) {
