@@ -65,7 +65,7 @@ const (
 	// topStrikesK is the number of concentration rows on the result —
 	// enough for a renderer to draw the "call wall / put wall" view
 	// without flooding the JSON payload.
-	topStrikesK = 8
+	topStrikesK = 10
 
 	// Throttle-signal abort. The option-chain fan-out makes hundreds
 	// of reqContractDetails calls in close succession; the gateway can

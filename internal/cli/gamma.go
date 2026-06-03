@@ -17,12 +17,16 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	force := fs.Bool("force", false, "start a diagnostic refresh; preserve a good served cache unless the refresh succeeds")
 	only := fs.String("only", "", "restrict to a single underlying: 'spy' or 'spx' (default: combined when both reachable)")
 	explain := fs.Bool("explain", false, "show methodology, citations, skew/source/compute metadata, per-bucket breakdown")
+	diagnostics := fs.Bool("diagnostics", false, "with --explain, include source collection diagnostics and low-level quality gates")
 	profiles := fs.Bool("profiles", false, "include full gamma-profile arrays in --json output")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
 		return fail(env, "gamma: takes no positional args (got %v)", fs.Args())
+	}
+	if *diagnostics && !*explain {
+		return fail(env, "gamma: --diagnostics requires --explain")
 	}
 
 	// Default: block up to 3 s for the result. Cached runs return
@@ -70,10 +74,19 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 		}
 		return printJSON(env, res)
 	}
-	return renderGammaText(env, &res, *explain)
+	return renderGammaTextWithOptions(env, &res, gammaRenderOptions{Explain: *explain, Diagnostics: *diagnostics})
+}
+
+type gammaRenderOptions struct {
+	Explain     bool
+	Diagnostics bool
 }
 
 func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
+	return renderGammaTextWithOptions(env, r, gammaRenderOptions{Explain: explain})
+}
+
+func renderGammaTextWithOptions(env *Env, r *rpc.GammaZeroSPXResult, opts gammaRenderOptions) int {
 	out := env.Stdout
 
 	// Hero. For Computing/Error states we still need a header but skip
@@ -168,7 +181,7 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 		if conv == "" {
 			conv = "sign-agnostic"
 		}
-		fmt.Fprintf(out, "  Magnitude   %s per 1%% move  (%s)\n", formatGEX(c.GammaTotalAbs), conv)
+		renderGammaReadyRow(env, "Magnitude", fmt.Sprintf("%s per 1%% move  (%s)", formatGEX(c.GammaTotalAbs), conv))
 	}
 
 	// Monthly OPEX is the third Friday of the month in NY time. Surfaced
@@ -180,13 +193,13 @@ func renderGammaText(env *Env, r *rpc.GammaZeroSPXResult, explain bool) int {
 		fmt.Fprintln(out, "  Calendar    monthly OPEX today — front-week reading is distorted by expiring contracts")
 	}
 
-	renderGammaDataNotes(env, c, explain, spxSkippedBanner)
+	renderGammaDataNotes(env, c, opts, spxSkippedBanner)
 
-	renderGammaTopStrikes(env, c, explain)
+	renderGammaTopStrikes(env, c, opts.Explain)
 
-	if explain {
-		renderGammaExplain(env, c)
-		renderGammaQualityExplain(env, c)
+	if opts.Explain {
+		renderGammaExplain(env, c, opts.Diagnostics)
+		renderGammaQualityExplain(env, c, opts.Diagnostics)
 	}
 
 	fmt.Fprintln(out)
@@ -197,7 +210,11 @@ func renderGammaSignalLine(env *Env, c *rpc.GammaZeroComputed) {
 	if c == nil || c.Quality == nil {
 		return
 	}
-	fmt.Fprintf(env.Stdout, "  Signal      %s\n", gammaSignalLine(c))
+	renderGammaReadyRow(env, "Signal", gammaSignalLine(c))
+}
+
+func renderGammaReadyRow(env *Env, label, value string) {
+	fmt.Fprintf(env.Stdout, "  %-10s %s\n", label, value)
 }
 
 func gammaSignalLine(c *rpc.GammaZeroComputed) string {
@@ -355,11 +372,10 @@ func gammaHeroSummaryStyle(r *rpc.GammaZeroSPXResult) func(*Env, string) string 
 //	SPY  no crossing · long-γ · 1052 legs
 //	SPY  γ-zero $735.00 (+0.5% from spot) · 1052 legs
 func renderGammaPerIndexLines(env *Env, c *rpc.GammaZeroComputed) {
-	out := env.Stdout
 	if c.Scope == rpc.GammaZeroScopeCombined {
 		for _, key := range []string{"SPY", "SPX"} {
 			if sub := c.PerIndex[key]; sub != nil {
-				fmt.Fprintf(out, "  %-5s %s\n", key, formatGammaPerIndexCompact(sub))
+				renderGammaReadyRow(env, key, formatGammaPerIndexCompact(sub))
 				if shouldShowDivergedBuckets(sub) {
 					renderGammaBucketBreakdown(env, "    ", sub)
 				}
@@ -368,7 +384,7 @@ func renderGammaPerIndexLines(env *Env, c *rpc.GammaZeroComputed) {
 		return
 	}
 	label := gammaSpotLabelForScope(c)
-	fmt.Fprintf(out, "  %-5s %s\n", label, formatGammaPerIndexCompact(c))
+	renderGammaReadyRow(env, label, formatGammaPerIndexCompact(c))
 	if shouldShowDivergedBuckets(c) {
 		renderGammaBucketBreakdown(env, "    ", c)
 	}
@@ -522,7 +538,7 @@ func renderGammaBucketBreakdown(env *Env, indent string, c *rpc.GammaZeroCompute
 		formatHorizonGammaLine(c.ZeroGammaTerm, c.GammaSignTerm, c.SpotUnderlying, c.LegCountTerm, "DTE > 7"))
 }
 
-func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, explain bool, spxSkippedBanner bool) {
+func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, opts gammaRenderOptions, spxSkippedBanner bool) {
 	details := gammaWarningDetailsForRender(c)
 	if len(details) == 0 {
 		return
@@ -531,7 +547,7 @@ func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, explain bool, spxS
 	printed := false
 	seen := map[string]struct{}{}
 	for _, d := range details {
-		if !shouldRenderGammaWarningDetail(d, explain, spxSkippedBanner) {
+		if !shouldRenderGammaWarningDetail(d, opts, spxSkippedBanner) {
 			continue
 		}
 		key := d.Scope + "\x00" + d.Code + "\x00" + d.Message
@@ -542,38 +558,54 @@ func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, explain bool, spxS
 		if !printed {
 			fmt.Fprintln(out)
 			heading := "Data notes:"
-			if !explain {
+			if !opts.Explain {
 				heading = "Context:"
 			}
 			fmt.Fprintln(out, env.dim("  "+heading))
 			printed = true
 		}
-		scope := ""
-		if d.Scope != "" {
-			scope = d.Scope + ": "
-		}
-		line := scope + d.Message
-		if d.Impact != "" {
-			line += " " + d.Impact
-		}
+		line := gammaWarningDetailLine(d, opts)
 		fmt.Fprintf(out, "    · %s\n", line)
-		if explain && d.Action != "" {
+		if opts.Explain && d.Action != "" {
 			fmt.Fprintf(out, "      %s\n", env.dim("Action: "+d.Action))
 		}
 	}
 }
 
-func shouldRenderGammaWarningDetail(d rpc.GammaWarningDetail, explain bool, spxSkippedBanner bool) bool {
+func shouldRenderGammaWarningDetail(d rpc.GammaWarningDetail, opts gammaRenderOptions, spxSkippedBanner bool) bool {
 	if d.Code == "no_crossing_in_window" {
 		return false
 	}
 	if strings.HasPrefix(d.Code, "spx_unavailable:") && spxSkippedBanner {
 		return false
 	}
-	if explain {
+	if opts.Diagnostics {
 		return true
 	}
+	if opts.Explain {
+		return shouldRenderGammaWarningDetailExplain(d)
+	}
 	return shouldRenderGammaWarningDetailDefault(d)
+}
+
+func shouldRenderGammaWarningDetailExplain(d rpc.GammaWarningDetail) bool {
+	code := strings.ToLower(strings.TrimSpace(d.Code))
+	switch {
+	case strings.HasPrefix(code, "spx_unavailable:"):
+		return true
+	case strings.HasPrefix(code, "spy_unavailable:"):
+		return true
+	case strings.HasPrefix(code, "spx_cache_fallback"):
+		return true
+	case strings.HasPrefix(code, "refresh_failed:"):
+		return true
+	}
+	switch code {
+	case "cache_stale_off_hours", "throttled", "oi_missing":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRenderGammaWarningDetailDefault(d rpc.GammaWarningDetail) bool {
@@ -596,6 +628,53 @@ func shouldRenderGammaWarningDetailDefault(d rpc.GammaWarningDetail) bool {
 	}
 }
 
+func gammaWarningDetailLine(d rpc.GammaWarningDetail, opts gammaRenderOptions) string {
+	code := strings.ToLower(strings.TrimSpace(d.Code))
+	if !opts.Diagnostics && strings.HasPrefix(code, "spx_cache_fallback") {
+		return gammaSPXCacheFallbackContextLine(time.Now())
+	}
+	scope := ""
+	if d.Scope != "" {
+		scope = d.Scope + ": "
+	}
+	line := scope + d.Message
+	if d.Impact != "" {
+		line += " " + d.Impact
+	}
+	return line
+}
+
+func gammaSPXCacheFallbackContextLine(now time.Time) string {
+	if rpc.ClassifySession(now) == rpc.SessionRTH {
+		return "SPX: regular option hours; using cached SPX slice because refresh did not land."
+	}
+	return fmt.Sprintf("SPX: %s; using cached SPX slice.", gammaOptionsMarketPhase(now))
+}
+
+func gammaOptionsMarketPhase(now time.Time) string {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return rpc.ClassifySession(now).String()
+	}
+	t := now.In(ny)
+	switch rpc.ClassifySession(now) {
+	case rpc.SessionPre:
+		return "pre-market (options closed)"
+	case rpc.SessionRTH:
+		return "regular option hours"
+	case rpc.SessionPost:
+		return "post-market (options closed)"
+	default:
+		if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
+			return "weekend (options closed)"
+		}
+		if t.Hour() < 4 || t.Hour() >= 20 {
+			return "overnight (options closed)"
+		}
+		return "options closed"
+	}
+}
+
 func renderGammaTopStrikes(env *Env, c *rpc.GammaZeroComputed, explain bool) {
 	if c == nil {
 		return
@@ -610,30 +689,186 @@ func renderGammaTopStrikes(env *Env, c *rpc.GammaZeroComputed, explain bool) {
 	if note != "" {
 		fmt.Fprintln(out, env.dim("  "+note))
 	}
+	fmt.Fprintln(out)
+	spotByUnderlying := gammaTopStrikeSpotByUnderlying(c)
+	asOfByUnderlying := gammaTopStrikeAsOfByUnderlying(c)
 	var header string
 	if showIndex {
-		header = fmt.Sprintf("    %-5s  %-12s  %8s  %5s  %12s  %12s  %10s",
-			"INDEX", "EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
+		header = fmt.Sprintf("    %-3s  %-10s %3s %6s %6s %3s %9s %9s %7s",
+			"IDX", "Expiry", "DTE", "STRK", "SPOT", "C/P", "|GEX|", "NOTIONAL", "OI")
 	} else {
-		header = fmt.Sprintf("    %-12s  %8s  %5s  %12s  %12s  %10s",
-			"EXPIRY", "STRIKE", "RIGHT", "|GEX|", "NOTIONAL", "OI")
+		header = fmt.Sprintf("    %-10s %3s %6s %6s %3s %9s %9s %7s",
+			"Expiry", "DTE", "STRK", "SPOT", "C/P", "|GEX|", "NOTIONAL", "OI")
 	}
 	fmt.Fprintln(out, env.dim(header))
 	fmt.Fprintln(out, env.dim("    "+strings.Repeat("─", visibleLen(header)-4)))
-	for _, ts := range rows {
-		notional := float64(ts.OI) * ts.Strike * 100
-		if showIndex {
-			idx := ts.Underlying
-			if idx == "" {
-				idx = "—"
-			}
-			fmt.Fprintf(out, "    %-5s  %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
-				idx, ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
-			continue
+	for i, ts := range rows {
+		line := formatGammaTopStrikeRow(
+			ts,
+			showIndex,
+			gammaTopStrikeSpot(c, spotByUnderlying, ts),
+			gammaTopStrikeAsOf(c, asOfByUnderlying, ts),
+		)
+		if shouldHighlightGammaTopStrike(rows, i) {
+			line = env.bold(line)
 		}
-		fmt.Fprintf(out, "    %-12s  %8.0f  %5s  %12s  %12s  %10d\n",
-			ts.Expiry, ts.Strike, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+		fmt.Fprintln(out, line)
 	}
+}
+
+func formatGammaTopStrikeRow(ts rpc.StrikeConcentration, showIndex bool, spot float64, asOf time.Time) string {
+	notional := float64(ts.OI) * ts.Strike * 100
+	expiry := formatGammaStrikeExpiry(ts.Expiry)
+	dte := formatGammaStrikeDTE(ts.Expiry, asOf)
+	delta := formatGammaStrikeSpotDelta(ts.Strike, spot)
+	if showIndex {
+		idx := ts.Underlying
+		if idx == "" {
+			idx = "—"
+		}
+		return fmt.Sprintf("    %-3s  %-10s %3s %6.0f %6s %3s %9s %9s %7d",
+			idx, expiry, dte, ts.Strike, delta, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+	}
+	return fmt.Sprintf("    %-10s %3s %6.0f %6s %3s %9s %9s %7d",
+		expiry, dte, ts.Strike, delta, ts.Right, formatGEX(ts.AbsGEX), formatGEX(notional), ts.OI)
+}
+
+func gammaTopStrikeSpotByUnderlying(c *rpc.GammaZeroComputed) map[string]float64 {
+	spots := map[string]float64{}
+	if c == nil {
+		return spots
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined {
+		for key, sub := range c.PerIndex {
+			if sub != nil && sub.SpotUnderlying > 0 {
+				spots[key] = sub.SpotUnderlying
+			}
+		}
+		return spots
+	}
+	if c.SpotUnderlying > 0 {
+		label := gammaSpotLabelForScope(c)
+		spots[label] = c.SpotUnderlying
+		for _, ts := range c.TopStrikes {
+			if ts.Underlying != "" {
+				spots[ts.Underlying] = c.SpotUnderlying
+			}
+		}
+	}
+	return spots
+}
+
+func gammaTopStrikeAsOfByUnderlying(c *rpc.GammaZeroComputed) map[string]time.Time {
+	asOfs := map[string]time.Time{}
+	if c == nil {
+		return asOfs
+	}
+	if c.Scope == rpc.GammaZeroScopeCombined {
+		for key, sub := range c.PerIndex {
+			if sub != nil && !sub.AsOf.IsZero() {
+				asOfs[key] = sub.AsOf
+			}
+		}
+		return asOfs
+	}
+	if !c.AsOf.IsZero() {
+		label := gammaSpotLabelForScope(c)
+		asOfs[label] = c.AsOf
+		for _, ts := range c.TopStrikes {
+			if ts.Underlying != "" {
+				asOfs[ts.Underlying] = c.AsOf
+			}
+		}
+	}
+	return asOfs
+}
+
+func gammaTopStrikeSpot(c *rpc.GammaZeroComputed, spotByUnderlying map[string]float64, ts rpc.StrikeConcentration) float64 {
+	if ts.Underlying != "" {
+		if spot := spotByUnderlying[ts.Underlying]; spot > 0 {
+			return spot
+		}
+	}
+	if c != nil && c.Scope != rpc.GammaZeroScopeCombined && c.SpotUnderlying > 0 {
+		return c.SpotUnderlying
+	}
+	if len(spotByUnderlying) == 1 {
+		for _, spot := range spotByUnderlying {
+			return spot
+		}
+	}
+	return 0
+}
+
+func gammaTopStrikeAsOf(c *rpc.GammaZeroComputed, asOfByUnderlying map[string]time.Time, ts rpc.StrikeConcentration) time.Time {
+	if ts.Underlying != "" {
+		if asOf := asOfByUnderlying[ts.Underlying]; !asOf.IsZero() {
+			return asOf
+		}
+	}
+	if c != nil && c.Scope != rpc.GammaZeroScopeCombined && !c.AsOf.IsZero() {
+		return c.AsOf
+	}
+	if len(asOfByUnderlying) == 1 {
+		for _, asOf := range asOfByUnderlying {
+			return asOf
+		}
+	}
+	return time.Time{}
+}
+
+func formatGammaStrikeSpotDelta(strike, spot float64) string {
+	if strike <= 0 || spot <= 0 {
+		return "—"
+	}
+	pct := (strike - spot) / spot * 100
+	if math.Abs(pct) < 0.05 {
+		return "ATM"
+	}
+	return fmt.Sprintf("%+.1f%%", pct)
+}
+
+func formatGammaStrikeExpiry(expiry string) string {
+	t, err := time.Parse("2006-01-02", strings.TrimSpace(expiry))
+	if err != nil {
+		return ifNonEmpty(strings.TrimSpace(expiry), "—")
+	}
+	return t.Format("2006-01-02")
+}
+
+func formatGammaStrikeDTE(expiry string, asOf time.Time) string {
+	if strings.TrimSpace(expiry) == "" || asOf.IsZero() {
+		return "—"
+	}
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		ny = time.UTC
+	}
+	expiryDate, err := time.ParseInLocation("2006-01-02", expiry, ny)
+	if err != nil {
+		return "—"
+	}
+	snap := asOf.In(ny)
+	snapDate := time.Date(snap.Year(), snap.Month(), snap.Day(), 0, 0, 0, 0, ny)
+	days := int(expiryDate.Sub(snapDate).Hours() / 24)
+	switch {
+	case days < 0:
+		return "exp"
+	case days == 0:
+		return "0"
+	default:
+		return fmt.Sprintf("%d", days)
+	}
+}
+
+func shouldHighlightGammaTopStrike(rows []rpc.StrikeConcentration, i int) bool {
+	if i == 0 {
+		return true
+	}
+	if i >= 3 || len(rows) == 0 || rows[0].AbsGEX <= 0 {
+		return false
+	}
+	return rows[i].AbsGEX >= rows[0].AbsGEX*0.5
 }
 
 func gammaTopStrikesForRender(c *rpc.GammaZeroComputed, explain bool) ([]rpc.StrikeConcentration, string, string, bool) {
@@ -642,25 +877,25 @@ func gammaTopStrikesForRender(c *rpc.GammaZeroComputed, explain bool) ([]rpc.Str
 	}
 	if c.Scope == rpc.GammaZeroScopeCombined {
 		if explain {
-			return c.TopStrikes, "Top strikes by |Γ|·OI (SPY+SPX diagnostic):", "", true
+			return c.TopStrikes, "Top strikes by |GEX| (SPY+SPX diagnostic):", "", true
 		}
 		spx := c.PerIndex["SPX"]
 		if spx == nil || len(spx.TopStrikes) == 0 {
 			return nil, "", "", false
 		}
 		return spx.TopStrikes,
-			"Top SPX strikes by |Γ|·OI (canonical concentration):",
+			"Top SPX strikes by |GEX| (canonical concentration):",
 			"SPY context strikes are available with --explain or `ibkr gamma --only=spy`.",
 			false
 	}
 	label := gammaSpotLabelForScope(c)
 	if gammaIsSPYProxy(c) {
 		return c.TopStrikes,
-			"Top SPY proxy strikes by |Γ|·OI:",
+			"Top SPY proxy strikes by |GEX|:",
 			"SPX is unavailable; treat this as proxy context, not canonical S&P dealer gamma.",
 			false
 	}
-	return c.TopStrikes, fmt.Sprintf("Top %s strikes by |Γ|·OI:", label), "", false
+	return c.TopStrikes, fmt.Sprintf("Top %s strikes by |GEX|:", label), "", false
 }
 
 func gammaWarningDetailsForRender(c *rpc.GammaZeroComputed) []rpc.GammaWarningDetail {
@@ -898,13 +1133,12 @@ func spyUnavailableAction(reason string) string {
 // breakdown, methodology/source/compute metadata block, citations, and
 // the sign-convention disclosure. Sequenced so a reader scans from the
 // most-actionable (per-bucket detail) down to the methodology footer.
-func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
+func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed, diagnostics bool) {
 	out := env.Stdout
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  How to read"))
-	fmt.Fprintln(out, env.dim("    · γ-zero is the signed profile crossing, when one exists inside the swept range."))
-	fmt.Fprintln(out, env.dim("    · No crossing means the model stayed long-γ or short-γ throughout that range."))
-	fmt.Fprintln(out, env.dim("    · This is market-structure context, not a trade recommendation."))
+	fmt.Fprintln(out, env.dim("    · γ-zero is the signed-profile crossing inside the swept range; no crossing means the whole sweep stayed long-γ/short-γ."))
+	fmt.Fprintln(out, env.dim("    · Market-structure context, not a trade recommendation."))
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  Per-bucket γ-zero (horizon split):"))
@@ -920,14 +1154,12 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  Scope       %s · ±%.0f%% candidate window · up to 80 strikes/expiry · %d expirations\n",
-		gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations))
+	fmt.Fprintf(out, "  Method      %s · ±%.0f%% sweep · 80 strikes/expiry · %d expirations · %d GEX legs",
+		gammaScopeLabel(c), c.Params.StrikeWidthPct*100, len(c.Expirations), c.LegCount)
 	if c.PricedLegCount > 0 && c.PricedLegCount != c.LegCount {
-		fmt.Fprintf(out, "  Leg count   %d GEX legs (%d priced) across %d expirations\n",
-			c.LegCount, c.PricedLegCount, len(c.Expirations))
-	} else {
-		fmt.Fprintf(out, "  Leg count   %d GEX legs across %d expirations\n", c.LegCount, len(c.Expirations))
+		fmt.Fprintf(out, " (%d priced)", c.PricedLegCount)
 	}
+	fmt.Fprintln(out)
 	if c.SkewModel != "" {
 		fmt.Fprintf(out, "  Skew model  %s", c.SkewModel)
 		if n := len(c.SkewFitQuality); n > 0 {
@@ -949,14 +1181,20 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 		fmt.Fprintf(out, "  Derived IV  %d/%d priced legs back-solved via Black-Scholes from option quotes/closes\n",
 			c.DerivedIVLegs, denom)
 	}
-	fmt.Fprintf(out, "  Method      %s\n", c.Method)
-	fmt.Fprintf(out, "  Source      %s\n", c.Source)
-	if c.DurationMS > 0 {
+	if diagnostics && c.Method != "" {
+		fmt.Fprintf(out, "  Model       %s\n", c.Method)
+	}
+	if diagnostics && c.Source != "" {
+		fmt.Fprintf(out, "  Source      %s\n", c.Source)
+	}
+	if diagnostics && c.DurationMS > 0 {
 		fmt.Fprintf(out, "  Compute     %s\n", formatDuration(int(c.DurationMS/1000)))
 	}
-	renderGammaSourceDiagnostics(env, c)
+	if diagnostics {
+		renderGammaSourceDiagnostics(env, c)
+	}
 
-	if len(c.MethodologyCitations) > 0 {
+	if diagnostics && len(c.MethodologyCitations) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "  Citations")
 		for _, ref := range c.MethodologyCitations {
@@ -969,15 +1207,11 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed) {
 	// level. The wire shape matches this: price-level fields stay
 	// under per_index.SPY / per_index.SPX.
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, env.dim("  Scaling     SPY contributes ~1/100 of SPX dollar-gamma per equivalent leg (S² scaling);"))
-	fmt.Fprintln(out, env.dim("              combined |Γ|·OI sums the books, but zero-gamma levels stay per-index"))
-	fmt.Fprintln(out, env.dim("              because SPY and SPX use different price scales."))
+	fmt.Fprintln(out, env.dim("  Scale       combined |Γ|·OI sums SPY/SPX books; zero-gamma levels stay per-index because price scales differ (SPY ≈ 1/100 SPX per equivalent leg via S²)."))
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, env.dim("  Disclosure: the signed γ-zero assumes the 2018 \"dealers long calls,"))
-	fmt.Fprintln(out, env.dim("  short puts\" convention. In regimes dominated by covered-call ETFs or"))
-	fmt.Fprintln(out, env.dim("  autocall hedging the sign can invert; treat it as a regime hint, not"))
-	fmt.Fprintln(out, env.dim("  a trade level. The magnitude signal above is sign-convention agnostic."))
+	fmt.Fprintln(out, env.dim("  Disclosure  signed γ-zero uses the legacy dealer long-calls/short-puts convention; sign can invert under flow asymmetry."))
+	fmt.Fprintln(out, env.dim("              Magnitude is sign-convention agnostic."))
 }
 
 func renderGammaSourceDiagnostics(env *Env, c *rpc.GammaZeroComputed) {
@@ -1063,12 +1297,26 @@ func gammaCollectionCapSummary(row rpc.GammaCollectionDiagnostic) string {
 	return strings.Join(parts, " · ")
 }
 
-func renderGammaQualityExplain(env *Env, c *rpc.GammaZeroComputed) {
+func renderGammaQualityExplain(env *Env, c *rpc.GammaZeroComputed, diagnostics bool) {
 	if c == nil || c.Quality == nil {
 		return
 	}
 	q := c.Quality
 	out := env.Stdout
+	if !diagnostics {
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "  Quality     %s\n", gammaQualityConciseLine(q))
+		if q.Rankability != rpc.GammaRankabilityRankable && q.RankabilityReason != "" {
+			fmt.Fprintf(out, "  Reason      %s\n", gammaPlainQualityReason(q))
+		}
+		cov := q.Coverage
+		if cov.PricedLegs > 0 {
+			fmt.Fprintf(out, "  Coverage    priced %d · OI observed %.1f%% · GEX legs %d\n",
+				cov.PricedLegs, cov.OIObservedPct, cov.GEXLegs)
+		}
+		return
+	}
+
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  Signal quality"))
 	fmt.Fprintf(out, "    Rankability %s\n", q.Rankability)
@@ -1120,6 +1368,61 @@ func renderGammaQualityExplain(env *Env, c *rpc.GammaZeroComputed) {
 			}
 			fmt.Fprintf(out, "      · %s: %s%s\n", g.Name, g.Status, reason)
 		}
+	}
+}
+
+func gammaQualityConciseLine(q *rpc.GammaSignalQuality) string {
+	if q == nil {
+		return "unknown"
+	}
+	parts := []string{gammaRankabilityLabel(q.Rankability)}
+	if q.Freshness != "" {
+		parts = append(parts, gammaFreshnessLabel(q.Freshness))
+	}
+	if q.Session != "" {
+		parts = append(parts, gammaSessionShortLabel(q.Session))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func gammaRankabilityLabel(rankability string) string {
+	switch rankability {
+	case rpc.GammaRankabilityRankable:
+		return "rankable"
+	case rpc.GammaRankabilityContextOnly:
+		return "context only"
+	case rpc.GammaRankabilityBlocked:
+		return "blocked"
+	case rpc.GammaRankabilityUnavailable:
+		return "unavailable"
+	default:
+		return ifNonEmpty(rankability, "unknown")
+	}
+}
+
+func gammaFreshnessLabel(freshness string) string {
+	switch freshness {
+	case "closed_session_context":
+		return "closed-session context"
+	case "session_mismatch":
+		return "session mismatch"
+	default:
+		return strings.ReplaceAll(ifNonEmpty(freshness, "freshness unknown"), "_", " ")
+	}
+}
+
+func gammaSessionShortLabel(session string) string {
+	switch session {
+	case rpc.SessionPre.String():
+		return "pre-market"
+	case rpc.SessionRTH.String():
+		return "RTH"
+	case rpc.SessionPost.String():
+		return "post-market"
+	case rpc.SessionClosed.String():
+		return "closed"
+	default:
+		return strings.ReplaceAll(ifNonEmpty(session, "session unknown"), "_", " ")
 	}
 }
 
@@ -1526,9 +1829,9 @@ func formatRegimeAgreement(c *rpc.GammaZeroComputed) string {
 	}
 	switch c.RegimeAgreement {
 	case "agree:long-gamma":
-		return "SPY and SPX both long-γ (stabilizing regime · agreement)"
+		return "long-γ (stabilizing regime)" + formatAgreementNoCrossingSuffix(c, "positive") + " · SPY/SPX agree"
 	case "agree:short-gamma":
-		return "SPY and SPX both short-γ (amplifying regime · agreement)"
+		return "short-γ (amplifying regime)" + formatAgreementNoCrossingSuffix(c, "negative") + " · SPY/SPX agree"
 	case "agree:transition-gamma":
 		spy := c.PerIndex["SPY"]
 		spx := c.PerIndex["SPX"]
@@ -1541,6 +1844,19 @@ func formatRegimeAgreement(c *rpc.GammaZeroComputed) string {
 		return formatRegimeDisagreement(c)
 	}
 	return "indeterminate (insufficient per-index data)"
+}
+
+func formatAgreementNoCrossingSuffix(c *rpc.GammaZeroComputed, sign string) string {
+	if c == nil {
+		return ""
+	}
+	for _, key := range []string{"SPY", "SPX"} {
+		sub := c.PerIndex[key]
+		if sub == nil || sub.ZeroGamma != nil || sub.GammaSign != sign {
+			return ""
+		}
+	}
+	return " · no γ-zero transition found in sweep"
 }
 
 // formatRegimeDisagreement renders the actionable case — one index
