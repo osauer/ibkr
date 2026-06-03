@@ -294,7 +294,7 @@ func TestRenderGamma_HeroSummaryColorFollowsRegime(t *testing.T) {
 			t.Fatalf("code=%d", code)
 		}
 		out := stdout.String()
-		if !strings.Contains(out, ansiBold+ansiGreen+"SPY and SPX both long-γ") {
+		if !strings.Contains(out, ansiBold+ansiGreen+"long-γ (stabilizing regime)") {
 			t.Fatalf("long-gamma hero summary should be bold green:\n%q", out)
 		}
 	})
@@ -313,7 +313,7 @@ func TestRenderGamma_HeroSummaryColorFollowsRegime(t *testing.T) {
 			t.Fatalf("code=%d", code)
 		}
 		out := stdout.String()
-		if !strings.Contains(out, ansiBold+ansiRed+"SPY and SPX both short-γ") {
+		if !strings.Contains(out, ansiBold+ansiRed+"short-γ (amplifying regime)") {
 			t.Fatalf("short-gamma hero summary should be bold red:\n%q", out)
 		}
 	})
@@ -367,8 +367,10 @@ func TestRenderGamma_DefaultUsesPlainSignalReadout(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Signal      after-hours context · valid cached snapshot, not fresh confirmation",
-		"SPY and SPX both long-γ",
+		"Signal     after-hours context · valid cached snapshot, not fresh confirmation",
+		"long-γ (stabilizing regime)",
+		"no γ-zero transition found in sweep",
+		"SPY/SPX agree",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("default render missing %q:\n%s", want, out)
@@ -428,11 +430,28 @@ func TestRenderGamma_DefaultFiltersDiagnosticDataNotes(t *testing.T) {
 	explain := stdout.String()
 	for _, want := range []string{
 		"Open-interest ticks were missing",
-		"nearest 80",
 		"Action: Check TWS",
 	} {
 		if !strings.Contains(explain, want) {
 			t.Errorf("--explain should retain diagnostic note %q:\n%s", want, explain)
+		}
+	}
+	if strings.Contains(explain, "nearest 80") {
+		t.Errorf("--explain should hide low-level strike cap diagnostics:\n%s", explain)
+	}
+
+	stdout.Reset()
+	if code := renderGammaTextWithOptions(env, fix, gammaRenderOptions{Explain: true, Diagnostics: true}); code != 0 {
+		t.Fatalf("diagnostics code=%d", code)
+	}
+	diagnostics := stdout.String()
+	for _, want := range []string{
+		"Open-interest ticks were missing",
+		"nearest 80",
+		"Action: Check TWS",
+	} {
+		if !strings.Contains(diagnostics, want) {
+			t.Errorf("--diagnostics should retain diagnostic note %q:\n%s", want, diagnostics)
 		}
 	}
 }
@@ -456,8 +475,7 @@ func TestRenderGamma_DefaultRendersCacheFallbackAsContext(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Context:",
-		"SPX live refresh timed out",
-		"quality.rankability controls",
+		"using cached SPX slice",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("default cache fallback render missing %q:\n%s", want, out)
@@ -465,10 +483,49 @@ func TestRenderGamma_DefaultRendersCacheFallbackAsContext(t *testing.T) {
 	}
 	for _, banned := range []string{
 		"Data notes:",
+		"live refresh",
+		"quality.rankability",
+		"not fresh confirmation",
 		"treat the combined gamma regime as degraded",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("default cache fallback render leaked %q:\n%s", banned, out)
+		}
+	}
+
+	stdout.Reset()
+	if code := renderGammaText(env, fix, true); code != 0 {
+		t.Fatalf("explain code=%d", code)
+	}
+	explain := stdout.String()
+	for _, want := range []string{
+		"Data notes:",
+		"using cached SPX slice",
+	} {
+		if !strings.Contains(explain, want) {
+			t.Errorf("--explain cache fallback render missing %q:\n%s", want, explain)
+		}
+	}
+	for _, banned := range []string{
+		"live refresh",
+		"quality.rankability",
+		"not fresh confirmation",
+	} {
+		if strings.Contains(explain, banned) {
+			t.Errorf("--explain cache fallback render leaked %q:\n%s", banned, explain)
+		}
+	}
+}
+
+func TestGammaSPXCacheFallbackContextLineNamesMarketPhase(t *testing.T) {
+	t.Parallel()
+	got := gammaSPXCacheFallbackContextLine(time.Date(2026, 6, 3, 2, 30, 0, 0, time.FixedZone("EDT", -4*60*60)))
+	for _, want := range []string{
+		"overnight (options closed)",
+		"using cached SPX slice",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cache fallback context missing %q: %q", want, got)
 		}
 	}
 }
@@ -504,9 +561,11 @@ func TestRenderGamma_DefaultShowsCanonicalSPXTopStrikes(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Top SPX strikes by |Γ|·OI (canonical concentration):",
+		"Top SPX strikes by |GEX| (canonical concentration):",
 		"SPY context strikes are available with --explain or `ibkr gamma --only=spy`.",
-		"2026-05-29        5400      C",
+		"DTE",
+		"SPOT",
+		"2026-05-29   6   5400  -0.6%   C",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("default render missing SPX top-strike marker %q:\n%s", want, out)
@@ -514,11 +573,70 @@ func TestRenderGamma_DefaultShowsCanonicalSPXTopStrikes(t *testing.T) {
 	}
 	for _, banned := range []string{
 		"INDEX",
-		"2026-05-29        740      P",
+		"2026-05-29   6    740  -0.5%   P",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("default combined render should not show %q:\n%s", banned, out)
 		}
+	}
+}
+
+func TestFormatGammaStrikeSpotDelta(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		strike float64
+		spot   float64
+		want   string
+	}{
+		{"below", 5400, 5430, "-0.6%"},
+		{"above", 5500, 5430, "+1.3%"},
+		{"atm", 5430.5, 5430, "ATM"},
+		{"unknown", 5400, 0, "—"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatGammaStrikeSpotDelta(tc.strike, tc.spot); got != tc.want {
+				t.Fatalf("formatGammaStrikeSpotDelta(%v, %v) = %q, want %q", tc.strike, tc.spot, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatGammaStrikeDTEUsesSnapshotDate(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, 6, 2, 21, 20, 0, 0, time.FixedZone("CEST", 2*60*60))
+	cases := []struct {
+		name   string
+		expiry string
+		asOf   time.Time
+		want   string
+	}{
+		{"same_day", "2026-06-02", asOf, "0"},
+		{"next_day", "2026-06-03", asOf, "1"},
+		{"six_days", "2026-06-08", asOf, "6"},
+		{"expired", "2026-06-01", asOf, "exp"},
+		{"unknown", "2026-06-02", time.Time{}, "—"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatGammaStrikeDTE(tc.expiry, tc.asOf); got != tc.want {
+				t.Fatalf("formatGammaStrikeDTE(%q, %v) = %q, want %q", tc.expiry, tc.asOf, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderGamma_HighlightsTopStrikeConcentration(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	if code := renderGammaText(env, gammaReadyFixture(), false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, ansiBold+"    2026-05-29") {
+		t.Fatalf("top strike row should be bold-highlighted:\n%q", out)
 	}
 }
 
@@ -594,10 +712,10 @@ func TestRenderGamma_ColdRendersDaemonReason(t *testing.T) {
 	}
 }
 
-// TestRenderGamma_ExplainSurfacesMetadata pins B6: with --explain set,
-// the methodology block + citations + sign-convention disclosure all
-// render. The citations come verbatim from MethodologyCitations.
-func TestRenderGamma_ExplainSurfacesMetadata(t *testing.T) {
+// TestRenderGamma_ExplainIsConcise pins the default --explain contract:
+// interpretation and methodology stay visible, while source diagnostics,
+// citations, and raw gate dumps move behind --diagnostics.
+func TestRenderGamma_ExplainIsConcise(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
@@ -606,20 +724,29 @@ func TestRenderGamma_ExplainSurfacesMetadata(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Method      bs-gamma-profile-v3-stickymoneyness-0dte-split",
-		"Source      SPY+SPX",
-		"Leg count   3202",
-		"Citations",
-		"Perfiliev (2022) — BS-sweep baseline",
-		"Cboe 2025 — 0DTE",
-		"Disclosure:",
-		"Signal quality",
-		"Rankability rankable",
-		"Gates",
-		"freshness: pass",
+		"How to read",
+		"Per-bucket γ-zero",
+		"Method      SPY + SPX · ±10% sweep · 80 strikes/expiry · 2 expirations · 3202 GEX legs",
+		"Quality     rankable · fresh · RTH",
+		"Scale",
+		"Disclosure",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"Citations",
+		"Perfiliev (2022)",
+		"Source diagnostics",
+		"Signal quality",
+		"Rankability rankable",
+		"Gates",
+		"Source      SPY+SPX",
+		"freshness: pass",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("--explain output leaked diagnostic phrase %q:\n%s", banned, out)
 		}
 	}
 }
@@ -633,10 +760,12 @@ func TestRenderGamma_ExplainShowsCombinedTopStrikesWithIndex(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Top strikes by |Γ|·OI (SPY+SPX diagnostic):",
-		"INDEX",
-		"SPX    2026-05-29        5400      C",
-		"SPY    2026-05-29         740      P",
+		"Top strikes by |GEX| (SPY+SPX diagnostic):",
+		"IDX",
+		"DTE",
+		"SPOT",
+		"SPX  2026-05-29   6   5400  -0.6%   C",
+		"SPY  2026-05-29   6    740  -0.5%   P",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain combined top strikes missing %q:\n%s", want, out)
@@ -686,8 +815,8 @@ func TestRenderGamma_SPXUnavailableLabelsSPYProxyStrikes(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"SPX skipped",
-		"Signal      SPY proxy only",
-		"Top SPY proxy strikes by |Γ|·OI:",
+		"Signal     SPY proxy only",
+		"Top SPY proxy strikes by |GEX|:",
 		"SPX is unavailable; treat this as proxy context, not canonical S&P dealer gamma.",
 	} {
 		if !strings.Contains(out, want) {
@@ -696,7 +825,7 @@ func TestRenderGamma_SPXUnavailableLabelsSPYProxyStrikes(t *testing.T) {
 	}
 }
 
-func TestRenderGamma_ExplainSurfacesSourceDiagnostics(t *testing.T) {
+func TestRenderGamma_DiagnosticsSurfacesSourceDiagnostics(t *testing.T) {
 	t.Parallel()
 	fix := gammaReadyFixture()
 	fix.Result.CollectionDiagnostics = []rpc.GammaCollectionDiagnostic{{
@@ -726,6 +855,14 @@ func TestRenderGamma_ExplainSurfacesSourceDiagnostics(t *testing.T) {
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	if code := renderGammaText(env, fix, true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if strings.Contains(stdout.String(), "Source diagnostics") {
+		t.Fatalf("--explain should not show source diagnostics by default:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	if code := renderGammaTextWithOptions(env, fix, gammaRenderOptions{Explain: true, Diagnostics: true}); code != 0 {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
@@ -758,8 +895,8 @@ func TestRenderGamma_DefaultShowsPerIndexCompact(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"SPY   no crossing · long-γ · 1052 GEX legs",
-		"SPX   no crossing · long-γ · 2150 GEX legs",
+		"SPY        no crossing · long-γ · 1052 GEX legs",
+		"SPX        no crossing · long-γ · 2150 GEX legs",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("per-index compact line missing %q:\n%s", want, out)
@@ -812,7 +949,7 @@ func TestGammaHeroSummary_SingleAndCombined(t *testing.T) {
 		input *rpc.GammaZeroSPXResult
 		want  string
 	}{
-		{"combined", mk(rpc.GammaZeroScopeCombined, "positive", nil), "SPY and SPX both long-γ"},
+		{"combined", mk(rpc.GammaZeroScopeCombined, "positive", nil), "long-γ (stabilizing regime)"},
 		{"spy_only_long", mk(rpc.GammaZeroScopeSPY, "positive", nil), "SPY long-γ"},
 		{"spx_only_short", mk(rpc.GammaZeroScopeSPX, "negative", nil), "SPX short-γ"},
 	}
@@ -839,9 +976,9 @@ func TestRenderGamma_ExplainCarriesScalingCaveat(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Scaling",
-		"S² scaling",
-		"combined |Γ|·OI sums the books",
+		"Scale",
+		"via S²",
+		"combined |Γ|·OI sums SPY/SPX books",
 		"zero-gamma levels stay per-index",
 	} {
 		if !strings.Contains(out, want) {

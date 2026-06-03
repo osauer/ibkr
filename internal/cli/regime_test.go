@@ -1354,7 +1354,7 @@ func TestRegimeRow_GammaCombinedUsesPerIndexSummary(t *testing.T) {
 	if strings.Contains(row.value, "spot 743.73") {
 		t.Errorf("combined-scope row must not invent a top-level SPY spot: %q", row.value)
 	}
-	if !strings.Contains(row.value, "SPY and SPX both long-γ") {
+	if !strings.Contains(row.value, "long-γ (stabilizing regime)") || !strings.Contains(row.value, "SPY/SPX agree") {
 		t.Errorf("combined-scope row should surface per-index agreement: %q", row.value)
 	}
 	if !strings.Contains(row.value, "|Γ|·OI") {

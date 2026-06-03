@@ -780,6 +780,20 @@ func TestRankTopStrikesByAbsGEX(t *testing.T) {
 	if got := rankTopStrikesByAbsGEX(legs, 5000, 0, "TEST"); got != nil {
 		t.Errorf("k=0: got %v, want nil", got)
 	}
+
+	many := make([]legData, 12)
+	for i := range many {
+		many[i] = legData{
+			expiryYMD:       "20260619",
+			strike:          5000 + float64(i*5),
+			right:           "C",
+			oi:              int64(1_000 + i),
+			gammaAtSnapshot: 0.001 + float64(i)*0.0001,
+		}
+	}
+	if got := rankTopStrikesByAbsGEX(many, 5000, topStrikesK, "TEST"); len(got) != 10 {
+		t.Errorf("topStrikesK rows = %d, want 10", len(got))
+	}
 }
 
 // TestThrottleDetected pins the throttle-abort threshold and sample-size
