@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/csv"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,9 +26,187 @@ func fetchFREDSeries(ctx context.Context, seriesID string) ([]regimeSeriesPoint,
 	return fetchCSVSeries(ctx, u, seriesID, "2006-01-02")
 }
 
+func fetchOfficialRegimeSeries(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+	switch seriesID {
+	case fredSeriesCP3M:
+		return fetchFedCommercialPaper90AAFinancial(ctx)
+	case fredSeriesTBill3M:
+		return fetchTreasury13WeekBill(ctx)
+	default:
+		return fetchFREDSeries(ctx, seriesID)
+	}
+}
+
 func fetchCBOEVVIXSeries(ctx context.Context) ([]regimeSeriesPoint, error) {
 	const u = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VVIX_History.csv"
 	return fetchCSVSeries(ctx, u, "VVIX", "01/02/2006")
+}
+
+var fedCommercialPaperRatesURL = "https://www.federalreserve.gov/datadownload/Output.aspx?rel=CP&series=593ce926936cbd64b3c79b960a792b85&lastobs=270&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package"
+
+var treasuryBillRatesXMLURL = func(month string) string {
+	return "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_bill_rates&field_tdr_date_value_month=" + url.QueryEscape(month)
+}
+
+func fetchFedCommercialPaper90AAFinancial(ctx context.Context) ([]regimeSeriesPoint, error) {
+	return fetchFedDDPSeries(ctx, fedCommercialPaperRatesURL, "RIFSPPFAAD90_N.B")
+}
+
+func fetchFedDDPSeries(ctx context.Context, endpoint, valueColumn string) ([]regimeSeriesPoint, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Go-http-client/1.1")
+	resp, err := regimeHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GET %s: HTTP %s", endpoint, resp.Status)
+	}
+	points, err := parseFedDDPSeriesCSV(resp.Body, valueColumn)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", valueColumn, err)
+	}
+	return points, nil
+}
+
+func parseFedDDPSeriesCSV(r io.Reader, valueColumn string) ([]regimeSeriesPoint, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1
+	dateIdx := -1
+	valueIdx := -1
+	var out []regimeSeriesPoint
+	for {
+		rec, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read CSV row: %w", err)
+		}
+		for i, h := range rec {
+			h = strings.TrimPrefix(strings.TrimSpace(h), "\ufeff")
+			switch {
+			case strings.EqualFold(h, "Time Period"):
+				dateIdx = i
+			case strings.EqualFold(h, valueColumn):
+				valueIdx = i
+			}
+		}
+		if dateIdx < 0 || valueIdx < 0 {
+			continue
+		}
+		if len(rec) <= dateIdx || len(rec) <= valueIdx {
+			continue
+		}
+		rawDate := strings.TrimSpace(rec[dateIdx])
+		rawValue := strings.TrimSpace(rec[valueIdx])
+		if rawDate == "" || rawValue == "" || rawValue == "." || strings.EqualFold(rawValue, "ND") || strings.EqualFold(rawValue, "NA") || strings.EqualFold(rawValue, "N/A") {
+			continue
+		}
+		value, err := strconv.ParseFloat(rawValue, 64)
+		if err != nil {
+			continue
+		}
+		date, err := time.Parse("2006-01-02", rawDate)
+		if err != nil {
+			continue
+		}
+		out = append(out, regimeSeriesPoint{Date: date, Value: value})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date.Before(out[j].Date) })
+	if len(out) == 0 {
+		return nil, fmt.Errorf("CSV contained no usable %s observations", valueColumn)
+	}
+	return out, nil
+}
+
+func fetchTreasury13WeekBill(ctx context.Context) ([]regimeSeriesPoint, error) {
+	now := time.Now().UTC()
+	months := []string{now.Format("200601"), now.AddDate(0, -1, 0).Format("200601")}
+	var lastErr error
+	for _, month := range months {
+		points, err := fetchTreasury13WeekBillMonth(ctx, month)
+		if err == nil && len(points) > 0 {
+			return points, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("treasury 13-week bill XML contained no usable observations")
+}
+
+func fetchTreasury13WeekBillMonth(ctx context.Context, month string) ([]regimeSeriesPoint, error) {
+	endpoint := treasuryBillRatesXMLURL(month)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Go-http-client/1.1")
+	resp, err := regimeHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GET %s: HTTP %s", endpoint, resp.Status)
+	}
+	points, err := parseTreasury13WeekBillXML(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+type treasuryBillFeed struct {
+	Entries []treasuryBillEntry `xml:"entry"`
+}
+
+type treasuryBillEntry struct {
+	Content treasuryBillContent `xml:"content"`
+}
+
+type treasuryBillContent struct {
+	Properties treasuryBillProperties `xml:"properties"`
+}
+
+type treasuryBillProperties struct {
+	IndexDate   string `xml:"INDEX_DATE"`
+	Bank13Weeks string `xml:"ROUND_B1_CLOSE_13WK_2"`
+}
+
+func parseTreasury13WeekBillXML(r io.Reader) ([]regimeSeriesPoint, error) {
+	var feed treasuryBillFeed
+	if err := xml.NewDecoder(r).Decode(&feed); err != nil {
+		return nil, fmt.Errorf("decode XML: %w", err)
+	}
+	var out []regimeSeriesPoint
+	for _, entry := range feed.Entries {
+		rawDate := strings.TrimSpace(entry.Content.Properties.IndexDate)
+		rawValue := strings.TrimSpace(entry.Content.Properties.Bank13Weeks)
+		if rawDate == "" || rawValue == "" || strings.EqualFold(rawValue, "N/A") {
+			continue
+		}
+		value, err := strconv.ParseFloat(rawValue, 64)
+		if err != nil {
+			continue
+		}
+		date, err := time.Parse("2006-01-02T15:04:05", rawDate)
+		if err != nil {
+			continue
+		}
+		out = append(out, regimeSeriesPoint{Date: date, Value: value})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date.Before(out[j].Date) })
+	if len(out) == 0 {
+		return nil, fmt.Errorf("treasury XML contained no usable 13-week bill observations")
+	}
+	return out, nil
 }
 
 func fetchCSVSeries(ctx context.Context, endpoint, valueColumn, dateLayout string) ([]regimeSeriesPoint, error) {

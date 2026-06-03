@@ -205,34 +205,17 @@ func gammaResultDegraded(c *rpc.GammaZeroComputed) bool {
 	if c == nil {
 		return false
 	}
-	spxCanonical := gammaSPXCanonicalRankable(c)
-	if c.Quality == nil || c.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if c.Quality == nil {
 		return true
 	}
-	if c.Summary != nil && strings.EqualFold(c.Summary.Confidence, "degraded") {
+	switch c.Quality.Rankability {
+	case rpc.GammaRankabilityRankable:
+		return false
+	case rpc.GammaRankabilityContextOnly:
+		return false
+	default:
 		return true
 	}
-	for _, rawCode := range gammaWarningCodes(c) {
-		code := strings.ToLower(strings.TrimSpace(rawCode))
-		switch {
-		case code == "throttled", code == "all_iv_derived", code == "cache_stale_off_hours", code == "oi_missing":
-			return true
-		case strings.HasPrefix(code, "spy_unavailable:"):
-			if !spxCanonical {
-				return true
-			}
-		case strings.HasPrefix(code, "spx_unavailable:"),
-			strings.HasPrefix(code, "spx_cache_fallback"),
-			strings.HasPrefix(code, "skew_fallback:"):
-			return true
-		}
-	}
-	for _, sub := range c.PerIndex {
-		if gammaResultDegraded(sub) {
-			return true
-		}
-	}
-	return false
 }
 
 func gammaSPXCanonicalRankable(c *rpc.GammaZeroComputed) bool {

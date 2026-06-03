@@ -50,7 +50,7 @@ same.
 | VVIX | `VVIX`, Cboe's VIX-of-VIX index | Cboe official daily VVIX time series. |
 | HYG/SPY | `HYG`, a high-yield corporate bond ETF, and `SPY`, an S&P 500 ETF | IBKR HYG/SPY quotes plus HMDS daily bars; SPY 52-week high uses IBKR Misc Stats tick 165 when available and daily-bar fallback otherwise. Backtests use Nasdaq public ETF history. |
 | HY OAS | FRED `BAMLH0A0HYM2` for high-yield OAS and `BAMLC0A0CM` for investment-grade corporate OAS | FRED/St. Louis Fed CSVs for ICE BofA option-adjusted spread series. |
-| CP 90-day AA financial minus 3-month T-bill | FRED `RIFSPPFAAD90NB` and `DTB3` | FRED/St. Louis Fed daily Federal Reserve rate series. |
+| CP 90-day AA financial minus 13-week T-bill | Federal Reserve `RIFSPPFAAD90_N.B` and U.S. Treasury `ROUND_B1_CLOSE_13WK_2`; cached under legacy series keys `RIFSPPFAAD90NB` / `DTB3` for wire compatibility | Federal Reserve Commercial Paper Data Download Program plus U.S. Treasury Daily Treasury Bill Rates. |
 | USD/JPY weekly change | `USD.JPY`, routed as IBKR `CASH` on `IDEALPRO` with currency `JPY` | IBKR FX tick plus HMDS midpoint history for the seven-trading-day comparison; Tier 1 historical replay uses FRED `DEXJPUS`. |
 | SPX-canonical dealer gamma | `SPX`/`SPXW` index options with `SPY` ETF options as context | IBKR option chains, open interest, option quotes/model-computation ticks, and the daemon's gamma cache. |
 | S&P 500 breadth | Current S&P 500 constituent stock tickers; there is no single breadth symbol used live | Local daemon compute from IBKR HMDS constituent daily bars and the generated S&P 500 membership list. |
@@ -162,13 +162,12 @@ gamma result. SPY-only gamma is a proxy, not the canonical S&P dealer-gamma row.
 
 Gamma is ranked only when `gamma_zero.envelope.result.quality.rankability` is
 `rankable`. Non-rankable gamma remains visible in the row/envelope, but it does
-not contribute the gamma cluster, lifecycle `confirmed_by`, or canary market
-stress confirmation:
+not become the active gamma market-structure read:
 
 | Rankability | Meaning |
 | --- | --- |
-| `rankable` | Fresh same-session payload with enough priced-leg, OI, horizon, skew, concentration, and cache-quality evidence to use as market evidence. Rankable SPX is stable and production-ready even when SPY is unavailable and disclosed as context. |
-| `context_only` | Useful market-structure context, but not independent confirmation. |
+| `rankable` | Fresh and covered enough to treat as the active market-structure signal. Rankable SPX is stable and production-ready even when SPY is unavailable and disclosed as context. |
+| `context_only` | Awareness-only market-structure context. |
 | `blocked` | Payload exists but a freshness, coverage, OI, model, cache, farm, entitlement, pacing, or partial-chain gate blocks ranking. |
 | `unavailable` | No usable OI-weighted gamma payload exists. |
 

@@ -173,8 +173,8 @@ func TestSPXCacheFallbackWarningTextPointsToRankability(t *testing.T) {
 	message, impact, action := spxCacheFallbackWarningText("timeout")
 	for _, want := range []string{
 		"using the last successful cached SPX slice",
-		"quality.rankability controls",
-		"fresh confirmation",
+		"quality.rankability shows",
+		"market-structure signal",
 	} {
 		if !strings.Contains(message+" "+impact+" "+action, want) {
 			t.Fatalf("cache fallback warning missing %q: message=%q impact=%q action=%q", want, message, impact, action)

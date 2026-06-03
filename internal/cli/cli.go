@@ -161,7 +161,7 @@ func init() {
 		{"technical", "Trend, relative strength, ATR, and liquidity from daily bars", "ibkr technical SYM[,SYM...] [--benchmark SPY] [--market us|de] [--json]", runTechnical},
 		{"breadth", "S&P 500 breadth — % above 50/200-DMA + new-highs/new-lows, computed locally from constituent fan-out (~60 min cold)", "ibkr breadth [--days 30] [--json]", runBreadth},
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--diagnostics] [--json]", runGamma},
-		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
+		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},

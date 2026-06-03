@@ -208,6 +208,30 @@ func TestGammaStatusQualityTreatsRankableSPXAsStableWithSPYExcluded(t *testing.T
 	}
 }
 
+func TestGammaStatusQualityTreatsContextOnlyAsContextNotDegraded(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 2, 22, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeCombined,
+			AsOf:  now,
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityContextOnly,
+				RankabilityReason: "freshness: market is closed; cached gamma is context only",
+			},
+			Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code:  "spx_cache_fallback:no_data",
+				Scope: "SPX",
+			}},
+		},
+	})
+	if ok {
+		t.Fatalf("gammaStatusQuality = %+v, want no high-level degraded data quality for context-only gamma", got)
+	}
+}
+
 func TestGammaStatusQualityReportsSPXCacheFallbackWithoutSummary(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)

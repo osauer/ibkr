@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -88,7 +90,7 @@ func (f *fakeDeps) build() *regimeDeps {
 			h := f.bars[sym]
 			return h.bars, h.err
 		},
-		fredSeries: func(_ context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+		officialSeries: func(_ context.Context, seriesID string) ([]regimeSeriesPoint, error) {
 			if err := f.seriesErr[seriesID]; err != nil {
 				return nil, err
 			}
@@ -608,6 +610,90 @@ func TestFetchRegimeCreditSpreads(t *testing.T) {
 	}
 }
 
+func TestFetchRegimeCreditSpreadsFetchesFREDPairConcurrently(t *testing.T) {
+	ctx := context.Background()
+	oldBudget := regimeOfficialSeriesBudget
+	regimeOfficialSeriesBudget = 30 * time.Millisecond
+	t.Cleanup(func() { regimeOfficialSeriesBudget = oldBudget })
+
+	hy := makeSeries(21, 3.50)
+	ig := makeSeries(21, 1.10)
+	deps := &regimeDeps{
+		officialSeries: func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+			select {
+			case <-time.After(20 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			switch seriesID {
+			case fredSeriesHYOAS:
+				return hy, nil
+			case fredSeriesIGOAS:
+				return ig, nil
+			default:
+				return nil, fmt.Errorf("unexpected series %s", seriesID)
+			}
+		},
+	}
+
+	got := fetchRegimeCreditSpreads(ctx, deps)
+	if got.Status == rpc.RegimeStatusError {
+		t.Fatalf("credit pair should fit per-series budget when fetched concurrently, got error: %s", got.ErrorMessage)
+	}
+	if got.HYOAS == nil || got.IGOAS == nil {
+		t.Fatalf("credit pair missing values after concurrent fetch: %+v", got)
+	}
+}
+
+func TestFetchRegimeOfficialDailyRowsUsePersistedLastGoodOnRefreshFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	seed := newRegimeSeriesCache(dir)
+	seed.freshFor = time.Nanosecond
+	hy := makeSeries(21, 3.50)
+	ig := makeSeries(21, 1.10)
+	cp := makeSeries(3, 5.30)
+	tb := makeSeries(3, 5.10)
+	hy[20].Value = 3.80
+	ig[20].Value = 1.25
+	cp[2].Value = 5.34
+	tb[2].Value = 5.20
+	seed.put(fredSeriesHYOAS, hy, now.Add(-13*time.Hour))
+	seed.put(fredSeriesIGOAS, ig, now.Add(-13*time.Hour))
+	seed.put(fredSeriesCP3M, cp, now.Add(-13*time.Hour))
+	seed.put(fredSeriesTBill3M, tb, now.Add(-13*time.Hour))
+
+	// New cache instance mirrors a restarted daemon: memory is empty, only
+	// the persisted official daily files remain. The live official-series
+	// fetcher then fails like the flapping first-call screenshot.
+	cacheAfterRestart := newRegimeSeriesCache(dir)
+	cacheAfterRestart.freshFor = time.Nanosecond
+	deps := &regimeDeps{
+		officialSeries: func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+			return cacheAfterRestart.fetch(ctx, seriesID, func(context.Context, string) ([]regimeSeriesPoint, error) {
+				return nil, errors.New("fetch timed out")
+			})
+		},
+	}
+
+	credit := fetchRegimeCreditSpreads(ctx, deps)
+	if credit.Status == rpc.RegimeStatusError || credit.HYOAS == nil || credit.IGOAS == nil {
+		t.Fatalf("credit row should use persisted last-good FRED OAS data, got %+v", credit)
+	}
+	if *credit.HYOAS != 3.80 || *credit.IGOAS != 1.25 {
+		t.Fatalf("credit values came from wrong source: hy=%v ig=%v", *credit.HYOAS, *credit.IGOAS)
+	}
+	funding := fetchRegimeFundingStress(ctx, deps)
+	if funding.Status == rpc.RegimeStatusError || funding.SpreadBps == nil {
+		t.Fatalf("funding row should use persisted last-good funding data, got %+v", funding)
+	}
+	if *funding.SpreadBps < 13.9 || *funding.SpreadBps > 14.1 {
+		t.Fatalf("funding spread=%v, want 14bp from cached CP/T-bill series", *funding.SpreadBps)
+	}
+}
+
 func TestFetchRegimeFundingStress(t *testing.T) {
 	ctx := context.Background()
 	cp := makeSeries(3, 5.30)
@@ -633,6 +719,65 @@ func TestFetchRegimeFundingStress(t *testing.T) {
 	}
 	if got.Source == "" || got.CP3MQuality == nil || got.SpreadQuality == nil {
 		t.Errorf("source/quality should be populated: %+v", got)
+	}
+}
+
+func TestFetchRegimeFundingStressUsesOfficialFedAndTreasurySources(t *testing.T) {
+	ctx := context.Background()
+	obsDate := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fed-cp":
+			fmt.Fprintf(w, "Header row ignored\nTime Period,RIFSPPFAAD90_N.B\n%s,ND\n%s,3.70\n", time.Now().UTC().AddDate(0, 0, -2).Format("2006-01-02"), obsDate)
+		case "/treasury-bills":
+			fmt.Fprintf(w, `<feed>
+  <entry>
+    <content>
+      <m:properties xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices">
+        <d:INDEX_DATE>%sT00:00:00</d:INDEX_DATE>
+        <d:ROUND_B1_CLOSE_13WK_2>3.63</d:ROUND_B1_CLOSE_13WK_2>
+      </m:properties>
+    </content>
+  </entry>
+</feed>`, obsDate)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	oldCPURL := fedCommercialPaperRatesURL
+	oldTreasuryURL := treasuryBillRatesXMLURL
+	fedCommercialPaperRatesURL = srv.URL + "/fed-cp"
+	treasuryBillRatesXMLURL = func(string) string { return srv.URL + "/treasury-bills" }
+	t.Cleanup(func() {
+		fedCommercialPaperRatesURL = oldCPURL
+		treasuryBillRatesXMLURL = oldTreasuryURL
+	})
+
+	deps := &regimeDeps{officialSeries: fetchOfficialRegimeSeries}
+	got := fetchRegimeFundingStress(ctx, deps)
+	if got.Status != rpc.RegimeStatusOK {
+		t.Fatalf("status=%q, want ok (%s)", got.Status, got.ErrorMessage)
+	}
+	if got.CP3M == nil || *got.CP3M != 3.70 {
+		t.Fatalf("CP3M=%v, want 3.70 from Federal Reserve DDP", got.CP3M)
+	}
+	if got.TBill3M == nil || *got.TBill3M != 3.63 {
+		t.Fatalf("TBill3M=%v, want 3.63 from Treasury bill XML", got.TBill3M)
+	}
+	if got.SpreadBps == nil || *got.SpreadBps < 6.9 || *got.SpreadBps > 7.1 {
+		t.Fatalf("SpreadBps=%v, want 7bp", got.SpreadBps)
+	}
+	if got.Source != "Federal Reserve Commercial Paper DDP + U.S. Treasury Daily Treasury Bill Rates" {
+		t.Fatalf("Source=%q, want official Fed/Treasury source label", got.Source)
+	}
+	if got.CP3MQuality == nil || !strings.Contains(got.CP3MQuality.Source, "Federal Reserve") {
+		t.Fatalf("CP quality source=%+v, want Federal Reserve provenance", got.CP3MQuality)
+	}
+	if got.TBill3MQuality == nil || !strings.Contains(got.TBill3MQuality.Source, "Treasury") {
+		t.Fatalf("T-bill quality source=%+v, want Treasury provenance", got.TBill3MQuality)
 	}
 }
 

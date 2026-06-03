@@ -367,7 +367,7 @@ func TestRenderGamma_DefaultUsesPlainSignalReadout(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Signal     after-hours context · valid cached snapshot, not fresh confirmation",
+		"Signal     after-hours context · cached snapshot is not a fresh market-structure read",
 		"long-γ (stabilizing regime)",
 		"no γ-zero transition found in sweep",
 		"SPY/SPX agree",
@@ -456,14 +456,14 @@ func TestRenderGamma_DefaultFiltersDiagnosticDataNotes(t *testing.T) {
 	}
 }
 
-func TestRenderGamma_DefaultRendersCacheFallbackAsContext(t *testing.T) {
+func TestRenderGamma_DefaultRendersCacheFallbackAsSourceNote(t *testing.T) {
 	t.Parallel()
 	fix := gammaReadyFixture()
 	fix.Result.WarningDetails = []rpc.GammaWarningDetail{{
 		Code:    "spx_cache_fallback:timeout",
 		Scope:   "SPX",
 		Message: "SPX live refresh timed out; using the last successful cached SPX slice.",
-		Impact:  "SPX is included from cache; quality.rankability controls whether gamma can confirm regime or canary evidence.",
+		Impact:  "SPX is included from cache; quality.rankability shows whether the gamma read is fresh and covered enough to act as a market-structure signal.",
 		Action:  "Refresh during 09:30-16:15 ET.",
 	}}
 
@@ -474,7 +474,7 @@ func TestRenderGamma_DefaultRendersCacheFallbackAsContext(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Context:",
+		"Source note:",
 		"using cached SPX slice",
 	} {
 		if !strings.Contains(out, want) {
@@ -725,6 +725,7 @@ func TestRenderGamma_ExplainIsConcise(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"How to read",
+		"Gamma is how fast option delta changes",
 		"Per-bucket γ-zero",
 		"Method      SPY + SPX · ±10% sweep · 80 strikes/expiry · 2 expirations · 3202 GEX legs",
 		"Quality     rankable · fresh · RTH",

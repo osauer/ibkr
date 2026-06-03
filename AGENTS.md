@@ -5,7 +5,7 @@
 
 `make check` is static (gofmt, vet, staticcheck, govulncheck, modernize, parity). `make smoke` runs the binary against a live TWS gateway and skips cleanly if no gateway is reachable; if you touched daemon or CLI code paths, ensure TWS is up and watch it bind.
 
-After editing daemon/CLI code, restart the binary: `pkill -f 'ibkr daemon'`, `make install`, relaunch, then run `ibkr status` plus a command exercising your change. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
+After editing daemon/CLI code, restart the installed daemon through the CLI: `make install && ibkr restart --timeout 15s`, then run `ibkr status` plus a command exercising your change. Do not use `pkill` for normal restarts; reserve it only for a broken/stuck daemon when `ibkr restart` cannot stop it. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
 
 ## Releases
 `make release RELEASE_VERSION=vX.Y.Z`. It orchestrates refresh-spx-members → check/test → build → release-smoke (strict: TWS required) → tag → release-binaries → push → plugin-tag → release-publish. `release-smoke` runs the actual version-stamped binary against a live TWS gateway and checks both JSON contracts and wire-level invariants — a release without TWS is a failed release. Never tag, push, or `gh release create` directly. If `make release` fails, fix the root cause.
