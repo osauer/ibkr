@@ -69,6 +69,7 @@ func Register(deps Dependencies) {
 	srv.GET("/api/alerts/settings", h.requireAuth(h.handleGetAlertSettings))
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
 	srv.GET("/api/alerts", h.requireAuth(h.handleAlerts))
+	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
 	srv.POST("/api/tools/{name}", h.requireAuth(h.handleTool))
@@ -260,6 +261,14 @@ func (h *handler) handlePutAlertSettings(w nethttp.ResponseWriter, r *nethttp.Re
 
 func (h *handler) handleAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
 	writeJSON(w, h.deps.Store.AlertHistory(50))
+}
+
+func (h *handler) handleClearAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
+	if err := h.deps.Store.ClearAlertHistory(); err != nil {
+		writeError(w, nethttp.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (h *handler) handlePushSubscribe(w nethttp.ResponseWriter, r *nethttp.Request) {

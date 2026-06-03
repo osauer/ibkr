@@ -29,14 +29,15 @@ type Service struct {
 }
 
 type Snapshot struct {
-	Version   int64                 `json:"version"`
-	UpdatedAt time.Time             `json:"updated_at,omitzero"`
-	Status    *rpc.HealthResult     `json:"status,omitempty"`
-	Account   *rpc.AccountResult    `json:"account,omitempty"`
-	Positions *rpc.PositionsResult  `json:"positions,omitempty"`
-	Canary    *rpc.CanaryResult     `json:"canary,omitempty"`
-	Errors    []SourceError         `json:"errors,omitempty"`
-	Sources   map[string]SourceMeta `json:"sources,omitempty"`
+	Version   int64                     `json:"version"`
+	UpdatedAt time.Time                 `json:"updated_at,omitzero"`
+	Status    *rpc.HealthResult         `json:"status,omitempty"`
+	Calendar  *rpc.MarketCalendarResult `json:"market_calendar,omitempty"`
+	Account   *rpc.AccountResult        `json:"account,omitempty"`
+	Positions *rpc.PositionsResult      `json:"positions,omitempty"`
+	Canary    *rpc.CanaryResult         `json:"canary,omitempty"`
+	Errors    []SourceError             `json:"errors,omitempty"`
+	Sources   map[string]SourceMeta     `json:"sources,omitempty"`
 }
 
 type SourceError struct {
@@ -115,6 +116,16 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources["status"] = SourceMeta{UpdatedAt: now}
 		if s.changed("status", status) {
 			events = append(events, Event{Type: "status", Data: status})
+		}
+	}
+	if calendar, err := s.client.MarketCalendar(ctx); err != nil {
+		errors = append(errors, sourceErr("calendar", err, now))
+		snap.Sources["calendar"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.Calendar = calendar
+		snap.Sources["calendar"] = SourceMeta{UpdatedAt: now}
+		if s.changed("calendar", calendar) {
+			events = append(events, Event{Type: "market_calendar", Data: calendar})
 		}
 	}
 	if account, err := s.client.Account(ctx); err != nil {

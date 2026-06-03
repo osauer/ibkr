@@ -14,9 +14,9 @@
       <header class="topbar">
         <div>
           <h1>ibkr</h1>
-          <p class="status-banner" id="connectionLine">Connecting</p>
+          <p class="status-banner" id="connectionLine">Market calendar loading</p>
         </div>
-        <div class="status-dot" id="statusDot" aria-label="connection status"></div>
+        <div class="status-dot" id="statusDot" aria-label="app connection status"></div>
       </header>
 
       <section class="banner-stack" aria-live="polite">
@@ -45,6 +45,15 @@
           <span class="hero-time" id="canaryAsOf">--</span>
           <strong id="canaryAction">--</strong>
           <p id="canarySummary">Waiting for canary snapshot.</p>
+          <div class="alert-focus" id="selectedAlertPanel" hidden>
+            <div>
+              <span>Selected alert</span>
+              <b id="selectedAlertTitle">--</b>
+              <p id="selectedAlertBody">--</p>
+              <small id="selectedAlertTime">--</small>
+            </div>
+            <button class="text-button" id="clearSelectedAlertButton" type="button">Clear</button>
+          </div>
           <button class="ghost-button" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
             Show detail
           </button>
@@ -133,6 +142,13 @@
               <b id="portfolioFxSensitivity">--</b>
             </div>
           </div>
+          <button class="section-toggle" id="portfolioDetailToggle" type="button" aria-expanded="false" aria-controls="portfolioDetailPanel">
+            <span>Portfolio details</span>
+            <b id="portfolioDetailSummary">--</b>
+          </button>
+          <div class="portfolio-detail-panel" id="portfolioDetailPanel" hidden>
+            <div class="detail-list" id="portfolioDetailList"></div>
+          </div>
           <div class="exposure-list" id="portfolioExposureList" hidden></div>
           <div class="metric-row">
             <span>Stocks</span>
@@ -162,13 +178,21 @@
         </article>
       </section>
 
-      <section class="panel" id="alertsPanel" hidden>
-        <div class="panel-head">
+      <details class="panel alerts-panel" id="alertsPanel" hidden>
+        <summary class="panel-head">
           <span>Alert history</span>
-          <span id="alertCount">0</span>
+          <span class="panel-actions">
+            <span id="alertCount">0</span>
+          </span>
+        </summary>
+        <div class="alerts-body">
+          <div class="alerts-toolbar">
+            <span id="alertsHint">Tap an alert to inspect it in Canary.</span>
+            <button class="text-button" id="clearAlertsButton" type="button">Clear history</button>
+          </div>
+          <div class="list" id="alertsList"></div>
         </div>
-        <div class="list" id="alertsList"></div>
-      </section>
+      </details>
 
       <details class="panel tools" id="toolsPanel" hidden>
         <summary class="panel-head">

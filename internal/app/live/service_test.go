@@ -13,6 +13,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	t.Parallel()
 	client := &fakeClient{
 		status:    &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
+		calendar:  &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
 		account:   &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
 		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{}},
 		canary:    &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
@@ -32,6 +33,9 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Status == nil || !snap.Status.Connected {
 		t.Fatalf("status missing from snapshot: %#v", snap.Status)
 	}
+	if snap.Calendar == nil || snap.Calendar.Session.State != "regular" {
+		t.Fatalf("calendar missing from snapshot: %#v", snap.Calendar)
+	}
 	if snap.Account == nil || snap.Account.BaseCurrency != "USD" {
 		t.Fatalf("account missing from snapshot: %#v", snap.Account)
 	}
@@ -40,7 +44,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	for range 5 {
+	for range 6 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -48,7 +52,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "account", "positions", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -72,6 +76,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 
 type fakeClient struct {
 	status    *rpc.HealthResult
+	calendar  *rpc.MarketCalendarResult
 	account   *rpc.AccountResult
 	positions *rpc.PositionsResult
 	canary    *rpc.CanaryResult
@@ -79,6 +84,10 @@ type fakeClient struct {
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
 	return c.status, nil
+}
+
+func (c *fakeClient) MarketCalendar(context.Context) (*rpc.MarketCalendarResult, error) {
+	return c.calendar, nil
 }
 
 func (c *fakeClient) Account(context.Context) (*rpc.AccountResult, error) {

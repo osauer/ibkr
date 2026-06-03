@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/osauer/ibkr/internal/cli"
 	"github.com/osauer/ibkr/internal/dial"
@@ -12,6 +13,7 @@ import (
 
 type Client interface {
 	Status(context.Context) (*rpc.HealthResult, error)
+	MarketCalendar(context.Context) (*rpc.MarketCalendarResult, error)
 	Account(context.Context) (*rpc.AccountResult, error)
 	Positions(context.Context) (*rpc.PositionsResult, error)
 	Canary(context.Context) (*rpc.CanaryResult, error)
@@ -25,6 +27,15 @@ type Real struct {
 func (c Real) Status(ctx context.Context) (*rpc.HealthResult, error) {
 	var out rpc.HealthResult
 	if err := c.call(ctx, rpc.MethodStatusHealth, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) MarketCalendar(ctx context.Context) (*rpc.MarketCalendarResult, error) {
+	var out rpc.MarketCalendarResult
+	params := rpc.MarketCalendarParams{Market: "us", At: time.Now().UTC(), Days: 3}
+	if err := c.call(ctx, rpc.MethodMarketCalendar, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
