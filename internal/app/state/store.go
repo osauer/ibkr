@@ -34,12 +34,13 @@ type Data struct {
 }
 
 type DeviceGrant struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name,omitempty"`
-	PublicKeyJWK string    `json:"public_key_jwk"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastSeenAt   time.Time `json:"last_seen_at,omitzero"`
-	RevokedAt    time.Time `json:"revoked_at,omitzero"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name,omitempty"`
+	PublicKeyJWK     string    `json:"public_key_jwk,omitempty"`
+	DeviceSecretHash string    `json:"device_secret_hash,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	LastSeenAt       time.Time `json:"last_seen_at,omitzero"`
+	RevokedAt        time.Time `json:"revoked_at,omitzero"`
 }
 
 type AlertSettings struct {

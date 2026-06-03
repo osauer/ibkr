@@ -165,6 +165,169 @@ func TestRunRestartCoreTimeoutWithoutForceFails(t *testing.T) {
 	}
 }
 
+func TestRunRestartAppCoreStartsWhenNoAppWasRunning(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	startArgs := []string{}
+	opts := &restartOptions{app: true, timeout: time.Second, out: &out, err: &errBuf}
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{}, errAppNotRunning
+		},
+		start: func(_ context.Context, args []string) (int, error) {
+			startArgs = append([]string(nil), args...)
+			return 44, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if strings.Join(startArgs, " ") != "app" {
+		t.Fatalf("start args = %q, want app", strings.Join(startArgs, " "))
+	}
+	if !strings.Contains(out.String(), "no app was running") || !strings.Contains(out.String(), "started app pid 44") {
+		t.Fatalf("output missing app start messages:\n%s", out.String())
+	}
+}
+
+func TestRunRestartAppCorePreservesArgsAndDetectsSupervisorRespawn(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	findCalls := 0
+	stoppedPID := 0
+	startCalled := false
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			findCalls++
+			if findCalls == 1 {
+				return appProcess{
+					PID:     51,
+					Command: "/tmp/ibkr app --addr 127.0.0.1:18765",
+					Args:    []string{"app", "--addr", "127.0.0.1:18765"},
+				}, nil
+			}
+			return appProcess{
+				PID:     52,
+				Command: "/tmp/ibkr app --addr 127.0.0.1:18765",
+				Args:    []string{"app", "--addr", "127.0.0.1:18765"},
+			}, nil
+		},
+		stop: func(pid int, _ time.Duration) error {
+			stoppedPID = pid
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			startCalled = true
+			return 0, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if stoppedPID != 51 {
+		t.Fatalf("stoppedPID = %d, want 51", stoppedPID)
+	}
+	if startCalled {
+		t.Fatal("manual start should not run when supervisor respawned the app")
+	}
+	var res appRestartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.Action != "restarted" || res.Target != "app" || !res.WasRunning || !res.Graceful || res.OldPID != 51 || res.NewPID != 52 {
+		t.Fatalf("result = %+v", res)
+	}
+	if strings.Join(res.Args, " ") != "app --addr 127.0.0.1:18765" {
+		t.Fatalf("args = %q", strings.Join(res.Args, " "))
+	}
+}
+
+func TestRunRestartAppCoreDoesNotTreatDifferentArgsAsRespawn(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	findCalls := 0
+	startArgs := []string{}
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			findCalls++
+			if findCalls == 1 {
+				return appProcess{
+					PID:     61,
+					Command: "/tmp/ibkr app --addr 127.0.0.1:18765",
+					Args:    []string{"app", "--addr", "127.0.0.1:18765"},
+				}, nil
+			}
+			return appProcess{
+				PID:     62,
+				Command: "ibkr app",
+				Args:    []string{"app"},
+			}, nil
+		},
+		stop: func(int, time.Duration) error {
+			return nil
+		},
+		start: func(_ context.Context, args []string) (int, error) {
+			startArgs = append([]string(nil), args...)
+			return 63, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if strings.Join(startArgs, " ") != "app --addr 127.0.0.1:18765" {
+		t.Fatalf("start args = %q", strings.Join(startArgs, " "))
+	}
+	var res appRestartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.NewPID != 63 {
+		t.Fatalf("new pid = %d, want manually started pid 63", res.NewPID)
+	}
+}
+
+func TestAppCommandArgsIgnoresPairCommand(t *testing.T) {
+	t.Parallel()
+
+	if _, ok := appCommandArgs("/tmp/ibkr app pair --json"); ok {
+		t.Fatalf("app pair should not be treated as the long-running app server")
+	}
+	args, ok := appCommandArgs("/tmp/ibkr app --addr 127.0.0.1:8765")
+	if !ok {
+		t.Fatalf("app server command was not detected")
+	}
+	if strings.Join(args, " ") != "app --addr 127.0.0.1:8765" {
+		t.Fatalf("args = %q", strings.Join(args, " "))
+	}
+}
+
+func TestAppCommandMatchReportsExactExecutable(t *testing.T) {
+	t.Parallel()
+
+	args, exact, ok := appCommandMatch("/tmp/ibkr app --addr 127.0.0.1:8765", map[string]struct{}{"/tmp/ibkr": {}})
+	if !ok {
+		t.Fatalf("app server command was not detected")
+	}
+	if !exact {
+		t.Fatalf("expected exact executable match")
+	}
+	if strings.Join(args, " ") != "app --addr 127.0.0.1:8765" {
+		t.Fatalf("args = %q", strings.Join(args, " "))
+	}
+	_, exact, ok = appCommandMatch("ibkr app", map[string]struct{}{"/tmp/ibkr": {}})
+	if !ok {
+		t.Fatalf("generic app command was not detected")
+	}
+	if exact {
+		t.Fatalf("generic command should not be an exact executable match")
+	}
+}
+
 func TestRunRestartRejectsUnexpectedArgument(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	exit := RunRestart(context.Background(), []string{"extra"}, &out, &errBuf)

@@ -1,6 +1,6 @@
 # Updating
 
-Updated: 2026-06-02 06:26 CEST
+Updated: 2026-06-03 17:04 CEST
 
 Four things can affect data freshness: the **binary** (`ibkr` itself), the **Claude Desktop MCPB** when installed through Desktop Extensions, the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
 
@@ -16,7 +16,7 @@ The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osau
 
 A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.
 
-## Restarting the daemon — `ibkr restart`
+## Restarting local processes - `ibkr restart`
 
 Use `ibkr restart` when you changed daemon-loaded config, installed a new binary outside `ibkr update`, or want to clear stale gateway connection state:
 
@@ -32,11 +32,14 @@ The command verifies the pidfile holder is really an `ibkr daemon` process, send
 ibkr restart --force          # escalate to SIGKILL only after graceful timeout
 ibkr restart --timeout 30s    # wait longer before failing or forcing
 ibkr restart --json           # scriptable result: old/new PID, force/graceful flags, health snapshot
+ibkr restart --app            # gracefully restart/start the HyperServe app process
 ```
 
 JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed."
 
 `ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
+
+`ibkr restart --app` targets the long-running `ibkr app` HyperServe process instead of the daemon. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr` or `--public-url`, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts `ibkr app` with default/env configuration.
 
 ### Release integrity
 

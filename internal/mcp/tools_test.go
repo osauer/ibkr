@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,200 @@ func TestInitializeAndToolsList(t *testing.T) {
 			t.Errorf("tool[%d].annotations.readOnlyHint: got false want true", i)
 		}
 	}
+}
+
+func TestParseProfile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw     string
+		want    Profile
+		wantErr bool
+	}{
+		{want: ProfileFull},
+		{raw: "full", want: ProfileFull},
+		{raw: " monitor ", want: ProfileMonitor},
+		{raw: "debug", wantErr: true},
+	}
+	for _, tc := range tests {
+		got, err := ParseProfile(tc.raw)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("ParseProfile(%q) err = nil, want error", tc.raw)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParseProfile(%q) err = %v", tc.raw, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParseProfile(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestMonitorProfileInitializeAndToolsList(t *testing.T) {
+	t.Parallel()
+
+	lines := serveMCP(t, ProfileMonitor,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+	)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 response lines, got %d", len(lines))
+	}
+
+	var initResp struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(lines[0], &initResp); err != nil {
+		t.Fatalf("initialize response: %v", err)
+	}
+	if !strings.Contains(initResp.Result.Instructions, "Use `ibkr_canary` first") {
+		t.Fatalf("monitor instructions should steer first call to ibkr_canary: %q", initResp.Result.Instructions)
+	}
+	if !strings.Contains(initResp.Result.Instructions, "call `ibkr_status` only") {
+		t.Fatalf("monitor instructions should keep ibkr_status diagnostic-only: %q", initResp.Result.Instructions)
+	}
+
+	var listResp struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(lines[1], &listResp); err != nil {
+		t.Fatalf("tools/list response: %v", err)
+	}
+	got := []string{}
+	for _, tool := range listResp.Result.Tools {
+		got = append(got, tool.Name)
+	}
+	want := []string{"ibkr_canary", "ibkr_status"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("monitor tools = %v, want %v", got, want)
+	}
+	for _, tool := range listResp.Result.Tools {
+		if !strings.Contains(strings.ToLower(tool.Description), "read-only") {
+			t.Fatalf("monitor description for %s should say read-only: %q", tool.Name, tool.Description)
+		}
+	}
+}
+
+func TestMonitorToolsListPayloadAtLeastHalfSmallerThanFull(t *testing.T) {
+	t.Parallel()
+
+	full := serveMCP(t, ProfileFull, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	monitor := serveMCP(t, ProfileMonitor, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if len(full) != 1 || len(monitor) != 1 {
+		t.Fatalf("unexpected response line counts: full=%d monitor=%d", len(full), len(monitor))
+	}
+	if len(monitor[0])*2 > len(full[0]) {
+		t.Fatalf("monitor tools/list payload = %d bytes, full = %d bytes; want monitor at least 50%% smaller", len(monitor[0]), len(full[0]))
+	}
+}
+
+func TestMonitorProfileRejectsHiddenTools(t *testing.T) {
+	t.Parallel()
+
+	lines := serveMCP(t, ProfileMonitor, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ibkr_positions","arguments":{}}}`)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response line, got %d", len(lines))
+	}
+	var resp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(lines[0], &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got %s", string(lines[0]))
+	}
+	if resp.Error.Code != codeMethodNotFound {
+		t.Fatalf("error code = %d, want %d", resp.Error.Code, codeMethodNotFound)
+	}
+	if !strings.Contains(resp.Error.Message, "profile monitor") || !strings.Contains(resp.Error.Message, "ibkr_positions") {
+		t.Fatalf("hidden-tool message should name profile and tool, got %q", resp.Error.Message)
+	}
+}
+
+func TestCompactViewSchemas(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		tool string
+		want map[string]bool
+	}{
+		{tool: "ibkr_canary", want: map[string]bool{rpc.ViewFull: true, rpc.ViewAlert: true}},
+		{tool: "ibkr_regime", want: map[string]bool{rpc.ViewDetail: true, rpc.ViewMonitor: true}},
+		{tool: "ibkr_positions", want: map[string]bool{rpc.ViewFull: true, rpc.ViewRisk: true}},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			tool, ok := lookupTool(tc.tool)
+			if !ok {
+				t.Fatalf("%s not registered", tc.tool)
+			}
+			enum := schemaEnumValues(t, tool.JSONSchema, "view")
+			missing := map[string]bool{}
+			for want := range tc.want {
+				missing[want] = true
+			}
+			for _, got := range enum {
+				delete(missing, got)
+			}
+			if len(missing) > 0 {
+				t.Fatalf("%s view enum missing %v (got %v)", tc.tool, missing, enum)
+			}
+		})
+	}
+}
+
+func serveMCP(t *testing.T, profile Profile, messages ...string) []json.RawMessage {
+	t.Helper()
+	in := &bytes.Buffer{}
+	for _, msg := range messages {
+		in.WriteString(msg)
+		in.WriteByte('\n')
+	}
+	out := &bytes.Buffer{}
+	srv := NewServer(nil, "test")
+	srv.SetProfile(profile)
+	if err := srv.Serve(context.Background(), in, out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	raw := bytes.Split(bytes.TrimRight(out.Bytes(), "\n"), []byte("\n"))
+	lines := make([]json.RawMessage, 0, len(raw))
+	for _, line := range raw {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		lines = append(lines, append(json.RawMessage(nil), line...))
+	}
+	return lines
+}
+
+func schemaEnumValues(t *testing.T, schema json.RawMessage, property string) []string {
+	t.Helper()
+	var decoded struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &decoded); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	prop, ok := decoded.Properties[property]
+	if !ok {
+		t.Fatalf("schema missing property %q", property)
+	}
+	return prop.Enum
 }
 
 // TestUnknownToolReturnsMethodNotFound verifies the protocol-error branch

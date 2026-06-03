@@ -98,15 +98,87 @@ func TestChallengeSessionUsesStoredDeviceKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartChallenge: %v", err)
 	}
-	sess, err := mgr.CompleteChallenge("device-1", challenge.Challenge, testDERSignature(t, key, challenge.Challenge))
+	sess, err := mgr.CompleteChallenge("device-1", challenge.Challenge, testDERSignature(t, key, challenge.Challenge), "")
 	if err != nil {
 		t.Fatalf("CompleteChallenge: %v", err)
 	}
 	if sess.Token == "" {
 		t.Fatalf("empty session token")
 	}
-	if _, err := mgr.CompleteChallenge("device-1", challenge.Challenge, testDERSignature(t, key, challenge.Challenge)); err == nil {
+	if _, err := mgr.CompleteChallenge("device-1", challenge.Challenge, testDERSignature(t, key, challenge.Challenge), ""); err == nil {
 		t.Fatalf("reused challenge unexpectedly succeeded")
+	}
+}
+
+func TestHTTPDeviceSecretPairingAndChallenge(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := NewManager(store, time.Minute)
+	pairing, err := mgr.StartPairing("http://192.168.1.42:8765")
+	if err != nil {
+		t.Fatalf("StartPairing: %v", err)
+	}
+	secret := testDeviceSecret()
+	res, err := mgr.CompletePairing(CompletePairingRequest{
+		PairingID:    pairing.ID,
+		Nonce:        pairing.Nonce,
+		DeviceName:   "HTTP Browser",
+		DeviceSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("CompletePairing: %v", err)
+	}
+	grant, ok := store.Device(res.DeviceID)
+	if !ok {
+		t.Fatalf("device grant was not stored")
+	}
+	if grant.PublicKeyJWK != "" {
+		t.Fatalf("HTTP fallback grant stored public key unexpectedly: %q", grant.PublicKeyJWK)
+	}
+	if grant.DeviceSecretHash == "" || grant.DeviceSecretHash == secret {
+		t.Fatalf("device secret hash not stored safely: %#v", grant)
+	}
+	challenge, err := mgr.StartChallenge(res.DeviceID)
+	if err != nil {
+		t.Fatalf("StartChallenge: %v", err)
+	}
+	sess, err := mgr.CompleteChallenge(res.DeviceID, challenge.Challenge, "", secret)
+	if err != nil {
+		t.Fatalf("CompleteChallenge: %v", err)
+	}
+	if sess.Token == "" {
+		t.Fatalf("empty session token")
+	}
+}
+
+func TestHTTPDeviceSecretRejectsWrongSecret(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	secret := testDeviceSecret()
+	hash, err := hashDeviceSecret(secret)
+	if err != nil {
+		t.Fatalf("hashDeviceSecret: %v", err)
+	}
+	if err := store.AddDevice(state.DeviceGrant{
+		ID:               "device-1",
+		DeviceSecretHash: hash,
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AddDevice: %v", err)
+	}
+	mgr := NewManager(store, time.Minute)
+	challenge, err := mgr.StartChallenge("device-1")
+	if err != nil {
+		t.Fatalf("StartChallenge: %v", err)
+	}
+	if _, err := mgr.CompleteChallenge("device-1", challenge.Challenge, "", testDeviceSecret()); err == nil {
+		t.Fatalf("wrong HTTP device secret unexpectedly succeeded")
 	}
 }
 
@@ -147,6 +219,14 @@ func testDERSignature(t *testing.T, key *ecdsa.PrivateKey, message string) strin
 		t.Fatalf("sign ASN.1: %v", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func testDeviceSecret() string {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 func signParts(t *testing.T, key *ecdsa.PrivateKey, message string) (*big.Int, *big.Int) {

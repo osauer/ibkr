@@ -20,11 +20,12 @@ import (
 // daemon connection and the raw JSON arguments (an empty object when the
 // client omits arguments).
 type Tool struct {
-	Name        string
-	Title       string
-	Description string
-	JSONSchema  json.RawMessage
-	Handler     func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error)
+	Name               string
+	Title              string
+	Description        string
+	MonitorDescription string
+	JSONSchema         json.RawMessage
+	Handler            func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error)
 }
 
 // Tools is the canonical read-only inventory exposed over MCP. Order is the
@@ -32,10 +33,11 @@ type Tool struct {
 // rebroadcasts whatever order we send.
 var Tools = []Tool{
 	{
-		Name:        "ibkr_status",
-		Title:       "IBKR Status",
-		Description: "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\", \"are downstream risk reads stale?\"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.",
-		JSONSchema:  schemaObject(nil, nil),
+		Name:               "ibkr_status",
+		Title:              "IBKR Status",
+		Description:        "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\", \"are downstream risk reads stale?\"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.",
+		MonitorDescription: "Connectivity and data-health check for the scheduled monitor. Use only when `ibkr_canary` reports degraded/failed inputs or the gateway may be disconnected. Read-only.",
+		JSONSchema:         schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.HealthResult
 			if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
@@ -64,15 +66,30 @@ var Tools = []Tool{
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"symbol": schemaString("filter to a single underlying symbol (case-insensitive)"),
 			"type":   schemaEnum([]string{"stk", "opt"}, "filter to stock or option positions"),
+			"view":   schemaEnum([]string{rpc.ViewFull, rpc.ViewRisk}, "response shape: full returns existing stocks/options/by_underlying detail (default); risk returns compact portfolio aggregates, top exposures, option-health counts, and flagged option legs"),
 		}, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
-			var in rpc.PositionsListParams
+			var in struct {
+				Symbol string `json:"symbol"`
+				Type   string `json:"type"`
+				View   string `json:"view"`
+			}
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
 			}
+			if in.View == "" {
+				in.View = rpc.ViewFull
+			}
+			if in.View != rpc.ViewFull && in.View != rpc.ViewRisk {
+				return nil, fmt.Errorf("view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewRisk, in.View)
+			}
 			var res rpc.PositionsResult
-			if err := conn.Call(ctx, rpc.MethodPositionsList, in, &res); err != nil {
+			params := rpc.PositionsListParams{Symbol: in.Symbol, Type: in.Type}
+			if err := conn.Call(ctx, rpc.MethodPositionsList, params, &res); err != nil {
 				return nil, err
+			}
+			if in.View == rpc.ViewRisk {
+				return json.Marshal(rpc.CompactPositionsRisk(&res, 5))
 			}
 			return json.Marshal(res)
 		},
@@ -442,11 +459,28 @@ var Tools = []Tool{
 			"In combined scope use `envelope.result.summary`, `per_index.SPY`, `per_index.SPX`, `gamma_total_abs`, and `top_strikes`; the signed γ-zero is a regime hint, not a precise level.",
 			"Expect gamma/breadth to be `computing` on cold starts and optional `fields_missing` values when a secondary scalar missed the fetch budget or an official daily file is temporarily unavailable.",
 		}, " "),
-		JSONSchema: schemaObject(nil, nil),
-		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"view": schemaEnum([]string{rpc.ViewDetail, rpc.ViewMonitor}, "response shape: detail returns the existing compact regime snapshot (default); monitor returns lifecycle, summary, source health, warnings, and compact indicator rows only"),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				View string `json:"view"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			if in.View == "" {
+				in.View = rpc.ViewDetail
+			}
+			if in.View != rpc.ViewDetail && in.View != rpc.ViewMonitor {
+				return nil, fmt.Errorf("view must be %q or %q (got %q)", rpc.ViewDetail, rpc.ViewMonitor, in.View)
+			}
 			var res rpc.RegimeSnapshotResult
 			if err := conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &res); err != nil {
 				return nil, err
+			}
+			if in.View == rpc.ViewMonitor {
+				return json.Marshal(rpc.CompactRegimeMonitor(&res))
 			}
 			rpc.CompactRegimeSnapshot(&res)
 			return json.Marshal(res)
@@ -471,11 +505,29 @@ var Tools = []Tool{
 			"This tool is read-only and does NOT place, preview, submit, modify, cancel, draft, size, or select orders.",
 			"NOT for detailed diagnostics — use `ibkr_regime`, `ibkr_positions`, or `ibkr_account` when you need underlying evidence; use `ibkr_positions` for held-option warnings such as `mark_outside_bid_ask` or `options_closed`.",
 		}, " "),
-		JSONSchema: schemaObject(nil, nil),
-		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
-			res, err := cli.FetchCanary(ctx, conn)
+		MonitorDescription: "One-call scheduled portfolio risk monitor. Use first for market-regime × held-portfolio state; do not call account/positions/regime separately unless this returns degraded inputs or an action requiring diagnostics. Read-only.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"view": schemaEnum([]string{rpc.ViewFull, rpc.ViewAlert}, "response shape: full returns the existing canary evidence payload (default); alert returns compact monitor headline, source health, portfolio/market summaries, option health, hedge offset, warnings, and non-observe flags"),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				View string `json:"view"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			if in.View == "" {
+				in.View = rpc.ViewFull
+			}
+			if in.View != rpc.ViewFull && in.View != rpc.ViewAlert {
+				return nil, fmt.Errorf("view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewAlert, in.View)
+			}
+			res, positions, err := cli.FetchCanarySnapshot(ctx, conn)
 			if err != nil {
 				return nil, err
+			}
+			if in.View == rpc.ViewAlert {
+				return json.Marshal(rpc.CompactCanaryAlert(&res, &positions))
 			}
 			return json.Marshal(res)
 		},

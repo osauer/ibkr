@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
@@ -18,6 +21,7 @@ import (
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
 	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/internal/xdgcache"
 )
 
 type App struct {
@@ -27,12 +31,22 @@ type App struct {
 	Live    *live.Service
 	Relay   relay.Client
 	Server  *hyperserve.Server
+	lock    *xdgcache.Lock
 }
 
 func New(opts Options) (*App, error) {
 	if opts.Addr == "" {
 		opts = DefaultOptions(opts.Version)
 	}
+	lock, err := acquireAppLock(opts.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if lock != nil {
+			_ = lock.Release()
+		}
+	}()
 	store, err := state.Open(opts.StateDir)
 	if err != nil {
 		return nil, err
@@ -55,7 +69,33 @@ func New(opts Options) (*App, error) {
 	liveSvc.OnCanary = func(ctx context.Context, canary rpc.CanaryResult) {
 		monitor.Observe(ctx, canary)
 	}
-	return newWithParts(opts, store, authMgr, liveSvc, relayClient)
+	app, err := newWithParts(opts, store, authMgr, liveSvc, relayClient)
+	if err != nil {
+		return nil, err
+	}
+	app.lock = lock
+	lock = nil
+	return app, nil
+}
+
+func acquireAppLock(stateDir string) (*xdgcache.Lock, error) {
+	if strings.TrimSpace(stateDir) == "" {
+		return nil, errors.New("state dir required")
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create app state dir: %w", err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("secure app state dir: %w", err)
+	}
+	lock, err := xdgcache.OpenLock(filepath.Join(stateDir, "app.lock"))
+	if err != nil {
+		if errors.Is(err, xdgcache.ErrLocked) {
+			return nil, errors.New("another ibkr app process is already running for this state directory")
+		}
+		return nil, err
+	}
+	return lock, nil
 }
 
 func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, liveSvc *live.Service, relayClient relay.Client) (*App, error) {
@@ -89,6 +129,7 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, liveS
 }
 
 func (a *App) Run(ctx context.Context) error {
+	defer func() { _ = a.Close() }()
 	liveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.Live.Start(liveCtx)
@@ -100,5 +141,14 @@ func (a *App) Run(ctx context.Context) error {
 	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, context.Canceled) {
 		return nil
 	}
+	return err
+}
+
+func (a *App) Close() error {
+	if a == nil || a.lock == nil {
+		return nil
+	}
+	err := a.lock.Release()
+	a.lock = nil
 	return err
 }

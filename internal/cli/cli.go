@@ -107,7 +107,7 @@ func isValueFlag(name string) bool {
 		"entry", "stop", "target", "risk-pct", "lot", "fx",
 		"only", "market", "exchange", "primary", "currency", "instrument", "log",
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
-		"min-dte", "max-dte", "target-dte":
+		"min-dte", "max-dte", "target-dte", "view":
 		return true
 	}
 	return false
@@ -171,7 +171,7 @@ func init() {
 		{"daemon", "Run the stateful gateway daemon (normally autospawned)", "ibkr daemon [--foreground] [--config PATH] [--socket PATH] [--log PATH|stderr]", nil}, // dispatched in cmd/ibkr/main.go — long-lived daemon
 		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil},                                                 // dispatched in cmd/ibkr/main.go — no daemon contact
 		{"update", "Self-update the ibkr binary from the latest GitHub release", "ibkr update [--check] [--force] [--restart|--no-restart]", nil},                   // dispatched in cmd/ibkr/main.go — no daemon contact
-		{"restart", "Gracefully restart or start the background daemon", "ibkr restart [--force] [--timeout 15s] [--json]", nil},                                    // dispatched in cmd/ibkr/main.go — process management
+		{"restart", "Gracefully restart or start the daemon or app process", "ibkr restart [--app] [--force] [--timeout 15s] [--json]", nil},                        // dispatched in cmd/ibkr/main.go — process management
 		{"version", "Print version, commit, build date", "ibkr version", nil},                                                                                       // version is handled in cmd/ibkr/main.go before dispatch
 	}
 }

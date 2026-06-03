@@ -81,6 +81,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	watch := fs.Bool("watch", false, "re-poll continuously; in-place redraw on a TTY")
 	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m)")
 	logPath := fs.String("log", "", "append snapshot to a JSONL file at <path> (one line per call)")
+	view := fs.String("view", rpc.ViewDetail, "JSON response view: detail | monitor")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -89,6 +90,12 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	}
 	if *diagnostics && !*explain {
 		return fail(env, "regime: --diagnostics requires --explain")
+	}
+	if *view != rpc.ViewDetail && *view != rpc.ViewMonitor {
+		return fail(env, "regime: --view must be %q or %q (got %q)", rpc.ViewDetail, rpc.ViewMonitor, *view)
+	}
+	if *view != rpc.ViewDetail && !*jsonOut {
+		return fail(env, "regime: --view requires --json")
 	}
 
 	fetchAndRender := func(out io.Writer) int {
@@ -108,6 +115,9 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 			}
 		}
 		if *jsonOut {
+			if *view == rpc.ViewMonitor {
+				return printJSONTo(env, out, rpc.CompactRegimeMonitor(&res))
+			}
 			if !*explain {
 				rpc.CompactRegimeSnapshot(&res)
 			} else {

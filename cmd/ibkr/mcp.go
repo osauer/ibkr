@@ -9,7 +9,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,15 +26,9 @@ const (
 )
 
 func runMCP(args []string) int {
-	// MCP servers take no flags today. Reject extras explicitly so a
-	// typo doesn't get silently swallowed and leave the client wondering.
-	if len(args) > 0 {
-		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "-help") {
-			printMCPUsage(os.Stdout)
-			return 0
-		}
-		fmt.Fprintln(os.Stderr, "ibkr mcp: takes no arguments")
-		return 2
+	profile, code := parseMCPArgs(args, os.Stdout, os.Stderr)
+	if code != 0 {
+		return code
 	}
 
 	ctx, cancel := mcpLifecycleContext()
@@ -40,6 +36,7 @@ func runMCP(args []string) int {
 
 	socketPath := dial.DefaultSocketPath()
 	srv := mcp.NewServer(nil, effectiveVersion())
+	srv.SetProfile(profile)
 	// Tool calls and streaming subscriptions use short-lived daemon
 	// connections so a timed-out MCP call cannot leave a late daemon reply
 	// queued on a shared control socket. The daemon is opened lazily on the
@@ -53,6 +50,29 @@ func runMCP(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func parseMCPArgs(args []string, stdout, stderr io.Writer) (mcp.Profile, int) {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	profileRaw := fs.String("profile", string(mcp.ProfileFull), "tool profile: full | monitor")
+	fs.Usage = func() { printMCPUsage(stdout) }
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return mcp.ProfileFull, 0
+		}
+		return mcp.ProfileFull, 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "ibkr mcp: takes no positional args (got %v)\n", fs.Args())
+		return mcp.ProfileFull, 2
+	}
+	profile, err := mcp.ParseProfile(*profileRaw)
+	if err != nil {
+		fmt.Fprintf(stderr, "ibkr mcp: %v\n", err)
+		return mcp.ProfileFull, 2
+	}
+	return profile, 0
 }
 
 func mcpServeOptions() mcp.ServeOptions {
@@ -111,20 +131,24 @@ func dialMCPDaemon(ctx context.Context, socketPath string) (*dial.Conn, error) {
 	return conn, nil
 }
 
-func printMCPUsage(w *os.File) {
+func printMCPUsage(w io.Writer) {
 	fmt.Fprintln(w, "ibkr mcp - run the stdio MCP server for local AI clients")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage: ibkr mcp")
+	fmt.Fprintln(w, "Usage: ibkr mcp [--profile full|monitor]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Configure your MCP host with an absolute command path and the arg \"mcp\":")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "{")
 	fmt.Fprintln(w, `  "mcpServers": {`)
 	fmt.Fprintln(w, `    "ibkr": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp"] }`)
+	fmt.Fprintln(w, `    "ibkr-monitor": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp", "--profile", "monitor"] }`)
 	fmt.Fprintln(w, "  }")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The server exposes read-only ibkr_* tools plus the ibkr://quote/{symbol}")
 	fmt.Fprintln(w, "resource template. resources/read returns one snapshot; resources/subscribe")
 	fmt.Fprintln(w, "streams quote updates until unsubscribe or client shutdown.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "The monitor profile exposes only ibkr_canary and ibkr_status for low-token")
+	fmt.Fprintln(w, "scheduled checks.")
 }
