@@ -280,6 +280,60 @@ type ContractParams struct {
 	Right        string  `json:"right,omitempty"` // C | P
 }
 
+const (
+	OrderActionBuy  = "BUY"
+	OrderActionSell = "SELL"
+
+	OrderTypeLMT = "LMT"
+	OrderTIFDay  = "DAY"
+
+	OrderStrategyPatientLimit = "patient-limit"
+
+	OrderPositionEffectReduce = "reduce"
+	OrderPositionEffectClose  = "close"
+
+	OrderWhatIfStatusUnavailable = "unavailable"
+)
+
+// OrderDraft is the canonical local intent shown by plan-based order preview.
+// Default builds never submit it; submit-capable builds must bind this exact
+// draft to a broker WhatIf result before minting a place token.
+type OrderDraft struct {
+	Action     string         `json:"action"`
+	Contract   ContractParams `json:"contract"`
+	Quantity   int            `json:"quantity"`
+	OrderType  string         `json:"order_type"`
+	LimitPrice float64        `json:"limit_price"`
+	TIF        string         `json:"tif"`
+	OutsideRTH bool           `json:"outside_rth"`
+	Strategy   string         `json:"strategy"`
+	OrderRef   string         `json:"order_ref"`
+}
+
+type OrderMarginImpact struct {
+	Currency                string   `json:"currency,omitempty"`
+	InitialMarginBefore     *float64 `json:"initial_margin_before,omitempty"`
+	InitialMarginAfter      *float64 `json:"initial_margin_after,omitempty"`
+	MaintenanceMarginBefore *float64 `json:"maintenance_margin_before,omitempty"`
+	MaintenanceMarginAfter  *float64 `json:"maintenance_margin_after,omitempty"`
+	EquityWithLoanBefore    *float64 `json:"equity_with_loan_before,omitempty"`
+	EquityWithLoanAfter     *float64 `json:"equity_with_loan_after,omitempty"`
+	Commission              *float64 `json:"commission,omitempty"`
+	CommissionCurrency      string   `json:"commission_currency,omitempty"`
+	WarningText             string   `json:"warning_text,omitempty"`
+	CompletedStatus         string   `json:"completed_status,omitempty"`
+	CompletedTime           string   `json:"completed_time,omitempty"`
+}
+
+type OrderWhatIfResult struct {
+	Status            string             `json:"status"`
+	RequiredForSubmit bool               `json:"required_for_submit"`
+	Available         bool               `json:"available"`
+	Message           string             `json:"message,omitempty"`
+	Action            string             `json:"action,omitempty"`
+	Margin            *OrderMarginImpact `json:"margin,omitempty"`
+}
+
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
 type QuoteSnapshotParams struct {
 	Contract         ContractParams `json:"contract"`
@@ -2012,11 +2066,14 @@ type FrameError struct {
 // (illiquid leg, OOH model abstention, subscribe slot churn) — never zero-
 // substituted.
 type PositionView struct {
-	Symbol   string  `json:"symbol"`
-	SecType  string  `json:"sec_type"`
-	Exchange string  `json:"exchange,omitempty"`
-	Currency string  `json:"currency,omitempty"`
-	Quantity float64 `json:"quantity"`
+	Symbol       string  `json:"symbol"`
+	SecType      string  `json:"sec_type"`
+	ConID        int     `json:"con_id,omitempty"`
+	Exchange     string  `json:"exchange,omitempty"`
+	Currency     string  `json:"currency,omitempty"`
+	LocalSymbol  string  `json:"local_symbol,omitempty"`
+	TradingClass string  `json:"trading_class,omitempty"`
+	Quantity     float64 `json:"quantity"`
 	// Multiplier is the contract multiplier — 1 for stocks, 100 for standard
 	// equity options, sometimes higher for index options. Needed by JSON
 	// consumers to convert between per-share Mark and per-contract AvgCost

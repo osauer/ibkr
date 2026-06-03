@@ -226,8 +226,11 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 		view := rpc.PositionView{
 			Symbol:        sym,
 			SecType:       positionSecType(pos.Contract.SecType),
+			ConID:         pos.Contract.ConID,
 			Exchange:      pos.Contract.Exchange,
 			Currency:      pos.Contract.Currency,
+			LocalSymbol:   pos.Contract.LocalSymbol,
+			TradingClass:  pos.Contract.TradingClass,
 			Quantity:      pos.Position,
 			Multiplier:    multiplier,
 			AvgCost:       pos.AverageCost,
