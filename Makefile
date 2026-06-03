@@ -35,8 +35,10 @@ MAIN_BRANCH ?= main
 RELEASE_TEST_JOBS ?= 3
 MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
+MCP_REGISTRY_AUTO_LOGIN ?= 1
+MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -434,8 +436,12 @@ release-registry-server: ## Generate and validate dist/server.json for MCP Regis
 	go run ./scripts/release-registry-server $(RELEASE_VERSION) "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" "$(DIST_DIR)/server.json"
 	$(MCP_PUBLISHER) validate "$(DIST_DIR)/server.json"
 
-registry-publish: release-registry-server ## Publish dist/server.json to the MCP Registry
-	$(MCP_PUBLISHER) publish "$(DIST_DIR)/server.json"
+registry-login: ## Refresh MCP Registry auth token (default: GitHub device flow)
+	$(MCP_PUBLISHER) login $(MCP_REGISTRY_LOGIN_METHOD)
+
+registry-publish: release-registry-server ## Publish dist/server.json, refreshing expired Registry auth when needed
+	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) MCP_REGISTRY_LOGIN_METHOD=$(MCP_REGISTRY_LOGIN_METHOD) \
+		./scripts/registry-publish-with-login.sh "$(MCP_PUBLISHER)" "$(DIST_DIR)/server.json"
 
 # Compose the GitHub Release notes by substituting __VERSION__ and
 # __HIGHLIGHTS__ in the install-header template, then appending the
