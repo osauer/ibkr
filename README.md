@@ -6,7 +6,7 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Agentic use](docs/guides/agentic-use.md)
+[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
 
 **Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
@@ -173,6 +173,12 @@ $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```
 
 `ibkr --help` lists subcommands; `ibkr <cmd> --help` lists flags. `ibkr status` first if anything looks off.
+
+### Mobile app
+
+`ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, and debug-only tools. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
+
+See [web/app/README.md](web/app/README.md) for the short operator notes and [docs/design/mobile-app-mvp.md](docs/design/mobile-app-mvp.md) for the MVP design.
 
 ### Go and other agent SDKs
 
