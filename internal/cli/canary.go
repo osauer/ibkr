@@ -21,6 +21,7 @@ type CanaryResult = rpc.CanaryResult
 type CanarySourceAsOf = rpc.CanarySourceAsOf
 type CanarySourceFingerprints = rpc.CanarySourceFingerprints
 type CanaryRow = rpc.CanaryRow
+type CanaryMarketIndicator = rpc.CanaryMarketIndicator
 type CanaryPortfolioSummary = rpc.CanaryPortfolioSummary
 type CanaryMarketSummary = rpc.CanaryMarketSummary
 
@@ -41,7 +42,8 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		SourceFingerprints: CanarySourceFingerprints{Account: &accountFingerprint, Positions: &positionsFingerprint, Regime: &regimeFingerprint},
 		Policy:             canaryPolicy.Name,
 		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions),
-		Market:             summarizeCanaryMarket(in.Regime),
+		Market:             summarizeCanaryMarket(in.Regime, now),
+		MarketIndicators:   canaryMarketIndicators(in.Regime, now),
 		NotExecution:       "Read-only canary snapshot; no orders are placed by ibkr.",
 	}
 	sourceIssues := canarySourceIssues(in, now)
@@ -70,7 +72,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	res.Summary = canaryDecisionSummary(res)
 	overall := canaryOverallRow(res.Direction, res.Severity, res.Summary, res.Market, res.Portfolio)
 	res.Rows = append([]CanaryRow{overall}, rows...)
-	res.Warnings = canaryWarnings(res.Market, in.Regime)
+	res.Warnings = canaryWarnings(res.Market, in.Regime, now)
 	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, res.InputHealth, res.Market)
 	res.Fingerprint = rpc.BuildCanaryFingerprint(&res)
 	return res
@@ -164,12 +166,13 @@ func canaryHasActiveMarginContext(acct rpc.AccountResult) bool {
 		acct.InitialMargin > 0
 }
 
-func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
+func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMarketSummary {
 	out := CanaryMarketSummary{
 		RegimeVerdict: r.Composite.Verdict,
 		SPYChangePct:  r.HYGSPYDivergence.SPYChangePct,
 		VIXChangePct:  r.VIXTermStructure.VIXChangePct,
 	}
+	contextClusters := canaryMarketContextClusters(r, now)
 	rawBands := rawRegimeClusterBands(r)
 	bands := confirmedRegimeClusterBands(r, rawBands)
 	clusterBands := map[string]string{}
@@ -203,12 +206,14 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 		if status == rpc.RegimeStatusComputing {
 			out.ComputingClusters = append(out.ComputingClusters, name)
 		}
-		if status == rpc.RegimeStatusStale {
+		if status == rpc.RegimeStatusStale && !contextClusters[name] {
 			out.StaleClusters = append(out.StaleClusters, name)
 		}
 		if clusterBand == "" {
-			out.AmbiguousClusters = append(out.AmbiguousClusters, name)
-		} else if status == rpc.RegimeStatusError || status == rpc.RegimeStatusUnavailable || status == rpc.RegimeStatusComputing {
+			if !contextClusters[name] {
+				out.AmbiguousClusters = append(out.AmbiguousClusters, name)
+			}
+		} else if !contextClusters[name] && (status == rpc.RegimeStatusError || status == rpc.RegimeStatusUnavailable || status == rpc.RegimeStatusComputing) {
 			out.PartialClusters = append(out.PartialClusters, name)
 		}
 	}
@@ -228,41 +233,159 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult) CanaryMarketSummary {
 	return out
 }
 
+func canaryMarketContextClusters(r rpc.RegimeSnapshotResult, now time.Time) map[string]bool {
+	out := map[string]bool{}
+	if canaryGammaContextOnly(r.GammaZero) {
+		out["gamma"] = true
+	}
+	if canaryVolClosedSessionContext(r, now) {
+		out["vol"] = true
+	}
+	return out
+}
+
+func canaryGammaContextOnly(g rpc.RegimeGammaZero) bool {
+	return g.Envelope.Result != nil &&
+		g.Envelope.Result.Quality != nil &&
+		g.Envelope.Result.Quality.Rankability == rpc.GammaRankabilityContextOnly
+}
+
+func canaryVolClosedSessionContext(r rpc.RegimeSnapshotResult, now time.Time) bool {
+	if rpc.ClassifySession(now) == rpc.SessionRTH {
+		return false
+	}
+	for _, q := range r.DataQuality {
+		if q.Status == rpc.RegimeStatusStale && slices.Contains(q.StaleClusters, "vol") {
+			return true
+		}
+	}
+	switch r.VIXTermStructure.Status {
+	case rpc.RegimeStatusStale:
+		return true
+	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+		return r.VolOfVol.Band != "" || r.VolOfVol.Status == rpc.RegimeStatusOK || r.VolOfVol.Status == rpc.RegimeStatusStale
+	default:
+		return false
+	}
+}
+
+func canaryMarketIndicators(r rpc.RegimeSnapshotResult, now time.Time) []CanaryMarketIndicator {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	contextClusters := canaryMarketContextClusters(r, now)
+	rows := []struct {
+		cluster string
+		row     regimeRow
+		asOf    *rpc.RegimeAsOfSummary
+		date    string
+		status  string
+	}{
+		{cluster: "vol", row: rowVIXTerm(now, r.VIXTermStructure), asOf: r.VIXTermStructure.AsOf, status: r.VIXTermStructure.Status},
+		{cluster: "vol", row: rowVolOfVol(now, r.VolOfVol), asOf: r.VolOfVol.AsOf, date: r.VolOfVol.AsOfDate, status: r.VolOfVol.Status},
+		{cluster: "credit", row: rowHYGSPY(now, r.HYGSPYDivergence), asOf: r.HYGSPYDivergence.AsOf, status: r.HYGSPYDivergence.Status},
+		{cluster: "credit", row: rowCreditSpreads(now, r.CreditSpreads), asOf: r.CreditSpreads.AsOf, date: r.CreditSpreads.AsOfDate, status: r.CreditSpreads.Status},
+		{cluster: "funding", row: rowFundingStress(now, r.FundingStress), asOf: r.FundingStress.AsOf, date: r.FundingStress.AsOfDate, status: r.FundingStress.Status},
+		{cluster: "fx", row: rowUSDJPY(now, r.USDJPY), asOf: r.USDJPY.AsOf, status: r.USDJPY.Status},
+		{cluster: "gamma", row: rowGamma(now, r.GammaZero), asOf: r.GammaZero.AsOf, status: r.GammaZero.Status},
+		{cluster: "breadth", row: rowBreadth(now, r.Breadth), asOf: r.Breadth.AsOf, status: r.Breadth.Status},
+	}
+	out := make([]CanaryMarketIndicator, 0, len(rows))
+	for _, item := range rows {
+		reading := item.row.value
+		if item.row.stateNote != "" && item.row.band == bandUnranked {
+			reading = item.row.stateNote
+		}
+		contextOnly := contextClusters[item.cluster]
+		out = append(out, CanaryMarketIndicator{
+			Name:    item.row.name,
+			Status:  canaryIndicatorStatus(item.row.band, item.status, contextOnly),
+			AsOf:    canaryIndicatorAsOf(item.asOf, item.date, item.row.asOf),
+			Reading: reading,
+			Comment: canaryIndicatorComment(item.row, reading, contextOnly),
+		})
+	}
+	return out
+}
+
+func canaryIndicatorStatus(b regimeBand, status string, contextOnly bool) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case rpc.RegimeStatusComputing, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+		if b == bandUnranked {
+			return "n/a"
+		}
+	}
+	switch b {
+	case bandGreen:
+		return "green"
+	case bandYellow:
+		return "amber"
+	case bandRed:
+		return "red"
+	default:
+		if contextOnly {
+			return "context"
+		}
+		return "n/a"
+	}
+}
+
+func canaryIndicatorAsOf(meta *rpc.RegimeAsOfSummary, date, fallback string) string {
+	if meta != nil {
+		if meta.Date != "" {
+			return meta.Date
+		}
+		if !meta.Time.IsZero() {
+			return meta.Time.Local().Format("2006-01-02")
+		}
+		if meta.Label != "" {
+			return meta.Label
+		}
+	}
+	if date != "" {
+		return date
+	}
+	return ifNonEmpty(fallback, "—")
+}
+
+func canaryIndicatorComment(row regimeRow, reading string, contextOnly bool) string {
+	parts := []string{}
+	add := func(part string) {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.EqualFold(part, strings.TrimSpace(reading)) || slices.Contains(parts, part) {
+			return
+		}
+		parts = append(parts, part)
+	}
+	add(row.reason)
+	if row.status == rpc.RegimeStatusStale && !strings.Contains(strings.ToLower(row.reason), "context") {
+		if contextOnly {
+			add("closed-session cached context")
+		} else {
+			add("stale input")
+		}
+	}
+	if row.quality != "" {
+		add(strings.TrimSpace(strings.TrimPrefix(row.quality, "·")))
+	}
+	return strings.Join(parts, "; ")
+}
+
 func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
 	if g.Envelope.Result == nil {
 		return false
 	}
-	if g.Envelope.Result.Quality == nil || g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if g.Envelope.Result.Quality == nil {
 		return true
 	}
-	if g.Envelope.Result.Summary != nil && strings.EqualFold(g.Envelope.Result.Summary.Confidence, "degraded") {
-		return true
-	}
-	return canaryGammaComputedDegraded(g.Envelope.Result)
-}
-
-func canaryGammaComputedDegraded(c *rpc.GammaZeroComputed) bool {
-	if c == nil {
+	switch g.Envelope.Result.Quality.Rankability {
+	case rpc.GammaRankabilityRankable:
 		return false
+	case rpc.GammaRankabilityContextOnly:
+		return false
+	default:
+		return true
 	}
-	for _, w := range c.WarningDetails {
-		code := strings.ToLower(strings.TrimSpace(w.Code))
-		switch {
-		case code == "oi_missing", code == "all_iv_derived", code == "cache_stale_off_hours":
-			return true
-		case strings.HasPrefix(code, "spy_unavailable:"),
-			strings.HasPrefix(code, "spx_unavailable:"),
-			strings.HasPrefix(code, "spx_cache_fallback"),
-			strings.HasPrefix(code, "skew_fallback:"):
-			return true
-		}
-	}
-	for _, sub := range c.PerIndex {
-		if canaryGammaComputedDegraded(sub) {
-			return true
-		}
-	}
-	return false
 }
 
 func weakestStatus(statuses []string) string {
@@ -462,13 +585,13 @@ func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m Canar
 
 func canaryDataQualityRow(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) CanaryRow {
 	if canaryHasMarketDataIssue(m) && (m.RedClusters > 0 || m.YellowClusters > 0) {
-		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Treat this as unresolved or degraded stress: verify weak clusters, but do not suppress confirmed independent red signals.", canaryAmbiguityEvidence(m))
+		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Verify incomplete inputs before escalation; do not suppress confirmed independent red signals.", canaryAmbiguityEvidence(m))
 	}
 	if canaryHasMarketDataIssue(m) {
-		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Market inputs are incomplete or stale; keep the canary on watch until coverage and freshness recover.", canaryAmbiguityEvidence(m))
+		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Refresh or verify incomplete market inputs; keep the canary on watch until coverage and freshness recover.", canaryAmbiguityEvidence(m))
 	}
 	if m.RankedClusters < 4 {
-		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Do not take urgent action on market data alone; wait for at least four ranked regime clusters.", canaryMarketEvidence(m))
+		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Verify market coverage before action; wait for at least four ranked regime clusters.", canaryMarketEvidence(m))
 	}
 	if r.GammaZero.Status == rpc.RegimeStatusComputing || r.Breadth.Status == rpc.RegimeStatusComputing {
 		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Do not escalate on gamma/breadth until the daemon finishes the cached compute.", canaryMarketEvidence(m))
@@ -575,7 +698,7 @@ func canaryInputHealth(in CanaryInput, m CanaryMarketSummary, sourceIssues []can
 		return canaryInputFailed
 	case in.Account.DailyPnL == nil:
 		return canaryInputWarming
-	case len(sourceIssues) > 0 || canaryHasMarketDataIssue(m) || m.UnrankedClusters > 0:
+	case len(sourceIssues) > 0 || canaryHasMarketDataIssue(m):
 		return canaryInputDegraded
 	default:
 		return canaryInputOK
@@ -1047,9 +1170,9 @@ func canaryOptionSignals(pos rpc.PositionsResult, m CanaryMarketSummary) []risk.
 func canaryDataQualitySignals(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []risk.Signal {
 	out := []risk.Signal{}
 	blockedBy := canaryUniqueClusters(m.AmbiguousClusters, m.PartialClusters, m.DegradedClusters, m.ComputingClusters)
-	if len(blockedBy) > 0 || m.UnrankedClusters > 0 {
-		observed := float64(max(len(blockedBy), m.UnrankedClusters))
-		out = append(out, risk.Signal{ID: risk.SignalRiskDataDegraded, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Metric: "degraded_inputs", Observed: &observed, Evidence: canaryAmbiguityEvidence(m), Confidence: "medium-low", ConfidenceImpact: "requires confirmation before severe action", BlockedBy: blockedBy})
+	if len(blockedBy) > 0 {
+		observed := float64(len(blockedBy))
+		out = append(out, risk.Signal{ID: risk.SignalRiskDataDegraded, Direction: risk.DirectionDataQuality, Severity: risk.SeverityWatch, Metric: "degraded_inputs", Observed: &observed, Evidence: canaryAmbiguityEvidence(m), Confidence: "medium-low", ConfidenceImpact: "requires verification before severe action", BlockedBy: blockedBy})
 	}
 	if len(m.StaleClusters) > 0 {
 		observed := float64(len(m.StaleClusters))
@@ -1263,31 +1386,94 @@ func canaryPrimaryDrivers(signals []risk.Signal) []risk.SignalID {
 	return out
 }
 
-func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []string {
+func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult, now time.Time) []string {
 	var warnings []string
-	if m.UnrankedClusters > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d regime cluster(s) unranked; severe market actions require independent confirmation", m.UnrankedClusters))
+	detailWarnings, detailedClusters := canaryRegimeWarningDetails(r.WarningDetails, now)
+	ambiguousClusters := canaryClustersWithoutDetailedWarning(m.AmbiguousClusters, detailedClusters)
+	partialClusters := canaryClustersWithoutDetailedWarning(m.PartialClusters, detailedClusters)
+	degradedClusters := canaryClustersWithoutDetailedWarning(m.DegradedClusters, detailedClusters)
+	staleClusters := canaryClustersWithoutDetailedWarning(m.StaleClusters, detailedClusters)
+
+	if len(ambiguousClusters) > 0 {
+		warnings = append(warnings, "ambiguous clusters: "+canaryClusterList(ambiguousClusters))
 	}
-	if len(m.AmbiguousClusters) > 0 {
-		warnings = append(warnings, "ambiguous clusters: "+canaryClusterList(m.AmbiguousClusters))
+	if len(partialClusters) > 0 {
+		warnings = append(warnings, "partial clusters: "+canaryClusterList(partialClusters))
 	}
-	if len(m.PartialClusters) > 0 {
-		warnings = append(warnings, "partial clusters: "+canaryClusterList(m.PartialClusters))
+	if len(degradedClusters) > 0 {
+		warnings = append(warnings, "degraded clusters: "+canaryClusterList(degradedClusters))
 	}
-	if len(m.DegradedClusters) > 0 {
-		warnings = append(warnings, "degraded clusters: "+canaryClusterList(m.DegradedClusters))
+	if len(staleClusters) > 0 {
+		warnings = append(warnings, "stale clusters: "+canaryClusterList(staleClusters))
 	}
-	if len(m.StaleClusters) > 0 {
-		warnings = append(warnings, "stale clusters: "+canaryClusterList(m.StaleClusters))
-	}
-	for _, w := range r.WarningDetails {
+	warnings = append(warnings, detailWarnings...)
+	return warnings
+}
+
+func canaryRegimeWarningDetails(details []rpc.RegimeWarning, now time.Time) ([]string, map[string]bool) {
+	lines := []string{}
+	clusters := map[string]bool{}
+	for _, w := range details {
+		if canaryRegimeWarningIsContext(w, now) {
+			continue
+		}
 		line := canaryWarningLine(w)
 		if line == "" {
 			continue
 		}
-		warnings = append(warnings, line)
+		lines = append(lines, line)
+		if cluster := canaryRegimeWarningCluster(w); cluster != "" {
+			clusters[cluster] = true
+		}
 	}
-	return warnings
+	return lines, clusters
+}
+
+func canaryRegimeWarningIsContext(w rpc.RegimeWarning, now time.Time) bool {
+	lower := strings.ToLower(strings.Join([]string{w.Code, w.Scope, w.Severity, w.Message, w.Impact, w.Action}, " "))
+	if strings.Contains(lower, "gamma") && (strings.Contains(lower, "context_only") || strings.Contains(lower, "context only") || strings.Contains(lower, "displayed as context")) {
+		return true
+	}
+	if rpc.ClassifySession(now) != rpc.SessionRTH &&
+		strings.Contains(lower, "vix_term_structure") &&
+		(strings.Contains(lower, "stale") || strings.Contains(lower, "no spot tick") || strings.Contains(lower, "calculation hours")) {
+		return true
+	}
+	return false
+}
+
+func canaryClustersWithoutDetailedWarning(clusters []string, detailed map[string]bool) []string {
+	if len(clusters) == 0 || len(detailed) == 0 {
+		return clusters
+	}
+	out := []string{}
+	for _, cluster := range clusters {
+		if detailed[cluster] {
+			continue
+		}
+		out = append(out, cluster)
+	}
+	return out
+}
+
+func canaryRegimeWarningCluster(w rpc.RegimeWarning) string {
+	text := strings.ToLower(strings.TrimSpace(w.Scope + " " + w.Code))
+	switch {
+	case strings.Contains(text, "gamma"):
+		return "gamma"
+	case strings.Contains(text, "funding"):
+		return "funding"
+	case strings.Contains(text, "vix") || strings.Contains(text, "vvix") || strings.Contains(text, "vol_of_vol"):
+		return "vol"
+	case strings.Contains(text, "hyg") || strings.Contains(text, "credit") || strings.Contains(text, "oas"):
+		return "credit"
+	case strings.Contains(text, "usd") || strings.Contains(text, "jpy") || strings.Contains(text, "fx"):
+		return "fx"
+	case strings.Contains(text, "breadth"):
+		return "breadth"
+	default:
+		return ""
+	}
 }
 
 func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
@@ -1339,11 +1525,11 @@ func canaryRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfi
 	if len(m.DegradedClusters) > 0 {
 		notes = append(notes, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
 	}
-	if len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 || m.UnrankedClusters > 0 {
+	if len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 {
 		notes = append(notes, canaryAmbiguityEvidence(m))
 	}
 	switch {
-	case len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 || m.UnrankedClusters > 0:
+	case len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0:
 		status = "partial"
 	case len(m.DegradedClusters) > 0:
 		status = "degraded"
@@ -1714,18 +1900,14 @@ func renderCanaryTextWidthDetails(env *Env, out io.Writer, r *CanaryResult, widt
 	renderCanarySectionRow(out, "Market weather", canaryMarketReadText(r), width, nil)
 	renderCanarySectionRow(out, "Portfolio shape", canaryPortfolioFitText(r), width, nil)
 	renderCanarySectionRow(out, "Combined read", canaryCombinedReadText(r), width, nil)
+	renderCanaryMarketIndicators(env, out, r.MarketIndicators, width)
 
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  Input health")
-	for _, row := range canaryInputHealthRows(r) {
-		renderCanarySectionRow(out, row.label, row.text, width, row.color)
-	}
+	renderCanaryWarnings(env, out, r.Warnings, width)
 
 	if details {
 		fmt.Fprintln(out)
 		renderCanaryRowsStacked(env, out, r.Rows, width)
 	}
-	renderCanaryWarnings(env, out, r.Warnings, width)
 	if r.Fingerprint.Key != "" {
 		fmt.Fprintln(out)
 		renderCanaryKV(out, "Alert ID", r.Fingerprint.Version+" "+r.Fingerprint.Key, width, env.dim)
@@ -1816,7 +1998,6 @@ func canaryCombinedReadText(r *CanaryResult) string {
 type canaryInputHealthRow struct {
 	label string
 	text  string
-	color func(string) string
 }
 
 func canaryInputHealthRows(r *CanaryResult) []canaryInputHealthRow {
@@ -1833,7 +2014,7 @@ func canaryInputHealthRows(r *CanaryResult) []canaryInputHealthRow {
 	if len(r.Market.StaleClusters) > 0 {
 		rows = append(rows, canaryInputHealthRow{label: "Stale input", text: canaryClusterList(r.Market.StaleClusters)})
 	}
-	if len(r.Market.PartialClusters) > 0 || len(r.Market.AmbiguousClusters) > 0 || len(r.Market.ComputingClusters) > 0 || r.Market.UnrankedClusters > 0 {
+	if len(r.Market.PartialClusters) > 0 || len(r.Market.AmbiguousClusters) > 0 || len(r.Market.ComputingClusters) > 0 {
 		rows = append(rows, canaryInputHealthRow{label: "Incomplete input", text: canaryAmbiguityEvidence(r.Market)})
 	}
 	for _, h := range r.SourceHealth {
@@ -1862,40 +2043,6 @@ func renderCanarySectionRow(out io.Writer, label, value string, width int, color
 			fmt.Fprintf(out, "    %-*s %s\n", labelW, "", line)
 		}
 	}
-}
-
-func lifecycleSummaryText(state rpc.LifecycleState) string {
-	if state.Stage == "" {
-		return ""
-	}
-	parts := []string{}
-	if state.Scope != "" {
-		parts = append(parts, humanLifecycleToken(state.Scope))
-	}
-	parts = append(parts, humanLifecycleToken(string(state.Stage)))
-	if state.Severity != "" {
-		parts = append(parts, string(state.Severity))
-	}
-	if state.Readiness != "" {
-		parts = append(parts, string(state.Readiness))
-	}
-	if state.Timing != "" {
-		parts = append(parts, humanLifecycleToken(state.Timing))
-	}
-	if state.Confidence != "" {
-		parts = append(parts, state.Confidence+" confidence")
-	}
-	if len(state.ConfirmedBy) > 0 {
-		parts = append(parts, "confirmed by "+strings.Join(state.ConfirmedBy, ", "))
-	}
-	if len(state.Unconfirmed) > 0 {
-		parts = append(parts, "unconfirmed "+strings.Join(state.Unconfirmed, ", "))
-	}
-	return strings.Join(parts, " · ")
-}
-
-func humanLifecycleToken(s string) string {
-	return strings.ReplaceAll(strings.TrimSpace(s), "_", " ")
 }
 
 func humanList(value string) string {
@@ -1951,12 +2098,82 @@ func renderCanaryKV(out io.Writer, label, value string, width int, color func(st
 func renderCanaryRowsStacked(env *Env, out io.Writer, rows []CanaryRow, width int) {
 	fmt.Fprintln(out, "  Details")
 	for _, row := range rows {
+		if row.Title == "Portfolio canary" {
+			continue
+		}
 		state := canaryRiskStateLabel(env, row.Direction, row.Severity, false)
 		fmt.Fprintf(out, "  %s · %s\n", row.Title, state)
 		renderCanaryIndented(out, "guidance", row.Guidance, width, nil)
 		if row.Evidence != "" {
 			renderCanaryIndented(out, "evidence", row.Evidence, width, env.dim)
 		}
+	}
+}
+
+func renderCanaryMarketIndicators(env *Env, out io.Writer, indicators []CanaryMarketIndicator, width int) {
+	if len(indicators) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  Market indicators")
+	nameW := 17
+	statusW := 6
+	asOfW := 10
+	for _, row := range indicators {
+		nameW = max(nameW, min(visibleLen(row.Name), 22))
+		statusW = max(statusW, visibleLen(row.Status))
+		asOfW = max(asOfW, min(visibleLen(ifNonEmpty(row.AsOf, "—")), 12))
+	}
+	detailW := max(width-4-nameW-2-statusW-2-asOfW-2, 24)
+	header := fmt.Sprintf("    %s  %s  %s  %s",
+		padRightVisible("INDICATOR", nameW),
+		padRightVisible("STATE", statusW),
+		padRightVisible("AS OF", asOfW),
+		"READING / COMMENT")
+	fmt.Fprintln(out, env.dim(header))
+	for _, row := range indicators {
+		detail := strings.TrimSpace(row.Reading)
+		if row.Comment != "" {
+			if detail != "" {
+				detail += " — "
+			}
+			detail += row.Comment
+		}
+		if detail == "" {
+			detail = "—"
+		}
+		lines := wrapVisibleText(detail, detailW)
+		status := padRightVisible(canaryIndicatorStatusLabel(env, row.Status), statusW)
+		for i, line := range lines {
+			if i == 0 {
+				fmt.Fprintf(out, "    %s  %s  %s  %s\n",
+					padRightVisible(row.Name, nameW),
+					status,
+					padRightVisible(ifNonEmpty(row.AsOf, "—"), asOfW),
+					line)
+				continue
+			}
+			fmt.Fprintf(out, "    %s  %s  %s  %s\n",
+				strings.Repeat(" ", nameW),
+				strings.Repeat(" ", statusW),
+				strings.Repeat(" ", asOfW),
+				line)
+		}
+	}
+}
+
+func canaryIndicatorStatusLabel(env *Env, status string) string {
+	switch status {
+	case "green":
+		return env.green(status)
+	case "amber":
+		return env.yellow(status)
+	case "red":
+		return env.red(status)
+	case "context":
+		return env.dim(status)
+	default:
+		return env.dim(status)
 	}
 }
 
@@ -1979,10 +2196,26 @@ func renderCanaryWarnings(env *Env, out io.Writer, warnings []string, width int)
 	if len(warnings) == 0 {
 		return
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  Warnings")
+	type inputCheck struct {
+		label string
+		text  string
+	}
+	checks := []inputCheck{}
 	for _, warning := range warnings {
 		label, text := canaryWarningLabel(warning)
+		text = canaryInputCheckText(label, text)
+		if !canaryInputCheckRenderable(label, text) {
+			continue
+		}
+		checks = append(checks, inputCheck{label: label, text: text})
+	}
+	if len(checks) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  Input checks")
+	for _, check := range checks {
+		label, text := check.label, check.text
 		labelText := label + ":"
 		available := max(width-4-visibleLen(labelText)-1, 24)
 		lines := wrapVisibleText(text, available)
@@ -1995,6 +2228,17 @@ func renderCanaryWarnings(env *Env, out io.Writer, warnings []string, width int)
 			}
 		}
 	}
+}
+
+func canaryInputCheckRenderable(label, text string) bool {
+	if label != "context" {
+		return true
+	}
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "action:") &&
+		!strings.Contains(lower, "no immediate fix") &&
+		!strings.Contains(lower, "closed-session") &&
+		!strings.Contains(lower, "context-only")
 }
 
 func signalDisplayStrings(ids []risk.SignalID) []string {
@@ -2093,22 +2337,62 @@ func splitVisibleWord(word string, width int) (string, string) {
 func canaryWarningLabel(warning string) (string, string) {
 	lower := strings.ToLower(warning)
 	switch {
-	case strings.Contains(lower, "stale") || strings.Contains(lower, "frozen"):
-		return "info", warning
-	case strings.Contains(lower, "computing") || strings.Contains(lower, "ambiguous") || strings.Contains(lower, "unranked"):
-		return "pending", warning
 	case strings.Contains(lower, "error"):
 		return "error", warning
+	case strings.Contains(lower, "context_only") ||
+		strings.Contains(lower, "context only") ||
+		strings.Contains(lower, "displayed as context") ||
+		strings.Contains(lower, "frozen") ||
+		strings.Contains(lower, "closed"):
+		return "context", warning
+	case strings.Contains(lower, "stale"):
+		return "refresh", warning
+	case strings.Contains(lower, "computing") || strings.Contains(lower, "ambiguous") || strings.Contains(lower, "unranked"):
+		return "verify", warning
 	default:
 		return "warning", warning
 	}
 }
 
+func canaryInputCheckText(label, warning string) string {
+	lower := strings.ToLower(warning)
+	switch {
+	case strings.Contains(lower, "gamma_zero") && (strings.Contains(lower, "context_only") || strings.Contains(lower, "context only")):
+		return "Gamma is after-hours/context-only. Action: no immediate fix; refresh during active option hours before using gamma as confirmation."
+	case strings.Contains(lower, "funding") && strings.Contains(lower, "unranked"):
+		return "Funding is not usable confirmation yet. Action: ignore it for escalation and rerun `ibkr regime` after the source updates."
+	case strings.Contains(lower, "ambiguous clusters:"):
+		clusters := strings.TrimSpace(warning[strings.LastIndex(warning, ":")+1:])
+		return fmt.Sprintf("%s cannot confirm the canary yet. Action: check the n/a row in Market indicators and verify with `ibkr regime` before escalating.", humanList(clusters))
+	case strings.Contains(lower, "partial clusters:"):
+		clusters := strings.TrimSpace(warning[strings.LastIndex(warning, ":")+1:])
+		return fmt.Sprintf("%s is partially usable. Action: inspect the affected Market indicators row; rely only on fresh independent clusters for confirmation.", humanList(clusters))
+	case strings.Contains(lower, "degraded clusters:"):
+		clusters := strings.TrimSpace(warning[strings.LastIndex(warning, ":")+1:])
+		return fmt.Sprintf("%s has degraded input quality. Action: inspect the source command before using it as confirmation.", humanList(clusters))
+	case strings.Contains(lower, "regime cluster") && strings.Contains(lower, "unranked"):
+		return "One or more regime clusters are unranked. Action: treat the canary as context until the n/a Market indicators rows rank."
+	case strings.Contains(lower, "stale clusters:"):
+		clusters := strings.TrimSpace(warning[strings.LastIndex(warning, ":")+1:])
+		return fmt.Sprintf("Refresh %s before escalation. Action: rerun `ibkr canary`; stale rows remain context, not fresh confirmation.", humanList(clusters))
+	case strings.Contains(lower, "vix_term_structure") && strings.Contains(lower, "stale"):
+		return "Volatility term structure is stale. Action: rerun `ibkr regime` or `ibkr canary` before treating vol as fresh confirmation."
+	case strings.Contains(lower, "computing"):
+		return warning + ". Action: wait for the daemon compute to finish, then rerun `ibkr canary`."
+	case label == "error":
+		return warning + ". Action: fix the source or daemon issue before relying on this canary."
+	case label == "warning":
+		return warning + ". Action: inspect the affected row before escalating."
+	default:
+		return warning
+	}
+}
+
 func canaryWarningLabelColor(env *Env, label, text string) string {
 	switch label {
-	case "info":
+	case "context":
 		return env.dim(text)
-	case "pending":
+	case "verify", "refresh":
 		return env.yellow(text)
 	case "error":
 		return env.red(text)

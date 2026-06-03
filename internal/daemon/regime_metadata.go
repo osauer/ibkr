@@ -53,7 +53,7 @@ func annotateRegimeMetadata(r *rpc.RegimeSnapshotResult) {
 		Band:       bandOrUnranked(bandForFundingStress(r.FundingStress)),
 		BandReason: fundingBandReason(r.FundingStress),
 		Thresholds: heuristicThresholds("funding_cp_tbill_v1", "CP/T-bill spread < 25 bp", "25 <= spread < 75 bp", "spread >= 75 bp"),
-		AsOf:       officialRowAsOf(now, r.FundingStress.AsOfDate, "FRED/St. Louis Fed Federal Reserve CP and T-bill daily series", r.FundingStress.Status),
+		AsOf:       officialRowAsOf(now, r.FundingStress.AsOfDate, "Federal Reserve CP DDP plus U.S. Treasury Daily Treasury Bill Rates", r.FundingStress.Status),
 	}
 	r.USDJPY.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
 		Band:       bandOrUnranked(bandForUSDJPY(r.USDJPY)),
@@ -64,7 +64,7 @@ func annotateRegimeMetadata(r *rpc.RegimeSnapshotResult) {
 	r.GammaZero.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
 		Band:       bandOrUnranked(bandForGamma(r.GammaZero)),
 		BandReason: gammaBandReason(r.GammaZero),
-		Thresholds: heuristicThresholds("dealer_gamma_v3", "spot > 2% above gamma-zero or profile wholly long-gamma", "spot within +/-2% of gamma-zero or mixed per-index gamma bands", "spot below gamma-zero, profile wholly short-gamma, or dominant/equal exposure is red"),
+		Thresholds: heuristicThresholds("dealer_gamma_v3", "spot > 2% above gamma-zero or profile wholly long-gamma", "spot within +/-2% of gamma-zero or mixed gamma profile", "spot below gamma-zero, profile wholly short-gamma, or dominant/equal exposure is amplifying"),
 		AsOf:       gammaAsOf(now, r.GammaZero),
 	}
 	r.Breadth.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
@@ -162,7 +162,7 @@ func creditSpreadBandReason(r rpc.RegimeCreditSpreads) string {
 
 func fundingBandReason(r rpc.RegimeFundingStress) string {
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
-		return shortMetaReason(r.ErrorMessage, "FRED funding series unavailable")
+		return shortMetaReason(r.ErrorMessage, "official funding series unavailable")
 	}
 	switch bandForFundingStress(r) {
 	case "green":
@@ -218,16 +218,13 @@ func gammaBandReason(r rpc.RegimeGammaZero) string {
 	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
 		switch bandForGamma(r) {
 		case "green":
-			return "SPY/SPX both stabilizing"
+			return "dealer gamma stabilizing"
 		case "red":
-			if c.RegimeAgreement == "disagree" {
-				return "SPY/SPX disagree; dominant gamma exposure is amplifying"
-			}
-			return "dominant gamma exposure is amplifying"
+			return "dealer gamma amplifying"
 		case "yellow":
-			return "SPY/SPX gamma regimes disagree"
+			return "mixed dealer-gamma read"
 		default:
-			return "no usable per-index gamma profile"
+			return "no usable dealer-gamma profile"
 		}
 	}
 	if c.ZeroGamma != nil && c.GapPct != nil {

@@ -37,7 +37,7 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
 		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
+	if !rowContains(res.Rows, "Ambiguity filter", "Refresh or verify incomplete market inputs") {
 		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
 	}
 }
@@ -138,6 +138,7 @@ func TestComputeCanaryEarlyStressRequiresSecondIndependentCluster(t *testing.T) 
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want defensive/watch for one red cluster plus yellow", res.Direction, res.Severity)
@@ -162,6 +163,7 @@ func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.MarketConfirmation == canaryMarketConfirmed {
 		t.Fatalf("market_confirmation = %s, want not confirmed for one red gamma cluster", res.MarketConfirmation)
@@ -200,22 +202,31 @@ func TestComputeCanaryContextOnlyGammaDoesNotConfirmStress(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 
 	if slices.Contains(res.Market.RedClusterNames, "gamma") {
 		t.Fatalf("red clusters = %+v, want context-only gamma excluded", res.Market.RedClusterNames)
 	}
-	if !slices.Contains(res.Market.DegradedClusters, "gamma") {
-		t.Fatalf("degraded clusters = %+v, want gamma degraded", res.Market.DegradedClusters)
+	if slices.Contains(res.Market.DegradedClusters, "gamma") {
+		t.Fatalf("degraded clusters = %+v, want context-only gamma excluded", res.Market.DegradedClusters)
+	}
+	if slices.Contains(res.Market.AmbiguousClusters, "gamma") {
+		t.Fatalf("ambiguous clusters = %+v, want context-only gamma excluded", res.Market.AmbiguousClusters)
 	}
 	if hasSignal(res.Signals, risk.SignalGammaRed) {
 		t.Fatalf("signals include gamma_red despite context-only gamma: %+v", res.Signals)
 	}
-	if res.PlannerReadiness != risk.PlannerReadinessBlocked && res.PlannerModeHint != risk.PlannerModeConfirmData {
-		t.Fatalf("planner = %s/%s, want blocked or confirm-data posture from degraded gamma", res.PlannerModeHint, res.PlannerReadiness)
+	if res.InputHealth != canaryInputOK {
+		t.Fatalf("input_health = %s, want ok for context-only gamma", res.InputHealth)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
-		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
+	for _, h := range res.SourceHealth {
+		if h.Source == "regime" && h.Status != rpc.RegimeStatusOK {
+			t.Fatalf("regime source health = %+v, want ok when only gamma is context-only", h)
+		}
+	}
+	if hasSignal(res.Signals, risk.SignalRiskDataDegraded) {
+		t.Fatalf("signals include data degraded despite context-only gamma: %+v", res.Signals)
 	}
 }
 
@@ -275,6 +286,7 @@ func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want defensive/watch for unconfirmed premarket SPY drop", res.Direction, res.Severity)
@@ -306,6 +318,7 @@ func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want defensive/watch for confirmed SPY/VIX context without high portfolio fit", res.Direction, res.Severity)
@@ -449,6 +462,7 @@ func TestComputeCanaryFastCarryUnwindActs(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want defensive/watch context without vulnerable portfolio fit", res.Direction, res.Severity)
@@ -472,6 +486,7 @@ func TestComputeCanaryConstructiveTapeShowsOpportunityPosture(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionConstructive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want constructive/watch", res.Direction, res.Severity)
@@ -585,6 +600,7 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want data_quality/watch when ranked market data is stale", res.Direction, res.Severity)
@@ -595,7 +611,7 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	if got := strings.Join(res.Market.StaleClusters, ","); got != "vol" {
 		t.Fatalf("stale clusters = %q, want vol", got)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "incomplete or stale") {
+	if !rowContains(res.Rows, "Ambiguity filter", "Refresh or verify incomplete market inputs") {
 		t.Fatalf("expected stale-data ambiguity row, rows: %+v", res.Rows)
 	}
 	if !strings.Contains(strings.Join(res.Warnings, "\n"), "stale clusters: vol") {
@@ -603,6 +619,45 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	}
 	if res.InputHealth != canaryInputDegraded {
 		t.Fatalf("input_health = %q, want degraded for stale data", res.InputHealth)
+	}
+}
+
+func TestComputeCanaryOffHoursVolStaleIsContext(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.VIXTermStructure.AsOf = &rpc.RegimeAsOfSummary{Label: "frozen", Date: "2026-06-01"}
+	r.DataQuality = []rpc.DataQualityHealth{{
+		Surface:       "regime",
+		Status:        rpc.RegimeStatusStale,
+		Summary:       "stale: vol",
+		StaleClusters: []string{"vol"},
+	}}
+	r.WarningDetails = []rpc.RegimeWarning{{
+		Code:    "vix_term_structure_stale",
+		Scope:   "vix_term_structure",
+		Message: "volatility term structure stale",
+	}}
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC),
+	})
+	if got := strings.Join(res.Market.StaleClusters, ","); got != "" {
+		t.Fatalf("stale clusters = %q, want none for expected off-hours vol context", got)
+	}
+	if res.InputHealth != canaryInputOK {
+		t.Fatalf("input_health = %q, want ok for expected off-hours vol context", res.InputHealth)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none for expected off-hours vol context", res.Warnings)
+	}
+	vix, ok := findCanaryIndicator(res.MarketIndicators, "VIX/VIX3M")
+	if !ok {
+		t.Fatalf("missing VIX indicator: %+v", res.MarketIndicators)
+	}
+	if strings.Contains(strings.ToLower(vix.Comment), "stale input") || !strings.Contains(vix.Comment, "closed-session cached context") {
+		t.Fatalf("VIX comment = %q, want closed-session context without stale-input action", vix.Comment)
 	}
 }
 
@@ -680,6 +735,9 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 			t.Fatalf("canary JSON missing %s: %s", key, b)
 		}
 	}
+	if _, ok := wire["market_indicators"]; !ok {
+		t.Fatalf("canary JSON missing market_indicators: %s", b)
+	}
 	if wire["action"] != canaryActionStandDown {
 		t.Fatalf("action = %#v, want stand_down", wire["action"])
 	}
@@ -712,6 +770,14 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	sourceHealth, ok := wire["source_health"].([]any)
 	if !ok || len(sourceHealth) != 3 {
 		t.Fatalf("source_health missing/malformed: %#v", wire["source_health"])
+	}
+	indicators, ok := wire["market_indicators"].([]any)
+	if !ok || len(indicators) == 0 {
+		t.Fatalf("market_indicators missing/malformed: %#v", wire["market_indicators"])
+	}
+	firstIndicator, ok := indicators[0].(map[string]any)
+	if !ok || firstIndicator["name"] == "" || firstIndicator["status"] == "" {
+		t.Fatalf("market indicator missing required scan fields: %#v", indicators[0])
 	}
 }
 
@@ -764,20 +830,23 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
 	r.GammaZero.Band = "red"
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
-		Quality: rankableCanaryGammaQuality(),
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityBlocked,
+			RankabilityReason: "oi_observed_coverage: OI coverage below threshold",
+		},
 		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
 	}
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if got := strings.Join(res.Market.AmbiguousClusters, ","); got != "" {
-		t.Fatalf("ambiguous clusters = %q, want none for ranked degraded gamma", got)
+	if got := strings.Join(res.Market.AmbiguousClusters, ","); got != "gamma" {
+		t.Fatalf("ambiguous clusters = %q, want gamma for blocked gamma", got)
 	}
 	if got := strings.Join(res.Market.DegradedClusters, ","); got != "gamma" {
 		t.Fatalf("degraded clusters = %q, want gamma", got)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "verify weak clusters") {
+	if !rowContainsEvidence(res.Rows, "Ambiguity filter", "ambiguous gamma; degraded gamma") {
 		t.Fatalf("expected degraded-gamma disclosure row, rows: %+v", res.Rows)
 	}
 	if res.InputHealth != canaryInputDegraded {
@@ -785,7 +854,7 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	}
 }
 
-func TestComputeCanaryDetectsWarningOnlyDegradedGamma(t *testing.T) {
+func TestComputeCanaryDoesNotDegradeRankableWarningOnlyGamma(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
 	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterGreenCount: 4, ClusterRankedCount: 6}
@@ -799,18 +868,125 @@ func TestComputeCanaryDetectsWarningOnlyDegradedGamma(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if got := strings.Join(res.Market.DegradedClusters, ","); got != "gamma" {
-		t.Fatalf("degraded clusters = %q, want gamma", got)
+	if got := strings.Join(res.Market.DegradedClusters, ","); got != "" {
+		t.Fatalf("degraded clusters = %q, want none for rankable warning-only gamma", got)
 	}
 	sig, ok := findSignal(res.Signals, risk.SignalRegimeStressConfirmed)
 	if !ok {
 		t.Fatalf("missing regime stress signal: %+v", res.Signals)
 	}
-	if !containsString(sig.BlockedBy, "gamma") {
-		t.Fatalf("regime stress signal blocked_by = %+v, want gamma", sig.BlockedBy)
+	if containsString(sig.BlockedBy, "gamma") {
+		t.Fatalf("regime stress signal blocked_by = %+v, want gamma usable", sig.BlockedBy)
 	}
-	if res.MarketConfirmation == canaryMarketConfirmed {
-		t.Fatalf("market_confirmation = %s, want degraded gamma to block confirmation", res.MarketConfirmation)
+	if res.MarketConfirmation != canaryMarketConfirmed {
+		t.Fatalf("market_confirmation = %s, want confirmed for rankable gamma", res.MarketConfirmation)
+	}
+}
+
+func TestComputeCanaryTreatsContextOnlyGammaAsContextNotDegraded(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRankedCount: 5, ClusterUnrankedCount: 1}
+	r.GammaZero.Band = "red"
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityContextOnly,
+			RankabilityReason: "freshness: market is closed; cached gamma is context only",
+		},
+		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+		WarningDetails: []rpc.GammaWarningDetail{{
+			Code:     "spx_cache_fallback:no_data",
+			Scope:    "SPX",
+			Severity: "data_quality",
+			Message:  "SPX live refresh was unavailable; using the last successful cached SPX slice.",
+		}},
+	}
+	r.WarningDetails = []rpc.RegimeWarning{{
+		Code:     "gamma_zero_context_only",
+		Scope:    "gamma_zero",
+		Severity: "info",
+		Message:  "dealer gamma context_only: freshness: market is closed; cached gamma is context only",
+		Impact:   "dealer gamma is displayed as context but is not ranked or used as independent stress confirmation.",
+	}}
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if got := strings.Join(res.Market.DegradedClusters, ","); got != "" {
+		t.Fatalf("degraded clusters = %q, want none for context-only gamma", got)
+	}
+	if got := strings.Join(res.Market.AmbiguousClusters, ","); got != "" {
+		t.Fatalf("ambiguous clusters = %q, want none for context-only gamma", got)
+	}
+	var out bytes.Buffer
+	renderCanaryTextWidthDetails(&Env{}, &out, &res, 120, true)
+	rendered := out.String()
+	for _, want := range []string{
+		"Market indicators",
+		"STATE",
+		"context",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("render missing %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"warning: degraded clusters: gamma",
+		"Degraded input   gamma",
+		"degraded gamma",
+		"ambiguous clusters: gamma",
+		"verify: gamma cannot confirm",
+		"Gamma is after-hours/context-only. Action:",
+		"Input checks",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("render should not contain %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
+func TestComputeCanaryMarketIndicatorsCarryDecisionContext(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.VIXTermStructure.AsOf = &rpc.RegimeAsOfSummary{Date: "2026-05-29"}
+	r.VIXTermStructure.Ratio = new(0.91)
+	r.VIXTermStructure.VIX = new(18.0)
+	r.VIXTermStructure.VIX3M = new(19.8)
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Scope:           rpc.GammaZeroScopeCombined,
+		SpotUnderlying:  500.0,
+		GammaSign:       "negative",
+		GammaTotalAbs:   10_000_000_000,
+		ZeroGamma:       nil,
+		RegimeAgreement: "agree:short-gamma",
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityContextOnly,
+			RankabilityReason: "freshness: market is closed; cached gamma is context only",
+		},
+	}
+
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+		Now:     time.Date(2026, 5, 29, 14, 0, 0, 0, time.UTC),
+	})
+
+	vix, ok := findCanaryIndicator(res.MarketIndicators, "VIX/VIX3M")
+	if !ok {
+		t.Fatalf("missing VIX indicator: %+v", res.MarketIndicators)
+	}
+	if vix.Status != "green" || vix.AsOf != "2026-05-29" || !strings.Contains(vix.Reading, "0.910") || !strings.Contains(vix.Comment, "contango") {
+		t.Fatalf("VIX indicator = %+v, want green dated reading with contango comment", vix)
+	}
+	gamma, ok := findCanaryIndicator(res.MarketIndicators, "γ-zero (SPY+SPX)")
+	if !ok {
+		t.Fatalf("missing combined gamma indicator: %+v", res.MarketIndicators)
+	}
+	if gamma.Status != "context" || !strings.Contains(gamma.Reading, "short-γ") || !strings.Contains(gamma.Comment, "context only") {
+		t.Fatalf("gamma indicator = %+v, want context decision context", gamma)
+	}
+	if strings.Contains(gamma.Comment, rpc.GammaRankabilityContextOnly+"; "+rpc.GammaRankabilityContextOnly) {
+		t.Fatalf("gamma comment duplicates state note: %+v", gamma)
 	}
 }
 
@@ -833,21 +1009,17 @@ func TestComputeCanaryMarginPressureDoesNotActWithoutMarketConfirmation(t *testi
 		Regime:  r,
 	})
 
-	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
-		t.Fatalf("state = %s/%s, want data_quality/watch because gamma input is degraded", res.Direction, res.Severity)
+	if res.Direction != "" || res.Severity != risk.SeverityObserve {
+		t.Fatalf("state = %s/%s, want observe because context gamma does not block canary", res.Direction, res.Severity)
 	}
-	if res.Action != canaryActionConfirmInputs || res.InputHealth != canaryInputDegraded {
-		t.Fatalf("decision = action %s input %s, want confirm_inputs/degraded", res.Action, res.InputHealth)
+	if res.Action != canaryActionStandDown || res.InputHealth != canaryInputOK {
+		t.Fatalf("decision = action %s input %s, want stand_down/ok", res.Action, res.InputHealth)
 	}
-	sig, ok := findSignal(res.Signals, risk.SignalRiskDataDegraded)
-	if !ok {
-		t.Fatalf("missing risk data degraded signal: %+v", res.Signals)
+	if got := strings.Join(res.Market.DegradedClusters, ","); got != "" {
+		t.Fatalf("degraded clusters = %q, want none for context-only gamma", got)
 	}
-	if got := strings.Join(sig.BlockedBy, ","); got != "gamma" {
-		t.Fatalf("risk data blocked_by = %q, want unique gamma", got)
-	}
-	if sig.Observed == nil || *sig.Observed != 1 {
-		t.Fatalf("risk data observed = %v, want one affected cluster", sig.Observed)
+	if hasSignal(res.Signals, risk.SignalRiskDataDegraded) {
+		t.Fatalf("context gamma should not produce risk data degraded signal: %+v", res.Signals)
 	}
 }
 
@@ -869,11 +1041,11 @@ func TestComputeCanaryDailyLossDoesNotActWithoutMarketConfirmation(t *testing.T)
 		Regime:  r,
 	})
 
-	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
-		t.Fatalf("state = %s/%s, want data_quality/watch because gamma input is degraded", res.Direction, res.Severity)
+	if res.Direction != "" || res.Severity != risk.SeverityObserve {
+		t.Fatalf("state = %s/%s, want observe because context gamma does not turn daily P&L into canary action", res.Direction, res.Severity)
 	}
-	if res.Action != canaryActionConfirmInputs {
-		t.Fatalf("action = %s, want confirm_inputs because daily P&L alone is outside canary scope", res.Action)
+	if res.Action != canaryActionStandDown || res.InputHealth != canaryInputOK {
+		t.Fatalf("decision = action %s input %s, want stand_down/ok", res.Action, res.InputHealth)
 	}
 }
 
@@ -986,6 +1158,7 @@ func TestComputeCanaryStaleRedClusterDoesNotConfirmLifecycle(t *testing.T) {
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 
 	sig, ok := findSignal(res.Signals, risk.SignalRegimeStressConfirmed)
@@ -1010,12 +1183,16 @@ func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T)
 	r.VIXTermStructure.Status = rpc.RegimeStatusStale
 	r.GammaZero.Band = "red"
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
-		Quality: rankableCanaryGammaQuality(),
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityBlocked,
+			RankabilityReason: "freshness: cache age exceeds TTL",
+		},
 		Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
 	}
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	var regimeHealth *rpc.SourceHealth
 	for i := range res.SourceHealth {
@@ -1027,8 +1204,8 @@ func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T)
 	if regimeHealth == nil {
 		t.Fatalf("missing regime source health: %+v", res.SourceHealth)
 	}
-	if regimeHealth.Status != "degraded" {
-		t.Fatalf("regime source status = %q, want degraded", regimeHealth.Status)
+	if regimeHealth.Status != "partial" {
+		t.Fatalf("regime source status = %q, want partial", regimeHealth.Status)
 	}
 	notes := strings.Join(regimeHealth.Notes, "\n")
 	for _, want := range []string{"stale clusters: vol", "degraded clusters: gamma"} {
@@ -1108,6 +1285,55 @@ func TestCanaryWarningsPolishUnrankedImpact(t *testing.T) {
 	}
 }
 
+func TestCanaryWarningLabelsAreActionOriented(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		warning string
+		want    string
+	}{
+		{warning: "ambiguous clusters: funding and gamma", want: "verify"},
+		{warning: "funding_stress: funding spread row is unranked; the composite has lower coverage.", want: "verify"},
+		{warning: "stale clusters: vol", want: "refresh"},
+		{warning: "gamma_zero: dealer gamma context_only: freshness: market is closed; cached gamma is context only", want: "context"},
+		{warning: "gamma_zero: dealer gamma blocked", want: "warning"},
+		{warning: "credit_spreads: source error", want: "error"},
+	}
+	for _, tt := range tests {
+		got, _ := canaryWarningLabel(tt.warning)
+		if got != tt.want {
+			t.Fatalf("canaryWarningLabel(%q) = %q, want %q", tt.warning, got, tt.want)
+		}
+	}
+}
+
+func TestCanaryWarningsPreferScopedInputChecks(t *testing.T) {
+	t.Parallel()
+	warnings := canaryWarnings(CanaryMarketSummary{
+		AmbiguousClusters: []string{"funding"},
+		UnrankedClusters:  1,
+	}, rpc.RegimeSnapshotResult{WarningDetails: []rpc.RegimeWarning{
+		{Scope: "funding_stress", Message: "funding spread row is unranked; the composite has lower coverage."},
+		{Scope: "gamma_zero", Message: "dealer gamma context_only: freshness: market is closed; cached gamma is context only"},
+		{Scope: "vix_term_structure", Message: "volatility term structure stale"},
+	}}, time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC))
+	got := strings.Join(warnings, "\n")
+	for _, unwanted := range []string{"ambiguous clusters:", "stale clusters:", "regime cluster(s) unranked"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("generic warning %q should be suppressed when scoped detail exists: %+v", unwanted, warnings)
+		}
+	}
+	for _, unwanted := range []string{"gamma_zero:", "vix_term_structure:"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("context warning %q should be suppressed: %+v", unwanted, warnings)
+		}
+	}
+	for _, want := range []string{"funding_stress:"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("scoped warning %q missing: %+v", want, warnings)
+		}
+	}
+}
+
 func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{
@@ -1126,8 +1352,11 @@ func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 		"Market weather",
 		"Portfolio shape",
 		"Combined read",
-		"Input health",
-		"Incomplete input",
+		"Market indicators",
+		"INDICATOR",
+		"STATE",
+		"READING / COMMENT",
+		"Input checks",
 		"computing",
 		"breadth and gamma",
 		"Alert ID   canary-fp-v1 sha256:",
@@ -1173,8 +1402,11 @@ func TestRenderCanaryDetailsShowsRowsWhenRequested(t *testing.T) {
 	})
 	var out bytes.Buffer
 	renderCanaryTextWidthDetails(&Env{}, &out, &res, 100, true)
-	if !strings.Contains(out.String(), "Details") || !strings.Contains(out.String(), "Portfolio canary") {
+	if !strings.Contains(out.String(), "Details") || !strings.Contains(out.String(), "Immediate margin safety") {
 		t.Fatalf("details render missing row evidence:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Portfolio canary ·") {
+		t.Fatalf("details render should not duplicate the top-level canary row:\n%s", out.String())
 	}
 }
 
@@ -1369,4 +1601,13 @@ func findSignal(signals []risk.Signal, id risk.SignalID) (risk.Signal, bool) {
 
 func containsString(values []string, want string) bool {
 	return slices.Contains(values, want)
+}
+
+func findCanaryIndicator(indicators []CanaryMarketIndicator, name string) (CanaryMarketIndicator, bool) {
+	for _, indicator := range indicators {
+		if indicator.Name == name {
+			return indicator, true
+		}
+	}
+	return CanaryMarketIndicator{}, false
 }

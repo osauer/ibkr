@@ -774,7 +774,7 @@ func canaryBacktestStage(canary CanaryResult) string {
 
 func runRegimeBacktestObservation(obs RegimeBacktestObservation) RegimeBacktestRowResult {
 	regime, asOf := regimeBacktestInput(obs)
-	market := summarizeCanaryMarket(regime)
+	market := summarizeCanaryMarket(regime, asOf)
 	stressWatch := regimeBacktestStressWatch(regime)
 	stressSignal := regimeBacktestStressSignal(regime)
 	dataQuality := regimeBacktestDataQualityWatch(regime)

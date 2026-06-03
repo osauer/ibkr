@@ -40,7 +40,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		return nil, ibkrlib.ErrIBKRUnavailable
 	}
 
-	deps := productionRegimeDeps(c, s.logger.Warnf)
+	deps := productionRegimeDeps(c, s.logger.Warnf, s.regimeSeries)
 	res := runRegimeFanout(
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
@@ -301,16 +301,22 @@ type regimeDeps struct {
 	// for its own per-call budget; canceling either the parent ctx or
 	// the per-call ctx unblocks the call. See v0.27.6 changelog for
 	// the bug class this guards against.
-	history    func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error)
-	fredSeries func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error)
-	vvixSeries func(ctx context.Context) ([]regimeSeriesPoint, error)
-	logWarnf   func(format string, args ...any)
+	history        func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error)
+	officialSeries func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error)
+	vvixSeries     func(ctx context.Context) ([]regimeSeriesPoint, error)
+	logWarnf       func(format string, args ...any)
 }
 
 // productionRegimeDeps wires the deps struct to the live connector.
 // Tests pass a hand-rolled regimeDeps with closures returning canned
 // values instead.
-func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any)) *regimeDeps {
+func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any), seriesCache *regimeSeriesCache) *regimeDeps {
+	officialSeries := fetchOfficialRegimeSeries
+	if seriesCache != nil {
+		officialSeries = func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error) {
+			return seriesCache.fetch(ctx, seriesID, fetchOfficialRegimeSeries)
+		}
+	}
 	return &regimeDeps{
 		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
 			return briefSnapshotPriceWithClose(ctx, c, sym, timeout)
@@ -321,9 +327,9 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
 			return c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
 		},
-		fredSeries: fetchFREDSeries,
-		vvixSeries: fetchCBOEVVIXSeries,
-		logWarnf:   logWarnf,
+		officialSeries: officialSeries,
+		vvixSeries:     fetchCBOEVVIXSeries,
+		logWarnf:       logWarnf,
 	}
 }
 
@@ -641,6 +647,8 @@ const (
 	fredSeriesIGOAS = "BAMLC0A0CM"
 )
 
+var regimeOfficialSeriesBudget = 12 * time.Second
+
 const creditSpreadsNotes = "Cash credit spreads from official ICE BofA OAS series via FRED/St. Louis Fed: high-yield OAS (BAMLH0A0HYM2) and investment-grade corporate OAS (BAMLC0A0CM). Units are percentage points. Default heuristic bands use HY OAS: <4.0 green, 4.0-5.5 yellow, >5.5 red; a 20-observation HY OAS widening of >0.50 pp is mixed and >1.00 pp is stressed. This complements HYG/SPY: HYG is faster intraday, OAS is the official cash-credit close."
 
 func fetchRegimeCreditSpreads(ctx context.Context, deps *regimeDeps) rpc.RegimeCreditSpreads {
@@ -648,15 +656,12 @@ func fetchRegimeCreditSpreads(ctx context.Context, deps *regimeDeps) rpc.RegimeC
 		Notes:  creditSpreadsNotes,
 		Source: "FRED/St. Louis Fed official ICE BofA OAS CSV",
 	}
-	if deps == nil || deps.fredSeries == nil {
+	if deps == nil || deps.officialSeries == nil {
 		out.Status = rpc.RegimeStatusUnavailable
-		out.ErrorMessage = "credit spreads: no FRED series fetcher configured"
+		out.ErrorMessage = "credit spreads: no official series fetcher configured"
 		return out
 	}
-	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	hyPoints, hyErr := deps.fredSeries(cctx, fredSeriesHYOAS)
-	igPoints, igErr := deps.fredSeries(cctx, fredSeriesIGOAS)
-	cancel()
+	hyPoints, hyErr, igPoints, igErr := fetchRegimeSeriesPair(ctx, deps, fredSeriesHYOAS, fredSeriesIGOAS, regimeOfficialSeriesBudget)
 	if hyErr != nil || igErr != nil {
 		out.Status = rpc.RegimeStatusError
 		switch {
@@ -716,27 +721,63 @@ func fetchRegimeCreditSpreads(ctx context.Context, deps *regimeDeps) rpc.RegimeC
 	return out
 }
 
+func fetchRegimeSeriesPair(ctx context.Context, deps *regimeDeps, leftID, rightID string, budget time.Duration) ([]regimeSeriesPoint, error, []regimeSeriesPoint, error) {
+	type result struct {
+		id     string
+		points []regimeSeriesPoint
+		err    error
+	}
+	ch := make(chan result, 2)
+	fetchOne := func(seriesID string) {
+		cctx, cancel := context.WithTimeout(ctx, budget)
+		points, err := deps.officialSeries(cctx, seriesID)
+		cancel()
+		ch <- result{id: seriesID, points: points, err: err}
+	}
+	go fetchOne(leftID)
+	go fetchOne(rightID)
+
+	var leftPoints, rightPoints []regimeSeriesPoint
+	var leftErr, rightErr error
+	for range 2 {
+		select {
+		case got := <-ch:
+			if got.id == leftID {
+				leftPoints, leftErr = got.points, got.err
+			} else {
+				rightPoints, rightErr = got.points, got.err
+			}
+		case <-ctx.Done():
+			if leftErr == nil && leftPoints == nil {
+				leftErr = ctx.Err()
+			}
+			if rightErr == nil && rightPoints == nil {
+				rightErr = ctx.Err()
+			}
+			return leftPoints, leftErr, rightPoints, rightErr
+		}
+	}
+	return leftPoints, leftErr, rightPoints, rightErr
+}
+
 const (
 	fredSeriesCP3M    = "RIFSPPFAAD90NB"
 	fredSeriesTBill3M = "DTB3"
 )
 
-const fundingStressNotes = "Funding stress proxy from the OFR FSI source set: 90-day AA financial commercial paper rate minus 3-month Treasury bill secondary-market rate. Both series are official Federal Reserve/FRED daily rates. Units are basis points. Default heuristic bands: <25 bp green, 25-75 bp yellow, >75 bp red. This is a slow daily funding/liquidity check, not an intraday funding-stress detector."
+const fundingStressNotes = "Funding stress proxy from the OFR FSI source set: 90-day AA financial commercial paper rate minus 13-week Treasury bill bank-discount rate. The commercial-paper leg comes from the Federal Reserve Commercial Paper Data Download Program; the bill leg comes from U.S. Treasury Daily Treasury Bill Rates. Units are basis points. Default heuristic bands: <25 bp green, 25-75 bp yellow, >75 bp red. This is a slow daily funding/liquidity check, not an intraday funding-stress detector."
 
 func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeFundingStress {
 	out := rpc.RegimeFundingStress{
 		Notes:  fundingStressNotes,
-		Source: "FRED/St. Louis Fed official Federal Reserve CP and T-bill series",
+		Source: "Federal Reserve Commercial Paper DDP + U.S. Treasury Daily Treasury Bill Rates",
 	}
-	if deps == nil || deps.fredSeries == nil {
+	if deps == nil || deps.officialSeries == nil {
 		out.Status = rpc.RegimeStatusUnavailable
-		out.ErrorMessage = "funding stress: no FRED series fetcher configured"
+		out.ErrorMessage = "funding stress: no official funding series fetcher configured"
 		return out
 	}
-	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	cpPoints, cpErr := deps.fredSeries(cctx, fredSeriesCP3M)
-	tbPoints, tbErr := deps.fredSeries(cctx, fredSeriesTBill3M)
-	cancel()
+	cpPoints, cpErr, tbPoints, tbErr := fetchRegimeSeriesPair(ctx, deps, fredSeriesCP3M, fredSeriesTBill3M, regimeOfficialSeriesBudget)
 	if cpErr != nil || tbErr != nil {
 		out.Status = rpc.RegimeStatusError
 		switch {
@@ -769,9 +810,9 @@ func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeF
 	out.SpreadBps = &spread
 	asOf := minTime(cp.Date, tb.Date)
 	out.AsOfDate = asOf.Format("2006-01-02")
-	out.CP3MQuality = officialDailyQuality(cp.Date, "FRED "+fredSeriesCP3M+" 90-day AA financial CP")
-	out.TBill3MQuality = officialDailyQuality(tb.Date, "FRED "+fredSeriesTBill3M+" 3-month T-bill")
-	out.SpreadQuality = officialDerivedQuality(asOf, "90-day AA financial CP minus 3-month T-bill")
+	out.CP3MQuality = officialDailyQuality(cp.Date, "Federal Reserve Commercial Paper DDP RIFSPPFAAD90_N.B")
+	out.TBill3MQuality = officialDailyQuality(tb.Date, "U.S. Treasury Daily Treasury Bill Rates 13-week bank discount")
+	out.SpreadQuality = officialDerivedQuality(asOf, "90-day AA financial CP minus 13-week Treasury bill")
 	if cp.Date.Format("2006-01-02") != tb.Date.Format("2006-01-02") {
 		out.FieldsMissing = append(out.FieldsMissing, "series_date_mismatch")
 	}

@@ -10,22 +10,22 @@ import (
 )
 
 const (
-	gammaRankableRTHMaxAge       = 60 * time.Minute
-	gammaContextClosedMaxAge     = 24 * time.Hour
-	gammaMinPricedLegs           = 100
-	gammaMinGEXLegs              = 25
-	gammaMinSPXOIObservedPct     = 95.0
-	gammaMinSPYOIObservedPct     = 50.0
-	gammaMinDefaultOIObservedPct = 75.0
-	gammaMinOIPositivePct        = 5.0
-	gammaBlockOIPositivePct      = 1.0
-	gammaContextDerivedIVPct     = 40.0
-	gammaBlockDerivedIVPct       = 80.0
-	gammaContextSPYSkewRSquared  = 0.70
-	gammaContextConcentrationPct = 50.0
-	gammaBlockConcentrationPct   = 90.0
-	gammaContextSkewRSquared     = 0.75
-	gammaBlockSkewRSquared       = 0.50
+	gammaRankableRTHMaxAge        = 60 * time.Minute
+	gammaClosedSessionCacheMaxAge = 24 * time.Hour
+	gammaMinPricedLegs            = 100
+	gammaMinGEXLegs               = 25
+	gammaMinSPXOIObservedPct      = 95.0
+	gammaMinSPYOIObservedPct      = 50.0
+	gammaMinDefaultOIObservedPct  = 75.0
+	gammaMinOIPositivePct         = 5.0
+	gammaBlockOIPositivePct       = 1.0
+	gammaContextDerivedIVPct      = 40.0
+	gammaBlockDerivedIVPct        = 80.0
+	gammaContextSPYSkewRSquared   = 0.70
+	gammaContextConcentrationPct  = 50.0
+	gammaBlockConcentrationPct    = 90.0
+	gammaContextSkewRSquared      = 0.75
+	gammaBlockSkewRSquared        = 0.50
 )
 
 func annotateGammaQuality(c *rpc.GammaZeroComputed, now time.Time) {
@@ -91,17 +91,17 @@ func gammaQualityFreshnessGate(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 	session := gammaClassifySession(now)
 	switch session {
 	case rpc.SessionClosed:
-		q.MaxAgeSeconds = int64(gammaContextClosedMaxAge.Seconds())
+		q.MaxAgeSeconds = int64(gammaClosedSessionCacheMaxAge.Seconds())
 		switch {
 		case now.Before(c.AsOf):
 			q.Freshness = "future"
 			gammaQualityAddGate(q, "freshness", rpc.GammaQualityGateBlock, "compute timestamp is in the future")
-		case now.Sub(c.AsOf) > gammaContextClosedMaxAge:
+		case now.Sub(c.AsOf) > gammaClosedSessionCacheMaxAge:
 			q.Freshness = "stale"
 			gammaQualityAddGate(q, "freshness", rpc.GammaQualityGateBlock, "closed-session cache is older than 24h")
 		default:
-			q.Freshness = "closed_session_context"
-			gammaQualityAddGate(q, "freshness", rpc.GammaQualityGateContext, "market is closed; cached gamma is context only")
+			q.Freshness = "closed_session_cache"
+			gammaQualityAddGate(q, "freshness", rpc.GammaQualityGatePass, "closed-session cache inside 24h TTL")
 		}
 	default:
 		q.MaxAgeSeconds = int64(gammaRankableRTHMaxAge.Seconds())
@@ -317,7 +317,7 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 				gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY option chain unavailable: "+strings.TrimPrefix(code, "spy_unavailable:"))
 			}
 		case strings.HasPrefix(code, "spx_cache_fallback"):
-			gammaQualityAddGate(q, "spx_cache_fallback", rpc.GammaQualityGateContext, "SPX slice came from cached fallback")
+			gammaQualityAddGate(q, "spx_cache_fallback", rpc.GammaQualityGatePass, "SPX slice served from cache; freshness and coverage gates decide rankability")
 		case strings.HasPrefix(code, "skew_fallback:"):
 			gammaQualityAddGate(q, "skew_fallback", rpc.GammaQualityGateContext, "one expiry fell back to sticky-IV")
 		case strings.Contains(code, "timeout"), strings.Contains(code, "pacing"), strings.Contains(code, "farm"):

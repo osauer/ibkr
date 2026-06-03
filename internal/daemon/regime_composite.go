@@ -368,8 +368,8 @@ func warningForGammaRankability(g rpc.RegimeGammaZero) (rpc.RegimeWarning, bool)
 			Scope:    "gamma_zero",
 			Severity: "warning",
 			Message:  "dealer gamma quality missing",
-			Impact:   "dealer gamma is displayed as context but is not ranked or used as independent stress confirmation.",
-			Action:   "Refresh with a gamma build that emits rankability quality before using gamma as evidence.",
+			Impact:   "dealer gamma is shown for awareness but is not a market-structure signal in this snapshot.",
+			Action:   "Refresh with a gamma build that emits rankability quality before relying on the gamma read.",
 		}, true
 	}
 	if c.Quality.Rankability == rpc.GammaRankabilityRankable {
@@ -388,8 +388,8 @@ func warningForGammaRankability(g rpc.RegimeGammaZero) (rpc.RegimeWarning, bool)
 		Scope:    "gamma_zero",
 		Severity: severity,
 		Message:  message,
-		Impact:   "dealer gamma is displayed as context but is not ranked or used as independent stress confirmation.",
-		Action:   "Refresh when the option-data surface is active and verify OI/skew coverage before using gamma as evidence.",
+		Impact:   "dealer gamma is shown for awareness but is not a market-structure signal in this snapshot.",
+		Action:   "Refresh when the option-data surface is active and verify OI/skew coverage before relying on the gamma read.",
 	}, true
 }
 

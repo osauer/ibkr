@@ -52,6 +52,9 @@ func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
 		out.ZeroGammaStatus = combineSummaryStatus(statuses)
 		out.Regime = combineSummaryRegime(c.RegimeAgreement, regimes)
 		out.Confidence = combineSummaryConfidence(confidences)
+		if c.Quality != nil && c.Quality.Rankability == rpc.GammaRankabilityRankable {
+			out.Confidence = gammaResultConfidence(c)
+		}
 		if len(parts) == 0 {
 			out.PrimaryStatement = "Zero-gamma: unavailable for SPY+SPX."
 		} else {
@@ -217,8 +220,6 @@ func gammaResultConfidence(c *rpc.GammaZeroComputed) string {
 			return "degraded"
 		case strings.HasPrefix(w, "spx_unavailable:"):
 			return "degraded"
-		case strings.HasPrefix(w, "spx_cache_fallback"):
-			return "degraded"
 		case strings.HasPrefix(w, "skew_fallback:"):
 			return "degraded"
 		}
@@ -374,7 +375,7 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		summary := strings.TrimPrefix(code, "refresh_failed:")
 		summary = strings.ReplaceAll(summary, "_", " ")
 		d.Message = "The latest gamma refresh failed."
-		d.Impact = "The daemon is serving an older cached gamma snapshot; do not rank it as fresh confirmation."
+		d.Impact = "The daemon is serving an older cached gamma snapshot; do not treat it as a fresh market-structure read."
 		if summary != "" {
 			d.Action = "Inspect gateway/farm state and retry after resolving: " + summary + "."
 		} else {
@@ -387,7 +388,7 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Severity = "data_quality"
 		d.Message, d.Impact, d.Action = spxUnavailableWarningText(strings.TrimPrefix(code, "spx_unavailable:"))
 	case strings.HasPrefix(code, "spx_cache_fallback"):
-		d.Severity = "data_quality"
+		d.Severity = "info"
 		d.Message, d.Impact, d.Action = spxCacheFallbackWarningText(strings.TrimPrefix(code, "spx_cache_fallback"))
 	case strings.HasPrefix(code, "skew_fallback:"):
 		d.Severity = "methodology"
@@ -538,8 +539,8 @@ func spxCacheFallbackWarningText(reason string) (message, impact, action string)
 		message = "SPX live refresh was unavailable; using the last successful cached SPX slice."
 	}
 	return message,
-		"SPX is included from cache; quality.rankability controls whether gamma can confirm regime or canary evidence.",
-		"Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before treating it as fresh confirmation."
+		"SPX is included from cache; quality.rankability shows whether the gamma read is fresh and covered enough to act as a market-structure signal.",
+		"Refresh during 09:30-16:15 ET and inspect the SPX per-index as_of before treating it as a fresh market-structure read."
 }
 
 func gammaWarningScope(c *rpc.GammaZeroComputed, code string) string {

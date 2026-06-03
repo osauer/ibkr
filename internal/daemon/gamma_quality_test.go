@@ -28,6 +28,50 @@ func TestGammaQualityRankableCombinedSPYSPX(t *testing.T) {
 	}
 }
 
+func TestGammaQualityClosedSessionCacheUnder24hRemainsRankable(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, 6, 2, 19, 20, 0, 0, time.UTC) // 15:20 ET, options RTH
+	now := time.Date(2026, 6, 3, 11, 55, 0, 0, time.UTC)  // 07:55 ET, options closed
+	if cls := gammaClassifySession(asOf); cls != rpc.SessionRTH {
+		t.Fatalf("asOf fixture should be RTH, got %s", cls)
+	}
+	if cls := gammaClassifySession(now); cls != rpc.SessionClosed {
+		t.Fatalf("now fixture should be closed, got %s", cls)
+	}
+	combined := rankableCombinedGammaFixture(asOf)
+
+	annotateGammaQuality(combined, now)
+	refreshGammaSummaries(combined)
+
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("rankability = %q, want rankable for healthy closed-session cache: %+v", got, combined.Quality)
+	}
+	if got := combined.Quality.Freshness; got != "closed_session_cache" {
+		t.Fatalf("freshness = %q, want closed_session_cache: %+v", got, combined.Quality)
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "red" {
+		t.Fatalf("bandForGamma = %q, want red for rankable cached short-gamma fixture", got)
+	}
+}
+
+func TestGammaQualityClosedSessionCacheOver24hBlocksRanking(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 3, 11, 55, 0, 0, time.UTC) // 07:55 ET, options closed
+	combined := rankableCombinedGammaFixture(now.Add(-25 * time.Hour))
+
+	annotateGammaQuality(combined, now)
+	refreshGammaSummaries(combined)
+
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityBlocked {
+		t.Fatalf("rankability = %q, want blocked for stale closed-session cache: %+v", got, combined.Quality)
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "" {
+		t.Fatalf("bandForGamma = %q, want unranked for stale closed-session cache", got)
+	}
+}
+
 func TestGammaQualitySingleScopesCanRankIndependently(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)

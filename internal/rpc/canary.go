@@ -43,6 +43,7 @@ type CanaryResult struct {
 	Rows               []CanaryRow              `json:"rows"`
 	Portfolio          CanaryPortfolioSummary   `json:"portfolio"`
 	Market             CanaryMarketSummary      `json:"market"`
+	MarketIndicators   []CanaryMarketIndicator  `json:"market_indicators,omitempty"`
 	Warnings           []string                 `json:"warnings,omitempty"`
 	NotExecution       string                   `json:"not_execution"`
 }
@@ -65,6 +66,14 @@ type CanaryRow struct {
 	Severity  risk.SignalSeverity  `json:"severity"`
 	Guidance  string               `json:"guidance"`
 	Evidence  string               `json:"evidence,omitempty"`
+}
+
+type CanaryMarketIndicator struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"` // green | amber | red | context | n/a
+	AsOf    string `json:"as_of,omitempty"`
+	Reading string `json:"reading,omitempty"`
+	Comment string `json:"comment,omitempty"`
 }
 
 type CanaryPortfolioSummary struct {

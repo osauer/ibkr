@@ -224,13 +224,16 @@ func gammaSignalLine(c *rpc.GammaZeroComputed) string {
 	q := c.Quality
 	switch q.Rankability {
 	case rpc.GammaRankabilityRankable:
-		return "usable · fresh enough for regime/canary evidence"
+		if q.Freshness == "closed_session_cache" {
+			return "cached snapshot · inside freshness window"
+		}
+		return "fresh snapshot · signal quality passed"
 	case rpc.GammaRankabilityContextOnly:
 		if gammaIsSPYProxy(c) {
 			return "SPY proxy only · SPX unavailable, so do not use gamma as S&P confirmation"
 		}
 		if q.Freshness == "closed_session_context" || (q.Session == rpc.SessionClosed.String() && strings.Contains(q.RankabilityReason, "market is closed")) {
-			return "after-hours context · valid cached snapshot, not fresh confirmation"
+			return "after-hours context · cached snapshot is not a fresh market-structure read"
 		}
 		return "context only · " + gammaPlainQualityReason(q)
 	case rpc.GammaRankabilityBlocked:
@@ -250,7 +253,7 @@ func gammaPlainQualityReason(q *rpc.GammaSignalQuality) string {
 	if reason == "" {
 		switch q.Rankability {
 		case rpc.GammaRankabilityRankable:
-			return "fresh enough for regime/canary evidence"
+			return "signal quality passed"
 		case rpc.GammaRankabilityUnavailable:
 			return "no usable gamma payload"
 		default:
@@ -268,7 +271,7 @@ func gammaPlainQualityReason(q *rpc.GammaSignalQuality) string {
 	case strings.HasPrefix(reason, "SPX slice is"):
 		return strings.ReplaceAll(reason, "context only", "context")
 	case reason == "all rankability gates passed":
-		return "fresh enough for regime/canary evidence"
+		return "signal quality passed"
 	default:
 		return reason
 	}
@@ -543,8 +546,7 @@ func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, opts gammaRenderOp
 	if len(details) == 0 {
 		return
 	}
-	out := env.Stdout
-	printed := false
+	rendered := make([]rpc.GammaWarningDetail, 0, len(details))
 	seen := map[string]struct{}{}
 	for _, d := range details {
 		if !shouldRenderGammaWarningDetail(d, opts, spxSkippedBanner) {
@@ -555,21 +557,33 @@ func renderGammaDataNotes(env *Env, c *rpc.GammaZeroComputed, opts gammaRenderOp
 			continue
 		}
 		seen[key] = struct{}{}
-		if !printed {
-			fmt.Fprintln(out)
-			heading := "Data notes:"
-			if !opts.Explain {
-				heading = "Context:"
-			}
-			fmt.Fprintln(out, env.dim("  "+heading))
-			printed = true
-		}
+		rendered = append(rendered, d)
+	}
+	if len(rendered) == 0 {
+		return
+	}
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, env.dim("  "+gammaDataNotesHeading(rendered, opts)))
+	for _, d := range rendered {
 		line := gammaWarningDetailLine(d, opts)
 		fmt.Fprintf(out, "    · %s\n", line)
 		if opts.Explain && d.Action != "" {
 			fmt.Fprintf(out, "      %s\n", env.dim("Action: "+d.Action))
 		}
 	}
+}
+
+func gammaDataNotesHeading(details []rpc.GammaWarningDetail, opts gammaRenderOptions) string {
+	if opts.Explain || opts.Diagnostics {
+		return "Data notes:"
+	}
+	for _, d := range details {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.Code)), "spx_cache_fallback") {
+			return "Context:"
+		}
+	}
+	return "Source note:"
 }
 
 func shouldRenderGammaWarningDetail(d rpc.GammaWarningDetail, opts gammaRenderOptions, spxSkippedBanner bool) bool {
@@ -1014,7 +1028,7 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		summary := strings.TrimPrefix(code, "refresh_failed:")
 		summary = strings.ReplaceAll(summary, "_", " ")
 		d.Message = "The latest gamma refresh failed."
-		d.Impact = "The daemon is serving an older cached gamma snapshot; do not rank it as fresh confirmation."
+		d.Impact = "The daemon is serving an older cached gamma snapshot; do not treat it as a fresh market-structure read."
 		if summary != "" {
 			d.Action = "Inspect gateway/farm state and retry after resolving: " + summary + "."
 		}
@@ -1137,6 +1151,7 @@ func renderGammaExplain(env *Env, c *rpc.GammaZeroComputed, diagnostics bool) {
 	out := env.Stdout
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, env.dim("  How to read"))
+	fmt.Fprintln(out, env.dim("    · Gamma is how fast option delta changes; short gamma makes dealer hedging chase price moves, while long gamma makes hedging lean against them."))
 	fmt.Fprintln(out, env.dim("    · γ-zero is the signed-profile crossing inside the swept range; no crossing means the whole sweep stayed long-γ/short-γ."))
 	fmt.Fprintln(out, env.dim("    · Market-structure context, not a trade recommendation."))
 
@@ -1402,6 +1417,8 @@ func gammaRankabilityLabel(rankability string) string {
 
 func gammaFreshnessLabel(freshness string) string {
 	switch freshness {
+	case "closed_session_cache":
+		return "closed-session cache"
 	case "closed_session_context":
 		return "closed-session context"
 	case "session_mismatch":

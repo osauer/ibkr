@@ -76,7 +76,8 @@ type regimeRow struct {
 func runRegime(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "regime")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON for tooling")
-	explain := fs.Bool("explain", false, "show spec thresholds, streaks, and quality under each row")
+	explain := fs.Bool("explain", false, "show concise threshold, reading, and provenance notes")
+	diagnostics := fs.Bool("diagnostics", false, "with --explain, include raw source, missing-field, and quality diagnostics")
 	watch := fs.Bool("watch", false, "re-poll continuously; in-place redraw on a TTY")
 	rate := fs.Duration("rate", 5*time.Minute, "poll interval for --watch (default 5m)")
 	logPath := fs.String("log", "", "append snapshot to a JSONL file at <path> (one line per call)")
@@ -85,6 +86,9 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	}
 	if fs.NArg() > 0 {
 		return fail(env, "regime: takes no positional args (got %v)", fs.Args())
+	}
+	if *diagnostics && !*explain {
+		return fail(env, "regime: --diagnostics requires --explain")
 	}
 
 	fetchAndRender := func(out io.Writer) int {
@@ -112,7 +116,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 			return printJSONTo(env, out, res)
 		}
 		rpc.StripRegimeGammaProfiles(&res)
-		return renderRegimeTextTo(env, out, &res, *explain)
+		return renderRegimeTextWithOptions(env, out, &res, regimeRenderOptions{Explain: *explain, Diagnostics: *diagnostics})
 	}
 
 	if *watch {
@@ -226,11 +230,31 @@ func renderRegimeText(env *Env, r *rpc.RegimeSnapshotResult) int {
 	return renderRegimeTextTo(env, env.Stdout, r, false)
 }
 
+type regimeRenderOptions struct {
+	Explain     bool
+	Diagnostics bool
+}
+
 // renderRegimeTextTo writes the dashboard to out. Layout: header with
 // timestamp; bold composite verdict + ranked-count summary; market tape;
 // one-line indicator rows; optional --explain footer with the spec's prose
 // per row. Pass explain=true for the verbose mode.
 func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, explain bool) int {
+	return renderRegimeTextWithOptions(env, out, r, regimeRenderOptions{Explain: explain})
+}
+
+func renderRegimeTextWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, opts regimeRenderOptions) int {
+	width := outputColumns(out)
+	if width == 0 {
+		width = 120
+	}
+	return renderRegimeTextWidthWithOptions(env, out, r, opts, width)
+}
+
+func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, opts regimeRenderOptions, width int) int {
+	if width < 40 {
+		width = 80
+	}
 	now := r.AsOf
 	rows := []regimeRow{
 		rowVIXTerm(now, r.VIXTermStructure),
@@ -255,20 +279,26 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 		"")
 	fmt.Fprintln(out)
 
-	// Hero summary: a color-coded regime label plus a plain-English
-	// evidence balance. The table below remains the audit trail; this
-	// line is the three-second read.
+	// Hero summary: regime label + usable-signal coverage. Raw band and
+	// rankability words stay out of the default readout; the table below is
+	// the audit trail and --explain carries the mechanics.
 	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeLabel(env, c, c.verdict())), env.dim("· "+c.evidence()))
-	if indicatorEvidence := c.indicatorEvidence(); indicatorEvidence != c.evidence() {
-		fmt.Fprintf(out, "  %s\n", env.dim("Indicators: "+indicatorEvidence))
-	}
 	fmt.Fprintln(out)
-	if lifecycle := lifecycleSummaryText(r.Lifecycle); lifecycle != "" {
-		renderRegimeSummaryLine(out, "Lifecycle:", lifecycle, nil)
+	renderRegimeSummaryLine(out, "Read:", regimeReadLine(c), width, nil)
+	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows), width, regimeInputHealthColor(env, c, rows))
+	if support := regimeSupportLine(rows); support != "" {
+		renderRegimeSummaryLine(out, "Support:", support, width, nil)
 	}
-	renderRegimeSummaryLine(out, "Punch line:", regimePunchLine(rows), nil)
+	if watch := regimeWatchLine(rows); watch != "" {
+		renderRegimeSummaryLine(out, "Watch:", watch, width, nil)
+	}
+	if aside := regimeSetAsideLine(rows); aside != "" {
+		renderRegimeSummaryLine(out, "Set aside:", aside, width, env.dim)
+	}
 	if len(r.DataQuality) > 0 {
-		renderRegimeSummaryLine(out, "Data quality:", formatDataQualityValue(r.DataQuality), env.yellow)
+		if context := regimeDataQualityContext(r.DataQuality); context != "" {
+			renderRegimeSummaryLine(out, "Data context:", context, width, env.dim)
+		}
 	}
 	fmt.Fprintln(out)
 
@@ -281,25 +311,28 @@ func renderRegimeTextTo(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, ex
 	// columns. Dim-colored so the band rows stay visually dominant. The
 	// rule width matches the widest row layout (glyph + name + value +
 	// band + note), recomputed once here so it tracks layout changes.
-	layout := regimeTableLayout(rows)
+	layout := regimeTableLayout(rows, width)
 	fmt.Fprintln(out, renderRegimeHeader(env, layout))
 	for _, row := range rows {
-		fmt.Fprintln(out, renderRow(env, row, layout))
+		for _, line := range renderRow(env, row, layout) {
+			fmt.Fprintln(out, line)
+		}
 	}
 
 	fmt.Fprintln(out)
-	if explain {
-		renderExplainBlock(env, out, r)
+	if opts.Explain {
+		renderExplainBlock(env, out, r, opts.Diagnostics)
 		return 0
 	}
-	fmt.Fprintln(out, env.dim("  Pass --explain for per-indicator spec thresholds, streaks, and quality notes."))
+	for _, line := range wrapVisibleText("Pass --explain for thresholds and reading notes; add --diagnostics for raw source/provenance details.", max(width-2, 24)) {
+		fmt.Fprintln(out, env.dim("  "+line))
+	}
 	return 0
 }
 
-func renderRegimeSummaryLine(out io.Writer, label, value string, color func(string) string) {
-	const maxWidth = 104
+func renderRegimeSummaryLine(out io.Writer, label, value string, width int, color func(string) string) {
 	prefix := "  " + label + " "
-	available := max(maxWidth-visibleLen(prefix), 40)
+	available := max(width-visibleLen(prefix), 24)
 	lines := wrapVisibleText(value, available)
 	for i, line := range lines {
 		if color != nil {
@@ -322,34 +355,55 @@ func renderRegimeSummaryLine(out io.Writer, label, value string, color func(stri
 // land directly over their cells. Reads as a key for the reader without
 // needing to consult docs.
 type regimeTableWidths struct {
-	nameW  int
-	valueW int
-	asOfW  int
-	bandW  int
+	nameW   int
+	valueW  int
+	asOfW   int
+	bandW   int
+	whyW    int
+	detailW int
+	compact bool
 }
 
-func regimeTableLayout(rows []regimeRow) regimeTableWidths {
-	w := regimeTableWidths{nameW: 17, valueW: 30, asOfW: 12, bandW: 7}
+func regimeTableLayout(rows []regimeRow, width int) regimeTableWidths {
+	w := regimeTableWidths{nameW: 17, valueW: 30, asOfW: 12, bandW: 8}
 	for _, row := range rows {
-		w.nameW = max(w.nameW, visibleLen(row.name))
-		value := row.value
-		if row.stateNote != "" {
-			value = row.stateNote
-		}
-		w.valueW = max(w.valueW, visibleLen(value))
-		w.asOfW = max(w.asOfW, visibleLen(ifNonEmpty(row.asOf, "—")))
+		w.nameW = min(max(w.nameW, visibleLen(row.name)), 18)
+		w.valueW = max(w.valueW, visibleLen(rowDisplayValue(row)))
+		w.asOfW = min(max(w.asOfW, visibleLen(regimeWhenLabel(row))), 12)
 	}
+	// Wide mode keeps the familiar SIGNAL / READING / WHEN / CALL / WHY
+	// table, but caps READING so WHY can wrap inside the terminal instead
+	// of spilling into the shell prompt.
+	const minWhyW = 24
+	fixedWithoutValue := 2 + 1 + 2 + w.nameW + 2 + 2 + w.asOfW + 2 + w.bandW + 2
+	allowedValue := width - fixedWithoutValue - minWhyW
+	if width < 96 || allowedValue < 22 {
+		w.compact = true
+		w.valueW = 0
+		w.detailW = max(width-(2+1+2+w.nameW+2+w.bandW+2+w.asOfW+2), 24)
+		return w
+	}
+	w.valueW = min(w.valueW, allowedValue)
+	w.whyW = max(width-(2+1+2+w.nameW+2+w.valueW+2+w.asOfW+2+w.bandW+2), minWhyW)
 	return w
 }
 
 func renderRegimeHeader(env *Env, w regimeTableWidths) string {
+	if w.compact {
+		header := fmt.Sprintf("     %s  %s  %s  %s",
+			padRightVisible("SIGNAL", w.nameW),
+			padRightVisible("CALL", w.bandW),
+			padRightVisible("WHEN", w.asOfW),
+			"READING / WHY")
+		return env.dim(header)
+	}
 	// "  " = 2-space indent + " " = where the glyph sits + 2 spaces.
 	header := fmt.Sprintf("     %s  %s  %s  %s  %s",
-		padRightVisible("INDICATOR", w.nameW),
-		padRightVisible("VALUE", w.valueW),
-		padRightVisible("AS OF", w.asOfW),
-		padRightVisible("BAND", w.bandW),
-		"NOTE")
+		padRightVisible("SIGNAL", w.nameW),
+		padRightVisible("READING", w.valueW),
+		padRightVisible("WHEN", w.asOfW),
+		padRightVisible("CALL", w.bandW),
+		"WHY")
 	return env.dim(header)
 }
 
@@ -360,15 +414,12 @@ func renderRegimeHeader(env *Env, w regimeTableWidths) string {
 // ("day 3"), optional quality/stale suffix. The band-word color is
 // applied AFTER padding so column alignment stays correct under ANSI
 // escapes — same trick as the account renderer's padLeftVisible.
-func renderRow(env *Env, r regimeRow, w regimeTableWidths) string {
-	value := r.value
-	if r.stateNote != "" {
-		value = r.stateNote
-	}
-	bandWord, colorFn := r.band.label()
-	bandCell := padRightVisible(bandWord, w.bandW)
+func renderRow(env *Env, r regimeRow, w regimeTableWidths) []string {
+	value := rowDisplayValue(r)
+	callWord, colorFn := r.callLabel()
+	callCell := padRightVisible(callWord, w.bandW)
 	if colorFn != nil {
-		bandCell = padRightVisible(colorFn(env, bandWord), w.bandW)
+		callCell = padRightVisible(colorFn(env, callWord), w.bandW)
 	}
 	// In default view, NOTE = the reason string verbatim (no surrounding
 	// parens, no quality clock). The reader sees a clean column with
@@ -376,10 +427,66 @@ func renderRow(env *Env, r regimeRow, w regimeTableWidths) string {
 	// markers are promoted to --explain since they're noise on the
 	// default scan and useful only when auditing one indicator's
 	// provenance.
-	note := env.dim(r.reason)
-	return fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
-		r.glyph(env), padRightVisible(r.name, w.nameW), padRightVisible(value, w.valueW),
-		padRightVisible(ifNonEmpty(r.asOf, "—"), w.asOfW), bandCell, note)
+	if w.compact {
+		detail := value
+		if r.reason != "" {
+			detail += " — " + r.reason
+		}
+		lines := wrapVisibleText(detail, w.detailW)
+		out := make([]string, 0, len(lines))
+		prefix := fmt.Sprintf("  %s  %s  %s  %s  ",
+			r.glyph(env),
+			padRightVisible(r.name, w.nameW),
+			callCell,
+			padRightVisible(regimeWhenLabel(r), w.asOfW))
+		continuation := strings.Repeat(" ", visibleLen(prefix))
+		for i, line := range lines {
+			if i == 0 {
+				out = append(out, prefix+line)
+				continue
+			}
+			out = append(out, continuation+env.dim(line))
+		}
+		return out
+	}
+	valueLines := wrapVisibleText(value, w.valueW)
+	whyLines := wrapVisibleText(r.reason, w.whyW)
+	lineCount := max(len(valueLines), len(whyLines))
+	out := make([]string, 0, lineCount)
+	for i := range lineCount {
+		valueCell := ""
+		if i < len(valueLines) {
+			valueCell = valueLines[i]
+		}
+		whyCell := ""
+		if i < len(whyLines) {
+			whyCell = env.dim(whyLines[i])
+		}
+		if i == 0 {
+			out = append(out, fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
+				r.glyph(env), padRightVisible(r.name, w.nameW), padRightVisible(valueCell, w.valueW),
+				padRightVisible(regimeWhenLabel(r), w.asOfW), callCell, whyCell))
+			continue
+		}
+		out = append(out, fmt.Sprintf("     %s  %s  %s  %s  %s",
+			strings.Repeat(" ", w.nameW), padRightVisible(valueCell, w.valueW),
+			strings.Repeat(" ", w.asOfW), strings.Repeat(" ", w.bandW), whyCell))
+	}
+	return out
+}
+
+func rowDisplayValue(r regimeRow) string {
+	value := strings.TrimSpace(r.value)
+	if value != "" && value != "—" {
+		return r.value
+	}
+	if r.stateNote != "" {
+		return r.stateNote
+	}
+	if value != "" {
+		return r.value
+	}
+	return "—"
 }
 
 // streakMarker formats a *rpc.StreakInfo into the compact "day N"
@@ -483,19 +590,28 @@ func (r regimeRow) glyph(env *Env) string {
 	}
 }
 
-// label returns the (word, color-fn) pair for the band column. nil
-// color-fn means render plain (the unranked path). The color-fn takes
-// an *Env so the no-op path (color off) shares the same code shape.
-func (b regimeBand) label() (string, func(*Env, string) string) {
-	switch b {
+// callLabel returns the trader-facing call for the row. The raw
+// green/yellow/red/unranked terms are still present in JSON and --explain,
+// but the default terminal view reads as calm/watch/stress/no-vote language.
+func (r regimeRow) callLabel() (string, func(*Env, string) string) {
+	switch r.band {
 	case bandGreen:
-		return "green", func(e *Env, s string) string { return e.green(s) }
+		return "calm", func(e *Env, s string) string { return e.green(s) }
 	case bandYellow:
-		return "yellow", func(e *Env, s string) string { return e.yellow(s) }
+		return "watch", func(e *Env, s string) string { return e.yellow(s) }
 	case bandRed:
-		return "red", func(e *Env, s string) string { return e.red(s) }
+		return "stress", func(e *Env, s string) string { return e.red(s) }
 	}
-	return "—", nil
+	switch r.status {
+	case rpc.RegimeStatusComputing:
+		return "building", func(e *Env, s string) string { return e.yellow(s) }
+	case rpc.RegimeStatusError:
+		return "retry", func(e *Env, s string) string { return e.red(s) }
+	case rpc.RegimeStatusUnavailable:
+		return "skip", nil
+	default:
+		return "no vote", nil
+	}
 }
 
 func asOfLabel(meta *rpc.RegimeAsOfSummary, status string) string {
@@ -514,6 +630,24 @@ func asOfLabel(meta *rpc.RegimeAsOfSummary, status string) string {
 	default:
 		return "—"
 	}
+}
+
+func regimeWhenLabel(row regimeRow) string {
+	label := strings.TrimSpace(row.asOf)
+	switch strings.ToLower(label) {
+	case "":
+		label = asOfLabel(nil, row.status)
+	case "stale", "frozen":
+		return "cached"
+	case "computing":
+		return "building"
+	case "unavailable":
+		return "missing"
+	}
+	if before, ok := strings.CutSuffix(strings.ToLower(label), " delayed"); ok {
+		return "delayed " + before
+	}
+	return ifNonEmpty(label, "—")
 }
 
 // ----------------------------------------------------------------------------
@@ -680,9 +814,9 @@ const verdictFloor = 3
 func (c regimeComposite) verdict() string {
 	switch {
 	case c.clusterRanked == 0:
-		return "No ranked indicators — see rows below for state"
+		return "No usable signal yet"
 	case c.clusterRanked < verdictFloor:
-		return "Insufficient signal — too few indicators ranked"
+		return "Insufficient signal — too few inputs ready"
 	case c.clusterRanked == c.clusterTotal && c.clusterRed == c.clusterTotal:
 		return "Full risk-off conditions"
 	case c.clusterRed >= 3:
@@ -699,41 +833,22 @@ func (c regimeComposite) verdict() string {
 func (c regimeComposite) evidence() string {
 	var parts []string
 	if c.clusterGreen > 0 {
-		parts = append(parts, fmt.Sprintf("%d green %s", c.clusterGreen, plural(c.clusterGreen, "cluster", "clusters")))
+		parts = append(parts, fmt.Sprintf("%d calm", c.clusterGreen))
 	}
 	if c.clusterYellow > 0 {
-		parts = append(parts, fmt.Sprintf("%d yellow %s", c.clusterYellow, plural(c.clusterYellow, "cluster", "clusters")))
+		parts = append(parts, fmt.Sprintf("%d watch", c.clusterYellow))
 	}
 	if c.clusterRed > 0 {
-		parts = append(parts, fmt.Sprintf("%d red %s", c.clusterRed, plural(c.clusterRed, "cluster", "clusters")))
+		parts = append(parts, fmt.Sprintf("%d stress", c.clusterRed))
 	}
 	if c.clusterUnranked > 0 {
-		parts = append(parts, fmt.Sprintf("%d unranked %s", c.clusterUnranked, plural(c.clusterUnranked, "cluster", "clusters")))
+		parts = append(parts, fmt.Sprintf("%d waiting", c.clusterUnranked))
 	}
+	coverage := fmt.Sprintf("%d/%d evidence groups usable", c.clusterRanked, c.clusterTotal)
 	if len(parts) == 0 {
-		return "0 ranked clusters"
+		return coverage
 	}
-	return strings.Join(parts, " / ")
-}
-
-func (c regimeComposite) indicatorEvidence() string {
-	var parts []string
-	if c.green > 0 {
-		parts = append(parts, fmt.Sprintf("%d green", c.green))
-	}
-	if c.yellow > 0 {
-		parts = append(parts, fmt.Sprintf("%d yellow", c.yellow))
-	}
-	if c.red > 0 {
-		parts = append(parts, fmt.Sprintf("%d red", c.red))
-	}
-	if c.unranked > 0 {
-		parts = append(parts, fmt.Sprintf("%d unranked", c.unranked))
-	}
-	if len(parts) == 0 {
-		return "0 ranked"
-	}
-	return strings.Join(parts, " / ")
+	return coverage + " · " + strings.Join(parts, " / ")
 }
 
 func colorRegimeLabel(env *Env, c regimeComposite, label string) string {
@@ -747,74 +862,184 @@ func colorRegimeLabel(env *Env, c regimeComposite, label string) string {
 	}
 }
 
-func regimePunchLine(rows []regimeRow) string {
-	groups := map[string][]string{}
-	for _, row := range rows {
-		key := row.band.labelKey(row.status)
-		groups[key] = append(groups[key], regimeEvidenceName(row.name))
+func regimeReadLine(c regimeComposite) string {
+	coverage := fmt.Sprintf("%d/%d evidence groups usable", c.clusterRanked, c.clusterTotal)
+	switch {
+	case c.clusterRanked == 0:
+		return "No regime read yet — every evidence group is still building or missing."
+	case c.clusterRanked < verdictFloor:
+		return "Thin read — " + coverage + "; treat the regime label as context until more inputs load."
+	case c.clusterRed >= 3:
+		return "Broad stress is confirmed across independent groups."
+	case c.clusterRed > 0:
+		return "Stress is visible, but not broad enough to dominate the read."
+	case c.clusterYellow > 0:
+		return "Watch conditions are visible; not a confirmed broad stress regime."
+	default:
+		return "Constructive tape across the loaded evidence groups."
 	}
+}
+
+func regimeInputHealthLine(c regimeComposite, rows []regimeRow) string {
+	coverage := fmt.Sprintf("%d/%d evidence groups loaded", c.clusterRanked, c.clusterTotal)
+	switch {
+	case c.clusterRanked == 0:
+		return "Blocked — no evidence group has loaded."
+	case c.clusterRanked < verdictFloor:
+		return "Degraded — " + coverage + "; wait for more inputs before trusting the label."
+	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable)) > 0:
+		return "Needs confirmation — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable))) + " did not load."
+	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing)) > 0:
+		return "Warming — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing))) + " still building."
+	default:
+		return "OK — " + coverage + "."
+	}
+}
+
+func regimeInputHealthColor(env *Env, c regimeComposite, rows []regimeRow) func(string) string {
+	switch {
+	case c.clusterRanked == 0 || c.clusterRanked < verdictFloor:
+		return env.red
+	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable, rpc.RegimeStatusComputing)) > 0:
+		return env.yellow
+	default:
+		return env.green
+	}
+}
+
+func regimeSupportLine(rows []regimeRow) string {
+	names := regimeNamesByBand(rows, bandGreen)
+	if len(names) == 0 {
+		return ""
+	}
+	verb := "is"
+	if len(names) > 1 {
+		verb = "are"
+	}
+	return fmt.Sprintf("%s %s calm.", joinHumanList(names), verb)
+}
+
+func regimeWatchLine(rows []regimeRow) string {
 	var parts []string
-	for _, spec := range []struct {
-		key  string
-		word string
-	}{
-		{"red", "stressed"},
-		{"yellow", "mixed"},
-		{"green", "constructive"},
-		{"computing", "computing"},
-		{"unavailable", "unavailable"},
-		{"unranked", "unranked"},
-	} {
-		names := groups[spec.key]
-		if len(names) == 0 {
-			continue
-		}
-		verb := "is"
-		if len(names) > 1 {
-			verb = "are"
-		}
-		parts = append(parts, fmt.Sprintf("%s %s %s", joinHumanList(names), verb, spec.word))
+	if names := regimeNamesByBand(rows, bandRed); len(names) > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s showing stress%s",
+			joinHumanList(names), areOrIs(names), cachedContextSuffix(rows, bandRed)))
+	}
+	if names := regimeNamesByBand(rows, bandYellow); len(names) > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s on watch%s",
+			joinHumanList(names), areOrIs(names), cachedContextSuffix(rows, bandYellow)))
 	}
 	if len(parts) == 0 {
-		return "No regime indicators produced a rankable reading."
-	}
-	if names := staleRegimeEvidenceNames(rows); len(names) > 0 {
-		verb := "is"
-		if len(names) > 1 {
-			verb = "are"
-		}
-		parts = append(parts, fmt.Sprintf("%s %s ranked from stale data", joinHumanList(names), verb))
+		return ""
 	}
 	return strings.Join(parts, "; ") + "."
 }
 
-func staleRegimeEvidenceNames(rows []regimeRow) []string {
+func regimeSetAsideLine(rows []regimeRow) string {
+	var building, missing []string
+	type noVoteRow struct {
+		name   string
+		reason string
+	}
+	var noVotes []noVoteRow
+	for _, row := range rows {
+		if row.band != bandUnranked {
+			continue
+		}
+		name := regimeRowDisplayName(row)
+		switch row.status {
+		case rpc.RegimeStatusComputing:
+			building = append(building, name)
+		case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+			missing = append(missing, name)
+		default:
+			noVotes = append(noVotes, noVoteRow{name: name, reason: row.reason})
+		}
+	}
+	var parts []string
+	if len(building) > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s still building", joinHumanList(building), areOrIs(building)))
+	}
+	if len(missing) > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s not in this read yet", joinHumanList(missing), areOrIs(missing)))
+	}
+	switch len(noVotes) {
+	case 0:
+	case 1:
+		part := noVotes[0].name + " did not vote"
+		if noVotes[0].reason != "" {
+			part += ": " + noVotes[0].reason
+		}
+		parts = append(parts, part)
+	default:
+		names := make([]string, 0, len(noVotes))
+		for _, row := range noVotes {
+			names = append(names, row.name)
+		}
+		parts = append(parts, fmt.Sprintf("%s did not vote", joinHumanList(names)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func regimeNamesByBand(rows []regimeRow, band regimeBand) []string {
 	var names []string
 	for _, row := range rows {
-		if row.status == rpc.RegimeStatusStale && row.band != bandUnranked {
-			names = append(names, regimeEvidenceName(row.name))
+		if row.band == band {
+			names = append(names, regimeRowDisplayName(row))
 		}
 	}
 	return names
 }
 
-func (b regimeBand) labelKey(status string) string {
-	switch b {
-	case bandGreen:
-		return "green"
-	case bandYellow:
-		return "yellow"
-	case bandRed:
-		return "red"
+func regimeRowsByStatuses(rows []regimeRow, statuses ...string) []regimeRow {
+	if len(statuses) == 0 {
+		return nil
 	}
-	switch status {
-	case rpc.RegimeStatusComputing:
-		return "computing"
-	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
-		return "unavailable"
-	default:
-		return "unranked"
+	statusSet := make(map[string]bool, len(statuses))
+	for _, status := range statuses {
+		statusSet[status] = true
 	}
+	var out []regimeRow
+	for _, row := range rows {
+		if statusSet[row.status] {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func regimeRowDisplayNames(rows []regimeRow) []string {
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, regimeRowDisplayName(row))
+	}
+	return names
+}
+
+func cachedContextSuffix(rows []regimeRow, band regimeBand) string {
+	for _, row := range rows {
+		if row.band == band && row.status == rpc.RegimeStatusStale {
+			return " from cached data"
+		}
+	}
+	return ""
+}
+
+func areOrIs(parts []string) string {
+	if len(parts) == 1 {
+		return "is"
+	}
+	return "are"
+}
+
+func regimeDataQualityContext(items []rpc.DataQualityHealth) string {
+	value := formatDataQualityValue(items)
+	value = strings.ReplaceAll(value, "degraded", "context")
+	value = strings.ReplaceAll(value, "stale", "cached")
+	return value
 }
 
 func regimeEvidenceName(name string) string {
@@ -840,6 +1065,14 @@ func regimeEvidenceName(name string) string {
 	}
 }
 
+func regimeRowDisplayName(row regimeRow) string {
+	evidence := regimeEvidenceName(row.name)
+	if evidence == row.name {
+		return row.name
+	}
+	return row.name + " (" + evidence + ")"
+}
+
 func joinHumanList(parts []string) string {
 	switch len(parts) {
 	case 0:
@@ -851,13 +1084,6 @@ func joinHumanList(parts []string) string {
 	default:
 		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
 	}
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
 
 // renderRegimeHeadline returns the SPY + VIX tape line shown immediately
@@ -947,20 +1173,23 @@ func signedFloat(v float64, decimals int) string {
 func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 	row := regimeRow{name: "VIX/VIX3M", cluster: "equity_vol", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Ratio == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "ratio unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "VIX/VIX3M tick missing")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "VIX/VIX3M not in this read")
 		return row
 	}
 	row.value = fmt.Sprintf("%.3f  (%s / %s)", *r.Ratio, floatPtr(r.VIX, 2), floatPtr(r.VIX3M, 2))
 	row.quality = qualityTag(now, r.VIXQuality, r.VIX3MQuality)
 	switch {
 	case *r.Ratio < vixRatioGreen:
-		row.band, row.reason = bandGreen, fmt.Sprintf("<%.2f  contango", vixRatioGreen)
+		row.band, row.reason = bandGreen, "vol curve in contango"
 	case *r.Ratio < vixRatioRed:
-		row.band, row.reason = bandYellow, "flattening"
+		row.band, row.reason = bandYellow, "vol curve flattening"
 	default:
-		row.band, row.reason = bandRed, "backwardation"
+		row.band, row.reason = bandRed, "vol curve inverted"
 	}
 	return row
 }
@@ -968,9 +1197,12 @@ func rowVIXTerm(now time.Time, r rpc.RegimeVIXTerm) regimeRow {
 func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
 	row := regimeRow{name: "VVIX", cluster: "equity_vol", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.Last == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "VVIX unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "Cboe VVIX file unavailable")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "VVIX not in this read")
 		return row
 	}
 	row.value = fmt.Sprintf("%.1f", *r.Last)
@@ -980,11 +1212,11 @@ func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
 	row.quality = qualityTag(now, r.ValueQuality)
 	switch {
 	case *r.Last < vvixYellow:
-		row.band, row.reason = bandGreen, "<90 vol-of-vol"
+		row.band, row.reason = bandGreen, "vol-of-vol calm"
 	case *r.Last < vvixRed:
-		row.band, row.reason = bandYellow, "90–110"
+		row.band, row.reason = bandYellow, "vol-of-vol elevated"
 	default:
-		row.band, row.reason = bandRed, ">110 vol-of-vol shock"
+		row.band, row.reason = bandRed, "vol-of-vol shock"
 	}
 	return row
 }
@@ -992,15 +1224,21 @@ func rowVolOfVol(now time.Time, r rpc.RegimeVolOfVol) regimeRow {
 func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	row := regimeRow{name: "HYG vs SPY", cluster: "credit", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "HYG/SPY unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "credit proxy tick missing")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "credit proxy not in this read")
 		return row
 	}
 	if r.HYGPrice == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "HYG price unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "HYG tick missing")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "HYG not in this read")
 		return row
 	}
 	// Value cell: HYG vs its 50dma is the structural signal; SPY's
@@ -1009,7 +1247,7 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	if r.HYG50DMA != nil {
 		hyg50 = fmt.Sprintf("%.2f", *r.HYG50DMA)
 	}
-	row.value = fmt.Sprintf("HYG %.2f / 50dma %s", *r.HYGPrice, hyg50)
+	row.value = fmt.Sprintf("HYG %.2f vs 50d %s", *r.HYGPrice, hyg50)
 	row.quality = qualityTag(now, r.HYGQuality, r.HYG50DMAQuality, r.SPYQuality, r.SPY52WHighQuality)
 	// Banding. HYG below 50dma while SPY is near highs is the credit-
 	// equity divergence this row exists to catch. Streaks carry the
@@ -1017,18 +1255,18 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 	// current divergence.
 	switch {
 	case r.HYG50DMA == nil:
-		row.band, row.reason = bandUnranked, "50dma missing — cannot band"
+		row.band, row.reason = bandUnranked, "need HYG 50-day average"
 	case *r.HYGPrice >= *r.HYG50DMA:
-		row.band, row.reason = bandGreen, "HYG ≥ 50dma"
+		row.band, row.reason = bandGreen, "credit holding above trend"
 	case r.SPY52WHigh != nil && r.SPYPrice != nil && *r.SPYPrice >= hygSpyNearHighProx**r.SPY52WHigh:
-		row.band, row.reason = bandRed, "HYG < 50dma · SPY near highs"
+		row.band, row.reason = bandRed, "credit lagging while SPY is near highs"
 	case r.SPY52WHigh != nil:
-		row.band, row.reason = bandYellow, "HYG < 50dma"
+		row.band, row.reason = bandYellow, "credit slipped below trend"
 	default:
 		// HYG < 50dma + SPY 52w high missing: we can't tell whether
 		// the divergence is "near highs" or not. Surface honestly
 		// rather than guess.
-		row.band, row.reason = bandUnranked, "HYG < 50dma · spy_52w_high missing"
+		row.band, row.reason = bandUnranked, "need SPY high anchor"
 	}
 	return row
 }
@@ -1036,9 +1274,12 @@ func rowHYGSPY(now time.Time, r rpc.RegimeHYGSPYDivergence) regimeRow {
 func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
 	row := regimeRow{name: "HY/IG OAS", cluster: "credit", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.HYOAS == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "OAS unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "FRED OAS series unavailable")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "official spreads not in this read")
 		return row
 	}
 	ig := "—"
@@ -1052,11 +1293,11 @@ func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
 	row.quality = qualityTag(now, r.HYOASQuality, r.IGOASQuality, r.SpreadQuality)
 	switch {
 	case *r.HYOAS >= hyOASRed || (r.HY20DChange != nil && *r.HY20DChange >= hyOASWidenRed):
-		row.band, row.reason = bandRed, "HY OAS stress"
+		row.band, row.reason = bandRed, "cash credit stress"
 	case *r.HYOAS >= hyOASYellow || (r.HY20DChange != nil && *r.HY20DChange >= hyOASWidenYellow):
-		row.band, row.reason = bandYellow, "HY OAS elevated/widening"
+		row.band, row.reason = bandYellow, "cash spreads elevated/widening"
 	default:
-		row.band, row.reason = bandGreen, "HY OAS <4.0"
+		row.band, row.reason = bandGreen, "cash spreads calm"
 	}
 	return row
 }
@@ -1064,9 +1305,12 @@ func rowCreditSpreads(now time.Time, r rpc.RegimeCreditSpreads) regimeRow {
 func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
 	row := regimeRow{name: "funding spread", cluster: "funding", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable || r.SpreadBps == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "funding unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "FRED funding series unavailable")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "official funding not in this read")
 		return row
 	}
 	cp := "—"
@@ -1077,15 +1321,15 @@ func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
 	if r.TBill3M != nil {
 		tb = fmt.Sprintf("%.2f", *r.TBill3M)
 	}
-	row.value = fmt.Sprintf("%.0fbp  CP %s / TB %s", *r.SpreadBps, cp, tb)
+	row.value = fmt.Sprintf("%.0fbp  CP %s / bills %s", *r.SpreadBps, cp, tb)
 	row.quality = qualityTag(now, r.CP3MQuality, r.TBill3MQuality, r.SpreadQuality)
 	switch {
 	case *r.SpreadBps < fundingYellowBps:
-		row.band, row.reason = bandGreen, "<25bp"
+		row.band, row.reason = bandGreen, "funding calm"
 	case *r.SpreadBps < fundingRedBps:
-		row.band, row.reason = bandYellow, "25–75bp"
+		row.band, row.reason = bandYellow, "funding spread wider"
 	default:
-		row.band, row.reason = bandRed, ">75bp funding stress"
+		row.band, row.reason = bandRed, "funding stress"
 	}
 	return row
 }
@@ -1093,15 +1337,21 @@ func rowFundingStress(now time.Time, r rpc.RegimeFundingStress) regimeRow {
 func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 	row := regimeRow{name: "USD/JPY", cluster: "fx_carry", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status == rpc.RegimeStatusError || r.Status == rpc.RegimeStatusUnavailable {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "no FX tick"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "check IDEALPRO entitlement")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "FX not in this read")
 		return row
 	}
 	if r.Last == nil {
+		if row.status == "" {
+			row.status = rpc.RegimeStatusUnavailable
+		}
 		row.value = "—"
 		row.stateNote = "FX tick unavailable"
-		row.reason = shortUnavailableReason(r.ErrorMessage, "last tick missing")
+		row.reason = shortUnavailableReason(r.ErrorMessage, "FX not in this read")
 		return row
 	}
 	wkly := "—"
@@ -1117,17 +1367,17 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) regimeRow {
 	// Spec: yen strengthening (USD/JPY *falling*) is the risk signal.
 	// Convention: WeeklyChange negative = yen strengthening.
 	if r.WeeklyChange == nil {
-		row.band, row.reason = bandUnranked, "weekly_change_pct missing"
+		row.band, row.reason = bandUnranked, "need weekly move"
 		return row
 	}
 	move := -*r.WeeklyChange // positive when yen strengthening
 	switch {
 	case move < usdJpyMoveYellow:
-		row.band, row.reason = bandGreen, "<1% weekly"
+		row.band, row.reason = bandGreen, "carry stable"
 	case move < usdJpyMoveRed:
-		row.band, row.reason = bandYellow, "yen strengthening 1–2%"
+		row.band, row.reason = bandYellow, "yen strengthening"
 	default:
-		row.band, row.reason = bandRed, "yen strengthening ≥2%"
+		row.band, row.reason = bandRed, "yen strengthening fast"
 	}
 	return row
 }
@@ -1162,7 +1412,7 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 	case rpc.RegimeStatusComputing:
 		row.value = ""
 		eta := r.Envelope.EtaSeconds
-		note := fmt.Sprintf("computing  %ds ETA", eta)
+		note := fmt.Sprintf("building  %ds ETA", eta)
 		if r.Envelope.Progress > 0 {
 			note += fmt.Sprintf(" · %d%%", r.Envelope.Progress)
 		}
@@ -1171,24 +1421,22 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		// being re-attempted instead of a clean "first call of the
 		// NY session" message that hides the previous abort.
 		if r.Envelope.RetryOfErrorAt != nil && r.Envelope.RetryOfErrorSummary != "" {
-			row.reason = fmt.Sprintf("retry of %q at %s",
-				r.Envelope.RetryOfErrorSummary,
-				r.Envelope.RetryOfErrorAt.Local().Format("15:04:05"))
+			row.reason = "retrying last failed gamma refresh"
 		} else {
-			row.reason = "first call of the NY session; re-poll for result"
+			row.reason = "building dealer-gamma snapshot"
 		}
 		row.stateNote = note
 		return row
 	case rpc.RegimeStatusError:
 		row.value = ""
 		row.stateNote = ifNonEmpty(r.Envelope.Error, "compute failed")
-		row.reason = "next regime call after 60 s will retry"
+		row.reason = "retry on the next regime call"
 		return row
 	case rpc.RegimeStatusUnavailable:
 		row.value = ""
 		row.stateNote = "unavailable"
 		if r.Envelope.Status == rpc.GammaZeroStatusCold {
-			row.reason = "no cached gamma snapshot"
+			row.reason = "no gamma snapshot yet"
 		} else {
 			row.reason = "gamma snapshot unavailable"
 		}
@@ -1201,23 +1449,19 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			return row
 		}
 		gammaRankable := gammaComputedExplicitlyRankable(c)
-		if c.Quality != nil {
-			row.stateNote = c.Quality.Rankability
-			if c.Quality.RankabilityReason != "" {
-				row.reason = c.Quality.RankabilityReason
-			}
-		} else {
-			row.stateNote = "quality_missing"
-			row.reason = "gamma quality missing"
+		if !gammaRankable {
+			row.reason = regimeGammaNoVoteReason(c)
+		} else if c.Quality != nil && c.Quality.RankabilityReason != "" {
+			row.reason = regimeGammaQualityReason(c.Quality)
 		}
 		// Gamma's two scalars are always modelled (zero_gamma via the
 		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
 		// row will carry "· modelled" regardless of ranking.
 		row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
 		if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
-			row.value = formatRegimeAgreement(c)
+			row.value = formatRegimeGammaAgreement(c)
 			if c.GammaTotalAbs > 0 {
-				row.value += fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
+				row.value += fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
 			}
 			if gammaRankable {
 				row.band = rankableGammaCombinedRegimeBand(c)
@@ -1226,24 +1470,14 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 			}
 			switch row.band {
 			case bandGreen:
-				row.reason = "SPY/SPX both stabilizing"
+				row.reason = regimeGammaCombinedReason(c, bandGreen)
 			case bandRed:
-				if c.RegimeAgreement == "agree:short-gamma" {
-					row.reason = "SPY/SPX both amplifying"
-				} else if c.RegimeAgreement == "disagree" {
-					row.reason = "SPY/SPX disagree; dominant gamma exposure is amplifying"
-				} else {
-					row.reason = "dominant gamma exposure is amplifying"
-				}
+				row.reason = regimeGammaCombinedReason(c, bandRed)
 			case bandYellow:
-				if c.RegimeAgreement == "disagree" {
-					row.reason = "SPY/SPX gamma regimes disagree"
-				} else {
-					row.reason = "mixed per-index gamma bands"
-				}
+				row.reason = regimeGammaCombinedReason(c, bandYellow)
 			default:
 				if row.reason == "" {
-					row.reason = "no usable per-index gamma profile"
+					row.reason = "no usable dealer-gamma profile"
 				}
 			}
 			return row
@@ -1304,7 +1538,7 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 		// misleading "$0.0bn" in the value cell.
 		mag := ""
 		if c.GammaTotalAbs > 0 {
-			mag = fmt.Sprintf("  |Γ|·OI %.1fbn", c.GammaTotalAbs/1e9)
+			mag = fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
 		}
 		spotPrefix := fmt.Sprintf("spot %.2f · ", c.SpotUnderlying)
 		switch c.GammaSign {
@@ -1335,6 +1569,55 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 	row.value = "—"
 	row.stateNote = string(r.Status)
 	return row
+}
+
+func formatRegimeGammaAgreement(c *rpc.GammaZeroComputed) string {
+	switch {
+	case c == nil:
+		return "dealer gamma unavailable"
+	case c.Summary != nil && c.Summary.Regime == "long_gamma":
+		return "long-γ (stabilizing)"
+	case c.Summary != nil && c.Summary.Regime == "short_gamma":
+		return "short-γ (amplifying)"
+	}
+	switch c.RegimeAgreement {
+	case "agree:long-gamma":
+		return "long-γ (stabilizing)"
+	case "agree:short-gamma":
+		return "short-γ (amplifying)"
+	case "disagree":
+		return "mixed dealer-gamma read"
+	default:
+		value := formatRegimeAgreement(c)
+		value = strings.ReplaceAll(value, "long-γ (stabilizing regime)", "long-γ (stabilizing)")
+		value = strings.ReplaceAll(value, "short-γ (amplifying regime)", "short-γ (amplifying)")
+		value = strings.ReplaceAll(value, " · no γ-zero transition found in sweep", "")
+		value = strings.ReplaceAll(value, " · SPY/SPX agree", "")
+		value = strings.ReplaceAll(value,
+			" (DISAGREEMENT — model regimes differ; use per-index below as primary)",
+			"")
+		return strings.TrimSpace(value)
+	}
+}
+
+func regimeGammaCombinedReason(c *rpc.GammaZeroComputed, band regimeBand) string {
+	noCrossing := c != nil && c.Summary != nil && c.Summary.ZeroGammaStatus == "none_in_window"
+	switch band {
+	case bandGreen:
+		if noCrossing {
+			return "long-γ across sweep; dealer hedging can dampen moves"
+		}
+		return "dealer gamma stabilizing"
+	case bandRed:
+		if noCrossing {
+			return "short-γ across sweep; dealer hedging can amplify moves"
+		}
+		return "dealer gamma amplifying"
+	case bandYellow:
+		return "mixed dealer-gamma read"
+	default:
+		return "dealer-gamma profile not usable"
+	}
 }
 
 func gammaCombinedRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
@@ -1468,21 +1751,58 @@ func gammaComputedExplicitlyRankable(c *rpc.GammaZeroComputed) bool {
 	return c != nil && c.Quality != nil && c.Quality.Rankability == rpc.GammaRankabilityRankable
 }
 
+func regimeGammaQualityReason(q *rpc.GammaSignalQuality) string {
+	if q == nil {
+		return "gamma quality unavailable"
+	}
+	switch q.Rankability {
+	case rpc.GammaRankabilityRankable:
+		if q.Freshness == "closed_session_cache" {
+			return "cached gamma usable"
+		}
+		return "fresh enough for regime evidence"
+	case rpc.GammaRankabilityContextOnly:
+		if q.Freshness == "closed_session_context" {
+			return "after-hours cached gamma; not a fresh market-structure read"
+		}
+		return gammaPlainQualityReason(q)
+	case rpc.GammaRankabilityBlocked:
+		return "coverage not clean enough"
+	case rpc.GammaRankabilityUnavailable:
+		return "gamma unavailable"
+	default:
+		return gammaPlainQualityReason(q)
+	}
+}
+
+func regimeGammaNoVoteReason(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "gamma payload missing"
+	}
+	if c.Quality == nil {
+		return "quality missing"
+	}
+	if gammaIsSPYProxy(c) {
+		return "SPX unavailable; proxy gamma cannot confirm S&P"
+	}
+	return regimeGammaQualityReason(c.Quality)
+}
+
 func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 	row := regimeRow{name: "SPX breadth", cluster: "breadth", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	if r.Status != rpc.RegimeStatusOK && r.Status != rpc.RegimeStatusStale {
 		switch r.Status {
 		case rpc.RegimeStatusUnavailable:
 			row.stateNote = "unavailable"
-			row.reason = "breadth engine offline (no cached snapshot)"
+			row.reason = "no breadth snapshot yet"
 		case rpc.RegimeStatusComputing:
-			row.stateNote = "computing"
+			row.stateNote = "building"
 			// ~60 min is the IBKR-pacing-limited cold-start cost
 			// (60 historical-data requests per 10-min sliding window
 			// × 503 names ≈ 85 min in the worst case; observed ~60).
 			// Mention --foreground so the user knows how to keep the
 			// daemon alive long enough to finish.
-			row.reason = "cold-start refresh (~60 min, IBKR-paced); use 'ibkr daemon --foreground'"
+			row.reason = "building breadth snapshot"
 		default:
 			row.stateNote = string(r.Status)
 		}
@@ -1490,13 +1810,9 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 	}
 	v50 := r.Envelope.PctAbove50DMA
 	v200 := r.Envelope.PctAbove200DMA
-	// Compact two-number value cell: "47%50d · 62%200d  +1.4% nh".
-	// "nh" stands for "net new highs". The annotation reads cramped at
-	// first glance but matches the rest of the rows' single-row layout
-	// — fuller breakdown lives in `ibkr breadth`.
-	row.value = fmt.Sprintf("%.0f%%50d · %.0f%%200d", v50, v200)
+	row.value = fmt.Sprintf("%.0f%% above 50d · %.0f%% above 200d", v50, v200)
 	if r.NewHighsToday > 0 || r.NewLowsToday > 0 {
-		row.value += fmt.Sprintf("  %+.1f%% nh", r.NetNewHighsPct)
+		row.value += fmt.Sprintf("  net highs %+.1f%%", r.NetNewHighsPct)
 	}
 	row.quality = qualityTag(now, r.ValueQuality)
 	// Renderer caveat: spec red band also requires "SPX within 3% of
@@ -1507,11 +1823,11 @@ func rowBreadth(now time.Time, r rpc.RegimeBreadth) regimeRow {
 	// signal but doesn't invent it.
 	switch {
 	case v50 >= breadthGreen:
-		row.band, row.reason = bandGreen, ">55% (50d)"
+		row.band, row.reason = bandGreen, "participation broad"
 	case v50 >= breadthRed:
-		row.band, row.reason = bandYellow, "40–55% (50d)"
+		row.band, row.reason = bandYellow, "participation narrowing"
 	default:
-		row.band, row.reason = bandRed, "<40% (50d)"
+		row.band, row.reason = bandRed, "participation weak"
 	}
 	return row
 }
@@ -1537,7 +1853,7 @@ type regimeExplainEntry struct {
 	quals      []regimeExplainQuality
 }
 
-func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
+func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, diagnostics bool) {
 	entries := []regimeExplainEntry{
 		{"VIX/VIX3M", r.VIXTermStructure.Thresholds, r.VIXTermStructure.Band, r.VIXTermStructure.BandReason,
 			"VIX is Cboe's 30-day S&P 500 implied-volatility index; VIX3M is the roughly three-month version.",
@@ -1571,7 +1887,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			}},
 		{"funding spread", r.FundingStress.Thresholds, r.FundingStress.Band, r.FundingStress.BandReason,
 			"90-day AA financial commercial paper is short-term financial-company borrowing; 3-month T-bills are short-term U.S. Treasury borrowing.",
-			"FRED/St. Louis Fed daily Federal Reserve series RIFSPPFAAD90NB and DTB3.",
+			"Federal Reserve Commercial Paper DDP RIFSPPFAAD90_N.B and U.S. Treasury Daily Treasury Bill Rates 13-week bank discount.",
 			r.FundingStress.FieldsMissing, []regimeExplainQuality{
 				{"CP_3m", r.FundingStress.CP3MQuality},
 				{"TBill_3m", r.FundingStress.TBill3MQuality},
@@ -1599,7 +1915,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 			}},
 	}
 	fmt.Fprintf(out, "  %s\n", env.bold("Explain"))
-	if r.SpecDoc != "" {
+	if diagnostics && r.SpecDoc != "" {
 		renderExplainKV(env, out, "Full methodology", r.SpecDoc, nil)
 	}
 	fmt.Fprintln(out)
@@ -1611,20 +1927,17 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 		if thresholdLine := explainThresholdLine(e.thresholds); thresholdLine != "" {
 			renderExplainKV(env, out, "Bands", thresholdLine, nil)
 		}
-		if e.inputs != "" {
-			renderExplainKV(env, out, "Inputs", e.inputs, nil)
-		}
-		if e.source != "" {
-			renderExplainKV(env, out, "Source", e.source, nil)
-		}
-		if qualityLine := explainQualityLine(r.AsOf, e.quals); qualityLine != "" {
+		if qualityLine := explainQualityLine(r.AsOf, e.quals, diagnostics); qualityLine != "" {
 			renderExplainKV(env, out, "Quality", qualityLine, nil)
+		}
+		if source := explainSourceSummary(e.name); source != "" {
+			renderExplainKV(env, out, "Source", source, nil)
 		}
 		// The gamma row gets extra surfaces specific to its modelled
 		// output: data-quality notes, BS-IV fallback disclosure, and a
 		// plain-English read of what γ-zero means.
 		if e.name == gammaRowLabel(r.GammaZero) {
-			if note := regimeGammaDataNote(r.GammaZero.Envelope.Result); note != "" {
+			if note := regimeGammaDataNote(r.GammaZero.Envelope.Result, diagnostics); note != "" {
 				renderExplainKV(env, out, "Data note", note, nil)
 			}
 			if res := r.GammaZero.Envelope.Result; res != nil && res.DerivedIVLegs > 0 {
@@ -1633,38 +1946,80 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult) {
 					denom = res.LegCount
 				}
 				renderExplainKV(env, out, "Model note", fmt.Sprintf(
-					"%d/%d priced legs used BS-IV from option quote/close fallback because the model engine was idle.",
+					"%d/%d priced legs used derived IV from option quote/close fallback.",
 					res.DerivedIVLegs, denom), nil)
 			}
 		}
 		if read := explainReadNote(e.name); read != "" {
 			renderExplainKV(env, out, "Read", read, nil)
 		}
-		if len(e.missing) > 0 {
-			renderExplainKV(env, out, "Missing", strings.Join(e.missing, ", "), env.yellow)
+		if diagnostics {
+			if e.inputs != "" {
+				renderExplainKV(env, out, "Inputs", e.inputs, nil)
+			}
+			if e.source != "" {
+				renderExplainKV(env, out, "Raw source", e.source, nil)
+			}
+			if len(e.missing) > 0 {
+				renderExplainKV(env, out, "Missing", strings.Join(e.missing, ", "), env.yellow)
+			}
 		}
 		fmt.Fprintln(out)
 	}
 }
 
-func regimeGammaDataNote(c *rpc.GammaZeroComputed) string {
+func explainSourceSummary(name string) string {
+	switch name {
+	case "VIX/VIX3M":
+		return "IBKR Cboe index market data; historical replay uses official Cboe files."
+	case "VVIX":
+		return "Cboe official daily VVIX time series."
+	case "HYG vs SPY":
+		return "IBKR HYG/SPY quotes plus IBKR daily bars for trend and high anchors."
+	case "HY/IG OAS":
+		return "FRED/St. Louis Fed official daily ICE BofA high-yield and investment-grade OAS series."
+	case "funding spread":
+		return "Federal Reserve commercial-paper release plus U.S. Treasury Daily Treasury Bill Rates."
+	case "USD/JPY":
+		return "IBKR IDEALPRO USD/JPY quote plus IBKR midpoint bars for the weekly move."
+	case "SPX breadth":
+		return "Local daemon breadth cache computed from IBKR daily bars for S&P 500 members."
+	}
+	if strings.Contains(name, "γ-zero") {
+		return "IBKR SPY/SPX option chains, open interest, option quotes/model ticks, and the daemon gamma cache."
+	}
+	return ""
+}
+
+func regimeGammaDataNote(c *rpc.GammaZeroComputed, diagnostics bool) string {
 	details := gammaWarningDetailsForRender(c)
 	for _, prefix := range []string{"spx_cache_fallback", "spx_unavailable:"} {
 		for _, d := range details {
 			if strings.HasPrefix(d.Code, prefix) {
-				return formatRegimeGammaDataNote(d)
+				return formatRegimeGammaDataNote(d, diagnostics)
 			}
 		}
 	}
 	for _, d := range details {
 		if d.Code == "cache_stale_off_hours" {
-			return formatRegimeGammaDataNote(d)
+			return formatRegimeGammaDataNote(d, diagnostics)
 		}
 	}
 	return ""
 }
 
-func formatRegimeGammaDataNote(d rpc.GammaWarningDetail) string {
+func formatRegimeGammaDataNote(d rpc.GammaWarningDetail, diagnostics bool) string {
+	code := strings.ToLower(strings.TrimSpace(d.Code))
+	if !diagnostics {
+		switch {
+		case strings.HasPrefix(code, "spx_cache_fallback"):
+			return gammaSPXCacheFallbackContextLine(time.Now())
+		case strings.HasPrefix(code, "spx_unavailable:"):
+			return "SPX is unavailable; proxy gamma is awareness-only for S&P market structure."
+		case code == "cache_stale_off_hours":
+			return "Cached after-hours gamma is stale; refresh during option hours for a fresh market-structure read."
+		}
+	}
 	msg := strings.TrimSpace(d.Message)
 	if msg == "" {
 		msg = d.Code
@@ -1679,8 +2034,10 @@ func formatRegimeGammaDataNote(d rpc.GammaWarningDetail) string {
 	if impact := strings.TrimSpace(d.Impact); impact != "" {
 		parts = append(parts, impact)
 	}
-	if action := strings.TrimSpace(d.Action); action != "" {
-		parts = append(parts, "Action: "+action)
+	if diagnostics {
+		if action := strings.TrimSpace(d.Action); action != "" {
+			parts = append(parts, "Action: "+action)
+		}
 	}
 	return strings.Join(parts, " ")
 }
@@ -1731,7 +2088,7 @@ func explainThresholdLine(t *rpc.RegimeThresholds) string {
 	return strings.Join(parts, "; ")
 }
 
-func explainQualityLine(now time.Time, fields []regimeExplainQuality) string {
+func explainQualityLine(now time.Time, fields []regimeExplainQuality, diagnostics bool) string {
 	parts := []string{}
 	for _, field := range fields {
 		if field.q == nil {
@@ -1741,7 +2098,7 @@ func explainQualityLine(now time.Time, fields []regimeExplainQuality) string {
 		if age := compactQualityAge(now.Sub(field.q.AsOf)); age != "" {
 			part += ", " + age
 		}
-		if field.q.Source != "" {
+		if diagnostics && field.q.Source != "" {
 			part += " (" + field.q.Source + ")"
 		}
 		parts = append(parts, part)

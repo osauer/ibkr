@@ -90,10 +90,22 @@ func rankableRegimeGammaQuality() *rpc.GammaSignalQuality {
 	return &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable}
 }
 
+func regimeRenderedRowHits(out, name string) int {
+	hits := 0
+	for line := range strings.SplitSeq(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(line, name) &&
+			(strings.HasPrefix(trimmed, "●") || strings.HasPrefix(trimmed, "✕") ||
+				strings.HasPrefix(trimmed, "○") || strings.HasPrefix(trimmed, "◌")) {
+			hits++
+		}
+	}
+	return hits
+}
+
 // TestRenderRegime_CompositeVerdictAndCount pins the headline: bold
-// verdict line per the spec's interpretation table, dim count summary
-// naming ranked and unranked separately. The fixture has 2 green + 1
-// yellow + 0 red ranked rows, so the verdict is "Normal regime".
+// verdict line per the spec's interpretation table, usable-coverage
+// summary, and decision-readout lines instead of raw band counts.
 func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
@@ -105,17 +117,23 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 	for _, want := range []string{
 		"Risk Regime",
 		"Normal regime",
-		"2 green clusters / 1 yellow cluster / 3 unranked clusters",
-		"Indicators: 2 green / 1 yellow / 5 unranked",
-		"Punch line:",
-		"volatility term structure and FX carry proxy are constructive",
-		"ETF credit proxy is mixed",
-		"dealer gamma is computing",
-		"breadth is unavailable",
+		"3/6 evidence groups usable",
+		"Read:",
+		"Input health:",
+		"Support:",
+		"VIX/VIX3M (volatility term structure) and USD/JPY (FX carry proxy) are calm",
+		"Watch:",
+		"HYG vs SPY (ETF credit proxy) is on watch from cached data",
+		"Set aside:",
+		"γ-zero (SPY+SPX) (dealer gamma) is still building",
+		"are not in this read yet",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("composite header missing %q\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "Use:") {
+		t.Errorf("default render should not use meta prompt label Use:\n%s", out)
 	}
 }
 
@@ -127,14 +145,14 @@ func TestRenderRegime_TapeSitsBetweenDescriptionAndIndicators(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	punch := strings.Index(out, "Punch line:")
+	read := strings.Index(out, "Read:")
 	spy := strings.Index(out, "SPY 737.34")
 	vix := strings.Index(out, "VIX 18.43")
-	header := strings.Index(out, "INDICATOR")
-	if punch < 0 || spy < 0 || vix < 0 || header < 0 {
-		t.Fatalf("missing expected blocks: punch=%d spy=%d vix=%d header=%d\n%s", punch, spy, vix, header, out)
+	header := strings.Index(out, "SIGNAL")
+	if read < 0 || spy < 0 || vix < 0 || header < 0 {
+		t.Fatalf("missing expected blocks: read=%d spy=%d vix=%d header=%d\n%s", read, spy, vix, header, out)
 	}
-	if !(punch < spy && spy < header && punch < vix && vix < header) {
+	if !(read < spy && spy < header && read < vix && vix < header) {
 		t.Errorf("SPY/VIX tape should sit after the description block and before indicators:\n%s", out)
 	}
 }
@@ -152,13 +170,61 @@ func TestRenderRegime_DataQualityLine(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Data quality:", "gamma degraded", "SPX excluded", "regime stale"} {
+	for _, want := range []string{"Data context:", "gamma context", "SPX excluded", "regime cached"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("regime output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Index(out, "Punch line:") > strings.Index(out, "Data quality:") {
-		t.Fatalf("data-quality line should follow the punch line:\n%s", out)
+	if strings.Index(out, "Set aside:") > strings.Index(out, "Data context:") {
+		t.Fatalf("data-quality context line should follow decision lines:\n%s", out)
+	}
+}
+
+func TestRenderRegime_DefaultOmitsLifecycleInternals(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	fix.Lifecycle = rpc.LifecycleState{
+		Scope:       "market",
+		Stage:       rpc.LifecycleEarlyWarning,
+		Severity:    "watch",
+		Readiness:   "degraded",
+		Timing:      "forward_warning",
+		Confidence:  "medium",
+		Unconfirmed: []string{"credit"},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeText(env, fix); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, notWant := range []string{"Stage:", "early warning", "forward warning", "unconfirmed credit"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("default render leaked lifecycle internals %q:\n%s", notWant, out)
+		}
+	}
+}
+
+func TestRenderRegime_InputHealthColorSeparatesContextFromProblems(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	fix.DataQuality = []rpc.DataQualityHealth{
+		{Surface: "regime", Status: "stale", Summary: "stale: off-hours vol", StaleClusters: []string{"vol"}},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	if code := renderRegimeText(env, fix); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, ansiYellow+"Needs confirmation") {
+		t.Errorf("technical input gaps should color Input health yellow:\n%s", out)
+	}
+	if strings.Contains(out, ansiYellow+"regime cached") {
+		t.Errorf("expected cached/off-hours data context should not be yellow:\n%s", out)
+	}
+	if !strings.Contains(out, ansiDim+"regime cached") {
+		t.Errorf("cached/off-hours context should be dim context, got:\n%s", out)
 	}
 }
 
@@ -173,37 +239,69 @@ func TestRenderRegime_RowsFitOneLineEach(t *testing.T) {
 	_ = renderRegimeText(env, regimeFixture())
 	indicators := []string{"VIX/VIX3M", "HYG vs SPY", "HY/IG OAS", "USD/JPY", "γ-zero (SPY+SPX)", "SPX breadth"}
 	for _, name := range indicators {
-		hits := strings.Count(stdout.String(), name)
+		hits := regimeRenderedRowHits(stdout.String(), name)
 		if hits != 1 {
 			t.Errorf("%s should appear on exactly one row (got %d):\n%s", name, hits, stdout.String())
 		}
 	}
 }
 
-// TestRenderRegime_BandWordsAppearOnRankedRows pins the band column:
-// ranked rows carry "green" / "yellow" / "red" verbatim; unranked rows
-// use the em-dash placeholder. Color escapes are filtered out via the
-// no-color env so this asserts on raw text shape.
-func TestRenderRegime_BandWordsAppearOnRankedRows(t *testing.T) {
+func TestRenderRegime_NarrowWidthWrapsDefaultOutput(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	_ = renderRegimeText(env, regimeFixture())
+	fix := regimeFixture()
+	hygPrice := 79.0
+	hyg50 := 80.0
+	spy := 737.0
+	spy52 := 740.0
+	fix.HYGSPYDivergence.HYGPrice = &hygPrice
+	fix.HYGSPYDivergence.HYG50DMA = &hyg50
+	fix.HYGSPYDivergence.SPYPrice = &spy
+	fix.HYGSPYDivergence.SPY52WHigh = &spy52
+
+	if code := renderRegimeTextWidthWithOptions(env, &stdout, fix, regimeRenderOptions{}, 80); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
 	out := stdout.String()
-	for _, want := range []string{"green", "yellow"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("band word %q missing:\n%s", want, out)
+	if !strings.Contains(out, "READING / WHY") {
+		t.Fatalf("80-column render should use compact table header:\n%s", out)
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if got := visibleLen(line); got > 80 {
+			t.Fatalf("line %d visible width = %d, want <= 80:\n%s\n\nfull output:\n%s", i+1, got, line, out)
 		}
 	}
 }
 
-func TestRenderRegime_AsOfColumnShowsFreshnessLabels(t *testing.T) {
+// TestRenderRegime_CallWordsAppearOnUsableRows pins the call column:
+// default output uses trader-facing calm/watch/stress/no-vote wording,
+// not raw JSON band enums.
+func TestRenderRegime_CallWordsAppearOnUsableRows(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
 	out := stdout.String()
-	for _, want := range []string{"AS OF", "live", "frozen", "15m delayed", "computing", "unavailable"} {
+	for _, want := range []string{"CALL", "calm", "watch", "building", "skip"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("call word %q missing:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"INDICATOR", "BAND", "unranked"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("default render leaked raw table word %q:\n%s", notWant, out)
+		}
+	}
+}
+
+func TestRenderRegime_WhenColumnShowsFriendlyFreshnessLabels(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	_ = renderRegimeText(env, regimeFixture())
+	out := stdout.String()
+	for _, want := range []string{"WHEN", "live", "cached", "delayed 15m", "building", "missing"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("regime table missing as-of label %q:\n%s", want, out)
 		}
@@ -220,7 +318,7 @@ func TestRenderRegime_GammaComputingInlinesETA(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
 	out := stdout.String()
-	for _, want := range []string{"computing", "42s ETA", "40%"} {
+	for _, want := range []string{"building", "42s ETA", "40%"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("gamma row missing %q on the same line:\n%s", want, out)
 		}
@@ -240,7 +338,7 @@ func TestRenderRegime_BreadthUnavailableReasonInline(t *testing.T) {
 	if !strings.Contains(out, "unavailable") {
 		t.Errorf("breadth row should surface unavailable in value cell:\n%s", out)
 	}
-	if !strings.Contains(out, "breadth engine offline") {
+	if !strings.Contains(out, "no breadth snapshot yet") {
 		t.Errorf("breadth row should surface the reason inline:\n%s", out)
 	}
 	if strings.Contains(out, "0.0%") {
@@ -275,16 +373,9 @@ func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Explain",
-		"Full methodology",
-		"Inputs:",
 		"Source:",
-		"VIX is Cboe's 30-day",
-		"HYG is a high-yield corporate bond ETF",
-		"BAMLH0A0HYM2",
-		"RIFSPPFAAD90NB",
-		"IDEALPRO",
-		"IBKR SPY/SPX option chains",
-		"No single live symbol",
+		"FRED/St. Louis Fed official daily ICE BofA",
+		"Federal Reserve commercial-paper release plus U.S. Treasury Daily Treasury Bill Rates.",
 		"Read:",
 		"Volatility term structure",
 		"Dealer-gamma model",
@@ -293,7 +384,10 @@ func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
 		}
 	}
-	for _, notWant := range []string{"VIX/VIX3M notes", "HYG/SPY notes", "USD/JPY notes", "gamma notes", "breadth notes"} {
+	for _, notWant := range []string{
+		"VIX/VIX3M notes", "HYG/SPY notes", "USD/JPY notes", "gamma notes", "breadth notes",
+		"Full methodology", "Inputs:", "Raw source:", "BAMLH0A0HYM2",
+	} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("--explain should not dump fixture note %q:\n%s", notWant, out)
 		}
@@ -434,7 +528,7 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 		// Coverage edge: 3 red but two unranked → still "regime shift", not "full"
 		{"three red with two unranked", 0, 0, 3, 5, "Broad stress regime"},
 		// Coverage edge: nothing ranked → no verdict claim
-		{"all unranked", 0, 0, 0, 5, "No ranked indicators — see rows below for state"},
+		{"all unranked", 0, 0, 0, 5, "No usable signal yet"},
 		// Honesty floor: a positive "Normal regime" verdict requires
 		// at least verdictFloor (3) ranked rows. Below that the
 		// renderer surfaces "Insufficient signal" instead of bold-
@@ -442,9 +536,9 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 		// v0.22.0 dashboard on weekend frozen data printed "Normal
 		// regime" with 1 of 5 ranked — exactly the misleading state
 		// this floor blocks.
-		{"one green ranked = insufficient", 1, 0, 0, 5, "Insufficient signal — too few indicators ranked"},
-		{"two green ranked = insufficient", 2, 0, 0, 5, "Insufficient signal — too few indicators ranked"},
-		{"one red + one yellow = insufficient (below floor even with reds)", 0, 1, 1, 5, "Insufficient signal — too few indicators ranked"},
+		{"one green ranked = insufficient", 1, 0, 0, 5, "Insufficient signal — too few inputs ready"},
+		{"two green ranked = insufficient", 2, 0, 0, 5, "Insufficient signal — too few inputs ready"},
+		{"one red + one yellow = insufficient (below floor even with reds)", 0, 1, 1, 5, "Insufficient signal — too few inputs ready"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -599,7 +693,7 @@ func TestRegimeRow_HYGSPYNearHighIsRed(t *testing.T) {
 	if row.band != bandRed {
 		t.Errorf("HYG<50dma + SPY near highs should be red, got %v", row.band)
 	}
-	if !strings.Contains(row.reason, "SPY near highs") {
+	if !strings.Contains(row.reason, "near highs") {
 		t.Errorf("red HYG/SPY row should explain the divergence, got %q", row.reason)
 	}
 }
@@ -751,10 +845,9 @@ func TestRenderRegime_GammaModelledAnnotation(t *testing.T) {
 }
 
 // TestRenderRegime_ExplainIncludesQualityBlocks pins the --explain
-// path: every populated Quality envelope surfaces as a per-scalar
-// provenance line, so a reader can audit any single number without
-// reading the methodology spec. The block names the field, the
-// confidence + freshness, and the source string.
+// path: every populated Quality envelope surfaces as a concise
+// confidence/freshness line. Raw source strings stay behind
+// --diagnostics so normal explain mode is not a source-mechanics wall.
 func TestRenderRegime_ExplainIncludesQualityBlocks(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
@@ -788,12 +881,28 @@ func TestRenderRegime_ExplainIncludesQualityBlocks(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"VIX tick", "firm", "live",
-		"SPY 252d max(High) fallback", "estimate", "derived",
-		"perfiliev-bs-sweep-v1", "modelled", "proxy",
+		"firm", "live",
+		"estimate", "derived",
+		"modelled", "proxy",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing Quality marker %q:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"VIX tick", "SPY 252d max(High) fallback", "perfiliev-bs-sweep-v1"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("--explain should hide raw quality source %q:\n%s", notWant, out)
+		}
+	}
+
+	stdout.Reset()
+	if code := renderRegimeTextWithOptions(env, &stdout, fix, regimeRenderOptions{Explain: true, Diagnostics: true}); code != 0 {
+		t.Fatalf("diagnostics code=%d", code)
+	}
+	diagnostics := stdout.String()
+	for _, want := range []string{"VIX tick", "SPY 252d max(High) fallback", "perfiliev-bs-sweep-v1"} {
+		if !strings.Contains(diagnostics, want) {
+			t.Errorf("--diagnostics output missing quality source %q:\n%s", want, diagnostics)
 		}
 	}
 }
@@ -926,9 +1035,59 @@ func TestRegimeRow_GammaRequiresExplicitRankableQuality(t *testing.T) {
 				t.Fatalf("row band = %v, want unranked", row.band)
 			}
 			if !strings.Contains(row.value, "short-γ") {
-				t.Fatalf("row should still display gamma as context, value=%q", row.value)
+				t.Fatalf("row should still display the gamma read, value=%q", row.value)
+			}
+			if row.reason == "" {
+				t.Fatalf("row should explain why gamma did not vote")
 			}
 		})
+	}
+}
+
+func TestRenderRegime_GammaContextOnlySaysNoVote(t *testing.T) {
+	t.Parallel()
+	fix := regimeFixture()
+	fix.GammaZero.Status = rpc.RegimeStatusOK
+	fix.GammaZero.AsOf = &rpc.RegimeAsOfSummary{Label: "1d old"}
+	fix.GammaZero.Envelope = rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope:           rpc.GammaZeroScopeCombined,
+			GammaTotalAbs:   34.9e9,
+			RegimeAgreement: "agree:short-gamma",
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityContextOnly,
+				RankabilityReason: "freshness: market is closed; cached gamma is context only",
+				Freshness:         "closed_session_context",
+				Session:           rpc.SessionClosed.String(),
+			},
+			PerIndex: map[string]*rpc.GammaZeroComputed{
+				"SPY": {Scope: rpc.GammaZeroScopeSPY, GammaSign: "negative", Quality: rankableRegimeGammaQuality()},
+				"SPX": {Scope: rpc.GammaZeroScopeSPX, GammaSign: "negative", Quality: rankableRegimeGammaQuality()},
+			},
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderRegimeText(env, fix); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"no vote",
+		"did not vote: after-hours cached gamma; not a fresh",
+		"market-structure read",
+		"short-γ (amplifying)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("regime render missing %q:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"closed-session context", "context only"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("regime render should not use vague gamma context wording %q:\n%s", notWant, out)
+		}
 	}
 }
 
@@ -1056,7 +1215,7 @@ func TestRenderRegime_ExplainSurfacesDerivedIVDisclosure(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"240/900 priced legs", "BS-IV", "quote/close"} {
+	for _, want := range []string{"240/900 priced legs", "derived IV", "quote/close"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing derived-IV disclosure %q:\n%s", want, out)
 		}
@@ -1102,13 +1261,26 @@ func TestRenderRegime_ExplainSurfacesGammaSPXCacheFallback(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Data note:",
-		"SPX live refresh was canceled",
 		"cached SPX slice",
-		"Action: Refresh during",
-		"09:30-16:15 ET",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing gamma SPX fallback note %q:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"SPX live refresh was canceled", "Action: Refresh during", "09:30-16:15 ET"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("--explain should hide diagnostic gamma fallback detail %q:\n%s", notWant, out)
+		}
+	}
+
+	stdout.Reset()
+	if code := renderRegimeTextWithOptions(env, &stdout, fix, regimeRenderOptions{Explain: true, Diagnostics: true}); code != 0 {
+		t.Fatalf("diagnostics code=%d", code)
+	}
+	diagnostics := stdout.String()
+	for _, want := range []string{"SPX live refresh was canceled", "Action: Refresh during", "09:30-16:15 ET"} {
+		if !strings.Contains(diagnostics, want) {
+			t.Errorf("--diagnostics output missing gamma fallback detail %q:\n%s", want, diagnostics)
 		}
 	}
 }
@@ -1238,11 +1410,11 @@ func TestRowGamma_UsesScopeAwareLabel(t *testing.T) {
 	}
 }
 
-// ----- B4: conditional |Γ|·OI rendering in the regime row -----
+// ----- B4: conditional |GEX| rendering in the regime row -----
 
 // TestRowGamma_OmitsMagnitudeWhenZero pins the conditional rendering:
 // when GammaTotalAbs is zero (no-crossing degenerate case or v2 daemon
-// without the aggregator), the row value omits the "|Γ|·OI X.Xbn"
+// without the aggregator), the row value omits the "|GEX| X.Xbn"
 // segment entirely rather than painting a misleading "$0.0bn".
 func TestRowGamma_OmitsMagnitudeWhenZero(t *testing.T) {
 	t.Parallel()
@@ -1259,8 +1431,8 @@ func TestRowGamma_OmitsMagnitudeWhenZero(t *testing.T) {
 			},
 		},
 	})
-	if strings.Contains(row.value, "|Γ|·OI") {
-		t.Errorf("zero magnitude should omit |Γ|·OI segment, got value=%q", row.value)
+	if strings.Contains(row.value, "|GEX|") {
+		t.Errorf("zero magnitude should omit |GEX| segment, got value=%q", row.value)
 	}
 	if !strings.Contains(row.value, "long-γ") {
 		t.Errorf("regime classification should still surface, got value=%q", row.value)
@@ -1285,7 +1457,7 @@ func TestRowGamma_KeepsMagnitudeWhenNonZero(t *testing.T) {
 			},
 		},
 	})
-	if !strings.Contains(row.value, "|Γ|·OI 2.7bn") {
+	if !strings.Contains(row.value, "|GEX| 2.7bn") {
 		t.Errorf("non-zero magnitude should render inline, got value=%q", row.value)
 	}
 }
@@ -1329,10 +1501,11 @@ func TestRowGamma_ShortReason(t *testing.T) {
 	}
 }
 
-// TestRegimeRow_GammaCombinedUsesPerIndexSummary pins the combined
-// contract: there is no top-level SPY anchor, so the regime row reads
-// the SPY/SPX per-index regimes and renders their agreement directly.
-func TestRegimeRow_GammaCombinedUsesPerIndexSummary(t *testing.T) {
+// TestRegimeRow_GammaCombinedHidesPerIndexMechanics pins the combined
+// default contract: there is no top-level SPY anchor, and the regime row
+// should render the trader-facing gamma implication instead of SPY/SPX
+// agreement mechanics.
+func TestRegimeRow_GammaCombinedHidesPerIndexMechanics(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
 	row := rowGamma(now, rpc.RegimeGammaZero{
@@ -1354,14 +1527,20 @@ func TestRegimeRow_GammaCombinedUsesPerIndexSummary(t *testing.T) {
 	if strings.Contains(row.value, "spot 743.73") {
 		t.Errorf("combined-scope row must not invent a top-level SPY spot: %q", row.value)
 	}
-	if !strings.Contains(row.value, "long-γ (stabilizing regime)") || !strings.Contains(row.value, "SPY/SPX agree") {
-		t.Errorf("combined-scope row should surface per-index agreement: %q", row.value)
+	if !strings.Contains(row.value, "long-γ (stabilizing)") {
+		t.Errorf("combined-scope row should surface gamma implication: %q", row.value)
 	}
-	if !strings.Contains(row.value, "|Γ|·OI") {
+	if strings.Contains(row.value, "SPY/SPX") || strings.Contains(row.reason, "SPY/SPX") {
+		t.Errorf("combined-scope row should hide per-index mechanics: value=%q reason=%q", row.value, row.reason)
+	}
+	if !strings.Contains(row.value, "|GEX|") {
 		t.Errorf("combined-scope row should still surface magnitude when non-zero: %q", row.value)
 	}
 	if row.band != bandGreen {
 		t.Errorf("combined long-gamma agreement should be green, got %v", row.band)
+	}
+	if row.reason != "dealer gamma stabilizing" {
+		t.Errorf("reason=%q want trader-facing gamma implication", row.reason)
 	}
 }
 
@@ -1387,8 +1566,11 @@ func TestRegimeRow_GammaCombinedDisagreementEscalatesDominantRed(t *testing.T) {
 	if row.band != bandRed {
 		t.Errorf("SPX-dominant combined disagreement should be red, got %v", row.band)
 	}
-	if !strings.Contains(row.reason, "disagree") {
-		t.Errorf("combined disagreement reason should say disagree, got %q", row.reason)
+	if row.reason != "dealer gamma amplifying" {
+		t.Errorf("combined dominant-red reason=%q want trader-facing amplification", row.reason)
+	}
+	if strings.Contains(row.value+" "+row.reason, "SPY/SPX") || strings.Contains(row.value+" "+row.reason, "disagree") {
+		t.Errorf("combined dominant-red row should not leak internal agreement mechanics: value=%q reason=%q", row.value, row.reason)
 	}
 }
 

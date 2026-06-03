@@ -245,6 +245,11 @@ type Server struct {
 	// autospawns the daemon and walks away, the idle watcher could
 	// previously fire mid-prewarm.
 	regimePrewarming atomic.Bool
+	// regimeSeries memoises official daily public-rate series used by
+	// regime rows. These inputs change once per
+	// business day, so persisting the last good CSV across daemon restarts
+	// prevents routine HTTP flaps from making credit/funding rows vanish.
+	regimeSeries *regimeSeriesCache
 	// lastRegimeQuality latches the cluster-level data-quality summary
 	// from the most recent regime snapshot. status.health reads this
 	// without re-running the regime fan-out, so `ibkr status` can disclose
@@ -318,6 +323,7 @@ func New(opts Options) *Server {
 	s.installMembersRefresher()
 	s.installContractStore()
 	s.installStreakStore()
+	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
 	return s
 }
@@ -354,6 +360,15 @@ func (s *Server) installStreakStore() {
 		return
 	}
 	s.streaks = NewStreakStore(dir)
+}
+
+func (s *Server) installRegimeSeriesCache() {
+	dir, err := regimeSeriesCacheDefaultDir()
+	if err != nil {
+		s.logger.Warnf("regime series cache: resolve dir: %v (persistence disabled)", err)
+		return
+	}
+	s.regimeSeries = newRegimeSeriesCache(dir)
 }
 
 // infof / warnf are nil-safe wrappers around s.logger. The tests that
