@@ -70,6 +70,13 @@ func main() {
 		os.Exit(runMCP(rest))
 	}
 
+	// `ibkr app` runs the mobile/PWA application layer. It owns its own
+	// HyperServe HTTP lifecycle and dials the daemon internally, so it must
+	// not go through the one-shot CLI autospawn path.
+	if cmd == "app" {
+		os.Exit(runApp(rest))
+	}
+
 	// `ibkr setup [client]` writes the MCP server entry into local AI
 	// client config files (e.g. claude_desktop_config.json). Purely local
 	// — no daemon involvement, special-cased here so we skip the dial.

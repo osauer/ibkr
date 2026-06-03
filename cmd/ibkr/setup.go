@@ -8,7 +8,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
@@ -21,16 +23,16 @@ func runSetup(args []string) int {
 	target := "claude-desktop"
 	if len(args) > 0 {
 		if args[0] == "--help" || args[0] == "-h" {
-			fmt.Println("ibkr setup — write the MCP server entry for a local AI client.")
+			fmt.Println("ibkr setup — write local integration config.")
 			fmt.Println()
 			fmt.Println("Usage: ibkr setup [client]")
 			fmt.Println()
 			fmt.Println("Supported clients:")
 			fmt.Println("  claude-desktop  (default)")
+			fmt.Println("  app             install the ibkr app macOS LaunchAgent")
 			fmt.Println()
-			fmt.Println("The command locates the client's config file, backs it up,")
-			fmt.Println("merges an mcpServers.ibkr entry pointing at this binary, and")
-			fmt.Println("writes the result back. Restart the client to pick up the change.")
+			fmt.Println("claude-desktop writes an mcpServers.ibkr entry pointing at this binary.")
+			fmt.Println("app writes ~/Library/LaunchAgents/com.osauer.ibkr-app.plist.")
 			return 0
 		}
 		target = args[0]
@@ -39,9 +41,11 @@ func runSetup(args []string) int {
 	switch target {
 	case "claude-desktop":
 		return setupClaudeDesktop()
+	case "app":
+		return setupAppLaunchAgent()
 	default:
 		fmt.Fprintf(os.Stderr, "ibkr setup: unknown client %q\n", target)
-		fmt.Fprintln(os.Stderr, "supported: claude-desktop")
+		fmt.Fprintln(os.Stderr, "supported: claude-desktop, app")
 		return 2
 	}
 }
@@ -165,4 +169,101 @@ func mergeIbkrMCPEntry(cfg map[string]any, binPath string) ([]byte, error) {
 	}
 	out = append(out, '\n')
 	return out, nil
+}
+
+func setupAppLaunchAgent() int {
+	if runtime.GOOS != "darwin" {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: macOS LaunchAgents are not available on %s\n", runtime.GOOS)
+		return 1
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: %v\n", err)
+		return 1
+	}
+	binPath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: locate own binary: %v\n", err)
+		return 1
+	}
+	if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
+		binPath = resolved
+	}
+	agentDir := filepath.Join(home, "Library", "LaunchAgents")
+	logDir := filepath.Join(home, "Library", "Logs", "ibkr")
+	plistPath := filepath.Join(agentDir, "com.osauer.ibkr-app.plist")
+	outPath := filepath.Join(logDir, "app.log")
+	errPath := filepath.Join(logDir, "app.err.log")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: create LaunchAgents dir: %v\n", err)
+		return 1
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: create log dir: %v\n", err)
+		return 1
+	}
+	if data, err := os.ReadFile(plistPath); err == nil {
+		stamp := time.Now().Format("20060102-150405")
+		backup := plistPath + ".bak-" + stamp
+		if err := os.WriteFile(backup, data, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "ibkr setup app: backup %s: %v\n", backup, err)
+			return 1
+		}
+		fmt.Printf("Backed up existing LaunchAgent -> %s\n", backup)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: read %s: %v\n", plistPath, err)
+		return 1
+	}
+	if err := os.WriteFile(plistPath, appLaunchAgentPlist(binPath, outPath, errPath), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: write %s: %v\n", plistPath, err)
+		return 1
+	}
+	fmt.Printf("Installed ibkr app LaunchAgent at %s\n", plistPath)
+	fmt.Println()
+	fmt.Println("Start it with:")
+	fmt.Printf("  launchctl bootstrap gui/$(id -u) %s\n", plistPath)
+	fmt.Println()
+	fmt.Println("Pair a phone after it is running:")
+	fmt.Println("  ibkr app pair")
+	fmt.Println()
+	fmt.Printf("Logs: %s and %s\n", outPath, errPath)
+	return 0
+}
+
+func appLaunchAgentPlist(binPath, outPath, errPath string) []byte {
+	var b bytes.Buffer
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString(`<plist version="1.0">` + "\n")
+	b.WriteString("<dict>\n")
+	writePlistString(&b, "Label", "com.osauer.ibkr-app")
+	b.WriteString("  <key>ProgramArguments</key>\n")
+	b.WriteString("  <array>\n")
+	writePlistArrayString(&b, binPath)
+	writePlistArrayString(&b, "app")
+	b.WriteString("  </array>\n")
+	b.WriteString("  <key>RunAtLoad</key>\n")
+	b.WriteString("  <true/>\n")
+	b.WriteString("  <key>KeepAlive</key>\n")
+	b.WriteString("  <true/>\n")
+	writePlistString(&b, "StandardOutPath", outPath)
+	writePlistString(&b, "StandardErrorPath", errPath)
+	b.WriteString("</dict>\n")
+	b.WriteString("</plist>\n")
+	return b.Bytes()
+}
+
+func writePlistString(b *bytes.Buffer, key, value string) {
+	fmt.Fprintf(b, "  <key>%s</key>\n", xmlEscape(key))
+	fmt.Fprintf(b, "  <string>%s</string>\n", xmlEscape(value))
+}
+
+func writePlistArrayString(b *bytes.Buffer, value string) {
+	fmt.Fprintf(b, "    <string>%s</string>\n", xmlEscape(value))
+}
+
+func xmlEscape(value string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(value))
+	return b.String()
 }

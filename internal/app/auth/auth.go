@@ -1,0 +1,323 @@
+package auth
+
+import (
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/asn1"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/osauer/ibkr/internal/app/state"
+)
+
+const SessionTTL = 12 * time.Hour
+
+type Manager struct {
+	store      *state.Store
+	pairingTTL time.Duration
+	now        func() time.Time
+
+	mu         sync.Mutex
+	pairing    map[string]PairingSession
+	challenges map[string]Challenge
+	sessions   map[string]Session
+}
+
+type PairingSession struct {
+	ID        string    `json:"id"`
+	Nonce     string    `json:"nonce"`
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Challenge struct {
+	DeviceID  string    `json:"device_id"`
+	Challenge string    `json:"challenge"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type Session struct {
+	Token     string    `json:"token"`
+	DeviceID  string    `json:"device_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type CompletePairingRequest struct {
+	PairingID    string          `json:"pairing_id"`
+	Nonce        string          `json:"nonce"`
+	DeviceName   string          `json:"device_name"`
+	PublicKeyJWK json.RawMessage `json:"public_key_jwk"`
+	Signature    string          `json:"signature"`
+}
+
+type CompletePairingResult struct {
+	DeviceID  string    `json:"device_id"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func NewManager(store *state.Store, pairingTTL time.Duration) *Manager {
+	if pairingTTL <= 0 {
+		pairingTTL = 5 * time.Minute
+	}
+	return &Manager{
+		store:      store,
+		pairingTTL: pairingTTL,
+		now:        time.Now,
+		pairing:    map[string]PairingSession{},
+		challenges: map[string]Challenge{},
+		sessions:   map[string]Session{},
+	}
+}
+
+func (m *Manager) StartPairing(publicURL string) (PairingSession, error) {
+	id, err := randomToken(18)
+	if err != nil {
+		return PairingSession{}, err
+	}
+	nonce, err := randomToken(32)
+	if err != nil {
+		return PairingSession{}, err
+	}
+	now := m.now().UTC()
+	s := PairingSession{
+		ID:        id,
+		Nonce:     nonce,
+		CreatedAt: now,
+		ExpiresAt: now.Add(m.pairingTTL),
+		URL:       strings.TrimRight(publicURL, "/") + "/pair.html?pair=" + id + "&nonce=" + nonce,
+	}
+	m.mu.Lock()
+	m.pairing[id] = s
+	m.mu.Unlock()
+	return s, nil
+}
+
+func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingResult, error) {
+	now := m.now().UTC()
+	m.mu.Lock()
+	s, ok := m.pairing[req.PairingID]
+	if ok {
+		delete(m.pairing, req.PairingID)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return CompletePairingResult{}, errors.New("unknown pairing session")
+	}
+	if now.After(s.ExpiresAt) {
+		return CompletePairingResult{}, errors.New("pairing session expired")
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Nonce), []byte(s.Nonce)) != 1 {
+		return CompletePairingResult{}, errors.New("pairing nonce mismatch")
+	}
+	if err := VerifyJWKSignature(req.PublicKeyJWK, []byte(req.Nonce), req.Signature); err != nil {
+		return CompletePairingResult{}, fmt.Errorf("verify device proof: %w", err)
+	}
+	deviceID, err := randomToken(16)
+	if err != nil {
+		return CompletePairingResult{}, err
+	}
+	grant := state.DeviceGrant{
+		ID:           deviceID,
+		Name:         strings.TrimSpace(req.DeviceName),
+		PublicKeyJWK: string(req.PublicKeyJWK),
+		CreatedAt:    now,
+		LastSeenAt:   now,
+	}
+	if grant.Name == "" {
+		grant.Name = "iPhone"
+	}
+	if err := m.store.AddDevice(grant); err != nil {
+		return CompletePairingResult{}, err
+	}
+	sess, err := m.newSession(deviceID, now)
+	if err != nil {
+		return CompletePairingResult{}, err
+	}
+	return CompletePairingResult{DeviceID: deviceID, Token: sess.Token, ExpiresAt: sess.ExpiresAt}, nil
+}
+
+func (m *Manager) StartChallenge(deviceID string) (Challenge, error) {
+	if _, ok := m.store.Device(deviceID); !ok {
+		return Challenge{}, errors.New("unknown device")
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return Challenge{}, err
+	}
+	ch := Challenge{DeviceID: deviceID, Challenge: token, ExpiresAt: m.now().UTC().Add(2 * time.Minute)}
+	m.mu.Lock()
+	m.challenges[token] = ch
+	m.mu.Unlock()
+	return ch, nil
+}
+
+func (m *Manager) CompleteChallenge(deviceID, challenge, signature string) (Session, error) {
+	now := m.now().UTC()
+	m.mu.Lock()
+	ch, ok := m.challenges[challenge]
+	if ok {
+		delete(m.challenges, challenge)
+	}
+	m.mu.Unlock()
+	if !ok || ch.DeviceID != deviceID {
+		return Session{}, errors.New("unknown challenge")
+	}
+	if now.After(ch.ExpiresAt) {
+		return Session{}, errors.New("challenge expired")
+	}
+	grant, ok := m.store.Device(deviceID)
+	if !ok {
+		return Session{}, errors.New("unknown device")
+	}
+	if err := VerifyJWKSignature(json.RawMessage(grant.PublicKeyJWK), []byte(challenge), signature); err != nil {
+		return Session{}, err
+	}
+	return m.newSession(deviceID, now)
+}
+
+func (m *Manager) Authenticate(token string) (Session, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return Session{}, false
+	}
+	now := m.now().UTC()
+	m.mu.Lock()
+	s, ok := m.sessions[token]
+	if ok && now.After(s.ExpiresAt) {
+		delete(m.sessions, token)
+		ok = false
+	}
+	m.mu.Unlock()
+	if !ok {
+		return Session{}, false
+	}
+	if _, ok := m.store.Device(s.DeviceID); !ok {
+		return Session{}, false
+	}
+	_ = m.store.SetDeviceSeen(s.DeviceID, now)
+	return s, true
+}
+
+func (m *Manager) newSession(deviceID string, now time.Time) (Session, error) {
+	token, err := randomToken(32)
+	if err != nil {
+		return Session{}, err
+	}
+	s := Session{Token: token, DeviceID: deviceID, CreatedAt: now, ExpiresAt: now.Add(SessionTTL)}
+	m.mu.Lock()
+	m.sessions[token] = s
+	m.mu.Unlock()
+	return s, nil
+}
+
+func randomToken(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+type jwkP256 struct {
+	Kty string `json:"kty"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+}
+
+func VerifyJWKSignature(raw json.RawMessage, message []byte, sigB64 string) error {
+	var jwk jwkP256
+	if err := json.Unmarshal(raw, &jwk); err != nil {
+		return err
+	}
+	if jwk.Kty != "EC" || jwk.Crv != "P-256" {
+		return errors.New("device key must be EC P-256")
+	}
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
+	if err != nil {
+		return err
+	}
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.Y)
+	if err != nil {
+		return err
+	}
+	if _, err := validateP256PublicKey(xBytes, yBytes); err != nil {
+		return err
+	}
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+	curve := elliptic.P256()
+	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(message)
+	pub := ecdsa.PublicKey{Curve: curve, X: x, Y: y}
+	if len(sig) == 64 {
+		r := new(big.Int).SetBytes(sig[:32])
+		s := new(big.Int).SetBytes(sig[32:])
+		if ecdsa.Verify(&pub, digest[:], r, s) {
+			return nil
+		}
+	}
+	if ecdsa.VerifyASN1(&pub, digest[:], sig) {
+		return nil
+	}
+	var parsed struct {
+		R, S *big.Int
+	}
+	if _, err := asn1.Unmarshal(sig, &parsed); err == nil && parsed.R != nil && parsed.S != nil {
+		if ecdsa.Verify(&pub, digest[:], parsed.R, parsed.S) {
+			return nil
+		}
+	}
+	return errors.New("invalid signature")
+}
+
+func validateP256PublicKey(xBytes, yBytes []byte) (*ecdh.PublicKey, error) {
+	x, err := p256Coordinate(xBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid P-256 x coordinate: %w", err)
+	}
+	y, err := p256Coordinate(yBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid P-256 y coordinate: %w", err)
+	}
+	encoded := make([]byte, 65)
+	encoded[0] = 4
+	copy(encoded[1:33], x)
+	copy(encoded[33:], y)
+	key, err := ecdh.P256().NewPublicKey(encoded)
+	if err != nil {
+		return nil, errors.New("public key is not on P-256")
+	}
+	return key, nil
+}
+
+func p256Coordinate(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("empty coordinate")
+	}
+	if len(raw) > 32 {
+		return nil, errors.New("coordinate exceeds 32 bytes")
+	}
+	if len(raw) == 32 {
+		return raw, nil
+	}
+	out := make([]byte, 32)
+	copy(out[32-len(raw):], raw)
+	return out, nil
+}

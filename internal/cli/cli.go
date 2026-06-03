@@ -166,6 +166,7 @@ func init() {
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
+		{"app", "Run the paired mobile PWA application layer", "ibkr app [--addr HOST:PORT] | ibkr app pair", nil},                                                  // dispatched in cmd/ibkr/main.go — long-lived app server
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
 		{"daemon", "Run the stateful gateway daemon (normally autospawned)", "ibkr daemon [--foreground] [--config PATH] [--socket PATH] [--log PATH|stderr]", nil}, // dispatched in cmd/ibkr/main.go — long-lived daemon
 		{"setup", "Wire ibkr into a local AI client (default: claude-desktop)", "ibkr setup [claude-desktop]", nil},                                                 // dispatched in cmd/ibkr/main.go — no daemon contact

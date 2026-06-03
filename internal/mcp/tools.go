@@ -639,6 +639,7 @@ var ExcludedCLI = map[string]string{
 	"version":  "info-only CLI verb; not useful as a tool call",
 	"mcp":      "transport server mode; the MCP host starts this process, no LLM should call it as a tool",
 	"daemon":   "local background service mode; autospawned by CLI/MCP clients and not an agent operation",
+	"app":      "local mobile/PWA service mode with browser pairing and Web Push state; not a broker-data MCP tool",
 	"setup":    "local configuration verb (writes claude_desktop_config.json); not a daemon RPC, no LLM should ever call it",
 	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 	"restart":  "local process-management verb (signals daemon processes); useful for humans and scripts, but not a broker-data MCP tool",
