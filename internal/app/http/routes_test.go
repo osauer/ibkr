@@ -87,6 +87,10 @@ func TestPairingBootstrapAndSnapshotTool(t *testing.T) {
 	if boot["version"] != "test-version" {
 		t.Fatalf("version=%v, want test-version", boot["version"])
 	}
+	snapshot, ok := boot["snapshot"].(map[string]any)
+	if !ok || snapshot["market_calendar"] == nil {
+		t.Fatalf("bootstrap snapshot missing market_calendar: %#v", boot["snapshot"])
+	}
 
 	toolReq := httptest.NewRequest(http.MethodPost, "/api/tools/snapshot", nil)
 	toolReq.AddCookie(cookies[0])
@@ -94,6 +98,35 @@ func TestPairingBootstrapAndSnapshotTool(t *testing.T) {
 	handler.ServeHTTP(toolRes, toolReq)
 	if toolRes.Code != http.StatusOK {
 		t.Fatalf("snapshot tool status=%d, want 200; body=%s", toolRes.Code, toolRes.Body.String())
+	}
+}
+
+func TestClearAlertHistory(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	clearReq := httptest.NewRequest(http.MethodDelete, "/api/alerts", nil)
+	clearReq.AddCookie(cookie)
+	clearRes := httptest.NewRecorder()
+	handler.ServeHTTP(clearRes, clearReq)
+	if clearRes.Code != http.StatusOK {
+		t.Fatalf("clear status=%d, want 200; body=%s", clearRes.Code, clearRes.Body.String())
+	}
+
+	alertsReq := httptest.NewRequest(http.MethodGet, "/api/alerts", nil)
+	alertsReq.AddCookie(cookie)
+	alertsRes := httptest.NewRecorder()
+	handler.ServeHTTP(alertsRes, alertsReq)
+	if alertsRes.Code != http.StatusOK {
+		t.Fatalf("alerts status=%d, want 200; body=%s", alertsRes.Code, alertsRes.Body.String())
+	}
+	var alerts []state.AlertRecord
+	if err := json.NewDecoder(alertsRes.Body).Decode(&alerts); err != nil {
+		t.Fatalf("decode alerts: %v", err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("alerts len=%d, want 0", len(alerts))
 	}
 }
 
@@ -194,10 +227,51 @@ func newTestHandler(t *testing.T) *hyperserve.Server {
 	return srv
 }
 
+func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
+	t.Helper()
+	pairReq := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte("{}")))
+	pairReq.RemoteAddr = "127.0.0.1:12345"
+	pairRes := httptest.NewRecorder()
+	handler.ServeHTTP(pairRes, pairReq)
+	if pairRes.Code != http.StatusOK {
+		t.Fatalf("pair status=%d, want 200; body=%s", pairRes.Code, pairRes.Body.String())
+	}
+	var pairing auth.PairingSession
+	if err := json.NewDecoder(pairRes.Body).Decode(&pairing); err != nil {
+		t.Fatalf("decode pairing: %v", err)
+	}
+	key := newRouteTestKey(t)
+	completeBody, err := json.Marshal(auth.CompletePairingRequest{
+		PairingID:    pairing.ID,
+		Nonce:        pairing.Nonce,
+		DeviceName:   "iPhone",
+		PublicKeyJWK: routeTestJWK(t, key),
+		Signature:    routeTestSignature(t, key, pairing.Nonce),
+	})
+	if err != nil {
+		t.Fatalf("marshal complete body: %v", err)
+	}
+	completeReq := httptest.NewRequest(http.MethodPost, "/api/pairing/complete", bytes.NewReader(completeBody))
+	completeRes := httptest.NewRecorder()
+	handler.ServeHTTP(completeRes, completeReq)
+	if completeRes.Code != http.StatusOK {
+		t.Fatalf("complete status=%d, want 200; body=%s", completeRes.Code, completeRes.Body.String())
+	}
+	cookies := completeRes.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("pairing response did not set a session cookie")
+	}
+	return cookies[0]
+}
+
 type routeFakeClient struct{}
 
 func (routeFakeClient) Status(context.Context) (*rpc.HealthResult, error) {
 	return &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497}, nil
+}
+
+func (routeFakeClient) MarketCalendar(context.Context) (*rpc.MarketCalendarResult, error) {
+	return &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}}, nil
 }
 
 func (routeFakeClient) Account(context.Context) (*rpc.AccountResult, error) {

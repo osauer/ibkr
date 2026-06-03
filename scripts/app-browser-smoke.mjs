@@ -95,7 +95,7 @@ await context.addInitScript(() => {
   globalThis.EventSource = function smokeEventSource(url, options) {
     const es = new NativeEventSource(url, options);
     globalThis.__ibkrSmoke.openedEvents++;
-    for (const type of ["snapshot", "status", "account", "positions", "canary", "heartbeat"]) {
+    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "canary", "heartbeat"]) {
       es.addEventListener(type, () => {
         globalThis.__ibkrSmoke.eventCounts[type] = (globalThis.__ibkrSmoke.eventCounts[type] || 0) + 1;
       });
@@ -119,12 +119,14 @@ try {
   await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
   await waitForSnapshotEvent(page, 0);
   const title = await page.title();
-  const connection = await waitForConnection(page, "Live");
+  const connection = await waitForHeader(page);
   const pushState = await page.locator("#pushState").textContent();
   const eventsBefore = await fetchEventsDiagnostics(page);
   const privacy = await exerciseAccountPrivacy(page);
   const canaryDetail = await exerciseCanaryDetail(page);
   const marketContext = await exerciseMarketContext(page);
+  const portfolioDetail = await exercisePortfolioDetail(page);
+  const alertHistory = await exerciseAlertHistory(page);
   await openDebugTools(page);
   await page.locator('[data-tool="snapshot"]').click();
   await page.waitForFunction(() => {
@@ -158,6 +160,8 @@ try {
     privacy,
     canary_detail: canaryDetail,
     market_context: marketContext,
+    portfolio_detail: portfolioDetail,
+    alert_history: alertHistory,
     events: {
       subscribers: eventsBefore.subscribers,
       last_event_at: eventsBefore.last_event_at,
@@ -185,10 +189,10 @@ async function runLifecycleSmoke(page) {
     snapshot: globalThis.__ibkrSmoke.eventCounts.snapshot || 0,
     authSessions: globalThis.__ibkrSmoke.fetches.filter((f) => f.url.endsWith("/api/auth/session") && f.status === 200).length,
   }));
-  const connectionBeforeRestart = await waitForConnection(page, "Live");
+  const connectionBeforeRestart = await waitForHeader(page);
   const restart = await runShellJSON(restartCommand);
   const snapshotAfter = await waitForSnapshotEvent(page, before.snapshot);
-  const connectionAfterRestart = await waitForConnection(page, "Live");
+  const connectionAfterRestart = await waitForHeader(page);
   const eventsAfter = await fetchEventsDiagnostics(page);
   const after = await page.evaluate(() => ({
     authSessions: globalThis.__ibkrSmoke.fetches.filter((f) => f.url.endsWith("/api/auth/session") && f.status === 200).length,
@@ -216,10 +220,12 @@ async function waitForSnapshotEvent(page, previousCount) {
   return page.evaluate(() => globalThis.__ibkrSmoke.eventCounts.snapshot || 0);
 }
 
-async function waitForConnection(page, expected) {
-  await page.waitForFunction((text) => {
-    return document.getElementById("connectionLine")?.textContent === text;
-  }, expected, { timeout: 20000 });
+async function waitForHeader(page) {
+  await page.waitForFunction(() => {
+    const text = document.getElementById("connectionLine")?.textContent?.trim() || "";
+    const dot = document.getElementById("statusDot");
+    return text && text !== "Connecting" && text !== "Market calendar loading" && dot?.classList.contains("ok");
+  }, { timeout: 20000 });
   return page.locator("#connectionLine").textContent();
 }
 
@@ -257,8 +263,19 @@ async function exerciseAccountPrivacy(page) {
 }
 
 async function exerciseCanaryDetail(page) {
-  const timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
-  if (!timestamp || timestamp === "--" || timestamp === "updated --") {
+  let timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
+  if ((timestamp === "no timestamp" || timestamp === "updated --") && !lifecycle) {
+    try {
+      await page.waitForFunction(() => {
+        const text = document.getElementById("canaryAsOf")?.textContent?.trim() || "";
+        return text && text !== "no timestamp" && text !== "updated --" && text !== "--";
+      }, { timeout: 30000 });
+      timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
+    } catch {
+      // Keep the explicit assertion below for app instances without live canary data.
+    }
+  }
+  if (!timestamp || timestamp === "--" || timestamp === "updated --" || (!lifecycle && timestamp === "no timestamp")) {
     throw new Error("canary timestamp is missing");
   }
   await page.locator("#canaryDetailToggle").click();
@@ -325,6 +342,49 @@ async function exerciseMarketContext(page) {
     vix_level_present: before.vixLevel !== "--",
     indicators,
   };
+}
+
+async function exercisePortfolioDetail(page) {
+  const summary = (await page.locator("#portfolioDetailSummary").textContent())?.trim() || "";
+  await page.locator("#portfolioDetailToggle").click();
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("portfolioDetailPanel");
+    return panel && !panel.hidden && document.getElementById("portfolioDetailList")?.children.length >= 4;
+  }, { timeout: 5000 });
+  const detail = await page.evaluate(() => ({
+    rows: document.getElementById("portfolioDetailList")?.children.length || 0,
+    text: document.getElementById("portfolioDetailList")?.textContent || "",
+  }));
+  if (!detail.text.includes("option legs") && !detail.text.includes("No option legs")) {
+    throw new Error("portfolio detail does not explain Greeks coverage");
+  }
+  await page.locator("#portfolioDetailToggle").click();
+  return { opens: true, summary, rows: detail.rows };
+}
+
+async function exerciseAlertHistory(page) {
+  const initiallyOpen = await page.locator("#alertsPanel").evaluate((el) => !!el.open);
+  await page.locator("#alertsPanel summary").click();
+  await page.waitForFunction(() => document.getElementById("alertsPanel")?.open, { timeout: 5000 });
+  const info = await page.evaluate(() => ({
+    count: Number(document.getElementById("alertCount")?.textContent || "0"),
+    rows: document.querySelectorAll("#alertsList .alert-row").length,
+    clearDisabled: document.getElementById("clearAlertsButton")?.disabled || false,
+    hint: document.getElementById("alertsHint")?.textContent || "",
+  }));
+  let selected = false;
+  if (info.rows > 0) {
+    await page.locator("#alertsList .alert-row").first().click();
+    await page.waitForFunction(() => {
+      const panel = document.getElementById("selectedAlertPanel");
+      return panel && !panel.hidden && document.getElementById("selectedAlertTitle")?.textContent?.trim();
+    }, { timeout: 5000 });
+    selected = true;
+  } else if (!info.clearDisabled) {
+    throw new Error("clear alert history should be disabled when there are no rows");
+  }
+  await page.locator("#alertsPanel summary").click();
+  return { initially_open: initiallyOpen, opens: true, count: info.count, rows: info.rows, selected };
 }
 
 async function readMarketContext(page) {

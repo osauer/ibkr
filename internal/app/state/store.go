@@ -229,6 +229,13 @@ func (s *Store) AlertHistory(limit int) []AlertRecord {
 	return out
 }
 
+func (s *Store) ClearAlertHistory() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.AlertHistory = nil
+	return s.save()
+}
+
 func (s *Store) HasAlertFingerprint(fp string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
