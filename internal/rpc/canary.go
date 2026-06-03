@@ -29,6 +29,9 @@ type CanaryResult struct {
 	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
 	SourceHealth       []SourceHealth           `json:"source_health,omitempty"`
 	Policy             string                   `json:"policy,omitempty"`
+	PolicyProfile      string                   `json:"policy_profile,omitempty"`
+	PolicyVersion      string                   `json:"policy_version,omitempty"`
+	PolicyFingerprint  Fingerprint              `json:"policy_fingerprint,omitzero"`
 	Action             string                   `json:"action,omitempty"`
 	MarketConfirmation string                   `json:"market_confirmation,omitempty"`
 	PortfolioFit       string                   `json:"portfolio_fit,omitempty"`

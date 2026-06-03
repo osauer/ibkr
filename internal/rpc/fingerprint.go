@@ -70,6 +70,9 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 	}
 	projection := canaryFingerprintProjection{
 		Policy:             cleanString(r.Policy),
+		PolicyProfile:      cleanString(r.PolicyProfile),
+		PolicyVersion:      cleanString(r.PolicyVersion),
+		PolicyFingerprint:  r.PolicyFingerprint,
 		Action:             cleanString(r.Action),
 		MarketConfirmation: cleanString(r.MarketConfirmation),
 		PortfolioFit:       cleanString(r.PortfolioFit),
@@ -286,6 +289,9 @@ type dataQualityFingerprint struct {
 
 type canaryFingerprintProjection struct {
 	Policy             string                    `json:"policy,omitempty"`
+	PolicyProfile      string                    `json:"policy_profile,omitempty"`
+	PolicyVersion      string                    `json:"policy_version,omitempty"`
+	PolicyFingerprint  Fingerprint               `json:"policy_fingerprint,omitzero"`
 	Action             string                    `json:"action,omitempty"`
 	MarketConfirmation string                    `json:"market_confirmation,omitempty"`
 	PortfolioFit       string                    `json:"portfolio_fit,omitempty"`

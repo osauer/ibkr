@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**16 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**17 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -188,6 +188,16 @@ Live stateless portfolio canary for scheduled checks every few minutes: it combi
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `view` | string | no | response shape: full returns the existing canary evidence payload (default); alert returns compact monitor headline, source health, portfolio/market summaries, option health, hedge offset, warnings, and non-observe flags |
+
+## `ibkr_risk_plan`
+
+Read-only risk response planner for the current account and held portfolio. Use after `ibkr_canary` when canary says to stage, defend, rebalance, or when the user asks what to reduce to get back inside policy. It refreshes account, positions, and regime, recomputes the canary, binds the plan to `policy_profile`, `policy_version`, `policy_fingerprint`, canary/source fingerprints, then emits reduce-only candidate intents for expert review. Candidates may include existing stock/ETF reductions and held-option close/reduce actions only. They expose before/after risk estimates, DTE, greeks, bid/ask spread checks, hedge-preservation warnings, realized-P&L estimates, slippage estimates, and explicit blocked reasons. NOT for order preview, order placement, order submission, cancellation, modification, or token minting. Use the human CLI handoff `ibkr order preview --from-plan ... --candidate ...` after expert selection; this MCP tool cannot create submit-capable tokens and never executes trades. NOT for broad-market-only weather — use `ibkr_regime`; NOT for raw held-position inspection — use `ibkr_positions`; NOT for account-only cash/margin facts — use `ibkr_account`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `mode` | string | no | planner mode; default auto lets margin/P&L act signals escalate even when canary headline is watch |
 
 ## `ibkr_size`
 

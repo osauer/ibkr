@@ -107,7 +107,8 @@ func isValueFlag(name string) bool {
 		"entry", "stop", "target", "risk-pct", "lot", "fx",
 		"only", "market", "exchange", "primary", "currency", "instrument", "log",
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
-		"min-dte", "max-dte", "target-dte", "view":
+		"min-dte", "max-dte", "target-dte", "view", "mode", "from-canary", "from-plan", "candidate",
+		"preview-token":
 		return true
 	}
 	return false
@@ -163,6 +164,9 @@ func init() {
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--diagnostics] [--json]", runGamma},
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
+		{"risk-plan", "Read-only risk mitigation planner from canary + current portfolio", "ibkr risk-plan [--mode auto|defend|rebalance|stage|confirm-data|deploy] [--from-canary PATH] [--json]", runRiskPlan},
+		{"order", "Preview or place an explicitly selected risk-plan candidate", "ibkr order preview --from-plan PLAN.json --candidate ID [--json] | ibkr order place --preview-token TOKEN", runOrder},
+		{"trading", "Local trading gate status (read-only by default)", "ibkr trading status [--json]", runTrading},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},

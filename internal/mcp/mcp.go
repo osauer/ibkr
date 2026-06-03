@@ -336,9 +336,9 @@ func (s *Server) handleInitialize(id, _ json.RawMessage) {
 
 func (s *Server) instructions() string {
 	if s.profile == ProfileMonitor {
-		return "Read-only Interactive Brokers monitor profile. Use `ibkr_canary` first; call `ibkr_status` only for connectivity or degraded-input troubleshooting."
+		return "Read-only Interactive Brokers monitor profile. Use `ibkr_canary` first; call `ibkr_risk_plan` only after canary indicates planner readiness; call `ibkr_status` only for connectivity or degraded-input troubleshooting."
 	}
-	return "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, and a stateless portfolio canary that combines market regime with held portfolio shape. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol})."
+	return "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, a stateless portfolio canary, and a read-only risk-plan surface for candidate mitigation intents. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol})."
 }
 
 // toolDescriptor is the wire shape MCP expects in tools/list.
@@ -578,7 +578,7 @@ func (s *Server) visibleTools() []Tool {
 	if s.profile != ProfileMonitor {
 		return Tools
 	}
-	names := []string{"ibkr_canary", "ibkr_status"}
+	names := []string{"ibkr_canary", "ibkr_risk_plan", "ibkr_status"}
 	out := make([]Tool, 0, len(names))
 	for _, name := range names {
 		if tool, ok := lookupTool(name); ok {

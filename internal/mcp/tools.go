@@ -533,6 +533,34 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:  "ibkr_risk_plan",
+		Title: "IBKR Risk Plan",
+		Description: strings.Join([]string{
+			"Read-only risk response planner for the current account and held portfolio. Use after `ibkr_canary` when canary says to stage, defend, rebalance, or when the user asks what to reduce to get back inside policy.",
+			"It refreshes account, positions, and regime, recomputes the canary, binds the plan to `policy_profile`, `policy_version`, `policy_fingerprint`, canary/source fingerprints, then emits reduce-only candidate intents for expert review.",
+			"Candidates may include existing stock/ETF reductions and held-option close/reduce actions only. They expose before/after risk estimates, DTE, greeks, bid/ask spread checks, hedge-preservation warnings, realized-P&L estimates, slippage estimates, and explicit blocked reasons.",
+			"NOT for order preview, order placement, order submission, cancellation, modification, or token minting. Use the human CLI handoff `ibkr order preview --from-plan ... --candidate ...` after expert selection; this MCP tool cannot create submit-capable tokens and never executes trades.",
+			"NOT for broad-market-only weather — use `ibkr_regime`; NOT for raw held-position inspection — use `ibkr_positions`; NOT for account-only cash/margin facts — use `ibkr_account`.",
+		}, " "),
+		MonitorDescription: "Read-only planner to call after `ibkr_canary` returns a planner-ready/stage/defend/rebalance state. Emits candidate intents only; no preview tokens or order submission.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"mode": schemaEnum([]string{rpc.RiskPlanModeAuto, rpc.RiskPlanModeDefend, rpc.RiskPlanModeRebalance, rpc.RiskPlanModeStage, rpc.RiskPlanModeConfirmData, rpc.RiskPlanModeDeploy}, "planner mode; default auto lets margin/P&L act signals escalate even when canary headline is watch"),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				Mode string `json:"mode"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			res, err := cli.FetchRiskPlan(ctx, conn, in.Mode, nil)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Title:       "IBKR Position Size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",
@@ -696,6 +724,8 @@ var ExcludedCLI = map[string]string{
 	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 	"restart":  "local process-management verb (signals daemon processes); useful for humans and scripts, but not a broker-data MCP tool",
 	"backtest": "offline research harness over local JSONL fixtures; not a live broker/MCP operation",
+	"order":    "CLI-only expert-review handoff; MCP must not preview, place, submit, modify, or cancel orders",
+	"trading":  "CLI-only local trading gate status; MCP must not expose trading/write surfaces",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {

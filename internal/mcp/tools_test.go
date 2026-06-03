@@ -33,7 +33,7 @@ func TestParity(t *testing.T) {
 			t.Errorf("MCP tool %q must use the ibkr_ prefix", tool.Name)
 			continue
 		}
-		mcpNames[name] = true
+		mcpNames[strings.ReplaceAll(name, "_", "-")] = true
 	}
 
 	for name := range cliNames {
@@ -57,7 +57,7 @@ func TestParity(t *testing.T) {
 		// since MCP clients use a flat tool surface and a focused tool
 		// per subverb is easier for agents than one mega-tool with a
 		// mode discriminator.
-		if i := strings.Index(name, "_"); i > 0 && cliNames[name[:i]] {
+		if i := strings.IndexAny(name, "_-"); i > 0 && cliNames[name[:i]] {
 			continue
 		}
 		t.Errorf("MCP tool ibkr_%s has no CLI counterpart (cli.Commands has no command named %q nor a parent command for a subverb) — drop the tool or add the CLI command", name, name)
@@ -240,6 +240,9 @@ func TestMonitorProfileInitializeAndToolsList(t *testing.T) {
 	if !strings.Contains(initResp.Result.Instructions, "Use `ibkr_canary` first") {
 		t.Fatalf("monitor instructions should steer first call to ibkr_canary: %q", initResp.Result.Instructions)
 	}
+	if !strings.Contains(initResp.Result.Instructions, "call `ibkr_risk_plan` only after canary") {
+		t.Fatalf("monitor instructions should expose risk-plan only after canary readiness: %q", initResp.Result.Instructions)
+	}
 	if !strings.Contains(initResp.Result.Instructions, "call `ibkr_status` only") {
 		t.Fatalf("monitor instructions should keep ibkr_status diagnostic-only: %q", initResp.Result.Instructions)
 	}
@@ -259,7 +262,7 @@ func TestMonitorProfileInitializeAndToolsList(t *testing.T) {
 	for _, tool := range listResp.Result.Tools {
 		got = append(got, tool.Name)
 	}
-	want := []string{"ibkr_canary", "ibkr_status"}
+	want := []string{"ibkr_canary", "ibkr_risk_plan", "ibkr_status"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("monitor tools = %v, want %v", got, want)
 	}
