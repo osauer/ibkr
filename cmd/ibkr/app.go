@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -62,7 +61,11 @@ func runAppServe(args []string) int {
 		return 2
 	}
 	opts.Addr = strings.TrimSpace(*addr)
-	opts.PublicURL = strings.TrimRight(strings.TrimSpace(*publicURL), "/")
+	if flagWasSet(fs, "public-url") {
+		opts.PublicURL = strings.TrimRight(strings.TrimSpace(*publicURL), "/")
+	} else if strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")) == "" {
+		opts.PublicURL = mobileapp.PublicURLForAddr(opts.Addr)
+	}
 	opts.StateDir = strings.TrimSpace(*stateDir)
 
 	app, err := mobileapp.New(opts)
@@ -89,7 +92,7 @@ func runAppPair(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stdout, "ibkr app pair - print a short-lived QR pairing URL from the local app host.")
 		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Usage: ibkr app pair [--addr HOST:PORT] [--json]")
+		fmt.Fprintln(os.Stdout, "Usage: ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, "Flags:")
 		fs.VisitAll(func(f *flag.Flag) {
@@ -97,6 +100,7 @@ func runAppPair(args []string) int {
 		})
 	}
 	addr := fs.String("addr", opts.Addr, "local app host listen address")
+	publicURL := fs.String("public-url", opts.PublicURL, "browser-visible base URL to embed in the pairing QR")
 	asJSON := fs.Bool("json", false, "print the pairing session as JSON")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -108,7 +112,12 @@ func runAppPair(args []string) int {
 		fmt.Fprintf(os.Stderr, "ibkr app pair: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	session, err := createPairingSession(strings.TrimSpace(*addr))
+	pairAddr := strings.TrimSpace(*addr)
+	pairPublicURL := strings.TrimSpace(*publicURL)
+	if !flagWasSet(fs, "public-url") && strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")) == "" {
+		pairPublicURL = mobileapp.PublicURLForAddr(pairAddr)
+	}
+	session, err := createPairingSession(pairAddr, pairPublicURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ibkr app pair: %v\n", err)
 		return 1
@@ -133,11 +142,24 @@ func runAppPair(args []string) int {
 	return 0
 }
 
-func createPairingSession(addr string) (auth.PairingSession, error) {
-	baseURL := "http://" + normalizeLoopbackAddr(addr)
+func createPairingSession(addr, publicURL string) (auth.PairingSession, error) {
+	baseURL := "http://" + mobileapp.LoopbackAddrForLocalConnect(addr)
+	if strings.TrimSpace(publicURL) == "" {
+		publicURL = mobileapp.PublicURLForAddr(addr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/pairing/sessions", bytes.NewReader([]byte("{}")))
+	body := []byte("{}")
+	if strings.TrimSpace(publicURL) != "" {
+		var err error
+		body, err = json.Marshal(struct {
+			PublicURL string `json:"public_url,omitempty"`
+		}{PublicURL: strings.TrimRight(strings.TrimSpace(publicURL), "/")})
+		if err != nil {
+			return auth.PairingSession{}, err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/pairing/sessions", bytes.NewReader(body))
 	if err != nil {
 		return auth.PairingSession{}, err
 	}
@@ -164,18 +186,14 @@ func createPairingSession(addr string) (auth.PairingSession, error) {
 	return session, nil
 }
 
-func normalizeLoopbackAddr(addr string) string {
-	if addr == "" {
-		addr = mobileapp.DefaultAddr
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return net.JoinHostPort(host, port)
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
 }
 
 func printAppUsage(w *os.File) {
@@ -183,7 +201,7 @@ func printAppUsage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--state-dir PATH]")
-	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--json]")
+	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots, debug-only /tools,")
 	fmt.Fprintln(w, "and opt-in canary Web Push subscriptions. Pairing URLs are short-lived.")

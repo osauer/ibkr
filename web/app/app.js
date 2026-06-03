@@ -13,8 +13,13 @@ async function main() {
   const pair = new URLSearchParams(location.search).get("pair");
   const nonce = new URLSearchParams(location.search).get("nonce");
   if (pair && nonce) {
-    await completePairing(pair, nonce);
-    history.replaceState({}, "", "/");
+    try {
+      await completePairing(pair, nonce);
+      history.replaceState({}, "", "/");
+    } catch (err) {
+      showPairing("Pairing failed: " + err.message);
+      return;
+    }
   }
   await bootstrap();
 }
@@ -52,6 +57,9 @@ function applyBootstrap(data) {
 }
 
 async function completePairing(pairingID, nonce) {
+  if (!hasWebCrypto()) {
+    return completeHTTPPairing(pairingID, nonce);
+  }
   showPairing("Generating a device key and proving QR possession.");
   const keys = await crypto.subtle.generateKey(
     { name: "ECDSA", namedCurve: "P-256" },
@@ -79,12 +87,37 @@ async function completePairing(pairingID, nonce) {
   const body = await res.json();
   localStorage.setItem("ibkrDeviceID", body.device_id);
   await savePrivateKey(keys.privateKey);
+  localStorage.removeItem("ibkrDeviceSecret");
+}
+
+async function completeHTTPPairing(pairingID, nonce) {
+  showPairing("Completing local HTTP pairing.");
+  const secret = randomDeviceSecret();
+  const res = await fetch("/api/pairing/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      pairing_id: pairingID,
+      nonce,
+      device_name: navigator.userAgent.includes("iPhone") ? "iPhone" : "Browser",
+      device_secret: secret,
+    }),
+  });
+  if (!res.ok) {
+    showPairing("Pairing failed: " + await res.text());
+    throw new Error("pairing failed");
+  }
+  const body = await res.json();
+  localStorage.setItem("ibkrDeviceID", body.device_id);
+  localStorage.setItem("ibkrDeviceSecret", secret);
 }
 
 async function tryDeviceLogin() {
   const deviceID = localStorage.getItem("ibkrDeviceID");
-  const privateKey = await loadPrivateKey();
-  if (!deviceID || !privateKey) return;
+  const privateKey = hasWebCrypto() ? await loadPrivateKey() : null;
+  const deviceSecret = localStorage.getItem("ibkrDeviceSecret") || "";
+  if (!deviceID || (!privateKey && !deviceSecret)) return;
   const ch = await fetch("/api/auth/challenge", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,13 +125,18 @@ async function tryDeviceLogin() {
   });
   if (!ch.ok) return;
   const challenge = await ch.json();
-  const signature = await sign(privateKey, challenge.challenge);
-  await fetch("/api/auth/session", {
+  const body = privateKey
+    ? { device_id: deviceID, challenge: challenge.challenge, signature: await sign(privateKey, challenge.challenge) }
+    : { device_id: deviceID, challenge: challenge.challenge, device_secret: deviceSecret };
+  const session = await fetch("/api/auth/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ device_id: deviceID, challenge: challenge.challenge, signature }),
+    body: JSON.stringify(body),
   });
+  if (!session.ok && deviceSecret) {
+    localStorage.removeItem("ibkrDeviceSecret");
+  }
 }
 
 function connectEvents() {
@@ -141,7 +179,7 @@ function renderAlertMode() {
   document.querySelectorAll("#alertSegments button").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === state.alertSettings.mode);
   });
-  $("pushState").textContent = Notification.permission === "granted" ? "push on" : "push off";
+  $("pushState").textContent = notificationStateLabel();
 }
 
 function renderAlerts() {
@@ -188,12 +226,12 @@ document.querySelectorAll("[data-tool]").forEach((button) => {
 });
 
 async function enablePush() {
-  if (!("PushManager" in window)) {
+  if (!canUseWebPush()) {
     $("pushState").textContent = "push unsupported";
     return;
   }
   const registration = await navigator.serviceWorker.ready;
-  const permission = await Notification.requestPermission();
+  const permission = await globalThis.Notification.requestPermission();
   if (permission !== "granted") {
     renderAlertMode();
     return;
@@ -212,12 +250,41 @@ async function enablePush() {
 }
 
 async function sign(privateKey, value) {
+  if (!hasWebCrypto()) {
+    throw new Error("WebCrypto is unavailable on this origin");
+  }
   const sig = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" },
     privateKey,
     new TextEncoder().encode(value)
   );
   return bytesToB64url(new Uint8Array(sig));
+}
+
+function hasWebCrypto() {
+  return !!globalThis.crypto?.subtle;
+}
+
+function randomDeviceSecret() {
+  const bytes = new Uint8Array(32);
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("secure random is unavailable in this browser");
+  }
+  globalThis.crypto.getRandomValues(bytes);
+  return bytesToB64url(bytes);
+}
+
+function notificationStateLabel() {
+  if (!hasNotifications()) return "push unsupported";
+  return globalThis.Notification.permission === "granted" ? "push on" : "push off";
+}
+
+function hasNotifications() {
+  return typeof globalThis.Notification === "function";
+}
+
+function canUseWebPush() {
+  return hasNotifications() && "PushManager" in globalThis && !!navigator.serviceWorker;
 }
 
 async function savePrivateKey(key) {

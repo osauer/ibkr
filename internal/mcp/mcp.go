@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ const ProtocolVersion = "2025-03-26"
 type Server struct {
 	conn    *dial.Conn
 	version string
+	profile Profile
 
 	mu  sync.Mutex // serializes writes to out
 	out *bufio.Writer
@@ -66,8 +68,16 @@ func NewServer(conn *dial.Conn, version string) *Server {
 	return &Server{
 		conn:    conn,
 		version: version,
+		profile: ProfileFull,
 		subs:    map[string]context.CancelFunc{},
 	}
+}
+
+func (s *Server) SetProfile(profile Profile) {
+	if profile == "" {
+		profile = ProfileFull
+	}
+	s.profile = profile
 }
 
 // SetDialer wires the function used to open daemon connections for tools and
@@ -318,10 +328,17 @@ func (s *Server) handleInitialize(id, _ json.RawMessage) {
 			Name:    "ibkr",
 			Version: s.version,
 		},
-		Instructions: "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, and a stateless portfolio canary that combines market regime with held portfolio shape. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol}).",
+		Instructions: s.instructions(),
 	}
 	b, _ := json.Marshal(res)
 	s.writeResult(id, b)
+}
+
+func (s *Server) instructions() string {
+	if s.profile == ProfileMonitor {
+		return "Read-only Interactive Brokers monitor profile. Use `ibkr_canary` first; call `ibkr_status` only for connectivity or degraded-input troubleshooting."
+	}
+	return "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, and a stateless portfolio canary that combines market regime with held portfolio shape. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol})."
 }
 
 // toolDescriptor is the wire shape MCP expects in tools/list.
@@ -339,12 +356,17 @@ type toolAnnotations struct {
 }
 
 func (s *Server) handleToolsList(id json.RawMessage) {
-	descs := make([]toolDescriptor, 0, len(Tools))
-	for _, t := range Tools {
+	tools := s.visibleTools()
+	descs := make([]toolDescriptor, 0, len(tools))
+	for _, t := range tools {
+		desc := t.Description
+		if s.profile == ProfileMonitor && strings.TrimSpace(t.MonitorDescription) != "" {
+			desc = t.MonitorDescription
+		}
 		descs = append(descs, toolDescriptor{
 			Name:        t.Name,
 			Title:       t.Title,
-			Description: t.Description,
+			Description: desc,
 			InputSchema: t.JSONSchema,
 			Annotations: toolAnnotations{
 				Title:        t.Title,
@@ -383,8 +405,12 @@ func (s *Server) handleToolsCall(ctx context.Context, id, params json.RawMessage
 		s.writeError(id, codeInvalidParams, err.Error())
 		return
 	}
-	tool, ok := lookupTool(p.Name)
+	tool, ok := s.lookupVisibleTool(p.Name)
 	if !ok {
+		if _, exists := lookupTool(p.Name); exists {
+			s.writeError(id, codeMethodNotFound, "tool unavailable in mcp profile "+string(s.profile)+": "+p.Name)
+			return
+		}
 		s.writeError(id, codeMethodNotFound, "unknown tool: "+p.Name)
 		return
 	}
@@ -541,6 +567,29 @@ func watchListOnlyArgs(args json.RawMessage) bool {
 
 func lookupTool(name string) (Tool, bool) {
 	for _, t := range Tools {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return Tool{}, false
+}
+
+func (s *Server) visibleTools() []Tool {
+	if s.profile != ProfileMonitor {
+		return Tools
+	}
+	names := []string{"ibkr_canary", "ibkr_status"}
+	out := make([]Tool, 0, len(names))
+	for _, name := range names {
+		if tool, ok := lookupTool(name); ok {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func (s *Server) lookupVisibleTool(name string) (Tool, bool) {
+	for _, t := range s.visibleTools() {
 		if t.Name == name {
 			return t, true
 		}

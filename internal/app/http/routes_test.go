@@ -10,8 +10,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +94,70 @@ func TestPairingBootstrapAndSnapshotTool(t *testing.T) {
 	handler.ServeHTTP(toolRes, toolReq)
 	if toolRes.Code != http.StatusOK {
 		t.Fatalf("snapshot tool status=%d, want 200; body=%s", toolRes.Code, toolRes.Body.String())
+	}
+}
+
+func TestPairingSessionAcceptsLocalPublicURLOverride(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestHandler(t).Handler()
+	body := bytes.NewReader([]byte(`{"public_url":"http://192.168.1.42:8765"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", body)
+	req.RemoteAddr = "127.0.0.1:12345"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	var pairing auth.PairingSession
+	if err := json.NewDecoder(res.Body).Decode(&pairing); err != nil {
+		t.Fatalf("decode pairing: %v", err)
+	}
+	if !strings.HasPrefix(pairing.URL, "http://192.168.1.42:8765/pair.html?") {
+		t.Fatalf("pairing URL = %q, want LAN public URL", pairing.URL)
+	}
+}
+
+func TestPairingSessionRejectsInvalidPublicURLOverride(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestHandler(t).Handler()
+	body := bytes.NewReader([]byte(`{"public_url":"ftp://192.168.1.42:8765"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", body)
+	req.RemoteAddr = "127.0.0.1:12345"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestPairingSessionStillRequiresLocalMac(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestHandler(t).Handler()
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte(`{"public_url":"http://192.168.1.42:8765"}`)))
+	req.RemoteAddr = "203.0.113.99:12345"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403; body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestIsLocalMacAcceptsOwnInterfaceAddress(t *testing.T) {
+	t.Parallel()
+
+	got := isLocalMacWithAddrs("192.168.1.42:54321", func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.42"), Mask: net.CIDRMask(24, 32)}}, nil
+	})
+	if !got {
+		t.Fatalf("isLocalMacWithAddrs should accept the Mac's own LAN interface address")
+	}
+	if isLocalMacWithAddrs("203.0.113.99:54321", func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.42"), Mask: net.CIDRMask(24, 32)}}, nil
+	}) {
+		t.Fatalf("isLocalMacWithAddrs accepted a non-local remote address")
 	}
 }
 

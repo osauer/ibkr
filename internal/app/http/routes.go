@@ -3,10 +3,12 @@ package apphttp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
 	nethttp "net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -86,16 +88,52 @@ func (h *handler) serveIcon(w nethttp.ResponseWriter, r *nethttp.Request) {
 }
 
 func (h *handler) handleStartPairing(w nethttp.ResponseWriter, r *nethttp.Request) {
-	if !isLoopback(r.RemoteAddr) {
+	if !isLocalMac(r.RemoteAddr) {
 		writeError(w, nethttp.StatusForbidden, "pairing sessions can only be created from the local Mac")
 		return
 	}
-	session, err := h.deps.Auth.StartPairing(h.deps.PublicURL)
+	publicURL := h.deps.PublicURL
+	var req struct {
+		PublicURL string `json:"public_url"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, nethttp.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if strings.TrimSpace(req.PublicURL) != "" {
+		clean, err := cleanPairingPublicURL(req.PublicURL)
+		if err != nil {
+			writeError(w, nethttp.StatusBadRequest, err.Error())
+			return
+		}
+		publicURL = clean
+	}
+	session, err := h.deps.Auth.StartPairing(publicURL)
 	if err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, session)
+}
+
+func cleanPairingPublicURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("public_url must use http or https")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", errors.New("public_url must include a host")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("public_url must be a base URL without query or fragment")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func (h *handler) handleCompletePairing(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -131,15 +169,16 @@ func (h *handler) handleAuthChallenge(w nethttp.ResponseWriter, r *nethttp.Reque
 
 func (h *handler) handleAuthSession(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req struct {
-		DeviceID  string `json:"device_id"`
-		Challenge string `json:"challenge"`
-		Signature string `json:"signature"`
+		DeviceID     string `json:"device_id"`
+		Challenge    string `json:"challenge"`
+		Signature    string `json:"signature"`
+		DeviceSecret string `json:"device_secret"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
-	sess, err := h.deps.Auth.CompleteChallenge(req.DeviceID, req.Challenge, req.Signature)
+	sess, err := h.deps.Auth.CompleteChallenge(req.DeviceID, req.Challenge, req.Signature, req.DeviceSecret)
 	if err != nil {
 		writeError(w, nethttp.StatusUnauthorized, err.Error())
 		return
@@ -366,11 +405,48 @@ func setSessionCookie(w nethttp.ResponseWriter, r *nethttp.Request, token string
 	})
 }
 
-func isLoopback(remote string) bool {
+type interfaceAddrsFunc func() ([]net.Addr, error)
+
+func isLocalMac(remote string) bool {
+	return isLocalMacWithAddrs(remote, net.InterfaceAddrs)
+}
+
+func isLocalMacWithAddrs(remote string, addrs interfaceAddrsFunc) bool {
 	host, _, err := net.SplitHostPort(remote)
 	if err != nil {
 		return false
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	return isLocalInterfaceIP(ip, addrs)
+}
+
+func isLocalInterfaceIP(ip net.IP, addrs interfaceAddrsFunc) bool {
+	if addrs == nil {
+		return false
+	}
+	items, err := addrs()
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		var local net.IP
+		switch v := item.(type) {
+		case *net.IPNet:
+			local = v.IP
+		case *net.IPAddr:
+			local = v.IP
+		default:
+			continue
+		}
+		if local != nil && local.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

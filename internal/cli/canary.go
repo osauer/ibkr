@@ -1781,11 +1781,18 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "canary")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON for scheduling")
 	details := fs.Bool("details", false, "show full canary evidence rows")
+	view := fs.String("view", rpc.ViewFull, "JSON response view: full | alert")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
 		return fail(env, "canary: takes no positional args (got %v)", fs.Args())
+	}
+	if *view != rpc.ViewFull && *view != rpc.ViewAlert {
+		return fail(env, "canary: --view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewAlert, *view)
+	}
+	if *view != rpc.ViewFull && !*jsonOut {
+		return fail(env, "canary: --view requires --json")
 	}
 	if !*jsonOut && isTerminal(env.Stdout) {
 		stop := startCanarySpinner(env)
@@ -1796,11 +1803,14 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 		}
 		return renderCanaryTextDetails(env, env.Stdout, &res, *details)
 	}
-	res, err := FetchCanary(ctx, env.Conn)
+	res, positions, err := FetchCanarySnapshot(ctx, env.Conn)
 	if err != nil {
 		return fail(env, "canary: %v", err)
 	}
 	if *jsonOut {
+		if *view == rpc.ViewAlert {
+			return printJSON(env, rpc.CompactCanaryAlert(&res, &positions))
+		}
 		return printJSON(env, res)
 	}
 	return renderCanaryTextDetails(env, env.Stdout, &res, *details)
@@ -1839,17 +1849,24 @@ func startCanarySpinner(env *Env) func() {
 func FetchCanary(ctx context.Context, conn interface {
 	Call(context.Context, string, any, any) error
 }) (CanaryResult, error) {
+	res, _, err := FetchCanarySnapshot(ctx, conn)
+	return res, err
+}
+
+func FetchCanarySnapshot(ctx context.Context, conn interface {
+	Call(context.Context, string, any, any) error
+}) (CanaryResult, rpc.PositionsResult, error) {
 	var acct rpc.AccountResult
 	if err := conn.Call(ctx, rpc.MethodAccountSummary, nil, &acct); err != nil {
-		return CanaryResult{}, fmt.Errorf("account: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("account: %w", err)
 	}
 	var pos rpc.PositionsResult
 	if err := conn.Call(ctx, rpc.MethodPositionsList, rpc.PositionsListParams{}, &pos); err != nil {
-		return CanaryResult{}, fmt.Errorf("positions: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("positions: %w", err)
 	}
 	var regime rpc.RegimeSnapshotResult
 	if err := conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &regime); err != nil {
-		return CanaryResult{}, fmt.Errorf("regime: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("regime: %w", err)
 	}
 	if acct.DailyPnL == nil {
 		var refreshed rpc.AccountResult
@@ -1858,7 +1875,7 @@ func FetchCanary(ctx context.Context, conn interface {
 		}
 	}
 	rpc.CompactRegimeSnapshot(&regime)
-	return ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime}), nil
+	return ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime}), pos, nil
 }
 
 func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {

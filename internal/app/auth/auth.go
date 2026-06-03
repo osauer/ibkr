@@ -60,6 +60,7 @@ type CompletePairingRequest struct {
 	DeviceName   string          `json:"device_name"`
 	PublicKeyJWK json.RawMessage `json:"public_key_jwk"`
 	Signature    string          `json:"signature"`
+	DeviceSecret string          `json:"device_secret"`
 }
 
 type CompletePairingResult struct {
@@ -122,7 +123,14 @@ func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingRe
 	if subtle.ConstantTimeCompare([]byte(req.Nonce), []byte(s.Nonce)) != 1 {
 		return CompletePairingResult{}, errors.New("pairing nonce mismatch")
 	}
-	if err := VerifyJWKSignature(req.PublicKeyJWK, []byte(req.Nonce), req.Signature); err != nil {
+	secretHash := ""
+	if strings.TrimSpace(req.DeviceSecret) != "" {
+		var err error
+		secretHash, err = hashDeviceSecret(req.DeviceSecret)
+		if err != nil {
+			return CompletePairingResult{}, fmt.Errorf("verify device secret: %w", err)
+		}
+	} else if err := VerifyJWKSignature(req.PublicKeyJWK, []byte(req.Nonce), req.Signature); err != nil {
 		return CompletePairingResult{}, fmt.Errorf("verify device proof: %w", err)
 	}
 	deviceID, err := randomToken(16)
@@ -130,11 +138,12 @@ func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingRe
 		return CompletePairingResult{}, err
 	}
 	grant := state.DeviceGrant{
-		ID:           deviceID,
-		Name:         strings.TrimSpace(req.DeviceName),
-		PublicKeyJWK: string(req.PublicKeyJWK),
-		CreatedAt:    now,
-		LastSeenAt:   now,
+		ID:               deviceID,
+		Name:             strings.TrimSpace(req.DeviceName),
+		PublicKeyJWK:     string(req.PublicKeyJWK),
+		DeviceSecretHash: secretHash,
+		CreatedAt:        now,
+		LastSeenAt:       now,
 	}
 	if grant.Name == "" {
 		grant.Name = "iPhone"
@@ -164,7 +173,7 @@ func (m *Manager) StartChallenge(deviceID string) (Challenge, error) {
 	return ch, nil
 }
 
-func (m *Manager) CompleteChallenge(deviceID, challenge, signature string) (Session, error) {
+func (m *Manager) CompleteChallenge(deviceID, challenge, signature, deviceSecret string) (Session, error) {
 	now := m.now().UTC()
 	m.mu.Lock()
 	ch, ok := m.challenges[challenge]
@@ -181,6 +190,12 @@ func (m *Manager) CompleteChallenge(deviceID, challenge, signature string) (Sess
 	grant, ok := m.store.Device(deviceID)
 	if !ok {
 		return Session{}, errors.New("unknown device")
+	}
+	if strings.TrimSpace(grant.DeviceSecretHash) != "" {
+		if err := verifyDeviceSecret(deviceSecret, grant.DeviceSecretHash); err != nil {
+			return Session{}, err
+		}
+		return m.newSession(deviceID, now)
 	}
 	if err := VerifyJWKSignature(json.RawMessage(grant.PublicKeyJWK), []byte(challenge), signature); err != nil {
 		return Session{}, err
@@ -229,6 +244,30 @@ func randomToken(n int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func hashDeviceSecret(secret string) (string, error) {
+	secret = strings.TrimSpace(secret)
+	raw, err := base64.RawURLEncoding.DecodeString(secret)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < 32 {
+		return "", errors.New("device secret must be at least 256 bits")
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+func verifyDeviceSecret(secret, wantHash string) error {
+	got, err := hashDeviceSecret(secret)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(wantHash))) != 1 {
+		return errors.New("invalid device secret")
+	}
+	return nil
 }
 
 type jwkP256 struct {

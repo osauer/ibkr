@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/internal/mcp"
 )
 
 func TestWatchMCPParentCancelsWhenParentChanges(t *testing.T) {
@@ -34,6 +37,44 @@ func TestMCPServeOptionsDoNotIdleTimeout(t *testing.T) {
 	opts := mcpServeOptions()
 	if opts.IdleTimeout != 0 {
 		t.Fatalf("MCP stdio server must not idle-exit while the host keeps stdin open; IdleTimeout=%s", opts.IdleTimeout)
+	}
+}
+
+func TestParseMCPArgsProfiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		args    []string
+		want    mcp.Profile
+		wantErr bool
+	}{
+		{name: "default", want: mcp.ProfileFull},
+		{name: "full", args: []string{"--profile", "full"}, want: mcp.ProfileFull},
+		{name: "monitor", args: []string{"--profile", "monitor"}, want: mcp.ProfileMonitor},
+		{name: "monitor equals", args: []string{"--profile=monitor"}, want: mcp.ProfileMonitor},
+		{name: "unknown", args: []string{"--profile", "diagnostic"}, wantErr: true},
+		{name: "positional", args: []string{"monitor"}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+			got, code := parseMCPArgs(tc.args, stdout, stderr)
+			if tc.wantErr {
+				if code == 0 {
+					t.Fatalf("parseMCPArgs(%v) code = 0, want error; stdout=%q stderr=%q", tc.args, stdout.String(), stderr.String())
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("parseMCPArgs(%v) code = %d, want 0; stderr=%q", tc.args, code, stderr.String())
+			}
+			if got != tc.want {
+				t.Fatalf("parseMCPArgs(%v) profile = %q, want %q", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 

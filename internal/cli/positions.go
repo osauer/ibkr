@@ -20,6 +20,7 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 	sortBy := fs.String("sort", "alpha", "sort: alpha | pnl | value")
 	by := fs.String("by", "", "group view: underlying (default = flat stocks/options tables)")
 	quotes := fs.Bool("quotes", false, "include quote-detail columns on stock rows: previous close, ranges, volume")
+	view := fs.String("view", rpc.ViewFull, "JSON response view: full | risk")
 	watch := fs.Bool("watch", false, "re-poll on a fixed interval; in-place redraw on a TTY")
 	rate := fs.Duration("rate", time.Second, "poll interval for --watch")
 	if err := fs.Parse(args); err != nil {
@@ -27,6 +28,12 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 	}
 	if *by != "" && *by != "underlying" {
 		return fail(env, "positions: --by must be 'underlying' (got %q)", *by)
+	}
+	if *view != rpc.ViewFull && *view != rpc.ViewRisk {
+		return fail(env, "positions: --view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewRisk, *view)
+	}
+	if *view != rpc.ViewFull && !*jsonOut {
+		return fail(env, "positions: --view requires --json")
 	}
 
 	fetchAndRender := func(out io.Writer) int {
@@ -38,6 +45,9 @@ func runPositions(ctx context.Context, env *Env, args []string) int {
 		applySort(res.Stocks, *sortBy)
 		applySort(res.Options, *sortBy)
 		if *jsonOut {
+			if *view == rpc.ViewRisk {
+				return printJSONTo(env, out, rpc.CompactPositionsRisk(&res, 5))
+			}
 			return printJSONTo(env, out, res)
 		}
 		if *by == "underlying" {

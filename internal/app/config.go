@@ -1,7 +1,6 @@
 package app
 
 import (
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +10,7 @@ import (
 )
 
 const (
-	DefaultAddr        = "127.0.0.1:8765"
+	DefaultAddr        = "0.0.0.0:8765"
 	DefaultPairingTTL  = 5 * time.Minute
 	DefaultPollEvery   = 5 * time.Second
 	DefaultCanaryEvery = time.Minute
@@ -29,7 +28,7 @@ type Options struct {
 }
 
 func DefaultOptions(version string) Options {
-	// docgen:env IBKR_APP_ADDR | HTTP listen address for `ibkr app`. Defaults to `127.0.0.1:8765`.
+	// docgen:env IBKR_APP_ADDR | HTTP listen address for `ibkr app`. Defaults to `0.0.0.0:8765` so a paired phone on the LAN can reach the app.
 	addr := strings.TrimSpace(os.Getenv("IBKR_APP_ADDR"))
 	if addr == "" {
 		addr = DefaultAddr
@@ -39,13 +38,10 @@ func DefaultOptions(version string) Options {
 	if stateDir == "" {
 		stateDir = defaultStateDir()
 	}
-	// docgen:env IBKR_APP_PUBLIC_URL | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to the local HTTP listen address for LAN/dev use.
+	// docgen:env IBKR_APP_PUBLIC_URL | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available.
 	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")), "/")
 	if publicURL == "" {
-		publicURL = "http://" + addr
-		if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
-			publicURL = "http://127.0.0.1:" + port
-		}
+		publicURL = PublicURLForAddr(addr)
 	}
 	return Options{
 		Addr:        addr,
