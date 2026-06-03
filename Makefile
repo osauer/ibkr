@@ -38,7 +38,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -65,8 +65,37 @@ restart-daemon: install ## Install, then gracefully restart/start daemon (FORCE=
 	$(PREFIX)/bin/ibkr restart --timeout $(RESTART_TIMEOUT) $(if $(FORCE),--force,)
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
+APP_SMOKE_BROWSER ?= chromium
 app-smoke: ## Browser-smoke a running ibkr app without scanning a QR code
-	node scripts/app-browser-smoke.mjs --base-url $(APP_SMOKE_URL) --no-notification
+	node scripts/app-browser-smoke.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER) --no-notification
+
+APP_LIFECYCLE_ADDR ?= 127.0.0.1:18765
+APP_LIFECYCLE_URL ?= http://$(APP_LIFECYCLE_ADDR)
+app-lifecycle-smoke: build ## Start an isolated app, pair, restart it, and verify browser SSE/auth recovery
+	@tmpdir=$$(mktemp -d /tmp/ibkr-app-lifecycle-smoke.XXXXXX); \
+	app="$$(pwd)/bin/ibkr"; \
+	log="$$tmpdir/app.log"; \
+	cleanup() { \
+		kill -TERM "$$app_pid" >/dev/null 2>&1 || true; \
+		wait "$$app_pid" >/dev/null 2>&1 || true; \
+		rm -rf "$$tmpdir"; \
+	}; \
+	trap cleanup EXIT; \
+	"$$app" app --addr $(APP_LIFECYCLE_ADDR) --public-url $(APP_LIFECYCLE_URL) --state-dir "$$tmpdir" >"$$log" 2>&1 & \
+	app_pid=$$!; \
+	for i in $$(seq 1 80); do \
+		if curl -fsS "$(APP_LIFECYCLE_URL)/manifest.webmanifest" >/dev/null 2>&1; then break; fi; \
+		sleep 0.1; \
+	done; \
+	curl -fsS "$(APP_LIFECYCLE_URL)/manifest.webmanifest" >/dev/null; \
+	node scripts/app-browser-smoke.mjs \
+		--base-url $(APP_LIFECYCLE_URL) \
+		--browser $(APP_SMOKE_BROWSER) \
+		--no-notification \
+		--no-webcrypto=true \
+		--lifecycle=true \
+		--restart-command "$$app restart --app --json --timeout $(RESTART_TIMEOUT)" \
+		--stop-restarted-app=true
 
 uninstall: ## Remove ibkr from $(PREFIX)/bin
 	rm -f $(PREFIX)/bin/ibkr

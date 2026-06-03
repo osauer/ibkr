@@ -1,20 +1,27 @@
 :root {
   color-scheme: light;
-  --bg: #f7f8fa;
+  --bg: #f5f6f8;
   --panel: #ffffff;
+  --panel-soft: #f9fafb;
   --text: #1d2430;
   --muted: #6d7786;
-  --line: #dfe4ea;
+  --line: #dde3ea;
+  --line-strong: #c9d2dd;
   --accent: #2563eb;
   --ok: #0f9f6e;
   --warn: #b7791f;
   --risk: #c2413a;
-  --shadow: 0 10px 30px rgba(29, 36, 48, 0.08);
+  --risk-soft: #fff4f2;
+  --shadow: 0 8px 24px rgba(29, 36, 48, 0.07);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 body {
@@ -31,19 +38,20 @@ button {
   width: min(960px, 100%);
   min-height: 100vh;
   margin: 0 auto;
-  padding: max(18px, env(safe-area-inset-top)) 16px 28px;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(28px, env(safe-area-inset-bottom));
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 18px;
+  gap: 16px;
+  margin-bottom: 12px;
 }
 
 h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 26px;
   line-height: 1.05;
   letter-spacing: 0;
 }
@@ -61,11 +69,24 @@ p {
 }
 
 .topbar p {
-  margin-top: 4px;
+  margin-top: 7px;
   font-size: 13px;
 }
 
+.status-banner {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  line-height: 1.2;
+}
+
 .status-dot {
+  flex: 0 0 auto;
   width: 14px;
   height: 14px;
   border-radius: 50%;
@@ -83,10 +104,42 @@ p {
   box-shadow: 0 0 0 4px rgba(194, 65, 58, 0.12);
 }
 
+.banner-stack {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.source-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(194, 65, 58, 0.28);
+  border-radius: 8px;
+  background: var(--risk-soft);
+  color: var(--risk);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.source-banner span {
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.source-banner b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 600;
+}
+
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 10px;
 }
 
 .panel,
@@ -95,12 +148,49 @@ p {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
-  padding: 14px;
-  margin-bottom: 12px;
+  padding: 13px;
+  margin-bottom: 10px;
 }
 
 .hero-panel {
-  grid-row: span 2;
+  min-height: 178px;
+  border-color: rgba(194, 65, 58, 0.28);
+  background: var(--risk-soft);
+}
+
+.canary-hero {
+  display: flex;
+  flex-direction: column;
+}
+
+.canary-hero .panel-head {
+  margin-bottom: 18px;
+}
+
+.canary-hero strong {
+  margin: auto 0 10px;
+  font-size: 34px;
+  line-height: 1;
+  text-transform: capitalize;
+}
+
+.canary-hero p {
+  max-width: 58ch;
+  color: #4d5968;
+  font-size: 15px;
+}
+
+.severity-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid rgba(194, 65, 58, 0.26);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--risk);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .panel-head,
@@ -114,18 +204,81 @@ p {
 }
 
 .panel-head {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   color: var(--muted);
   font-size: 12px;
   text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
-.panel strong {
+.panel-head span {
+  min-width: 0;
+}
+
+.panel strong,
+.account-primary strong {
   display: block;
-  margin-bottom: 14px;
+  margin-bottom: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
   font-size: 25px;
   line-height: 1.1;
   letter-spacing: 0;
+}
+
+.account-primary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.account-primary span,
+.metric-strip span,
+.risk-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric-strip,
+.risk-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.metric-strip div,
+.risk-metrics div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.metric-strip b,
+.risk-metrics b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.risk-metrics {
+  margin-bottom: 10px;
+}
+
+.exposure-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.exposure-list > * {
+  min-width: 0;
 }
 
 .split,
@@ -161,11 +314,12 @@ p {
   background: transparent;
   color: var(--text);
   font-size: 13px;
+  line-height: 1.15;
 }
 
 .segments button.active {
   background: var(--panel);
-  border-color: var(--line);
+  border-color: var(--line-strong);
   box-shadow: 0 2px 8px rgba(29, 36, 48, 0.08);
 }
 
@@ -213,6 +367,37 @@ p {
   background: #f9fafb;
 }
 
+.panel.tools {
+  padding: 0;
+}
+
+.tools summary.panel-head {
+  min-height: 46px;
+  margin: 0;
+  padding: 0 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tools summary.panel-head::-webkit-details-marker {
+  display: none;
+}
+
+.tools summary.panel-head::after {
+  content: "+";
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.tools[open] summary.panel-head::after {
+  content: "-";
+}
+
+.tools-body {
+  padding: 0 13px 13px;
+}
+
 pre {
   overflow: auto;
   max-height: 360px;
@@ -225,16 +410,55 @@ pre {
   line-height: 1.45;
 }
 
-@media (max-width: 640px) {
+@media (min-width: 720px) {
+  .shell {
+    padding: max(22px, env(safe-area-inset-top)) 18px 32px;
+  }
+
   .summary-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+    align-items: start;
+    gap: 12px;
   }
 
   .hero-panel {
-    grid-row: auto;
+    grid-row: span 2;
+    min-height: 286px;
+    padding: 18px;
   }
 
-  .panel strong {
-    font-size: 23px;
+  .canary-hero strong {
+    font-size: 44px;
+  }
+
+  .panel,
+  .pairing {
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .panel-head {
+    gap: 8px;
+  }
+
+  .canary-hero strong {
+    font-size: 31px;
+  }
+
+  .account-primary strong {
+    font-size: 22px;
+  }
+
+  .segments button,
+  .tool-grid button,
+  .primary,
+  .pairing button {
+    font-size: 12px;
   }
 }

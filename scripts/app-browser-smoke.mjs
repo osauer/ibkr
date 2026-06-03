@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createRequire } from "node:module";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -10,6 +11,10 @@ const pairPublicURL = trimRight(args["pair-public-url"] || baseURL, "/");
 const browserName = args.browser || "chromium";
 const channel = args.channel || process.env.PLAYWRIGHT_CHANNEL || "";
 const noNotification = args["no-notification"] !== "false";
+const noWebCrypto = args["no-webcrypto"] === "true";
+const lifecycle = args.lifecycle === "true";
+const restartCommand = args["restart-command"] || "";
+const stopRestartedApp = args["stop-restarted-app"] === "true";
 const mobile = args.mobile !== "false";
 
 const playwright = loadPlaywright();
@@ -26,6 +31,7 @@ if (channel) {
 }
 const launched = await launchBrowser(playwright[browserName], launchOptions);
 const browser = launched.browser;
+let cleanupPID = 0;
 const context = await browser.newContext({
   viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 },
   isMobile: mobile,
@@ -44,6 +50,60 @@ if (noNotification) {
     }
   });
 }
+if (noWebCrypto) {
+  await context.addInitScript(() => {
+    try {
+      const proto = Object.getPrototypeOf(globalThis.crypto);
+      Object.defineProperty(proto, "subtle", {
+        configurable: true,
+        get() {
+          return undefined;
+        },
+      });
+    } catch {
+      try {
+        Object.defineProperty(globalThis.crypto, "subtle", {
+          configurable: true,
+          value: undefined,
+        });
+      } catch {
+        // The final JSON reports whether the fallback path was used.
+      }
+    }
+  });
+}
+await context.addInitScript(() => {
+  globalThis.__ibkrSmoke = {
+    eventCounts: {},
+    fetches: [],
+    openedEvents: 0,
+  };
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = async (...fetchArgs) => {
+    const request = fetchArgs[0];
+    const url = typeof request === "string" ? request : request?.url || "";
+    try {
+      const res = await nativeFetch(...fetchArgs);
+      globalThis.__ibkrSmoke.fetches.push({ url, status: res.status, at: Date.now() });
+      return res;
+    } catch (err) {
+      globalThis.__ibkrSmoke.fetches.push({ url, error: String(err?.message || err), at: Date.now() });
+      throw err;
+    }
+  };
+  const NativeEventSource = globalThis.EventSource;
+  globalThis.EventSource = function smokeEventSource(url, options) {
+    const es = new NativeEventSource(url, options);
+    globalThis.__ibkrSmoke.openedEvents++;
+    for (const type of ["snapshot", "status", "account", "positions", "canary", "heartbeat"]) {
+      es.addEventListener(type, () => {
+        globalThis.__ibkrSmoke.eventCounts[type] = (globalThis.__ibkrSmoke.eventCounts[type] || 0) + 1;
+      });
+    }
+    return es;
+  };
+  globalThis.EventSource.prototype = NativeEventSource.prototype;
+});
 const page = await context.newPage();
 const consoleMessages = [];
 const pageErrors = [];
@@ -57,10 +117,13 @@ page.on("pageerror", (err) => pageErrors.push(String(err?.message || err)));
 try {
   await page.goto(pairing.url, { waitUntil: "domcontentloaded", timeout: 15000 });
   await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
+  await waitForSnapshotEvent(page, 0);
   const title = await page.title();
-  const connection = await page.locator("#connectionLine").textContent();
+  const connection = await waitForConnection(page, "Live");
   const pushState = await page.locator("#pushState").textContent();
-  await page.getByRole("button", { name: "Snapshot" }).click();
+  const eventsBefore = await fetchEventsDiagnostics(page);
+  await openDebugTools(page);
+  await page.locator('[data-tool="snapshot"]').click();
   await page.waitForFunction(() => {
     const out = document.getElementById("toolOutput");
     return out && out.textContent && out.textContent.trim() !== "{}";
@@ -71,6 +134,12 @@ try {
   if (pageErrors.length > 0 || consoleMessages.length > 0) {
     throw new Error(`browser errors:\n${[...pageErrors, ...consoleMessages].join("\n")}`);
   }
+  let lifecycleResult = null;
+  if (lifecycle) {
+    lifecycleResult = await runLifecycleSmoke(page);
+  }
+  const smokeState = await page.evaluate(() => globalThis.__ibkrSmoke);
+  const fallbackDeviceSecretStored = await page.evaluate(() => !!localStorage.getItem("ibkrDeviceSecret"));
   console.log(JSON.stringify({
     ok: true,
     browser: browserName,
@@ -78,13 +147,125 @@ try {
     base_url: baseURL,
     mobile,
     notification_removed: noNotification,
+    webcrypto_removed: noWebCrypto,
+    used_http_fallback: fallbackDeviceSecretStored,
     title,
     connection,
     push_state: pushState,
+    events: {
+      subscribers: eventsBefore.subscribers,
+      last_event_at: eventsBefore.last_event_at,
+      event_counts: smokeState.eventCounts,
+    },
+    lifecycle: lifecycleResult,
     pair_expires_at: pairing.expires_at,
   }, null, 2));
 } finally {
   await browser.close();
+  if (stopRestartedApp && cleanupPID) {
+    try {
+      process.kill(cleanupPID, "SIGTERM");
+    } catch {
+      // Best effort cleanup for isolated lifecycle smoke.
+    }
+  }
+}
+
+async function runLifecycleSmoke(page) {
+  if (!restartCommand) {
+    throw new Error("--restart-command is required with --lifecycle=true");
+  }
+  const before = await page.evaluate(() => ({
+    snapshot: globalThis.__ibkrSmoke.eventCounts.snapshot || 0,
+    authSessions: globalThis.__ibkrSmoke.fetches.filter((f) => f.url.endsWith("/api/auth/session") && f.status === 200).length,
+  }));
+  const connectionBeforeRestart = await waitForConnection(page, "Live");
+  const restart = await runShellJSON(restartCommand);
+  const snapshotAfter = await waitForSnapshotEvent(page, before.snapshot);
+  const connectionAfterRestart = await waitForConnection(page, "Live");
+  const eventsAfter = await fetchEventsDiagnostics(page);
+  const after = await page.evaluate(() => ({
+    authSessions: globalThis.__ibkrSmoke.fetches.filter((f) => f.url.endsWith("/api/auth/session") && f.status === 200).length,
+  }));
+  if (eventsAfter.subscribers < 1) {
+    throw new Error(`expected at least one SSE subscriber after restart, got ${eventsAfter.subscribers}`);
+  }
+  return {
+    connection_before_restart: connectionBeforeRestart,
+    connection_after_restart: connectionAfterRestart,
+    reauth_after_restart: after.authSessions > before.authSessions,
+    snapshot_events_after_restart: snapshotAfter,
+    restart,
+    events: {
+      subscribers: eventsAfter.subscribers,
+      last_event_at: eventsAfter.last_event_at,
+    },
+  };
+}
+
+async function waitForSnapshotEvent(page, previousCount) {
+  await page.waitForFunction((count) => {
+    return (globalThis.__ibkrSmoke?.eventCounts?.snapshot || 0) > count;
+  }, previousCount, { timeout: 20000 });
+  return page.evaluate(() => globalThis.__ibkrSmoke.eventCounts.snapshot || 0);
+}
+
+async function waitForConnection(page, expected) {
+  await page.waitForFunction((text) => {
+    return document.getElementById("connectionLine")?.textContent === text;
+  }, expected, { timeout: 20000 });
+  return page.locator("#connectionLine").textContent();
+}
+
+async function fetchEventsDiagnostics(page) {
+  const events = await page.evaluate(async () => {
+    const res = await fetch("/api/tools/events", { method: "POST", credentials: "include" });
+    if (!res.ok) {
+      throw new Error(`events tool failed ${res.status}: ${await res.text()}`);
+    }
+    return res.json();
+  });
+  if (events.subscribers < 1) {
+    throw new Error(`expected at least one SSE subscriber, got ${events.subscribers}`);
+  }
+  return events;
+}
+
+async function openDebugTools(page) {
+  const tools = page.locator("#toolsPanel");
+  await tools.evaluate((el) => {
+    if ("open" in el) {
+      el.open = true;
+    }
+  });
+}
+
+async function runShellJSON(command) {
+  const started = Date.now();
+  const { stdout, stderr } = await execFilePromise("/bin/sh", ["-lc", command]);
+  if (stderr.trim()) {
+    console.error(stderr.trim());
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(`restart command did not emit JSON: ${String(err?.message || err)}\n${stdout}`);
+  }
+  cleanupPID = parsed.new_pid || 0;
+  return { ...parsed, smoke_elapsed_ms: Date.now() - started };
+}
+
+function execFilePromise(file, argv) {
+  return new Promise((resolve, reject) => {
+    execFile(file, argv, { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(`${file} ${argv.join(" ")} failed: ${String(err?.message || err)}\n${stderr}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 async function launchBrowser(browserType, launchOptions) {
