@@ -161,6 +161,6 @@ Submission pack:
 Publish sequence:
 
 1. Release any MCPB-readiness changes through `make release RELEASE_VERSION=vX.Y.Z`; do not tag or create releases manually.
-2. Publish the open MCP Registry metadata only through `make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher` after `mcp-publisher login github` succeeds.
+2. Publish the open MCP Registry metadata only through `make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher`. If the Registry JWT is expired, the target starts `mcp-publisher login github`, prints the device-code instructions, waits for authorization, and retries publish automatically.
 3. Submit to Anthropic's Desktop extension submission form from the Claude docs, attaching the public GitHub release asset URL and the submission materials above.
 4. Wait for Anthropic review. Directory approval, listing slug, and in-product availability are controlled by Anthropic; a successful MCP Registry publish is not a Claude Directory publish.
