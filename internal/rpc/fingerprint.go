@@ -69,17 +69,18 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 		return semanticFingerprint(CanaryFingerprintVersion, nil)
 	}
 	projection := canaryFingerprintProjection{
-		Policy:           cleanString(r.Policy),
-		Direction:        r.Direction,
-		PortfolioPosture: r.PortfolioPosture,
-		Severity:         r.Severity,
-		PlannerModeHint:  r.PlannerModeHint,
-		PlannerReadiness: r.PlannerReadiness,
-		DataConfidence:   cleanString(r.DataConfidence),
-		SignalConfidence: cleanString(r.SignalConfidence),
-		PrimaryDrivers:   signalIDs(r.PrimaryDrivers),
-		Signals:          canarySignalFingerprints(r.Signals),
-		Rows:             canaryRowFingerprints(r.Rows),
+		Policy:             cleanString(r.Policy),
+		Action:             cleanString(r.Action),
+		MarketConfirmation: cleanString(r.MarketConfirmation),
+		PortfolioFit:       cleanString(r.PortfolioFit),
+		InputHealth:        cleanString(r.InputHealth),
+		Direction:          r.Direction,
+		Severity:           r.Severity,
+		PlannerModeHint:    r.PlannerModeHint,
+		PlannerReadiness:   r.PlannerReadiness,
+		PrimaryDrivers:     signalIDs(r.PrimaryDrivers),
+		Signals:            canarySignalFingerprints(r.Signals),
+		Rows:               canaryRowFingerprints(r.Rows),
 		Market: canaryMarketFingerprint{
 			RegimeVerdict:      cleanString(r.Market.RegimeVerdict),
 			RedClusters:        r.Market.RedClusters,
@@ -94,8 +95,7 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 			DegradedClusters:   cleanSorted(r.Market.DegradedClusters),
 			StaleClusters:      cleanSorted(r.Market.StaleClusters),
 		},
-		Lifecycle: lifecycleFingerprintProjectionFromState(r.Lifecycle),
-		Sources:   sourceHealthFingerprints(r.SourceHealth),
+		Sources: sourceHealthFingerprints(r.SourceHealth),
 	}
 	if r.SourceFingerprints.Account != nil {
 		projection.Source.Account = *r.SourceFingerprints.Account
@@ -285,21 +285,21 @@ type dataQualityFingerprint struct {
 }
 
 type canaryFingerprintProjection struct {
-	Policy           string                         `json:"policy,omitempty"`
-	Direction        risk.SignalDirection           `json:"direction,omitempty"`
-	PortfolioPosture risk.PortfolioPosture          `json:"portfolio_posture,omitempty"`
-	Severity         risk.SignalSeverity            `json:"severity,omitempty"`
-	PlannerModeHint  risk.PlannerMode               `json:"planner_mode_hint,omitempty"`
-	PlannerReadiness risk.PlannerReadiness          `json:"planner_readiness,omitempty"`
-	DataConfidence   string                         `json:"data_confidence,omitempty"`
-	SignalConfidence string                         `json:"signal_confidence,omitempty"`
-	PrimaryDrivers   []string                       `json:"primary_drivers,omitempty"`
-	Signals          []canarySignalFingerprint      `json:"signals,omitempty"`
-	Rows             []canaryRowFingerprint         `json:"rows,omitempty"`
-	Market           canaryMarketFingerprint        `json:"market"`
-	Lifecycle        lifecycleFingerprintProjection `json:"lifecycle,omitzero"`
-	Sources          []sourceHealthFingerprint      `json:"sources,omitempty"`
-	Source           canarySourceFingerprint        `json:"source,omitzero"`
+	Policy             string                    `json:"policy,omitempty"`
+	Action             string                    `json:"action,omitempty"`
+	MarketConfirmation string                    `json:"market_confirmation,omitempty"`
+	PortfolioFit       string                    `json:"portfolio_fit,omitempty"`
+	InputHealth        string                    `json:"input_health,omitempty"`
+	Direction          risk.SignalDirection      `json:"direction,omitempty"`
+	Severity           risk.SignalSeverity       `json:"severity,omitempty"`
+	PlannerModeHint    risk.PlannerMode          `json:"planner_mode_hint,omitempty"`
+	PlannerReadiness   risk.PlannerReadiness     `json:"planner_readiness,omitempty"`
+	PrimaryDrivers     []string                  `json:"primary_drivers,omitempty"`
+	Signals            []canarySignalFingerprint `json:"signals,omitempty"`
+	Rows               []canaryRowFingerprint    `json:"rows,omitempty"`
+	Market             canaryMarketFingerprint   `json:"market"`
+	Sources            []sourceHealthFingerprint `json:"sources,omitempty"`
+	Source             canarySourceFingerprint   `json:"source,omitzero"`
 }
 
 type canarySourceFingerprint struct {
@@ -309,6 +309,7 @@ type canarySourceFingerprint struct {
 }
 
 type lifecycleFingerprintProjection struct {
+	Scope       string              `json:"scope,omitempty"`
 	Stage       string              `json:"stage,omitempty"`
 	Severity    string              `json:"severity,omitempty"`
 	Readiness   string              `json:"readiness,omitempty"`
@@ -449,6 +450,7 @@ func dataQualityFingerprints(values []DataQualityHealth) []dataQualityFingerprin
 
 func lifecycleFingerprintProjectionFromState(state LifecycleState) lifecycleFingerprintProjection {
 	return lifecycleFingerprintProjection{
+		Scope:       cleanString(state.Scope),
 		Stage:       cleanString(state.Stage),
 		Severity:    cleanString(state.Severity),
 		Readiness:   cleanString(state.Readiness),

@@ -28,6 +28,14 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPY",
 		AsOf:                    now,
+		TopStrikes: []rpc.StrikeConcentration{{
+			Underlying: "SPY",
+			Expiry:     "2026-05-29",
+			Strike:     740,
+			Right:      "P",
+			AbsGEX:     180_000_000,
+			OI:         12_000,
+		}},
 	}
 	spx := &rpc.GammaZeroComputed{
 		Scope:                   rpc.GammaZeroScopeSPX,
@@ -40,6 +48,14 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPX",
 		AsOf:                    now,
+		TopStrikes: []rpc.StrikeConcentration{{
+			Underlying: "SPX",
+			Expiry:     "2026-05-29",
+			Strike:     5400,
+			Right:      "C",
+			AbsGEX:     2_200_000_000,
+			OI:         8_000,
+		}},
 	}
 	combined := &rpc.GammaZeroComputed{
 		Scope:                   rpc.GammaZeroScopeCombined,
@@ -52,8 +68,37 @@ func gammaReadyFixture() *rpc.GammaZeroSPXResult {
 		Method:                  "bs-gamma-profile-v3-stickymoneyness-0dte-split",
 		Source:                  "SPY+SPX",
 		AsOf:                    now,
-		PerIndex:                map[string]*rpc.GammaZeroComputed{"SPY": spy, "SPX": spx},
-		RegimeAgreement:         "agree:long-gamma",
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityRankable,
+			RankabilityReason: "all rankability gates passed",
+			Freshness:         "fresh",
+			Session:           rpc.SessionRTH.String(),
+			Gates: []rpc.GammaQualityGate{{
+				Name:   "freshness",
+				Status: rpc.GammaQualityGatePass,
+				Reason: "same session and inside freshness TTL",
+			}},
+		},
+		TopStrikes: []rpc.StrikeConcentration{
+			{
+				Underlying: "SPX",
+				Expiry:     "2026-05-29",
+				Strike:     5400,
+				Right:      "C",
+				AbsGEX:     2_200_000_000,
+				OI:         8_000,
+			},
+			{
+				Underlying: "SPY",
+				Expiry:     "2026-05-29",
+				Strike:     740,
+				Right:      "P",
+				AbsGEX:     180_000_000,
+				OI:         12_000,
+			},
+		},
+		PerIndex:        map[string]*rpc.GammaZeroComputed{"SPY": spy, "SPX": spx},
+		RegimeAgreement: "agree:long-gamma",
 		MethodologyCitations: []string{
 			"Perfiliev (2022) — BS-sweep baseline",
 			"Derman / Daglish-Hull-Suo — sticky-moneyness skew dynamics",
@@ -294,9 +339,136 @@ func TestRenderGamma_DefaultOmitsMetadataBlock(t *testing.T) {
 		"Citations",
 		"Perfiliev (2022)",
 		"Disclosure:",
+		"Rankability",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("default render must not surface %q (--explain only):\n%s", banned, out)
+		}
+	}
+}
+
+func TestRenderGamma_DefaultUsesPlainSignalReadout(t *testing.T) {
+	t.Parallel()
+	fix := gammaReadyFixture()
+	fix.Result.Summary = &rpc.GammaZeroSummary{
+		PrimaryStatement: "Zero-gamma: SPY none in $645.59-$878.11 (long-gamma). No combined zero is computed across SPY/SPX price scales.",
+	}
+	fix.Result.Quality = &rpc.GammaSignalQuality{
+		Rankability:       rpc.GammaRankabilityContextOnly,
+		RankabilityReason: "freshness: market is closed; cached gamma is context only",
+		Freshness:         "closed_session_context",
+		Session:           rpc.SessionClosed.String(),
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, fix, false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Signal      after-hours context · valid cached snapshot, not fresh confirmation",
+		"SPY and SPX both long-γ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default render missing %q:\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"Rankability context_only",
+		"freshness:",
+		"No combined zero",
+		"SPY none in",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("default render leaked raw diagnostic phrase %q:\n%s", banned, out)
+		}
+	}
+}
+
+func TestRenderGamma_DefaultFiltersDiagnosticDataNotes(t *testing.T) {
+	t.Parallel()
+	fix := gammaReadyFixture()
+	fix.Result.PerIndex["SPX"].WarningDetails = []rpc.GammaWarningDetail{
+		{
+			Code:    "oi_missing",
+			Scope:   "SPX",
+			Message: "Open-interest ticks were missing for 592 priced legs.",
+			Impact:  "Missing OI is unknown, not zero.",
+			Action:  "Check TWS before trusting magnitude.",
+		},
+		{
+			Code:    "strike_budget_capped",
+			Scope:   "SPX",
+			Message: "The strike fan-out was capped to the nearest 80 listed strikes per expiry.",
+			Impact:  "Farther strikes were skipped.",
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, fix, false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, banned := range []string{
+		"Open-interest ticks",
+		"nearest 80",
+		"Data notes:",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("default render should hide diagnostic note %q:\n%s", banned, out)
+		}
+	}
+
+	stdout.Reset()
+	if code := renderGammaText(env, fix, true); code != 0 {
+		t.Fatalf("explain code=%d", code)
+	}
+	explain := stdout.String()
+	for _, want := range []string{
+		"Open-interest ticks were missing",
+		"nearest 80",
+		"Action: Check TWS",
+	} {
+		if !strings.Contains(explain, want) {
+			t.Errorf("--explain should retain diagnostic note %q:\n%s", want, explain)
+		}
+	}
+}
+
+func TestRenderGamma_DefaultRendersCacheFallbackAsContext(t *testing.T) {
+	t.Parallel()
+	fix := gammaReadyFixture()
+	fix.Result.WarningDetails = []rpc.GammaWarningDetail{{
+		Code:    "spx_cache_fallback:timeout",
+		Scope:   "SPX",
+		Message: "SPX live refresh timed out; using the last successful cached SPX slice.",
+		Impact:  "SPX is included from cache; quality.rankability controls whether gamma can confirm regime or canary evidence.",
+		Action:  "Refresh during 09:30-16:15 ET.",
+	}}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, fix, false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Context:",
+		"SPX live refresh timed out",
+		"quality.rankability controls",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default cache fallback render missing %q:\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"Data notes:",
+		"treat the combined gamma regime as degraded",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("default cache fallback render leaked %q:\n%s", banned, out)
 		}
 	}
 }
@@ -320,6 +492,33 @@ func TestRenderGamma_DefaultShowsMagnitudeCoPrimary(t *testing.T) {
 	}
 	if !strings.Contains(out, "(sign-agnostic)") {
 		t.Errorf("Magnitude line should label convention from wire:\n%s", out)
+	}
+}
+
+func TestRenderGamma_DefaultShowsCanonicalSPXTopStrikes(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, gammaReadyFixture(), false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Top SPX strikes by |Γ|·OI (canonical concentration):",
+		"SPY context strikes are available with --explain or `ibkr gamma --only=spy`.",
+		"2026-05-29        5400      C",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default render missing SPX top-strike marker %q:\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"INDEX",
+		"2026-05-29        740      P",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("default combined render should not show %q:\n%s", banned, out)
+		}
 	}
 }
 
@@ -414,9 +613,85 @@ func TestRenderGamma_ExplainSurfacesMetadata(t *testing.T) {
 		"Perfiliev (2022) — BS-sweep baseline",
 		"Cboe 2025 — 0DTE",
 		"Disclosure:",
+		"Signal quality",
+		"Rankability rankable",
+		"Gates",
+		"freshness: pass",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderGamma_ExplainShowsCombinedTopStrikesWithIndex(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, gammaReadyFixture(), true); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Top strikes by |Γ|·OI (SPY+SPX diagnostic):",
+		"INDEX",
+		"SPX    2026-05-29        5400      C",
+		"SPY    2026-05-29         740      P",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--explain combined top strikes missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderGamma_SPXUnavailableLabelsSPYProxyStrikes(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC)
+	res := &rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope:          rpc.GammaZeroScopeSPY,
+			SpotUnderlying: 743.73,
+			GammaSign:      "positive",
+			GammaTotalAbs:  1.8e9,
+			LegCount:       1052,
+			AsOf:           now,
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityContextOnly,
+				RankabilityReason: "spx_coverage: SPX option chain unavailable; using SPY proxy: timeout",
+			},
+			TopStrikes: []rpc.StrikeConcentration{{
+				Underlying: "SPY",
+				Expiry:     "2026-05-29",
+				Strike:     740,
+				Right:      "P",
+				AbsGEX:     180_000_000,
+				OI:         12_000,
+			}},
+			WarningDetails: []rpc.GammaWarningDetail{{
+				Code:    "spx_unavailable:timeout",
+				Scope:   "SPX",
+				Message: "SPX option-chain fetch timed out before usable data landed.",
+				Impact:  "Showing SPY only; SPX gamma is not included.",
+				Action:  "Retry during 09:30-16:15 ET or run --only=spy.",
+			}},
+		},
+	}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, res, false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"SPX skipped",
+		"Signal      SPY proxy only",
+		"Top SPY proxy strikes by |Γ|·OI:",
+		"SPX is unavailable; treat this as proxy context, not canonical S&P dealer gamma.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("SPY proxy render missing %q:\n%s", want, out)
 		}
 	}
 }

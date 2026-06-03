@@ -31,8 +31,8 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want data_quality/watch for ambiguous all-unranked market", res.Direction, res.Severity)
 	}
-	if res.PortfolioPosture != risk.PortfolioPostureConfirmData {
-		t.Fatalf("portfolio_posture = %s, want confirm_data", res.PortfolioPosture)
+	if res.Action != canaryActionConfirmInputs || res.MarketConfirmation != canaryMarketBlocked || res.InputHealth != canaryInputDegraded {
+		t.Fatalf("decision = action %s market %s input %s, want confirm_inputs/blocked/degraded", res.Action, res.MarketConfirmation, res.InputHealth)
 	}
 	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
 		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
@@ -59,11 +59,11 @@ func TestComputeCanaryConfirmedStressWithIncompleteGammaBreadthStillDelevers(t *
 		}},
 		Regime: redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
-		t.Fatalf("state = %s/%s, want defensive/act on confirmed vol+credit stress with high exposure", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch until degraded inputs are clean", res.Direction, res.Severity)
 	}
-	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessBlocked {
-		t.Fatalf("planner = %s/%s, want defend/blocked until degraded inputs are confirmed", res.PlannerModeHint, res.PlannerReadiness)
+	if res.Action != canaryActionWatch || res.PlannerReadiness != risk.PlannerReadinessPrestage {
+		t.Fatalf("action/readiness = %s/%s, want watch/prestage", res.Action, res.PlannerReadiness)
 	}
 	if !rowContains(res.Rows, "Ambiguity filter", "do not suppress confirmed independent red signals") {
 		t.Fatalf("expected ambiguity filter disclosure, rows: %+v", res.Rows)
@@ -83,11 +83,11 @@ func TestComputeCanaryImmediateMarginDangerLiquidatesDespiteAmbiguousMarket(t *t
 			},
 		},
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
-		t.Fatalf("state = %s/%s, want defensive/urgent on margin cushion below 10%%", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch because market inputs are blocked", res.Direction, res.Severity)
 	}
-	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
-		t.Fatalf("planner = %s/%s, want defend/ready for immediate margin danger", res.PlannerModeHint, res.PlannerReadiness)
+	if res.Action != canaryActionConfirmInputs {
+		t.Fatalf("action = %s, want confirm_inputs for account-only margin danger in canary", res.Action)
 	}
 }
 
@@ -101,8 +101,11 @@ func TestComputeCanaryZeroExcessLiquidityLiquidatesWhenMarginContextPresent(t *t
 		Account: acct,
 		Regime:  healthyCanaryRegime(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
-		t.Fatalf("state = %s/%s, want defensive/urgent when active margin account has zero cushion", res.Direction, res.Severity)
+	if res.Direction != "" || res.Severity != risk.SeverityObserve {
+		t.Fatalf("state = %s/%s, want observe because account-only margin danger is outside canary scope", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionStandDown {
+		t.Fatalf("action = %s, want stand_down without market pressure", res.Action)
 	}
 	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "cushion 0%") {
 		t.Fatalf("expected zero-cushion evidence, rows: %+v", res.Rows)
@@ -117,8 +120,8 @@ func TestComputeCanaryLookAheadMarginDangerLiquidates(t *testing.T) {
 		Account: acct,
 		Regime:  healthyCanaryRegime(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
-		t.Fatalf("state = %s/%s, want defensive/urgent when look-ahead cushion is below 10%%", res.Direction, res.Severity)
+	if res.Direction != "" || res.Severity != risk.SeverityObserve {
+		t.Fatalf("state = %s/%s, want observe because look-ahead margin alone is outside canary scope", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "Immediate margin safety", "look-ahead cushion 8%") {
 		t.Fatalf("expected look-ahead cushion evidence, rows: %+v", res.Rows)
@@ -160,8 +163,8 @@ func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if len(res.Lifecycle.ConfirmedBy) != 0 {
-		t.Fatalf("confirmed_by = %+v, want none for one red gamma cluster", res.Lifecycle.ConfirmedBy)
+	if res.MarketConfirmation == canaryMarketConfirmed {
+		t.Fatalf("market_confirmation = %s, want not confirmed for one red gamma cluster", res.MarketConfirmation)
 	}
 	if !hasSignal(res.Signals, risk.SignalGammaRed) {
 		t.Fatalf("missing gamma red watch signal, signals: %+v", res.Signals)
@@ -304,11 +307,11 @@ func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
-		t.Fatalf("state = %s/%s, want defensive/act for confirmed SPY/VIX shock plus red cluster", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch for confirmed SPY/VIX context without high portfolio fit", res.Direction, res.Severity)
 	}
-	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
-		t.Fatalf("planner = %s/%s, want defend/ready", res.PlannerModeHint, res.PlannerReadiness)
+	if res.Action != canaryActionWatch || res.PlannerReadiness != risk.PlannerReadinessPrestage {
+		t.Fatalf("action/readiness = %s/%s, want watch/prestage", res.Action, res.PlannerReadiness)
 	}
 	if !rowContains(res.Rows, "Index tape shock", "direct SPY stress is confirmed") {
 		t.Fatalf("expected confirmed direct tape row, rows: %+v", res.Rows)
@@ -336,8 +339,8 @@ func TestComputeCanaryGrossDollarDeltaCatchesOffsettingOptionBook(t *testing.T) 
 		}},
 		Regime: redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityUrgent {
-		t.Fatalf("state = %s/%s, want defensive/urgent on 180%% gross delta in confirmed stress", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch until degraded inputs are clean", res.Direction, res.Severity)
 	}
 	if !rowContainsEvidence(res.Rows, "US equity/options exposure", "gross delta 180% NLV") {
 		t.Fatalf("expected gross delta evidence, rows: %+v", res.Rows)
@@ -352,8 +355,8 @@ func TestComputeCanaryStressedExposureDeleverHasMatchingSignal(t *testing.T) {
 		Account: acct,
 		Regime:  redVolCreditRegimeWithComputingSlowRows(),
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
-		t.Fatalf("state = %s/%s, want defensive/act on stressed gross exposure", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch until degraded inputs are clean", res.Direction, res.Severity)
 	}
 	sig, ok := findSignal(res.Signals, risk.SignalGrossExposureHigh)
 	if !ok {
@@ -378,8 +381,8 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	if res.Direction != risk.DirectionRebalance || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want rebalance/watch on largest dollar-delta concentration", res.Direction, res.Severity)
 	}
-	if res.PortfolioPosture != risk.PortfolioPostureRebalance {
-		t.Fatalf("portfolio_posture = %s, want rebalance", res.PortfolioPosture)
+	if res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh {
+		t.Fatalf("decision = action %s fit %s, want rebalance/high", res.Action, res.PortfolioFit)
 	}
 	if res.PlannerModeHint != risk.PlannerModeRebalance || res.PlannerReadiness != risk.PlannerReadinessReady {
 		t.Fatalf("planner = %s/%s, want rebalance/ready", res.PlannerModeHint, res.PlannerReadiness)
@@ -394,12 +397,9 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	if !ok || sig.Direction != risk.DirectionRebalance || sig.Posture != risk.PortfolioPostureRebalance {
 		t.Fatalf("single-name delta signal = %+v, want rebalance direction/posture", sig)
 	}
-	if res.SignalConfidence != "high" {
-		t.Fatalf("signal_confidence = %q, want high", res.SignalConfidence)
-	}
 }
 
-func TestComputeCanarySignalsExposureAndConfidenceReasons(t *testing.T) {
+func TestComputeCanarySignalsExposureAndDecisionShape(t *testing.T) {
 	t.Parallel()
 	delta := 140_000.0
 	res := ComputeCanary(CanaryInput{
@@ -424,14 +424,14 @@ func TestComputeCanarySignalsExposureAndConfidenceReasons(t *testing.T) {
 	if res.Direction != risk.DirectionRebalance {
 		t.Fatalf("direction = %q, want rebalance", res.Direction)
 	}
-	if res.DataConfidence != "high" || res.SignalConfidence != "high" || res.PlannerReadiness != risk.PlannerReadinessReady {
-		t.Fatalf("confidence profile = data %q signals %q readiness %q", res.DataConfidence, res.SignalConfidence, res.PlannerReadiness)
+	if res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh || res.InputHealth != canaryInputOK {
+		t.Fatalf("decision = action %s fit %s input %s, want rebalance/high/ok", res.Action, res.PortfolioFit, res.InputHealth)
+	}
+	if res.PlannerReadiness != risk.PlannerReadinessReady {
+		t.Fatalf("planner_readiness = %q, want ready", res.PlannerReadiness)
 	}
 	if res.PlannerModeHint != risk.PlannerModeRebalance {
 		t.Fatalf("planner_mode_hint = %s, want rebalance", res.PlannerModeHint)
-	}
-	if !strings.Contains(strings.Join(res.ConfidenceReasons, "\n"), "portfolio breach lacks independent market-stress confirmation") {
-		t.Fatalf("missing confidence reason, got %+v", res.ConfidenceReasons)
 	}
 }
 
@@ -450,14 +450,11 @@ func TestComputeCanaryFastCarryUnwindActs(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityAct {
-		t.Fatalf("state = %s/%s, want defensive/act for FX carry unwind with tape confirmation", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch context without vulnerable portfolio fit", res.Direction, res.Severity)
 	}
-	if res.PortfolioPosture != risk.PortfolioPostureThreat {
-		t.Fatalf("portfolio_posture = %s, want threat", res.PortfolioPosture)
-	}
-	if res.PlannerModeHint != risk.PlannerModeDefend || res.PlannerReadiness != risk.PlannerReadinessReady {
-		t.Fatalf("planner = %s/%s, want defend/ready", res.PlannerModeHint, res.PlannerReadiness)
+	if res.MarketConfirmation != canaryMarketConfirmed || res.PortfolioFit != canaryPortfolioFitLow || res.Action != canaryActionWatch {
+		t.Fatalf("decision = market %s fit %s action %s, want confirmed/low/watch", res.MarketConfirmation, res.PortfolioFit, res.Action)
 	}
 	if !rowContains(res.Rows, "Fast carry unwind", "FX stress is confirmed") {
 		t.Fatalf("expected fast-carry market row, rows: %+v", res.Rows)
@@ -476,14 +473,11 @@ func TestComputeCanaryConstructiveTapeShowsOpportunityPosture(t *testing.T) {
 		Account: baseCanaryAccount(),
 		Regime:  r,
 	})
-	if res.Direction != risk.DirectionConstructive || res.Severity != risk.SeverityAct {
-		t.Fatalf("state = %s/%s, want constructive/act", res.Direction, res.Severity)
+	if res.Direction != risk.DirectionConstructive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want constructive/watch", res.Direction, res.Severity)
 	}
-	if res.PortfolioPosture != risk.PortfolioPostureOpportunity {
-		t.Fatalf("portfolio_posture = %s, want opportunity", res.PortfolioPosture)
-	}
-	if res.PlannerModeHint != risk.PlannerModeDeploy || res.PlannerReadiness != risk.PlannerReadinessReady {
-		t.Fatalf("planner = %s/%s, want deploy/ready", res.PlannerModeHint, res.PlannerReadiness)
+	if res.Action != canaryActionDeploy || res.MarketConfirmation != canaryMarketConfirmed {
+		t.Fatalf("decision = action %s market %s, want deploy/confirmed", res.Action, res.MarketConfirmation)
 	}
 	sig, ok := findSignal(res.Signals, risk.SignalMarketRallyViolent)
 	if !ok || sig.Posture != risk.PortfolioPostureOpportunity {
@@ -510,8 +504,8 @@ func TestComputeCanaryPositivePnLShockProtectsGains(t *testing.T) {
 	if sig.ConfidenceImpact == "" {
 		t.Fatalf("P&L signal should explain why a gain is not directly deployable: %+v", sig)
 	}
-	if res.Direction != risk.DirectionDefensive {
-		t.Fatalf("direction = %q, want defensive", res.Direction)
+	if res.Direction != "" || res.Action != canaryActionStandDown {
+		t.Fatalf("decision = direction %q action %q, want no canary action for P&L-only evidence", res.Direction, res.Action)
 	}
 }
 
@@ -607,8 +601,8 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	if !strings.Contains(strings.Join(res.Warnings, "\n"), "stale clusters: vol") {
 		t.Fatalf("expected stale-cluster warning, warnings: %+v", res.Warnings)
 	}
-	if res.Confidence != "medium-low" {
-		t.Fatalf("confidence = %q, want medium-low for stale data", res.Confidence)
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input_health = %q, want degraded for stale data", res.InputHealth)
 	}
 }
 
@@ -681,13 +675,13 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		t.Fatalf("re-decode: %v", err)
 	}
-	for _, key := range []string{"fingerprint", "source_fingerprints", "source_health", "lifecycle", "direction", "portfolio_posture", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
+	for _, key := range []string{"fingerprint", "source_fingerprints", "source_health", "action", "market_confirmation", "portfolio_fit", "input_health", "severity", "planner_mode_hint", "planner_readiness", "signals", "rows"} {
 		if _, ok := wire[key]; !ok {
 			t.Fatalf("canary JSON missing %s: %s", key, b)
 		}
 	}
-	if wire["portfolio_posture"] != string(risk.PortfolioPostureThreat) {
-		t.Fatalf("portfolio_posture = %#v, want threat", wire["portfolio_posture"])
+	if wire["action"] != canaryActionStandDown {
+		t.Fatalf("action = %#v, want stand_down", wire["action"])
 	}
 	signals, ok := wire["signals"].([]any)
 	if !ok || len(signals) == 0 {
@@ -714,10 +708,6 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	regimeFP, ok := sources["regime"].(map[string]any)
 	if !ok || regimeFP["version"] != rpc.RegimeFingerprintVersion || regimeFP["key"] != regime.Fingerprint.Key {
 		t.Fatalf("source_fingerprints.regime = %#v, want %+v", sources["regime"], regime.Fingerprint)
-	}
-	lifecycle, ok := wire["lifecycle"].(map[string]any)
-	if !ok || lifecycle["stage"] == "" || lifecycle["fingerprint"] == nil {
-		t.Fatalf("lifecycle missing/malformed: %#v", wire["lifecycle"])
 	}
 	sourceHealth, ok := wire["source_health"].([]any)
 	if !ok || len(sourceHealth) != 3 {
@@ -790,8 +780,8 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	if !rowContains(res.Rows, "Ambiguity filter", "verify weak clusters") {
 		t.Fatalf("expected degraded-gamma disclosure row, rows: %+v", res.Rows)
 	}
-	if res.Confidence != "medium-low" {
-		t.Fatalf("confidence = %q, want medium-low for degraded gamma", res.Confidence)
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input_health = %q, want degraded for degraded gamma", res.InputHealth)
 	}
 }
 
@@ -819,8 +809,197 @@ func TestComputeCanaryDetectsWarningOnlyDegradedGamma(t *testing.T) {
 	if !containsString(sig.BlockedBy, "gamma") {
 		t.Fatalf("regime stress signal blocked_by = %+v, want gamma", sig.BlockedBy)
 	}
-	if containsString(res.Lifecycle.ConfirmedBy, "gamma") || containsString(res.Lifecycle.ConfirmedBy, string(risk.SignalRegimeStressConfirmed)) {
-		t.Fatalf("lifecycle confirmed_by = %+v, want degraded gamma/regime confirmation excluded", res.Lifecycle.ConfirmedBy)
+	if res.MarketConfirmation == canaryMarketConfirmed {
+		t.Fatalf("market_confirmation = %s, want degraded gamma to block confirmation", res.MarketConfirmation)
+	}
+}
+
+func TestComputeCanaryMarginPressureDoesNotActWithoutMarketConfirmation(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.12
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRankedCount: 5, ClusterUnrankedCount: 1}
+	r.GammaZero.Band = "red"
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityContextOnly,
+			RankabilityReason: "freshness: cached gamma is context only",
+		},
+	}
+
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  r,
+	})
+
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch because gamma input is degraded", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionConfirmInputs || res.InputHealth != canaryInputDegraded {
+		t.Fatalf("decision = action %s input %s, want confirm_inputs/degraded", res.Action, res.InputHealth)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalRiskDataDegraded)
+	if !ok {
+		t.Fatalf("missing risk data degraded signal: %+v", res.Signals)
+	}
+	if got := strings.Join(sig.BlockedBy, ","); got != "gamma" {
+		t.Fatalf("risk data blocked_by = %q, want unique gamma", got)
+	}
+	if sig.Observed == nil || *sig.Observed != 1 {
+		t.Fatalf("risk data observed = %v, want one affected cluster", sig.Observed)
+	}
+}
+
+func TestComputeCanaryDailyLossDoesNotActWithoutMarketConfirmation(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	daily := -11_000.0
+	acct.DailyPnL = &daily
+	r := healthyCanaryRegime()
+	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
+		Quality: &rpc.GammaSignalQuality{
+			Rankability:       rpc.GammaRankabilityContextOnly,
+			RankabilityReason: "freshness: cached gamma is context only",
+		},
+	}
+
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  r,
+	})
+
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch because gamma input is degraded", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionConfirmInputs {
+		t.Fatalf("action = %s, want confirm_inputs because daily P&L alone is outside canary scope", res.Action)
+	}
+}
+
+func TestComputeCanaryMarginPressureDoesNotConfirmMarketTape(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.Cushion = 0.12
+	r := healthyCanaryRegime()
+	spyPct := -2.6
+	vixPct := 2.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  r,
+	})
+
+	if res.Direction != risk.DirectionDefensive || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want defensive/watch from partial market pressure plus margin exposure", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionWatch || res.PlannerReadiness != risk.PlannerReadinessPrestage {
+		t.Fatalf("action/readiness = %s/%s, want watch/prestage", res.Action, res.PlannerReadiness)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalMarketSelloffViolent)
+	if !ok {
+		t.Fatalf("missing market selloff signal: %+v", res.Signals)
+	}
+	if sig.Severity != risk.SeverityWatch || !containsString(sig.BlockedBy, "confirmation") {
+		t.Fatalf("selloff signal = severity %q blocked_by %+v, want watch blocked by market confirmation", sig.Severity, sig.BlockedBy)
+	}
+	if !rowContains(res.Rows, "Index tape shock", "needs confirmation") {
+		t.Fatalf("expected tape row to require confirmation, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryStaleAccountBlocksMarginAction(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 29, 16, 0, 0, 0, time.UTC)
+	acct := baseCanaryAccount()
+	acct.AsOf = now.Add(-2 * time.Hour)
+	acct.Cushion = 0.07
+
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  healthyCanaryRegime(),
+		Now:     now,
+	})
+
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch until account refresh", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionConfirmInputs || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("action/readiness = %s/%s, want confirm_inputs/blocked", res.Action, res.PlannerReadiness)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalMarginCushionLow)
+	if !ok {
+		t.Fatalf("missing margin signal: %+v", res.Signals)
+	}
+	if !containsString(sig.BlockedBy, "account") || sig.Confidence != "medium-low" {
+		t.Fatalf("margin signal = blocked_by %+v confidence %q, want stale account block", sig.BlockedBy, sig.Confidence)
+	}
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input_health = %s, want degraded", res.InputHealth)
+	}
+}
+
+func TestComputeCanaryStalePositionsBlocksRebalanceAction(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 29, 16, 0, 0, 0, time.UTC)
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: now.Add(-2 * time.Hour),
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{
+					{Underlying: "AAPL", DollarDeltaBase: new(45_000.0)},
+				},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+		Now:    now,
+	})
+
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch {
+		t.Fatalf("state = %s/%s, want data_quality/watch from stale position exposure", res.Direction, res.Severity)
+	}
+	if res.Action != canaryActionConfirmInputs || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("action/readiness = %s/%s, want confirm_inputs/blocked until positions refresh", res.Action, res.PlannerReadiness)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalSingleNameDeltaHigh)
+	if !ok {
+		t.Fatalf("missing single-name delta signal: %+v", res.Signals)
+	}
+	if !containsString(sig.BlockedBy, "positions") || sig.Confidence != "medium-low" {
+		t.Fatalf("single-name signal = blocked_by %+v confidence %q, want stale positions block", sig.BlockedBy, sig.Confidence)
+	}
+}
+
+func TestComputeCanaryStaleRedClusterDoesNotConfirmLifecycle(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterGreenCount: 4, ClusterRankedCount: 6}
+	r.VIXTermStructure.Band = "red"
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.VolOfVol.Band = "red"
+	r.HYGSPYDivergence.Band = "red"
+	r.CreditSpreads.Band = "red"
+
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+
+	sig, ok := findSignal(res.Signals, risk.SignalRegimeStressConfirmed)
+	if !ok {
+		t.Fatalf("missing regime stress signal: %+v", res.Signals)
+	}
+	if !containsString(sig.BlockedBy, "vol") {
+		t.Fatalf("regime stress blocked_by = %+v, want stale vol", sig.BlockedBy)
+	}
+	if res.MarketConfirmation == canaryMarketConfirmed {
+		t.Fatalf("market_confirmation = %s, want stale vol to block confirmed market stress", res.MarketConfirmation)
+	}
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input_health = %s, want degraded", res.InputHealth)
 	}
 }
 
@@ -929,7 +1108,7 @@ func TestCanaryWarningsPolishUnrankedImpact(t *testing.T) {
 	}
 }
 
-func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
+func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
@@ -940,60 +1119,62 @@ func TestRenderCanaryTextShowsRiskStateAndNextStep(t *testing.T) {
 	renderCanaryText(&Env{}, &out, &res)
 	got := out.String()
 	for _, want := range []string{
-		"Risk state [Defensive / Act]",
-		"Posture    Threat",
+		"Action     WATCH",
+		"Guidance   Watch this portfolio against market weather; do not run a major action from this snapshot alone.",
+		"Next step  Stage risk-plan",
+		"Why this fired",
+		"Market weather",
+		"Portfolio shape",
+		"Combined read",
+		"Input health",
+		"Incomplete input",
+		"computing",
+		"breadth and gamma",
 		"Alert ID   canary-fp-v1 sha256:",
-		"Guidance   Refresh or confirm degraded inputs before planning major portfolio changes.",
-		"Confidence Medium-low (data:",
-		"breadth and gamma computing",
-		"Next step  Confirm data before defend",
-		"Title                        Risk state",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("render missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Index(got, "Guidance") > strings.Index(got, "Confidence") {
-		t.Fatalf("guidance should render before confidence:\n%s", got)
+	if strings.Contains(got, "Posture") || strings.Contains(got, "Lifecycle") || strings.Contains(got, "Confidence") {
+		t.Fatalf("render leaked deleted hero fields:\n%s", got)
 	}
-	if strings.Index(got, "Why") > strings.Index(got, "Next step") {
-		t.Fatalf("next step should render below why:\n%s", got)
+	if strings.Contains(got, "Title                        Risk state") {
+		t.Fatalf("default render should not use wide details table:\n%s", got)
 	}
 }
 
-func TestCanaryConfidenceExplanationHumanizesReasons(t *testing.T) {
+func TestCanaryInputHealthRowsHumanizeMarketIssues(t *testing.T) {
 	t.Parallel()
-	got := canaryConfidenceExplanation(&CanaryResult{
-		Confidence:       "medium-low",
-		DataConfidence:   "medium-low",
-		SignalConfidence: "high",
-		ConfidenceReasons: []string{
-			"degraded clusters: gamma",
-			"stale clusters: credit,fx,vol",
-			"portfolio breach lacks independent market-stress confirmation",
+	res := CanaryResult{
+		InputHealth: canaryInputDegraded,
+		Market: CanaryMarketSummary{
+			DegradedClusters: []string{"gamma"},
+			StaleClusters:    []string{"credit", "fx", "vol"},
 		},
-	})
+	}
+	rows := canaryInputHealthRows(&res)
+	got := fmt.Sprint(rows)
 	for _, want := range []string{
-		"gamma degraded",
-		"credit, FX, and vol stale",
-		"portfolio breach lacks independent market-stress confirmation",
+		"Degraded input gamma",
+		"Stale input credit, FX, and vol",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("explanation missing %q: %s", want, got)
+			t.Fatalf("input health rows missing %q: %s", want, got)
 		}
 	}
 }
 
-func TestCanaryInlineConfidenceReasonSeparatesDataAndConfirmation(t *testing.T) {
+func TestRenderCanaryDetailsShowsRowsWhenRequested(t *testing.T) {
 	t.Parallel()
-	got := canaryInlineConfidenceReason([]string{
-		"degraded clusters: gamma",
-		"stale clusters: credit,fx,vol",
-		"portfolio breach lacks independent market-stress confirmation",
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  healthyCanaryRegime(),
 	})
-	want := "data: gamma degraded, credit, FX, and vol stale; confirmation missing"
-	if got != want {
-		t.Fatalf("inline confidence reason = %q, want %q", got, want)
+	var out bytes.Buffer
+	renderCanaryTextWidthDetails(&Env{}, &out, &res, 100, true)
+	if !strings.Contains(out.String(), "Details") || !strings.Contains(out.String(), "Portfolio canary") {
+		t.Fatalf("details render missing row evidence:\n%s", out.String())
 	}
 }
 
@@ -1025,26 +1206,29 @@ func TestRenderCanaryTextWrapsAtCommonTerminalWidths(t *testing.T) {
 	}
 }
 
-func TestRenderCanaryTextUsesStackedRowsBelowWideTerminals(t *testing.T) {
+func TestRenderCanaryTextHidesDetailsUnlessRequested(t *testing.T) {
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
 		Regime:  redVolCreditRegimeWithComputingSlowRows(),
 		Now:     time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
 	})
-	var narrow bytes.Buffer
-	renderCanaryTextWidth(&Env{}, &narrow, &res, 100)
-	if !strings.Contains(narrow.String(), "  Details\n") {
-		t.Fatalf("narrow canary render should use stacked details:\n%s", narrow.String())
+	var normal bytes.Buffer
+	renderCanaryTextWidth(&Env{}, &normal, &res, 120)
+	if strings.Contains(normal.String(), "  Details\n") {
+		t.Fatalf("default canary render should hide full details:\n%s", normal.String())
 	}
-	if strings.Contains(narrow.String(), "Title                        Risk state") {
-		t.Fatalf("narrow canary render should not use wide table:\n%s", narrow.String())
+	if strings.Contains(normal.String(), "Title                        Risk state") {
+		t.Fatalf("default canary render should not use wide table:\n%s", normal.String())
 	}
 
-	var wide bytes.Buffer
-	renderCanaryTextWidth(&Env{}, &wide, &res, 120)
-	if !strings.Contains(wide.String(), "Title                        Risk state") {
-		t.Fatalf("wide canary render should use table:\n%s", wide.String())
+	var details bytes.Buffer
+	renderCanaryTextWidthDetails(&Env{}, &details, &res, 120, true)
+	if !strings.Contains(details.String(), "  Details\n") {
+		t.Fatalf("details canary render should use stacked details:\n%s", details.String())
+	}
+	if strings.Contains(details.String(), "Title                        Risk state") {
+		t.Fatalf("details canary render should not use wide table:\n%s", details.String())
 	}
 }
 
@@ -1052,6 +1236,7 @@ func TestRenderCanaryTextColorsCurrentState(t *testing.T) {
 	t.Parallel()
 	res := CanaryResult{
 		AsOf:             time.Date(2026, 5, 29, 5, 55, 0, 0, time.FixedZone("CEST", 2*60*60)),
+		Action:           canaryActionWatch,
 		Direction:        risk.DirectionDefensive,
 		Severity:         risk.SeverityWatch,
 		PlannerModeHint:  risk.PlannerModeStage,
@@ -1067,8 +1252,8 @@ func TestRenderCanaryTextColorsCurrentState(t *testing.T) {
 	var out bytes.Buffer
 	renderCanaryText(&Env{Color: true}, &out, &res)
 	got := out.String()
-	if !strings.Contains(got, ansiBold+ansiYellow+"[Defensive / Watch]"+ansiReset+ansiReset) {
-		t.Fatalf("current defensive/watch state is not bold yellow:\n%q", got)
+	if !strings.Contains(got, ansiBold) || !strings.Contains(got, ansiYellow) || !strings.Contains(got, "WATCH") {
+		t.Fatalf("current watch action is not bold yellow:\n%q", got)
 	}
 	if strings.Contains(got, "CURRENT") {
 		t.Fatalf("render should not repeat CURRENT:\n%q", got)

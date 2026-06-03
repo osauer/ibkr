@@ -17,11 +17,11 @@ type CanaryInput struct {
 	Now       time.Time
 }
 
-// CanaryResult is the compact scheduled-monitor payload. Rows are ordered from
-// portfolio-level state to supporting gates so an agent can print the table
-// directly without composing prose. Fingerprint is the canonical alert identity
-// for monitors; SourceFingerprints records the classified upstream state the
-// canary consumed.
+// CanaryResult is the compact scheduled-monitor payload. The canary is
+// stateless: it combines current broad-market regime with the current portfolio
+// shape, then emits a fresh action snapshot. Fingerprint is the canonical
+// alert identity for monitors; SourceFingerprints records the classified
+// upstream state the canary consumed.
 type CanaryResult struct {
 	AsOf               time.Time                `json:"as_of"`
 	SourceAsOf         CanarySourceAsOf         `json:"source_as_of,omitzero"`
@@ -29,17 +29,15 @@ type CanaryResult struct {
 	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
 	SourceHealth       []SourceHealth           `json:"source_health,omitempty"`
 	Policy             string                   `json:"policy,omitempty"`
-	Lifecycle          LifecycleState           `json:"lifecycle,omitzero"`
+	Action             string                   `json:"action,omitempty"`
+	MarketConfirmation string                   `json:"market_confirmation,omitempty"`
+	PortfolioFit       string                   `json:"portfolio_fit,omitempty"`
+	InputHealth        string                   `json:"input_health,omitempty"`
 	Direction          risk.SignalDirection     `json:"direction,omitempty"`
-	PortfolioPosture   risk.PortfolioPosture    `json:"portfolio_posture,omitempty"`
 	Severity           risk.SignalSeverity      `json:"severity"`
 	PlannerModeHint    risk.PlannerMode         `json:"planner_mode_hint,omitempty"`
 	PlannerReadiness   risk.PlannerReadiness    `json:"planner_readiness,omitempty"`
 	Summary            string                   `json:"summary"`
-	Confidence         string                   `json:"confidence,omitempty"`
-	DataConfidence     string                   `json:"data_confidence,omitempty"`
-	SignalConfidence   string                   `json:"signal_confidence,omitempty"`
-	ConfidenceReasons  []string                 `json:"confidence_reasons,omitempty"`
 	PrimaryDrivers     []risk.SignalID          `json:"primary_drivers,omitempty"`
 	Signals            []risk.Signal            `json:"signals,omitempty"`
 	Rows               []CanaryRow              `json:"rows"`

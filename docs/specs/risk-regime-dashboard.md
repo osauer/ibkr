@@ -27,7 +27,7 @@ Each row should show:
 
 The top-level envelope should also show:
 
-- `lifecycle`: stage, severity, readiness, timing, confidence, evidence,
+- `lifecycle`: scope (`market` for regime), stage, severity, readiness, timing, confidence, evidence,
   confirmed sources, unconfirmed sources, a semantic lifecycle fingerprint, and
   an explicit no-execution statement;
 - `source_health`: per-cluster `as_of`, status, age/freshness, confidence, and

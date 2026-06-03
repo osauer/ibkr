@@ -140,10 +140,10 @@ is downgraded from stress to watch.
 - Canary adds portfolio-specific lift beyond regime alone: sourced holdout
   portfolio-stress recall moves from 75% regime-only to 100% canary, with one
   additional portfolio true positive.
-- Canary lifecycle metrics are now first-class: early-warning recall of later
+- Canary action/readiness metrics are now first-class: watch recall of later
   confirmed stress is 100% on the sourced holdout, median lead is 1.0 day,
-  panic/forced-defense recall is 100%, and stabilization/opportunity false
-  starts are 0.
+  and action buckets are tracked separately from the stateless canary JSON
+  surface.
 - Category reporting is split for market-driven, portfolio-driven,
   concentration-driven, margin-driven, options-driven, and data-quality cases.
   Current sourced holdout has no options-driven rows, so that slice is

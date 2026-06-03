@@ -34,10 +34,10 @@ func TestCanaryBacktestSampleProducesSignalMetrics(t *testing.T) {
 	if got, want := res.Metrics.WatchMiss, 0; got != want {
 		t.Fatalf("watch_miss = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.WatchFalsePositive, 1; got != want {
+	if got, want := res.Metrics.WatchFalsePositive, 3; got != want {
 		t.Fatalf("watch_false_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.ActTruePositive, 6; got != want {
+	if got, want := res.Metrics.ActTruePositive, 0; got != want {
 		t.Fatalf("act_true_positive = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.RebalanceWatch, 7; got != want {
@@ -70,7 +70,7 @@ func TestRunBacktestCanaryRendersText(t *testing.T) {
 		"Canary Backtest",
 		"18 observations",
 		"precision 69%",
-		"Watch        precision 90%",
+		"Watch        precision 75%",
 		"2024 yen carry unwind",
 		"Risk budget",
 		"data-quality watch",
