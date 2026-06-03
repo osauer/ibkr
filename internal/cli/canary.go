@@ -169,7 +169,9 @@ func canaryHasActiveMarginContext(acct rpc.AccountResult) bool {
 func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMarketSummary {
 	out := CanaryMarketSummary{
 		RegimeVerdict: r.Composite.Verdict,
+		SPYPrice:      r.HYGSPYDivergence.SPYPrice,
 		SPYChangePct:  r.HYGSPYDivergence.SPYChangePct,
+		VIX:           r.VIXTermStructure.VIX,
 		VIXChangePct:  r.VIXTermStructure.VIXChangePct,
 	}
 	contextClusters := canaryMarketContextClusters(r, now)

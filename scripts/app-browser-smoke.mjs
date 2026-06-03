@@ -124,6 +124,7 @@ try {
   const eventsBefore = await fetchEventsDiagnostics(page);
   const privacy = await exerciseAccountPrivacy(page);
   const canaryDetail = await exerciseCanaryDetail(page);
+  const marketContext = await exerciseMarketContext(page);
   await openDebugTools(page);
   await page.locator('[data-tool="snapshot"]').click();
   await page.waitForFunction(() => {
@@ -156,6 +157,7 @@ try {
     push_state: pushState,
     privacy,
     canary_detail: canaryDetail,
+    market_context: marketContext,
     events: {
       subscribers: eventsBefore.subscribers,
       last_event_at: eventsBefore.last_event_at,
@@ -255,6 +257,10 @@ async function exerciseAccountPrivacy(page) {
 }
 
 async function exerciseCanaryDetail(page) {
+  const timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
+  if (!timestamp || timestamp === "--" || timestamp === "updated --") {
+    throw new Error("canary timestamp is missing");
+  }
   await page.locator("#canaryDetailToggle").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("canaryDetailPanel");
@@ -265,7 +271,71 @@ async function exerciseCanaryDetail(page) {
     drivers: document.getElementById("canaryDrivers")?.children.length || 0,
   }));
   await page.locator("#canaryDetailToggle").click();
-  return { opens: true, cards: counts.cards, drivers: counts.drivers };
+  return { opens: true, timestamp, cards: counts.cards, drivers: counts.drivers };
+}
+
+async function exerciseMarketContext(page) {
+  let before = await readMarketContext(page);
+  if ((!before.regime || before.regime === "--") && !lifecycle) {
+    try {
+      await page.waitForFunction(() => {
+        const text = document.getElementById("marketRegime")?.textContent?.trim() || "";
+        return text && text !== "--";
+      }, { timeout: 10000 });
+      before = await readMarketContext(page);
+    } catch {
+      // Keep the no-value assertion below for app instances without live data.
+    }
+  }
+  if (before.spyLevel !== "--" && before.spyChange === "--") {
+    throw new Error("SPY has a level but no percent change");
+  }
+  if (before.vixLevel !== "--" && before.vixChange === "--") {
+    throw new Error("VIX has a level but no percent change");
+  }
+  if (!before.regime || before.regime === "--") {
+    if (before.weather !== "weather-na") {
+      throw new Error(`empty market regime should use weather-na, got ${JSON.stringify(before.weather)}`);
+    }
+    return {
+      no_value: true,
+      weather: before.weather,
+      spy_level_present: before.spyLevel !== "--",
+      vix_level_present: before.vixLevel !== "--",
+      indicators: 0,
+    };
+  }
+  if (!["weather-green", "weather-amber", "weather-red"].includes(before.weather)) {
+    throw new Error(`market weather is not color coded, got ${JSON.stringify(before.weather)}`);
+  }
+  await page.locator("#marketRegimeToggle").click();
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("regimeDetailPanel");
+    return panel && !panel.hidden;
+  }, { timeout: 5000 });
+  const indicators = await page.evaluate(() => document.getElementById("regimeIndicators")?.children.length || 0);
+  if (indicators === 0) {
+    throw new Error("market regime detail is empty");
+  }
+  await page.locator("#marketRegimeToggle").click();
+  return {
+    regime: before.regime,
+    weather: before.weather,
+    spy_level_present: before.spyLevel !== "--",
+    vix_level_present: before.vixLevel !== "--",
+    indicators,
+  };
+}
+
+async function readMarketContext(page) {
+  return page.evaluate(() => ({
+    spyLevel: document.getElementById("spyLevel")?.textContent?.trim() || "",
+    spyChange: document.getElementById("spyChange")?.textContent?.trim() || "",
+    vixLevel: document.getElementById("vixLevel")?.textContent?.trim() || "",
+    vixChange: document.getElementById("vixChange")?.textContent?.trim() || "",
+    regime: document.getElementById("marketRegime")?.textContent?.trim() || "",
+    weather: [...(document.getElementById("marketRegimeToggle")?.classList || [])].find((name) => name.startsWith("weather-")) || "",
+  }));
 }
 
 async function openDebugTools(page) {

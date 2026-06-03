@@ -7,6 +7,7 @@ const state = {
   reconnectTimer: null,
   accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
   canaryDetailOpen: false,
+  regimeDetailOpen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -198,7 +199,7 @@ function renderAll() {
   const positions = snap.positions || {};
   const canary = snap.canary || {};
   renderAccountValue(account);
-  $("dailyPnl").textContent = account.daily_pnl == null ? "--" : money(account.daily_pnl, account.base_currency);
+  renderSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
   $("cushion").textContent = typeof account.cushion === "number" ? pct(account.cushion * 100) : "--";
   $("accountAsOf").textContent = shortTime(account.as_of);
   $("positionsAsOf").textContent = shortTime(positions.as_of);
@@ -208,6 +209,7 @@ function renderAll() {
   $("canarySeverity").textContent = canary.severity || "--";
   $("canaryAction").textContent = (canary.action || "--").replaceAll("_", " ");
   $("canarySummary").textContent = canary.summary || "Waiting for canary snapshot.";
+  renderCanaryTimestamp(canary);
   renderMarketContext(canary);
   renderCanaryDetail(canary);
   renderPortfolioRisk(positions, account);
@@ -263,12 +265,67 @@ function renderCanaryDetail(canary) {
   }));
 }
 
+function renderCanaryTimestamp(canary) {
+  const el = $("canaryAsOf");
+  const at = parseDate(canary.as_of);
+  if (!at) {
+    el.textContent = "no timestamp";
+    el.classList.add("stale");
+    return;
+  }
+  const ageMS = Date.now() - at.getTime();
+  const ageMinutes = Math.max(0, Math.floor(ageMS / 60000));
+  const stale = ageMinutes >= 5;
+  el.textContent = `${stale ? "stale" : "updated"} ${shortTime(canary.as_of)} · ${ageLabel(ageMinutes)}`;
+  el.classList.toggle("stale", stale);
+}
+
 function renderMarketContext(canary) {
   const market = canary.market || {};
+  const indicators = canary.market_indicators || [];
   $("marketAsOf").textContent = shortTime(canary.as_of);
+  $("spyLevel").textContent = numberRead(market.spy_price);
+  $("vixLevel").textContent = numberRead(market.vix);
   renderSignedPercent("spyChange", market.spy_change_pct, false);
   renderSignedPercent("vixChange", market.vix_change_pct, true);
   $("marketRegime").textContent = cleanDetail(market.regime_verdict);
+  renderMarketWeather(market, indicators);
+  renderRegimeDetail(indicators);
+}
+
+function renderMarketWeather(market, indicators) {
+  const tone = marketWeatherTone(market, indicators);
+  const button = $("marketRegimeToggle");
+  button.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
+  button.classList.add("weather-" + tone);
+}
+
+function marketWeatherTone(market, indicators) {
+  const redClusters = Number(market.red_clusters || 0);
+  const yellowClusters = Number(market.yellow_clusters || 0);
+  const rankedClusters = Number(market.ranked_clusters || 0);
+  const cautionLists = [
+    market.ambiguous_clusters,
+    market.partial_clusters,
+    market.computing_clusters,
+    market.degraded_clusters,
+    market.stale_clusters,
+    market.unconfirmed_red_cluster_names,
+  ];
+  if (redClusters > 0) return "red";
+  if (yellowClusters > 0 || cautionLists.some((items) => Array.isArray(items) && items.length > 0)) return "amber";
+  if (rankedClusters > 0) return "green";
+
+  const statuses = (indicators || []).map((indicator) => indicatorStatusClass(indicator.status));
+  if (statuses.includes("red")) return "red";
+  if (statuses.some((status) => ["amber", "context", "na"].includes(status))) return "amber";
+  if (statuses.includes("green")) return "green";
+
+  const verdict = String(market.regime_verdict || "").toLowerCase();
+  if (!verdict) return "na";
+  if (verdict.includes("broad stress") || verdict.includes("stress signal") || verdict.includes("red")) return "red";
+  if (verdict.includes("normal") || verdict.includes("green") || verdict.includes("constructive")) return "green";
+  return "amber";
 }
 
 function renderSignedPercent(id, value, positiveIsRisk) {
@@ -283,6 +340,45 @@ function renderSignedPercent(id, value, positiveIsRisk) {
   const isOk = positiveIsRisk ? value < 0 : value > 0;
   if (isRisk) el.classList.add("risk");
   if (isOk) el.classList.add("ok");
+}
+
+function renderRegimeDetail(indicators) {
+  const panel = $("regimeDetailPanel");
+  const button = $("marketRegimeToggle");
+  panel.hidden = !state.regimeDetailOpen;
+  button.setAttribute("aria-expanded", String(state.regimeDetailOpen));
+  if (!state.regimeDetailOpen) return;
+  $("regimeIndicators").replaceChildren(...indicators.map((indicator) => {
+    const row = document.createElement("div");
+    row.className = "indicator-row";
+    const dot = document.createElement("span");
+    dot.className = "indicator-status " + indicatorStatusClass(indicator.status);
+    const body = document.createElement("div");
+    body.className = "indicator-body";
+    const head = document.createElement("div");
+    head.className = "indicator-head";
+    const title = document.createElement("b");
+    title.textContent = indicator.name || "Indicator";
+    const at = document.createElement("span");
+    at.textContent = indicator.as_of || "--";
+    head.append(title, at);
+    const reading = document.createElement("p");
+    reading.textContent = indicator.reading || "--";
+    body.append(head, reading);
+    if (indicator.comment) {
+      const comment = document.createElement("small");
+      comment.textContent = indicator.comment;
+      body.append(comment);
+    }
+    row.append(dot, body);
+    return row;
+  }));
+}
+
+function indicatorStatusClass(status) {
+  status = String(status || "").toLowerCase();
+  if (["green", "amber", "red", "context"].includes(status)) return status;
+  return "na";
 }
 
 function detailCard(label, value) {
@@ -323,7 +419,15 @@ function renderPortfolioRisk(positions, account) {
     label.textContent = exposure.underlying + pctText;
     const value = document.createElement("b");
     value.textContent = money(exposure.market_value_base, exposure.base_currency || baseCurrency);
+    value.className = "exposure-value";
     row.append(label, value);
+    const pnl = exposure.daily_pnl_base ?? exposure.unrealized_pnl_base;
+    if (typeof pnl === "number") {
+      const detail = document.createElement("small");
+      detail.className = signedClass(pnl);
+      detail.textContent = "P/L " + money(pnl, exposure.base_currency || baseCurrency);
+      value.append(detail);
+    }
     return row;
   }));
 }
@@ -405,6 +509,10 @@ $("accountPrivacyToggle").addEventListener("click", () => {
 $("canaryDetailToggle").addEventListener("click", () => {
   state.canaryDetailOpen = !state.canaryDetailOpen;
   renderCanaryDetail(state.snapshot?.canary || {});
+});
+$("marketRegimeToggle").addEventListener("click", () => {
+  state.regimeDetailOpen = !state.regimeDetailOpen;
+  renderRegimeDetail(state.snapshot?.canary?.market_indicators || []);
 });
 
 document.querySelectorAll("[data-tool]").forEach((button) => {
@@ -522,6 +630,22 @@ function money(value, currency) {
   return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
 }
 
+function renderSignedMoney(id, value, currency) {
+  const el = $(id);
+  el.className = signedClass(value);
+  el.textContent = typeof value === "number" ? money(value, currency) : "--";
+}
+
+function signedClass(value) {
+  if (typeof value !== "number" || value === 0) return "signed";
+  return "signed " + (value > 0 ? "ok" : "risk");
+}
+
+function numberRead(value) {
+  if (typeof value !== "number") return "--";
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+}
+
 function pct(value) {
   if (typeof value !== "number") return "--";
   return value.toFixed(1) + "%";
@@ -536,6 +660,20 @@ function signedPct(value) {
 function cleanDetail(value) {
   if (!value) return "--";
   return String(value).replaceAll("_", " ");
+}
+
+function ageLabel(minutes) {
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m old`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours}h old` : `${hours}h ${rest}m old`;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const at = new Date(value);
+  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 function shortTime(value) {

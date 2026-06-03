@@ -990,6 +990,32 @@ func TestComputeCanaryMarketIndicatorsCarryDecisionContext(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryMarketSummaryCarriesTapeLevels(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.HYGSPYDivergence.SPYPrice = new(512.34)
+	r.HYGSPYDivergence.SPYChangePct = new(-0.75)
+	r.VIXTermStructure.VIX = new(16.34)
+	r.VIXTermStructure.VIXChangePct = new(3.61)
+
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  r,
+	})
+	if res.Market.SPYPrice == nil || *res.Market.SPYPrice != 512.34 {
+		t.Fatalf("spy_price = %v, want 512.34", res.Market.SPYPrice)
+	}
+	if res.Market.VIX == nil || *res.Market.VIX != 16.34 {
+		t.Fatalf("vix = %v, want 16.34", res.Market.VIX)
+	}
+	if res.Market.SPYChangePct == nil || *res.Market.SPYChangePct != -0.75 {
+		t.Fatalf("spy_change_pct = %v, want -0.75", res.Market.SPYChangePct)
+	}
+	if res.Market.VIXChangePct == nil || *res.Market.VIXChangePct != 3.61 {
+		t.Fatalf("vix_change_pct = %v, want 3.61", res.Market.VIXChangePct)
+	}
+}
+
 func TestComputeCanaryMarginPressureDoesNotActWithoutMarketConfirmation(t *testing.T) {
 	t.Parallel()
 	acct := baseCanaryAccount()

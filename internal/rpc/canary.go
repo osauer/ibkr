@@ -106,6 +106,8 @@ type CanaryMarketSummary struct {
 	ComputingClusters          []string `json:"computing_clusters,omitempty"`
 	DegradedClusters           []string `json:"degraded_clusters,omitempty"`
 	StaleClusters              []string `json:"stale_clusters,omitempty"`
+	SPYPrice                   *float64 `json:"spy_price,omitempty"`
 	SPYChangePct               *float64 `json:"spy_change_pct,omitempty"`
+	VIX                        *float64 `json:"vix,omitempty"`
 	VIXChangePct               *float64 `json:"vix_change_pct,omitempty"`
 }
