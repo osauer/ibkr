@@ -122,6 +122,8 @@ try {
   const connection = await waitForConnection(page, "Live");
   const pushState = await page.locator("#pushState").textContent();
   const eventsBefore = await fetchEventsDiagnostics(page);
+  const privacy = await exerciseAccountPrivacy(page);
+  const canaryDetail = await exerciseCanaryDetail(page);
   await openDebugTools(page);
   await page.locator('[data-tool="snapshot"]').click();
   await page.waitForFunction(() => {
@@ -152,6 +154,8 @@ try {
     title,
     connection,
     push_state: pushState,
+    privacy,
+    canary_detail: canaryDetail,
     events: {
       subscribers: eventsBefore.subscribers,
       last_event_at: eventsBefore.last_event_at,
@@ -229,6 +233,39 @@ async function fetchEventsDiagnostics(page) {
     throw new Error(`expected at least one SSE subscriber, got ${events.subscribers}`);
   }
   return events;
+}
+
+async function exerciseAccountPrivacy(page) {
+  const value = page.locator("#netLiquidation");
+  const before = (await value.textContent())?.trim();
+  if (before === "--") {
+    return { masked_by_default: false, toggle_reveals: false, no_value: true };
+  }
+  if (before !== "******") {
+    throw new Error(`net liquidation should be masked by default, got ${JSON.stringify(before)}`);
+  }
+  await page.locator("#accountPrivacyToggle").click();
+  await page.waitForFunction(() => {
+    const text = document.getElementById("netLiquidation")?.textContent?.trim();
+    return text && text !== "******" && text !== "--";
+  }, { timeout: 5000 });
+  await page.locator("#accountPrivacyToggle").click();
+  await page.waitForFunction(() => document.getElementById("netLiquidation")?.textContent?.trim() === "******", { timeout: 5000 });
+  return { masked_by_default: true, toggle_reveals: true };
+}
+
+async function exerciseCanaryDetail(page) {
+  await page.locator("#canaryDetailToggle").click();
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("canaryDetailPanel");
+    return panel && !panel.hidden && document.getElementById("canaryDetailGrid")?.children.length >= 4;
+  }, { timeout: 5000 });
+  const counts = await page.evaluate(() => ({
+    cards: document.getElementById("canaryDetailGrid")?.children.length || 0,
+    drivers: document.getElementById("canaryDrivers")?.children.length || 0,
+  }));
+  await page.locator("#canaryDetailToggle").click();
+  return { opens: true, cards: counts.cards, drivers: counts.drivers };
 }
 
 async function openDebugTools(page) {

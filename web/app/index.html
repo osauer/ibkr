@@ -44,12 +44,51 @@
           </div>
           <strong id="canaryAction">--</strong>
           <p id="canarySummary">Waiting for canary snapshot.</p>
+          <button class="ghost-button" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
+            Show detail
+          </button>
+          <div class="detail-panel" id="canaryDetailPanel" hidden>
+            <div class="detail-grid" id="canaryDetailGrid"></div>
+            <div class="detail-list" id="canaryDrivers"></div>
+          </div>
+        </article>
+
+        <article class="panel market-panel">
+          <div class="panel-head">
+            <span>Market context</span>
+            <span id="marketAsOf">--</span>
+          </div>
+          <div class="market-grid">
+            <div class="market-tile">
+              <span>SPY</span>
+              <b class="market-value" id="spyChange">--</b>
+              <small>Broad tape</small>
+            </div>
+            <div class="market-tile">
+              <span>VIX</span>
+              <b class="market-value" id="vixChange">--</b>
+              <small>Volatility</small>
+            </div>
+          </div>
+          <div class="market-regime">
+            <span>Regime</span>
+            <b id="marketRegime">--</b>
+          </div>
         </article>
 
         <article class="panel account-panel">
           <div class="panel-head">
             <span>Account</span>
-            <span id="accountAsOf">--</span>
+            <span class="panel-actions">
+              <button class="icon-button" id="accountPrivacyToggle" type="button" aria-label="Show net liquidation" aria-pressed="false" title="Show net liquidation">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2.1 12s3.4-6 9.9-6 9.9 6 9.9 6-3.4 6-9.9 6-9.9-6-9.9-6Z"></path>
+                  <circle cx="12" cy="12" r="2.8"></circle>
+                  <path class="eye-slash" d="M4 4l16 16"></path>
+                </svg>
+              </button>
+              <span id="accountAsOf">--</span>
+            </span>
           </div>
           <div class="account-primary">
             <span>Net liquidation</span>
