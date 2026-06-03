@@ -42,6 +42,7 @@
             <span>Canary</span>
             <span class="severity-pill" id="canarySeverity">--</span>
           </div>
+          <span class="hero-time" id="canaryAsOf">--</span>
           <strong id="canaryAction">--</strong>
           <p id="canarySummary">Waiting for canary snapshot.</p>
           <button class="ghost-button" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
@@ -61,18 +62,21 @@
           <div class="market-grid">
             <div class="market-tile">
               <span>SPY</span>
-              <b class="market-value" id="spyChange">--</b>
-              <small>Broad tape</small>
+              <b id="spyLevel">--</b>
+              <small class="market-change" id="spyChange">--</small>
             </div>
             <div class="market-tile">
               <span>VIX</span>
-              <b class="market-value" id="vixChange">--</b>
-              <small>Volatility</small>
+              <b id="vixLevel">--</b>
+              <small class="market-change" id="vixChange">--</small>
             </div>
           </div>
-          <div class="market-regime">
+          <button class="market-regime weather-na" id="marketRegimeToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
             <span>Regime</span>
             <b id="marketRegime">--</b>
+          </button>
+          <div class="regime-detail-panel" id="regimeDetailPanel" hidden>
+            <div class="regime-indicators" id="regimeIndicators"></div>
           </div>
         </article>
 
