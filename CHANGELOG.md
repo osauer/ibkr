@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.6.1 — 2026-06-03 14:53 CEST
+
+### What's new
+
+- `ibkr regime`, `ibkr gamma`, and `ibkr canary` now present dealer-gamma and broad-market stress as trader-facing market-structure reads instead of exposing internal voting, gate, and cache mechanics.
+- Regime funding and credit inputs now use official daily series with caching: Fed commercial paper, U.S. Treasury bill rates, and FRED HY/IG OAS.
+
+### Changed
+
+- Tightened default regime, gamma, and canary wording around gamma rankability, cached snapshots, market context, and data quality while keeping JSON/schema contracts stable.
+- Moved source/provenance mechanics toward explain and diagnostics output, and refreshed MCP and generated reference descriptions to match the new semantics.
+
+### Fixed
+
+- Fixed regime funding-spread and HY/IG OAS fetch behavior so official daily indicators can be served from cache when live connectivity is otherwise healthy.
+- Fixed gamma cache quality handling so a valid closed-session cached snapshot can remain a rankable market-structure signal instead of being downgraded by regime or canary.
+
 ## v1.6.0 — 2026-06-02 14:52 CEST
 
 ### What's new
