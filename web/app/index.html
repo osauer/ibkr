@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#f7f8fa">
+    <meta name="theme-color" content="#f6f7f9">
     <title>ibkr app</title>
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
@@ -11,13 +11,58 @@
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
-        <div>
-          <h1>ibkr</h1>
-          <p class="status-banner" id="connectionLine">Market calendar loading</p>
+      <header class="app-header">
+        <div class="brand-block">
+          <h1>IBKR Private</h1>
+          <p>Personal risk monitor</p>
         </div>
-        <div class="status-dot" id="statusDot" aria-label="app connection status"></div>
+        <button class="account-chip" id="accountMenuToggle" type="button" aria-label="Account menu" aria-expanded="false" aria-controls="accountMenu">
+          <span class="account-chip__icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3.25 18.5 5.8v5.7c0 4.8-2.6 8.6-6.5 10.25C8.1 19.1 5.5 15.3 5.5 11.5V5.8L12 3.25Z"></path>
+            </svg>
+          </span>
+          <span>Account</span>
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
+          </svg>
+        </button>
       </header>
+
+      <section class="account-menu" id="accountMenu" hidden>
+        <div>
+          <span>Account</span>
+          <b id="menuAccountID">--</b>
+        </div>
+        <div>
+          <span>Type</span>
+          <b id="menuAccountType">--</b>
+        </div>
+        <div>
+          <span>Base</span>
+          <b id="menuBaseCurrency">--</b>
+        </div>
+        <div>
+          <span>Last account sync</span>
+          <b id="menuAccountSync">--</b>
+        </div>
+      </section>
+
+      <section class="market-strip" aria-live="polite">
+        <div class="market-strip__status">
+          <span class="market-strip__pulse" aria-hidden="true"></span>
+          <span class="market-strip__phase" id="sessionPhase">Syncing</span>
+        </div>
+        <div class="market-strip__clock">
+          <span class="market-strip__label" id="sessionLabel">Waiting</span>
+          <b class="market-strip__countdown" id="sessionCountdown">--:--:--</b>
+          <span class="market-strip__meta" id="sessionMeta">HH:MM:SS</span>
+        </div>
+        <div class="market-strip__side">
+          <p class="status-banner" id="connectionLine">Waiting for official market calendar</p>
+          <span class="status-dot" id="statusDot" aria-label="app connection status"></span>
+        </div>
+      </section>
 
       <section class="banner-stack" aria-live="polite">
         <div class="source-banner" id="sourceErrorBanner" role="status" hidden>
@@ -31,20 +76,62 @@
       </section>
 
       <section class="pairing" id="pairingPanel" hidden>
-        <h2>Pair this device</h2>
-        <p id="pairingText">Completing secure pairing with the Mac.</p>
-        <button id="retryAuthButton" type="button">Retry</button>
+        <div class="pairing__body">
+          <div>
+            <h2>Pair this device</h2>
+            <p id="pairingText">Completing secure pairing with the Mac.</p>
+          </div>
+          <button id="retryAuthButton" type="button">Retry</button>
+        </div>
       </section>
 
-      <section class="summary-grid" id="dashboard" hidden>
-        <article class="panel hero-panel canary-hero">
-          <div class="panel-head">
-            <span>Canary</span>
-            <span class="severity-pill" id="canarySeverity">--</span>
+      <section class="dashboard" id="dashboard" hidden>
+        <article class="panel hero-panel canary-hero" id="canaryHero">
+          <div class="panel-head panel-head--hero">
+            <span>Portfolio Canary</span>
+            <button class="panel-chevron panel-chevron--light" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
+              Show detail
+            </button>
           </div>
-          <span class="hero-time" id="canaryAsOf">--</span>
-          <strong id="canaryAction">--</strong>
-          <p id="canarySummary">Waiting for canary snapshot.</p>
+          <div class="canary-hero__grid">
+            <div class="canary-hero__copy">
+              <span class="hero-time" id="canaryAsOf">--</span>
+              <strong id="canaryAction">--</strong>
+              <p id="canarySummary">Waiting for canary snapshot.</p>
+            </div>
+            <div class="canary-gauge" aria-hidden="true">
+              <svg viewBox="0 0 160 160" class="canary-gauge__svg">
+                <path class="shield-outline" d="M80 10 126 28v45c0 37-18.4 65.6-46 77-27.6-11.4-46-40-46-77V28L80 10Z"></path>
+                <path class="gauge-arc gauge-arc--ok" d="M42 92a48 48 0 0 1 18-37"></path>
+                <path class="gauge-arc gauge-arc--support" d="M62 53a48 48 0 0 1 25-5"></path>
+                <path class="gauge-arc gauge-arc--warn" d="M91 49a48 48 0 0 1 28 25"></path>
+                <path class="gauge-needle" d="M80 91 111 65"></path>
+                <circle class="gauge-pin" cx="80" cy="91" r="8"></circle>
+              </svg>
+              <div class="canary-gauge__label">
+                <small>Risk</small>
+                <span id="canaryGlyphMode">--</span>
+              </div>
+            </div>
+          </div>
+          <div class="canary-chip-row" aria-label="Canary status">
+            <div class="canary-chip canary-chip--mode">
+              <i aria-hidden="true"></i>
+              <span>Mode</span>
+              <b id="canaryMode">--</b>
+            </div>
+            <div class="canary-chip canary-chip--warn">
+              <i aria-hidden="true"></i>
+              <span>Warnings</span>
+              <b id="canaryWarningCount">--</b>
+            </div>
+            <div class="canary-chip canary-chip--check">
+              <i aria-hidden="true"></i>
+              <span>Checks</span>
+              <b id="canaryCheckCount">--</b>
+            </div>
+          </div>
+          <span class="severity-pill" id="canarySeverity">--</span>
           <div class="alert-focus" id="selectedAlertPanel" hidden>
             <div>
               <span>Selected alert</span>
@@ -52,12 +139,9 @@
               <p id="selectedAlertBody">--</p>
               <small id="selectedAlertTime">--</small>
             </div>
-            <button class="text-button" id="clearSelectedAlertButton" type="button">Clear</button>
+            <button class="text-button text-button--dark" id="clearSelectedAlertButton" type="button">Clear</button>
           </div>
-          <button class="ghost-button" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
-            Show detail
-          </button>
-          <div class="detail-panel" id="canaryDetailPanel" hidden>
+          <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
             <div class="detail-grid" id="canaryDetailGrid"></div>
             <div class="detail-list" id="canaryDrivers"></div>
           </div>
@@ -65,25 +149,39 @@
 
         <article class="panel market-panel">
           <div class="panel-head">
-            <span>Market context</span>
+            <span>Market Context</span>
             <span id="marketAsOf">--</span>
           </div>
           <div class="market-grid">
-            <div class="market-tile">
+            <div class="market-tile market-tile--spy">
               <span>SPY</span>
               <b id="spyLevel">--</b>
               <small class="market-change" id="spyChange">--</small>
+              <div class="sparkline sparkline--spy" aria-hidden="true"></div>
+              <em>S&amp;P 500 ETF</em>
             </div>
-            <div class="market-tile">
+            <div class="market-tile market-tile--vix">
               <span>VIX</span>
               <b id="vixLevel">--</b>
               <small class="market-change" id="vixChange">--</small>
+              <div class="sparkline sparkline--vix" aria-hidden="true"></div>
+              <em>Volatility Index</em>
             </div>
+            <div class="market-tile market-tile--nasdaq">
+              <span>QQQ</span>
+              <b id="nasdaqLevel">--</b>
+              <small class="market-change" id="nasdaqChange">--</small>
+              <div class="sparkline sparkline--nasdaq" aria-hidden="true"></div>
+              <em>Nasdaq 100</em>
+            </div>
+            <button class="market-regime weather-na" id="marketRegimeToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
+              <span>Regime</span>
+              <b id="marketRegime">--</b>
+              <small id="marketRegimeSummary">Latest regime read</small>
+              <em id="marketRegimeMix">Waiting for market evidence</em>
+              <strong>View details</strong>
+            </button>
           </div>
-          <button class="market-regime weather-na" id="marketRegimeToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
-            <span>Regime</span>
-            <b id="marketRegime">--</b>
-          </button>
           <div class="regime-detail-panel" id="regimeDetailPanel" hidden>
             <div class="regime-indicators" id="regimeIndicators"></div>
           </div>
@@ -92,125 +190,165 @@
         <article class="panel account-panel">
           <div class="panel-head">
             <span>Account</span>
-            <span class="panel-actions">
-              <button class="icon-button" id="accountPrivacyToggle" type="button" aria-label="Show net liquidation" aria-pressed="false" title="Show net liquidation">
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M2.1 12s3.4-6 9.9-6 9.9 6 9.9 6-3.4 6-9.9 6-9.9-6-9.9-6Z"></path>
-                  <circle cx="12" cy="12" r="2.8"></circle>
-                  <path class="eye-slash" d="M4 4l16 16"></path>
-                </svg>
-              </button>
-              <span id="accountAsOf">--</span>
+            <span class="account-hidden-state">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"></path>
+                <circle cx="12" cy="12" r="2.6"></circle>
+                <path d="m4 4 16 16"></path>
+              </svg>
+              <span id="accountPrivacyState">Hidden</span>
             </span>
+            <button class="text-link" id="accountPrivacyToggle" type="button" aria-label="Show account values" aria-pressed="false" title="Show account values">
+              <span id="accountPrivacyLabel">Show values</span>
+            </button>
+            <span class="panel-time" id="accountAsOf">--</span>
           </div>
-          <div class="account-primary">
-            <span>Net liquidation</span>
-            <strong id="netLiquidation">--</strong>
-          </div>
-          <div class="metric-strip">
-            <div>
-              <span>Daily P/L</span>
-              <b id="dailyPnl">--</b>
+          <div class="account-metrics">
+            <div class="account-primary">
+              <span>Net Liquidation</span>
+              <strong id="netLiquidation">--</strong>
             </div>
-            <div>
-              <span>Cushion</span>
-              <b id="cushion">--</b>
+            <div class="account-primary">
+              <span>Buying Power</span>
+              <strong id="buyingPower">--</strong>
+            </div>
+            <div class="account-primary">
+              <span>Daily P&amp;L</span>
+              <strong id="dailyPnl">--</strong>
+            </div>
+            <div class="account-primary">
+              <span>Account</span>
+              <strong id="accountID">--</strong>
             </div>
           </div>
+          <p class="private-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10"></path>
+              <rect x="5" y="10" width="14" height="11" rx="2"></rect>
+            </svg>
+            <span id="accountPrivacyNote">Values are hidden. Enable to view your account metrics.</span>
+          </p>
+          <span class="sr-only" id="cushion">--</span>
         </article>
 
         <article class="panel portfolio-panel">
           <div class="panel-head">
-            <span>Portfolio risk</span>
-            <span id="positionsAsOf">--</span>
+            <span>Portfolio Risk</span>
+            <button class="panel-chevron" id="portfolioDetailToggle" type="button" aria-expanded="false" aria-controls="portfolioDetailPanel">
+              Detail
+            </button>
+            <span class="panel-time" id="positionsAsOf">--</span>
           </div>
-          <div class="risk-metrics">
-            <div>
-              <span>Dollar delta</span>
-              <b id="portfolioDollarDelta">--</b>
+          <div class="portfolio-layout">
+            <div class="portfolio-lede">
+              <span>Net Delta (Market Risk)</span>
+              <strong id="portfolioDollarDelta">--</strong>
+              <button class="text-link text-link--muted" type="button" aria-disabled="true">What this means</button>
             </div>
-            <div>
-              <span>Theta/day</span>
-              <b id="portfolioDailyTheta">--</b>
-            </div>
-            <div>
-              <span>Greeks</span>
-              <b id="portfolioGreeksCoverage">--</b>
-            </div>
-            <div>
-              <span>FX 1%</span>
-              <b id="portfolioFxSensitivity">--</b>
+            <div class="exposure-composition">
+              <span>Exposure Composition</span>
+              <div class="exposure-visual" id="portfolioExposureVisual" hidden></div>
             </div>
           </div>
-          <button class="section-toggle" id="portfolioDetailToggle" type="button" aria-expanded="false" aria-controls="portfolioDetailPanel">
-            <span>Portfolio details</span>
-            <b id="portfolioDetailSummary">--</b>
-          </button>
+          <div class="greeks-row">
+            <span class="greeks-copy">
+              <span>Option Greeks Ready</span>
+              <small id="portfolioGreeksMeaning">Model Greeks available for option legs.</small>
+            </span>
+            <b id="portfolioGreeksCoverage">--</b>
+            <span class="sr-only" id="portfolioDailyTheta">--</span>
+            <span class="sr-only" id="portfolioFxSensitivity">--</span>
+            <span class="sr-only" id="portfolioDetailSummary">--</span>
+          </div>
+          <p class="portfolio-risk-hint">Dollar delta is the fastest read on market risk: estimated portfolio P/L for a one-point move in the held underlyings.</p>
           <div class="portfolio-detail-panel" id="portfolioDetailPanel" hidden>
             <div class="detail-list" id="portfolioDetailList"></div>
-          </div>
-          <div class="exposure-list" id="portfolioExposureList" hidden></div>
-          <div class="metric-row">
-            <span>Stocks</span>
-            <b id="stockCount">0</b>
-          </div>
-          <div class="metric-row">
-            <span>Options</span>
-            <b id="optionCount">0</b>
-          </div>
-          <div class="metric-row">
-            <span>Base</span>
-            <b id="baseCurrency">--</b>
+            <div class="exposure-list" id="portfolioExposureList" hidden></div>
+            <div class="portfolio-summary">
+              <div class="metric-row">
+                <span>Stocks</span>
+                <b id="stockCount">0</b>
+              </div>
+              <div class="metric-row">
+                <span>Options</span>
+                <b id="optionCount">0</b>
+              </div>
+              <div class="metric-row">
+                <span>Base</span>
+                <b id="baseCurrency">--</b>
+              </div>
+            </div>
           </div>
         </article>
 
-        <article class="panel">
-          <div class="panel-head">
-            <span>Alerts</span>
-            <span id="pushState">push off</span>
+        <details class="panel alerts-panel" id="alertsPanel" hidden open>
+          <summary class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6.5 10.5a5.5 5.5 0 0 1 11 0c0 5 2 5.5 2 7H4.5c0-1.5 2-2 2-7Z"></path>
+                <path d="M10 20a2.3 2.3 0 0 0 4 0"></path>
+              </svg>
+              Alerts
+            </span>
+            <span class="alert-active-count" id="alertCount">0 Active</span>
+          </summary>
+          <div class="alerts-body">
+            <div class="alerts-filter-bar">
+              <span class="segments" id="alertViewSegments" aria-label="Alert filter">
+                <button class="active" type="button" data-alert-filter="all">All</button>
+                <button type="button" data-alert-filter="warnings">Warnings</button>
+                <button type="button" data-alert-filter="info">Info</button>
+              </span>
+            </div>
+            <div class="list" id="alertsList"></div>
+            <div class="alerts-toolbar">
+              <span id="alertsHint">No alert history yet.</span>
+              <button class="text-link" id="clearAlertsButton" type="button">Clear history</button>
+            </div>
+            <div class="alert-settings">
+              <span id="pushState">push off</span>
+              <div class="segments segments--settings" id="alertSegments">
+                <button type="button" data-mode="none">None</button>
+                <button type="button" data-mode="act_only">Act only</button>
+                <button type="button" data-mode="watch_and_act">Watch + act</button>
+              </div>
+              <button class="primary" id="enablePushButton" type="button">Enable phone alerts</button>
+            </div>
           </div>
-          <div class="segments" id="alertSegments">
-            <button type="button" data-mode="none">None</button>
-            <button type="button" data-mode="act_only">Act only</button>
-            <button type="button" data-mode="watch_and_act">Watch + act</button>
+        </details>
+
+        <details class="panel tools" id="toolsPanel" hidden open>
+          <summary class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m14.5 5.5 4-4 2 2-4 4"></path>
+                <path d="M13 7 4.5 15.5a3 3 0 0 0 4.25 4.25L17 11"></path>
+                <path d="m7.5 14.5 3 3"></path>
+              </svg>
+              Debug tools
+            </span>
+            <span>Development only</span>
+          </summary>
+          <div class="tools-body">
+            <div class="tool-grid">
+              <button type="button" data-tool="snapshot"><span>Snap &amp; Save</span><small>Capture current snapshot</small></button>
+              <button type="button" data-tool="status"><span>App Diagnostics</span><small>Health, subsystems, data quality</small></button>
+              <button type="button" data-tool="events"><span>Event Stream</span><small>SSE subscribers and latest events</small></button>
+              <button type="button" data-tool="auth"><span>Auth State</span><small>Paired devices and session state</small></button>
+              <button type="button" data-tool="push"><span>Push Relay</span><small>Subscription and delivery state</small></button>
+              <button type="button" data-tool="relay"><span>Relay Status</span><small>Local relay diagnostics</small></button>
+            </div>
+            <pre id="toolOutput" hidden>{}</pre>
           </div>
-          <button class="primary" id="enablePushButton" type="button">Enable phone alerts</button>
-        </article>
+        </details>
       </section>
 
-      <details class="panel alerts-panel" id="alertsPanel" hidden>
-        <summary class="panel-head">
-          <span>Alert history</span>
-          <span class="panel-actions">
-            <span id="alertCount">0</span>
-          </span>
-        </summary>
-        <div class="alerts-body">
-          <div class="alerts-toolbar">
-            <span id="alertsHint">Tap an alert to inspect it in Canary.</span>
-            <button class="text-button" id="clearAlertsButton" type="button">Clear history</button>
-          </div>
-          <div class="list" id="alertsList"></div>
-        </div>
-      </details>
-
-      <details class="panel tools" id="toolsPanel" hidden>
-        <summary class="panel-head">
-          <span>Tools</span>
-          <span>debug only</span>
-        </summary>
-        <div class="tools-body">
-          <div class="tool-grid">
-            <button type="button" data-tool="status">Status</button>
-            <button type="button" data-tool="snapshot">Snapshot</button>
-            <button type="button" data-tool="events">Events</button>
-            <button type="button" data-tool="auth">Auth</button>
-            <button type="button" data-tool="push">Push</button>
-            <button type="button" data-tool="relay">Relay</button>
-          </div>
-          <pre id="toolOutput">{}</pre>
-        </div>
-      </details>
+      <footer class="sync-strip" id="syncStrip" hidden>
+        <span class="sync-strip__state" id="syncStatusState">standby</span>
+        <span class="sync-strip__label" id="syncStatusLabel">Waiting for snapshot</span>
+        <b class="sync-strip__time" id="syncStatusTime">--</b>
+        <span class="sync-strip__auto">Auto</span>
+      </footer>
     </main>
     <script src="/app.js" type="module"></script>
   </body>

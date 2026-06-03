@@ -123,6 +123,7 @@ try {
   const pushState = await page.locator("#pushState").textContent();
   const eventsBefore = await fetchEventsDiagnostics(page);
   const privacy = await exerciseAccountPrivacy(page);
+  const accountMenu = await exerciseAccountMenu(page);
   const canaryDetail = await exerciseCanaryDetail(page);
   const marketContext = await exerciseMarketContext(page);
   const portfolioDetail = await exercisePortfolioDetail(page);
@@ -158,6 +159,7 @@ try {
     connection,
     push_state: pushState,
     privacy,
+    account_menu: accountMenu,
     canary_detail: canaryDetail,
     market_context: marketContext,
     portfolio_detail: portfolioDetail,
@@ -262,6 +264,36 @@ async function exerciseAccountPrivacy(page) {
   return { masked_by_default: true, toggle_reveals: true };
 }
 
+async function exerciseAccountMenu(page) {
+  await page.locator("#accountMenuToggle").click();
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("accountMenu");
+    return panel && !panel.hidden && document.getElementById("menuAccountSync")?.textContent?.trim();
+  }, { timeout: 5000 });
+  const menu = await page.evaluate(() => ({
+    expanded: document.getElementById("accountMenuToggle")?.getAttribute("aria-expanded") === "true",
+    account: document.getElementById("menuAccountID")?.textContent?.trim() || "",
+    type: document.getElementById("menuAccountType")?.textContent?.trim() || "",
+    base: document.getElementById("menuBaseCurrency")?.textContent?.trim() || "",
+    sync: document.getElementById("menuAccountSync")?.textContent?.trim() || "",
+  }));
+  if (!menu.expanded) {
+    throw new Error("account menu did not mark itself expanded");
+  }
+  if (!menu.account || !menu.type || !menu.base || !menu.sync) {
+    throw new Error(`account menu is missing values: ${JSON.stringify(menu)}`);
+  }
+  await page.locator("#accountMenuToggle").click();
+  await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
+  return {
+    opens: true,
+    privacy_masked: menu.account === "******",
+    type: menu.type,
+    base: menu.base,
+    sync_present: menu.sync !== "--",
+  };
+}
+
 async function exerciseCanaryDetail(page) {
   let timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
   if ((timestamp === "no timestamp" || timestamp === "updated --") && !lifecycle) {
@@ -364,10 +396,12 @@ async function exercisePortfolioDetail(page) {
 
 async function exerciseAlertHistory(page) {
   const initiallyOpen = await page.locator("#alertsPanel").evaluate((el) => !!el.open);
-  await page.locator("#alertsPanel summary").click();
-  await page.waitForFunction(() => document.getElementById("alertsPanel")?.open, { timeout: 5000 });
+  if (!initiallyOpen) {
+    await page.locator("#alertsPanel summary").click();
+    await page.waitForFunction(() => document.getElementById("alertsPanel")?.open, { timeout: 5000 });
+  }
   const info = await page.evaluate(() => ({
-    count: Number(document.getElementById("alertCount")?.textContent || "0"),
+    count: Number.parseInt(document.getElementById("alertCount")?.textContent || "0", 10) || 0,
     rows: document.querySelectorAll("#alertsList .alert-row").length,
     clearDisabled: document.getElementById("clearAlertsButton")?.disabled || false,
     hint: document.getElementById("alertsHint")?.textContent || "",
@@ -380,10 +414,13 @@ async function exerciseAlertHistory(page) {
       return panel && !panel.hidden && document.getElementById("selectedAlertTitle")?.textContent?.trim();
     }, { timeout: 5000 });
     selected = true;
-  } else if (!info.clearDisabled) {
+  }
+  if (info.count === 0 && !info.clearDisabled) {
     throw new Error("clear alert history should be disabled when there are no rows");
   }
-  await page.locator("#alertsPanel summary").click();
+  if (!initiallyOpen) {
+    await page.locator("#alertsPanel summary").click();
+  }
   return { initially_open: initiallyOpen, opens: true, count: info.count, rows: info.rows, selected };
 }
 
