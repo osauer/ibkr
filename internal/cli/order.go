@@ -137,7 +137,7 @@ func runOrderPlace(_ context.Context, env *Env, args []string) int {
 	if strings.TrimSpace(*token) == "" {
 		return fail(env, "order place: --preview-token is required")
 	}
-	return fail(env, "order place: trading disabled in the default build; no submit-capable broker WhatIf token can be redeemed")
+	return fail(env, "order place: broker write path disabled in the default build; preview tokens cannot be redeemed here")
 }
 
 func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {

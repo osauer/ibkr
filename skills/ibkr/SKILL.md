@@ -39,8 +39,8 @@ risk-plan orchestration. It does not choose hedges, size trades, or execute.
 
 If the user explicitly asks for a preview-only stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from
-`submit_eligible`; in the default build, broker WhatIf is unavailable, so a
-minted token is not submit-eligible. If the user asks anything that implies
+`submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
+minted token submit-eligible. If the user asks anything that implies
 placing, modifying, cancelling, submitting, or closing a position, refuse and
 explain that `ibkr` cannot transmit broker orders in this release. Do not invent
 or simulate trade execution.

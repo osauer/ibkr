@@ -3367,62 +3367,15 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 		return fmt.Errorf("server version %d is too old for placeOrder v45+ encoding; upgrade TWS/IB Gateway", c.serverVersion)
 	}
 
-	if err := ValidateOrder(order); err != nil {
+	if err := preparePlaceOrder(order, c); err != nil {
 		return err
-	}
-
-	stringFields := []struct {
-		name  string
-		value string
-	}{
-		{"symbol", order.Symbol},
-		{"secType", order.SecType},
-		{"exchange", order.Exchange},
-		{"currency", order.Currency},
-		{"primary exchange", order.PrimaryExch},
-		{"local symbol", order.LocalSymbol},
-		{"trading class", order.TradingClass},
-		{"account", order.Account},
-		{"orderRef", order.OrderRef},
-		{"tif", order.TIF},
-		{"action", order.Action},
-	}
-	for _, field := range stringFields {
-		if err := ensureASCII(field.name, field.value); err != nil {
-			return err
-		}
-	}
-
-	if order.OrderID == 0 {
-		order.OrderID = c.GetNextOrderID()
-	}
-	if order.ClientID == 0 {
-		order.ClientID = c.config.ClientID
-	}
-	if order.Account == "" {
-		order.Account = c.account
-	}
-	if order.Account == "" {
-		order.Account = c.config.Account
-	}
-	if order.OpenClose == "" {
-		order.OpenClose = "O"
 	}
 	if !order.Transmit {
 		order.Transmit = true
 	}
+	order.WhatIf = false
 
-	fields := clonePlaceOrderFields()
-	assignPlaceOrderFields(fields, order)
-
-	interfaces := make([]any, len(fields))
-	interfaces[0] = placeOrder
-	for i := 1; i < len(fields); i++ {
-		interfaces[i] = fields[i]
-	}
-
-	msg := c.encodeMsg(interfaces...)
-	if err := c.sendMessageWithType(msg, RequestTypeOrder); err != nil {
+	if err := c.sendPlaceOrderFrame(order); err != nil {
 		return err
 	}
 
@@ -3619,6 +3572,7 @@ func assignPlaceOrderFields(fields []string, order *IBKROrder) {
 	setStringField(fields, 94, order.ClearingAccount)
 	setStringField(fields, 95, order.ClearingIntent)
 	setBoolField(fields, 96, order.NotHeld)
+	setBoolField(fields, placeOrderFieldWhatIf, order.WhatIf)
 }
 
 func setStringField(fields []string, idx int, value string) {

@@ -79,7 +79,7 @@ func previewRiskPlanCandidate(ctx context.Context, env *Env, plan rpc.RiskPlanRe
 			Status:            rpc.OrderWhatIfStatusUnavailable,
 			RequiredForSubmit: true,
 			Available:         false,
-			Message:           "broker WhatIf/order wire support is not enabled in the default read-only build; preview is diagnostic only",
+			Message:           "risk-plan order preview does not run broker WhatIf; preview is diagnostic only",
 			Action:            "Do not place; enable the gated trading build before expecting submit eligibility.",
 		},
 		NotExecution: "Read-only handoff preview; no order is submitted and no submit-capable token is minted.",

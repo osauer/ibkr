@@ -84,7 +84,7 @@ Returns the % of S&P names above their 50-DMA (the tactical signal) and per-row 
 
 → Claude invokes `ibkr_trading_status`, then `ibkr_order_preview` only if the local preview gate is ready.
 
-Returns a draft order, quote inputs, position impact, notional, warnings, and preview-token fields. `token_minted` means the local daemon created a preview artifact. `submit_eligible` means broker WhatIf accepted the exact draft and a future write path could consider the token. In the default build, broker WhatIf is unavailable, so `token_minted` can be true while `submit_eligible` and compatibility field `executable` are false. The preview itself does not place, modify, cancel, or transmit any broker order.
+Returns a draft order, quote inputs, position impact, notional, warnings, and preview-token fields. `token_minted` means the local daemon created a preview artifact. `submit_eligible` means broker WhatIf accepted the exact draft and a future write path could consider the token. If broker WhatIf is unavailable or rejected, `token_minted` can still be true while `submit_eligible` and compatibility field `executable` are false. The preview itself does not place, modify, cancel, or transmit any broker order.
 
 ## What Claude can't do here
 

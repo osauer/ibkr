@@ -13,6 +13,7 @@ import (
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 func TestPreviewLimitPriceDefaultsPatientLimit(t *testing.T) {
@@ -309,6 +310,45 @@ func TestOrderPreviewBindsAcceptedBrokerWhatIf(t *testing.T) {
 	}
 	if payload.WhatIf.Status != rpc.OrderWhatIfStatusAccepted || payload.WhatIf.Margin == nil || payload.WhatIf.Margin.Commission == nil || *payload.WhatIf.Margin.Commission != commission {
 		t.Fatalf("token did not bind accepted WhatIf margin: %+v", payload.WhatIf)
+	}
+}
+
+func TestRpcWhatIfResultFromBrokerMapsSubmitEligibility(t *testing.T) {
+	t.Parallel()
+	commission := 1.25
+	accepted := rpcWhatIfResultFromBroker(ibkrlib.OrderWhatIfResult{
+		Status:       ibkrlib.OrderWhatIfStatusAccepted,
+		BrokerStatus: "Submitted",
+		Margin: ibkrlib.OrderWhatIfMargin{
+			Currency:           "USD",
+			Commission:         &commission,
+			CommissionCurrency: "USD",
+		},
+	})
+	if accepted.Status != rpc.OrderWhatIfStatusAccepted || accepted.RequiredForSubmit || !accepted.Available {
+		t.Fatalf("accepted broker result mapped wrong: %+v", accepted)
+	}
+	if accepted.Margin == nil || accepted.Margin.Commission == nil || *accepted.Margin.Commission != commission {
+		t.Fatalf("accepted margin mapped wrong: %+v", accepted.Margin)
+	}
+
+	rejected := rpcWhatIfResultFromBroker(ibkrlib.OrderWhatIfResult{
+		Status:  ibkrlib.OrderWhatIfStatusRejected,
+		Message: "insufficient buying power",
+	})
+	if rejected.Status != rpc.OrderWhatIfStatusRejected || !rejected.RequiredForSubmit || !rejected.Available {
+		t.Fatalf("rejected broker result mapped wrong: %+v", rejected)
+	}
+	if !strings.Contains(rejected.Message, "insufficient buying power") {
+		t.Fatalf("rejected message = %q", rejected.Message)
+	}
+
+	unavailable := rpcWhatIfResultFromBroker(ibkrlib.OrderWhatIfResult{
+		Status:  ibkrlib.OrderWhatIfStatusUnavailable,
+		Message: "timeout waiting for broker WhatIf response",
+	})
+	if unavailable.Status != rpc.OrderWhatIfStatusUnavailable || !unavailable.RequiredForSubmit || unavailable.Available {
+		t.Fatalf("unavailable broker result mapped wrong: %+v", unavailable)
 	}
 }
 

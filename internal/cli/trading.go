@@ -60,6 +60,7 @@ func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 	statusRow(env, out, "Client ID", fmt.Sprintf("%d (%s)", st.ClientID, nonEmpty(st.ClientIDOrigin, "default")))
 	statusRow(env, out, "MCP trading", nonEmpty(st.MCPTrading, rpc.TradingMCPDisabled))
 	statusRow(env, out, "Preview req", fmt.Sprint(st.PreviewRequired))
+	statusRow(env, out, "Capabilities", formatTradingCapabilities(*st))
 	statusRow(env, out, "Open orders", fmt.Sprint(st.OpenOrders))
 	if st.LastOrderEvent != "" {
 		statusRow(env, out, "Last event", st.LastOrderEvent)
@@ -81,6 +82,10 @@ func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+func formatTradingCapabilities(st rpc.TradingStatus) string {
+	return fmt.Sprintf("preview=%v transmit=%v modify=%v cancel=%v", st.CanPreview, st.CanTransmit, st.CanModify, st.CanCancel)
 }
 
 func formatPaperSmokeValue(st rpc.TradingStatus) string {
