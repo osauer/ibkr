@@ -258,6 +258,23 @@ func (s *Server) submitPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGa
 	return c.SubmitPaperOrder(gate, contract, order)
 }
 
+func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingStatus, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.orderPlaceBroker != nil {
+		return s.orderPlaceBroker(ctx, contract, order)
+	}
+	c := s.gatewayConnector()
+	if c == nil {
+		return ibkrlib.ErrIBKRUnavailable
+	}
+	if status.Mode == config.TradingModeLive {
+		return c.SubmitOrder(contract, order)
+	}
+	return c.SubmitPaperOrder(paperGateFromStatus(status), contract, order)
+}
+
 func (s *Server) cancelPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGate, orderID int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -352,17 +369,23 @@ func orderJournalEventForDraft(draft rpc.OrderDraft, eventType string, status rp
 		Mode:            status.Mode,
 		Symbol:          draft.Contract.Symbol,
 		SecType:         draft.Contract.SecType,
+		ConID:           draft.Contract.ConID,
 		Exchange:        draft.Contract.Exchange,
 		PrimaryExch:     draft.Contract.PrimaryExch,
 		Currency:        draft.Contract.Currency,
 		LocalSymbol:     draft.Contract.LocalSymbol,
 		TradingClass:    draft.Contract.TradingClass,
+		Expiry:          draft.Contract.Expiry,
+		Strike:          draft.Contract.Strike,
+		Right:           draft.Contract.Right,
+		Multiplier:      draft.Contract.Multiplier,
 		Action:          draft.Action,
 		OrderType:       draft.OrderType,
 		TIF:             draft.TIF,
 		OutsideRTH:      draft.OutsideRTH,
 		Quantity:        float64(draft.Quantity),
 		LimitPrice:      draft.LimitPrice,
+		OpenClose:       draft.OpenClose,
 	}
 }
 
@@ -377,19 +400,29 @@ func orderJournalEventFromView(view rpc.OrderView, eventType string, at time.Tim
 		Account:         view.Account,
 		Endpoint:        view.Endpoint,
 		Mode:            view.Mode,
+		Source:          view.Source,
+		PurgeID:         view.PurgeID,
+		LegID:           view.LegID,
+		BypassPreview:   view.BypassPreview,
 		Symbol:          view.Symbol,
 		SecType:         view.SecType,
+		ConID:           view.ConID,
 		Exchange:        view.Exchange,
 		PrimaryExch:     view.PrimaryExch,
 		Currency:        view.Currency,
 		LocalSymbol:     view.LocalSymbol,
 		TradingClass:    view.TradingClass,
+		Expiry:          view.Expiry,
+		Strike:          view.Strike,
+		Right:           view.Right,
+		Multiplier:      view.Multiplier,
 		Action:          view.Action,
 		OrderType:       view.OrderType,
 		TIF:             view.TIF,
 		OutsideRTH:      view.OutsideRTH,
 		Quantity:        view.Quantity,
 		LimitPrice:      view.LimitPrice,
+		OpenClose:       view.OpenClose,
 		Status:          view.Status,
 		Filled:          view.Filled,
 		Remaining:       view.Remaining,
@@ -416,6 +449,7 @@ func orderDraftFromView(view rpc.OrderView) rpc.OrderDraft {
 	return rpc.OrderDraft{
 		Action: view.Action,
 		Contract: rpc.ContractParams{
+			ConID:        view.ConID,
 			Symbol:       view.Symbol,
 			SecType:      view.SecType,
 			Exchange:     view.Exchange,
@@ -423,6 +457,10 @@ func orderDraftFromView(view rpc.OrderView) rpc.OrderDraft {
 			Currency:     view.Currency,
 			LocalSymbol:  view.LocalSymbol,
 			TradingClass: view.TradingClass,
+			Expiry:       view.Expiry,
+			Strike:       view.Strike,
+			Right:        view.Right,
+			Multiplier:   view.Multiplier,
 		},
 		Quantity:   int(view.Quantity),
 		OrderType:  view.OrderType,
@@ -430,5 +468,6 @@ func orderDraftFromView(view rpc.OrderView) rpc.OrderDraft {
 		TIF:        view.TIF,
 		OutsideRTH: view.OutsideRTH,
 		OrderRef:   view.OrderRef,
+		OpenClose:  view.OpenClose,
 	}
 }

@@ -72,6 +72,83 @@ func TestClassifyPositionEffectBlocksShortFlip(t *testing.T) {
 	}
 }
 
+func TestStockPositionQuantityMatchesContractIdentity(t *testing.T) {
+	t.Parallel()
+	positions := []*ibkrlib.RawPosition{
+		{
+			Contract: ibkrlib.Contract{
+				Symbol:      "SAP",
+				SecType:     "STK",
+				Exchange:    "NYSE",
+				Currency:    "USD",
+				LocalSymbol: "SAP",
+			},
+			Position: 100,
+		},
+		{
+			Contract: ibkrlib.Contract{
+				Symbol:      "SAP",
+				SecType:     "STK",
+				Exchange:    "IBIS",
+				PrimaryExch: "IBIS",
+				Currency:    "EUR",
+				LocalSymbol: "SAP",
+			},
+			Position: 25,
+		},
+		{
+			Contract: ibkrlib.Contract{
+				Symbol:   "SAP",
+				SecType:  "OPT",
+				Exchange: "SMART",
+				Currency: "USD",
+			},
+			Position: 7,
+		},
+		{
+			Contract: ibkrlib.Contract{
+				Symbol:   "SIE",
+				SecType:  "STK",
+				Exchange: "SMART",
+				Currency: "EUR",
+			},
+			Position: 12,
+		},
+	}
+
+	eurContract := rpc.ContractParams{
+		Symbol:      "SAP",
+		SecType:     "STK",
+		Exchange:    "SMART",
+		PrimaryExch: "IBIS",
+		Currency:    "EUR",
+	}
+	if got := stockPositionQuantity(positions, eurContract); got != 25 {
+		t.Fatalf("EUR/IBIS SAP quantity = %v, want 25", got)
+	}
+
+	usdContract := rpc.ContractParams{
+		Symbol:   "SAP",
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: "USD",
+	}
+	if got := stockPositionQuantity(positions, usdContract); got != 100 {
+		t.Fatalf("USD SAP quantity = %v, want 100", got)
+	}
+
+	routedContract := rpc.ContractParams{
+		Symbol:      "SIE",
+		SecType:     "STK",
+		Exchange:    "SMART",
+		PrimaryExch: "IBIS",
+		Currency:    "EUR",
+	}
+	if got := stockPositionQuantity(positions, routedContract); got != 12 {
+		t.Fatalf("SMART-routed EUR SIE quantity = %v, want 12", got)
+	}
+}
+
 func TestOrderTokenSignerBindsDraft(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 28, 8, 30, 0, 0, time.UTC)
@@ -208,9 +285,9 @@ func TestOrderPreviewPaperMintsTokenAndJournal(t *testing.T) {
 			AsOf:         srv.now(),
 		}, nil
 	}
-	srv.orderPreviewPositionImpact = func(_ context.Context, symbol, action string, qty int) (rpc.OrderPositionImpact, error) {
-		if symbol != "AAPL" || action != rpc.OrderActionBuy || qty != 10 {
-			t.Fatalf("position hook args = %s %s %d", symbol, action, qty)
+	srv.orderPreviewPositionImpact = func(_ context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
+		if contract.Symbol != "AAPL" || contract.Exchange != "SMART" || contract.Currency != "USD" || action != rpc.OrderActionBuy || qty != 10 {
+			t.Fatalf("position hook args = %+v %s %d", contract, action, qty)
 		}
 		return rpc.OrderPositionImpact{Before: 0, After: 10, Effect: rpc.OrderPositionEffectOpen}, nil
 	}
@@ -520,26 +597,33 @@ func TestOrderPreviewRejectsStockFlipUnlessEnabled(t *testing.T) {
 	}
 }
 
-func TestOrderPreviewRejectsOptionsBeforeQuote(t *testing.T) {
+func TestOrderPreviewAllowsSingleLegOption(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
-	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
-		t.Fatal("quote hook should not be called for option preview rejection")
-		return rpc.OrderQuoteSnapshot{}, nil
+	bid := 2.05
+	ask := 2.15
+	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		if c.SecType != "OPT" || c.Expiry != "20260619" || c.Right != "C" || c.Strike != 520 {
+			t.Fatalf("option contract not preserved: %+v", c)
+		}
+		return rpc.OrderQuoteSnapshot{Symbol: "SPY_20260619C520", Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}, nil
 	}
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
 
 	limit := 2.10
-	_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 		Action: "buy",
 		Contract: rpc.ContractParams{
-			Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520,
+			Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100,
 		},
 		Quantity:   1,
 		LimitPrice: &limit,
 	})
-	var bad *badRequestError
-	if !errors.As(err, &bad) || !strings.Contains(err.Error(), "single-leg options remain disabled") {
-		t.Fatalf("previewOrder err = %v, want option-disabled bad request", err)
+	if err != nil {
+		t.Fatalf("previewOrder option: %v", err)
+	}
+	if res.Draft.OpenClose != "C" || res.Notional != 210 {
+		t.Fatalf("option preview open_close/notional = %q %.2f, want C 210.00", res.Draft.OpenClose, res.Notional)
 	}
 }
 
@@ -577,8 +661,8 @@ func fixedPreviewQuote(bid, ask float64) func(context.Context, rpc.ContractParam
 	}
 }
 
-func fixedPreviewPosition(before, after float64, effect string) func(context.Context, string, string, int) (rpc.OrderPositionImpact, error) {
-	return func(context.Context, string, string, int) (rpc.OrderPositionImpact, error) {
+func fixedPreviewPosition(before, after float64, effect string) func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
+	return func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
 		return rpc.OrderPositionImpact{Before: before, After: after, Effect: effect}, nil
 	}
 }

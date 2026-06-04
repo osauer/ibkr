@@ -2096,6 +2096,7 @@ type RawOrder struct {
 	Account    string
 	OrderRef   string // Our internal order ID
 	OutsideRth bool   // Allow execution outside regular trading hours
+	OpenClose  string // O=open, C=close
 }
 
 // SubmitOrder submits an order to IBKR
@@ -2156,8 +2157,11 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 		OutsideRth:   order.OutsideRth,
 		Account:      order.Account,
 		Transmit:     true,
-		OpenClose:    "O",
+		OpenClose:    strings.ToUpper(strings.TrimSpace(order.OpenClose)),
 		Origin:       0,
+	}
+	if ibkrOrder.OpenClose == "" {
+		ibkrOrder.OpenClose = "O"
 	}
 
 	brokerID := strconv.Itoa(ibkrOrder.OrderID)
@@ -2698,6 +2702,29 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 		result = append(result, pos)
 	}
 	return result, nil
+}
+
+// RefreshPositions issues a one-shot reqPositions request, waits for
+// positionEnd, then returns the same filtered shape as GetCachedPositions.
+// The underlying TWS API has no request ID for reqPositions, so callers should
+// use this sparingly and avoid concurrent refreshes.
+func (c *Connector) RefreshPositions(timeout time.Duration) ([]*RawPosition, error) {
+	if !c.isConnected() {
+		return nil, ErrIBKRUnavailable
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return nil, ErrIBKRUnavailable
+	}
+	if err := conn.RequestPositions(); err != nil {
+		return nil, err
+	}
+	if err := conn.WaitForPositionsEnd(timeout); err != nil {
+		return nil, err
+	}
+	return c.GetCachedPositions()
 }
 
 // registerHandlers sets up message handlers for IBKR responses.

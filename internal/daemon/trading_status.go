@@ -100,9 +100,6 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	default:
 		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", tr.Mode), "Set [trading].mode to paper or live.")
 	}
-	if !tr.PreviewRequired() {
-		add("preview_not_required", "trading requires submit-eligible preview tokens", "Set [trading].require_preview = true.")
-	}
 	if cfg.Gateway.Port == nil {
 		add("gateway_port_unpinned", "order submission requires a pinned gateway port", "Set [gateway].port.")
 	}

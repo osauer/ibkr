@@ -52,19 +52,29 @@ type orderJournalEvent struct {
 	Account         string    `json:"account,omitempty"`
 	Endpoint        string    `json:"endpoint,omitempty"`
 	Mode            string    `json:"mode,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	PurgeID         string    `json:"purge_id,omitempty"`
+	LegID           string    `json:"leg_id,omitempty"`
+	BypassPreview   bool      `json:"bypass_preview,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	ConID           int       `json:"con_id,omitempty"`
 	Exchange        string    `json:"exchange,omitempty"`
 	PrimaryExch     string    `json:"primary_exch,omitempty"`
 	Currency        string    `json:"currency,omitempty"`
 	LocalSymbol     string    `json:"local_symbol,omitempty"`
 	TradingClass    string    `json:"trading_class,omitempty"`
+	Expiry          string    `json:"expiry,omitempty"`
+	Strike          float64   `json:"strike,omitempty"`
+	Right           string    `json:"right,omitempty"`
+	Multiplier      int       `json:"multiplier,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
 	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
+	OpenClose       string    `json:"open_close,omitempty"`
 	Status          string    `json:"status,omitempty"`
 	Filled          float64   `json:"filled,omitempty"`
 	Remaining       float64   `json:"remaining,omitempty"`
@@ -100,6 +110,18 @@ func (s *orderJournalStore) Append(ev orderJournalEvent) error {
 	return s.appendLocked(ev)
 }
 
+func (s *orderJournalStore) AppendAll(events []orderJournalEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	if s == nil {
+		return fmt.Errorf("order journal path is empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendAllLocked(events)
+}
+
 func (s *orderJournalStore) appendLocked(ev orderJournalEvent) error {
 	if s == nil || s.Path == "" {
 		return fmt.Errorf("order journal path is empty")
@@ -121,6 +143,45 @@ func (s *orderJournalStore) appendLocked(ev orderJournalEvent) error {
 		return fmt.Errorf("marshal order journal event: %w", err)
 	}
 	data = append(data, '\n')
+	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open order journal %s: %w", s.Path, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod order journal: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("append order journal: %w", err)
+	}
+	return nil
+}
+
+func (s *orderJournalStore) appendAllLocked(events []orderJournalEvent) error {
+	if s == nil || s.Path == "" {
+		return fmt.Errorf("order journal path is empty")
+	}
+	var data []byte
+	for _, ev := range events {
+		if ev.At.IsZero() {
+			ev.At = time.Now().UTC()
+		}
+		if ev.Version == 0 {
+			ev.Version = orderJournalFileVersion
+		}
+		if err := validateOrderJournalEvent(ev); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			return fmt.Errorf("marshal order journal event: %w", err)
+		}
+		data = append(data, raw...)
+		data = append(data, '\n')
+	}
+	if err := ensurePrivateStateDir(s.Path); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open order journal %s: %w", s.Path, err)

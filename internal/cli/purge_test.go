@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,7 +123,37 @@ func TestApplyQuoteToPurgeLegComputesShadowSaved(t *testing.T) {
 	}
 }
 
-func TestMergePurgeBookAddsIntoActiveBook(t *testing.T) {
+func TestRenderPurgeBookTextUsesReviewLanguage(t *testing.T) {
+	t.Parallel()
+
+	saved := 9.0
+	book := purgeBook{
+		PurgeID:      "active",
+		Status:       purgeBookStatusDraft,
+		BaseCurrency: "EUR",
+		Totals: purgeBookTotals{
+			ExitValue:   242.02,
+			ShadowSaved: &saved,
+		},
+		NotExecution: "Dry-run review only.",
+	}
+	var out bytes.Buffer
+	env := &Env{Stdout: &out, Stderr: &bytes.Buffer{}}
+
+	renderPurgeBookText(env, &out, &book)
+
+	got := out.String()
+	for _, bad := range []string{"HELPED", "Status", "draft", "Purge Book"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("render output contains stale execution language %q:\n%s", bad, got)
+		}
+	}
+	if !strings.Contains(got, "IBKR Purge Review") || !strings.Contains(got, "REVIEW") {
+		t.Fatalf("render output missing review language:\n%s", got)
+	}
+}
+
+func TestMergePurgeBookReconcilesExistingInstrumentQuantity(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 4, 15, 30, 0, 0, time.UTC)
@@ -173,14 +205,14 @@ func TestMergePurgeBookAddsIntoActiveBook(t *testing.T) {
 		t.Fatalf("legs = %d, want 1", len(active.Legs))
 	}
 	leg := active.Legs[0]
-	if leg.Quantity != 15 || leg.OriginalQuantity != 15 {
-		t.Fatalf("merged quantity = %.2f/%.2f, want 15/15", leg.Quantity, leg.OriginalQuantity)
+	if leg.Quantity != 5 || leg.OriginalQuantity != 5 {
+		t.Fatalf("reconciled quantity = %.2f/%.2f, want 5/5", leg.Quantity, leg.OriginalQuantity)
 	}
-	if math.Abs(leg.ExitValue-1450) > 1e-9 {
-		t.Fatalf("exit value = %.2f, want 1450", leg.ExitValue)
+	if math.Abs(leg.ExitValue-500) > 1e-9 {
+		t.Fatalf("exit value = %.2f, want original exit price scaled to 500", leg.ExitValue)
 	}
-	if math.Abs(leg.ExitPrice-(1450.0/15.0)) > 1e-9 {
-		t.Fatalf("exit price = %.6f, want weighted average", leg.ExitPrice)
+	if math.Abs(leg.ExitPrice-firstPrice) > 1e-9 {
+		t.Fatalf("exit price = %.6f, want original purge reference %.2f", leg.ExitPrice, firstPrice)
 	}
 }
 
@@ -386,6 +418,14 @@ func TestPurgeTargetArgAllDoesNotCollideWithTickerALL(t *testing.T) {
 	if ticker.All || ticker.Symbol != "ALL" {
 		t.Fatalf("ALL target = %+v, want ticker ALL", ticker)
 	}
+
+	_, err = purgeTargetArg(false, []string{"README.md", "cmd"}, "usage")
+	if err == nil {
+		t.Fatal("expanded glob target unexpectedly succeeded")
+	}
+	if got := err.Error(); !strings.Contains(got, "unquoted *") || !strings.Contains(got, "--all") {
+		t.Fatalf("expanded glob error = %q, want shell wildcard guidance", got)
+	}
 }
 
 func TestPurgeLegIDStableAcrossQuantity(t *testing.T) {
@@ -409,6 +449,16 @@ func TestPurgeSubcommandIndexHandlesHoistedFlags(t *testing.T) {
 	idx := purgeSubcommandIndex(args)
 	if idx < 0 || args[idx] != "dry-run" {
 		t.Fatalf("purgeSubcommandIndex(%v) = %d", args, idx)
+	}
+}
+
+func TestPurgeSubcommandIndexIgnoresExpandedGlobTokens(t *testing.T) {
+	t.Parallel()
+
+	args := hoistFlags([]string{"README.md", "status", "cmd"})
+	idx := purgeSubcommandIndex(args)
+	if idx >= 0 {
+		t.Fatalf("purgeSubcommandIndex(%v) = %d, want no subcommand", args, idx)
 	}
 }
 

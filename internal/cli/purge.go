@@ -150,7 +150,7 @@ type purgeRPCConn interface {
 
 func runPurge(ctx context.Context, env *Env, args []string) int {
 	if len(args) == 0 {
-		return fail(env, "purge: usage is `ibkr purge SYMBOL` or `ibkr purge status`")
+		return fail(env, "purge: usage is `ibkr purge SYMBOL` or `ibkr purge --all`")
 	}
 	subIdx := purgeSubcommandIndex(args)
 	if subIdx < 0 {
@@ -168,18 +168,30 @@ func runPurge(ctx context.Context, env *Env, args []string) int {
 	case "restore":
 		return runPurgeRestore(ctx, env, args)
 	case "execute":
-		return fail(env, "purge execute: broker write path is not enabled in this build; use dry-run/status/monitor/restore review")
+		return runPurgeExecute(ctx, env, args)
 	default:
-		return fail(env, "purge: unknown subcommand %q (try dry-run, status, monitor, or restore)", sub)
+		return fail(env, "purge: unknown subcommand %q (try dry-run, status, monitor, restore, or execute)", sub)
 	}
 }
 
 func purgeSubcommandIndex(args []string) int {
-	for i, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			name := strings.TrimLeft(arg, "-")
+			if before, _, ok := strings.Cut(name, "="); ok {
+				name = before
+			}
+			if isValueFlag(name) && !strings.Contains(arg, "=") {
+				i++
+			}
+			continue
+		}
 		switch arg {
 		case "dry-run", "status", "monitor", "restore", "execute":
 			return i
 		}
+		return -1
 	}
 	return -1
 }
@@ -188,43 +200,16 @@ func runPurgeTicker(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "purge")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	all := fs.Bool("all", false, "target all open positions")
-	timeout := fs.Duration("timeout", 5*time.Second, "quote refresh timeout for the initial shadow snapshot")
+	bypassPreview := fs.Bool("bypass-preview", true, "bypass order preview/WhatIf and use the purge fast path")
+	wait := fs.Duration("wait", 2*time.Second, "wait briefly for immediate broker lifecycle callbacks after sending")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge SYMBOL|'*' [--json] or ibkr purge --all [--json]")
+	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge SYMBOL|'*' [--bypass-preview=true] [--wait 2s] [--json] or ibkr purge --all [--bypass-preview=true] [--wait 2s] [--json]")
 	if err != nil {
 		return fail(env, "purge: %v", err)
 	}
-	var pos rpc.PositionsResult
-	if err := env.Conn.Call(ctx, rpc.MethodPositionsList, target.positionsParams(), &pos); err != nil {
-		return fail(env, "purge %s: positions: %v", target.label(), err)
-	}
-	now := time.Now()
-	incoming := buildPurgeBookFromPositions(pos, now)
-	if len(incoming.Legs) == 0 {
-		return fail(env, "purge %s: %s; purge book unchanged", target.label(), target.noPositionsMessage())
-	}
-	book, err := loadOrNewActivePurgeBook(now)
-	if err != nil {
-		return fail(env, "purge %s: load active purge book: %v", target.label(), err)
-	}
-	if err := mergePurgeBook(&book, incoming, now); err != nil {
-		return fail(env, "purge %s: %v", target.label(), err)
-	}
-	if err := refreshPurgeBookQuotes(ctx, env.Conn, &book, *timeout); err != nil {
-		book.Warnings = appendUniqueString(book.Warnings, "quote refresh failed: "+err.Error())
-	}
-	path, err := savePurgeBook(&book)
-	if err != nil {
-		return fail(env, "purge %s: save active purge book: %v", target.label(), err)
-	}
-	book.BookPath = path
-	if *jsonOut {
-		return printJSON(env, book)
-	}
-	renderPurgeBookText(env, env.Stdout, &book)
-	return 0
+	return runPurgeDirect(ctx, env, "purge", target, *bypassPreview, *wait, *jsonOut)
 }
 
 func runPurgeDryRun(ctx context.Context, env *Env, args []string) int {
@@ -238,12 +223,14 @@ func runPurgeDryRun(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() > 0 {
 		return fail(env, "purge dry-run: takes no positional args")
 	}
+	purgeProgress(env, *jsonOut, "purge dry-run: loading current positions")
 	var pos rpc.PositionsResult
 	if err := env.Conn.Call(ctx, rpc.MethodPositionsList, rpc.PositionsListParams{}, &pos); err != nil {
 		return fail(env, "purge dry-run: positions: %v", err)
 	}
 	now := time.Now()
 	book := buildPurgeBookFromPositions(pos, now)
+	purgeProgress(env, *jsonOut, "purge dry-run: refreshing quotes for %d leg(s)", len(book.Legs))
 	if err := refreshPurgeBookQuotes(ctx, env.Conn, &book, *timeout); err != nil {
 		book.Warnings = append(book.Warnings, "quote refresh failed: "+err.Error())
 	}
@@ -258,9 +245,11 @@ func runPurgeDryRun(ctx context.Context, env *Env, args []string) int {
 		if err := mergePurgeBook(&active, book, now); err != nil {
 			return fail(env, "purge dry-run: %v", err)
 		}
+		purgeProgress(env, *jsonOut, "purge dry-run: refreshing active purge book quotes for %d leg(s)", len(active.Legs))
 		if err := refreshPurgeBookQuotes(ctx, env.Conn, &active, *timeout); err != nil {
 			active.Warnings = appendUniqueString(active.Warnings, "quote refresh failed: "+err.Error())
 		}
+		purgeProgress(env, *jsonOut, "purge dry-run: saving active purge book")
 		path, err := savePurgeBook(&active)
 		if err != nil {
 			return fail(env, "purge dry-run: save active purge book: %v", err)
@@ -280,7 +269,7 @@ func runPurgeStatus(ctx context.Context, env *Env, args []string, monitor bool) 
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	watch := fs.Bool("watch", false, "refresh repeatedly until Ctrl-C")
 	rate := fs.Duration("rate", time.Second, "refresh interval for --watch")
-	timeout := fs.Duration("timeout", 5*time.Second, "per-leg quote refresh timeout")
+	account := fs.String("account", "", "filter to one account")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -295,33 +284,21 @@ func runPurgeStatus(ctx context.Context, env *Env, args []string, monitor bool) 
 		purgeID = fs.Arg(0)
 	}
 	render := func(out io.Writer) int {
-		var book purgeBook
-		if purgeID == activePurgeBookID {
-			active, found, err := loadActivePurgeBook()
-			if err != nil {
-				return fail(env, "purge %s: load active purge book: %v", statusVerb(monitor), err)
-			}
-			if !found {
-				return fail(env, "purge %s: no active purge book yet; run `ibkr purge SYMBOL` first", statusVerb(monitor))
-			}
-			book = active
-		} else {
-			var err error
-			book, err = loadPurgeBook(purgeID)
-			if err != nil {
-				return fail(env, "purge: %v", err)
-			}
+		params := rpc.PurgeStatusParams{
+			Account: strings.TrimSpace(*account),
+			Limit:   50,
 		}
-		if err := refreshPurgeBookQuotes(ctx, env.Conn, &book, *timeout); err != nil {
-			book.Warnings = append(book.Warnings, "quote refresh failed: "+err.Error())
+		if purgeID != activePurgeBookID {
+			params.PurgeID = purgeID
 		}
-		if path, err := savePurgeBook(&book); err == nil {
-			book.BookPath = path
+		var res rpc.PurgeStatusResult
+		if err := env.Conn.Call(ctx, rpc.MethodPurgeStatus, params, &res); err != nil {
+			return fail(env, "purge %s: %v", statusVerb(monitor), err)
 		}
 		if *jsonOut {
-			return printJSONTo(env, out, book)
+			return printJSONTo(env, out, res)
 		}
-		renderPurgeBookText(env, out, &book)
+		renderPurgeStatusText(env, out, &res)
 		return 0
 	}
 	if *watch {
@@ -343,54 +320,115 @@ func statusVerb(monitor bool) string {
 func runPurgeRestore(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "purge")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	all := fs.Bool("all", false, "target every leg in the active purge book")
+	all := fs.Bool("all", false, "target every restore leg in the active purge book")
 	scale := fs.Float64("scale", 1, "quantity scale to restore, 0.0-1.0")
-	record := fs.Bool("record", false, "record the reviewed restore quantities against the active purge book")
-	timeout := fs.Duration("timeout", 5*time.Second, "per-leg quote refresh timeout")
+	record := fs.Bool("record", false, "deprecated; restore quantities are adjusted only from daemon fill evidence")
+	execute := fs.Bool("execute", false, "submit restore orders after a fresh daemon WhatIf preflight")
+	wait := fs.Duration("wait", 2*time.Second, "wait briefly for immediate broker lifecycle callbacks after sending")
+	timeout := fs.Duration("timeout", 5*time.Second, "per-leg quote/WhatIf preflight timeout")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	if *scale < 0 || *scale > 1 || math.IsNaN(*scale) || math.IsInf(*scale, 0) {
-		return fail(env, "purge restore: --scale must be between 0 and 1")
+	if *scale <= 0 || *scale > 1 || math.IsNaN(*scale) || math.IsInf(*scale, 0) {
+		return fail(env, "purge restore: --scale must be greater than 0 and at most 1")
 	}
-	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge restore SYMBOL|'*' [--scale 0.5] [--record] or ibkr purge restore --all [--scale 0.5] [--record]")
+	if *record {
+		return fail(env, "purge restore: --record is disabled; daemon ledger quantities change only after broker fills or safe reconciliation")
+	}
+	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge restore SYMBOL|'*' [--scale 0.5] [--execute] [--json] or ibkr purge restore --all [--scale 0.5] [--execute] [--json]")
 	if err != nil {
 		return fail(env, "purge restore: %v", err)
 	}
-	book, found, err := loadActivePurgeBook()
-	if err != nil {
-		return fail(env, "purge restore %s: load active purge book: %v", target.label(), err)
+	verb := "previewing daemon restore plan"
+	method := rpc.MethodPurgeRestorePreview
+	if *execute {
+		verb = "executing daemon restore plan"
+		method = rpc.MethodPurgeRestoreExecute
 	}
-	if !found {
-		return fail(env, "purge restore %s: %s", target.label(), target.noRestoreBookMessage())
+	purgeProgress(env, *jsonOut, "purge restore %s: %s", target.label(), verb)
+	params := rpc.PurgeRestoreParams{
+		All:       target.All,
+		Symbols:   target.onlySymbols(),
+		Scale:     *scale,
+		WaitMs:    int(wait.Milliseconds()),
+		TimeoutMs: int(timeout.Milliseconds()),
 	}
-	if err := refreshPurgeBookQuotes(ctx, env.Conn, &book, *timeout); err != nil {
-		book.Warnings = append(book.Warnings, "quote refresh failed: "+err.Error())
+	if len(params.Symbols) == 0 {
+		params.All = true
 	}
-	if path, err := savePurgeBook(&book); err == nil {
-		book.BookPath = path
-	}
-	plan := buildPurgeRestorePlan(book, *scale, target.onlySymbols(), time.Now())
-	if len(plan.Legs) == 0 {
-		return fail(env, "purge restore %s: %s", target.label(), target.noRestoreLegsMessage())
-	}
-	if *record {
-		if err := recordPurgeRestorePlan(&book, plan, time.Now()); err != nil {
-			return fail(env, "purge restore %s: record restore: %v", target.label(), err)
-		}
-		path, err := savePurgeBook(&book)
-		if err != nil {
-			return fail(env, "purge restore %s: save active purge book: %v", target.label(), err)
-		}
-		book.BookPath = path
-		plan.Recorded = true
-		plan.NotExecution = "Restore review recorded in the active purge book; no broker order has been placed, modified, cancelled, previewed, or transmitted."
+	var res rpc.PurgeRestoreResult
+	if err := env.Conn.Call(ctx, method, params, &res); err != nil {
+		return fail(env, "purge restore %s: %v", target.label(), err)
 	}
 	if *jsonOut {
-		return printJSON(env, plan)
+		_ = printJSON(env, res)
+		if purgeRestoreResultOK(res, *execute) {
+			return 0
+		}
+		return 1
 	}
-	renderPurgeRestorePlanText(env, env.Stdout, &plan)
-	return 0
+	renderPurgeRestoreResultText(env, env.Stdout, &res)
+	if purgeRestoreResultOK(res, *execute) {
+		return 0
+	}
+	return 1
+}
+
+func purgeRestoreResultOK(res rpc.PurgeRestoreResult, execute bool) bool {
+	if execute {
+		return res.Status == "submitted" || res.Status == "flat"
+	}
+	return res.Status == "preview" || res.Status == "flat"
+}
+
+func runPurgeExecute(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "purge")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	all := fs.Bool("all", false, "target all open positions")
+	bypassPreview := fs.Bool("bypass-preview", true, "bypass order preview/WhatIf and use the purge fast path")
+	wait := fs.Duration("wait", 2*time.Second, "wait briefly for immediate broker lifecycle callbacks after sending")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	target, err := purgeOptionalTargetArg(*all, fs.Args(), "ibkr purge execute [SYMBOL|'*'|--all] [--bypass-preview=true] [--wait 2s] [--json]")
+	if err != nil {
+		return fail(env, "purge execute: %v", err)
+	}
+	return runPurgeDirect(ctx, env, "purge execute", target, *bypassPreview, *wait, *jsonOut)
+}
+
+func runPurgeDirect(ctx context.Context, env *Env, verb string, target purgeTarget, bypassPreview bool, wait time.Duration, jsonOut bool) int {
+	purgeProgress(env, jsonOut, "%s %s: refreshing current positions and submitting close orders", verb, target.label())
+	params := rpc.PurgeExecuteParams{
+		PurgeID:       purgeBookID(time.Now()),
+		All:           target.All,
+		Symbols:       target.onlySymbols(),
+		BypassPreview: &bypassPreview,
+		WaitMs:        int(wait.Milliseconds()),
+	}
+	if len(params.Symbols) == 0 {
+		params.All = true
+	}
+	var result rpc.PurgeExecuteResult
+	if err := env.Conn.Call(ctx, rpc.MethodPurgeExecute, params, &result); err != nil {
+		return fail(env, "%s %s: %v", verb, target.label(), err)
+	}
+	if jsonOut {
+		_ = printJSON(env, result)
+		if purgeExecuteResultOK(result) {
+			return 0
+		}
+		return 1
+	}
+	renderPurgeExecuteResultText(env, env.Stdout, &result)
+	if purgeExecuteResultOK(result) {
+		return 0
+	}
+	return 1
+}
+
+func purgeExecuteResultOK(result rpc.PurgeExecuteResult) bool {
+	return result.Status == "submitted" || result.Status == "flat"
 }
 
 type purgeTarget struct {
@@ -406,7 +444,7 @@ func purgeTargetArg(all bool, args []string, usage string) (purgeTarget, error) 
 		return purgeTarget{All: true}, nil
 	}
 	if len(args) != 1 {
-		return purgeTarget{}, fmt.Errorf("usage is `%s`", usage)
+		return purgeTarget{}, purgeTargetUsageError(args, usage)
 	}
 	raw := strings.TrimSpace(args[0])
 	if raw == "*" {
@@ -419,6 +457,26 @@ func purgeTargetArg(all bool, args []string, usage string) (purgeTarget, error) 
 	return purgeTarget{Symbol: symbols[0]}, nil
 }
 
+func purgeOptionalTargetArg(all bool, args []string, usage string) (purgeTarget, error) {
+	if all {
+		if len(args) != 0 {
+			return purgeTarget{}, fmt.Errorf("--all cannot be combined with a ticker")
+		}
+		return purgeTarget{All: true}, nil
+	}
+	if len(args) == 0 {
+		return purgeTarget{All: true}, nil
+	}
+	return purgeTargetArg(false, args, usage)
+}
+
+func purgeTargetUsageError(args []string, usage string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("expected one ticker (got %d args); if you typed an unquoted *, your shell expanded it before ibkr saw it; use `ibkr purge --all` or quote it as `ibkr purge '*'`; usage is `%s`", len(args), usage)
+	}
+	return fmt.Errorf("usage is `%s`", usage)
+}
+
 func (t purgeTarget) label() string {
 	if t.All {
 		return "*"
@@ -426,39 +484,11 @@ func (t purgeTarget) label() string {
 	return t.Symbol
 }
 
-func (t purgeTarget) positionsParams() rpc.PositionsListParams {
-	if t.All {
-		return rpc.PositionsListParams{}
-	}
-	return rpc.PositionsListParams{Symbol: t.Symbol}
-}
-
 func (t purgeTarget) onlySymbols() []string {
 	if t.All {
 		return nil
 	}
 	return []string{t.Symbol}
-}
-
-func (t purgeTarget) noPositionsMessage() string {
-	if t.All {
-		return "no open positions"
-	}
-	return "no open positions for " + t.Symbol
-}
-
-func (t purgeTarget) noRestoreBookMessage() string {
-	if t.All {
-		return "no active purge book; run `ibkr purge '*'` after positions exist"
-	}
-	return fmt.Sprintf("no active purge book contains %s; run `ibkr purge %s` after positions exist", t.Symbol, t.Symbol)
-}
-
-func (t purgeTarget) noRestoreLegsMessage() string {
-	if t.All {
-		return "active purge book has no legs to restore"
-	}
-	return fmt.Sprintf("active purge book has no %s legs to restore", t.Symbol)
 }
 
 func buildPurgeBookFromPositions(pos rpc.PositionsResult, now time.Time) purgeBook {
@@ -476,8 +506,8 @@ func buildPurgeBookFromPositions(pos rpc.PositionsResult, now time.Time) purgeBo
 		Source:           "positions.snapshot",
 		SourceAsOf:       pos.AsOf,
 		PositionCount:    len(pos.Stocks) + len(pos.Options),
-		NotExecution:     "Draft purge book only; no broker order has been placed, modified, cancelled, or transmitted.",
-		ExecutionCommand: "not available in this build",
+		NotExecution:     "Dry-run review only; no broker order has been placed, modified, cancelled, or transmitted.",
+		ExecutionCommand: "ibkr purge --all",
 	}
 	if pos.Portfolio != nil {
 		book.BaseCurrency = pos.Portfolio.BaseCurrency
@@ -531,10 +561,10 @@ func newActivePurgeBook(now time.Time) purgeBook {
 		CreatedAt:        now,
 		UpdatedAt:        now,
 		Source:           "active.purge_book",
-		NotExecution:     "Active purge book only; no broker order has been placed, modified, cancelled, or transmitted.",
+		NotExecution:     "Saved restore review only; no broker order has been placed, modified, cancelled, or transmitted.",
 		RestoreCommand:   "ibkr purge restore SYMBOL",
 		MonitorCommand:   "ibkr purge monitor",
-		ExecutionCommand: "not available in this build",
+		ExecutionCommand: "ibkr purge --all",
 	}
 	return book
 }
@@ -570,10 +600,10 @@ func prepareActivePurgeBook(book *purgeBook, now time.Time) {
 		book.Source = "active.purge_book"
 	}
 	book.PositionCount = len(book.Legs)
-	book.NotExecution = "Active purge book only; no broker order has been placed, modified, cancelled, or transmitted."
+	book.NotExecution = "Saved restore review only; no broker order has been placed, modified, cancelled, or transmitted."
 	book.RestoreCommand = "ibkr purge restore SYMBOL"
 	book.MonitorCommand = "ibkr purge monitor"
-	book.ExecutionCommand = "not available in this build"
+	book.ExecutionCommand = "ibkr purge --all"
 	sortPurgeBookLegs(book.Legs)
 	recomputePurgeBookTotals(book)
 }
@@ -630,37 +660,60 @@ func mergePurgeLeg(dst *purgeBookLeg, src purgeBookLeg) error {
 		return fmt.Errorf("active purge book already tracks %s as %s; restore or record that leg before adding the opposite side", purgeLegLabel(*dst), dst.OriginalSide)
 	}
 	oldQty := dst.Quantity
-	addQty := src.Quantity
-	totalQty := oldQty + addQty
-	if totalQty <= 0 {
+	newQty := src.Quantity
+	if newQty <= 0 {
 		return nil
 	}
-	dst.Quantity = totalQty
-	dst.OriginalQuantity += src.OriginalQuantity
-	dst.ExitValue += src.ExitValue
-	dst.OriginalMarketValueCCY += src.OriginalMarketValueCCY
 	multiplier := max(max(dst.Multiplier, src.Multiplier), 1)
 	if dst.Multiplier != src.Multiplier {
-		dst.Warnings = appendUniqueString(dst.Warnings, "merged positions reported different multipliers")
+		dst.Warnings = appendUniqueString(dst.Warnings, "refreshed position reported a different multiplier")
 	}
+	if math.Abs(oldQty-newQty) > 1e-9 {
+		dst.Warnings = appendUniqueString(dst.Warnings, "quantity reconciled from current positions")
+	}
+	if dst.ExitPrice <= 0 && src.ExitPrice > 0 {
+		dst.ExitPrice = src.ExitPrice
+		dst.ExitPriceSource = src.ExitPriceSource
+	}
+	if dst.ExitPriceSource == "" {
+		dst.ExitPriceSource = src.ExitPriceSource
+	}
+	dst.Symbol = src.Symbol
+	dst.SecType = src.SecType
+	dst.Contract = src.Contract
+	dst.Currency = src.Currency
+	dst.OriginalQuantity = src.OriginalQuantity
+	dst.Quantity = newQty
 	dst.Multiplier = multiplier
-	if dst.ExitValue > 0 {
-		dst.ExitPrice = dst.ExitValue / (dst.Quantity * float64(multiplier))
+	if dst.ExitPrice > 0 {
+		dst.ExitValue = dst.ExitPrice * dst.Quantity * float64(multiplier)
+	} else {
+		dst.ExitValue = 0
 	}
-	if dst.ExitPriceSource != src.ExitPriceSource {
-		dst.ExitPriceSource = "weighted_average"
-	}
+	dst.OriginalMarketValueCCY = src.OriginalMarketValueCCY
 	for _, warning := range src.Warnings {
 		dst.Warnings = appendUniqueString(dst.Warnings, warning)
 	}
-	if dst.Status == purgeLegStatusFractional || src.Status == purgeLegStatusFractional {
+	if oldQty > 0 && math.Abs(oldQty-newQty) > 1e-9 {
+		ratio := newQty / oldQty
+		scaleFloatPtr(dst.CurrentRestoreValue, ratio)
+		scaleFloatPtr(dst.ShadowSaved, ratio)
+		scaleFloatPtr(dst.LowRestoreValue, ratio)
+		scaleFloatPtr(dst.HighRestoreValue, ratio)
+		if dst.ShadowSaved != nil && dst.ExitValue > 0 {
+			pct := *dst.ShadowSaved / dst.ExitValue * 100
+			dst.ShadowSavedPctExit = &pct
+		}
+	}
+	if src.Status == purgeLegStatusFractional {
 		dst.Status = purgeLegStatusFractional
 	} else if dst.ExitPrice <= 0 {
 		dst.Status = purgeLegStatusUnpriced
+	} else if dst.CurrentPrice != nil {
+		dst.Status = purgeLegStatusPriced
 	} else {
 		dst.Status = purgeLegStatusDraft
 	}
-	resetPurgeLegQuote(dst)
 	return nil
 }
 
@@ -817,6 +870,7 @@ func purgeContractFromPosition(p rpc.PositionView) rpc.ContractParams {
 		secType = "OPT"
 	}
 	c := rpc.ContractParams{
+		ConID:        p.ConID,
 		Symbol:       strings.ToUpper(strings.TrimSpace(p.Symbol)),
 		SecType:      secType,
 		Exchange:     strings.TrimSpace(p.Exchange),
@@ -826,6 +880,7 @@ func purgeContractFromPosition(p rpc.PositionView) rpc.ContractParams {
 		Expiry:       strings.TrimSpace(p.Expiry),
 		Strike:       p.Strike,
 		Right:        strings.ToUpper(strings.TrimSpace(p.Right)),
+		Multiplier:   max(p.Multiplier, 1),
 	}
 	if c.Exchange == "" {
 		c.Exchange = "SMART"
@@ -1102,23 +1157,153 @@ func sortPurgeBookLegs(legs []purgeBookLeg) {
 	})
 }
 
+func renderPurgeStatusText(env *Env, out io.Writer, res *rpc.PurgeStatusResult) {
+	fmt.Fprintln(out)
+	if res == nil {
+		fmt.Fprintln(out, "No purge status")
+		return
+	}
+	fmt.Fprintf(out, "IBKR Purge Status  %s\n", env.statusBadge(statusConcern{Text: purgeStatusBadgeText(res.Status), Level: purgeStatusConcernLevel(res.Status)}))
+	if res.PurgeID != "" {
+		statusRow(env, out, "Purge", res.PurgeID)
+	} else {
+		statusRow(env, out, "Purge", "all tracked purge orders")
+	}
+	if res.Account != "" {
+		statusRow(env, out, "Account", res.Account)
+	}
+	statusRow(env, out, "Orders", fmt.Sprintf("%d total / %d open / %d filled / %d cancelled / %d attention",
+		res.TotalOrders, res.OpenOrders, res.FilledOrders, res.CancelledOrders, res.AttentionOrders))
+	statusRow(env, out, "Book", fmt.Sprintf("%d active / %d restored / %s remaining",
+		res.Totals.ActiveRows, res.Totals.RestoredRows, formatPurgeQuantity(res.Totals.RemainingQuantity)))
+	if res.Totals.PurgeValue != 0 {
+		statusRow(env, out, "Purge value", formatMoneyBare(res.Totals.PurgeValue))
+	}
+	if res.Totals.RestoreValue != 0 {
+		statusRow(env, out, "Restore value", formatMoneyBare(res.Totals.RestoreValue))
+	}
+	if res.Totals.ShadowPnL != 0 {
+		statusRow(env, out, "Shadow P/L", env.colorBySign(res.Totals.ShadowPnL, formatMoneyBare(res.Totals.ShadowPnL), signPnL))
+	}
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
+	}
+	if len(res.Rows) > 0 {
+		fmt.Fprintln(out)
+		cols := []positionTableColumn{
+			{header: "LEG", align: positionAlignLeft},
+			{header: "SIDE", align: positionAlignLeft},
+			{header: "PURGED", align: positionAlignRight},
+			{header: "RESTORED", align: positionAlignRight},
+			{header: "REMAIN", align: positionAlignRight},
+			{header: "P/L", align: positionAlignRight},
+			{header: "STATE", align: positionAlignLeft},
+		}
+		rows := make([][]string, 0, len(res.Rows))
+		for _, row := range res.Rows {
+			rows = append(rows, []string{
+				purgeLedgerRowLabel(row),
+				row.OriginalSide,
+				formatPurgeQuantity(row.PurgedQuantity),
+				formatPurgeQuantity(row.RestoredQuantity),
+				formatPurgeQuantity(row.RemainingQuantity),
+				env.colorBySign(row.ShadowPnL, formatMoneyBare(row.ShadowPnL), signPnL),
+				row.Status,
+			})
+		}
+		renderPositionTable(env, out, cols, rows)
+	}
+	if len(res.Orders) > 0 {
+		fmt.Fprintln(out)
+		cols := []positionTableColumn{
+			{header: "PURGE", align: positionAlignLeft},
+			{header: "ORDER", align: positionAlignLeft},
+			{header: "LEG", align: positionAlignLeft},
+			{header: "ACTION", align: positionAlignLeft},
+			{header: "QTY", align: positionAlignRight},
+			{header: "FILLED", align: positionAlignRight},
+			{header: "STATE", align: positionAlignLeft},
+			{header: "UPDATED", align: positionAlignLeft},
+		}
+		rows := make([][]string, 0, len(res.Orders))
+		for _, order := range res.Orders {
+			state := order.LifecycleStatus
+			if order.SendState != "" && order.SendState != "send_attempted" {
+				state += "/" + order.SendState
+			}
+			rows = append(rows, []string{
+				nonEmpty(order.PurgeID, "unknown"),
+				purgeOrderIDLabel(order),
+				purgeOrderLegLabel(order),
+				order.Action,
+				formatPurgeQuantity(order.Quantity),
+				formatPurgeQuantity(order.Filled),
+				state,
+				formatOrderTime(order.UpdatedAt),
+			})
+		}
+		renderPositionTable(env, out, cols, rows)
+	}
+	fmt.Fprintln(out)
+}
+
+func purgeLedgerRowLabel(row rpc.PurgeLedgerRow) string {
+	return purgeLegLabel(purgeBookLeg{Symbol: row.Symbol, Contract: row.Contract})
+}
+
+func purgeOrderIDLabel(order rpc.OrderView) string {
+	if strings.TrimSpace(order.OrderRef) != "" {
+		return order.OrderRef
+	}
+	if order.ReservedOrderID != 0 {
+		return strconv.Itoa(order.ReservedOrderID)
+	}
+	return "unknown"
+}
+
+func purgeStatusConcernLevel(status string) statusConcernLevel {
+	switch status {
+	case "attention":
+		return statusConcernWarn
+	case "open":
+		return statusConcernNotice
+	default:
+		return statusConcernNone
+	}
+}
+
+func purgeStatusBadgeText(status string) string {
+	switch status {
+	case "no_orders":
+		return "NO ORDERS"
+	default:
+		return strings.ToUpper(strings.ReplaceAll(status, "_", " "))
+	}
+}
+
+func purgeOrderLegLabel(order rpc.OrderView) string {
+	return purgeLegLabel(purgeBookLeg{
+		Symbol: order.Symbol,
+		Contract: rpc.ContractParams{
+			Symbol:       order.Symbol,
+			SecType:      order.SecType,
+			Expiry:       order.Expiry,
+			Strike:       order.Strike,
+			Right:        order.Right,
+			LocalSymbol:  order.LocalSymbol,
+			TradingClass: order.TradingClass,
+		},
+	})
+}
+
 func renderPurgeBookText(env *Env, out io.Writer, book *purgeBook) {
 	fmt.Fprintln(out)
 	if book == nil {
 		fmt.Fprintln(out, "No purge book")
 		return
 	}
-	badge := statusConcern{Text: strings.ToUpper(book.Status), Level: statusConcernNotice}
-	if book.Totals.ShadowSaved != nil {
-		if *book.Totals.ShadowSaved > 0 {
-			badge = statusConcern{Text: "HELPED", Level: statusConcernNone}
-		} else if *book.Totals.ShadowSaved < 0 {
-			badge = statusConcern{Text: "MISSED", Level: statusConcernWarn}
-		}
-	}
-	fmt.Fprintf(out, "IBKR Purge Book  %s\n", env.statusBadge(badge))
-	statusRow(env, out, "Purge", book.PurgeID)
-	statusRow(env, out, "Status", book.Status)
+	fmt.Fprintf(out, "IBKR Purge Review  %s\n", env.statusBadge(statusConcern{Text: "REVIEW", Level: statusConcernNotice}))
+	statusRow(env, out, "Review", book.PurgeID)
 	if book.AccountID != "" {
 		statusRow(env, out, "Account", book.AccountID)
 	}
@@ -1188,60 +1373,218 @@ func renderPurgeLegTable(env *Env, out io.Writer, book *purgeBook) {
 	renderPositionTable(env, out, cols, rows)
 }
 
-func renderPurgeRestorePlanText(env *Env, out io.Writer, plan *purgeRestorePlan) {
+func renderPurgeRestoreResultText(env *Env, out io.Writer, res *rpc.PurgeRestoreResult) {
 	fmt.Fprintln(out)
-	if plan == nil {
-		fmt.Fprintln(out, "No restore plan")
+	if res == nil {
+		fmt.Fprintln(out, "No restore result")
 		return
 	}
-	fmt.Fprintf(out, "IBKR Purge Restore  %s\n", env.statusBadge(statusConcern{Text: "REVIEW", Level: statusConcernNotice}))
-	statusRow(env, out, "Purge", plan.PurgeID)
-	statusRow(env, out, "Scale", fmt.Sprintf("%.0f%%", plan.Scale*100))
-	if plan.Recorded {
-		statusRow(env, out, "Recorded", "yes")
+	badge := statusConcern{Text: strings.ToUpper(res.Status), Level: statusConcernNotice}
+	switch res.Status {
+	case "preview", "submitted", "flat":
+		badge.Level = statusConcernNone
+	case "blocked", "partial":
+		badge.Level = statusConcernWarn
+	default:
+		badge.Level = statusConcernBad
 	}
-	if plan.Totals.EstimatedValue != nil {
-		statusRow(env, out, "Restore value", formatMoneyCcy(*plan.Totals.EstimatedValue, plan.BaseCurrency))
+	fmt.Fprintf(out, "IBKR Purge Restore  %s\n", env.statusBadge(badge))
+	statusRow(env, out, "Purge", nonEmpty(res.PurgeID, "active"))
+	if res.Account != "" {
+		statusRow(env, out, "Account", res.Account)
 	}
-	if plan.Totals.ShadowSavedUsed != nil {
-		statusRow(env, out, "Shadow saved", env.colorBySign(*plan.Totals.ShadowSavedUsed, formatMoneyCcy(*plan.Totals.ShadowSavedUsed, plan.BaseCurrency), signPnL))
+	if res.Endpoint != "" {
+		statusRow(env, out, "Endpoint", fmt.Sprintf("%s client %d", res.Endpoint, res.ClientID))
 	}
-	statusRow(env, out, "Boundary", plan.NotExecution)
-	if len(plan.Legs) > 0 {
+	statusRow(env, out, "Scale", fmt.Sprintf("%.0f%%", res.Scale*100))
+	statusRow(env, out, "Selected", fmt.Sprintf("%d leg(s)", res.SelectedLegs))
+	if res.SubmittedLegs > 0 {
+		statusRow(env, out, "Submitted", fmt.Sprintf("%d order(s)", res.SubmittedLegs))
+	}
+	if res.EstimatedValue != 0 {
+		statusRow(env, out, "Restore value", formatMoneyBare(res.EstimatedValue))
+	}
+	if res.ShadowPnL != 0 {
+		statusRow(env, out, "Shadow P/L", env.colorBySign(res.ShadowPnL, formatMoneyBare(res.ShadowPnL), signPnL))
+	}
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
+	}
+	if len(res.Legs) > 0 {
 		fmt.Fprintln(out)
 		cols := []positionTableColumn{
 			{header: "LEG", align: positionAlignLeft},
 			{header: "ACTION", align: positionAlignLeft},
 			{header: "QTY", align: positionAlignRight},
-			{header: "PRICE", align: positionAlignRight},
+			{header: "LIMIT", align: positionAlignRight},
 			{header: "VALUE", align: positionAlignRight},
+			{header: "WHATIF", align: positionAlignLeft},
 			{header: "STATE", align: positionAlignLeft},
 		}
-		rows := make([][]string, 0, len(plan.Legs))
-		for _, leg := range plan.Legs {
-			value := "—"
-			if leg.EstimatedValue != nil {
-				value = formatMoneyBare(*leg.EstimatedValue)
-			}
+		rows := make([][]string, 0, len(res.Legs))
+		for _, leg := range res.Legs {
 			rows = append(rows, []string{
-				purgeRestoreLegLabel(leg),
+				purgeRPCRestoreLegLabel(leg),
 				leg.Action,
-				formatPurgeQuantity(leg.Quantity),
-				formatPositionPricePtr(leg.ReferencePrice),
-				value,
-				purgeRestoreState(leg),
+				formatPurgeQuantity(float64(leg.Quantity)),
+				formatPositionPrice(leg.LimitPrice),
+				formatMoneyBare(leg.EstimatedValue),
+				nonEmpty(leg.WhatIf.Status, "—"),
+				leg.Status,
 			})
 		}
 		renderPositionTable(env, out, cols, rows)
 	}
-	if len(plan.Warnings) > 0 {
+	if len(res.Orders) > 0 {
+		fmt.Fprintln(out)
+		cols := []positionTableColumn{
+			{header: "LEG", align: positionAlignLeft},
+			{header: "ACTION", align: positionAlignLeft},
+			{header: "QTY", align: positionAlignRight},
+			{header: "LIMIT", align: positionAlignRight},
+			{header: "ORDER", align: positionAlignLeft},
+			{header: "STATE", align: positionAlignLeft},
+		}
+		rows := make([][]string, 0, len(res.Orders))
+		for _, order := range res.Orders {
+			state := order.LifecycleStatus
+			if state == "" {
+				state = order.SendState
+			}
+			rows = append(rows, []string{
+				purgeExecuteOrderLabel(order),
+				order.Action,
+				formatPurgeQuantity(float64(order.Quantity)),
+				formatPositionPrice(order.LimitPrice),
+				order.OrderRef,
+				state,
+			})
+		}
+		renderPositionTable(env, out, cols, rows)
+	}
+	if len(res.Skipped) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Skipped:")
+		for _, leg := range res.Skipped {
+			fmt.Fprintf(out, "  - %s: %s\n", purgeExecuteSkippedLabel(leg), leg.Reason)
+		}
+	}
+	if len(res.Blockers) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Blockers:")
+		for _, blocker := range res.Blockers {
+			fmt.Fprintf(out, "  - %s: %s\n", blocker.Code, blocker.Message)
+		}
+	}
+	if len(res.Warnings) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Warnings:")
-		for _, w := range plan.Warnings {
+		for _, w := range res.Warnings {
 			fmt.Fprintf(out, "  - %s\n", w)
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+func purgeRPCRestoreLegLabel(leg rpc.PurgeRestoreLeg) string {
+	return purgeLegLabel(purgeBookLeg{Symbol: leg.Symbol, Contract: leg.Contract})
+}
+
+func renderPurgeExecuteResultText(env *Env, out io.Writer, result *rpc.PurgeExecuteResult) {
+	fmt.Fprintln(out)
+	if result == nil {
+		fmt.Fprintln(out, "No purge execution result")
+		return
+	}
+	badge := statusConcern{Text: strings.ToUpper(result.Status), Level: statusConcernNone}
+	switch result.Status {
+	case "submitted", "flat":
+		badge.Level = statusConcernNone
+	case "partial", "blocked":
+		badge.Level = statusConcernWarn
+	default:
+		badge.Level = statusConcernBad
+	}
+	fmt.Fprintf(out, "IBKR Purge  %s\n", env.statusBadge(badge))
+	statusRow(env, out, "Purge", result.PurgeID)
+	if result.Account != "" {
+		statusRow(env, out, "Account", result.Account)
+	}
+	if result.Endpoint != "" {
+		statusRow(env, out, "Endpoint", result.Endpoint)
+	}
+	statusRow(env, out, "Selected", fmt.Sprintf("%d leg(s)", result.SelectedLegs))
+	statusRow(env, out, "Submitted", fmt.Sprintf("%d order(s)", result.SubmittedLegs))
+	statusRow(env, out, "Skipped", fmt.Sprintf("%d leg(s)", result.SkippedLegs))
+	if result.ErrorLegs > 0 {
+		statusRow(env, out, "Errors", fmt.Sprintf("%d leg(s)", result.ErrorLegs))
+	}
+	if result.Message != "" {
+		statusRow(env, out, "Message", result.Message)
+	}
+	if result.MonitorCommand != "" {
+		statusRow(env, out, "Monitor", result.MonitorCommand)
+	}
+	if result.RestoreReviewCommand != "" {
+		statusRow(env, out, "Restore review", result.RestoreReviewCommand)
+	}
+	if len(result.Orders) > 0 {
+		fmt.Fprintln(out)
+		cols := []positionTableColumn{
+			{header: "LEG", align: positionAlignLeft},
+			{header: "ACTION", align: positionAlignLeft},
+			{header: "QTY", align: positionAlignRight},
+			{header: "LIMIT", align: positionAlignRight},
+			{header: "ORDER", align: positionAlignLeft},
+			{header: "STATE", align: positionAlignLeft},
+		}
+		rows := make([][]string, 0, len(result.Orders))
+		for _, order := range result.Orders {
+			state := order.LifecycleStatus
+			if state == "" {
+				state = order.SendState
+			}
+			rows = append(rows, []string{
+				purgeExecuteOrderLabel(order),
+				order.Action,
+				formatPurgeQuantity(float64(order.Quantity)),
+				formatPositionPrice(order.LimitPrice),
+				order.OrderRef,
+				state,
+			})
+		}
+		renderPositionTable(env, out, cols, rows)
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Skipped:")
+		for _, leg := range result.Skipped {
+			fmt.Fprintf(out, "  - %s: %s\n", purgeExecuteSkippedLabel(leg), leg.Reason)
+		}
+	}
+	if len(result.Blockers) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Blockers:")
+		for _, blocker := range result.Blockers {
+			fmt.Fprintf(out, "  - %s: %s\n", blocker.Code, blocker.Message)
+		}
+	}
+	if len(result.Warnings) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Warnings:")
+		for _, w := range result.Warnings {
+			fmt.Fprintf(out, "  - %s\n", w)
+		}
+	}
+	fmt.Fprintln(out)
+}
+
+func purgeExecuteOrderLabel(order rpc.PurgeExecuteOrder) string {
+	return purgeLegLabel(purgeBookLeg{Symbol: order.Symbol, Contract: order.Contract})
+}
+
+func purgeExecuteSkippedLabel(leg rpc.PurgeExecuteSkippedLeg) string {
+	return purgeLegLabel(purgeBookLeg{Symbol: leg.Symbol, Contract: leg.Contract})
 }
 
 func loadPurgeBook(id string) (purgeBook, error) {
@@ -1428,10 +1771,6 @@ func purgeLegLabel(leg purgeBookLeg) string {
 	return leg.Symbol
 }
 
-func purgeRestoreLegLabel(leg purgeRestoreLeg) string {
-	return purgeLegLabel(purgeBookLeg{Symbol: leg.Symbol, Contract: leg.Contract})
-}
-
 func purgeLegState(leg purgeBookLeg) string {
 	state := leg.Status
 	if leg.QuoteQuality != "" {
@@ -1440,14 +1779,6 @@ func purgeLegState(leg purgeBookLeg) string {
 	if leg.DataType != "" && !rpc.IsLiveDataType(leg.DataType) {
 		state += "/" + leg.DataType
 	}
-	if len(leg.Warnings) > 0 {
-		state += " warn"
-	}
-	return state
-}
-
-func purgeRestoreState(leg purgeRestoreLeg) string {
-	state := leg.Status
 	if len(leg.Warnings) > 0 {
 		state += " warn"
 	}
@@ -1463,4 +1794,11 @@ func formatPurgeQuantity(q float64) string {
 
 func validPricePtr(v *float64) bool {
 	return v != nil && *v > 0 && !math.IsNaN(*v) && !math.IsInf(*v, 0)
+}
+
+func purgeProgress(env *Env, jsonOut bool, format string, args ...any) {
+	if jsonOut || env == nil || env.Stderr == nil {
+		return
+	}
+	fmt.Fprintf(env.Stderr, "ibkr: "+format+"...\n", args...)
 }

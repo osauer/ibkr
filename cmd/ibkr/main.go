@@ -22,6 +22,7 @@ import (
 
 	"github.com/osauer/ibkr/internal/cli"
 	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/internal/tui"
 )
 
 var (
@@ -38,7 +39,16 @@ var (
 func main() {
 	runtimeVersion := effectiveVersion()
 	args := os.Args[1:]
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+	if len(args) == 0 {
+		if tui.IsInteractive(os.Stdin, os.Stdout) {
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			os.Exit(tui.Run(ctx, tui.Options{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Version: runtimeVersion}))
+		}
+		cli.PrintUsage(os.Stdout)
+		return
+	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		cli.PrintUsage(os.Stdout)
 		return
 	}

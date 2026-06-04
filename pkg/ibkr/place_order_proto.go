@@ -57,6 +57,12 @@ func encodePlaceOrderContractProto(order *IBKROrder) ([]byte, error) {
 	msg = protoAppendInt32(msg, 1, int32(order.ConID))
 	msg = protoAppendString(msg, 2, order.Symbol)
 	msg = protoAppendString(msg, 3, strings.ToUpper(order.SecType))
+	msg = protoAppendString(msg, 4, order.Expiry)
+	if order.Strike != 0 {
+		msg = protoAppendDouble(msg, 5, order.Strike)
+	}
+	msg = protoAppendString(msg, 6, strings.ToUpper(order.Right))
+	msg = protoAppendString(msg, 7, order.Multiplier)
 	msg = protoAppendString(msg, 8, order.Exchange)
 	msg = protoAppendString(msg, 9, order.PrimaryExch)
 	msg = protoAppendString(msg, 10, order.Currency)
@@ -125,8 +131,8 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	}
 
 	secType := strings.ToUpper(order.SecType)
-	if secType != "STK" && secType != "ETF" {
-		return unsupportedPlaceOrderProtoValue("secType", order.SecType, "STK/ETF only")
+	if secType != "STK" && secType != "ETF" && secType != "OPT" {
+		return unsupportedPlaceOrderProtoValue("secType", order.SecType, "STK/ETF/OPT only")
 	}
 	if strings.ToUpper(order.OrderType) != "LMT" {
 		return unsupportedPlaceOrderProtoValue("orderType", order.OrderType, "LMT only")
@@ -135,16 +141,44 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 		return unsupportedPlaceOrderProtoValue("tif", order.TIF, "DAY only")
 	}
 	if order.LmtPrice <= 0 {
-		return fmt.Errorf("protobuf placeOrder WhatIf requires positive lmtPrice")
+		return fmt.Errorf("protobuf placeOrder requires positive lmtPrice")
+	}
+	if secType == "OPT" {
+		if strings.TrimSpace(order.Expiry) == "" {
+			return fmt.Errorf("protobuf placeOrder OPT requires expiry")
+		}
+		right := strings.ToUpper(strings.TrimSpace(order.Right))
+		if right != "C" && right != "P" {
+			return unsupportedPlaceOrderProtoValue("right", order.Right, "C/P only")
+		}
+		if order.Strike <= 0 {
+			return fmt.Errorf("protobuf placeOrder OPT requires positive strike")
+		}
+		if strings.TrimSpace(order.Multiplier) == "" {
+			return fmt.Errorf("protobuf placeOrder OPT requires multiplier")
+		}
+	} else {
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"expiry", order.Expiry},
+			{"right", order.Right},
+			{"multiplier", order.Multiplier},
+		} {
+			if field.value != "" {
+				return unsupportedPlaceOrderProtoField(field.name)
+			}
+		}
+		if order.Strike != 0 {
+			return unsupportedPlaceOrderProtoField("strike")
+		}
 	}
 
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{"expiry", order.Expiry},
-		{"right", order.Right},
-		{"multiplier", order.Multiplier},
 		{"ocaGroup", order.OcaGroup},
 		{"goodAfterTime", order.GoodAfterTime},
 		{"goodTillDate", order.GoodTillDate},
@@ -204,15 +238,15 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	if order.ExemptCode != 0 && order.ExemptCode != -1 {
 		return unsupportedPlaceOrderProtoField("exemptCode")
 	}
-	if order.OpenClose != "" && order.OpenClose != "O" {
-		return unsupportedPlaceOrderProtoValue("openClose", order.OpenClose, "O only")
+	openClose := strings.ToUpper(strings.TrimSpace(order.OpenClose))
+	if openClose != "" && openClose != "O" && openClose != "C" {
+		return unsupportedPlaceOrderProtoValue("openClose", order.OpenClose, "O/C only")
 	}
 
 	for _, field := range []struct {
 		name  string
 		value float64
 	}{
-		{"strike", order.Strike},
 		{"auxPrice", order.AuxPrice},
 		{"discretionaryAmt", order.DiscretionaryAmt},
 		{"percentOffset", order.PercentOffset},
@@ -269,14 +303,14 @@ func validateProtoInt32(name string, value int) error {
 }
 
 func unsupportedPlaceOrderProtoField(name string) error {
-	return fmt.Errorf("protobuf placeOrder WhatIf does not support populated field %s in this preview slice", name)
+	return fmt.Errorf("protobuf placeOrder does not support populated field %s in this order slice", name)
 }
 
 func unsupportedPlaceOrderProtoValue(name, value, supported string) error {
 	if value == "" {
 		value = "<empty>"
 	}
-	return fmt.Errorf("protobuf placeOrder WhatIf does not support %s=%q in this preview slice (%s)", name, value, supported)
+	return fmt.Errorf("protobuf placeOrder does not support %s=%q in this order slice (%s)", name, value, supported)
 }
 
 func protoAppendTag(buf []byte, fieldNumber, wireType int) []byte {
@@ -344,8 +378,13 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 	}
 	fields = append(fields,
 		"orderId="+strconv.Itoa(summary.orderID),
+		"conId="+strconv.Itoa(summary.conID),
 		"symbol="+summary.symbol,
 		"secType="+summary.secType,
+		"expiry="+summary.expiry,
+		"strike="+formatProtoSummaryFloat(summary.strike),
+		"right="+summary.right,
+		"multiplier="+summary.multiplier,
 		"action="+summary.action,
 		"qty="+summary.quantity,
 		"orderType="+summary.orderType,
@@ -356,14 +395,20 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 		"outsideRth="+strconv.FormatBool(summary.outsideRth),
 		"whatIf="+strconv.FormatBool(summary.whatIf),
 		"transmit="+strconv.FormatBool(summary.transmit),
+		"openClose="+summary.openClose,
 	)
 	return fields
 }
 
 type placeOrderProtoSummary struct {
 	orderID    int
+	conID      int
 	symbol     string
 	secType    string
+	expiry     string
+	strike     float64
+	right      string
+	multiplier string
 	action     string
 	quantity   string
 	orderType  string
@@ -374,6 +419,7 @@ type placeOrderProtoSummary struct {
 	outsideRth bool
 	whatIf     bool
 	transmit   bool
+	openClose  string
 }
 
 func parsePlaceOrderProtoSummary(body []byte) (placeOrderProtoSummary, error) {
@@ -399,10 +445,28 @@ func parsePlaceOrderProtoSummary(body []byte) (placeOrderProtoSummary, error) {
 func parseContractProtoSummary(body []byte, summary *placeOrderProtoSummary) error {
 	return forEachProtoField(body, func(fieldNumber, wireType int, value []byte) error {
 		switch fieldNumber {
+		case 1:
+			v, err := protoVarintValue(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.conID = int(v)
 		case 2:
 			summary.symbol = string(value)
 		case 3:
 			summary.secType = string(value)
+		case 4:
+			summary.expiry = string(value)
+		case 5:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.strike = math.Float64frombits(v)
+		case 6:
+			summary.right = string(value)
+		case 7:
+			summary.multiplier = string(value)
 		}
 		return nil
 	})
@@ -447,6 +511,8 @@ func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error 
 				return err
 			}
 			summary.transmit = v != 0
+		case 68:
+			summary.openClose = string(value)
 		}
 		return nil
 	})

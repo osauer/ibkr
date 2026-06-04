@@ -92,8 +92,9 @@ func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Serv
 }
 
 func (s *Service) Start(ctx context.Context) {
-	_ = s.PollOnce(ctx)
+	_ = s.pollStatus(ctx)
 	s.startMarketQuoteStreams(ctx)
+	_ = s.PollOnce(ctx)
 	t := time.NewTicker(s.pollEvery)
 	defer t.Stop()
 	for {
@@ -105,6 +106,43 @@ func (s *Service) Start(ctx context.Context) {
 			_ = s.PollOnce(ctx)
 		}
 	}
+}
+
+func (s *Service) pollStatus(ctx context.Context) Snapshot {
+	now := s.now().UTC()
+	s.mu.Lock()
+	snap := cloneSnapshot(s.snapshot)
+	if snap.Sources == nil {
+		snap.Sources = map[string]SourceMeta{}
+	}
+	s.mu.Unlock()
+
+	var events []Event
+	errors := []SourceError{}
+	if status, err := s.client.Status(ctx); err != nil {
+		errors = append(errors, sourceErr("status", err, now))
+		snap.Sources["status"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.Status = status
+		snap.Sources["status"] = SourceMeta{UpdatedAt: now}
+		if s.changed("status", status) {
+			events = append(events, Event{Type: "status", Data: status})
+		}
+	}
+
+	s.mu.Lock()
+	snap.UpdatedAt = now
+	snap.Errors = errors
+	snap.Version++
+	s.snapshot = snap
+	out := cloneSnapshot(s.snapshot)
+	s.mu.Unlock()
+
+	events = append(events, Event{Type: "snapshot", Data: out})
+	for _, ev := range events {
+		s.publish(ev)
+	}
+	return out
 }
 
 func (s *Service) startMarketQuoteStreams(ctx context.Context) {
@@ -189,20 +227,24 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			events = append(events, Event{Type: "positions", Data: positions})
 		}
 	}
+	if len(events) > 0 {
+		snap = s.publishSnapshot(now, snap, errors, events)
+		events = nil
+	}
 	if quotes, err := s.marketQuotes(ctx, now); err != nil {
 		errors = append(errors, sourceErr("market_quotes", err, now))
 		snap.Sources["market_quotes"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
 		if quotes != nil {
-			snap.Quotes = quotes
-			if s.changed("market_quotes", quotes) {
-				events = append(events, Event{Type: "market_quotes", Data: quotes})
+			snap.Quotes = mergeMarketQuotes(snap.Quotes, quotes)
+			if s.changed("market_quotes", snap.Quotes) {
+				events = append(events, Event{Type: "market_quotes", Data: snap.Quotes})
 			}
 		}
 	} else {
-		snap.Quotes = quotes
+		snap.Quotes = mergeMarketQuotes(snap.Quotes, quotes)
 		snap.Sources["market_quotes"] = SourceMeta{UpdatedAt: now}
-		if s.changed("market_quotes", quotes) {
-			events = append(events, Event{Type: "market_quotes", Data: quotes})
+		if s.changed("market_quotes", snap.Quotes) {
+			events = append(events, Event{Type: "market_quotes", Data: snap.Quotes})
 		}
 	}
 	if trading, err := s.client.TradingStatus(ctx); err != nil {
@@ -245,6 +287,22 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		s.mu.Unlock()
 	}
 
+	s.mu.Lock()
+	snap.UpdatedAt = now
+	snap.Errors = errors
+	snap.Version++
+	s.snapshot = snap
+	out := cloneSnapshot(s.snapshot)
+	s.mu.Unlock()
+
+	events = append(events, Event{Type: "snapshot", Data: out})
+	for _, ev := range events {
+		s.publish(ev)
+	}
+	return out
+}
+
+func (s *Service) publishSnapshot(now time.Time, snap Snapshot, errors []SourceError, events []Event) Snapshot {
 	s.mu.Lock()
 	snap.UpdatedAt = now
 	snap.Errors = errors
@@ -547,6 +605,48 @@ func cloneMarketQuotes(in *MarketQuotes) *MarketQuotes {
 	out.Quotes = maps.Clone(in.Quotes)
 	out.Errors = maps.Clone(in.Errors)
 	return &out
+}
+
+func mergeMarketQuotes(existing, update *MarketQuotes) *MarketQuotes {
+	if existing == nil {
+		return cloneMarketQuotes(update)
+	}
+	if update == nil {
+		return cloneMarketQuotes(existing)
+	}
+	out := cloneMarketQuotes(existing)
+	if out == nil {
+		out = &MarketQuotes{}
+	}
+	if !update.AsOf.IsZero() {
+		out.AsOf = update.AsOf
+	}
+	if len(update.Quotes) > 0 {
+		if out.Quotes == nil {
+			out.Quotes = map[string]rpc.Quote{}
+		}
+		if out.Errors != nil {
+			for symbol := range update.Quotes {
+				delete(out.Errors, symbol)
+			}
+		}
+		maps.Copy(out.Quotes, update.Quotes)
+	}
+	if len(update.Errors) > 0 {
+		if out.Errors == nil {
+			out.Errors = map[string]string{}
+		}
+		maps.Copy(out.Errors, update.Errors)
+	} else if len(update.Quotes) > 0 && out.Errors != nil && len(out.Errors) == 0 {
+		out.Errors = nil
+	}
+	if len(out.Quotes) == 0 {
+		out.Quotes = nil
+	}
+	if len(out.Errors) == 0 {
+		out.Errors = nil
+	}
+	return out
 }
 
 func cloneRegimeMonitor(in *rpc.RegimeMonitorResult) *rpc.RegimeMonitorResult {

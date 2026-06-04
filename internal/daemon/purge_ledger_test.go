@@ -1,0 +1,273 @@
+package daemon
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/osauer/ibkr/internal/discover"
+	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+)
+
+func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 4, 19, 0, 0, 0, time.UTC)
+	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	contract := purgeLedgerTestStockContract()
+
+	if err := store.ApplyOrderFill(purgeLedgerEventWithContract(orderJournalEvent{
+		Type:     orderJournalEventSendAttempted,
+		Source:   purgeExecuteSource,
+		OrderRef: "purge-1",
+		PurgeID:  "purge-test",
+		LegID:    "leg-aapl",
+		Account:  "DU123",
+		Action:   rpc.OrderActionSell,
+		Quantity: 4,
+	}, contract)); err != nil {
+		t.Fatalf("send attempt ApplyOrderFill: %v", err)
+	}
+	rows, totals, err := store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after send attempt: %v", err)
+	}
+	if len(rows) != 0 || totals.ActiveRows != 0 {
+		t.Fatalf("send attempt mutated ledger rows=%+v totals=%+v", rows, totals)
+	}
+
+	purgePartial := purgeLedgerFillEvent(purgeExecuteSource, "purge-1", "purge-test", "leg-aapl", contract, rpc.OrderActionSell, 4, 2, 100)
+	if err := store.ApplyOrderFill(purgePartial); err != nil {
+		t.Fatalf("partial purge fill: %v", err)
+	}
+	if err := store.ApplyOrderFill(purgePartial); err != nil {
+		t.Fatalf("duplicate purge fill: %v", err)
+	}
+	rows, _, err = store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after partial purge: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PurgedQuantity != 2 || rows[0].RemainingQuantity != 2 || rows[0].PurgeValue != 200 {
+		t.Fatalf("partial purge row = %+v", rows)
+	}
+
+	purgeFull := purgeLedgerFillEvent(purgeExecuteSource, "purge-1", "purge-test", "leg-aapl", contract, rpc.OrderActionSell, 4, 4, 101)
+	if err := store.ApplyOrderFill(purgeFull); err != nil {
+		t.Fatalf("full purge fill: %v", err)
+	}
+	rows, _, err = store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after full purge: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PurgedQuantity != 4 || rows[0].PurgeValue != 404 || rows[0].RemainingQuantity != 4 {
+		t.Fatalf("full purge row = %+v", rows)
+	}
+
+	restorePartial := purgeLedgerFillEvent(purgeRestoreSource, "restore-1", "purge-test", "leg-aapl", contract, rpc.OrderActionBuy, 4, 1, 95)
+	if err := store.ApplyOrderFill(restorePartial); err != nil {
+		t.Fatalf("partial restore fill: %v", err)
+	}
+	if err := store.ApplyOrderFill(restorePartial); err != nil {
+		t.Fatalf("duplicate restore fill: %v", err)
+	}
+	rows, _, err = store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after partial restore: %v", err)
+	}
+	if len(rows) != 1 || rows[0].RestoredQuantity != 1 || rows[0].RemainingQuantity != 3 || rows[0].RestoreValue != 95 || rows[0].ShadowPnL != 6 {
+		t.Fatalf("partial restore row = %+v", rows)
+	}
+
+	restoreFull := purgeLedgerFillEvent(purgeRestoreSource, "restore-2", "purge-test", "leg-aapl", contract, rpc.OrderActionBuy, 3, 3, 96)
+	if err := store.ApplyOrderFill(restoreFull); err != nil {
+		t.Fatalf("full restore fill: %v", err)
+	}
+	rows, totals, err = store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after full restore: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("restored row count = %d, want retained row", len(rows))
+	}
+	row := rows[0]
+	if row.Status != purgeLedgerStatusRestored || row.RemainingQuantity != 0 || row.RestoredQuantity != 4 {
+		t.Fatalf("restored row = %+v", row)
+	}
+	if totals.ActiveRows != 0 || totals.RestoredRows != 1 || totals.RemainingQuantity != 0 || totals.ShadowPnL != 21 {
+		t.Fatalf("restored totals = %+v", totals)
+	}
+}
+
+func TestPurgeLedgerShadowPnLForShortRows(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 4, 19, 5, 0, 0, time.UTC)
+	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	contract := purgeLedgerTestStockContract()
+
+	purgeFill := purgeLedgerFillEvent(purgeExecuteSource, "purge-short", "purge-test", "leg-aapl-short", contract, rpc.OrderActionBuy, 2, 2, 50)
+	restoreFill := purgeLedgerFillEvent(purgeRestoreSource, "restore-short", "purge-test", "leg-aapl-short", contract, rpc.OrderActionSell, 2, 2, 45)
+	if err := store.ApplyOrderFill(purgeFill); err != nil {
+		t.Fatalf("short purge fill: %v", err)
+	}
+	if err := store.ApplyOrderFill(restoreFill); err != nil {
+		t.Fatalf("short restore fill: %v", err)
+	}
+	rows, totals, err := store.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("short snapshot: %v", err)
+	}
+	if len(rows) != 1 || rows[0].OriginalSide != purgeOriginalSideShort || rows[0].ShadowPnL != -10 || totals.ShadowPnL != -10 {
+		t.Fatalf("short row/totals = %+v / %+v", rows, totals)
+	}
+}
+
+func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 4, 19, 10, 0, 0, time.UTC)
+	dir := t.TempDir()
+	srv := &Server{
+		orderJournal: newOrderJournalStore(filepath.Join(dir, "order-journal.jsonl")),
+		purgeLedger:  newPurgeLedgerStore(filepath.Join(dir, "purge-ledger.json"), func() time.Time { return now }),
+		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU123"},
+		now:          func() time.Time { return now },
+	}
+	contract := purgeLedgerTestStockContract()
+	if err := srv.orderJournal.Append(purgeLedgerEventWithContract(orderJournalEvent{
+		At:              now,
+		Type:            orderJournalEventSendAttempted,
+		Source:          purgeExecuteSource,
+		PurgeID:         "purge-test",
+		LegID:           "leg-aapl",
+		OrderRef:        "purge-1",
+		ReservedOrderID: 1001,
+		ClientID:        31,
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+		Quantity:        2,
+		LimitPrice:      99,
+		SendState:       orderSendStateSendAttempted,
+	}, contract)); err != nil {
+		t.Fatalf("append purge send: %v", err)
+	}
+	rows, _, err := srv.purgeLedger.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot before lifecycle: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("send attempt created ledger rows: %+v", rows)
+	}
+
+	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
+		Type:         ibkrlib.OrderLifecycleEventStatus,
+		OrderID:      1001,
+		PermID:       9001,
+		ClientID:     31,
+		Status:       "Filled",
+		Filled:       2,
+		Remaining:    0,
+		AvgFillPrice: 100,
+	})
+	rows, _, err = srv.purgeLedger.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after purge lifecycle: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Symbol != "AAPL" || rows[0].PurgeAction != rpc.OrderActionSell || rows[0].PurgedQuantity != 2 || rows[0].RemainingQuantity != 2 {
+		t.Fatalf("purge lifecycle row = %+v", rows)
+	}
+
+	if err := srv.orderJournal.Append(purgeLedgerEventWithContract(orderJournalEvent{
+		At:              now.Add(time.Second),
+		Type:            orderJournalEventSendAttempted,
+		Source:          purgeRestoreSource,
+		PurgeID:         "purge-test",
+		LegID:           "leg-aapl",
+		OrderRef:        "restore-1",
+		ReservedOrderID: 1002,
+		ClientID:        31,
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Action:          rpc.OrderActionBuy,
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+		Quantity:        2,
+		LimitPrice:      90,
+		SendState:       orderSendStateSendAttempted,
+	}, contract)); err != nil {
+		t.Fatalf("append restore send: %v", err)
+	}
+	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
+		Type:         ibkrlib.OrderLifecycleEventStatus,
+		OrderID:      1002,
+		PermID:       9002,
+		ClientID:     31,
+		Status:       "Filled",
+		Filled:       2,
+		Remaining:    0,
+		AvgFillPrice: 90,
+	})
+	rows, totals, err := srv.purgeLedger.Snapshot("", "")
+	if err != nil {
+		t.Fatalf("snapshot after restore lifecycle: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Status != purgeLedgerStatusRestored || rows[0].RemainingQuantity != 0 || rows[0].RestoredQuantity != 2 {
+		t.Fatalf("restore lifecycle row = %+v", rows)
+	}
+	if totals.ActiveRows != 0 || totals.RestoredRows != 1 || totals.ShadowPnL != 20 {
+		t.Fatalf("restore lifecycle totals = %+v", totals)
+	}
+}
+
+func purgeLedgerFillEvent(source, orderRef, purgeID, legID string, contract rpc.ContractParams, action string, quantity, filled, avgFillPrice float64) orderJournalEvent {
+	return purgeLedgerEventWithContract(orderJournalEvent{
+		Type:         orderJournalEventStatusUpdated,
+		Source:       source,
+		OrderRef:     orderRef,
+		PurgeID:      purgeID,
+		LegID:        legID,
+		Account:      "DU123",
+		Action:       action,
+		OrderType:    rpc.OrderTypeLMT,
+		TIF:          rpc.OrderTIFDay,
+		Quantity:     quantity,
+		Filled:       filled,
+		Remaining:    max(quantity-filled, 0),
+		AvgFillPrice: avgFillPrice,
+		SendState:    orderSendStateTerminal,
+	}, contract)
+}
+
+func purgeLedgerEventWithContract(ev orderJournalEvent, contract rpc.ContractParams) orderJournalEvent {
+	ev.ConID = contract.ConID
+	ev.Symbol = contract.Symbol
+	ev.SecType = contract.SecType
+	ev.Exchange = contract.Exchange
+	ev.PrimaryExch = contract.PrimaryExch
+	ev.Currency = contract.Currency
+	ev.LocalSymbol = contract.LocalSymbol
+	ev.TradingClass = contract.TradingClass
+	ev.Expiry = contract.Expiry
+	ev.Strike = contract.Strike
+	ev.Right = contract.Right
+	ev.Multiplier = contract.Multiplier
+	return ev
+}
+
+func purgeLedgerTestStockContract() rpc.ContractParams {
+	return rpc.ContractParams{
+		ConID:       265598,
+		Symbol:      "AAPL",
+		SecType:     "STK",
+		Exchange:    "SMART",
+		PrimaryExch: "NASDAQ",
+		Currency:    "USD",
+		Multiplier:  1,
+	}
+}
