@@ -87,7 +87,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 - **Market breadth.** S&P 500 participation from constituent daily bars: percent above 50-DMA, percent above 200-DMA, and fresh 52-week highs/lows. A fresh cache is instant; first-ever cold start can take about an hour because of IBKR pacing.
 - **Dealer gamma.** Production-ready SPX/SPXW-canonical zero-gamma and concentration view, with SPY used as corroborating context when its option surface is usable. A fresh, rankable SPX result is the stable headline signal; SPY-only is a labeled proxy. Treat the signed level as a regime hint, not a precise trading level.
 - **Risk regime.** One call returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, SPX-canonical dealer gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
-- **Portfolio canary.** `ibkr canary` and MCP `ibkr_canary` produce a stateless `market regime × portfolio shape` monitor with `action`, `market_confirmation`, `portfolio_fit`, `input_health`, planner readiness, stable fingerprints, and supporting `signals[]`. Account-only risk stays evidence, not a canary DEFEND trigger; DEFEND requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Use `ibkr canary --details` for the full evidence rows.
+- **Portfolio canary.** `ibkr canary` and MCP `ibkr_canary` produce a stateless `market regime × portfolio shape` monitor with `action`, `market_confirmation`, `portfolio_fit`, `input_health`, planner readiness, stable fingerprints, and supporting `signals[]`. It also emits bounded `portfolio.held_stress[]` rows for material held underlyings when existing positions data shows held-name daily P&L shock, near-expiry held-option delta concentration, or held-name liquidity degradation. Account-only risk stays evidence, not a canary DEFEND trigger; DEFEND requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Use `ibkr canary --details` for the full evidence rows.
 
 Every data command supports `--json`. `ibkr restart --json` is also useful for scripts: it reports whether a daemon was already running, old/new PIDs, whether `--force` was used, and the post-start `status.health` snapshot. Lifecycle commands such as `setup`, `update`, `restart`, `mcp`, and `daemon` are for local operation and transport setup.
 
@@ -167,7 +167,7 @@ $ ibkr quote AAPL,MSFT --json | jq '.[] | {sym: .symbol, price: .price, chg: .ch
 $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency, last: .last}'
 $ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
-$ ibkr canary --json | jq '.decision, .rows[] | {title, decision, action}'
+$ ibkr canary --json | jq '{action, market_confirmation, portfolio_fit, held_stress: .portfolio.held_stress}'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```

@@ -1,6 +1,6 @@
 # Concepts
 
-Updated: 2026-05-31 21:23 CEST
+Updated: 2026-06-04 07:42 CEST
 
 What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
@@ -47,6 +47,22 @@ Two failure modes worth flagging on the wire:
 - Live IBKR rows may carry a `fields_missing` array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat `fields_missing` as a render hint, not an error.
 
 The full methodology spec is at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Use it when calibrating your own threshold bands — the spec's suggestions are starting points, not gospel.
+
+---
+
+## Canary
+
+The portfolio canary answers a narrower question than regime: *does today's market weather matter for the portfolio currently held in the account?* It consumes account, positions, and regime snapshots, then emits `action`, `market_confirmation`, `portfolio_fit`, `input_health`, planner readiness, source health, and a semantic alert fingerprint for monitor dedupe.
+
+The high-precision rule is intentional: broad-market stress must be confirmed by market evidence, not by the user's own losses or margin pressure. Account-only facts and portfolio-only facts can appear as evidence, but `defend` requires confirmed market pressure, vulnerable portfolio fit, and usable input health. Portfolio-only pressure normally becomes `rebalance` or `watch`.
+
+`portfolio.held_stress[]` is the positions-only single-name stress surface. It is bounded to material held underlyings and appears only when an existing position shows one of these conditions:
+
+- held-name daily P&L shock as a percent of NLV
+- near-expiry held-option delta concentration
+- held-name stock quote or option bid/ask degradation
+
+Canary does not call option chains, scanners, borrow feeds, short-interest feeds, or external flow sources. For deeper diagnosis, use `ibkr_positions`, `ibkr_regime`, or `ibkr_account`; canary is the alert boundary, not the investigation.
 
 ---
 

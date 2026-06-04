@@ -151,9 +151,6 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 		res.Foreground = proc.Foreground
 		res.SocketPath = proc.SocketPath
 		res.LockPath = proc.LockPath
-		if !opts.jsonOut {
-			fmt.Fprintf(opts.out, "ibkr restart: stopping daemon pid %d gracefully\n", proc.PID)
-		}
 		stopErr := deps.stop(proc.PID, opts.timeout)
 		if stopErr != nil {
 			if !opts.force || !errors.Is(stopErr, update.ErrStopTimeout) {
@@ -223,9 +220,6 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 		if len(proc.Args) > 0 {
 			args = append([]string(nil), proc.Args...)
 			res.Args = append([]string(nil), proc.Args...)
-		}
-		if !opts.jsonOut {
-			fmt.Fprintf(opts.out, "ibkr restart --app: stopping app pid %d gracefully\n", proc.PID)
 		}
 		stopErr := deps.stop(proc.PID, opts.timeout)
 		if stopErr != nil {

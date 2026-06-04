@@ -1,6 +1,6 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-05-31 21:23 CEST
+Last reviewed: 2026-06-04 07:42 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
@@ -23,8 +23,9 @@ gamma/breadth semantic state.
 
 `canary` emits `canary-fp-v1` from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
-primary drivers, signal semantics, classified market state, source-health
-buckets, row titles/states, and `source_fingerprints.account`,
+primary drivers, signal semantics including held-underlying stress buckets,
+classified market state, source-health buckets, row titles/states, and
+`source_fingerprints.account`,
 `source_fingerprints.positions`, and `source_fingerprints.regime`.
 
 Regime also exposes a nested `lifecycle.fingerprint` for consumers that dedupe

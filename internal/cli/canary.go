@@ -16,6 +16,8 @@ import (
 
 var canaryPolicy = risk.DefaultPolicy()
 
+const canaryHeldStressLimit = 5
+
 type CanaryInput = rpc.CanaryInput
 type CanaryResult = rpc.CanaryResult
 type CanarySourceAsOf = rpc.CanarySourceAsOf
@@ -44,7 +46,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		PolicyProfile:      canaryPolicy.PolicyProfile(),
 		PolicyVersion:      canaryPolicy.PolicyVersion(),
 		PolicyFingerprint:  rpc.Fingerprint{Version: risk.PolicyFingerprintVersion, Key: canaryPolicy.FingerprintKey()},
-		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions),
+		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions, now),
 		Market:             summarizeCanaryMarket(in.Regime, now),
 		MarketIndicators:   canaryMarketIndicators(in.Regime, now),
 		NotExecution:       "Read-only canary snapshot; no orders are placed by ibkr.",
@@ -58,6 +60,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		canaryMarketRow(res.Market),
 		canaryExposureRow(res.Portfolio, res.Market),
 		canaryConcentrationRow(res.Portfolio, res.Market),
+		canaryHeldStressRow(res.Portfolio, res.Market),
 		canaryOptionsRow(res.Portfolio, in.Positions, res.Market),
 		canaryDataQualityRow(res.Market, in.Regime),
 	}
@@ -81,7 +84,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	return res
 }
 
-func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult) CanaryPortfolioSummary {
+func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, now time.Time) CanaryPortfolioSummary {
 	out := CanaryPortfolioSummary{
 		BaseCurrency:   acct.BaseCurrency,
 		NetLiquidation: acct.NetLiquidation,
@@ -129,7 +132,340 @@ func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult) C
 			}
 		}
 	}
+	out.HeldStress = canaryHeldStressSummaries(acct, pos, now)
 	return out
+}
+
+func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, now time.Time) []rpc.CanaryHeldStress {
+	if acct.NetLiquidation <= 0 {
+		return nil
+	}
+	builders := map[string]*rpc.CanaryHeldStress{}
+	order := []string{}
+	ensure := func(underlying string) *rpc.CanaryHeldStress {
+		underlying = strings.ToUpper(strings.TrimSpace(underlying))
+		if underlying == "" {
+			return nil
+		}
+		if s := builders[underlying]; s != nil {
+			return s
+		}
+		builders[underlying] = &rpc.CanaryHeldStress{Underlying: underlying}
+		order = append(order, underlying)
+		return builders[underlying]
+	}
+
+	if pos.Portfolio != nil {
+		for _, e := range pos.Portfolio.ExposureBase {
+			s := ensure(e.Underlying)
+			if s == nil {
+				continue
+			}
+			canarySetFloatPtrIfNil(&s.MarketValuePctNLV, e.MarketValuePctNLV)
+			if s.DeltaPctNLV == nil && e.DollarDeltaBase != nil {
+				v := math.Abs(*e.DollarDeltaBase) / acct.NetLiquidation * 100
+				s.DeltaPctNLV = &v
+			}
+			if s.DailyPnLPctNLV == nil && e.DailyPnLBase != nil {
+				v := *e.DailyPnLBase / acct.NetLiquidation * 100
+				s.DailyPnLPctNLV = &v
+			}
+		}
+	}
+
+	for _, group := range pos.ByUnderlying {
+		s := ensure(group.Underlying)
+		if s == nil {
+			continue
+		}
+		canarySetFloatPtrIfNil(&s.MarketValuePctNLV, group.GroupMarketValuePctNLV)
+		if s.MarketValuePctNLV == nil && group.GroupMarketValueBase != nil {
+			v := *group.GroupMarketValueBase / acct.NetLiquidation * 100
+			s.MarketValuePctNLV = &v
+		}
+		if s.DeltaPctNLV == nil && group.GroupDollarDeltaBase != nil {
+			v := math.Abs(*group.GroupDollarDeltaBase) / acct.NetLiquidation * 100
+			s.DeltaPctNLV = &v
+		}
+		if s.DailyPnLPctNLV == nil && group.GroupDailyPnLBase != nil {
+			v := *group.GroupDailyPnLBase / acct.NetLiquidation * 100
+			s.DailyPnLPctNLV = &v
+		}
+		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldStockLiquidityFlags(group.Stock)...)
+	}
+
+	for i := range pos.Stocks {
+		stock := &pos.Stocks[i]
+		s := ensure(stock.Symbol)
+		if s == nil {
+			continue
+		}
+		if s.MarketValuePctNLV == nil && stock.MarketValueBase != nil {
+			v := *stock.MarketValueBase / acct.NetLiquidation * 100
+			s.MarketValuePctNLV = &v
+		}
+		if s.DailyPnLPctNLV == nil && stock.DailyPnLBase != nil {
+			v := *stock.DailyPnLBase / acct.NetLiquidation * 100
+			s.DailyPnLPctNLV = &v
+		}
+		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldStockLiquidityFlags(stock)...)
+	}
+
+	optionsByUnderlying := canaryOptionsByUnderlying(pos)
+	optionUnderlyings := make([]string, 0, len(optionsByUnderlying))
+	for underlying := range optionsByUnderlying {
+		optionUnderlyings = append(optionUnderlyings, underlying)
+	}
+	slices.Sort(optionUnderlyings)
+	for _, underlying := range optionUnderlyings {
+		options := optionsByUnderlying[underlying]
+		s := ensure(underlying)
+		if s == nil {
+			continue
+		}
+		canaryApplyHeldOptionStress(s, options, now, acct.NetLiquidation)
+		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldOptionLiquidityFlags(options)...)
+	}
+
+	out := []rpc.CanaryHeldStress{}
+	for _, underlying := range order {
+		s := builders[underlying]
+		s.MaterialReasons = canaryHeldStressMaterialReasons(*s)
+		s.SignalIDs = canaryHeldStressSignalIDs(*s)
+		if len(s.MaterialReasons) == 0 || len(s.SignalIDs) == 0 {
+			continue
+		}
+		out = append(out, *s)
+	}
+	slices.SortStableFunc(out, func(a, b rpc.CanaryHeldStress) int {
+		return cmp.Compare(canaryHeldStressSortScore(b), canaryHeldStressSortScore(a))
+	})
+	if len(out) > canaryHeldStressLimit {
+		out = out[:canaryHeldStressLimit]
+	}
+	return out
+}
+
+func canarySetFloatPtrIfNil(dst **float64, src *float64) {
+	if *dst != nil || src == nil {
+		return
+	}
+	v := *src
+	*dst = &v
+}
+
+func canaryOptionsByUnderlying(pos rpc.PositionsResult) map[string][]rpc.PositionView {
+	out := map[string][]rpc.PositionView{}
+	if len(pos.ByUnderlying) > 0 {
+		for _, group := range pos.ByUnderlying {
+			underlying := strings.ToUpper(strings.TrimSpace(group.Underlying))
+			if underlying == "" || len(group.Options) == 0 {
+				continue
+			}
+			out[underlying] = append(out[underlying], group.Options...)
+		}
+		return out
+	}
+	for _, opt := range pos.Options {
+		underlying := strings.ToUpper(strings.TrimSpace(opt.Symbol))
+		if underlying == "" {
+			continue
+		}
+		out[underlying] = append(out[underlying], opt)
+	}
+	return out
+}
+
+func canaryApplyHeldOptionStress(s *rpc.CanaryHeldStress, options []rpc.PositionView, now time.Time, nlv float64) {
+	if s == nil || nlv <= 0 {
+		return
+	}
+	var deltaAbsBase, gamma float64
+	var hasDelta, hasGamma bool
+	var minDTE *int
+	for _, opt := range options {
+		dte, ok := canaryOptionDTE(opt.Expiry, now)
+		if !ok || dte < 0 || dte > canaryPolicy.HeldOptionNearDTE {
+			continue
+		}
+		if minDTE == nil || dte < *minDTE {
+			v := dte
+			minDTE = &v
+		}
+		if opt.Delta != nil && opt.Underlying != nil && *opt.Underlying > 0 {
+			fx := 1.0
+			if opt.FXRate != nil {
+				fx = *opt.FXRate
+			}
+			v := *opt.Delta * opt.Quantity * float64(max(opt.Multiplier, 1)) * *opt.Underlying * fx
+			deltaAbsBase += math.Abs(v)
+			hasDelta = true
+		}
+		if opt.Gamma != nil {
+			gamma += *opt.Gamma * opt.Quantity * float64(max(opt.Multiplier, 1))
+			hasGamma = true
+		}
+	}
+	s.NearExpiryMinDTE = minDTE
+	if hasDelta {
+		pct := deltaAbsBase / nlv * 100
+		s.NearExpiryDeltaPctNLV = &pct
+	}
+	if hasGamma {
+		s.NearExpiryGamma = &gamma
+	}
+}
+
+func canaryHeldStockLiquidityFlags(stock *rpc.PositionView) []string {
+	if stock == nil {
+		return nil
+	}
+	flags := []string{}
+	liveOrUnknown := canaryPositionMarketOpenOrUnknown(*stock)
+	quality := strings.ToLower(strings.TrimSpace(stock.QuoteQuality))
+	switch quality {
+	case "stale", "missing", "prev_close":
+		flags = append(flags, "stock_quote_"+quality)
+	case "wide":
+		if liveOrUnknown {
+			flags = append(flags, "stock_wide_quote")
+		}
+	}
+	if stock.Stale {
+		flags = append(flags, "stock_quote_stale")
+	}
+	if liveOrUnknown && stock.SpreadPct != nil && *stock.SpreadPct >= canaryPolicy.HeldLiquidityStockSpreadPct {
+		flags = append(flags, "stock_wide_spread")
+	}
+	return canaryUniqueFlags(nil, flags...)
+}
+
+func canaryPositionMarketOpenOrUnknown(p rpc.PositionView) bool {
+	if p.SessionContext == nil {
+		return true
+	}
+	return p.SessionContext.IsOpen
+}
+
+func canaryHeldOptionLiquidityFlags(options []rpc.PositionView) []string {
+	flags := []string{}
+	for _, opt := range options {
+		if canaryPositionWarningHas(opt.WarningDetails, "options_closed") {
+			continue
+		}
+		if opt.MarkOutsideBidAsk {
+			flags = append(flags, "option_mark_outside_bid_ask")
+		}
+		if opt.OptionBid == nil || opt.OptionAsk == nil {
+			flags = append(flags, "option_bid_ask_missing")
+			continue
+		}
+		if *opt.OptionBid <= 0 || *opt.OptionAsk <= 0 || *opt.OptionAsk < *opt.OptionBid {
+			flags = append(flags, "option_bid_ask_missing")
+			continue
+		}
+		mid := (*opt.OptionBid + *opt.OptionAsk) / 2
+		if mid <= 0 {
+			flags = append(flags, "option_bid_ask_missing")
+			continue
+		}
+		spreadPct := (*opt.OptionAsk - *opt.OptionBid) / mid * 100
+		if spreadPct >= canaryPolicy.HeldLiquidityOptionSpreadPctOfMid {
+			flags = append(flags, "option_wide_spread")
+		}
+	}
+	return canaryUniqueFlags(nil, flags...)
+}
+
+func canaryPositionWarningHas(details []rpc.DataWarning, code string) bool {
+	code = strings.ToLower(strings.TrimSpace(code))
+	for _, detail := range details {
+		if strings.ToLower(strings.TrimSpace(detail.Code)) == code {
+			return true
+		}
+	}
+	return false
+}
+
+func canaryOptionDTE(expiry string, now time.Time) (int, bool) {
+	expiry = strings.TrimSpace(expiry)
+	if expiry == "" {
+		return 0, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	loc := now.Location()
+	var t time.Time
+	var err error
+	for _, layout := range []string{"20060102", "2006-01-02"} {
+		t, err = time.ParseInLocation(layout, expiry, loc)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return 0, false
+	}
+	y, m, d := now.In(loc).Date()
+	start := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	return int(t.Sub(start).Hours() / 24), true
+}
+
+func canaryHeldStressMaterialReasons(s rpc.CanaryHeldStress) []string {
+	reasons := []string{}
+	if s.MarketValuePctNLV != nil && math.Abs(*s.MarketValuePctNLV) >= canaryPolicy.HeldStressMaterialPct {
+		reasons = appendUniqueString(reasons, "market_value")
+	}
+	if s.DeltaPctNLV != nil && *s.DeltaPctNLV >= canaryPolicy.HeldStressMaterialPct {
+		reasons = appendUniqueString(reasons, "delta")
+	}
+	if s.DailyPnLPctNLV != nil && *s.DailyPnLPctNLV <= -canaryPolicy.HeldUnderlyingPnLWatchPct {
+		reasons = appendUniqueString(reasons, "daily_pnl")
+	}
+	if s.NearExpiryDeltaPctNLV != nil && *s.NearExpiryDeltaPctNLV >= canaryPolicy.HeldOptionDeltaWatchPct {
+		reasons = appendUniqueString(reasons, "near_expiry_option_delta")
+	}
+	return reasons
+}
+
+func canaryHeldStressSignalIDs(s rpc.CanaryHeldStress) []risk.SignalID {
+	ids := []risk.SignalID{}
+	if s.DailyPnLPctNLV != nil && *s.DailyPnLPctNLV <= -canaryPolicy.HeldUnderlyingPnLWatchPct {
+		ids = append(ids, risk.SignalHeldUnderlyingPnLShock)
+	}
+	if s.NearExpiryDeltaPctNLV != nil && *s.NearExpiryDeltaPctNLV >= canaryPolicy.HeldOptionDeltaWatchPct {
+		ids = append(ids, risk.SignalHeldOptionExpiryConcentration)
+	}
+	if len(s.LiquidityFlags) > 0 {
+		ids = append(ids, risk.SignalHeldLiquidityDegraded)
+	}
+	return ids
+}
+
+func canaryHeldStressSortScore(s rpc.CanaryHeldStress) float64 {
+	score := 0.0
+	if s.MarketValuePctNLV != nil {
+		score = max(score, math.Abs(*s.MarketValuePctNLV))
+	}
+	if s.DeltaPctNLV != nil {
+		score = max(score, *s.DeltaPctNLV)
+	}
+	if s.NearExpiryDeltaPctNLV != nil {
+		score = max(score, *s.NearExpiryDeltaPctNLV)
+	}
+	if s.DailyPnLPctNLV != nil && *s.DailyPnLPctNLV < 0 {
+		score = max(score, math.Abs(*s.DailyPnLPctNLV)*10)
+	}
+	score += float64(len(s.LiquidityFlags)) * 5
+	return score
+}
+
+func canaryUniqueFlags(flags []string, values ...string) []string {
+	for _, value := range values {
+		flags = appendUniqueString(flags, value)
+	}
+	return flags
 }
 
 func canaryCurrentCushionPct(acct rpc.AccountResult) *float64 {
@@ -570,6 +906,48 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 	return canaryRow("Largest concentration", "", risk.SeverityObserve, "No concentration trim required by the canary.", evidence)
 }
 
+func canaryHeldStressRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
+	if len(p.HeldStress) == 0 {
+		return canaryRow("Held-name stress", "", risk.SeverityObserve, "No material held-name stress from existing positions data.", "no material held-name stress")
+	}
+	signals := canaryHeldStressSignals(p.HeldStress, m)
+	direction, severity := canaryHeldStressRowState(signals)
+	evidence := canaryHeldStressEvidence(p.HeldStress)
+	switch direction {
+	case risk.DirectionDefensive:
+		return canaryRow("Held-name stress", direction, severity, "Held-name stress aligns with confirmed market pressure; review material underlyings before smaller positions.", evidence)
+	case risk.DirectionRebalance:
+		return canaryRow("Held-name stress", direction, severity, "Review material held names before adding risk; rebalance stressed names without treating this as market-confirmed defense.", evidence)
+	case risk.DirectionDataQuality:
+		return canaryRow("Held-name stress", direction, severity, "Confirm held-name quotes and option bid/ask context before acting on those names.", evidence)
+	default:
+		return canaryRow("Held-name stress", "", risk.SeverityObserve, "No material held-name stress from existing positions data.", evidence)
+	}
+}
+
+func canaryHeldStressRowState(signals []risk.Signal) (risk.SignalDirection, risk.SignalSeverity) {
+	var best *risk.Signal
+	for i := range signals {
+		if signals[i].Direction == risk.DirectionDataQuality {
+			continue
+		}
+		if best == nil || signalSeverityRank(signals[i].Severity) > signalSeverityRank(best.Severity) {
+			best = &signals[i]
+		}
+	}
+	if best == nil {
+		for i := range signals {
+			if best == nil || signalSeverityRank(signals[i].Severity) > signalSeverityRank(best.Severity) {
+				best = &signals[i]
+			}
+		}
+	}
+	if best == nil {
+		return "", risk.SeverityObserve
+	}
+	return best.Direction, best.Severity
+}
+
 func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMarketSummary) CanaryRow {
 	if pos.Portfolio == nil || pos.Portfolio.GreeksTotal == 0 {
 		if len(pos.Options) > 0 {
@@ -682,6 +1060,8 @@ func canaryPortfolioFit(p CanaryPortfolioSummary, signals []risk.Signal) string 
 			risk.SignalGrossDeltaHigh,
 			risk.SignalSingleNameExposureHigh,
 			risk.SignalSingleNameDeltaHigh,
+			risk.SignalHeldUnderlyingPnLShock,
+			risk.SignalHeldOptionExpiryConcentration,
 			risk.SignalShortConvexityHigh:
 			return canaryPortfolioFitHigh
 		case risk.SignalMarginCushionLow,
@@ -880,6 +1260,7 @@ func canarySignals(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMa
 	signals = append(signals, canaryRegimeSignals(m)...)
 	signals = append(signals, canaryExposureSignals(p, m)...)
 	signals = append(signals, canaryConcentrationSignals(p, m)...)
+	signals = append(signals, canaryHeldStressSignals(p.HeldStress, m)...)
 	signals = append(signals, canaryOptionSignals(pos, m)...)
 	signals = append(signals, canaryDataQualitySignals(m, r)...)
 	for i := range signals {
@@ -1145,6 +1526,90 @@ func canaryConcentrationSignals(p CanaryPortfolioSummary, m CanaryMarketSummary)
 	return out
 }
 
+func canaryHeldStressSignals(stresses []rpc.CanaryHeldStress, m CanaryMarketSummary) []risk.Signal {
+	out := []risk.Signal{}
+	stressed := canaryConfirmedMarketStress(m)
+	for _, stress := range stresses {
+		subject := strings.ToUpper(strings.TrimSpace(stress.Underlying))
+		if subject == "" {
+			subject = "held_underlying"
+		}
+		direction := risk.DirectionRebalance
+		if stressed {
+			direction = risk.DirectionDefensive
+		}
+		if stress.DailyPnLPctNLV != nil && *stress.DailyPnLPctNLV <= -canaryPolicy.HeldUnderlyingPnLWatchPct {
+			observed := *stress.DailyPnLPctNLV
+			severity := risk.SeverityWatch
+			threshold := -canaryPolicy.HeldUnderlyingPnLWatchPct
+			if observed <= -canaryPolicy.HeldUnderlyingPnLActPct {
+				severity = risk.SeverityAct
+				threshold = -canaryPolicy.HeldUnderlyingPnLActPct
+			}
+			out = append(out, risk.Signal{
+				ID:         risk.SignalHeldUnderlyingPnLShock,
+				Direction:  direction,
+				Severity:   severity,
+				Subject:    subject,
+				Metric:     "held_daily_pnl_pct_nlv",
+				Observed:   &observed,
+				Threshold:  &threshold,
+				Unit:       "pct_nlv",
+				Evidence:   fmt.Sprintf("%s daily P&L %+.1f%% NLV", subject, observed),
+				Confidence: "medium",
+			})
+		}
+		if stress.NearExpiryDeltaPctNLV != nil && *stress.NearExpiryDeltaPctNLV >= canaryPolicy.HeldOptionDeltaWatchPct {
+			observed := *stress.NearExpiryDeltaPctNLV
+			severity := risk.SeverityWatch
+			threshold := canaryPolicy.HeldOptionDeltaWatchPct
+			confidenceImpact := ""
+			if observed >= canaryPolicy.HeldOptionDeltaActPct {
+				severity = risk.SeverityAct
+				threshold = canaryPolicy.HeldOptionDeltaActPct
+			}
+			if stressed && stress.NearExpiryGamma != nil && *stress.NearExpiryGamma < 0 {
+				severity = risk.SeverityAct
+				confidenceImpact = "near-expiry negative gamma can accelerate hedging needs under confirmed stress"
+			}
+			evidence := fmt.Sprintf("%s near-expiry option delta %.0f%% NLV", subject, observed)
+			if stress.NearExpiryMinDTE != nil {
+				evidence += fmt.Sprintf(" (%d DTE)", *stress.NearExpiryMinDTE)
+			}
+			out = append(out, risk.Signal{
+				ID:               risk.SignalHeldOptionExpiryConcentration,
+				Direction:        direction,
+				Severity:         severity,
+				Subject:          subject,
+				Metric:           "near_expiry_option_delta_pct_nlv",
+				Observed:         &observed,
+				Threshold:        &threshold,
+				Unit:             "pct_nlv",
+				Evidence:         evidence,
+				Confidence:       "medium",
+				ConfidenceImpact: confidenceImpact,
+			})
+		}
+		if len(stress.LiquidityFlags) > 0 {
+			observed := float64(len(stress.LiquidityFlags))
+			threshold := 1.0
+			out = append(out, risk.Signal{
+				ID:               risk.SignalHeldLiquidityDegraded,
+				Direction:        risk.DirectionDataQuality,
+				Severity:         risk.SeverityWatch,
+				Subject:          subject,
+				Metric:           "held_liquidity_flags",
+				Observed:         &observed,
+				Threshold:        &threshold,
+				Evidence:         fmt.Sprintf("%s liquidity %s", subject, strings.Join(stress.LiquidityFlags, ",")),
+				Confidence:       "medium-low",
+				ConfidenceImpact: "verify held-name quote and option bid/ask context before acting on the affected name",
+			})
+		}
+	}
+	return out
+}
+
 func canaryOptionSignals(pos rpc.PositionsResult, m CanaryMarketSummary) []risk.Signal {
 	if pos.Portfolio == nil || pos.Portfolio.GreeksTotal == 0 {
 		if len(pos.Options) > 0 {
@@ -1290,6 +1755,9 @@ func canarySignalDependsOnPositions(id risk.SignalID) bool {
 		risk.SignalGrossDeltaHigh,
 		risk.SignalSingleNameExposureHigh,
 		risk.SignalSingleNameDeltaHigh,
+		risk.SignalHeldUnderlyingPnLShock,
+		risk.SignalHeldOptionExpiryConcentration,
+		risk.SignalHeldLiquidityDegraded,
 		risk.SignalOptionGreeksDegraded,
 		risk.SignalShortConvexityHigh:
 		return true
@@ -1722,8 +2190,12 @@ func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
 }
 
 func canaryPortfolioEvidence(p CanaryPortfolioSummary) string {
-	return fmt.Sprintf("%s, gross %.0f%% NLV, net delta %.0f%% NLV, gross delta %.0f%% NLV",
+	out := fmt.Sprintf("%s, gross %.0f%% NLV, net delta %.0f%% NLV, gross delta %.0f%% NLV",
 		canaryCushionEvidence(p), derefPct(p.GrossExposurePctNLV), derefPct(p.NetDeltaPctNLV), derefPct(p.GrossDeltaPctNLV))
+	if len(p.HeldStress) > 0 {
+		out += ", held stress " + canaryHeldStressNames(p.HeldStress, 2)
+	}
+	return out
 }
 
 func canaryHasMarketDataIssue(m CanaryMarketSummary) bool {
@@ -1769,6 +2241,64 @@ func canaryConcentrationEvidence(p CanaryPortfolioSummary) string {
 		parts = append(parts, fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func canaryHeldStressEvidence(stresses []rpc.CanaryHeldStress) string {
+	if len(stresses) == 0 {
+		return "no material held-name stress"
+	}
+	parts := []string{}
+	for _, stress := range stresses {
+		items := []string{}
+		if stress.DailyPnLPctNLV != nil && *stress.DailyPnLPctNLV <= -canaryPolicy.HeldUnderlyingPnLWatchPct {
+			items = append(items, fmt.Sprintf("daily P&L %+.1f%% NLV", *stress.DailyPnLPctNLV))
+		}
+		if stress.NearExpiryDeltaPctNLV != nil && *stress.NearExpiryDeltaPctNLV >= canaryPolicy.HeldOptionDeltaWatchPct {
+			text := fmt.Sprintf("near-expiry delta %.0f%% NLV", *stress.NearExpiryDeltaPctNLV)
+			if stress.NearExpiryMinDTE != nil {
+				text += fmt.Sprintf(" at %d DTE", *stress.NearExpiryMinDTE)
+			}
+			items = append(items, text)
+		}
+		if len(stress.LiquidityFlags) > 0 {
+			items = append(items, "liquidity "+strings.Join(stress.LiquidityFlags, ","))
+		}
+		if len(items) == 0 {
+			items = append(items, strings.Join(stress.MaterialReasons, ","))
+		}
+		parts = append(parts, stress.Underlying+" "+strings.Join(items, "; "))
+		if len(parts) == 3 {
+			break
+		}
+	}
+	if len(stresses) > len(parts) {
+		parts = append(parts, fmt.Sprintf("+%d more", len(stresses)-len(parts)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func canaryHeldStressNames(stresses []rpc.CanaryHeldStress, limit int) string {
+	if limit <= 0 {
+		limit = len(stresses)
+	}
+	names := []string{}
+	for _, stress := range stresses {
+		if stress.Underlying == "" {
+			continue
+		}
+		names = append(names, stress.Underlying)
+		if len(names) == limit {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "none"
+	}
+	out := strings.Join(names, ",")
+	if len(stresses) > len(names) {
+		out += fmt.Sprintf("+%d", len(stresses)-len(names))
+	}
+	return out
 }
 
 func pctEvidence(label string, pct float64) string {
@@ -2287,6 +2817,12 @@ func signalDisplayString(id risk.SignalID) string {
 		return "title exposure"
 	case risk.SignalSingleNameDeltaHigh:
 		return "title delta"
+	case risk.SignalHeldUnderlyingPnLShock:
+		return "held P&L shock"
+	case risk.SignalHeldOptionExpiryConcentration:
+		return "held expiry risk"
+	case risk.SignalHeldLiquidityDegraded:
+		return "held liquidity"
 	case risk.SignalGrossExposureHigh:
 		return "gross exposure"
 	case risk.SignalNetDeltaHigh:

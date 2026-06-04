@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-06-03 21:50 CEST
+Updated: 2026-06-04 07:42 CEST
 
 `ibkr mcp` makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -32,9 +32,11 @@ Claude composes an answer that names which indicators are in which band, calls o
 
 → Claude invokes `ibkr_canary`.
 
-Returns a stateless market-context portfolio monitor for scheduled stress checks. The canary combines market-regime clusters, direct SPY/VIX tape shock, current exposures, concentration, option-greeks coverage, and input-health gates into `action`, `market_confirmation`, `portfolio_fit`, and `input_health`.
+Returns a stateless market-context portfolio monitor for scheduled stress checks. The canary combines market-regime clusters, direct SPY/VIX tape shock, current exposures, concentration, positions-only held-underlying stress, option-greeks coverage, and input-health gates into `action`, `market_confirmation`, `portfolio_fit`, and `input_health`.
 
 The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `watch`, while `defend` requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Account-only margin or P&L facts remain evidence; they do not become a canary DEFEND action by themselves. Missing, stale, degraded, warming, or computing inputs become explicit input-health rows instead of being treated as safe.
+
+Held-underlying stress appears in `portfolio.held_stress[]` only when a material held name has a real positions-derived condition: held-name daily P&L shock, near-expiry held-option delta concentration, or held-name quote/option bid-ask degradation. These probes do not call option chains, scanners, borrow feeds, or external flow sources. Without independent market confirmation they are rebalance/watch context, not market-stress confirmation.
 
 For a scheduler-friendly prompt that preserves action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
 
@@ -116,7 +118,7 @@ A few prompt patterns that work well, learned from observing real conversations:
 - **Ask the question, don't name the tool.** "How does my portfolio look?" works better than "Run ibkr_positions." Claude picks the right tool based on the question; naming the tool just adds friction.
 - **Chain follow-ups freely.** Each tool call is cheap (cached when possible). "And what about gamma for those?" or "How did that look yesterday?" generate natural follow-up tool calls.
 - **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
-- **For scheduled stress checks, ask for the canary.** "How does market weather interact with my portfolio right now?" triggers `ibkr_canary`, which returns action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
+- **For scheduled stress checks, ask for the canary.** "How does market weather interact with my portfolio right now?" triggers `ibkr_canary`, which returns action, market confirmation, portfolio fit, held-underlying stress, input health, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
 - **For sizing, give Claude the full plan.** "I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV" lets `ibkr_size` return the R-multiple, breakeven win rate, and share count in one round-trip.
 
 ## Reference

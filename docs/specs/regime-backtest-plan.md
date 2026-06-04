@@ -1,6 +1,6 @@
 # Regime and Canary Backtest Runbook
 
-**Updated:** 2026-05-31 21:23 CEST
+**Updated:** 2026-06-04 07:42 CEST
 
 This is the single umbrella for proving and tuning `ibkr regime` and
 `ibkr canary`. Keep the work here. Do not add another experiment plan, tuning
@@ -17,8 +17,9 @@ detection without overfitting to named events.
 - `regime` answers: what is the broad market state?
 - `canary` answers: given account, positions, and regime, should the monitor
   stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?
-- Portfolio-only stress belongs to canary. Regime can keep those rows for
-  context, but they are out-of-scope for market-regime precision and recall.
+- Portfolio-only stress, including positions-only held-underlying stress,
+  belongs to canary. Regime can keep those rows for context, but they are
+  out-of-scope for market-regime precision and recall.
 
 ## Artifact Map
 
@@ -145,9 +146,11 @@ is downgraded from stress to watch.
   and action buckets are tracked separately from the stateless canary JSON
   surface.
 - Category reporting is split for market-driven, portfolio-driven,
-  concentration-driven, margin-driven, options-driven, and data-quality cases.
-  Current sourced holdout has no options-driven rows, so that slice is
-  instrumented but not yet proven.
+  concentration-driven, margin-driven, options-driven, and data-quality cases;
+  held-underlying P&L shock maps to concentration-driven, near-expiry held-option
+  delta maps to options-driven, and held-liquidity degradation maps to
+  data-quality. Current sourced holdout has no options-driven rows, so that
+  slice is instrumented but not yet proven.
 - Tier 1 exposes the broader problem: current `any red cluster` stress signals
   catch stress rows but fire too often in non-stress volatility regimes.
 - A pure confirmation rule cuts false alarms but gives up too much recall.

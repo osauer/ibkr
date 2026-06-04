@@ -412,6 +412,118 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	}
 }
 
+func TestComputeCanaryHeldUnderlyingPnLShockRebalancesWithoutMarketConfirmation(t *testing.T) {
+	t.Parallel()
+	dailyLoss := -2_500.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: time.Now(),
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{{
+					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+				}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if res.MarketConfirmation != canaryMarketNone {
+		t.Fatalf("market_confirmation = %s, want none; held-name stress must not confirm market tape", res.MarketConfirmation)
+	}
+	if res.Direction != risk.DirectionRebalance || res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh {
+		t.Fatalf("decision = %s/%s fit %s, want rebalance/rebalance/high", res.Direction, res.Action, res.PortfolioFit)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalHeldUnderlyingPnLShock)
+	if !ok {
+		t.Fatalf("missing held P&L shock signal: %+v", res.Signals)
+	}
+	if sig.Subject != "BB" || sig.Direction != risk.DirectionRebalance || sig.Severity != risk.SeverityWatch {
+		t.Fatalf("held P&L signal = %+v, want BB rebalance/watch", sig)
+	}
+	if len(res.Portfolio.HeldStress) != 1 || res.Portfolio.HeldStress[0].Underlying != "BB" {
+		t.Fatalf("held_stress = %+v, want one BB row", res.Portfolio.HeldStress)
+	}
+	if !rowContainsEvidence(res.Rows, "Held-name stress", "BB daily P&L -2.5% NLV") {
+		t.Fatalf("expected held-name evidence, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryHeldOptionExpiryConcentrationRebalances(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 4, 14, 0, 0, 0, time.UTC)
+	underlying := 50.0
+	delta := 0.60
+	gamma := -0.03
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: now,
+			Options: []rpc.PositionView{{
+				Symbol:     "BB",
+				SecType:    rpc.SecTypeOption,
+				Quantity:   10,
+				Multiplier: 100,
+				Expiry:     now.Add(5 * 24 * time.Hour).Format("20060102"),
+				Delta:      &delta,
+				Gamma:      &gamma,
+				Underlying: &underlying,
+			}},
+			Portfolio: &rpc.PositionsPortfolio{
+				GreeksCoverage: 1,
+				GreeksTotal:    1,
+			},
+		},
+		Regime: healthyCanaryRegime(),
+		Now:    now,
+	})
+	sig, ok := findSignal(res.Signals, risk.SignalHeldOptionExpiryConcentration)
+	if !ok {
+		t.Fatalf("missing held option expiry signal: %+v", res.Signals)
+	}
+	if sig.Subject != "BB" || sig.Direction != risk.DirectionRebalance || sig.Observed == nil || *sig.Observed != 30 {
+		t.Fatalf("held option signal = %+v, want BB rebalance at 30%% NLV", sig)
+	}
+	if res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh {
+		t.Fatalf("decision = action %s fit %s, want rebalance/high", res.Action, res.PortfolioFit)
+	}
+	if got := res.Portfolio.HeldStress[0].NearExpiryMinDTE; got == nil || *got != 5 {
+		t.Fatalf("near_expiry_min_dte = %v, want 5", got)
+	}
+	if !rowContainsEvidence(res.Rows, "Held-name stress", "BB near-expiry delta 30% NLV at 5 DTE") {
+		t.Fatalf("expected held option evidence, rows: %+v", res.Rows)
+	}
+}
+
+func TestComputeCanaryHeldLiquidityDegradedIsDataQualityOnly(t *testing.T) {
+	t.Parallel()
+	spread := 1.20
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: time.Now(),
+			Stocks: []rpc.PositionView{{
+				Symbol: "BB", SecType: rpc.SecTypeStock, Quantity: 1_000, SpreadPct: &spread, QuoteQuality: "firm",
+			}},
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{{
+					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0),
+				}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if res.Direction != "" || res.Action != canaryActionStandDown {
+		t.Fatalf("decision = %s/%s, want stand_down for held-liquidity-only evidence", res.Direction, res.Action)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalHeldLiquidityDegraded)
+	if !ok || sig.Direction != risk.DirectionDataQuality {
+		t.Fatalf("held liquidity signal = %+v ok=%v, want data-quality signal", sig, ok)
+	}
+	if !rowContains(res.Rows, "Held-name stress", "Confirm held-name quotes") {
+		t.Fatalf("expected held-name data-quality row, rows: %+v", res.Rows)
+	}
+}
+
 func TestComputeCanarySignalsExposureAndDecisionShape(t *testing.T) {
 	t.Parallel()
 	delta := 140_000.0
@@ -778,6 +890,43 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	firstIndicator, ok := indicators[0].(map[string]any)
 	if !ok || firstIndicator["name"] == "" || firstIndicator["status"] == "" {
 		t.Fatalf("market indicator missing required scan fields: %#v", indicators[0])
+	}
+}
+
+func TestComputeCanaryJSONCarriesHeldStress(t *testing.T) {
+	t.Parallel()
+	dailyLoss := -2_500.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: time.Now(),
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{{
+					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+				}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	portfolio, ok := wire["portfolio"].(map[string]any)
+	if !ok {
+		t.Fatalf("portfolio missing/malformed: %s", b)
+	}
+	held, ok := portfolio["held_stress"].([]any)
+	if !ok || len(held) != 1 {
+		t.Fatalf("held_stress missing/malformed: %#v", portfolio["held_stress"])
+	}
+	first, ok := held[0].(map[string]any)
+	if !ok || first["underlying"] != "BB" || first["daily_pnl_pct_nlv"] == nil || first["signal_ids"] == nil {
+		t.Fatalf("held_stress[0] = %#v, want BB stress with daily P&L and signal IDs", held[0])
 	}
 }
 
@@ -1168,6 +1317,35 @@ func TestComputeCanaryStalePositionsBlocksRebalanceAction(t *testing.T) {
 	}
 	if !containsString(sig.BlockedBy, "positions") || sig.Confidence != "medium-low" {
 		t.Fatalf("single-name signal = blocked_by %+v confidence %q, want stale positions block", sig.BlockedBy, sig.Confidence)
+	}
+}
+
+func TestComputeCanaryStalePositionsBlockHeldStressAction(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 29, 16, 0, 0, 0, time.UTC)
+	dailyLoss := -2_500.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf: now.Add(-2 * time.Hour),
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{{
+					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+				}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+		Now:    now,
+	})
+	if res.Direction != risk.DirectionDataQuality || res.Action != canaryActionConfirmInputs {
+		t.Fatalf("decision = %s/%s, want confirm_inputs while held-stress positions are stale", res.Direction, res.Action)
+	}
+	sig, ok := findSignal(res.Signals, risk.SignalHeldUnderlyingPnLShock)
+	if !ok {
+		t.Fatalf("missing held P&L signal: %+v", res.Signals)
+	}
+	if !containsString(sig.BlockedBy, "positions") || sig.Confidence != "medium-low" {
+		t.Fatalf("held P&L signal = blocked_by %+v confidence %q, want stale positions block", sig.BlockedBy, sig.Confidence)
 	}
 }
 

@@ -1662,16 +1662,16 @@ func canaryBacktestCategories(row CanaryBacktestRowResult) []string {
 	if canaryBacktestPortfolioScope(scope) {
 		categories = append(categories, "portfolio-driven")
 	}
-	if strings.Contains(kind, "concentration") || strings.Contains(kind, "squeeze") || hasAnySignal(row.PrimaryDrivers, risk.SignalSingleNameExposureHigh, risk.SignalSingleNameDeltaHigh) {
+	if strings.Contains(kind, "concentration") || strings.Contains(kind, "squeeze") || hasAnySignal(row.PrimaryDrivers, risk.SignalSingleNameExposureHigh, risk.SignalSingleNameDeltaHigh, risk.SignalHeldUnderlyingPnLShock) {
 		categories = append(categories, "concentration-driven")
 	}
 	if strings.Contains(kind, "margin") || hasAnySignal(row.PrimaryDrivers, risk.SignalMarginCushionLow, risk.SignalLookAheadCushionLow) {
 		categories = append(categories, "margin-driven")
 	}
-	if strings.Contains(kind, "option") || strings.Contains(kind, "convex") || hasAnySignal(row.PrimaryDrivers, risk.SignalShortConvexityHigh, risk.SignalOptionGreeksDegraded) {
+	if strings.Contains(kind, "option") || strings.Contains(kind, "convex") || hasAnySignal(row.PrimaryDrivers, risk.SignalShortConvexityHigh, risk.SignalOptionGreeksDegraded, risk.SignalHeldOptionExpiryConcentration) {
 		categories = append(categories, "options-driven")
 	}
-	if strings.Contains(kind, "coverage") || strings.Contains(kind, "data-quality") || row.DataQualityWatch || row.Blocked || row.LifecycleStage == rpc.LifecycleDataQuality {
+	if strings.Contains(kind, "coverage") || strings.Contains(kind, "data-quality") || row.DataQualityWatch || row.Blocked || row.LifecycleStage == rpc.LifecycleDataQuality || hasAnySignal(row.PrimaryDrivers, risk.SignalHeldLiquidityDegraded) {
 		categories = append(categories, "data-quality")
 	}
 	if len(categories) == 0 {
