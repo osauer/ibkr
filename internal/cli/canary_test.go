@@ -151,6 +151,32 @@ func TestComputeCanaryEarlyStressRequiresSecondIndependentCluster(t *testing.T) 
 	}
 }
 
+func TestComputeCanaryLowExposureMarketWatchDoesNotClaimPortfolioExposed(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.GrossPositionValue = 0
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterYellowCount: 1, ClusterRankedCount: 6}
+	r.VIXTermStructure.Band = "red"
+	r.VolOfVol.Band = "red"
+	r.Breadth.Band = "yellow"
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Regime:  r,
+		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
+	})
+	if res.Action != canaryActionWatch || res.PortfolioFit != canaryPortfolioFitLow {
+		t.Fatalf("decision = action %s portfolio_fit %s, want watch/low", res.Action, res.PortfolioFit)
+	}
+	summary := strings.ToLower(res.Summary)
+	if strings.Contains(summary, "portfolio is exposed") || strings.Contains(summary, "stage reductions") {
+		t.Fatalf("summary should not claim low-exposure portfolio is exposed: %q", res.Summary)
+	}
+	if !strings.Contains(summary, "portfolio exposure is low") {
+		t.Fatalf("summary should explain low exposure watch posture, got %q", res.Summary)
+	}
+}
+
 func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -1550,7 +1576,7 @@ func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"Action     WATCH",
-		"Guidance   Watch this portfolio against market weather; do not run a major action from this snapshot alone.",
+		"Guidance   Market stress is confirmed, but current portfolio exposure is low; keep watch without staging reductions.",
 		"Next step  Stage risk-plan",
 		"Why this fired",
 		"Market weather",

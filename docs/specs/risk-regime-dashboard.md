@@ -171,6 +171,11 @@ not become the active gamma market-structure read:
 | `blocked` | Payload exists but a freshness, coverage, OI, model, cache, farm, entitlement, pacing, or partial-chain gate blocks ranking. |
 | `unavailable` | No usable OI-weighted gamma payload exists. |
 
+Missing 0DTE is disclosed in the horizon coverage and warning details, but it
+does not by itself make an otherwise healthy SPX read context-only when the
+1-7DTE and term buckets are present. After the expiring SPXW series closes, the
+0DTE bucket can be absent while the broader SPX surface remains usable.
+
 ### Breadth
 
 This cluster watches how many S&P 500 stocks are participating. A rally led by

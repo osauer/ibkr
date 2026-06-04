@@ -89,6 +89,11 @@ Every ready gamma result also carries `quality.rankability`:
 
 The quality object records session key, age, coverage, OI observed/positive ratios, horizon coverage, derived-IV share, skew fit quality, strike concentration, and explicit blockers/context notes. Missing OI is unknown, never zero. Priced legs without observed OI may help IV/skew fitting, but they do not contribute OI-weighted GEX.
 
+Missing 0DTE remains visible in horizon coverage and warnings, but it is not
+alone a no-vote when SPX has healthy 1-7DTE and term coverage.
+After the expiring SPXW series closes, the 0DTE bucket can be absent while the
+broader SPX surface remains usable.
+
 Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see `status: "ready"` instantly. The cache persists across daemon restarts.
 
 Full methodology at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Cache persistence details are in [`docs/design/gamma-zero-cache-persistence.md`](./design/gamma-zero-cache-persistence.md).

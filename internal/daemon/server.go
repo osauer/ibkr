@@ -1921,6 +1921,9 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	case rpc.MethodOrderPlace:
 		_, err := handleOrderPlace(ctx, req)
 		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
+	case rpc.MethodOrderModify:
+		_, err := handleOrderModify(ctx, req)
+		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
 	case rpc.MethodOrderCancel:
 		_, err := handleOrderCancel(ctx, req)
 		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())

@@ -2,6 +2,7 @@ package daemonclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,12 +15,19 @@ import (
 type Client interface {
 	Status(context.Context) (*rpc.HealthResult, error)
 	MarketCalendar(context.Context) (*rpc.MarketCalendarResult, error)
+	MarketCalendarFor(context.Context, string) (*rpc.MarketCalendarResult, error)
 	Account(context.Context) (*rpc.AccountResult, error)
 	Positions(context.Context) (*rpc.PositionsResult, error)
+	Quote(context.Context, rpc.ContractParams) (*rpc.Quote, error)
+	StreamQuote(context.Context, rpc.ContractParams, func(rpc.Frame) error) error
 	Canary(context.Context) (*rpc.CanaryResult, error)
+	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
 	RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error)
 	OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error)
+	OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error)
+	OrderModify(context.Context, rpc.OrderModifyParams) (*rpc.OrderModifyResult, error)
+	OrderCancel(context.Context, rpc.OrderCancelParams) (*rpc.OrderCancelResult, error)
 	OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error)
 	OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error)
 }
@@ -28,6 +36,8 @@ type Real struct {
 	SocketPath string
 	AutoSpawn  bool
 }
+
+const appQuoteSnapshotTimeout = 2500 * time.Millisecond
 
 func (c Real) Status(ctx context.Context) (*rpc.HealthResult, error) {
 	var out rpc.HealthResult
@@ -38,8 +48,12 @@ func (c Real) Status(ctx context.Context) (*rpc.HealthResult, error) {
 }
 
 func (c Real) MarketCalendar(ctx context.Context) (*rpc.MarketCalendarResult, error) {
+	return c.MarketCalendarFor(ctx, "us")
+}
+
+func (c Real) MarketCalendarFor(ctx context.Context, market string) (*rpc.MarketCalendarResult, error) {
 	var out rpc.MarketCalendarResult
-	params := rpc.MarketCalendarParams{Market: "us", At: time.Now().UTC(), Days: 3}
+	params := rpc.MarketCalendarParams{Market: market, At: time.Now().UTC(), Days: 3}
 	if err := c.call(ctx, rpc.MethodMarketCalendar, params, &out); err != nil {
 		return nil, err
 	}
@@ -62,6 +76,37 @@ func (c Real) Positions(ctx context.Context) (*rpc.PositionsResult, error) {
 	return &out, nil
 }
 
+func (c Real) Quote(ctx context.Context, contract rpc.ContractParams) (*rpc.Quote, error) {
+	var out rpc.Quote
+	params := rpc.QuoteSnapshotParams{
+		Contract:  contract,
+		TimeoutMs: int(appQuoteSnapshotTimeout.Milliseconds()),
+	}
+	if err := c.call(ctx, rpc.MethodQuoteSnapshot, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) StreamQuote(ctx context.Context, contract rpc.ContractParams, onFrame func(rpc.Frame) error) error {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	params := rpc.QuoteSubscribeParams{Contract: contract}
+	return conn.Stream(ctx, rpc.MethodQuoteSubscribe, params, func(raw json.RawMessage) error {
+		var frame rpc.Frame
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			return err
+		}
+		if onFrame != nil {
+			return onFrame(frame)
+		}
+		return nil
+	})
+}
+
 func (c Real) Canary(ctx context.Context) (*rpc.CanaryResult, error) {
 	conn, err := c.connect(ctx)
 	if err != nil {
@@ -73,6 +118,20 @@ func (c Real) Canary(ctx context.Context) (*rpc.CanaryResult, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer conn.Close()
+	canary, _, regime, err := cli.FetchCanarySnapshotWithRegime(ctx, conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	monitor := rpc.CompactRegimeMonitor(&regime)
+	return &canary, &monitor, nil
 }
 
 func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {
@@ -99,6 +158,30 @@ func (c Real) RiskPlan(ctx context.Context, mode string, trigger *rpc.CanaryResu
 func (c Real) OrderPreview(ctx context.Context, params rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {
 	var out rpc.OrderPreviewResult
 	if err := c.call(ctx, rpc.MethodOrderPreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrderPlace(ctx context.Context, params rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+	var out rpc.OrderPlaceResult
+	if err := c.call(ctx, rpc.MethodOrderPlace, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrderModify(ctx context.Context, params rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
+	var out rpc.OrderModifyResult
+	if err := c.call(ctx, rpc.MethodOrderModify, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrderCancel(ctx context.Context, params rpc.OrderCancelParams) (*rpc.OrderCancelResult, error) {
+	var out rpc.OrderCancelResult
+	if err := c.call(ctx, rpc.MethodOrderCancel, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

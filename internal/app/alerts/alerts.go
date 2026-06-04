@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -71,6 +72,9 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 }
 
 func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
+	if !portfolioAlertRelevant(canary) {
+		return false
+	}
 	switch mode {
 	case state.AlertModeNone:
 		return false
@@ -84,6 +88,28 @@ func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
 	default:
 		return false
 	}
+}
+
+func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
+	if !strings.EqualFold(canary.PortfolioFit, "low") {
+		return true
+	}
+	p := canary.Portfolio
+	if len(p.HeldStress) > 0 {
+		return true
+	}
+	for _, value := range []*float64{
+		p.GrossExposurePctNLV,
+		p.NetDeltaPctNLV,
+		p.GrossDeltaPctNLV,
+		p.LargestExposurePct,
+		p.LargestDeltaPctNLV,
+	} {
+		if value != nil && math.Abs(*value) >= 0.5 {
+			return true
+		}
+	}
+	return false
 }
 
 func RedactedRecord(canary rpc.CanaryResult, now time.Time) state.AlertRecord {

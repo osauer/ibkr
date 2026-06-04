@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"sync"
@@ -657,6 +658,44 @@ func TestGammaKeepJobAfterPrewarm(t *testing.T) {
 					tc.symbol, tc.prewarmComplete, tc.cached, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGammaShouldKeepJobAfterPrewarmBlocksZeroDetailFallback(t *testing.T) {
+	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, false, true); got {
+		t.Fatal("authoritative zero-detail prewarm should not fall back to per-leg resolution")
+	}
+	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, true, true); !got {
+		t.Fatal("cached contract should still be usable when prewarm fallback is blocked")
+	}
+	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, false, false); !got {
+		t.Fatal("ordinary incomplete SPX prewarm should retain resolution fallback")
+	}
+}
+
+func TestGammaPrewarmZeroContractDetailsClassifiesAsContractMissing(t *testing.T) {
+	err := errors.New("prewarm SPX 20260603 class=SPXW returned zero contract details across route attempts SMART/CBOE")
+	if got := classifyGammaLegFailure(err); got != gammaLegFailureContractMissing {
+		t.Fatalf("classifyGammaLegFailure = %q, want %q", got, gammaLegFailureContractMissing)
+	}
+	if !gammaPrewarmFailureBlocksFallback(err) {
+		t.Fatal("zero-detail prewarm should block per-leg fallback")
+	}
+
+	picked := []pickedExpiration{{
+		date:         "2026-06-03",
+		expiryYMD:    "20260603",
+		tradingClass: "SPXW",
+		strikes:      []float64{7550, 7600},
+	}}
+	d := newGammaCollectionDiagnostics("SPX", picked)
+	d.notePrewarm("SPXW", "20260603", 0, 0, err)
+	rows := d.finish(2 * time.Second)
+	if len(rows) != 1 {
+		t.Fatalf("diagnostic rows len=%d, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].SubscriptionRejects != 0 || rows[0].Timeouts != 0 {
+		t.Fatalf("zero-detail prewarm should not be counted as reject/timeout: %+v", rows[0])
 	}
 }
 

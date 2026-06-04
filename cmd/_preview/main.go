@@ -387,50 +387,41 @@ func fixtureStatus() *rpc.HealthResult {
 
 func fixtureCanary() *rpc.CanaryResult {
 	acct := *fixtureAccount()
-	pos := fixturePositions()
 	regime := *fixtureRegime()
-	regime.AsOf = time.Date(2026, 5, 29, 12, 40, 0, 0, time.UTC)
-	regime.Composite = rpc.RegimeComposite{
-		Verdict:              "Stress signal present",
-		GreenCount:           3,
-		YellowCount:          3,
-		RedCount:             2,
-		RankedCount:          8,
-		ClusterGreenCount:    2,
-		ClusterYellowCount:   2,
-		ClusterRedCount:      2,
-		ClusterRankedCount:   6,
-		ClusterUnrankedCount: 0,
-	}
-	regime.VIXTermStructure.Status = rpc.RegimeStatusOK
-	regime.VIXTermStructure.Band = "red"
-	regime.VIXTermStructure.VIXChangePct = f64(18.4)
-	regime.HYGSPYDivergence.Status = rpc.RegimeStatusOK
-	regime.HYGSPYDivergence.Band = "red"
-	regime.HYGSPYDivergence.SPYChangePct = f64(-2.1)
-	regime.CreditSpreads.Status = rpc.RegimeStatusOK
-	regime.CreditSpreads.Band = "yellow"
-	regime.FundingStress.Status = rpc.RegimeStatusOK
-	regime.FundingStress.Band = "green"
-	regime.USDJPY.Band = "green"
-	regime.GammaZero.Status = rpc.RegimeStatusOK
-	regime.GammaZero.Band = "yellow"
-	regime.Breadth.Band = "yellow"
-	regime.Breadth.Status = rpc.RegimeStatusOK
 
-	nlv := acct.NetLiquidation
-	pos.Portfolio.DollarDeltaBase = f64(nlv * 0.72)
-	pos.Portfolio.ExposureBase = []rpc.UnderlyingExposure{
-		{Underlying: "AAPL", MarketValueBase: nlv * 0.30, MarketValuePctNLV: f64(30), BaseCurrency: "EUR"},
-		{Underlying: "NVDA", MarketValueBase: nlv * 0.22, MarketValuePctNLV: f64(22), BaseCurrency: "EUR"},
-		{Underlying: "SPY", MarketValueBase: nlv * 0.10, MarketValuePctNLV: f64(10), BaseCurrency: "EUR"},
+	acct.AsOf = regime.AsOf
+	acct.BuyingPower = acct.NetLiquidation * 4
+	acct.AvailableFunds = acct.NetLiquidation
+	acct.ExcessLiquidity = acct.NetLiquidation
+	acct.TotalCash = acct.NetLiquidation
+	acct.MaintenanceMargin = 0
+	acct.InitialMargin = 0
+	acct.GrossPositionValue = 0
+	acct.UnrealizedPnL = 0
+	acct.RealizedPnL = 0
+	acct.Cushion = 1
+	acct.LookAheadInitMargin = 0
+	acct.LookAheadMaintMargin = 0
+	acct.LookAheadAvailable = acct.NetLiquidation
+	acct.LookAheadExcess = acct.NetLiquidation
+	acct.DailyPnL = f64(0)
+	acct.DailyPnLUnrealized = f64(0)
+	acct.DailyPnLRealized = f64(0)
+
+	pos := &rpc.PositionsResult{
+		AsOf:      regime.AsOf,
+		AccountID: acct.AccountID,
+		Portfolio: &rpc.PositionsPortfolio{BaseCurrency: acct.BaseCurrency, NetLiquidationBase: f64(acct.NetLiquidation)},
+		DataType:  rpc.MarketDataLive,
+		Stocks:    []rpc.PositionView{},
+		Options:   []rpc.PositionView{},
 	}
 
 	res := cli.ComputeCanary(cli.CanaryInput{
 		Account:   acct,
 		Positions: *pos,
 		Regime:    regime,
-		Now:       time.Date(2026, 5, 29, 12, 42, 0, 0, time.UTC),
+		Now:       regime.AsOf,
 	})
 	return &res
 }
@@ -466,75 +457,254 @@ func f64(v float64) *float64 { return &v }
 
 func ptrInt64(v int64) *int64 { return &v }
 
-// fixtureRegime returns a realistic mid-session regime envelope that
-// exercises every render branch: one OK-live row, one stale row with a
-// missing sub-field, one OK row with weekly change, one row in the
-// computing state, and one structurally-unavailable row. Numbers track
-// the spec's "Live-test result on 2026-05-17" snippet so the screen and
-// the spec doc agree.
+func previewQuality(at time.Time, freshness, confidence, source string) *rpc.Quality {
+	return &rpc.Quality{AsOf: at, FreshnessClass: freshness, Confidence: confidence, Source: source}
+}
+
+func previewAsOf(label string, at time.Time, freshness, source string) *rpc.RegimeAsOfSummary {
+	return &rpc.RegimeAsOfSummary{Label: label, Time: at, Freshness: freshness, Source: source}
+}
+
+func previewDateAsOf(label, date, freshness, source string) *rpc.RegimeAsOfSummary {
+	return &rpc.RegimeAsOfSummary{Label: label, Date: date, Freshness: freshness, Source: source}
+}
+
+// fixtureRegime mirrors the audited pre-market read where market weather is
+// mixed: dealer gamma is the only red cluster, breadth is on watch, VIX/VVIX,
+// cash credit, and funding are calm, and HYG/FX are set aside because required
+// history fields are missing.
 func fixtureRegime() *rpc.RegimeSnapshotResult {
-	return &rpc.RegimeSnapshotResult{
-		AsOf:    time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC),
+	cest := time.FixedZone("CEST", 2*60*60)
+	now := time.Date(2026, 6, 4, 11, 24, 0, 0, cest)
+	officialDate := "2026-06-03"
+	r := &rpc.RegimeSnapshotResult{
+		AsOf:    now,
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
+		Summary: rpc.RegimeSummary{
+			Label:             "Stress signal present",
+			Evidence:          "3 green clusters / 1 yellow cluster / 1 red cluster / 1 waiting",
+			IndicatorEvidence: "4 green / 1 yellow / 1 red / 2 unranked",
+			PunchLine:         "Stress is visible, but not broad enough to dominate the read.",
+			Confidence:        "medium",
+			DominantRisks:     []string{"dealer gamma", "breadth"},
+			NotAdvice:         "Regime read only; no orders are placed by ibkr.",
+		},
 		VIXTermStructure: rpc.RegimeVIXTerm{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "vol curve in contango",
+				AsOf:       previewAsOf("live", now, rpc.FreshnessLive, "IBKR index ticks"),
+			},
 			Status:       rpc.RegimeStatusOK,
-			VIX:          f64(18.43),
-			VIX3M:        f64(21.36),
-			Ratio:        f64(18.43 / 21.36),
-			VIXPrevClose: f64(18.85),
-			VIXChangePct: f64((18.43 - 18.85) / 18.85 * 100),
+			VIX:          f64(16.48),
+			VIX3M:        f64(19.76),
+			Ratio:        f64(16.48 / 19.76),
+			VIXPrevClose: f64(16.06),
+			VIXChangePct: f64((16.48 - 16.06) / 16.06 * 100),
 			DataType:     rpc.MarketDataLive,
+			VIXQuality:   previewQuality(now, rpc.FreshnessLive, rpc.ConfidenceFirm, "VIX tick"),
+			VIX3MQuality: previewQuality(now, rpc.FreshnessLive, rpc.ConfidenceFirm, "VIX3M tick"),
 			Notes:        "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing).",
 		},
+		VolOfVol: rpc.RegimeVolOfVol{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "vol-of-vol calm",
+				AsOf:       previewDateAsOf("close D-1", officialDate, rpc.FreshnessDerived, "Cboe VVIX daily file"),
+			},
+			Status:       rpc.RegimeStatusOK,
+			Symbol:       "VVIX",
+			Last:         f64(89.8),
+			Change20D:    f64(-5.7),
+			AsOfDate:     officialDate,
+			Source:       "Cboe official daily VVIX",
+			ValueQuality: previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "Cboe VVIX daily file"),
+			Notes:        "VVIX vol-of-vol. Spec thresholds: <90 green, 90-110 yellow, >110 red.",
+		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
-			Status:       rpc.RegimeStatusStale,
-			HYGPrice:     f64(79.55),
-			HYG50DMA:     f64(80.10),
-			SPYPrice:     f64(737.34),
-			SPY52WHigh:   f64(749.30),
-			SPYPrevClose: f64(736.14),
-			SPYChange:    f64(737.34 - 736.14),
-			SPYChangePct: f64((737.34 - 736.14) / 736.14 * 100),
-			HYGDataType:  rpc.MarketDataDelayedFrozen,
-			Notes:        "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high.",
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "unranked",
+				BandReason: "need HYG 50-day average",
+				AsOf:       previewAsOf("live", now, rpc.FreshnessLive, "IBKR ETF ticks"),
+			},
+			Status:        rpc.RegimeStatusOK,
+			HYGPrice:      f64(79.70),
+			SPYPrice:      f64(751.20),
+			SPY52WHigh:    f64(760.39),
+			SPYPrevClose:  f64(754.24),
+			SPYChange:     f64(751.20 - 754.24),
+			SPYChangePct:  f64((751.20 - 754.24) / 754.24 * 100),
+			HYGDataType:   rpc.MarketDataLive,
+			FieldsMissing: []string{"hyg_50dma"},
+			HYGQuality:    previewQuality(now, rpc.FreshnessLive, rpc.ConfidenceFirm, "HYG tick"),
+			SPYQuality:    previewQuality(now, rpc.FreshnessLive, rpc.ConfidenceFirm, "SPY tick"),
+			Notes:         "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when both trending up and HYG above 50-day SMA; yellow when HYG breaks 50-day SMA while SPY within 3% of 52-week high.",
+		},
+		CreditSpreads: rpc.RegimeCreditSpreads{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "cash spreads calm",
+				AsOf:       previewDateAsOf("close D-1", officialDate, rpc.FreshnessDerived, "FRED ICE BofA OAS"),
+			},
+			Status:        rpc.RegimeStatusOK,
+			HYOAS:         f64(2.71),
+			IGOAS:         f64(0.74),
+			HYIGSpread:    f64(1.97),
+			HY20DChange:   f64(-0.04),
+			AsOfDate:      officialDate,
+			Source:        "FRED ICE BofA OAS",
+			HYOASQuality:  previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "FRED BAMLH0A0HYM2"),
+			IGOASQuality:  previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "FRED BAMLC0A0CM"),
+			SpreadQuality: previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "HY minus IG OAS"),
+			Notes:         "Cash credit spreads from official ICE BofA OAS series. Spec thresholds: HY OAS <4 green, 4-5.5 yellow, >5.5 red, with widening overlays.",
+		},
+		FundingStress: rpc.RegimeFundingStress{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "green",
+				BandReason: "funding calm",
+				AsOf:       previewDateAsOf("close D-1", officialDate, rpc.FreshnessDerived, "FRED CP and T-bill rates"),
+			},
+			Status:         rpc.RegimeStatusOK,
+			CP3M:           f64(3.70),
+			TBill3M:        f64(3.63),
+			SpreadBps:      f64(7),
+			AsOfDate:       officialDate,
+			Source:         "FRED CP3M and DTB3",
+			CP3MQuality:    previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "FRED CP3M"),
+			TBill3MQuality: previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "FRED DTB3"),
+			SpreadQuality:  previewQuality(now.Add(-16*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceFirm, "CP minus T-bill spread"),
+			Notes:          "3-month AA financial commercial paper minus 3-month Treasury bill. Spec thresholds: <25bp green, 25-75bp yellow, >75bp red.",
 		},
 		USDJPY: rpc.RegimeUSDJPY{
-			Status:       rpc.RegimeStatusOK,
-			Symbol:       "USD.JPY",
-			Last:         f64(158.7285),
-			Close7DAgo:   f64(158.05),
-			WeeklyChange: f64(0.43),
-			DataType:     rpc.MarketDataLive,
-			Notes:        "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength (yellow); >2% in 3 days or >3% in a week (red).",
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "unranked",
+				BandReason: "need weekly move",
+				AsOf:       previewAsOf("live", now, rpc.FreshnessLive, "IBKR FX tick"),
+			},
+			Status:        rpc.RegimeStatusOK,
+			Symbol:        "USD.JPY",
+			Last:          f64(159.8700),
+			DataType:      rpc.MarketDataLive,
+			FieldsMissing: []string{"close_7d_ago", "weekly_change_pct"},
+			LastQuality:   previewQuality(now, rpc.FreshnessLive, rpc.ConfidenceFirm, "USD.JPY midpoint"),
+			Notes:         "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength (yellow); >2% in 3 days or >3% in a week (red).",
 		},
 		GammaZero: rpc.RegimeGammaZero{
-			Status: rpc.RegimeStatusComputing,
-			Envelope: rpc.GammaZeroSPXResult{
-				Status:     rpc.GammaZeroStatusComputing,
-				EtaSeconds: 42,
-				Progress:   40,
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "red",
+				BandReason: "dealer short-γ · amplifying",
+				AsOf:       previewAsOf("cached 11:23", now.Add(-time.Minute), rpc.FreshnessModelled, "gamma.zero_spx"),
 			},
-			Notes: "SPY dealer zero-gamma flip level. Spec thresholds: SPY >2% above zero_gamma (green); within 2% (yellow); below (red). Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
+			Status: rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{
+				Status: rpc.GammaZeroStatusReady,
+				Result: &rpc.GammaZeroComputed{
+					SpotUnderlying:          7553.68,
+					SpotAt:                  now.Add(-time.Minute),
+					GammaSign:               "negative",
+					GammaTotalAbs:           29_683_981_889,
+					GammaTotalAbsConvention: "sign-agnostic",
+					Method:                  "perfiliev-bs-sweep-v1",
+					AsOf:                    now.Add(-time.Minute),
+					DurationMS:              18_430,
+					Scope:                   rpc.GammaZeroScopeSPX,
+					Quality: &rpc.GammaSignalQuality{
+						Rankability: rpc.GammaRankabilityRankable,
+						Freshness:   "fresh",
+						Session:     "premarket",
+						AsOf:        now.Add(-time.Minute),
+						Coverage: rpc.GammaQualityCoverage{
+							PricedLegs:      1840,
+							OIObservedLegs:  1729,
+							OIPositiveLegs:  1698,
+							GEXLegs:         1698,
+							OIObservedPct:   94.0,
+							OIPositivePct:   92.3,
+							ExpirationCount: 8,
+							Has0DTE:         true,
+							Has1To7DTE:      true,
+							HasTerm:         true,
+						},
+					},
+					Summary: &rpc.GammaZeroSummary{
+						PrimaryStatement: "SPX dealer gamma is short across the swept window.",
+						ZeroGammaStatus:  "none_in_window",
+						Regime:           "short_gamma",
+						Confidence:       "medium",
+					},
+				},
+			},
+			ZeroGammaQuality:     previewQuality(now.Add(-time.Minute), rpc.FreshnessModelled, rpc.ConfidenceProxy, "perfiliev-bs-sweep-v1"),
+			GammaTotalAbsQuality: previewQuality(now.Add(-time.Minute), rpc.FreshnessDerived, rpc.ConfidenceEstimate, "observed OI and IV aggregation"),
+			Notes:                "SPX dealer zero-gamma flip level. Spec thresholds: spot >2% above zero_gamma (green); within 2% (yellow); below (red), or whole-sweep short-gamma as red. Methodology: Perfiliev BS-sweep; see spec for limitations and the calibration ritual.",
 		},
 		Breadth: rpc.RegimeBreadth{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
+				Band:       "yellow",
+				BandReason: "participation narrowing",
+				AsOf:       previewDateAsOf("close D-1", officialDate, rpc.FreshnessDerived, "local S&P 500 breadth cache"),
+			},
 			Status: rpc.RegimeStatusOK,
 			Envelope: rpc.BreadthSPXResult{
 				State:          rpc.BreadthStateReady,
-				PctAbove50DMA:  61.8,
-				PctAbove200DMA: 68.2,
-				NewHighsToday:  27,
-				NewLowsToday:   8,
-				NetNewHighsPct: 3.8,
+				PctAbove50DMA:  49.5,
+				PctAbove200DMA: 53.2,
+				NewHighsToday:  26,
+				NewLowsToday:   19,
+				NetNewHighsPct: 1.4,
 				Source:         "Computed from S&P-500 constituent daily bars (IBKR HMDS)",
 				Method:         "constituent-fanout-50/200dma-hl",
-				AsOf:           time.Date(2026, 5, 16, 20, 35, 0, 0, time.UTC),
+				AsOf:           time.Date(2026, 6, 3, 22, 0, 0, 0, cest),
 			},
-			PctAbove50DMA:  61.8,
-			PctAbove200DMA: 68.2,
-			NewHighsToday:  27,
-			NewLowsToday:   8,
-			NetNewHighsPct: 3.8,
+			PctAbove50DMA:  49.5,
+			PctAbove200DMA: 53.2,
+			NewHighsToday:  26,
+			NewLowsToday:   19,
+			NetNewHighsPct: 1.4,
+			ValueQuality:   previewQuality(now.Add(-13*time.Hour), rpc.FreshnessDerived, rpc.ConfidenceEstimate, "S&P 500 constituent daily bars"),
 			Notes:          "% S&P 500 stocks above their 50-day SMA. Spec thresholds: >55 green (healthy participation); 40-55 yellow; <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). IBKR doesn't redistribute S&P DJI's S5FI index on retail subscriptions, so the daemon computes the same number locally from the 500 constituent daily closes (once-daily refresh post-close).",
 		},
 	}
+	r.Composite = rpc.RegimeComposite{
+		Verdict:              "Stress signal present",
+		GreenCount:           4,
+		YellowCount:          1,
+		RedCount:             1,
+		RankedCount:          6,
+		UnrankedCount:        2,
+		ClusterGreenCount:    3,
+		ClusterYellowCount:   1,
+		ClusterRedCount:      1,
+		ClusterRankedCount:   5,
+		ClusterUnrankedCount: 1,
+	}
+	r.WarningDetails = []rpc.RegimeWarning{
+		{
+			Code:     "missing_required_fields",
+			Scope:    "HYG vs SPY",
+			Severity: "warning",
+			Message:  "HYG tick arrived, but the HYG 50-day average is missing.",
+			Impact:   "The ETF credit proxy is shown for context but does not vote in the composite.",
+			Action:   "Refresh historical bars or wait for the next cache build.",
+		},
+		{
+			Code:     "missing_required_fields",
+			Scope:    "USD/JPY",
+			Severity: "warning",
+			Message:  "USD/JPY spot arrived, but the 7-day close and weekly change are missing.",
+			Impact:   "The FX carry proxy is shown for context but does not vote in the composite.",
+			Action:   "Refresh FX historical bars.",
+		},
+	}
+	r.DataQuality = []rpc.DataQualityHealth{{
+		Surface:         "regime",
+		Status:          "partial",
+		Summary:         "partial: credit, fx",
+		PartialClusters: []string{"credit", "fx"},
+		AsOf:            r.AsOf,
+	}}
+	r.SourceHealth = rpc.BuildRegimeSourceHealth(r, r.AsOf)
+	r.Lifecycle = rpc.BuildRegimeLifecycle(r)
+	r.Fingerprint = rpc.BuildRegimeFingerprint(r)
+	return r
 }

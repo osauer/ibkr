@@ -202,9 +202,9 @@ func classedSPXCandidateSpecs(classed map[string][]ibkrlib.ExpiryClassedStrikes,
 			if parseErr != nil {
 				continue
 			}
-			cutoff := classSettlementInstant(entry.TradingClass, day.Year(), day.Month(), day.Day(), loc).Add(classSettlementBuffer)
-			if nyNow.After(cutoff) {
-				continue // post-settle for this specific class
+			cutoff := spxGammaDataCutoff(entry.TradingClass, day, loc)
+			if spxGammaDataWindowClosed(entry.TradingClass, nyNow, cutoff) {
+				continue // post usable data window for this specific class
 			}
 			if date < today && !strings.EqualFold(entry.TradingClass, "SPX") {
 				continue
@@ -228,6 +228,24 @@ func classedSPXCandidateSpecs(classed map[string][]ibkrlib.ExpiryClassedStrikes,
 	})
 
 	return candidates
+}
+
+func spxGammaDataCutoff(tradingClass string, day time.Time, loc *time.Location) time.Time {
+	settle := classSettlementInstant(tradingClass, day.Year(), day.Month(), day.Day(), loc)
+	if strings.EqualFold(strings.TrimSpace(tradingClass), "SPXW") {
+		// Expiring SPXW Weeklys/EOM stop trading at 16:00 ET. Non-expiring
+		// SPXW series can trade later, but the same-day 0DTE bucket is no
+		// longer collectable after the expiring series closes.
+		return settle
+	}
+	return settle.Add(classSettlementBuffer)
+}
+
+func spxGammaDataWindowClosed(tradingClass string, nyNow, cutoff time.Time) bool {
+	if strings.EqualFold(strings.TrimSpace(tradingClass), "SPXW") {
+		return !nyNow.Before(cutoff)
+	}
+	return nyNow.After(cutoff)
 }
 
 func pickSPXExpirationSlots(candidates []spxExpirySpec, nyNow time.Time, count int) []spxExpirySpec {

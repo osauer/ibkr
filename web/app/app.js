@@ -12,8 +12,11 @@ const state = {
   regimeDetailOpen: false,
   portfolioDetailOpen: false,
   accountMenuOpen: false,
+  selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
+  marketCalendarOverride: null,
   selectedAlertID: null,
   alertFilter: "all",
+  clearedAlertFingerprint: localStorage.getItem("ibkrClearedAlertFingerprint") || "",
   orderReviewSets: [],
   activeOrderReviewSetID: null,
   orderReviewEdits: {},
@@ -39,6 +42,7 @@ async function main() {
     }
   }
   await bootstrap();
+  setupMarketSelect();
   setInterval(() => {
     const snap = state.snapshot || {};
     renderTopbar(snap);
@@ -96,6 +100,9 @@ function applyBootstrap(data) {
   renderAll();
   connectEvents();
   refreshOpenOrders();
+  if (state.selectedMarket !== "us") {
+    refreshSelectedMarketCalendar();
+  }
 }
 
 async function completePairing(pairingID, nonce) {
@@ -190,7 +197,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "trading", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -240,7 +247,7 @@ function renderAll() {
   renderSelectedAlert();
   renderOrderReview();
   renderOpenOrders();
-  renderMarketContext(canary);
+  renderMarketContext(snap);
   renderCanaryDetail(canary);
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
@@ -283,6 +290,7 @@ function renderAccountMenu(account) {
   const accountContext = currentAccountContext(account);
   panel.hidden = !state.accountMenuOpen;
   button.setAttribute("aria-expanded", String(state.accountMenuOpen));
+  button.className = "account-chip " + accountContext.modeClass;
   $("accountChipText").textContent = accountContext.chipLabel;
 }
 
@@ -321,6 +329,7 @@ function renderCanaryDetail(canary) {
   if (!state.canaryDetailOpen) return;
 
   $("canaryDetailGrid").replaceChildren(...canaryExplanationCards(canary).map(detailCard));
+  renderHeldStress(canary);
 
   const rows = (canary.rows || []).slice(0, 3);
   $("canaryDrivers").replaceChildren(...rows.map((row) => {
@@ -372,7 +381,6 @@ function renderCanaryStatus(canary) {
   $("canaryMode").textContent = mode;
   $("canaryWarningCount").textContent = String(warningCount);
   $("canaryCheckCount").textContent = checkCount;
-  $("canaryGlyphMode").textContent = canaryRiskLabel(canary);
 }
 
 function canaryStageLabel(canary) {
@@ -437,11 +445,13 @@ function marketExplanation(canary) {
 
 function portfolioExplanation(canary) {
   const fit = String(canary.portfolio_fit || "").toLowerCase();
+  const heldStress = heldStressItems(canary);
+  const heldStressLine = heldStress.length > 0 ? ` Held stress: ${heldStressSummary(heldStress, 2)}.` : "";
   if (fit === "high") {
     return {
       label: "Portfolio",
       title: "Portfolio is exposed",
-      body: "The current portfolio shape is vulnerable if this market pressure continues.",
+      body: "The current portfolio shape is vulnerable if this market pressure continues." + heldStressLine,
       tone: "risk",
     };
   }
@@ -449,7 +459,15 @@ function portfolioExplanation(canary) {
     return {
       label: "Portfolio",
       title: "Exposure is meaningful",
-      body: "The portfolio has some sensitivity to the current stress. Size changes carefully.",
+      body: "The portfolio has some sensitivity to the current stress. Size changes carefully." + heldStressLine,
+      tone: "warn",
+    };
+  }
+  if (heldStress.length > 0) {
+    return {
+      label: "Portfolio",
+      title: "Held-name stress",
+      body: heldStressSummary(heldStress, 2),
       tone: "warn",
     };
   }
@@ -520,36 +538,119 @@ function renderCanaryTimestamp(canary) {
   el.classList.toggle("stale", stale);
 }
 
-function renderMarketContext(canary) {
+function renderMarketContext(snap) {
+  const canary = snap.canary || {};
   const market = canary.market || {};
   const indicators = canary.market_indicators || [];
-  const nasdaqPrice = firstNumber(
+  const quotes = snap.market_quotes?.quotes || {};
+  const spyQuote = quoteBySymbol(quotes, "SPY");
+  const qqqQuote = quoteBySymbol(quotes, "QQQ");
+  const vixQuote = quoteBySymbol(quotes, "VIX");
+  const spyPrice = quotePrice(spyQuote) ?? market.spy_price;
+  const spyChange = quoteChangePct(spyQuote) ?? market.spy_change_pct;
+  const vixPrice = quotePrice(vixQuote) ?? market.vix;
+  const vixChange = quoteChangePct(vixQuote) ?? market.vix_change_pct;
+  const nasdaqPrice = quotePrice(qqqQuote) ?? firstNumber(
     market.qqq_price,
     market.ndx_price,
     market.nasdaq_price,
     market.nasdaq_100_price,
   );
-  const nasdaqChange = firstNumber(
+  const nasdaqChange = quoteChangePct(qqqQuote) ?? firstNumber(
     market.qqq_change_pct,
     market.ndx_change_pct,
     market.nasdaq_change_pct,
     market.nasdaq_100_change_pct,
   );
-  $("marketAsOf").textContent = shortTime(canary.as_of);
-  $("spyLevel").textContent = numberRead(market.spy_price);
-  $("vixLevel").textContent = numberRead(market.vix);
+  const hasSpyData = typeof spyPrice === "number";
+  const hasVIXData = typeof vixPrice === "number";
+  const hasNasdaqData = typeof nasdaqPrice === "number";
+  $("marketAsOf").textContent = marketQuoteFreshnessLabel(snap.market_quotes, [spyQuote, qqqQuote, vixQuote], canary.as_of);
+  $("spyLevel").textContent = numberRead(spyPrice);
+  $("vixLevel").textContent = numberRead(vixPrice);
   $("nasdaqLevel").textContent = numberRead(nasdaqPrice);
-  renderSignedPercent("spyChange", market.spy_change_pct, false);
-  renderSignedPercent("vixChange", market.vix_change_pct, true);
-  renderSignedPercent("nasdaqChange", nasdaqChange, false);
-  renderCloseGuide(".sparkline--spy", market.spy_prev_close, market.spy_price, market.spy_change_pct, "SPY");
-  renderCloseGuide(".sparkline--vix", market.vix_prev_close, market.vix, market.vix_change_pct, "VIX");
-  renderCloseGuide(".sparkline--nasdaq", market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "Nasdaq");
+  const spyTone = renderSignedPercent("spyChange", spyChange, false);
+  const vixTone = renderSignedPercent("vixChange", vixChange, true);
+  const nasdaqTone = renderSignedPercent("nasdaqChange", nasdaqChange, false);
+  setMarketTileTone(".market-tile--spy", spyTone);
+  setMarketTileTone(".market-tile--vix", vixTone);
+  setMarketTileTone(".market-tile--nasdaq", nasdaqTone);
+  setSparklineTone(".sparkline--spy", spyTone);
+  setSparklineTone(".sparkline--vix", vixTone);
+  setSparklineTone(".sparkline--nasdaq", nasdaqTone);
+  renderCloseGuide(".sparkline--spy", quotePrevClose(spyQuote) ?? market.spy_prev_close, spyPrice, spyChange, "SPY", !hasSpyData);
+  renderCloseGuide(".sparkline--vix", quotePrevClose(vixQuote) ?? market.vix_prev_close, vixPrice, vixChange, "VIX", !hasVIXData);
+  renderCloseGuide(".sparkline--nasdaq", quotePrevClose(qqqQuote) ?? market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "QQQ", !hasNasdaqData);
+  document.querySelector(".market-tile--spy")?.classList.toggle("market-tile--missing", !hasSpyData);
+  document.querySelector(".market-tile--vix")?.classList.toggle("market-tile--missing", !hasVIXData);
+  document.querySelector(".market-tile--nasdaq")?.classList.toggle("market-tile--missing", !hasNasdaqData);
+  $("nasdaqNote").textContent = quoteTileNote(qqqQuote, "Nasdaq 100 ETF", !hasNasdaqData);
   $("marketRegime").textContent = marketRegimeLabel(market, indicators);
   $("marketRegimeSummary").textContent = "Latest regime read";
   $("marketRegimeMix").textContent = latestRegimeRead(canary, indicators);
   renderMarketWeather(market, indicators);
   renderRegimeDetail(indicators);
+}
+
+function quoteBySymbol(quotes, symbol) {
+  if (!quotes) return null;
+  return quotes[symbol] || quotes[symbol.toLowerCase()] || null;
+}
+
+function quotePrice(quote) {
+  if (!quote) return null;
+  return firstNumber(quote.quote_price, quote.price, quote.last, quote.mark);
+}
+
+function quotePrevClose(quote) {
+  if (!quote) return null;
+  return firstNumber(quote.prev_close, quote.regular_close, quote.prior_regular_close);
+}
+
+function quoteChangePct(quote) {
+  if (!quote) return null;
+  const explicit = firstNumber(quote.quote_change_pct, quote.change_pct, quote.regular_change_pct);
+  if (typeof explicit === "number") return explicit;
+  const price = quotePrice(quote);
+  const prev = quotePrevClose(quote);
+  if (typeof price === "number" && typeof prev === "number" && prev !== 0) {
+    return (price - prev) / prev * 100;
+  }
+  return null;
+}
+
+function quoteTileNote(quote, fallback, missing) {
+  if (missing) return "No QQQ data";
+  const quality = String(quote?.quote_quality || "").trim();
+  if (quality && quality !== "firm") return labelize(quality) + " quote";
+  const dataType = String(quote?.data_type || "").trim();
+  if (dataType && dataType !== "live") return labelize(dataType) + " quote";
+  return fallback;
+}
+
+function marketQuoteFreshnessLabel(marketQuotes, quotes, fallbackTime) {
+  const present = (quotes || []).filter(Boolean);
+  const at = marketQuotes?.as_of || latestQuoteTime(present) || fallbackTime;
+  if (present.length === 0) {
+    return at ? `Quote pending ${shortTime(at)}` : "Quote pending";
+  }
+  const dataTypes = present.map((quote) => String(quote.data_type || "").toLowerCase()).filter(Boolean);
+  const delayed = dataTypes.some((value) => value.includes("delayed"));
+  const frozen = dataTypes.some((value) => value.includes("frozen"));
+  const live = dataTypes.includes("live");
+  const prefix = delayed ? "Delayed quote" : live ? "Live quote" : frozen ? "Frozen quote" : "Quote";
+  return at ? `${prefix} ${shortTime(at)}` : prefix;
+}
+
+function latestQuoteTime(quotes) {
+  let latest = null;
+  for (const quote of quotes) {
+    const at = parseDate(quote?.quote_price_at || quote?.price_at || quote?.as_of);
+    if (at && (!latest || at > latest)) {
+      latest = at;
+    }
+  }
+  return latest?.toISOString() || "";
 }
 
 function marketRegimeLabel(market, indicators) {
@@ -635,23 +736,42 @@ function marketWeatherTone(market, indicators) {
 
 function renderSignedPercent(id, value, positiveIsRisk) {
   const el = $(id);
-  el.classList.remove("ok", "risk");
+  el.classList.remove("signed", "ok", "risk", "neutral");
   if (typeof value !== "number") {
     el.textContent = "--";
-    return;
+    return "neutral";
   }
   el.textContent = signedPct(value);
+  el.classList.add("signed");
   const isRisk = positiveIsRisk ? value > 0 : value < 0;
   const isOk = positiveIsRisk ? value < 0 : value > 0;
   if (isRisk) el.classList.add("risk");
   if (isOk) el.classList.add("ok");
+  if (!isRisk && !isOk) el.classList.add("neutral");
+  return isRisk ? "risk" : isOk ? "ok" : "neutral";
 }
 
-function renderCloseGuide(selector, previousClose, currentPrice, changePct, label) {
+function setMarketTileTone(selector, tone) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  el.classList.remove("market-tile--ok", "market-tile--risk", "market-tile--neutral");
+  el.classList.add("market-tile--" + (tone || "neutral"));
+}
+
+function setSparklineTone(selector, tone) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  el.classList.remove("sparkline--ok", "sparkline--risk", "sparkline--neutral");
+  el.classList.add("sparkline--" + (tone || "neutral"));
+}
+
+function renderCloseGuide(selector, previousClose, currentPrice, changePct, label, showMissingGuide = false) {
   const el = document.querySelector(selector);
   if (!el) return;
   const inferredPreviousClose = previousClose ?? previousCloseFromChange(currentPrice, changePct);
-  el.classList.toggle("has-close-guide", typeof inferredPreviousClose === "number");
+  const hasGuide = typeof inferredPreviousClose === "number";
+  el.classList.toggle("has-close-guide", hasGuide || showMissingGuide);
+  el.classList.toggle("sparkline--missing", !hasGuide && showMissingGuide);
   el.title = typeof inferredPreviousClose === "number"
     ? `${label} last close ${numberRead(inferredPreviousClose)}`
     : `${label} last close unavailable`;
@@ -712,6 +832,116 @@ function detailCard(card) {
   body.textContent = card.body || "";
   item.append(labelEl, valueEl, body);
   return item;
+}
+
+function renderHeldStress(canary) {
+  const panel = $("heldStressPanel");
+  if (!panel) return;
+  const stresses = heldStressItems(canary);
+  panel.hidden = stresses.length === 0;
+  if (stresses.length === 0) {
+    $("heldStressSummary").textContent = "--";
+    $("heldStressList").replaceChildren();
+    return;
+  }
+  $("heldStressSummary").textContent = heldStressSummary(stresses, 2);
+  $("heldStressList").replaceChildren(...stresses.slice(0, 5).map(heldStressRow));
+}
+
+function heldStressRow(stress) {
+  const row = document.createElement("div");
+  row.className = "held-stress-row " + heldStressTone(stress);
+  const title = document.createElement("b");
+  title.textContent = stress.underlying || "Held name";
+  const body = document.createElement("p");
+  body.textContent = heldStressEvidence(stress);
+  const reasons = document.createElement("div");
+  reasons.className = "held-stress-row__reasons";
+  for (const reason of heldStressReasonLabels(stress)) {
+    const pill = document.createElement("span");
+    pill.textContent = reason;
+    reasons.append(pill);
+  }
+  row.append(title, body, reasons);
+  return row;
+}
+
+function heldStressItems(canary) {
+  const items = canary?.portfolio?.held_stress;
+  return Array.isArray(items) ? items : [];
+}
+
+function heldStressTone(stress) {
+  const daily = stress.daily_pnl_pct_nlv;
+  if (typeof daily === "number" && daily <= -2) return "risk";
+  if ((stress.liquidity_flags || []).length > 0 || typeof stress.near_expiry_delta_pct_nlv === "number") return "warn";
+  return "neutral";
+}
+
+function heldStressSummary(stresses, limit) {
+  const shown = stresses.slice(0, limit).map((stress) => {
+    const evidence = heldStressEvidence(stress);
+    return `${stress.underlying || "Held name"} ${evidence}`;
+  });
+  if (stresses.length > shown.length) {
+    shown.push(`+${stresses.length - shown.length} more`);
+  }
+  return shown.join("; ");
+}
+
+function heldStressEvidence(stress) {
+  const parts = [];
+  if (typeof stress.daily_pnl_pct_nlv === "number") {
+    parts.push(`daily P/L ${signedPct(stress.daily_pnl_pct_nlv)} NLV`);
+  }
+  if (typeof stress.near_expiry_delta_pct_nlv === "number") {
+    let text = `near-expiry delta ${pct(stress.near_expiry_delta_pct_nlv)} NLV`;
+    if (typeof stress.near_expiry_min_dte === "number") {
+      text += ` at ${stress.near_expiry_min_dte} DTE`;
+    }
+    parts.push(text);
+  }
+  if ((stress.liquidity_flags || []).length > 0) {
+    parts.push("liquidity " + stress.liquidity_flags.map(heldStressFlagLabel).join(", "));
+  }
+  if (typeof stress.market_value_pct_nlv === "number") {
+    parts.push(`market value ${pct(stress.market_value_pct_nlv)} NLV`);
+  }
+  if (typeof stress.delta_pct_nlv === "number") {
+    parts.push(`delta ${pct(stress.delta_pct_nlv)} NLV`);
+  }
+  if (parts.length === 0 && (stress.material_reasons || []).length > 0) {
+    parts.push(stress.material_reasons.map(labelize).join(", "));
+  }
+  return parts.join(" / ") || "Material held-name stress";
+}
+
+function heldStressReasonLabels(stress) {
+  const labels = (stress.material_reasons || []).map(heldStressReasonLabel);
+  if ((stress.liquidity_flags || []).length > 0) labels.push("Liquidity");
+  if (labels.length === 0 && (stress.signal_ids || []).length > 0) {
+    labels.push(...stress.signal_ids.map(heldStressReasonLabel));
+  }
+  return [...new Set(labels)].slice(0, 4);
+}
+
+function heldStressReasonLabel(value) {
+  const key = String(value || "").toLowerCase();
+  if (key === "daily_pnl" || key === "held_underlying_pnl_shock") return "Daily P/L";
+  if (key === "near_expiry_option_delta" || key === "held_option_expiry_concentration") return "Near-expiry options";
+  if (key === "market_value") return "Market value";
+  if (key === "delta") return "Delta";
+  if (key === "held_liquidity_degraded") return "Liquidity";
+  return labelize(value);
+}
+
+function heldStressFlagLabel(value) {
+  const key = String(value || "").toLowerCase();
+  if (key === "mark_outside_bid_ask") return "mark outside bid/ask";
+  if (key === "options_closed") return "options closed";
+  if (key === "stale_quote") return "stale quote";
+  if (key === "wide_spread") return "wide spread";
+  return cleanDetail(value);
 }
 
 function renderPortfolioRisk(positions, account) {
@@ -981,17 +1211,56 @@ function setBanner(bannerID, textID, text) {
 }
 
 function renderTopbar(snap) {
-  const label = marketSessionLabel(snap.market_calendar);
+  const label = marketSessionLabel(currentMarketCalendar(snap));
   const line = $("connectionLine");
+  const strip = document.querySelector(".market-strip");
   line.textContent = label.side || label.text || state.connectionText;
   line.classList.remove("market-open", "market-closed", "market-warn");
+  strip?.classList.remove("market-open", "market-closed", "market-warn");
   if (label.tone) {
     line.classList.add(label.tone);
+    strip?.classList.add(label.tone);
   }
   $("sessionPhase").textContent = label.phase;
   $("sessionLabel").textContent = label.label;
   $("sessionCountdown").textContent = label.countdown;
   $("sessionMeta").textContent = label.meta;
+}
+
+function currentMarketCalendar(snap) {
+  return state.marketCalendarOverride || snap.market_calendar;
+}
+
+function setupMarketSelect() {
+  const select = $("marketSelect");
+  if (!select) return;
+  select.value = state.selectedMarket;
+  select.addEventListener("change", () => {
+    state.selectedMarket = select.value || "us";
+    localStorage.setItem("ibkrSelectedMarket", state.selectedMarket);
+    if (state.selectedMarket === "us") {
+      state.marketCalendarOverride = null;
+      renderTopbar(state.snapshot || {});
+      return;
+    }
+    refreshSelectedMarketCalendar();
+  });
+}
+
+async function refreshSelectedMarketCalendar() {
+  const select = $("marketSelect");
+  const market = state.selectedMarket || "us";
+  if (select) select.disabled = true;
+  try {
+    const res = await fetch(`/api/market-calendar?market=${encodeURIComponent(market)}`, { credentials: "include" });
+    if (!res.ok) throw new Error(await res.text());
+    state.marketCalendarOverride = await res.json();
+  } catch {
+    state.marketCalendarOverride = null;
+  } finally {
+    if (select) select.disabled = false;
+    renderTopbar(state.snapshot || {});
+  }
 }
 
 function renderSyncStrip(snap) {
@@ -1021,10 +1290,11 @@ function renderSyncStrip(snap) {
 function marketSessionLabel(calendar) {
   const session = calendar?.session;
   if (!session) {
+    const marketName = marketCalendarShortLabel(calendar, null);
     return {
       text: state.connectionOK ? "Waiting for official market calendar" : "App connection offline",
       tone: state.connectionOK ? "market-warn" : "market-closed",
-      phase: state.connectionOK ? "Syncing" : "Offline",
+      phase: state.connectionOK ? `${marketName} syncing` : "Offline",
       label: "Waiting",
       countdown: "--:--:--",
       meta: "HH:MM:SS",
@@ -1037,9 +1307,10 @@ function marketSessionLabel(calendar) {
   const open = parseDate(session.open);
   const close = parseDate(session.close);
   const nextOpen = parseDate(session.next_open);
+  const marketName = marketCalendarShortLabel(calendar, session);
   if (session.is_open) {
     const timeLeft = countdownLabel(close);
-    const phase = stateText === "early_close" ? "US early close" : "US market open";
+    const phase = stateText === "early_close" ? `${marketName} early close` : marketOpenPhase(marketName);
     return {
       text: session.reason || "Regular cash session",
       tone: "market-open",
@@ -1056,7 +1327,7 @@ function marketSessionLabel(calendar) {
     return {
       text: session.state === "early_close" ? session.reason || "Shortened session ahead" : "Regular cash session",
       tone: "market-warn",
-      phase: "US pre-open",
+      phase: `${marketName} pre-open`,
       label: "Opens",
       countdown: untilOpen || "--:--:--",
       meta: marketClockMeta("Open", session, open),
@@ -1069,7 +1340,7 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason || "Next regular cash session",
       tone: "market-closed",
-      phase: stateText === "early_close" ? "US after early close" : "US after close",
+      phase: stateText === "early_close" ? `${marketName} after early close` : `${marketName} after close`,
       label: "Opens",
       countdown: untilOpen || "--:--:--",
       meta: marketClockMeta("Next", session, nextOpen),
@@ -1082,7 +1353,7 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason || "Official market holiday",
       tone: "market-closed",
-      phase: "US holiday",
+      phase: `${marketName} holiday`,
       label: "Opens",
       countdown: untilOpen || "--:--:--",
       meta: marketClockMeta("Next", session, nextOpen),
@@ -1095,7 +1366,7 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason === "weekend" ? "Weekend closure" : `Outside regular cash session${reason}`,
       tone: "market-closed",
-      phase: session.reason === "weekend" ? "US weekend" : "US market closed",
+      phase: session.reason === "weekend" ? `${marketName} weekend` : marketClosedPhase(marketName),
       label: "Opens",
       countdown: untilOpen || "--:--:--",
       meta: marketClockMeta("Next", session, nextOpen),
@@ -1108,7 +1379,7 @@ function marketSessionLabel(calendar) {
     return {
       text: `Calendar coverage unavailable${reason}`,
       tone: "market-warn",
-      phase: "US market unknown",
+      phase: `${marketName} unknown`,
       label: "Next",
       countdown: untilOpen || "--:--:--",
       meta: marketClockMeta("Session", session, nextOpen),
@@ -1120,12 +1391,27 @@ function marketSessionLabel(calendar) {
   return {
     text: session.reason || `Official calendar${reason}`,
     tone: "market-warn",
-    phase: `US ${cleanDetail(session.state)}`,
+    phase: `${marketName} ${cleanDetail(session.state)}`,
     label: "Opens",
     countdown: untilOpen || "--:--:--",
     meta: marketClockMeta("Open", session, nextOpen),
     side: marketSessionNow(session),
   };
+}
+
+function marketCalendarShortLabel(calendar, session) {
+  const raw = String(calendar?.label || session?.label || session?.market || calendar?.market || "").toLowerCase();
+  if (raw.includes("xetra") || raw.includes("de_") || raw === "de") return "Xetra";
+  if (raw.includes("option")) return "US options";
+  return "US";
+}
+
+function marketOpenPhase(marketName) {
+  return marketName === "US" ? "US market open" : `${marketName} open`;
+}
+
+function marketClosedPhase(marketName) {
+  return marketName === "US" ? "US market closed" : `${marketName} closed`;
 }
 
 function marketSessionNow(session) {
@@ -1200,13 +1486,21 @@ function renderAlerts() {
   const items = filteredAlertItems();
   const allItems = alertItems();
   const activeItems = allItems.filter((alert) => !alertIsStale(alert));
+  const clearableLivePreview = currentAlertPreviewItems().length > 0 && !liveAlertPreviewsSuppressed();
   const staleCount = state.alerts.filter((alert) => alertIsStale(alert)).length;
-  $("alertCount").textContent = `${activeItems.length} Active`;
+  const count = $("alertCount");
+  const activeTones = activeItems.map(alertTone);
+  count.textContent = `${activeItems.length} Active`;
+  count.classList.toggle("is-zero", activeItems.length === 0);
+  count.classList.toggle("has-risk", activeTones.includes("risk"));
+  count.classList.toggle("has-warn", !activeTones.includes("risk") && activeTones.includes("warn"));
   $("alertsHint").textContent = state.alerts.length === 0
-    ? "Live canary preview; no alert history recorded yet."
+    ? liveAlertPreviewsSuppressed() ? "Current canary alerts cleared for this snapshot." : currentCanaryHasPortfolioAlert()
+      ? "Live canary preview; no alert history recorded yet."
+      : "No portfolio alerts for the current low-exposure snapshot."
     : staleCount > 0 ? `${staleCount} previous-context alert${staleCount === 1 ? "" : "s"} hidden. Clear history to reset.`
       : "Tap an alert to inspect it in Canary.";
-  $("clearAlertsButton").disabled = state.alerts.length === 0;
+  $("clearAlertsButton").disabled = state.alerts.length === 0 && !clearableLivePreview;
   document.querySelectorAll("[data-alert-filter]").forEach((button) => {
     button.classList.toggle("active", button.dataset.alertFilter === state.alertFilter);
   });
@@ -1258,22 +1552,21 @@ function renderSelectedAlert() {
 }
 
 function activeOrderReviewSet() {
-  return state.orderReviewSets.find((set) => set.id === state.activeOrderReviewSetID) || state.orderReviewSets[0] || null;
+  const currentSets = state.orderReviewSets.filter((set) => !reviewSetIsStale(set));
+  return currentSets.find((set) => set.id === state.activeOrderReviewSetID) || currentSets[0] || null;
 }
 
 function renderOrderReview() {
   const panel = $("orderReviewPanel");
-  const canary = state.snapshot?.canary || {};
   const set = activeOrderReviewSet();
-  const staleReview = reviewSetIsStale(set);
-  const shouldShow = Boolean(set || canary.action || canary.severity || state.snapshot?.trading);
+  const shouldShow = Boolean(set || state.orderReviewLoading || state.orderReviewError || state.orderPreview);
   panel.hidden = !shouldShow;
   if (!shouldShow) return;
 
   const trading = set?.capabilities || state.snapshot?.trading || {};
-  $("orderReviewTitle").textContent = set ? labelize(set.intent || "mitigation") : "Risk action plan";
+  $("orderReviewTitle").textContent = "Mitigation plan";
   $("orderReviewMeta").textContent = set
-    ? `${set.plan_id || "plan"} / ${set.revision || "revision"}`
+    ? `${(set.rows || []).length} review row${(set.rows || []).length === 1 ? "" : "s"} · updated ${shortTime(set.updated_at || set.created_at)}`
     : "Create a review set from the latest canary context";
   $("orderReviewStatus").textContent = capabilityLine(trading, set);
   $("refreshOrderReviewButton").disabled = state.orderReviewLoading;
@@ -1293,7 +1586,7 @@ function renderOrderReview() {
     ? "No selected rows"
     : `${selected.length} selected / ${totalQty} units`;
   $("resetOrderReviewButton").disabled = !set || state.orderReviewLoading;
-  $("previewOrdersButton").disabled = !set || staleReview || !trading.can_preview || selected.length === 0 || state.orderReviewLoading;
+  $("previewOrdersButton").disabled = !set || !trading.can_preview || selected.length === 0 || state.orderReviewLoading;
   const previewSubmitReady = state.orderPreview?.set_id === set?.id && state.orderPreview?.set_revision === set?.revision && state.orderPreview?.submit_ready;
   $("transmitSelectedButton").disabled = !set || !trading.can_transmit || !previewSubmitReady;
   $("transmitSelectedButton").title = transmitDisabledReason(trading, previewSubmitReady);
@@ -1610,9 +1903,20 @@ function alertItems() {
   const history = state.alerts
     .map((alert) => ({ ...alert, preview: false }))
     .filter((alert) => !alertIsStale(alert));
+  const previews = liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems();
+  if (history.length === 0) return previews;
+  const historyTitles = new Set(history.map((item) => String(item.title || "").toLowerCase()));
+  return [
+    ...history,
+    ...previews.filter((item) => !historyTitles.has(String(item.title || "").toLowerCase())),
+  ].slice(0, 3);
+}
+
+function currentAlertPreviewItems() {
   const canary = state.snapshot?.canary || {};
-  const rows = (canary.rows || []).slice(0, 3);
-  const previews = rows.map((row, index) => ({
+  if (!canaryHasPortfolioAlert(canary)) return [];
+  const rows = canaryPreviewRows(canary);
+  return rows.map((row, index) => ({
     id: `preview-${index}`,
     title: row.title || labelize(row.severity || "canary"),
     body: [row.guidance, row.evidence].filter(Boolean).join(" ") || canary.summary || "Current canary context.",
@@ -1621,12 +1925,30 @@ function alertItems() {
     severity: row.severity || canary.severity,
     preview: true,
   }));
-  if (history.length === 0) return previews;
-  const historyTitles = new Set(history.map((item) => String(item.title || "").toLowerCase()));
-  return [
-    ...history,
-    ...previews.filter((item) => !historyTitles.has(String(item.title || "").toLowerCase())),
-  ].slice(0, 3);
+}
+
+function currentCanaryHasPortfolioAlert() {
+  return canaryHasPortfolioAlert(state.snapshot?.canary || {});
+}
+
+function canaryHasPortfolioAlert(canary) {
+  const fit = String(canary.portfolio_fit || "").toLowerCase();
+  if (fit !== "low") return true;
+  const portfolio = canary.portfolio || {};
+  if ((portfolio.held_stress || []).length > 0) return true;
+  const exposureValues = [
+    portfolio.gross_exposure_pct_nlv,
+    portfolio.net_delta_pct_nlv,
+    portfolio.gross_delta_pct_nlv,
+    portfolio.largest_exposure_pct_nlv,
+    portfolio.largest_delta_pct_nlv,
+  ];
+  return exposureValues.some((value) => typeof value === "number" && Math.abs(value) >= 0.5);
+}
+
+function liveAlertPreviewsSuppressed() {
+  const current = currentCanaryFingerprint();
+  return Boolean(current && state.clearedAlertFingerprint === current);
 }
 
 function filteredAlertItems() {
@@ -1640,9 +1962,33 @@ function filteredAlertItems() {
   return items;
 }
 
+function canaryPreviewRows(canary) {
+  const rows = Array.isArray(canary.rows) ? canary.rows : [];
+  const heldStress = heldStressItems(canary);
+  if (heldStress.length === 0) return rows.slice(0, 3);
+  const heldRow = {
+    title: "Held-name stress",
+    severity: "watch",
+    guidance: "Review material held underlyings before acting.",
+    evidence: heldStressSummary(heldStress, 2),
+  };
+  const hasHeldRow = rows.some((row) => {
+    const text = `${row.title || ""} ${row.evidence || ""} ${row.guidance || ""}`.toLowerCase();
+    return text.includes("held") && text.includes("stress");
+  });
+  if (hasHeldRow) return rows.slice(0, 3);
+  return [...rows.slice(0, 2), heldRow];
+}
+
 function alertTone(alert) {
-  const text = `${alert.severity || ""} ${alert.title || ""} ${alert.body || ""}`.toLowerCase();
-  if (text.includes("act") || text.includes("defend") || text.includes("high") || text.includes("risk")) return "risk";
+  const severity = String(alert.severity || "").toLowerCase();
+  const action = String(alert.action || "").toLowerCase();
+  if (["act", "risk", "high", "critical"].includes(severity) || ["defend", "rebalance"].includes(action)) return "risk";
+  if (["watch", "warn", "warning", "medium"].includes(severity)) return "warn";
+  if (["observe", "ok", "info", "low"].includes(severity)) return "info";
+
+  const text = `${alert.title || ""} ${alert.body || ""}`.toLowerCase();
+  if (text.includes("act now") || text.includes("defend now") || text.includes("high severity")) return "risk";
   if (text.includes("watch") || text.includes("warn") || text.includes("spike") || text.includes("down")) return "warn";
   return "info";
 }
@@ -1652,6 +1998,11 @@ async function clearAlerts() {
   if (!res.ok) return;
   state.alerts = [];
   state.selectedAlertID = null;
+  const fp = currentCanaryFingerprint();
+  if (fp) {
+    state.clearedAlertFingerprint = fp;
+    localStorage.setItem("ibkrClearedAlertFingerprint", fp);
+  }
   renderAlerts();
   renderSelectedAlert();
 }

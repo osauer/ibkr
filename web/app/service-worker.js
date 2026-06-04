@@ -7,11 +7,11 @@ self.addEventListener("push", (event) => {
   }
   const title = payload.title || "ibkr canary";
   const options = {
-    body: payload.body || "Open ibkr for details.",
+    body: payload.body || "Open ibkr canary for details.",
     data: { url: payload.url || "/" },
     tag: payload.alert_id || "ibkr-canary",
-    badge: "/icon.svg",
-    icon: "/icon.svg",
+    badge: "/favicon-64.png",
+    icon: "/icon-192.png",
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });

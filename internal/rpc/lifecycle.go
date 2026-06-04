@@ -149,24 +149,28 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 		now = r.AsOf
 	}
 	_, bands := regimeLifecycleClusterBands(*r)
+	volPartial := regimeSourceMissingRequiredFields(r.VIXTermStructure.Status, r.VIXTermStructure.Band, r.VIXTermStructure.FieldsMissing)
+	creditPartial := regimeSourceMissingRequiredFields(r.HYGSPYDivergence.Status, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.FieldsMissing) ||
+		regimeSourceMissingRequiredFields(r.CreditSpreads.Status, r.CreditSpreads.Band, r.CreditSpreads.FieldsMissing)
 	rows := []struct {
 		name          string
 		band          string
 		statuses      []string
 		asOf          []RegimeAsOfSummary
 		qualityStatus string
+		partial       bool
 	}{
-		{"vol", bands[0], []string{r.VIXTermStructure.Status, r.VolOfVol.Status}, []RegimeAsOfSummary{metaAsOf(r.VIXTermStructure.RegimeIndicatorMeta), metaAsOf(r.VolOfVol.RegimeIndicatorMeta)}, ""},
-		{"credit", bands[1], []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}, []RegimeAsOfSummary{metaAsOf(r.HYGSPYDivergence.RegimeIndicatorMeta), metaAsOf(r.CreditSpreads.RegimeIndicatorMeta)}, ""},
-		{"funding", bands[2], []string{r.FundingStress.Status}, []RegimeAsOfSummary{metaAsOf(r.FundingStress.RegimeIndicatorMeta)}, ""},
-		{"fx", bands[3], []string{r.USDJPY.Status}, []RegimeAsOfSummary{metaAsOf(r.USDJPY.RegimeIndicatorMeta)}, ""},
-		{"gamma", bands[4], []string{r.GammaZero.Status}, []RegimeAsOfSummary{metaAsOf(r.GammaZero.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "gamma")},
-		{"breadth", bands[5], []string{r.Breadth.Status}, []RegimeAsOfSummary{metaAsOf(r.Breadth.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "breadth")},
+		{"vol", bands[0], []string{r.VIXTermStructure.Status, r.VolOfVol.Status}, []RegimeAsOfSummary{metaAsOf(r.VIXTermStructure.RegimeIndicatorMeta), metaAsOf(r.VolOfVol.RegimeIndicatorMeta)}, "", volPartial},
+		{"credit", bands[1], []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}, []RegimeAsOfSummary{metaAsOf(r.HYGSPYDivergence.RegimeIndicatorMeta), metaAsOf(r.CreditSpreads.RegimeIndicatorMeta)}, "", creditPartial},
+		{"funding", bands[2], []string{r.FundingStress.Status}, []RegimeAsOfSummary{metaAsOf(r.FundingStress.RegimeIndicatorMeta)}, "", regimeSourceMissingRequiredFields(r.FundingStress.Status, r.FundingStress.Band, r.FundingStress.FieldsMissing)},
+		{"fx", bands[3], []string{r.USDJPY.Status}, []RegimeAsOfSummary{metaAsOf(r.USDJPY.RegimeIndicatorMeta)}, "", regimeSourceMissingRequiredFields(r.USDJPY.Status, r.USDJPY.Band, r.USDJPY.FieldsMissing)},
+		{"gamma", bands[4], []string{r.GammaZero.Status}, []RegimeAsOfSummary{metaAsOf(r.GammaZero.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "gamma"), regimeSourceMissingRequiredFields(r.GammaZero.Status, r.GammaZero.Band, r.GammaZero.FieldsMissing)},
+		{"breadth", bands[5], []string{r.Breadth.Status}, []RegimeAsOfSummary{metaAsOf(r.Breadth.RegimeIndicatorMeta)}, regimeSourceQualityStatus(r.DataQuality, "breadth"), regimeSourceMissingRequiredFields(r.Breadth.Status, r.Breadth.Band, r.Breadth.FieldsMissing)},
 	}
 	out := make([]SourceHealth, 0, len(rows))
 	for _, row := range rows {
 		asOf := weakestRegimeAsOf(row.asOf)
-		status := regimeSourceStatus(row.statuses, row.band, row.qualityStatus)
+		status := regimeSourceStatus(row.statuses, row.band, row.qualityStatus, row.partial)
 		out = append(out, SourceHealth{
 			Source:               row.name,
 			Status:               status,
@@ -516,7 +520,7 @@ func sourceAgeSeconds(now, asOf time.Time) int64 {
 	return int64(age.Seconds())
 }
 
-func regimeSourceStatus(statuses []string, band string, qualityStatus string) string {
+func regimeSourceStatus(statuses []string, band string, qualityStatus string, partial bool) string {
 	switch qualityStatus {
 	case "degraded":
 		return "degraded"
@@ -524,6 +528,9 @@ func regimeSourceStatus(statuses []string, band string, qualityStatus string) st
 		return "partial"
 	case RegimeStatusStale:
 		return RegimeStatusStale
+	}
+	if partial {
+		return "partial"
 	}
 	sawBad, sawStale, sawComputing, sawError, sawUnavailable := false, false, false, false, false
 	for _, status := range statuses {
@@ -560,6 +567,23 @@ func regimeSourceStatus(statuses []string, band string, qualityStatus string) st
 		return RegimeStatusStale
 	}
 	return RegimeStatusOK
+}
+
+func regimeSourceMissingRequiredFields(status string, band string, fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case RegimeStatusOK, RegimeStatusStale:
+	default:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(band)) {
+	case "", "unranked":
+		return true
+	default:
+		return false
+	}
 }
 
 func regimeSourceConfidence(status string) string {

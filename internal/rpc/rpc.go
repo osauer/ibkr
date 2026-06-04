@@ -37,6 +37,7 @@ const (
 	MethodRegimeSnapshot = "regime.snapshot"
 	MethodCancel         = "cancel"
 	MethodOrderPlace     = "order.place"
+	MethodOrderModify    = "order.modify"
 	MethodOrderCancel    = "order.cancel"
 )
 
@@ -2828,6 +2829,7 @@ type OrderPreviewParams struct {
 	Strategy   string         `json:"strategy,omitempty"` // default patient-limit for stocks/ETFs
 	TIF        string         `json:"tif,omitempty"`      // default DAY
 	OutsideRTH bool           `json:"outside_rth,omitempty"`
+	ReplaceID  string         `json:"replace_id,omitempty"`
 	TimeoutMs  int            `json:"timeout_ms,omitempty"`
 }
 
@@ -2924,6 +2926,75 @@ type OrderPreviewResult struct {
 	WhatIf      OrderWhatIfResult   `json:"what_if"`
 	Warnings    []DataWarning       `json:"warnings,omitempty"`
 	AsOf        time.Time           `json:"as_of"`
+}
+
+// OrderPlaceParams redeems a submit-eligible preview token for a broker
+// transmit. The daemon revalidates the local trading gate and token binding
+// before any socket write.
+type OrderPlaceParams struct {
+	PreviewToken string `json:"preview_token"`
+	TimeoutMs    int    `json:"timeout_ms,omitempty"`
+}
+
+// OrderModifyParams applies a constrained modify to a locally tracked open
+// order. The preview token must describe the replacement draft; the daemon
+// reuses the existing broker order ID instead of creating a new one.
+type OrderModifyParams struct {
+	ID           string `json:"id"`
+	PreviewToken string `json:"preview_token"`
+	TimeoutMs    int    `json:"timeout_ms,omitempty"`
+}
+
+// OrderCancelParams requests cancellation of a locally tracked order. Cancel
+// is intentionally identified by local order_ref, IBKR order ID, or permanent
+// ID so the daemon can bind the request to journal evidence first.
+type OrderCancelParams struct {
+	ID        string `json:"id"`
+	TimeoutMs int    `json:"timeout_ms,omitempty"`
+}
+
+type OrderPlaceResult struct {
+	Accepted        bool       `json:"accepted"`
+	Mode            string     `json:"mode"`
+	Account         string     `json:"account"`
+	Endpoint        string     `json:"endpoint"`
+	ClientID        int        `json:"client_id"`
+	OrderRef        string     `json:"order_ref"`
+	PreviewTokenID  string     `json:"preview_token_id"`
+	ReservedOrderID int        `json:"reserved_order_id"`
+	Draft           OrderDraft `json:"draft"`
+	Status          string     `json:"status,omitempty"`
+	LifecycleStatus string     `json:"lifecycle_status,omitempty"`
+	SendState       string     `json:"send_state,omitempty"`
+	Message         string     `json:"message,omitempty"`
+	AsOf            time.Time  `json:"as_of"`
+}
+
+type OrderModifyResult struct {
+	Accepted        bool       `json:"accepted"`
+	Mode            string     `json:"mode"`
+	Account         string     `json:"account"`
+	Endpoint        string     `json:"endpoint"`
+	ClientID        int        `json:"client_id"`
+	OrderRef        string     `json:"order_ref"`
+	PreviewTokenID  string     `json:"preview_token_id"`
+	ReservedOrderID int        `json:"reserved_order_id"`
+	Draft           OrderDraft `json:"draft"`
+	Status          string     `json:"status,omitempty"`
+	LifecycleStatus string     `json:"lifecycle_status,omitempty"`
+	SendState       string     `json:"send_state,omitempty"`
+	Message         string     `json:"message,omitempty"`
+	AsOf            time.Time  `json:"as_of"`
+}
+
+type OrderCancelResult struct {
+	Accepted        bool      `json:"accepted"`
+	Order           OrderView `json:"order"`
+	Status          string    `json:"status,omitempty"`
+	LifecycleStatus string    `json:"lifecycle_status,omitempty"`
+	SendState       string    `json:"send_state,omitempty"`
+	Message         string    `json:"message,omitempty"`
+	AsOf            time.Time `json:"as_of"`
 }
 
 // OrderEvent is the read-only lifecycle/audit row exposed from the private

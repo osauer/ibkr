@@ -120,6 +120,52 @@ func TestGammaQualitySPXCanonicalRanksWithSPYUnavailable(t *testing.T) {
 	}
 }
 
+func TestGammaQualitySPXRanksWithout0DTEWhenNearAndTermCovered(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.LegCount0DTE = 0
+	spx.GammaSign0DTE = "no_data"
+	spx.Warnings = []string{"0dte_no_legs"}
+
+	annotateGammaQuality(spx, now)
+
+	if got := spx.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("rankability = %q, want rankable without 0DTE when near+term buckets are covered: %+v", got, spx.Quality)
+	}
+	if spx.Quality.Coverage.Has0DTE {
+		t.Fatalf("coverage should still disclose missing 0DTE: %+v", spx.Quality.Coverage)
+	}
+	for _, ctx := range spx.Quality.Context {
+		if strings.Contains(ctx, "horizon_0dte") {
+			t.Fatalf("missing 0DTE alone should not make SPX gamma context-only: %+v", spx.Quality)
+		}
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: spx}}
+	if got := bandForGamma(row); got != "red" {
+		t.Fatalf("bandForGamma = %q, want red for rankable short-gamma SPX without 0DTE", got)
+	}
+}
+
+func TestGammaQualityMissing0DTERemainsContextWhenTermMissing(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.LegCount0DTE = 0
+	spx.GammaSign0DTE = "no_data"
+	spx.LegCountTerm = 0
+	spx.GammaSignTerm = "no_data"
+
+	annotateGammaQuality(spx, now)
+
+	if got := spx.Quality.Rankability; got != rpc.GammaRankabilityContextOnly {
+		t.Fatalf("rankability = %q, want context_only when 0DTE and term buckets are missing: %+v", got, spx.Quality)
+	}
+	if !strings.Contains(spx.Quality.RankabilityReason, "horizon_0dte") {
+		t.Fatalf("rankability reason = %q, want 0DTE context reason", spx.Quality.RankabilityReason)
+	}
+}
+
 func TestGammaQualitySPYLivePartialOIStillRankable(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)

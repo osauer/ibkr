@@ -12,9 +12,9 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-// handleOrderPlace and handleOrderCancel must refuse every call with
+// The order-write handlers must refuse every call with
 // ErrTradingDisabled until the gated write path exists. Preview can mint local
-// tokens, but no broker place/cancel path is opened by this slice.
+// tokens, but no broker place/modify/cancel path is opened by this slice.
 func TestOrderHandlersAlwaysRefuse(t *testing.T) {
 	t.Parallel()
 
@@ -22,6 +22,9 @@ func TestOrderHandlersAlwaysRefuse(t *testing.T) {
 
 	if _, err := handleOrderPlace(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
 		t.Errorf("handleOrderPlace returned %v, want ErrTradingDisabled", err)
+	}
+	if _, err := handleOrderModify(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
+		t.Errorf("handleOrderModify returned %v, want ErrTradingDisabled", err)
 	}
 	if _, err := handleOrderCancel(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
 		t.Errorf("handleOrderCancel returned %v, want ErrTradingDisabled", err)
@@ -34,7 +37,7 @@ func TestOrderHandlersAlwaysRefuse(t *testing.T) {
 func TestDispatchOrderVerbsClassifyAsTradingDisabled(t *testing.T) {
 	t.Parallel()
 
-	for _, method := range []string{rpc.MethodOrderPlace, rpc.MethodOrderCancel} {
+	for _, method := range []string{rpc.MethodOrderPlace, rpc.MethodOrderModify, rpc.MethodOrderCancel} {
 		t.Run(method, func(t *testing.T) {
 			srv := newTestServer(t)
 

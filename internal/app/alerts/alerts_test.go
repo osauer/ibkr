@@ -34,6 +34,20 @@ func TestShouldAlertModes(t *testing.T) {
 	if !ShouldAlert(state.AlertModeWatchAndAct, watch) {
 		t.Fatalf("watch_and_act should alert on watch severity")
 	}
+	emptyMarketWatch := rpc.CanaryResult{
+		Severity:     risk.SeverityWatch,
+		PortfolioFit: "low",
+		Portfolio:    rpc.CanaryPortfolioSummary{},
+	}
+	if ShouldAlert(state.AlertModeWatchAndAct, emptyMarketWatch) {
+		t.Fatalf("watch_and_act should not alert on market-only low-exposure canary")
+	}
+	exposed := 1.0
+	portfolioWatch := emptyMarketWatch
+	portfolioWatch.Portfolio.GrossExposurePctNLV = &exposed
+	if !ShouldAlert(state.AlertModeWatchAndAct, portfolioWatch) {
+		t.Fatalf("watch_and_act should alert when low-fit canary still has material exposure")
+	}
 	if ShouldAlert("bogus", act) {
 		t.Fatalf("unknown mode should not alert")
 	}

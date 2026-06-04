@@ -225,6 +225,8 @@ func gammaQualityHorizonGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 	cov := q.Coverage
 	if cov.Has0DTE {
 		gammaQualityAddGate(q, "horizon_0dte", rpc.GammaQualityGatePass, "0DTE bucket present")
+	} else if cov.Has1To7DTE && cov.HasTerm {
+		gammaQualityAddGate(q, "horizon_0dte", rpc.GammaQualityGatePass, "0DTE bucket missing; 1-7 DTE and term buckets present")
 	} else {
 		gammaQualityAddGate(q, "horizon_0dte", rpc.GammaQualityGateContext, "0DTE bucket missing")
 	}

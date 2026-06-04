@@ -4,8 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f6f7f9">
-    <title>ibkr app</title>
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <title>ibkr canary</title>
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -13,15 +14,13 @@
     <main class="shell">
       <header class="app-header">
         <div class="brand-block">
-          <h1>IBKR Private</h1>
-          <p>Personal risk monitor</p>
+          <img class="brand-mark" src="/icon-192.png" width="50" height="50" alt="" aria-hidden="true">
+          <div class="brand-copy">
+            <h1>ibkr canary</h1>
+            <p>Portfolio risk monitor</p>
+          </div>
         </div>
         <button class="account-chip" id="accountMenuToggle" type="button" aria-label="Account menu" aria-expanded="false" aria-controls="accountMenu">
-          <span class="account-chip__icon">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3.25 18.5 5.8v5.7c0 4.8-2.6 8.6-6.5 10.25C8.1 19.1 5.5 15.3 5.5 11.5V5.8L12 3.25Z"></path>
-            </svg>
-          </span>
           <span id="accountChipText">Account</span>
           <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
             <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
@@ -72,6 +71,16 @@
       <section class="market-strip" aria-live="polite">
         <div class="market-strip__status">
           <span class="market-strip__pulse" aria-hidden="true"></span>
+          <label class="market-strip__selector">
+            <select id="marketSelect" aria-label="Market calendar">
+              <option value="us">US equities</option>
+              <option value="us-options">US options</option>
+              <option value="de">Xetra</option>
+            </select>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
+            </svg>
+          </label>
           <span class="market-strip__phase" id="sessionPhase">Syncing</span>
         </div>
         <div class="market-strip__clock">
@@ -120,34 +129,36 @@
               <strong id="canaryAction">--</strong>
               <p id="canarySummary">Waiting for canary snapshot.</p>
             </div>
-            <div class="canary-gauge" aria-hidden="true">
-              <svg viewBox="0 0 160 160" class="canary-gauge__svg">
-                <path class="shield-outline" d="M80 10 126 28v45c0 37-18.4 65.6-46 77-27.6-11.4-46-40-46-77V28L80 10Z"></path>
-                <path class="gauge-arc gauge-arc--ok" d="M42 92a48 48 0 0 1 18-37"></path>
-                <path class="gauge-arc gauge-arc--support" d="M62 53a48 48 0 0 1 25-5"></path>
-                <path class="gauge-arc gauge-arc--warn" d="M91 49a48 48 0 0 1 28 25"></path>
-                <path class="gauge-needle" d="M80 91 111 65"></path>
-                <circle class="gauge-pin" cx="80" cy="91" r="8"></circle>
-              </svg>
-              <div class="canary-gauge__label">
-                <small>Risk</small>
-                <span id="canaryGlyphMode">--</span>
-              </div>
-            </div>
           </div>
           <div class="canary-chip-row" aria-label="Canary status">
             <div class="canary-chip canary-chip--mode">
-              <i aria-hidden="true"></i>
+              <span class="canary-chip__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8"></circle>
+                  <circle cx="12" cy="12" r="2.2"></circle>
+                </svg>
+              </span>
               <span>Mode</span>
               <b id="canaryMode">--</b>
             </div>
             <div class="canary-chip canary-chip--warn">
-              <i aria-hidden="true"></i>
+              <span class="canary-chip__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M12 3.5 21 19H3L12 3.5Z"></path>
+                  <path d="M12 9v4.4"></path>
+                  <path d="M12 17h.01"></path>
+                </svg>
+              </span>
               <span>Warnings</span>
               <b id="canaryWarningCount">--</b>
             </div>
             <div class="canary-chip canary-chip--check">
-              <i aria-hidden="true"></i>
+              <span class="canary-chip__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8.5"></circle>
+                  <path d="m8 12.4 2.6 2.6L16.5 9"></path>
+                </svg>
+              </span>
               <span>Checks</span>
               <b id="canaryCheckCount">--</b>
             </div>
@@ -185,6 +196,13 @@
           </div>
           <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
             <div class="detail-grid" id="canaryDetailGrid"></div>
+            <div class="held-stress" id="heldStressPanel" hidden>
+              <div class="held-stress__head">
+                <span>Held stress</span>
+                <b id="heldStressSummary">--</b>
+              </div>
+              <div class="held-stress__list" id="heldStressList"></div>
+            </div>
             <div class="detail-list" id="canaryDrivers"></div>
           </div>
         </article>
@@ -214,7 +232,7 @@
               <b id="nasdaqLevel">--</b>
               <small class="market-change" id="nasdaqChange">--</small>
               <div class="sparkline sparkline--nasdaq" aria-hidden="true"></div>
-              <em>Nasdaq 100</em>
+              <em id="nasdaqNote">Nasdaq 100 ETF</em>
             </div>
             <button class="market-regime weather-na" id="marketRegimeToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
               <span>Regime</span>
@@ -301,7 +319,7 @@
             <div class="list" id="alertsList"></div>
             <div class="alerts-toolbar">
               <span id="alertsHint">No alert history yet.</span>
-              <button class="text-link" id="clearAlertsButton" type="button">Clear history</button>
+              <button class="text-button" id="clearAlertsButton" type="button">Clear alerts</button>
             </div>
             <div class="alert-settings">
               <span id="pushState">push off</span>

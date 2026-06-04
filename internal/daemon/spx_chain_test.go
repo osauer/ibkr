@@ -81,6 +81,39 @@ func TestSelectSPXExpirationsClassedKeepsBothPreSettle(t *testing.T) {
 	}
 }
 
+func TestSelectSPXExpirationsClassedDropsExpiringSPXWAtClose(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	classed := map[string][]ibkrlib.ExpiryClassedStrikes{
+		"2026-06-03": {{TradingClass: "SPXW", Strikes: []float64{7550, 7600}}},
+		"2026-06-04": {{TradingClass: "SPXW", Strikes: []float64{7550, 7600}}},
+	}
+
+	preClose := selectSPXExpirationsClassed(classed, time.Date(2026, 6, 3, 15, 59, 59, 0, loc), 6)
+	if len(preClose) == 0 || preClose[0].Date != "2026-06-03" {
+		t.Fatalf("pre-close SPXW 0DTE should be selectable, got %+v", preClose)
+	}
+
+	atClose := selectSPXExpirationsClassed(classed, time.Date(2026, 6, 3, 16, 0, 0, 0, loc), 6)
+	if len(atClose) == 0 {
+		t.Fatalf("expected next SPXW expiry after expiring close")
+	}
+	for _, spec := range atClose {
+		if spec.Date == "2026-06-03" {
+			t.Fatalf("expiring SPXW should be dropped at 16:00 ET, got %+v", atClose)
+		}
+	}
+
+	postClose := selectSPXExpirationsClassed(classed, time.Date(2026, 6, 3, 16, 10, 0, 0, loc), 6)
+	for _, spec := range postClose {
+		if spec.Date == "2026-06-03" {
+			t.Fatalf("expiring SPXW should be dropped after 16:00 ET, got %+v", postClose)
+		}
+	}
+}
+
 func TestSelectSPXChainEntryUsesOnlyListedClass(t *testing.T) {
 	t.Parallel()
 	entries := normalisedSPXChainEntries([]ibkrlib.ExpiryClassedStrikes{{

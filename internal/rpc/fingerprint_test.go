@@ -242,3 +242,34 @@ func TestRegimeSourceHealthUsesPartialDataQuality(t *testing.T) {
 		t.Fatalf("gamma source health = %+v, want partial/medium", gamma)
 	}
 }
+
+func TestRegimeSourceHealthTreatsMissingRequiredFieldsAsPartial(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 4, 9, 15, 0, 0, time.UTC)
+	res := &RegimeSnapshotResult{
+		AsOf: now,
+		USDJPY: RegimeUSDJPY{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{
+				Band: "unranked",
+				AsOf: &RegimeAsOfSummary{Time: now},
+			},
+			Status:        RegimeStatusOK,
+			FieldsMissing: []string{"close_7d_ago", "weekly_change_pct"},
+		},
+	}
+
+	got := BuildRegimeSourceHealth(res, now)
+	var fx *SourceHealth
+	for i := range got {
+		if got[i].Source == "fx" {
+			fx = &got[i]
+			break
+		}
+	}
+	if fx == nil {
+		t.Fatalf("missing fx source health: %+v", got)
+	}
+	if fx.Status != "partial" || fx.Confidence != "medium" {
+		t.Fatalf("fx source health = %+v, want partial/medium", fx)
+	}
+}
