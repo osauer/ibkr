@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -42,33 +41,18 @@ func TestPlaceOrderDoesNotSendDoubleMaxSentinels(t *testing.T) {
 	}
 
 	require.NoError(t, conn.PlaceOrder(order))
-	fields := extractPayloadFields(t, &buf)
-	payload := strings.Join(fields, "\x00")
+	payload := extractRawPayload(t, &buf)
 
 	if strings.Contains(payload, "1.7976931348623157e+308") {
 		t.Fatalf("placeOrder payload should not contain double max sentinel, payload=%q", payload)
 	}
 }
 
-func extractPayloadFields(t *testing.T, buf *bytes.Buffer) []string {
+func extractRawPayload(t *testing.T, buf *bytes.Buffer) string {
 	data := buf.Bytes()
 	require.GreaterOrEqual(t, len(data), 4)
 	msgLen := binary.BigEndian.Uint32(data[:4])
 	require.GreaterOrEqual(t, uint32(len(data[4:])), msgLen)
 	payload := data[4 : 4+msgLen]
-	fields := make([]string, 0, 32)
-	if len(payload) >= 4 {
-		msgType := binary.BigEndian.Uint32(payload[:4])
-		fields = append(fields, strconv.Itoa(int(msgType)))
-		payload = payload[4:]
-		// Skip null terminator after message type if present
-		if len(payload) > 0 && payload[0] == 0x00 {
-			payload = payload[1:]
-		}
-	}
-	parts := bytes.SplitSeq(payload, []byte{0})
-	for part := range parts {
-		fields = append(fields, string(part))
-	}
-	return fields
+	return string(payload)
 }

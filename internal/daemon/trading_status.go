@@ -21,6 +21,13 @@ func (s *Server) handleTradingStatus() *rpc.TradingStatus {
 }
 
 func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
+	if s != nil {
+		// These hooks are exercised only by the trading-tag write tests, but
+		// Server is compiled in the default read-only build too.
+		_ = s.orderReserveBrokerID
+		_ = s.orderPlaceBroker
+		_ = s.orderCancelBroker
+	}
 	var cfg config.Resolved
 	if s != nil && s.cfg != nil {
 		cfg = *s.cfg
@@ -35,9 +42,9 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	if port == 0 && cfg.Gateway.Port != nil {
 		port = *cfg.Gateway.Port
 	}
-	account := ep.Account
+	account := cfg.Gateway.Account
 	if account == "" {
-		account = cfg.Gateway.Account
+		account = ep.Account
 	}
 	clientID := ep.ClientID
 	if clientID == 0 {
@@ -103,7 +110,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		add("gateway_account_unpinned", "order submission requires a pinned account", "Set [gateway].account.")
 	} else if strings.EqualFold(strings.TrimSpace(cfg.Gateway.Account), "All") {
 		add("gateway_account_not_concrete", "order preview requires a concrete IBKR account, not the aggregate account \"All\"", "Pin the paper/live account code shown by TWS, such as a DU paper account.")
-	} else if connectedAccount := s.connectedGatewayAccount(); connectedAccount != "" && !strings.EqualFold(cfg.Gateway.Account, connectedAccount) {
+	} else if connectedAccount := s.connectedGatewayAccount(); connectedAccount != "" && accountMismatchesConnected(cfg.Gateway.Account, connectedAccount) {
 		add("gateway_account_mismatch", fmt.Sprintf("configured account %q does not match connected account %q", cfg.Gateway.Account, connectedAccount), "Pin [gateway].account to the account advertised by the connected TWS/Gateway session.")
 	}
 	if cfg.Gateway.ClientID == nil {
@@ -150,13 +157,21 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 
 	status.Blocked = len(status.Blockers) > 0
 	status.CanPreview = tr.Enabled && !status.Blocked && tr.PreviewRequired()
-	status.CanTransmit = false
-	status.CanModify = false
-	status.CanCancel = false
+	paperWriteReady := tr.Mode == config.TradingModePaper && status.CanPreview && s.orderPaperWritesEnabled()
+	status.CanTransmit = paperWriteReady
+	status.CanModify = paperWriteReady
+	status.CanCancel = paperWriteReady
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}
 	return status
+}
+
+func (s *Server) orderPaperWritesEnabled() bool {
+	if s != nil && s.orderWritesEnabled != nil {
+		return s.orderWritesEnabled()
+	}
+	return orderWritesAvailable
 }
 
 func (s *Server) connectedGatewayAccount() string {
@@ -170,6 +185,18 @@ func (s *Server) connectedGatewayAccount() string {
 		return ""
 	}
 	return strings.TrimSpace(c.AccountID())
+}
+
+func accountMismatchesConnected(configured, connected string) bool {
+	configured = strings.TrimSpace(configured)
+	connected = strings.TrimSpace(connected)
+	if configured == "" || connected == "" {
+		return false
+	}
+	if strings.EqualFold(connected, "All") {
+		return false
+	}
+	return !strings.EqualFold(configured, connected)
 }
 
 func endpointString(host string, port int) string {

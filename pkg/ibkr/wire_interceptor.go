@@ -175,7 +175,7 @@ func (w *WireInterceptor) newFrame(dir WireDirection, msgID int, raw []byte, fie
 		When:        time.Now(),
 		Direction:   dir,
 		MsgID:       msgID,
-		MsgName:     resolveMessageName(msgID),
+		MsgName:     resolveMessageNameForDirection(dir, msgID),
 		LengthBytes: hex.EncodeToString(length),
 		Fields:      cloneStringSlice(fields),
 		RawHex:      hex.EncodeToString(raw),
@@ -230,7 +230,15 @@ func extractReqInfo(msgID int, fields []string) (string, string) {
 	if len(fields) == 0 {
 		return "", ""
 	}
+	if msgID == protoPlaceOrderMsgID {
+		return summaryFieldValue(fields, "orderId="), summaryFieldValue(fields, "symbol=")
+	}
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		return summaryFieldValue(fields, "orderId="), summaryFieldValue(fields, "symbol=")
+	}
 	switch msgID {
+	case placeOrder:
+		return fieldValue(fields, 1), fieldValue(fields, 3)
 	case reqMktData:
 		return fieldValue(fields, 2), fieldValue(fields, 4)
 	case reqContractData:
@@ -245,7 +253,12 @@ func extractReqInfo(msgID int, fields []string) (string, string) {
 }
 
 func resolveMessageName(msgID int) string {
+	if msgID == protoPlaceOrderMsgID {
+		return "placeOrderProtoBuf"
+	}
 	switch msgID {
+	case placeOrder:
+		return "placeOrder"
 	case reqMktData:
 		return "reqMktData"
 	case reqContractData:
@@ -256,6 +269,10 @@ func resolveMessageName(msgID int) string {
 		return "reqCalcImpliedVol"
 	case cancelMktData:
 		return "cancelMktData"
+	case msgOpenOrder:
+		return "openOrder"
+	case msgExecDetails:
+		return "execDetails"
 	case msgErrMsg:
 		return "error"
 	case msgSystemNotification:
@@ -263,4 +280,20 @@ func resolveMessageName(msgID int) string {
 	default:
 		return fmt.Sprintf("msg(%d)", msgID)
 	}
+}
+
+func resolveMessageNameForDirection(dir WireDirection, msgID int) string {
+	if dir == WireOutbound && msgID == protoCancelOrderMsgID {
+		return "cancelOrderProtoBuf"
+	}
+	return resolveMessageName(msgID)
+}
+
+func summaryFieldValue(fields []string, prefix string) string {
+	for _, field := range fields {
+		if after, ok := strings.CutPrefix(field, prefix); ok {
+			return after
+		}
+	}
+	return ""
 }

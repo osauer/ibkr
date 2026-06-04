@@ -66,3 +66,43 @@ func TestParseOrderLifecycleEventIgnoresMalformed(t *testing.T) {
 		t.Fatal("unknown message should be ignored")
 	}
 }
+
+func TestConnectorOrderLifecycleHandlerReceivesBrokerStatus(t *testing.T) {
+	t.Parallel()
+	c := NewConnector(&ConnectorConfig{})
+	received := make(chan OrderLifecycleEvent, 1)
+	c.RegisterOrderLifecycleHandler(func(ev OrderLifecycleEvent) {
+		received <- ev
+	})
+
+	c.notifyOrderLifecycle([]string{"3", "1", "1001", "Submitted", "0", "1", "0", "987654", "0", "31", "0", "", "0"})
+
+	select {
+	case ev := <-received:
+		if ev.Type != OrderLifecycleEventStatus || ev.OrderID != 1001 || ev.Status != "Submitted" || ev.PermID != 987654 {
+			t.Fatalf("event = %+v, want Submitted status for order 1001", ev)
+		}
+	default:
+		t.Fatal("lifecycle handler was not called")
+	}
+}
+
+func TestConnectorOrderLifecycleHandlerIgnoresWhatIfOpenOrder(t *testing.T) {
+	t.Parallel()
+	c := NewConnector(&ConnectorConfig{})
+	received := make(chan OrderLifecycleEvent, 1)
+	c.RegisterOrderLifecycleHandler(func(ev OrderLifecycleEvent) {
+		received <- ev
+	})
+
+	c.notifyOrderLifecycle([]string{
+		"5", "38", "1001", "265598", "AAPL", "STK", "", "0", "", "1", "SMART", "USD", "", "AAPL",
+		"BUY", "10", "LMT", "190.5", "0", "DAY", "1", "Submitted", "987654",
+	})
+
+	select {
+	case ev := <-received:
+		t.Fatalf("what-if event should be ignored, got %+v", ev)
+	default:
+	}
+}

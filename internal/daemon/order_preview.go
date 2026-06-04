@@ -25,25 +25,43 @@ const (
 	orderPreviewTokenPrefix  = "ibkrp1"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
-	orderPreviewWhatIfWait   = 8 * time.Second
+	orderPreviewWhatIfWait   = 3 * time.Minute
 )
 
 type orderPreviewTokenPayload struct {
-	Version      int                     `json:"version"`
-	TokenID      string                  `json:"token_id"`
-	Scope        string                  `json:"scope"`
-	IssuedAt     time.Time               `json:"issued_at"`
-	ExpiresAt    time.Time               `json:"expires_at"`
-	Mode         string                  `json:"mode"`
-	Account      string                  `json:"account"`
-	Endpoint     string                  `json:"endpoint"`
-	ClientID     int                     `json:"client_id"`
-	Draft        rpc.OrderDraft          `json:"draft"`
-	Quote        rpc.OrderQuoteSnapshot  `json:"quote"`
-	Position     rpc.OrderPositionImpact `json:"position"`
-	Notional     float64                 `json:"notional"`
-	WhatIf       rpc.OrderWhatIfResult   `json:"what_if"`
-	WhatIfStatus string                  `json:"what_if_status,omitempty"`
+	Version      int                       `json:"version"`
+	TokenID      string                    `json:"token_id"`
+	Scope        string                    `json:"scope"`
+	IssuedAt     time.Time                 `json:"issued_at"`
+	ExpiresAt    time.Time                 `json:"expires_at"`
+	Mode         string                    `json:"mode"`
+	Account      string                    `json:"account"`
+	Endpoint     string                    `json:"endpoint"`
+	ClientID     int                       `json:"client_id"`
+	Draft        rpc.OrderDraft            `json:"draft"`
+	Quote        rpc.OrderQuoteSnapshot    `json:"quote"`
+	Position     rpc.OrderPositionImpact   `json:"position"`
+	Notional     float64                   `json:"notional"`
+	WhatIf       rpc.OrderWhatIfResult     `json:"what_if"`
+	WhatIfStatus string                    `json:"what_if_status,omitempty"`
+	Replace      orderPreviewReplaceTarget `json:"replace"`
+}
+
+type orderPreviewReplaceTarget struct {
+	OrderRef        string  `json:"order_ref,omitempty"`
+	ReservedOrderID int     `json:"reserved_order_id,omitempty"`
+	PermID          int     `json:"perm_id,omitempty"`
+	ClientID        int     `json:"client_id,omitempty"`
+	Account         string  `json:"account,omitempty"`
+	Endpoint        string  `json:"endpoint,omitempty"`
+	Mode            string  `json:"mode,omitempty"`
+	Status          string  `json:"status,omitempty"`
+	LifecycleStatus string  `json:"lifecycle_status,omitempty"`
+	Quantity        float64 `json:"quantity,omitempty"`
+	Filled          float64 `json:"filled,omitempty"`
+	Remaining       float64 `json:"remaining,omitempty"`
+	LimitPrice      float64 `json:"limit_price,omitempty"`
+	OutsideRTH      bool    `json:"outside_rth,omitempty"`
 }
 
 type orderTokenSigner struct {
@@ -109,7 +127,14 @@ func (s *orderTokenSigner) mint(payload orderPreviewTokenPayload) (token string,
 	}
 	payload.Version = orderPreviewTokenVersion
 	payload.TokenID = tokenID
-	payload.Scope = rpc.OrderTokenScopePlace
+	if payload.Scope == "" {
+		payload.Scope = rpc.OrderTokenScopePlace
+	}
+	switch payload.Scope {
+	case rpc.OrderTokenScopePlace, rpc.OrderTokenScopeModify:
+	default:
+		return "", "", time.Time{}, fmt.Errorf("unsupported order preview token scope %q", payload.Scope)
+	}
 	payload.IssuedAt = now
 	if payload.ExpiresAt.IsZero() {
 		payload.ExpiresAt = now.Add(orderPreviewTokenTTL)
@@ -156,7 +181,9 @@ func (s *orderTokenSigner) verify(token string) (orderPreviewTokenPayload, error
 	if payload.Version != orderPreviewTokenVersion {
 		return orderPreviewTokenPayload{}, fmt.Errorf("unsupported order preview token version %d", payload.Version)
 	}
-	if payload.Scope != rpc.OrderTokenScopePlace {
+	switch payload.Scope {
+	case rpc.OrderTokenScopePlace, rpc.OrderTokenScopeModify:
+	default:
 		return orderPreviewTokenPayload{}, fmt.Errorf("unsupported order preview token scope %q", payload.Scope)
 	}
 	if payload.WhatIf.Status == "" && payload.WhatIfStatus != "" {
@@ -204,6 +231,23 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	}
 	if s.orderTokens == nil {
 		return nil, fmt.Errorf("%w: order preview token signer is unavailable", ErrTradingDisabled)
+	}
+	scope := rpc.OrderTokenScopePlace
+	var replaceView rpc.OrderView
+	replaceID := strings.TrimSpace(p.ReplaceID)
+	if replaceID != "" {
+		if !status.CanModify {
+			return nil, fmt.Errorf("%w: paper modify is not available", ErrTradingDisabled)
+		}
+		view, err := s.openOrderViewForWrite(replaceID, status)
+		if err != nil {
+			return nil, err
+		}
+		if !view.ModifyEligible {
+			return nil, errBadRequest("replacement preview target is not modify-eligible")
+		}
+		scope = rpc.OrderTokenScopeModify
+		replaceView = view
 	}
 
 	cfg := config.Trading{}.WithDefaults()
@@ -279,11 +323,23 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Strategy:   strategy,
 		OrderRef:   previewOrderRef(now),
 	}
-	whatIf, err := s.fetchPreviewWhatIf(ctx, draft)
+	if scope == rpc.OrderTokenScopeModify {
+		if err := validateModifyDraft(replaceView, draft); err != nil {
+			return nil, err
+		}
+		draft.Contract = modifyContractForView(replaceView, draft.Contract)
+	}
+	var whatIf rpc.OrderWhatIfResult
+	if scope == rpc.OrderTokenScopeModify {
+		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, replaceView, draft)
+	} else {
+		whatIf, err = s.fetchPreviewWhatIf(ctx, draft)
+	}
 	if err != nil {
 		return nil, err
 	}
 	token, tokenID, expiresAt, err := s.orderTokens.mint(orderPreviewTokenPayload{
+		Scope:        scope,
 		Mode:         status.Mode,
 		Account:      status.Account,
 		Endpoint:     status.Endpoint,
@@ -294,6 +350,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Notional:     notional,
 		WhatIf:       whatIf,
 		WhatIfStatus: whatIf.Status,
+		Replace:      replaceTargetFromView(replaceView),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTradingDisabled, err)
@@ -309,9 +366,15 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Mode:           status.Mode,
 		Symbol:         draft.Contract.Symbol,
 		SecType:        draft.Contract.SecType,
+		Exchange:       draft.Contract.Exchange,
+		PrimaryExch:    draft.Contract.PrimaryExch,
+		Currency:       draft.Contract.Currency,
+		LocalSymbol:    draft.Contract.LocalSymbol,
+		TradingClass:   draft.Contract.TradingClass,
 		Action:         draft.Action,
 		OrderType:      draft.OrderType,
 		TIF:            draft.TIF,
+		OutsideRTH:     draft.OutsideRTH,
 		Quantity:       float64(draft.Quantity),
 		LimitPrice:     draft.LimitPrice,
 		Message:        previewWhatIfJournalMessage(whatIf),
@@ -334,7 +397,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	return &rpc.OrderPreviewResult{
 		PreviewToken:          token,
 		PreviewTokenID:        tokenID,
-		PreviewTokenScope:     rpc.OrderTokenScopePlace,
+		PreviewTokenScope:     scope,
 		PreviewTokenExpiresAt: expiresAt,
 		TokenMinted:           tokenMinted,
 		SubmitEligible:        submitEligible,
@@ -379,6 +442,23 @@ func (s *Server) fetchPreviewWhatIf(ctx context.Context, draft rpc.OrderDraft) (
 	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
 	defer cancel()
 	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrder(draft))
+	if err != nil {
+		return rpc.OrderWhatIfResult{}, err
+	}
+	return rpcWhatIfResultFromBroker(result), nil
+}
+
+func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, view rpc.OrderView, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+	if s.orderPreviewWhatIf != nil {
+		return s.orderPreviewWhatIf(ctx, draft)
+	}
+	c := s.gatewayConnector()
+	if c == nil {
+		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
+	}
+	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
+	defer cancel()
+	result, err := c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrder(draft), view.ReservedOrderID)
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
 	}
@@ -440,12 +520,13 @@ func rpcWhatIfResultFromBroker(result ibkrlib.OrderWhatIfResult) rpc.OrderWhatIf
 			msg = "Broker WhatIf rejected this order draft."
 		}
 		return rpc.OrderWhatIfResult{
-			Status:            rpc.OrderWhatIfStatusRejected,
-			RequiredForSubmit: true,
-			Available:         true,
-			Message:           msg,
-			Action:            "Adjust the draft and run order preview again before any submit attempt.",
-			Margin:            rpcMarginFromBroker(result.Margin),
+			Status:             rpc.OrderWhatIfStatusRejected,
+			RequiredForSubmit:  true,
+			Available:          true,
+			Message:            msg,
+			AdvancedRejectJSON: strings.TrimSpace(result.AdvancedRejectJSON),
+			Action:             "Adjust the draft and run order preview again before any submit attempt.",
+			Margin:             rpcMarginFromBroker(result.Margin),
 		}
 	default:
 		msg := strings.TrimSpace(result.Message)
@@ -771,5 +852,31 @@ func previewWhatIfWarnings(whatIf rpc.OrderWhatIfResult) []rpc.DataWarning {
 }
 
 func previewOrderRef(now time.Time) string {
-	return "ibkr-" + now.UTC().Format("20060102-150405")
+	tokenID, err := randomTokenID()
+	if err != nil {
+		return "ibkr-" + now.UTC().Format("20060102-150405")
+	}
+	return "ibkr-" + now.UTC().Format("20060102-150405") + "-" + tokenID[:8]
+}
+
+func replaceTargetFromView(view rpc.OrderView) orderPreviewReplaceTarget {
+	if view.OrderRef == "" && view.ReservedOrderID == 0 && view.PermID == 0 {
+		return orderPreviewReplaceTarget{}
+	}
+	return orderPreviewReplaceTarget{
+		OrderRef:        view.OrderRef,
+		ReservedOrderID: view.ReservedOrderID,
+		PermID:          view.PermID,
+		ClientID:        view.ClientID,
+		Account:         view.Account,
+		Endpoint:        view.Endpoint,
+		Mode:            view.Mode,
+		Status:          view.Status,
+		LifecycleStatus: view.LifecycleStatus,
+		Quantity:        view.Quantity,
+		Filled:          view.Filled,
+		Remaining:       view.Remaining,
+		LimitPrice:      view.LimitPrice,
+		OutsideRTH:      view.OutsideRTH,
+	}
 }

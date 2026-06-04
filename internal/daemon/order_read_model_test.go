@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,137 @@ func TestBuildOrderViewsTerminalStatusNotOpen(t *testing.T) {
 	}
 }
 
+func TestOrderLifecycleApiPendingIsNotWriteEligible(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 5, 28, 9, 30, 0, 0, time.UTC)
+	ev, ok := orderJournalEventFromLifecycle(ibkrlib.OrderLifecycleEvent{
+		Type:      ibkrlib.OrderLifecycleEventStatus,
+		OrderID:   1001,
+		Status:    "ApiPending",
+		Remaining: 1,
+	}, base)
+	if !ok {
+		t.Fatal("orderJournalEventFromLifecycle ok=false")
+	}
+	if ev.SendState != orderSendStateUncertainSend {
+		t.Fatalf("ApiPending send state = %q, want uncertain_send", ev.SendState)
+	}
+
+	views := buildOrderViews([]orderJournalEvent{ev})
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	got := views[0]
+	if got.LifecycleStatus != rpc.OrderLifecyclePendingSubmit {
+		t.Fatalf("ApiPending lifecycle = %q, want pending_submit: %+v", got.LifecycleStatus, got)
+	}
+	if got.ModifyEligible || got.CancelEligible {
+		t.Fatalf("ApiPending should not be write-eligible: %+v", got)
+	}
+}
+
+func TestBuildOrderViewsAliasesBrokerOnlyLifecycleToOrderRef(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 5, 28, 9, 30, 0, 0, time.UTC)
+	events := []orderJournalEvent{
+		{
+			At:             base,
+			Type:           orderJournalEventPreviewed,
+			OrderRef:       "ibkr-20260528-093000",
+			PreviewTokenID: "tok_1",
+			Account:        "DU1234567",
+			Endpoint:       "127.0.0.1:4002",
+			Mode:           "paper",
+			Symbol:         "AAPL",
+			SecType:        "STK",
+			Action:         rpc.OrderActionBuy,
+			OrderType:      rpc.OrderTypeLMT,
+			TIF:            rpc.OrderTIFDay,
+			Quantity:       10,
+			LimitPrice:     190.50,
+		},
+		{
+			At:              base.Add(time.Second),
+			Type:            orderJournalEventSendAttempted,
+			OrderRef:        "ibkr-20260528-093000",
+			PreviewTokenID:  "tok_1",
+			ReservedOrderID: 1001,
+			SendState:       orderSendStateSendAttempted,
+		},
+		{
+			At:              base.Add(2 * time.Second),
+			Type:            orderJournalEventStatusUpdated,
+			ReservedOrderID: 1001,
+			PermID:          987654,
+			Status:          "Cancelled",
+			SendState:       orderSendStateTerminal,
+		},
+	}
+
+	views := buildOrderViews(events)
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want one canonical order-ref row: %+v", len(views), views)
+	}
+	got := views[0]
+	if got.OrderRef != "ibkr-20260528-093000" || got.ReservedOrderID != 1001 || got.PermID != 987654 || got.Status != "Cancelled" {
+		t.Fatalf("aliased view fields wrong: %+v", got)
+	}
+	if got.Open || got.LifecycleStatus != rpc.OrderLifecycleCancelled {
+		t.Fatalf("aliased lifecycle = open:%v %s, want closed cancelled: %+v", got.Open, got.LifecycleStatus, got)
+	}
+
+	eventsByKey := buildOrderEventsByKey(events)
+	if got := len(eventsByKey["ref:ibkr-20260528-093000"]); got != 3 {
+		t.Fatalf("canonical events = %d, want 3: %+v", got, eventsByKey)
+	}
+	if _, ok := eventsByKey["order:1001"]; ok {
+		t.Fatalf("broker-only alias should not create separate events row: %+v", eventsByKey)
+	}
+}
+
+func TestOrderViewWriteEligibilityRequiresBrokerConfirmedState(t *testing.T) {
+	t.Parallel()
+	base := rpc.OrderView{
+		Open:            true,
+		ReservedOrderID: 1001,
+		SecType:         "STK",
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+	}
+
+	confirmed := base
+	confirmed.SendState = orderSendStateBrokerAcknowledged
+	confirmed.LifecycleStatus = rpc.OrderLifecycleSubmitted
+	if !orderViewModifyEligible(confirmed) || !orderViewCancelEligible(confirmed) {
+		t.Fatalf("confirmed submitted order should be write-eligible: %+v", confirmed)
+	}
+
+	for _, view := range []rpc.OrderView{
+		func() rpc.OrderView {
+			v := base
+			v.SendState = orderSendStateSendAttempted
+			v.LifecycleStatus = rpc.OrderLifecyclePendingSubmit
+			return v
+		}(),
+		func() rpc.OrderView {
+			v := base
+			v.SendState = orderSendStateUncertainSend
+			v.LifecycleStatus = rpc.OrderLifecycleUnknownReconcileRequired
+			return v
+		}(),
+		func() rpc.OrderView {
+			v := base
+			v.SendState = orderSendStateBrokerAcknowledged
+			v.LifecycleStatus = rpc.OrderLifecycleUnknownReconcileRequired
+			return v
+		}(),
+	} {
+		if orderViewModifyEligible(view) || orderViewCancelEligible(view) {
+			t.Fatalf("non-confirmed/reconcile-required order should not be write-eligible: %+v", view)
+		}
+	}
+}
+
 func TestOrderJournalEventFromLifecycle(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 5, 28, 9, 31, 0, 0, time.UTC)
@@ -108,5 +240,88 @@ func TestOrderJournalEventFromLifecycle(t *testing.T) {
 	}
 	if ev.ReservedOrderID != 1001 || ev.PermID != 987654 || ev.Status != "Filled" || ev.Filled != 10 {
 		t.Fatalf("event fields wrong: %+v", ev)
+	}
+}
+
+func TestOrderJournalEventFromLifecycleBrokerError(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 5, 28, 9, 31, 0, 0, time.UTC)
+	ev, ok := orderJournalEventFromLifecycle(ibkrlib.OrderLifecycleEvent{
+		Type:      ibkrlib.OrderLifecycleEventError,
+		OrderID:   1001,
+		Status:    "Rejected",
+		ErrorCode: 201,
+		Message:   `broker order error code 201: Order rejected advanced_reject_json={"reason":"size"}`,
+	}, at)
+	if !ok {
+		t.Fatal("orderJournalEventFromLifecycle ok=false")
+	}
+	if ev.Type != orderJournalEventBrokerError || ev.SendState != orderSendStateTerminal || ev.Status != "Rejected" {
+		t.Fatalf("event = %+v, want terminal broker error", ev)
+	}
+	views := buildOrderViews([]orderJournalEvent{
+		{At: at.Add(-time.Second), Type: orderJournalEventSendAttempted, OrderRef: "ord-1", ReservedOrderID: 1001, SendState: orderSendStateSendAttempted},
+		ev,
+	})
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	if views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleRejected || !strings.Contains(views[0].LastMessage, "advanced_reject_json") {
+		t.Fatalf("view = %+v, want closed rejected with broker message", views[0])
+	}
+}
+
+func TestBuildOrderViewsModifyBrokerErrorPreservesWorkingOrder(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 5, 28, 9, 30, 0, 0, time.UTC)
+	views := buildOrderViews([]orderJournalEvent{
+		{
+			At:              base,
+			Type:            orderJournalEventBrokerAcknowledged,
+			OrderRef:        "ord-1",
+			ReservedOrderID: 1001,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
+			Symbol:          "AAPL",
+			SecType:         "STK",
+			Action:          rpc.OrderActionBuy,
+			OrderType:       rpc.OrderTypeLMT,
+			TIF:             rpc.OrderTIFDay,
+			Quantity:        1,
+			Remaining:       1,
+			LimitPrice:      190.50,
+			Status:          "Submitted",
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              base.Add(time.Second),
+			Type:            orderJournalEventModifyRequested,
+			OrderRef:        "ord-1",
+			ReservedOrderID: 1001,
+			Quantity:        1,
+			Remaining:       1,
+			LimitPrice:      189.50,
+			Status:          "Submitted",
+			SendState:       orderSendStateSendAttempted,
+		},
+		{
+			At:              base.Add(2 * time.Second),
+			Type:            orderJournalEventBrokerError,
+			ReservedOrderID: 1001,
+			Status:          "Rejected",
+			SendState:       orderSendStateTerminal,
+			Message:         "broker order error code 321: modify rejected",
+		},
+	})
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	got := views[0]
+	if !got.Open || got.Status != "Submitted" || got.LifecycleStatus != rpc.OrderLifecycleUnknownReconcileRequired || got.SendState != orderSendStateUncertainSend {
+		t.Fatalf("view after modify reject = %+v, want open submitted reconcile-required", got)
+	}
+	if got.ModifyEligible || got.CancelEligible {
+		t.Fatalf("reconcile-required order should not be write-eligible: %+v", got)
 	}
 }

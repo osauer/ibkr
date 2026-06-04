@@ -264,6 +264,68 @@ func TestOrderPreviewPaperMintsTokenAndJournal(t *testing.T) {
 	}
 }
 
+func TestOrderPreviewReplaceMintsModifyScopedToken(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 28, 8, 45, 0, 0, time.UTC)
+	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv.now = func() time.Time { return now }
+	srv.orderWritesEnabled = func() bool { return true }
+	srv.orderPreviewQuote = fixedPreviewQuote(99, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 1, rpc.OrderPositionEffectOpen)
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+	if err := srv.orderJournal.Append(orderJournalEvent{
+		At:              now.Add(-time.Minute),
+		Type:            orderJournalEventBrokerAcknowledged,
+		OrderRef:        "ord-1",
+		ReservedOrderID: 1001,
+		ClientID:        31,
+		Account:         "DU1234567",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Symbol:          "AAPL",
+		SecType:         "STK",
+		Exchange:        "SMART",
+		Currency:        "USD",
+		Action:          "BUY",
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+		Quantity:        1,
+		Remaining:       1,
+		LimitPrice:      100,
+		Status:          "Submitted",
+		SendState:       orderSendStateBrokerAcknowledged,
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	limit := 99.5
+	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:     rpc.OrderActionBuy,
+		Contract:   rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Quantity:   1,
+		OrderType:  rpc.OrderTypeLMT,
+		LimitPrice: &limit,
+		TIF:        rpc.OrderTIFDay,
+		ReplaceID:  "ord-1",
+		TimeoutMs:  100,
+	})
+	if err != nil {
+		t.Fatalf("previewOrder replace err = %v", err)
+	}
+	if res.PreviewTokenScope != rpc.OrderTokenScopeModify || !res.SubmitEligible {
+		t.Fatalf("preview result = %+v, want modify submit-eligible token", res)
+	}
+	payload, err := srv.orderTokens.verify(res.PreviewToken)
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if payload.Scope != rpc.OrderTokenScopeModify || payload.Replace.ReservedOrderID != 1001 || payload.Replace.OrderRef != "ord-1" {
+		t.Fatalf("payload = %+v, want modify target ord-1/1001", payload)
+	}
+}
+
 func TestOrderPreviewBindsAcceptedBrokerWhatIf(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
@@ -333,14 +395,18 @@ func TestRpcWhatIfResultFromBrokerMapsSubmitEligibility(t *testing.T) {
 	}
 
 	rejected := rpcWhatIfResultFromBroker(ibkrlib.OrderWhatIfResult{
-		Status:  ibkrlib.OrderWhatIfStatusRejected,
-		Message: "insufficient buying power",
+		Status:             ibkrlib.OrderWhatIfStatusRejected,
+		Message:            "insufficient buying power",
+		AdvancedRejectJSON: `{"reason":"size"}`,
 	})
 	if rejected.Status != rpc.OrderWhatIfStatusRejected || !rejected.RequiredForSubmit || !rejected.Available {
 		t.Fatalf("rejected broker result mapped wrong: %+v", rejected)
 	}
 	if !strings.Contains(rejected.Message, "insufficient buying power") {
 		t.Fatalf("rejected message = %q", rejected.Message)
+	}
+	if rejected.AdvancedRejectJSON != `{"reason":"size"}` {
+		t.Fatalf("advanced reject json = %q", rejected.AdvancedRejectJSON)
 	}
 
 	unavailable := rpcWhatIfResultFromBroker(ibkrlib.OrderWhatIfResult{
@@ -407,7 +473,7 @@ func TestConfirmPreviewTokenForPlaceRejectsGateMismatch(t *testing.T) {
 		Available:         true,
 		RequiredForSubmit: false,
 	})
-	srv.endpoint.Account = "DU7654321"
+	srv.cfg.Gateway.Account = "DU7654321"
 
 	_, err := srv.confirmPreviewTokenForPlace(token)
 	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "preview token was minted for") {

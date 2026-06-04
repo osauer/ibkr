@@ -9,6 +9,7 @@ const (
 	OrderLifecycleEventOpenOrder   = "openOrder"
 	OrderLifecycleEventStatus      = "orderStatus"
 	OrderLifecycleEventExecDetails = "execDetails"
+	OrderLifecycleEventError       = "error"
 )
 
 // OrderLifecycleEvent is the typed subset of IBKR order callbacks needed by
@@ -21,6 +22,8 @@ type OrderLifecycleEvent struct {
 	ClientID      int
 	RequestID     int
 	Status        string
+	ErrorCode     int
+	Message       string
 	Symbol        string
 	SecType       string
 	Expiry        string
@@ -37,11 +40,14 @@ type OrderLifecycleEvent struct {
 	LimitPrice    float64
 	AuxPrice      float64
 	TIF           string
+	OutsideRth    bool
+	WhatIf        bool
 	Filled        float64
 	Remaining     float64
 	AvgFillPrice  float64
 	LastFillPrice float64
 	WhyHeld       string
+	MktCapPrice   float64
 	ExecID        string
 	ExecTime      string
 	Account       string
@@ -78,12 +84,21 @@ func ParseOrderLifecycleEvent(fields []string) (ev OrderLifecycleEvent, ok bool)
 }
 
 func parseOpenOrderEvent(fields []string) (OrderLifecycleEvent, bool) {
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		return parseOpenOrderProtoEvent(fields)
+	}
 	start := 1
 	if len(fields) > 2 && orderEventIntOK(fields[1]) {
 		start = 2
 	}
 	if len(fields) <= start+17 {
 		return OrderLifecycleEvent{}, false
+	}
+	statusIdx := start + 18
+	whatIf := false
+	if parseIBKRBool(orderEventField(fields, statusIdx)) && orderWhatIfStateStatus(orderEventField(fields, statusIdx+1)) {
+		whatIf = true
+		statusIdx++
 	}
 	ev := OrderLifecycleEvent{
 		Type:          OrderLifecycleEventOpenOrder,
@@ -105,13 +120,17 @@ func parseOpenOrderEvent(fields []string) (OrderLifecycleEvent, bool) {
 		LimitPrice:    orderEventFloat(orderEventField(fields, start+15)),
 		AuxPrice:      orderEventFloat(orderEventField(fields, start+16)),
 		TIF:           strings.ToUpper(strings.TrimSpace(orderEventField(fields, start+17))),
-		Status:        strings.TrimSpace(orderEventField(fields, start+18)),
+		WhatIf:        whatIf,
+		Status:        strings.TrimSpace(orderEventField(fields, statusIdx)),
 		Raw:           append([]string{}, fields...),
 	}
 	return ev, ev.OrderID > 0
 }
 
 func parseOrderStatusEvent(fields []string) (OrderLifecycleEvent, bool) {
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		return parseOrderStatusProtoEvent(fields)
+	}
 	start := 1
 	if len(fields) > 3 && orderEventIntOK(fields[1]) && orderEventIntOK(fields[2]) {
 		start = 2
@@ -130,12 +149,16 @@ func parseOrderStatusEvent(fields []string) (OrderLifecycleEvent, bool) {
 		LastFillPrice: orderEventFloat(orderEventField(fields, start+6)),
 		ClientID:      orderEventInt(orderEventField(fields, start+7)),
 		WhyHeld:       strings.TrimSpace(orderEventField(fields, start+9)),
+		MktCapPrice:   orderEventFloat(orderEventField(fields, start+10)),
 		Raw:           append([]string{}, fields...),
 	}
 	return ev, ev.OrderID > 0 && ev.Status != ""
 }
 
 func parseExecDetailsEvent(fields []string) (OrderLifecycleEvent, bool) {
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		return parseExecDetailsProtoEvent(fields)
+	}
 	start := 1
 	if len(fields) > 2 && orderEventIntOK(fields[1]) {
 		start = 2
@@ -167,6 +190,100 @@ func parseExecDetailsEvent(fields []string) (OrderLifecycleEvent, bool) {
 		CumQty:        orderEventFloat(orderEventField(fields, start+22)),
 		AvgFillPrice:  orderEventFloat(orderEventField(fields, start+23)),
 		OrderRef:      strings.TrimSpace(orderEventField(fields, start+24)),
+		Raw:           append([]string{}, fields...),
+	}
+	return ev, ev.OrderID > 0 && ev.ExecID != ""
+}
+
+func parseOpenOrderProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
+	ev := OrderLifecycleEvent{
+		Type:          OrderLifecycleEventOpenOrder,
+		OrderID:       orderEventInt(summaryFieldValue(fields, "orderId=")),
+		PermID:        orderEventInt(summaryFieldValue(fields, "permId=")),
+		ClientID:      orderEventInt(summaryFieldValue(fields, "clientId=")),
+		Symbol:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "symbol="))),
+		SecType:       strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "secType="))),
+		Expiry:        strings.TrimSpace(summaryFieldValue(fields, "expiry=")),
+		Strike:        orderEventFloat(summaryFieldValue(fields, "strike=")),
+		Right:         strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "right="))),
+		Multiplier:    orderEventInt(summaryFieldValue(fields, "multiplier=")),
+		Exchange:      strings.TrimSpace(summaryFieldValue(fields, "exchange=")),
+		Currency:      strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "currency="))),
+		LocalSymbol:   strings.TrimSpace(summaryFieldValue(fields, "localSymbol=")),
+		TradingClass:  strings.TrimSpace(summaryFieldValue(fields, "tradingClass=")),
+		Action:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "action="))),
+		TotalQuantity: orderEventFloat(summaryFieldValue(fields, "qty=")),
+		OrderType:     strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "orderType="))),
+		LimitPrice:    orderEventFloat(summaryFieldValue(fields, "lmtPrice=")),
+		AuxPrice:      orderEventFloat(summaryFieldValue(fields, "auxPrice=")),
+		TIF:           strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "tif="))),
+		OutsideRth:    protoSummaryBool(fields, "outsideRth="),
+		WhatIf:        protoSummaryBool(fields, "whatIf="),
+		Account:       strings.TrimSpace(summaryFieldValue(fields, "account=")),
+		OrderRef:      strings.TrimSpace(summaryFieldValue(fields, "orderRef=")),
+		Status:        strings.TrimSpace(summaryFieldValue(fields, "status=")),
+		Message:       orderEventWarningMessage(fields),
+		Raw:           append([]string{}, fields...),
+	}
+	return ev, ev.OrderID > 0
+}
+
+func orderEventWarningMessage(fields []string) string {
+	rejectReason := strings.TrimSpace(summaryFieldValue(fields, "rejectReason="))
+	warningText := strings.TrimSpace(summaryFieldValue(fields, "warningText="))
+	switch {
+	case rejectReason != "" && warningText != "":
+		return rejectReason + "; " + warningText
+	case rejectReason != "":
+		return rejectReason
+	default:
+		return warningText
+	}
+}
+
+func parseOrderStatusProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
+	ev := OrderLifecycleEvent{
+		Type:          OrderLifecycleEventStatus,
+		OrderID:       orderEventInt(summaryFieldValue(fields, "orderId=")),
+		Status:        strings.TrimSpace(summaryFieldValue(fields, "status=")),
+		Filled:        orderEventFloat(summaryFieldValue(fields, "filled=")),
+		Remaining:     orderEventFloat(summaryFieldValue(fields, "remaining=")),
+		AvgFillPrice:  orderEventFloat(summaryFieldValue(fields, "avgFillPrice=")),
+		PermID:        orderEventInt(summaryFieldValue(fields, "permId=")),
+		LastFillPrice: orderEventFloat(summaryFieldValue(fields, "lastFillPrice=")),
+		ClientID:      orderEventInt(summaryFieldValue(fields, "clientId=")),
+		WhyHeld:       strings.TrimSpace(summaryFieldValue(fields, "whyHeld=")),
+		MktCapPrice:   orderEventFloat(summaryFieldValue(fields, "mktCapPrice=")),
+		Raw:           append([]string{}, fields...),
+	}
+	return ev, ev.OrderID > 0 && ev.Status != ""
+}
+
+func parseExecDetailsProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
+	ev := OrderLifecycleEvent{
+		Type:          OrderLifecycleEventExecDetails,
+		RequestID:     orderEventInt(summaryFieldValue(fields, "reqId=")),
+		OrderID:       orderEventInt(summaryFieldValue(fields, "orderId=")),
+		Symbol:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "symbol="))),
+		SecType:       strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "secType="))),
+		Expiry:        strings.TrimSpace(summaryFieldValue(fields, "expiry=")),
+		Strike:        orderEventFloat(summaryFieldValue(fields, "strike=")),
+		Right:         strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "right="))),
+		Multiplier:    orderEventInt(summaryFieldValue(fields, "multiplier=")),
+		Exchange:      strings.TrimSpace(summaryFieldValue(fields, "exchange=")),
+		Currency:      strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "currency="))),
+		LocalSymbol:   strings.TrimSpace(summaryFieldValue(fields, "localSymbol=")),
+		ExecID:        strings.TrimSpace(summaryFieldValue(fields, "execId=")),
+		ExecTime:      strings.TrimSpace(summaryFieldValue(fields, "execTime=")),
+		Account:       strings.TrimSpace(summaryFieldValue(fields, "account=")),
+		ExecutionSide: strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "executionSide="))),
+		Shares:        orderEventFloat(summaryFieldValue(fields, "shares=")),
+		Price:         orderEventFloat(summaryFieldValue(fields, "price=")),
+		PermID:        orderEventInt(summaryFieldValue(fields, "permId=")),
+		ClientID:      orderEventInt(summaryFieldValue(fields, "clientId=")),
+		CumQty:        orderEventFloat(summaryFieldValue(fields, "cumQty=")),
+		AvgFillPrice:  orderEventFloat(summaryFieldValue(fields, "avgFillPrice=")),
+		OrderRef:      strings.TrimSpace(summaryFieldValue(fields, "orderRef=")),
 		Raw:           append([]string{}, fields...),
 	}
 	return ev, ev.OrderID > 0 && ev.ExecID != ""

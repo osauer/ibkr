@@ -39,17 +39,18 @@ type OrderWhatIfMargin struct {
 // OrderWhatIfResult is the narrow broker preview result used by the daemon's
 // order-preview gate. It is not an order submission receipt.
 type OrderWhatIfResult struct {
-	OrderID      int
-	Status       string
-	BrokerStatus string
-	Message      string
-	Margin       OrderWhatIfMargin
+	OrderID            int
+	Status             string
+	BrokerStatus       string
+	Message            string
+	AdvancedRejectJSON string
+	Margin             OrderWhatIfMargin
 }
 
-// PreviewOrderWhatIf sends a non-transmitting WhatIf order preview and waits
-// for the matching broker openOrder/error callback. It is intentionally
-// available in the default build because it requires Transmit=false and
-// WhatIf=true; PlaceOrder/CancelOrder remain guarded by the trading build tag.
+// PreviewOrderWhatIf sends a broker WhatIf order preview and waits for the
+// matching broker openOrder/error callback. It is intentionally available in
+// the default build because WhatIf=true makes the broker evaluate without
+// creating a working order; PlaceOrder/CancelOrder remain guarded.
 func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (OrderWhatIfResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -57,20 +58,15 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 	if order == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("order is nil")
 	}
-	if order.Transmit {
-		return OrderWhatIfResult{}, fmt.Errorf("whatif preview requires transmit=false")
-	}
 	if !c.IsConnected() {
 		return orderWhatIfUnavailableResult("not connected to IBKR"), nil
-	}
-	if c.serverVersion >= minServerVerProtoBufPlaceOrder {
-		return orderWhatIfUnavailableResult(fmt.Sprintf("broker WhatIf unavailable: server version %d requires protobuf placeOrder encoding, which this build does not send yet", c.serverVersion)), nil
 	}
 	if err := preparePlaceOrder(order, c); err != nil {
 		return OrderWhatIfResult{}, err
 	}
 	order.WhatIf = true
-	order.Transmit = false
+	order.Transmit = true
+	c.markWhatIfOrderID(order.OrderID)
 
 	resultCh := make(chan OrderWhatIfResult, 1)
 	errorHandlerID := c.RegisterHandler(msgErrMsg, func(fields []string) {
@@ -82,7 +78,20 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 			OrderID:      order.OrderID,
 			Status:       OrderWhatIfStatusRejected,
 			BrokerStatus: "rejected",
-			Message:      orderWhatIfErrorMessage(code, msg),
+			Message:      orderWhatIfErrorMessage(code, msg, ""),
+		})
+	})
+	systemNoticeHandlerID := c.RegisterHandler(msgSystemNotification, func(fields []string) {
+		reqID, code, msg, advancedRejectJSON, ok := parseOrderWhatIfSystemNotice(fields)
+		if !ok || reqID != order.OrderID || orderWhatIfInformationalError(code) {
+			return
+		}
+		sendOrderWhatIfResult(resultCh, OrderWhatIfResult{
+			OrderID:            order.OrderID,
+			Status:             OrderWhatIfStatusRejected,
+			BrokerStatus:       "rejected",
+			Message:            orderWhatIfErrorMessage(code, msg, advancedRejectJSON),
+			AdvancedRejectJSON: advancedRejectJSON,
 		})
 	})
 	openOrderHandlerID := c.RegisterHandler(msgOpenOrder, func(fields []string) {
@@ -92,6 +101,7 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 		}
 	})
 	defer c.UnregisterHandler(msgErrMsg, errorHandlerID)
+	defer c.UnregisterHandler(msgSystemNotification, systemNoticeHandlerID)
 	defer c.UnregisterHandler(msgOpenOrder, openOrderHandlerID)
 
 	if err := c.sendPlaceOrderFrame(order); err != nil {
@@ -106,10 +116,24 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 	}
 }
 
-// PreviewOrderWhatIf sends a non-transmitting broker WhatIf preview for a
-// connector-level contract/order pair. It deliberately does not update
-// Connector.openOrders because no working order should exist.
+// PreviewOrderWhatIf sends a broker WhatIf preview for a connector-level
+// contract/order pair. It deliberately does not update Connector.openOrders
+// because no working order should exist.
 func (c *Connector) PreviewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder) (OrderWhatIfResult, error) {
+	return c.previewOrderWhatIf(ctx, contract, order, 0)
+}
+
+// PreviewOrderWhatIfWithOrderID sends a broker WhatIf preview using an
+// existing broker order ID. It is used for paper modify previews where IBKR
+// must evaluate the exact replacement draft for a tracked order.
+func (c *Connector) PreviewOrderWhatIfWithOrderID(ctx context.Context, contract *Contract, order *RawOrder, orderID int) (OrderWhatIfResult, error) {
+	if orderID <= 0 {
+		return OrderWhatIfResult{}, fmt.Errorf("order ID must be positive")
+	}
+	return c.previewOrderWhatIf(ctx, contract, order, orderID)
+}
+
+func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder, orderID int) (OrderWhatIfResult, error) {
 	if contract == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("contract is nil")
 	}
@@ -155,6 +179,9 @@ func (c *Connector) PreviewOrderWhatIf(ctx context.Context, contract *Contract, 
 		WhatIf:       true,
 		OpenClose:    "O",
 		Origin:       0,
+	}
+	if orderID > 0 {
+		ibkrOrder.OrderID = orderID
 	}
 	return conn.PreviewOrderWhatIf(ctx, ibkrOrder)
 }
@@ -205,6 +232,14 @@ func preparePlaceOrder(order *IBKROrder, c *Connection) error {
 }
 
 func (c *Connection) sendPlaceOrderFrame(order *IBKROrder) error {
+	if c.serverVersion >= minServerVerProtoBufPlaceOrder {
+		msg, err := encodePlaceOrderProtoFrame(order)
+		if err != nil {
+			return err
+		}
+		return c.sendMessageWithType(msg, RequestTypeOrder)
+	}
+
 	fields := clonePlaceOrderFields()
 	assignPlaceOrderFields(fields, order)
 
@@ -242,6 +277,17 @@ func parseOrderWhatIfError(fields []string) (reqID, code int, message string, ok
 	return reqID, code, message, code != 0
 }
 
+func parseOrderWhatIfSystemNotice(fields []string) (reqID, code int, message, advancedRejectJSON string, ok bool) {
+	if len(fields) < 2 {
+		return 0, 0, "", "", false
+	}
+	note, err := parseSystemNotificationPayload([]byte(fields[1]))
+	if err != nil || note == nil || note.tickerID < 0 || note.code == 0 {
+		return 0, 0, "", "", false
+	}
+	return int(note.tickerID), note.code, strings.TrimSpace(note.message), strings.TrimSpace(note.advancedOrderRejectJSON), true
+}
+
 func orderWhatIfInformationalError(code int) bool {
 	switch code {
 	case 2104, 2106, 2107, 2119, 2158, 2169:
@@ -250,17 +296,25 @@ func orderWhatIfInformationalError(code int) bool {
 	return code >= 2100 && code < 2200
 }
 
-func orderWhatIfErrorMessage(code int, message string) string {
+func orderWhatIfErrorMessage(code int, message, advancedRejectJSON string) string {
 	message = strings.TrimSpace(message)
 	if message == "" {
-		return fmt.Sprintf("broker rejected WhatIf request with error code %d", code)
+		message = fmt.Sprintf("broker rejected WhatIf request with error code %d", code)
+	} else {
+		message = fmt.Sprintf("broker rejected WhatIf request with error code %d: %s", code, message)
 	}
-	return fmt.Sprintf("broker rejected WhatIf request with error code %d: %s", code, message)
+	if advancedRejectJSON = strings.TrimSpace(advancedRejectJSON); advancedRejectJSON != "" {
+		message += " advanced_reject_json=" + advancedRejectJSON
+	}
+	return message
 }
 
 func parseOrderWhatIfOpenOrder(fields []string, orderID, serverVersion int) (OrderWhatIfResult, bool) {
 	if len(fields) == 0 || strings.TrimSpace(fields[0]) != strconv.Itoa(msgOpenOrder) {
 		return OrderWhatIfResult{}, false
+	}
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		return parseOrderWhatIfOpenOrderProto(fields, orderID)
 	}
 	start := 1
 	if len(fields) > 2 && orderEventIntOK(fields[1]) {
@@ -276,6 +330,50 @@ func parseOrderWhatIfOpenOrder(fields []string, orderID, serverVersion int) (Ord
 	}
 	brokerStatus := strings.TrimSpace(orderEventField(fields, idx+1))
 	margin, rejectReason := parseOrderWhatIfMargin(fields, idx+2, serverVersion)
+	status := OrderWhatIfStatusAccepted
+	message := ""
+	if orderWhatIfRejectedStatus(brokerStatus) || rejectReason != "" {
+		status = OrderWhatIfStatusRejected
+		message = rejectReason
+		if message == "" {
+			message = fmt.Sprintf("broker WhatIf status is %s", brokerStatus)
+		}
+	}
+	return OrderWhatIfResult{
+		OrderID:      orderID,
+		Status:       status,
+		BrokerStatus: brokerStatus,
+		Message:      message,
+		Margin:       margin,
+	}, true
+}
+
+func parseOrderWhatIfOpenOrderProto(fields []string, orderID int) (OrderWhatIfResult, bool) {
+	if orderEventInt(summaryFieldValue(fields, "orderId=")) != orderID {
+		return OrderWhatIfResult{}, false
+	}
+	if !protoSummaryBool(fields, "whatIf=") {
+		return OrderWhatIfResult{}, false
+	}
+	brokerStatus := strings.TrimSpace(summaryFieldValue(fields, "status="))
+	if brokerStatus == "" {
+		return OrderWhatIfResult{}, false
+	}
+	rejectReason := strings.TrimSpace(summaryFieldValue(fields, "rejectReason="))
+	margin := OrderWhatIfMargin{
+		InitialMarginBefore:     parseIBKRFloatPtr(summaryFieldValue(fields, "initMarginBefore=")),
+		MaintenanceMarginBefore: parseIBKRFloatPtr(summaryFieldValue(fields, "maintMarginBefore=")),
+		EquityWithLoanBefore:    parseIBKRFloatPtr(summaryFieldValue(fields, "equityWithLoanBefore=")),
+		InitialMarginAfter:      parseIBKRFloatPtr(summaryFieldValue(fields, "initMarginAfter=")),
+		MaintenanceMarginAfter:  parseIBKRFloatPtr(summaryFieldValue(fields, "maintMarginAfter=")),
+		EquityWithLoanAfter:     parseIBKRFloatPtr(summaryFieldValue(fields, "equityWithLoanAfter=")),
+		Commission:              parseIBKRFloatPtr(summaryFieldValue(fields, "commission=")),
+		MinCommission:           parseIBKRFloatPtr(summaryFieldValue(fields, "minCommission=")),
+		MaxCommission:           parseIBKRFloatPtr(summaryFieldValue(fields, "maxCommission=")),
+		CommissionCurrency:      strings.TrimSpace(summaryFieldValue(fields, "commissionCurrency=")),
+		Currency:                strings.TrimSpace(summaryFieldValue(fields, "marginCurrency=")),
+		WarningText:             strings.TrimSpace(summaryFieldValue(fields, "warningText=")),
+	}
 	status := OrderWhatIfStatusAccepted
 	message := ""
 	if orderWhatIfRejectedStatus(brokerStatus) || rejectReason != "" {

@@ -164,6 +164,51 @@ func TestReadHandlersReturnGatewayUnavailableWhenDisconnected(t *testing.T) {
 	})
 }
 
+func TestHandleQuoteSubscribeHonorsRoutedContract(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	fake := newFakeConnector()
+	srv.subs = newSubManager(func() ibkrMarketConnector { return fake })
+	srv.subs.coalesce = 5 * time.Millisecond
+
+	params, _ := json.Marshal(rpc.QuoteSubscribeParams{
+		Contract: rpc.ContractParams{
+			Symbol:      "VIX",
+			SecType:     "IND",
+			Exchange:    "CBOE",
+			PrimaryExch: "CBOE",
+			Currency:    "USD",
+		},
+	})
+	req := &rpc.Request{ID: "route-quote", Method: rpc.MethodQuoteSubscribe, Params: params}
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.handleQuoteSubscribe(context.Background(), req, json.NewEncoder(&buf), bufio.NewReader(bytes.NewReader(nil)))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleQuoteSubscribe did not return after client disconnect")
+	}
+
+	key := ibkrlib.MarketDataKeyForContract(ibkrlib.Contract{
+		Symbol:      "VIX",
+		SecType:     "IND",
+		Exchange:    "CBOE",
+		PrimaryExch: "CBOE",
+		Currency:    "USD",
+	})
+	if got := fake.subCount("VIX"); got != 0 {
+		t.Fatalf("quote.subscribe used bare symbol path %d times, want 0", got)
+	}
+	if got := fake.subCount(key); got != 1 {
+		t.Fatalf("quote.subscribe routed subscribe count for %s = %d, want 1", key, got)
+	}
+}
+
 // computeQuoteChange returns nil for either output unless both Last and
 // PrevClose are present and PrevClose is strictly positive. No
 // fabrication — pre-market with no Last must show em-dash, not zero.

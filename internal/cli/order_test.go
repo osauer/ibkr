@@ -59,3 +59,12 @@ func TestRenderOrderPreviewShowsTokenAndSubmitEligibility(t *testing.T) {
 		}
 	}
 }
+
+func TestHoistFlagsKeepsReplaceOrderValue(t *testing.T) {
+	t.Parallel()
+	got := hoistFlags([]string{"preview", "--replace-order", "6", "--market", "de", "buy", "MBG", "1"})
+	want := []string{"--replace-order", "6", "--market", "de", "preview", "buy", "MBG", "1"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("hoistFlags = %#v, want %#v", got, want)
+	}
+}

@@ -71,3 +71,26 @@ func TestRegisterUnregisterRace(t *testing.T) {
 		t.Fatal("snapshotHandlers never dispatched; race goroutine arrangement is wrong")
 	}
 }
+
+func TestRegisterHandlerReplaysPendingOrderLifecycleMessage(t *testing.T) {
+	t.Parallel()
+	conn := &Connection{
+		msgHandlers:   map[int][]handlerEntry{},
+		serverVersion: 100,
+	}
+	conn.processMessage(conn.encodeMsg(msgOrderStatus, 1, 1001, "Submitted", "0", "1", "0", "987654", "0", "41", "0", "", "0"))
+
+	received := make(chan []string, 1)
+	conn.RegisterHandler(msgOrderStatus, func(fields []string) {
+		received <- fields
+	})
+
+	select {
+	case fields := <-received:
+		if len(fields) < 4 || fields[0] != "3" || fields[2] != "1001" || fields[3] != "Submitted" {
+			t.Fatalf("replayed fields = %#v, want orderStatus for 1001 Submitted", fields)
+		}
+	default:
+		t.Fatal("pending order lifecycle message was not replayed")
+	}
+}

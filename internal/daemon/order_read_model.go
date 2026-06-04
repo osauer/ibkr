@@ -76,9 +76,10 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 }
 
 func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
+	aliases := orderJournalKeyAliases(events)
 	viewsByKey := map[string]rpc.OrderView{}
 	for _, ev := range events {
-		key := orderJournalKey(ev)
+		key := orderJournalCanonicalKey(ev, aliases)
 		if key == "" {
 			continue
 		}
@@ -90,6 +91,8 @@ func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
 	for _, view := range viewsByKey {
 		view.LifecycleStatus = mapOrderViewLifecycleStatus(view)
 		view.Open = orderViewIsOpen(view)
+		view.ModifyEligible = orderViewModifyEligible(view)
+		view.CancelEligible = orderViewCancelEligible(view)
 		views = append(views, view)
 	}
 	sortOrderViews(views)
@@ -97,9 +100,10 @@ func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
 }
 
 func buildOrderEventsByKey(events []orderJournalEvent) map[string][]rpc.OrderEvent {
+	aliases := orderJournalKeyAliases(events)
 	out := map[string][]rpc.OrderEvent{}
 	for _, ev := range events {
-		key := orderJournalKey(ev)
+		key := orderJournalCanonicalKey(ev, aliases)
 		if key == "" {
 			continue
 		}
@@ -114,6 +118,7 @@ func buildOrderEventsByKey(events []orderJournalEvent) map[string][]rpc.OrderEve
 }
 
 func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
+	preserveWorkingOrderOnBrokerError := brokerErrorShouldPreserveWorkingOrder(*view, ev)
 	if view.OrderRef == "" {
 		view.OrderRef = ev.OrderRef
 	}
@@ -144,6 +149,21 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.SecType != "" {
 		view.SecType = ev.SecType
 	}
+	if ev.Exchange != "" {
+		view.Exchange = ev.Exchange
+	}
+	if ev.PrimaryExch != "" {
+		view.PrimaryExch = ev.PrimaryExch
+	}
+	if ev.Currency != "" {
+		view.Currency = ev.Currency
+	}
+	if ev.LocalSymbol != "" {
+		view.LocalSymbol = ev.LocalSymbol
+	}
+	if ev.TradingClass != "" {
+		view.TradingClass = ev.TradingClass
+	}
 	if ev.Action != "" {
 		view.Action = ev.Action
 	}
@@ -153,13 +173,16 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.TIF != "" {
 		view.TIF = ev.TIF
 	}
+	if ev.OutsideRTH {
+		view.OutsideRTH = true
+	}
 	if ev.Quantity != 0 {
 		view.Quantity = ev.Quantity
 	}
 	if ev.LimitPrice != 0 {
 		view.LimitPrice = ev.LimitPrice
 	}
-	if ev.Status != "" {
+	if ev.Status != "" && !preserveWorkingOrderOnBrokerError {
 		view.Status = ev.Status
 	}
 	if ev.Filled != 0 {
@@ -174,8 +197,18 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.LastFillPrice != 0 {
 		view.LastFillPrice = ev.LastFillPrice
 	}
+	if ev.WhyHeld != "" {
+		view.WhyHeld = ev.WhyHeld
+	}
+	if ev.MktCapPrice != 0 {
+		view.MktCapPrice = ev.MktCapPrice
+	}
 	if ev.SendState != "" {
-		view.SendState = ev.SendState
+		if preserveWorkingOrderOnBrokerError && ev.SendState == orderSendStateTerminal {
+			view.SendState = orderSendStateUncertainSend
+		} else {
+			view.SendState = ev.SendState
+		}
 	}
 	if ev.Message != "" {
 		view.LastMessage = ev.Message
@@ -183,6 +216,18 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if !ev.At.IsZero() && (view.UpdatedAt.IsZero() || ev.At.After(view.UpdatedAt)) {
 		view.UpdatedAt = ev.At
 		view.LastEvent = ev.Type
+	}
+}
+
+func brokerErrorShouldPreserveWorkingOrder(view rpc.OrderView, ev orderJournalEvent) bool {
+	if ev.Type != orderJournalEventBrokerError {
+		return false
+	}
+	switch view.LastEvent {
+	case orderJournalEventModifyRequested, orderJournalEventCancelRequested:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -200,9 +245,15 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		Mode:            ev.Mode,
 		Symbol:          ev.Symbol,
 		SecType:         ev.SecType,
+		Exchange:        ev.Exchange,
+		PrimaryExch:     ev.PrimaryExch,
+		Currency:        ev.Currency,
+		LocalSymbol:     ev.LocalSymbol,
+		TradingClass:    ev.TradingClass,
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,
+		OutsideRTH:      ev.OutsideRTH,
 		Quantity:        ev.Quantity,
 		LimitPrice:      ev.LimitPrice,
 		Status:          ev.Status,
@@ -211,6 +262,8 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		Remaining:       ev.Remaining,
 		AvgFillPrice:    ev.AvgFillPrice,
 		LastFillPrice:   ev.LastFillPrice,
+		WhyHeld:         ev.WhyHeld,
+		MktCapPrice:     ev.MktCapPrice,
 		ExecID:          ev.ExecID,
 		ExecTime:        ev.ExecTime,
 		SendState:       ev.SendState,
@@ -228,9 +281,14 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		Account:         ev.Account,
 		Symbol:          ev.Symbol,
 		SecType:         ev.SecType,
+		Exchange:        ev.Exchange,
+		Currency:        ev.Currency,
+		LocalSymbol:     ev.LocalSymbol,
+		TradingClass:    ev.TradingClass,
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,
+		OutsideRTH:      ev.OutsideRth,
 		Quantity:        ev.TotalQuantity,
 		LimitPrice:      ev.LimitPrice,
 		Status:          ev.Status,
@@ -238,8 +296,11 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		Remaining:       ev.Remaining,
 		AvgFillPrice:    ev.AvgFillPrice,
 		LastFillPrice:   ev.LastFillPrice,
+		WhyHeld:         ev.WhyHeld,
+		MktCapPrice:     ev.MktCapPrice,
 		ExecID:          ev.ExecID,
 		ExecTime:        ev.ExecTime,
+		Message:         ev.Message,
 	}
 	switch ev.Type {
 	case ibkrlib.OrderLifecycleEventOpenOrder:
@@ -252,6 +313,8 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		out.Type = orderJournalEventStatusUpdated
 		if orderLifecycleStatusIsTerminal(mapBrokerOrderLifecycleStatus(ev.Status, ev.Filled, ev.Remaining)) {
 			out.SendState = orderSendStateTerminal
+		} else if brokerOrderStatusIsUncertainPending(ev.Status) {
+			out.SendState = orderSendStateUncertainSend
 		} else if ev.Status != "" {
 			out.SendState = orderSendStateBrokerAcknowledged
 		}
@@ -261,6 +324,13 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		out.Filled = ev.CumQty
 		out.LastFillPrice = ev.Price
 		out.AvgFillPrice = ev.AvgFillPrice
+	case ibkrlib.OrderLifecycleEventError:
+		out.Type = orderJournalEventBrokerError
+		if out.Status == "" {
+			out.SendState = orderSendStateUncertainSend
+		} else if orderLifecycleStatusIsTerminal(mapBrokerOrderLifecycleStatus(out.Status, out.Filled, out.Remaining)) {
+			out.SendState = orderSendStateTerminal
+		}
 	default:
 		return orderJournalEvent{}, false
 	}
@@ -278,8 +348,12 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 		return rpc.OrderLifecyclePendingSubmit
 	case orderJournalEventBrokerAcknowledged:
 		return rpc.OrderLifecycleSubmitted
+	case orderJournalEventModifyRequested:
+		return rpc.OrderLifecycleSubmitted
 	case orderJournalEventCancelRequested:
 		return rpc.OrderLifecyclePendingCancel
+	case orderJournalEventBrokerError:
+		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledUnknown:
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	default:
@@ -291,6 +365,9 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 }
 
 func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
+	if view.LastEvent == orderJournalEventBrokerError && view.SendState == orderSendStateUncertainSend {
+		return rpc.OrderLifecycleUnknownReconcileRequired
+	}
 	if view.Status != "" {
 		return mapBrokerOrderLifecycleStatus(view.Status, view.Filled, view.Remaining)
 	}
@@ -301,8 +378,12 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
 		return rpc.OrderLifecyclePendingSubmit
 	case orderJournalEventBrokerAcknowledged:
 		return rpc.OrderLifecycleSubmitted
+	case orderJournalEventModifyRequested:
+		return rpc.OrderLifecycleSubmitted
 	case orderJournalEventCancelRequested:
 		return rpc.OrderLifecyclePendingCancel
+	case orderJournalEventBrokerError:
+		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledUnknown:
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	default:
@@ -321,7 +402,9 @@ func mapBrokerOrderLifecycleStatus(status string, filled, remaining float64) str
 		return rpc.OrderLifecyclePendingSubmit
 	case "presubmitted":
 		return rpc.OrderLifecyclePreSubmitted
-	case "submitted", "apipending":
+	case "apipending":
+		return rpc.OrderLifecyclePendingSubmit
+	case "submitted":
 		if filled > 0 && remaining > 0 {
 			return rpc.OrderLifecyclePartiallyFilled
 		}
@@ -347,6 +430,10 @@ func mapBrokerOrderLifecycleStatus(status string, filled, remaining float64) str
 	}
 }
 
+func brokerOrderStatusIsUncertainPending(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "ApiPending")
+}
+
 func orderLifecycleStatusIsTerminal(status string) bool {
 	switch status {
 	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive:
@@ -357,17 +444,49 @@ func orderLifecycleStatusIsTerminal(status string) bool {
 }
 
 func orderViewIsOpen(view rpc.OrderView) bool {
+	if view.SendState == orderSendStateTerminal {
+		return false
+	}
 	if orderLifecycleStatusIsTerminal(view.LifecycleStatus) {
 		return false
 	}
 	switch view.LastEvent {
-	case orderJournalEventSendAttempted, orderJournalEventBrokerAcknowledged, orderJournalEventStatusUpdated, orderJournalEventModifyRequested, orderJournalEventCancelRequested, orderJournalEventReconciledUnknown:
+	case orderJournalEventSendAttempted, orderJournalEventBrokerAcknowledged, orderJournalEventStatusUpdated, orderJournalEventModifyRequested, orderJournalEventCancelRequested, orderJournalEventBrokerError, orderJournalEventReconciledUnknown:
 		return true
 	default:
 		return view.SendState == orderSendStateReserved ||
 			view.SendState == orderSendStateSendAttempted ||
 			view.SendState == orderSendStateBrokerAcknowledged ||
 			view.SendState == orderSendStateUncertainSend
+	}
+}
+
+func orderViewModifyEligible(view rpc.OrderView) bool {
+	return view.Open &&
+		view.ReservedOrderID > 0 &&
+		orderViewBrokerConfirmedForWrite(view) &&
+		view.LifecycleStatus != rpc.OrderLifecyclePendingCancel &&
+		strings.EqualFold(view.SecType, "STK") &&
+		strings.EqualFold(view.OrderType, rpc.OrderTypeLMT) &&
+		strings.EqualFold(view.TIF, rpc.OrderTIFDay)
+}
+
+func orderViewCancelEligible(view rpc.OrderView) bool {
+	return view.Open &&
+		view.ReservedOrderID > 0 &&
+		orderViewBrokerConfirmedForWrite(view) &&
+		view.LifecycleStatus != rpc.OrderLifecyclePendingCancel
+}
+
+func orderViewBrokerConfirmedForWrite(view rpc.OrderView) bool {
+	if view.SendState != orderSendStateBrokerAcknowledged {
+		return false
+	}
+	switch view.LifecycleStatus {
+	case rpc.OrderLifecycleSubmitted, rpc.OrderLifecyclePreSubmitted, rpc.OrderLifecyclePartiallyFilled:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -382,6 +501,78 @@ func orderJournalKey(ev orderJournalEvent) string {
 		return "perm:" + strconv.Itoa(ev.PermID)
 	}
 	return ""
+}
+
+func orderJournalCanonicalKey(ev orderJournalEvent, aliases map[string]string) string {
+	return resolveOrderJournalAlias(orderJournalKey(ev), aliases)
+}
+
+func orderJournalKeyAliases(events []orderJournalEvent) map[string]string {
+	aliases := map[string]string{}
+	for _, ev := range events {
+		keys := orderJournalIdentityKeys(ev)
+		if len(keys) == 0 {
+			continue
+		}
+
+		canonical := ""
+		for _, key := range keys {
+			if resolved := resolveOrderJournalAlias(key, aliases); resolved != "" {
+				canonical = resolved
+				break
+			}
+		}
+		if ev.OrderRef != "" {
+			canonical = "ref:" + ev.OrderRef
+		}
+		if canonical == "" {
+			canonical = keys[0]
+		}
+		for _, key := range keys {
+			aliases[key] = canonical
+		}
+		for key, resolved := range aliases {
+			if resolved == canonical {
+				continue
+			}
+			if slices.Contains(keys, resolved) {
+				aliases[key] = canonical
+			}
+		}
+	}
+	for key := range aliases {
+		aliases[key] = resolveOrderJournalAlias(key, aliases)
+	}
+	return aliases
+}
+
+func orderJournalIdentityKeys(ev orderJournalEvent) []string {
+	keys := make([]string, 0, 3)
+	if ev.OrderRef != "" {
+		keys = append(keys, "ref:"+ev.OrderRef)
+	}
+	if ev.ReservedOrderID != 0 {
+		keys = append(keys, "order:"+strconv.Itoa(ev.ReservedOrderID))
+	}
+	if ev.PermID != 0 {
+		keys = append(keys, "perm:"+strconv.Itoa(ev.PermID))
+	}
+	return keys
+}
+
+func resolveOrderJournalAlias(key string, aliases map[string]string) string {
+	if key == "" {
+		return ""
+	}
+	seen := map[string]bool{}
+	for {
+		next := aliases[key]
+		if next == "" || next == key || seen[key] {
+			return key
+		}
+		seen[key] = true
+		key = next
+	}
 }
 
 func orderViewKey(view rpc.OrderView) string {

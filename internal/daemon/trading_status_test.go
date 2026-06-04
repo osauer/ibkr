@@ -106,6 +106,30 @@ func TestTradingStatusBlocksAggregateAccount(t *testing.T) {
 	}
 }
 
+func TestAccountMismatchesConnectedAllowsAggregateManagedAccount(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		configured string
+		connected  string
+		want       bool
+	}{
+		{name: "same concrete account", configured: "DU1234567", connected: "DU1234567", want: false},
+		{name: "case-insensitive concrete account", configured: "du1234567", connected: "DU1234567", want: false},
+		{name: "connected aggregate all", configured: "DU1234567", connected: "All", want: false},
+		{name: "blank connected account unknown", configured: "DU1234567", connected: "", want: false},
+		{name: "different concrete account", configured: "DU1234567", connected: "DU7654321", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := accountMismatchesConnected(tc.configured, tc.connected); got != tc.want {
+				t.Fatalf("accountMismatchesConnected(%q, %q) = %v, want %v", tc.configured, tc.connected, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTradingStatusBlocksClientIDAutoWalk(t *testing.T) {
 	t.Parallel()
 	port := 4002
@@ -143,8 +167,29 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 	if !st.CanPreview {
 		t.Fatalf("ready paper gate should allow preview: %+v", st)
 	}
-	if st.CanTransmit || st.CanModify || st.CanCancel {
-		t.Fatalf("write capabilities must remain disabled in preview-only build: %+v", st)
+	if st.CanTransmit != orderWritesAvailable || st.CanModify != orderWritesAvailable || st.CanCancel != orderWritesAvailable {
+		t.Fatalf("write capabilities mismatch build mode: %+v", st)
+	}
+}
+
+func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
+	t.Parallel()
+	port := 7497
+	clientID := 31
+	srv := &Server{
+		cfg: &config.Resolved{
+			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
+			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		},
+		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+	}
+	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 7497, ClientID: 31, Account: "All", PortOrigin: discover.OriginPinned})
+
+	if st.Blocked {
+		t.Fatalf("paper status should be ready, got blockers %+v", st.Blockers)
+	}
+	if st.Account != "DU1234567" {
+		t.Fatalf("Account = %q, want pinned concrete account", st.Account)
 	}
 }
 
@@ -237,7 +282,7 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
 	}
 	if !st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
-		t.Fatalf("live-ready capabilities should expose preview only in default build: %+v", st)
+		t.Fatalf("live-ready capabilities should remain preview-only in this release: %+v", st)
 	}
 }
 

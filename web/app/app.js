@@ -23,7 +23,11 @@ const state = {
   orderReviewLoading: false,
   orderReviewError: "",
   orderPreview: null,
+  orderTransmitLoading: false,
+  orderTransmitResult: null,
   ordersOpen: null,
+  openOrderEdits: {},
+  underlyingActionNotice: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -233,6 +237,7 @@ function renderAll() {
   renderTopbar(snap);
   renderAccountValue(account);
   renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
+  renderCanaryUnderlyings(positions, account);
   renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
   $("accountAsOf").textContent = shortTime(account.as_of);
   $("positionsAsOf").textContent = shortTime(positions.as_of);
@@ -292,6 +297,391 @@ function renderAccountMenu(account) {
   button.setAttribute("aria-expanded", String(state.accountMenuOpen));
   button.className = "account-chip " + accountContext.modeClass;
   $("accountChipText").textContent = accountContext.chipLabel;
+}
+
+function renderCanaryUnderlyings(positions = {}, account = {}) {
+  const list = $("underlyingBookList");
+  if (!list) return;
+
+  const baseCurrency = normalizeCurrency(account.base_currency || positions.portfolio?.base_currency || "USD") || "USD";
+  const rows = underlyingBookRows(positions, baseCurrency);
+  const heldCount = rows.filter((row) => !row.virtual).length;
+  const virtualCount = rows.length - heldCount;
+  const count = $("underlyingBookCount");
+  const status = $("underlyingBookStatus");
+  count.textContent = rows.length === 0
+    ? "No underlyings"
+    : `${heldCount} held${virtualCount > 0 ? ` / ${virtualCount} virtual` : ""}`;
+  status.textContent = state.underlyingActionNotice
+    || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
+
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "underlying-book__empty";
+    empty.textContent = "No held or virtual underlyings.";
+    list.replaceChildren(empty);
+    return;
+  }
+
+  list.replaceChildren(...rows.map((row) => underlyingBookRow(row, baseCurrency)));
+}
+
+function underlyingBookRows(positions, baseCurrency) {
+  const rows = new Map();
+  for (const row of heldUnderlyingRows(positions, baseCurrency)) {
+    rows.set(row.symbol, row);
+  }
+  for (const row of purgedUnderlyingRows(positions, baseCurrency)) {
+    const existing = rows.get(row.symbol);
+    if (existing) {
+      existing.hasPurgeRecord = true;
+      existing.purgeLabel = row.purgeLabel;
+      continue;
+    }
+    rows.set(row.symbol, row);
+  }
+  return [...rows.values()].sort((a, b) => {
+    if (a.virtual !== b.virtual) return a.virtual ? 1 : -1;
+    return a.symbol.localeCompare(b.symbol);
+  });
+}
+
+function heldUnderlyingRows(positions, baseCurrency) {
+  return (positions.by_underlying || []).map((group) => {
+    const symbol = normalizeSymbol(group.underlying || group.stock?.symbol || group.options?.[0]?.symbol);
+    if (!symbol) return null;
+    const quote = quoteBySymbol(state.snapshot?.market_quotes?.quotes || {}, symbol);
+    const price = heldUnderlyingPrice(group, quote);
+    const currency = heldUnderlyingCurrency(group, quote, baseCurrency);
+    const pnl = heldUnderlyingPnl(group, baseCurrency, currency);
+    const stockCount = group.stock ? 1 : 0;
+    const optionCount = (group.options || []).length;
+    return {
+      symbol,
+      currency,
+      price: price.value,
+      priceSource: price.source,
+      changePct: heldUnderlyingChangePct(group, quote, price.value),
+      pnl: pnl.value,
+      pnlCurrency: pnl.currency,
+      pnlSource: pnl.source,
+      held: true,
+      virtual: false,
+      purged: false,
+      stockCount,
+      optionCount,
+      detail: underlyingPositionDetail(stockCount, optionCount),
+    };
+  }).filter(Boolean);
+}
+
+function heldUnderlyingPrice(group, quote) {
+  const marketPrice = quotePrice(quote);
+  if (typeof marketPrice === "number") {
+    return { value: marketPrice, source: quoteSourceLabel(quote, "market quote") };
+  }
+  const stockPrice = firstNumber(group.stock?.quote_price, group.stock?.mark, group.stock?.valuation_mark);
+  if (typeof stockPrice === "number") {
+    const source = typeof group.stock?.quote_price === "number" ? "stock quote" : "account mark";
+    return { value: stockPrice, source };
+  }
+  const optionUnderlying = firstNumber(...(group.options || []).map((option) => option.underlying));
+  if (typeof optionUnderlying === "number") {
+    return { value: optionUnderlying, source: "option model spot" };
+  }
+  return { value: null, source: "no price" };
+}
+
+function heldUnderlyingChangePct(group, quote, price) {
+  const marketChange = quoteChangePct(quote);
+  if (typeof marketChange === "number") return marketChange;
+  const stockChange = firstNumber(group.stock?.quote_change_pct, group.stock?.regular_change_pct, group.stock?.day_change_pct);
+  if (typeof stockChange === "number") return stockChange;
+  const prevClose = firstNumber(...(group.options || []).map((option) => option.prev_close));
+  if (typeof price === "number" && typeof prevClose === "number" && prevClose !== 0) {
+    return (price - prevClose) / prevClose * 100;
+  }
+  return null;
+}
+
+function heldUnderlyingCurrency(group, quote, baseCurrency) {
+  const quoteCurrency = normalizeCurrency(quote?.currency || quote?.contract?.currency);
+  if (quoteCurrency) return quoteCurrency;
+  const rows = [group.stock, ...(group.options || [])].filter(Boolean);
+  const currencies = [...new Set(rows.map((row) => normalizeCurrency(row.currency)).filter(Boolean))];
+  if (currencies.length === 1) return currencies[0];
+  if (currencies.length > 1) return "MIX";
+  return baseCurrency;
+}
+
+function heldUnderlyingPnl(group, baseCurrency, currency) {
+  if (typeof group.group_unrealized_pnl_base === "number") {
+    return { value: group.group_unrealized_pnl_base, currency: baseCurrency, source: "unrealized P/L" };
+  }
+  const rows = [group.stock, ...(group.options || [])].filter(Boolean);
+  if (rows.length > 0 && rows.every((row) => typeof row.unrealized_pnl_base === "number")) {
+    return { value: rows.reduce((sum, row) => sum + row.unrealized_pnl_base, 0), currency: baseCurrency, source: "unrealized P/L" };
+  }
+  if (typeof group.group_unrealized_pnl_ccy === "number") {
+    return { value: group.group_unrealized_pnl_ccy, currency, source: "unrealized P/L" };
+  }
+  return { value: null, currency: baseCurrency, source: "no P/L" };
+}
+
+function purgedUnderlyingRows(positions, baseCurrency) {
+  const rows = new Map();
+  for (const entry of purgeBookEntries(positions)) {
+    const symbol = normalizeSymbol(entry.underlying || entry.symbol || entry.ticker || entry.contract?.symbol);
+    if (!symbol) continue;
+    const row = rows.get(symbol) || {
+      symbol,
+      currency: "",
+      price: null,
+      priceSource: "",
+      changePct: null,
+      pnl: null,
+      pnlCurrency: "",
+      pnlSource: "shadow P/L",
+      virtual: true,
+      purged: true,
+      held: false,
+      legCount: 0,
+      purgeIDs: new Set(),
+      detail: "",
+    };
+    const currency = normalizeCurrency(entry.currency || entry.trading_currency || entry.contract?.currency || entry.base_currency);
+    if (currency) {
+      row.currency = mergeCurrency(row.currency, currency);
+    }
+    const price = firstNumber(entry.current_price, entry.quote_price, entry.price, entry.last_price, entry.mark, entry.underlying, entry.reference_price);
+    if (typeof price === "number" && row.price === null) {
+      row.price = price;
+      row.priceSource = entry.current_price_source || entry.quote_price_source || entry.price_source || "purge book";
+    }
+    const change = firstNumber(entry.quote_change_pct, entry.change_pct, entry.day_change_pct, entry.regular_change_pct);
+    if (typeof change === "number" && row.changePct === null) {
+      row.changePct = change;
+    }
+    const pnl = purgeEntryPnl(entry);
+    if (typeof pnl.value === "number") {
+      row.pnl = (row.pnl || 0) + pnl.value;
+      row.pnlCurrency = mergeCurrency(row.pnlCurrency, pnl.currency || currency || baseCurrency);
+      row.pnlSource = pnl.source;
+    }
+    if (entry.purge_id) row.purgeIDs.add(String(entry.purge_id));
+    row.legCount += Number(entry.leg_count || 1);
+    rows.set(symbol, row);
+  }
+  return [...rows.values()].map((row) => ({
+    ...row,
+    currency: row.currency || row.pnlCurrency || baseCurrency,
+    pnlCurrency: row.pnlCurrency || row.currency || baseCurrency,
+    priceSource: row.priceSource || "purge book",
+    purgeLabel: row.purgeIDs.size > 0 ? [...row.purgeIDs].slice(0, 2).join(", ") : "purge book",
+    detail: `${row.legCount} purged ${row.legCount === 1 ? "leg" : "legs"}`,
+  }));
+}
+
+function purgeBookEntries(positions = {}) {
+  const out = [];
+  const candidates = [
+    state.snapshot?.purge_book,
+    state.snapshot?.purge_books,
+    state.snapshot?.purged_underlyings,
+    state.snapshot?.purged_positions,
+    positions.purge_book,
+    positions.purge_books,
+    positions.purged_underlyings,
+    positions.purged_positions,
+    readLocalPurgeBook(),
+  ];
+  for (const candidate of candidates) {
+    collectPurgeEntries(candidate, out, {});
+  }
+  return out;
+}
+
+function collectPurgeEntries(candidate, out, context) {
+  if (!candidate) return;
+  if (Array.isArray(candidate)) {
+    candidate.forEach((item) => collectPurgeEntries(item, out, context));
+    return;
+  }
+  if (typeof candidate !== "object") return;
+
+  const next = {
+    purge_id: candidate.purge_id || context.purge_id,
+    base_currency: candidate.base_currency || context.base_currency,
+  };
+  for (const key of ["books", "underlyings", "positions", "rows"]) {
+    if (Array.isArray(candidate[key])) {
+      candidate[key].forEach((item) => collectPurgeEntries(item, out, next));
+    }
+  }
+  if (Array.isArray(candidate.legs)) {
+    candidate.legs.forEach((leg) => out.push({ ...leg, ...next }));
+  }
+  if (candidate.symbol || candidate.underlying || candidate.ticker || candidate.contract?.symbol) {
+    out.push({ ...candidate, ...next });
+  }
+}
+
+function readLocalPurgeBook() {
+  for (const key of ["ibkrPurgeBook", "ibkrPurgeBooks"]) {
+    const raw = localStorage.getItem(key);
+    if (!raw) continue;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function purgeEntryPnl(entry) {
+  const direct = firstNumber(entry.group_unrealized_pnl_base, entry.unrealized_pnl_base, entry.pnl_base, entry.pnl, entry.shadow_saved);
+  const currency = normalizeCurrency(entry.pnl_currency || entry.base_currency || entry.currency || entry.contract?.currency);
+  if (typeof direct === "number") {
+    return { value: direct, currency, source: typeof entry.shadow_saved === "number" ? "shadow P/L" : "unrealized P/L" };
+  }
+  const restore = firstNumber(entry.current_restore_value, entry.estimated_value);
+  const exit = firstNumber(entry.exit_value);
+  if (typeof restore === "number" && typeof exit === "number") {
+    return { value: exit - restore, currency, source: "shadow P/L" };
+  }
+  return { value: null, currency, source: "no P/L" };
+}
+
+function underlyingBookRow(row, baseCurrency) {
+  const item = document.createElement("div");
+  item.className = "underlying-row" + (row.virtual ? " underlying-row--virtual" : "") + (row.hasPurgeRecord ? " underlying-row--book" : "");
+  item.dataset.symbol = row.symbol;
+
+  const identity = document.createElement("div");
+  identity.className = "underlying-row__identity";
+  const title = document.createElement("div");
+  title.className = "underlying-row__title";
+  const symbol = document.createElement("strong");
+  symbol.textContent = row.symbol;
+  title.append(symbol, ...underlyingMarkers(row));
+  const detail = document.createElement("small");
+  detail.textContent = row.detail;
+  identity.append(title, detail);
+
+  const price = document.createElement("div");
+  price.className = "underlying-row__metric";
+  const priceValue = document.createElement("b");
+  priceValue.textContent = displayMoney(row.price, row.currency);
+  const priceNote = document.createElement("small");
+  priceNote.textContent = row.priceSource || "price";
+  price.append(priceValue, priceNote);
+
+  const change = document.createElement("div");
+  change.className = "underlying-row__metric";
+  const changeValue = document.createElement("b");
+  changeValue.className = signedClass(row.changePct);
+  changeValue.textContent = signedPct(row.changePct);
+  const changeNote = document.createElement("small");
+  changeNote.textContent = "% change";
+  change.append(changeValue, changeNote);
+
+  const pnl = document.createElement("div");
+  pnl.className = "underlying-row__metric underlying-row__metric--pnl";
+  const pnlValue = document.createElement("b");
+  pnlValue.className = signedClass(row.pnl) + (!state.accountValueVisible && typeof row.pnl === "number" ? " is-private" : "");
+  pnlValue.textContent = typeof row.pnl === "number" && !state.accountValueVisible ? "******" : displayMoney(row.pnl, row.pnlCurrency || baseCurrency);
+  const pnlNote = document.createElement("small");
+  pnlNote.textContent = row.pnlSource || "P/L";
+  pnl.append(pnlValue, pnlNote);
+
+  const actions = document.createElement("div");
+  actions.className = "underlying-row__actions";
+  actions.append(
+    underlyingActionButton("Purge", !row.virtual, row, "purge"),
+    underlyingActionButton("Restore", row.virtual, row, "restore"),
+    underlyingActionButton("Rebuild", row.virtual, row, "rebuild"),
+  );
+
+  item.append(identity, price, change, pnl, actions);
+  return item;
+}
+
+function underlyingMarkers(row) {
+  const markers = [];
+  if (row.virtual) {
+    markers.push(underlyingMarker("Virtual", "virtual"));
+    markers.push(underlyingMarker("Purged", "purged"));
+  } else if (row.hasPurgeRecord) {
+    markers.push(underlyingMarker("Book", "book"));
+  }
+  return markers;
+}
+
+function underlyingMarker(label, tone) {
+  const marker = document.createElement("span");
+  marker.className = "underlying-marker underlying-marker--" + tone;
+  marker.textContent = label;
+  return marker;
+}
+
+function underlyingActionButton(label, enabled, row, action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "underlying-action underlying-action--" + action;
+  button.textContent = label;
+  button.disabled = !enabled;
+  const disabledReason = row.virtual
+    ? "Already in the purge book; restore or rebuild is available."
+    : "Available after this underlying has been purged.";
+  button.title = enabled ? `${label} placeholder for ${row.symbol}` : disabledReason;
+  button.setAttribute("aria-label", `${label} ${row.symbol}`);
+  if (enabled) {
+    button.addEventListener("click", () => {
+      state.underlyingActionNotice = `${label} placeholder for ${row.symbol}; backend wiring pending.`;
+      renderCanaryUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+    });
+  }
+  return button;
+}
+
+function quoteSourceLabel(quote, fallback) {
+  const dataType = String(quote?.data_type || "").trim();
+  if (!dataType || dataType === "live") return fallback;
+  return labelize(dataType) + " quote";
+}
+
+function underlyingPositionDetail(stockCount, optionCount) {
+  const parts = [];
+  if (stockCount > 0) parts.push(`${stockCount} stock ${stockCount === 1 ? "leg" : "legs"}`);
+  if (optionCount > 0) parts.push(`${optionCount} option ${optionCount === 1 ? "leg" : "legs"}`);
+  return parts.length ? parts.join(" / ") : "Held position";
+}
+
+function normalizeSymbol(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function normalizeCurrency(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function mergeCurrency(left, right) {
+  const a = normalizeCurrency(left);
+  const b = normalizeCurrency(right);
+  if (!a) return b;
+  if (!b || a === b) return a;
+  return "MIX";
+}
+
+function displayMoney(value, currency) {
+  if (typeof value !== "number") return "--";
+  const ccy = normalizeCurrency(currency);
+  if (/^[A-Z]{3}$/.test(ccy) && ccy !== "MIX") {
+    return money(value, ccy);
+  }
+  const amount = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+  return ccy ? `${amount} ${ccy}` : amount;
 }
 
 function currentAccountContext(account = {}) {
@@ -356,13 +746,6 @@ function canaryExplanationCards(canary) {
 }
 
 function renderCanaryStatus(canary) {
-  const cards = canaryExplanationCards(canary);
-  const indicators = canary.market_indicators || [];
-  const warningCount = (canary.warnings || []).length || cards.filter((card) => card.tone === "warn" || card.tone === "risk").length;
-  const checkCount = indicators.length > 0
-    ? `${indicators.filter((indicator) => indicatorStatusClass(indicator.status) === "green").length} / ${indicators.length}`
-    : `${cards.filter((card) => card.tone === "ok").length} / ${cards.length}`;
-  const mode = canaryModeLabel(canary);
   const severity = String(canary.severity || "").toLowerCase();
   const hero = $("canaryHero");
   const pill = $("canarySeverity");
@@ -378,9 +761,6 @@ function renderCanaryStatus(canary) {
     hero.classList.add("severity-observe");
     pill.classList.add("severity-observe");
   }
-  $("canaryMode").textContent = mode;
-  $("canaryWarningCount").textContent = String(warningCount);
-  $("canaryCheckCount").textContent = checkCount;
 }
 
 function canaryStageLabel(canary) {
@@ -392,27 +772,6 @@ function canaryStageLabel(canary) {
   if (severity === "act") return "Defend";
   if (severity === "watch") return "Watch";
   if (severity === "observe") return "Steady";
-  return labelize(canary.action || "--");
-}
-
-function canaryModeLabel(canary) {
-  const inputHealth = String(canary.input_health || "").toLowerCase();
-  if (inputHealth === "ok") return "Live";
-  const severity = String(canary.severity || "").toLowerCase();
-  const action = String(canary.action || "").toLowerCase();
-  if (action) return labelize(action);
-  if (severity === "act") return "Risk action";
-  if (severity === "watch") return "Closer watch";
-  if (severity === "observe") return "Monitor";
-  return "--";
-}
-
-function canaryRiskLabel(canary) {
-  const action = String(canary.action || "").toLowerCase();
-  const severity = String(canary.severity || "").toLowerCase();
-  if (severity === "act" || action === "defend") return "High";
-  if (severity === "watch") return "Watch";
-  if (severity === "observe") return "Low";
   return labelize(canary.action || "--");
 }
 
@@ -575,18 +934,23 @@ function renderMarketContext(snap) {
   setMarketTileTone(".market-tile--spy", spyTone);
   setMarketTileTone(".market-tile--vix", vixTone);
   setMarketTileTone(".market-tile--nasdaq", nasdaqTone);
-  setSparklineTone(".sparkline--spy", spyTone);
-  setSparklineTone(".sparkline--vix", vixTone);
-  setSparklineTone(".sparkline--nasdaq", nasdaqTone);
-  renderCloseGuide(".sparkline--spy", quotePrevClose(spyQuote) ?? market.spy_prev_close, spyPrice, spyChange, "SPY", !hasSpyData);
-  renderCloseGuide(".sparkline--vix", quotePrevClose(vixQuote) ?? market.vix_prev_close, vixPrice, vixChange, "VIX", !hasVIXData);
-  renderCloseGuide(".sparkline--nasdaq", quotePrevClose(qqqQuote) ?? market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "QQQ", !hasNasdaqData);
+  setQuoteRangeTone("#spyBaseline", spyTone);
+  setQuoteRangeTone("#vixBaseline", vixTone);
+  setQuoteRangeTone("#nasdaqBaseline", nasdaqTone);
+  renderQuoteRange("#spyBaseline", quotePrevClose(spyQuote) ?? market.spy_prev_close, spyPrice, spyChange, "SPY", !hasSpyData);
+  renderQuoteRange("#vixBaseline", quotePrevClose(vixQuote) ?? market.vix_prev_close, vixPrice, vixChange, "VIX", !hasVIXData);
+  renderQuoteRange("#nasdaqBaseline", quotePrevClose(qqqQuote) ?? market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "QQQ", !hasNasdaqData);
   document.querySelector(".market-tile--spy")?.classList.toggle("market-tile--missing", !hasSpyData);
   document.querySelector(".market-tile--vix")?.classList.toggle("market-tile--missing", !hasVIXData);
   document.querySelector(".market-tile--nasdaq")?.classList.toggle("market-tile--missing", !hasNasdaqData);
-  $("nasdaqNote").textContent = quoteTileNote(qqqQuote, "Nasdaq 100 ETF", !hasNasdaqData);
+  const spyChangePending = hasSpyData && typeof spyChange !== "number";
+  const vixChangePending = hasVIXData && typeof vixChange !== "number";
+  const nasdaqChangePending = hasNasdaqData && typeof nasdaqChange !== "number";
+  setQuoteTileNote("spyNote", spyQuote, spyChangePending ? "Change pending" : "S&P 500 ETF", "SPY", !hasSpyData, quoteChangePendingTitle(spyChangePending));
+  setQuoteTileNote("vixNote", vixQuote, vixChangePending ? "Change pending" : "VIX index", "VIX", !hasVIXData, quoteChangePendingTitle(vixChangePending));
+  setQuoteTileNote("nasdaqNote", qqqQuote, nasdaqChangePending ? "Change pending" : "Nasdaq 100 ETF", "QQQ", !hasNasdaqData, quoteChangePendingTitle(nasdaqChangePending));
   $("marketRegime").textContent = marketRegimeLabel(market, indicators);
-  $("marketRegimeSummary").textContent = "Latest regime read";
+  $("marketRegimeSummary").textContent = "Regime read";
   $("marketRegimeMix").textContent = latestRegimeRead(canary, indicators);
   renderMarketWeather(market, indicators);
   renderRegimeDetail(indicators);
@@ -619,13 +983,31 @@ function quoteChangePct(quote) {
   return null;
 }
 
-function quoteTileNote(quote, fallback, missing) {
-  if (missing) return "No QQQ data";
+function setQuoteTileNote(id, quote, fallback, symbol, missing, title = "") {
+  const el = $(id);
+  el.textContent = quoteTileNote(quote, fallback, symbol, missing);
+  el.title = missing ? missingQuoteReason(quote) : title;
+}
+
+function quoteTileNote(quote, fallback, symbol, missing) {
+  if (missing) return `No ${symbol} price`;
   const quality = String(quote?.quote_quality || "").trim();
   if (quality && quality !== "firm") return labelize(quality) + " quote";
   const dataType = String(quote?.data_type || "").trim();
   if (dataType && dataType !== "live") return labelize(dataType) + " quote";
   return fallback;
+}
+
+function missingQuoteReason(quote) {
+  const staleReason = String(quote?.stale_reason || "").trim();
+  if (staleReason) return labelize(staleReason);
+  const quality = String(quote?.quote_quality || "").trim().toLowerCase();
+  if (quality && quality !== "missing") return `${labelize(quality)} quote`;
+  return "IBKR returned no price";
+}
+
+function quoteChangePendingTitle(pending) {
+  return pending ? "IBKR quote has no previous-close baseline yet." : "";
 }
 
 function marketQuoteFreshnessLabel(marketQuotes, quotes, fallbackTime) {
@@ -634,11 +1016,15 @@ function marketQuoteFreshnessLabel(marketQuotes, quotes, fallbackTime) {
   if (present.length === 0) {
     return at ? `Quote pending ${shortTime(at)}` : "Quote pending";
   }
+  const priced = present.filter((quote) => typeof quotePrice(quote) === "number");
+  if (priced.length === 0) {
+    return at ? `IBKR quote pending ${shortTime(at)}` : "IBKR quote pending";
+  }
   const dataTypes = present.map((quote) => String(quote.data_type || "").toLowerCase()).filter(Boolean);
   const delayed = dataTypes.some((value) => value.includes("delayed"));
   const frozen = dataTypes.some((value) => value.includes("frozen"));
   const live = dataTypes.includes("live");
-  const prefix = delayed ? "Delayed quote" : live ? "Live quote" : frozen ? "Frozen quote" : "Quote";
+  const prefix = delayed ? "Delayed quote" : live ? "Live quote" : frozen ? "Frozen quote" : "IBKR quote";
   return at ? `${prefix} ${shortTime(at)}` : prefix;
 }
 
@@ -736,9 +1122,10 @@ function marketWeatherTone(market, indicators) {
 
 function renderSignedPercent(id, value, positiveIsRisk) {
   const el = $(id);
-  el.classList.remove("signed", "ok", "risk", "neutral");
+  el.classList.remove("signed", "ok", "risk", "neutral", "is-empty");
   if (typeof value !== "number") {
-    el.textContent = "--";
+    el.textContent = "";
+    el.classList.add("is-empty");
     return "neutral";
   }
   el.textContent = signedPct(value);
@@ -758,23 +1145,37 @@ function setMarketTileTone(selector, tone) {
   el.classList.add("market-tile--" + (tone || "neutral"));
 }
 
-function setSparklineTone(selector, tone) {
+function setQuoteRangeTone(selector, tone) {
   const el = document.querySelector(selector);
   if (!el) return;
-  el.classList.remove("sparkline--ok", "sparkline--risk", "sparkline--neutral");
-  el.classList.add("sparkline--" + (tone || "neutral"));
+  el.classList.remove("quote-range--ok", "quote-range--risk", "quote-range--neutral");
+  el.classList.add("quote-range--" + (tone || "neutral"));
 }
 
-function renderCloseGuide(selector, previousClose, currentPrice, changePct, label, showMissingGuide = false) {
+function renderQuoteRange(selector, previousClose, currentPrice, changePct, label, showMissingGuide = false) {
   const el = document.querySelector(selector);
   if (!el) return;
   const inferredPreviousClose = previousClose ?? previousCloseFromChange(currentPrice, changePct);
-  const hasGuide = typeof inferredPreviousClose === "number";
-  el.classList.toggle("has-close-guide", hasGuide || showMissingGuide);
-  el.classList.toggle("sparkline--missing", !hasGuide && showMissingGuide);
-  el.title = typeof inferredPreviousClose === "number"
-    ? `${label} last close ${numberRead(inferredPreviousClose)}`
-    : `${label} last close unavailable`;
+  const hasGuide = typeof inferredPreviousClose === "number" && typeof currentPrice === "number";
+  el.textContent = "";
+  el.classList.toggle("quote-range--missing", !hasGuide);
+  if (hasGuide) {
+    const movePct = typeof changePct === "number" ? changePct : ((currentPrice - inferredPreviousClose) / inferredPreviousClose) * 100;
+    const labelText = `${label} ${numberRead(currentPrice)} vs previous close ${numberRead(inferredPreviousClose)} (${signedPct(movePct)})`;
+    el.style.setProperty("--quote-pos", quoteRangePosition(movePct) + "%");
+    el.title = labelText;
+    el.setAttribute("aria-label", labelText);
+    return;
+  }
+  el.style.removeProperty("--quote-pos");
+  const missingText = showMissingGuide ? `${label} quote unavailable` : `${label} previous-close marker pending`;
+  el.title = missingText;
+  el.setAttribute("aria-label", missingText);
+}
+
+function quoteRangePosition(changePct) {
+  if (typeof changePct !== "number") return 50;
+  return Math.max(6, Math.min(94, 50 + changePct * 10));
 }
 
 function previousCloseFromChange(currentPrice, changePct) {
@@ -1222,9 +1623,12 @@ function renderTopbar(snap) {
     strip?.classList.add(label.tone);
   }
   $("sessionPhase").textContent = label.phase;
-  $("sessionLabel").textContent = label.label;
-  $("sessionCountdown").textContent = label.countdown;
-  $("sessionMeta").textContent = label.meta;
+  const marketDot = $("marketStateDot");
+  if (marketDot) {
+    const dotLabel = label.dotTitle || label.text || "Market session status";
+    marketDot.setAttribute("aria-label", dotLabel);
+    marketDot.title = dotLabel;
+  }
 }
 
 function currentMarketCalendar(snap) {
@@ -1290,15 +1694,14 @@ function renderSyncStrip(snap) {
 function marketSessionLabel(calendar) {
   const session = calendar?.session;
   if (!session) {
-    const marketName = marketCalendarShortLabel(calendar, null);
     return {
       text: state.connectionOK ? "Waiting for official market calendar" : "App connection offline",
       tone: state.connectionOK ? "market-warn" : "market-closed",
-      phase: state.connectionOK ? `${marketName} syncing` : "Offline",
-      label: "Waiting",
-      countdown: "--:--:--",
-      meta: "HH:MM:SS",
+      phase: state.connectionOK ? "syncing" : "offline",
+      countdownVerb: "opening in",
+      countdown: "--",
       side: state.connectionOK ? "Calendar pending" : "Offline",
+      dotTitle: state.connectionOK ? "Market calendar is loading" : "App stream is reconnecting",
     };
   }
   const now = Date.now();
@@ -1307,18 +1710,17 @@ function marketSessionLabel(calendar) {
   const open = parseDate(session.open);
   const close = parseDate(session.close);
   const nextOpen = parseDate(session.next_open);
-  const marketName = marketCalendarShortLabel(calendar, session);
   if (session.is_open) {
     const timeLeft = countdownLabel(close);
-    const phase = stateText === "early_close" ? `${marketName} early close` : marketOpenPhase(marketName);
+    const phase = stateText === "early_close" ? "early close" : "open";
     return {
       text: session.reason || "Regular cash session",
       tone: "market-open",
-      phase,
-      label: "Closes",
+      phase: marketStatusPhrase(phase, "closing in", timeLeft || "live"),
+      countdownVerb: "closing in",
       countdown: timeLeft || "live",
-      meta: marketClockMeta("Close", session, close),
       side: marketSessionNow(session),
+      dotTitle: stateText === "early_close" ? "Selected market is open in an early-close session" : "Selected market is open",
     };
   }
 
@@ -1327,11 +1729,11 @@ function marketSessionLabel(calendar) {
     return {
       text: session.state === "early_close" ? session.reason || "Shortened session ahead" : "Regular cash session",
       tone: "market-warn",
-      phase: `${marketName} pre-open`,
-      label: "Opens",
+      phase: marketStatusPhrase("pre-open", "opening in", untilOpen || "--"),
+      countdownVerb: "opening in",
       countdown: untilOpen || "--:--:--",
-      meta: marketClockMeta("Open", session, open),
       side: marketSessionNow(session),
+      dotTitle: "Selected market is pre-open",
     };
   }
 
@@ -1340,11 +1742,11 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason || "Next regular cash session",
       tone: "market-closed",
-      phase: stateText === "early_close" ? `${marketName} after early close` : `${marketName} after close`,
-      label: "Opens",
+      phase: marketStatusPhrase(stateText === "early_close" ? "after early close" : "after close", "opening in", untilOpen || "--"),
+      countdownVerb: "opening in",
       countdown: untilOpen || "--:--:--",
-      meta: marketClockMeta("Next", session, nextOpen),
       side: marketSessionNow(session),
+      dotTitle: stateText === "early_close" ? "Selected market has closed after an early-close session" : "Selected market is closed",
     };
   }
 
@@ -1353,11 +1755,11 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason || "Official market holiday",
       tone: "market-closed",
-      phase: `${marketName} holiday`,
-      label: "Opens",
+      phase: marketStatusPhrase("holiday", "opening in", untilOpen || "--"),
+      countdownVerb: "opening in",
       countdown: untilOpen || "--:--:--",
-      meta: marketClockMeta("Next", session, nextOpen),
       side: marketSessionNow(session),
+      dotTitle: "Selected market is closed for a holiday",
     };
   }
 
@@ -1366,11 +1768,11 @@ function marketSessionLabel(calendar) {
     return {
       text: session.reason === "weekend" ? "Weekend closure" : `Outside regular cash session${reason}`,
       tone: "market-closed",
-      phase: session.reason === "weekend" ? `${marketName} weekend` : marketClosedPhase(marketName),
-      label: "Opens",
+      phase: marketStatusPhrase(session.reason === "weekend" ? "weekend" : "closed", "opening in", untilOpen || "--"),
+      countdownVerb: "opening in",
       countdown: untilOpen || "--:--:--",
-      meta: marketClockMeta("Next", session, nextOpen),
       side: marketSessionNow(session),
+      dotTitle: session.reason === "weekend" ? "Selected market is closed for the weekend" : "Selected market is closed",
     };
   }
 
@@ -1379,11 +1781,11 @@ function marketSessionLabel(calendar) {
     return {
       text: `Calendar coverage unavailable${reason}`,
       tone: "market-warn",
-      phase: `${marketName} unknown`,
-      label: "Next",
+      phase: marketStatusPhrase("unknown", "opening in", untilOpen || "--"),
+      countdownVerb: "opening in",
       countdown: untilOpen || "--:--:--",
-      meta: marketClockMeta("Session", session, nextOpen),
       side: marketSessionNow(session),
+      dotTitle: "Selected market calendar status is unknown",
     };
   }
 
@@ -1391,27 +1793,16 @@ function marketSessionLabel(calendar) {
   return {
     text: session.reason || `Official calendar${reason}`,
     tone: "market-warn",
-    phase: `${marketName} ${cleanDetail(session.state)}`,
-    label: "Opens",
+    phase: marketStatusPhrase(cleanDetail(session.state), "opening in", untilOpen || "--"),
+    countdownVerb: "opening in",
     countdown: untilOpen || "--:--:--",
-    meta: marketClockMeta("Open", session, nextOpen),
     side: marketSessionNow(session),
+    dotTitle: "Selected market calendar status needs attention",
   };
 }
 
-function marketCalendarShortLabel(calendar, session) {
-  const raw = String(calendar?.label || session?.label || session?.market || calendar?.market || "").toLowerCase();
-  if (raw.includes("xetra") || raw.includes("de_") || raw === "de") return "Xetra";
-  if (raw.includes("option")) return "US options";
-  return "US";
-}
-
-function marketOpenPhase(marketName) {
-  return marketName === "US" ? "US market open" : `${marketName} open`;
-}
-
-function marketClosedPhase(marketName) {
-  return marketName === "US" ? "US market closed" : `${marketName} closed`;
+function marketStatusPhrase(phase, verb, countdown) {
+  return [phase, `${verb} ${countdown || "--"}`].filter(Boolean).join(" · ");
 }
 
 function marketSessionNow(session) {
@@ -1430,11 +1821,6 @@ function marketSessionNow(session) {
     return `${parts[1]} ${parts[0].toUpperCase()} ${parts[2]} ${parts[3]} ${parts[4]}`;
   }
   return formatted.toUpperCase();
-}
-
-function marketClockMeta(label, session, target) {
-  if (!target) return "HH:MM:SS";
-  return "HH:MM:SS";
 }
 
 function countdownLabel(target) {
@@ -1556,6 +1942,56 @@ function activeOrderReviewSet() {
   return currentSets.find((set) => set.id === state.activeOrderReviewSetID) || currentSets[0] || null;
 }
 
+function activeOrderPreview(set) {
+  if (!set) return null;
+  for (const preview of [state.orderPreview, set.latest_preview]) {
+    if (preview?.set_id === set.id && preview?.set_revision === set.revision) {
+      return preview;
+    }
+  }
+  return null;
+}
+
+function selectedReviewRows(set) {
+  return (set?.rows || []).filter((row) => {
+    const edit = rowEdit(row);
+    return edit.included && Number(edit.quantity || 0) > 0;
+  });
+}
+
+function previewRowsByID(preview) {
+  const out = new Map();
+  for (const row of preview?.rows || []) {
+    out.set(row.row_id, row);
+  }
+  return out;
+}
+
+function reviewTransmitGate(set, trading, selected) {
+  if (!set) return { ready: false, reason: "Create or refresh a mitigation plan first" };
+  if (reviewSetIsStale(set)) return { ready: false, reason: "Refresh the stale mitigation plan before transmitting" };
+  if (!trading.can_transmit) return { ready: false, reason: "Transmit is not enabled by trading.status" };
+  if ((selected || []).length === 0) return { ready: false, reason: "Select at least one row before transmitting" };
+  const preview = activeOrderPreview(set);
+  if (!preview) return { ready: false, reason: "Preview selected rows first" };
+  if (!preview.submit_ready) return { ready: false, reason: "Latest preview is not submit-ready" };
+  const previewRows = previewRowsByID(preview);
+  for (const row of selected) {
+    const edit = rowEdit(row);
+    const previewRow = previewRows.get(row.row_id);
+    if (!previewRow || !previewRow.included || previewRow.quantity !== Number(edit.quantity || 0)) {
+      return { ready: false, reason: `Preview ${contractLabel(row.contract)} again after selection changes` };
+    }
+    if (!previewRow.submit_eligible) {
+      return { ready: false, reason: `${contractLabel(row.contract)} is not submit eligible` };
+    }
+    if (!previewToken(previewRow.preview)) {
+      return { ready: false, reason: `${contractLabel(row.contract)} has no preview token` };
+    }
+  }
+  return { ready: true, reason: "Transmit selected rows after confirmation" };
+}
+
 function renderOrderReview() {
   const panel = $("orderReviewPanel");
   const set = activeOrderReviewSet();
@@ -1563,7 +1999,7 @@ function renderOrderReview() {
   panel.hidden = !shouldShow;
   if (!shouldShow) return;
 
-  const trading = set?.capabilities || state.snapshot?.trading || {};
+  const trading = state.snapshot?.trading || set?.capabilities || {};
   $("orderReviewTitle").textContent = "Mitigation plan";
   $("orderReviewMeta").textContent = set
     ? `${(set.rows || []).length} review row${(set.rows || []).length === 1 ? "" : "s"} · updated ${shortTime(set.updated_at || set.created_at)}`
@@ -1580,16 +2016,17 @@ function renderOrderReview() {
     $("orderReviewRows").replaceChildren(empty);
   }
 
-  const selected = rows.filter((row) => rowEdit(row).included && rowEdit(row).quantity > 0);
+  const selected = selectedReviewRows(set);
   const totalQty = selected.reduce((sum, row) => sum + rowEdit(row).quantity, 0);
   $("orderReviewSummary").textContent = selected.length === 0
     ? "No selected rows"
     : `${selected.length} selected / ${totalQty} units`;
-  $("resetOrderReviewButton").disabled = !set || state.orderReviewLoading;
-  $("previewOrdersButton").disabled = !set || !trading.can_preview || selected.length === 0 || state.orderReviewLoading;
-  const previewSubmitReady = state.orderPreview?.set_id === set?.id && state.orderPreview?.set_revision === set?.revision && state.orderPreview?.submit_ready;
-  $("transmitSelectedButton").disabled = !set || !trading.can_transmit || !previewSubmitReady;
-  $("transmitSelectedButton").title = transmitDisabledReason(trading, previewSubmitReady);
+  $("resetOrderReviewButton").disabled = !set || state.orderReviewLoading || state.orderTransmitLoading;
+  $("previewOrdersButton").disabled = !set || !trading.can_preview || selected.length === 0 || state.orderReviewLoading || state.orderTransmitLoading;
+  $("previewOrdersButton").title = !set ? "Create a review set first" : !trading.can_preview ? "Preview is not enabled by trading.status" : selected.length === 0 ? "Select at least one row" : "Preview selected rows";
+  const transmitGate = reviewTransmitGate(set, trading, selected);
+  $("transmitSelectedButton").disabled = !transmitGate.ready || state.orderReviewLoading || state.orderTransmitLoading;
+  $("transmitSelectedButton").title = state.orderTransmitLoading ? "Transmit in progress" : transmitGate.reason;
 
   renderOrderPreview();
 }
@@ -1606,6 +2043,8 @@ function orderReviewRowElement(row) {
   include.setAttribute("aria-label", `Include ${row.contract?.symbol || row.row_id}`);
   include.addEventListener("change", () => {
     state.orderReviewEdits[row.row_id] = { ...edit, included: include.checked, quantity: include.checked ? Math.max(1, edit.quantity || row.editable_quantity || row.proposed_quantity || 1) : 0 };
+    state.orderPreview = null;
+    state.orderTransmitResult = null;
     renderOrderReview();
   });
 
@@ -1633,6 +2072,8 @@ function orderReviewRowElement(row) {
   qty.addEventListener("input", () => {
     const next = Math.max(0, Math.trunc(Number(qty.value || 0)));
     state.orderReviewEdits[row.row_id] = { ...edit, included: next > 0 && edit.included, quantity: next };
+    state.orderPreview = null;
+    state.orderTransmitResult = null;
     renderOrderReview();
   });
 
@@ -1647,8 +2088,9 @@ function orderReviewRowElement(row) {
 
 function renderOrderPreview() {
   const panel = $("orderPreviewPanel");
-  const preview = state.orderPreview;
-  if (!preview && !state.orderReviewError) {
+  const set = activeOrderReviewSet();
+  const preview = activeOrderPreview(set);
+  if (!preview && !state.orderReviewError && !state.orderTransmitResult) {
     panel.hidden = true;
     panel.replaceChildren();
     return;
@@ -1669,6 +2111,7 @@ function renderOrderPreview() {
     for (const row of preview.rows || []) {
       const item = document.createElement("div");
       item.className = "order-preview-row";
+      item.classList.toggle("order-preview-row--blocked", row.included && !row.submit_eligible);
       const title = document.createElement("b");
       title.textContent = row.draft
         ? `${row.draft.action} ${row.quantity} ${contractLabel(row.draft.contract)}`
@@ -1678,8 +2121,23 @@ function renderOrderPreview() {
       const token = document.createElement("small");
       token.textContent = row.preview?.preview_token_id ? `token ${row.preview.preview_token_id}` : "no submit token";
       item.append(title, detail, token);
+      const transmit = transmitRowResult(row.row_id);
+      if (transmit) {
+        const result = document.createElement("small");
+        result.className = "order-result-line " + (transmit.failure || transmit.result?.accepted === false ? "risk" : "ok");
+        result.textContent = transmit.failure
+          ? `Transmit failed: ${transmit.failure}`
+          : `Transmit row result: ${transmit.result?.accepted ? "accepted" : "not accepted"}${transmit.result?.message ? " / " + transmit.result.message : ""}`;
+        item.append(result);
+      }
       children.push(item);
     }
+  }
+  if (state.orderTransmitResult) {
+    const summary = document.createElement("div");
+    summary.className = "order-preview__banner order-preview__banner--result";
+    summary.textContent = transmitResultSummary(state.orderTransmitResult);
+    children.push(summary);
   }
   panel.replaceChildren(...children);
 }
@@ -1695,30 +2153,99 @@ function renderOpenOrders() {
     list.replaceChildren(empty);
     return;
   }
-  list.replaceChildren(...orders.map((order) => {
-    const row = document.createElement("div");
-    row.className = "open-order-row";
-    const title = document.createElement("b");
-    title.textContent = `${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"}`;
-    const meta = document.createElement("span");
-    meta.textContent = [order.lifecycle_status, order.send_state, order.order_ref].filter(Boolean).join(" / ") || "journal view";
-    const controls = document.createElement("div");
-    controls.className = "open-order-row__controls";
-    const trading = state.snapshot?.trading || {};
-    controls.append(disabledOrderButton("Modify", trading.can_modify && order.modify_eligible === true));
-    controls.append(disabledOrderButton("Cancel", trading.can_cancel && order.cancel_eligible === true));
-    row.append(title, meta, controls);
-    return row;
-  }));
+  list.replaceChildren(...orders.map(openOrderRowElement));
 }
 
-function disabledOrderButton(label, enabled) {
+function openOrderRowElement(order) {
+  const row = document.createElement("div");
+  row.className = "open-order-row";
+  const id = orderIdentity(order);
+  const edit = openOrderEdit(order);
+  const trading = state.snapshot?.trading || {};
+  const modifyGate = orderModifyGate(order, trading);
+  const cancelGate = orderCancelGate(order, trading);
+
+  const main = document.createElement("div");
+  main.className = "open-order-row__main";
+  const title = document.createElement("b");
+  title.textContent = `${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"}`;
+  const meta = document.createElement("span");
+  meta.textContent = [
+    order.lifecycle_status,
+    order.send_state,
+    order.order_ref,
+    order.account,
+    order.endpoint,
+  ].filter(Boolean).join(" / ") || "journal view";
+  main.append(title, meta);
+
+  const editBox = document.createElement("div");
+  editBox.className = "open-order-row__edit";
+
+  const qty = document.createElement("input");
+  qty.type = "number";
+  qty.min = "1";
+  qty.max = String(orderReductionMax(order) || 1);
+  qty.step = "1";
+  qty.value = String(edit.quantity || orderReductionMax(order) || 1);
+  qty.setAttribute("aria-label", `Reduction quantity for ${order.symbol || id}`);
+  qty.disabled = !modifyGate.ready || edit.busy;
+  qty.addEventListener("change", () => {
+    const maxQty = orderReductionMax(order) || 1;
+    edit.quantity = Math.min(maxQty, Math.max(1, Math.trunc(Number(qty.value || 1))));
+    edit.preview = null;
+    edit.result = null;
+    edit.error = "";
+    renderOpenOrders();
+  });
+
+  const price = document.createElement("input");
+  price.type = "number";
+  price.min = "0";
+  price.step = "0.01";
+  price.value = typeof edit.limit_price === "number" ? String(edit.limit_price) : "";
+  price.placeholder = "Limit";
+  price.setAttribute("aria-label", `Limit price for ${order.symbol || id}`);
+  price.disabled = !modifyGate.ready || edit.busy;
+  price.addEventListener("change", () => {
+    const next = Number(price.value || 0);
+    edit.limit_price = Number.isFinite(next) && next > 0 ? next : null;
+    edit.preview = null;
+    edit.result = null;
+    edit.error = "";
+    renderOpenOrders();
+  });
+
+  const fixed = document.createElement("span");
+  fixed.className = "open-order-row__fixed";
+  fixed.textContent = `${order.order_type || "LMT"} / ${order.tif || "DAY"} / ${order.action || "--"}`;
+  editBox.append(qty, price, fixed);
+
+  const controls = document.createElement("div");
+  controls.className = "open-order-row__controls";
+  const previewButton = orderActionButton("Preview change", modifyGate.ready && !edit.busy, modifyGate.reason);
+  previewButton.addEventListener("click", () => previewOrderModify(order));
+  const applyButton = orderActionButton("Apply change", modifyGate.ready && modifyPreviewReady(edit.preview) && !edit.busy, modifyApplyDisabledReason(modifyGate, edit.preview));
+  applyButton.addEventListener("click", () => applyOrderModify(order));
+  const cancelButton = orderActionButton("Cancel order", cancelGate.ready && !edit.busy, cancelGate.reason);
+  cancelButton.addEventListener("click", () => cancelOpenOrder(order));
+  controls.append(previewButton, applyButton, cancelButton);
+
+  const status = document.createElement("small");
+  status.className = "open-order-row__status";
+  status.textContent = openOrderStatusLine(order, edit, modifyGate, cancelGate);
+
+  row.append(main, editBox, controls, status);
+  return row;
+}
+
+function orderActionButton(label, enabled, reason) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "text-button";
   button.textContent = label;
   button.disabled = !enabled;
-  button.title = enabled ? label : `${label} is not enabled by trading.status`;
+  button.title = enabled ? label : reason || `${label} unavailable`;
   return button;
 }
 
@@ -1732,6 +2259,7 @@ function rowEdit(row) {
 function resetOrderReviewEdits() {
   state.orderReviewEdits = {};
   state.orderPreview = null;
+  state.orderTransmitResult = null;
   state.orderReviewError = "";
   renderOrderReview();
 }
@@ -1739,6 +2267,7 @@ function resetOrderReviewEdits() {
 async function refreshOrderReviewSet() {
   state.orderReviewLoading = true;
   state.orderReviewError = "";
+  state.orderTransmitResult = null;
   renderOrderReview();
   try {
     const res = await fetch("/api/order-review-sets", { method: "POST", credentials: "include" });
@@ -1791,12 +2320,155 @@ async function previewOrderReviewSet() {
     upsertOrderReviewSet(body.set);
     state.activeOrderReviewSetID = body.set.id;
     state.orderPreview = body.preview;
+    state.orderTransmitResult = null;
     await refreshOpenOrders();
   } catch (err) {
     state.orderReviewError = err.message;
   } finally {
     state.orderReviewLoading = false;
     renderOrderReview();
+  }
+}
+
+async function transmitSelectedOrders() {
+  const set = activeOrderReviewSet();
+  if (!set) return;
+  const trading = state.snapshot?.trading || set.capabilities || {};
+  const selected = selectedReviewRows(set);
+  const gate = reviewTransmitGate(set, trading, selected);
+  if (!gate.ready) {
+    state.orderReviewError = gate.reason;
+    renderOrderReview();
+    return;
+  }
+  if (!window.confirm(transmitConfirmationText(set, activeOrderPreview(set), selected, trading))) {
+    return;
+  }
+  state.orderTransmitLoading = true;
+  state.orderReviewError = "";
+  state.orderTransmitResult = null;
+  renderOrderReview();
+  try {
+    const res = await fetch(`/api/order-review-sets/${encodeURIComponent(set.id)}/transmit`, {
+      method: "POST",
+      credentials: "include",
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    state.orderTransmitResult = body;
+    if (body.orders_open) {
+      state.ordersOpen = body.orders_open;
+      renderOpenOrders();
+    }
+    await refreshOpenOrders();
+  } catch (err) {
+    state.orderReviewError = err.message;
+  } finally {
+    state.orderTransmitLoading = false;
+    renderOrderReview();
+  }
+}
+
+async function previewOrderModify(order) {
+  const id = orderIdentity(order);
+  const edit = openOrderEdit(order);
+  const trading = state.snapshot?.trading || {};
+  const gate = orderModifyGate(order, trading);
+  if (!gate.ready) {
+    edit.error = gate.reason;
+    renderOpenOrders();
+    return;
+  }
+  edit.busy = "preview";
+  edit.error = "";
+  edit.result = null;
+  edit.cancelResult = null;
+  renderOpenOrders();
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(id)}/preview-modify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(modifyPreviewBody(order, edit)),
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    edit.preview = body;
+  } catch (err) {
+    edit.preview = null;
+    edit.error = err.message;
+  } finally {
+    edit.busy = "";
+    renderOpenOrders();
+  }
+}
+
+async function applyOrderModify(order) {
+  const id = orderIdentity(order);
+  const edit = openOrderEdit(order);
+  const trading = state.snapshot?.trading || {};
+  const gate = orderModifyGate(order, trading);
+  if (!gate.ready || !modifyPreviewReady(edit.preview)) {
+    edit.error = modifyApplyDisabledReason(gate, edit.preview);
+    renderOpenOrders();
+    return;
+  }
+  if (!window.confirm(modifyConfirmationText(order, edit.preview))) {
+    return;
+  }
+  edit.busy = "modify";
+  edit.error = "";
+  renderOpenOrders();
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(id)}/modify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ preview_token: edit.preview.preview_token }),
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    edit.result = body;
+    edit.preview = null;
+    await refreshOpenOrders();
+  } catch (err) {
+    edit.error = err.message;
+  } finally {
+    edit.busy = "";
+    renderOpenOrders();
+  }
+}
+
+async function cancelOpenOrder(order) {
+  const id = orderIdentity(order);
+  const edit = openOrderEdit(order);
+  const trading = state.snapshot?.trading || {};
+  const gate = orderCancelGate(order, trading);
+  if (!gate.ready) {
+    edit.error = gate.reason;
+    renderOpenOrders();
+    return;
+  }
+  if (!window.confirm(cancelConfirmationText(order, trading))) {
+    return;
+  }
+  edit.busy = "cancel";
+  edit.error = "";
+  renderOpenOrders();
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      credentials: "include",
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    edit.cancelResult = body;
+    await refreshOpenOrders();
+  } catch (err) {
+    edit.error = err.message;
+  } finally {
+    edit.busy = "";
+    renderOpenOrders();
   }
 }
 
@@ -1815,6 +2487,121 @@ function upsertOrderReviewSet(set) {
   if (!set?.id) return;
   const next = state.orderReviewSets.filter((item) => item.id !== set.id);
   state.orderReviewSets = [set, ...next].slice(0, 10);
+}
+
+function orderIdentity(order) {
+  return String(order.order_ref || order.reserved_order_id || order.perm_id || order.preview_token_id || order.symbol || "").trim();
+}
+
+function openOrderEdit(order) {
+  const id = orderIdentity(order);
+  if (!state.openOrderEdits[id]) {
+    state.openOrderEdits[id] = {
+      quantity: orderReductionMax(order) || 1,
+      limit_price: order.limit_price > 0 ? order.limit_price : null,
+      preview: null,
+      result: null,
+      cancelResult: null,
+      error: "",
+      busy: "",
+    };
+  }
+  return state.openOrderEdits[id];
+}
+
+function orderReductionMax(order) {
+  const remaining = Number(order.remaining || 0);
+  const quantity = Number(order.quantity || 0);
+  return Math.max(0, Math.floor(remaining > 0 ? remaining : quantity));
+}
+
+function orderModifyGate(order, trading) {
+  if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
+  if (!trading.can_modify) return { ready: false, reason: "Modify is not enabled by trading.status" };
+  if ("modify_eligible" in order && order.modify_eligible !== true) return { ready: false, reason: "This order is not modify eligible" };
+  if (order.open === false) return { ready: false, reason: "Only open orders can be modified" };
+  if (String(order.order_type || "LMT").toUpperCase() !== "LMT") return { ready: false, reason: "Canary mitigation UI only supports LMT price changes" };
+  if (orderReductionMax(order) <= 0) return { ready: false, reason: "No remaining quantity available to reduce" };
+  return { ready: true, reason: "Preview a reduction-only quantity or LMT price change" };
+}
+
+function orderCancelGate(order, trading) {
+  if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
+  if (!trading.can_cancel) return { ready: false, reason: "Cancel is not enabled by trading.status" };
+  if ("cancel_eligible" in order && order.cancel_eligible !== true) return { ready: false, reason: "This order is not cancel eligible" };
+  if (order.open === false) return { ready: false, reason: "Only open orders can be cancelled" };
+  return { ready: true, reason: "Cancel this journal-backed open order after confirmation" };
+}
+
+function modifyPreviewBody(order, edit) {
+  const limit = Number(edit.limit_price || 0);
+  return {
+    action: order.action || "",
+    quantity: Math.min(orderReductionMax(order) || 1, Math.max(1, Math.trunc(Number(edit.quantity || 1)))),
+    limit_price: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+    tif: order.tif || "DAY",
+  };
+}
+
+function modifyPreviewReady(preview) {
+  return Boolean(preview?.submit_eligible && previewToken(preview));
+}
+
+function modifyApplyDisabledReason(gate, preview) {
+  if (!gate.ready) return gate.reason;
+  if (!preview) return "Preview change first";
+  if (!preview.submit_eligible) return "Modify preview is not submit eligible";
+  if (!previewToken(preview)) return "Modify preview did not mint a preview token";
+  return "Apply previewed change after confirmation";
+}
+
+function openOrderStatusLine(order, edit, modifyGate, cancelGate) {
+  if (edit.busy === "preview") return "Previewing change.";
+  if (edit.busy === "modify") return "Applying previewed change.";
+  if (edit.busy === "cancel") return "Cancelling order.";
+  if (edit.error) return edit.error;
+  if (edit.result) return `Modify result: ${edit.result.accepted ? "accepted" : "not accepted"}${edit.result.message ? " / " + edit.result.message : ""}`;
+  if (edit.cancelResult) return `Cancel result: ${edit.cancelResult.accepted ? "accepted" : "not accepted"}${edit.cancelResult.message ? " / " + edit.cancelResult.message : ""}`;
+  if (edit.preview) return modifyPreviewLine(edit.preview);
+  const reasons = [modifyGate.ready ? "" : modifyGate.reason, cancelGate.ready ? "" : cancelGate.reason].filter(Boolean);
+  return reasons.length ? reasons.join(" / ") : `Open ${order.action || "--"} ${order.quantity || "--"} ${order.symbol || "--"}`;
+}
+
+function modifyPreviewLine(preview) {
+  const parts = [
+    preview.submit_eligible ? "submit eligible" : "not submit eligible",
+    preview.what_if?.status ? `WhatIf ${preview.what_if.status}` : "",
+    preview.preview_token_id ? `token ${preview.preview_token_id}` : "no submit token",
+    preview.what_if?.message || "",
+    warningMessages(preview.warnings).join(" / "),
+  ].filter(Boolean);
+  return "Preview change: " + parts.join(" / ");
+}
+
+function transmitRowResult(rowID) {
+  return (state.orderTransmitResult?.rows || []).find((row) => row.row_id === rowID) || null;
+}
+
+function transmitResultSummary(result) {
+  const rows = result?.rows || [];
+  const accepted = rows.filter((row) => row.result?.accepted).length;
+  const failed = rows.filter((row) => row.failure || row.result?.accepted === false).length;
+  return `Transmit returned per-row results: ${accepted} accepted, ${failed} failed. This is not all-or-nothing.`;
+}
+
+function previewToken(preview) {
+  return String(preview?.preview_token || "").trim();
+}
+
+function readJSONOrText(res) {
+  return res.text().then((text) => {
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  });
 }
 
 function capabilityLine(trading, set) {
@@ -1852,10 +2639,82 @@ function reviewSetIsStale(set) {
   return canaryChanged || accountChanged || modeChanged;
 }
 
-function transmitDisabledReason(trading, previewSubmitReady) {
-  if (!trading.can_transmit) return "Transmit is not enabled by trading.status";
-  if (!previewSubmitReady) return "Preview selected rows first; every selected row must be submit eligible";
-  return "Ready when backend transmit is enabled";
+function transmitConfirmationText(set, preview, selected, trading) {
+  const previewRows = previewRowsByID(preview);
+  const firstPreview = selected.map((row) => previewRows.get(row.row_id)?.preview).find(Boolean);
+  const lines = [
+    "Transmit selected orders?",
+    "",
+    `Mode: ${labelize(firstPreview?.mode || trading.mode || set.capabilities?.mode || "--")}`,
+    `Account: ${firstPreview?.account || trading.account || set.capabilities?.account || "--"}`,
+    `Endpoint: ${venueLabel(firstPreview || trading)}`,
+    "",
+    "Selected rows:",
+  ];
+  for (const row of selected) {
+    const previewRow = previewRows.get(row.row_id) || {};
+    lines.push(" - " + orderConfirmationLine(row, previewRow));
+  }
+  lines.push("", "Rows transmit independently; this is not all-or-nothing.");
+  return lines.join("\n");
+}
+
+function modifyConfirmationText(order, preview) {
+  const warnings = warningMessages(preview.warnings).join(" / ") || "--";
+  return [
+    "Apply previewed order change?",
+    "",
+    `Mode: ${labelize(preview.mode || order.mode || "--")}`,
+    `Account: ${preview.account || order.account || "--"}`,
+    `Endpoint: ${venueLabel(preview || order)}`,
+    `Order: ${preview.draft?.action || order.action || "--"} ${preview.draft?.quantity || "--"} ${preview.draft?.contract?.symbol || order.symbol || "--"} ${preview.draft?.order_type || order.order_type || "LMT"} ${priceLabel(preview.draft?.limit_price || order.limit_price)} ${preview.draft?.tif || order.tif || "DAY"}`,
+    `WhatIf: ${preview.what_if?.status || "--"}${preview.what_if?.message ? " / " + preview.what_if.message : ""}`,
+    `Broker warning/message: ${warnings}`,
+    `Submit eligibility: ${preview.submit_eligible ? "eligible" : "not eligible"} / ${preview.preview_token_id ? "token " + preview.preview_token_id : "no token"}`,
+  ].join("\n");
+}
+
+function cancelConfirmationText(order, trading) {
+  return [
+    "Cancel order?",
+    "",
+    `Mode: ${labelize(order.mode || trading.mode || "--")}`,
+    `Account: ${order.account || trading.account || "--"}`,
+    `Endpoint: ${venueLabel(order.endpoint ? order : trading)}`,
+    `Order: ${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"} ${order.order_type || "LMT"} ${priceLabel(order.limit_price)} ${order.tif || "DAY"}`,
+    `Status: ${[order.lifecycle_status, order.send_state, order.last_message].filter(Boolean).join(" / ") || "--"}`,
+  ].join("\n");
+}
+
+function orderConfirmationLine(row, previewRow) {
+  const preview = previewRow.preview || {};
+  const draft = previewRow.draft || preview.draft || {};
+  const warnings = [
+    ...warningMessages(preview.warnings),
+    ...(previewRow.warnings || []),
+    preview.what_if?.message || "",
+  ].filter(Boolean).join(" / ") || "--";
+  return [
+    `${draft.action || row.action || "--"} ${previewRow.quantity || rowEdit(row).quantity || "--"} ${contractLabel(draft.contract || row.contract)}`,
+    `${draft.order_type || row.order_type || "LMT"} ${priceLabel(draft.limit_price || row.limit_price)} ${draft.tif || row.tif || "DAY"}`,
+    `WhatIf ${previewRow.what_if_status || preview.what_if?.status || "--"}`,
+    `warning/message ${warnings}`,
+    `submit ${previewRow.submit_eligible ? "eligible" : "not eligible"} / ${preview.preview_token_id ? "token " + preview.preview_token_id : "no token"}`,
+  ].join(" / ");
+}
+
+function warningMessages(warnings = []) {
+  return warnings.map((warning) => {
+    if (!warning) return "";
+    if (typeof warning === "string") return warning;
+    return warning.message || warning.code || JSON.stringify(warning);
+  }).filter(Boolean);
+}
+
+function venueLabel(value = {}) {
+  if (value.endpoint) return value.endpoint;
+  if (value.gateway_host && value.gateway_port) return `${value.gateway_host}:${value.gateway_port}`;
+  return "broker endpoint unavailable";
 }
 
 function metaPill(text) {
@@ -2054,6 +2913,7 @@ $("clearSelectedAlertButton").addEventListener("click", () => {
 $("refreshOrderReviewButton").addEventListener("click", refreshOrderReviewSet);
 $("resetOrderReviewButton").addEventListener("click", resetOrderReviewEdits);
 $("previewOrdersButton").addEventListener("click", previewOrderReviewSet);
+$("transmitSelectedButton").addEventListener("click", transmitSelectedOrders);
 $("marketRegimeToggle").addEventListener("click", () => {
   state.regimeDetailOpen = !state.regimeDetailOpen;
   renderRegimeDetail(state.snapshot?.canary?.market_indicators || []);
@@ -2259,7 +3119,7 @@ function signedTone(value, inverse = false) {
 
 function numberRead(value) {
   if (typeof value !== "number") return "--";
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+  return new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 }
 
 function riskMoney(value, currency) {
@@ -2284,7 +3144,7 @@ function wholePct(value) {
 function signedPct(value) {
   if (typeof value !== "number") return "--";
   const sign = value > 0 ? "+" : "";
-  return sign + value.toFixed(1) + "%";
+  return sign + value.toFixed(2) + "%";
 }
 
 function cleanDetail(value) {
@@ -2331,7 +3191,9 @@ function setConnection(text, ok) {
   state.connectionText = text;
   state.connectionOK = ok;
   $("statusDot").className = "status-dot " + (ok ? "ok" : "risk");
-  $("statusDot").setAttribute("aria-label", ok ? "app connected" : "app reconnecting");
+  const statusLabel = ok ? "App data stream connected" : "App data stream reconnecting";
+  $("statusDot").setAttribute("aria-label", statusLabel);
+  $("statusDot").title = statusLabel;
   renderTopbar(state.snapshot || {});
 }
 

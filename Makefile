@@ -17,6 +17,8 @@ DATE     ?= $(shell TZ=UTC date +%Y-%m-%dT%H:%M:%SZ)
 STRIP_LDFLAGS = -s -w
 
 LDFLAGS = $(STRIP_LDFLAGS) -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+GO_TAGS ?=
+GO_BUILD_TAGS = $(if $(strip $(GO_TAGS)),-tags '$(GO_TAGS)',)
 
 # Install location for `make install`. Defaults to ~/.local/bin (XDG
 # user-local convention; usually already on PATH). Override for a system
@@ -52,7 +54,7 @@ help: ## List available targets
 
 build: ## Compile bin/ibkr with version stamped via ldflags
 	@mkdir -p bin
-	go build -ldflags '$(LDFLAGS)' -o bin/ibkr ./cmd/ibkr
+	go build $(GO_BUILD_TAGS) -ldflags '$(LDFLAGS)' -o bin/ibkr ./cmd/ibkr
 
 install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin)
 	install -d $(PREFIX)/bin
