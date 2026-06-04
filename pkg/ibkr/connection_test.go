@@ -196,3 +196,16 @@ func TestConnection_HandleAccountSummaryUpdatesAccount(t *testing.T) {
 		t.Fatalf("expected NetLiquidation value 150000, got %s", stored)
 	}
 }
+
+func TestConnectionManagedAccountsStoresVersionedAccountList(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatalf("NewConnection returned nil")
+	}
+
+	conn.processMessage(conn.encodeMsg(msgManagedAccts, "1", "DU123"))
+
+	if got := conn.GetAccountCode(); got != "DU123" {
+		t.Fatalf("managed account = %q, want DU123", got)
+	}
+}

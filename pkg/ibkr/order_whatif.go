@@ -63,8 +63,8 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 	if !c.IsConnected() {
 		return orderWhatIfUnavailableResult("not connected to IBKR"), nil
 	}
-	if c.serverVersion > 0 && c.serverVersion < minServerVerProtoBufPlaceOrder {
-		return orderWhatIfUnavailableResult(fmt.Sprintf("server version %d is too old for placeOrder v45+ encoding", c.serverVersion)), nil
+	if c.serverVersion >= minServerVerProtoBufPlaceOrder {
+		return orderWhatIfUnavailableResult(fmt.Sprintf("broker WhatIf unavailable: server version %d requires protobuf placeOrder encoding, which this build does not send yet", c.serverVersion)), nil
 	}
 	if err := preparePlaceOrder(order, c); err != nil {
 		return OrderWhatIfResult{}, err

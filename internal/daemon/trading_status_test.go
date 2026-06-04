@@ -62,6 +62,24 @@ func TestTradingStatusBlocksPaperModeOnLiveLookingEndpoint(t *testing.T) {
 	}
 }
 
+func TestTradingStatusBlocksAggregateAccount(t *testing.T) {
+	t.Parallel()
+	port := 7497
+	clientID := 31
+	srv := &Server{cfg: &config.Resolved{
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "All"},
+		Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+	}}
+	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 7497, ClientID: 31, Account: "All", PortOrigin: discover.OriginPinned})
+
+	if !hasTradingBlocker(st, "gateway_account_not_concrete") {
+		t.Fatalf("missing aggregate account blocker in %+v", st.Blockers)
+	}
+	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("blocked capabilities should all be false: %+v", st)
+	}
+}
+
 func TestTradingStatusBlocksClientIDAutoWalk(t *testing.T) {
 	t.Parallel()
 	port := 4002
