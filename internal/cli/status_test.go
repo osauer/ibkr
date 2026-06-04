@@ -250,8 +250,9 @@ func TestRenderStatus_FlightDeckShape(t *testing.T) {
 		DaemonVersion: "v1.0.0",
 		UptimeSeconds: 1842,
 		Account:       "DU0000000",
+		AccountMode:   rpc.AccountModePaper,
 		GatewayHost:   "127.0.0.1",
-		GatewayPort:   4001,
+		GatewayPort:   4002,
 		PortOrigin:    "discovered",
 		ClientID:      17,
 		Connected:     true,
@@ -267,7 +268,7 @@ func TestRenderStatus_FlightDeckShape(t *testing.T) {
 	got := stdout.String()
 	for _, want := range []string{
 		"IBKR Gateway  READY",
-		"Session        DU0000000 via 127.0.0.1:4001 (tls=false, discovered), client 17",
+		"Session        DU0000000 (PAPER) via 127.0.0.1:4002 (tls=false, discovered), client 17",
 		"Market data    Live",
 		"Daemon         v1.0.0, up 30m42s",
 		"TWS            API server 178",
@@ -279,6 +280,46 @@ func TestRenderStatus_FlightDeckShape(t *testing.T) {
 	}
 	if strings.Contains(got, "Next concern") {
 		t.Fatalf("clean status should omit Next concern:\n%s", got)
+	}
+}
+
+func TestRenderStatus_ConnectedAccountAndPaperBadge(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}, Color: true}
+	res := &rpc.HealthResult{
+		DaemonVersion:    "v1.0.0",
+		Account:          "",
+		ConnectedAccount: "DU1234567",
+		AccountMode:      rpc.AccountModePaper,
+		GatewayHost:      "127.0.0.1",
+		GatewayPort:      4002,
+		PortOrigin:       "discovered",
+		ClientID:         15,
+		Connected:        true,
+		ServerVersion:    203,
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	wantBadge := ansiYellow + ansiBold + "PAPER" + ansiReset + ansiReset
+	if !strings.Contains(got, "Session") || !strings.Contains(got, "DU1234567 ("+wantBadge+") via 127.0.0.1:4002") {
+		t.Fatalf("status should render connected paper account with prominent badge:\n%q", got)
+	}
+	if strings.Contains(got, "auto-detect") {
+		t.Fatalf("connected account should replace auto-detect placeholder:\n%s", got)
+	}
+}
+
+func TestFormatStatusAccountMode(t *testing.T) {
+	t.Parallel()
+	if got := formatStatusAccountMode(&Env{Color: false}, rpc.AccountModePaper); got != "PAPER" {
+		t.Fatalf("paper no-color badge = %q, want PAPER", got)
+	}
+	if got := formatStatusAccountMode(&Env{Color: false}, rpc.AccountModeLive); got != "live" {
+		t.Fatalf("live badge = %q, want live", got)
+	}
+	if got := formatStatusAccountMode(&Env{Color: false}, ""); got != "" {
+		t.Fatalf("empty mode badge = %q, want empty", got)
 	}
 }
 

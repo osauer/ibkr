@@ -36,6 +36,7 @@ type Snapshot struct {
 	Account   *rpc.AccountResult        `json:"account,omitempty"`
 	Positions *rpc.PositionsResult      `json:"positions,omitempty"`
 	Canary    *rpc.CanaryResult         `json:"canary,omitempty"`
+	Trading   *rpc.TradingStatus        `json:"trading,omitempty"`
 	Errors    []SourceError             `json:"errors,omitempty"`
 	Sources   map[string]SourceMeta     `json:"sources,omitempty"`
 }
@@ -146,6 +147,16 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources["positions"] = SourceMeta{UpdatedAt: now}
 		if s.changed("positions", positions) {
 			events = append(events, Event{Type: "positions", Data: positions})
+		}
+	}
+	if trading, err := s.client.TradingStatus(ctx); err != nil {
+		errors = append(errors, sourceErr("trading", err, now))
+		snap.Sources["trading"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.Trading = trading
+		snap.Sources["trading"] = SourceMeta{UpdatedAt: now}
+		if s.changed("trading", trading) {
+			events = append(events, Event{Type: "trading", Data: trading})
 		}
 	}
 	if pollCanary {

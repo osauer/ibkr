@@ -61,7 +61,7 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	fmt.Fprintf(out, "IBKR Gateway  %s\n", env.statusBadge(statusVerdict(*res, cliVersion)))
 	fmt.Fprintln(out)
 
-	statusRow(env, out, "Session", formatSessionValue(*res))
+	statusRow(env, out, "Session", formatSessionValue(env, *res))
 	statusRow(env, out, "Market data", formatMarketDataValue(env, *res))
 	if len(res.DataFarms) > 0 {
 		statusRow(env, out, "Data farms", env.yellow(formatDataFarmsValue(res.DataFarms)))
@@ -216,14 +216,37 @@ func daemonVersionDrift(daemonVersion, cliVersion string) bool {
 		daemonVersion != cliVersion
 }
 
-func formatSessionValue(res rpc.HealthResult) string {
-	account := nonEmpty(res.Account, "auto-detect")
+func formatSessionValue(env *Env, res rpc.HealthResult) string {
+	account := statusAccountID(res)
+	if mode := formatStatusAccountMode(env, res.AccountMode); mode != "" {
+		account += " (" + mode + ")"
+	}
 	endpoint := formatGatewayAddress(res)
 	value := fmt.Sprintf("%s via %s %s, client %d", account, endpoint, formatGatewayBadge(res), res.ClientID)
 	if len(res.Alternates) > 0 {
 		value += "; also up: " + joinPorts(res.Alternates)
 	}
 	return value
+}
+
+func statusAccountID(res rpc.HealthResult) string {
+	if account := strings.TrimSpace(res.ConnectedAccount); account != "" {
+		return account
+	}
+	return nonEmpty(res.Account, "auto-detect")
+}
+
+func formatStatusAccountMode(env *Env, mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case rpc.AccountModePaper:
+		return env.yellow(env.bold("PAPER"))
+	case rpc.AccountModeLive:
+		return "live"
+	case rpc.AccountModeUnknown:
+		return env.dim("unknown")
+	default:
+		return strings.TrimSpace(mode)
+	}
 }
 
 func formatGatewayAddress(res rpc.HealthResult) string {

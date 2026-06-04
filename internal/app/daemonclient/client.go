@@ -17,6 +17,11 @@ type Client interface {
 	Account(context.Context) (*rpc.AccountResult, error)
 	Positions(context.Context) (*rpc.PositionsResult, error)
 	Canary(context.Context) (*rpc.CanaryResult, error)
+	TradingStatus(context.Context) (*rpc.TradingStatus, error)
+	RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error)
+	OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error)
+	OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error)
+	OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error)
 }
 
 type Real struct {
@@ -65,6 +70,51 @@ func (c Real) Canary(ctx context.Context) (*rpc.CanaryResult, error) {
 	defer conn.Close()
 	out, err := cli.FetchCanary(ctx, conn)
 	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {
+	var out rpc.TradingStatus
+	if err := c.call(ctx, rpc.MethodTradingStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) RiskPlan(ctx context.Context, mode string, trigger *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	out, err := cli.FetchRiskPlan(ctx, conn, mode, trigger)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrderPreview(ctx context.Context, params rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {
+	var out rpc.OrderPreviewResult
+	if err := c.call(ctx, rpc.MethodOrderPreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrdersOpen(ctx context.Context, params rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error) {
+	var out rpc.OrdersOpenResult
+	if err := c.call(ctx, rpc.MethodOrdersOpen, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OrderStatus(ctx context.Context, params rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
+	var out rpc.OrderStatusResult
+	if err := c.call(ctx, rpc.MethodOrderStatus, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

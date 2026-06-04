@@ -14,6 +14,13 @@ const state = {
   accountMenuOpen: false,
   selectedAlertID: null,
   alertFilter: "all",
+  orderReviewSets: [],
+  activeOrderReviewSetID: null,
+  orderReviewEdits: {},
+  orderReviewLoading: false,
+  orderReviewError: "",
+  orderPreview: null,
+  ordersOpen: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -77,14 +84,18 @@ function applyBootstrap(data) {
   state.snapshot = data.snapshot;
   state.alertSettings = data.alert_settings || state.alertSettings;
   state.alerts = data.alerts || [];
+  state.orderReviewSets = data.order_review_sets || [];
+  state.activeOrderReviewSetID = state.orderReviewSets[0]?.id || null;
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
   $("dashboard").hidden = false;
   $("alertsPanel").hidden = false;
+  $("ordersPanel").hidden = false;
   $("toolsPanel").hidden = false;
   setConnection("Connected", true);
   renderAll();
   connectEvents();
+  refreshOpenOrders();
 }
 
 async function completePairing(pairingID, nonce) {
@@ -179,7 +190,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "trading", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -227,6 +238,8 @@ function renderAll() {
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
+  renderOrderReview();
+  renderOpenOrders();
   renderMarketContext(canary);
   renderCanaryDetail(canary);
   renderPortfolioRisk(positions, account);
@@ -239,13 +252,19 @@ function renderAll() {
 function renderAccountValue(account) {
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
   const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
+  const accountContext = currentAccountContext(account);
   const value = $("netLiquidation");
   value.textContent = state.accountValueVisible || !hasValue
-    ? money(account.net_liquidation, account.base_currency)
+    ? compactMoney(account.net_liquidation, account.base_currency)
     : "******";
   value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
-  renderSensitiveText("buyingPower", money(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
-  renderSensitiveText("accountID", account.account_id || "--", Boolean(account.account_id));
+  renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
+  $("accountContextLine").textContent = accountContext.contextLine;
+  $("tradingEnvPill").textContent = accountContext.modeLabel;
+  $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
+  $("accountStatusCard").className = "account-status-card " + accountContext.modeClass;
+  $("accountEnvironment").textContent = accountContext.modeLabel;
+  $("orderAccountLabel").textContent = accountContext.accountLabel;
 
   const button = $("accountPrivacyToggle");
   button.classList.toggle("is-visible", state.accountValueVisible);
@@ -253,11 +272,6 @@ function renderAccountValue(account) {
   const label = state.accountValueVisible ? "Hide account values" : "Show account values";
   button.setAttribute("aria-label", label);
   button.title = label;
-  $("accountPrivacyLabel").textContent = state.accountValueVisible ? "Hide values" : "Show values";
-  $("accountPrivacyState").textContent = state.accountValueVisible ? "Visible" : "Hidden";
-  $("accountPrivacyNote").textContent = state.accountValueVisible
-    ? "Values are visible on this device."
-    : "Values are hidden. Enable to view your account metrics.";
   renderAccountMenu(account);
 }
 
@@ -266,15 +280,36 @@ function renderAccountMenu(account) {
   const button = $("accountMenuToggle");
   if (!panel || !button) return;
 
-  const hasAccountSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
+  const accountContext = currentAccountContext(account);
   panel.hidden = !state.accountMenuOpen;
   button.setAttribute("aria-expanded", String(state.accountMenuOpen));
-  $("menuAccountID").textContent = account.account_id
-    ? state.accountValueVisible ? account.account_id : "******"
-    : "Not synced";
-  $("menuAccountType").textContent = account.account_type || account.type || (hasAccountSnapshot ? "IBKR" : "Local PWA");
-  $("menuBaseCurrency").textContent = account.base_currency || "Pending";
-  $("menuAccountSync").textContent = account.as_of ? shortTimeWithZone(account.as_of) : "Waiting";
+  $("accountChipText").textContent = accountContext.chipLabel;
+}
+
+function currentAccountContext(account = {}) {
+  const trading = state.snapshot?.trading || {};
+  const rawTradingAccount = String(trading.account || "").trim();
+  const rawAccount = String(account.account_id || "").trim();
+  const rawPositionsAccount = String(state.snapshot?.positions?.account_id || "").trim();
+  const concreteTradingAccount = rawTradingAccount && rawTradingAccount.toLowerCase() !== "all" ? rawTradingAccount : "";
+  const concreteAccount = rawAccount && rawAccount.toLowerCase() !== "all" ? rawAccount : "";
+  const concretePositionsAccount = rawPositionsAccount && rawPositionsAccount.toLowerCase() !== "all" ? rawPositionsAccount : "";
+  const accountLabel = concreteTradingAccount || concreteAccount || concretePositionsAccount || "";
+  const mode = String(trading.mode || "").trim();
+  const modeLabel = mode ? labelize(mode) : account.account_type || account.type || (accountLabel ? "IBKR" : "Local PWA");
+  const aggregate = rawTradingAccount.toLowerCase() === "all" || rawAccount.toLowerCase() === "all" || rawPositionsAccount.toLowerCase() === "all";
+  const contextLine = accountLabel
+    ? `${accountLabel} / ${modeLabel}`
+    : aggregate ? `No concrete order account / ${modeLabel}` : "No account synced";
+  return {
+    accountLabel: accountLabel || "No concrete account",
+    chipLabel: accountLabel ? `${accountLabel} / ${modeLabel}` : mode ? modeLabel : "Account",
+    contextLine,
+    modeClass: String(modeLabel).toLowerCase().includes("paper") ? "paper" : String(modeLabel).toLowerCase().includes("live") ? "live" : "neutral",
+    modeLabel,
+    hasAccount: Boolean(accountLabel || aggregate),
+    hasConcreteAccount: Boolean(accountLabel),
+  };
 }
 
 function renderCanaryDetail(canary) {
@@ -1164,10 +1199,13 @@ function renderAlertMode() {
 function renderAlerts() {
   const items = filteredAlertItems();
   const allItems = alertItems();
-  $("alertCount").textContent = `${allItems.length} Active`;
+  const activeItems = allItems.filter((alert) => !alertIsStale(alert));
+  const staleCount = state.alerts.filter((alert) => alertIsStale(alert)).length;
+  $("alertCount").textContent = `${activeItems.length} Active`;
   $("alertsHint").textContent = state.alerts.length === 0
     ? "Live canary preview; no alert history recorded yet."
-    : "Tap an alert to inspect it in Canary.";
+    : staleCount > 0 ? `${staleCount} previous-context alert${staleCount === 1 ? "" : "s"} hidden. Clear history to reset.`
+      : "Tap an alert to inspect it in Canary.";
   $("clearAlertsButton").disabled = state.alerts.length === 0;
   document.querySelectorAll("[data-alert-filter]").forEach((button) => {
     button.classList.toggle("active", button.dataset.alertFilter === state.alertFilter);
@@ -1175,12 +1213,14 @@ function renderAlerts() {
   $("alertsList").replaceChildren(...items.map((alert) => {
     const row = document.createElement("button");
     row.className = "alert-row alert-row--" + alertTone(alert);
+    row.classList.toggle("alert-row--stale", alertIsStale(alert));
     row.type = "button";
     row.classList.toggle("active", alert.id === state.selectedAlertID);
     row.addEventListener("click", () => {
       state.selectedAlertID = alert.id;
       renderAlerts();
       renderSelectedAlert();
+      if (!activeOrderReviewSet()) refreshOrderReviewSet();
       $("selectedAlertPanel").scrollIntoView({ block: "nearest" });
     });
     const text = document.createElement("div");
@@ -1190,7 +1230,7 @@ function renderAlerts() {
     body.textContent = alert.body;
     text.append(title, body);
     const at = document.createElement("span");
-    at.textContent = shortTime(alert.created_at);
+    at.textContent = alertIsStale(alert) ? "stale" : shortTime(alert.created_at);
     row.append(text, at);
     return row;
   }));
@@ -1208,8 +1248,347 @@ function renderSelectedAlert() {
   panel.hidden = !alert;
   if (!alert) return;
   $("selectedAlertTitle").textContent = alert.title || "Canary alert";
-  $("selectedAlertBody").textContent = alert.body || "Open detail for the current canary context.";
-  $("selectedAlertTime").textContent = alert.created_at ? `recorded ${shortTime(alert.created_at)}` : "recorded --";
+  const stale = alertIsStale(alert);
+  $("selectedAlertBody").textContent = stale
+    ? `Stale alert from a previous canary/account context. ${alert.body || ""}`.trim()
+    : alert.body || "Open detail for the current canary context.";
+  $("selectedAlertTime").textContent = stale
+    ? "not valid for current daemon context"
+    : alert.created_at ? `recorded ${shortTime(alert.created_at)}` : "recorded --";
+}
+
+function activeOrderReviewSet() {
+  return state.orderReviewSets.find((set) => set.id === state.activeOrderReviewSetID) || state.orderReviewSets[0] || null;
+}
+
+function renderOrderReview() {
+  const panel = $("orderReviewPanel");
+  const canary = state.snapshot?.canary || {};
+  const set = activeOrderReviewSet();
+  const staleReview = reviewSetIsStale(set);
+  const shouldShow = Boolean(set || canary.action || canary.severity || state.snapshot?.trading);
+  panel.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  const trading = set?.capabilities || state.snapshot?.trading || {};
+  $("orderReviewTitle").textContent = set ? labelize(set.intent || "mitigation") : "Risk action plan";
+  $("orderReviewMeta").textContent = set
+    ? `${set.plan_id || "plan"} / ${set.revision || "revision"}`
+    : "Create a review set from the latest canary context";
+  $("orderReviewStatus").textContent = capabilityLine(trading, set);
+  $("refreshOrderReviewButton").disabled = state.orderReviewLoading;
+
+  const rows = set?.rows || [];
+  $("orderReviewRows").replaceChildren(...rows.map(orderReviewRowElement));
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "order-review__empty";
+    empty.textContent = state.orderReviewLoading ? "Refreshing risk plan." : "No review rows yet.";
+    $("orderReviewRows").replaceChildren(empty);
+  }
+
+  const selected = rows.filter((row) => rowEdit(row).included && rowEdit(row).quantity > 0);
+  const totalQty = selected.reduce((sum, row) => sum + rowEdit(row).quantity, 0);
+  $("orderReviewSummary").textContent = selected.length === 0
+    ? "No selected rows"
+    : `${selected.length} selected / ${totalQty} units`;
+  $("resetOrderReviewButton").disabled = !set || state.orderReviewLoading;
+  $("previewOrdersButton").disabled = !set || staleReview || !trading.can_preview || selected.length === 0 || state.orderReviewLoading;
+  const previewSubmitReady = state.orderPreview?.set_id === set?.id && state.orderPreview?.set_revision === set?.revision && state.orderPreview?.submit_ready;
+  $("transmitSelectedButton").disabled = !set || !trading.can_transmit || !previewSubmitReady;
+  $("transmitSelectedButton").title = transmitDisabledReason(trading, previewSubmitReady);
+
+  renderOrderPreview();
+}
+
+function orderReviewRowElement(row) {
+  const edit = rowEdit(row);
+  const item = document.createElement("div");
+  item.className = "order-review-row";
+  if (!edit.included || edit.quantity === 0) item.classList.add("excluded");
+
+  const include = document.createElement("input");
+  include.type = "checkbox";
+  include.checked = edit.included;
+  include.setAttribute("aria-label", `Include ${row.contract?.symbol || row.row_id}`);
+  include.addEventListener("change", () => {
+    state.orderReviewEdits[row.row_id] = { ...edit, included: include.checked, quantity: include.checked ? Math.max(1, edit.quantity || row.editable_quantity || row.proposed_quantity || 1) : 0 };
+    renderOrderReview();
+  });
+
+  const main = document.createElement("div");
+  main.className = "order-review-row__main";
+  const title = document.createElement("b");
+  title.textContent = `${row.action || "--"} ${contractLabel(row.contract)}`;
+  const rationale = document.createElement("p");
+  rationale.textContent = row.rationale || "Risk-plan row";
+  main.append(title, rationale);
+
+  const meta = document.createElement("div");
+  meta.className = "order-review-row__meta";
+  meta.append(metaPill(`Proposed ${row.proposed_quantity || 0}`));
+  meta.append(metaPill(`${row.order_type || "LMT"} ${priceLabel(row.limit_price)}`));
+  meta.append(metaPill(row.tif || "DAY"));
+  if (row.position_effect) meta.append(metaPill(labelize(row.position_effect)));
+
+  const qty = document.createElement("input");
+  qty.type = "number";
+  qty.min = "0";
+  qty.max = String(row.max_quantity ?? row.proposed_quantity ?? 0);
+  qty.step = "1";
+  qty.value = String(edit.quantity ?? 0);
+  qty.addEventListener("input", () => {
+    const next = Math.max(0, Math.trunc(Number(qty.value || 0)));
+    state.orderReviewEdits[row.row_id] = { ...edit, included: next > 0 && edit.included, quantity: next };
+    renderOrderReview();
+  });
+
+  const blockers = document.createElement("div");
+  blockers.className = "order-review-row__blockers";
+  blockers.textContent = (row.blockers || []).join(" / ");
+  blockers.hidden = (row.blockers || []).length === 0;
+
+  item.append(include, main, meta, qty, blockers);
+  return item;
+}
+
+function renderOrderPreview() {
+  const panel = $("orderPreviewPanel");
+  const preview = state.orderPreview;
+  if (!preview && !state.orderReviewError) {
+    panel.hidden = true;
+    panel.replaceChildren();
+    return;
+  }
+  panel.hidden = false;
+  const children = [];
+  if (state.orderReviewError) {
+    const banner = document.createElement("div");
+    banner.className = "order-preview__banner";
+    banner.textContent = state.orderReviewError;
+    children.push(banner);
+  }
+  if (preview) {
+    const head = document.createElement("div");
+    head.className = "order-preview__head";
+    head.innerHTML = `<b>${preview.submit_ready ? "Submit-ready preview" : "Preview needs attention"}</b><span>${shortTime(preview.as_of)}</span>`;
+    children.push(head);
+    for (const row of preview.rows || []) {
+      const item = document.createElement("div");
+      item.className = "order-preview-row";
+      const title = document.createElement("b");
+      title.textContent = row.draft
+        ? `${row.draft.action} ${row.quantity} ${contractLabel(row.draft.contract)}`
+        : `${row.row_id} / ${row.quantity}`;
+      const detail = document.createElement("p");
+      detail.textContent = previewRowLine(row);
+      const token = document.createElement("small");
+      token.textContent = row.preview?.preview_token_id ? `token ${row.preview.preview_token_id}` : "no submit token";
+      item.append(title, detail, token);
+      children.push(item);
+    }
+  }
+  panel.replaceChildren(...children);
+}
+
+function renderOpenOrders() {
+  const list = $("ordersOpenList");
+  const orders = state.ordersOpen?.orders || [];
+  $("ordersAsOf").textContent = state.ordersOpen?.as_of ? shortTime(state.ordersOpen.as_of) : "--";
+  if (orders.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-row";
+    empty.textContent = "No open journal-backed orders.";
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...orders.map((order) => {
+    const row = document.createElement("div");
+    row.className = "open-order-row";
+    const title = document.createElement("b");
+    title.textContent = `${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"}`;
+    const meta = document.createElement("span");
+    meta.textContent = [order.lifecycle_status, order.send_state, order.order_ref].filter(Boolean).join(" / ") || "journal view";
+    const controls = document.createElement("div");
+    controls.className = "open-order-row__controls";
+    const trading = state.snapshot?.trading || {};
+    controls.append(disabledOrderButton("Modify", trading.can_modify && order.modify_eligible === true));
+    controls.append(disabledOrderButton("Cancel", trading.can_cancel && order.cancel_eligible === true));
+    row.append(title, meta, controls);
+    return row;
+  }));
+}
+
+function disabledOrderButton(label, enabled) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button";
+  button.textContent = label;
+  button.disabled = !enabled;
+  button.title = enabled ? label : `${label} is not enabled by trading.status`;
+  return button;
+}
+
+function rowEdit(row) {
+  return state.orderReviewEdits[row.row_id] || {
+    included: row.included,
+    quantity: row.editable_quantity ?? row.proposed_quantity ?? 0,
+  };
+}
+
+function resetOrderReviewEdits() {
+  state.orderReviewEdits = {};
+  state.orderPreview = null;
+  state.orderReviewError = "";
+  renderOrderReview();
+}
+
+async function refreshOrderReviewSet() {
+  state.orderReviewLoading = true;
+  state.orderReviewError = "";
+  renderOrderReview();
+  try {
+    const res = await fetch("/api/order-review-sets", { method: "POST", credentials: "include" });
+    if (!res.ok) throw new Error(await res.text());
+    const set = await res.json();
+    upsertOrderReviewSet(set);
+    state.activeOrderReviewSetID = set.id;
+    resetOrderReviewEdits();
+  } catch (err) {
+    state.orderReviewError = err.message;
+    renderOrderReview();
+  } finally {
+    state.orderReviewLoading = false;
+    renderOrderReview();
+  }
+}
+
+async function previewOrderReviewSet() {
+  const set = activeOrderReviewSet();
+  if (!set) return;
+  if (reviewSetIsStale(set)) {
+    state.orderReviewError = "Review set is stale for the current canary/account context. Refresh before previewing.";
+    renderOrderReview();
+    return;
+  }
+  state.orderReviewLoading = true;
+  state.orderReviewError = "";
+  renderOrderReview();
+  const rows = (set.rows || []).map((row) => {
+    const edit = rowEdit(row);
+    return { row_id: row.row_id, included: Boolean(edit.included), quantity: Number(edit.quantity || 0) };
+  });
+  try {
+    const res = await fetch(`/api/order-review-sets/${encodeURIComponent(set.id)}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ revision: set.revision, rows }),
+    });
+    const body = await res.json();
+    if (res.status === 409 && body.code === "rebase_required") {
+      upsertOrderReviewSet(body.current_set);
+      state.activeOrderReviewSetID = body.current_set.id;
+      state.orderReviewEdits = {};
+      state.orderPreview = null;
+      state.orderReviewError = "Proposal changed. Review the refreshed rows before previewing.";
+      return;
+    }
+    if (!res.ok) throw new Error(body.error || JSON.stringify(body));
+    upsertOrderReviewSet(body.set);
+    state.activeOrderReviewSetID = body.set.id;
+    state.orderPreview = body.preview;
+    await refreshOpenOrders();
+  } catch (err) {
+    state.orderReviewError = err.message;
+  } finally {
+    state.orderReviewLoading = false;
+    renderOrderReview();
+  }
+}
+
+async function refreshOpenOrders() {
+  try {
+    const res = await fetch("/api/orders/open", { credentials: "include" });
+    if (!res.ok) return;
+    state.ordersOpen = await res.json();
+    renderOpenOrders();
+  } catch {
+    // Open orders are read-only context; the live snapshot remains primary.
+  }
+}
+
+function upsertOrderReviewSet(set) {
+  if (!set?.id) return;
+  const next = state.orderReviewSets.filter((item) => item.id !== set.id);
+  state.orderReviewSets = [set, ...next].slice(0, 10);
+}
+
+function capabilityLine(trading, set) {
+  if (!set) return "Create or refresh the review set before preview.";
+  if (reviewSetIsStale(set)) return "Stale review set for a previous canary/account context. Refresh before preview.";
+  const bits = [
+    trading.can_preview ? "preview ready" : "preview blocked",
+    trading.can_transmit ? "transmit ready" : "transmit disabled",
+    trading.open_orders ? `${trading.open_orders} open` : "",
+  ].filter(Boolean);
+  const blockers = (trading.blockers || []).map((blocker) => blocker.message || blocker.code).filter(Boolean);
+  return [...bits, ...blockers].join(" / ") || "Trading status unavailable";
+}
+
+function currentCanaryFingerprint() {
+  return state.snapshot?.canary?.fingerprint?.key || "";
+}
+
+function alertIsStale(alert) {
+  const current = currentCanaryFingerprint();
+  const canaryChanged = Boolean(alert?.fingerprint && current && alert.fingerprint !== current);
+  const trading = state.snapshot?.trading || {};
+  const accountChanged = Boolean(alert?.account && trading.account && alert.account !== trading.account);
+  const modeChanged = Boolean(alert?.mode && trading.mode && alert.mode !== trading.mode);
+  return canaryChanged || accountChanged || modeChanged;
+}
+
+function reviewSetIsStale(set) {
+  const current = currentCanaryFingerprint();
+  const canaryChanged = Boolean(set?.canary_fingerprint && current && set.canary_fingerprint !== current);
+  const trading = state.snapshot?.trading || {};
+  const setCaps = set?.capabilities || {};
+  const accountChanged = Boolean(setCaps.account && trading.account && setCaps.account !== trading.account);
+  const modeChanged = Boolean(setCaps.mode && trading.mode && setCaps.mode !== trading.mode);
+  return canaryChanged || accountChanged || modeChanged;
+}
+
+function transmitDisabledReason(trading, previewSubmitReady) {
+  if (!trading.can_transmit) return "Transmit is not enabled by trading.status";
+  if (!previewSubmitReady) return "Preview selected rows first; every selected row must be submit eligible";
+  return "Ready when backend transmit is enabled";
+}
+
+function metaPill(text) {
+  const pill = document.createElement("span");
+  pill.textContent = text || "--";
+  return pill;
+}
+
+function contractLabel(contract = {}) {
+  if (contract.local_symbol) return contract.local_symbol;
+  if (!contract.symbol) return "--";
+  if (contract.sec_type === "OPT") return `${contract.symbol} ${contract.expiry || ""} ${contract.right || ""}${contract.strike || ""}`.trim();
+  return contract.symbol;
+}
+
+function priceLabel(value) {
+  return typeof value === "number" ? value.toFixed(2) : "auto";
+}
+
+function previewRowLine(row) {
+  const parts = [];
+  parts.push(row.submit_eligible ? "submit eligible" : "not submit eligible");
+  if (row.what_if_status) parts.push(`WhatIf ${row.what_if_status}`);
+  if (row.blockers?.length) parts.push(row.blockers.join(" / "));
+  if (row.failure) parts.push(row.failure);
+  return parts.join(" / ");
 }
 
 async function refreshAlerts() {
@@ -1228,7 +1607,9 @@ async function refreshAlerts() {
 }
 
 function alertItems() {
-  const history = state.alerts.map((alert) => ({ ...alert, preview: false }));
+  const history = state.alerts
+    .map((alert) => ({ ...alert, preview: false }))
+    .filter((alert) => !alertIsStale(alert));
   const canary = state.snapshot?.canary || {};
   const rows = (canary.rows || []).slice(0, 3);
   const previews = rows.map((row, index) => ({
@@ -1236,6 +1617,7 @@ function alertItems() {
     title: row.title || labelize(row.severity || "canary"),
     body: [row.guidance, row.evidence].filter(Boolean).join(" ") || canary.summary || "Current canary context.",
     created_at: canary.as_of,
+    fingerprint: currentCanaryFingerprint(),
     severity: row.severity || canary.severity,
     preview: true,
   }));
@@ -1318,6 +1700,9 @@ $("clearSelectedAlertButton").addEventListener("click", () => {
   renderAlerts();
   renderSelectedAlert();
 });
+$("refreshOrderReviewButton").addEventListener("click", refreshOrderReviewSet);
+$("resetOrderReviewButton").addEventListener("click", resetOrderReviewEdits);
+$("previewOrdersButton").addEventListener("click", previewOrderReviewSet);
 $("marketRegimeToggle").addEventListener("click", () => {
   state.regimeDetailOpen = !state.regimeDetailOpen;
   renderRegimeDetail(state.snapshot?.canary?.market_indicators || []);
@@ -1442,6 +1827,21 @@ function bytesToB64url(bytes) {
 function money(value, currency) {
   if (typeof value !== "number") return "--";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
+}
+
+function compactMoney(value, currency) {
+  if (typeof value !== "number") return "--";
+  const abs = Math.abs(value);
+  if (abs >= 1000000) {
+    return `${currency || "USD"} ${(value / 1000000).toFixed(abs >= 10000000 ? 1 : 2)}m`;
+  }
+  if (abs >= 100000) {
+    return `${currency || "USD"} ${(value / 1000).toFixed(0)}k`;
+  }
+  if (abs >= 10000) {
+    return `${currency || "USD"} ${(value / 1000).toFixed(1)}k`;
+  }
+  return money(value, currency);
 }
 
 function renderSignedMoney(id, value, currency) {
@@ -1588,6 +1988,8 @@ function showPairing(text) {
   $("pairingPanel").hidden = false;
   $("dashboard").hidden = true;
   $("alertsPanel").hidden = true;
+  $("accountMenu").hidden = true;
+  $("ordersPanel").hidden = true;
   $("toolsPanel").hidden = true;
   $("syncStrip").hidden = true;
   $("pairingText").textContent = text;

@@ -22,31 +22,52 @@
               <path d="M12 3.25 18.5 5.8v5.7c0 4.8-2.6 8.6-6.5 10.25C8.1 19.1 5.5 15.3 5.5 11.5V5.8L12 3.25Z"></path>
             </svg>
           </span>
-          <span>Account</span>
+          <span id="accountChipText">Account</span>
           <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
             <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
           </svg>
         </button>
       </header>
 
-      <section class="account-menu" id="accountMenu" hidden>
-        <div>
+      <article class="panel account-panel account-popover" id="accountMenu" hidden>
+        <div class="panel-head">
           <span>Account</span>
-          <b id="menuAccountID">--</b>
+          <span class="trading-env-pill" id="tradingEnvPill">--</span>
+          <button class="icon-button account-privacy-toggle" id="accountPrivacyToggle" type="button" aria-label="Show account values" aria-pressed="false" title="Show account values">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"></path>
+              <circle cx="12" cy="12" r="2.6"></circle>
+            </svg>
+          </button>
+          <span class="panel-time" id="accountAsOf">--</span>
         </div>
-        <div>
-          <span>Type</span>
-          <b id="menuAccountType">--</b>
+        <div class="account-context-line" id="accountContextLine">Waiting for account context</div>
+        <div class="account-status-card" id="accountStatusCard">
+          <div>
+            <span>Environment</span>
+            <b id="accountEnvironment">--</b>
+          </div>
+          <div>
+            <span>Order account</span>
+            <b id="orderAccountLabel">--</b>
+          </div>
         </div>
-        <div>
-          <span>Base</span>
-          <b id="menuBaseCurrency">--</b>
+        <div class="account-metrics">
+          <div class="account-primary">
+            <span>Net Liquidation</span>
+            <strong id="netLiquidation">--</strong>
+          </div>
+          <div class="account-primary">
+            <span>Buying Power</span>
+            <strong id="buyingPower">--</strong>
+          </div>
+          <div class="account-primary">
+            <span>Daily P&amp;L</span>
+            <strong id="dailyPnl">--</strong>
+          </div>
         </div>
-        <div>
-          <span>Last account sync</span>
-          <b id="menuAccountSync">--</b>
-        </div>
-      </section>
+        <span class="sr-only" id="cushion">--</span>
+      </article>
 
       <section class="market-strip" aria-live="polite">
         <div class="market-strip__status">
@@ -141,6 +162,27 @@
             </div>
             <button class="text-button text-button--dark" id="clearSelectedAlertButton" type="button">Clear</button>
           </div>
+          <div class="order-review" id="orderReviewPanel" hidden>
+            <div class="order-review__head">
+              <div>
+                <span>Mitigation plan</span>
+                <b id="orderReviewTitle">Order review set</b>
+                <small id="orderReviewMeta">Waiting for risk plan</small>
+              </div>
+              <button class="text-button text-button--dark" id="refreshOrderReviewButton" type="button">Refresh</button>
+            </div>
+            <div class="order-review__status" id="orderReviewStatus">Preview unavailable</div>
+            <div class="order-review__rows" id="orderReviewRows"></div>
+            <div class="order-review__footer">
+              <span id="orderReviewSummary">No selected rows</span>
+              <div class="order-review__actions">
+                <button class="text-button text-button--dark" id="resetOrderReviewButton" type="button">Reset</button>
+                <button class="text-button text-button--dark" id="previewOrdersButton" type="button">Preview orders</button>
+                <button class="text-button text-button--dark" id="transmitSelectedButton" type="button" disabled>Transmit selected</button>
+              </div>
+            </div>
+            <div class="order-preview" id="orderPreviewPanel" hidden></div>
+          </div>
           <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
             <div class="detail-grid" id="canaryDetailGrid"></div>
             <div class="detail-list" id="canaryDrivers"></div>
@@ -185,50 +227,6 @@
           <div class="regime-detail-panel" id="regimeDetailPanel" hidden>
             <div class="regime-indicators" id="regimeIndicators"></div>
           </div>
-        </article>
-
-        <article class="panel account-panel">
-          <div class="panel-head">
-            <span>Account</span>
-            <span class="account-hidden-state">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"></path>
-                <circle cx="12" cy="12" r="2.6"></circle>
-                <path d="m4 4 16 16"></path>
-              </svg>
-              <span id="accountPrivacyState">Hidden</span>
-            </span>
-            <button class="text-link" id="accountPrivacyToggle" type="button" aria-label="Show account values" aria-pressed="false" title="Show account values">
-              <span id="accountPrivacyLabel">Show values</span>
-            </button>
-            <span class="panel-time" id="accountAsOf">--</span>
-          </div>
-          <div class="account-metrics">
-            <div class="account-primary">
-              <span>Net Liquidation</span>
-              <strong id="netLiquidation">--</strong>
-            </div>
-            <div class="account-primary">
-              <span>Buying Power</span>
-              <strong id="buyingPower">--</strong>
-            </div>
-            <div class="account-primary">
-              <span>Daily P&amp;L</span>
-              <strong id="dailyPnl">--</strong>
-            </div>
-            <div class="account-primary">
-              <span>Account</span>
-              <strong id="accountID">--</strong>
-            </div>
-          </div>
-          <p class="private-note">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10"></path>
-              <rect x="5" y="10" width="14" height="11" rx="2"></rect>
-            </svg>
-            <span id="accountPrivacyNote">Values are hidden. Enable to view your account metrics.</span>
-          </p>
-          <span class="sr-only" id="cushion">--</span>
         </article>
 
         <article class="panel portfolio-panel">
@@ -314,6 +312,23 @@
               </div>
               <button class="primary" id="enablePushButton" type="button">Enable phone alerts</button>
             </div>
+          </div>
+        </details>
+
+        <details class="panel orders-panel" id="ordersPanel" hidden open>
+          <summary class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7h14"></path>
+                <path d="M5 12h14"></path>
+                <path d="M5 17h8"></path>
+              </svg>
+              Open Orders
+            </span>
+            <span class="panel-time" id="ordersAsOf">--</span>
+          </summary>
+          <div class="orders-body">
+            <div class="orders-list" id="ordersOpenList"></div>
           </div>
         </details>
 

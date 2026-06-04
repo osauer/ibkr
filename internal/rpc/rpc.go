@@ -2649,6 +2649,12 @@ type DataFarmHealth struct {
 	AsOf    time.Time `json:"as_of,omitzero"`
 }
 
+const (
+	AccountModeUnknown = "unknown"
+	AccountModePaper   = "paper"
+	AccountModeLive    = "live"
+)
+
 // HealthResult is the response to MethodStatusHealth.
 //
 // PortOrigin / TLSOrigin record how the daemon arrived at the values
@@ -2661,18 +2667,26 @@ type HealthResult struct {
 	DaemonStarted time.Time `json:"daemon_started"`
 	UptimeSeconds int64     `json:"uptime_seconds"`
 	Account       string    `json:"account,omitempty"`
-	GatewayHost   string    `json:"gateway_host"`
-	GatewayPort   int       `json:"gateway_port"`
-	GatewayTLS    bool      `json:"gateway_tls"`
-	NegotiatedTLS bool      `json:"negotiated_tls"`
-	PortOrigin    string    `json:"port_origin"`
-	TLSOrigin     string    `json:"tls_origin"`
-	Alternates    []int     `json:"alternates,omitempty"`
-	ClientID      int       `json:"client_id"`
-	Connected     bool      `json:"connected"`
-	DataType      string    `json:"data_type,omitempty"`
-	ServerVersion int       `json:"server_version,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
+	// ConnectedAccount is the account code advertised by the connected
+	// TWS/Gateway session via managedAccounts / accountSummary. It differs
+	// from Account when [gateway].account is empty and the daemon
+	// auto-detected the account after handshake.
+	ConnectedAccount string `json:"connected_account,omitempty"`
+	// AccountMode is the daemon's best classification of the connected
+	// endpoint/account: "paper", "live", or "unknown".
+	AccountMode   string `json:"account_mode,omitempty"`
+	GatewayHost   string `json:"gateway_host"`
+	GatewayPort   int    `json:"gateway_port"`
+	GatewayTLS    bool   `json:"gateway_tls"`
+	NegotiatedTLS bool   `json:"negotiated_tls"`
+	PortOrigin    string `json:"port_origin"`
+	TLSOrigin     string `json:"tls_origin"`
+	Alternates    []int  `json:"alternates,omitempty"`
+	ClientID      int    `json:"client_id"`
+	Connected     bool   `json:"connected"`
+	DataType      string `json:"data_type,omitempty"`
+	ServerVersion int    `json:"server_version,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
 	// BackgroundTasks lists daemon-internal long-running computes that
 	// are running or waiting for a scheduled retry. Empty when nothing
 	// is active. Always present on the wire (never omitted) so

@@ -62,6 +62,32 @@ func TestTradingStatusBlocksPaperModeOnLiveLookingEndpoint(t *testing.T) {
 	}
 }
 
+func TestAccountModeForStatus(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		port    int
+		account string
+		want    string
+	}{
+		{name: "gateway paper port", port: 4002, want: rpc.AccountModePaper},
+		{name: "tws paper port", port: 7497, want: rpc.AccountModePaper},
+		{name: "paper account", port: 4001, account: "DU1234567", want: rpc.AccountModePaper},
+		{name: "gateway live port", port: 4001, want: rpc.AccountModeLive},
+		{name: "tws live port", port: 7496, want: rpc.AccountModeLive},
+		{name: "live account on custom port", port: 5000, account: "U1234567", want: rpc.AccountModeLive},
+		{name: "aggregate account on custom port", port: 5000, account: "All", want: rpc.AccountModeUnknown},
+		{name: "unknown", port: 5000, want: rpc.AccountModeUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := accountModeForStatus(tc.port, tc.account); got != tc.want {
+				t.Fatalf("accountModeForStatus(%d, %q) = %q, want %q", tc.port, tc.account, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTradingStatusBlocksAggregateAccount(t *testing.T) {
 	t.Parallel()
 	port := 7497

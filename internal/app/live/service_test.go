@@ -17,6 +17,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		account:   &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
 		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{}},
 		canary:    &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
+		trading:   &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
 	}
 	svc := New(client, time.Minute, time.Minute)
 	ch, release := svc.Subscribe()
@@ -42,9 +43,12 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Canary == nil || snap.Canary.Fingerprint.Key != "fp-1" {
 		t.Fatalf("canary missing from snapshot: %#v", snap.Canary)
 	}
+	if snap.Trading == nil || !snap.Trading.CanPreview {
+		t.Fatalf("trading missing from snapshot: %#v", snap.Trading)
+	}
 
 	seen := map[string]bool{}
-	for range 6 {
+	for range 7 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -52,7 +56,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "trading", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -80,6 +84,7 @@ type fakeClient struct {
 	account   *rpc.AccountResult
 	positions *rpc.PositionsResult
 	canary    *rpc.CanaryResult
+	trading   *rpc.TradingStatus
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
@@ -100,4 +105,24 @@ func (c *fakeClient) Positions(context.Context) (*rpc.PositionsResult, error) {
 
 func (c *fakeClient) Canary(context.Context) (*rpc.CanaryResult, error) {
 	return c.canary, nil
+}
+
+func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
+	return c.trading, nil
+}
+
+func (c *fakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
+	return nil, nil
 }

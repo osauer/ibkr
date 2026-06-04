@@ -55,8 +55,9 @@ func New(opts Options) (*App, error) {
 		return nil, fmt.Errorf("vapid keys: %w", err)
 	}
 	authMgr := auth.NewManager(store, opts.PairingTTL)
+	daemonClient := daemonclient.Real{SocketPath: opts.SocketPath, AutoSpawn: true}
 	liveSvc := live.New(
-		daemonclient.Real{SocketPath: opts.SocketPath, AutoSpawn: true},
+		daemonClient,
 		opts.PollEvery,
 		opts.CanaryEvery,
 	)
@@ -66,10 +67,13 @@ func New(opts Options) (*App, error) {
 		Sender: push.WebPushSender{Subscriber: "mailto:ibkr-app@localhost"},
 		URL:    opts.PublicURL,
 	}
+	monitor.TradingStatus = func() *rpc.TradingStatus {
+		return liveSvc.Snapshot().Trading
+	}
 	liveSvc.OnCanary = func(ctx context.Context, canary rpc.CanaryResult) {
 		monitor.Observe(ctx, canary)
 	}
-	app, err := newWithParts(opts, store, authMgr, liveSvc, relayClient)
+	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +102,7 @@ func acquireAppLock(stateDir string) (*xdgcache.Lock, error) {
 	return lock, nil
 }
 
-func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, liveSvc *live.Service, relayClient relay.Client) (*App, error) {
+func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemonClient daemonclient.Client, liveSvc *live.Service, relayClient relay.Client) (*App, error) {
 	srv, err := hyperserve.NewServer(
 		hyperserve.WithAddr(opts.Addr),
 		hyperserve.WithTimeouts(30*time.Second, 0, 0),
@@ -120,6 +124,7 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, liveS
 		Server:    srv,
 		Store:     store,
 		Auth:      authMgr,
+		Daemon:    daemonClient,
 		Live:      liveSvc,
 		Relay:     relayClient,
 		PublicURL: opts.PublicURL,

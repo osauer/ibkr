@@ -3459,7 +3459,12 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		ClientID:      ep.ClientID,
 		LastError:     lastErr,
 	}
+	accountForMode := ep.Account
 	if c != nil {
+		res.ConnectedAccount = strings.TrimSpace(c.AccountID())
+		if res.ConnectedAccount != "" {
+			accountForMode = res.ConnectedAccount
+		}
 		// Report IsReady, not IsConnected: the gateway being TCP-reachable
 		// is not enough — handlers must be armed (post-handshake) for any
 		// data verb to succeed. Reporting IsConnected here while every
@@ -3486,6 +3491,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		res.NegotiatedTLS = c.UsingTLS()
 		res.DataFarms = statusDataFarms(c.DataFarmStatuses())
 	}
+	res.AccountMode = accountModeForStatus(ep.Port, accountForMode)
 
 	// BackgroundTasks lists daemon-internal long-running computes
 	// running RIGHT NOW. Presence-as-state: a task appears here iff
