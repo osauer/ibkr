@@ -71,6 +71,31 @@ func TestIsProcessAliveZeroAndNegativeReportFalse(t *testing.T) {
 	}
 }
 
+func TestIsProcessAliveZombieReportsFalse(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	savedLookup := lookupProcessStatus
+	lookupProcessStatus = func(got int) (string, error) {
+		if got != pid {
+			t.Fatalf("lookup pid = %d, want %d", got, pid)
+		}
+		return "Z", nil
+	}
+	t.Cleanup(func() { lookupProcessStatus = savedLookup })
+
+	if IsProcessAlive(pid) {
+		t.Fatalf("IsProcessAlive(%d) = true for zombie status, want false", pid)
+	}
+}
+
 func TestIsProcessAliveLifecycle(t *testing.T) {
 	t.Parallel()
 	// Spawn a sleep, observe alive=true, kill, observe alive=false.

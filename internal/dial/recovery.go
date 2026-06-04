@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,8 +34,10 @@ func LockHolderPID(lockPath string) int {
 	return pid
 }
 
-// IsProcessAlive reports whether a PID is currently a live process. Uses
-// signal 0 (kill -0) which is a no-op probe.
+// IsProcessAlive reports whether a PID is currently a live, non-zombie
+// process. Uses signal 0 (kill -0) as the ownership/existence probe, then
+// filters out defunct processes because zombies still satisfy kill -0 on Unix
+// even though SIGTERM/SIGKILL cannot make them "more exited".
 //
 // EPERM (we know the process exists but cannot signal it — typically
 // owned by another user) reports false here on purpose: the caller would
@@ -50,11 +53,34 @@ func IsProcessAlive(pid int) bool {
 		return false
 	}
 	if err := p.Signal(syscall.Signal(0)); err == nil {
-		return true
+		return !isProcessZombie(pid)
 	} else if errors.Is(err, syscall.ESRCH) {
 		return false
 	}
 	return false
+}
+
+var lookupProcessStatus = processStatus
+
+func isProcessZombie(pid int) bool {
+	status, err := lookupProcessStatus(pid)
+	if err != nil {
+		return false
+	}
+	status = strings.TrimSpace(status)
+	return strings.HasPrefix(status, "Z")
+}
+
+func processStatus(pid int) (string, error) {
+	if pid <= 0 {
+		return "", errors.New("invalid PID")
+	}
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // TailLastLine returns the last non-empty line of the file at path, capped
