@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation brief.
 **Created:** 2026-05-29 20:43 CEST
-**Last update:** 2026-05-31 21:23 CEST
+**Last update:** 2026-06-04 07:42 CEST
 **Owner:** osauer
 **Related:** [internal/cli/canary.go](../../internal/cli/canary.go), [docs/specs/risk-regime-dashboard.md](../specs/risk-regime-dashboard.md), [docs/reference/protocol.md](../reference/protocol.md)
 
@@ -51,6 +51,7 @@ The shared policy should cover both defense and opportunity:
 | Fast carry unwind | `fx_carry_unwind` | Defend when FX stress is confirmed by tape or breadth deterioration. |
 | Portfolio P&L shock | `portfolio_pnl_shock` | Protect liquidity or gains; a gain is not deployable by itself. |
 | Single-title concentration | `single_name_exposure_high`, `single_name_delta_high` | Reduce the largest title risk before smaller issues. |
+| Held-underlying stress | `held_underlying_pnl_shock`, `held_option_expiry_concentration`, `held_liquidity_degraded` | Rebalance/watch material held names; verify liquidity flags before acting. |
 | Portfolio exposure | `gross_exposure_high`, `net_delta_high`, `gross_delta_high` | Defend, rebalance, or stage reductions before stress worsens. |
 | Option quality and convexity | `option_greeks_degraded`, `short_convexity_high`, `gamma_red` | Block or prioritize option-specific actions. |
 | Data quality | `risk_data_degraded`, `market_data_stale` | Block action or force human review. |

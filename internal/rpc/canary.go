@@ -80,19 +80,36 @@ type CanaryMarketIndicator struct {
 }
 
 type CanaryPortfolioSummary struct {
-	BaseCurrency         string   `json:"base_currency,omitempty"`
-	NetLiquidation       float64  `json:"net_liquidation,omitempty"`
-	CushionPct           *float64 `json:"cushion_pct,omitempty"`
-	LookAheadCushionPct  *float64 `json:"look_ahead_cushion_pct,omitempty"`
-	GrossExposurePctNLV  *float64 `json:"gross_exposure_pct_nlv,omitempty"`
-	NetDeltaPctNLV       *float64 `json:"net_delta_pct_nlv,omitempty"`
-	GrossDeltaPctNLV     *float64 `json:"gross_delta_pct_nlv,omitempty"`
-	LargestExposure      string   `json:"largest_exposure,omitempty"`
-	LargestExposurePct   *float64 `json:"largest_exposure_pct_nlv,omitempty"`
-	LargestDeltaExposure string   `json:"largest_delta_exposure,omitempty"`
-	LargestDeltaPctNLV   *float64 `json:"largest_delta_pct_nlv,omitempty"`
-	DailyPnLPct          *float64 `json:"daily_pnl_pct,omitempty"`
-	OptionGreeks         string   `json:"option_greeks,omitempty"`
+	BaseCurrency         string             `json:"base_currency,omitempty"`
+	NetLiquidation       float64            `json:"net_liquidation,omitempty"`
+	CushionPct           *float64           `json:"cushion_pct,omitempty"`
+	LookAheadCushionPct  *float64           `json:"look_ahead_cushion_pct,omitempty"`
+	GrossExposurePctNLV  *float64           `json:"gross_exposure_pct_nlv,omitempty"`
+	NetDeltaPctNLV       *float64           `json:"net_delta_pct_nlv,omitempty"`
+	GrossDeltaPctNLV     *float64           `json:"gross_delta_pct_nlv,omitempty"`
+	LargestExposure      string             `json:"largest_exposure,omitempty"`
+	LargestExposurePct   *float64           `json:"largest_exposure_pct_nlv,omitempty"`
+	LargestDeltaExposure string             `json:"largest_delta_exposure,omitempty"`
+	LargestDeltaPctNLV   *float64           `json:"largest_delta_pct_nlv,omitempty"`
+	DailyPnLPct          *float64           `json:"daily_pnl_pct,omitempty"`
+	OptionGreeks         string             `json:"option_greeks,omitempty"`
+	HeldStress           []CanaryHeldStress `json:"held_stress,omitempty"`
+}
+
+// CanaryHeldStress is a bounded, positions-only explanation of stress inside
+// material held underlyings. It deliberately avoids option-chain fan-out; all
+// fields come from the existing positions/account snapshot.
+type CanaryHeldStress struct {
+	Underlying            string          `json:"underlying"`
+	MaterialReasons       []string        `json:"material_reasons,omitempty"`
+	MarketValuePctNLV     *float64        `json:"market_value_pct_nlv,omitempty"`
+	DeltaPctNLV           *float64        `json:"delta_pct_nlv,omitempty"`
+	DailyPnLPctNLV        *float64        `json:"daily_pnl_pct_nlv,omitempty"`
+	NearExpiryDeltaPctNLV *float64        `json:"near_expiry_delta_pct_nlv,omitempty"`
+	NearExpiryGamma       *float64        `json:"near_expiry_gamma,omitempty"`
+	NearExpiryMinDTE      *int            `json:"near_expiry_min_dte,omitempty"`
+	LiquidityFlags        []string        `json:"liquidity_flags,omitempty"`
+	SignalIDs             []risk.SignalID `json:"signal_ids,omitempty"`
 }
 
 type CanaryMarketSummary struct {

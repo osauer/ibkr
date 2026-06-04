@@ -103,6 +103,9 @@ func TestRunRestartCoreReportsStoppedBeforeHealthWait(t *testing.T) {
 	if stopped < 0 || wait < 0 || started < 0 {
 		t.Fatalf("missing expected output:\n%s", got)
 	}
+	if strings.Contains(got, "stopping daemon pid 15 gracefully") {
+		t.Fatalf("graceful restart should not print duplicate stop progress and confirmation lines:\n%s", got)
+	}
 	if stopped > wait || wait > started {
 		t.Fatalf("output order is wrong:\n%s", got)
 	}
@@ -229,6 +232,9 @@ func TestRunRestartAppCorePreservesArgsAndDetectsSupervisorRespawn(t *testing.T)
 	}
 	if stoppedPID != 51 {
 		t.Fatalf("stoppedPID = %d, want 51", stoppedPID)
+	}
+	if strings.Contains(out.String(), "stopping app pid 51 gracefully") {
+		t.Fatalf("app restart should not print duplicate stop progress and confirmation lines:\n%s", out.String())
 	}
 	if startCalled {
 		t.Fatal("manual start should not run when supervisor respawned the app")
