@@ -25,6 +25,7 @@ const (
 	orderPreviewTokenPrefix  = "ibkrp1"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
+	orderPreviewWhatIfWait   = 8 * time.Second
 )
 
 type orderPreviewTokenPayload struct {
@@ -371,7 +372,128 @@ func (s *Server) fetchPreviewWhatIf(ctx context.Context, draft rpc.OrderDraft) (
 	if s.orderPreviewWhatIf != nil {
 		return s.orderPreviewWhatIf(ctx, draft)
 	}
-	return previewWhatIfUnavailable(), nil
+	c := s.gatewayConnector()
+	if c == nil {
+		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
+	}
+	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
+	defer cancel()
+	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrder(draft))
+	if err != nil {
+		return rpc.OrderWhatIfResult{}, err
+	}
+	return rpcWhatIfResultFromBroker(result), nil
+}
+
+func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
+	secType := strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if secType == "" {
+		secType = "STK"
+	}
+	exchange := strings.TrimSpace(contract.Exchange)
+	if exchange == "" {
+		exchange = "SMART"
+	}
+	currency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	if currency == "" {
+		currency = "USD"
+	}
+	return &ibkrlib.Contract{
+		Symbol:       strings.ToUpper(strings.TrimSpace(contract.Symbol)),
+		SecType:      secType,
+		Exchange:     exchange,
+		PrimaryExch:  strings.TrimSpace(contract.PrimaryExch),
+		Currency:     currency,
+		LocalSymbol:  strings.TrimSpace(contract.LocalSymbol),
+		TradingClass: strings.TrimSpace(contract.TradingClass),
+		Expiry:       strings.TrimSpace(contract.Expiry),
+		Strike:       contract.Strike,
+		Right:        strings.ToUpper(strings.TrimSpace(contract.Right)),
+	}
+}
+
+func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
+	return &ibkrlib.RawOrder{
+		Action:     strings.ToUpper(strings.TrimSpace(draft.Action)),
+		TotalQty:   draft.Quantity,
+		OrderType:  strings.ToUpper(strings.TrimSpace(draft.OrderType)),
+		LmtPrice:   draft.LimitPrice,
+		TIF:        strings.ToUpper(strings.TrimSpace(draft.TIF)),
+		OrderRef:   draft.OrderRef,
+		OutsideRth: draft.OutsideRTH,
+	}
+}
+
+func rpcWhatIfResultFromBroker(result ibkrlib.OrderWhatIfResult) rpc.OrderWhatIfResult {
+	switch result.Status {
+	case ibkrlib.OrderWhatIfStatusAccepted:
+		return rpc.OrderWhatIfResult{
+			Status:            rpc.OrderWhatIfStatusAccepted,
+			RequiredForSubmit: false,
+			Available:         true,
+			Message:           strings.TrimSpace(result.Message),
+			Margin:            rpcMarginFromBroker(result.Margin),
+		}
+	case ibkrlib.OrderWhatIfStatusRejected:
+		msg := strings.TrimSpace(result.Message)
+		if msg == "" {
+			msg = "Broker WhatIf rejected this order draft."
+		}
+		return rpc.OrderWhatIfResult{
+			Status:            rpc.OrderWhatIfStatusRejected,
+			RequiredForSubmit: true,
+			Available:         true,
+			Message:           msg,
+			Action:            "Adjust the draft and run order preview again before any submit attempt.",
+			Margin:            rpcMarginFromBroker(result.Margin),
+		}
+	default:
+		msg := strings.TrimSpace(result.Message)
+		if msg == "" {
+			msg = "Broker WhatIf did not return an accepted preview."
+		}
+		return previewWhatIfUnavailableWithMessage(msg)
+	}
+}
+
+func rpcMarginFromBroker(in ibkrlib.OrderWhatIfMargin) *rpc.OrderMarginImpact {
+	out := &rpc.OrderMarginImpact{
+		Currency:                in.Currency,
+		InitialMarginBefore:     cloneFloat64Ptr(in.InitialMarginBefore),
+		InitialMarginAfter:      cloneFloat64Ptr(in.InitialMarginAfter),
+		MaintenanceMarginBefore: cloneFloat64Ptr(in.MaintenanceMarginBefore),
+		MaintenanceMarginAfter:  cloneFloat64Ptr(in.MaintenanceMarginAfter),
+		EquityWithLoanBefore:    cloneFloat64Ptr(in.EquityWithLoanBefore),
+		EquityWithLoanAfter:     cloneFloat64Ptr(in.EquityWithLoanAfter),
+		Commission:              cloneFloat64Ptr(in.Commission),
+		MinCommission:           cloneFloat64Ptr(in.MinCommission),
+		MaxCommission:           cloneFloat64Ptr(in.MaxCommission),
+		CommissionCurrency:      in.CommissionCurrency,
+		WarningText:             in.WarningText,
+	}
+	if out.Currency == "" &&
+		out.InitialMarginBefore == nil &&
+		out.InitialMarginAfter == nil &&
+		out.MaintenanceMarginBefore == nil &&
+		out.MaintenanceMarginAfter == nil &&
+		out.EquityWithLoanBefore == nil &&
+		out.EquityWithLoanAfter == nil &&
+		out.Commission == nil &&
+		out.MinCommission == nil &&
+		out.MaxCommission == nil &&
+		out.CommissionCurrency == "" &&
+		out.WarningText == "" {
+		return nil
+	}
+	return out
+}
+
+func cloneFloat64Ptr(in *float64) *float64 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func firstTradingBlockerMessage(blockers []rpc.TradingBlocker) string {
@@ -594,9 +716,18 @@ func previewWhatIfUnavailable() rpc.OrderWhatIfResult {
 		Status:            rpc.OrderWhatIfStatusUnavailable,
 		RequiredForSubmit: true,
 		Available:         false,
-		Message:           "Broker WhatIf is isolated from the default read-only order wire; no place/modify/cancel path was opened.",
-		Action:            "Wire WhatIf behind the trading build tag before enabling order.place.",
+		Message:           "Broker WhatIf did not return an accepted preview; no broker order was placed.",
+		Action:            "Run order preview again with a ready broker WhatIf path before any submit attempt.",
 	}
+}
+
+func previewWhatIfUnavailableWithMessage(message string) rpc.OrderWhatIfResult {
+	out := previewWhatIfUnavailable()
+	if msg := strings.TrimSpace(message); msg != "" {
+		out.Message = msg
+		out.Action = "Resolve broker WhatIf availability and run order preview again before any submit attempt."
+	}
+	return out
 }
 
 func previewWhatIfJournalMessage(whatIf rpc.OrderWhatIfResult) string {
@@ -606,7 +737,7 @@ func previewWhatIfJournalMessage(whatIf rpc.OrderWhatIfResult) string {
 	case rpc.OrderWhatIfStatusRejected:
 		return "preview token minted with broker WhatIf rejection; later place gate must reject this token"
 	default:
-		return "preview token minted; broker WhatIf path not enabled in the default build"
+		return "preview token minted; broker WhatIf unavailable or not accepted"
 	}
 }
 
@@ -633,8 +764,8 @@ func previewWhatIfWarnings(whatIf rpc.OrderWhatIfResult) []rpc.DataWarning {
 		return []rpc.DataWarning{{
 			Code:     "broker_what_if_unavailable",
 			Severity: "warning",
-			Message:  "Broker WhatIf is not wired in the default build; this preview token cannot bypass the later broker-WhatIf submit gate.",
-			Action:   "Use this token only as preview evidence until the trading build wires WhatIf and place handling.",
+			Message:  "Broker WhatIf did not accept this draft; this preview token cannot bypass the later broker-WhatIf submit gate.",
+			Action:   "Use this token only as preview evidence until broker WhatIf returns accepted for the exact draft.",
 		}}
 	}
 }

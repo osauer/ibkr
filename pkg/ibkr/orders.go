@@ -41,6 +41,7 @@ type IBKROrder struct {
 	OcaType       int
 	OrderRef      string // Our reference
 	Transmit      bool
+	WhatIf        bool
 	OpenClose     string
 	Origin        int
 	ParentID      int

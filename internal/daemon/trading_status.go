@@ -145,6 +145,10 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	}
 
 	status.Blocked = len(status.Blockers) > 0
+	status.CanPreview = tr.Enabled && !status.Blocked && tr.PreviewRequired()
+	status.CanTransmit = false
+	status.CanModify = false
+	status.CanCancel = false
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}

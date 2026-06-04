@@ -28,6 +28,9 @@ func TestTradingStatusDefaultDisabled(t *testing.T) {
 	if !st.PreviewRequired {
 		t.Fatal("preview should default required")
 	}
+	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("disabled capabilities should all be false: %+v", st)
+	}
 }
 
 func TestTradingStatusBlocksEnabledWithoutPinnedGateway(t *testing.T) {
@@ -71,6 +74,33 @@ func TestTradingStatusBlocksClientIDAutoWalk(t *testing.T) {
 
 	if !hasTradingBlocker(st, "gateway_client_id_autowalked") {
 		t.Fatalf("missing client-id auto-walk blocker in %+v", st.Blockers)
+	}
+	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("blocked capabilities should all be false: %+v", st)
+	}
+}
+
+func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
+	t.Parallel()
+	port := 4002
+	clientID := 31
+	srv := &Server{
+		cfg: &config.Resolved{
+			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
+			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		},
+		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+	}
+	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
+
+	if st.Blocked {
+		t.Fatalf("paper status should be ready, got blockers %+v", st.Blockers)
+	}
+	if !st.CanPreview {
+		t.Fatalf("ready paper gate should allow preview: %+v", st)
+	}
+	if st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("write capabilities must remain disabled in preview-only build: %+v", st)
 	}
 }
 
@@ -161,6 +191,9 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	}
 	if st.LiveOverride != rpc.TradingLiveOverrideReady {
 		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
+	}
+	if !st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("live-ready capabilities should expose preview only in default build: %+v", st)
 	}
 }
 

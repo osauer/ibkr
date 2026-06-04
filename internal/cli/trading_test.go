@@ -29,6 +29,7 @@ func TestRenderTradingStatusTextDisabled(t *testing.T) {
 		"Local gate     disabled",
 		"MCP trading    disabled",
 		"Preview req    true",
+		"Capabilities   preview=false transmit=false modify=false cancel=false",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("trading status missing %q:\n%s", want, got)
@@ -51,6 +52,7 @@ func TestRenderTradingStatusTextBlocked(t *testing.T) {
 		ClientIDOrigin:  "default",
 		MCPTrading:      rpc.TradingMCPDisabled,
 		PreviewRequired: true,
+		CanPreview:      false,
 		Blocked:         true,
 		Blockers: []rpc.TradingBlocker{{
 			Code:    "gateway_client_id_unpinned",
@@ -62,6 +64,7 @@ func TestRenderTradingStatusTextBlocked(t *testing.T) {
 	for _, want := range []string{
 		"IBKR Trading  BLOCKED",
 		"Local gate     paper blocked",
+		"Capabilities   preview=false transmit=false modify=false cancel=false",
 		"gateway_client_id_unpinned: order submission requires a pinned client ID",
 		"action: Set [gateway].client_id.",
 	} {
