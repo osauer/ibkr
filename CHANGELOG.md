@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.7.0 — 2026-06-04 20:28 CEST
+
+### What's new
+
+- The mobile web app now has a fuller trader workflow for market context, portfolio risk, canary state, order review, and purge-book handling.
+- Stock and ETF order drafts now support preview-only broker WhatIf review surfaces while preserving the no-transmit execution boundary.
+- Release data now carries the latest S&P 500 membership refresh for breadth and market-regime calculations.
+
+### Added
+
+- Added mobile PWA screens for lifecycle smoke coverage, risk dashboard controls, market context, held-stress canary context, purge workflow, and paper-trading review flows.
+- Added read-only risk-plan and preview-only order workflow surfaces that expose reviewable broker feedback without placing, modifying, canceling, or transmitting orders.
+
+### Changed
+
+- Improved restart behavior around stale daemon PIDs and tightened terminal canary wording for current mobile and purge workflows.
+- Updated public MCP server metadata to advertise the `1.7.0` release candidate.
+
+### Fixed
+
+- Refreshed the S&P 500 constituent list as of 2026-06-04, replacing `EPAM` with `FDXF`.
+- Guarded paper preview readiness and stabilized the mobile app server baseline before first release readiness.
+
 ## v1.6.1 — 2026-06-03 14:53 CEST
 
 ### What's new
