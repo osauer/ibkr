@@ -13,10 +13,11 @@ import (
 )
 
 type Monitor struct {
-	Store  *state.Store
-	Sender push.Sender
-	URL    string
-	Now    func() time.Time
+	Store         *state.Store
+	Sender        push.Sender
+	URL           string
+	Now           func() time.Time
+	TradingStatus func() *rpc.TradingStatus
 }
 
 func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.AlertRecord, []state.PushAttempt) {
@@ -40,6 +41,12 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	}
 	rec := RedactedRecord(canary, now)
 	rec.Fingerprint = fp
+	if m.TradingStatus != nil {
+		if trading := m.TradingStatus(); trading != nil {
+			rec.Account = trading.Account
+			rec.Mode = trading.Mode
+		}
+	}
 	if err := m.Store.RecordAlert(rec); err != nil {
 		return nil, []state.PushAttempt{{At: now, AlertID: rec.ID, Error: err.Error()}}
 	}

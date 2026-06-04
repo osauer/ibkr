@@ -15,6 +15,7 @@ import (
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
 	"github.com/osauer/ibkr/internal/app/auth"
+	"github.com/osauer/ibkr/internal/app/daemonclient"
 	"github.com/osauer/ibkr/internal/app/live"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
@@ -25,6 +26,7 @@ type Dependencies struct {
 	Server    *hyperserve.Server
 	Store     *state.Store
 	Auth      *auth.Manager
+	Daemon    daemonclient.Client
 	Live      *live.Service
 	Relay     relay.Client
 	PublicURL string
@@ -70,6 +72,11 @@ func Register(deps Dependencies) {
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
 	srv.GET("/api/alerts", h.requireAuth(h.handleAlerts))
 	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
+	srv.POST("/api/order-review-sets", h.requireAuth(h.handleCreateOrderReviewSet))
+	srv.GET("/api/order-review-sets/{id}", h.requireAuth(h.handleGetOrderReviewSet))
+	srv.POST("/api/order-review-sets/{id}/preview", h.requireAuth(h.handlePreviewOrderReviewSet))
+	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
+	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
 	srv.POST("/api/tools/{name}", h.requireAuth(h.handleTool))
@@ -191,15 +198,16 @@ func (h *handler) handleAuthSession(w nethttp.ResponseWriter, r *nethttp.Request
 func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) {
 	vapid, _ := h.deps.Store.VAPID()
 	writeJSON(w, map[string]any{
-		"version":          h.deps.Version,
-		"public_url":       h.deps.PublicURL,
-		"snapshot":         h.deps.Live.Snapshot(),
-		"alert_settings":   h.deps.Store.AlertSettings(),
-		"alerts":           h.deps.Store.AlertHistory(20),
-		"last_push":        h.deps.Store.LastPush(),
-		"relay":            h.deps.Relay.Status(),
-		"vapid_public_key": vapid.PublicKey,
-		"auth":             h.authStatus(r),
+		"version":           h.deps.Version,
+		"public_url":        h.deps.PublicURL,
+		"snapshot":          h.deps.Live.Snapshot(),
+		"alert_settings":    h.deps.Store.AlertSettings(),
+		"alerts":            h.deps.Store.AlertHistory(20),
+		"order_review_sets": h.deps.Store.OrderReviewSets(10),
+		"last_push":         h.deps.Store.LastPush(),
+		"relay":             h.deps.Relay.Status(),
+		"vapid_public_key":  vapid.PublicKey,
+		"auth":              h.authStatus(r),
 	})
 }
 

@@ -203,6 +203,22 @@ func looksPaper(port int, account string) bool {
 	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(account)), "DU")
 }
 
+func accountModeForStatus(port int, account string) string {
+	if looksPaper(port, account) {
+		return rpc.AccountModePaper
+	}
+	account = strings.TrimSpace(account)
+	if account != "" && !strings.EqualFold(account, "All") {
+		return rpc.AccountModeLive
+	}
+	switch port {
+	case 4001, 7496:
+		return rpc.AccountModeLive
+	default:
+		return rpc.AccountModeUnknown
+	}
+}
+
 func tradingMCPStatus(tr config.Trading) string {
 	if !tr.MCPEnabled {
 		return rpc.TradingMCPDisabled
