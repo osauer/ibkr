@@ -12,7 +12,7 @@
 
 `ibkr` turns your local IB Gateway or TWS session into structured account and market context for the terminal, Claude Desktop, Claude Code, Cursor, Continue, Zed, and other MCP hosts. It is the local `ibkr mcp` TWS bridge for portfolio review, exposure mapping, options diagnostics, market-regime checks, scanner-driven research, watchlist monitoring, and position-sizing math.
 
-For MCP users, `ibkr mcp` is a local IBKR workflow layer for semi-professional retail traders who want agentic portfolio and trading-research analysis on live broker data. The bundled MCP surface is deliberately read-side only: it can analyze and size plans, but it cannot place, modify, or cancel orders.
+For MCP users, `ibkr mcp` is a local IBKR workflow layer for semi-professional retail traders who want agentic portfolio and trading-research analysis on live broker data. The bundled MCP surface is deliberately no-broker-write: it can analyze and size plans, and it can draft preview-only stock/ETF LMT orders, but it cannot place, modify, cancel, or transmit broker orders.
 
 Use it from a shell:
 
@@ -99,7 +99,7 @@ For ready-to-run prompts, see [examples/ibkr_portfolio_analysis_prompt.md](examp
 
 ### Claude Desktop, Cursor, Continue, Zed
 
-`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same read-only account, watchlist, quote, calendar, position, scanner, sizing, regime, and canary tools that the CLI exposes as JSON. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
+`ibkr mcp` starts a local stdio MCP server. MCP hosts can call the same account, watchlist, quote, calendar, position, scanner, sizing, regime, canary, and preview-only order-draft tools that the CLI exposes as JSON. The order preview surface can mint a local non-submitting preview token, but it cannot place, modify, cancel, or transmit broker orders. Watchlist access through MCP can return either the saved symbols or enriched quote rows; local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` stay outside the MCP tool set.
 
 The server also exposes quotes for stocks and ETFs as an MCP resource:
 
@@ -142,7 +142,7 @@ claude plugin marketplace add osauer/ibkr
 claude plugin install ibkr@ibkr
 ```
 
-The plugin carries a skill, a `PreToolUse` hook that hard-blocks trading verbs and shell command chaining (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
+The plugin carries a skill, a `PreToolUse` hook that permits preview/status order reads while hard-blocking broker-write verbs and shell command chaining (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read and preview-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
 
 **The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install](#install). The two have independent release cadences and independent update paths:
 
@@ -290,15 +290,15 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 ## Safety
 
-`ibkr` is the stable read-only line. Five independent layers refuse `order`, `trade`, `cancel`:
+`ibkr` is the stable no-broker-write line. It exposes read tools plus preview-only stock/ETF order drafts; preview tokens are local artifacts and are not broker orders. Five independent layers refuse broker writes:
 
 1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from `Connection.PlaceOrder`, `Connection.CancelOrder`, `Connector.SubmitOrder`, and `Connector.CancelOrder` before any wire write. The raw encoder is available only to explicit downstream forks built with `-tags trading`.
-2. The daemon's order-handler dispatch returns `ErrTradingDisabled` for both `MethodOrderPlace` and `MethodOrderCancel` ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)).
-3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies the verbs in `permissions.deny`.
-4. The plugin's `PreToolUse` hook hard-blocks the verb patterns and fails closed if `jq` is missing from PATH.
-5. A unit test in `internal/mcp` refuses to ship the MCP server with any tool whose name contains `order`, `trade`, `cancel`, `submit`, or `place`.
+2. The daemon's write-handler dispatch returns `ErrTradingDisabled` for place/cancel RPCs ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)); preview can mint a token but reports `submit_eligible=false` unless broker WhatIf is accepted.
+3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies broker-write verbs while allowing `order preview`, `order status`, `orders open`, and `trading status`.
+4. The plugin's `PreToolUse` hook hard-blocks broker-write patterns and fails closed if `jq` is missing from PATH.
+5. A unit test in `internal/mcp` allows only preview/read-model order tools and refuses unallowlisted order/trade/cancel/submit/place tool names.
 
-Per [semver](https://semver.org/), v1.x keeps the CLI, JSON, and MCP read-only interfaces stable except for documented minor additions and patch fixes.
+Per [semver](https://semver.org/), v1.x keeps broker writes unavailable. Preview-only CLI, JSON, and MCP additions may appear as documented minor additions.
 
 ## Other install paths
 

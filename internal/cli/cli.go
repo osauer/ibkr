@@ -107,8 +107,10 @@ func isValueFlag(name string) bool {
 		"entry", "stop", "target", "risk-pct", "lot", "fx",
 		"only", "market", "exchange", "primary", "currency", "instrument", "log",
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
-		"min-dte", "max-dte", "target-dte", "view", "mode", "from-canary", "from-plan", "candidate",
-		"preview-token":
+		"min-dte", "max-dte", "target-dte", "view",
+		"mode", "from-canary", "from-plan", "candidate",
+		"host", "port", "account", "client-id", "preview-token", "ttl", "live-ack",
+		"strategy", "tif":
 		return true
 	}
 	return false
@@ -165,11 +167,12 @@ func init() {
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
 		{"risk-plan", "Read-only risk mitigation planner from canary + current portfolio", "ibkr risk-plan [--mode auto|defend|rebalance|stage|confirm-data|deploy] [--from-canary PATH] [--json]", runRiskPlan},
-		{"order", "Preview or place an explicitly selected risk-plan candidate", "ibkr order preview --from-plan PLAN.json --candidate ID [--json] | ibkr order place --preview-token TOKEN", runOrder},
-		{"trading", "Local trading gate status (read-only by default)", "ibkr trading status [--json]", runTrading},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
+		{"trading", "Local trading gate status and configuration", "ibkr trading status [--json]", runTrading},
+		{"orders", "Read local order lifecycle state without transmitting orders", "ibkr orders open [--account ACCOUNT] [--json]", runOrders},
+		{"order", "Preview gated order drafts or selected risk-plan candidates without placing them", "ibkr order preview buy|sell SYMBOL QTY [--limit PRICE|--strategy patient-limit] [--tif DAY] [--json] | ibkr order preview --from-plan PLAN.json --candidate ID [--json] | ibkr order status ID [--json]", runOrder},
 		{"app", "Run the paired mobile PWA application layer", "ibkr app [--addr HOST:PORT] | ibkr app pair", nil},                                                  // dispatched in cmd/ibkr/main.go — long-lived app server
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
 		{"daemon", "Run the stateful gateway daemon (normally autospawned)", "ibkr daemon [--foreground] [--config PATH] [--socket PATH] [--log PATH|stderr]", nil}, // dispatched in cmd/ibkr/main.go — long-lived daemon

@@ -2,9 +2,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,67 +13,115 @@ import (
 
 func runOrder(ctx context.Context, env *Env, args []string) int {
 	if len(args) == 0 {
-		return fail(env, "order: subcommand required (try `ibkr order preview --from-plan PLAN.json --candidate ID`)")
+		return fail(env, "order: subcommand required (try `ibkr order preview ...`)")
 	}
 	subIdx := orderSubcommandIndex(args)
 	if subIdx < 0 {
-		return fail(env, "order: subcommand required (try `ibkr order preview --from-plan PLAN.json --candidate ID`)")
+		return runOrderPreview(ctx, env, args)
 	}
 	sub := args[subIdx]
 	args = append(append([]string{}, args[:subIdx]...), args[subIdx+1:]...)
 	switch sub {
 	case "preview":
-		return runOrderPreviewFromPlan(ctx, env, args)
+		if orderPreviewFromPlanArgs(args) {
+			return runOrderPreviewFromPlan(ctx, env, args)
+		}
+		return runOrderPreview(ctx, env, args)
+	case "status":
+		return runOrderStatus(ctx, env, args)
 	case "place":
 		return runOrderPlace(ctx, env, args)
+	case "modify", "cancel":
+		return fail(env, "order %s is not enabled; run `ibkr order preview` first and wait for the gated write path", sub)
 	default:
-		return fail(env, "order: unknown subcommand %q (try `preview` or `place`)", sub)
+		return fail(env, "order: unknown subcommand %q (try `ibkr order preview` or `ibkr order status`)", sub)
 	}
 }
 
 func orderSubcommandIndex(args []string) int {
 	for i, arg := range args {
 		switch arg {
-		case "preview", "place":
+		case "preview", "status", "place", "modify", "cancel":
 			return i
 		}
 	}
 	return -1
 }
 
-func runOrderPreviewFromPlan(ctx context.Context, env *Env, args []string) int {
-	fs := flagSet(env, "order preview")
+func orderPreviewFromPlanArgs(args []string) bool {
+	for _, arg := range args {
+		if arg == "--from-plan" || strings.HasPrefix(arg, "--from-plan=") || arg == "--candidate" || strings.HasPrefix(arg, "--candidate=") {
+			return true
+		}
+	}
+	return false
+}
+
+func runOrderPreview(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "order")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	planPath := fs.String("from-plan", "", "risk-plan JSON artifact to preview")
-	candidateID := fs.String("candidate", "", "risk-plan candidate ID to preview")
+	limit := fs.Float64("limit", 0, "explicit LMT limit price")
+	strategy := fs.String("strategy", "", "pricing strategy: patient-limit (default) or explicit-limit")
+	tif := fs.String("tif", "", "time in force; DAY only")
+	outsideRTH := fs.Bool("outside-rth", false, "allow outside regular trading hours when supported")
+	timeout := fs.Duration("timeout", 5*time.Second, "quote snapshot timeout")
+	market := fs.String("market", "", "stock market routing shortcut: us (default) or de")
+	exchange := fs.String("exchange", "", "IBKR stock exchange/venue override (e.g. SMART, IBIS)")
+	primary := fs.String("primary", "", "IBKR stock primary-exchange hint when routing through SMART")
+	currency := fs.String("currency", "", "stock quote/order currency override (e.g. USD, EUR)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	if fs.NArg() > 0 {
-		return fail(env, "order preview: takes no positional args when using --from-plan")
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "preview" {
+		rest = rest[1:]
 	}
-	if strings.TrimSpace(*planPath) == "" || strings.TrimSpace(*candidateID) == "" {
-		return fail(env, "order preview: usage is `ibkr order preview --from-plan PLAN.json --candidate ID`")
+	if len(rest) != 3 {
+		if len(rest) == 6 {
+			return fail(env, "order preview: single-leg options are not enabled in this slice")
+		}
+		return fail(env, "order preview: usage is `ibkr order preview buy|sell SYMBOL QTY`")
 	}
-	plan, err := loadRiskPlanArtifact(strings.TrimSpace(*planPath))
-	if err != nil {
+	qty, err := strconv.Atoi(rest[2])
+	if err != nil || qty <= 0 {
+		return fail(env, "order preview: quantity must be a positive integer")
+	}
+	var limitPtr *float64
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "limit" {
+			v := *limit
+			limitPtr = &v
+		}
+	})
+	params := rpc.OrderPreviewParams{
+		Action: strings.ToUpper(strings.TrimSpace(rest[0])),
+		Contract: rpc.ContractParams{
+			Symbol:      strings.ToUpper(strings.TrimSpace(rest[1])),
+			SecType:     "STK",
+			Market:      strings.TrimSpace(*market),
+			Exchange:    strings.ToUpper(strings.TrimSpace(*exchange)),
+			PrimaryExch: strings.ToUpper(strings.TrimSpace(*primary)),
+			Currency:    strings.ToUpper(strings.TrimSpace(*currency)),
+		},
+		Quantity:   qty,
+		OrderType:  rpc.OrderTypeLMT,
+		LimitPrice: limitPtr,
+		Strategy:   strings.TrimSpace(*strategy),
+		TIF:        strings.ToUpper(strings.TrimSpace(*tif)),
+		OutsideRTH: *outsideRTH,
+		TimeoutMs:  int(timeout.Milliseconds()),
+	}
+	if params.Contract.Currency == "" && params.Contract.Market == "" && params.Contract.Exchange == "" && params.Contract.PrimaryExch == "" {
+		params.Contract.Currency = "USD"
+	}
+	var res rpc.OrderPreviewResult
+	if err := env.Conn.Call(ctx, rpc.MethodOrderPreview, params, &res); err != nil {
 		return fail(env, "order preview: %v", err)
 	}
-	res := previewRiskPlanCandidate(ctx, env, plan, strings.TrimSpace(*candidateID))
 	if *jsonOut {
-		code := printJSON(env, res)
-		if code != 0 {
-			return code
-		}
-		if len(res.Blockers) > 0 {
-			return 1
-		}
-		return 0
+		return printJSON(env, res)
 	}
-	renderRiskPlanOrderPreviewText(env, &res)
-	if len(res.Blockers) > 0 {
-		return 1
-	}
+	renderOrderPreviewText(env, &res)
 	return 0
 }
 
@@ -92,157 +140,58 @@ func runOrderPlace(_ context.Context, env *Env, args []string) int {
 	return fail(env, "order place: trading disabled in the default build; no submit-capable broker WhatIf token can be redeemed")
 }
 
-func loadRiskPlanArtifact(path string) (rpc.RiskPlanResult, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return rpc.RiskPlanResult{}, fmt.Errorf("read risk plan %s: %w", path, err)
-	}
-	var plan rpc.RiskPlanResult
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		return rpc.RiskPlanResult{}, fmt.Errorf("decode risk plan %s: %w", path, err)
-	}
-	if plan.Kind != rpc.RiskPlanKind || plan.SchemaVersion != rpc.RiskPlanSchemaVersion {
-		return rpc.RiskPlanResult{}, fmt.Errorf("artifact is %q/%q, want %q/%q", plan.Kind, plan.SchemaVersion, rpc.RiskPlanKind, rpc.RiskPlanSchemaVersion)
-	}
-	if plan.PlanID == "" {
-		return rpc.RiskPlanResult{}, fmt.Errorf("risk plan artifact has no plan_id")
-	}
-	return plan, nil
-}
-
-func previewRiskPlanCandidate(ctx context.Context, env *Env, plan rpc.RiskPlanResult, candidateID string) rpc.RiskPlanOrderPreviewResult {
-	now := time.Now()
-	candidate, ok := findRiskPlanCandidate(plan, candidateID)
-	res := rpc.RiskPlanOrderPreviewResult{
-		Kind:              "ibkr.order_preview",
-		SchemaVersion:     "order-preview-v1",
-		AsOf:              now,
-		PlanID:            plan.PlanID,
-		CandidateID:       candidateID,
-		PolicyFingerprint: plan.PolicyFingerprint,
-		WhatIf: rpc.OrderWhatIfResult{
-			Status:            rpc.OrderWhatIfStatusUnavailable,
-			RequiredForSubmit: true,
-			Available:         false,
-			Message:           "broker WhatIf/order wire support is not enabled in the default read-only build; preview is diagnostic only",
-			Action:            "Do not place; enable the gated trading build before expecting submit eligibility.",
-		},
-		NotExecution: "Read-only handoff preview; no order is submitted and no submit-capable token is minted.",
-	}
-	if !ok {
-		res.Blockers = append(res.Blockers, "candidate_not_found")
-		res.SourceValidation = "not_checked"
-		return res
-	}
-	if candidate.Status != rpc.RiskPlanCandidatePreviewable {
-		res.Blockers = append(res.Blockers, "candidate_not_previewable:"+candidate.Status)
-	}
-	res.SourceValidation = validatePlanSource(ctx, env, plan)
-	if res.SourceValidation != "ok" {
-		res.Blockers = append(res.Blockers, res.SourceValidation)
-	}
-	for i, leg := range candidate.Legs {
-		if leg.EstimatedLimitPrice == nil || *leg.EstimatedLimitPrice <= 0 {
-			res.Blockers = append(res.Blockers, fmt.Sprintf("leg_%d_missing_limit_price", i+1))
-			continue
-		}
-		action, err := brokerActionForPlanLeg(leg.Action)
-		if err != nil {
-			res.Blockers = append(res.Blockers, fmt.Sprintf("leg_%d_%v", i+1, err))
-			continue
-		}
-		res.Previews = append(res.Previews, rpc.RiskPlanOrderLegPreview{
-			CandidateLeg: leg,
-			Draft: rpc.OrderDraft{
-				Action:     action,
-				Contract:   leg.Contract,
-				Quantity:   leg.Quantity,
-				OrderType:  leg.OrderType,
-				LimitPrice: *leg.EstimatedLimitPrice,
-				TIF:        leg.TIF,
-				OutsideRTH: leg.OutsideRTH,
-				Strategy:   leg.LimitStrategy,
-				OrderRef:   fmt.Sprintf("%s_%s_%02d", plan.PlanID, candidate.ID, i+1),
-			},
-		})
-	}
-	res.Blockers = append(res.Blockers, "broker_whatif_unavailable")
-	return res
-}
-
-func validatePlanSource(ctx context.Context, env *Env, plan rpc.RiskPlanResult) string {
-	if env == nil || env.Conn == nil {
-		return "source_not_checked_no_daemon"
-	}
-	current, err := FetchRiskPlan(ctx, env.Conn, rpc.RiskPlanModeAuto, nil)
-	if err != nil {
-		return "source_check_failed:" + err.Error()
-	}
-	if current.PolicyFingerprint != plan.PolicyFingerprint {
-		return "policy_fingerprint_changed"
-	}
-	if fingerprintKey(current.SourceFingerprints.Account) != fingerprintKey(plan.SourceFingerprints.Account) {
-		return "account_fingerprint_changed"
-	}
-	if fingerprintKey(current.SourceFingerprints.Positions) != fingerprintKey(plan.SourceFingerprints.Positions) {
-		return "positions_fingerprint_changed"
-	}
-	if fingerprintKey(current.SourceFingerprints.Regime) != fingerprintKey(plan.SourceFingerprints.Regime) {
-		return "regime_fingerprint_changed"
-	}
-	return "ok"
-}
-
-func fingerprintKey(fp *rpc.Fingerprint) string {
-	if fp == nil {
-		return ""
-	}
-	return fp.Version + " " + fp.Key
-}
-
-func findRiskPlanCandidate(plan rpc.RiskPlanResult, id string) (rpc.RiskPlanCandidate, bool) {
-	for _, candidate := range plan.Candidates {
-		if candidate.ID == id {
-			return candidate, true
-		}
-	}
-	return rpc.RiskPlanCandidate{}, false
-}
-
-func brokerActionForPlanLeg(action string) (string, error) {
-	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "SELL", "SELL_TO_CLOSE":
-		return rpc.OrderActionSell, nil
-	case "BUY_TO_CLOSE":
-		return rpc.OrderActionBuy, nil
-	default:
-		return "", fmt.Errorf("unsupported action %q", action)
-	}
-}
-
-func renderRiskPlanOrderPreviewText(env *Env, res *rpc.RiskPlanOrderPreviewResult) {
+func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "IBKR Order Preview  %s\n", env.statusBadge(statusConcern{Text: "BLOCKED", Level: statusConcernWarn}))
-	statusRow(env, out, "Plan", res.PlanID)
-	statusRow(env, out, "Candidate", res.CandidateID)
-	statusRow(env, out, "Source", res.SourceValidation)
+	fmt.Fprintf(out, "IBKR Order Preview  %s\n", env.statusBadge(statusConcern{Text: "TOKEN", Level: statusConcernNotice}))
+	statusRow(env, out, "Mode", res.Mode)
+	statusRow(env, out, "Account", res.Account)
+	statusRow(env, out, "Endpoint", fmt.Sprintf("%s client %d", res.Endpoint, res.ClientID))
+	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s outside_rth=%v",
+		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF, res.Draft.OutsideRTH))
+	statusRow(env, out, "Strategy", res.Draft.Strategy)
+	statusRow(env, out, "Notional", fmt.Sprintf("%.2f", res.Notional))
+	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", res.Position.Before, res.Position.After, res.Position.Effect))
+	statusRow(env, out, "Quote", formatOrderPreviewQuote(res.Quote))
+	statusRow(env, out, "WhatIf", fmt.Sprintf("%s (required=%v)", res.WhatIf.Status, res.WhatIf.RequiredForSubmit))
+	statusRow(env, out, "Token minted", fmt.Sprint(res.TokenMinted))
 	statusRow(env, out, "Submit eligible", fmt.Sprint(res.SubmitEligible))
-	statusRow(env, out, "WhatIf", res.WhatIf.Status+"; required=true")
-	if len(res.Previews) > 0 {
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Drafts:")
-		for _, preview := range res.Previews {
-			d := preview.Draft
-			fmt.Fprintf(out, "  - %s %d %s %s %.4f %s\n", d.Action, d.Quantity, d.Contract.Symbol, d.OrderType, d.LimitPrice, d.TIF)
-		}
+	statusRow(env, out, "Token ID", res.PreviewTokenID)
+	if !res.PreviewTokenExpiresAt.IsZero() {
+		statusRow(env, out, "Expires", res.PreviewTokenExpiresAt.Format(time.RFC3339))
 	}
-	if len(res.Blockers) > 0 {
+	if res.PreviewToken != "" {
+		statusRow(env, out, "Token", res.PreviewToken)
+	}
+	if len(res.Warnings) > 0 {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Blockers:")
-		for _, blocker := range res.Blockers {
-			fmt.Fprintf(out, "  - %s\n", blocker)
+		fmt.Fprintln(out, "Warnings:")
+		for _, w := range res.Warnings {
+			fmt.Fprintf(out, "  - %s: %s\n", w.Code, w.Message)
+			if w.Action != "" {
+				fmt.Fprintf(out, "    action: %s\n", w.Action)
+			}
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+func formatOrderPreviewQuote(q rpc.OrderQuoteSnapshot) string {
+	parts := []string{q.Symbol}
+	if q.Bid != nil {
+		parts = append(parts, fmt.Sprintf("bid %.4f", *q.Bid))
+	}
+	if q.Ask != nil {
+		parts = append(parts, fmt.Sprintf("ask %.4f", *q.Ask))
+	}
+	if q.Midpoint != nil {
+		parts = append(parts, fmt.Sprintf("mid %.4f", *q.Midpoint))
+	}
+	if q.DataType != "" {
+		parts = append(parts, "data "+q.DataType)
+	}
+	if q.QuoteQuality != "" {
+		parts = append(parts, "quality "+q.QuoteQuality)
+	}
+	return strings.Join(parts, " | ")
 }

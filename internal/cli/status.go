@@ -81,6 +81,9 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if len(res.Subsystems) > 0 {
 		statusRow(env, out, "Subsystems", formatSubsystemsValue(env, res.Subsystems))
 	}
+	if res.Trading.LocalGate != "" {
+		statusRow(env, out, "Trading", formatTradingStatusValue(env, res.Trading))
+	}
 	if len(res.DataQuality) > 0 {
 		statusRow(env, out, "Data quality", env.yellow(formatDataQualityValue(res.DataQuality)))
 	}
@@ -187,11 +190,20 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		}
 	case membersRefreshNeedsAttention(res.Members):
 		return statusConcern{Text: "SPX members refresh " + res.Members.RefreshState, Level: statusConcernWarn}
+	case res.Trading.Enabled && res.Trading.Blocked:
+		return statusConcern{Text: "Trading blocked: " + firstTradingBlockerMessage(res.Trading), Level: statusConcernWarn}
 	case len(res.BackgroundTasks) > 0:
 		return statusConcern{Text: "Background work: " + formatBackgroundTasks(res.BackgroundTasks), Level: statusConcernNotice}
 	default:
 		return statusConcern{Text: "None", Level: statusConcernNone}
 	}
+}
+
+func firstTradingBlockerMessage(st rpc.TradingStatus) string {
+	if len(st.Blockers) == 0 {
+		return "local gate blocked"
+	}
+	return st.Blockers[0].Message
 }
 
 func isDataQualityConcern(c statusConcern) bool {

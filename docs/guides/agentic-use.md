@@ -1,8 +1,8 @@
 # Agentic use
 
-Updated: 2026-06-02 06:28 CEST
+Updated: 2026-06-03 21:50 CEST
 
-`ibkr mcp` makes every read-only CLI operation available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
+`ibkr mcp` makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
 This page is for the human installing the plugin and wondering *"what can I actually ask Claude with this?"* For exact tool parameters and JSON envelopes, see the auto-generated [MCP tools reference](../reference/mcp-tools.md). For protocol mechanics, see the upstream [Model Context Protocol spec](https://modelcontextprotocol.io/).
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_order_preview` ↔ `ibkr order preview`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -80,19 +80,26 @@ The important diagnostic is **`disagree`** — one book stabilising while the ot
 
 Returns the % of S&P names above their 50-DMA (the tactical signal) and per-row scanner output enriched with last / prev_close / change_pct / volume / IV. Claude typically pairs the breadth context ("market-wide reading: 54% above 50-DMA, healthy") with the specific names that match the scan. For follow-up questions like *"show me daily bars for AAPL"*, Claude chains to `ibkr_history`. See [Concepts → Breadth](../concepts.md#breadth).
 
+### "Preview buying 10 AAPL shares."
+
+→ Claude invokes `ibkr_trading_status`, then `ibkr_order_preview` only if the local preview gate is ready.
+
+Returns a draft order, quote inputs, position impact, notional, warnings, and preview-token fields. `token_minted` means the local daemon created a preview artifact. `submit_eligible` means broker WhatIf accepted the exact draft and a future write path could consider the token. In the default build, broker WhatIf is unavailable, so `token_minted` can be true while `submit_eligible` and compatibility field `executable` are false. The preview itself does not place, modify, cancel, or transmit any broker order.
+
 ## What Claude can't do here
 
-The MCP interface is intentionally **read-only**. There is no trade-execution tool. Claude can:
+The MCP interface intentionally has no trade-execution tool. Claude can:
 
 - ✅ tell you what you own
 - ✅ read your local saved-symbol watchlist
 - ✅ tell you the market state
 - ✅ size a trade (`ibkr_size` — pure math against your NLV, never proposes an order)
+- ✅ preview a locally gated stock/ETF LMT draft without broker submission
 - ❌ place an order
 - ❌ cancel an order
 - ❌ modify a position
 
-If you ask Claude to "buy 100 shares of AAPL," it will tell you it can't — and won't try to. This is a hard architectural boundary: the daemon never exposes write paths to IBKR, regardless of what Claude asks.
+If you ask Claude to "buy 100 shares of AAPL," it can preview a non-submitting draft only if you explicitly ask for preview. It cannot submit that order, and won't try to. This is a hard architectural boundary: the bundled daemon does not expose broker-write paths to MCP, regardless of what Claude asks.
 
 Streaming quote resources are separate from tools. MCP clients discover the `ibkr://quote/{symbol}` template via `resources/templates/list`; `resources/read` gives one quote snapshot, and `resources/subscribe` emits coalesced tick frames through `notifications/resources/updated` until the client unsubscribes or closes the MCP session. This streaming resource is stock/ETF only; option streaming is not exposed.
 

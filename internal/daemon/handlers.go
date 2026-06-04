@@ -3498,6 +3498,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	res.Subsystems = s.subsystemHealth(res.Connected)
 	res.DataQuality = s.statusDataQuality()
 	res.Members = s.membersHealth()
+	res.Trading = *s.handleTradingStatus()
 	return res
 }
 

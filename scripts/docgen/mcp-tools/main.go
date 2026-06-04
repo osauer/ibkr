@@ -72,7 +72,7 @@ func render(tools []mcp.Tool) string {
 			out.WriteString("*No parameters.*\n\n")
 		}
 	}
-	return out.String()
+	return strings.TrimRight(out.String(), "\n") + "\n"
 }
 
 // renderProperties emits a table of parameters with name, type,

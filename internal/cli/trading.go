@@ -3,79 +3,140 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
-type tradingStatusResult struct {
-	Enabled         bool      `json:"enabled"`
-	Mode            string    `json:"mode"`
-	LocalGate       string    `json:"local_gate"`
-	BrokerGate      string    `json:"broker_gate"`
-	PreviewRequired bool      `json:"preview_required"`
-	Blocked         bool      `json:"blocked"`
-	Blockers        []string  `json:"blockers"`
-	AsOf            time.Time `json:"as_of"`
-}
-
-func runTrading(_ context.Context, env *Env, args []string) int {
+func runTrading(ctx context.Context, env *Env, args []string) int {
 	sub := "status"
-	if subIdx := tradingSubcommandIndex(args); subIdx >= 0 {
-		sub = args[subIdx]
-		args = append(append([]string{}, args[:subIdx]...), args[subIdx+1:]...)
+	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		return runTradingStatus(ctx, env, args)
 	}
-	if sub != "status" {
+	if len(args) > 0 && args[0] != "status" {
+		sub = args[0]
+		args = args[1:]
+	} else if len(args) > 0 {
+		args = args[1:]
+	}
+	switch sub {
+	case "status":
+		return runTradingStatus(ctx, env, args)
+	default:
 		return fail(env, "trading: unknown subcommand %q (try `ibkr trading status`)", sub)
 	}
-	return runTradingStatus(env, args)
 }
 
-func tradingSubcommandIndex(args []string) int {
-	for i, arg := range args {
-		if arg == "status" {
-			return i
-		}
-	}
-	return -1
-}
-
-func runTradingStatus(env *Env, args []string) int {
+func runTradingStatus(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "trading status")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	res := tradingStatusResult{
-		Enabled:         false,
-		Mode:            "read-only-default",
-		LocalGate:       "disabled",
-		BrokerGate:      "whatif_unavailable",
-		PreviewRequired: true,
-		Blocked:         true,
-		Blockers: []string{
-			"default build exposes risk-plan candidate preview diagnostics only",
-			"broker WhatIf and order writes require an explicitly enabled trading build",
-			"MCP order submission is not exposed",
-		},
-		AsOf: time.Now(),
+	var res rpc.TradingStatus
+	if err := env.Conn.Call(ctx, rpc.MethodTradingStatus, nil, &res); err != nil {
+		return fail(env, "trading status: %v", err)
 	}
 	if *jsonOut {
 		return printJSON(env, res)
 	}
-	renderTradingStatus(env, res)
-	return 1
+	renderTradingStatusText(env, &res)
+	if res.Blocked {
+		return 1
+	}
+	return 0
 }
 
-func renderTradingStatus(env *Env, res tradingStatusResult) {
+func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "IBKR Trading  %s\n", env.statusBadge(statusConcern{Text: "DISABLED", Level: statusConcernNotice}))
-	statusRow(env, out, "Local gate", res.LocalGate)
-	statusRow(env, out, "Broker gate", res.BrokerGate)
-	statusRow(env, out, "Preview req", fmt.Sprint(res.PreviewRequired))
+	fmt.Fprintf(out, "IBKR Trading  %s\n", env.statusBadge(tradingStatusVerdict(*st)))
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Blockers:")
-	for _, blocker := range res.Blockers {
-		fmt.Fprintf(out, "  - %s\n", blocker)
+	statusRow(env, out, "Local gate", formatTradingLocalGate(env, *st))
+	statusRow(env, out, "Broker gate", nonEmpty(st.BrokerGate, rpc.BrokerTradingGateUnknown))
+	statusRow(env, out, "Endpoint", nonEmpty(st.Endpoint, "auto-detect"))
+	statusRow(env, out, "Account", nonEmpty(st.Account, "auto-detect")+" ("+nonEmpty(st.AccountOrigin, "auto")+")")
+	statusRow(env, out, "Client ID", fmt.Sprintf("%d (%s)", st.ClientID, nonEmpty(st.ClientIDOrigin, "default")))
+	statusRow(env, out, "MCP trading", nonEmpty(st.MCPTrading, rpc.TradingMCPDisabled))
+	statusRow(env, out, "Preview req", fmt.Sprint(st.PreviewRequired))
+	statusRow(env, out, "Open orders", fmt.Sprint(st.OpenOrders))
+	if st.LastOrderEvent != "" {
+		statusRow(env, out, "Last event", st.LastOrderEvent)
+	}
+	if st.LocalGate == rpc.TradingLocalGateLive {
+		statusRow(env, out, "Live override", nonEmpty(st.LiveOverride, rpc.TradingLiveOverrideBlocked))
+		if st.PaperSmoke != "" {
+			statusRow(env, out, "Paper smoke", formatPaperSmokeValue(*st))
+		}
+	}
+	if len(st.Blockers) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Blockers:")
+		for _, b := range st.Blockers {
+			fmt.Fprintf(out, "  - %s: %s\n", b.Code, b.Message)
+			if b.Action != "" {
+				fmt.Fprintf(out, "    action: %s\n", b.Action)
+			}
+		}
 	}
 	fmt.Fprintln(out)
+}
+
+func formatPaperSmokeValue(st rpc.TradingStatus) string {
+	value := st.PaperSmoke
+	if st.PaperSmokeAt != nil && !st.PaperSmokeAt.IsZero() {
+		value += " at " + st.PaperSmokeAt.Format(time.RFC3339)
+	}
+	if st.PaperSmokeAccount != "" || st.PaperSmokeEndpoint != "" || st.PaperSmokeClientID != 0 {
+		value += fmt.Sprintf(" (%s via %s, client %d)", nonEmpty(st.PaperSmokeAccount, "unknown-account"), nonEmpty(st.PaperSmokeEndpoint, "unknown-endpoint"), st.PaperSmokeClientID)
+	}
+	if st.PaperSmokeMaxAge != "" {
+		value += "; max age " + st.PaperSmokeMaxAge
+	}
+	return value
+}
+
+func tradingStatusVerdict(st rpc.TradingStatus) statusConcern {
+	switch {
+	case !st.Enabled:
+		return statusConcern{Text: "DISABLED", Level: statusConcernNotice}
+	case st.Blocked:
+		return statusConcern{Text: "BLOCKED", Level: statusConcernWarn}
+	default:
+		return statusConcern{Text: "READY", Level: statusConcernNone}
+	}
+}
+
+func formatTradingLocalGate(env *Env, st rpc.TradingStatus) string {
+	if !st.Enabled {
+		return env.dim(rpc.TradingLocalGateDisabled)
+	}
+	if st.Blocked {
+		return env.yellow(st.LocalGate + " blocked")
+	}
+	if st.LocalGate == rpc.TradingLocalGateLive {
+		return env.yellow(st.LocalGate + " ready")
+	}
+	return env.green(st.LocalGate + " ready")
+}
+
+func formatTradingStatusValue(env *Env, st rpc.TradingStatus) string {
+	if st.LocalGate == "" {
+		return env.dim("unknown")
+	}
+	if !st.Enabled {
+		return env.dim("disabled")
+	}
+	if st.Blocked {
+		msg := "blocked"
+		if len(st.Blockers) > 0 {
+			msg += ": " + st.Blockers[0].Message
+		}
+		return env.yellow(st.LocalGate + " " + msg)
+	}
+	if st.LocalGate == rpc.TradingLocalGateLive {
+		return env.yellow("live ready")
+	}
+	return env.green(st.LocalGate + " ready")
 }

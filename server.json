@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.osauer/ibkr",
   "title": "IBKR MCP Server",
-  "description": "IBKR MCP server for agentic portfolio analysis and trading research via TWS/IB Gateway.",
-  "version": "1.5.0",
+  "description": "IBKR MCP server for agentic portfolio analysis, trading research, and preview-only stock/ETF order drafts via TWS/IB Gateway. It cannot place, modify, cancel, or transmit broker orders.",
+  "version": "1.6.1",
   "websiteUrl": "https://github.com/osauer/ibkr",
   "repository": {
     "url": "https://github.com/osauer/ibkr",
