@@ -287,10 +287,10 @@ func TestStartupCanaryIsTerminalNativeAndYellow(t *testing.T) {
 	m := newModel(testCatalog(t), Size{Rows: 14, Cols: 72})
 	got := render(m)
 	plain := stripControl(got)
-	if !strings.Contains(plain, "/####( o )###>") || !strings.Contains(plain, "ibkr canary") {
+	if !strings.Contains(plain, "▐████ ███▌▸") || !strings.Contains(plain, "ibkr canary") {
 		t.Fatalf("startup canary missing from render: %q", plain)
 	}
-	if !strings.Contains(got, ansiWarn+"   /####( o )###>") {
+	if !strings.Contains(got, ansiWarn+"   ▐████ ███▌▸") {
 		t.Fatalf("startup canary is not yellow: %q", got)
 	}
 }
@@ -302,10 +302,10 @@ func TestRiskPanelUsesYellowMiniCanary(t *testing.T) {
 	if len(lines) == 0 {
 		t.Fatal("risk panel returned no lines")
 	}
-	if !strings.Contains(stripControl(lines[0]), ">(#) CANARY") {
+	if !strings.Contains(stripControl(lines[0]), "▐█▌▸ CANARY") {
 		t.Fatalf("risk panel canary title missing: %q", lines[0])
 	}
-	if !strings.Contains(lines[0], ansiWarn+">(#)") || !strings.Contains(lines[0], ansiWarn+"CANARY") {
+	if !strings.Contains(lines[0], ansiWarn+"▐█▌▸") || !strings.Contains(lines[0], ansiWarn+"CANARY") {
 		t.Fatalf("risk panel canary is not yellow: %q", lines[0])
 	}
 }
