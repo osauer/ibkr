@@ -71,6 +71,7 @@ type Server struct {
 	socketPath string
 	startedAt  time.Time
 	version    string
+	now        func() time.Time
 
 	listener net.Listener
 
@@ -237,6 +238,26 @@ type Server struct {
 	// restart resets the counters).
 	streaks *StreakStore
 
+	// tradingReadiness persists daemon-owned evidence for local write
+	// gates, starting with the recent paper-smoke proof required before
+	// live mode. It deliberately lives outside config so a TOML edit cannot
+	// fake runtime readiness.
+	tradingReadiness *tradingReadinessStore
+	// orderJournal is the durable audit log for order intents and broker
+	// lifecycle events. It is installed before order writes exist so status
+	// and later handlers share one state primitive.
+	orderJournal *orderJournalStore
+	// orderTokens signs preview tokens. Tokens are local intent artifacts;
+	// they are not broker orders and cannot submit anything until a separate
+	// gated place handler exists.
+	orderTokens *orderTokenSigner
+	// orderPreview* hooks let tests exercise the full preview gate/token path
+	// without a live gateway. Nil hooks use the production connector-backed
+	// implementations.
+	orderPreviewQuote          func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
+	orderPreviewPositionImpact func(context.Context, string, string, int) (rpc.OrderPositionImpact, error)
+	orderPreviewWhatIf         func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
+
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
 	// shutdown and `ibkr status` reflects the work — same coherence
@@ -308,6 +329,7 @@ func New(opts Options) *Server {
 		cfg:            opts.Config,
 		socketPath:     opts.SocketPath,
 		version:        opts.Version,
+		now:            time.Now,
 		streams:        map[string]context.CancelFunc{},
 		idleStop:       make(chan struct{}),
 		logger:         opts.Logger,
@@ -323,6 +345,9 @@ func New(opts Options) *Server {
 	s.installMembersRefresher()
 	s.installContractStore()
 	s.installStreakStore()
+	s.installTradingReadinessStore()
+	s.installOrderJournalStore()
+	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
 	return s
@@ -360,6 +385,38 @@ func (s *Server) installStreakStore() {
 		return
 	}
 	s.streaks = NewStreakStore(dir)
+}
+
+func (s *Server) installTradingReadinessStore() {
+	path, err := defaultTradingReadinessPath()
+	if err != nil {
+		s.warnf("trading readiness: resolve state path: %v (live smoke gate will stay blocked)", err)
+		return
+	}
+	s.tradingReadiness = newTradingReadinessStore(path)
+}
+
+func (s *Server) installOrderJournalStore() {
+	path, err := defaultOrderJournalPath()
+	if err != nil {
+		s.warnf("order journal: resolve state path: %v (order audit disabled)", err)
+		return
+	}
+	s.orderJournal = newOrderJournalStore(path)
+}
+
+func (s *Server) installOrderTokenSigner() {
+	path, err := defaultOrderTokenKeyPath()
+	if err != nil {
+		s.warnf("order preview tokens: resolve state path: %v (preview tokens disabled)", err)
+		return
+	}
+	signer, err := newOrderTokenSigner(path, s.now)
+	if err != nil {
+		s.warnf("order preview tokens: %v (preview tokens disabled)", err)
+		return
+	}
+	s.orderTokens = signer
 }
 
 func (s *Server) installRegimeSeriesCache() {
@@ -1848,6 +1905,14 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
+	case rpc.MethodTradingStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleTradingStatus(), nil })
+	case rpc.MethodOrdersOpen:
+		s.unary(req, enc, func() (any, error) { return s.handleOrdersOpen(ctx, req) })
+	case rpc.MethodOrderStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleOrderStatus(ctx, req) })
+	case rpc.MethodOrderPreview:
+		s.unary(req, enc, func() (any, error) { return s.handleOrderPreview(ctx, req) })
 	case rpc.MethodQuoteSubscribe:
 		s.handleQuoteSubscribe(ctx, req, enc, r)
 		return true
@@ -1945,9 +2010,9 @@ func unaryDeadline(method string) time.Duration {
 		// budget to absorb a degraded gateway without timing out before
 		// the connection error surfaces.
 		return 15 * time.Second
-	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
+	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot, rpc.MethodOrderPreview:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0
@@ -1988,6 +2053,8 @@ func classifyError(err error) (string, string) {
 		return rpc.CodeSymbolInactive, err.Error()
 	case errors.Is(err, ibkrlib.ErrIBKRUnavailable):
 		return rpc.CodeGatewayUnavailable, err.Error()
+	case errors.Is(err, ErrTradingDisabled):
+		return rpc.CodeTradingDisabled, err.Error()
 	case errors.Is(err, ibkrlib.ErrContractDetailsTimeout):
 		return rpc.CodeTimeout, err.Error()
 	case errors.Is(err, context.DeadlineExceeded):

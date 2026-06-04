@@ -435,6 +435,22 @@ func TestNextConcernPriority(t *testing.T) {
 			want: "SPX members refresh parse_failed",
 		},
 		{
+			name: "trading blocked",
+			in: rpc.HealthResult{
+				Connected: true,
+				Trading: rpc.TradingStatus{
+					Enabled:   true,
+					LocalGate: rpc.TradingLocalGatePaper,
+					Blocked:   true,
+					Blockers: []rpc.TradingBlocker{{
+						Code:    "gateway_account_unpinned",
+						Message: "order submission requires a pinned account",
+					}},
+				},
+			},
+			want: "Trading blocked: order submission requires a pinned account",
+		},
+		{
 			name: "background work",
 			in: rpc.HealthResult{
 				Connected:       true,
@@ -535,6 +551,14 @@ func TestStatusVerdict(t *testing.T) {
 		{
 			name: "market data warning",
 			in:   rpc.HealthResult{Connected: true, DataType: rpc.MarketDataDelayed},
+			want: "ATTENTION",
+		},
+		{
+			name: "trading blocked",
+			in: rpc.HealthResult{
+				Connected: true,
+				Trading:   rpc.TradingStatus{Enabled: true, LocalGate: rpc.TradingLocalGatePaper, Blocked: true},
+			},
 			want: "ATTENTION",
 		},
 		{

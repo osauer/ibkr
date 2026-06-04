@@ -14,13 +14,21 @@
       "Bash(ibkr breadth*)",
       "Bash(ibkr gamma*)",
       "Bash(ibkr regime*)",
+      "Bash(ibkr trading status*)",
+      "Bash(ibkr orders open*)",
+      "Bash(ibkr order status*)",
+      "Bash(ibkr order preview*)",
       "Bash(ibkr status*)",
       "Bash(ibkr version*)"
     ],
     "deny": [
-      "Bash(ibkr order*)",
+      "Bash(ibkr order place*)",
+      "Bash(ibkr order modify*)",
+      "Bash(ibkr order cancel*)",
       "Bash(ibkr trade*)",
-      "Bash(ibkr cancel*)"
+      "Bash(ibkr cancel*)",
+      "Bash(ibkr submit*)",
+      "Bash(ibkr place*)"
     ]
   },
   "hooks": {
@@ -30,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v jq >/dev/null 2>&1 || { echo 'ibkr: jq missing on PATH; failing closed for ibkr Bash commands' >&2; exit 2; }; cmd=$(jq -r '.tool_input.command // \"\"'); printf '%s' \"$cmd\" | grep -Eq '(^|[[:space:]/])ibkr[[:space:]]+' || exit 0; if printf '%s' \"$cmd\" | grep -Eq '(^|[[:space:]/])ibkr[[:space:]]+(order|trade|cancel|submit|place)([[:space:]]|$)'; then echo 'ibkr: refusing trading verb; ibkr is read-only' >&2; exit 2; fi; if printf '%s' \"$cmd\" | grep -Eq '[;&|<>`]|[$][(]|[[:cntrl:]]'; then echo 'ibkr: refusing shell metacharacters in allowed ibkr command' >&2; exit 2; fi; exit 0"
+            "command": "command -v jq >/dev/null 2>&1 || { echo 'ibkr: jq missing on PATH; failing closed for ibkr Bash commands' >&2; exit 2; }; cmd=$(jq -r '.tool_input.command // \"\"'); printf '%s' \"$cmd\" | grep -Eq '(^|[[:space:]/])ibkr[[:space:]]+' || exit 0; if printf '%s' \"$cmd\" | grep -Eq '[;&|<>`]|[$][(]|[[:cntrl:]]'; then echo 'ibkr: refusing shell metacharacters in allowed ibkr command' >&2; exit 2; fi; if printf '%s' \"$cmd\" | grep -Eq '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|orders([[:space:]]+open)?|trading([[:space:]]+status)?)([[:space:]]|$)'; then exit 0; fi; if printf '%s' \"$cmd\" | grep -Eq '(^|[[:space:]/])ibkr[[:space:]]+(order|orders|trading|trade|cancel|submit|place)([[:space:]]|$)'; then echo 'ibkr: refusing broker-write verb; only order preview/status and trading/orders status reads are allowed' >&2; exit 2; fi; exit 0"
           }
         ]
       }

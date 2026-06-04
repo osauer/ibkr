@@ -43,7 +43,7 @@ func TestParity(t *testing.T) {
 			}
 			continue
 		}
-		if !mcpNames[name] {
+		if !mcpNames[name] && !hasMCPSubtool(mcpNames, name) {
 			t.Errorf("CLI command %q has no MCP tool (ibkr_%s); add a Tool entry to internal/mcp/tools.go or list it in ExcludedCLI with a reason", name, name)
 		}
 	}
@@ -69,6 +69,17 @@ func TestParity(t *testing.T) {
 	}
 }
 
+func hasMCPSubtool(mcpNames map[string]bool, cliName string) bool {
+	underscorePrefix := cliName + "_"
+	hyphenPrefix := cliName + "-"
+	for name := range mcpNames {
+		if strings.HasPrefix(name, underscorePrefix) || strings.HasPrefix(name, hyphenPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSchemasAreValidJSON guards against typos in the hand-built JSON
 // Schemas. Every tool's InputSchema must be a well-formed object schema.
 func TestSchemasAreValidJSON(t *testing.T) {
@@ -85,15 +96,37 @@ func TestSchemasAreValidJSON(t *testing.T) {
 	}
 }
 
-// TestNoTradingTools is the safety counterpart to the build-tag stub and the
-// PreToolUse hook. Even if a contributor adds a Tool entry by mistake,
-// `make check` refuses to compile a binary that exposes trading verbs.
-func TestNoTradingTools(t *testing.T) {
+// TestTradingToolAllowlist is the safety counterpart to the build-tag stub
+// and the PreToolUse hook. Preview/read-model order tools are explicit;
+// any broker-write tool name still fails the MCP surface.
+func TestTradingToolAllowlist(t *testing.T) {
 	t.Parallel()
 	for _, tool := range Tools {
+		switch tool.Name {
+		case "ibkr_trading_status":
+			desc := strings.ToLower(tool.Description)
+			if !strings.Contains(desc, "does not place") || !strings.Contains(desc, "only reports readiness") {
+				t.Errorf("tool %s must explicitly say it only reports readiness and does not place orders", tool.Name)
+			}
+			continue
+		case "ibkr_orders_open", "ibkr_order_status":
+			desc := strings.ToLower(tool.Description)
+			if !strings.Contains(desc, "read-only") || !strings.Contains(desc, "does not place") {
+				t.Errorf("tool %s must explicitly say it is read-only and does not place orders", tool.Name)
+			}
+			continue
+		case "ibkr_order_preview":
+			desc := strings.ToLower(tool.Description)
+			for _, want := range []string{"does not submit an order", "submit_eligible", "executable=false"} {
+				if !strings.Contains(desc, want) {
+					t.Errorf("tool %s description must include %q", tool.Name, want)
+				}
+			}
+			continue
+		}
 		for _, banned := range []string{"order", "trade", "cancel", "submit", "place"} {
 			if strings.Contains(strings.ToLower(tool.Name), banned) {
-				t.Errorf("tool %s name contains banned trading verb %q — ibkr is read-only", tool.Name, banned)
+				t.Errorf("tool %s name contains unallowlisted trading verb %q", tool.Name, banned)
 			}
 		}
 	}
@@ -182,8 +215,12 @@ func TestInitializeAndToolsList(t *testing.T) {
 		if listResp.Result.Tools[i].Annotations.Title != want.Title {
 			t.Errorf("tool[%d].annotations.title: got %q want %q", i, listResp.Result.Tools[i].Annotations.Title, want.Title)
 		}
-		if !listResp.Result.Tools[i].Annotations.ReadOnlyHint {
-			t.Errorf("tool[%d].annotations.readOnlyHint: got false want true", i)
+		wantReadOnly := true
+		if want.ReadOnlyHint != nil {
+			wantReadOnly = *want.ReadOnlyHint
+		}
+		if listResp.Result.Tools[i].Annotations.ReadOnlyHint != wantReadOnly {
+			t.Errorf("tool[%d].annotations.readOnlyHint: got %v want %v", i, listResp.Result.Tools[i].Annotations.ReadOnlyHint, wantReadOnly)
 		}
 	}
 }

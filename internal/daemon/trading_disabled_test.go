@@ -13,9 +13,8 @@ import (
 )
 
 // handleOrderPlace and handleOrderCancel must refuse every call with
-// ErrTradingDisabled. Pre-v0.14 a build-tagged simulator could override
-// these; that path is gone, and this test pins the always-refused
-// behaviour so it cannot regress without a deliberate edit.
+// ErrTradingDisabled until the gated write path exists. Preview can mint local
+// tokens, but no broker place/cancel path is opened by this slice.
 func TestOrderHandlersAlwaysRefuse(t *testing.T) {
 	t.Parallel()
 

@@ -90,8 +90,8 @@ cat > "$stage/manifest.json" <<JSON
   "name": "ibkr",
   "display_name": "ibkr",
   "version": "$semver",
-  "description": "Read-only Interactive Brokers MCP server for account and market analysis.",
-  "long_description": "ibkr packages a local read-only Interactive Brokers (IBKR) MCP server for Claude Desktop and other MCPB-compatible clients. It exposes account, positions, quotes, watchlists, option chains, scanners, technical screens, breadth, dealer gamma, and risk-regime context through the local ibkr CLI. It does not expose order entry, order modification, or order cancellation.",
+  "description": "No-broker-write Interactive Brokers MCP server for account, market analysis, and preview-only drafts.",
+  "long_description": "ibkr packages a local no-broker-write Interactive Brokers (IBKR) MCP server for Claude Desktop and other MCPB-compatible clients. It exposes account, positions, quotes, watchlists, option chains, scanners, technical screens, breadth, dealer gamma, risk-regime context, and preview-only stock/ETF order drafts through the local ibkr CLI. It cannot place, modify, cancel, or transmit broker orders.",
   "author": {
     "name": "Oliver Sauer",
     "url": "https://github.com/osauer"

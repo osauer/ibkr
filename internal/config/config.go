@@ -116,6 +116,102 @@ type Daemon struct {
 	LogLevel string `toml:"log_level"`
 }
 
+// Trading holds local order-entry gates. A missing [trading] section is
+// intentionally non-trading; TWS / Gateway broker permissions remain the final
+// authority even after these local gates pass.
+type Trading struct {
+	// Enabled controls whether any order preview/place/modify/cancel command can progress beyond the local gate (default false).
+	Enabled bool `toml:"enabled"`
+	// Mode selects the target account class for local safety checks: "paper" (default) or "live".
+	Mode string `toml:"mode"`
+	// RequirePreview forces every write through a submit-eligible preview token. Defaults to true; false is invalid for the shipped trading release.
+	RequirePreview *bool `toml:"require_preview"`
+	// MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency.
+	MaxNotional float64 `toml:"max_notional"`
+	// MaxOptionContracts caps first-release single-leg option quantity; default 5.
+	MaxOptionContracts int `toml:"max_option_contracts"`
+	// AllowStockShort permits stock short/opening flip previews when true. Default false.
+	AllowStockShort bool `toml:"allow_stock_short"`
+	// AllowOptionSellToOpen permits option sell-to-open previews when true. Default false.
+	AllowOptionSellToOpen bool `toml:"allow_option_sell_to_open"`
+	// AllowOptionMarketOrders permits option market orders when true. Default false; first trading release still blocks this.
+	AllowOptionMarketOrders bool `toml:"allow_option_market_orders"`
+	// AllowLive is the explicit local live-trading override. Default false.
+	AllowLive bool `toml:"allow_live"`
+	// LiveAckAccount must match the pinned live account before live writes are allowed.
+	LiveAckAccount string `toml:"live_ack_account"`
+	// LiveAckEndpoint must match host:port for the pinned live endpoint before live writes are allowed.
+	LiveAckEndpoint string `toml:"live_ack_endpoint"`
+	// PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. Defaults to 168h.
+	PaperSmokeMaxAge duration `toml:"paper_smoke_max_age"`
+	// MCPEnabled controls whether MCP write tools may progress beyond preview/status. Default false.
+	MCPEnabled bool `toml:"mcp_enabled"`
+	// MCPMode selects MCP scope: "preview" (default), "paper-write", or "live-write".
+	MCPMode string `toml:"mcp_mode"`
+	// MCPNonceTTL controls how long CLI-minted human nonces remain valid. Defaults to 5m.
+	MCPNonceTTL duration `toml:"mcp_nonce_ttl"`
+}
+
+const (
+	TradingModePaper = "paper"
+	TradingModeLive  = "live"
+
+	MCPModePreview    = "preview"
+	MCPModePaperWrite = "paper-write"
+	MCPModeLiveWrite  = "live-write"
+)
+
+// WithDefaults returns t with default values applied without granting trading.
+func (t Trading) WithDefaults() Trading {
+	if t.Mode == "" {
+		t.Mode = TradingModePaper
+	}
+	if t.RequirePreview == nil {
+		v := true
+		t.RequirePreview = &v
+	}
+	if t.MaxNotional == 0 {
+		t.MaxNotional = 10000
+	}
+	if t.MaxOptionContracts == 0 {
+		t.MaxOptionContracts = 5
+	}
+	if t.PaperSmokeMaxAge == 0 {
+		t.PaperSmokeMaxAge = duration(168 * time.Hour)
+	}
+	if t.MCPMode == "" {
+		t.MCPMode = MCPModePreview
+	}
+	if t.MCPNonceTTL == 0 {
+		t.MCPNonceTTL = duration(5 * time.Minute)
+	}
+	return t
+}
+
+// PreviewRequired reports the resolved preview-token requirement.
+func (t Trading) PreviewRequired() bool {
+	if t.RequirePreview == nil {
+		return true
+	}
+	return *t.RequirePreview
+}
+
+// PaperSmokeMaxAgeDuration returns the resolved paper-smoke freshness window.
+func (t Trading) PaperSmokeMaxAgeDuration() time.Duration {
+	if t.PaperSmokeMaxAge == 0 {
+		return 168 * time.Hour
+	}
+	return t.PaperSmokeMaxAge.Std()
+}
+
+// MCPNonceTTLDuration returns the resolved MCP human-nonce lifetime.
+func (t Trading) MCPNonceTTLDuration() time.Duration {
+	if t.MCPNonceTTL == 0 {
+		return 5 * time.Minute
+	}
+	return t.MCPNonceTTL.Std()
+}
+
 // SPX holds the SPX-related daemon knobs. Currently just the members
 // auto-refresh toggle; grouping under [spx] gives future SPX-scoped
 // configs (e.g. fetcher concurrency, sweep tunables) a natural home
@@ -164,6 +260,7 @@ type Scan struct {
 type Config struct {
 	Gateway Gateway         `toml:"gateway"`
 	Daemon  Daemon          `toml:"daemon"`
+	Trading Trading         `toml:"trading"`
 	SPX     SPX             `toml:"spx"`
 	Scans   map[string]Scan `toml:"scans"`
 }
@@ -174,6 +271,7 @@ type Config struct {
 type Resolved struct {
 	Gateway Gateway
 	Daemon  Daemon
+	Trading Trading
 	SPX     SPX
 	Scans   map[string]Scan
 }
@@ -242,7 +340,7 @@ func Load(path string) (*Config, error) {
 		for i, k := range undecoded {
 			keys[i] = k.String()
 		}
-		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [scans.<name>])", path, strings.Join(keys, ", "))
+		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
 }
@@ -271,6 +369,7 @@ func (c *Config) Resolve() (*Resolved, error) {
 	return &Resolved{
 		Gateway: c.Gateway,
 		Daemon:  dae,
+		Trading: c.Trading.WithDefaults(),
 		SPX:     c.SPX,
 		Scans:   scans,
 	}, nil

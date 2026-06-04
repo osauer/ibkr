@@ -4,13 +4,57 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**17 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**21 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
 Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness ("why is data missing / stale / wrong-account?", "will scanner or gamma be busy?", "are downstream risk reads stale?"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.
 
 *No parameters.*
+
+## `ibkr_trading_status`
+
+Local trading gate status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, MCP write mode, live override status, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.
+
+*No parameters.*
+
+## `ibkr_orders_open`
+
+Read locally journaled open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open or when the user asks for open orders. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for creating a new preview token (use `ibkr_order_preview`) and NOT for submitting, modifying, or cancelling an order.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `account` | string | no | optional account filter; omit to show all locally journaled accounts |
+
+## `ibkr_order_status`
+
+Read one locally journaled order's lifecycle and audit events by order ref, IBKR order ID, or permanent ID. Use when the user asks what happened to a specific order or needs the daemon's latest broker-callback evidence. This tool is read-only: it does NOT place, modify, cancel, preview, transmit, or confirm an order. For the open-order list use `ibkr_orders_open`; for a new tokenized preview use `ibkr_order_preview`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `id` | string | **yes** | order identifier to inspect: local order_ref such as ibkr-20260528-093000, IBKR order ID, or permanent ID |
+
+## `ibkr_order_preview`
+
+Preview a locally gated stock/ETF LMT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`. This tool validates the local trading gate, pinned endpoint/account/client ID, LMT-only order type, max notional, and stock short/flip policy, and returns quote inputs, position effect, `token_minted`, and `submit_eligible`. In the default build, broker WhatIf is unavailable, so a token can be minted while `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a future separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For market context without token minting use `ibkr_quote`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `action` | string | **yes** | order side; buy increases or closes short exposure, sell reduces/closes long exposure unless stock shorting is explicitly enabled |
+| `limit` | number | no | optional explicit LMT price. Omit to use the default patient-limit strategy from live bid/ask. |
+| `market` | string | no | optional stock routing shortcut; omit or use "us" for SMART/USD, use "de" for German/Xetra EUR equities via SMART with primary_exchange=IBIS |
+| `outside_rth` | boolean | no | whether the draft allows outside regular trading hours. Default false; set true only when the human explicitly asks. |
+| `quantity` | integer | **yes** | share quantity; must be positive |
+| `strategy` | string | no | pricing strategy. Defaults to patient-limit when limit is omitted and explicit-limit when limit is supplied. |
+| `symbol` | string | **yes** | stock or ETF ticker symbol; options are intentionally not accepted by this preview slice |
+| `tif` | string | no | time in force; only DAY is accepted in this slice |
+| `timeout_ms` | integer | no | quote snapshot timeout; default 5000 ms |
 
 ## `ibkr_account`
 
@@ -215,4 +259,3 @@ Fixed-fractional position sizing pegged to live NLV. Pure math against the accou
 | `stop` | number | **yes** | planned stop price per share, quote currency |
 | `symbol` | string | **yes** | ticker the trade plan applies to (for reporting only) |
 | `target` | number | no | optional take-profit price; when set, response includes r (reward:risk multiple) and breakeven_win_rate |
-

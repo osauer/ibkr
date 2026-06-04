@@ -2,7 +2,7 @@
 
 Last updated: 2026-05-29 06:36 CEST
 
-Use the IBKR MCP tools to produce a professional portfolio review from the user's live Interactive Brokers / TWS context. The goal is not generic personal-finance advice; it is an agentic desk-style workflow for semi-professional retail users who care about exposure, market regime, option risk, data freshness, and what to review next. Produce analysis and plans only. The available MCP interface is read-only and cannot place, preview, modify, or cancel orders.
+Use the IBKR MCP tools to produce a professional portfolio review from the user's live Interactive Brokers / TWS context. The goal is not generic personal-finance advice; it is an agentic desk-style workflow for semi-professional retail users who care about exposure, market regime, option risk, data freshness, and what to review next. Produce analysis and plans only. Do not invoke order-preview, placement, modification, cancellation, or broker-submission tools in this workflow.
 
 Optimize for decision quality, data provenance, and a compact final answer. Use tools deliberately, parallelize independent calls when the client supports it, and stop when the portfolio picture is clear enough to produce a useful review. Do not narrate progress while running; emit only the final report or a readiness/partial-stop report.
 
@@ -112,7 +112,7 @@ Use compact Markdown. Lead with the answer.
 
 ## Guardrails
 
-- Do not place, preview, modify, or cancel orders; no MCP tool exists for that.
+- Do not place, preview, modify, or cancel orders in this workflow. Order preview is a separate non-submitting surface and is not part of portfolio review.
 - Do not convert analysis into a trade instruction unless the user explicitly asks for a plan.
 - Do not treat `quote_price` as the official account valuation mark; positions carry account marks and quote context separately.
 - Do not zero-fill null daily P&L, missing Greeks, missing OI, missing IV, or missing FX rates.

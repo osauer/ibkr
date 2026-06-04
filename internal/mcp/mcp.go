@@ -1,7 +1,7 @@
-// Package mcp serves the `ibkr` daemon's read-only RPC surface as an MCP
-// (Model Context Protocol) server over stdio. Spoken by Claude Desktop and
-// any other local MCP client; the tool inventory mirrors the CLI 1:1 and is
-// gated by a parity test (see tools_test.go).
+// Package mcp serves the `ibkr` daemon's no-broker-write RPC surface as an
+// MCP (Model Context Protocol) server over stdio. Spoken by Claude Desktop
+// and any other local MCP client; the tool inventory mirrors the CLI 1:1 and
+// is gated by a parity test (see tools_test.go).
 //
 // Wire: newline-delimited JSON-RPC 2.0 over stdin/stdout, no framing headers.
 // The MCP lifecycle is initialize → initialized (notification) → repeated
@@ -338,7 +338,7 @@ func (s *Server) instructions() string {
 	if s.profile == ProfileMonitor {
 		return "Read-only Interactive Brokers monitor profile. Use `ibkr_canary` first; call `ibkr_risk_plan` only after canary indicates planner readiness; call `ibkr_status` only for connectivity or degraded-input troubleshooting."
 	}
-	return "Read-only Interactive Brokers tools and resources. Tools cover account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, a stateless portfolio canary, and a read-only risk-plan surface for candidate mitigation intents. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol})."
+	return "Interactive Brokers tools and resources. Most tools are read-only: account, positions, snapshot quotes, option chains, daily history, technical/relative-strength screens, market scans, fixed-fractional position sizing, S&P 500 breadth (50-/200-DMA, new highs/lows), SPX-canonical dealer zero-gamma with SPY context, a broad-market stress-lifecycle regime dashboard, a stateless portfolio canary, and a read-only risk-plan surface for candidate mitigation intents. Order-status/open-order tools are read-only journal views. The order-preview tool can mint a local preview token and reports submit_eligible separately, but cannot place, modify, cancel, or transmit a broker order. Resources expose live streaming quotes via subscribe (URI template: ibkr://quote/{symbol})."
 }
 
 // toolDescriptor is the wire shape MCP expects in tools/list.
@@ -363,6 +363,10 @@ func (s *Server) handleToolsList(id json.RawMessage) {
 		if s.profile == ProfileMonitor && strings.TrimSpace(t.MonitorDescription) != "" {
 			desc = t.MonitorDescription
 		}
+		readOnly := true
+		if t.ReadOnlyHint != nil {
+			readOnly = *t.ReadOnlyHint
+		}
 		descs = append(descs, toolDescriptor{
 			Name:        t.Name,
 			Title:       t.Title,
@@ -370,7 +374,7 @@ func (s *Server) handleToolsList(id json.RawMessage) {
 			InputSchema: t.JSONSchema,
 			Annotations: toolAnnotations{
 				Title:        t.Title,
-				ReadOnlyHint: true,
+				ReadOnlyHint: readOnly,
 			},
 		})
 	}

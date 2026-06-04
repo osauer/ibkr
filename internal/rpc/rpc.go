@@ -28,12 +28,16 @@ const (
 	MethodTechnical      = "technical.snapshot"
 	MethodMarketCalendar = "market.calendar"
 	MethodStatusHealth   = "status.health"
+	MethodTradingStatus  = "trading.status"
+	MethodOrdersOpen     = "orders.open"
+	MethodOrderStatus    = "order.status"
+	MethodOrderPreview   = "order.preview"
 	MethodBreadthSPX     = "breadth.spx"
 	MethodGammaZeroSPX   = "gamma.zero_spx"
 	MethodRegimeSnapshot = "regime.snapshot"
 	MethodCancel         = "cancel"
-	MethodOrderPlace     = "order.place"  // refused in v1
-	MethodOrderCancel    = "order.cancel" // refused in v1
+	MethodOrderPlace     = "order.place"
+	MethodOrderCancel    = "order.cancel"
 )
 
 // Error codes used in Error.Code. CLI maps these to user-facing messages.
@@ -278,60 +282,6 @@ type ContractParams struct {
 	Expiry       string  `json:"expiry,omitempty"` // YYYYMMDD
 	Strike       float64 `json:"strike,omitempty"`
 	Right        string  `json:"right,omitempty"` // C | P
-}
-
-const (
-	OrderActionBuy  = "BUY"
-	OrderActionSell = "SELL"
-
-	OrderTypeLMT = "LMT"
-	OrderTIFDay  = "DAY"
-
-	OrderStrategyPatientLimit = "patient-limit"
-
-	OrderPositionEffectReduce = "reduce"
-	OrderPositionEffectClose  = "close"
-
-	OrderWhatIfStatusUnavailable = "unavailable"
-)
-
-// OrderDraft is the canonical local intent shown by plan-based order preview.
-// Default builds never submit it; submit-capable builds must bind this exact
-// draft to a broker WhatIf result before minting a place token.
-type OrderDraft struct {
-	Action     string         `json:"action"`
-	Contract   ContractParams `json:"contract"`
-	Quantity   int            `json:"quantity"`
-	OrderType  string         `json:"order_type"`
-	LimitPrice float64        `json:"limit_price"`
-	TIF        string         `json:"tif"`
-	OutsideRTH bool           `json:"outside_rth"`
-	Strategy   string         `json:"strategy"`
-	OrderRef   string         `json:"order_ref"`
-}
-
-type OrderMarginImpact struct {
-	Currency                string   `json:"currency,omitempty"`
-	InitialMarginBefore     *float64 `json:"initial_margin_before,omitempty"`
-	InitialMarginAfter      *float64 `json:"initial_margin_after,omitempty"`
-	MaintenanceMarginBefore *float64 `json:"maintenance_margin_before,omitempty"`
-	MaintenanceMarginAfter  *float64 `json:"maintenance_margin_after,omitempty"`
-	EquityWithLoanBefore    *float64 `json:"equity_with_loan_before,omitempty"`
-	EquityWithLoanAfter     *float64 `json:"equity_with_loan_after,omitempty"`
-	Commission              *float64 `json:"commission,omitempty"`
-	CommissionCurrency      string   `json:"commission_currency,omitempty"`
-	WarningText             string   `json:"warning_text,omitempty"`
-	CompletedStatus         string   `json:"completed_status,omitempty"`
-	CompletedTime           string   `json:"completed_time,omitempty"`
-}
-
-type OrderWhatIfResult struct {
-	Status            string             `json:"status"`
-	RequiredForSubmit bool               `json:"required_for_submit"`
-	Available         bool               `json:"available"`
-	Message           string             `json:"message,omitempty"`
-	Action            string             `json:"action,omitempty"`
-	Margin            *OrderMarginImpact `json:"margin,omitempty"`
 }
 
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
@@ -2741,6 +2691,298 @@ type HealthResult struct {
 	// know yet (engine construction failed); the CLI hides the row
 	// in that case.
 	Members MembersHealth `json:"members"`
+	Trading TradingStatus `json:"trading"`
+}
+
+const (
+	TradingLocalGateDisabled = "disabled"
+	TradingLocalGatePaper    = "paper"
+	TradingLocalGateLive     = "live"
+
+	BrokerTradingGateUnknown          = "unknown"
+	BrokerTradingGatePaperSmokePassed = "paper-smoke-passed"
+
+	TradingMCPDisabled = "disabled"
+	TradingMCPPreview  = "preview-only"
+	TradingMCPPaper    = "paper-write"
+	TradingMCPLive     = "live-write"
+
+	TradingLiveOverrideBlocked = "blocked"
+	TradingLiveOverrideReady   = "ready"
+)
+
+// TradingBlocker explains one local reason an order write cannot proceed.
+type TradingBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Action  string `json:"action,omitempty"`
+}
+
+// TradingStatus is the local order-entry readiness surface. It is deliberately
+// separate from broker permission: TWS / IB Gateway can still reject writes
+// after all local gates pass.
+type TradingStatus struct {
+	Enabled            bool             `json:"enabled"`
+	Mode               string           `json:"mode"`
+	LocalGate          string           `json:"local_gate"`
+	BrokerGate         string           `json:"broker_gate"`
+	Endpoint           string           `json:"endpoint,omitempty"`
+	GatewayHost        string           `json:"gateway_host,omitempty"`
+	GatewayPort        int              `json:"gateway_port,omitempty"`
+	PortOrigin         string           `json:"port_origin,omitempty"`
+	Account            string           `json:"account,omitempty"`
+	AccountOrigin      string           `json:"account_origin,omitempty"`
+	ClientID           int              `json:"client_id,omitempty"`
+	ClientIDOrigin     string           `json:"client_id_origin,omitempty"`
+	MCPTrading         string           `json:"mcp_trading"`
+	PreviewRequired    bool             `json:"preview_required"`
+	OpenOrders         int              `json:"open_orders,omitempty"`
+	LastOrderEvent     string           `json:"last_order_event,omitempty"`
+	PaperSmoke         string           `json:"paper_smoke,omitempty"`
+	PaperSmokeAt       *time.Time       `json:"paper_smoke_at,omitempty"`
+	PaperSmokeMaxAge   string           `json:"paper_smoke_max_age,omitempty"`
+	PaperSmokeAccount  string           `json:"paper_smoke_account,omitempty"`
+	PaperSmokeEndpoint string           `json:"paper_smoke_endpoint,omitempty"`
+	PaperSmokeClientID int              `json:"paper_smoke_client_id,omitempty"`
+	PaperSmokeVersion  string           `json:"paper_smoke_version,omitempty"`
+	LiveOverride       string           `json:"live_override,omitempty"`
+	Blocked            bool             `json:"blocked"`
+	Blockers           []TradingBlocker `json:"blockers,omitempty"`
+}
+
+const (
+	OrderActionBuy  = "BUY"
+	OrderActionSell = "SELL"
+
+	OrderTypeLMT = "LMT"
+
+	OrderTIFDay = "DAY"
+
+	OrderStrategyPatientLimit  = "patient-limit"
+	OrderStrategyExplicitLimit = "explicit-limit"
+
+	OrderPositionEffectOpen      = "open"
+	OrderPositionEffectIncrease  = "increase"
+	OrderPositionEffectReduce    = "reduce"
+	OrderPositionEffectClose     = "close"
+	OrderPositionEffectFlip      = "flip"
+	OrderPositionEffectOpenShort = "open_short"
+
+	OrderWhatIfStatusUnavailable = "unavailable"
+	OrderWhatIfStatusAccepted    = "accepted"
+	OrderWhatIfStatusRejected    = "rejected"
+
+	OrderTokenScopePlace = "place"
+
+	OrderLifecyclePreviewed                = "previewed"
+	OrderLifecyclePendingSubmit            = "pending_submit"
+	OrderLifecyclePreSubmitted             = "pre_submitted"
+	OrderLifecycleSubmitted                = "submitted"
+	OrderLifecyclePartiallyFilled          = "partially_filled"
+	OrderLifecycleFilled                   = "filled"
+	OrderLifecyclePendingCancel            = "pending_cancel"
+	OrderLifecycleCancelled                = "cancelled"
+	OrderLifecycleRejected                 = "rejected"
+	OrderLifecycleInactive                 = "inactive"
+	OrderLifecycleUnknownReconcileRequired = "unknown_reconcile_required"
+)
+
+// OrdersOpenParams filters the read-only local order lifecycle view.
+type OrdersOpenParams struct {
+	Account string `json:"account,omitempty"`
+}
+
+// OrderStatusParams identifies one journal-backed order view by order ref,
+// IBKR order ID, or permanent ID.
+type OrderStatusParams struct {
+	ID string `json:"id"`
+}
+
+// OrderPreviewParams asks the daemon to validate and price an order draft,
+// then mint a short-lived preview token. The preview path never places the
+// order; place/modify/cancel remain separate gated RPCs.
+type OrderPreviewParams struct {
+	Action     string         `json:"action"` // BUY | SELL, case-insensitive
+	Contract   ContractParams `json:"contract"`
+	Quantity   int            `json:"quantity"`
+	OrderType  string         `json:"order_type,omitempty"` // LMT only in the first trading slice
+	LimitPrice *float64       `json:"limit_price,omitempty"`
+	Strategy   string         `json:"strategy,omitempty"` // default patient-limit for stocks/ETFs
+	TIF        string         `json:"tif,omitempty"`      // default DAY
+	OutsideRTH bool           `json:"outside_rth,omitempty"`
+	TimeoutMs  int            `json:"timeout_ms,omitempty"`
+}
+
+// OrderDraft is the canonical local intent bound into a preview token.
+type OrderDraft struct {
+	Action     string         `json:"action"`
+	Contract   ContractParams `json:"contract"`
+	Quantity   int            `json:"quantity"`
+	OrderType  string         `json:"order_type"`
+	LimitPrice float64        `json:"limit_price"`
+	TIF        string         `json:"tif"`
+	OutsideRTH bool           `json:"outside_rth"`
+	Strategy   string         `json:"strategy"`
+	OrderRef   string         `json:"order_ref"`
+}
+
+// OrderQuoteSnapshot captures the market-data inputs used by preview pricing.
+type OrderQuoteSnapshot struct {
+	Symbol       string        `json:"symbol"`
+	Bid          *float64      `json:"bid,omitempty"`
+	Ask          *float64      `json:"ask,omitempty"`
+	Last         *float64      `json:"last,omitempty"`
+	Mark         *float64      `json:"mark,omitempty"`
+	Midpoint     *float64      `json:"midpoint,omitempty"`
+	DataType     string        `json:"data_type,omitempty"`
+	QuoteQuality string        `json:"quote_quality,omitempty"`
+	SpreadPct    *float64      `json:"spread_pct,omitempty"`
+	PriceAt      time.Time     `json:"price_at,omitzero"`
+	AsOf         time.Time     `json:"as_of,omitzero"`
+	Warnings     []DataWarning `json:"warnings,omitempty"`
+}
+
+// OrderPositionImpact reports local position-effect math. Broker permissions
+// and margin remain authoritative; this is a disclosure and local safety gate.
+type OrderPositionImpact struct {
+	Before float64 `json:"before"`
+	After  float64 `json:"after"`
+	Effect string  `json:"effect"`
+}
+
+// OrderMarginImpact is populated from IBKR WhatIf once the raw preview-only
+// path is available in the trading build.
+type OrderMarginImpact struct {
+	Currency                string   `json:"currency,omitempty"`
+	InitialMarginBefore     *float64 `json:"initial_margin_before,omitempty"`
+	InitialMarginAfter      *float64 `json:"initial_margin_after,omitempty"`
+	MaintenanceMarginBefore *float64 `json:"maintenance_margin_before,omitempty"`
+	MaintenanceMarginAfter  *float64 `json:"maintenance_margin_after,omitempty"`
+	EquityWithLoanBefore    *float64 `json:"equity_with_loan_before,omitempty"`
+	EquityWithLoanAfter     *float64 `json:"equity_with_loan_after,omitempty"`
+	Commission              *float64 `json:"commission,omitempty"`
+	MinCommission           *float64 `json:"min_commission,omitempty"`
+	MaxCommission           *float64 `json:"max_commission,omitempty"`
+	CommissionCurrency      string   `json:"commission_currency,omitempty"`
+	WarningText             string   `json:"warning_text,omitempty"`
+	CompletedStatus         string   `json:"completed_status,omitempty"`
+	CompletedTime           string   `json:"completed_time,omitempty"`
+}
+
+// OrderWhatIfResult is the broker preview surface. Status is "accepted" only
+// after IBKR returns a successful WhatIf response for this exact draft.
+type OrderWhatIfResult struct {
+	Status            string             `json:"status"`
+	RequiredForSubmit bool               `json:"required_for_submit"`
+	Available         bool               `json:"available"`
+	Message           string             `json:"message,omitempty"`
+	Action            string             `json:"action,omitempty"`
+	Margin            *OrderMarginImpact `json:"margin,omitempty"`
+}
+
+// OrderPreviewResult is returned by order.preview. PreviewToken is a daemon-
+// signed bearer token for a later place flow; this RPC itself does not submit
+// anything to IBKR.
+type OrderPreviewResult struct {
+	PreviewToken          string    `json:"preview_token,omitempty"`
+	PreviewTokenID        string    `json:"preview_token_id,omitempty"`
+	PreviewTokenScope     string    `json:"preview_token_scope,omitempty"`
+	PreviewTokenExpiresAt time.Time `json:"preview_token_expires_at,omitzero"`
+	TokenMinted           bool      `json:"token_minted"`
+	SubmitEligible        bool      `json:"submit_eligible"`
+	// Executable is retained for older clients and is equivalent to
+	// SubmitEligible. A minted preview token is not executable unless an
+	// accepted broker WhatIf result is bound into the token.
+	Executable  bool                `json:"executable"`
+	Mode        string              `json:"mode"`
+	Account     string              `json:"account"`
+	Endpoint    string              `json:"endpoint"`
+	ClientID    int                 `json:"client_id"`
+	Draft       OrderDraft          `json:"draft"`
+	Quote       OrderQuoteSnapshot  `json:"quote"`
+	Position    OrderPositionImpact `json:"position"`
+	Notional    float64             `json:"notional"`
+	MaxNotional float64             `json:"max_notional,omitempty"`
+	WhatIf      OrderWhatIfResult   `json:"what_if"`
+	Warnings    []DataWarning       `json:"warnings,omitempty"`
+	AsOf        time.Time           `json:"as_of"`
+}
+
+// OrderEvent is the read-only lifecycle/audit row exposed from the private
+// journal. It redacts full preview tokens and never implies a broker write
+// unless Type/SendState explicitly say one was attempted.
+type OrderEvent struct {
+	At              time.Time `json:"at"`
+	Type            string    `json:"type"`
+	OrderRef        string    `json:"order_ref,omitempty"`
+	PreviewTokenID  string    `json:"preview_token_id,omitempty"`
+	ReservedOrderID int       `json:"reserved_order_id,omitempty"`
+	ClientID        int       `json:"client_id,omitempty"`
+	PermID          int       `json:"perm_id,omitempty"`
+	Account         string    `json:"account,omitempty"`
+	Endpoint        string    `json:"endpoint,omitempty"`
+	Mode            string    `json:"mode,omitempty"`
+	Symbol          string    `json:"symbol,omitempty"`
+	SecType         string    `json:"sec_type,omitempty"`
+	Action          string    `json:"action,omitempty"`
+	OrderType       string    `json:"order_type,omitempty"`
+	TIF             string    `json:"tif,omitempty"`
+	Quantity        float64   `json:"quantity,omitempty"`
+	LimitPrice      float64   `json:"limit_price,omitempty"`
+	Status          string    `json:"status,omitempty"`
+	LifecycleStatus string    `json:"lifecycle_status,omitempty"`
+	Filled          float64   `json:"filled,omitempty"`
+	Remaining       float64   `json:"remaining,omitempty"`
+	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
+	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
+	ExecID          string    `json:"exec_id,omitempty"`
+	ExecTime        string    `json:"exec_time,omitempty"`
+	SendState       string    `json:"send_state,omitempty"`
+	Message         string    `json:"message,omitempty"`
+}
+
+// OrderView is the daemon's read-only product state for one locally observed
+// order intent. It is reduced from the append-only journal; broker callbacks
+// remain authoritative for acknowledgement/fill/cancel status.
+type OrderView struct {
+	OrderRef        string    `json:"order_ref,omitempty"`
+	PreviewTokenID  string    `json:"preview_token_id,omitempty"`
+	ReservedOrderID int       `json:"reserved_order_id,omitempty"`
+	ClientID        int       `json:"client_id,omitempty"`
+	PermID          int       `json:"perm_id,omitempty"`
+	Account         string    `json:"account,omitempty"`
+	Endpoint        string    `json:"endpoint,omitempty"`
+	Mode            string    `json:"mode,omitempty"`
+	Symbol          string    `json:"symbol,omitempty"`
+	SecType         string    `json:"sec_type,omitempty"`
+	Action          string    `json:"action,omitempty"`
+	OrderType       string    `json:"order_type,omitempty"`
+	TIF             string    `json:"tif,omitempty"`
+	Quantity        float64   `json:"quantity,omitempty"`
+	LimitPrice      float64   `json:"limit_price,omitempty"`
+	Status          string    `json:"status,omitempty"`
+	LifecycleStatus string    `json:"lifecycle_status"`
+	Filled          float64   `json:"filled,omitempty"`
+	Remaining       float64   `json:"remaining,omitempty"`
+	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
+	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
+	SendState       string    `json:"send_state,omitempty"`
+	LastEvent       string    `json:"last_event,omitempty"`
+	LastMessage     string    `json:"last_message,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at,omitzero"`
+	Open            bool      `json:"open"`
+}
+
+type OrdersOpenResult struct {
+	Orders []OrderView `json:"orders"`
+	AsOf   time.Time   `json:"as_of"`
+}
+
+type OrderStatusResult struct {
+	Found  bool         `json:"found"`
+	Order  OrderView    `json:"order,omitzero"`
+	Events []OrderEvent `json:"events,omitempty"`
+	AsOf   time.Time    `json:"as_of"`
 }
 
 // MembersHealth is the wire shape for the SPX-members surface

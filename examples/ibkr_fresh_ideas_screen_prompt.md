@@ -2,7 +2,7 @@
 
 Last updated: 2026-05-27 21:41 CEST
 
-Use the read-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
+Use the analysis-only IBKR MCP tools to surface **1-3 fresh trade ideas** (maximum 5 only if the tape genuinely offers them) in US and, when Xetra is open, German equities/options. The target is a credible **3-6 month violent move**: long ideas should plausibly double, short/put ideas should offer comparable payoff. Produce plans only; never place, preview, modify, or cancel orders.
 
 Optimize for **decision quality per tool call and wall-clock latency**. A good run proves data readiness, scans wide enough, narrows once, validates only the finalists, and stops. Run independent MCP calls in parallel when the client supports it; do not serialize readiness, context, batch technical, or batch quote calls unless a later call depends on the prior result. Do not narrate progress while running; emit only the final report or a readiness/partial-stop report.
 

@@ -1,6 +1,6 @@
 # Marketplace readiness
 
-Last reviewed: 2026-05-31 21:23 CEST
+Last reviewed: 2026-06-03 21:50 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
@@ -15,7 +15,7 @@ Always include these qualifiers:
 - Requires IB Gateway or TWS running locally.
 - Requires an IBKR Pro account; IBKR Lite does not include TWS API access.
 - The plugin/skill does not ship the binary; users install `ibkr` separately.
-- Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface. If an approval-gated execution layer ships, update this sentence and the safety metadata before promotion.
+- Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel broker-write interface. If an approval-gated execution layer ships, update this sentence and the safety metadata before promotion.
 - Data returned by MCP tools can include account-sensitive balances, positions, and P&L.
 
 ## Anthropic / Claude Code
@@ -24,8 +24,8 @@ Current package:
 
 - `.claude-plugin/plugin.json` describes the plugin.
 - `.claude-plugin/marketplace.json` exposes the self-hosted marketplace.
-- `skills/ibkr/SKILL.md` teaches Claude the current analysis and sizing workflow.
-- `hooks/hooks.json` blocks trading-verb Bash calls and starts the install/version warning hook.
+- `skills/ibkr/SKILL.md` teaches Claude the current analysis, sizing, and preview-only workflow.
+- `hooks/hooks.json` allows preview/status order reads, blocks broker-write Bash calls, and starts the install/version warning hook.
 - `settings/ibkr.settings.json` is the optional global allow/deny template.
 
 Pre-submit checks:
@@ -154,7 +154,7 @@ Submission pack:
 - Tagline: "Agentic Interactive Brokers portfolio analysis and trading research through local TWS or IB Gateway."
 - Short description: "Connect Claude Desktop, Claude Code, Cursor, Zed, or another MCP host to a local Interactive Brokers session for portfolio review, exposure analysis, options diagnostics, quotes, scanners, sizing, breadth, dealer gamma, broad-market regime lifecycle, and a stateless portfolio canary."
 - Requirements: IB Gateway 10.37+ or TWS running locally; IBKR Pro account with TWS API access; macOS or Linux binary for the bundled path.
-- Current boundary: current public CLI and MCP releases expose analysis and sizing tools, but no order placement, modification, or cancellation interface.
+- Current boundary: current public CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no order placement, modification, cancellation, or broker-transmission interface.
 - Target users: semi-professional retail traders using IBKR as capital-markets infrastructure who want agent-assisted review and research on broker-native data.
 - Links: <https://github.com/osauer/ibkr>, <https://github.com/osauer/ibkr/blob/main/docs/reference/mcp-tools.md>, <https://github.com/osauer/ibkr/blob/main/docs/guides/agentic-use.md>, <https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb>.
 

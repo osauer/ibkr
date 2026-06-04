@@ -25,12 +25,13 @@ type Tool struct {
 	Description        string
 	MonitorDescription string
 	JSONSchema         json.RawMessage
+	ReadOnlyHint       *bool
 	Handler            func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error)
 }
 
-// Tools is the canonical read-only inventory exposed over MCP. Order is the
-// same as cli.Commands() to keep the parity test readable; the MCP client
-// rebroadcasts whatever order we send.
+// Tools is the canonical inventory exposed over MCP. Order is the same as
+// cli.Commands() to keep the parity test readable; the MCP client rebroadcasts
+// whatever order we send.
 var Tools = []Tool{
 	{
 		Name:               "ibkr_status",
@@ -41,6 +42,114 @@ var Tools = []Tool{
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.HealthResult
 			if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:        "ibkr_trading_status",
+		Title:       "IBKR Trading Status",
+		Description: "Local trading gate status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, MCP write mode, live override status, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.",
+		JSONSchema:  schemaObject(nil, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+			var res rpc.TradingStatus
+			if err := conn.Call(ctx, rpc.MethodTradingStatus, nil, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:        "ibkr_orders_open",
+		Title:       "IBKR Open Orders",
+		Description: "Read locally journaled open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open or when the user asks for open orders. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for creating a new preview token (use `ibkr_order_preview`) and NOT for submitting, modifying, or cancelling an order.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"account": schemaString("optional account filter; omit to show all locally journaled accounts"),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.OrdersOpenParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.OrdersOpenResult
+			if err := conn.Call(ctx, rpc.MethodOrdersOpen, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:        "ibkr_order_status",
+		Title:       "IBKR Order Status",
+		Description: "Read one locally journaled order's lifecycle and audit events by order ref, IBKR order ID, or permanent ID. Use when the user asks what happened to a specific order or needs the daemon's latest broker-callback evidence. This tool is read-only: it does NOT place, modify, cancel, preview, transmit, or confirm an order. For the open-order list use `ibkr_orders_open`; for a new tokenized preview use `ibkr_order_preview`.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"id": schemaString("order identifier to inspect: local order_ref such as ibkr-20260528-093000, IBKR order ID, or permanent ID"),
+		}, []string{"id"}),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.OrderStatusParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.OrderStatusResult
+			if err := conn.Call(ctx, rpc.MethodOrderStatus, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:         "ibkr_order_preview",
+		Title:        "IBKR Order Preview",
+		Description:  "Preview a locally gated stock/ETF LMT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`. This tool validates the local trading gate, pinned endpoint/account/client ID, LMT-only order type, max notional, and stock short/flip policy, and returns quote inputs, position effect, `token_minted`, and `submit_eligible`. In the default build, broker WhatIf is unavailable, so a token can be minted while `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a future separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For market context without token minting use `ibkr_quote`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
+		ReadOnlyHint: new(false),
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"action":      schemaEnum([]string{"buy", "sell"}, "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless stock shorting is explicitly enabled"),
+			"symbol":      schemaString("stock or ETF ticker symbol; options are intentionally not accepted by this preview slice"),
+			"quantity":    json.RawMessage(`{"type":"integer","minimum":1,"description":"share quantity; must be positive"}`),
+			"limit":       json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional explicit LMT price. Omit to use the default patient-limit strategy from live bid/ask."}`),
+			"strategy":    schemaEnum([]string{"patient-limit", "explicit-limit"}, "pricing strategy. Defaults to patient-limit when limit is omitted and explicit-limit when limit is supplied."),
+			"tif":         schemaEnum([]string{"DAY"}, "time in force; only DAY is accepted in this slice"),
+			"outside_rth": json.RawMessage(`{"type":"boolean","description":"whether the draft allows outside regular trading hours. Default false; set true only when the human explicitly asks."}`),
+			"timeout_ms":  json.RawMessage(`{"type":"integer","minimum":100,"description":"quote snapshot timeout; default 5000 ms"}`),
+			"market":      json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
+		}, []string{"action", "symbol", "quantity"}),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				Action     string   `json:"action"`
+				Symbol     string   `json:"symbol"`
+				Quantity   int      `json:"quantity"`
+				Limit      *float64 `json:"limit"`
+				Strategy   string   `json:"strategy"`
+				TIF        string   `json:"tif"`
+				OutsideRTH bool     `json:"outside_rth"`
+				TimeoutMs  int      `json:"timeout_ms"`
+				Market     string   `json:"market"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.OrderPreviewResult
+			params := rpc.OrderPreviewParams{
+				Action: strings.ToUpper(strings.TrimSpace(in.Action)),
+				Contract: rpc.ContractParams{
+					Symbol:   strings.ToUpper(strings.TrimSpace(in.Symbol)),
+					SecType:  "STK",
+					Market:   strings.TrimSpace(in.Market),
+					Currency: "USD",
+				},
+				Quantity:   in.Quantity,
+				OrderType:  rpc.OrderTypeLMT,
+				LimitPrice: in.Limit,
+				Strategy:   strings.TrimSpace(in.Strategy),
+				TIF:        strings.ToUpper(strings.TrimSpace(in.TIF)),
+				OutsideRTH: in.OutsideRTH,
+				TimeoutMs:  in.TimeoutMs,
+			}
+			if strings.EqualFold(params.Contract.Market, "de") {
+				params.Contract.Currency = "EUR"
+			}
+			if err := conn.Call(ctx, rpc.MethodOrderPreview, params, &res); err != nil {
 				return nil, err
 			}
 			return json.Marshal(res)
@@ -724,8 +833,6 @@ var ExcludedCLI = map[string]string{
 	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 	"restart":  "local process-management verb (signals daemon processes); useful for humans and scripts, but not a broker-data MCP tool",
 	"backtest": "offline research harness over local JSONL fixtures; not a live broker/MCP operation",
-	"order":    "CLI-only expert-review handoff; MCP must not preview, place, submit, modify, or cancel orders",
-	"trading":  "CLI-only local trading gate status; MCP must not expose trading/write surfaces",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {

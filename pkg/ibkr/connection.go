@@ -1137,6 +1137,7 @@ const (
 	msgAcctUpdateTime                         = 8
 	msgNextValidID                            = 9
 	msgContractData                           = 10
+	msgExecDetails                            = 11
 	msgMarketDepth                            = 12
 	msgMarketDepthL2                          = 13
 	msgNewsBulletins                          = 14

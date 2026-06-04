@@ -5,15 +5,17 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   open interest), official market calendars, local watchlist, daily price history, technical/relative-strength screens, running a market scan, sizing a planned trade by
   fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
-  regime dashboard), or checking portfolio-aware canary stress lifecycle. Read-only —
-  never attempts to place orders.
+  regime dashboard), checking portfolio-aware canary stress lifecycle, or explicitly requests
+  a non-submitting order preview/status read. Never attempts to place, modify, cancel, or
+  transmit orders.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr status*) Bash(ibkr version*)
+  Bash(ibkr canary*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-02 06:26 CEST
+Updated: 2026-06-03 21:50 CEST
 
 ## When to use
 
@@ -35,9 +37,13 @@ quality state, run `ibkr canary --json`. Canary answers quiet/watch/act/
 rebalance/opportunity/data-quality posture and readiness for downstream
 risk-plan orchestration. It does not choose hedges, size trades, or execute.
 
-If the user asks anything that implies *placing* an order (buy, sell, cancel,
-"close my position"), refuse and explain that `ibkr` is read-only in this
-release. Do not invent or simulate trade execution.
+If the user explicitly asks for a preview-only stock/ETF order draft, use
+`ibkr order preview` and explain `token_minted` separately from
+`submit_eligible`; in the default build, broker WhatIf is unavailable, so a
+minted token is not submit-eligible. If the user asks anything that implies
+placing, modifying, cancelling, submitting, or closing a position, refuse and
+explain that `ibkr` cannot transmit broker orders in this release. Do not invent
+or simulate trade execution.
 
 ## Output discipline
 

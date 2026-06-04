@@ -38,6 +38,30 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Daemon.LogLevel != "info" {
 		t.Errorf("default log_level = %q, want info", res.Daemon.LogLevel)
 	}
+	if res.Trading.Enabled {
+		t.Error("trading should default disabled")
+	}
+	if res.Trading.Mode != TradingModePaper {
+		t.Errorf("trading mode = %q, want %q", res.Trading.Mode, TradingModePaper)
+	}
+	if !res.Trading.PreviewRequired() {
+		t.Error("trading preview should default required")
+	}
+	if res.Trading.MaxNotional != 10000 {
+		t.Errorf("trading max_notional = %v, want 10000", res.Trading.MaxNotional)
+	}
+	if res.Trading.MaxOptionContracts != 5 {
+		t.Errorf("trading max_option_contracts = %d, want 5", res.Trading.MaxOptionContracts)
+	}
+	if res.Trading.PaperSmokeMaxAgeDuration() != 168*time.Hour {
+		t.Errorf("trading paper_smoke_max_age = %v, want 168h", res.Trading.PaperSmokeMaxAgeDuration())
+	}
+	if res.Trading.MCPMode != MCPModePreview {
+		t.Errorf("trading mcp_mode = %q, want %q", res.Trading.MCPMode, MCPModePreview)
+	}
+	if res.Trading.MCPNonceTTLDuration() != 5*time.Minute {
+		t.Errorf("trading mcp_nonce_ttl = %v, want 5m", res.Trading.MCPNonceTTLDuration())
+	}
 	if _, ok := res.Scans["top-movers"]; !ok {
 		t.Errorf("top-movers preset missing from defaults")
 	}
@@ -57,6 +81,23 @@ tls                = false
 [daemon]
 idle_timeout = "10m"
 log_level    = "debug"
+
+[trading]
+enabled = true
+mode = "live"
+require_preview = true
+max_notional = 25000
+max_option_contracts = 3
+allow_stock_short = true
+allow_option_sell_to_open = true
+allow_option_market_orders = false
+allow_live = true
+live_ack_account = "U111"
+live_ack_endpoint = "127.0.0.1:4001"
+paper_smoke_max_age = "24h"
+mcp_enabled = true
+mcp_mode = "live-write"
+mcp_nonce_ttl = "2m"
 
 [scans.movers]
 type       = "TOP_PERC_GAIN"
@@ -96,6 +137,48 @@ timeout    = "30s"
 	}
 	if res.Daemon.LogLevel != "debug" {
 		t.Errorf("log_level = %q, want debug", res.Daemon.LogLevel)
+	}
+	if !res.Trading.Enabled {
+		t.Error("Trading.Enabled should parse true")
+	}
+	if res.Trading.Mode != TradingModeLive {
+		t.Errorf("Trading.Mode = %q, want %q", res.Trading.Mode, TradingModeLive)
+	}
+	if !res.Trading.PreviewRequired() {
+		t.Error("Trading.RequirePreview should parse true")
+	}
+	if res.Trading.MaxNotional != 25000 {
+		t.Errorf("Trading.MaxNotional = %v, want 25000", res.Trading.MaxNotional)
+	}
+	if res.Trading.MaxOptionContracts != 3 {
+		t.Errorf("Trading.MaxOptionContracts = %d, want 3", res.Trading.MaxOptionContracts)
+	}
+	if !res.Trading.AllowStockShort {
+		t.Error("Trading.AllowStockShort should parse true")
+	}
+	if !res.Trading.AllowOptionSellToOpen {
+		t.Error("Trading.AllowOptionSellToOpen should parse true")
+	}
+	if !res.Trading.AllowLive {
+		t.Error("Trading.AllowLive should parse true")
+	}
+	if res.Trading.LiveAckAccount != "U111" {
+		t.Errorf("Trading.LiveAckAccount = %q, want U111", res.Trading.LiveAckAccount)
+	}
+	if res.Trading.LiveAckEndpoint != "127.0.0.1:4001" {
+		t.Errorf("Trading.LiveAckEndpoint = %q, want 127.0.0.1:4001", res.Trading.LiveAckEndpoint)
+	}
+	if res.Trading.PaperSmokeMaxAgeDuration() != 24*time.Hour {
+		t.Errorf("Trading.PaperSmokeMaxAge = %v, want 24h", res.Trading.PaperSmokeMaxAgeDuration())
+	}
+	if !res.Trading.MCPEnabled {
+		t.Error("Trading.MCPEnabled should parse true")
+	}
+	if res.Trading.MCPMode != MCPModeLiveWrite {
+		t.Errorf("Trading.MCPMode = %q, want %q", res.Trading.MCPMode, MCPModeLiveWrite)
+	}
+	if res.Trading.MCPNonceTTLDuration() != 2*time.Minute {
+		t.Errorf("Trading.MCPNonceTTL = %v, want 2m", res.Trading.MCPNonceTTLDuration())
 	}
 	got, ok := res.Scans["movers"]
 	if !ok {
@@ -171,6 +254,9 @@ client_id = 15
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q must mention %q", msg, want)
 		}
+	}
+	if !strings.Contains(msg, "[trading]") {
+		t.Errorf("error %q must mention supported [trading] schema", msg)
 	}
 }
 
