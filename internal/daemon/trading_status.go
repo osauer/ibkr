@@ -101,6 +101,10 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	}
 	if cfg.Gateway.Account == "" {
 		add("gateway_account_unpinned", "order submission requires a pinned account", "Set [gateway].account.")
+	} else if strings.EqualFold(strings.TrimSpace(cfg.Gateway.Account), "All") {
+		add("gateway_account_not_concrete", "order preview requires a concrete IBKR account, not the aggregate account \"All\"", "Pin the paper/live account code shown by TWS, such as a DU paper account.")
+	} else if connectedAccount := s.connectedGatewayAccount(); connectedAccount != "" && !strings.EqualFold(cfg.Gateway.Account, connectedAccount) {
+		add("gateway_account_mismatch", fmt.Sprintf("configured account %q does not match connected account %q", cfg.Gateway.Account, connectedAccount), "Pin [gateway].account to the account advertised by the connected TWS/Gateway session.")
 	}
 	if cfg.Gateway.ClientID == nil {
 		add("gateway_client_id_unpinned", "order submission requires a pinned client ID", "Set [gateway].client_id.")
@@ -153,6 +157,19 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}
 	return status
+}
+
+func (s *Server) connectedGatewayAccount() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	c := s.connector
+	s.mu.Unlock()
+	if c == nil || !c.IsReady() {
+		return ""
+	}
+	return strings.TrimSpace(c.AccountID())
 }
 
 func endpointString(host string, port int) string {

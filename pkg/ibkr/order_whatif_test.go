@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,7 +15,7 @@ func TestPreviewOrderWhatIfSendsNonTransmittingWhatIfAndWaitsForOpenOrder(t *tes
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
-	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
+	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
 	conn.nextOrderID = 77
 
 	var buf bytes.Buffer
@@ -80,11 +81,48 @@ func TestPreviewOrderWhatIfSendsNonTransmittingWhatIfAndWaitsForOpenOrder(t *tes
 	}
 }
 
-func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
+func TestPreviewOrderWhatIfModernServerRequiresProtobufEncoding(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
+	conn.nextOrderID = 77
+
+	var buf bytes.Buffer
+	conn.writer = bufio.NewWriter(&buf)
+
+	result, err := conn.PreviewOrderWhatIf(context.Background(), &IBKROrder{
+		Symbol:    "MSFT",
+		SecType:   "STK",
+		Exchange:  "SMART",
+		Currency:  "USD",
+		Action:    "BUY",
+		TotalQty:  2,
+		OrderType: "LMT",
+		LmtPrice:  425.50,
+		TIF:       "DAY",
+		Account:   "DU123456",
+		Transmit:  false,
+	})
+	if err != nil {
+		t.Fatalf("PreviewOrderWhatIf err = %v", err)
+	}
+	if result.Status != OrderWhatIfStatusUnavailable {
+		t.Fatalf("status = %q, want unavailable", result.Status)
+	}
+	if !strings.Contains(result.Message, "requires protobuf placeOrder encoding") {
+		t.Fatalf("message = %q, want protobuf explanation", result.Message)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("modern unavailable path wrote %d bytes", buf.Len())
+	}
+}
+
+func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
 	conn.nextOrderID = 88
 
 	var buf bytes.Buffer

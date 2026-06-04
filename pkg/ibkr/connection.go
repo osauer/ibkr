@@ -1723,14 +1723,13 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			}
 		}
 	case msgManagedAccts:
-		if len(fields) > 1 {
-			acct := strings.TrimSpace(fields[1])
+		if acct := managedAccountsField(fields); acct != "" {
 			c.accountMu.Lock()
 			c.account = acct
 			c.accountMu.Unlock()
 			// Only log for first connection in pool
 			if c.config.ClientID == 1 {
-				ibkrLogger.Infof("Managed Accounts: %s", fields[1])
+				ibkrLogger.Infof("Managed Accounts: %s", acct)
 			}
 		}
 	case msgErrMsg:
@@ -2933,6 +2932,18 @@ func determineMessageID(serverVersion int, payload []byte) int {
 		return -1
 	}
 	return id
+}
+
+func managedAccountsField(fields []string) string {
+	if len(fields) <= 1 {
+		return ""
+	}
+	if len(fields) > 2 {
+		if _, err := strconv.Atoi(strings.TrimSpace(fields[1])); err == nil {
+			return strings.TrimSpace(fields[2])
+		}
+	}
+	return strings.TrimSpace(fields[1])
 }
 
 // readMessage reads a length-prefixed message
