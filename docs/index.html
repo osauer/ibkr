@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBKR MCP Server for TWS and Claude</title>
+  <meta name="description" content="Connect Interactive Brokers TWS or IB Gateway to Claude, Cursor, and Zed for read-only portfolio analysis, quotes, risk checks, and trading research.">
+  <link rel="canonical" href="https://osauer.dev/ibkr/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://osauer.dev/ibkr/">
+  <meta property="og:title" content="IBKR MCP server for TWS and portfolio workflows">
+  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts for portfolio analysis, risk checks, and trading research.">
+  <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="IBKR MCP server for TWS and portfolio workflows">
+  <meta name="twitter:description" content="Agentic IBKR portfolio analysis and trading research on live TWS or IB Gateway data.">
+  <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "ibkr",
+        "alternateName": [
+          "IBKR MCP Server",
+          "IBKR MCP TWS",
+          "IBKR TWS MCP Server",
+          "Interactive Brokers MCP Server",
+          "TWS MCP Server",
+          "IB Gateway MCP Server",
+          "IBKR Claude Desktop MCP",
+          "Best IBKR MCP server for Claude Code",
+          "Portfolio review with Claude and IBKR",
+          "osauer ibkr"
+        ],
+        "url": "https://osauer.dev/ibkr/",
+        "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.",
+        "author": {
+          "@type": "Person",
+          "name": "Oliver Sauer",
+          "url": "https://github.com/osauer"
+        },
+        "creator": {
+          "@type": "Person",
+          "name": "Oliver Sauer",
+          "url": "https://github.com/osauer"
+        },
+        "applicationCategory": "FinanceApplication",
+        "applicationSubCategory": "Model Context Protocol server",
+        "operatingSystem": "macOS, Linux, Unix",
+        "softwareVersion": "1.5.0",
+        "dateModified": "2026-05-29T12:46:00+02:00",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "downloadUrl": "https://github.com/osauer/ibkr/releases/latest",
+        "codeRepository": "https://github.com/osauer/ibkr",
+        "softwareHelp": "https://osauer.dev/ibkr/interactive-brokers-mcp-server/",
+        "sameAs": [
+          "https://github.com/osauer/ibkr",
+          "https://osauer.dev/",
+          "https://pkg.go.dev/github.com/osauer/ibkr"
+        ],
+        "isAccessibleForFree": true,
+        "keywords": "ibkr osauer, osauer ibkr, IBKR MCP, IBKR MCP TWS, ibkr mcp tws, IBKR TWS MCP server, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, portfolio review with Claude and IBKR, Claude IBKR portfolio review, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
+        "featureList": [
+          "Agentic portfolio analysis workflow layer",
+          "Prompted portfolio review with Claude and IBKR",
+          "Interactive Brokers TWS and IB Gateway support",
+          "Account and positions tools",
+          "Stock and ETF quote resources",
+          "Options, scanners, breadth, gamma, risk-regime, portfolio-canary, and sizing tools",
+          "Read-side MCP boundary with no order-entry tools"
+        ]
+      },
+      {
+        "@type": "SoftwareSourceCode",
+        "name": "ibkr",
+        "codeRepository": "https://github.com/osauer/ibkr",
+        "programmingLanguage": "Go",
+        "runtimePlatform": "macOS, Linux, Unix",
+        "license": "https://github.com/osauer/ibkr/blob/main/LICENSE",
+        "about": "Clean-room Go implementation of the Interactive Brokers TWS read-side protocol with CLI and MCP interfaces."
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is the IBKR MCP server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "ibkr mcp is a local Model Context Protocol server that lets Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts analyze Interactive Brokers account and market data through IB Gateway or TWS."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can this MCP server place Interactive Brokers orders?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The bundled CLI and MCP server expose account and market data, but they do not expose order placement, order modification, or order cancellation tools."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does ibkr work with TWS and IB Gateway?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. ibkr can connect to a local Trader Workstation or IB Gateway API session and auto-discovers the standard paper and live ports unless you pin a specific config."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I connect Claude Desktop to IBKR?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install the latest ibkr MCP Bundle from the GitHub release, open the .mcpb file with Claude Desktop, and restart Claude Desktop while IB Gateway or TWS is running locally."
+            }
+          }
+        ]
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "ibkr",
+            "item": "https://osauer.dev/ibkr/"
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+
+  <style>
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --amber: #9a5b00;
+      --blue: #245dbb;
+      --terminal: #0e1626;
+      --terminal-line: #26364c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+
+    a {
+      color: var(--green-dark);
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.18em;
+    }
+
+    .topline {
+      height: 12px;
+      background: var(--green);
+    }
+
+    .wrap {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
+      gap: 38px;
+      align-items: center;
+      padding: 20px 0 34px;
+    }
+
+    .eyebrow {
+      margin: 0 0 18px;
+      color: var(--green-dark);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(40px, 4.8vw, 58px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 24px 0 0;
+      color: #26364d;
+      font-size: clamp(18px, 1.55vw, 19px);
+      line-height: 1.35;
+    }
+
+    .safety {
+      max-width: 760px;
+      margin: 18px 0 0;
+      color: var(--green-dark);
+      font-size: 18px;
+      font-weight: 750;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 26px 0 0;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      color: var(--ink);
+      font-weight: 750;
+      text-decoration: none;
+      background: transparent;
+    }
+
+    .button.primary {
+      border-color: var(--green);
+      background: var(--green);
+      color: #fff;
+    }
+
+    .hero-shot {
+      padding: 0;
+    }
+
+    .hero-shot img,
+    .proof img {
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      box-shadow: 0 18px 42px rgba(16, 24, 39, 0.18);
+    }
+
+    .trust {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-strong);
+    }
+
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+    }
+
+    .trust-item {
+      min-height: 120px;
+      padding: 24px;
+      border-left: 1px solid var(--line);
+    }
+
+    .trust-item:last-child {
+      border-right: 1px solid var(--line);
+    }
+
+    .trust-item strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    .trust-item span {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    section {
+      padding: 76px 0;
+    }
+
+    .section-head {
+      max-width: 760px;
+      margin-bottom: 34px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(32px, 4vw, 52px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .proof-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .proof {
+      display: grid;
+      gap: 14px;
+    }
+
+    .proof h3,
+    .feature h3 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .proof p,
+    .feature p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    .feature {
+      min-height: 210px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper-strong);
+    }
+
+    .feature small {
+      display: block;
+      margin-bottom: 16px;
+      color: var(--amber);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .install {
+      display: grid;
+      grid-template-columns: minmax(0, 0.85fr) minmax(360px, 1fr);
+      gap: 36px;
+      align-items: start;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 24px;
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      background: var(--terminal);
+      color: #f4f7fb;
+      font: 16px/1.55 Menlo, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .questions {
+      columns: 2;
+      column-gap: 36px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .questions li {
+      break-inside: avoid;
+      margin: 0 0 14px;
+      padding-left: 18px;
+      position: relative;
+      color: #24324a;
+      font-size: 18px;
+    }
+
+    .questions li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.7em;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    footer {
+      padding: 36px 0 54px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    footer .wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: start;
+    }
+
+    footer p {
+      margin: 0;
+      max-width: 840px;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 16px;
+    }
+
+    @media (max-width: 980px) {
+      .hero,
+      .install {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        gap: 34px;
+        padding-top: 24px;
+      }
+
+      .hero-shot {
+        max-width: 760px;
+      }
+
+      .trust-grid,
+      .proof-grid,
+      .feature-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 660px) {
+      .wrap {
+        width: min(100% - 28px, 1180px);
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px 0 10px;
+      }
+
+      .nav-links {
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        font-size: 14px;
+      }
+
+      h1 {
+        font-size: 36px;
+        line-height: 1.03;
+      }
+
+      .hero {
+        gap: 22px;
+        padding: 14px 0 26px;
+      }
+
+      .lead {
+        margin-top: 18px;
+        font-size: 15px;
+        line-height: 1.34;
+      }
+
+      .safety {
+        margin-top: 14px;
+        font-size: 16px;
+      }
+
+      .actions {
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .button {
+        min-height: 42px;
+        padding: 0 10px;
+        font-size: 14px;
+      }
+
+      .hero-shot {
+        max-width: 320px;
+      }
+
+      section {
+        padding: 58px 0;
+      }
+
+      .trust-grid,
+      .proof-grid,
+      .feature-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .trust-item,
+      .trust-item:last-child {
+        border-right: 1px solid var(--line);
+      }
+
+      .questions {
+        columns: 1;
+      }
+
+      footer .wrap {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="https://osauer.dev/ibkr/" aria-label="ibkr home">ibkr</a>
+    <nav class="nav-links" aria-label="Page">
+      <a href="#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="reference/mcp-tools.html">MCP tools</a>
+      <a href="guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="wrap hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">Agentic IBKR workflows</p>
+        <h1 id="hero-title">IBKR MCP server for portfolio analysis and trading research</h1>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Turn portfolio, options, quotes, scanners, breadth, gamma, risk-regime, and canary stress checks into agentic review workflows.</p>
+        <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
+        <div class="actions" aria-label="Main actions">
+          <a class="button primary" href="#install">Install</a>
+          <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
+          <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
+        </div>
+      </div>
+      <div class="hero-shot">
+        <img src="social/regime.png" width="1280" height="650" alt="Terminal screenshot of ibkr regime showing volatility, credit, funding, FX, gamma, and breadth indicators">
+      </div>
+    </section>
+
+    <div class="trust" aria-label="Core properties">
+      <div class="wrap trust-grid">
+        <div class="trust-item">
+          <strong>Local by default</strong>
+          <span>Connects to IB Gateway or TWS on your machine. No hosted broker custody layer.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Agent-ready</strong>
+          <span>Runs as a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Workflow depth</strong>
+          <span>Portfolio review, options diagnostics, scanners, scheduled stress canary, gamma, breadth, and regime context in one tool.</span>
+        </div>
+        <div class="trust-item">
+          <strong>Go binary</strong>
+          <span>One installable CLI with a local daemon and a clean-room Go TWS protocol library.</span>
+        </div>
+      </div>
+    </div>
+
+    <section class="wrap">
+      <div class="section-head">
+        <h2>Market, account, and option context.</h2>
+        <p>Terminal screenshots are generated from synthetic fixture data, so the public page shows the real CLI shape without exposing account holdings or balances.</p>
+      </div>
+      <div class="proof-grid">
+        <article class="proof">
+          <img src="social/regime.png" width="1280" height="650" loading="lazy" alt="ibkr regime terminal output">
+          <h3>Risk regime</h3>
+          <p>One dashboard for volatility, credit, funding, FX carry, dealer gamma, and S&amp;P 500 breadth.</p>
+        </article>
+        <article class="proof">
+          <img src="social/canary.png" width="1280" height="760" loading="lazy" alt="synthetic ibkr canary terminal output">
+          <h3>Portfolio canary</h3>
+          <p>Scheduled <code>Go</code>, <code>Watch</code>, <code>De-lever</code>, or <code>Liquidate</code> checks from account, exposure, regime, and data-quality gates.</p>
+        </article>
+        <article class="proof">
+          <img src="social/chain.png" width="1080" height="560" loading="lazy" alt="ibkr chain SPY terminal output">
+          <h3>Option chains</h3>
+          <p>Expiry lists, ATM implied volatility, and expected moves from the local IBKR market-data session.</p>
+        </article>
+        <article class="proof">
+          <img src="social/positions.png" width="1280" height="880" loading="lazy" alt="sanitized ibkr positions by underlying terminal output">
+          <h3>Positions and exposure</h3>
+          <p>Underlying grouping, option legs, marks, Greek coverage, and portfolio-level exposure with sensitive values redacted here.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <div class="section-head">
+        <h2>Ask portfolio and market questions in plain language.</h2>
+        <p>The MCP descriptions are written for agent routing, so assistants can pick the right tool without you naming commands.</p>
+      </div>
+      <ul class="questions">
+        <li>Review my portfolio and rank the risks I should look at today.</li>
+        <li>What is in my IBKR account?</li>
+        <li>Show my SPY exposure, including option deltas.</li>
+        <li>How does the market regime look today?</li>
+        <li>Should I hold, watch, de-lever, or liquidate risk?</li>
+        <li>Is Xetra open on Whit Monday?</li>
+        <li>Are dealers supporting or amplifying today's SPY move?</li>
+        <li>What expiries are listed for SPY and what is the implied move?</li>
+        <li>If I enter MSFT at 418 with a stop at 408, what is my EUR risk?</li>
+      </ul>
+    </section>
+
+    <section class="wrap" aria-labelledby="surfaces-title">
+      <div class="section-head">
+        <h2 id="surfaces-title">One local tool, three ways to use it.</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>MCP server</small>
+          <h3>For AI assistants</h3>
+          <p><code>ibkr mcp</code> exposes account, quote, calendar, chain, scanner, sizing, breadth, gamma, regime, and canary tools to MCP clients for analysis and scheduled-monitoring workflows.</p>
+        </article>
+        <article class="feature">
+          <small>Terminal CLI</small>
+          <h3>For fast checks</h3>
+          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr canary</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON.</p>
+        </article>
+        <article class="feature">
+          <small>Go library</small>
+          <h3>For custom systems</h3>
+          <p><code>github.com/osauer/ibkr/pkg/ibkr</code> speaks the TWS protocol directly with no Python bridge and no IBKR jars.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" aria-labelledby="search-paths-title">
+      <div class="section-head">
+        <h2 id="search-paths-title">Popular setup paths.</h2>
+        <p>Use the page that matches the phrase you searched for; all paths install the same local <code>ibkr mcp</code> workflow surface.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>IBKR MCP TWS</small>
+          <h3><a href="ibkr-mcp-tws/">IBKR MCP TWS setup</a></h3>
+          <p>Exact setup path for using <code>ibkr mcp</code> against a local Trader Workstation API session.</p>
+        </article>
+        <article class="feature">
+          <small>IBKR MCP</small>
+          <h3><a href="ibkr-mcp/">IBKR MCP server</a></h3>
+          <p>Exact setup notes for users searching by the IBKR acronym and MCP server phrase.</p>
+        </article>
+        <article class="feature">
+          <small>Interactive Brokers</small>
+          <h3><a href="interactive-brokers-mcp-server/">Interactive Brokers MCP server</a></h3>
+          <p>The broader guide for account, market-data, install, and safety boundaries.</p>
+        </article>
+        <article class="feature">
+          <small>TWS</small>
+          <h3><a href="tws-mcp-server/">TWS MCP server</a></h3>
+          <p>Use Trader Workstation as the local API session behind the MCP tools.</p>
+        </article>
+        <article class="feature">
+          <small>IB Gateway</small>
+          <h3><a href="ib-gateway-mcp/">IB Gateway MCP server</a></h3>
+          <p>Use the lighter local Gateway process as the source for account and market data.</p>
+        </article>
+        <article class="feature">
+          <small>Claude Desktop</small>
+          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Interactive Brokers setup</a></h3>
+          <p>Install the MCPB and connect Claude Desktop to your local IBKR session.</p>
+        </article>
+        <article class="feature">
+          <small>IBKR Claude Desktop MCP</small>
+          <h3><a href="ibkr-claude-desktop-mcp/">IBKR Claude Desktop MCP setup</a></h3>
+          <p>Exact setup notes for Claude Desktop users whose search results are mixing in IBKR Desktop.</p>
+        </article>
+        <article class="feature">
+          <small>Claude</small>
+          <h3><a href="connect-claude-to-ibkr/">Connect Claude to IBKR</a></h3>
+          <p>Use Claude Desktop or Claude Code for local IBKR portfolio review and market analysis.</p>
+        </article>
+        <article class="feature">
+          <small>Claude Code</small>
+          <h3><a href="best-ibkr-mcp-server-claude-code/">Best IBKR MCP server for Claude Code</a></h3>
+          <p>How to evaluate Claude Code IBKR MCP servers by local execution, tool coverage, and current execution boundary.</p>
+        </article>
+        <article class="feature">
+          <small>Portfolio AI</small>
+          <h3><a href="analyze-interactive-brokers-portfolio-with-ai/">Analyze an Interactive Brokers portfolio with AI</a></h3>
+          <p>Ask natural-language portfolio questions against live local positions, options, and market context.</p>
+        </article>
+        <article class="feature">
+          <small>Claude portfolio review</small>
+          <h3><a href="portfolio-review-with-claude-ibkr/">Portfolio review with Claude and IBKR</a></h3>
+          <p>Use a desk-style prompt to rank exposures, options risks, quote freshness, and next review steps.</p>
+        </article>
+        <article class="feature">
+          <small>Safety</small>
+          <h3><a href="read-only-mcp-server/">Read-only MCP server</a></h3>
+          <p>Make the no-order-entry boundary explicit for agentic account and market workflows.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap install" id="install" aria-labelledby="install-title">
+      <div>
+        <div class="section-head">
+          <h2 id="install-title">Install for Claude Desktop or shell.</h2>
+          <p>Claude Desktop users can install the MCP Bundle release asset directly. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
+        </div>
+        <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
+        <p><a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a></p>
+        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings → Extensions → Install Extension. macOS and Linux are supported; Windows users can use WSL with the shell path.</p>
+      </div>
+      <pre><code># Shell, Cursor, Continue, Zed, generic MCP hosts
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr setup claude-desktop
+
+# then ask:
+# "How does my IBKR account look today?"</code></pre>
+    </section>
+
+    <section class="wrap" aria-labelledby="faq-title">
+      <div class="section-head">
+        <h2 id="faq-title">IBKR MCP FAQ.</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <h3>What is the IBKR MCP server?</h3>
+          <p><code>ibkr mcp</code> is a local Model Context Protocol server for Interactive Brokers account and market-data workflows.</p>
+        </article>
+        <article class="feature">
+          <h3>Can it place orders?</h3>
+          <p>No. The bundled CLI and MCP server expose account and market data, but no place, modify, or cancel order tools.</p>
+        </article>
+        <article class="feature">
+          <h3>Does it use TWS or IB Gateway?</h3>
+          <p>Yes. It connects to a local TWS or IB Gateway API session and auto-discovers the standard paper and live ports.</p>
+        </article>
+        <article class="feature">
+          <h3>How does Claude Desktop connect?</h3>
+          <p>Install the latest MCPB release asset, open it with Claude Desktop, and restart Claude while IB Gateway or TWS is running.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p><strong>Independent third-party project.</strong> "Interactive Brokers", "IBKR", "TWS", and "IB Gateway" are trademarks or registered trademarks of Interactive Brokers Group, Inc. or its affiliates. This project is not built, endorsed, sponsored, or supported by Interactive Brokers Group, Inc. or its affiliates.</p>
+      <div class="footer-links">
+        <a href="https://www.linkedin.com/in/osauer/">Oliver Sauer</a>
+        <a href="https://github.com/osauer/ibkr">GitHub</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
