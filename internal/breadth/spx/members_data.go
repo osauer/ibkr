@@ -12,7 +12,7 @@ import "time"
 // verification scrape compares against $SPXA50R daily, so drift here
 // shows up as a divergence in verify.log within one trading day of any
 // reconstitution.
-var sp500AsOf = time.Date(2026, time.June, 3, 0, 0, 0, 0, time.UTC)
+var sp500AsOf = time.Date(2026, time.June, 4, 0, 0, 0, 0, time.UTC)
 
 // sp500Members is the S&P-500 constituent list pulled from Wikipedia
 // and rewritten by `make refresh-spx-members` on every release.
@@ -182,7 +182,6 @@ var sp500Members = []string{
 	"EME",
 	"EMR",
 	"EOG",
-	"EPAM",
 	"EQIX",
 	"EQR",
 	"EQT",
@@ -204,6 +203,7 @@ var sp500Members = []string{
 	"FCX",
 	"FDS",
 	"FDX",
+	"FDXF",
 	"FE",
 	"FFIV",
 	"FICO",
