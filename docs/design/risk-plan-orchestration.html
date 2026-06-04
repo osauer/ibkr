@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary-driven risk response | ibkr</title>
+  <meta name="description" content="canary is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger,...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/design/risk-plan-orchestration.html">
+  <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "author": {
+      "@type": "Person",
+      "name": "Oliver Sauer",
+      "url": "https://github.com/osauer"
+    },
+    "dateModified": "2026-05-31T21:23:00+02:00",
+    "description": "canary is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger,...",
+    "headline": "Canary-driven risk response",
+    "isPartOf": {
+      "@type": "SoftwareApplication",
+      "name": "ibkr",
+      "url": "https://osauer.dev/ibkr/"
+    },
+    "url": "https://osauer.dev/ibkr/design/risk-plan-orchestration.html"
+  }
+  </script>
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="../guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="canary-driven-risk-response">Canary-driven risk response</h1>
+<p><strong>Status:</strong> Draft implementation brief. <strong>Created:</strong> 2026-05-29 20:43 CEST <strong>Last update:</strong> 2026-05-31 21:23 CEST <strong>Owner:</strong> osauer <strong>Related:</strong> <a href="https://github.com/osauer/ibkr/blob/main/internal/cli/canary.go">internal/cli/canary.go</a>, <a href="../specs/risk-regime-dashboard.html">docs/specs/risk-regime-dashboard.md</a>, <a href="../reference/protocol.html">docs/reference/protocol.md</a></p>
+<h2 id="thesis">Thesis</h2>
+<p><code>canary</code> is the live money-saving sentinel. It watches for conditions that demand attention: violent downside markets, euphoric upside markets, margin danger, portfolio overexposure, data failure, and unusual opportunity.</p>
+<p><code>risk-plan</code> is the response planner. It does not decide that the world is dangerous by itself, it does not authorize execution, and it does not execute. It receives an alert context, refreshes live account and portfolio state, rebuilds the risk ledger, and proposes candidate actions for expert review.</p>
+<p>No single input should dominate blindly. In monitor-triggered runs, the canary alert is the reason <code>risk-plan</code> wakes up. The source of truth for action is the refreshed portfolio ledger evaluated against the same policy that canary used to alert.</p>
+<pre><code>live account + positions + regime
+              |
+              v
+        shared risk policy
+              |
+      +-------+--------+
+      |                |
+      v                v
+ canary alert      risk-plan
+ sentinel          planner
+      |                |
+      +-------&gt; plan -&gt; expert review -&gt; selected candidate
+                                      |
+                                      v
+                         trading/order-entry preview
+                                      |
+                                      v
+                         approval -&gt; execution -&gt; post-check</code></pre>
+<p>The handoff is deliberately split. Risk-plan can explain what might be done. An expert reviewer decides whether any candidate should proceed. The trading/order-entry subsystem independently validates any selected candidate before it can become an order.</p>
+<h2 id="shared-policy">Shared Policy</h2>
+<p>Canary and risk-plan need shared criteria. Canary should not only say &#34;something is wrong&#34;; it should say which policy criteria fired, in machine-readable form. Risk-plan should not parse canary prose; it should re-evaluate those same criteria from fresh data.</p>
+<p>The shared policy should cover both defense and opportunity:</p>
+<table>
+<thead><tr><th>Area</th><th>Example signals</th><th>Planner implication</th></tr></thead>
+<tbody>
+<tr><td>Margin danger</td><td><code>margin_cushion_low</code>, <code>lookahead_cushion_low</code></td><td>Cut or liquidate risk first.</td></tr>
+<tr><td>Violent downside</td><td><code>market_selloff_violent</code>, <code>vol_spike_confirmed</code>, <code>regime_stress_confirmed</code></td><td>Defend capital, reduce fragile exposure, consider hedges.</td></tr>
+<tr><td>Violent upside or enthusiasm</td><td><code>market_rally_violent</code>, <code>vol_crush_confirmed</code></td><td>Check underinvestment while guarding against chase-risk; possibly deploy or rebalance.</td></tr>
+<tr><td>Fast carry unwind</td><td><code>fx_carry_unwind</code></td><td>Defend when FX stress is confirmed by tape or breadth deterioration.</td></tr>
+<tr><td>Portfolio P&amp;L shock</td><td><code>portfolio_pnl_shock</code></td><td>Protect liquidity or gains; a gain is not deployable by itself.</td></tr>
+<tr><td>Single-title concentration</td><td><code>single_name_exposure_high</code>, <code>single_name_delta_high</code></td><td>Reduce the largest title risk before smaller issues.</td></tr>
+<tr><td>Portfolio exposure</td><td><code>gross_exposure_high</code>, <code>net_delta_high</code>, <code>gross_delta_high</code></td><td>Defend, rebalance, or stage reductions before stress worsens.</td></tr>
+<tr><td>Option quality and convexity</td><td><code>option_greeks_degraded</code>, <code>short_convexity_high</code>, <code>gamma_red</code></td><td>Block or prioritize option-specific actions.</td></tr>
+<tr><td>Data quality</td><td><code>risk_data_degraded</code>, <code>market_data_stale</code></td><td>Block action or force human review.</td></tr>
+</tbody>
+</table>
+<p>The exact thresholds and buckets are implementation details. The important design point is that the signal vocabulary and thresholds are shared, while candidate construction remains owned by risk-plan and order validation remains owned by trading/order-entry.</p>
+<p>Current signal payloads carry:</p>
+<ul>
+<li><code>id</code>: stable signal name from the shared vocabulary.</li>
+<li><code>direction</code>: <code>defensive</code>, <code>constructive</code>, <code>rebalance</code>, <code>mixed</code>, or <code>data_quality</code>.</li>
+<li><code>posture</code>: portfolio-relative interpretation: <code>threat</code>, <code>rebalance</code>, <code>opportunity</code>, <code>threat_opportunity</code>, <code>confirm_data</code>, or <code>neutral</code>.</li>
+<li><code>severity</code>: <code>observe</code>, <code>watch</code>, <code>act</code>, or <code>urgent</code>.</li>
+<li><code>subject</code>: optional symbol, cluster, or bucket.</li>
+<li><code>metric</code>, <code>observed</code>, <code>threshold</code>, <code>target</code>, and <code>unit</code>.</li>
+<li><code>evidence</code>: compact human-readable evidence.</li>
+<li><code>confidence</code> and <code>confidence_impact</code>.</li>
+<li><code>blocked_by</code>: missing or degraded inputs that prevent stronger action.</li>
+</ul>
+<p>Targets must mean post-action targets. If a signal is only a watch-level early warning and the nearest action floor is below the current watch threshold, omit <code>target</code> rather than asking the planner to solve toward a weaker state.</p>
+<h2 id="canary-contract">Canary Contract</h2>
+<p>Canary is a high-frequency alerting tool, not a planner.</p>
+<p>It should emit:</p>
+<ul>
+<li>stress lifecycle stage: quiet, early-warning, confirmed-stress, panic,</li>
+</ul>
+<p>forced-defense, stabilization, opportunity, or data-quality</p>
+<ul>
+<li>alert direction: defensive, constructive, rebalance, mixed, or data-quality</li>
+<li>portfolio posture: threat, rebalance, opportunity, threat-opportunity, confirm-data, or neutral</li>
+<li>severity: observe, watch, act, or urgent</li>
+<li>planner mode hint: none, stage, defend, rebalance, deploy, or confirm-data</li>
+<li>planner readiness: none, watch, prestage, ready, or blocked</li>
+<li>compact human summary</li>
+<li>fired shared signal IDs</li>
+<li>observed values and thresholds for those signals</li>
+<li>split confidence: data confidence and signal confidence</li>
+<li>source fingerprints for account, positions, and consumed regime</li>
+<li>source health for account, positions, and regime, including <code>as_of</code>,</li>
+</ul>
+<p>stale/degraded/partial status, max-age cadence, confidence, and semantic-bucket fingerprint stability</p>
+<ul>
+<li>source timestamps and policy profile/version</li>
+<li>compact account, portfolio, and regime context</li>
+<li>explicit ambiguity and stale-data warnings</li>
+</ul>
+<p>It must not emit order drafts, trade quantities, strikes, expiries, selected candidate IDs, previewable intents, preview tokens, nonces, or order authorizations. A canary alert answers: &#34;Do we need to pay attention now, and why?&#34;</p>
+<p>The legacy <code>GO</code> / <code>WATCH</code> / <code>DE-LEVER</code> / <code>LIQUIDATE</code> ladder is no longer part of the machine contract. It was readable, but too trade-shaped for a sentinel. Human UX should instead show:</p>
+<pre><code>Risk state  Defensive / Watch
+Posture     Threat
+Next step   Stage risk-plan
+Guidance    Freeze new risk and stage a risk plan; wait for confirmation before major action.
+Drivers     margin_cushion_low, net_delta_high, gamma_red</code></pre>
+<h2 id="risk-plan-contract">Risk-Plan Contract</h2>
+<p>Risk-plan answers: &#34;Given the alert and current portfolio, which candidate responses should an expert review?&#34;</p>
+<p>Every live run should:</p>
+<ol>
+<li>Resolve response mode from the user request or canary alert: defend, rebalance, deploy, stage, or confirm-data.</li>
+<li>Refresh account, positions, regime, and canary.</li>
+<li>Rebuild the portfolio risk ledger.</li>
+<li>Re-evaluate shared policy criteria from fresh data.</li>
+<li>Load pending previews, locally tracked open orders, and recent candidate history.</li>
+<li>Generate candidate actions that address the largest active risk or opportunity.</li>
+<li>Mark unsupported, stale, duplicate, or policy-blocked candidates as blocked.</li>
+<li>Emit a typed plan artifact whose mandatory next step is expert review.</li>
+</ol>
+<p>Response modes:</p>
+<ul>
+<li><code>defend</code>: reduce, hedge, or liquidate risk under stress or margin danger.</li>
+<li><code>rebalance</code>: bring the portfolio back inside accepted policy bounds.</li>
+<li><code>deploy</code>: use available risk budget when constructive conditions and portfolio constraints allow it.</li>
+<li><code>stage</code>: prepare candidates without implying immediate execution.</li>
+<li><code>confirm-data</code>: refresh or verify degraded inputs before planning major action.</li>
+</ul>
+<p>The MVP can implement defensive reductions first, but the design should not bake in &#34;risk-plan only sells.&#34; A live sentinel should also support disciplined opportunity response when the policy says risk budget can be used.</p>
+<p>Risk-plan must not choose or authorize the execution channel. Its artifact is advisory until an expert reviewer accepts, rejects, edits, or selects candidate IDs for preview.</p>
+<h2 id="process-flow">Process Flow</h2>
+<h3 id="monitor-triggered-response">Monitor-triggered response</h3>
+<ol>
+<li>A scheduler runs canary, for example every 10 minutes.</li>
+<li>Canary emits <code>fingerprint</code>, <code>lifecycle</code>, <code>source_fingerprints.account</code>,</li>
+</ol>
+<p><code>source_fingerprints.positions</code>, <code>source_fingerprints.regime</code>, <code>source_health</code>, alert direction, portfolio posture, severity, and fired shared signals.</p>
+<ol>
+<li>Monitor policy dedupes by <code>canary.fingerprint.key</code> and decides whether to call risk-plan.</li>
+<li>Risk-plan refreshes live state and rechecks the same policy criteria.</li>
+<li>Risk-plan loads pending previews, tracked open orders, and recent plan candidates for duplicate suppression.</li>
+<li>If the alert resolved, the plan says no action is currently required.</li>
+<li>If action pressure remains, risk-plan emits candidate responses for expert review.</li>
+<li>The expert reviewer rejects, edits, or selects candidate IDs.</li>
+<li>Order preview validates selected candidate IDs against the current trading gate and order-entry capability.</li>
+<li>Execution, when implemented, is owned by trading/order-entry and requires explicit approval plus fresh validation.</li>
+<li>Canary runs again after action to confirm the portfolio state.</li>
+</ol>
+<p>The monitor must not recompute its own hash over raw JSON. <code>canary.fingerprint</code> is the semantic alert identity; <code>lifecycle.fingerprint</code> is the semantic lifecycle-transition identity; <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, and <code>source_fingerprints.regime</code> record which classified input buckets the canary consumed. A repeated unchanged fingerprint updates <code>last_seen</code> but does not create another alert. A changed fingerprint, recovery to observe/no-action, stale/degraded source-health transition, or unchanged urgent state past a configured repeat TTL are monitor policy decisions outside the daemon.</p>
+<p>Three opt-in monitor shapes stay intentionally outside the daemon:</p>
+<ul>
+<li>Agentic scheduled MCP loop: a scheduler calls <code>ibkr_canary</code> once, preserves the fingerprint, and wakes a human/risk-plan workflow only on transitions.</li>
+<li>Workflow/cron CLI loop: <code>ibkr canary --json</code> writes a small state file and sends a webhook/local notification only when the fingerprint changes or recovery occurs.</li>
+<li>Small code loop later: <code>ibkr monitor canary --every 5m --notify webhook:...</code> can standardize state, signing, retries, and repeat TTLs without adding daemon push/subscriber state.</li>
+</ul>
+<p>Webhook delivery is an alert boundary, not execution authority. A receiver may verify the webhook, dedupe by fingerprint, fetch fresh account/positions/regime/canary, and open a human or risk-plan review. The webhook must not carry order drafts, quantities, strikes, expiries, preview tokens, nonces, broker order IDs, or submit eligibility.</p>
+<h3 id="user-requested-response">User-requested response</h3>
+<p>The user can call risk-plan directly without waiting for canary:</p>
+<ul>
+<li>&#34;Bring risk back inside limits&#34; maps to <code>rebalance</code>.</li>
+<li>&#34;What should I cut if this gets worse?&#34; maps to <code>stage</code>.</li>
+<li>&#34;Can I put cash to work under this regime?&#34; maps to <code>deploy</code>.</li>
+<li>&#34;Reduce harm now&#34; maps to <code>defend</code>.</li>
+</ul>
+<p>Risk-plan still uses the same shared policy, refreshed ledger, duplicate suppression, and expert-review boundary.</p>
+<h2 id="expert-review-boundary">Expert Review Boundary</h2>
+<p>Expert review is the mandatory next step after planning.</p>
+<p>The reviewer owns judgment, not transport. They decide whether the plan is coherent, whether the policy and source data are trustworthy, whether any candidate should be edited or rejected, and which candidate IDs may proceed to preview.</p>
+<p>The reviewer does not bypass trading/order-entry gates. A selected candidate is only an instruction to ask for preview. It is not an order, approval, nonce, or authorization to submit.</p>
+<p>The plan artifact should make this explicit:</p>
+<ul>
+<li><code>execution_authority</code>: always <code>none</code></li>
+<li><code>next_required_step</code>: <code>expert_review</code></li>
+<li>no <code>execution_owner</code></li>
+<li>no submission channel</li>
+<li>no preview token</li>
+<li>no human nonce</li>
+<li>no order authorization</li>
+</ul>
+<h2 id="trading-and-preview-boundary">Trading and Preview Boundary</h2>
+<p>Trading/order-entry independently validates selected candidates. It must not trust risk-plan as an authority.</p>
+<p>Preview should verify at least:</p>
+<ul>
+<li>local trading gate and blockers</li>
+<li>account match</li>
+<li>policy profile and policy version match</li>
+<li>source timestamps and hashes are still acceptable</li>
+<li>selected candidate ID exists in the artifact and is not blocked</li>
+<li>current gateway endpoint, account, and client ID match the trading configuration</li>
+<li>current order-entry capability supports the candidate</li>
+<li>max notional, max contracts, short/flip rules, and option-opening rules</li>
+<li>broker <code>WhatIf</code> result before any submit-eligible token</li>
+<li>token binding, expiry, and confirmation gates before execution</li>
+</ul>
+<p>Current order-preview capability is intentionally narrow: equities and ETFs only, <code>LMT</code> only, <code>DAY</code> only, default <code>patient-limit</code>, and <code>outside_rth=false</code>. Until order-entry grows and tests a broader capability, risk-plan may still describe unsupported risk responses, but it must mark them <code>blocked</code> or <code>informational</code>; they must not be previewable.</p>
+<p>Broker <code>WhatIf</code>, preview tokens, single-use confirmation, and actual order execution belong to trading/order-entry. Risk-plan cannot mint preview tokens, mark a token executable, or authorize broker writes.</p>
+<h2 id="monitor-idempotency">Monitor Idempotency</h2>
+<p>Monitor-triggered plans can repeat frequently. Repeating the same candidate every 10 minutes is a trading risk, even if every individual candidate looks valid.</p>
+<p>Before emitting candidates, risk-plan should account for:</p>
+<ul>
+<li>pending previews that have not expired</li>
+<li>locally tracked open orders</li>
+<li>recent candidate IDs and their source hashes</li>
+<li>materially changed account, position, regime, or policy inputs</li>
+<li>stale data and partially failed source refreshes</li>
+</ul>
+<p>Candidate IDs should be stable for the same plan source and intent. If the same alert snapshot produces the same response, risk-plan should report the existing pending candidate instead of creating a fresh previewable candidate. If the source snapshot changed materially, the artifact should say why a new candidate supersedes the old one.</p>
+<h2 id="mcp-boundary">MCP Boundary</h2>
+<p>MCP risk-plan tools may produce plan artifacts. They may ask the trading subsystem for candidate validation or preview diagnostics only after expert selection, and only through a non-submitting surface that does not mint a submit-capable token. Until such a diagnostic-only preview mode exists, risk-plan MCP tools must not call order preview directly.</p>
+<p>They must not:</p>
+<ul>
+<li>submit, modify, or cancel orders</li>
+<li>mint preview tokens</li>
+<li>mint or request human nonces</li>
+<li>present a risk-plan candidate as approved</li>
+<li>call MCP order-write tools on behalf of the user</li>
+<li>bypass expert review</li>
+</ul>
+<p>If future MCP order-write tools exist, they remain under the trading/order-entry policy: explicit trading config, matching preview token, out-of-band human nonce, fresh validation, and audited journal state. Risk-plan MCP tools do not provide that authority.</p>
+<h2 id="candidate-priority">Candidate Priority</h2>
+<p>Default priority should be simple:</p>
+<ol>
+<li>Prevent margin or liquidity harm.</li>
+<li>Address the largest active breach or opportunity.</li>
+<li>Prefer simple changes to complex ones.</li>
+<li>Prefer closing or resizing known exposure before opening new exposure.</li>
+<li>Prefer candidates the current order-entry capability can preview.</li>
+<li>Require expert review before any preview.</li>
+<li>Require preview for every selected candidate before any execution path.</li>
+</ol>
+<p>For defensive runs, the largest active issue may be margin, single-title concentration, short convexity, or market beta. For deployment runs, it may be unused risk budget, missing target exposure, or a constructive market regime. The policy decides which opportunities are valid; risk-plan should not chase enthusiasm without constraints.</p>
+<h2 id="artifact-boundary">Artifact Boundary</h2>
+<p>Risk-plan emits a typed artifact. Expert review consumes that artifact first. Order preview may later consume the same artifact plus selected candidate IDs. Raw canary output and agent-authored orders are not preview inputs.</p>
+<p>The artifact should carry:</p>
+<ul>
+<li>kind, plan ID, account ID, policy profile, policy version, and response mode</li>
+<li>source timestamps and hashes for account, positions, quotes, regime, canary, and policy</li>
+<li>alert context and fired shared signals</li>
+<li>refreshed risk-ledger summary</li>
+<li>pending preview, open order, and recent candidate references used for duplicate suppression</li>
+<li>candidate IDs, rationale, draft intent, and capability status</li>
+<li>estimated before/after effects</li>
+<li>warnings, blocked reasons, and expiration</li>
+<li><code>execution_authority: none</code></li>
+<li><code>next_required_step: expert_review</code></li>
+</ul>
+<p>The artifact should not carry:</p>
+<ul>
+<li>execution owner</li>
+<li>submission channel</li>
+<li>preview tokens</li>
+<li>human nonces</li>
+<li>broker order IDs</li>
+<li>order authorizations</li>
+</ul>
+<h2 id="implementation-direction">Implementation Direction</h2>
+<p>Build the shared policy and signal vocabulary first, then wire canary and risk-plan to it.</p>
+<p>Suggested order:</p>
+<ol>
+<li>Define shared signal IDs, severity, direction, and policy profiles.</li>
+<li>Add machine-readable fired signals, planner mode hint, and planner readiness to canary.</li>
+<li>Build a reusable risk ledger from account, positions, and regime.</li>
+<li>Add monitor duplicate-suppression inputs: pending previews, open orders, and recent candidates.</li>
+<li>Implement defensive risk-plan candidates for existing positions.</li>
+<li>Add typed plan artifacts with expert-review-required semantics.</li>
+<li>Add order-preview consumption only for candidates supported by current trading capability.</li>
+<li>Extend exposure axes for asset class and market buckets before currency buckets.</li>
+<li>Add deploy/stage modes once defensive planning is trustworthy.</li>
+</ol>
+<h2 id="non-goals">Non-Goals</h2>
+<ul>
+<li>No scheduler inside risk-plan.</li>
+<li>No automatic trading.</li>
+<li>No execution-channel decision inside risk-plan.</li>
+<li>No order-level fields in canary.</li>
+<li>No direct canary-to-preview path.</li>
+<li>No preview tokens, nonces, or order authorization from risk-plan.</li>
+<li>No MCP order submission.</li>
+<li>No optimizer, tax-lot engine, or naked short-option strategy generation in the first version.</li>
+</ul>
+<h2 id="open-questions">Open Questions</h2>
+<ul>
+<li>What exact thresholds should the first asset-class and market buckets use?</li>
+<li>What exact clean-risk-budget criteria make a constructive signal deployable rather than merely euphoric?</li>
+<li>How long should recent candidate history be retained for duplicate suppression?</li>
+<li>What evidence should let an expert reviewer mark a stale plan safe to rerun instead of creating a new candidate?</li>
+</ul>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>
