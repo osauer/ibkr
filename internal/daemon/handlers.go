@@ -1824,6 +1824,7 @@ func normaliseStockQuoteContract(in rpc.ContractParams) (ibkrlib.Contract, rpc.C
 	}
 
 	echo := rpc.ContractParams{
+		ConID:        in.ConID,
 		Symbol:       sym,
 		SecType:      secType,
 		Market:       market,
@@ -1832,6 +1833,7 @@ func normaliseStockQuoteContract(in rpc.ContractParams) (ibkrlib.Contract, rpc.C
 		Currency:     currency,
 		LocalSymbol:  localSymbol,
 		TradingClass: tradingClass,
+		Multiplier:   in.Multiplier,
 	}
 	if !routed {
 		echo.Exchange = ""
@@ -1840,6 +1842,7 @@ func normaliseStockQuoteContract(in rpc.ContractParams) (ibkrlib.Contract, rpc.C
 		}
 	}
 	contract := ibkrlib.Contract{
+		ConID:        in.ConID,
 		Symbol:       sym,
 		SecType:      secType,
 		Exchange:     exchange,
@@ -1847,6 +1850,7 @@ func normaliseStockQuoteContract(in rpc.ContractParams) (ibkrlib.Contract, rpc.C
 		Currency:     currency,
 		LocalSymbol:  localSymbol,
 		TradingClass: tradingClass,
+		Multiplier:   in.Multiplier,
 	}
 	return contract, echo, routed, nil
 }
@@ -1984,6 +1988,9 @@ func normaliseOptionQuoteContract(in rpc.ContractParams) (rpc.ContractParams, er
 	out.SecType = "OPT"
 	out.Expiry = expiry
 	out.Right = right
+	if out.Multiplier == 0 {
+		out.Multiplier = 100
+	}
 	if out.Exchange == "" {
 		out.Exchange = "SMART"
 	}

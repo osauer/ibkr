@@ -177,8 +177,11 @@ func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, 
 		Account:      order.Account,
 		Transmit:     false,
 		WhatIf:       true,
-		OpenClose:    "O",
+		OpenClose:    strings.ToUpper(strings.TrimSpace(order.OpenClose)),
 		Origin:       0,
+	}
+	if ibkrOrder.OpenClose == "" {
+		ibkrOrder.OpenClose = "O"
 	}
 	if orderID > 0 {
 		ibkrOrder.OrderID = orderID

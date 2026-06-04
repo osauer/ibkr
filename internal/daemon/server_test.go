@@ -214,6 +214,10 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodOrderPlace, cliDefault},
 		{rpc.MethodOrderModify, cliDefault},
 		{rpc.MethodOrderCancel, cliDefault},
+		{rpc.MethodPurgeStatus, cliDefault},
+		{rpc.MethodPurgeExecute, cliDefault},
+		{rpc.MethodPurgeRestorePreview, cliDefault},
+		{rpc.MethodPurgeRestoreExecute, cliDefault},
 	}
 	for _, tc := range cases {
 		d := unaryDeadline(tc.method)

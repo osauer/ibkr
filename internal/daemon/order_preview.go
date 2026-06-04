@@ -262,11 +262,11 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if err != nil {
 		return nil, err
 	}
-	if contract.SecType != "STK" {
-		return nil, errBadRequest("order preview currently supports stocks and ETFs only; single-leg options remain disabled until their parser and broker WhatIf gates are complete")
-	}
 	if p.Quantity <= 0 {
 		return nil, errBadRequest("quantity must be positive")
+	}
+	if contract.SecType == "OPT" && p.Quantity > cfg.MaxOptionContracts {
+		return nil, errBadRequest(fmt.Sprintf("option quantity %d exceeds [trading].max_option_contracts %d", p.Quantity, cfg.MaxOptionContracts))
 	}
 	orderType := strings.ToUpper(strings.TrimSpace(p.OrderType))
 	if orderType == "" {
@@ -296,16 +296,19 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if err != nil {
 		return nil, err
 	}
-	notional := float64(p.Quantity) * limit
+	notional := float64(p.Quantity) * limit * float64(contractMultiplier(contract))
 	if notional > cfg.MaxNotional {
 		return nil, errBadRequest(fmt.Sprintf("order notional %.2f exceeds [trading].max_notional %.2f", notional, cfg.MaxNotional))
 	}
-	position, err := s.fetchPreviewPositionImpact(ctx, contract.Symbol, action, p.Quantity)
+	position, err := s.fetchPreviewPositionImpact(ctx, contract, action, p.Quantity)
 	if err != nil {
 		return nil, err
 	}
-	if stockShortOrFlip(position.Effect) && !cfg.AllowStockShort {
+	switch {
+	case contract.SecType == "STK" && stockShortOrFlip(position.Effect) && !cfg.AllowStockShort:
 		return nil, errBadRequest("stock short/flip previews require [trading].allow_stock_short = true")
+	case contract.SecType == "OPT" && optionSellToOpen(action, position.Effect) && !cfg.AllowOptionSellToOpen:
+		return nil, errBadRequest("option sell-to-open previews require [trading].allow_option_sell_to_open = true")
 	}
 
 	now := time.Now().UTC()
@@ -322,6 +325,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		OutsideRTH: p.OutsideRTH,
 		Strategy:   strategy,
 		OrderRef:   previewOrderRef(now),
+		OpenClose:  orderOpenCloseForEffect(position.Effect),
 	}
 	if scope == rpc.OrderTokenScopeModify {
 		if err := validateModifyDraft(replaceView, draft); err != nil {
@@ -366,17 +370,23 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Mode:           status.Mode,
 		Symbol:         draft.Contract.Symbol,
 		SecType:        draft.Contract.SecType,
+		ConID:          draft.Contract.ConID,
 		Exchange:       draft.Contract.Exchange,
 		PrimaryExch:    draft.Contract.PrimaryExch,
 		Currency:       draft.Contract.Currency,
 		LocalSymbol:    draft.Contract.LocalSymbol,
 		TradingClass:   draft.Contract.TradingClass,
+		Expiry:         draft.Contract.Expiry,
+		Strike:         draft.Contract.Strike,
+		Right:          draft.Contract.Right,
+		Multiplier:     draft.Contract.Multiplier,
 		Action:         draft.Action,
 		OrderType:      draft.OrderType,
 		TIF:            draft.TIF,
 		OutsideRTH:     draft.OutsideRTH,
 		Quantity:       float64(draft.Quantity),
 		LimitPrice:     draft.LimitPrice,
+		OpenClose:      draft.OpenClose,
 		Message:        previewWhatIfJournalMessage(whatIf),
 	}); err != nil {
 		return nil, fmt.Errorf("%w: append preview journal: %v", ErrTradingDisabled, err)
@@ -424,11 +434,11 @@ func (s *Server) fetchPreviewQuote(ctx context.Context, contract rpc.ContractPar
 	return s.previewQuote(ctx, contract, timeout)
 }
 
-func (s *Server) fetchPreviewPositionImpact(ctx context.Context, symbol, action string, qty int) (rpc.OrderPositionImpact, error) {
+func (s *Server) fetchPreviewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
 	if s.orderPreviewPositionImpact != nil {
-		return s.orderPreviewPositionImpact(ctx, symbol, action, qty)
+		return s.orderPreviewPositionImpact(ctx, contract, action, qty)
 	}
-	return s.previewPositionImpact(ctx, symbol, action, qty)
+	return s.previewPositionImpact(ctx, contract, action, qty)
 }
 
 func (s *Server) fetchPreviewWhatIf(ctx context.Context, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
@@ -479,6 +489,7 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 		currency = "USD"
 	}
 	return &ibkrlib.Contract{
+		ConID:        contract.ConID,
 		Symbol:       strings.ToUpper(strings.TrimSpace(contract.Symbol)),
 		SecType:      secType,
 		Exchange:     exchange,
@@ -489,6 +500,7 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 		Expiry:       strings.TrimSpace(contract.Expiry),
 		Strike:       contract.Strike,
 		Right:        strings.ToUpper(strings.TrimSpace(contract.Right)),
+		Multiplier:   contract.Multiplier,
 	}
 }
 
@@ -501,6 +513,7 @@ func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
 		TIF:        strings.ToUpper(strings.TrimSpace(draft.TIF)),
 		OrderRef:   draft.OrderRef,
 		OutsideRth: draft.OutsideRTH,
+		OpenClose:  strings.ToUpper(strings.TrimSpace(draft.OpenClose)),
 	}
 }
 
@@ -601,8 +614,9 @@ func normalizePreviewContract(in rpc.ContractParams) (rpc.ContractParams, error)
 		secType = "STK"
 	}
 	switch secType {
-	case "STK":
+	case "STK", "ETF":
 		_, echo, _, err := normaliseStockQuoteContract(rpc.ContractParams{
+			ConID:        in.ConID,
 			Symbol:       in.Symbol,
 			SecType:      secType,
 			Market:       in.Market,
@@ -611,6 +625,7 @@ func normalizePreviewContract(in rpc.ContractParams) (rpc.ContractParams, error)
 			Currency:     in.Currency,
 			LocalSymbol:  in.LocalSymbol,
 			TradingClass: in.TradingClass,
+			Multiplier:   in.Multiplier,
 		})
 		if err != nil {
 			return rpc.ContractParams{}, err
@@ -621,12 +636,14 @@ func normalizePreviewContract(in rpc.ContractParams) (rpc.ContractParams, error)
 		if echo.Currency == "" {
 			echo.Currency = "USD"
 		}
-		echo.SecType = "STK"
+		echo.SecType = secType
+		echo.ConID = in.ConID
+		echo.Multiplier = max(in.Multiplier, 1)
 		return echo, nil
 	case "OPT":
 		return normaliseOptionQuoteContract(in)
 	default:
-		return rpc.ContractParams{}, errBadRequest("order preview supports STK contracts only in this slice")
+		return rpc.ContractParams{}, errBadRequest("order preview supports STK/ETF/OPT contracts only")
 	}
 }
 
@@ -724,7 +741,17 @@ func roundPrice(price float64) float64 {
 	return math.Round(price*10000) / 10000
 }
 
-func (s *Server) previewPositionImpact(ctx context.Context, symbol, action string, qty int) (rpc.OrderPositionImpact, error) {
+func contractMultiplier(contract rpc.ContractParams) int {
+	if contract.Multiplier > 0 {
+		return contract.Multiplier
+	}
+	if strings.EqualFold(contract.SecType, "OPT") {
+		return 100
+	}
+	return 1
+}
+
+func (s *Server) previewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
 	c := s.gatewayConnector()
 	if c == nil {
 		return rpc.OrderPositionImpact{}, ibkrlib.ErrIBKRUnavailable
@@ -734,7 +761,7 @@ func (s *Server) previewPositionImpact(ctx context.Context, symbol, action strin
 		return rpc.OrderPositionImpact{}, err
 	}
 	_ = ctx
-	before := stockPositionQuantity(positions, symbol)
+	before := positionQuantityForContract(positions, contract)
 	delta := float64(qty)
 	if action == rpc.OrderActionSell {
 		delta = -delta
@@ -747,18 +774,110 @@ func (s *Server) previewPositionImpact(ctx context.Context, symbol, action strin
 	}, nil
 }
 
-func stockPositionQuantity(positions []*ibkrlib.RawPosition, symbol string) float64 {
-	want := strings.ToUpper(strings.TrimSpace(symbol))
+func positionQuantityForContract(positions []*ibkrlib.RawPosition, contract rpc.ContractParams) float64 {
+	if strings.EqualFold(contract.SecType, "OPT") {
+		return optionPositionQuantity(positions, contract)
+	}
+	return stockPositionQuantity(positions, contract)
+}
+
+func stockPositionQuantity(positions []*ibkrlib.RawPosition, contract rpc.ContractParams) float64 {
+	wantSymbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	if wantSymbol == "" {
+		return 0
+	}
+	wantCurrency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	wantLocalSymbol := strings.ToUpper(strings.TrimSpace(contract.LocalSymbol))
+	wantTradingClass := strings.ToUpper(strings.TrimSpace(contract.TradingClass))
+	wantPrimaryExch := strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	wantExchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
 	var qty float64
 	for _, pos := range positions {
 		if pos == nil {
 			continue
 		}
-		if strings.EqualFold(pos.Contract.SecType, "STK") && strings.EqualFold(pos.Contract.Symbol, want) {
-			qty += pos.Position
+		if !strings.EqualFold(pos.Contract.SecType, "STK") || !strings.EqualFold(pos.Contract.Symbol, wantSymbol) {
+			continue
 		}
+		if wantCurrency != "" && pos.Contract.Currency != "" && !strings.EqualFold(pos.Contract.Currency, wantCurrency) {
+			continue
+		}
+		if wantLocalSymbol != "" && pos.Contract.LocalSymbol != "" && !strings.EqualFold(pos.Contract.LocalSymbol, wantLocalSymbol) {
+			continue
+		}
+		if wantTradingClass != "" && pos.Contract.TradingClass != "" && !strings.EqualFold(pos.Contract.TradingClass, wantTradingClass) {
+			continue
+		}
+		if wantPrimaryExch != "" && !stockVenueMatches(pos.Contract, wantPrimaryExch) {
+			continue
+		}
+		if wantPrimaryExch == "" && wantExchange != "" && wantExchange != "SMART" && !stockVenueMatches(pos.Contract, wantExchange) {
+			continue
+		}
+		qty += pos.Position
 	}
 	return qty
+}
+
+func optionPositionQuantity(positions []*ibkrlib.RawPosition, contract rpc.ContractParams) float64 {
+	wantSymbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	wantExpiry := strings.TrimSpace(contract.Expiry)
+	wantRight := strings.ToUpper(strings.TrimSpace(contract.Right))
+	wantCurrency := strings.ToUpper(strings.TrimSpace(contract.Currency))
+	wantLocalSymbol := strings.ToUpper(strings.TrimSpace(contract.LocalSymbol))
+	wantTradingClass := strings.ToUpper(strings.TrimSpace(contract.TradingClass))
+	for _, pos := range positions {
+		if pos == nil || !strings.EqualFold(pos.Contract.SecType, "OPT") {
+			continue
+		}
+		if contract.ConID > 0 && pos.Contract.ConID > 0 {
+			if contract.ConID == pos.Contract.ConID {
+				return pos.Position
+			}
+			continue
+		}
+		if !strings.EqualFold(pos.Contract.Symbol, wantSymbol) ||
+			strings.TrimSpace(pos.Contract.Expiry) != wantExpiry ||
+			!strings.EqualFold(pos.Contract.Right, wantRight) ||
+			!samePreviewFloat(pos.Contract.Strike, contract.Strike) {
+			continue
+		}
+		if wantCurrency != "" && pos.Contract.Currency != "" && !strings.EqualFold(pos.Contract.Currency, wantCurrency) {
+			continue
+		}
+		if wantLocalSymbol != "" && pos.Contract.LocalSymbol != "" && !strings.EqualFold(pos.Contract.LocalSymbol, wantLocalSymbol) {
+			continue
+		}
+		if wantTradingClass != "" && pos.Contract.TradingClass != "" && !strings.EqualFold(pos.Contract.TradingClass, wantTradingClass) {
+			continue
+		}
+		return pos.Position
+	}
+	return 0
+}
+
+func samePreviewFloat(a, b float64) bool {
+	const epsilon = 1e-9
+	if a > b {
+		return a-b < epsilon
+	}
+	return b-a < epsilon
+}
+
+func stockVenueMatches(contract ibkrlib.Contract, want string) bool {
+	want = strings.ToUpper(strings.TrimSpace(want))
+	if want == "" {
+		return true
+	}
+	primaryExch := strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	exchange := strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	if exchange == "SMART" {
+		exchange = ""
+	}
+	if primaryExch == "" && exchange == "" {
+		return true
+	}
+	return primaryExch == want || exchange == want
 }
 
 func classifyPositionEffect(before, after float64) string {
@@ -790,6 +909,19 @@ func classifyPositionEffect(before, after float64) string {
 
 func stockShortOrFlip(effect string) bool {
 	return effect == rpc.OrderPositionEffectFlip || effect == rpc.OrderPositionEffectOpenShort
+}
+
+func optionSellToOpen(action, effect string) bool {
+	return action == rpc.OrderActionSell && (effect == rpc.OrderPositionEffectOpenShort || effect == rpc.OrderPositionEffectFlip)
+}
+
+func orderOpenCloseForEffect(effect string) string {
+	switch effect {
+	case rpc.OrderPositionEffectClose, rpc.OrderPositionEffectReduce:
+		return "C"
+	default:
+		return "O"
+	}
 }
 
 func previewWhatIfUnavailable() rpc.OrderWhatIfResult {

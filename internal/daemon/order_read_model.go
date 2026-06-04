@@ -143,11 +143,26 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.Mode != "" {
 		view.Mode = ev.Mode
 	}
+	if ev.Source != "" {
+		view.Source = ev.Source
+	}
+	if ev.PurgeID != "" {
+		view.PurgeID = ev.PurgeID
+	}
+	if ev.LegID != "" {
+		view.LegID = ev.LegID
+	}
+	if ev.BypassPreview {
+		view.BypassPreview = true
+	}
 	if ev.Symbol != "" {
 		view.Symbol = ev.Symbol
 	}
 	if ev.SecType != "" {
 		view.SecType = ev.SecType
+	}
+	if ev.ConID != 0 {
+		view.ConID = ev.ConID
 	}
 	if ev.Exchange != "" {
 		view.Exchange = ev.Exchange
@@ -163,6 +178,18 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	}
 	if ev.TradingClass != "" {
 		view.TradingClass = ev.TradingClass
+	}
+	if ev.Expiry != "" {
+		view.Expiry = ev.Expiry
+	}
+	if ev.Strike != 0 {
+		view.Strike = ev.Strike
+	}
+	if ev.Right != "" {
+		view.Right = ev.Right
+	}
+	if ev.Multiplier != 0 {
+		view.Multiplier = ev.Multiplier
 	}
 	if ev.Action != "" {
 		view.Action = ev.Action
@@ -181,6 +208,9 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	}
 	if ev.LimitPrice != 0 {
 		view.LimitPrice = ev.LimitPrice
+	}
+	if ev.OpenClose != "" {
+		view.OpenClose = ev.OpenClose
 	}
 	if ev.Status != "" && !preserveWorkingOrderOnBrokerError {
 		view.Status = ev.Status
@@ -243,19 +273,29 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		Account:         ev.Account,
 		Endpoint:        ev.Endpoint,
 		Mode:            ev.Mode,
+		Source:          ev.Source,
+		PurgeID:         ev.PurgeID,
+		LegID:           ev.LegID,
+		BypassPreview:   ev.BypassPreview,
 		Symbol:          ev.Symbol,
 		SecType:         ev.SecType,
+		ConID:           ev.ConID,
 		Exchange:        ev.Exchange,
 		PrimaryExch:     ev.PrimaryExch,
 		Currency:        ev.Currency,
 		LocalSymbol:     ev.LocalSymbol,
 		TradingClass:    ev.TradingClass,
+		Expiry:          ev.Expiry,
+		Strike:          ev.Strike,
+		Right:           ev.Right,
+		Multiplier:      ev.Multiplier,
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,
 		OutsideRTH:      ev.OutsideRTH,
 		Quantity:        ev.Quantity,
 		LimitPrice:      ev.LimitPrice,
+		OpenClose:       ev.OpenClose,
 		Status:          ev.Status,
 		LifecycleStatus: mapOrderJournalLifecycleStatus(ev),
 		Filled:          ev.Filled,
@@ -285,6 +325,10 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		Currency:        ev.Currency,
 		LocalSymbol:     ev.LocalSymbol,
 		TradingClass:    ev.TradingClass,
+		Expiry:          ev.Expiry,
+		Strike:          ev.Strike,
+		Right:           ev.Right,
+		Multiplier:      ev.Multiplier,
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,

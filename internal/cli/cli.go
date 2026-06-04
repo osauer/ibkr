@@ -101,17 +101,16 @@ func hoistFlags(in []string) []string {
 }
 
 func isValueFlag(name string) bool {
-	switch name {
-	case "expiry", "width", "side", "rate", "timeout", "limit", "symbol",
-		"type", "sort", "days", "by", "lookback-days",
-		"entry", "stop", "target", "risk-pct", "lot", "fx",
-		"only", "scale", "market", "exchange", "primary", "currency", "instrument", "log",
-		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
-		"min-dte", "max-dte", "target-dte", "view",
-		"mode", "from-canary", "from-plan", "candidate",
-		"host", "port", "account", "client-id", "preview-token", "ttl", "live-ack",
-		"strategy", "tif", "replace-order":
-		return true
+	name = strings.TrimLeft(name, "-")
+	if i := strings.IndexByte(name, '='); i >= 0 {
+		name = name[:i]
+	}
+	for _, cmd := range Catalog() {
+		for _, f := range cmd.Flags {
+			if f.Name == name && f.TakesValue {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -167,7 +166,7 @@ func init() {
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
 		{"risk-plan", "Read-only risk mitigation planner from canary + current portfolio", "ibkr risk-plan [--mode auto|defend|rebalance|stage|confirm-data|deploy] [--from-canary PATH] [--json]", runRiskPlan},
-		{"purge", "CLI-only purge book: ticker-scoped flattening, shadow monitor, and restore review", "ibkr purge SYMBOL|'*' [--json] | ibkr purge --all [--json] | ibkr purge status [--json] | ibkr purge monitor [--watch --rate 1s] | ibkr purge restore SYMBOL|'*' [--scale 1.0] [--record] [--json] | ibkr purge restore --all [--scale 1.0] [--record] [--json] | ibkr purge dry-run [--save] [--json]", runPurge},
+		{"purge", "Emergency fast-path close for current stock/ETF and single-leg option positions", "ibkr purge SYMBOL|'*' [--bypass-preview=true] [--wait 2s] [--json] | ibkr purge --all [--bypass-preview=true] [--wait 2s] [--json] | ibkr purge restore SYMBOL|'*' [--scale 0.5] [--execute] [--json] | ibkr purge status [PURGE_ID] [--json] | ibkr purge monitor [PURGE_ID] [--watch --rate 1s] | ibkr purge dry-run [--json]", runPurge},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},

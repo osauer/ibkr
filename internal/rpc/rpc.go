@@ -15,30 +15,34 @@ import (
 
 // Method names. Keep stable; the CLI sends these as strings.
 const (
-	MethodAccountSummary = "account.summary"
-	MethodPositionsList  = "positions.list"
-	MethodQuoteSnapshot  = "quote.snapshot"
-	MethodQuoteSubscribe = "quote.subscribe"
-	MethodChainFetch     = "chain.fetch"
-	MethodChainExpiries  = "chain.expiries"
-	MethodScanRun        = "scan.run"
-	MethodScanList       = "scan.list"
-	MethodScanParams     = "scan.params"
-	MethodHistoryDaily   = "history.daily"
-	MethodTechnical      = "technical.snapshot"
-	MethodMarketCalendar = "market.calendar"
-	MethodStatusHealth   = "status.health"
-	MethodTradingStatus  = "trading.status"
-	MethodOrdersOpen     = "orders.open"
-	MethodOrderStatus    = "order.status"
-	MethodOrderPreview   = "order.preview"
-	MethodBreadthSPX     = "breadth.spx"
-	MethodGammaZeroSPX   = "gamma.zero_spx"
-	MethodRegimeSnapshot = "regime.snapshot"
-	MethodCancel         = "cancel"
-	MethodOrderPlace     = "order.place"
-	MethodOrderModify    = "order.modify"
-	MethodOrderCancel    = "order.cancel"
+	MethodAccountSummary      = "account.summary"
+	MethodPositionsList       = "positions.list"
+	MethodQuoteSnapshot       = "quote.snapshot"
+	MethodQuoteSubscribe      = "quote.subscribe"
+	MethodChainFetch          = "chain.fetch"
+	MethodChainExpiries       = "chain.expiries"
+	MethodScanRun             = "scan.run"
+	MethodScanList            = "scan.list"
+	MethodScanParams          = "scan.params"
+	MethodHistoryDaily        = "history.daily"
+	MethodTechnical           = "technical.snapshot"
+	MethodMarketCalendar      = "market.calendar"
+	MethodStatusHealth        = "status.health"
+	MethodTradingStatus       = "trading.status"
+	MethodOrdersOpen          = "orders.open"
+	MethodOrderStatus         = "order.status"
+	MethodOrderPreview        = "order.preview"
+	MethodBreadthSPX          = "breadth.spx"
+	MethodGammaZeroSPX        = "gamma.zero_spx"
+	MethodRegimeSnapshot      = "regime.snapshot"
+	MethodCancel              = "cancel"
+	MethodOrderPlace          = "order.place"
+	MethodOrderModify         = "order.modify"
+	MethodOrderCancel         = "order.cancel"
+	MethodPurgeStatus         = "purge.status"
+	MethodPurgeExecute        = "purge.execute"
+	MethodPurgeRestorePreview = "purge.restore.preview"
+	MethodPurgeRestoreExecute = "purge.restore.execute"
 )
 
 // Error codes used in Error.Code. CLI maps these to user-facing messages.
@@ -272,6 +276,7 @@ func (e *Error) Error() string {
 // SecType "STK" for stocks/ETFs; "OPT" for options (Expiry, Strike,
 // Right required).
 type ContractParams struct {
+	ConID        int     `json:"con_id,omitempty"`
 	Symbol       string  `json:"symbol"`
 	SecType      string  `json:"sec_type,omitempty"` // STK | OPT | FUT | IND (request-side; see asymmetry note)
 	Market       string  `json:"market,omitempty"`   // us | de
@@ -283,6 +288,7 @@ type ContractParams struct {
 	Expiry       string  `json:"expiry,omitempty"` // YYYYMMDD
 	Strike       float64 `json:"strike,omitempty"`
 	Right        string  `json:"right,omitempty"` // C | P
+	Multiplier   int     `json:"multiplier,omitempty"`
 }
 
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
@@ -2845,6 +2851,7 @@ type OrderDraft struct {
 	OutsideRTH bool           `json:"outside_rth"`
 	Strategy   string         `json:"strategy"`
 	OrderRef   string         `json:"order_ref"`
+	OpenClose  string         `json:"open_close,omitempty"`
 }
 
 // OrderQuoteSnapshot captures the market-data inputs used by preview pricing.
@@ -2972,6 +2979,189 @@ type OrderPlaceResult struct {
 	AsOf            time.Time  `json:"as_of"`
 }
 
+type PurgeExecuteParams struct {
+	PurgeID       string            `json:"purge_id"`
+	All           bool              `json:"all,omitempty"`
+	Symbols       []string          `json:"symbols,omitempty"`
+	Legs          []PurgeExecuteLeg `json:"legs,omitempty"`
+	BypassPreview *bool             `json:"bypass_preview,omitempty"`
+	WaitMs        int               `json:"wait_ms,omitempty"`
+}
+
+type PurgeExecuteLeg struct {
+	LegID        string         `json:"leg_id"`
+	Symbol       string         `json:"symbol"`
+	SecType      string         `json:"sec_type"`
+	Contract     ContractParams `json:"contract"`
+	OriginalSide string         `json:"original_side"`
+	PurgeAction  string         `json:"purge_action"`
+	Quantity     float64        `json:"quantity"`
+	Multiplier   int            `json:"multiplier,omitempty"`
+}
+
+type PurgeExecuteResult struct {
+	Kind                 string                   `json:"kind"`
+	PurgeID              string                   `json:"purge_id"`
+	Status               string                   `json:"status"`
+	Mode                 string                   `json:"mode,omitempty"`
+	Account              string                   `json:"account,omitempty"`
+	Endpoint             string                   `json:"endpoint,omitempty"`
+	ClientID             int                      `json:"client_id,omitempty"`
+	BypassPreview        bool                     `json:"bypass_preview"`
+	SelectedLegs         int                      `json:"selected_legs"`
+	SubmittedLegs        int                      `json:"submitted_legs"`
+	SkippedLegs          int                      `json:"skipped_legs"`
+	ErrorLegs            int                      `json:"error_legs"`
+	Orders               []PurgeExecuteOrder      `json:"orders,omitempty"`
+	Skipped              []PurgeExecuteSkippedLeg `json:"skipped,omitempty"`
+	Warnings             []string                 `json:"warnings,omitempty"`
+	Blockers             []TradingBlocker         `json:"blockers,omitempty"`
+	Message              string                   `json:"message,omitempty"`
+	MonitorCommand       string                   `json:"monitor_command,omitempty"`
+	RestoreReviewCommand string                   `json:"restore_review_command,omitempty"`
+	AsOf                 time.Time                `json:"as_of"`
+}
+
+type PurgeExecuteOrder struct {
+	LegID           string             `json:"leg_id"`
+	Symbol          string             `json:"symbol"`
+	SecType         string             `json:"sec_type"`
+	Contract        ContractParams     `json:"contract"`
+	Action          string             `json:"action"`
+	Quantity        int                `json:"quantity"`
+	LimitPrice      float64            `json:"limit_price"`
+	OrderRef        string             `json:"order_ref"`
+	ReservedOrderID int                `json:"reserved_order_id,omitempty"`
+	Status          string             `json:"status,omitempty"`
+	LifecycleStatus string             `json:"lifecycle_status,omitempty"`
+	SendState       string             `json:"send_state,omitempty"`
+	Message         string             `json:"message,omitempty"`
+	Quote           OrderQuoteSnapshot `json:"quote"`
+}
+
+type PurgeExecuteSkippedLeg struct {
+	LegID    string         `json:"leg_id"`
+	Symbol   string         `json:"symbol"`
+	SecType  string         `json:"sec_type"`
+	Contract ContractParams `json:"contract"`
+	Reason   string         `json:"reason"`
+}
+
+type PurgeStatusParams struct {
+	PurgeID string `json:"purge_id,omitempty"`
+	Account string `json:"account,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+type PurgeStatusResult struct {
+	Kind            string            `json:"kind"`
+	PurgeID         string            `json:"purge_id,omitempty"`
+	Status          string            `json:"status"`
+	Account         string            `json:"account,omitempty"`
+	Rows            []PurgeLedgerRow  `json:"rows,omitempty"`
+	Totals          PurgeLedgerTotals `json:"totals"`
+	TotalOrders     int               `json:"total_orders"`
+	OpenOrders      int               `json:"open_orders"`
+	FilledOrders    int               `json:"filled_orders"`
+	CancelledOrders int               `json:"cancelled_orders"`
+	AttentionOrders int               `json:"attention_orders"`
+	Orders          []OrderView       `json:"orders,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	AsOf            time.Time         `json:"as_of"`
+}
+
+type PurgeLedgerTotals struct {
+	ActiveRows        int     `json:"active_rows"`
+	RestoredRows      int     `json:"restored_rows"`
+	PurgedQuantity    float64 `json:"purged_quantity"`
+	RestoredQuantity  float64 `json:"restored_quantity"`
+	RemainingQuantity float64 `json:"remaining_quantity"`
+	PurgeValue        float64 `json:"purge_value"`
+	RestoreValue      float64 `json:"restore_value"`
+	ShadowPnL         float64 `json:"shadow_pnl"`
+}
+
+type PurgeLedgerRow struct {
+	LegID               string         `json:"leg_id"`
+	PurgeID             string         `json:"purge_id,omitempty"`
+	Symbol              string         `json:"symbol"`
+	SecType             string         `json:"sec_type"`
+	Contract            ContractParams `json:"contract"`
+	Account             string         `json:"account,omitempty"`
+	Currency            string         `json:"currency,omitempty"`
+	OriginalSide        string         `json:"original_side"`
+	OriginalQuantity    float64        `json:"original_quantity"`
+	PurgeAction         string         `json:"purge_action"`
+	RestoreAction       string         `json:"restore_action"`
+	Multiplier          int            `json:"multiplier"`
+	PurgedQuantity      float64        `json:"purged_quantity"`
+	RestoredQuantity    float64        `json:"restored_quantity"`
+	RemainingQuantity   float64        `json:"remaining_quantity"`
+	PurgeAvgPrice       float64        `json:"purge_avg_price,omitempty"`
+	RestoreAvgPrice     float64        `json:"restore_avg_price,omitempty"`
+	PurgeValue          float64        `json:"purge_value,omitempty"`
+	RestoreValue        float64        `json:"restore_value,omitempty"`
+	ShadowPnL           float64        `json:"shadow_pnl,omitempty"`
+	Status              string         `json:"status"`
+	LastPurgeOrderRef   string         `json:"last_purge_order_ref,omitempty"`
+	LastRestoreOrderRef string         `json:"last_restore_order_ref,omitempty"`
+	CreatedAt           time.Time      `json:"created_at,omitzero"`
+	UpdatedAt           time.Time      `json:"updated_at,omitzero"`
+	Warnings            []string       `json:"warnings,omitempty"`
+}
+
+type PurgeRestoreParams struct {
+	PurgeID   string   `json:"purge_id,omitempty"`
+	All       bool     `json:"all,omitempty"`
+	Symbols   []string `json:"symbols,omitempty"`
+	Scale     float64  `json:"scale,omitempty"`
+	WaitMs    int      `json:"wait_ms,omitempty"`
+	TimeoutMs int      `json:"timeout_ms,omitempty"`
+}
+
+type PurgeRestoreResult struct {
+	Kind           string                   `json:"kind"`
+	PurgeID        string                   `json:"purge_id,omitempty"`
+	Status         string                   `json:"status"`
+	Mode           string                   `json:"mode,omitempty"`
+	Account        string                   `json:"account,omitempty"`
+	Endpoint       string                   `json:"endpoint,omitempty"`
+	ClientID       int                      `json:"client_id,omitempty"`
+	Scale          float64                  `json:"scale"`
+	SelectedLegs   int                      `json:"selected_legs"`
+	SubmittedLegs  int                      `json:"submitted_legs"`
+	SkippedLegs    int                      `json:"skipped_legs"`
+	ErrorLegs      int                      `json:"error_legs"`
+	EstimatedValue float64                  `json:"estimated_value,omitempty"`
+	ShadowPnL      float64                  `json:"shadow_pnl,omitempty"`
+	Legs           []PurgeRestoreLeg        `json:"legs,omitempty"`
+	Orders         []PurgeExecuteOrder      `json:"orders,omitempty"`
+	Skipped        []PurgeExecuteSkippedLeg `json:"skipped,omitempty"`
+	Warnings       []string                 `json:"warnings,omitempty"`
+	Blockers       []TradingBlocker         `json:"blockers,omitempty"`
+	Message        string                   `json:"message,omitempty"`
+	LedgerRows     []PurgeLedgerRow         `json:"ledger_rows,omitempty"`
+	AsOf           time.Time                `json:"as_of"`
+}
+
+type PurgeRestoreLeg struct {
+	LegID           string              `json:"leg_id"`
+	Symbol          string              `json:"symbol"`
+	SecType         string              `json:"sec_type"`
+	Contract        ContractParams      `json:"contract"`
+	Action          string              `json:"action"`
+	Quantity        int                 `json:"quantity"`
+	RemainingBefore float64             `json:"remaining_before"`
+	LimitPrice      float64             `json:"limit_price,omitempty"`
+	EstimatedValue  float64             `json:"estimated_value,omitempty"`
+	ShadowPnL       float64             `json:"shadow_pnl,omitempty"`
+	Quote           OrderQuoteSnapshot  `json:"quote,omitzero"`
+	Position        OrderPositionImpact `json:"position,omitzero"`
+	WhatIf          OrderWhatIfResult   `json:"what_if,omitzero"`
+	Status          string              `json:"status"`
+	Warnings        []string            `json:"warnings,omitempty"`
+}
+
 type OrderModifyResult struct {
 	Accepted        bool       `json:"accepted"`
 	Mode            string     `json:"mode"`
@@ -3013,19 +3203,29 @@ type OrderEvent struct {
 	Account         string    `json:"account,omitempty"`
 	Endpoint        string    `json:"endpoint,omitempty"`
 	Mode            string    `json:"mode,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	PurgeID         string    `json:"purge_id,omitempty"`
+	LegID           string    `json:"leg_id,omitempty"`
+	BypassPreview   bool      `json:"bypass_preview,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	ConID           int       `json:"con_id,omitempty"`
 	Exchange        string    `json:"exchange,omitempty"`
 	PrimaryExch     string    `json:"primary_exch,omitempty"`
 	Currency        string    `json:"currency,omitempty"`
 	LocalSymbol     string    `json:"local_symbol,omitempty"`
 	TradingClass    string    `json:"trading_class,omitempty"`
+	Expiry          string    `json:"expiry,omitempty"`
+	Strike          float64   `json:"strike,omitempty"`
+	Right           string    `json:"right,omitempty"`
+	Multiplier      int       `json:"multiplier,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
 	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
+	OpenClose       string    `json:"open_close,omitempty"`
 	Status          string    `json:"status,omitempty"`
 	LifecycleStatus string    `json:"lifecycle_status,omitempty"`
 	Filled          float64   `json:"filled,omitempty"`
@@ -3052,19 +3252,29 @@ type OrderView struct {
 	Account         string    `json:"account,omitempty"`
 	Endpoint        string    `json:"endpoint,omitempty"`
 	Mode            string    `json:"mode,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	PurgeID         string    `json:"purge_id,omitempty"`
+	LegID           string    `json:"leg_id,omitempty"`
+	BypassPreview   bool      `json:"bypass_preview,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	ConID           int       `json:"con_id,omitempty"`
 	Exchange        string    `json:"exchange,omitempty"`
 	PrimaryExch     string    `json:"primary_exch,omitempty"`
 	Currency        string    `json:"currency,omitempty"`
 	LocalSymbol     string    `json:"local_symbol,omitempty"`
 	TradingClass    string    `json:"trading_class,omitempty"`
+	Expiry          string    `json:"expiry,omitempty"`
+	Strike          float64   `json:"strike,omitempty"`
+	Right           string    `json:"right,omitempty"`
+	Multiplier      int       `json:"multiplier,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
 	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
+	OpenClose       string    `json:"open_close,omitempty"`
 	Status          string    `json:"status,omitempty"`
 	LifecycleStatus string    `json:"lifecycle_status"`
 	Filled          float64   `json:"filled,omitempty"`

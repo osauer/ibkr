@@ -211,6 +211,49 @@ func TestPreviewOrderWhatIfModernServerSendsProtobufWhatIfAndWaitsForOpenOrder(t
 	}
 }
 
+func TestEncodePlaceOrderProtoSupportsOptionClose(t *testing.T) {
+	order := &IBKROrder{
+		OrderID:      88,
+		ClientID:     31,
+		ConID:        123456,
+		Symbol:       "SPY",
+		SecType:      "OPT",
+		Expiry:       "20260619",
+		Strike:       520,
+		Right:        "C",
+		Multiplier:   "100",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		LocalSymbol:  "SPY  260619C00520000",
+		TradingClass: "SPY",
+		Action:       "BUY",
+		TotalQty:     2,
+		OrderType:    "LMT",
+		LmtPrice:     2.18,
+		TIF:          "DAY",
+		Account:      "DU123456",
+		OrderRef:     "purge-test",
+		Transmit:     true,
+		OpenClose:    "C",
+	}
+	payload, err := encodePlaceOrderProtoFrame(order)
+	if err != nil {
+		t.Fatalf("encodePlaceOrderProtoFrame option close: %v", err)
+	}
+	summary, err := parsePlaceOrderProtoSummary(payload[4:])
+	if err != nil {
+		t.Fatalf("parse option protobuf summary: %v", err)
+	}
+	if summary.conID != 123456 || summary.symbol != "SPY" || summary.secType != "OPT" ||
+		summary.expiry != "20260619" || summary.strike != 520 || summary.right != "C" || summary.multiplier != "100" {
+		t.Fatalf("option contract summary = %+v", summary)
+	}
+	if summary.action != "BUY" || summary.quantity != "2" || summary.orderType != "LMT" || summary.lmtPrice != 2.18 ||
+		summary.tif != "DAY" || !summary.transmit || summary.openClose != "C" {
+		t.Fatalf("option order summary = %+v", summary)
+	}
+}
+
 func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()

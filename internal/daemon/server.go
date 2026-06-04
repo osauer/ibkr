@@ -250,6 +250,10 @@ type Server struct {
 	// lifecycle events. It is installed before order writes exist so status
 	// and later handlers share one state primitive.
 	orderJournal *orderJournalStore
+	// purgeLedger is the fill-backed purge/restore book. It is reduced from
+	// broker lifecycle evidence, not from preview/send attempts, so restore
+	// cannot double a position merely because a local file was edited.
+	purgeLedger *purgeLedgerStore
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
 	// gated place handler exists.
@@ -258,8 +262,9 @@ type Server struct {
 	// without a live gateway. Nil hooks use the production connector-backed
 	// implementations.
 	orderPreviewQuote          func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
-	orderPreviewPositionImpact func(context.Context, string, string, int) (rpc.OrderPositionImpact, error)
+	orderPreviewPositionImpact func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
 	orderPreviewWhatIf         func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
+	purgeRefreshPositions      func() ([]*ibkrlib.RawPosition, error)
 	orderWritesEnabled         func() bool
 	orderReserveBrokerID       func(context.Context) (int, error)
 	orderPlaceBroker           func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error
@@ -354,6 +359,7 @@ func New(opts Options) *Server {
 	s.installStreakStore()
 	s.installTradingReadinessStore()
 	s.installOrderJournalStore()
+	s.installPurgeLedgerStore()
 	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
@@ -410,6 +416,15 @@ func (s *Server) installOrderJournalStore() {
 		return
 	}
 	s.orderJournal = newOrderJournalStore(path)
+}
+
+func (s *Server) installPurgeLedgerStore() {
+	path, err := defaultPurgeLedgerPath()
+	if err != nil {
+		s.warnf("purge ledger: resolve state path: %v (purge ledger disabled)", err)
+		return
+	}
+	s.purgeLedger = newPurgeLedgerStore(path, s.now)
 }
 
 func (s *Server) installOrderTokenSigner() {
@@ -1933,6 +1948,14 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleOrderModify(ctx, req) })
 	case rpc.MethodOrderCancel:
 		s.unary(req, enc, func() (any, error) { return s.handleOrderCancel(ctx, req) })
+	case rpc.MethodPurgeStatus:
+		s.unary(req, enc, func() (any, error) { return s.handlePurgeStatus(ctx, req) })
+	case rpc.MethodPurgeExecute:
+		s.unary(req, enc, func() (any, error) { return s.handlePurgeExecute(ctx, req) })
+	case rpc.MethodPurgeRestorePreview:
+		s.unary(req, enc, func() (any, error) { return s.handlePurgeRestorePreview(ctx, req) })
+	case rpc.MethodPurgeRestoreExecute:
+		s.unary(req, enc, func() (any, error) { return s.handlePurgeRestoreExecute(ctx, req) })
 	default:
 		writeError(enc, req.ID, rpc.CodeUnknownMethod, "unknown method: "+req.Method)
 	}
@@ -2025,9 +2048,11 @@ func unaryDeadline(method string) time.Duration {
 		// a fast quote path on a v203 TWS session; leave enough room for
 		// it while still beating the CLI's default 60 s unary ceiling.
 		return 55 * time.Second
+	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute:
+		return 55 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0

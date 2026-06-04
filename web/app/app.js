@@ -246,7 +246,7 @@ function renderAll() {
   $("baseCurrency").textContent = account.base_currency || positions.portfolio?.base_currency || "--";
   $("canarySeverity").textContent = labelize(canary.severity || "--");
   $("canaryAction").textContent = canaryStageLabel(canary);
-  $("canarySummary").textContent = canary.summary || "Waiting for canary snapshot.";
+  $("canarySummary").textContent = canarySummaryText(canary, snap);
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
@@ -767,12 +767,44 @@ function canaryStageLabel(canary) {
   const action = String(canary.action || "").toLowerCase();
   if (action === "defend") return "Defend";
   if (action === "rebalance") return "Rebalance";
-  if (action === "confirm_inputs") return "Confirm";
+  if (action === "confirm_inputs") return "Check data";
   const severity = String(canary.severity || "").toLowerCase();
   if (severity === "act") return "Defend";
   if (severity === "watch") return "Watch";
   if (severity === "observe") return "Steady";
   return labelize(canary.action || "--");
+}
+
+function canarySummaryText(canary, snap = {}) {
+  const fallback = canary.summary || "Waiting for canary snapshot.";
+  if (!canaryInputCheckBlocksAction(canary)) return fallback;
+
+  const verdict = cleanDetail(canary.market?.regime_verdict);
+  const prefix = verdict === "--" ? "Market read" : verdict;
+  const issues = canaryInputIssueSummary(canary, snap);
+  const issueLine = issues ? `check ${issues}` : "check input health";
+  const confirmation = String(canary.market_confirmation || "").toLowerCase();
+  const actionLine = confirmation === "confirmed"
+    ? "verify before escalation."
+    : "no market-stress action.";
+  return `${prefix}; ${issueLine} before treating canary as a market signal; ${actionLine}`;
+}
+
+function canaryNeedsInputCheck(canary) {
+  const inputHealth = String(canary.input_health || "").toLowerCase();
+  return canaryInputCheckBlocksAction(canary) ||
+    ["warming", "degraded", "failed"].includes(inputHealth);
+}
+
+function canaryInputCheckBlocksAction(canary) {
+  const action = String(canary.action || "").toLowerCase();
+  const direction = String(canary.direction || "").toLowerCase();
+  const planner = String(canary.planner_mode_hint || "").toLowerCase();
+  const readiness = String(canary.planner_readiness || "").toLowerCase();
+  return action === "confirm_inputs" ||
+    planner === "confirm_data" ||
+    direction === "data_quality" ||
+    readiness === "blocked";
 }
 
 function marketExplanation(canary) {
@@ -851,13 +883,21 @@ function inputExplanation(canary) {
   return {
     label: "Inputs",
     title: "Check data quality",
-    body: "Some inputs are stale, missing, or degraded. Use the detail rows before acting.",
+    body: "Some inputs are stale, missing, or degraded. " + canaryInputCheckSentence(canary),
     tone: "warn",
   };
 }
 
 function readinessExplanation(canary) {
   const readiness = String(canary.planner_readiness || canary.planner_mode_hint || "").toLowerCase();
+  if (canaryInputCheckBlocksAction(canary)) {
+    return {
+      label: "Readiness",
+      title: "Data check blocked",
+      body: "Risk-plan readiness is blocked until the missing or stale inputs are refreshed.",
+      tone: "warn",
+    };
+  }
   if (readiness.includes("ready")) {
     return {
       label: "Readiness",
@@ -949,9 +989,11 @@ function renderMarketContext(snap) {
   setQuoteTileNote("spyNote", spyQuote, spyChangePending ? "Change pending" : "S&P 500 ETF", "SPY", !hasSpyData, quoteChangePendingTitle(spyChangePending));
   setQuoteTileNote("vixNote", vixQuote, vixChangePending ? "Change pending" : "VIX index", "VIX", !hasVIXData, quoteChangePendingTitle(vixChangePending));
   setQuoteTileNote("nasdaqNote", qqqQuote, nasdaqChangePending ? "Change pending" : "Nasdaq 100 ETF", "QQQ", !hasNasdaqData, quoteChangePendingTitle(nasdaqChangePending));
-  $("marketRegime").textContent = marketRegimeLabel(market, indicators);
-  $("marketRegimeSummary").textContent = "Regime read";
-  $("marketRegimeMix").textContent = latestRegimeRead(canary, indicators);
+  const regimeStatus = marketRegimeStatusLine(snap, canary, market, indicators);
+  $("marketRegime").textContent = marketRegimeLabel(market, indicators, canary);
+  $("marketRegimeSummary").textContent = regimeStatus.summary;
+  $("marketRegimeMix").textContent = regimeStatus.detail;
+  $("marketRegimeMix").title = regimeStatus.title;
   renderMarketWeather(market, indicators);
   renderRegimeDetail(indicators);
 }
@@ -1039,13 +1081,35 @@ function latestQuoteTime(quotes) {
   return latest?.toISOString() || "";
 }
 
-function marketRegimeLabel(market, indicators) {
+function marketRegimeLabel(market, indicators, canary = {}) {
   const tone = marketWeatherTone(market, indicators);
   if (tone === "red") return "Risk-off";
+  if (tone === "amber" && marketHasDataGaps(market) && canaryNeedsInputCheck(canary)) {
+    const verdict = cleanDetail(market.regime_verdict);
+    if (verdict.toLowerCase().includes("normal")) return "Normal + gaps";
+    return "Data gaps";
+  }
   if (tone === "green") return "Support";
   if (tone === "amber") return "Mixed";
   const verdict = cleanDetail(market.regime_verdict);
   return verdict === "--" ? "--" : labelize(verdict);
+}
+
+function marketRegimeStatusLine(snap, canary, market, indicators) {
+  const latest = latestRegimeRead(canary, indicators);
+  const ranked = Number(market.ranked_clusters || 0);
+  const unranked = Number(market.unranked_clusters || 0);
+  const total = ranked + unranked;
+  if (!canaryNeedsInputCheck(canary) && !marketHasDataGaps(market)) {
+    return { summary: "Regime read", detail: latest, title: latest };
+  }
+
+  const issues = canaryInputIssueSummary(canary, snap);
+  const coverage = total > 0 ? `${ranked}/${total} ranked` : "ranked inputs pending";
+  const summary = issues ? `${coverage}; data gaps` : `${coverage}; degraded`;
+  const gateway = gatewayDataStatus(snap);
+  const detail = issues ? `${gateway}; check ${issues}` : `${gateway}; check regime sources`;
+  return { summary, detail, title: `${detail}; regime updated ${latest}` };
 }
 
 function marketRegimeMix(market, indicators) {
@@ -1118,6 +1182,118 @@ function marketWeatherTone(market, indicators) {
   if (verdict.includes("broad stress") || verdict.includes("stress signal") || verdict.includes("red")) return "red";
   if (verdict.includes("normal") || verdict.includes("green") || verdict.includes("constructive")) return "green";
   return "amber";
+}
+
+function marketHasDataGaps(market = {}) {
+  const lists = [
+    market.ambiguous_clusters,
+    market.partial_clusters,
+    market.computing_clusters,
+    market.degraded_clusters,
+    market.stale_clusters,
+  ];
+  return lists.some((items) => Array.isArray(items) && items.length > 0) ||
+    Number(market.unranked_clusters || 0) > 0;
+}
+
+function canaryInputCheckSentence(canary) {
+  const issues = canaryInputIssueSummary(canary, state.snapshot || {});
+  return issues
+    ? `Refresh or verify ${issues} before treating the canary as a market signal.`
+    : "Use the detail rows before acting.";
+}
+
+function canaryInputIssueSummary(canary, snap = {}) {
+  return humanList(canaryInputIssueLabels(canary, snap), 4);
+}
+
+function canaryInputIssueLabels(canary, snap = {}) {
+  const labels = [];
+  const add = (label) => {
+    label = String(label || "").trim();
+    if (label && !labels.includes(label)) labels.push(label);
+  };
+
+  const market = canary.market || {};
+  for (const cluster of [
+    ...(market.partial_clusters || []),
+    ...(market.ambiguous_clusters || []),
+    ...(market.computing_clusters || []),
+    ...(market.degraded_clusters || []),
+    ...(market.stale_clusters || []),
+  ]) {
+    add(clusterInputLabel(cluster));
+  }
+
+  for (const item of snap.status?.data_quality || []) {
+    for (const cluster of [
+      ...(item.partial_clusters || []),
+      ...(item.degraded_clusters || []),
+      ...(item.stale_clusters || []),
+    ]) {
+      add(clusterInputLabel(cluster));
+    }
+  }
+
+  for (const source of canary.source_health || []) {
+    const status = String(source.status || "").toLowerCase();
+    if (!status || status === "ok") continue;
+    if (source.source === "account") add("account snapshot");
+    if (source.source === "positions") add("positions snapshot");
+  }
+
+  for (const warning of canary.warnings || []) {
+    const text = String(warning || "").toLowerCase();
+    if (text.includes("hyg") || text.includes("50dma") || text.includes("50-day")) add("HYG 50-DMA");
+    if (text.includes("usd.jpy") || text.includes("usd/jpy") || text.includes("weekly") || text.includes("7d")) add("USD/JPY baseline");
+    if (text.includes("gamma")) add("gamma cache");
+  }
+  return labels;
+}
+
+function clusterInputLabel(cluster) {
+  switch (String(cluster || "").trim().toLowerCase()) {
+    case "credit":
+      return "HYG 50-DMA";
+    case "fx":
+      return "USD/JPY baseline";
+    case "gamma":
+      return "gamma cache";
+    case "breadth":
+      return "breadth compute";
+    case "vol":
+    case "volatility":
+      return "volatility feed";
+    case "funding":
+      return "funding series";
+    default:
+      return labelize(cluster);
+  }
+}
+
+function gatewayDataStatus(snap = {}) {
+  const status = snap.status || {};
+  const mode = String(status.account_mode || snap.trading?.mode || "").toLowerCase();
+  const quoteReady = (status.subsystems || []).some((subsystem) =>
+    String(subsystem.name || "").toLowerCase() === "quote" &&
+    String(subsystem.status || "").toLowerCase() === "ready"
+  );
+  if (status.connected && quoteReady && mode.includes("paper")) return "Paper gateway live quotes OK";
+  if (status.connected && quoteReady) return "Gateway live quotes OK";
+  if (status.connected) return "Gateway connected";
+  return "Gateway status pending";
+}
+
+function humanList(items, limit = 3) {
+  items = (items || []).filter(Boolean);
+  if (items.length === 0) return "";
+  const shown = items.slice(0, limit);
+  if (items.length > limit) {
+    shown[shown.length - 1] = `${shown[shown.length - 1]} +${items.length - limit} more`;
+  }
+  if (shown.length === 1) return shown[0];
+  if (shown.length === 2) return `${shown[0]} and ${shown[1]}`;
+  return `${shown.slice(0, -1).join(", ")}, and ${shown[shown.length - 1]}`;
 }
 
 function renderSignedPercent(id, value, positiveIsRisk) {
@@ -2904,6 +3080,22 @@ $("accountMenuToggle").addEventListener("click", () => {
 $("canaryDetailToggle").addEventListener("click", () => {
   state.canaryDetailOpen = !state.canaryDetailOpen;
   renderCanaryDetail(state.snapshot?.canary || {});
+});
+$("quickReviewBlockersButton").addEventListener("click", () => {
+  state.canaryDetailOpen = true;
+  renderCanaryDetail(state.snapshot?.canary || {});
+  $("canaryDetailPanel").scrollIntoView({ block: "nearest" });
+});
+$("quickRiskPlanButton").addEventListener("click", async () => {
+  await refreshOrderReviewSet();
+  $("orderReviewPanel").scrollIntoView({ block: "nearest" });
+});
+$("quickHeldActionsButton").addEventListener("click", () => {
+  $("underlyingBook").scrollIntoView({ block: "nearest" });
+});
+$("quickAlertsButton").addEventListener("click", () => {
+  $("alertsPanel").open = true;
+  $("alertsPanel").scrollIntoView({ block: "nearest" });
 });
 $("clearSelectedAlertButton").addEventListener("click", () => {
   state.selectedAlertID = null;

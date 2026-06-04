@@ -20,8 +20,8 @@
   --green-soft: #eafaf2;
   --amber: #ffb521;
   --orange: #ff6b2c;
-  --shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
-  --shadow-soft: 0 8px 22px rgba(15, 23, 42, 0.045);
+  --shadow: 0 8px 22px rgba(15, 23, 42, 0.055);
+  --shadow-soft: 0 4px 14px rgba(15, 23, 42, 0.04);
   --radius-card: 8px;
   --radius-control: 10px;
   --radius-pill: 999px;
@@ -34,16 +34,18 @@
 
 html {
   background: var(--bg);
+  overflow-x: hidden;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 247, 249, 0.94) 180px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 247, 249, 0.96) 220px),
     var(--bg);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
   text-rendering: optimizeLegibility;
 }
 
@@ -386,10 +388,11 @@ p {
 .pairing,
 .panel {
   min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--surface);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-soft);
 }
 
 .pairing__body,
@@ -425,11 +428,11 @@ p {
   min-width: 0;
   margin-bottom: 13px;
   color: var(--ink);
-  font-size: 13px;
-  font-weight: 780;
-  letter-spacing: 0.08em;
-  line-height: 1.1;
-  text-transform: uppercase;
+  font-size: 14px;
+  font-weight: 720;
+  letter-spacing: 0;
+  line-height: 1.15;
+  text-transform: none;
 }
 
 .panel-head > span:first-child {
@@ -495,13 +498,12 @@ p {
 .hero-panel {
   position: relative;
   overflow: hidden;
-  border-color: rgba(9, 15, 24, 0.88);
+  border-color: rgba(12, 34, 27, 0.94);
   background:
-    radial-gradient(circle at 62% 30%, rgba(41, 73, 111, 0.22), transparent 34%),
-    radial-gradient(circle at 18% 58%, rgba(255, 255, 255, 0.06), transparent 26%),
-    linear-gradient(180deg, #111a27 0%, #080d15 100%);
+    radial-gradient(circle at 82% 18%, rgba(255, 181, 33, 0.08), transparent 28%),
+    linear-gradient(180deg, #11271f 0%, #08130f 100%);
   color: #fff;
-  box-shadow: 0 17px 34px rgba(9, 15, 24, 0.24);
+  box-shadow: 0 16px 32px rgba(8, 19, 15, 0.2);
 }
 
 .panel-head--hero {
@@ -510,9 +512,10 @@ p {
 }
 
 .canary-hero {
+  order: -2;
   display: grid;
-  gap: 8px;
-  padding: 11px 12px;
+  gap: 10px;
+  padding: 14px;
 }
 
 .canary-hero__grid {
@@ -535,16 +538,20 @@ p {
 
 .canary-hero strong {
   overflow-wrap: anywhere;
-  color: var(--red);
-  font-size: 24px;
-  font-weight: 680;
+  color: #ffca48;
+  font-size: 36px;
+  font-weight: 820;
   line-height: 1;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
+.canary-hero.severity-act strong {
+  color: #ff7a70;
+}
+
 .canary-hero.severity-watch strong {
-  color: var(--amber);
+  color: #ffca48;
 }
 
 .canary-hero.severity-observe strong {
@@ -553,10 +560,59 @@ p {
 
 .canary-hero p {
   max-width: 520px;
-  color: rgba(255, 255, 255, 0.94);
-  font-size: 13px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 14px;
   font-weight: 460;
   line-height: 1.35;
+}
+
+.canary-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  padding-top: 2px;
+}
+
+.canary-action {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  min-height: 62px;
+  padding: 8px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.075);
+  color: rgba(255, 255, 255, 0.92);
+  text-align: center;
+}
+
+.canary-action--primary {
+  border-color: rgba(255, 202, 72, 0.86);
+  background: #ffca48;
+  color: #151007;
+}
+
+.canary-action span {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.08;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canary-action small {
+  display: block;
+  overflow: hidden;
+  margin-top: 5px;
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 520;
+  line-height: 1.1;
+  opacity: 0.66;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .alert-focus,
@@ -986,7 +1042,6 @@ p {
 }
 
 .market-panel {
-  order: -1;
   padding: 13px 15px 14px;
 }
 
@@ -2024,11 +2079,14 @@ p {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 34px;
   padding: 2px;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 7px;
-  background: #f6f7f9;
+  background: #eff1f3;
 }
 
 .segments button {
@@ -2044,9 +2102,9 @@ p {
 }
 
 .segments button.active {
-  background: var(--dark);
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16);
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.1);
 }
 
 .alert-active-count {
@@ -2074,6 +2132,10 @@ p {
 .alerts-body,
 .orders-body,
 .tools-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
   padding: 0 15px 15px;
 }
 
@@ -2156,11 +2218,15 @@ p {
 }
 
 .alerts-filter-bar {
+  min-width: 0;
+  max-width: 100%;
   margin-bottom: 10px;
 }
 
 .list {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .alert-row {
@@ -2287,7 +2353,7 @@ p {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  color: var(--muted);
+  color: var(--blue);
   font-size: 12px;
   font-weight: 650;
 }
@@ -2380,7 +2446,7 @@ pre[hidden] {
 
 .sync-strip {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 0.45fr) minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   min-height: 52px;
@@ -2425,9 +2491,11 @@ pre[hidden] {
 }
 
 .sync-strip__time {
+  overflow: hidden;
   color: var(--ink);
   font-weight: 560;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -2494,6 +2562,22 @@ pre[hidden] {
   .shell {
     padding-right: 13px;
     padding-left: 13px;
+  }
+
+  .canary-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canary-action {
+    min-height: 54px;
+    padding-right: 9px;
+    padding-left: 9px;
+    text-align: left;
+  }
+
+  .canary-action span,
+  .canary-action small {
+    white-space: normal;
   }
 
   .market-strip {

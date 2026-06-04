@@ -34,8 +34,8 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	snap := svc.PollOnce(context.Background())
-	if snap.Version != 1 {
-		t.Fatalf("snapshot version=%d, want 1", snap.Version)
+	if snap.Version != 2 {
+		t.Fatalf("snapshot version=%d, want 2", snap.Version)
 	}
 	if snap.Status == nil || !snap.Status.Connected {
 		t.Fatalf("status missing from snapshot: %#v", snap.Status)
@@ -90,6 +90,106 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 }
 
+func TestStartPublishesStatusBeforeFullPollCompletes(t *testing.T) {
+	t.Parallel()
+	canaryBlock := make(chan struct{})
+	client := &fakeClient{
+		status:      &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
+		calendar:    &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
+		account:     &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
+		positions:   &rpc.PositionsResult{Stocks: []rpc.PositionView{}},
+		quotes:      map[string]rpc.Quote{"SPY": {Symbol: "SPY", Price: new(500.0)}},
+		regime:      &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
+		canary:      &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
+		trading:     &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		canaryBlock: canaryBlock,
+	}
+	svc := New(client, time.Hour, time.Hour)
+	ch, release := svc.Subscribe()
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.Start(ctx)
+		close(done)
+	}()
+	defer func() {
+		close(canaryBlock)
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("live service did not stop")
+		}
+	}()
+
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("subscription closed before status event")
+			}
+			if ev.Type == "status" {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for startup status event")
+		}
+	}
+}
+
+func TestPollOncePublishesPositionsBeforeMarketQuotesComplete(t *testing.T) {
+	t.Parallel()
+	quoteBlock := make(chan struct{})
+	client := &fakeClient{
+		status:     &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
+		calendar:   &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
+		account:    &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
+		positions:  &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "SAP"}}},
+		quotes:     map[string]rpc.Quote{"SPY": {Symbol: "SPY", Price: new(500.0)}},
+		regime:     &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
+		canary:     &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
+		trading:    &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		quoteBlock: quoteBlock,
+	}
+	svc := New(client, time.Hour, time.Hour)
+	ch, release := svc.Subscribe()
+	defer release()
+
+	done := make(chan struct{})
+	go func() {
+		svc.PollOnce(context.Background())
+		close(done)
+	}()
+	defer func() {
+		close(quoteBlock)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("PollOnce did not stop")
+		}
+	}()
+
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type != "snapshot" {
+				continue
+			}
+			snap, ok := ev.Data.(Snapshot)
+			if !ok {
+				t.Fatalf("snapshot event data type %T, want Snapshot", ev.Data)
+			}
+			if snap.Positions != nil && len(snap.Positions.Stocks) == 1 {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for early positions snapshot")
+		}
+	}
+}
+
 func TestMarketQuoteStreamFrameKeepsChangeAnchor(t *testing.T) {
 	t.Parallel()
 	svc := New(&fakeClient{}, time.Minute, time.Minute)
@@ -114,6 +214,36 @@ func TestMarketQuoteStreamFrameKeepsChangeAnchor(t *testing.T) {
 	}
 }
 
+func TestMergeMarketQuotesPreservesLastGoodStreamQuote(t *testing.T) {
+	t.Parallel()
+	oldSPY := 500.0
+	newQQQ := 420.0
+	existing := &MarketQuotes{
+		AsOf: time.Date(2026, 6, 4, 15, 30, 0, 0, time.UTC),
+		Quotes: map[string]rpc.Quote{
+			"SPY": {Symbol: "SPY", Price: &oldSPY},
+		},
+	}
+	update := &MarketQuotes{
+		AsOf: time.Date(2026, 6, 4, 15, 31, 0, 0, time.UTC),
+		Quotes: map[string]rpc.Quote{
+			"QQQ": {Symbol: "QQQ", Price: &newQQQ},
+		},
+		Errors: map[string]string{"SPY": "snapshot timeout"},
+	}
+
+	got := mergeMarketQuotes(existing, update)
+	if got.Quotes["SPY"].Price == nil || *got.Quotes["SPY"].Price != oldSPY {
+		t.Fatalf("SPY last-good quote lost: %#v", got.Quotes["SPY"])
+	}
+	if got.Quotes["QQQ"].Price == nil || *got.Quotes["QQQ"].Price != newQQQ {
+		t.Fatalf("QQQ update missing: %#v", got.Quotes["QQQ"])
+	}
+	if got.Errors["SPY"] != "snapshot timeout" {
+		t.Fatalf("SPY error=%q, want snapshot timeout", got.Errors["SPY"])
+	}
+}
+
 type fakeClient struct {
 	status    *rpc.HealthResult
 	calendar  *rpc.MarketCalendarResult
@@ -123,6 +253,9 @@ type fakeClient struct {
 	regime    *rpc.RegimeMonitorResult
 	canary    *rpc.CanaryResult
 	trading   *rpc.TradingStatus
+
+	canaryBlock <-chan struct{}
+	quoteBlock  <-chan struct{}
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
@@ -146,6 +279,9 @@ func (c *fakeClient) Positions(context.Context) (*rpc.PositionsResult, error) {
 }
 
 func (c *fakeClient) Quote(_ context.Context, contract rpc.ContractParams) (*rpc.Quote, error) {
+	if c.quoteBlock != nil {
+		<-c.quoteBlock
+	}
 	q := c.quotes[contract.Symbol]
 	return &q, nil
 }
@@ -159,6 +295,9 @@ func (c *fakeClient) Canary(context.Context) (*rpc.CanaryResult, error) {
 }
 
 func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error) {
+	if c.canaryBlock != nil {
+		<-c.canaryBlock
+	}
 	return c.canary, c.regime, nil
 }
 
