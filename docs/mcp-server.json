@@ -1,0 +1,82 @@
+{
+  "name": "ibkr",
+  "title": "IBKR MCP Server",
+  "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
+  "homepage": "https://osauer.dev/ibkr/",
+  "repository": "https://github.com/osauer/ibkr",
+  "license": "MIT",
+  "version": "1.5.0",
+  "transport": {
+    "type": "stdio",
+    "command": "ibkr",
+    "args": ["mcp"]
+  },
+  "install": {
+    "shell": "curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh",
+    "mcpb": "https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb",
+    "claude_desktop": "ibkr setup claude-desktop"
+  },
+  "requires": [
+    "IB Gateway 10.37+ or TWS running locally",
+    "IBKR Pro account with TWS API access"
+  ],
+  "compatible_hosts": [
+    "Claude Desktop",
+    "Claude Code",
+    "Cursor",
+    "Continue",
+    "Zed",
+    "any local stdio MCP host"
+  ],
+  "capabilities": [
+    "account summary",
+    "positions and exposure",
+    "stock and ETF quotes",
+    "official market calendars",
+    "option chains",
+    "daily historical bars",
+    "market scanners",
+    "portfolio review workflow",
+    "agentic trading research",
+    "risk checks",
+    "fixed-fractional position sizing",
+    "S&P 500 breadth",
+    "SPY+SPX dealer gamma",
+    "broad-market stress lifecycle",
+    "portfolio canary lifecycle",
+    "stock and ETF quote resources"
+  ],
+  "safety": {
+    "order_entry_surface": false,
+    "can_place_orders": false,
+    "can_modify_orders": false,
+    "can_cancel_orders": false,
+    "summary": "Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface."
+  },
+  "keywords": [
+    "Interactive Brokers",
+    "IBKR",
+    "TWS API",
+    "IB Gateway",
+    "MCP server",
+    "IBKR MCP",
+    "IBKR MCP TWS",
+    "IBKR TWS MCP server",
+    "Interactive Brokers MCP server",
+    "TWS MCP server",
+    "IB Gateway MCP",
+    "Claude Desktop Interactive Brokers",
+    "Interactive Brokers portfolio analysis AI",
+    "Claude IBKR portfolio review",
+    "agentic IBKR portfolio analysis",
+    "agentic trading research",
+    "portfolio review workflow",
+    "risk checks",
+    "controlled execution boundary",
+    "Claude Desktop",
+    "Claude Code",
+    "Cursor",
+    "Zed",
+    "Go"
+  ]
+}

@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Risk Regime Dashboard Contract | ibkr</title>
+  <meta name="description" content="ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...">
+  <link rel="canonical" href="https://osauer.dev/ibkr/specs/risk-regime-dashboard.html">
+  <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "author": {
+      "@type": "Person",
+      "name": "Oliver Sauer",
+      "url": "https://github.com/osauer"
+    },
+    "dateModified": "2026-05-31T21:23:00+02:00",
+    "description": "ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...",
+    "headline": "Risk Regime Dashboard Contract",
+    "isPartOf": {
+      "@type": "SoftwareApplication",
+      "name": "ibkr",
+      "url": "https://osauer.dev/ibkr/"
+    },
+    "url": "https://osauer.dev/ibkr/specs/risk-regime-dashboard.html"
+  }
+  </script>
+  <style>
+
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --terminal: #0e1626;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--green-dark); text-underline-offset: 0.18em; }
+    .topline { height: 12px; background: var(--green); }
+    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+    .brand {
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
+    .nav-links a { color: var(--muted); text-decoration: none; }
+    .doc {
+      padding: 28px 0 70px;
+    }
+    .doc h1 {
+      max-width: 820px;
+      margin: 0 0 18px;
+      font-size: clamp(36px, 5vw, 56px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .doc h2 {
+      margin: 44px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.15;
+    }
+    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
+    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
+    .doc p, .doc li { color: #26364d; font-size: 17px; }
+    .doc ul, .doc ol { padding-left: 26px; }
+    .doc li { margin: 6px 0; }
+    .doc code {
+      border: 1px solid #d5cdbc;
+      border-radius: 5px;
+      background: var(--paper-strong);
+      padding: 0.08em 0.28em;
+      color: #172033;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .doc pre {
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--terminal);
+      padding: 18px;
+      border: 1px solid #26364c;
+    }
+    .doc pre code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #eef3ff;
+      font-size: 14px;
+    }
+    .doc blockquote {
+      margin: 20px 0;
+      padding: 10px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--paper-strong);
+    }
+    .doc table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0 26px;
+      background: var(--paper-strong);
+      font-size: 15px;
+    }
+    .doc th, .doc td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .doc th { color: var(--ink); background: #ece7db; }
+    footer {
+      border-top: 1px solid var(--line);
+      background: var(--paper-strong);
+      padding: 28px 0;
+    }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+    @media (max-width: 760px) {
+      .nav { align-items: flex-start; flex-direction: column; }
+      .nav-links { flex-wrap: wrap; gap: 12px; }
+      .wrap { width: min(100% - 28px, 1040px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../index.html">ibkr</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="../index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
+      <a href="../guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="risk-regime-dashboard-contract">Risk Regime Dashboard Contract</h1>
+<p><strong>Updated:</strong> 2026-05-31 21:23 CEST</p>
+<p><code>ibkr regime</code> reports the broad-market stress lifecycle: <code>quiet</code>, <code>early_warning</code>, <code>confirmed_stress</code>, <code>panic</code>, <code>stabilization</code>, <code>opportunity</code>, or <code>data_quality</code>. It is an evidence-balance read, not a prediction, trading system, portfolio planner, or investment recommendation.</p>
+<p>Use it to answer one question: are several independent market-risk indicators confirming each other, or is the market still broadly calm?</p>
+<p>Canary may consume this output, but canary owns account and portfolio action. A portfolio concentration problem can be real even while the broad market regime is calm.</p>
+<h2 id="output-shape">Output Shape</h2>
+<p>Each row should show:</p>
+<ul>
+<li>current value;</li>
+<li>band: <code>green</code>, <code>yellow</code>, <code>red</code>, or unranked;</li>
+<li>status: <code>ok</code>, <code>stale</code>, <code>computing</code>, <code>unavailable</code>, or <code>error</code>;</li>
+<li>source and as-of information;</li>
+<li>a short band reason;</li>
+<li>the threshold set used for that row.</li>
+</ul>
+<p>The top-level envelope should also show:</p>
+<ul>
+<li><code>lifecycle</code>: stage, severity, readiness, timing, confidence, evidence,</li>
+</ul>
+<p>confirmed sources, unconfirmed sources, a semantic lifecycle fingerprint, and an explicit no-execution statement;</p>
+<ul>
+<li><code>source_health</code>: per-cluster <code>as_of</code>, status, age/freshness, confidence, and</li>
+</ul>
+<p>fingerprint-stability semantics;</p>
+<ul>
+<li><code>fingerprint</code>: semantic identity for the classified broad-market state.</li>
+</ul>
+<p>Missing, stale, computing, and degraded data must stay visible. A quiet reading with missing critical inputs is not the same thing as a confirmed calm regime.</p>
+<h2 id="clusters">Clusters</h2>
+<p>A cluster is a group of related indicators. The composite regime counts clusters, not raw rows, so one market theme cannot vote twice.</p>
+<p>Within each cluster, the worst ranked row wins: red beats yellow, yellow beats green. Unavailable, computing, and error rows are unranked.</p>
+<h3 id="equity-volatility">Equity Volatility</h3>
+<p>This cluster watches option-market fear. VIX/VIX3M asks whether near-term fear is priced above longer-term fear. VVIX asks whether traders are paying up for large volatility moves. When both worsen, equity stress is usually becoming more urgent.</p>
+<p>VIX/VIX3M backwardation is stress-level evidence by itself. An isolated VVIX red between 110 and 120 is noisier: the VVIX row remains red and visible, but the equity-volatility cluster counts as yellow unless VVIX is at least 120, VIX is up at least 20% on the day, SPY is down at least 1% on the day, or another independent cluster is red. This keeps volatility warnings visible without letting a standalone vol-of-vol pop dominate the broad-market read.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>VIX/VIX3M</td><td>&lt; 0.92</td><td>0.92-1.00</td><td>&gt; 1.00</td></tr>
+<tr><td>VVIX</td><td>&lt; 90</td><td>90-110</td><td>&gt; 110</td></tr>
+</tbody>
+</table>
+<h3 id="credit">Credit</h3>
+<p>This cluster watches whether corporate credit is weakening before or alongside stocks. HYG/SPY is the faster market proxy. HY/IG OAS is the slower official cash-credit read. Credit stress matters because equity rallies are less sturdy when lenders are already demanding more compensation for risk.</p>
+<p>HYG/SPY can still show a red row by itself. For the cluster count, that single proxy red is treated as a yellow watch unless cash credit is also red or another independent cluster is red. The row stays visible; it just does not get to call broad stress alone.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>HYG/SPY</td><td>HYG healthy</td><td>HYG below 50-DMA</td><td>HYG weak while SPY is near highs</td></tr>
+<tr><td>HY OAS</td><td>&lt; 4.0 and not widening</td><td>4.0-5.5 or widening &gt; 0.50 pp</td><td>&gt; 5.5 or widening &gt; 1.00 pp</td></tr>
+</tbody>
+</table>
+<h3 id="funding">Funding</h3>
+<p>This cluster watches whether short-term money markets are becoming stressed. The spread between 90-day AA financial commercial paper and 3-month T-bills is a simple check on whether financial borrowers are paying unusually high short- term funding costs.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>CP 90-day AA financial minus 3-month T-bill</td><td>&lt; 25 bp</td><td>25-75 bp</td><td>&gt; 75 bp</td></tr>
+</tbody>
+</table>
+<h3 id="fx-carry">FX Carry</h3>
+<p>This cluster watches USD/JPY as a proxy for global carry-trade pressure. When the yen strengthens quickly, leveraged risk trades can unwind at the same time. That does not predict every selloff, but it is useful confirmation when other clusters are also deteriorating.</p>
+<p>USD/JPY can still show a red row by itself. For the cluster count, an isolated FX red is treated as a yellow watch until another independent cluster confirms stress. Canary may still act on a fast carry unwind when direct SPY/VIX tape or breadth confirms the move.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>USD/JPY weekly change</td><td>yen move &lt; 1%</td><td>yen strengthens 1-2%</td><td>yen strengthens &gt; 2%</td></tr>
+</tbody>
+</table>
+<h3 id="dealer-gamma">Dealer Gamma</h3>
+<p>This cluster watches whether dealer hedging is more likely to dampen or amplify index moves. Above zero-gamma, hedging flows are usually more stabilizing. Below zero-gamma, hedging can chase the market lower or higher and make moves sharper. Treat this as a regime hint, not a precise tradable level.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>SPY+SPX zero-gamma</td><td>spot &gt; 2% above zero-gamma</td><td>within +/-2%</td><td>spot below zero-gamma</td></tr>
+</tbody>
+</table>
+<h3 id="breadth">Breadth</h3>
+<p>This cluster watches how many S&amp;P 500 stocks are participating. A rally led by many stocks is healthier than a rally carried by a few mega-caps. Weak breadth near index highs warns that the headline index may be hiding fragility.</p>
+<table>
+<thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
+<tbody>
+<tr><td>S&amp;P 500 breadth</td><td>&gt; 55% above 50-DMA</td><td>40-55%, or weakening near highs</td><td>&lt; 40%, especially while SPX is near highs</td></tr>
+</tbody>
+</table>
+<h2 id="composite-logic">Composite Logic</h2>
+<table>
+<thead><tr><th>Cluster state</th><th>Regime label</th></tr></thead>
+<tbody>
+<tr><td>0 red and 0-2 yellow</td><td>Normal regime</td></tr>
+<tr><td>0 red and 3+ yellow</td><td>Elevated stress watch</td></tr>
+<tr><td>1-2 red</td><td>Stress signal present</td></tr>
+<tr><td>3+ red</td><td>Broad stress regime</td></tr>
+<tr><td>all ranked clusters red</td><td>Full risk-off conditions</td></tr>
+</tbody>
+</table>
+<p>The output may also show raw indicator counts for transparency. Cluster counts are the primary signal because related rows, such as VIX and VVIX, are not fully independent votes.</p>
+<p>Lifecycle is a second layer on top of the row and cluster evidence:</p>
+<table>
+<thead><tr><th>Lifecycle stage</th><th>Broad-market meaning</th></tr></thead>
+<tbody>
+<tr><td><code>quiet</code></td><td>Enough data is ranked and no material stress or recovery/opportunity evidence is present.</td></tr>
+<tr><td><code>early_warning</code></td><td>Weak, isolated, or forward-looking evidence is visible, but independent confirmation is not yet present.</td></tr>
+<tr><td><code>confirmed_stress</code></td><td>At least two independent stress clusters, or one severe cluster plus confirming SPY/VIX tape, are active.</td></tr>
+<tr><td><code>panic</code></td><td>Stress is broad or tape is severe enough that the regime should be treated as acute.</td></tr>
+<tr><td><code>stabilization</code></td><td>Stress evidence is easing, but this is not yet a deployable opportunity by itself.</td></tr>
+<tr><td><code>opportunity</code></td><td>Constructive tape and low stress evidence are present; this is broad-market context only, not a trade instruction.</td></tr>
+<tr><td><code>data_quality</code></td><td>Missing, stale, computing, or degraded inputs prevent a confident lifecycle read.</td></tr>
+</tbody>
+</table>
+<p>The lifecycle layer must keep unconfirmed red evidence visible without letting a single fragile proxy dominate the trigger. <code>readiness</code> should be <code>blocked</code> or degraded when critical source health is stale, partial, computing, or degraded.</p>
+<p>An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row details, but it is counted as yellow at the cluster level. This keeps fast proxies useful without letting one fragile proxy dominate the broad-market read.</p>
+<p>The expanded Tier 1 backtest shows that isolated red equity-volatility clusters are also the main source of repeated false alarms. They should not be deleted: major stress often starts in volatility before credit, funding, or FX confirms. The live rule therefore keeps VIX/VIX3M inversion as stress, but downgrades an isolated moderate VVIX-only red to yellow unless the already-visible SPY/VIX tape or another cluster confirms it.</p>
+<h2 id="method-notes">Method Notes</h2>
+<p>Breadth is computed locally from S&amp;P 500 constituent daily bars because the retail IBKR feed does not provide the official S&amp;P breadth series directly. The daemon caches the post-close result; reads should not trigger a 500-name fanout.</p>
+<p>Dealer gamma is a best-effort SPY+SPX zero-gamma estimate from IBKR option chain data. Historical backtests should exclude gamma unless the row has a trusted point-in-time gamma snapshot with method, source, coverage, and timestamp.</p>
+<p>MOVE/rates-vol is outside the live surface until a verified IBKR contract or licensed official connector exists. Do not proxy it with ETFs or futures.</p>
+<h2 id="backtesting">Backtesting</h2>
+<p>The active backtest sequence, tuning gates, and source-data backlog live in <a href="regime-backtest-plan.html">Regime and Canary Backtest Runbook</a>. Keep this file as the product contract for <code>ibkr regime</code>; do not use it as a second tuning backlog.</p>
+  </main>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>

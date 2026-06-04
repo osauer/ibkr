@@ -33,32 +33,5 @@ CLAUDE.md
 /HANDOFF.md
 /*screen*.html
 
-# Local website and marketing pages. The product repo keeps source docs, but
-# osauer.dev publishing outputs and SEO landing pages live outside git here.
-/docs/**/*.html
-/docs/.nojekyll
-/docs/.well-known/
-/docs/social/
-/docs/sitemap.xml
-/docs/indexnow.txt
-/docs/llms.txt
-/docs/llms-full.txt
-/docs/mcp-server.json
-/docs/analyze-interactive-brokers-portfolio-with-ai/
-/docs/best-ibkr-mcp-server-claude-code/
-/docs/claude-desktop-interactive-brokers/
-/docs/connect-claude-to-ibkr/
-/docs/ib-gateway-mcp/
-/docs/ibkr-claude-desktop-mcp/
-/docs/ibkr-mcp/
-/docs/ibkr-mcp-tws/
-/docs/interactive-brokers-mcp-server/
-/docs/portfolio-review-with-claude-ibkr/
-/docs/read-only-mcp-server/
-/docs/tws-mcp-server/
-/.github/workflows/public-discovery.yml
-/scripts/docgen/site-html/
-/scripts/discovery-check/
-/scripts/public-discovery-check/
-/scripts/submit-indexnow/
-/scripts/release-prep/
+# GitHub Pages serves https://osauer.dev/ibkr/ from /docs on main, so generated
+# page artifacts under docs/ must stay visible to git.
