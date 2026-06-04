@@ -31,8 +31,10 @@ func runOrder(ctx context.Context, env *Env, args []string) int {
 		return runOrderStatus(ctx, env, args)
 	case "place":
 		return runOrderPlace(ctx, env, args)
-	case "modify", "cancel":
-		return fail(env, "order %s is not enabled; run `ibkr order preview` first and wait for the gated write path", sub)
+	case "modify":
+		return runOrderModify(ctx, env, args)
+	case "cancel":
+		return runOrderCancel(ctx, env, args)
 	default:
 		return fail(env, "order: unknown subcommand %q (try `ibkr order preview` or `ibkr order status`)", sub)
 	}
@@ -64,6 +66,7 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	strategy := fs.String("strategy", "", "pricing strategy: patient-limit (default) or explicit-limit")
 	tif := fs.String("tif", "", "time in force; DAY only")
 	outsideRTH := fs.Bool("outside-rth", false, "allow outside regular trading hours when supported")
+	replaceID := fs.String("replace-order", "", "preview a replacement for an existing open order ref/order-id/perm-id")
 	timeout := fs.Duration("timeout", 5*time.Second, "quote snapshot timeout")
 	market := fs.String("market", "", "stock market routing shortcut: us (default) or de")
 	exchange := fs.String("exchange", "", "IBKR stock exchange/venue override (e.g. SMART, IBIS)")
@@ -109,6 +112,7 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 		Strategy:   strings.TrimSpace(*strategy),
 		TIF:        strings.ToUpper(strings.TrimSpace(*tif)),
 		OutsideRTH: *outsideRTH,
+		ReplaceID:  strings.TrimSpace(*replaceID),
 		TimeoutMs:  int(timeout.Milliseconds()),
 	}
 	if params.Contract.Currency == "" && params.Contract.Market == "" && params.Contract.Exchange == "" && params.Contract.PrimaryExch == "" {
@@ -125,8 +129,9 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	return 0
 }
 
-func runOrderPlace(_ context.Context, env *Env, args []string) int {
+func runOrderPlace(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "order place")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	token := fs.String("preview-token", "", "submit-capable preview token")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
@@ -137,7 +142,59 @@ func runOrderPlace(_ context.Context, env *Env, args []string) int {
 	if strings.TrimSpace(*token) == "" {
 		return fail(env, "order place: --preview-token is required")
 	}
-	return fail(env, "order place: broker write path disabled in the default build; preview tokens cannot be redeemed here")
+	var res rpc.OrderPlaceResult
+	if err := env.Conn.Call(ctx, rpc.MethodOrderPlace, rpc.OrderPlaceParams{PreviewToken: strings.TrimSpace(*token)}, &res); err != nil {
+		return fail(env, "order place: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderOrderPlaceText(env, &res)
+	return 0
+}
+
+func runOrderModify(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "order modify")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	token := fs.String("preview-token", "", "submit-capable preview token for the replacement draft")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	if fs.NArg() != 1 {
+		return fail(env, "order modify: usage is `ibkr order modify <order-ref|order-id|perm-id> --preview-token TOKEN`")
+	}
+	if strings.TrimSpace(*token) == "" {
+		return fail(env, "order modify: --preview-token is required")
+	}
+	var res rpc.OrderModifyResult
+	if err := env.Conn.Call(ctx, rpc.MethodOrderModify, rpc.OrderModifyParams{ID: strings.TrimSpace(fs.Arg(0)), PreviewToken: strings.TrimSpace(*token)}, &res); err != nil {
+		return fail(env, "order modify: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderOrderModifyText(env, &res)
+	return 0
+}
+
+func runOrderCancel(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "order cancel")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	if fs.NArg() != 1 {
+		return fail(env, "order cancel: usage is `ibkr order cancel <order-ref|order-id|perm-id>`")
+	}
+	var res rpc.OrderCancelResult
+	if err := env.Conn.Call(ctx, rpc.MethodOrderCancel, rpc.OrderCancelParams{ID: strings.TrimSpace(fs.Arg(0))}, &res); err != nil {
+		return fail(env, "order cancel: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderOrderCancelText(env, &res)
+	return 0
 }
 
 func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
@@ -156,6 +213,7 @@ func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 	statusRow(env, out, "WhatIf", fmt.Sprintf("%s (required=%v)", res.WhatIf.Status, res.WhatIf.RequiredForSubmit))
 	statusRow(env, out, "Token minted", fmt.Sprint(res.TokenMinted))
 	statusRow(env, out, "Submit eligible", fmt.Sprint(res.SubmitEligible))
+	statusRow(env, out, "Token scope", res.PreviewTokenScope)
 	statusRow(env, out, "Token ID", res.PreviewTokenID)
 	if !res.PreviewTokenExpiresAt.IsZero() {
 		statusRow(env, out, "Expires", res.PreviewTokenExpiresAt.Format(time.RFC3339))
@@ -172,6 +230,48 @@ func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 				fmt.Fprintf(out, "    action: %s\n", w.Action)
 			}
 		}
+	}
+	fmt.Fprintln(out)
+}
+
+func renderOrderPlaceText(env *Env, res *rpc.OrderPlaceResult) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "IBKR Order Place  %s\n", env.statusBadge(statusConcern{Text: "SENT", Level: statusConcernNotice}))
+	statusRow(env, out, "Mode", res.Mode)
+	statusRow(env, out, "Account", res.Account)
+	statusRow(env, out, "Order", fmt.Sprintf("%s broker_id=%d", res.OrderRef, res.ReservedOrderID))
+	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s",
+		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF))
+	statusRow(env, out, "State", nonEmpty(res.LifecycleStatus, res.SendState))
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
+	}
+	fmt.Fprintln(out)
+}
+
+func renderOrderModifyText(env *Env, res *rpc.OrderModifyResult) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "IBKR Order Modify  %s\n", env.statusBadge(statusConcern{Text: "SENT", Level: statusConcernNotice}))
+	statusRow(env, out, "Order", fmt.Sprintf("%s broker_id=%d", res.OrderRef, res.ReservedOrderID))
+	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s",
+		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF))
+	statusRow(env, out, "State", nonEmpty(res.LifecycleStatus, res.SendState))
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
+	}
+	fmt.Fprintln(out)
+}
+
+func renderOrderCancelText(env *Env, res *rpc.OrderCancelResult) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "IBKR Order Cancel  %s\n", env.statusBadge(statusConcern{Text: "SENT", Level: statusConcernNotice}))
+	statusRow(env, out, "Order", formatOrderViewTitle(res.Order))
+	statusRow(env, out, "State", nonEmpty(res.LifecycleStatus, res.SendState))
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
 	}
 	fmt.Fprintln(out)
 }

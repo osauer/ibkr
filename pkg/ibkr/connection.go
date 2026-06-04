@@ -296,9 +296,13 @@ type Connection struct {
 	onDisconnect func(error)
 
 	// Message handling
-	msgHandlers map[int][]handlerEntry
-	handlersMu  sync.RWMutex
-	handlerSeq  uint64
+	msgHandlers        map[int][]handlerEntry
+	handlersMu         sync.RWMutex
+	handlerSeq         uint64
+	pendingHandlersMu  sync.Mutex
+	pendingHandlerMsgs map[int][][]string
+	whatIfOrdersMu     sync.Mutex
+	whatIfOrderIDs     map[int]struct{}
 
 	// Market data type per reqID (1=RealTime,2=Frozen,3=Delayed,4=DelayedFrozen)
 	mktDataType   map[int]int
@@ -1122,6 +1126,12 @@ const (
 	// Version 203 = MIN_SERVER_VER_PROTOBUF_PLACE_ORDER
 	// Required for protobuf-encoded placeOrder messages
 	minServerVerProtoBufPlaceOrder = 203
+	protoBufMsgID                  = 200
+
+	minServerVerManualOrderTime  = 169
+	minServerVerRFQFields        = 187
+	minServerVerUndoRFQFields    = 190
+	minServerVerCMETaggingFields = 192
 
 	// Required for startApi optional capabilities
 	minServerVerStartAPICapab = 72
@@ -1708,12 +1718,12 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	// Handle common messages
 	switch msgID {
 	case msgNextValidID:
-		if len(fields) > 1 {
-			// Store for later use
-			c.nextOrderID, _ = strconv.Atoi(fields[1])
-			// Only log for first connection in pool
+		if id, ok := parseNextValidOrderID(fields); ok {
+			c.reqIDMu.Lock()
+			c.nextOrderID = id
+			c.reqIDMu.Unlock()
 			if c.config.ClientID == 1 {
-				ibkrLogger.Infof("Next Valid Order ID: %s", fields[1])
+				ibkrLogger.Infof("Next Valid Order ID: %d", id)
 			}
 		}
 	case msgCurrentTimeMillis:
@@ -1786,6 +1796,11 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		}
 	case msgSystemNotification:
 		c.handleSystemNotification(fields)
+		if handlers := c.snapshotHandlers(msgSystemNotification); len(handlers) > 0 {
+			for _, handler := range handlers {
+				handler(fields)
+			}
+		}
 	case msgTickNews:
 		// News tick - handle silently for now
 		// Format: [msgID, reqID, timeStamp, providerCode, articleID, headline, extraData]
@@ -1820,6 +1835,8 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			for _, handler := range handlers {
 				handler(fields)
 			}
+		} else if c.bufferPendingHandlerMessage(msgID, fields) {
+			return
 		} else if isBenignUnhandledMessage(msgID) {
 			// Contract details may arrive even when the connector did not register a handler.
 			// Avoid logging warnings for these routine responses.
@@ -1837,6 +1854,46 @@ func isBenignUnhandledMessage(msgID int) bool {
 	default:
 		return false
 	}
+}
+
+const pendingHandlerMessageLimit = 256
+
+func isPendingHandlerMessage(msgID int) bool {
+	switch msgID {
+	case msgOrderStatus, msgOpenOrder, msgExecDetails, msgOpenOrderEnd:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Connection) bufferPendingHandlerMessage(msgID int, fields []string) bool {
+	if !isPendingHandlerMessage(msgID) {
+		return false
+	}
+	c.pendingHandlersMu.Lock()
+	defer c.pendingHandlersMu.Unlock()
+	if c.pendingHandlerMsgs == nil {
+		c.pendingHandlerMsgs = make(map[int][][]string)
+	}
+	copied := append([]string{}, fields...)
+	pending := c.pendingHandlerMsgs[msgID]
+	if len(pending) >= pendingHandlerMessageLimit {
+		pending = pending[1:]
+	}
+	c.pendingHandlerMsgs[msgID] = append(pending, copied)
+	return true
+}
+
+func (c *Connection) takePendingHandlerMessages(msgID int) [][]string {
+	c.pendingHandlersMu.Lock()
+	defer c.pendingHandlersMu.Unlock()
+	pending := c.pendingHandlerMsgs[msgID]
+	if len(pending) == 0 {
+		return nil
+	}
+	delete(c.pendingHandlerMsgs, msgID)
+	return pending
 }
 
 // getErrorDescription returns a human-readable description for IBKR error codes
@@ -2597,7 +2654,7 @@ func (c *Connection) sendMessage(msg []byte) error {
 			if c.writer == nil {
 				return fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)")
 			}
-			fields := c.decodeMessage(msg)
+			fields := c.decodeOutboundMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
 			c.logSuspiciousOutbound(msgID, fields)
@@ -2648,7 +2705,7 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 			if c.writer == nil {
 				return fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)")
 			}
-			fields := c.decodeMessage(msg)
+			fields := c.decodeOutboundMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
 			c.logSuspiciousOutbound(msgID, fields)
@@ -3126,6 +3183,11 @@ func (c *Connection) decodeMessage(msgBytes []byte) []string {
 			result = append(result, string(remaining))
 			return result
 		}
+		if c.serverVersion >= minServerVerProtoBufPlaceOrder {
+			if fields, ok := summarizeInboundOrderProtoCallback(int(msgType), remaining); ok {
+				return fields
+			}
+		}
 		raw := bytes.SplitSeq(remaining, []byte{'\x00'})
 		for field := range raw {
 			result = append(result, string(field))
@@ -3142,10 +3204,11 @@ func (c *Connection) decodeMessage(msgBytes []byte) []string {
 }
 
 type systemNotification struct {
-	tickerID  int64
-	timestamp time.Time
-	code      int
-	message   string
+	tickerID                int64
+	timestamp               time.Time
+	code                    int
+	message                 string
+	advancedOrderRejectJSON string
 }
 
 func parseSystemNotificationPayload(payload []byte) (*systemNotification, error) {
@@ -3191,8 +3254,11 @@ func parseSystemNotificationPayload(payload []byte) (*systemNotification, error)
 			}
 			val := buf[:length]
 			buf = buf[length:]
-			if fieldNum == 4 {
+			switch fieldNum {
+			case 4:
 				note.message = string(val)
+			case 5:
+				note.advancedOrderRejectJSON = string(val)
 			}
 		default:
 			return nil, fmt.Errorf("unsupported wire type %d in system notification", wireType)
@@ -3368,6 +3434,20 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
 	}
+	return c.placeOrder(order)
+}
+
+// PlacePaperOrder sends a paper-gated placeOrder request. It is intentionally
+// narrower than PlaceOrder so default package builds can support daemon-owned
+// paper execution without exposing an unrestricted raw write path.
+func (c *Connection) PlacePaperOrder(gate PaperOrderGate, order *IBKROrder) error {
+	if err := gate.validateConnection(c); err != nil {
+		return err
+	}
+	return c.placeOrder(order)
+}
+
+func (c *Connection) placeOrder(order *IBKROrder) error {
 	if order == nil {
 		return fmt.Errorf("order is nil")
 	}
@@ -3385,6 +3465,7 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 		order.Transmit = true
 	}
 	order.WhatIf = false
+	c.clearWhatIfOrderID(order.OrderID)
 
 	if err := c.sendPlaceOrderFrame(order); err != nil {
 		return err
@@ -3411,12 +3492,26 @@ func (c *Connection) CancelOrder(orderID int) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
 	}
+	return c.cancelOrder(orderID)
+}
+
+// CancelPaperOrder sends a paper-gated cancelOrder request.
+func (c *Connection) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
+	if err := gate.validateConnection(c); err != nil {
+		return err
+	}
+	return c.cancelOrder(orderID)
+}
+
+func (c *Connection) cancelOrder(orderID int) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
 
-	fields := []any{cancelOrder, 1, orderID}
-	msg := c.encodeMsg(fields...)
+	msg, err := c.encodeCancelOrderMessage(orderID)
+	if err != nil {
+		return err
+	}
 	if err := c.sendMessageWithType(msg, RequestTypeOrder); err != nil {
 		return err
 	}
@@ -3625,7 +3720,7 @@ func setBoolField(fields []string, idx int, value bool) {
 	}
 }
 
-// GetNextOrderID returns the next synthetic order ID used by tests and scaffolding.
+// GetNextOrderID reserves the next broker order ID learned from nextValidId.
 func (c *Connection) GetNextOrderID() int {
 	c.reqIDMu.Lock()
 	defer c.reqIDMu.Unlock()
@@ -3635,6 +3730,57 @@ func (c *Connection) GetNextOrderID() int {
 	id := c.nextOrderID
 	c.nextOrderID++
 	return id
+}
+
+func parseNextValidOrderID(fields []string) (int, bool) {
+	for _, idx := range []int{2, 1} {
+		if idx >= len(fields) {
+			continue
+		}
+		raw := strings.TrimSpace(fields[idx])
+		if raw == "" {
+			continue
+		}
+		id, err := strconv.Atoi(raw)
+		if err != nil || id <= 0 {
+			continue
+		}
+		return id, true
+	}
+	return 0, false
+}
+
+func (c *Connection) markWhatIfOrderID(orderID int) {
+	if orderID <= 0 {
+		return
+	}
+	c.whatIfOrdersMu.Lock()
+	defer c.whatIfOrdersMu.Unlock()
+	if c.whatIfOrderIDs == nil {
+		c.whatIfOrderIDs = make(map[int]struct{})
+	}
+	c.whatIfOrderIDs[orderID] = struct{}{}
+}
+
+func (c *Connection) clearWhatIfOrderID(orderID int) {
+	if orderID <= 0 {
+		return
+	}
+	c.whatIfOrdersMu.Lock()
+	defer c.whatIfOrdersMu.Unlock()
+	delete(c.whatIfOrderIDs, orderID)
+}
+
+// IsWhatIfOrderID reports whether orderID is currently reserved for broker
+// WhatIf evaluation callbacks rather than a working broker order.
+func (c *Connection) IsWhatIfOrderID(orderID int) bool {
+	if c == nil || orderID <= 0 {
+		return false
+	}
+	c.whatIfOrdersMu.Lock()
+	defer c.whatIfOrdersMu.Unlock()
+	_, ok := c.whatIfOrderIDs[orderID]
+	return ok
 }
 
 // RequestMarketData subscribes to market data for a symbol. ctx bounds the
@@ -4842,10 +4988,14 @@ func (c *Connection) RegisterHandler(msgID int, handler func([]string)) uint64 {
 		return 0
 	}
 	c.handlersMu.Lock()
-	defer c.handlersMu.Unlock()
 	c.handlerSeq++
 	entry := handlerEntry{id: c.handlerSeq, fn: handler}
 	c.msgHandlers[msgID] = append(c.msgHandlers[msgID], entry)
+	c.handlersMu.Unlock()
+
+	for _, fields := range c.takePendingHandlerMessages(msgID) {
+		handler(fields)
+	}
 	return entry.id
 }
 

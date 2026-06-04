@@ -202,7 +202,18 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodHistoryDaily, cliDefault},
 		{rpc.MethodTechnical, cliLong},
 		{rpc.MethodMarketCalendar, cliDefault},
+		{rpc.MethodBreadthSPX, cliDefault},
+		{rpc.MethodGammaZeroSPX, cliDefault},
+		{rpc.MethodRegimeSnapshot, cliDefault},
 		{rpc.MethodStatusHealth, cliDefault},
+		{rpc.MethodTradingStatus, cliDefault},
+		{rpc.MethodOrdersOpen, cliDefault},
+		{rpc.MethodOrderStatus, cliDefault},
+		{rpc.MethodOrderPreview, cliDefault},
+		{rpc.MethodCancel, cliDefault},
+		{rpc.MethodOrderPlace, cliDefault},
+		{rpc.MethodOrderModify, cliDefault},
+		{rpc.MethodOrderCancel, cliDefault},
 	}
 	for _, tc := range cases {
 		d := unaryDeadline(tc.method)
@@ -215,6 +226,14 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 	}
 	if d := unaryDeadline(rpc.MethodQuoteSubscribe); d != 0 {
 		t.Errorf("unaryDeadline(%q) = %s, want 0 (streaming methods must not have a deadline)", rpc.MethodQuoteSubscribe, d)
+	}
+}
+
+func TestOrderPreviewUnaryDeadlineCoversBrokerWhatIf(t *testing.T) {
+	t.Parallel()
+
+	if got := unaryDeadline(rpc.MethodOrderPreview); got < 50*time.Second || got >= 60*time.Second {
+		t.Fatalf("order.preview deadline = %s, want enough room for broker WhatIf but below the CLI 60s ceiling", got)
 	}
 }
 

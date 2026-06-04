@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ const (
 	orderJournalEventTokenConfirmed     = "token-confirmed"
 	orderJournalEventSendAttempted      = "send-attempted"
 	orderJournalEventSendError          = "send-error"
+	orderJournalEventBrokerError        = "broker-error"
 	orderJournalEventBrokerAcknowledged = "broker-acknowledged"
 	orderJournalEventStatusUpdated      = "status-updated"
 	orderJournalEventModifyRequested    = "modify-requested"
@@ -52,9 +54,15 @@ type orderJournalEvent struct {
 	Mode            string    `json:"mode,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	Exchange        string    `json:"exchange,omitempty"`
+	PrimaryExch     string    `json:"primary_exch,omitempty"`
+	Currency        string    `json:"currency,omitempty"`
+	LocalSymbol     string    `json:"local_symbol,omitempty"`
+	TradingClass    string    `json:"trading_class,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
+	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
 	Status          string    `json:"status,omitempty"`
@@ -62,6 +70,8 @@ type orderJournalEvent struct {
 	Remaining       float64   `json:"remaining,omitempty"`
 	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
 	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
+	WhyHeld         string    `json:"why_held,omitempty"`
+	MktCapPrice     float64   `json:"mkt_cap_price,omitempty"`
 	ExecID          string    `json:"exec_id,omitempty"`
 	ExecTime        string    `json:"exec_time,omitempty"`
 	SendState       string    `json:"send_state,omitempty"`
@@ -177,6 +187,10 @@ func (s *orderJournalStore) loadEventsLocked(limit int) ([]orderJournalEvent, er
 }
 
 func (s *orderJournalStore) ConfirmPreviewTokenUse(ev orderJournalEvent) error {
+	return s.ConfirmPreviewTokenUseAndAppend(ev)
+}
+
+func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent, after ...orderJournalEvent) error {
 	if s == nil {
 		return fmt.Errorf("order journal path is empty")
 	}
@@ -209,7 +223,15 @@ func (s *orderJournalStore) ConfirmPreviewTokenUse(ev orderJournalEvent) error {
 			return fmt.Errorf("%w: %s was already consumed by %s%s", errOrderPreviewTokenAlreadyUsed, ev.PreviewTokenID, prior.Type, when)
 		}
 	}
-	return s.appendLocked(ev)
+	if err := s.appendLocked(ev); err != nil {
+		return err
+	}
+	for _, next := range after {
+		if err := s.appendLocked(next); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *orderJournalStore) Summary() (orderJournalSummary, error) {
@@ -217,23 +239,18 @@ func (s *orderJournalStore) Summary() (orderJournalSummary, error) {
 	if err != nil {
 		return orderJournalSummary{}, err
 	}
-	latest := map[string]orderJournalEvent{}
 	var last orderJournalEvent
 	for _, ev := range events {
 		last = ev
-		if ev.OrderRef == "" {
-			continue
-		}
-		latest[ev.OrderRef] = ev
 	}
 	var summary orderJournalSummary
-	for _, ev := range latest {
-		if orderJournalEventCountsOpen(ev) {
+	for _, view := range buildOrderViews(events) {
+		if view.Open {
 			summary.OpenOrders++
 		}
 	}
 	if !last.At.IsZero() {
-		summary.LastEvent = fmt.Sprintf("%s %s at %s", last.Type, nonEmptyString(last.OrderRef, "unknown-order"), last.At.Format(time.RFC3339))
+		summary.LastEvent = fmt.Sprintf("%s %s at %s", last.Type, orderJournalEventLabel(last), last.At.Format(time.RFC3339))
 	}
 	return summary, nil
 }
@@ -246,24 +263,6 @@ func validateOrderJournalEvent(ev orderJournalEvent) error {
 		return fmt.Errorf("unsupported order journal version %d", ev.Version)
 	}
 	return nil
-}
-
-func orderJournalEventCountsOpen(ev orderJournalEvent) bool {
-	if orderLifecycleStatusIsTerminal(mapOrderJournalLifecycleStatus(ev)) {
-		return false
-	}
-	switch ev.SendState {
-	case orderSendStateReserved, orderSendStateSendAttempted, orderSendStateBrokerAcknowledged, orderSendStateUncertainSend:
-		return true
-	case orderSendStateTerminal:
-		return false
-	}
-	switch ev.Type {
-	case orderJournalEventSendAttempted, orderJournalEventBrokerAcknowledged, orderJournalEventStatusUpdated, orderJournalEventModifyRequested, orderJournalEventCancelRequested, orderJournalEventReconciledUnknown:
-		return true
-	default:
-		return false
-	}
 }
 
 func orderJournalEventConsumesPreviewToken(ev orderJournalEvent) bool {
@@ -280,9 +279,15 @@ func orderJournalEventConsumesPreviewToken(ev orderJournalEvent) bool {
 	}
 }
 
-func nonEmptyString(v, fallback string) string {
-	if v == "" {
-		return fallback
+func orderJournalEventLabel(ev orderJournalEvent) string {
+	if ev.OrderRef != "" {
+		return ev.OrderRef
 	}
-	return v
+	if ev.ReservedOrderID != 0 {
+		return "order:" + strconv.Itoa(ev.ReservedOrderID)
+	}
+	if ev.PermID != 0 {
+		return "perm:" + strconv.Itoa(ev.PermID)
+	}
+	return "unknown-order"
 }

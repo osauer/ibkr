@@ -83,6 +83,15 @@ func renderOrdersOpenText(env *Env, res *rpc.OrdersOpenResult) {
 	for _, order := range res.Orders {
 		fmt.Fprintf(out, "  %s\n", formatOrderViewTitle(order))
 		fmt.Fprintf(out, "    %s  %s  updated %s\n", order.LifecycleStatus, nonEmpty(order.Status, order.LastEvent), formatOrderTime(order.UpdatedAt))
+		if order.LastMessage != "" {
+			fmt.Fprintf(out, "    %s\n", order.LastMessage)
+		}
+		if order.WhyHeld != "" {
+			fmt.Fprintf(out, "    held: %s\n", order.WhyHeld)
+		}
+		if order.MktCapPrice != 0 {
+			fmt.Fprintf(out, "    capped price: %.4f\n", order.MktCapPrice)
+		}
 	}
 	fmt.Fprintln(out)
 }
@@ -106,6 +115,15 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 	statusRow(env, out, "Account", res.Order.Account)
 	statusRow(env, out, "Status", nonEmpty(res.Order.Status, res.Order.LifecycleStatus))
 	statusRow(env, out, "Filled", fmt.Sprintf("%.4g / %.4g", res.Order.Filled, res.Order.Quantity))
+	if res.Order.LastMessage != "" {
+		statusRow(env, out, "Message", res.Order.LastMessage)
+	}
+	if res.Order.WhyHeld != "" {
+		statusRow(env, out, "Held", res.Order.WhyHeld)
+	}
+	if res.Order.MktCapPrice != 0 {
+		statusRow(env, out, "Capped price", fmt.Sprintf("%.4f", res.Order.MktCapPrice))
+	}
 	if !res.Order.UpdatedAt.IsZero() {
 		statusRow(env, out, "Updated", formatOrderTime(res.Order.UpdatedAt))
 	}
@@ -119,6 +137,12 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 			}
 			if ev.Message != "" {
 				fmt.Fprintf(out, "  %s", ev.Message)
+			}
+			if ev.WhyHeld != "" {
+				fmt.Fprintf(out, "  held=%s", ev.WhyHeld)
+			}
+			if ev.MktCapPrice != 0 {
+				fmt.Fprintf(out, "  capped_price=%.4f", ev.MktCapPrice)
 			}
 			fmt.Fprintln(out)
 		}

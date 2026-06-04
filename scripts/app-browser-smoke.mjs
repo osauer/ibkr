@@ -138,10 +138,14 @@ try {
   const eventsBefore = await fetchEventsDiagnostics(page);
   const privacy = await exerciseAccountPrivacy(page);
   const accountMenu = await exerciseAccountMenu(page);
+  const marketLayout = await exerciseMarketLayout(page);
+  const canaryControls = await exerciseCanaryControlsRemoved(page);
+  const underlyingBookFixture = await exerciseCanaryUnderlyingBookFixture(page);
   const canaryDetail = await exerciseCanaryDetail(page);
   const marketContext = await exerciseMarketContext(page);
   const portfolioDetail = await exercisePortfolioDetail(page);
   const alertHistory = await exerciseAlertHistory(page);
+  const openOrders = await exerciseOpenOrders(page);
   await openDebugTools(page);
   await page.locator('[data-tool="snapshot"]').click();
   await page.waitForFunction(() => {
@@ -174,10 +178,14 @@ try {
     push_state: pushState,
     privacy,
     account_menu: accountMenu,
+    market_layout: marketLayout,
+    canary_controls: canaryControls,
+    underlying_book_fixture: underlyingBookFixture,
     canary_detail: canaryDetail,
     market_context: marketContext,
     portfolio_detail: portfolioDetail,
     alert_history: alertHistory,
+    open_orders: openOrders,
     events: {
       subscribers: eventsBefore.subscribers,
       last_event_at: eventsBefore.last_event_at,
@@ -307,12 +315,16 @@ async function exerciseAccountMenu(page) {
     orderAccount: document.getElementById("orderAccountLabel")?.textContent?.trim() || "",
     pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
     chip: document.getElementById("accountChipText")?.textContent?.trim() || "",
+    accountHasUnderlyingBook: !!document.querySelector("#accountMenu #underlyingBookList"),
   }));
   if (!menu.expanded) {
     throw new Error("account menu did not mark itself expanded");
   }
   if (!menu.context || !menu.environment || !menu.orderAccount || !menu.pill || !menu.chip) {
     throw new Error(`account menu is missing values: ${JSON.stringify(menu)}`);
+  }
+  if (menu.accountHasUnderlyingBook) {
+    throw new Error("account menu should not contain the underlyings subledger");
   }
   await page.locator("#accountMenuToggle").click();
   await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
@@ -322,6 +334,145 @@ async function exerciseAccountMenu(page) {
     environment: menu.environment,
     order_account: menu.orderAccount,
     chip: menu.chip,
+    account_has_underlying_book: menu.accountHasUnderlyingBook,
+  };
+}
+
+async function exerciseMarketLayout(page) {
+  await page.waitForFunction(() => {
+    const text = document.getElementById("sessionPhase")?.textContent?.trim() || "";
+    return /\b(closing|opening) in\b/i.test(text);
+  }, { timeout: 10000 });
+  const layout = await page.evaluate(() => {
+    const marketPanel = document.getElementById("marketPanel");
+    const canaryPanel = document.getElementById("canaryHero");
+    const marketStrip = document.querySelector(".market-strip");
+    const accountMenu = document.getElementById("accountMenu");
+    const marketBeforeCanary = !!(marketPanel && canaryPanel && (marketPanel.compareDocumentPosition(canaryPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const accountAfterMarketStrip = !!(marketStrip && accountMenu && (marketStrip.compareDocumentPosition(accountMenu) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const phase = document.getElementById("sessionPhase")?.textContent?.trim() || "";
+    const strip = document.querySelector(".market-strip");
+    const marketOpen = strip?.classList.contains("market-open") || false;
+    const accountHasUnderlyingBook = !!document.querySelector("#accountMenu #underlyingBookList");
+    const canaryHasUnderlyingBook = !!document.querySelector("#canaryHero #underlyingBookList");
+    return { marketBeforeCanary, accountAfterMarketStrip, phase, marketOpen, accountHasUnderlyingBook, canaryHasUnderlyingBook };
+  });
+  if (!layout.marketBeforeCanary) {
+    throw new Error("Market Context should appear before Portfolio Canary in DOM order");
+  }
+  if (!layout.accountAfterMarketStrip) {
+    throw new Error("Account panel should appear below the market countdown in DOM order");
+  }
+  if (layout.marketOpen && !/\bclosing in\b/i.test(layout.phase)) {
+    throw new Error(`open market line should contain closing in: ${JSON.stringify(layout.phase)}`);
+  }
+  if (!layout.marketOpen && !/\bopening in\b/i.test(layout.phase)) {
+    throw new Error(`closed market line should contain opening in: ${JSON.stringify(layout.phase)}`);
+  }
+  if (layout.accountHasUnderlyingBook) {
+    throw new Error("Account menu still contains the underlyings subledger");
+  }
+  if (!layout.canaryHasUnderlyingBook) {
+    throw new Error("Portfolio Canary is missing the underlyings subledger");
+  }
+  if (/\b(Xetra|US market|US equities|US options)\b/i.test(layout.phase)) {
+    throw new Error(`market line should not repeat the selected market label: ${JSON.stringify(layout.phase)}`);
+  }
+  return layout;
+}
+
+async function exerciseCanaryControlsRemoved(page) {
+  const counts = await page.evaluate(() => ({
+    chipRows: document.querySelectorAll(".canary-chip-row").length,
+    chips: document.querySelectorAll(".canary-chip").length,
+    warningToggle: document.querySelectorAll("#canaryWarningsToggle").length,
+    checksToggle: document.querySelectorAll("#canaryChecksToggle").length,
+    inlineDetail: document.querySelectorAll("#canaryInlineDetailPanel").length,
+  }));
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  if (total > 0) {
+    throw new Error(`canary summary controls should be removed: ${JSON.stringify(counts)}`);
+  }
+  return counts;
+}
+
+async function exerciseCanaryUnderlyingBookFixture(page) {
+  await page.evaluate(() => {
+    localStorage.setItem("ibkrPurgeBook", JSON.stringify({
+      purge_id: "purge_ui_fixture",
+      base_currency: "USD",
+      legs: [{
+        symbol: "MSFT",
+        sec_type: "STK",
+        currency: "USD",
+        current_price: 444.12,
+        current_price_source: "fixture quote",
+        quote_change_pct: -0.7,
+        shadow_saved: 125.5,
+        status: "priced",
+      }],
+    }));
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
+  await page.waitForFunction(() => {
+    return document.querySelector("#canaryHero #underlyingBookList .underlying-row");
+  }, { timeout: 5000 });
+  const info = await page.evaluate(() => ({
+    count: document.getElementById("underlyingBookCount")?.textContent?.trim() || "",
+    status: document.getElementById("underlyingBookStatus")?.textContent?.trim() || "",
+    accountHasUnderlyingBook: !!document.querySelector("#accountMenu #underlyingBookList"),
+    canaryHasUnderlyingBook: !!document.querySelector("#canaryHero #underlyingBookList"),
+    rows: [...document.querySelectorAll("#canaryHero #underlyingBookList .underlying-row")].map((row) => ({
+      symbol: row.dataset.symbol || "",
+      virtual: row.classList.contains("underlying-row--virtual"),
+      markers: [...row.querySelectorAll(".underlying-marker")].map((marker) => marker.textContent?.trim() || ""),
+      buttons: [...row.querySelectorAll("button")].map((button) => ({
+        text: button.textContent?.trim() || "",
+        disabled: button.disabled,
+        title: button.title || "",
+      })),
+      text: row.textContent?.replace(/\s+/g, " ").trim() || "",
+    })),
+  }));
+  if (info.accountHasUnderlyingBook || !info.canaryHasUnderlyingBook) {
+    throw new Error(`underlyings subledger is in the wrong panel: ${JSON.stringify(info)}`);
+  }
+  const row = info.rows.find((item) => item.symbol === "MSFT");
+  if (!row || !row.virtual) {
+    throw new Error(`virtual purge row is missing: ${JSON.stringify(info)}`);
+  }
+  for (const marker of ["Virtual", "Purged"]) {
+    if (!row.markers.includes(marker)) {
+      throw new Error(`virtual purge row lacks ${marker} marker: ${JSON.stringify(row)}`);
+    }
+  }
+  const purge = row.buttons.find((button) => button.text === "Purge");
+  const restore = row.buttons.find((button) => button.text === "Restore");
+  const rebuild = row.buttons.find((button) => button.text === "Rebuild");
+  if (!purge?.disabled || !purge.title) {
+    throw new Error(`purged row should disable Purge with a reason: ${JSON.stringify(row.buttons)}`);
+  }
+  if (!restore || restore.disabled || !rebuild || rebuild.disabled) {
+    throw new Error(`purged row should enable Restore and Rebuild: ${JSON.stringify(row.buttons)}`);
+  }
+
+  await page.locator('#canaryHero #underlyingBookList .underlying-row[data-symbol="MSFT"] .underlying-action--restore').click();
+  await page.waitForFunction(() => document.getElementById("underlyingBookStatus")?.textContent?.includes("Restore placeholder"), { timeout: 5000 });
+  const notice = (await page.locator("#underlyingBookStatus").textContent())?.trim() || "";
+
+  await page.evaluate(() => localStorage.removeItem("ibkrPurgeBook"));
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
+
+  return {
+    virtual_rows: info.rows.length,
+    count: info.count,
+    markers: row.markers,
+    purge_disabled: purge.disabled,
+    restore_enabled: !restore.disabled,
+    rebuild_enabled: !rebuild.disabled,
+    placeholder_notice: notice,
   };
 }
 
@@ -372,14 +523,50 @@ async function exerciseMarketContext(page) {
       // Keep the no-value assertion below for app instances without live data.
     }
   }
-  if (before.spyLevel !== "--" && before.spyChange === "--") {
-    throw new Error("SPY has a level but no percent change");
+  for (const [symbol, level, change, note] of [
+    ["SPY", before.spyLevel, before.spyChange, before.spyNote],
+    ["VIX", before.vixLevel, before.vixChange, before.vixNote],
+    ["QQQ", before.qqqLevel, before.qqqChange, before.qqqNote],
+  ]) {
+    if (level !== "--" && (!change || change === "--") && !/change pending/i.test(note)) {
+      throw new Error(`${symbol} has a level but no percent-change explanation: ${JSON.stringify({ change, note })}`);
+    }
   }
-  if (before.vixLevel !== "--" && before.vixChange === "--") {
-    throw new Error("VIX has a level but no percent change");
+  for (const [symbol, level, note] of [
+    ["SPY", before.spyLevel, before.spyNote],
+    ["VIX", before.vixLevel, before.vixNote],
+    ["QQQ", before.qqqLevel, before.qqqNote],
+  ]) {
+    if (level === "--" && !new RegExp(`No ${symbol} (data|price)`).test(note)) {
+      throw new Error(`${symbol} missing data should be explicit, got ${JSON.stringify(note)}`);
+    }
   }
-  if (before.qqqLevel !== "--" && before.qqqChange === "--") {
-    throw new Error("QQQ has a level but no percent change");
+  for (const [label, value] of [
+    ["SPY level", before.spyLevel],
+    ["VIX level", before.vixLevel],
+    ["QQQ level", before.qqqLevel],
+  ]) {
+    if (value !== "--" && !/^-?[\d.,]+[.,]\d{2}$/.test(value)) {
+      throw new Error(`${label} should use two decimal places, got ${JSON.stringify(value)}`);
+    }
+  }
+  for (const [label, value] of [
+    ["SPY change", before.spyChange],
+    ["VIX change", before.vixChange],
+    ["QQQ change", before.qqqChange],
+  ]) {
+    if (value && value !== "--" && !/^[+-]?[\d.,]+[.,]\d{2}%$/.test(value)) {
+      throw new Error(`${label} should use two decimal places, got ${JSON.stringify(value)}`);
+    }
+  }
+  if (before.sparklineCount !== 0) {
+    throw new Error(`market context should not render invented sparklines, found ${before.sparklineCount}`);
+  }
+  if (before.rangeCount !== 3) {
+    throw new Error(`market context should render three compact quote range markers, found ${before.rangeCount}`);
+  }
+  if (before.rangeText.some(Boolean)) {
+    throw new Error(`market quote range markers should not render fallback text, got ${JSON.stringify(before.rangeText)}`);
   }
   if (!before.regime || before.regime === "--") {
     if (before.weather !== "weather-na") {
@@ -465,14 +652,68 @@ async function exerciseAlertHistory(page) {
   return { initially_open: initiallyOpen, opens: true, count: info.count, rows: info.rows, selected };
 }
 
+async function exerciseOpenOrders(page) {
+  const initiallyOpen = await page.locator("#ordersPanel").evaluate((el) => !!el.open);
+  if (!initiallyOpen) {
+    await page.locator("#ordersPanel summary").click();
+    await page.waitForFunction(() => document.getElementById("ordersPanel")?.open, { timeout: 5000 });
+  }
+  const info = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll("#ordersOpenList button")].map((button) => ({
+      text: button.textContent?.trim() || "",
+      disabled: button.disabled,
+      title: button.title || "",
+    }));
+    return {
+      rows: document.querySelectorAll("#ordersOpenList .open-order-row").length,
+      empty: document.getElementById("ordersOpenList")?.textContent?.includes("No open journal-backed orders.") || false,
+      buttons,
+      oldLabels: buttons.map((button) => button.text).filter((label) => ["Modify", "Cancel", "Execute"].includes(label)),
+    };
+  });
+  if (info.oldLabels.length > 0) {
+    throw new Error(`open-order controls still use old labels: ${info.oldLabels.join(", ")}`);
+  }
+  if (info.rows === 0 && !info.empty) {
+    throw new Error("open-order empty state is missing");
+  }
+  if (info.rows > 0) {
+    for (const label of ["Preview change", "Apply change", "Cancel order"]) {
+      if (!info.buttons.some((button) => button.text === label)) {
+        throw new Error(`open-order control ${JSON.stringify(label)} is missing`);
+      }
+    }
+    for (const button of info.buttons.filter((item) => item.disabled)) {
+      if (!button.title) {
+        throw new Error(`disabled open-order control lacks a reason: ${JSON.stringify(button.text)}`);
+      }
+    }
+  }
+  if (!initiallyOpen) {
+    await page.locator("#ordersPanel summary").click();
+  }
+  return {
+    initially_open: initiallyOpen,
+    rows: info.rows,
+    empty: info.empty,
+    buttons: info.buttons.map((button) => ({ text: button.text, disabled: button.disabled, has_reason: !!button.title })),
+  };
+}
+
 async function readMarketContext(page) {
   return page.evaluate(() => ({
     spyLevel: document.getElementById("spyLevel")?.textContent?.trim() || "",
     spyChange: document.getElementById("spyChange")?.textContent?.trim() || "",
+    spyNote: document.getElementById("spyNote")?.textContent?.trim() || "",
     qqqLevel: document.getElementById("nasdaqLevel")?.textContent?.trim() || "",
     qqqChange: document.getElementById("nasdaqChange")?.textContent?.trim() || "",
+    qqqNote: document.getElementById("nasdaqNote")?.textContent?.trim() || "",
     vixLevel: document.getElementById("vixLevel")?.textContent?.trim() || "",
     vixChange: document.getElementById("vixChange")?.textContent?.trim() || "",
+    vixNote: document.getElementById("vixNote")?.textContent?.trim() || "",
+    rangeText: [...document.querySelectorAll(".quote-range")].map((node) => node.textContent?.trim() || ""),
+    rangeCount: document.querySelectorAll(".quote-range").length,
+    sparklineCount: document.querySelectorAll(".sparkline").length,
     regime: document.getElementById("marketRegime")?.textContent?.trim() || "",
     weather: [...(document.getElementById("marketRegimeToggle")?.classList || [])].find((name) => name.startsWith("weather-")) || "",
   }));

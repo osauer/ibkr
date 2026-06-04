@@ -2043,7 +2043,18 @@ func (s *Server) handleQuoteSubscribe(ctx context.Context, req *rpc.Request, enc
 		return
 	}
 
-	frames, release, err := s.subs.Subscribe(ctx, p.Contract.Symbol)
+	routeContract, echoedContract, routedQuote, err := normaliseStockQuoteContract(p.Contract)
+	if err != nil {
+		writeError(enc, req.ID, rpc.CodeBadRequest, err.Error())
+		return
+	}
+	var frames <-chan rpc.Frame
+	var release func()
+	if routedQuote {
+		frames, release, err = s.subs.SubscribeContract(ctx, routeContract)
+	} else {
+		frames, release, err = s.subs.Subscribe(ctx, echoedContract.Symbol)
+	}
 	if err != nil {
 		if errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
 			writeError(enc, req.ID, rpc.CodeGatewayUnavailable, err.Error())

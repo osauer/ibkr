@@ -61,6 +61,8 @@ type Connector struct {
 	openOrders       map[string]*Order
 	brokerOrderIndex map[string]string // IB order ID -> internal order ID
 	orderMu          sync.RWMutex
+	orderLifecycleMu sync.RWMutex
+	orderLifecycle   []func(OrderLifecycleEvent)
 
 	// Lightweight contract details cache to improve routing during OOH sessions
 	contractMu         sync.RWMutex
@@ -541,6 +543,9 @@ func (c *Connector) markSymbolInactive(symbol, reason string) {
 func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotification) {
 	if note == nil {
 		return
+	}
+	if note.tickerID > 0 {
+		c.notifyOrderErrorLifecycle(int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
 	}
 	c.recordDataFarmNotice(note.code, note.message, note.timestamp)
 	symbol := strings.ToUpper(strings.TrimSpace(alias.symbol))
@@ -2098,6 +2103,19 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
 	}
+	return c.submitOrder(contract, order, nil)
+}
+
+// SubmitPaperOrder submits a daemon-gated paper order without enabling the
+// unrestricted raw SubmitOrder path in default package builds.
+func (c *Connector) SubmitPaperOrder(gate PaperOrderGate, contract *Contract, order *RawOrder) error {
+	if err := gate.validate(); err != nil {
+		return err
+	}
+	return c.submitOrder(contract, order, &gate)
+}
+
+func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *PaperOrderGate) error {
 	if !c.isConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -2113,6 +2131,9 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 
 	// Convert to IBKROrder for the connection
 	ibkrOrder := &IBKROrder{
+		OrderID:      order.OrderID,
+		ClientID:     order.ClientID,
+		PermID:       order.PermID,
 		ConID:        contract.ConID,
 		Symbol:       contract.Symbol,
 		SecType:      contract.SecType,
@@ -2139,17 +2160,14 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 		Origin:       0,
 	}
 
-	// Place the order through the connection
-	err := conn.PlaceOrder(ibkrOrder)
-	if err != nil {
-		return fmt.Errorf("failed to place order: %w", err)
-	}
-
-	// Track it locally as well
 	brokerID := strconv.Itoa(ibkrOrder.OrderID)
+	localID := strings.TrimSpace(order.OrderRef)
+	if localID == "" {
+		localID = brokerID
+	}
 	now := time.Now()
 	coreOrder := &Order{
-		ID:              order.OrderRef,
+		ID:              localID,
 		BrokerID:        brokerID,
 		Symbol:          contract.Symbol,
 		Side:            OrderSide(order.Action),
@@ -2165,15 +2183,82 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 	}
 
 	c.orderMu.Lock()
-	c.openOrders[order.OrderRef] = coreOrder
-	c.brokerOrderIndex[brokerID] = order.OrderRef
+	previousOrder, hadPreviousOrder := c.openOrders[localID]
+	previousIndex, hadPreviousIndex := c.brokerOrderIndex[brokerID]
+	c.openOrders[localID] = coreOrder
+	c.brokerOrderIndex[brokerID] = localID
 	c.orderMu.Unlock()
+
+	// Place the order through the connection after local indexing so fast
+	// broker callbacks and errors can be correlated with the journal.
+	var err error
+	if paperGate != nil {
+		err = conn.PlacePaperOrder(*paperGate, ibkrOrder)
+	} else {
+		err = conn.PlaceOrder(ibkrOrder)
+	}
+	if err != nil {
+		c.orderMu.Lock()
+		if hadPreviousOrder {
+			c.openOrders[localID] = previousOrder
+		} else {
+			delete(c.openOrders, localID)
+		}
+		if hadPreviousIndex {
+			c.brokerOrderIndex[brokerID] = previousIndex
+		} else {
+			delete(c.brokerOrderIndex, brokerID)
+		}
+		c.orderMu.Unlock()
+		return fmt.Errorf("failed to place order: %w", err)
+	}
+	order.OrderID = ibkrOrder.OrderID
+	order.ClientID = ibkrOrder.ClientID
+	order.PermID = ibkrOrder.PermID
+
+	if newBrokerID := strconv.Itoa(ibkrOrder.OrderID); newBrokerID != brokerID {
+		c.orderMu.Lock()
+		delete(c.brokerOrderIndex, brokerID)
+		coreOrder.BrokerID = newBrokerID
+		c.brokerOrderIndex[newBrokerID] = localID
+		c.orderMu.Unlock()
+	}
 
 	c.logInfo("Order submitted: ID=%d, %s %s %d @ %.2f (TIF=%s, OutsideRth=%v)",
 		ibkrOrder.OrderID, order.Action, contract.Symbol, order.TotalQty,
 		order.LmtPrice, order.TIF, order.OutsideRth)
 
 	return nil
+}
+
+// ReserveOrderID claims the next broker order ID for a later SubmitOrder call.
+// Callers use this when they need a durable audit record before writing the
+// placeOrder frame to the socket.
+func (c *Connector) ReserveOrderID() (int, error) {
+	if !tradingEnabled {
+		return 0, ErrTradingDisabled
+	}
+	if !c.isConnected() {
+		return 0, fmt.Errorf("not connected to IBKR")
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return 0, fmt.Errorf("no active connection")
+	}
+	return conn.GetNextOrderID(), nil
+}
+
+// RegisterOrderLifecycleHandler registers a callback for broker order
+// lifecycle messages. The callback is best-effort and must return quickly.
+func (c *Connector) RegisterOrderLifecycleHandler(handler func(OrderLifecycleEvent)) {
+	if c == nil || handler == nil {
+		return
+	}
+	c.orderLifecycleMu.Lock()
+	defer c.orderLifecycleMu.Unlock()
+	c.orderLifecycle = append(c.orderLifecycle, handler)
 }
 
 func multiplierToString(mult int) string {
@@ -2219,6 +2304,36 @@ func (c *Connector) CancelOrder(orderID int) error {
 
 	c.logInfo("Order cancel request sent for ID: %d", orderID)
 
+	return nil
+}
+
+// CancelPaperOrder cancels a daemon-gated paper order without enabling the
+// unrestricted raw CancelOrder path in default package builds.
+func (c *Connector) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
+	if err := gate.validate(); err != nil {
+		return err
+	}
+	if !c.isConnected() {
+		return fmt.Errorf("not connected to IBKR")
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	if err := conn.CancelPaperOrder(gate, orderID); err != nil {
+		return fmt.Errorf("failed to cancel order: %w", err)
+	}
+	c.orderMu.Lock()
+	orderIDStr := strconv.Itoa(orderID)
+	if order, exists := c.openOrders[orderIDStr]; exists {
+		order.Status = OrderStatusCancelled
+		now := time.Now()
+		order.CancelledAt = &now
+	}
+	c.orderMu.Unlock()
+	c.logInfo("Paper order cancel request sent for ID: %d", orderID)
 	return nil
 }
 
@@ -2646,10 +2761,18 @@ func (c *Connector) registerHandlers(conn *Connection) {
 		c.handlePortfolioValue(fields)
 	})
 
-	// Register order status handler (msgID 3)
-	conn.RegisterHandler(3, func(fields []string) {
-		c.handleOrderStatus(fields)
+	// Register order lifecycle handlers (openOrder/orderStatus/execDetails).
+	conn.RegisterHandler(msgOpenOrder, func(fields []string) {
+		c.notifyOrderLifecycle(fields)
 	})
+	conn.RegisterHandler(msgOrderStatus, func(fields []string) {
+		c.handleOrderStatus(fields)
+		c.notifyOrderLifecycle(fields)
+	})
+	conn.RegisterHandler(msgExecDetails, func(fields []string) {
+		c.notifyOrderLifecycle(fields)
+	})
+	conn.RegisterHandler(msgOpenOrderEnd, func(fields []string) {})
 
 	// Register system notification handler (msgID 204) for farm status changes
 	conn.RegisterHandler(204, func(fields []string) {})
@@ -3197,6 +3320,7 @@ func (c *Connector) handleIBKRError(fields []string) {
 	if len(fields) > 4 {
 		rawMsg = fields[4]
 	}
+	c.notifyOrderErrorLifecycle(reqID, code, rawMsg, "")
 	c.recordDataFarmNotice(code, rawMsg, time.Now())
 	upperMsg := strings.ToUpper(rawMsg)
 	upperSymbol := strings.ToUpper(symbol)
@@ -4386,21 +4510,38 @@ func (c *Connector) handleOrderStatus(fields []string) {
 		return
 	}
 
-	orderID := fields[start]
-	status := fields[start+1]
-	filled := fields[start+2]
-	remaining := fields[start+3]
+	orderID := ""
+	status := ""
+	filled := "0"
+	remaining := "0"
 	avgFillPrice := "0"
-	if len(fields) > start+4 {
-		avgFillPrice = fields[start+4]
-	}
 	lastFillPrice := "0"
-	if len(fields) > start+6 {
-		lastFillPrice = fields[start+6]
-	}
 	whyHeld := ""
-	if len(fields) > start+9 {
-		whyHeld = fields[start+9]
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		orderID = summaryFieldValue(fields, "orderId=")
+		status = summaryFieldValue(fields, "status=")
+		filled = summaryFieldValue(fields, "filled=")
+		remaining = summaryFieldValue(fields, "remaining=")
+		avgFillPrice = summaryFieldValue(fields, "avgFillPrice=")
+		lastFillPrice = summaryFieldValue(fields, "lastFillPrice=")
+		whyHeld = summaryFieldValue(fields, "whyHeld=")
+	} else {
+		orderID = fields[start]
+		status = fields[start+1]
+		filled = fields[start+2]
+		remaining = fields[start+3]
+		if len(fields) > start+4 {
+			avgFillPrice = fields[start+4]
+		}
+		if len(fields) > start+6 {
+			lastFillPrice = fields[start+6]
+		}
+		if len(fields) > start+9 {
+			whyHeld = fields[start+9]
+		}
+	}
+	if orderID == "" || status == "" {
+		return
 	}
 
 	filledQty, _ := strconv.ParseFloat(filled, 64)
@@ -4452,6 +4593,91 @@ func (c *Connector) handleOrderStatus(fields []string) {
 	}
 
 	c.orderMu.Unlock()
+}
+
+func (c *Connector) notifyOrderLifecycle(fields []string) {
+	ev, ok := ParseOrderLifecycleEvent(fields)
+	if !ok {
+		return
+	}
+	if ev.WhatIf {
+		return
+	}
+	if ev.Type == OrderLifecycleEventStatus && c.isWhatIfOrderID(ev.OrderID) {
+		return
+	}
+	c.dispatchOrderLifecycle(ev)
+}
+
+func (c *Connector) isWhatIfOrderID(orderID int) bool {
+	if c == nil || orderID <= 0 {
+		return false
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	return conn != nil && conn.IsWhatIfOrderID(orderID)
+}
+
+func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advancedRejectJSON string) {
+	if orderID <= 0 || code == 0 || orderWhatIfInformationalError(code) {
+		return
+	}
+	brokerID := strconv.Itoa(orderID)
+	c.orderMu.RLock()
+	_, indexed := c.brokerOrderIndex[brokerID]
+	_, direct := c.openOrders[brokerID]
+	c.orderMu.RUnlock()
+	if !indexed && !direct {
+		return
+	}
+	message = orderBrokerErrorMessage(code, message, advancedRejectJSON)
+	ev := OrderLifecycleEvent{
+		Type:      OrderLifecycleEventError,
+		OrderID:   orderID,
+		ErrorCode: code,
+		Status:    orderBrokerErrorStatus(code, message),
+		Message:   message,
+	}
+	c.dispatchOrderLifecycle(ev)
+}
+
+func (c *Connector) dispatchOrderLifecycle(ev OrderLifecycleEvent) {
+	c.orderLifecycleMu.RLock()
+	handlers := append([]func(OrderLifecycleEvent){}, c.orderLifecycle...)
+	c.orderLifecycleMu.RUnlock()
+	for _, handler := range handlers {
+		handler(ev)
+	}
+}
+
+func orderBrokerErrorStatus(code int, message string) string {
+	msg := strings.ToLower(message)
+	switch {
+	case code == 201 || code == 321 || code == 103:
+		return "Rejected"
+	case strings.Contains(msg, "reject") || strings.Contains(msg, "duplicate order id"):
+		return "Rejected"
+	default:
+		return ""
+	}
+}
+
+func orderBrokerErrorMessage(code int, message, advancedRejectJSON string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = getErrorDescription(code)
+	}
+	if advancedRejectJSON = strings.TrimSpace(advancedRejectJSON); advancedRejectJSON != "" {
+		if message != "" {
+			message += "; "
+		}
+		message += "advanced_reject_json=" + advancedRejectJSON
+	}
+	if message == "" {
+		return fmt.Sprintf("broker error %d", code)
+	}
+	return fmt.Sprintf("broker error %d: %s", code, message)
 }
 
 // GetMarketData retrieves current market data for subscribed symbols

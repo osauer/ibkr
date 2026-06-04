@@ -2791,7 +2791,8 @@ const (
 	OrderWhatIfStatusAccepted    = "accepted"
 	OrderWhatIfStatusRejected    = "rejected"
 
-	OrderTokenScopePlace = "place"
+	OrderTokenScopePlace  = "place"
+	OrderTokenScopeModify = "modify"
 
 	OrderLifecyclePreviewed                = "previewed"
 	OrderLifecyclePendingSubmit            = "pending_submit"
@@ -2892,12 +2893,13 @@ type OrderMarginImpact struct {
 // OrderWhatIfResult is the broker preview surface. Status is "accepted" only
 // after IBKR returns a successful WhatIf response for this exact draft.
 type OrderWhatIfResult struct {
-	Status            string             `json:"status"`
-	RequiredForSubmit bool               `json:"required_for_submit"`
-	Available         bool               `json:"available"`
-	Message           string             `json:"message,omitempty"`
-	Action            string             `json:"action,omitempty"`
-	Margin            *OrderMarginImpact `json:"margin,omitempty"`
+	Status             string             `json:"status"`
+	RequiredForSubmit  bool               `json:"required_for_submit"`
+	Available          bool               `json:"available"`
+	Message            string             `json:"message,omitempty"`
+	Action             string             `json:"action,omitempty"`
+	AdvancedRejectJSON string             `json:"advanced_reject_json,omitempty"`
+	Margin             *OrderMarginImpact `json:"margin,omitempty"`
 }
 
 // OrderPreviewResult is returned by order.preview. PreviewToken is a daemon-
@@ -3013,9 +3015,15 @@ type OrderEvent struct {
 	Mode            string    `json:"mode,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	Exchange        string    `json:"exchange,omitempty"`
+	PrimaryExch     string    `json:"primary_exch,omitempty"`
+	Currency        string    `json:"currency,omitempty"`
+	LocalSymbol     string    `json:"local_symbol,omitempty"`
+	TradingClass    string    `json:"trading_class,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
+	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
 	Status          string    `json:"status,omitempty"`
@@ -3024,6 +3032,8 @@ type OrderEvent struct {
 	Remaining       float64   `json:"remaining,omitempty"`
 	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
 	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
+	WhyHeld         string    `json:"why_held,omitempty"`
+	MktCapPrice     float64   `json:"mkt_cap_price,omitempty"`
 	ExecID          string    `json:"exec_id,omitempty"`
 	ExecTime        string    `json:"exec_time,omitempty"`
 	SendState       string    `json:"send_state,omitempty"`
@@ -3044,9 +3054,15 @@ type OrderView struct {
 	Mode            string    `json:"mode,omitempty"`
 	Symbol          string    `json:"symbol,omitempty"`
 	SecType         string    `json:"sec_type,omitempty"`
+	Exchange        string    `json:"exchange,omitempty"`
+	PrimaryExch     string    `json:"primary_exch,omitempty"`
+	Currency        string    `json:"currency,omitempty"`
+	LocalSymbol     string    `json:"local_symbol,omitempty"`
+	TradingClass    string    `json:"trading_class,omitempty"`
 	Action          string    `json:"action,omitempty"`
 	OrderType       string    `json:"order_type,omitempty"`
 	TIF             string    `json:"tif,omitempty"`
+	OutsideRTH      bool      `json:"outside_rth,omitempty"`
 	Quantity        float64   `json:"quantity,omitempty"`
 	LimitPrice      float64   `json:"limit_price,omitempty"`
 	Status          string    `json:"status,omitempty"`
@@ -3055,11 +3071,15 @@ type OrderView struct {
 	Remaining       float64   `json:"remaining,omitempty"`
 	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
 	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
+	WhyHeld         string    `json:"why_held,omitempty"`
+	MktCapPrice     float64   `json:"mkt_cap_price,omitempty"`
 	SendState       string    `json:"send_state,omitempty"`
 	LastEvent       string    `json:"last_event,omitempty"`
 	LastMessage     string    `json:"last_message,omitempty"`
 	UpdatedAt       time.Time `json:"updated_at,omitzero"`
 	Open            bool      `json:"open"`
+	ModifyEligible  bool      `json:"modify_eligible"`
+	CancelEligible  bool      `json:"cancel_eligible"`
 }
 
 type OrdersOpenResult struct {

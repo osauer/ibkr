@@ -834,6 +834,7 @@ var ExcludedCLI = map[string]string{
 	"update":   "binary-management verb (replaces the ibkr binary from GitHub releases); not a daemon RPC, must stay user-triggered for trust-boundary reasons",
 	"restart":  "local process-management verb (signals daemon processes); useful for humans and scripts, but not a broker-data MCP tool",
 	"backtest": "offline research harness over local JSONL fixtures; not a live broker/MCP operation",
+	"purge":    "emergency local-terminal purge-book workflow; deliberately withheld from MCP until execution/review safety is proven",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {

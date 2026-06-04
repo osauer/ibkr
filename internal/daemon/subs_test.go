@@ -22,6 +22,7 @@ type fakeConnector struct {
 	cache          map[string]*ibkrlib.MarketData
 	dataType       int
 	subscribed     map[string]int // count of SubscribeMarketData calls per symbol
+	contracts      map[string]ibkrlib.Contract
 	unsubscribed   map[string]int // count of UnsubscribeMarketData calls per symbol
 	subscribeError error
 	// subscribeDelay simulates a slow IBKR Subscribe call so tests can
@@ -34,6 +35,7 @@ func newFakeConnector() *fakeConnector {
 	return &fakeConnector{
 		cache:        map[string]*ibkrlib.MarketData{},
 		subscribed:   map[string]int{},
+		contracts:    map[string]ibkrlib.Contract{},
 		unsubscribed: map[string]int{},
 		dataType:     1, // live
 	}
@@ -57,6 +59,25 @@ func (f *fakeConnector) SubscribeMarketData(ctx context.Context, symbol string, 
 	defer f.mu.Unlock()
 	f.subscribed[symbol]++
 	return nil
+}
+
+func (f *fakeConnector) SubscribeMarketDataWithContract(ctx context.Context, contract ibkrlib.Contract, _ []string) (string, error) {
+	if f.subscribeError != nil {
+		return "", f.subscribeError
+	}
+	if f.subscribeDelay > 0 {
+		select {
+		case <-time.After(f.subscribeDelay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	key := ibkrlib.MarketDataKeyForContract(contract)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed[key]++
+	f.contracts[key] = contract
+	return key, nil
 }
 
 func (f *fakeConnector) UnsubscribeMarketData(symbol string) error {
@@ -102,6 +123,13 @@ func (f *fakeConnector) unsubCount(symbol string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.unsubscribed[symbol]
+}
+
+func (f *fakeConnector) subscribedContract(symbol string) (ibkrlib.Contract, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	contract, ok := f.contracts[symbol]
+	return contract, ok
 }
 
 // testManager pairs a subManager with the atomic.Bool that gates its
@@ -290,6 +318,41 @@ func TestHoldAndSubscribeShareLine(t *testing.T) {
 	}
 	fake.putTick("AAPL", 1.0, 1.01, 1.005)
 	receiveFrame(t, frames, 200*time.Millisecond)
+}
+
+func TestSubscribeContractUsesRouteKey(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConnector()
+	m := newTestManager(fake)
+	defer m.Close()
+
+	contract := ibkrlib.Contract{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"}
+	key := ibkrlib.MarketDataKeyForContract(contract)
+	frames, release, err := m.SubscribeContract(context.Background(), contract)
+	if err != nil {
+		t.Fatalf("SubscribeContract: %v", err)
+	}
+	defer release()
+
+	if got := fake.subCount("VIX"); got != 0 {
+		t.Fatalf("SubscribeContract used bare symbol path %d times, want 0", got)
+	}
+	if got := fake.subCount(key); got != 1 {
+		t.Fatalf("SubscribeMarketDataWithContract called %d times for %s, want 1", got, key)
+	}
+	if got, ok := fake.subscribedContract(key); !ok || got.SecType != "IND" || got.Exchange != "CBOE" {
+		t.Fatalf("routed contract not preserved: got %+v ok=%v", got, ok)
+	}
+
+	fake.putTick(key, 15.10, 15.20, 15.15)
+	f := receiveFrame(t, frames, 200*time.Millisecond)
+	if f.Last == nil || *f.Last != 15.15 {
+		t.Fatalf("routed frame.Last: got %v, want 15.15", f.Last)
+	}
+	release()
+	if got := fake.unsubCount(key); got != 1 {
+		t.Fatalf("routed unsubscribe count: got %d, want 1", got)
+	}
 }
 
 // TestGatewayLostEmitsTerminalFrame covers F7: a gateway disconnect

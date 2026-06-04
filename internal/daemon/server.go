@@ -96,6 +96,9 @@ type Server struct {
 	// short-lived request ctx that triggered the rediscover.
 	serverCtx context.Context
 
+	orderLifecycleHandlersMu sync.Mutex
+	orderLifecycleHandlers   map[*ibkrlib.Connector]struct{}
+
 	idleTimer   *time.Timer
 	idleStop    chan struct{}
 	activeConns int
@@ -257,6 +260,10 @@ type Server struct {
 	orderPreviewQuote          func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
 	orderPreviewPositionImpact func(context.Context, string, string, int) (rpc.OrderPositionImpact, error)
 	orderPreviewWhatIf         func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
+	orderWritesEnabled         func() bool
+	orderReserveBrokerID       func(context.Context) (int, error)
+	orderPlaceBroker           func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error
+	orderCancelBroker          func(context.Context, int) error
 
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
@@ -1125,6 +1132,7 @@ func (s *Server) connectWithFailover(ctx context.Context, primary discover.Endpo
 		s.lastConnectError = ""
 		if real, ok := a.(*ibkrlib.Connector); ok {
 			s.connector = real
+			s.registerOrderLifecycleJournal(real)
 		}
 		s.mu.Unlock()
 
@@ -1284,6 +1292,7 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// SPX has reconstituted since the last save — added members fall
 	// through to fresh resolution via the normal path.
 	s.seedFromContractStore(s.connector)
+	s.registerOrderLifecycleJournal(s.connector)
 
 	// Spawn the periodic save loop. Guarded by contractCacheSaveStarted
 	// so reconnect-driven postConnectSetup re-runs don't multiply the
@@ -1919,14 +1928,11 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 	case rpc.MethodCancel:
 		s.unary(req, enc, func() (any, error) { return s.handleCancel(req) })
 	case rpc.MethodOrderPlace:
-		_, err := handleOrderPlace(ctx, req)
-		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
+		s.unary(req, enc, func() (any, error) { return s.handleOrderPlace(ctx, req) })
 	case rpc.MethodOrderModify:
-		_, err := handleOrderModify(ctx, req)
-		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
+		s.unary(req, enc, func() (any, error) { return s.handleOrderModify(ctx, req) })
 	case rpc.MethodOrderCancel:
-		_, err := handleOrderCancel(ctx, req)
-		writeError(enc, req.ID, rpc.CodeTradingDisabled, err.Error())
+		s.unary(req, enc, func() (any, error) { return s.handleOrderCancel(ctx, req) })
 	default:
 		writeError(enc, req.ID, rpc.CodeUnknownMethod, "unknown method: "+req.Method)
 	}
@@ -2013,7 +2019,13 @@ func unaryDeadline(method string) time.Duration {
 		// budget to absorb a degraded gateway without timing out before
 		// the connection error surfaces.
 		return 15 * time.Second
-	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot, rpc.MethodOrderPreview:
+	case rpc.MethodOrderPreview:
+		// 55 s — order preview does a quote snapshot, position-impact
+		// read, then broker WhatIf. The WhatIf leg can take longer than
+		// a fast quote path on a v203 TWS session; leave enough room for
+		// it while still beating the CLI's default 60 s unary ceiling.
+		return 55 * time.Second
+	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
 	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodScanList:
 		return 5 * time.Second

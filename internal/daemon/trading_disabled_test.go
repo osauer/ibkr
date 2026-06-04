@@ -1,3 +1,5 @@
+//go:build !trading
+
 package daemon
 
 import (
@@ -20,13 +22,14 @@ func TestOrderHandlersAlwaysRefuse(t *testing.T) {
 
 	req := &rpc.Request{ID: "td-1", Method: rpc.MethodOrderPlace}
 
-	if _, err := handleOrderPlace(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
+	srv := newTestServer(t)
+	if _, err := srv.handleOrderPlace(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
 		t.Errorf("handleOrderPlace returned %v, want ErrTradingDisabled", err)
 	}
-	if _, err := handleOrderModify(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
+	if _, err := srv.handleOrderModify(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
 		t.Errorf("handleOrderModify returned %v, want ErrTradingDisabled", err)
 	}
-	if _, err := handleOrderCancel(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
+	if _, err := srv.handleOrderCancel(context.Background(), req); !errors.Is(err, ErrTradingDisabled) {
 		t.Errorf("handleOrderCancel returned %v, want ErrTradingDisabled", err)
 	}
 }
