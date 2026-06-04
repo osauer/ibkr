@@ -3,8 +3,10 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,10 +37,18 @@ type Snapshot struct {
 	Calendar  *rpc.MarketCalendarResult `json:"market_calendar,omitempty"`
 	Account   *rpc.AccountResult        `json:"account,omitempty"`
 	Positions *rpc.PositionsResult      `json:"positions,omitempty"`
+	Quotes    *MarketQuotes             `json:"market_quotes,omitempty"`
+	Regime    *rpc.RegimeMonitorResult  `json:"regime,omitempty"`
 	Canary    *rpc.CanaryResult         `json:"canary,omitempty"`
 	Trading   *rpc.TradingStatus        `json:"trading,omitempty"`
 	Errors    []SourceError             `json:"errors,omitempty"`
 	Sources   map[string]SourceMeta     `json:"sources,omitempty"`
+}
+
+type MarketQuotes struct {
+	AsOf   time.Time            `json:"as_of,omitzero"`
+	Quotes map[string]rpc.Quote `json:"quotes,omitempty"`
+	Errors map[string]string    `json:"errors,omitempty"`
 }
 
 type SourceError struct {
@@ -83,6 +93,7 @@ func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Serv
 
 func (s *Service) Start(ctx context.Context) {
 	_ = s.PollOnce(ctx)
+	s.startMarketQuoteStreams(ctx)
 	t := time.NewTicker(s.pollEvery)
 	defer t.Stop()
 	for {
@@ -92,6 +103,35 @@ func (s *Service) Start(ctx context.Context) {
 			return
 		case <-t.C:
 			_ = s.PollOnce(ctx)
+		}
+	}
+}
+
+func (s *Service) startMarketQuoteStreams(ctx context.Context) {
+	for _, item := range marketQuoteContracts {
+		go s.runMarketQuoteStream(ctx, item)
+	}
+}
+
+func (s *Service) runMarketQuoteStream(ctx context.Context, item marketQuoteContract) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		err := s.client.StreamQuote(ctx, item.contract, func(frame rpc.Frame) error {
+			s.applyMarketQuoteFrame(item.label, frame)
+			return nil
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			s.applyMarketQuoteError(item.label, err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(s.pollEvery):
 		}
 	}
 }
@@ -149,6 +189,22 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			events = append(events, Event{Type: "positions", Data: positions})
 		}
 	}
+	if quotes, err := s.marketQuotes(ctx, now); err != nil {
+		errors = append(errors, sourceErr("market_quotes", err, now))
+		snap.Sources["market_quotes"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+		if quotes != nil {
+			snap.Quotes = quotes
+			if s.changed("market_quotes", quotes) {
+				events = append(events, Event{Type: "market_quotes", Data: quotes})
+			}
+		}
+	} else {
+		snap.Quotes = quotes
+		snap.Sources["market_quotes"] = SourceMeta{UpdatedAt: now}
+		if s.changed("market_quotes", quotes) {
+			events = append(events, Event{Type: "market_quotes", Data: quotes})
+		}
+	}
 	if trading, err := s.client.TradingStatus(ctx); err != nil {
 		errors = append(errors, sourceErr("trading", err, now))
 		snap.Sources["trading"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
@@ -160,10 +216,21 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		}
 	}
 	if pollCanary {
-		if canary, err := s.client.Canary(ctx); err != nil {
+		if canary, regime, err := s.client.CanaryWithRegime(ctx); err != nil {
 			errors = append(errors, sourceErr("canary", err, now))
 			snap.Sources["canary"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+			if strings.HasPrefix(err.Error(), "regime:") {
+				errors = append(errors, sourceErr("regime", err, now))
+				snap.Sources["regime"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+			}
 		} else {
+			if regime != nil {
+				snap.Regime = regime
+				snap.Sources["regime"] = SourceMeta{UpdatedAt: now}
+				if s.changed("regime", regime) {
+					events = append(events, Event{Type: "regime", Data: regime})
+				}
+			}
 			snap.Canary = canary
 			snap.Sources["canary"] = SourceMeta{UpdatedAt: now}
 			if s.changed("canary", canary) {
@@ -191,6 +258,206 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		s.publish(ev)
 	}
 	return out
+}
+
+type marketQuoteContract struct {
+	label    string
+	contract rpc.ContractParams
+}
+
+var marketQuoteContracts = []marketQuoteContract{
+	{
+		label:    "SPY",
+		contract: rpc.ContractParams{Symbol: "SPY", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+	},
+	{
+		label:    "QQQ",
+		contract: rpc.ContractParams{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+	},
+	{
+		label:    "VIX",
+		contract: rpc.ContractParams{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"},
+	},
+}
+
+func (s *Service) marketQuotes(ctx context.Context, now time.Time) (*MarketQuotes, error) {
+	type result struct {
+		label string
+		quote *rpc.Quote
+		err   error
+	}
+	results := make(chan result, len(marketQuoteContracts))
+	var wg sync.WaitGroup
+	for _, item := range marketQuoteContracts {
+		wg.Go(func() {
+			quote, err := s.client.Quote(ctx, item.contract)
+			results <- result{label: item.label, quote: quote, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	out := &MarketQuotes{
+		AsOf:   now,
+		Quotes: map[string]rpc.Quote{},
+		Errors: map[string]string{},
+	}
+	for res := range results {
+		if res.err != nil {
+			out.Errors[res.label] = res.err.Error()
+			continue
+		}
+		if res.quote != nil {
+			out.Quotes[res.label] = *res.quote
+		}
+	}
+	if len(out.Errors) == 0 {
+		out.Errors = nil
+	}
+	if len(out.Quotes) == 0 {
+		out.Quotes = nil
+	}
+	if len(out.Errors) > 0 {
+		return out, errors.New(marketQuoteError(out.Errors))
+	}
+	return out, nil
+}
+
+func (s *Service) applyMarketQuoteFrame(label string, frame rpc.Frame) {
+	now := s.now().UTC()
+	s.mu.Lock()
+	if s.snapshot.Quotes == nil {
+		s.snapshot.Quotes = &MarketQuotes{}
+	}
+	if s.snapshot.Quotes.Quotes == nil {
+		s.snapshot.Quotes.Quotes = map[string]rpc.Quote{}
+	}
+	if frame.Error != nil {
+		if s.snapshot.Quotes.Errors == nil {
+			s.snapshot.Quotes.Errors = map[string]string{}
+		}
+		s.snapshot.Quotes.Errors[label] = frame.Error.Code + ": " + frame.Error.Message
+		s.snapshot.Quotes.AsOf = now
+		out := cloneMarketQuotes(s.snapshot.Quotes)
+		s.mu.Unlock()
+		s.publish(Event{Type: "market_quotes", Data: out})
+		return
+	}
+
+	if s.snapshot.Quotes.Errors != nil {
+		delete(s.snapshot.Quotes.Errors, label)
+		if len(s.snapshot.Quotes.Errors) == 0 {
+			s.snapshot.Quotes.Errors = nil
+		}
+	}
+	quote := s.snapshot.Quotes.Quotes[label]
+	if quote.Symbol == "" {
+		quote.Symbol = label
+	}
+	if frame.T.IsZero() {
+		frame.T = now
+	}
+	quote.AsOf = frame.T
+	quote.PriceAt = frame.T
+	quote.QuotePriceAt = frame.T
+	if frame.Bid != nil {
+		quote.Bid = frame.Bid
+	}
+	if frame.Ask != nil {
+		quote.Ask = frame.Ask
+	}
+	if frame.Last != nil {
+		quote.Last = frame.Last
+	}
+	if frame.BidSize != nil {
+		quote.BidSize = frame.BidSize
+	}
+	if frame.AskSize != nil {
+		quote.AskSize = frame.AskSize
+	}
+	if frame.DataType != "" {
+		quote.DataType = frame.DataType
+	}
+	if price := marketQuoteFramePrice(frame); price != nil {
+		quote.Price = price
+		quote.QuotePrice = price
+		quote.PriceSource = marketQuoteFramePriceSource(frame)
+		quote.QuotePriceSource = quote.PriceSource
+		if quote.PrevClose != nil && *quote.PrevClose != 0 {
+			change := *price - *quote.PrevClose
+			changePct := change / *quote.PrevClose * 100
+			quote.Change = new(change)
+			quote.ChangePct = new(changePct)
+			quote.QuoteChange = new(change)
+			quote.QuoteChangePct = new(changePct)
+		}
+	}
+	s.snapshot.Quotes.Quotes[label] = quote
+	s.snapshot.Quotes.AsOf = now
+	out := cloneMarketQuotes(s.snapshot.Quotes)
+	s.mu.Unlock()
+	s.publish(Event{Type: "market_quotes", Data: out})
+}
+
+func (s *Service) applyMarketQuoteError(label string, err error) {
+	now := s.now().UTC()
+	s.mu.Lock()
+	if s.snapshot.Quotes == nil {
+		s.snapshot.Quotes = &MarketQuotes{}
+	}
+	if s.snapshot.Quotes.Errors == nil {
+		s.snapshot.Quotes.Errors = map[string]string{}
+	}
+	s.snapshot.Quotes.Errors[label] = err.Error()
+	s.snapshot.Quotes.AsOf = now
+	out := cloneMarketQuotes(s.snapshot.Quotes)
+	s.mu.Unlock()
+	s.publish(Event{Type: "market_quotes", Data: out})
+}
+
+func marketQuoteFramePrice(frame rpc.Frame) *float64 {
+	if frame.Last != nil {
+		return new(*frame.Last)
+	}
+	if frame.Bid != nil && frame.Ask != nil {
+		return new((*frame.Bid + *frame.Ask) / 2)
+	}
+	if frame.Bid != nil {
+		return new(*frame.Bid)
+	}
+	if frame.Ask != nil {
+		return new(*frame.Ask)
+	}
+	return nil
+}
+
+func marketQuoteFramePriceSource(frame rpc.Frame) string {
+	if frame.Last != nil {
+		return "last"
+	}
+	if frame.Bid != nil && frame.Ask != nil {
+		return "midpoint"
+	}
+	if frame.Bid != nil {
+		return "bid"
+	}
+	if frame.Ask != nil {
+		return "ask"
+	}
+	return ""
+}
+
+func marketQuoteError(errs map[string]string) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(errs))
+	for _, symbol := range []string{"SPY", "QQQ", "VIX"} {
+		if msg := errs[symbol]; msg != "" {
+			parts = append(parts, symbol+": "+msg)
+		}
+	}
+	return strings.Join(parts, " | ")
 }
 
 func (s *Service) Snapshot() Snapshot {
@@ -267,5 +534,34 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out := in
 	out.Errors = append([]SourceError(nil), in.Errors...)
 	out.Sources = maps.Clone(in.Sources)
+	out.Quotes = cloneMarketQuotes(in.Quotes)
+	out.Regime = cloneRegimeMonitor(in.Regime)
 	return out
+}
+
+func cloneMarketQuotes(in *MarketQuotes) *MarketQuotes {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Quotes = maps.Clone(in.Quotes)
+	out.Errors = maps.Clone(in.Errors)
+	return &out
+}
+
+func cloneRegimeMonitor(in *rpc.RegimeMonitorResult) *rpc.RegimeMonitorResult {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Lifecycle.Evidence = append([]rpc.LifecycleEvidence(nil), in.Lifecycle.Evidence...)
+	out.Lifecycle.ConfirmedBy = append([]string(nil), in.Lifecycle.ConfirmedBy...)
+	out.Lifecycle.Unconfirmed = append([]string(nil), in.Lifecycle.Unconfirmed...)
+	out.Lifecycle.Suppressed = append([]string(nil), in.Lifecycle.Suppressed...)
+	out.Lifecycle.RejectedBy = append([]string(nil), in.Lifecycle.RejectedBy...)
+	out.WarningDetails = append([]rpc.RegimeWarning(nil), in.WarningDetails...)
+	out.DataQuality = append([]rpc.DataQualityHealth(nil), in.DataQuality...)
+	out.SourceHealth = append([]rpc.CompactSourceHealth(nil), in.SourceHealth...)
+	out.Indicators = append([]rpc.RegimeMonitorIndicator(nil), in.Indicators...)
+	return &out
 }

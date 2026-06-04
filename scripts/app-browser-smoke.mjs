@@ -85,6 +85,11 @@ await context.addInitScript(() => {
     try {
       const res = await nativeFetch(...fetchArgs);
       globalThis.__ibkrSmoke.fetches.push({ url, status: res.status, at: Date.now() });
+      if (res.ok && url.endsWith("/api/bootstrap")) {
+        res.clone().json().then((body) => {
+          globalThis.__ibkrSmoke.latestCanaryHeldStress = body?.snapshot?.canary?.portfolio?.held_stress?.length || 0;
+        }).catch(() => {});
+      }
       return res;
     } catch (err) {
       globalThis.__ibkrSmoke.fetches.push({ url, error: String(err?.message || err), at: Date.now() });
@@ -95,9 +100,18 @@ await context.addInitScript(() => {
   globalThis.EventSource = function smokeEventSource(url, options) {
     const es = new NativeEventSource(url, options);
     globalThis.__ibkrSmoke.openedEvents++;
-    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "canary", "heartbeat"]) {
-      es.addEventListener(type, () => {
+    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "canary", "heartbeat"]) {
+      es.addEventListener(type, (event) => {
         globalThis.__ibkrSmoke.eventCounts[type] = (globalThis.__ibkrSmoke.eventCounts[type] || 0) + 1;
+        if (type === "snapshot" || type === "canary") {
+          try {
+            const data = JSON.parse(event.data);
+            const canary = type === "snapshot" ? data?.canary : data;
+            globalThis.__ibkrSmoke.latestCanaryHeldStress = canary?.portfolio?.held_stress?.length || 0;
+          } catch {
+            // Smoke assertions below stay DOM-based when payload inspection fails.
+          }
+        }
       });
     }
     return es;
@@ -246,9 +260,21 @@ async function fetchEventsDiagnostics(page) {
 }
 
 async function exerciseAccountPrivacy(page) {
+  const menuWasOpen = await page.locator("#accountMenu").evaluate((el) => !el.hidden);
+  if (!menuWasOpen) {
+    await page.locator("#accountMenuToggle").click();
+    await page.waitForFunction(() => {
+      const panel = document.getElementById("accountMenu");
+      return panel && !panel.hidden;
+    }, { timeout: 5000 });
+  }
   const value = page.locator("#netLiquidation");
   const before = (await value.textContent())?.trim();
   if (before === "--") {
+    if (!menuWasOpen) {
+      await page.locator("#accountMenuToggle").click();
+      await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
+    }
     return { masked_by_default: false, toggle_reveals: false, no_value: true };
   }
   if (before !== "******") {
@@ -261,6 +287,10 @@ async function exerciseAccountPrivacy(page) {
   }, { timeout: 5000 });
   await page.locator("#accountPrivacyToggle").click();
   await page.waitForFunction(() => document.getElementById("netLiquidation")?.textContent?.trim() === "******", { timeout: 5000 });
+  if (!menuWasOpen) {
+    await page.locator("#accountMenuToggle").click();
+    await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
+  }
   return { masked_by_default: true, toggle_reveals: true };
 }
 
@@ -268,29 +298,30 @@ async function exerciseAccountMenu(page) {
   await page.locator("#accountMenuToggle").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("accountMenu");
-    return panel && !panel.hidden && document.getElementById("menuAccountSync")?.textContent?.trim();
+    return panel && !panel.hidden && document.getElementById("accountContextLine")?.textContent?.trim();
   }, { timeout: 5000 });
   const menu = await page.evaluate(() => ({
     expanded: document.getElementById("accountMenuToggle")?.getAttribute("aria-expanded") === "true",
-    account: document.getElementById("menuAccountID")?.textContent?.trim() || "",
-    type: document.getElementById("menuAccountType")?.textContent?.trim() || "",
-    base: document.getElementById("menuBaseCurrency")?.textContent?.trim() || "",
-    sync: document.getElementById("menuAccountSync")?.textContent?.trim() || "",
+    context: document.getElementById("accountContextLine")?.textContent?.trim() || "",
+    environment: document.getElementById("accountEnvironment")?.textContent?.trim() || "",
+    orderAccount: document.getElementById("orderAccountLabel")?.textContent?.trim() || "",
+    pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
+    chip: document.getElementById("accountChipText")?.textContent?.trim() || "",
   }));
   if (!menu.expanded) {
     throw new Error("account menu did not mark itself expanded");
   }
-  if (!menu.account || !menu.type || !menu.base || !menu.sync) {
+  if (!menu.context || !menu.environment || !menu.orderAccount || !menu.pill || !menu.chip) {
     throw new Error(`account menu is missing values: ${JSON.stringify(menu)}`);
   }
   await page.locator("#accountMenuToggle").click();
   await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
   return {
     opens: true,
-    privacy_masked: menu.account === "******",
-    type: menu.type,
-    base: menu.base,
-    sync_present: menu.sync !== "--",
+    context_present: menu.context !== "Waiting for account context",
+    environment: menu.environment,
+    order_account: menu.orderAccount,
+    chip: menu.chip,
   };
 }
 
@@ -318,9 +349,14 @@ async function exerciseCanaryDetail(page) {
   const counts = await page.evaluate(() => ({
     cards: document.getElementById("canaryDetailGrid")?.children.length || 0,
     drivers: document.getElementById("canaryDrivers")?.children.length || 0,
+    held_stress: document.getElementById("heldStressList")?.children.length || 0,
+    held_stress_payload: globalThis.__ibkrSmoke?.latestCanaryHeldStress || 0,
   }));
+  if (counts.held_stress_payload > 0 && counts.held_stress === 0) {
+    throw new Error("canary held_stress payload is present but detail panel did not render it");
+  }
   await page.locator("#canaryDetailToggle").click();
-  return { opens: true, timestamp, cards: counts.cards, drivers: counts.drivers };
+  return { opens: true, timestamp, cards: counts.cards, drivers: counts.drivers, held_stress: counts.held_stress };
 }
 
 async function exerciseMarketContext(page) {
@@ -342,6 +378,9 @@ async function exerciseMarketContext(page) {
   if (before.vixLevel !== "--" && before.vixChange === "--") {
     throw new Error("VIX has a level but no percent change");
   }
+  if (before.qqqLevel !== "--" && before.qqqChange === "--") {
+    throw new Error("QQQ has a level but no percent change");
+  }
   if (!before.regime || before.regime === "--") {
     if (before.weather !== "weather-na") {
       throw new Error(`empty market regime should use weather-na, got ${JSON.stringify(before.weather)}`);
@@ -350,6 +389,7 @@ async function exerciseMarketContext(page) {
       no_value: true,
       weather: before.weather,
       spy_level_present: before.spyLevel !== "--",
+      qqq_level_present: before.qqqLevel !== "--",
       vix_level_present: before.vixLevel !== "--",
       indicators: 0,
     };
@@ -371,6 +411,7 @@ async function exerciseMarketContext(page) {
     regime: before.regime,
     weather: before.weather,
     spy_level_present: before.spyLevel !== "--",
+    qqq_level_present: before.qqqLevel !== "--",
     vix_level_present: before.vixLevel !== "--",
     indicators,
   };
@@ -428,6 +469,8 @@ async function readMarketContext(page) {
   return page.evaluate(() => ({
     spyLevel: document.getElementById("spyLevel")?.textContent?.trim() || "",
     spyChange: document.getElementById("spyChange")?.textContent?.trim() || "",
+    qqqLevel: document.getElementById("nasdaqLevel")?.textContent?.trim() || "",
+    qqqChange: document.getElementById("nasdaqChange")?.textContent?.trim() || "",
     vixLevel: document.getElementById("vixLevel")?.textContent?.trim() || "",
     vixChange: document.getElementById("vixChange")?.textContent?.trim() || "",
     regime: document.getElementById("marketRegime")?.textContent?.trim() || "",

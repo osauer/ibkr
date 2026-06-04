@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	nethttp "net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/osauer/ibkr/internal/app/auth"
 	"github.com/osauer/ibkr/internal/app/daemonclient"
 	"github.com/osauer/ibkr/internal/app/live"
+	"github.com/osauer/ibkr/internal/app/orderreview"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
 	appweb "github.com/osauer/ibkr/web/app"
@@ -57,7 +59,11 @@ func Register(deps Dependencies) {
 	srv.GET("/service-worker.js", h.serveStatic)
 	srv.GET("/app.js", h.serveStatic)
 	srv.GET("/styles.css", h.serveStatic)
-	srv.GET("/icon.svg", h.serveStatic)
+	srv.GET("/icon-192.png", h.serveStatic)
+	srv.GET("/icon-512.png", h.serveStatic)
+	srv.GET("/favicon-16.png", h.serveStatic)
+	srv.GET("/favicon-32.png", h.serveStatic)
+	srv.GET("/favicon-64.png", h.serveStatic)
 	srv.GET("/favicon.ico", h.serveIcon)
 
 	srv.POST("/api/pairing/sessions", h.handleStartPairing)
@@ -67,6 +73,7 @@ func Register(deps Dependencies) {
 
 	srv.GET("/api/bootstrap", h.requireAuth(h.handleBootstrap))
 	srv.GET("/api/snapshot", h.requireAuth(h.handleSnapshot))
+	srv.GET("/api/market-calendar", h.requireAuth(h.handleMarketCalendar))
 	srv.GET("/api/events", h.requireAuth(h.handleEvents))
 	srv.GET("/api/alerts/settings", h.requireAuth(h.handleGetAlertSettings))
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
@@ -75,8 +82,12 @@ func Register(deps Dependencies) {
 	srv.POST("/api/order-review-sets", h.requireAuth(h.handleCreateOrderReviewSet))
 	srv.GET("/api/order-review-sets/{id}", h.requireAuth(h.handleGetOrderReviewSet))
 	srv.POST("/api/order-review-sets/{id}/preview", h.requireAuth(h.handlePreviewOrderReviewSet))
+	srv.POST("/api/order-review-sets/{id}/transmit", h.requireAuth(h.handleTransmitOrderReviewSet))
 	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
 	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
+	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
+	srv.POST("/api/orders/{id}/preview-modify", h.requireAuth(h.handleOrderPreviewModify))
+	srv.POST("/api/orders/{id}/modify", h.requireAuth(h.handleOrderModify))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
 	srv.POST("/api/tools/{name}", h.requireAuth(h.handleTool))
@@ -91,8 +102,8 @@ func (h *handler) serveStatic(w nethttp.ResponseWriter, r *nethttp.Request) {
 }
 
 func (h *handler) serveIcon(w nethttp.ResponseWriter, r *nethttp.Request) {
-	w.Header().Set("Content-Type", "image/svg+xml")
-	nethttp.ServeFileFS(w, r, appweb.Files, "icon.svg")
+	w.Header().Set("Content-Type", "image/png")
+	nethttp.ServeFileFS(w, r, appweb.Files, "favicon-32.png")
 }
 
 func (h *handler) handleStartPairing(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -203,7 +214,7 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"snapshot":          h.deps.Live.Snapshot(),
 		"alert_settings":    h.deps.Store.AlertSettings(),
 		"alerts":            h.deps.Store.AlertHistory(20),
-		"order_review_sets": h.deps.Store.OrderReviewSets(10),
+		"order_review_sets": h.currentOrderReviewSets(10),
 		"last_push":         h.deps.Store.LastPush(),
 		"relay":             h.deps.Relay.Status(),
 		"vapid_public_key":  vapid.PublicKey,
@@ -211,8 +222,59 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 	})
 }
 
+func (h *handler) currentOrderReviewSets(limit int) []orderreview.Set {
+	snap := h.deps.Live.Snapshot()
+	if snap.Canary == nil || snap.Canary.Fingerprint.Key == "" {
+		return nil
+	}
+	sets := h.deps.Store.OrderReviewSets(0)
+	out := make([]orderreview.Set, 0, min(limit, len(sets)))
+	for _, set := range sets {
+		if !orderReviewSetMatchesSnapshot(set, snap) {
+			continue
+		}
+		out = append(out, set)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func orderReviewSetMatchesSnapshot(set orderreview.Set, snap live.Snapshot) bool {
+	if snap.Canary == nil || snap.Canary.Fingerprint.Key == "" {
+		return false
+	}
+	if set.CanaryFingerprint == "" || set.CanaryFingerprint != snap.Canary.Fingerprint.Key {
+		return false
+	}
+	if snap.Trading == nil {
+		return true
+	}
+	if set.Capabilities.Account != "" && snap.Trading.Account != "" && set.Capabilities.Account != snap.Trading.Account {
+		return false
+	}
+	if set.Capabilities.Mode != "" && snap.Trading.Mode != "" && set.Capabilities.Mode != snap.Trading.Mode {
+		return false
+	}
+	return true
+}
+
 func (h *handler) handleSnapshot(w nethttp.ResponseWriter, _ *nethttp.Request) {
 	writeJSON(w, h.deps.Live.Snapshot())
+}
+
+func (h *handler) handleMarketCalendar(w nethttp.ResponseWriter, r *nethttp.Request) {
+	market := strings.TrimSpace(r.URL.Query().Get("market"))
+	if market == "" {
+		market = "us"
+	}
+	calendar, err := h.deps.Daemon.MarketCalendarFor(r.Context(), market)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, calendar)
 }
 
 func (h *handler) handleEvents(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -271,12 +333,15 @@ func (h *handler) handleAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
 	writeJSON(w, h.deps.Store.AlertHistory(50))
 }
 
-func (h *handler) handleClearAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
+func (h *handler) handleClearAlerts(w nethttp.ResponseWriter, r *nethttp.Request) {
+	cleared := len(h.deps.Store.AlertHistory(0))
 	if err := h.deps.Store.ClearAlertHistory(); err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]bool{"ok": true})
+	sess, _ := h.session(r)
+	log.Printf("ibkr app alerts.clear device_id=%s cleared=%d", sess.DeviceID, cleared)
+	writeJSON(w, map[string]any{"ok": true, "cleared": cleared})
 }
 
 func (h *handler) handlePushSubscribe(w nethttp.ResponseWriter, r *nethttp.Request) {

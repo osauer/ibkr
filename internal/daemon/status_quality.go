@@ -397,26 +397,48 @@ func staleRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
 }
 
 func partialRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
+	volPartial := regimeRequiredFieldsMissing(r.VIXTermStructure.Status, r.VIXTermStructure.Band, r.VIXTermStructure.FieldsMissing)
+	creditPartial := regimeRequiredFieldsMissing(r.HYGSPYDivergence.Status, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.FieldsMissing) ||
+		regimeRequiredFieldsMissing(r.CreditSpreads.Status, r.CreditSpreads.Band, r.CreditSpreads.FieldsMissing)
 	candidates := []struct {
 		name     string
 		statuses []string
+		partial  bool
 	}{
-		{name: "vol", statuses: []string{r.VIXTermStructure.Status, r.VolOfVol.Status}},
-		{name: "credit", statuses: []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}},
-		{name: "funding", statuses: []string{r.FundingStress.Status}},
-		{name: "FX", statuses: []string{r.USDJPY.Status}},
-		{name: "gamma", statuses: []string{r.GammaZero.Status}},
-		{name: "breadth", statuses: []string{r.Breadth.Status}},
+		{name: "vol", statuses: []string{r.VIXTermStructure.Status, r.VolOfVol.Status}, partial: volPartial},
+		{name: "credit", statuses: []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}, partial: creditPartial},
+		{name: "funding", statuses: []string{r.FundingStress.Status}, partial: regimeRequiredFieldsMissing(r.FundingStress.Status, r.FundingStress.Band, r.FundingStress.FieldsMissing)},
+		{name: "FX", statuses: []string{r.USDJPY.Status}, partial: regimeRequiredFieldsMissing(r.USDJPY.Status, r.USDJPY.Band, r.USDJPY.FieldsMissing)},
+		{name: "gamma", statuses: []string{r.GammaZero.Status}, partial: regimeRequiredFieldsMissing(r.GammaZero.Status, r.GammaZero.Band, r.GammaZero.FieldsMissing)},
+		{name: "breadth", statuses: []string{r.Breadth.Status}, partial: regimeRequiredFieldsMissing(r.Breadth.Status, r.Breadth.Band, r.Breadth.FieldsMissing)},
 	}
 	out := []string{}
 	for _, c := range candidates {
-		if hasRegimeStatus(c.statuses, rpc.RegimeStatusComputing) ||
+		if c.partial ||
+			hasRegimeStatus(c.statuses, rpc.RegimeStatusComputing) ||
 			hasRegimeStatus(c.statuses, rpc.RegimeStatusUnavailable) ||
 			hasRegimeStatus(c.statuses, rpc.RegimeStatusError) {
 			out = append(out, c.name)
 		}
 	}
 	return out
+}
+
+func regimeRequiredFieldsMissing(status string, band string, fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case rpc.RegimeStatusOK, rpc.RegimeStatusStale:
+	default:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(band)) {
+	case "", "unranked":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasRegimeStatus(statuses []string, want string) bool {

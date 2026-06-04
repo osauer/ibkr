@@ -17,6 +17,10 @@ func handleOrderPlace(_ context.Context, _ *rpc.Request) (any, error) {
 	return nil, ErrTradingDisabled
 }
 
+func handleOrderModify(_ context.Context, _ *rpc.Request) (any, error) {
+	return nil, ErrTradingDisabled
+}
+
 func handleOrderCancel(_ context.Context, _ *rpc.Request) (any, error) {
 	return nil, ErrTradingDisabled
 }

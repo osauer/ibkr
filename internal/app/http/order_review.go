@@ -27,6 +27,28 @@ type orderReviewRowEdit struct {
 	Quantity int    `json:"quantity"`
 }
 
+type orderReviewTransmitRow struct {
+	RowID    string                `json:"row_id"`
+	Quantity int                   `json:"quantity"`
+	Result   *rpc.OrderPlaceResult `json:"result,omitempty"`
+	Failure  string                `json:"failure,omitempty"`
+}
+
+type orderModifyPreviewRequest struct {
+	Action     string              `json:"action,omitempty"`
+	Contract   *rpc.ContractParams `json:"contract,omitempty"`
+	Quantity   int                 `json:"quantity"`
+	OrderType  string              `json:"order_type,omitempty"`
+	LimitPrice *float64            `json:"limit_price,omitempty"`
+	Strategy   string              `json:"strategy,omitempty"`
+	TIF        string              `json:"tif,omitempty"`
+	OutsideRTH *bool               `json:"outside_rth,omitempty"`
+}
+
+type orderModifyRequest struct {
+	PreviewToken string `json:"preview_token"`
+}
+
 func (h *handler) handleCreateOrderReviewSet(w nethttp.ResponseWriter, r *nethttp.Request) {
 	set, err := h.currentRiskPlanReviewSet(r.Context())
 	if err != nil {
@@ -95,6 +117,46 @@ func (h *handler) handlePreviewOrderReviewSet(w nethttp.ResponseWriter, r *netht
 	writeJSON(w, map[string]any{"set": set, "preview": preview})
 }
 
+func (h *handler) handleTransmitOrderReviewSet(w nethttp.ResponseWriter, r *nethttp.Request) {
+	set, ok := h.deps.Store.OrderReviewSet(r.PathValue("id"))
+	if !ok {
+		writeError(w, nethttp.StatusNotFound, "order review set not found")
+		return
+	}
+	preview := set.LatestPreview
+	if preview == nil {
+		writeError(w, nethttp.StatusBadRequest, "order review set has no preview")
+		return
+	}
+	trading, err := h.deps.Daemon.TradingStatus(r.Context())
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	rows, err := validateTransmitPreview(set, *preview, *trading, time.Now().UTC())
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	out := make([]orderReviewTransmitRow, 0, len(rows))
+	for _, row := range rows {
+		token := strings.TrimSpace(row.Preview.PreviewToken)
+		res, err := h.deps.Daemon.OrderPlace(r.Context(), rpc.OrderPlaceParams{PreviewToken: token, TimeoutMs: 10000})
+		item := orderReviewTransmitRow{RowID: row.RowID, Quantity: row.Quantity}
+		if err != nil {
+			item.Failure = err.Error()
+		} else {
+			item.Result = res
+		}
+		out = append(out, item)
+	}
+	if orders, err := h.deps.Daemon.OrdersOpen(r.Context(), rpc.OrdersOpenParams{}); err == nil {
+		writeJSON(w, map[string]any{"rows": out, "orders_open": orders, "as_of": time.Now().UTC()})
+		return
+	}
+	writeJSON(w, map[string]any{"rows": out, "as_of": time.Now().UTC()})
+}
+
 func (h *handler) handleOrdersOpen(w nethttp.ResponseWriter, r *nethttp.Request) {
 	res, err := h.deps.Daemon.OrdersOpen(r.Context(), rpc.OrdersOpenParams{Account: strings.TrimSpace(r.URL.Query().Get("account"))})
 	if err != nil {
@@ -117,8 +179,70 @@ func (h *handler) handleOrderStatus(w nethttp.ResponseWriter, r *nethttp.Request
 	writeJSON(w, res)
 }
 
+func (h *handler) handleOrderCancel(w nethttp.ResponseWriter, r *nethttp.Request) {
+	res, err := h.deps.Daemon.OrderCancel(r.Context(), rpc.OrderCancelParams{ID: r.PathValue("id"), TimeoutMs: 10000})
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (h *handler) handleOrderPreviewModify(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req orderModifyPreviewRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	status, err := h.deps.Daemon.OrderStatus(r.Context(), rpc.OrderStatusParams{ID: r.PathValue("id")})
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	if !status.Found {
+		writeError(w, nethttp.StatusNotFound, "order not found")
+		return
+	}
+	params, err := modifyPreviewParamsFromRequest(status.Order, req)
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := h.deps.Daemon.OrderPreview(r.Context(), params)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (h *handler) handleOrderModify(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req orderModifyRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.PreviewToken) == "" {
+		writeError(w, nethttp.StatusBadRequest, "preview_token required")
+		return
+	}
+	res, err := h.deps.Daemon.OrderModify(r.Context(), rpc.OrderModifyParams{
+		ID:           r.PathValue("id"),
+		PreviewToken: strings.TrimSpace(req.PreviewToken),
+		TimeoutMs:    10000,
+	})
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
 func (h *handler) currentRiskPlanReviewSet(ctx context.Context) (orderreview.Set, error) {
-	canary, _ := h.deps.Daemon.Canary(ctx)
+	canary, err := h.deps.Daemon.Canary(ctx)
+	if err != nil {
+		return orderreview.Set{}, err
+	}
 	plan, err := h.deps.Daemon.RiskPlan(ctx, rpc.RiskPlanModeAuto, canary)
 	if err != nil {
 		return orderreview.Set{}, err
@@ -327,6 +451,99 @@ func validateReviewRowEdit(row orderreview.Row, qty int, included bool) []string
 		blockers = append(blockers, "contract symbol required")
 	}
 	return blockers
+}
+
+func validateTransmitPreview(set orderreview.Set, preview orderreview.Preview, trading rpc.TradingStatus, now time.Time) ([]orderreview.PreviewRow, error) {
+	if !trading.CanTransmit {
+		return nil, fmt.Errorf("trading.status can_transmit=false")
+	}
+	if preview.SetID != set.ID {
+		return nil, fmt.Errorf("preview set_id does not match review set")
+	}
+	if preview.SetRevision != set.Revision {
+		return nil, fmt.Errorf("preview revision does not match review set")
+	}
+	if !preview.SubmitReady {
+		return nil, fmt.Errorf("preview is not submit-ready")
+	}
+	rows := make([]orderreview.PreviewRow, 0)
+	for _, row := range preview.Rows {
+		if !row.Included || row.Quantity <= 0 {
+			continue
+		}
+		if !row.SubmitEligible {
+			return nil, fmt.Errorf("row %s is not submit-eligible", row.RowID)
+		}
+		if row.Preview == nil {
+			return nil, fmt.Errorf("row %s has no broker preview", row.RowID)
+		}
+		if strings.TrimSpace(row.Preview.PreviewToken) == "" {
+			return nil, fmt.Errorf("row %s has no preview token", row.RowID)
+		}
+		if row.Preview.PreviewTokenExpiresAt.IsZero() || !now.Before(row.Preview.PreviewTokenExpiresAt) {
+			return nil, fmt.Errorf("row %s preview token is expired", row.RowID)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("select at least one submit-eligible row")
+	}
+	return rows, nil
+}
+
+func modifyPreviewParamsFromRequest(order rpc.OrderView, req orderModifyPreviewRequest) (rpc.OrderPreviewParams, error) {
+	if req.Quantity <= 0 {
+		return rpc.OrderPreviewParams{}, fmt.Errorf("quantity must be positive")
+	}
+	contract := rpc.ContractParams{
+		Symbol:  strings.TrimSpace(order.Symbol),
+		SecType: strings.TrimSpace(order.SecType),
+	}
+	if req.Contract != nil {
+		contract = *req.Contract
+	}
+	if strings.TrimSpace(contract.Symbol) == "" {
+		return rpc.OrderPreviewParams{}, fmt.Errorf("contract symbol required")
+	}
+	if strings.TrimSpace(contract.SecType) == "" {
+		contract.SecType = "STK"
+	}
+	if strings.TrimSpace(contract.Currency) == "" && strings.TrimSpace(contract.Market) == "" &&
+		strings.TrimSpace(contract.Exchange) == "" && strings.TrimSpace(contract.PrimaryExch) == "" {
+		contract.Currency = "USD"
+	}
+	action := strings.TrimSpace(req.Action)
+	if action == "" {
+		action = order.Action
+	}
+	if strings.TrimSpace(action) == "" {
+		return rpc.OrderPreviewParams{}, fmt.Errorf("action required")
+	}
+	orderType := defaultString(req.OrderType, order.OrderType)
+	orderType = defaultString(orderType, rpc.OrderTypeLMT)
+	tif := defaultString(req.TIF, order.TIF)
+	tif = defaultString(tif, rpc.OrderTIFDay)
+	limit := req.LimitPrice
+	if limit == nil && order.LimitPrice > 0 {
+		v := order.LimitPrice
+		limit = &v
+	}
+	outsideRTH := false
+	if req.OutsideRTH != nil {
+		outsideRTH = *req.OutsideRTH
+	}
+	return rpc.OrderPreviewParams{
+		Action:     action,
+		Contract:   contract,
+		Quantity:   req.Quantity,
+		OrderType:  orderType,
+		LimitPrice: limit,
+		Strategy:   defaultString(req.Strategy, rpc.OrderStrategyPatientLimit),
+		TIF:        tif,
+		OutsideRTH: outsideRTH,
+		ReplaceID:  order.OrderRef,
+		TimeoutMs:  5000,
+	}, nil
 }
 
 func classifyReviewSetChanges(oldSet, newSet orderreview.Set) []orderreview.RebaseChange {

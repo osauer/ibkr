@@ -28,6 +28,22 @@ make app-smoke APP_SMOKE_BROWSER=webkit
 make app-lifecycle-smoke APP_SMOKE_BROWSER=webkit
 ```
 
+App icons are generated PNGs. Regenerate the smaller PWA/favicon sizes from
+the checked-in cropped master with:
+
+```sh
+web/app/generate-icons.sh
+```
+
+If the original canary source sheet is available locally, recrop the 512px
+master and regenerate all derived sizes with:
+
+```sh
+IBKR_CANARY_ICON_SOURCE_SHEET=/path/to/source.png \
+IBKR_CANARY_ICON_CROP=y,x,height,width \
+web/app/generate-icons.sh
+```
+
 The `/tools` surface is deliberately boring: status, snapshot, events, auth,
 push, and relay diagnostics only. Trading workflows, HTTP MCP, and production
 relay hosting are future work.

@@ -20,7 +20,9 @@ import (
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
 	"github.com/osauer/ibkr/internal/app/auth"
+	"github.com/osauer/ibkr/internal/app/daemonclient"
 	"github.com/osauer/ibkr/internal/app/live"
+	"github.com/osauer/ibkr/internal/app/orderreview"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -282,6 +284,110 @@ func TestOrderReviewSetPreviewRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestOrderReviewSetMatchesCurrentSnapshotOnly(t *testing.T) {
+	t.Parallel()
+	snap := live.Snapshot{
+		Canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
+		Trading: &rpc.TradingStatus{Account: "DU123", Mode: "paper"},
+	}
+	current := orderreview.Set{
+		CanaryFingerprint: "fp-1",
+		Capabilities:      rpc.TradingStatus{Account: "DU123", Mode: "paper"},
+	}
+	if !orderReviewSetMatchesSnapshot(current, snap) {
+		t.Fatalf("current set should match snapshot")
+	}
+	for name, set := range map[string]orderreview.Set{
+		"fingerprint": {CanaryFingerprint: "fp-old", Capabilities: current.Capabilities},
+		"account":     {CanaryFingerprint: "fp-1", Capabilities: rpc.TradingStatus{Account: "DU999", Mode: "paper"}},
+		"mode":        {CanaryFingerprint: "fp-1", Capabilities: rpc.TradingStatus{Account: "DU123", Mode: "live"}},
+	} {
+		if orderReviewSetMatchesSnapshot(set, snap) {
+			t.Fatalf("%s-stale set should not match snapshot", name)
+		}
+	}
+}
+
+func TestOrderReviewSetTransmitRequiresTradingCapability(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	cookie := routeSessionCookie(t, handler)
+	set := createRouteReviewSet(t, handler, cookie)
+	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", nil)
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("transmit status=%d, want 400; body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "can_transmit=false") {
+		t.Fatalf("transmit response missing capability reason: %s", res.Body.String())
+	}
+}
+
+func TestOrderWriteHTTPAdapters(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+	set := createRouteReviewSet(t, handler, cookie)
+	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
+
+	transmitReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", nil)
+	transmitReq.AddCookie(cookie)
+	transmitRes := httptest.NewRecorder()
+	handler.ServeHTTP(transmitRes, transmitReq)
+	if transmitRes.Code != http.StatusOK {
+		t.Fatalf("transmit status=%d, want 200; body=%s", transmitRes.Code, transmitRes.Body.String())
+	}
+	var transmit struct {
+		Rows []struct {
+			RowID  string                `json:"row_id"`
+			Result *rpc.OrderPlaceResult `json:"result"`
+		} `json:"rows"`
+	}
+	if err := json.NewDecoder(transmitRes.Body).Decode(&transmit); err != nil {
+		t.Fatalf("decode transmit: %v", err)
+	}
+	if len(transmit.Rows) != 1 || transmit.Rows[0].RowID != set.RowID || transmit.Rows[0].Result == nil || !transmit.Rows[0].Result.Accepted {
+		t.Fatalf("unexpected transmit response: %#v", transmit)
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/cancel", nil)
+	cancelReq.AddCookie(cookie)
+	cancelRes := httptest.NewRecorder()
+	handler.ServeHTTP(cancelRes, cancelReq)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d, want 200; body=%s", cancelRes.Code, cancelRes.Body.String())
+	}
+
+	modPreviewBody := bytes.NewReader([]byte(`{"action":"SELL","quantity":1,"limit_price":449.5,"tif":"DAY"}`))
+	modPreviewReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/preview-modify", modPreviewBody)
+	modPreviewReq.AddCookie(cookie)
+	modPreviewRes := httptest.NewRecorder()
+	handler.ServeHTTP(modPreviewRes, modPreviewReq)
+	if modPreviewRes.Code != http.StatusOK {
+		t.Fatalf("preview-modify status=%d, want 200; body=%s", modPreviewRes.Code, modPreviewRes.Body.String())
+	}
+	var modPreview rpc.OrderPreviewResult
+	if err := json.NewDecoder(modPreviewRes.Body).Decode(&modPreview); err != nil {
+		t.Fatalf("decode preview-modify: %v", err)
+	}
+	if modPreview.Draft.Quantity != 1 || modPreview.Draft.OrderRef == "" {
+		t.Fatalf("unexpected modify preview draft: %#v", modPreview.Draft)
+	}
+
+	modifyBody := bytes.NewReader([]byte(`{"preview_token":"modify-token"}`))
+	modifyReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/modify", modifyBody)
+	modifyReq.AddCookie(cookie)
+	modifyRes := httptest.NewRecorder()
+	handler.ServeHTTP(modifyRes, modifyReq)
+	if modifyRes.Code != http.StatusOK {
+		t.Fatalf("modify status=%d, want 200; body=%s", modifyRes.Code, modifyRes.Body.String())
+	}
+}
+
 func TestPairingSessionAcceptsLocalPublicURLOverride(t *testing.T) {
 	t.Parallel()
 
@@ -348,6 +454,11 @@ func TestIsLocalMacAcceptsOwnInterfaceAddress(t *testing.T) {
 
 func newTestHandler(t *testing.T) *hyperserve.Server {
 	t.Helper()
+	return newTestHandlerWithClient(t, routeFakeClient{})
+}
+
+func newTestHandlerWithClient(t *testing.T, fakeClient daemonclient.Client) *hyperserve.Server {
+	t.Helper()
 	store, err := state.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -358,7 +469,6 @@ func newTestHandler(t *testing.T) *hyperserve.Server {
 		t.Fatalf("EnsureVAPID: %v", err)
 	}
 	authMgr := auth.NewManager(store, time.Minute)
-	fakeClient := routeFakeClient{}
 	liveSvc := live.New(fakeClient, time.Minute, time.Minute)
 	liveSvc.PollOnce(t.Context())
 	srv, err := hyperserve.NewServer(
@@ -379,6 +489,59 @@ func newTestHandler(t *testing.T) *hyperserve.Server {
 		Version:   "test-version",
 	})
 	return srv
+}
+
+type routeReviewSetRef struct {
+	ID       string
+	Revision string
+	RowID    string
+}
+
+func createRouteReviewSet(t *testing.T, handler http.Handler, cookie *http.Cookie) routeReviewSetRef {
+	t.Helper()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets", nil)
+	createReq.AddCookie(cookie)
+	createRes := httptest.NewRecorder()
+	handler.ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusOK {
+		t.Fatalf("create status=%d, want 200; body=%s", createRes.Code, createRes.Body.String())
+	}
+	var set struct {
+		ID       string `json:"id"`
+		Revision string `json:"revision"`
+		Rows     []struct {
+			RowID string `json:"row_id"`
+		} `json:"rows"`
+	}
+	if err := json.NewDecoder(createRes.Body).Decode(&set); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if set.ID == "" || set.Revision == "" || len(set.Rows) == 0 {
+		t.Fatalf("unexpected created set: %#v", set)
+	}
+	return routeReviewSetRef{ID: set.ID, Revision: set.Revision, RowID: set.Rows[0].RowID}
+}
+
+func previewRouteReviewSet(t *testing.T, handler http.Handler, cookie *http.Cookie, setID, revision, rowID string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"revision": revision,
+		"rows": []map[string]any{{
+			"row_id":   rowID,
+			"included": true,
+			"quantity": 2,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal preview: %v", err)
+	}
+	previewReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+setID+"/preview", bytes.NewReader(body))
+	previewReq.AddCookie(cookie)
+	previewRes := httptest.NewRecorder()
+	handler.ServeHTTP(previewRes, previewReq)
+	if previewRes.Code != http.StatusOK {
+		t.Fatalf("preview status=%d, want 200; body=%s", previewRes.Code, previewRes.Body.String())
+	}
 }
 
 func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
@@ -428,6 +591,10 @@ func (routeFakeClient) MarketCalendar(context.Context) (*rpc.MarketCalendarResul
 	return &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}}, nil
 }
 
+func (routeFakeClient) MarketCalendarFor(_ context.Context, market string) (*rpc.MarketCalendarResult, error) {
+	return &rpc.MarketCalendarResult{Market: market, Label: market, Session: rpc.MarketSession{Market: market, State: "regular", IsOpen: true}}, nil
+}
+
 func (routeFakeClient) Account(context.Context) (*rpc.AccountResult, error) {
 	return &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000}, nil
 }
@@ -436,8 +603,22 @@ func (routeFakeClient) Positions(context.Context) (*rpc.PositionsResult, error) 
 	return &rpc.PositionsResult{}, nil
 }
 
+func (routeFakeClient) Quote(_ context.Context, contract rpc.ContractParams) (*rpc.Quote, error) {
+	return &rpc.Quote{Symbol: contract.Symbol, Price: new(500.0), ChangePct: new(0.4), DataType: rpc.MarketDataLive}, nil
+}
+
+func (routeFakeClient) StreamQuote(context.Context, rpc.ContractParams, func(rpc.Frame) error) error {
+	return nil
+}
+
 func (routeFakeClient) Canary(context.Context) (*rpc.CanaryResult, error) {
 	return &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}}, nil
+}
+
+func (routeFakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error) {
+	return &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
+		&rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
+		nil
 }
 
 func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
@@ -483,22 +664,27 @@ func (routeFakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rp
 }
 
 func (routeFakeClient) OrderPreview(_ context.Context, params rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {
+	limit := 0.0
+	if params.LimitPrice != nil {
+		limit = *params.LimitPrice
+	}
 	return &rpc.OrderPreviewResult{
-		PreviewToken:   "redacted-test-token",
-		PreviewTokenID: "tok-1",
-		TokenMinted:    true,
-		SubmitEligible: true,
-		Executable:     true,
-		Mode:           "paper",
-		Account:        "DU123",
-		Endpoint:       "127.0.0.1:7497",
-		ClientID:       7,
+		PreviewToken:          "redacted-test-token",
+		PreviewTokenID:        "tok-1",
+		PreviewTokenExpiresAt: time.Now().UTC().Add(time.Minute),
+		TokenMinted:           true,
+		SubmitEligible:        true,
+		Executable:            true,
+		Mode:                  "paper",
+		Account:               "DU123",
+		Endpoint:              "127.0.0.1:7497",
+		ClientID:              7,
 		Draft: rpc.OrderDraft{
 			Action:     params.Action,
 			Contract:   params.Contract,
 			Quantity:   params.Quantity,
 			OrderType:  rpc.OrderTypeLMT,
-			LimitPrice: *params.LimitPrice,
+			LimitPrice: limit,
 			TIF:        rpc.OrderTIFDay,
 			Strategy:   params.Strategy,
 			OrderRef:   "ord-1",
@@ -508,12 +694,137 @@ func (routeFakeClient) OrderPreview(_ context.Context, params rpc.OrderPreviewPa
 	}, nil
 }
 
+func (routeFakeClient) OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+	return nil, nil
+}
+
+func (routeFakeClient) OrderModify(context.Context, rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
+	return nil, nil
+}
+
+func (routeFakeClient) OrderCancel(context.Context, rpc.OrderCancelParams) (*rpc.OrderCancelResult, error) {
+	return nil, nil
+}
+
 func (routeFakeClient) OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error) {
-	return &rpc.OrdersOpenResult{Orders: []rpc.OrderView{{OrderRef: "ord-1", Symbol: "SPY", Open: true}}, AsOf: time.Now().UTC()}, nil
+	return &rpc.OrdersOpenResult{Orders: []rpc.OrderView{routeOpenOrderView()}}, nil
 }
 
 func (routeFakeClient) OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
-	return &rpc.OrderStatusResult{Found: true, Order: rpc.OrderView{OrderRef: "ord-1", Symbol: "SPY", Open: true}, AsOf: time.Now().UTC()}, nil
+	return &rpc.OrderStatusResult{Found: true, Order: routeOpenOrderView(), AsOf: time.Now().UTC()}, nil
+}
+
+type routeWriteFakeClient struct {
+	routeFakeClient
+}
+
+func (routeWriteFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
+	return &rpc.TradingStatus{
+		Enabled:         true,
+		Mode:            "paper",
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:7497",
+		ClientID:        7,
+		PreviewRequired: true,
+		CanPreview:      true,
+		CanTransmit:     true,
+		CanModify:       true,
+		CanCancel:       true,
+	}, nil
+}
+
+func (routeWriteFakeClient) OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+	return &rpc.OrderPlaceResult{
+		Accepted:        true,
+		Mode:            "paper",
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:7497",
+		ClientID:        7,
+		OrderRef:        "ord-1",
+		PreviewTokenID:  "tok-1",
+		ReservedOrderID: 42,
+		Draft: rpc.OrderDraft{
+			Action:     rpc.OrderActionSell,
+			Contract:   rpc.ContractParams{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			Quantity:   3,
+			OrderType:  rpc.OrderTypeLMT,
+			LimitPrice: 450.25,
+			TIF:        rpc.OrderTIFDay,
+			Strategy:   rpc.OrderStrategyPatientLimit,
+			OrderRef:   "ord-1",
+		},
+		Status:          "submitted",
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+		SendState:       "sent",
+		AsOf:            time.Now().UTC(),
+	}, nil
+}
+
+func (routeWriteFakeClient) OrderModify(context.Context, rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
+	return &rpc.OrderModifyResult{
+		Accepted:        true,
+		Mode:            "paper",
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:7497",
+		ClientID:        7,
+		OrderRef:        "ord-1",
+		PreviewTokenID:  "modify-token",
+		ReservedOrderID: 42,
+		Draft: rpc.OrderDraft{
+			Action:     rpc.OrderActionSell,
+			Contract:   rpc.ContractParams{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			Quantity:   1,
+			OrderType:  rpc.OrderTypeLMT,
+			LimitPrice: 449.50,
+			TIF:        rpc.OrderTIFDay,
+			Strategy:   rpc.OrderStrategyExplicitLimit,
+			OrderRef:   "ord-1",
+		},
+		Status:          "submitted",
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+		SendState:       "sent",
+		AsOf:            time.Now().UTC(),
+	}, nil
+}
+
+func (routeWriteFakeClient) OrderCancel(context.Context, rpc.OrderCancelParams) (*rpc.OrderCancelResult, error) {
+	return &rpc.OrderCancelResult{
+		Accepted: true,
+		Order: rpc.OrderView{
+			OrderRef:        "ord-1",
+			Symbol:          "SPY",
+			Status:          "cancelled",
+			LifecycleStatus: rpc.OrderLifecycleCancelled,
+			SendState:       "sent",
+			UpdatedAt:       time.Now().UTC(),
+		},
+		Status:          "cancelled",
+		LifecycleStatus: rpc.OrderLifecycleCancelled,
+		SendState:       "sent",
+		AsOf:            time.Now().UTC(),
+	}, nil
+}
+
+func routeOpenOrderView() rpc.OrderView {
+	return rpc.OrderView{
+		OrderRef:        "ord-1",
+		PreviewTokenID:  "tok-1",
+		Account:         "DU123",
+		Endpoint:        "127.0.0.1:7497",
+		Mode:            "paper",
+		Symbol:          "SPY",
+		SecType:         "STK",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+		Quantity:        2,
+		LimitPrice:      450.25,
+		Status:          "submitted",
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+		SendState:       "sent",
+		Open:            true,
+		UpdatedAt:       time.Now().UTC(),
+	}
 }
 
 func newRouteTestKey(t *testing.T) *ecdsa.PrivateKey {

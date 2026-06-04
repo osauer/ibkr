@@ -467,6 +467,8 @@ func classifyGammaLegFailure(err error) string {
 	switch {
 	case strings.Contains(msg, "contract details unavailable"), strings.Contains(msg, "no security definition"):
 		return gammaLegFailureContractMissing
+	case strings.Contains(msg, "returned zero contract details"):
+		return gammaLegFailureContractMissing
 	case strings.Contains(msg, "354"), strings.Contains(msg, "entitlement"), strings.Contains(msg, "not subscribed"):
 		return gammaLegFailureEntitlement
 	case strings.Contains(msg, "pacing"), strings.Contains(msg, "rate"):
@@ -760,6 +762,7 @@ func computeGammaZeroFor(
 	prewarmStart := now()
 	prewarmTotal := 0
 	prewarmComplete := make(map[string]bool, len(picked))
+	prewarmBlocksFallback := make(map[string]bool, len(picked))
 	if gammaDirectListedOptionMarketData(sym) {
 		log.Infof("gamma.prewarm.skip underlying=%s reason=direct_listed_option_market_data", sym)
 	} else {
@@ -768,6 +771,7 @@ func computeGammaZeroFor(
 			for _, r := range prewarmResults {
 				key := gammaPrewarmKey(class, r.Expiry)
 				prewarmComplete[key] = r.Err == nil && r.Dropped == 0
+				prewarmBlocksFallback[key] = gammaPrewarmFailureBlocksFallback(r.Err)
 				collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
 				if r.Err != nil {
 					log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
@@ -805,9 +809,10 @@ func computeGammaZeroFor(
 	filteredJobs := jobs[:0]
 	incompletePrewarmKept := 0
 	for _, j := range jobs {
-		complete := prewarmComplete[gammaPrewarmKey(j.tradingClass, j.expiryYMD)]
+		prewarmKey := gammaPrewarmKey(j.tradingClass, j.expiryYMD)
+		complete := prewarmComplete[prewarmKey]
 		cached := c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
-		if gammaKeepJobAfterPrewarm(sym, complete, cached) {
+		if gammaShouldKeepJobAfterPrewarm(sym, complete, cached, prewarmBlocksFallback[prewarmKey]) {
 			filteredJobs = append(filteredJobs, j)
 			collection.noteRequested(j)
 			if !complete {
@@ -1700,6 +1705,23 @@ func gammaKeepJobAfterPrewarm(sym string, prewarmComplete bool, cached bool) boo
 	return true
 }
 
+func gammaShouldKeepJobAfterPrewarm(sym string, prewarmComplete, cached, fallbackBlocked bool) bool {
+	if fallbackBlocked {
+		return cached
+	}
+	return gammaKeepJobAfterPrewarm(sym, prewarmComplete, cached)
+}
+
+func gammaPrewarmFailureBlocksFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	if classifyGammaLegFailure(err) != gammaLegFailureContractMissing {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "returned zero contract details")
+}
+
 func gammaDirectListedOptionMarketData(sym string) bool {
 	return strings.EqualFold(strings.TrimSpace(sym), "SPY")
 }
@@ -1778,6 +1800,9 @@ func (d *gammaCollectionDiagnostics) notePrewarm(tradingClass, expiryYMD string,
 	case gammaLegFailureEntitlement:
 		row.EntitlementErrors++
 	case gammaLegFailureContractMissing:
+		if gammaPrewarmFailureBlocksFallback(err) {
+			return
+		}
 		row.ContractMissingLegs++
 	default:
 		row.SubscriptionRejects++

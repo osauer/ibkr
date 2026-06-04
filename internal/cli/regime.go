@@ -295,7 +295,7 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeLabel(env, c, c.verdict())), env.dim("· "+c.evidence()))
 	fmt.Fprintln(out)
 	renderRegimeSummaryLine(out, "Read:", regimeReadLine(c), width, nil)
-	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows), width, regimeInputHealthColor(env, c, rows))
+	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows, r.DataQuality), width, regimeInputHealthColor(env, c, rows, r.DataQuality))
 	if support := regimeSupportLine(rows); support != "" {
 		renderRegimeSummaryLine(out, "Support:", support, width, nil)
 	}
@@ -890,8 +890,9 @@ func regimeReadLine(c regimeComposite) string {
 	}
 }
 
-func regimeInputHealthLine(c regimeComposite, rows []regimeRow) string {
+func regimeInputHealthLine(c regimeComposite, rows []regimeRow, dataQuality []rpc.DataQualityHealth) string {
 	coverage := fmt.Sprintf("%d/%d evidence groups loaded", c.clusterRanked, c.clusterTotal)
+	qualityProblems := regimeInputHealthDataQualityProblems(dataQuality)
 	switch {
 	case c.clusterRanked == 0:
 		return "Blocked — no evidence group has loaded."
@@ -901,20 +902,39 @@ func regimeInputHealthLine(c regimeComposite, rows []regimeRow) string {
 		return "Needs confirmation — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable))) + " did not load."
 	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing)) > 0:
 		return "Warming — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing))) + " still building."
+	case len(qualityProblems) > 0:
+		return "Needs confirmation — " + coverage + "; " + joinHumanList(qualityProblems) + " need confirmation."
 	default:
 		return "OK — " + coverage + "."
 	}
 }
 
-func regimeInputHealthColor(env *Env, c regimeComposite, rows []regimeRow) func(string) string {
+func regimeInputHealthColor(env *Env, c regimeComposite, rows []regimeRow, dataQuality []rpc.DataQualityHealth) func(string) string {
 	switch {
 	case c.clusterRanked == 0 || c.clusterRanked < verdictFloor:
 		return env.red
-	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable, rpc.RegimeStatusComputing)) > 0:
+	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable, rpc.RegimeStatusComputing)) > 0 || len(regimeInputHealthDataQualityProblems(dataQuality)) > 0:
 		return env.yellow
 	default:
 		return env.green
 	}
+}
+
+func regimeInputHealthDataQualityProblems(items []rpc.DataQualityHealth) []string {
+	var out []string
+	for _, item := range items {
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "partial":
+			for _, cluster := range item.PartialClusters {
+				out = appendUniqueString(out, strings.TrimSpace(cluster))
+			}
+		case "degraded":
+			for _, cluster := range item.DegradedClusters {
+				out = appendUniqueString(out, strings.TrimSpace(cluster))
+			}
+		}
+	}
+	return out
 }
 
 func regimeSupportLine(rows []regimeRow) string {

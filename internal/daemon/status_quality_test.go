@@ -121,6 +121,34 @@ func TestRegimeStatusQualityClustersPartialInputs(t *testing.T) {
 	}
 }
 
+func TestRegimeStatusQualityTreatsMissingRequiredFieldsAsPartial(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 4, 9, 15, 0, 0, time.UTC)
+	res := &rpc.RegimeSnapshotResult{
+		AsOf: now,
+		USDJPY: rpc.RegimeUSDJPY{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{Band: "unranked"},
+			Status:              rpc.RegimeStatusOK,
+			FieldsMissing:       []string{"close_7d_ago", "weekly_change_pct"},
+		},
+	}
+
+	got := regimeStatusQuality(res)
+	if len(got) != 1 {
+		t.Fatalf("regimeStatusQuality len=%d, want 1: %+v", len(got), got)
+	}
+	q := got[0]
+	if q.Surface != "regime" || q.Status != "partial" {
+		t.Fatalf("quality header = %+v, want regime/partial", q)
+	}
+	if got, want := q.PartialClusters, []string{"FX"}; !equalStrings(got, want) {
+		t.Fatalf("partial clusters = %#v, want %#v", got, want)
+	}
+	if q.Summary != "partial: FX" {
+		t.Fatalf("summary = %q, want partial: FX", q.Summary)
+	}
+}
+
 func TestStatusDataFarmsKeepsOnlyUnhealthyFarms(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)

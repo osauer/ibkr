@@ -74,6 +74,12 @@ Returns the signed zero-gamma price level, the dealer book's current sign (`posi
 
 Always read `quality.rankability` before treating gamma as a market-structure signal. `rankable` means the read is fresh and covered enough; `context_only` is awareness-only; `blocked` and `unavailable` are data-quality blockers.
 
+Do not treat missing 0DTE alone as a gamma no-vote. If SPX has healthy 1-7DTE
+and term coverage, the result can remain rankable while still disclosing the
+missing 0DTE bucket in `quality.coverage` and `warning_details`. After the
+expiring SPXW series closes, the 0DTE bucket can be absent even when the broader
+SPX surface is usable.
+
 The important diagnostic is **`disagree`** — one book stabilising while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see `status: "computing"` with an ETA — re-ask in a few minutes for the result. See [Concepts → Gamma](../concepts.md#gamma).
 
 ### "Find me top S&P 500 names trading above their 50-day moving average."

@@ -1237,6 +1237,12 @@ func canaryDecisionSummary(r CanaryResult) string {
 	case canaryActionDefend:
 		return "Market stress is confirmed against a vulnerable portfolio; run a defensive risk plan."
 	case canaryActionWatch:
+		if r.PortfolioFit == canaryPortfolioFitLow {
+			if r.MarketConfirmation == canaryMarketConfirmed {
+				return "Market stress is confirmed, but current portfolio exposure is low; keep watch without staging reductions."
+			}
+			return "Market pressure is developing, but current portfolio exposure is low; keep watch without staging reductions."
+		}
 		if r.MarketConfirmation == canaryMarketPartial {
 			return "Market pressure is developing and the portfolio is exposed; freeze new risk and stage reductions."
 		}
@@ -2391,17 +2397,24 @@ func FetchCanary(ctx context.Context, conn interface {
 func FetchCanarySnapshot(ctx context.Context, conn interface {
 	Call(context.Context, string, any, any) error
 }) (CanaryResult, rpc.PositionsResult, error) {
+	res, positions, _, err := FetchCanarySnapshotWithRegime(ctx, conn)
+	return res, positions, err
+}
+
+func FetchCanarySnapshotWithRegime(ctx context.Context, conn interface {
+	Call(context.Context, string, any, any) error
+}) (CanaryResult, rpc.PositionsResult, rpc.RegimeSnapshotResult, error) {
 	var acct rpc.AccountResult
 	if err := conn.Call(ctx, rpc.MethodAccountSummary, nil, &acct); err != nil {
-		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("account: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, rpc.RegimeSnapshotResult{}, fmt.Errorf("account: %w", err)
 	}
 	var pos rpc.PositionsResult
 	if err := conn.Call(ctx, rpc.MethodPositionsList, rpc.PositionsListParams{}, &pos); err != nil {
-		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("positions: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, rpc.RegimeSnapshotResult{}, fmt.Errorf("positions: %w", err)
 	}
 	var regime rpc.RegimeSnapshotResult
 	if err := conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &regime); err != nil {
-		return CanaryResult{}, rpc.PositionsResult{}, fmt.Errorf("regime: %w", err)
+		return CanaryResult{}, rpc.PositionsResult{}, rpc.RegimeSnapshotResult{}, fmt.Errorf("regime: %w", err)
 	}
 	if acct.DailyPnL == nil {
 		var refreshed rpc.AccountResult
@@ -2409,8 +2422,9 @@ func FetchCanarySnapshot(ctx context.Context, conn interface {
 			acct = refreshed
 		}
 	}
+	canary := ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime})
 	rpc.CompactRegimeSnapshot(&regime)
-	return ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime}), pos, nil
+	return canary, pos, regime, nil
 }
 
 func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {
