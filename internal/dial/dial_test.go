@@ -135,8 +135,8 @@ func TestWaitForSocketOrPIDDeathFallsThroughOnPIDExit(t *testing.T) {
 		t.Fatalf("start sleep: %v", err)
 	}
 	// Reap concurrently so the OS releases the child PID promptly when
-	// it exits — an unreaped zombie still satisfies kill -0 on macOS
-	// and would defeat the IsProcessAlive check the function depends on.
+	// it exits. IsProcessAlive treats zombie status as dead, but this
+	// still keeps the test process table clean.
 	go func() { _ = cmd.Wait() }()
 	pid := cmd.Process.Pid
 

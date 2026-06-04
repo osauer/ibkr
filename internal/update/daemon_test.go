@@ -88,10 +88,9 @@ func TestRestartDaemon_SignalDelivered(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)
 	}
-	// Reap in a goroutine so the kernel removes the PID from /proc
-	// as soon as the child exits — without this the PID lingers as
-	// a zombie and IsProcessAlive (kill -0) keeps returning true,
-	// causing RestartDaemon to time out.
+	// Reap in a goroutine so the kernel removes the PID promptly when
+	// the child exits. IsProcessAlive treats zombie status as dead, but
+	// this still keeps the test process table clean.
 	pid := cmd.Process.Pid
 	go func() { _, _ = cmd.Process.Wait() }()
 
@@ -109,12 +108,9 @@ func TestRestartDaemon_SignalDelivered(t *testing.T) {
 	}
 }
 
-// TestRestartDaemon_Timeout asserts the descriptive timeout error
-// fires when the target process refuses SIGTERM. We can't easily
-// build a SIGTERM-trapping subprocess in a portable test; instead we
-// rely on a custom test wrapper that catches the signal with a
-// shell `trap`. The wrapper traps TERM, sleeps past the shortened test
-// timeout anyway, then exits.
+// TestRestartDaemon_Timeout asserts the descriptive timeout error fires when
+// the target process refuses SIGTERM. The loop prevents the shell from execing
+// the final command away, which would make the target PID disappear.
 func TestRestartDaemon_Timeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in short mode (subprocess fork)")
@@ -127,10 +123,11 @@ func TestRestartDaemon_Timeout(t *testing.T) {
 		restartPoll = savedPoll
 	})
 
-	cmd := exec.Command("sh", "-c", `trap '' TERM; sleep 1`)
+	cmd := exec.Command("sh", "-c", `trap '' TERM; while :; do sleep 1 & wait $!; done`)
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start trap-sleep: %v", err)
+		t.Fatalf("start trap-loop: %v", err)
 	}
+	time.Sleep(50 * time.Millisecond)
 	defer func() {
 		_ = cmd.Process.Signal(syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
