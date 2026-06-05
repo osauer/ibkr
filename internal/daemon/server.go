@@ -1042,6 +1042,10 @@ type connectAttempter interface {
 	SubscribeAccountPnL(account string) error
 }
 
+type lastErrorReporter interface {
+	LastError() string
+}
+
 // newConnector constructs (but does not start) the IBKR connector from
 // the supplied endpoint. Returns immediately — no network I/O.
 //
@@ -1251,8 +1255,11 @@ func (s *Server) tryOneHandshake(ctx context.Context, a connectAttempter, ep dis
 	// handshake hasn't completed (e.g. gateway unreachable, API socket
 	// disabled). Probe IsConnected so we log the truth.
 	if !a.IsConnected() {
-		hint := fmt.Sprintf("gateway %s:%d did not complete TWS handshake; check IB Gateway is running and 'Enable ActiveX and Socket Clients' is on",
-			ep.Host, ep.Port)
+		hint := connectorLastError(a)
+		if hint == "" {
+			hint = fmt.Sprintf("gateway %s:%d did not complete TWS handshake; check IB Gateway is running and 'Enable ActiveX and Socket Clients' is on",
+				ep.Host, ep.Port)
+		}
 		s.mu.Lock()
 		s.lastConnectError = hint
 		s.mu.Unlock()
@@ -1260,6 +1267,24 @@ func (s *Server) tryOneHandshake(ctx context.Context, a connectAttempter, ep dis
 		return false
 	}
 	return true
+}
+
+func connectorLastError(a connectAttempter) string {
+	reporter, ok := a.(lastErrorReporter)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(reporter.LastError())
+}
+
+func (s *Server) gatewayUnavailableError() error {
+	s.mu.Lock()
+	lastErr := strings.TrimSpace(s.lastConnectError)
+	s.mu.Unlock()
+	if lastErr == "" {
+		return ibkrlib.ErrIBKRUnavailable
+	}
+	return fmt.Errorf("%w: %s", ibkrlib.ErrIBKRUnavailable, lastErr)
 }
 
 // postConnectSetup runs the best-effort initialization that follows a

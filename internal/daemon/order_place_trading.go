@@ -239,7 +239,7 @@ func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return 0, ibkrlib.ErrIBKRUnavailable
+		return 0, s.gatewayUnavailableError()
 	}
 	return c.ReserveOrderID()
 }
@@ -253,7 +253,7 @@ func (s *Server) submitPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGa
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return ibkrlib.ErrIBKRUnavailable
+		return s.gatewayUnavailableError()
 	}
 	return c.SubmitPaperOrder(gate, contract, order)
 }
@@ -267,7 +267,7 @@ func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingSt
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return ibkrlib.ErrIBKRUnavailable
+		return s.gatewayUnavailableError()
 	}
 	if status.Mode == config.TradingModeLive {
 		return c.SubmitOrder(contract, order)
@@ -284,7 +284,7 @@ func (s *Server) cancelPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGa
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return ibkrlib.ErrIBKRUnavailable
+		return s.gatewayUnavailableError()
 	}
 	return c.CancelPaperOrder(gate, orderID)
 }

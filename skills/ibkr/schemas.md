@@ -1663,8 +1663,11 @@ regime itself.
   ],
   "portfolio": {"base_currency": "EUR", "net_liquidation": 273014,
                 "net_delta_pct_nlv": 250.4, "option_greeks": "8/8 legs"},
-  "market": {"regime_verdict": "Stress signal present", "red_clusters": 2,
-             "red_cluster_names": ["credit", "gamma"]},
+  "market": {"regime_verdict": "Stress signal present",
+             "regime_posture": {"label": "Stress signal present",
+                                "tone": "watch",
+                                "stage": "early_warning"},
+             "red_clusters": 1, "red_cluster_names": ["gamma"]},
   "warnings": ["stale clusters: breadth, credit, and vol"],
   "not_execution": "Read-only canary posture; no orders are placed by ibkr."
 }
@@ -1692,5 +1695,7 @@ Field meanings:
 - `portfolio` and `market` are compact context blocks for rendering and quick
   diagnostics. Use `ibkr account`, `ibkr positions`, and `ibkr regime` for
   full underlying evidence.
+- `market.regime_posture` is the canonical market-regime display/policy read.
+  Render its `label`/`tone`; do not derive risk-off from raw red-cluster counts.
 - `not_execution` is part of the contract. Canary does not place, preview,
   submit, modify, cancel, draft, size, or select orders.

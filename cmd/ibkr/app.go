@@ -63,7 +63,7 @@ func runAppServe(args []string) int {
 	opts.Addr = strings.TrimSpace(*addr)
 	if flagWasSet(fs, "public-url") {
 		opts.PublicURL = strings.TrimRight(strings.TrimSpace(*publicURL), "/")
-	} else if strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")) == "" {
+	} else if !opts.PublicURLFromEnv {
 		opts.PublicURL = mobileapp.PublicURLForAddr(opts.Addr)
 	}
 	opts.StateDir = strings.TrimSpace(*stateDir)
@@ -100,7 +100,11 @@ func runAppPair(args []string) int {
 		})
 	}
 	addr := fs.String("addr", opts.Addr, "local app host listen address")
-	publicURL := fs.String("public-url", opts.PublicURL, "browser-visible base URL to embed in the pairing QR")
+	publicURLDefault := ""
+	if opts.PublicURLFromEnv {
+		publicURLDefault = opts.PublicURL
+	}
+	publicURL := fs.String("public-url", publicURLDefault, "override browser-visible base URL to embed in the pairing QR")
 	asJSON := fs.Bool("json", false, "print the pairing session as JSON")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -113,10 +117,7 @@ func runAppPair(args []string) int {
 		return 2
 	}
 	pairAddr := strings.TrimSpace(*addr)
-	pairPublicURL := strings.TrimSpace(*publicURL)
-	if !flagWasSet(fs, "public-url") && strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")) == "" {
-		pairPublicURL = mobileapp.PublicURLForAddr(pairAddr)
-	}
+	pairPublicURL := appPairPublicURLOverride(fs, *publicURL, opts.PublicURLFromEnv)
 	session, err := createPairingSession(pairAddr, pairPublicURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ibkr app pair: %v\n", err)
@@ -144,9 +145,6 @@ func runAppPair(args []string) int {
 
 func createPairingSession(addr, publicURL string) (auth.PairingSession, error) {
 	baseURL := "http://" + mobileapp.LoopbackAddrForLocalConnect(addr)
-	if strings.TrimSpace(publicURL) == "" {
-		publicURL = mobileapp.PublicURLForAddr(addr)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	body := []byte("{}")
@@ -184,6 +182,13 @@ func createPairingSession(addr, publicURL string) (auth.PairingSession, error) {
 		return auth.PairingSession{}, err
 	}
 	return session, nil
+}
+
+func appPairPublicURLOverride(fs *flag.FlagSet, publicURL string, defaultIsExplicit bool) string {
+	if !flagWasSet(fs, "public-url") && !defaultIsExplicit {
+		return ""
+	}
+	return strings.TrimSpace(publicURL)
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {

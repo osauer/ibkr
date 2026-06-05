@@ -506,8 +506,13 @@ func canaryHasActiveMarginContext(acct rpc.AccountResult) bool {
 }
 
 func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMarketSummary {
+	posture := r.Posture
+	if posture.Label == "" && posture.Tone == "" {
+		posture = rpc.BuildRegimePosture(&r)
+	}
 	out := CanaryMarketSummary{
 		RegimeVerdict: r.Composite.Verdict,
+		RegimePosture: posture,
 		SPYPrice:      r.HYGSPYDivergence.SPYPrice,
 		SPYChangePct:  r.HYGSPYDivergence.SPYChangePct,
 		VIX:           r.VIXTermStructure.VIX,

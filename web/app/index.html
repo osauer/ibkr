@@ -8,7 +8,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/styles.css?v=spa-remediation-errors-20260605">
+    <link rel="stylesheet" href="/styles.css?v=mobile-touch-panels-20260605">
   </head>
   <body>
     <main class="shell">
@@ -43,6 +43,13 @@
         <div class="market-strip__side sr-only">
           <p class="status-banner" id="connectionLine">Waiting for official market calendar</p>
           <span class="status-dot" id="statusDot" aria-label="app connection status"></span>
+        </div>
+      </section>
+
+      <section class="banner-stack" id="bannerStack" aria-live="polite" hidden>
+        <div class="source-banner" id="snapshotErrorBanner" role="status" hidden>
+          <span>Snapshot issue</span>
+          <b id="snapshotErrorText">--</b>
         </div>
       </section>
 
@@ -97,13 +104,6 @@
         </div>
         <span class="sr-only" id="cushion">--</span>
       </article>
-
-      <section class="banner-stack" id="bannerStack" aria-live="polite" hidden>
-        <div class="source-banner" id="snapshotErrorBanner" role="status" hidden>
-          <span>Snapshot issue</span>
-          <b id="snapshotErrorText">--</b>
-        </div>
-      </section>
 
       <section class="pairing" id="pairingPanel" hidden>
         <div class="pairing__body">
@@ -221,12 +221,14 @@
           </div>
         </article>
 
-        <details class="panel underlying-panel" id="underlyingPanel">
-          <summary class="panel-head">
+        <article class="panel underlying-panel" id="underlyingPanel" data-open="false">
+          <div class="panel-head underlying-panel__head">
             <span>Underlyings</span>
             <span class="panel-time" id="underlyingBookFreshness">--</span>
-            <span class="panel-chevron panel-chevron--summary" aria-hidden="true"></span>
-          </summary>
+            <button class="panel-chevron" id="underlyingDetailToggle" type="button" aria-expanded="false" aria-controls="underlyingBookListPanel">
+              Show underlyings
+            </button>
+          </div>
           <div class="underlying-book" id="underlyingBook">
             <div class="underlying-book__head">
               <div>
@@ -236,14 +238,16 @@
               <small id="underlyingBookStatus">Held and virtual purge-book records</small>
             </div>
             <div class="underlying-bulk-actions" aria-label="Underlying bulk actions">
-              <button class="underlying-action underlying-action--purge" id="purgeAllUnderlyingsButton" type="button">Purge</button>
-              <button class="underlying-action underlying-action--restore" id="restoreAllUnderlyingsButton" type="button">Restore</button>
-              <button class="underlying-action underlying-action--build" id="buildAllUnderlyingsButton" type="button">Build</button>
+              <button class="underlying-action underlying-action--purge" id="purgeAllUnderlyingsButton" type="button">Purge all!</button>
+              <button class="underlying-action underlying-action--restore" id="restoreAllUnderlyingsButton" type="button">Restore all</button>
+              <button class="underlying-action underlying-action--build" id="buildAllUnderlyingsButton" type="button">Rebuild all</button>
             </div>
             <div class="underlying-action-result" id="underlyingActionResult" hidden></div>
-            <div class="underlying-book__list" id="underlyingBookList"></div>
+            <div class="underlying-book__list-panel" id="underlyingBookListPanel" hidden>
+              <div class="underlying-book__list" id="underlyingBookList"></div>
+            </div>
           </div>
-        </details>
+        </article>
 
         <article class="panel portfolio-panel">
           <div class="panel-head">
@@ -376,6 +380,6 @@
         <span class="sync-strip__auto">Auto</span>
       </footer>
     </main>
-    <script src="/app.js?v=spa-remediation-errors-20260605" type="module"></script>
+    <script src="/app.js?v=mobile-touch-panels-20260605" type="module"></script>
   </body>
 </html>

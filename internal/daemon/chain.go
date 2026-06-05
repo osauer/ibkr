@@ -54,7 +54,7 @@ func (s *Server) handleChainExpiries(ctx context.Context, req *rpc.Request) (*rp
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 
 	// Per-stage budget visibility. Captured at INFO so an off-hours
@@ -532,7 +532,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	expiryYMD, err := normalizeExpiry(p.Expiry)
 	if err != nil {
@@ -556,7 +556,7 @@ func (s *Server) handleChainFetch(ctx context.Context, req *rpc.Request) (*rpc.C
 	snapshotMs = time.Since(tSnapshot).Milliseconds()
 	if spot.Price <= 0 {
 		if s.gatewayConnector() == nil {
-			return nil, ibkrlib.ErrIBKRUnavailable
+			return nil, s.gatewayUnavailableError()
 		}
 		return nil, fmt.Errorf("no spot price available for %s (market closed or symbol inactive)", p.Symbol)
 	}

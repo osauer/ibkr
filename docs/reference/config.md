@@ -12,7 +12,7 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[daemon]` | `log_level` | `string` | LogLevel is the daemon's log verbosity — one of "debug", "info" (default), "warn", or "error". |
 | `[gateway]` | `account` | `string` | Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts. |
 | `[gateway]` | `breadth_client_id` | `*int` | BreadthClientID is the IBKR clientID used by the dedicated historical-bar connector that backs the SPX breadth refresh. |
-| `[gateway]` | `client_id` | `*int` | ClientID pins the IBKR API clientID for the primary connection (default 15); collisions with another running ibkr process auto-walk to the next free ID via the SDK's retry path. |
+| `[gateway]` | `client_id` | `*int` | ClientID pins the IBKR API clientID for the primary connection (default 15); collisions are treated as a stale-client/operator issue and are not auto-walked to neighboring reserved IDs. |
 | `[gateway]` | `host` | `string` | Host pins the IB Gateway / TWS host; empty (the default) defers to auto-discovery on loopback (127.0.0.1), any non-empty value skips probing. |
 | `[gateway]` | `port` | `*int` | Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery. |
 | `[gateway]` | `tls` | `*bool` | TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, `true` forces TLS-only with no plain fallback, `false` forces plain — setting the field disables fallback in either direction. |

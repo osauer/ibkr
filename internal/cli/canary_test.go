@@ -194,6 +194,9 @@ func TestComputeCanarySingleGammaRedIsNotLifecycleConfirmation(t *testing.T) {
 	if res.MarketConfirmation == canaryMarketConfirmed {
 		t.Fatalf("market_confirmation = %s, want not confirmed for one red gamma cluster", res.MarketConfirmation)
 	}
+	if res.Market.RegimePosture.Label != "Stress signal present" || res.Market.RegimePosture.Tone != rpc.RegimeToneWatch {
+		t.Fatalf("market posture = %+v, want Stress signal present/watch", res.Market.RegimePosture)
+	}
 	if !hasSignal(res.Signals, risk.SignalGammaRed) {
 		t.Fatalf("missing gamma red watch signal, signals: %+v", res.Signals)
 	}

@@ -23,6 +23,14 @@ const (
 	FingerprintStabilitySemanticBuckets = "semantic_buckets_only"
 )
 
+const (
+	RegimeToneNormal      = "normal"
+	RegimeToneWatch       = "watch"
+	RegimeToneStress      = "stress"
+	RegimeToneRiskOff     = "risk_off"
+	RegimeToneDataQuality = "data_quality"
+)
+
 // LifecycleState is the stable monitor/orchestration surface for regime and
 // canary payloads. Stage is intentionally a small state machine, while
 // Evidence preserves weak/unconfirmed inputs without letting them dominate the
@@ -139,6 +147,87 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	}
 	state.Fingerprint = lifecycleFingerprint(state)
 	return state
+}
+
+func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
+	if r == nil {
+		return RegimePosture{
+			Label:      "No usable signal yet",
+			Tone:       RegimeToneDataQuality,
+			Stage:      LifecycleDataQuality,
+			Severity:   "watch",
+			Readiness:  "blocked",
+			Confidence: "low",
+		}
+	}
+	label := regimePostureLabel(r.Composite)
+	confidence := strings.TrimSpace(r.Lifecycle.Confidence)
+	if confidence == "" {
+		confidence = strings.TrimSpace(r.Summary.Confidence)
+	}
+	return RegimePosture{
+		Label:      label,
+		Tone:       regimePostureTone(r.Composite, r.Lifecycle),
+		Stage:      strings.TrimSpace(r.Lifecycle.Stage),
+		Severity:   strings.TrimSpace(r.Lifecycle.Severity),
+		Readiness:  strings.TrimSpace(r.Lifecycle.Readiness),
+		Confidence: confidence,
+		Evidence:   strings.TrimSpace(r.Summary.Evidence),
+	}
+}
+
+func regimePostureLabel(c RegimeComposite) string {
+	switch {
+	case c.ClusterRankedCount == 0:
+		return "No usable signal yet"
+	case c.ClusterRankedCount < 3:
+		return "Insufficient signal — too few inputs ready"
+	case c.ClusterUnrankedCount == 0 && c.ClusterRedCount == c.ClusterRankedCount:
+		return "Full risk-off conditions"
+	case c.ClusterRedCount >= 2:
+		return "Broad stress regime"
+	case c.ClusterRedCount >= 1:
+		return "Stress signal present"
+	case c.ClusterYellowCount >= 3:
+		return "Elevated stress watch"
+	default:
+		return "Normal regime"
+	}
+}
+
+func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
+	label := strings.TrimSpace(c.Verdict)
+	if label == "" {
+		label = regimePostureLabel(c)
+	}
+	if label == "Full risk-off conditions" {
+		return RegimeToneRiskOff
+	}
+	if c.ClusterRankedCount < 3 {
+		return RegimeToneDataQuality
+	}
+	switch lifecycle.Stage {
+	case LifecycleDataQuality:
+		return RegimeToneDataQuality
+	case LifecyclePanic:
+		return RegimeToneStress
+	case LifecycleConfirmedStress, LifecycleForcedDefense:
+		return RegimeToneStress
+	case LifecycleEarlyWarning, LifecycleStabilization:
+		return RegimeToneWatch
+	case LifecycleOpportunity:
+		return RegimeToneNormal
+	}
+	switch label {
+	case "Broad stress regime":
+		return RegimeToneStress
+	case "Stress signal present", "Elevated stress watch":
+		return RegimeToneWatch
+	case "No usable signal yet", "Insufficient signal — too few inputs ready", "No ranked indicators — see rows below for state":
+		return RegimeToneDataQuality
+	default:
+		return RegimeToneNormal
+	}
 }
 
 func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHealth {

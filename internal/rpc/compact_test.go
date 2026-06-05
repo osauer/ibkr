@@ -248,6 +248,9 @@ func TestCompactRegimeMonitorDropsFullIndicatorObjects(t *testing.T) {
 	if out.Indicators[0].Name != "VIX/VIX3M" || out.Indicators[0].Status != RegimeStatusOK || out.Indicators[0].Band != "green" {
 		t.Fatalf("first indicator = %+v, want compact VIX/VIX3M row", out.Indicators[0])
 	}
+	if out.Posture.Label != "Normal regime" || out.Posture.Tone != RegimeToneNormal {
+		t.Fatalf("posture = %+v, want Normal regime/normal", out.Posture)
+	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

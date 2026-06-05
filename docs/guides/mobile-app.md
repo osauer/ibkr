@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-06-03 18:19 CEST
+Updated: 2026-06-05 14:04 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -21,6 +21,18 @@ ibkr app pair
 Scan the QR code or open the printed pairing URL. The URL contains a short-lived
 pairing id plus nonce, not a durable secret.
 
+The default app bind is LAN-capable (`0.0.0.0:8765`), so the same app process
+can serve a local browser preview at `http://127.0.0.1:8765` and a phone at the
+Mac's LAN URL. For a local preview, override only the pairing URL:
+
+```sh
+ibkr app pair --public-url http://127.0.0.1:8765 --json
+```
+
+Use plain `ibkr app pair` for the phone so the running app host's configured
+public URL is used. Do not run the shared app host with `--addr 127.0.0.1:8765`
+when a phone needs to pair too.
+
 ## Restart
 
 ```sh
@@ -31,6 +43,16 @@ This sends SIGTERM to the existing `ibkr app` process so HyperServe can shut
 down gently. It preserves the old app flags such as `--addr`, `--public-url`,
 and `--state-dir`. If launchd respawns the app, the command reports the
 supervised PID and does not start a duplicate.
+
+To switch an old local-only app host back to the shared local-preview plus
+phone mode:
+
+```sh
+ibkr restart --app --addr 0.0.0.0:8765
+```
+
+When `--addr` is overridden without `--public-url`, restart clears any preserved
+app `--public-url` flag so the app can derive the Mac's LAN URL again.
 
 ## Browser Smoke
 

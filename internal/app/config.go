@@ -17,14 +17,15 @@ const (
 )
 
 type Options struct {
-	Addr        string
-	PublicURL   string
-	StateDir    string
-	SocketPath  string
-	Version     string
-	PairingTTL  time.Duration
-	PollEvery   time.Duration
-	CanaryEvery time.Duration
+	Addr             string
+	PublicURL        string
+	PublicURLFromEnv bool
+	StateDir         string
+	SocketPath       string
+	Version          string
+	PairingTTL       time.Duration
+	PollEvery        time.Duration
+	CanaryEvery      time.Duration
 }
 
 func DefaultOptions(version string) Options {
@@ -40,18 +41,20 @@ func DefaultOptions(version string) Options {
 	}
 	// docgen:env IBKR_APP_PUBLIC_URL | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available.
 	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")), "/")
+	publicURLFromEnv := publicURL != ""
 	if publicURL == "" {
 		publicURL = PublicURLForAddr(addr)
 	}
 	return Options{
-		Addr:        addr,
-		PublicURL:   publicURL,
-		StateDir:    stateDir,
-		SocketPath:  dial.DefaultSocketPath(),
-		Version:     version,
-		PairingTTL:  DefaultPairingTTL,
-		PollEvery:   DefaultPollEvery,
-		CanaryEvery: DefaultCanaryEvery,
+		Addr:             addr,
+		PublicURL:        publicURL,
+		PublicURLFromEnv: publicURLFromEnv,
+		StateDir:         stateDir,
+		SocketPath:       dial.DefaultSocketPath(),
+		Version:          version,
+		PairingTTL:       DefaultPairingTTL,
+		PollEvery:        DefaultPollEvery,
+		CanaryEvery:      DefaultCanaryEvery,
 	}
 }
 

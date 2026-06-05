@@ -113,7 +113,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	if cfg.Gateway.ClientID == nil {
 		add("gateway_client_id_unpinned", "order submission requires a pinned client ID", "Set [gateway].client_id.")
 	} else if ep.ClientID != 0 && ep.ClientID != *cfg.Gateway.ClientID {
-		add("gateway_client_id_autowalked", "connected client ID differs from the pinned client ID", "Stop the conflicting API client or choose a free [gateway].client_id.")
+		add("gateway_client_id_mismatch", "connected client ID differs from the pinned client ID", "Stop the conflicting API client or choose a free [gateway].client_id.")
 	}
 
 	switch tr.Mode {

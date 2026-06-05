@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,14 +24,21 @@ import (
 )
 
 const restartDefaultTimeout = 15 * time.Second
+const restartDefaultAppAddr = "0.0.0.0:8765"
 
 type restartOptions struct {
-	jsonOut bool
-	force   bool
-	app     bool
-	timeout time.Duration
-	out     io.Writer
-	err     io.Writer
+	jsonOut         bool
+	force           bool
+	app             bool
+	timeout         time.Duration
+	appAddr         string
+	appAddrSet      bool
+	appPublicURL    string
+	appPublicURLSet bool
+	appStateDir     string
+	appStateDirSet  bool
+	out             io.Writer
+	err             io.Writer
 }
 
 type restartDeps struct {
@@ -103,11 +113,21 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.BoolVar(&opts.force, "force", false, "send SIGKILL if graceful SIGTERM does not stop the target process before --timeout")
 	fs.BoolVar(&opts.app, "app", false, "restart the HyperServe app process instead of the daemon")
 	fs.DurationVar(&opts.timeout, "timeout", restartDefaultTimeout, "how long to wait for graceful process stop before failing or forcing")
+	fs.StringVar(&opts.appAddr, "addr", "", "app listen address to use with --app")
+	fs.StringVar(&opts.appPublicURL, "public-url", "", "app public URL to use with --app")
+	fs.StringVar(&opts.appStateDir, "state-dir", "", "app state directory to use with --app")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
+	opts.appAddrSet = restartFlagWasSet(fs, "addr")
+	opts.appPublicURLSet = restartFlagWasSet(fs, "public-url")
+	opts.appStateDirSet = restartFlagWasSet(fs, "state-dir")
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "ibkr restart: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	if !opts.app && (opts.appAddrSet || opts.appPublicURLSet || opts.appStateDirSet) {
+		fmt.Fprintln(stderr, "ibkr restart: --addr, --public-url, and --state-dir require --app")
 		return 2
 	}
 	if opts.timeout <= 0 {
@@ -209,6 +229,15 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 	startedAt := time.Now()
 	res := appRestartResult{Action: "started", Target: "app", Args: []string{"app"}}
 	args := []string{"app"}
+	argsFinalized := false
+	finalizeArgs := func() {
+		if argsFinalized {
+			return
+		}
+		args = appArgsWithRestartOverrides(args, opts)
+		res.Args = append([]string(nil), args...)
+		argsFinalized = true
+	}
 
 	proc, err := deps.find(ctx)
 	switch {
@@ -219,8 +248,8 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 		res.OldCommand = proc.Command
 		if len(proc.Args) > 0 {
 			args = append([]string(nil), proc.Args...)
-			res.Args = append([]string(nil), proc.Args...)
 		}
+		finalizeArgs()
 		stopErr := deps.stop(proc.PID, opts.timeout)
 		if stopErr != nil {
 			if !opts.force || !errors.Is(stopErr, errAppStopTimeout) {
@@ -265,6 +294,7 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 			fmt.Fprintln(opts.out, "ibkr restart --app: starting app")
 		}
 	case errors.Is(err, errAppNotRunning):
+		finalizeArgs()
 		if !opts.jsonOut {
 			fmt.Fprintln(opts.out, "ibkr restart --app: no app was running; starting app")
 		}
@@ -273,6 +303,7 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 		return 1
 	}
 
+	finalizeArgs()
 	newPID, err := deps.start(ctx, args)
 	if err != nil {
 		fmt.Fprintf(opts.err, "ibkr restart --app: start app: %v\n", err)
@@ -288,6 +319,64 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 	fmt.Fprintf(opts.out, "ibkr restart --app: started app pid %d\n", newPID)
 	fmt.Fprintln(opts.out, "ibkr restart --app: pair a phone with `ibkr app pair`")
 	return 0
+}
+
+func restartFlagWasSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
+func appArgsWithRestartOverrides(args []string, opts *restartOptions) []string {
+	if len(args) == 0 {
+		args = []string{"app"}
+	}
+	out := append([]string(nil), args...)
+	if opts == nil {
+		return out
+	}
+	if opts.appAddrSet {
+		out = setAppValueArg(out, "addr", strings.TrimSpace(opts.appAddr))
+		if !opts.appPublicURLSet {
+			out = removeAppValueArg(out, "public-url")
+		}
+	}
+	if opts.appPublicURLSet {
+		out = setAppValueArg(out, "public-url", strings.TrimSpace(opts.appPublicURL))
+	}
+	if opts.appStateDirSet {
+		out = setAppValueArg(out, "state-dir", strings.TrimSpace(opts.appStateDir))
+	}
+	return out
+}
+
+func setAppValueArg(args []string, name, value string) []string {
+	out := removeAppValueArg(args, name)
+	return append(out, "--"+name, value)
+}
+
+func removeAppValueArg(args []string, name string) []string {
+	flagName := "--" + name
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == flagName:
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		case strings.HasPrefix(arg, flagName+"="):
+			continue
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 func startDaemonAndFetchHealth(ctx context.Context, socketPath string, progress io.Writer, quiet bool) (int, rpc.HealthResult, error) {
@@ -546,11 +635,85 @@ func startAppProcess(ctx context.Context, args []string) (int, error) {
 	if err := cmd.Process.Release(); err != nil {
 		return 0, err
 	}
-	time.Sleep(250 * time.Millisecond)
-	if !dial.IsProcessAlive(pid) {
-		return 0, fmt.Errorf("app pid %d exited immediately; check %s", pid, appRestartLogPath())
+	if err := waitForAppProcessReady(ctx, pid, args, 5*time.Second); err != nil {
+		return 0, err
 	}
 	return pid, nil
+}
+
+func waitForAppProcessReady(ctx context.Context, pid int, args []string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	addr := appValueArg(args, "addr")
+	if strings.TrimSpace(addr) == "" {
+		addr = restartDefaultAppAddr
+	}
+	url := "http://" + appLoopbackAddrForLocalConnect(addr) + "/manifest.webmanifest"
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if !dial.IsProcessAlive(pid) {
+			return fmt.Errorf("app pid %d exited before becoming ready; check %s", pid, appRestartLogPath())
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		res, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, res.Body)
+			_ = res.Body.Close()
+			if res.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("GET %s: %s", url, res.Status)
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("app pid %d did not become ready at %s within %s: %w; check %s", pid, url, timeout, lastErr, appRestartLogPath())
+	}
+	return fmt.Errorf("app pid %d did not become ready at %s within %s; check %s", pid, url, timeout, appRestartLogPath())
+}
+
+func appValueArg(args []string, name string) string {
+	flagName := "--" + name
+	for i := range args {
+		arg := args[i]
+		if arg == flagName {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if value, ok := strings.CutPrefix(arg, flagName+"="); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func appLoopbackAddrForLocalConnect(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		addr = restartDefaultAppAddr
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func openAppRestartLog() (*os.File, error) {

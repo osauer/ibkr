@@ -165,7 +165,7 @@ func (s *Server) refreshPurgePositions() ([]*ibkrlib.RawPosition, error) {
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	return c.RefreshPositions(10 * time.Second)
 }

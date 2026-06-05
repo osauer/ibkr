@@ -37,7 +37,7 @@ import (
 func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc.RegimeSnapshotResult, error) {
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 
 	deps := productionRegimeDeps(c, s.logger.Warnf, s.regimeSeries)
@@ -73,6 +73,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res.DataQuality = regimeSnapshotDataQuality(res)
 	res.SourceHealth = rpc.BuildRegimeSourceHealth(res, res.AsOf)
 	res.Lifecycle = rpc.BuildRegimeLifecycle(res)
+	res.Posture = rpc.BuildRegimePosture(res)
 	res.Fingerprint = rpc.BuildRegimeFingerprint(res)
 	s.updateRegimeStatusQuality(res)
 	return res, nil

@@ -74,9 +74,13 @@ func TestAppJSRegimeCardSeparatesDataGapsFromRegime(t *testing.T) {
 	}
 	js := string(data)
 	for _, want := range []string{
-		`marketRegimeLabel(market, indicators, canary)`,
+		`marketRegimeLabel(posture)`,
+		"function regimePosture(snap = {}, canary = {}, market = {})",
+		"function regimeWeatherClass(tone)",
+		"function normalizeRegimePosture(candidate)",
+		`snap.regime?.posture`,
+		`market.regime_posture`,
 		"function marketRegimeStatusLine(snap, canary, market, indicators)",
-		`return "Normal + gaps";`,
 		"Paper gateway live quotes OK",
 		"HYG 50-DMA",
 		"USD/JPY baseline",
@@ -84,6 +88,81 @@ func TestAppJSRegimeCardSeparatesDataGapsFromRegime(t *testing.T) {
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing regime data-gap contract %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`if (redClusters > 0) return "red";`,
+		`return "Risk-off";`,
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("app.js still has UI-owned regime policy %q", forbidden)
+		}
+	}
+}
+
+func TestAppMobileDashboardContracts(t *testing.T) {
+	t.Parallel()
+	appData, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	htmlData, err := Files.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	cssData, err := Files.ReadFile("styles.css")
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	js := string(appData)
+	html := string(htmlData)
+	css := string(cssData)
+
+	for _, want := range []string{
+		`const symbols = ["SPY", "VIX", "QQQ", "IWM", "HYG", "TLT"];`,
+		"function handleExpandablePanelTap(event, which)",
+		`$("regimePanel").addEventListener("click"`,
+		`$("canaryHero").addEventListener("click"`,
+		"function setUnderlyingExpansion(open)",
+		"function renderUnderlyingExpansion()",
+		`$("underlyingDetailToggle").addEventListener("click"`,
+		"function gatewayIssueText(snap = {})",
+		"snap.status?.last_error",
+		"client id .*already in use",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing mobile dashboard contract %q", want)
+		}
+	}
+	for _, want := range []string{
+		`id="bannerStack"`,
+		`id="accountPanel"`,
+		`id="underlyingPanel" data-open="false"`,
+		`id="underlyingDetailToggle"`,
+		`Purge all!`,
+		`Restore all`,
+		`Rebuild all`,
+		`id="underlyingBookListPanel" hidden`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("index.html missing mobile dashboard contract %q", want)
+		}
+	}
+	if strings.Index(html, `id="bannerStack"`) > strings.Index(html, `id="accountPanel"`) {
+		t.Fatalf("snapshot banner should render above account panel")
+	}
+	if strings.Contains(html, `<details class="panel underlying-panel"`) {
+		t.Fatalf("underlyings panel should not hide summary/actions inside native details")
+	}
+	for _, want := range []string{
+		".source-banner",
+		"background: var(--red);",
+		"color: #fff;",
+		`.underlying-panel[data-open="true"] .panel-chevron::after`,
+		".underlying-book__list-panel",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
 		}
 	}
 }

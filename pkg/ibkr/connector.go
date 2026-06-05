@@ -48,9 +48,10 @@ type Connector struct {
 	contractTimingHook   func(string, time.Duration, bool)
 
 	// Component state
-	running bool
-	mu      sync.RWMutex
-	ready   bool // true after handlers registered and startup completes
+	running   bool
+	lastError error
+	mu        sync.RWMutex
+	ready     bool // true after handlers registered and startup completes
 
 	// Market data subscriptions
 	subscriptions map[string]*Subscription
@@ -759,17 +760,31 @@ func (c *Connector) Start(ctx context.Context) error {
 		c.logWarn("Running in degraded mode without IBKR connection")
 		c.mu.Lock()
 		c.running = true
+		c.lastError = err
 		c.mu.Unlock()
 		return nil
 	}
 
 	c.mu.Lock()
 	c.running = true
+	c.lastError = nil
 	c.mu.Unlock()
 
 	c.logInfo("IBKR connector started successfully (client_id: %d)", c.config.PreferredClientID)
 
 	return nil
+}
+
+// LastError returns the most recent connector startup error that left the
+// connector in degraded mode. Empty means either healthy or no concrete
+// connector-level diagnosis is available.
+func (c *Connector) LastError() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.lastError == nil {
+		return ""
+	}
+	return c.lastError.Error()
 }
 
 func (c *Connector) attachConnectionHooks(conn *Connection) {
@@ -793,6 +808,7 @@ func (c *Connector) onConnectionEstablished(conn *Connection) {
 	c.mu.Lock()
 	c.conn = conn
 	c.ready = false
+	c.lastError = nil
 	c.mu.Unlock()
 
 	c.registerHandlers(conn)

@@ -166,6 +166,59 @@ func TestRegimeLifecycleDegradesReadinessForWeakRows(t *testing.T) {
 	}
 }
 
+func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		composite RegimeComposite
+		wantLabel string
+		wantTone  string
+		wantStage string
+	}{
+		{
+			name:      "one red plus one yellow is watch",
+			composite: RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRedCount: 1, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
+			wantLabel: "Stress signal present",
+			wantTone:  RegimeToneWatch,
+			wantStage: LifecycleEarlyWarning,
+		},
+		{
+			name:      "two red clusters are confirmed stress",
+			composite: RegimeComposite{ClusterGreenCount: 3, ClusterRedCount: 2, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
+			wantLabel: "Broad stress regime",
+			wantTone:  RegimeToneStress,
+			wantStage: LifecycleConfirmedStress,
+		},
+		{
+			name:      "all ranked clusters red is risk off",
+			composite: RegimeComposite{ClusterRedCount: 6, ClusterRankedCount: 6},
+			wantLabel: "Full risk-off conditions",
+			wantTone:  RegimeToneRiskOff,
+			wantStage: LifecyclePanic,
+		},
+		{
+			name:      "too few ranked clusters is data quality",
+			composite: RegimeComposite{ClusterGreenCount: 1, ClusterRedCount: 1, ClusterRankedCount: 2, ClusterUnrankedCount: 4},
+			wantLabel: "Insufficient signal — too few inputs ready",
+			wantTone:  RegimeToneDataQuality,
+			wantStage: LifecycleDataQuality,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			regime := RegimeSnapshotResult{Composite: tt.composite}
+			regime.Lifecycle = BuildRegimeLifecycle(&regime)
+			got := BuildRegimePosture(&regime)
+			if got.Label != tt.wantLabel || got.Tone != tt.wantTone || got.Stage != tt.wantStage {
+				t.Fatalf("posture = %+v, want label=%q tone=%q stage=%q", got, tt.wantLabel, tt.wantTone, tt.wantStage)
+			}
+		})
+	}
+}
+
 func TestRegimeSourceHealthUsesOldestClusterAsOf(t *testing.T) {
 	t.Parallel()
 	old := time.Date(2026, time.May, 29, 21, 0, 0, 0, time.UTC)

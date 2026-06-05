@@ -1762,6 +1762,7 @@ type RegimeSnapshotResult struct {
 	Fingerprint      Fingerprint            `json:"fingerprint"`
 	Lifecycle        LifecycleState         `json:"lifecycle,omitzero"`
 	Summary          RegimeSummary          `json:"summary"`
+	Posture          RegimePosture          `json:"posture,omitzero"`
 	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
 	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`
 	HYGSPYDivergence RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
@@ -1807,6 +1808,19 @@ type RegimeSummary struct {
 	Confidence        string   `json:"confidence"`
 	DominantRisks     []string `json:"dominant_risks,omitempty"`
 	NotAdvice         string   `json:"not_advice,omitempty"`
+}
+
+// RegimePosture is the canonical display/policy read for market-regime
+// consumers. UIs should render this instead of deriving their own tone from raw
+// cluster counts.
+type RegimePosture struct {
+	Label      string `json:"label,omitempty"`
+	Tone       string `json:"tone,omitempty"`
+	Stage      string `json:"stage,omitempty"`
+	Severity   string `json:"severity,omitempty"`
+	Readiness  string `json:"readiness,omitempty"`
+	Confidence string `json:"confidence,omitempty"`
+	Evidence   string `json:"evidence,omitempty"`
 }
 
 // RegimeWarning is a structured data-quality or availability issue scoped

@@ -108,7 +108,7 @@ func catalogExtras() map[string]CommandSpec {
 		"daemon":    {Flags: flags(boolFlag("foreground"), boolFlag("version"), valueFlag("config", nil), valueFlag("socket", nil), valueFlag("log", nil)), Guard: GuardLocal, TUI: TUIExternal},
 		"setup":     {Guard: GuardLocal, TUI: TUIExternal},
 		"update":    {Flags: flags(boolFlag("check"), boolFlag("force"), boolFlag("restart"), boolFlag("no-restart")), Guard: GuardConfirm},
-		"restart":   {Flags: flags(boolFlag("app"), boolFlag("force"), valueFlag("timeout", nil), boolFlag("json")), Guard: GuardConfirm},
+		"restart":   {Flags: flags(boolFlag("app"), boolFlag("force"), valueFlag("timeout", nil), valueFlag("addr", nil), valueFlag("public-url", nil), valueFlag("state-dir", nil), boolFlag("json")), Guard: GuardConfirm},
 		"version":   {Guard: GuardLocal},
 	}
 }

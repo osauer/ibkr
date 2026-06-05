@@ -429,33 +429,42 @@ p {
 }
 
 .banner-stack {
-  margin-bottom: 10px;
+  width: 100%;
+  margin: 4px 0 12px;
 }
 
 .source-banner {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  padding: 11px 12px;
-  border: 1px solid rgba(255, 55, 51, 0.22);
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: baseline;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
   border-radius: var(--radius-card);
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
+  background: var(--red);
+  color: #fff;
+  box-shadow: 0 5px 12px rgba(224, 0, 34, 0.12);
 }
 
 .source-banner span {
-  color: var(--red);
-  font-size: 10px;
+  min-width: 0;
+  color: #fff;
+  font-size: 9px;
   font-weight: 780;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
+  line-height: 1.2;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .source-banner b {
+  min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--ink-2);
+  color: #fff;
   font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
 }
 
 .source-inline {
@@ -597,6 +606,8 @@ p {
   min-height: 150px;
   padding: 13px;
   border-top: 3px solid var(--line);
+  cursor: pointer;
+  touch-action: manipulation;
 }
 
 .signal-panel .panel-head {
@@ -609,6 +620,14 @@ p {
 
 .signal-panel .panel-chevron {
   margin-left: 0;
+}
+
+.signal-panel :where(.detail-panel, .regime-detail-panel, .order-review, .alert-focus) {
+  cursor: auto;
+}
+
+.signal-panel :where(button, a, input, select, textarea, label) {
+  cursor: pointer;
 }
 
 .canary-hero {
@@ -1617,35 +1636,38 @@ p {
 }
 
 .underlying-panel {
+  display: grid;
+  gap: 0;
   padding: 0;
+  overflow: hidden;
 }
 
-.underlying-panel summary {
+.underlying-panel__head {
   display: flex;
   align-items: center;
   gap: 9px;
   margin: 0;
   padding: 15px;
-  cursor: pointer;
-  list-style: none;
 }
 
-.underlying-panel summary::-webkit-details-marker {
-  display: none;
-}
-
-.panel-chevron--summary {
+.underlying-panel__head .panel-chevron {
   margin-left: 0;
-  pointer-events: none;
 }
 
-.underlying-panel[open] .panel-chevron--summary::after {
+.underlying-panel[data-open="true"] .panel-chevron::after {
   transform: rotate(135deg);
 }
 
 .underlying-panel .underlying-book {
   padding: 0 15px 15px;
   border-top: 0;
+}
+
+.underlying-book__list-panel {
+  display: grid;
+  gap: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .underlying-book__head {
@@ -2640,6 +2662,12 @@ p {
   .shell {
     padding-right: 18px;
     padding-left: 18px;
+  }
+
+  .source-banner {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding: 9px 11px 10px;
   }
 
   .canary-action span,

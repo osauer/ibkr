@@ -57,6 +57,7 @@ type RegimeMonitorResult struct {
 	Fingerprint    Fingerprint              `json:"fingerprint"`
 	Lifecycle      LifecycleState           `json:"lifecycle,omitzero"`
 	Summary        RegimeSummary            `json:"summary"`
+	Posture        RegimePosture            `json:"posture,omitzero"`
 	Composite      RegimeComposite          `json:"composite"`
 	WarningDetails []RegimeWarning          `json:"warning_details,omitempty"`
 	DataQuality    []DataQualityHealth      `json:"data_quality,omitempty"`
@@ -172,11 +173,16 @@ func CompactRegimeMonitor(r *RegimeSnapshotResult) RegimeMonitorResult {
 		return RegimeMonitorResult{}
 	}
 	CompactRegimeSnapshot(r)
+	posture := r.Posture
+	if posture.Label == "" && posture.Tone == "" {
+		posture = BuildRegimePosture(r)
+	}
 	return RegimeMonitorResult{
 		AsOf:           r.AsOf,
 		Fingerprint:    r.Fingerprint,
 		Lifecycle:      r.Lifecycle,
 		Summary:        r.Summary,
+		Posture:        posture,
 		Composite:      r.Composite,
 		WarningDetails: r.WarningDetails,
 		DataQuality:    r.DataQuality,

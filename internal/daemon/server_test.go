@@ -828,7 +828,7 @@ func TestBackgroundTasksRegistry_isBusyAndHandlerAgree(t *testing.T) {
 // idle-shutdown path.
 func TestCloseListenerIdempotent(t *testing.T) {
 	t.Parallel()
-	srv := &Server{}
+	srv := &Server{logger: NewLogger(&bytes.Buffer{}, "error")}
 	srv.closeListener() // never opened — must not panic
 	srv.closeListener() // still nil — must not panic
 
@@ -1218,6 +1218,7 @@ type fakeAttempter struct {
 	port              int
 	connectOk         bool
 	startErr          error
+	lastError         string
 	blockUntilCtxDone bool
 	connected         atomic.Bool
 	stopCalls         atomic.Int32
@@ -1247,6 +1248,7 @@ func (f *fakeAttempter) Stop() error {
 }
 func (f *fakeAttempter) IsConnected() bool { return f.connected.Load() }
 func (f *fakeAttempter) UsingTLS() bool    { return false }
+func (f *fakeAttempter) LastError() string { return f.lastError }
 func (f *fakeAttempter) SetMarketDataType(t int) error {
 	f.setMarketDataType.Store(int32(t))
 	return nil
@@ -1261,6 +1263,20 @@ func (f *fakeAttempter) SubscribeAccountPnL(account string) error {
 	// fake records nothing extra — the failover tests don't assert PnL
 	// subscription state and adding tracking would just be noise.
 	return nil
+}
+
+func TestTryOneHandshakePublishesConnectorLastError(t *testing.T) {
+	t.Parallel()
+	srv := &Server{logger: NewLogger(&bytes.Buffer{}, "error")}
+	ep := discover.Endpoint{Host: "127.0.0.1", Port: 7496, ClientID: 15}
+	cause := "ibkr: client id already in use: gateway client ID 15 is already in use; stop the stale IBKR API client or choose a free [gateway].client_id"
+
+	if srv.tryOneHandshake(context.Background(), &fakeAttempter{lastError: cause}, ep) {
+		t.Fatal("tryOneHandshake succeeded for disconnected attempter")
+	}
+	if srv.lastConnectError != cause {
+		t.Fatalf("lastConnectError = %q, want connector cause %q", srv.lastConnectError, cause)
+	}
 }
 
 // The failover bug fix: when discovery picks a port that completes the
