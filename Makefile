@@ -40,7 +40,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -68,6 +68,17 @@ restart-daemon: install ## Install, then gracefully restart/start daemon (FORCE=
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
 APP_SMOKE_BROWSER ?= chromium
+app-check: ## Fast SPA gate: JS syntax + static app contracts
+	node --check web/app/app.js
+	go test ./web/app
+
+app-refresh: install ## Install, restart the shared app host, and print a local pairing URL
+	$(PREFIX)/bin/ibkr restart --app --timeout $(RESTART_TIMEOUT)
+	$(PREFIX)/bin/ibkr app pair --public-url $(APP_SMOKE_URL) --json
+
+app-refresh-smoke: app-refresh ## Refresh the shared app host, then run the browser app smoke
+	$(MAKE) app-smoke APP_SMOKE_URL=$(APP_SMOKE_URL) APP_SMOKE_BROWSER=$(APP_SMOKE_BROWSER)
+
 app-smoke: ## Browser-smoke a running ibkr app without scanning a QR code
 	node scripts/app-browser-smoke.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER) --no-notification
 

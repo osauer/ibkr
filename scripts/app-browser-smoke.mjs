@@ -299,6 +299,8 @@ async function exerciseAccountPanel(page) {
     accountLabel: document.getElementById("accountLabel")?.textContent?.trim() || "",
     pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
     freshness: document.getElementById("accountAsOf")?.textContent?.trim() || "",
+    dailyPnl: document.getElementById("dailyPnl")?.textContent?.trim() || "",
+    dailyPnlPct: document.getElementById("dailyPnlPct")?.textContent?.trim() || "",
     riskValues: [
       document.getElementById("accountRiskDelta")?.textContent?.trim() || "",
       document.getElementById("accountRiskTheta")?.textContent?.trim() || "",
@@ -310,8 +312,11 @@ async function exerciseAccountPanel(page) {
   if (panel.accountMenuPresent || panel.accountMenuTogglePresent) {
     throw new Error(`account dropdown DOM should be removed: ${JSON.stringify(panel)}`);
   }
-  if (!panel.accountLabel || !panel.pill || !panel.freshness || panel.riskValues.some((value) => !value)) {
+  if (!panel.accountLabel || !panel.pill || !panel.freshness || !panel.dailyPnlPct || panel.riskValues.some((value) => !value)) {
     throw new Error(`account panel is missing values: ${JSON.stringify(panel)}`);
+  }
+  if (panel.dailyPnl !== "--" && (panel.dailyPnlPct === "******" || !panel.dailyPnlPct.includes("%"))) {
+    throw new Error(`account Daily P/L percent should stay visible in privacy mode: ${JSON.stringify(panel)}`);
   }
   if (/no concrete/i.test(panel.accountLabel)) {
     throw new Error(`account panel should not show no-concrete copy: ${JSON.stringify(panel)}`);
@@ -535,10 +540,12 @@ async function exerciseUnderlyingPanelFixture(page) {
   const info = await page.evaluate(() => ({
     count: document.getElementById("underlyingBookCount")?.textContent?.trim() || "",
     status: document.getElementById("underlyingBookStatus")?.textContent?.trim() || "",
+    winner: document.getElementById("underlyingWinnerPnl")?.textContent?.trim() || "",
+    loser: document.getElementById("underlyingLoserPnl")?.textContent?.trim() || "",
     accountHasUnderlyingBook: !!document.querySelector("#accountPanel #underlyingBookList"),
     canaryHasUnderlyingBook: !!document.querySelector("#canaryHero #underlyingBookList"),
     standaloneHasUnderlyingBook: !!document.querySelector("#underlyingPanel #underlyingBookList"),
-    foldIcon: Boolean(document.querySelector("#underlyingPanel summary .panel-chevron--summary")),
+    foldIcon: Boolean(document.querySelector("#underlyingPanel #underlyingDetailToggle.panel-chevron")),
     bulkButtons: [...document.querySelectorAll("#underlyingPanel .underlying-bulk-actions button")].map((button) => ({
       text: button.textContent?.trim() || "",
       disabled: button.disabled,
@@ -562,7 +569,10 @@ async function exerciseUnderlyingPanelFixture(page) {
     throw new Error(`underlyings subledger is in the wrong panel: ${JSON.stringify(info)}`);
   }
   if (!info.foldIcon) {
-    throw new Error(`underlyings folded summary is missing its disclosure icon: ${JSON.stringify(info)}`);
+    throw new Error(`underlyings folded summary is missing its disclosure toggle: ${JSON.stringify(info)}`);
+  }
+  if (!info.winner || !info.loser) {
+    throw new Error(`underlyings folded summary is missing winner/loser totals: ${JSON.stringify(info)}`);
   }
   const row = info.rows.find((item) => item.symbol === "MSFT");
   if (!row || !row.virtual) {
@@ -592,9 +602,9 @@ async function exerciseUnderlyingPanelFixture(page) {
     throw new Error(`underlying row still contains placeholder action copy: ${JSON.stringify(row.buttons)}`);
   }
   const bulkLabels = info.bulkButtons.map((item) => item.text);
-  const expectedBulkLabels = ["Purge", "Restore", "Build"];
+  const expectedBulkLabels = ["Purge all!", "Restore all", "Rebuild all"];
   if (JSON.stringify(bulkLabels) !== JSON.stringify(expectedBulkLabels)) {
-    throw new Error(`bulk underlying controls should be ordered Purge, Restore, Build: ${JSON.stringify(info.bulkButtons)}`);
+    throw new Error(`bulk underlying controls should be ordered Purge all!, Restore all, Rebuild all: ${JSON.stringify(info.bulkButtons)}`);
   }
   for (const label of expectedBulkLabels) {
     const button = info.bulkButtons.find((item) => item.text === label);
@@ -765,10 +775,22 @@ async function exerciseMarketContext(page) {
 
 async function exercisePortfolioDetail(page) {
   const summary = (await page.locator("#portfolioDetailSummary").textContent())?.trim() || "";
-  await page.locator("#portfolioDetailToggle").click();
+  const hero = await page.evaluate(() => ({
+    panelOpen: document.getElementById("portfolioPanel")?.dataset.open || "",
+    delta: document.getElementById("portfolioDollarDelta")?.textContent?.trim() || "",
+    meaning: document.getElementById("portfolioDeltaMeaning")?.textContent?.trim() || "",
+  }));
+  if (hero.panelOpen !== "false" || !hero.delta || !hero.meaning) {
+    throw new Error(`portfolio folded hero is incomplete: ${JSON.stringify(hero)}`);
+  }
+  if (/[0-9$€£]|USD|EUR|GBP/.test(hero.delta)) {
+    throw new Error(`portfolio folded delta should not expose the private numeric value: ${JSON.stringify(hero)}`);
+  }
+  await page.locator("#portfolioPanel .portfolio-layout").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("portfolioDetailPanel");
-    return panel && !panel.hidden && document.getElementById("portfolioDetailList")?.children.length >= 4;
+    return document.getElementById("portfolioPanel")?.dataset.open === "true" &&
+      panel && !panel.hidden && document.getElementById("portfolioDetailList")?.children.length >= 4;
   }, { timeout: 5000 });
   const detail = await page.evaluate(() => ({
     rows: document.getElementById("portfolioDetailList")?.children.length || 0,
@@ -778,7 +800,11 @@ async function exercisePortfolioDetail(page) {
     throw new Error("portfolio detail does not explain Greeks coverage");
   }
   await page.locator("#portfolioDetailToggle").click();
-  return { opens: true, summary, rows: detail.rows };
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("portfolioDetailPanel");
+    return document.getElementById("portfolioPanel")?.dataset.open === "false" && panel && panel.hidden;
+  }, { timeout: 5000 });
+  return { opens: true, summary, rows: detail.rows, delta: hero.delta };
 }
 
 async function exerciseAlertHistory(page) {

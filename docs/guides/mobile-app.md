@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-06-05 14:04 CEST
+Updated: 2026-06-05 17:42 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -54,6 +54,13 @@ ibkr restart --app --addr 0.0.0.0:8765
 When `--addr` is overridden without `--public-url`, restart clears any preserved
 app `--public-url` flag so the app can derive the Mac's LAN URL again.
 
+For SPA development, use the refresh target so embedded assets and the running
+app host stay in sync:
+
+```sh
+make app-refresh
+```
+
 ## Browser Smoke
 
 To avoid QR-driven manual testing for every frontend issue, run a browser smoke
@@ -98,3 +105,6 @@ for the local Node environment before running the smoke.
 The Go test gate also includes static compatibility tests for browser globals in
 `web/app/app_compat_test.go`, so direct unguarded `Notification` references fail
 under `go test ./...`.
+
+For the full SPA development and debugging playbook, including P/L semantics and
+Browser plugin caveats, see [Canary SPA Development](canary-spa-dev.md).

@@ -23,10 +23,18 @@ the app for bootstrap data and live SSE updates.
 Useful while developing or testing:
 
 ```sh
+make app-check
+make app-refresh
+make app-refresh-smoke APP_SMOKE_BROWSER=webkit
 ibkr restart --app --timeout 15s
 make app-smoke APP_SMOKE_BROWSER=webkit
 make app-lifecycle-smoke APP_SMOKE_BROWSER=webkit
 ```
+
+For source edits, prefer `make app-refresh` before Browser verification because
+the SPA is embedded in the installed `ibkr` binary. The detailed development
+playbook lives in
+[`docs/guides/canary-spa-dev.md`](../../docs/guides/canary-spa-dev.md).
 
 App icons are generated PNGs. Regenerate the smaller PWA/favicon sizes from
 the checked-in cropped master with:

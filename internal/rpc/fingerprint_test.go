@@ -170,39 +170,52 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		composite RegimeComposite
-		wantLabel string
-		wantTone  string
-		wantStage string
+		name         string
+		composite    RegimeComposite
+		wantLabel    string
+		wantTone     string
+		wantStage    string
+		wantSeverity string
 	}{
 		{
-			name:      "one red plus one yellow is watch",
-			composite: RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRedCount: 1, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
-			wantLabel: "Stress signal present",
-			wantTone:  RegimeToneWatch,
-			wantStage: LifecycleEarlyWarning,
+			name:         "one red plus one yellow is watch",
+			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRedCount: 1, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
+			wantLabel:    "Stress signal present",
+			wantTone:     RegimeToneWatch,
+			wantStage:    LifecycleEarlyWarning,
+			wantSeverity: "watch",
 		},
 		{
-			name:      "two red clusters are confirmed stress",
-			composite: RegimeComposite{ClusterGreenCount: 3, ClusterRedCount: 2, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
-			wantLabel: "Broad stress regime",
-			wantTone:  RegimeToneStress,
-			wantStage: LifecycleConfirmedStress,
+			name:         "two red clusters are confirmed stress",
+			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterRedCount: 2, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
+			wantLabel:    "Broad stress regime",
+			wantTone:     RegimeToneStress,
+			wantStage:    LifecycleConfirmedStress,
+			wantSeverity: "act",
 		},
 		{
-			name:      "all ranked clusters red is risk off",
-			composite: RegimeComposite{ClusterRedCount: 6, ClusterRankedCount: 6},
-			wantLabel: "Full risk-off conditions",
-			wantTone:  RegimeToneRiskOff,
-			wantStage: LifecyclePanic,
+			name:         "all ranked clusters red is risk off",
+			composite:    RegimeComposite{ClusterRedCount: 6, ClusterRankedCount: 6},
+			wantLabel:    "Full risk-off conditions",
+			wantTone:     RegimeToneRiskOff,
+			wantStage:    LifecyclePanic,
+			wantSeverity: "urgent",
 		},
 		{
-			name:      "too few ranked clusters is data quality",
-			composite: RegimeComposite{ClusterGreenCount: 1, ClusterRedCount: 1, ClusterRankedCount: 2, ClusterUnrankedCount: 4},
-			wantLabel: "Insufficient signal — too few inputs ready",
-			wantTone:  RegimeToneDataQuality,
-			wantStage: LifecycleDataQuality,
+			name:         "too few ranked clusters is data quality",
+			composite:    RegimeComposite{ClusterGreenCount: 1, ClusterRedCount: 1, ClusterRankedCount: 2, ClusterUnrankedCount: 4},
+			wantLabel:    "Insufficient signal — too few inputs ready",
+			wantTone:     RegimeToneDataQuality,
+			wantStage:    LifecycleDataQuality,
+			wantSeverity: "watch",
+		},
+		{
+			name:         "one yellow cluster is amber normal watch",
+			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
+			wantLabel:    "Normal regime",
+			wantTone:     RegimeToneWatch,
+			wantStage:    LifecycleQuiet,
+			wantSeverity: "watch",
 		},
 	}
 
@@ -212,10 +225,29 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 			regime := RegimeSnapshotResult{Composite: tt.composite}
 			regime.Lifecycle = BuildRegimeLifecycle(&regime)
 			got := BuildRegimePosture(&regime)
-			if got.Label != tt.wantLabel || got.Tone != tt.wantTone || got.Stage != tt.wantStage {
-				t.Fatalf("posture = %+v, want label=%q tone=%q stage=%q", got, tt.wantLabel, tt.wantTone, tt.wantStage)
+			if got.Label != tt.wantLabel || got.Tone != tt.wantTone || got.Stage != tt.wantStage || got.Severity != tt.wantSeverity {
+				t.Fatalf("posture = %+v, want label=%q tone=%q stage=%q severity=%q", got, tt.wantLabel, tt.wantTone, tt.wantStage, tt.wantSeverity)
 			}
 		})
+	}
+}
+
+func TestRegimePostureMarksDegradedNormalAsDataQuality(t *testing.T) {
+	t.Parallel()
+	regime := RegimeSnapshotResult{
+		Summary:   RegimeSummary{Confidence: "high"},
+		Composite: RegimeComposite{ClusterGreenCount: 4, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
+		DataQuality: []DataQualityHealth{
+			{Surface: "regime", Status: "partial", PartialClusters: []string{"credit", "FX"}},
+		},
+	}
+	regime.Lifecycle = BuildRegimeLifecycle(&regime)
+	got := BuildRegimePosture(&regime)
+	if got.Label != "Normal regime" {
+		t.Fatalf("label: want Normal regime, got %+v", got)
+	}
+	if got.Tone != RegimeToneDataQuality || got.Severity != "watch" || got.Readiness != "degraded" {
+		t.Fatalf("posture should warn on degraded normal, got %+v", got)
 	}
 }
 

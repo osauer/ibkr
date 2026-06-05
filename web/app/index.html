@@ -8,7 +8,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/styles.css?v=mobile-touch-panels-20260605">
+    <link rel="stylesheet" href="/styles.css?v=daily-underlyings-20260605">
   </head>
   <body>
     <main class="shell">
@@ -79,6 +79,7 @@
           <div class="account-primary">
             <span>Daily P&amp;L</span>
             <strong id="dailyPnl">--</strong>
+            <small id="dailyPnlPct">--</small>
           </div>
         </div>
         <div class="account-risk-strip">
@@ -230,12 +231,15 @@
             </button>
           </div>
           <div class="underlying-book" id="underlyingBook">
-            <div class="underlying-book__head">
-              <div>
-                <span>Held and purged</span>
-                <b id="underlyingBookCount">No underlyings</b>
+            <div class="underlying-pnl-summary" aria-label="Underlying daily profit and loss totals">
+              <div class="underlying-pnl-card underlying-pnl-card--winner">
+                <span>Winner daily P/L</span>
+                <b id="underlyingWinnerPnl">--</b>
               </div>
-              <small id="underlyingBookStatus">Held and virtual purge-book records</small>
+              <div class="underlying-pnl-card underlying-pnl-card--loser">
+                <span>Loser daily P/L</span>
+                <b id="underlyingLoserPnl">--</b>
+              </div>
             </div>
             <div class="underlying-bulk-actions" aria-label="Underlying bulk actions">
               <button class="underlying-action underlying-action--purge" id="purgeAllUnderlyingsButton" type="button">Purge all!</button>
@@ -244,12 +248,19 @@
             </div>
             <div class="underlying-action-result" id="underlyingActionResult" hidden></div>
             <div class="underlying-book__list-panel" id="underlyingBookListPanel" hidden>
+              <div class="underlying-book__head">
+                <div>
+                  <span>Held and purged</span>
+                  <b id="underlyingBookCount">No underlyings</b>
+                </div>
+                <small id="underlyingBookStatus">Held and virtual purge-book records</small>
+              </div>
               <div class="underlying-book__list" id="underlyingBookList"></div>
             </div>
           </div>
         </article>
 
-        <article class="panel portfolio-panel">
+        <article class="panel portfolio-panel" id="portfolioPanel" data-open="false">
           <div class="panel-head">
             <span>Portfolio Risk</span>
             <button class="panel-chevron" id="portfolioDetailToggle" type="button" aria-expanded="false" aria-controls="portfolioDetailPanel">
@@ -259,27 +270,27 @@
           </div>
           <div class="portfolio-layout">
             <div class="portfolio-lede">
-              <span>Net Delta (Market Risk)</span>
+              <span>Delta posture</span>
               <strong id="portfolioDollarDelta">--</strong>
-              <button class="text-link text-link--muted" type="button" aria-disabled="true">What this means</button>
+              <small id="portfolioDeltaMeaning">Market-risk read pending.</small>
             </div>
             <div class="exposure-composition">
               <span>Exposure Composition</span>
               <div class="exposure-visual" id="portfolioExposureVisual" hidden></div>
             </div>
           </div>
-          <div class="greeks-row">
-            <span class="greeks-copy">
-              <span>Option Greeks Ready</span>
-              <small id="portfolioGreeksMeaning">Model Greeks available for option legs.</small>
-            </span>
-            <b id="portfolioGreeksCoverage">--</b>
-            <span class="sr-only" id="portfolioDailyTheta">--</span>
-            <span class="sr-only" id="portfolioFxSensitivity">--</span>
-            <span class="sr-only" id="portfolioDetailSummary">--</span>
-          </div>
-          <p class="portfolio-risk-hint">Dollar delta is the fastest read on market risk: estimated portfolio P/L for a one-point move in the held underlyings.</p>
+          <span class="sr-only" id="portfolioDailyTheta">--</span>
+          <span class="sr-only" id="portfolioFxSensitivity">--</span>
+          <span class="sr-only" id="portfolioDetailSummary">--</span>
           <div class="portfolio-detail-panel" id="portfolioDetailPanel" hidden>
+            <div class="greeks-row">
+              <span class="greeks-copy">
+                <span>Option Greeks Ready</span>
+                <small id="portfolioGreeksMeaning">Model Greeks available for option legs.</small>
+              </span>
+              <b id="portfolioGreeksCoverage">--</b>
+            </div>
+            <p class="portfolio-risk-hint">Dollar delta is the fastest read on market risk: estimated portfolio P/L for a one-point move in the held underlyings.</p>
             <div class="detail-list" id="portfolioDetailList"></div>
             <div class="exposure-list" id="portfolioExposureList" hidden></div>
             <div class="portfolio-summary">
@@ -380,6 +391,6 @@
         <span class="sync-strip__auto">Auto</span>
       </footer>
     </main>
-    <script src="/app.js?v=mobile-touch-panels-20260605" type="module"></script>
+    <script src="/app.js?v=daily-underlyings-20260605" type="module"></script>
   </body>
 </html>
