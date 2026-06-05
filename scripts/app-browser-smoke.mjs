@@ -16,6 +16,7 @@ const lifecycle = args.lifecycle === "true";
 const restartCommand = args["restart-command"] || "";
 const stopRestartedApp = args["stop-restarted-app"] === "true";
 const mobile = args.mobile !== "false";
+const rawGatewayCopyPattern = /gateway_unavailable|ibkr connection unavailable|quote\.snapshot|account\.summary|positions\.list/i;
 
 const playwright = loadPlaywright();
 
@@ -123,7 +124,11 @@ const consoleMessages = [];
 const pageErrors = [];
 page.on("console", (msg) => {
   if (msg.type() === "error" || msg.type() === "warning") {
-    consoleMessages.push(`${msg.type()}: ${msg.text()}`);
+    const text = msg.text();
+    if (/ERR_INCOMPLETE_CHUNKED_ENCODING/.test(text)) {
+      return;
+    }
+    consoleMessages.push(`${msg.type()}: ${text}`);
   }
 });
 page.on("pageerror", (err) => pageErrors.push(String(err?.message || err)));
@@ -137,21 +142,18 @@ try {
   const pushState = await page.locator("#pushState").textContent();
   const eventsBefore = await fetchEventsDiagnostics(page);
   const privacy = await exerciseAccountPrivacy(page);
-  const accountMenu = await exerciseAccountMenu(page);
+  const accountPanel = await exerciseAccountPanel(page);
+  const snapshotBanner = await assertSnapshotBannerCopy(page);
   const marketLayout = await exerciseMarketLayout(page);
+  const viewportOverflow = await assertNoViewportOverflow(page);
   const canaryControls = await exerciseCanaryControlsRemoved(page);
-  const underlyingBookFixture = await exerciseCanaryUnderlyingBookFixture(page);
+  const underlyingBookFixture = await exerciseUnderlyingPanelFixture(page);
   const canaryDetail = await exerciseCanaryDetail(page);
   const marketContext = await exerciseMarketContext(page);
   const portfolioDetail = await exercisePortfolioDetail(page);
   const alertHistory = await exerciseAlertHistory(page);
   const openOrders = await exerciseOpenOrders(page);
-  await openDebugTools(page);
-  await page.locator('[data-tool="snapshot"]').click();
-  await page.waitForFunction(() => {
-    const out = document.getElementById("toolOutput");
-    return out && out.textContent && out.textContent.trim() !== "{}";
-  }, { timeout: 10000 });
+  const debugTools = await assertDebugToolsRemoved(page, baseURL);
   if (noNotification && pushState !== "push unsupported") {
     throw new Error(`expected push unsupported with Notification removed, got ${JSON.stringify(pushState)}`);
   }
@@ -177,8 +179,10 @@ try {
     connection,
     push_state: pushState,
     privacy,
-    account_menu: accountMenu,
+    account_panel: accountPanel,
+    snapshot_banner: snapshotBanner,
     market_layout: marketLayout,
+    viewport_overflow: viewportOverflow,
     canary_controls: canaryControls,
     underlying_book_fixture: underlyingBookFixture,
     canary_detail: canaryDetail,
@@ -186,9 +190,9 @@ try {
     portfolio_detail: portfolioDetail,
     alert_history: alertHistory,
     open_orders: openOrders,
+    debug_tools: debugTools,
     events: {
-      subscribers: eventsBefore.subscribers,
-      last_event_at: eventsBefore.last_event_at,
+      opened_event_streams: eventsBefore.opened_event_streams,
       event_counts: smokeState.eventCounts,
     },
     lifecycle: lifecycleResult,
@@ -221,8 +225,8 @@ async function runLifecycleSmoke(page) {
   const after = await page.evaluate(() => ({
     authSessions: globalThis.__ibkrSmoke.fetches.filter((f) => f.url.endsWith("/api/auth/session") && f.status === 200).length,
   }));
-  if (eventsAfter.subscribers < 1) {
-    throw new Error(`expected at least one SSE subscriber after restart, got ${eventsAfter.subscribers}`);
+  if (eventsAfter.opened_event_streams < 1) {
+    throw new Error(`expected at least one SSE stream after restart, got ${eventsAfter.opened_event_streams}`);
   }
   return {
     connection_before_restart: connectionBeforeRestart,
@@ -231,8 +235,8 @@ async function runLifecycleSmoke(page) {
     snapshot_events_after_restart: snapshotAfter,
     restart,
     events: {
-      subscribers: eventsAfter.subscribers,
-      last_event_at: eventsAfter.last_event_at,
+      opened_event_streams: eventsAfter.opened_event_streams,
+      event_counts: eventsAfter.event_counts,
     },
   };
 }
@@ -254,35 +258,21 @@ async function waitForHeader(page) {
 }
 
 async function fetchEventsDiagnostics(page) {
-  const events = await page.evaluate(async () => {
-    const res = await fetch("/api/tools/events", { method: "POST", credentials: "include" });
-    if (!res.ok) {
-      throw new Error(`events tool failed ${res.status}: ${await res.text()}`);
-    }
-    return res.json();
-  });
-  if (events.subscribers < 1) {
-    throw new Error(`expected at least one SSE subscriber, got ${events.subscribers}`);
+  const events = await page.evaluate(() => ({
+    opened_event_streams: globalThis.__ibkrSmoke?.openedEvents || 0,
+    event_counts: { ...(globalThis.__ibkrSmoke?.eventCounts || {}) },
+  }));
+  if (events.opened_event_streams < 1) {
+    throw new Error(`expected at least one SSE stream, got ${events.opened_event_streams}`);
   }
   return events;
 }
 
 async function exerciseAccountPrivacy(page) {
-  const menuWasOpen = await page.locator("#accountMenu").evaluate((el) => !el.hidden);
-  if (!menuWasOpen) {
-    await page.locator("#accountMenuToggle").click();
-    await page.waitForFunction(() => {
-      const panel = document.getElementById("accountMenu");
-      return panel && !panel.hidden;
-    }, { timeout: 5000 });
-  }
+  await page.waitForSelector("#accountPanel:not([hidden])", { timeout: 5000 });
   const value = page.locator("#netLiquidation");
   const before = (await value.textContent())?.trim();
   if (before === "--") {
-    if (!menuWasOpen) {
-      await page.locator("#accountMenuToggle").click();
-      await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
-    }
     return { masked_by_default: false, toggle_reveals: false, no_value: true };
   }
   if (before !== "******") {
@@ -295,47 +285,75 @@ async function exerciseAccountPrivacy(page) {
   }, { timeout: 5000 });
   await page.locator("#accountPrivacyToggle").click();
   await page.waitForFunction(() => document.getElementById("netLiquidation")?.textContent?.trim() === "******", { timeout: 5000 });
-  if (!menuWasOpen) {
-    await page.locator("#accountMenuToggle").click();
-    await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
-  }
   return { masked_by_default: true, toggle_reveals: true };
 }
 
-async function exerciseAccountMenu(page) {
-  await page.locator("#accountMenuToggle").click();
+async function exerciseAccountPanel(page) {
   await page.waitForFunction(() => {
-    const panel = document.getElementById("accountMenu");
-    return panel && !panel.hidden && document.getElementById("accountContextLine")?.textContent?.trim();
+    const panel = document.getElementById("accountPanel");
+    return panel && !panel.hidden && document.getElementById("accountLabel")?.textContent?.trim();
   }, { timeout: 5000 });
-  const menu = await page.evaluate(() => ({
-    expanded: document.getElementById("accountMenuToggle")?.getAttribute("aria-expanded") === "true",
-    context: document.getElementById("accountContextLine")?.textContent?.trim() || "",
-    environment: document.getElementById("accountEnvironment")?.textContent?.trim() || "",
-    orderAccount: document.getElementById("orderAccountLabel")?.textContent?.trim() || "",
+  const panel = await page.evaluate(() => ({
+    accountMenuPresent: !!document.getElementById("accountMenu"),
+    accountMenuTogglePresent: !!document.getElementById("accountMenuToggle"),
+    accountLabel: document.getElementById("accountLabel")?.textContent?.trim() || "",
     pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
-    chip: document.getElementById("accountChipText")?.textContent?.trim() || "",
-    accountHasUnderlyingBook: !!document.querySelector("#accountMenu #underlyingBookList"),
+    freshness: document.getElementById("accountAsOf")?.textContent?.trim() || "",
+    riskValues: [
+      document.getElementById("accountRiskDelta")?.textContent?.trim() || "",
+      document.getElementById("accountRiskTheta")?.textContent?.trim() || "",
+      document.getElementById("accountRiskFx")?.textContent?.trim() || "",
+      document.getElementById("accountLargestExposureLabel")?.textContent?.trim() || "",
+    ],
+    accountHasUnderlyingBook: !!document.querySelector("#accountPanel #underlyingBookList"),
   }));
-  if (!menu.expanded) {
-    throw new Error("account menu did not mark itself expanded");
+  if (panel.accountMenuPresent || panel.accountMenuTogglePresent) {
+    throw new Error(`account dropdown DOM should be removed: ${JSON.stringify(panel)}`);
   }
-  if (!menu.context || !menu.environment || !menu.orderAccount || !menu.pill || !menu.chip) {
-    throw new Error(`account menu is missing values: ${JSON.stringify(menu)}`);
+  if (!panel.accountLabel || !panel.pill || !panel.freshness || panel.riskValues.some((value) => !value)) {
+    throw new Error(`account panel is missing values: ${JSON.stringify(panel)}`);
   }
-  if (menu.accountHasUnderlyingBook) {
-    throw new Error("account menu should not contain the underlyings subledger");
+  if (/no concrete/i.test(panel.accountLabel)) {
+    throw new Error(`account panel should not show no-concrete copy: ${JSON.stringify(panel)}`);
   }
-  await page.locator("#accountMenuToggle").click();
-  await page.waitForFunction(() => document.getElementById("accountMenu")?.hidden, { timeout: 5000 });
+  if (/^all accounts$/i.test(panel.accountLabel)) {
+    throw new Error(`account panel should avoid vague All accounts copy: ${JSON.stringify(panel)}`);
+  }
+  if (panel.accountHasUnderlyingBook) {
+    throw new Error("account panel should not contain the underlyings subledger");
+  }
+  const exposureDisabled = await page.locator("#accountLargestExposureToggle").evaluate((button) => button.disabled);
+  if (!exposureDisabled) {
+    await page.locator("#accountLargestExposureToggle").click();
+    await page.waitForFunction(() => {
+      const toggle = document.getElementById("accountLargestExposureToggle");
+      const detail = document.getElementById("accountLargestExposurePanel");
+      return toggle?.getAttribute("aria-expanded") === "true" && detail && !detail.hidden;
+    }, { timeout: 5000 });
+  }
   return {
-    opens: true,
-    context_present: menu.context !== "Waiting for account context",
-    environment: menu.environment,
-    order_account: menu.orderAccount,
-    chip: menu.chip,
-    account_has_underlying_book: menu.accountHasUnderlyingBook,
+    visible: true,
+    account: panel.accountLabel,
+    mode: panel.pill,
+    account_has_underlying_book: panel.accountHasUnderlyingBook,
+    exposure_detail_disabled: exposureDisabled,
   };
+}
+
+async function assertSnapshotBannerCopy(page) {
+  const banner = await page.evaluate(() => {
+    const el = document.getElementById("snapshotErrorBanner");
+    const text = document.getElementById("snapshotErrorText");
+    return {
+      visible: !!el && !el.hidden,
+      text: text?.textContent?.trim() || "",
+      title: text?.getAttribute("title") || "",
+    };
+  });
+  if (rawGatewayCopyPattern.test(banner.text)) {
+    throw new Error(`snapshot banner leaks raw gateway error text: ${JSON.stringify(banner)}`);
+  }
+  return banner;
 }
 
 async function exerciseMarketLayout(page) {
@@ -344,21 +362,53 @@ async function exerciseMarketLayout(page) {
     return /\b(closing|opening) in\b/i.test(text);
   }, { timeout: 10000 });
   const layout = await page.evaluate(() => {
-    const marketPanel = document.getElementById("marketPanel");
+    const regimePanel = document.getElementById("regimePanel");
     const canaryPanel = document.getElementById("canaryHero");
+    const underlyingPanel = document.getElementById("underlyingPanel");
     const marketStrip = document.querySelector(".market-strip");
-    const accountMenu = document.getElementById("accountMenu");
-    const marketBeforeCanary = !!(marketPanel && canaryPanel && (marketPanel.compareDocumentPosition(canaryPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
-    const accountAfterMarketStrip = !!(marketStrip && accountMenu && (marketStrip.compareDocumentPosition(accountMenu) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const accountPanel = document.getElementById("accountPanel");
+    const regimeBeforeCanary = !!(regimePanel && canaryPanel && (regimePanel.compareDocumentPosition(canaryPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const canaryBeforeUnderlying = !!(canaryPanel && underlyingPanel && (canaryPanel.compareDocumentPosition(underlyingPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const accountAfterMarketStrip = !!(marketStrip && accountPanel && (marketStrip.compareDocumentPosition(accountPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
     const phase = document.getElementById("sessionPhase")?.textContent?.trim() || "";
     const strip = document.querySelector(".market-strip");
+    const stripStyle = strip ? getComputedStyle(strip) : null;
+    const quoteStrip = document.getElementById("marketQuoteStrip");
+    const quoteStripStyle = quoteStrip ? getComputedStyle(quoteStrip) : null;
+    const firstQuote = document.querySelector("#marketQuoteStrip .market-quote-cell");
+    const labelStyle = firstQuote?.querySelector("b") ? getComputedStyle(firstQuote.querySelector("b")) : null;
     const marketOpen = strip?.classList.contains("market-open") || false;
-    const accountHasUnderlyingBook = !!document.querySelector("#accountMenu #underlyingBookList");
+    const accountHasUnderlyingBook = !!document.querySelector("#accountPanel #underlyingBookList");
     const canaryHasUnderlyingBook = !!document.querySelector("#canaryHero #underlyingBookList");
-    return { marketBeforeCanary, accountAfterMarketStrip, phase, marketOpen, accountHasUnderlyingBook, canaryHasUnderlyingBook };
+    const standaloneHasUnderlyingBook = !!document.querySelector("#underlyingPanel #underlyingBookList");
+    const quoteCells = document.querySelectorAll("#marketQuoteStrip .market-quote-cell").length;
+    const underlyingOpen = !!underlyingPanel?.open;
+    return {
+      regimeBeforeCanary,
+      canaryBeforeUnderlying,
+      accountAfterMarketStrip,
+      phase,
+      marketOpen,
+      accountHasUnderlyingBook,
+      canaryHasUnderlyingBook,
+      standaloneHasUnderlyingBook,
+      quoteCells,
+      underlyingOpen,
+      marketStyle: {
+        stripShadow: stripStyle?.boxShadow || "",
+        quoteBorder: quoteStripStyle?.borderTopWidth || "",
+        quoteRadius: quoteStripStyle?.borderRadius || "",
+        quoteBackground: quoteStripStyle?.backgroundColor || "",
+        labelColor: labelStyle?.color || "",
+        labelSize: labelStyle?.fontSize || "",
+      },
+    };
   });
-  if (!layout.marketBeforeCanary) {
-    throw new Error("Market Context should appear before Portfolio Canary in DOM order");
+  if (!layout.regimeBeforeCanary) {
+    throw new Error("Regime should appear before Portfolio Canary in DOM order");
+  }
+  if (!layout.canaryBeforeUnderlying) {
+    throw new Error("Underlyings should appear after Portfolio Canary in DOM order");
   }
   if (!layout.accountAfterMarketStrip) {
     throw new Error("Account panel should appear below the market countdown in DOM order");
@@ -370,15 +420,79 @@ async function exerciseMarketLayout(page) {
     throw new Error(`closed market line should contain opening in: ${JSON.stringify(layout.phase)}`);
   }
   if (layout.accountHasUnderlyingBook) {
-    throw new Error("Account menu still contains the underlyings subledger");
+    throw new Error("Account panel still contains the underlyings subledger");
   }
-  if (!layout.canaryHasUnderlyingBook) {
-    throw new Error("Portfolio Canary is missing the underlyings subledger");
+  if (layout.canaryHasUnderlyingBook || !layout.standaloneHasUnderlyingBook) {
+    throw new Error("Underlyings subledger should be standalone, not inside Portfolio Canary");
+  }
+  if (layout.quoteCells !== 6) {
+    throw new Error(`market strip should render six bounded quote cells, found ${layout.quoteCells}`);
+  }
+  if (layout.underlyingOpen) {
+    throw new Error("Underlyings should be folded by default");
+  }
+  if (layout.marketStyle.stripShadow !== "none" || layout.marketStyle.quoteBorder !== "0px" || layout.marketStyle.quoteRadius !== "0px") {
+    throw new Error(`market strip should be flat and unframed: ${JSON.stringify(layout.marketStyle)}`);
+  }
+  if (!/^1[1-3]px$/.test(layout.marketStyle.labelSize)) {
+    throw new Error(`market symbol labels should use compact subtle sizing: ${JSON.stringify(layout.marketStyle)}`);
   }
   if (/\b(Xetra|US market|US equities|US options)\b/i.test(layout.phase)) {
     throw new Error(`market line should not repeat the selected market label: ${JSON.stringify(layout.phase)}`);
   }
   return layout;
+}
+
+async function assertNoViewportOverflow(page) {
+  const sizes = [
+    { width: 390, height: 844 },
+    { width: 547, height: 919 },
+    { width: 900, height: 900 },
+    { width: 1280, height: 900 },
+  ];
+  const results = [];
+  for (const size of sizes) {
+    await page.setViewportSize(size);
+    await page.waitForTimeout(120);
+    const info = await page.evaluate(() => {
+      const clientWidth = document.documentElement.clientWidth;
+      const pageScrollWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
+      const regime = document.getElementById("regimePanel")?.getBoundingClientRect();
+      const canary = document.getElementById("canaryHero")?.getBoundingClientRect();
+      const signalLayout = regime && canary ? {
+        sameRow: Math.abs(regime.top - canary.top) <= 4,
+        regimeFirst: regime.top < canary.top - 4 || (Math.abs(regime.top - canary.top) <= 4 && regime.left < canary.left),
+        similarWidths: Math.abs(regime.width - canary.width) <= 24,
+        similarHeights: Math.abs(regime.height - canary.height) <= 18,
+        regime: { left: Math.round(regime.left), top: Math.round(regime.top), width: Math.round(regime.width), height: Math.round(regime.height) },
+        canary: { left: Math.round(canary.left), top: Math.round(canary.top), width: Math.round(canary.width), height: Math.round(canary.height) },
+      } : null;
+      const offenders = [...document.querySelectorAll("body *")]
+        .filter((el) => {
+          const style = getComputedStyle(el);
+          if (style.display === "none" || style.visibility === "hidden") return false;
+          if (style.overflowX === "auto" || style.overflowX === "scroll") return false;
+          return el.scrollWidth > el.clientWidth + 1;
+        })
+        .slice(0, 8)
+        .map((el) => ({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || "",
+          className: typeof el.className === "string" ? el.className : "",
+          scrollWidth: el.scrollWidth,
+          clientWidth: el.clientWidth,
+        }));
+      return { clientWidth, pageScrollWidth, offenders, signalLayout };
+    });
+    results.push({ ...size, ...info });
+    if (info.pageScrollWidth > info.clientWidth + 1) {
+      throw new Error(`page overflows at ${size.width}px: ${JSON.stringify(info)}`);
+    }
+    if (size.width >= 900 && (!info.signalLayout?.sameRow || !info.signalLayout?.regimeFirst || !info.signalLayout?.similarWidths || !info.signalLayout?.similarHeights)) {
+      throw new Error(`Regime and Canary should align side-by-side with equal weight at ${size.width}px: ${JSON.stringify(info.signalLayout)}`);
+    }
+  }
+  return results;
 }
 
 async function exerciseCanaryControlsRemoved(page) {
@@ -396,7 +510,7 @@ async function exerciseCanaryControlsRemoved(page) {
   return counts;
 }
 
-async function exerciseCanaryUnderlyingBookFixture(page) {
+async function exerciseUnderlyingPanelFixture(page) {
   await page.evaluate(() => {
     localStorage.setItem("ibkrPurgeBook", JSON.stringify({
       purge_id: "purge_ui_fixture",
@@ -416,17 +530,26 @@ async function exerciseCanaryUnderlyingBookFixture(page) {
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
   await page.waitForFunction(() => {
-    return document.querySelector("#canaryHero #underlyingBookList .underlying-row");
+    return document.querySelector("#underlyingPanel #underlyingBookList .underlying-row");
   }, { timeout: 5000 });
   const info = await page.evaluate(() => ({
     count: document.getElementById("underlyingBookCount")?.textContent?.trim() || "",
     status: document.getElementById("underlyingBookStatus")?.textContent?.trim() || "",
-    accountHasUnderlyingBook: !!document.querySelector("#accountMenu #underlyingBookList"),
+    accountHasUnderlyingBook: !!document.querySelector("#accountPanel #underlyingBookList"),
     canaryHasUnderlyingBook: !!document.querySelector("#canaryHero #underlyingBookList"),
-    rows: [...document.querySelectorAll("#canaryHero #underlyingBookList .underlying-row")].map((row) => ({
+    standaloneHasUnderlyingBook: !!document.querySelector("#underlyingPanel #underlyingBookList"),
+    foldIcon: Boolean(document.querySelector("#underlyingPanel summary .panel-chevron--summary")),
+    bulkButtons: [...document.querySelectorAll("#underlyingPanel .underlying-bulk-actions button")].map((button) => ({
+      text: button.textContent?.trim() || "",
+      disabled: button.disabled,
+      title: button.title || "",
+    })),
+      rows: [...document.querySelectorAll("#underlyingPanel #underlyingBookList .underlying-row")].map((row) => ({
       symbol: row.dataset.symbol || "",
       virtual: row.classList.contains("underlying-row--virtual"),
       markers: [...row.querySelectorAll(".underlying-marker")].map((marker) => marker.textContent?.trim() || ""),
+      quoteStatus: row.querySelector(".underlying-quote-status")?.textContent?.trim() || "",
+      quoteStatusTitle: row.querySelector(".underlying-quote-status")?.getAttribute("title") || "",
       buttons: [...row.querySelectorAll("button")].map((button) => ({
         text: button.textContent?.trim() || "",
         disabled: button.disabled,
@@ -435,12 +558,21 @@ async function exerciseCanaryUnderlyingBookFixture(page) {
       text: row.textContent?.replace(/\s+/g, " ").trim() || "",
     })),
   }));
-  if (info.accountHasUnderlyingBook || !info.canaryHasUnderlyingBook) {
+  if (info.accountHasUnderlyingBook || info.canaryHasUnderlyingBook || !info.standaloneHasUnderlyingBook) {
     throw new Error(`underlyings subledger is in the wrong panel: ${JSON.stringify(info)}`);
+  }
+  if (!info.foldIcon) {
+    throw new Error(`underlyings folded summary is missing its disclosure icon: ${JSON.stringify(info)}`);
   }
   const row = info.rows.find((item) => item.symbol === "MSFT");
   if (!row || !row.virtual) {
     throw new Error(`virtual purge row is missing: ${JSON.stringify(info)}`);
+  }
+  if (!row.quoteStatus || !row.quoteStatusTitle) {
+    throw new Error(`underlying row should include quote price status: ${JSON.stringify(row)}`);
+  }
+  if (rawGatewayCopyPattern.test(row.quoteStatus)) {
+    throw new Error(`underlying row leaks raw gateway error text: ${JSON.stringify(row)}`);
   }
   for (const marker of ["Virtual", "Purged"]) {
     if (!row.markers.includes(marker)) {
@@ -449,17 +581,27 @@ async function exerciseCanaryUnderlyingBookFixture(page) {
   }
   const purge = row.buttons.find((button) => button.text === "Purge");
   const restore = row.buttons.find((button) => button.text === "Restore");
-  const rebuild = row.buttons.find((button) => button.text === "Rebuild");
+  const build = row.buttons.find((button) => button.text === "Build");
   if (!purge?.disabled || !purge.title) {
     throw new Error(`purged row should disable Purge with a reason: ${JSON.stringify(row.buttons)}`);
   }
-  if (!restore || restore.disabled || !rebuild || rebuild.disabled) {
-    throw new Error(`purged row should enable Restore and Rebuild: ${JSON.stringify(row.buttons)}`);
+  if (!restore || !build) {
+    throw new Error(`purged row should render Restore and Build actions: ${JSON.stringify(row.buttons)}`);
   }
-
-  await page.locator('#canaryHero #underlyingBookList .underlying-row[data-symbol="MSFT"] .underlying-action--restore').click();
-  await page.waitForFunction(() => document.getElementById("underlyingBookStatus")?.textContent?.includes("Restore placeholder"), { timeout: 5000 });
-  const notice = (await page.locator("#underlyingBookStatus").textContent())?.trim() || "";
+  if (row.buttons.some((button) => /placeholder|backend wiring/i.test(button.title))) {
+    throw new Error(`underlying row still contains placeholder action copy: ${JSON.stringify(row.buttons)}`);
+  }
+  const bulkLabels = info.bulkButtons.map((item) => item.text);
+  const expectedBulkLabels = ["Purge", "Restore", "Build"];
+  if (JSON.stringify(bulkLabels) !== JSON.stringify(expectedBulkLabels)) {
+    throw new Error(`bulk underlying controls should be ordered Purge, Restore, Build: ${JSON.stringify(info.bulkButtons)}`);
+  }
+  for (const label of expectedBulkLabels) {
+    const button = info.bulkButtons.find((item) => item.text === label);
+    if (button.disabled && !button.title) {
+      throw new Error(`disabled bulk underlying control lacks a reason: ${JSON.stringify(button)}`);
+    }
+  }
 
   await page.evaluate(() => localStorage.removeItem("ibkrPurgeBook"));
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -470,9 +612,9 @@ async function exerciseCanaryUnderlyingBookFixture(page) {
     count: info.count,
     markers: row.markers,
     purge_disabled: purge.disabled,
-    restore_enabled: !restore.disabled,
-    rebuild_enabled: !rebuild.disabled,
-    placeholder_notice: notice,
+    restore_disabled: restore.disabled,
+    build_disabled: build.disabled,
+    bulk_buttons: info.bulkButtons,
   };
 }
 
@@ -489,7 +631,31 @@ async function exerciseCanaryDetail(page) {
       // Keep the explicit assertion below for app instances without live canary data.
     }
   }
-  if (!timestamp || timestamp === "--" || timestamp === "updated --" || (!lifecycle && timestamp === "no timestamp")) {
+  const timestampMissing = !timestamp || timestamp === "--" || timestamp === "updated --" || timestamp === "no timestamp";
+  const initiallyOpen = await page.locator("#canaryDetailPanel").evaluate((el) => !el.hidden);
+  if (initiallyOpen) {
+    throw new Error("Portfolio Canary detail should be collapsed by default");
+  }
+  const mitigation = await page.evaluate(() => {
+    const button = document.getElementById("canaryMitigationButton");
+    return {
+      text: button?.textContent?.trim() || "",
+      disabled: button?.disabled || false,
+      title: button?.title || "",
+      orderReviewFoldedHidden: document.getElementById("orderReviewPanel")?.hidden ?? true,
+    };
+  });
+  if (mitigation.text !== "Mitigation plan" || (mitigation.disabled && !mitigation.title) || !mitigation.orderReviewFoldedHidden) {
+    throw new Error(`folded Canary mitigation affordance is wrong: ${JSON.stringify(mitigation)}`);
+  }
+  if (timestampMissing && !lifecycle) {
+    const pending = await page.locator("#canaryHero").textContent();
+    if (!/waiting for canary snapshot/i.test(pending || "")) {
+      throw new Error(`canary timestamp is missing without pending copy: ${JSON.stringify({ timestamp, pending })}`);
+    }
+    return { opens: false, initially_open: initiallyOpen, timestamp, mitigation, no_value: true };
+  }
+  if (timestampMissing) {
     throw new Error("canary timestamp is missing");
   }
   await page.locator("#canaryDetailToggle").click();
@@ -507,7 +673,11 @@ async function exerciseCanaryDetail(page) {
     throw new Error("canary held_stress payload is present but detail panel did not render it");
   }
   await page.locator("#canaryDetailToggle").click();
-  return { opens: true, timestamp, cards: counts.cards, drivers: counts.drivers, held_stress: counts.held_stress };
+  await page.waitForFunction(() => {
+    const canary = document.getElementById("canaryDetailPanel");
+    return canary?.hidden;
+  }, { timeout: 5000 });
+  return { opens: true, initially_open: initiallyOpen, timestamp, mitigation, cards: counts.cards, drivers: counts.drivers, held_stress: counts.held_stress };
 }
 
 async function exerciseMarketContext(page) {
@@ -523,50 +693,30 @@ async function exerciseMarketContext(page) {
       // Keep the no-value assertion below for app instances without live data.
     }
   }
-  for (const [symbol, level, change, note] of [
-    ["SPY", before.spyLevel, before.spyChange, before.spyNote],
-    ["VIX", before.vixLevel, before.vixChange, before.vixNote],
-    ["QQQ", before.qqqLevel, before.qqqChange, before.qqqNote],
-  ]) {
-    if (level !== "--" && (!change || change === "--") && !/change pending/i.test(note)) {
-      throw new Error(`${symbol} has a level but no percent-change explanation: ${JSON.stringify({ change, note })}`);
+  const expectedSymbols = ["SPY", "QQQ", "IWM", "VIX", "HYG", "TLT"];
+  if (before.quotes.length !== expectedSymbols.length) {
+    throw new Error(`market strip should render ${expectedSymbols.length} quote cells: ${JSON.stringify(before.quotes)}`);
+  }
+  for (const symbol of expectedSymbols) {
+    const quote = before.quotes.find((item) => item.symbol === symbol);
+    if (!quote) {
+      throw new Error(`market strip missing ${symbol}: ${JSON.stringify(before.quotes)}`);
+    }
+    if (quote.price !== "--" && !/^-?[\d.,]+[.,]\d{2}$/.test(quote.price)) {
+      throw new Error(`${symbol} price should use two decimal places, got ${JSON.stringify(quote.price)}`);
+    }
+    if (quote.change && quote.change !== "--" && !/^[+-]?[\d.,]+[.,]\d{2}%$/.test(quote.change)) {
+      throw new Error(`${symbol} change should use two decimal places, got ${JSON.stringify(quote.change)}`);
+    }
+    if (!quote.source) {
+      throw new Error(`${symbol} quote cell should include source/as-of or error text`);
+    }
+    if (rawGatewayCopyPattern.test(quote.source)) {
+      throw new Error(`${symbol} quote cell leaks raw gateway error text: ${JSON.stringify(quote.source)}`);
     }
   }
-  for (const [symbol, level, note] of [
-    ["SPY", before.spyLevel, before.spyNote],
-    ["VIX", before.vixLevel, before.vixNote],
-    ["QQQ", before.qqqLevel, before.qqqNote],
-  ]) {
-    if (level === "--" && !new RegExp(`No ${symbol} (data|price)`).test(note)) {
-      throw new Error(`${symbol} missing data should be explicit, got ${JSON.stringify(note)}`);
-    }
-  }
-  for (const [label, value] of [
-    ["SPY level", before.spyLevel],
-    ["VIX level", before.vixLevel],
-    ["QQQ level", before.qqqLevel],
-  ]) {
-    if (value !== "--" && !/^-?[\d.,]+[.,]\d{2}$/.test(value)) {
-      throw new Error(`${label} should use two decimal places, got ${JSON.stringify(value)}`);
-    }
-  }
-  for (const [label, value] of [
-    ["SPY change", before.spyChange],
-    ["VIX change", before.vixChange],
-    ["QQQ change", before.qqqChange],
-  ]) {
-    if (value && value !== "--" && !/^[+-]?[\d.,]+[.,]\d{2}%$/.test(value)) {
-      throw new Error(`${label} should use two decimal places, got ${JSON.stringify(value)}`);
-    }
-  }
-  if (before.sparklineCount !== 0) {
-    throw new Error(`market context should not render invented sparklines, found ${before.sparklineCount}`);
-  }
-  if (before.rangeCount !== 3) {
-    throw new Error(`market context should render three compact quote range markers, found ${before.rangeCount}`);
-  }
-  if (before.rangeText.some(Boolean)) {
-    throw new Error(`market quote range markers should not render fallback text, got ${JSON.stringify(before.rangeText)}`);
+  if (before.marketContextPanelPresent) {
+    throw new Error("old Market Context panel should be removed");
   }
   if (!before.regime || before.regime === "--") {
     if (before.weather !== "weather-na") {
@@ -575,31 +725,40 @@ async function exerciseMarketContext(page) {
     return {
       no_value: true,
       weather: before.weather,
-      spy_level_present: before.spyLevel !== "--",
-      qqq_level_present: before.qqqLevel !== "--",
-      vix_level_present: before.vixLevel !== "--",
+      quote_cells: before.quotes.length,
       indicators: 0,
     };
   }
   if (!["weather-green", "weather-amber", "weather-red"].includes(before.weather)) {
     throw new Error(`market weather is not color coded, got ${JSON.stringify(before.weather)}`);
   }
-  await page.locator("#marketRegimeToggle").click();
+  const canaryInitiallyOpen = await page.locator("#canaryDetailPanel").evaluate((el) => !el.hidden);
+  const regimeInitiallyOpen = await page.locator("#regimeDetailPanel").evaluate((el) => !el.hidden);
+  if (canaryInitiallyOpen || regimeInitiallyOpen) {
+    throw new Error(`Regime and Canary details should both be collapsed by default: ${JSON.stringify({ canaryInitiallyOpen, regimeInitiallyOpen })}`);
+  }
+  await page.locator("#regimeDetailToggle").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("regimeDetailPanel");
-    return panel && !panel.hidden;
+    const canary = document.getElementById("canaryDetailPanel");
+    return panel && !panel.hidden && canary?.hidden;
   }, { timeout: 5000 });
   const indicators = await page.evaluate(() => document.getElementById("regimeIndicators")?.children.length || 0);
   if (indicators === 0) {
     throw new Error("market regime detail is empty");
   }
-  await page.locator("#marketRegimeToggle").click();
+  await page.locator("#canaryDetailToggle").click();
+  await page.waitForFunction(() => {
+    const regime = document.getElementById("regimeDetailPanel");
+    const canary = document.getElementById("canaryDetailPanel");
+    return regime?.hidden && canary && !canary.hidden;
+  }, { timeout: 5000 });
   return {
     regime: before.regime,
     weather: before.weather,
-    spy_level_present: before.spyLevel !== "--",
-    qqq_level_present: before.qqqLevel !== "--",
-    vix_level_present: before.vixLevel !== "--",
+    quote_cells: before.quotes.length,
+    canary_initially_open: canaryInitiallyOpen,
+    regime_initially_open: regimeInitiallyOpen,
     indicators,
   };
 }
@@ -630,13 +789,19 @@ async function exerciseAlertHistory(page) {
   }
   const info = await page.evaluate(() => ({
     count: Number.parseInt(document.getElementById("alertCount")?.textContent || "0", 10) || 0,
-    rows: document.querySelectorAll("#alertsList .alert-row").length,
+    currentRows: document.querySelectorAll("#currentSignalList .alert-row").length,
+    historyRows: document.querySelectorAll("#alertHistoryList .alert-row").length,
+    previousRows: document.querySelectorAll("#previousContextList .alert-row").length,
+    currentCount: Number.parseInt(document.getElementById("currentSignalCount")?.textContent || "0", 10) || 0,
+    historyCount: Number.parseInt(document.getElementById("alertHistoryCount")?.textContent || "0", 10) || 0,
+    previousCount: Number.parseInt(document.getElementById("previousContextCount")?.textContent || "0", 10) || 0,
     clearDisabled: document.getElementById("clearAlertsButton")?.disabled || false,
     hint: document.getElementById("alertsHint")?.textContent || "",
   }));
   let selected = false;
-  if (info.rows > 0) {
-    await page.locator("#alertsList .alert-row").first().click();
+  const firstAlert = page.locator("#currentSignalList .alert-row, #alertHistoryList .alert-row, #previousContextList .alert-row").first();
+  if ((await firstAlert.count()) > 0) {
+    await firstAlert.click();
     await page.waitForFunction(() => {
       const panel = document.getElementById("selectedAlertPanel");
       return panel && !panel.hidden && document.getElementById("selectedAlertTitle")?.textContent?.trim();
@@ -649,7 +814,18 @@ async function exerciseAlertHistory(page) {
   if (!initiallyOpen) {
     await page.locator("#alertsPanel summary").click();
   }
-  return { initially_open: initiallyOpen, opens: true, count: info.count, rows: info.rows, selected };
+  return {
+    initially_open: initiallyOpen,
+    opens: true,
+    count: info.count,
+    current_rows: info.currentRows,
+    history_rows: info.historyRows,
+    previous_rows: info.previousRows,
+    current_count: info.currentCount,
+    history_count: info.historyCount,
+    previous_count: info.previousCount,
+    selected,
+  };
 }
 
 async function exerciseOpenOrders(page) {
@@ -664,9 +840,11 @@ async function exerciseOpenOrders(page) {
       disabled: button.disabled,
       title: button.title || "",
     }));
+    const panel = document.getElementById("ordersPanel");
     return {
+      hidden: panel?.hidden || false,
       rows: document.querySelectorAll("#ordersOpenList .open-order-row").length,
-      empty: document.getElementById("ordersOpenList")?.textContent?.includes("No open journal-backed orders.") || false,
+      empty: document.getElementById("ordersOpenList")?.textContent?.includes("No open orders available for this view.") || false,
       buttons,
       oldLabels: buttons.map((button) => button.text).filter((label) => ["Modify", "Cancel", "Execute"].includes(label)),
     };
@@ -676,6 +854,9 @@ async function exerciseOpenOrders(page) {
   }
   if (info.rows === 0 && !info.empty) {
     throw new Error("open-order empty state is missing");
+  }
+  if (info.rows === 0 && !info.hidden) {
+    throw new Error("empty open-order panel should stay hidden until rows exist");
   }
   if (info.rows > 0) {
     for (const label of ["Preview change", "Apply change", "Cancel order"]) {
@@ -694,6 +875,7 @@ async function exerciseOpenOrders(page) {
   }
   return {
     initially_open: initiallyOpen,
+    hidden_when_empty: info.hidden && info.rows === 0,
     rows: info.rows,
     empty: info.empty,
     buttons: info.buttons.map((button) => ({ text: button.text, disabled: button.disabled, has_reason: !!button.title })),
@@ -702,30 +884,41 @@ async function exerciseOpenOrders(page) {
 
 async function readMarketContext(page) {
   return page.evaluate(() => ({
-    spyLevel: document.getElementById("spyLevel")?.textContent?.trim() || "",
-    spyChange: document.getElementById("spyChange")?.textContent?.trim() || "",
-    spyNote: document.getElementById("spyNote")?.textContent?.trim() || "",
-    qqqLevel: document.getElementById("nasdaqLevel")?.textContent?.trim() || "",
-    qqqChange: document.getElementById("nasdaqChange")?.textContent?.trim() || "",
-    qqqNote: document.getElementById("nasdaqNote")?.textContent?.trim() || "",
-    vixLevel: document.getElementById("vixLevel")?.textContent?.trim() || "",
-    vixChange: document.getElementById("vixChange")?.textContent?.trim() || "",
-    vixNote: document.getElementById("vixNote")?.textContent?.trim() || "",
-    rangeText: [...document.querySelectorAll(".quote-range")].map((node) => node.textContent?.trim() || ""),
-    rangeCount: document.querySelectorAll(".quote-range").length,
-    sparklineCount: document.querySelectorAll(".sparkline").length,
+    marketContextPanelPresent: !!document.getElementById("marketPanel"),
+    quotes: [...document.querySelectorAll("#marketQuoteStrip .market-quote-cell")].map((cell) => ({
+      symbol: cell.querySelector("b")?.textContent?.trim() || "",
+      price: cell.querySelector("strong")?.textContent?.trim() || "",
+      change: cell.querySelector(".market-change")?.textContent?.trim() || "",
+      source: cell.querySelector("small")?.textContent?.trim() || "",
+    })),
     regime: document.getElementById("marketRegime")?.textContent?.trim() || "",
-    weather: [...(document.getElementById("marketRegimeToggle")?.classList || [])].find((name) => name.startsWith("weather-")) || "",
+    weather: [...(document.getElementById("regimeSummaryCard")?.classList || [])].find((name) => name.startsWith("weather-")) || "",
   }));
 }
 
-async function openDebugTools(page) {
-  const tools = page.locator("#toolsPanel");
-  await tools.evaluate((el) => {
-    if ("open" in el) {
-      el.open = true;
-    }
+async function assertDebugToolsRemoved(page, baseURL) {
+  const domInfo = await page.evaluate(() => ({
+    panel_present: !!document.getElementById("toolsPanel"),
+    tool_buttons: document.querySelectorAll("[data-tool]").length,
+  }));
+  const cookies = await page.context().cookies(baseURL);
+  const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  const endpoint = new URL("/api/tools/events", baseURL);
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: cookieHeader ? { Cookie: cookieHeader } : {},
   });
+  const info = {
+    ...domInfo,
+    endpoint_status: res.status,
+  };
+  if (info.panel_present || info.tool_buttons > 0) {
+    throw new Error(`debug tools still render: ${JSON.stringify(info)}`);
+  }
+  if (info.endpoint_status < 400) {
+    throw new Error(`debug tools endpoint still responds successfully: ${JSON.stringify(info)}`);
+  }
+  return info;
 }
 
 async function runShellJSON(command) {

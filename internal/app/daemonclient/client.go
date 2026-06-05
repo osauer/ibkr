@@ -30,6 +30,10 @@ type Client interface {
 	OrderCancel(context.Context, rpc.OrderCancelParams) (*rpc.OrderCancelResult, error)
 	OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error)
 	OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error)
+	PurgeStatus(context.Context, rpc.PurgeStatusParams) (*rpc.PurgeStatusResult, error)
+	PurgeExecute(context.Context, rpc.PurgeExecuteParams) (*rpc.PurgeExecuteResult, error)
+	PurgeRestorePreview(context.Context, rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error)
+	PurgeRestoreExecute(context.Context, rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error)
 }
 
 type Real struct {
@@ -198,6 +202,38 @@ func (c Real) OrdersOpen(ctx context.Context, params rpc.OrdersOpenParams) (*rpc
 func (c Real) OrderStatus(ctx context.Context, params rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
 	var out rpc.OrderStatusResult
 	if err := c.call(ctx, rpc.MethodOrderStatus, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) PurgeStatus(ctx context.Context, params rpc.PurgeStatusParams) (*rpc.PurgeStatusResult, error) {
+	var out rpc.PurgeStatusResult
+	if err := c.call(ctx, rpc.MethodPurgeStatus, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) PurgeExecute(ctx context.Context, params rpc.PurgeExecuteParams) (*rpc.PurgeExecuteResult, error) {
+	var out rpc.PurgeExecuteResult
+	if err := c.call(ctx, rpc.MethodPurgeExecute, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) PurgeRestorePreview(ctx context.Context, params rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error) {
+	var out rpc.PurgeRestoreResult
+	if err := c.call(ctx, rpc.MethodPurgeRestorePreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) PurgeRestoreExecute(ctx context.Context, params rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error) {
+	var out rpc.PurgeRestoreResult
+	if err := c.call(ctx, rpc.MethodPurgeRestoreExecute, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

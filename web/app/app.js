@@ -10,8 +10,10 @@ const state = {
   accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
   canaryDetailOpen: false,
   regimeDetailOpen: false,
+  regimeCanaryExpansionInitialized: false,
+  detailPreferenceSet: false,
   portfolioDetailOpen: false,
-  accountMenuOpen: false,
+  accountExposureOpen: false,
   selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
   marketCalendarOverride: null,
   selectedAlertID: null,
@@ -27,7 +29,9 @@ const state = {
   orderTransmitResult: null,
   ordersOpen: null,
   openOrderEdits: {},
-  underlyingActionNotice: "",
+  underlyingNotice: "",
+  underlyingBusy: "",
+  latestPurgeStatus: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -96,14 +100,15 @@ function applyBootstrap(data) {
   state.activeOrderReviewSetID = state.orderReviewSets[0]?.id || null;
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
+  $("accountPanel").hidden = false;
+  $("underlyingPanel").hidden = false;
   $("dashboard").hidden = false;
   $("alertsPanel").hidden = false;
-  $("ordersPanel").hidden = false;
-  $("toolsPanel").hidden = false;
   setConnection("Connected", true);
   renderAll();
   connectEvents();
   refreshOpenOrders();
+  refreshPurgeStatus();
   if (state.selectedMarket !== "us") {
     refreshSelectedMarketCalendar();
   }
@@ -234,12 +239,11 @@ function renderAll() {
   const account = snap.account || {};
   const positions = snap.positions || {};
   const canary = snap.canary || {};
+  ensureRegimeCanaryExpansion(canary);
   renderTopbar(snap);
-  renderAccountValue(account);
-  renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
-  renderCanaryUnderlyings(positions, account);
+  renderAccountPanel(account, positions, canary);
+  renderUnderlyings(positions, account);
   renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
-  $("accountAsOf").textContent = shortTime(account.as_of);
   $("positionsAsOf").textContent = shortTime(positions.as_of);
   $("stockCount").textContent = (positions.stocks || []).length;
   $("optionCount").textContent = (positions.options || []).length;
@@ -251,8 +255,10 @@ function renderAll() {
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
   renderOrderReview();
+  renderCanaryMitigation(canary);
   renderOpenOrders();
   renderMarketContext(snap);
+  renderRegimePanel(snap);
   renderCanaryDetail(canary);
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
@@ -261,7 +267,29 @@ function renderAll() {
   renderSyncStrip(snap);
 }
 
-function renderAccountValue(account) {
+function ensureRegimeCanaryExpansion(canary = {}) {
+  if (state.detailPreferenceSet || state.regimeCanaryExpansionInitialized) return;
+  state.canaryDetailOpen = false;
+  state.regimeDetailOpen = false;
+  state.regimeCanaryExpansionInitialized = true;
+}
+
+function setRegimeCanaryExpansion(which, open) {
+  state.detailPreferenceSet = true;
+  if (which === "regime") {
+    state.regimeDetailOpen = open;
+    if (open) state.canaryDetailOpen = false;
+  } else {
+    state.canaryDetailOpen = open;
+    if (open) state.regimeDetailOpen = false;
+  }
+  renderRegimePanel(state.snapshot || {});
+  renderCanaryDetail(state.snapshot?.canary || {});
+  renderOrderReview();
+  renderCanaryMitigation(state.snapshot?.canary || {});
+}
+
+function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
   const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
   const accountContext = currentAccountContext(account);
@@ -271,12 +299,11 @@ function renderAccountValue(account) {
     : "******";
   value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
   renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
-  $("accountContextLine").textContent = accountContext.contextLine;
+  renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
+  $("accountLabel").textContent = accountContext.accountLabel;
   $("tradingEnvPill").textContent = accountContext.modeLabel;
   $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
-  $("accountStatusCard").className = "account-status-card " + accountContext.modeClass;
-  $("accountEnvironment").textContent = accountContext.modeLabel;
-  $("orderAccountLabel").textContent = accountContext.accountLabel;
+  $("accountAsOf").textContent = account.as_of ? `fresh ${shortTime(account.as_of)}` : "freshness pending";
 
   const button = $("accountPrivacyToggle");
   button.classList.toggle("is-visible", state.accountValueVisible);
@@ -284,22 +311,84 @@ function renderAccountValue(account) {
   const label = state.accountValueVisible ? "Hide account values" : "Show account values";
   button.setAttribute("aria-label", label);
   button.title = label;
-  renderAccountMenu(account);
+
+  const portfolio = positions.portfolio || {};
+  const baseCurrency = portfolio.base_currency || account.base_currency || "USD";
+  renderSensitiveText("accountRiskDelta", riskMoney(
+    portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy,
+    portfolio.dollar_delta_base_currency || portfolio.dollar_delta_ccy_currency || baseCurrency,
+  ), hasNumericValue(portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy));
+  renderSensitiveText("accountRiskTheta", riskMoney(
+    portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
+    portfolio.daily_theta_base_currency || portfolio.daily_theta_ccy_currency || baseCurrency,
+  ), hasNumericValue(portfolio.daily_theta_base ?? portfolio.daily_theta_ccy));
+  renderSensitiveText("accountRiskFx", riskMoney(
+    portfolio.fx_sensitivity_per_pct,
+    portfolio.fx_base_currency || baseCurrency,
+  ), hasNumericValue(portfolio.fx_sensitivity_per_pct));
+  renderAccountLargestExposure(portfolio, canary, baseCurrency);
 }
 
-function renderAccountMenu(account) {
-  const panel = $("accountMenu");
-  const button = $("accountMenuToggle");
-  if (!panel || !button) return;
+function renderAccountLargestExposure(portfolio = {}, canary = {}, baseCurrency = "USD") {
+  const panel = $("accountLargestExposurePanel");
+  const button = $("accountLargestExposureToggle");
+  const list = $("accountLargestExposureList");
+  const exposures = (portfolio.exposure_base || []).slice(0, 5);
+  const largest = exposures[0];
+  const label = largest?.underlying
+    ? `${largest.underlying}${typeof largest.market_value_pct_nlv === "number" ? ` ${pct(largest.market_value_pct_nlv)}` : ""}`
+    : "--";
+  $("accountLargestExposureLabel").textContent = label;
+  panel.hidden = !state.accountExposureOpen;
+  button.setAttribute("aria-expanded", String(state.accountExposureOpen));
+  button.disabled = exposures.length === 0 && heldStressItems(canary).length === 0;
+  button.title = button.disabled ? "No exposure rows in this snapshot" : "Show largest exposure detail";
+  if (panel.hidden) return;
 
-  const accountContext = currentAccountContext(account);
-  panel.hidden = !state.accountMenuOpen;
-  button.setAttribute("aria-expanded", String(state.accountMenuOpen));
-  button.className = "account-chip " + accountContext.modeClass;
-  $("accountChipText").textContent = accountContext.chipLabel;
+  const rows = exposures.map((exposure) => exposureMetricRow(exposure, baseCurrency));
+  const stress = heldStressItems(canary).slice(0, 3);
+  for (const item of stress) {
+    rows.push(heldStressMetricRow(item));
+  }
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-row";
+    empty.textContent = "No exposure rows available for this snapshot.";
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...rows);
 }
 
-function renderCanaryUnderlyings(positions = {}, account = {}) {
+function exposureMetricRow(exposure, baseCurrency) {
+  const row = document.createElement("div");
+  row.className = "metric-row";
+  const label = document.createElement("span");
+  const pctText = typeof exposure.market_value_pct_nlv === "number" ? ` ${pct(exposure.market_value_pct_nlv)}` : "";
+  label.textContent = `${exposure.underlying || "--"}${pctText}`;
+  const value = document.createElement("b");
+  value.textContent = state.accountValueVisible
+    ? money(exposure.market_value_base, exposure.base_currency || baseCurrency)
+    : "******";
+  if (!state.accountValueVisible && typeof exposure.market_value_base === "number") {
+    value.className = "is-private";
+  }
+  row.append(label, value);
+  return row;
+}
+
+function heldStressMetricRow(stress) {
+  const row = document.createElement("div");
+  row.className = "metric-row";
+  const label = document.createElement("span");
+  label.textContent = `${stress.underlying || "Held name"} stress`;
+  const value = document.createElement("b");
+  value.textContent = heldStressEvidence(stress);
+  row.append(label, value);
+  return row;
+}
+
+function renderUnderlyings(positions = {}, account = {}) {
   const list = $("underlyingBookList");
   if (!list) return;
 
@@ -309,11 +398,24 @@ function renderCanaryUnderlyings(positions = {}, account = {}) {
   const virtualCount = rows.length - heldCount;
   const count = $("underlyingBookCount");
   const status = $("underlyingBookStatus");
+  const freshness = $("underlyingBookFreshness");
+  const heldSymbols = rows.filter((row) => !row.virtual).slice(0, 3).map((row) => row.symbol);
+  const heldLabel = heldSymbols.length > 0 ? ` · ${heldSymbols.join(", ")}${heldCount > heldSymbols.length ? ` +${heldCount - heldSymbols.length}` : ""}` : "";
+  const quoteSummary = underlyingQuoteSummary(rows);
   count.textContent = rows.length === 0
     ? "No underlyings"
-    : `${heldCount} held${virtualCount > 0 ? ` / ${virtualCount} virtual` : ""}`;
-  status.textContent = state.underlyingActionNotice
+    : `${heldCount} held / ${virtualCount} purged${heldLabel}`;
+  status.textContent = state.underlyingNotice
+    || quoteSummary
     || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
+  if (freshness) {
+    freshness.textContent = positions.as_of ? shortTime(positions.as_of) : "freshness pending";
+  }
+  const panel = $("underlyingPanel");
+  if (panel && (state.underlyingBusy || state.underlyingNotice)) {
+    panel.open = true;
+  }
+  renderUnderlyingBulkActions(rows);
 
   if (rows.length === 0) {
     const empty = document.createElement("div");
@@ -324,6 +426,35 @@ function renderCanaryUnderlyings(positions = {}, account = {}) {
   }
 
   list.replaceChildren(...rows.map((row) => underlyingBookRow(row, baseCurrency)));
+}
+
+function renderUnderlyingBulkActions(rows) {
+  const heldCount = rows.filter((row) => !row.virtual).length;
+  const virtualCount = rows.length - heldCount;
+  const trading = state.snapshot?.trading || {};
+  setUnderlyingActionButtonState("buildAllUnderlyingsButton", virtualCount > 0 && !state.underlyingBusy, virtualCount > 0 ? "Build a non-executing restore draft for all purged rows" : "No purged rows to build");
+  setUnderlyingActionButtonState("purgeAllUnderlyingsButton", heldCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Purge all held underlyings", heldCount > 0, trading));
+  setUnderlyingActionButtonState("restoreAllUnderlyingsButton", virtualCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Restore all purged rows", virtualCount > 0, trading));
+}
+
+function setUnderlyingActionButtonState(id, enabled, reason) {
+  const button = $(id);
+  if (!button) return;
+  button.disabled = !enabled;
+  button.title = enabled ? reason : reason || "Unavailable";
+}
+
+function canWriteUnderlyings(trading = {}) {
+  return Boolean(trading.enabled && trading.can_transmit && trading.account && trading.mode);
+}
+
+function underlyingWriteReason(action, hasRows, trading = {}) {
+  if (!hasRows) return "No matching underlying rows";
+  if (!trading.enabled) return "Trading is disabled";
+  if (!trading.can_transmit) return "Broker writes are not enabled by trading.status";
+  if (!trading.account) return "Broker-write account unavailable";
+  if (!trading.mode) return "Trading mode unavailable";
+  return `${action} after confirming ${trading.mode}/${trading.account}`;
 }
 
 function underlyingBookRows(positions, baseCurrency) {
@@ -350,21 +481,25 @@ function heldUnderlyingRows(positions, baseCurrency) {
   return (positions.by_underlying || []).map((group) => {
     const symbol = normalizeSymbol(group.underlying || group.stock?.symbol || group.options?.[0]?.symbol);
     if (!symbol) return null;
-    const quote = quoteBySymbol(state.snapshot?.market_quotes?.quotes || {}, symbol);
+    const quoteState = underlyingMarketQuote(symbol);
+    const quote = quoteState.quote;
     const price = heldUnderlyingPrice(group, quote);
     const currency = heldUnderlyingCurrency(group, quote, baseCurrency);
     const pnl = heldUnderlyingPnl(group, baseCurrency, currency);
     const stockCount = group.stock ? 1 : 0;
     const optionCount = (group.options || []).length;
-    return {
+    const row = {
       symbol,
       currency,
       price: price.value,
       priceSource: price.source,
+      priceAt: price.at,
       changePct: heldUnderlyingChangePct(group, quote, price.value),
       pnl: pnl.value,
       pnlCurrency: pnl.currency,
       pnlSource: pnl.source,
+      quote,
+      quoteError: quoteState.error,
       held: true,
       virtual: false,
       purged: false,
@@ -372,22 +507,24 @@ function heldUnderlyingRows(positions, baseCurrency) {
       optionCount,
       detail: underlyingPositionDetail(stockCount, optionCount),
     };
+    row.quoteStatus = underlyingQuoteStatus(row);
+    return row;
   }).filter(Boolean);
 }
 
 function heldUnderlyingPrice(group, quote) {
   const marketPrice = quotePrice(quote);
   if (typeof marketPrice === "number") {
-    return { value: marketPrice, source: quoteSourceLabel(quote, "market quote") };
+    return { value: marketPrice, source: quoteSourceLabel(quote, "IBKR quote"), at: quoteTimestamp(quote) };
   }
   const stockPrice = firstNumber(group.stock?.quote_price, group.stock?.mark, group.stock?.valuation_mark);
   if (typeof stockPrice === "number") {
     const source = typeof group.stock?.quote_price === "number" ? "stock quote" : "account mark";
-    return { value: stockPrice, source };
+    return { value: stockPrice, source, at: group.stock?.quote_price_at || group.stock?.price_at || "" };
   }
   const optionUnderlying = firstNumber(...(group.options || []).map((option) => option.underlying));
   if (typeof optionUnderlying === "number") {
-    return { value: optionUnderlying, source: "option model spot" };
+    return { value: optionUnderlying, source: "option model spot", at: "" };
   }
   return { value: null, source: "no price" };
 }
@@ -433,15 +570,19 @@ function purgedUnderlyingRows(positions, baseCurrency) {
   for (const entry of purgeBookEntries(positions)) {
     const symbol = normalizeSymbol(entry.underlying || entry.symbol || entry.ticker || entry.contract?.symbol);
     if (!symbol) continue;
+    const quoteState = underlyingMarketQuote(symbol);
     const row = rows.get(symbol) || {
       symbol,
       currency: "",
       price: null,
       priceSource: "",
+      priceAt: "",
       changePct: null,
       pnl: null,
       pnlCurrency: "",
       pnlSource: "shadow P/L",
+      quote: quoteState.quote,
+      quoteError: quoteState.error,
       virtual: true,
       purged: true,
       held: false,
@@ -452,6 +593,26 @@ function purgedUnderlyingRows(positions, baseCurrency) {
     const currency = normalizeCurrency(entry.currency || entry.trading_currency || entry.contract?.currency || entry.base_currency);
     if (currency) {
       row.currency = mergeCurrency(row.currency, currency);
+    }
+    if (quoteState.quote) {
+      row.quote = quoteState.quote;
+      const marketPrice = quotePrice(quoteState.quote);
+      if (typeof marketPrice === "number") {
+        row.price = marketPrice;
+        row.priceSource = quoteSourceLabel(quoteState.quote, "IBKR quote");
+        row.priceAt = quoteTimestamp(quoteState.quote);
+      }
+      const quoteChange = quoteChangePct(quoteState.quote);
+      if (typeof quoteChange === "number") {
+        row.changePct = quoteChange;
+      }
+      const quoteCurrency = normalizeCurrency(quoteState.quote.currency || quoteState.quote.contract?.currency);
+      if (quoteCurrency) {
+        row.currency = mergeCurrency(row.currency, quoteCurrency);
+      }
+    }
+    if (quoteState.error) {
+      row.quoteError = quoteState.error;
     }
     const price = firstNumber(entry.current_price, entry.quote_price, entry.price, entry.last_price, entry.mark, entry.underlying, entry.reference_price);
     if (typeof price === "number" && row.price === null) {
@@ -472,14 +633,125 @@ function purgedUnderlyingRows(positions, baseCurrency) {
     row.legCount += Number(entry.leg_count || 1);
     rows.set(symbol, row);
   }
-  return [...rows.values()].map((row) => ({
-    ...row,
-    currency: row.currency || row.pnlCurrency || baseCurrency,
-    pnlCurrency: row.pnlCurrency || row.currency || baseCurrency,
-    priceSource: row.priceSource || "purge book",
-    purgeLabel: row.purgeIDs.size > 0 ? [...row.purgeIDs].slice(0, 2).join(", ") : "purge book",
-    detail: `${row.legCount} purged ${row.legCount === 1 ? "leg" : "legs"}`,
-  }));
+  return [...rows.values()].map((row) => {
+    const out = {
+      ...row,
+      currency: row.currency || row.pnlCurrency || baseCurrency,
+      pnlCurrency: row.pnlCurrency || row.currency || baseCurrency,
+      priceSource: row.priceSource || "purge book",
+      purgeLabel: row.purgeIDs.size > 0 ? [...row.purgeIDs].slice(0, 2).join(", ") : "purge book",
+      detail: `${row.legCount} purged ${row.legCount === 1 ? "leg" : "legs"}`,
+    };
+    out.quoteStatus = underlyingQuoteStatus(out);
+    return out;
+  });
+}
+
+function underlyingMarketQuote(symbol) {
+  const marketQuotes = state.snapshot?.market_quotes || {};
+  return {
+    quote: quoteBySymbol(marketQuotes.quotes || {}, symbol),
+    error: quoteErrorBySymbol(marketQuotes.errors || {}, symbol),
+    marketQuotes,
+  };
+}
+
+function quoteErrorBySymbol(errors, symbol) {
+  if (!errors) return "";
+  const target = normalizeSymbol(symbol);
+  if (!target) return "";
+  for (const [key, value] of Object.entries(errors)) {
+    if (normalizeSymbol(key) === target) return String(value || "");
+  }
+  return "";
+}
+
+function underlyingQuoteSummary(rows) {
+  const quoteRows = rows.filter((row) => row.held || row.quote);
+  const interrupted = quoteRows.filter((row) => row.quoteError).map((row) => row.symbol);
+  if (interrupted.length > 0) {
+    return `Quote feed interrupted for ${humanList(interrupted, 3)}; showing frozen values`;
+  }
+  const quoted = quoteRows.filter((row) => typeof quotePrice(row.quote) === "number").length;
+  if (quoted > 0) {
+    return `Quotes updating for ${quoted}/${quoteRows.length} rows`;
+  }
+  return "";
+}
+
+function underlyingQuoteStatus(row) {
+  const quote = row.quote || null;
+  const error = String(row.quoteError || "").trim();
+  const at = quoteTimestamp(quote) || row.priceAt || "";
+  const atLabel = at ? quoteTime(at) : "";
+  const dataType = String(quote?.data_type || "").toLowerCase();
+  const quality = String(quote?.quote_quality || "").toLowerCase();
+  const hasQuotePrice = typeof quotePrice(quote) === "number";
+  const source = row.priceSource || quoteSourceLabel(quote, "IBKR quote");
+  const sourceDetail = [source, atLabel].filter(Boolean).join(" · ");
+  const frozenLabel = atLabel ? `Frozen · ${atLabel}` : "Frozen";
+  const showSource = sourceDetail || "last available value";
+
+  if (error) {
+    return {
+      tone: "error",
+      label: typeof row.price === "number"
+        ? atLabel ? `Frozen · ${atLabel}` : "Frozen"
+        : "Feed issue",
+      title: `${marketQuoteErrorLabel(error)}; showing ${showSource}`,
+    };
+  }
+  if (quote?.stale || quality === "stale" || quality === "missing") {
+    return {
+      tone: "warn",
+      label: atLabel ? `Stale · ${atLabel}` : "Stale",
+      title: `${cleanDetail(quote.stale_reason || quality || "stale quote")}; showing ${showSource}`,
+    };
+  }
+  if (dataType.includes("frozen")) {
+    return {
+      tone: "warn",
+      label: frozenLabel,
+      title: `Gateway is in ${labelize(dataType)} mode; showing ${showSource}`,
+    };
+  }
+  if (dataType.includes("delayed")) {
+    return {
+      tone: "warn",
+      label: atLabel ? `Delayed · ${atLabel}` : "Delayed",
+      title: `Delayed market-data feed; showing ${showSource}`,
+    };
+  }
+  if (quality && quality !== "firm") {
+    return {
+      tone: "warn",
+      label: atLabel ? `${labelize(quality)} · ${atLabel}` : labelize(quality),
+      title: `Quote quality ${labelize(quality)}; showing ${showSource}`,
+    };
+  }
+  if (quote && hasQuotePrice) {
+    return {
+      tone: "ok",
+      label: atLabel ? `Live · ${atLabel}` : "Live",
+      title: `IBKR quote feed; showing ${showSource}`,
+    };
+  }
+  if (typeof row.price === "number") {
+    return {
+      tone: "fallback",
+      label: cleanDetail(source || "Position mark"),
+      title: quote ? "Underlying quote has no current price yet; showing the latest position mark." : "No live underlying quote yet; showing the latest position mark.",
+    };
+  }
+  return {
+    tone: "error",
+    label: "No price",
+    title: "No quote or position mark is available for this underlying.",
+  };
+}
+
+function quoteTimestamp(quote) {
+  return quote?.quote_price_at || quote?.price_at || quote?.as_of || "";
 }
 
 function purgeBookEntries(positions = {}) {
@@ -489,6 +761,7 @@ function purgeBookEntries(positions = {}) {
     state.snapshot?.purge_books,
     state.snapshot?.purged_underlyings,
     state.snapshot?.purged_positions,
+    state.latestPurgeStatus,
     positions.purge_book,
     positions.purge_books,
     positions.purged_underlyings,
@@ -556,6 +829,7 @@ function purgeEntryPnl(entry) {
 function underlyingBookRow(row, baseCurrency) {
   const item = document.createElement("div");
   item.className = "underlying-row" + (row.virtual ? " underlying-row--virtual" : "") + (row.hasPurgeRecord ? " underlying-row--book" : "");
+  if (row.quoteError) item.classList.add("underlying-row--quote-error");
   item.dataset.symbol = row.symbol;
 
   const identity = document.createElement("div");
@@ -570,11 +844,14 @@ function underlyingBookRow(row, baseCurrency) {
   identity.append(title, detail);
 
   const price = document.createElement("div");
-  price.className = "underlying-row__metric";
+  const quoteStatus = row.quoteStatus || underlyingQuoteStatus(row);
+  price.className = "underlying-row__metric underlying-row__metric--quote quote-" + quoteStatus.tone;
   const priceValue = document.createElement("b");
   priceValue.textContent = displayMoney(row.price, row.currency);
   const priceNote = document.createElement("small");
-  priceNote.textContent = row.priceSource || "price";
+  priceNote.className = "underlying-quote-status " + quoteStatus.tone;
+  priceNote.textContent = quoteStatus.label;
+  priceNote.title = quoteStatus.title;
   price.append(priceValue, priceNote);
 
   const change = document.createElement("div");
@@ -600,7 +877,7 @@ function underlyingBookRow(row, baseCurrency) {
   actions.append(
     underlyingActionButton("Purge", !row.virtual, row, "purge"),
     underlyingActionButton("Restore", row.virtual, row, "restore"),
-    underlyingActionButton("Rebuild", row.virtual, row, "rebuild"),
+    underlyingActionButton("Build", row.virtual, row, "build"),
   );
 
   item.append(identity, price, change, pnl, actions);
@@ -630,19 +907,28 @@ function underlyingActionButton(label, enabled, row, action) {
   button.type = "button";
   button.className = "underlying-action underlying-action--" + action;
   button.textContent = label;
-  button.disabled = !enabled;
+  const trading = state.snapshot?.trading || {};
+  const writeAction = action === "purge" || action === "restore";
+  const available = enabled && !state.underlyingBusy && (!writeAction || canWriteUnderlyings(trading));
+  button.disabled = !available;
   const disabledReason = row.virtual
-    ? "Already in the purge book; restore or rebuild is available."
+    ? "Already in the purge book; restore or build is available."
     : "Available after this underlying has been purged.";
-  button.title = enabled ? `${label} placeholder for ${row.symbol}` : disabledReason;
+  button.title = available
+    ? underlyingActionTitle(label, row, action)
+    : writeAction ? underlyingWriteReason(`${label} ${row.symbol}`, enabled, trading) : disabledReason;
   button.setAttribute("aria-label", `${label} ${row.symbol}`);
-  if (enabled) {
+  if (available) {
     button.addEventListener("click", () => {
-      state.underlyingActionNotice = `${label} placeholder for ${row.symbol}; backend wiring pending.`;
-      renderCanaryUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+      runUnderlyingAction(action, { symbols: [row.symbol] });
     });
   }
   return button;
+}
+
+function underlyingActionTitle(label, row, action) {
+  if (action === "build") return `Build a non-executing restore draft for ${row.symbol}`;
+  return `${label} ${row.symbol} after account/mode confirmation`;
 }
 
 function quoteSourceLabel(quote, fallback) {
@@ -686,27 +972,39 @@ function displayMoney(value, currency) {
 
 function currentAccountContext(account = {}) {
   const trading = state.snapshot?.trading || {};
+  const status = state.snapshot?.status || {};
   const rawTradingAccount = String(trading.account || "").trim();
   const rawAccount = String(account.account_id || "").trim();
   const rawPositionsAccount = String(state.snapshot?.positions?.account_id || "").trim();
+  const rawStatusAccount = String(status.connected_account || status.account || "").trim();
   const concreteTradingAccount = rawTradingAccount && rawTradingAccount.toLowerCase() !== "all" ? rawTradingAccount : "";
   const concreteAccount = rawAccount && rawAccount.toLowerCase() !== "all" ? rawAccount : "";
   const concretePositionsAccount = rawPositionsAccount && rawPositionsAccount.toLowerCase() !== "all" ? rawPositionsAccount : "";
-  const accountLabel = concreteTradingAccount || concreteAccount || concretePositionsAccount || "";
-  const mode = String(trading.mode || "").trim();
-  const modeLabel = mode ? labelize(mode) : account.account_type || account.type || (accountLabel ? "IBKR" : "Local PWA");
-  const aggregate = rawTradingAccount.toLowerCase() === "all" || rawAccount.toLowerCase() === "all" || rawPositionsAccount.toLowerCase() === "all";
-  const contextLine = accountLabel
-    ? `${accountLabel} / ${modeLabel}`
-    : aggregate ? `No concrete order account / ${modeLabel}` : "No account synced";
+  const concreteStatusAccount = rawStatusAccount && rawStatusAccount.toLowerCase() !== "all" ? rawStatusAccount : "";
+  const accountLabel = concreteTradingAccount || concreteAccount || concretePositionsAccount || concreteStatusAccount || "";
+  const modeSource = [
+    status.account_mode,
+    account.account_mode,
+    account.mode,
+    account.environment,
+    trading.mode,
+    status.trading?.mode,
+    trading.local_gate,
+    status.trading?.local_gate,
+  ].map((value) => String(value || "").trim()).find((value) => /paper|live/i.test(value));
+  const modeLabel = modeSource
+    ? modeSource.toLowerCase().includes("paper") ? "Paper" : "Live"
+    : "IBKR";
+  const aggregate = rawTradingAccount.toLowerCase() === "all" ||
+    rawAccount.toLowerCase() === "all" ||
+    rawPositionsAccount.toLowerCase() === "all" ||
+    rawStatusAccount.toLowerCase() === "all";
+  const visibleAccountLabel = accountLabel || (aggregate ? "Aggregate account" : "Account pending");
   return {
-    accountLabel: accountLabel || "No concrete account",
-    chipLabel: accountLabel ? `${accountLabel} / ${modeLabel}` : mode ? modeLabel : "Account",
-    contextLine,
+    accountLabel: visibleAccountLabel,
     modeClass: String(modeLabel).toLowerCase().includes("paper") ? "paper" : String(modeLabel).toLowerCase().includes("live") ? "live" : "neutral",
     modeLabel,
     hasAccount: Boolean(accountLabel || aggregate),
-    hasConcreteAccount: Boolean(accountLabel),
   };
 }
 
@@ -734,6 +1032,52 @@ function renderCanaryDetail(canary) {
     item.append(label, title, body);
     return item;
   }));
+}
+
+function renderCanaryMitigation(canary = {}) {
+  const button = $("canaryMitigationButton");
+  const gate = mitigationPlanGate(canary);
+  button.disabled = !gate.ready;
+  button.textContent = state.orderReviewLoading ? "Refreshing..." : "Mitigation plan";
+  button.title = gate.reason;
+}
+
+function mitigationPlanGate(canary = {}) {
+  const set = activeOrderReviewSet();
+  if (set) {
+    return { ready: true, reason: "Open the current mitigation plan" };
+  }
+  if (state.orderReviewLoading) {
+    return { ready: false, reason: "Refreshing mitigation plan" };
+  }
+  if (!canary || !canary.as_of) {
+    return { ready: false, reason: "Waiting for a current Canary snapshot" };
+  }
+  if (canaryInputCheckBlocksAction(canary)) {
+    return { ready: false, reason: canaryInputCheckSentence(canary) };
+  }
+  const readiness = String(canary.planner_readiness || canary.planner_mode_hint || "").toLowerCase();
+  const action = String(canary.action || "").toLowerCase();
+  const severity = String(canary.severity || "").toLowerCase();
+  const canBuild = readiness.includes("ready") ||
+    ["defend", "rebalance", "trim", "purge", "restore"].includes(action) ||
+    severity === "act";
+  return canBuild
+    ? { ready: true, reason: "Create a mitigation plan from the current Canary snapshot" }
+    : { ready: false, reason: "No mitigation plan is available for the current Canary state" };
+}
+
+async function openMitigationPlan() {
+  const gate = mitigationPlanGate(state.snapshot?.canary || {});
+  if (!gate.ready) return;
+  setRegimeCanaryExpansion("canary", true);
+  if (!activeOrderReviewSet()) {
+    await refreshOrderReviewSet();
+  }
+  const panel = $("orderReviewPanel");
+  if (!panel.hidden) {
+    panel.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function canaryExplanationCards(canary) {
@@ -940,62 +1284,143 @@ function renderCanaryTimestamp(canary) {
 function renderMarketContext(snap) {
   const canary = snap.canary || {};
   const market = canary.market || {};
-  const indicators = canary.market_indicators || [];
   const quotes = snap.market_quotes?.quotes || {};
-  const spyQuote = quoteBySymbol(quotes, "SPY");
-  const qqqQuote = quoteBySymbol(quotes, "QQQ");
-  const vixQuote = quoteBySymbol(quotes, "VIX");
-  const spyPrice = quotePrice(spyQuote) ?? market.spy_price;
-  const spyChange = quoteChangePct(spyQuote) ?? market.spy_change_pct;
-  const vixPrice = quotePrice(vixQuote) ?? market.vix;
-  const vixChange = quoteChangePct(vixQuote) ?? market.vix_change_pct;
-  const nasdaqPrice = quotePrice(qqqQuote) ?? firstNumber(
-    market.qqq_price,
-    market.ndx_price,
-    market.nasdaq_price,
-    market.nasdaq_100_price,
-  );
-  const nasdaqChange = quoteChangePct(qqqQuote) ?? firstNumber(
-    market.qqq_change_pct,
-    market.ndx_change_pct,
-    market.nasdaq_change_pct,
-    market.nasdaq_100_change_pct,
-  );
-  const hasSpyData = typeof spyPrice === "number";
-  const hasVIXData = typeof vixPrice === "number";
-  const hasNasdaqData = typeof nasdaqPrice === "number";
-  $("marketAsOf").textContent = marketQuoteFreshnessLabel(snap.market_quotes, [spyQuote, qqqQuote, vixQuote], canary.as_of);
-  $("spyLevel").textContent = numberRead(spyPrice);
-  $("vixLevel").textContent = numberRead(vixPrice);
-  $("nasdaqLevel").textContent = numberRead(nasdaqPrice);
-  const spyTone = renderSignedPercent("spyChange", spyChange, false);
-  const vixTone = renderSignedPercent("vixChange", vixChange, true);
-  const nasdaqTone = renderSignedPercent("nasdaqChange", nasdaqChange, false);
-  setMarketTileTone(".market-tile--spy", spyTone);
-  setMarketTileTone(".market-tile--vix", vixTone);
-  setMarketTileTone(".market-tile--nasdaq", nasdaqTone);
-  setQuoteRangeTone("#spyBaseline", spyTone);
-  setQuoteRangeTone("#vixBaseline", vixTone);
-  setQuoteRangeTone("#nasdaqBaseline", nasdaqTone);
-  renderQuoteRange("#spyBaseline", quotePrevClose(spyQuote) ?? market.spy_prev_close, spyPrice, spyChange, "SPY", !hasSpyData);
-  renderQuoteRange("#vixBaseline", quotePrevClose(vixQuote) ?? market.vix_prev_close, vixPrice, vixChange, "VIX", !hasVIXData);
-  renderQuoteRange("#nasdaqBaseline", quotePrevClose(qqqQuote) ?? market.qqq_prev_close ?? market.ndx_prev_close ?? market.nasdaq_prev_close, nasdaqPrice, nasdaqChange, "QQQ", !hasNasdaqData);
-  document.querySelector(".market-tile--spy")?.classList.toggle("market-tile--missing", !hasSpyData);
-  document.querySelector(".market-tile--vix")?.classList.toggle("market-tile--missing", !hasVIXData);
-  document.querySelector(".market-tile--nasdaq")?.classList.toggle("market-tile--missing", !hasNasdaqData);
-  const spyChangePending = hasSpyData && typeof spyChange !== "number";
-  const vixChangePending = hasVIXData && typeof vixChange !== "number";
-  const nasdaqChangePending = hasNasdaqData && typeof nasdaqChange !== "number";
-  setQuoteTileNote("spyNote", spyQuote, spyChangePending ? "Change pending" : "S&P 500 ETF", "SPY", !hasSpyData, quoteChangePendingTitle(spyChangePending));
-  setQuoteTileNote("vixNote", vixQuote, vixChangePending ? "Change pending" : "VIX index", "VIX", !hasVIXData, quoteChangePendingTitle(vixChangePending));
-  setQuoteTileNote("nasdaqNote", qqqQuote, nasdaqChangePending ? "Change pending" : "Nasdaq 100 ETF", "QQQ", !hasNasdaqData, quoteChangePendingTitle(nasdaqChangePending));
+  const strip = $("marketQuoteStrip");
+  const symbols = ["SPY", "QQQ", "IWM", "VIX", "HYG", "TLT"];
+  strip.replaceChildren(...symbols.map((symbol) => marketQuoteCell(symbol, quoteBySymbol(quotes, symbol), market, snap.market_quotes)));
+}
+
+function marketQuoteCell(symbol, quote, market, marketQuotes) {
+  const fallback = marketQuoteFallback(symbol, market);
+  const price = quotePrice(quote) ?? fallback.price;
+  const change = quoteChangePct(quote) ?? fallback.changePct;
+  const error = marketQuotes?.errors?.[symbol] || "";
+  const hasPrice = typeof price === "number";
+  const cell = document.createElement("div");
+  cell.className = "market-quote-cell";
+  cell.classList.toggle("market-quote-cell--missing", !hasPrice);
+  if (error) cell.classList.add("market-quote-cell--error");
+  cell.setAttribute("aria-label", `${symbol} ${hasPrice ? numberRead(price) : "price pending"} ${typeof change === "number" ? signedPct(change) : "change pending"}`);
+
+  const head = document.createElement("div");
+  head.className = "market-quote-cell__head";
+  const label = document.createElement("b");
+  label.textContent = symbol;
+  head.append(label);
+
+  const valueLine = document.createElement("div");
+  valueLine.className = "market-quote-cell__value";
+  const value = document.createElement("strong");
+  value.textContent = hasPrice ? numberRead(price) : "--";
+  const changeEl = document.createElement("span");
+  changeEl.className = "market-change " + signedClass(change);
+  changeEl.textContent = typeof change === "number" ? signedPct(change) : "--";
+  valueLine.append(value, changeEl);
+
+  const source = document.createElement("small");
+  source.className = "market-quote-cell__source" + (error ? " error" : "");
+  source.textContent = error
+    ? marketQuoteInterruptedLine(quote, marketQuotes, hasPrice)
+    : marketQuoteSourceLine(quote, marketQuotes, fallback.source);
+  source.title = error
+    ? `${marketQuoteErrorLabel(error)}; ${hasPrice ? "showing last available quote" : "no frozen quote available yet"}`
+    : source.textContent;
+  cell.append(head, valueLine, source);
+  return cell;
+}
+
+function marketQuoteInterruptedLine(quote, marketQuotes, hasPrice) {
+  const at = quoteTimestamp(quote) || marketQuotes?.as_of || "";
+  const atLabel = at ? ` · ${quoteTime(at)}` : "";
+  return hasPrice ? `Frozen${atLabel}` : "Feed issue";
+}
+
+function marketQuoteFallback(symbol, market = {}) {
+  switch (symbol) {
+    case "SPY":
+      return { price: market.spy_price, changePct: market.spy_change_pct, source: "canary market read" };
+    case "QQQ":
+      return {
+        price: firstNumber(market.qqq_price, market.ndx_price, market.nasdaq_price, market.nasdaq_100_price),
+        changePct: firstNumber(market.qqq_change_pct, market.ndx_change_pct, market.nasdaq_change_pct, market.nasdaq_100_change_pct),
+        source: "canary market read",
+      };
+    case "VIX":
+      return { price: market.vix, changePct: market.vix_change_pct, source: "canary market read" };
+    default:
+      return { price: null, changePct: null, source: "IBKR quote pending" };
+  }
+}
+
+function marketQuoteSourceLine(quote, marketQuotes, fallback) {
+  const parts = [];
+  const quality = String(quote?.quote_quality || "").trim();
+  const dataType = String(quote?.data_type || "").trim();
+  if (quality && quality !== "firm") parts.push(labelize(quality));
+  if (dataType && dataType !== "live") parts.push(labelize(dataType));
+  const uniqueParts = [...new Set(parts)];
+  if (uniqueParts.length === 0) uniqueParts.push(quote ? "IBKR quote" : fallback || "Quote pending");
+  const at = quote?.quote_price_at || quote?.price_at || quote?.as_of || marketQuotes?.as_of;
+  if (at) uniqueParts.push(quoteTime(at));
+  return uniqueParts.join(" · ");
+}
+
+function quoteTime(value) {
+  if (!value) return "--";
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function renderRegimePanel(snap) {
+  const canary = snap.canary || {};
+  const market = canary.market || {};
+  const indicators = canary.market_indicators || [];
   const regimeStatus = marketRegimeStatusLine(snap, canary, market, indicators);
   $("marketRegime").textContent = marketRegimeLabel(market, indicators, canary);
   $("marketRegimeSummary").textContent = regimeStatus.summary;
   $("marketRegimeMix").textContent = regimeStatus.detail;
   $("marketRegimeMix").title = regimeStatus.title;
+  $("regimeAsOf").textContent = latestRegimeRead(canary, indicators);
   renderMarketWeather(market, indicators);
-  renderRegimeDetail(indicators);
+  renderRegimeDetail(indicators, snap, canary);
+}
+
+function marketSourceIssueLabels(snap = {}) {
+  const labels = [];
+  const add = (label) => {
+    label = String(label || "").trim();
+    if (label && !labels.includes(label)) labels.push(label);
+  };
+
+  for (const [symbol, error] of Object.entries(snap.market_quotes?.errors || {})) {
+    add(`${normalizeSymbol(symbol)} ${marketQuoteErrorLabel(error)}`);
+  }
+
+  const marketSourceError = String(snap.sources?.market_quotes?.error || "").trim();
+  if (marketSourceError) {
+    for (const part of marketSourceError.split("|")) {
+      add(marketSourceErrorLabel(part));
+    }
+  }
+
+  return labels;
+}
+
+function marketSourceErrorLabel(error) {
+  const text = String(error || "").trim();
+  const match = text.match(/^([A-Za-z0-9._-]+):\s*(.+)$/);
+  if (!match) return marketQuoteErrorLabel(text);
+  return `${normalizeSymbol(match[1])} ${marketQuoteErrorLabel(match[2])}`;
+}
+
+function marketQuoteErrorLabel(error) {
+  const text = String(error || "").trim();
+  if (!text) return "";
+  const withoutPrefix = text.replace(/^quote\.snapshot:\s*/i, "").trim();
+  const lower = withoutPrefix.toLowerCase();
+  if (lower.includes("gateway_unavailable") || lower.includes("connection unavailable") || lower.includes("ibkr connection unavailable")) return "feed interrupted";
+  if (lower.includes("symbol_inactive")) return "quote unavailable";
+  if (lower.includes("timeout")) return "quote timeout";
+  return withoutPrefix;
 }
 
 function quoteBySymbol(quotes, symbol) {
@@ -1025,62 +1450,6 @@ function quoteChangePct(quote) {
   return null;
 }
 
-function setQuoteTileNote(id, quote, fallback, symbol, missing, title = "") {
-  const el = $(id);
-  el.textContent = quoteTileNote(quote, fallback, symbol, missing);
-  el.title = missing ? missingQuoteReason(quote) : title;
-}
-
-function quoteTileNote(quote, fallback, symbol, missing) {
-  if (missing) return `No ${symbol} price`;
-  const quality = String(quote?.quote_quality || "").trim();
-  if (quality && quality !== "firm") return labelize(quality) + " quote";
-  const dataType = String(quote?.data_type || "").trim();
-  if (dataType && dataType !== "live") return labelize(dataType) + " quote";
-  return fallback;
-}
-
-function missingQuoteReason(quote) {
-  const staleReason = String(quote?.stale_reason || "").trim();
-  if (staleReason) return labelize(staleReason);
-  const quality = String(quote?.quote_quality || "").trim().toLowerCase();
-  if (quality && quality !== "missing") return `${labelize(quality)} quote`;
-  return "IBKR returned no price";
-}
-
-function quoteChangePendingTitle(pending) {
-  return pending ? "IBKR quote has no previous-close baseline yet." : "";
-}
-
-function marketQuoteFreshnessLabel(marketQuotes, quotes, fallbackTime) {
-  const present = (quotes || []).filter(Boolean);
-  const at = marketQuotes?.as_of || latestQuoteTime(present) || fallbackTime;
-  if (present.length === 0) {
-    return at ? `Quote pending ${shortTime(at)}` : "Quote pending";
-  }
-  const priced = present.filter((quote) => typeof quotePrice(quote) === "number");
-  if (priced.length === 0) {
-    return at ? `IBKR quote pending ${shortTime(at)}` : "IBKR quote pending";
-  }
-  const dataTypes = present.map((quote) => String(quote.data_type || "").toLowerCase()).filter(Boolean);
-  const delayed = dataTypes.some((value) => value.includes("delayed"));
-  const frozen = dataTypes.some((value) => value.includes("frozen"));
-  const live = dataTypes.includes("live");
-  const prefix = delayed ? "Delayed quote" : live ? "Live quote" : frozen ? "Frozen quote" : "IBKR quote";
-  return at ? `${prefix} ${shortTime(at)}` : prefix;
-}
-
-function latestQuoteTime(quotes) {
-  let latest = null;
-  for (const quote of quotes) {
-    const at = parseDate(quote?.quote_price_at || quote?.price_at || quote?.as_of);
-    if (at && (!latest || at > latest)) {
-      latest = at;
-    }
-  }
-  return latest?.toISOString() || "";
-}
-
 function marketRegimeLabel(market, indicators, canary = {}) {
   const tone = marketWeatherTone(market, indicators);
   if (tone === "red") return "Risk-off";
@@ -1089,9 +1458,11 @@ function marketRegimeLabel(market, indicators, canary = {}) {
     if (verdict.toLowerCase().includes("normal")) return "Normal + gaps";
     return "Data gaps";
   }
-  if (tone === "green") return "Support";
-  if (tone === "amber") return "Mixed";
+  if (tone === "green") return "Normal";
   const verdict = cleanDetail(market.regime_verdict);
+  if (tone === "amber") {
+    return verdict.toLowerCase().includes("stress") ? "Stress" : "Mixed";
+  }
   return verdict === "--" ? "--" : labelize(verdict);
 }
 
@@ -1121,8 +1492,8 @@ function marketRegimeMix(market, indicators) {
   }, {});
   const risk = (counts.red || 0) + Number(market.red_clusters || 0);
   const neutral = (counts.amber || 0) + (counts.context || 0) + (counts.na || 0);
-  const support = counts.green || 0;
-  return `${risk} Risk · ${neutral} Neutral · ${support} Support`;
+  const normal = counts.green || 0;
+  return `${risk} Risk · ${neutral} Neutral · ${normal} Normal`;
 }
 
 function latestRegimeRead(canary, indicators) {
@@ -1151,9 +1522,12 @@ function latestRegimeRead(canary, indicators) {
 
 function renderMarketWeather(market, indicators) {
   const tone = marketWeatherTone(market, indicators);
-  const button = $("marketRegimeToggle");
-  button.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
-  button.classList.add("weather-" + tone);
+  const card = $("regimeSummaryCard");
+  const panel = $("regimePanel");
+  card.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
+  panel.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
+  card.classList.add("weather-" + tone);
+  panel.classList.add("weather-" + tone);
 }
 
 function marketWeatherTone(market, indicators) {
@@ -1314,58 +1688,15 @@ function renderSignedPercent(id, value, positiveIsRisk) {
   return isRisk ? "risk" : isOk ? "ok" : "neutral";
 }
 
-function setMarketTileTone(selector, tone) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  el.classList.remove("market-tile--ok", "market-tile--risk", "market-tile--neutral");
-  el.classList.add("market-tile--" + (tone || "neutral"));
-}
-
-function setQuoteRangeTone(selector, tone) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  el.classList.remove("quote-range--ok", "quote-range--risk", "quote-range--neutral");
-  el.classList.add("quote-range--" + (tone || "neutral"));
-}
-
-function renderQuoteRange(selector, previousClose, currentPrice, changePct, label, showMissingGuide = false) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  const inferredPreviousClose = previousClose ?? previousCloseFromChange(currentPrice, changePct);
-  const hasGuide = typeof inferredPreviousClose === "number" && typeof currentPrice === "number";
-  el.textContent = "";
-  el.classList.toggle("quote-range--missing", !hasGuide);
-  if (hasGuide) {
-    const movePct = typeof changePct === "number" ? changePct : ((currentPrice - inferredPreviousClose) / inferredPreviousClose) * 100;
-    const labelText = `${label} ${numberRead(currentPrice)} vs previous close ${numberRead(inferredPreviousClose)} (${signedPct(movePct)})`;
-    el.style.setProperty("--quote-pos", quoteRangePosition(movePct) + "%");
-    el.title = labelText;
-    el.setAttribute("aria-label", labelText);
-    return;
-  }
-  el.style.removeProperty("--quote-pos");
-  const missingText = showMissingGuide ? `${label} quote unavailable` : `${label} previous-close marker pending`;
-  el.title = missingText;
-  el.setAttribute("aria-label", missingText);
-}
-
-function quoteRangePosition(changePct) {
-  if (typeof changePct !== "number") return 50;
-  return Math.max(6, Math.min(94, 50 + changePct * 10));
-}
-
-function previousCloseFromChange(currentPrice, changePct) {
-  if (typeof currentPrice !== "number" || typeof changePct !== "number" || changePct <= -100) return null;
-  return currentPrice / (1 + changePct / 100);
-}
-
-function renderRegimeDetail(indicators) {
+function renderRegimeDetail(indicators, snap = {}, canary = {}) {
   const panel = $("regimeDetailPanel");
-  const button = $("marketRegimeToggle");
+  const button = $("regimeDetailToggle");
   panel.hidden = !state.regimeDetailOpen;
+  button.textContent = state.regimeDetailOpen ? "Hide detail" : "Show detail";
   button.setAttribute("aria-expanded", String(state.regimeDetailOpen));
   if (!state.regimeDetailOpen) return;
-  $("regimeIndicators").replaceChildren(...indicators.map((indicator) => {
+  const rows = indicators.length > 0 ? indicators : regimeFallbackIndicators(snap, canary);
+  $("regimeIndicators").replaceChildren(...rows.map((indicator) => {
     const row = document.createElement("div");
     row.className = "indicator-row";
     const dot = document.createElement("span");
@@ -1390,6 +1721,47 @@ function renderRegimeDetail(indicators) {
     row.append(dot, body);
     return row;
   }));
+  renderRegimeQualityRemarks(snap, canary);
+}
+
+function regimeFallbackIndicators(snap = {}, canary = {}) {
+  const market = canary.market || {};
+  const status = marketRegimeStatusLine(snap, canary, market, []);
+  const tone = marketWeatherTone(market, []);
+  const rows = [{
+    name: "Regime status",
+    status: tone === "red" ? "red" : tone === "green" ? "green" : tone === "amber" ? "amber" : "na",
+    as_of: latestRegimeRead(canary, []),
+    reading: status.summary,
+    comment: status.detail,
+  }, {
+    name: "Gateway",
+    status: state.connectionOK ? "green" : "amber",
+    as_of: snap.updated_at ? shortTimeWithZone(snap.updated_at) : "--",
+    reading: gatewayDataStatus(snap),
+    comment: state.connectionOK ? "Live app stream connected." : "App stream is reconnecting.",
+  }];
+  const issues = [...marketSourceIssueLabels(snap), ...canaryInputIssueLabels(canary, snap)];
+  if (issues.length > 0) {
+    rows.push({
+      name: "Data quality",
+      status: "amber",
+      as_of: canary.as_of ? shortTimeWithZone(canary.as_of) : "--",
+      reading: humanList([...new Set(issues)], 4),
+      comment: "Fine-print data gaps are kept inside the Regime panel.",
+    });
+  }
+  return rows;
+}
+
+function renderRegimeQualityRemarks(snap = {}, canary = {}) {
+  const panel = $("regimeQualityRemarks");
+  const text = $("regimeQualityText");
+  if (!panel || !text) return;
+  const issues = [...marketSourceIssueLabels(snap), ...canaryInputIssueLabels(canary, snap)];
+  const unique = [...new Set(issues.filter(Boolean))];
+  panel.hidden = unique.length === 0;
+  text.textContent = unique.length === 0 ? "--" : humanList(unique, 4);
 }
 
 function indicatorStatusClass(status) {
@@ -1771,20 +2143,51 @@ function detailFact(fact) {
 }
 
 function renderSourceBanners(snap) {
-  const sourceErrors = Object.entries(snap.sources || {})
-    .filter(([, meta]) => meta?.error)
-    .map(([source, meta]) => `${source}: ${meta.error}`);
-  setBanner("sourceErrorBanner", "sourceErrorText", sourceErrors.join(" | "));
-
-  const snapshotErrors = (snap.errors || []).map((err) => `${err.source}: ${err.message}`);
-  setBanner("snapshotErrorBanner", "snapshotErrorText", snapshotErrors.join(" | "));
+  const snapshotErrors = (snap.errors || []).filter((err) => err.source !== "market_quotes");
+  const summary = snapshotIssueSummary(snapshotErrors);
+  setBanner("snapshotErrorBanner", "snapshotErrorText", summary.text, summary.title);
+  $("bannerStack").hidden = snapshotErrors.length === 0;
 }
 
-function setBanner(bannerID, textID, text) {
+function snapshotIssueSummary(errors) {
+  if (!errors.length) return { text: "", title: "" };
+  const sources = [...new Set(errors.map((err) => snapshotSourceLabel(err.source)).filter(Boolean))];
+  const sourceText = humanList(sources, 3);
+  const title = errors.map((err) => `${err.source}: ${err.message}`).join(" | ");
+  return {
+    text: `${sourceText || "Data"} feed interrupted; showing last good snapshot.`,
+    title,
+  };
+}
+
+function snapshotSourceLabel(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "account":
+      return "account";
+    case "positions":
+      return "positions";
+    case "status":
+      return "gateway status";
+    case "calendar":
+      return "market calendar";
+    case "trading":
+      return "trading status";
+    case "canary":
+      return "canary";
+    case "regime":
+      return "regime";
+    default:
+      return cleanDetail(source);
+  }
+}
+
+function setBanner(bannerID, textID, text, title = "") {
   const banner = $(bannerID);
   if (!banner) return;
   banner.hidden = !text;
-  $(textID).textContent = text || "--";
+  const target = $(textID);
+  target.textContent = text || "--";
+  target.title = title || text || "";
 }
 
 function renderTopbar(snap) {
@@ -1861,7 +2264,7 @@ function renderSyncStrip(snap) {
       : ageMinutes >= 5
         ? "stale"
         : "live";
-  $("syncStatusLabel").textContent = sourceIssues > 0 ? "Source issues" : "Last sync:";
+  $("syncStatusLabel").textContent = sourceIssues > 0 ? "Data gaps" : "Last sync:";
   $("syncStatusTime").textContent = `${shortTimeWithZone(snap.updated_at)} · ${state.connectionOK ? "SSE connected" : "SSE reconnecting"}`;
   $("syncStatusState").textContent = labelize(stateLabel);
   strip.hidden = false;
@@ -2045,61 +2448,95 @@ function renderAlertMode() {
 }
 
 function renderAlerts() {
-  const items = filteredAlertItems();
-  const allItems = alertItems();
-  const activeItems = allItems.filter((alert) => !alertIsStale(alert));
+  const currentItems = filterAlertItems(liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems());
+  const historyItems = filterAlertItems(currentHistoryAlertItems());
+  const previousItems = filterAlertItems(previousContextAlertItems());
+  const activeItems = [...currentItems, ...historyItems];
   const clearableLivePreview = currentAlertPreviewItems().length > 0 && !liveAlertPreviewsSuppressed();
-  const staleCount = state.alerts.filter((alert) => alertIsStale(alert)).length;
+  const staleCount = previousContextAlertItems().length;
+  const activeHistoryCount = currentHistoryAlertItems().length;
+  const activePreviewCount = liveAlertPreviewsSuppressed() ? 0 : currentAlertPreviewItems().length;
   const count = $("alertCount");
-  const activeTones = activeItems.map(alertTone);
-  count.textContent = `${activeItems.length} Active`;
-  count.classList.toggle("is-zero", activeItems.length === 0);
+  const activeTones = [...currentItems, ...historyItems].map(alertTone);
+  count.textContent = activePreviewCount > 0 || activeHistoryCount > 0
+    ? `${activePreviewCount} current / ${activeHistoryCount} stored`
+    : "0 active";
+  count.classList.toggle("is-zero", activeHistoryCount === 0 && activePreviewCount === 0);
   count.classList.toggle("has-risk", activeTones.includes("risk"));
   count.classList.toggle("has-warn", !activeTones.includes("risk") && activeTones.includes("warn"));
+  $("currentSignalCount").textContent = String(activePreviewCount);
+  $("alertHistoryCount").textContent = String(activeHistoryCount);
+  $("previousContextCount").textContent = String(staleCount);
   $("alertsHint").textContent = state.alerts.length === 0
-    ? liveAlertPreviewsSuppressed() ? "Current canary alerts cleared for this snapshot." : currentCanaryHasPortfolioAlert()
-      ? "Live canary preview; no alert history recorded yet."
+    ? liveAlertPreviewsSuppressed() ? "Current canary signals dismissed for this snapshot." : currentCanaryHasPortfolioAlert()
+      ? "Current canary signals from the live snapshot; no alert history recorded yet."
       : "No portfolio alerts for the current low-exposure snapshot."
     : staleCount > 0 ? `${staleCount} previous-context alert${staleCount === 1 ? "" : "s"} hidden. Clear history to reset.`
       : "Tap an alert to inspect it in Canary.";
+  $("clearAlertsButton").textContent = state.alerts.length === 0 && clearableLivePreview ? "Dismiss current" : "Clear alerts";
   $("clearAlertsButton").disabled = state.alerts.length === 0 && !clearableLivePreview;
   document.querySelectorAll("[data-alert-filter]").forEach((button) => {
     button.classList.toggle("active", button.dataset.alertFilter === state.alertFilter);
   });
-  $("alertsList").replaceChildren(...items.map((alert) => {
-    const row = document.createElement("button");
-    row.className = "alert-row alert-row--" + alertTone(alert);
-    row.classList.toggle("alert-row--stale", alertIsStale(alert));
-    row.type = "button";
-    row.classList.toggle("active", alert.id === state.selectedAlertID);
-    row.addEventListener("click", () => {
-      state.selectedAlertID = alert.id;
-      renderAlerts();
-      renderSelectedAlert();
-      if (!activeOrderReviewSet()) refreshOrderReviewSet();
-      $("selectedAlertPanel").scrollIntoView({ block: "nearest" });
-    });
-    const text = document.createElement("div");
-    const title = document.createElement("b");
-    title.textContent = alert.title;
-    const body = document.createElement("p");
-    body.textContent = alert.body;
-    text.append(title, body);
-    const at = document.createElement("span");
-    at.textContent = alertIsStale(alert) ? "stale" : shortTime(alert.created_at);
-    row.append(text, at);
-    return row;
-  }));
+  renderAlertList("currentSignalList", currentItems, "No current canary signal.");
+  renderAlertList("alertHistoryList", historyItems, "No stored alert history for the current context.");
+  renderAlertList("previousContextList", previousItems, "No previous-context alerts.");
+  $("previousContextAlerts").hidden = staleCount === 0;
+}
+
+function renderAlertList(id, items, emptyText) {
+  const list = $(id);
+  list.replaceChildren(...items.map(alertRowElement));
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-row";
-    empty.textContent = "No matching canary alerts.";
-    $("alertsList").replaceChildren(empty);
+    empty.textContent = emptyText;
+    list.replaceChildren(empty);
   }
 }
 
+function alertRowElement(alert) {
+  const row = document.createElement("button");
+  row.className = "alert-row alert-row--" + alertTone(alert);
+  row.classList.toggle("alert-row--stale", alertIsStale(alert));
+  row.type = "button";
+  row.classList.toggle("active", alert.id === state.selectedAlertID);
+  row.addEventListener("click", () => {
+    state.selectedAlertID = alert.id;
+    renderAlerts();
+    renderSelectedAlert();
+    if (!activeOrderReviewSet()) refreshOrderReviewSet();
+    $("selectedAlertPanel").scrollIntoView({ block: "nearest" });
+  });
+  const text = document.createElement("div");
+  text.className = "alert-row__copy";
+  const title = document.createElement("b");
+  title.textContent = alert.title;
+  const body = document.createElement("p");
+  body.textContent = alert.body;
+  text.append(title, body);
+  const at = document.createElement("span");
+  at.className = "alert-row__source";
+  at.textContent = alertSourceLabel(alert);
+  at.title = alertSourceTitle(alert);
+  row.append(text, at);
+  return row;
+}
+
+function alertSourceLabel(alert) {
+  if (alert.preview) return "current signal";
+  if (alertIsStale(alert)) return `stale: ${staleAlertReason(alert)}`;
+  return alert.created_at ? `stored ${shortTime(alert.created_at)}` : "stored history";
+}
+
+function alertSourceTitle(alert) {
+  if (alert.preview) return "Synthetic current Canary preview from the live snapshot";
+  if (alertIsStale(alert)) return `Persisted alert from ${staleAlertReason(alert)}`;
+  return "Persisted alert history for the current Canary context";
+}
+
 function renderSelectedAlert() {
-  const alert = alertItems().find((item) => item.id === state.selectedAlertID);
+  const alert = allAlertItems().find((item) => item.id === state.selectedAlertID);
   const panel = $("selectedAlertPanel");
   panel.hidden = !alert;
   if (!alert) return;
@@ -2110,6 +2547,7 @@ function renderSelectedAlert() {
     : alert.body || "Open detail for the current canary context.";
   $("selectedAlertTime").textContent = stale
     ? "not valid for current daemon context"
+    : alert.preview ? "current canary snapshot"
     : alert.created_at ? `recorded ${shortTime(alert.created_at)}` : "recorded --";
 }
 
@@ -2171,8 +2609,9 @@ function reviewTransmitGate(set, trading, selected) {
 function renderOrderReview() {
   const panel = $("orderReviewPanel");
   const set = activeOrderReviewSet();
-  const shouldShow = Boolean(set || state.orderReviewLoading || state.orderReviewError || state.orderPreview);
+  const shouldShow = state.canaryDetailOpen && Boolean(set || state.orderReviewLoading || state.orderReviewError || state.orderPreview);
   panel.hidden = !shouldShow;
+  renderCanaryMitigation(state.snapshot?.canary || {});
   if (!shouldShow) return;
 
   const trading = state.snapshot?.trading || set?.capabilities || {};
@@ -2319,13 +2758,15 @@ function renderOrderPreview() {
 }
 
 function renderOpenOrders() {
+  const panel = $("ordersPanel");
   const list = $("ordersOpenList");
   const orders = state.ordersOpen?.orders || [];
+  if (panel) panel.hidden = orders.length === 0;
   $("ordersAsOf").textContent = state.ordersOpen?.as_of ? shortTime(state.ordersOpen.as_of) : "--";
   if (orders.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-row";
-    empty.textContent = "No open journal-backed orders.";
+    empty.textContent = "No open orders available for this view.";
     list.replaceChildren(empty);
     return;
   }
@@ -2780,6 +3221,116 @@ function readJSONOrText(res) {
   });
 }
 
+async function refreshPurgeStatus() {
+  try {
+    const res = await fetch("/api/purge/status", { credentials: "include" });
+    if (!res.ok) return;
+    state.latestPurgeStatus = await res.json();
+    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+  } catch {
+    // Purge status is secondary context; live positions and trading remain primary.
+  }
+}
+
+async function runUnderlyingAction(action, target = {}) {
+  const all = Boolean(target.all);
+  const symbols = (target.symbols || []).map(normalizeSymbol).filter(Boolean);
+  const label = underlyingActionLabel(action, all, symbols);
+  const body = { all, symbols };
+  const writeAction = action === "purge" || action === "restore";
+  if (writeAction) {
+    const confirmation = underlyingWriteConfirmation(action, label);
+    if (!confirmation) return;
+    body.confirm_account = confirmation.account;
+    body.confirm_mode = confirmation.mode;
+  }
+
+  state.underlyingBusy = action;
+  state.underlyingNotice = `${label}: running.`;
+  renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+  try {
+    const res = await fetch(underlyingActionEndpoint(action), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+    });
+    const result = await readJSONOrText(res);
+    if (!res.ok) throw new Error(result.error || result.message || String(result));
+    state.underlyingNotice = `${label}: ${purgeResultSummary(result)}`;
+    renderUnderlyingActionResult(result);
+    await refreshPurgeStatus();
+    await refreshOpenOrders();
+  } catch (err) {
+    state.underlyingNotice = `${label}: ${err.message}`;
+    renderUnderlyingActionResult({ status: "error", message: err.message });
+  } finally {
+    state.underlyingBusy = "";
+    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+  }
+}
+
+function underlyingActionEndpoint(action) {
+  if (action === "build") return "/api/purge/restore/preview";
+  if (action === "restore") return "/api/purge/restore/execute";
+  return "/api/purge/execute";
+}
+
+function underlyingActionLabel(action, all, symbols) {
+  const target = all ? "all" : symbols.join(", ") || "selection";
+  if (action === "build") return `Build ${target}`;
+  if (action === "restore") return `Restore ${target}`;
+  return `Purge ${target}`;
+}
+
+function underlyingWriteConfirmation(action, label) {
+  const trading = state.snapshot?.trading || {};
+  if (!canWriteUnderlyings(trading)) {
+    state.underlyingNotice = underlyingWriteReason(label, true, trading);
+    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+    return null;
+  }
+  const expected = `${trading.mode}/${trading.account}`;
+  const verb = action === "restore" ? "restore purged rows" : "purge held positions";
+  const got = window.prompt([
+    `${label} is a broker-write action.`,
+    `Type ${expected} to ${verb}.`,
+  ].join("\n"));
+  if (got !== expected) {
+    state.underlyingNotice = `${label}: confirmation cancelled.`;
+    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+    return null;
+  }
+  return { account: trading.account, mode: trading.mode };
+}
+
+function purgeResultSummary(result = {}) {
+  const status = result.status || "ok";
+  const selected = Number(result.selected_legs || 0);
+  const submitted = Number(result.submitted_legs || 0);
+  const skipped = Number(result.skipped_legs || 0);
+  const errors = Number(result.error_legs || 0);
+  const message = result.message ? ` / ${result.message}` : "";
+  const preview = result.kind === "ibkr.purge_restore_preview" ? "draft" : status;
+  return `${preview}; ${selected} selected, ${submitted} submitted, ${skipped} skipped, ${errors} errors${message}`;
+}
+
+function renderUnderlyingActionResult(result = {}) {
+  const panel = $("underlyingActionResult");
+  if (!panel) return;
+  panel.hidden = false;
+  panel.className = "underlying-action-result " + (result.status === "error" || result.error_legs > 0 ? "risk" : "neutral");
+  const lines = [];
+  if (result.message) lines.push(result.message);
+  if ((result.blockers || []).length > 0) {
+    lines.push(...result.blockers.map((blocker) => blocker.message || blocker.code).filter(Boolean));
+  }
+  if ((result.skipped || []).length > 0) {
+    lines.push(...result.skipped.slice(0, 3).map((row) => `${row.symbol || row.leg_id}: ${row.reason}`));
+  }
+  panel.textContent = lines.join(" / ") || purgeResultSummary(result);
+}
+
 function capabilityLine(trading, set) {
   if (!set) return "Create or refresh the review set before preview.";
   if (reviewSetIsStale(set)) return "Stale review set for a previous canary/account context. Refresh before preview.";
@@ -2803,6 +3354,15 @@ function alertIsStale(alert) {
   const accountChanged = Boolean(alert?.account && trading.account && alert.account !== trading.account);
   const modeChanged = Boolean(alert?.mode && trading.mode && alert.mode !== trading.mode);
   return canaryChanged || accountChanged || modeChanged;
+}
+
+function staleAlertReason(alert) {
+  const current = currentCanaryFingerprint();
+  if (alert?.fingerprint && current && alert.fingerprint !== current) return "previous signal";
+  const trading = state.snapshot?.trading || {};
+  if (alert?.account && trading.account && alert.account !== trading.account) return "previous account";
+  if (alert?.mode && trading.mode && alert.mode !== trading.mode) return "previous mode";
+  return "previous context";
 }
 
 function reviewSetIsStale(set) {
@@ -2924,7 +3484,7 @@ async function refreshAlerts() {
     const res = await fetch("/api/alerts", { credentials: "include" });
     if (!res.ok) return;
     state.alerts = await res.json();
-    if (state.selectedAlertID && !alertItems().some((alert) => alert.id === state.selectedAlertID)) {
+    if (state.selectedAlertID && !allAlertItems().some((alert) => alert.id === state.selectedAlertID)) {
       state.selectedAlertID = null;
     }
     renderAlerts();
@@ -2935,9 +3495,7 @@ async function refreshAlerts() {
 }
 
 function alertItems() {
-  const history = state.alerts
-    .map((alert) => ({ ...alert, preview: false }))
-    .filter((alert) => !alertIsStale(alert));
+  const history = currentHistoryAlertItems();
   const previews = liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems();
   if (history.length === 0) return previews;
   const historyTitles = new Set(history.map((item) => String(item.title || "").toLowerCase()));
@@ -2945,6 +3503,26 @@ function alertItems() {
     ...history,
     ...previews.filter((item) => !historyTitles.has(String(item.title || "").toLowerCase())),
   ].slice(0, 3);
+}
+
+function allAlertItems() {
+  return [
+    ...(liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems()),
+    ...currentHistoryAlertItems(),
+    ...previousContextAlertItems(),
+  ];
+}
+
+function currentHistoryAlertItems() {
+  return state.alerts
+    .map((alert) => ({ ...alert, preview: false }))
+    .filter((alert) => !alertIsStale(alert));
+}
+
+function previousContextAlertItems() {
+  return state.alerts
+    .map((alert) => ({ ...alert, preview: false }))
+    .filter((alert) => alertIsStale(alert));
 }
 
 function currentAlertPreviewItems() {
@@ -2986,8 +3564,7 @@ function liveAlertPreviewsSuppressed() {
   return Boolean(current && state.clearedAlertFingerprint === current);
 }
 
-function filteredAlertItems() {
-  const items = alertItems();
+function filterAlertItems(items) {
   if (state.alertFilter === "warnings") {
     return items.filter((item) => ["risk", "warn"].includes(alertTone(item)));
   }
@@ -3073,25 +3650,22 @@ $("accountPrivacyToggle").addEventListener("click", () => {
   localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
   renderAll();
 });
-$("accountMenuToggle").addEventListener("click", () => {
-  state.accountMenuOpen = !state.accountMenuOpen;
-  renderAccountMenu(state.snapshot?.account || {});
+$("accountLargestExposureToggle").addEventListener("click", () => {
+  state.accountExposureOpen = !state.accountExposureOpen;
+  renderAccountPanel(state.snapshot?.account || {}, state.snapshot?.positions || {}, state.snapshot?.canary || {});
 });
 $("canaryDetailToggle").addEventListener("click", () => {
-  state.canaryDetailOpen = !state.canaryDetailOpen;
-  renderCanaryDetail(state.snapshot?.canary || {});
+  setRegimeCanaryExpansion("canary", !state.canaryDetailOpen);
 });
 $("quickReviewBlockersButton").addEventListener("click", () => {
-  state.canaryDetailOpen = true;
-  renderCanaryDetail(state.snapshot?.canary || {});
+  setRegimeCanaryExpansion("canary", true);
   $("canaryDetailPanel").scrollIntoView({ block: "nearest" });
 });
-$("quickRiskPlanButton").addEventListener("click", async () => {
-  await refreshOrderReviewSet();
-  $("orderReviewPanel").scrollIntoView({ block: "nearest" });
-});
+$("canaryMitigationButton").addEventListener("click", openMitigationPlan);
+$("quickRiskPlanButton").addEventListener("click", openMitigationPlan);
 $("quickHeldActionsButton").addEventListener("click", () => {
-  $("underlyingBook").scrollIntoView({ block: "nearest" });
+  $("underlyingPanel").open = true;
+  $("underlyingPanel").scrollIntoView({ block: "nearest" });
 });
 $("quickAlertsButton").addEventListener("click", () => {
   $("alertsPanel").open = true;
@@ -3106,23 +3680,23 @@ $("refreshOrderReviewButton").addEventListener("click", refreshOrderReviewSet);
 $("resetOrderReviewButton").addEventListener("click", resetOrderReviewEdits);
 $("previewOrdersButton").addEventListener("click", previewOrderReviewSet);
 $("transmitSelectedButton").addEventListener("click", transmitSelectedOrders);
-$("marketRegimeToggle").addEventListener("click", () => {
-  state.regimeDetailOpen = !state.regimeDetailOpen;
-  renderRegimeDetail(state.snapshot?.canary?.market_indicators || []);
+$("regimeDetailToggle").addEventListener("click", () => {
+  setRegimeCanaryExpansion("regime", !state.regimeDetailOpen);
+});
+$("buildAllUnderlyingsButton").addEventListener("click", () => {
+  runUnderlyingAction("build", { all: true });
+});
+$("purgeAllUnderlyingsButton").addEventListener("click", () => {
+  runUnderlyingAction("purge", { all: true });
+});
+$("restoreAllUnderlyingsButton").addEventListener("click", () => {
+  runUnderlyingAction("restore", { all: true });
 });
 $("portfolioDetailToggle").addEventListener("click", () => {
   state.portfolioDetailOpen = !state.portfolioDetailOpen;
   renderPortfolioDetail(state.snapshot?.positions?.portfolio || {}, state.snapshot?.positions || {}, state.snapshot?.account?.base_currency || "USD");
 });
 $("clearAlertsButton").addEventListener("click", clearAlerts);
-
-document.querySelectorAll("[data-tool]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    const res = await fetch("/api/tools/" + button.dataset.tool, { method: "POST", credentials: "include" });
-    $("toolOutput").hidden = false;
-    $("toolOutput").textContent = JSON.stringify(await res.json(), null, 2);
-  });
-});
 
 async function enablePush() {
   if (!canUseWebPush()) {
@@ -3393,9 +3967,10 @@ function showPairing(text) {
   $("pairingPanel").hidden = false;
   $("dashboard").hidden = true;
   $("alertsPanel").hidden = true;
-  $("accountMenu").hidden = true;
+  $("accountPanel").hidden = true;
+  $("underlyingPanel").hidden = true;
   $("ordersPanel").hidden = true;
-  $("toolsPanel").hidden = true;
+  $("bannerStack").hidden = true;
   $("syncStrip").hidden = true;
   $("pairingText").textContent = text;
   setConnection("Locked", false);

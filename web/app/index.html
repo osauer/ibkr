@@ -4,11 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f6f7f9">
-    <title>ibkr canary</title>
+    <title>Canary · IBKR</title>
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=spa-remediation-errors-20260605">
   </head>
   <body>
     <main class="shell">
@@ -16,61 +16,49 @@
         <div class="brand-block">
           <img class="brand-mark" src="/icon-192.png" width="50" height="50" alt="" aria-hidden="true">
           <div class="brand-copy">
-            <h1>ibkr canary</h1>
-            <p>Portfolio risk monitor</p>
+            <h1 aria-label="Canary IBKR"><span>Canary</span><sub aria-hidden="true">IBKR</sub></h1>
           </div>
         </div>
-        <button class="account-chip" id="accountMenuToggle" type="button" aria-label="Account menu" aria-expanded="false" aria-controls="accountMenu">
-          <span id="accountChipText">Account</span>
-          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
-          </svg>
-        </button>
+        <p class="app-subtitle">Portfolio Risk Monitor</p>
       </header>
 
       <section class="market-strip" aria-live="polite">
-        <div class="market-strip__status">
-          <span class="market-strip__pulse" id="marketStateDot" role="img" aria-label="Market session status" title="Market session status"></span>
-          <label class="market-strip__selector">
-            <select id="marketSelect" aria-label="Market calendar">
-              <option value="us">US equities</option>
-              <option value="us-options">US options</option>
-              <option value="de">Xetra</option>
-            </select>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
-            </svg>
-          </label>
+        <div class="market-strip__session">
+          <div class="market-strip__status">
+            <span class="market-strip__pulse" id="marketStateDot" role="img" aria-label="Market session status" title="Market session status"></span>
+            <label class="market-strip__selector">
+              <select id="marketSelect" aria-label="Market calendar">
+                <option value="us">US Markets</option>
+                <option value="us-options">US Options</option>
+                <option value="de">Xetra</option>
+              </select>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path>
+              </svg>
+            </label>
+          </div>
           <span class="market-strip__phase" id="sessionPhase">Syncing</span>
         </div>
+        <div class="market-strip__quotes" id="marketQuoteStrip" aria-label="Market quotes"></div>
         <div class="market-strip__side sr-only">
           <p class="status-banner" id="connectionLine">Waiting for official market calendar</p>
           <span class="status-dot" id="statusDot" aria-label="app connection status"></span>
         </div>
       </section>
 
-      <article class="panel account-panel account-popover" id="accountMenu" hidden>
-        <div class="panel-head">
-          <span>Account</span>
+      <article class="panel account-panel" id="accountPanel" aria-label="Account and risk">
+        <div class="account-panel__top">
           <span class="trading-env-pill" id="tradingEnvPill">--</span>
+          <div class="account-panel__identity">
+            <b id="accountLabel">--</b>
+          </div>
           <button class="icon-button account-privacy-toggle" id="accountPrivacyToggle" type="button" aria-label="Show account values" aria-pressed="false" title="Show account values">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"></path>
               <circle cx="12" cy="12" r="2.6"></circle>
             </svg>
           </button>
-          <span class="panel-time" id="accountAsOf">--</span>
-        </div>
-        <div class="account-context-line" id="accountContextLine">Waiting for account context</div>
-        <div class="account-status-card" id="accountStatusCard">
-          <div>
-            <span>Environment</span>
-            <b id="accountEnvironment">--</b>
-          </div>
-          <div>
-            <span>Order account</span>
-            <b id="orderAccountLabel">--</b>
-          </div>
+          <span class="account-panel__freshness" id="accountAsOf">--</span>
         </div>
         <div class="account-metrics">
           <div class="account-primary">
@@ -86,14 +74,31 @@
             <strong id="dailyPnl">--</strong>
           </div>
         </div>
+        <div class="account-risk-strip">
+          <div class="account-risk-item">
+            <span>Net $ Delta</span>
+            <b id="accountRiskDelta">--</b>
+          </div>
+          <div class="account-risk-item">
+            <span>Theta/day</span>
+            <b id="accountRiskTheta">--</b>
+          </div>
+          <div class="account-risk-item">
+            <span>FX 1%</span>
+            <b id="accountRiskFx">--</b>
+          </div>
+          <button class="account-risk-item account-risk-item--button" id="accountLargestExposureToggle" type="button" aria-expanded="false" aria-controls="accountLargestExposurePanel">
+            <span>Largest exposure</span>
+            <b id="accountLargestExposureLabel">--</b>
+          </button>
+        </div>
+        <div class="account-exposure-panel" id="accountLargestExposurePanel" hidden>
+          <div class="exposure-list" id="accountLargestExposureList"></div>
+        </div>
         <span class="sr-only" id="cushion">--</span>
       </article>
 
-      <section class="banner-stack" aria-live="polite">
-        <div class="source-banner" id="sourceErrorBanner" role="status" hidden>
-          <span>Source issue</span>
-          <b id="sourceErrorText">--</b>
-        </div>
+      <section class="banner-stack" id="bannerStack" aria-live="polite" hidden>
         <div class="source-banner" id="snapshotErrorBanner" role="status" hidden>
           <span>Snapshot issue</span>
           <b id="snapshotErrorText">--</b>
@@ -111,95 +116,50 @@
       </section>
 
       <section class="dashboard" id="dashboard" hidden>
-        <article class="panel market-panel" id="marketPanel">
+        <article class="panel signal-panel regime-panel weather-na" id="regimePanel">
           <div class="panel-head">
-            <span>Market Context</span>
-            <span id="marketAsOf">--</span>
-          </div>
-          <div class="market-grid">
-            <div class="market-tile market-tile--spy">
-              <span>SPY</span>
-              <div class="market-quote-row">
-                <b id="spyLevel">--</b>
-                <small class="market-change" id="spyChange">--</small>
-              </div>
-              <div class="quote-range quote-range--spy quote-range--missing" id="spyBaseline" aria-label="SPY quote range unavailable"></div>
-              <em id="spyNote">S&amp;P 500 ETF</em>
-            </div>
-            <div class="market-tile market-tile--vix">
-              <span>VIX</span>
-              <div class="market-quote-row">
-                <b id="vixLevel">--</b>
-                <small class="market-change" id="vixChange">--</small>
-              </div>
-              <div class="quote-range quote-range--vix quote-range--missing" id="vixBaseline" aria-label="VIX quote range unavailable"></div>
-              <em id="vixNote">VIX index</em>
-            </div>
-            <div class="market-tile market-tile--nasdaq">
-              <span>QQQ</span>
-              <div class="market-quote-row">
-                <b id="nasdaqLevel">--</b>
-                <small class="market-change" id="nasdaqChange">--</small>
-              </div>
-              <div class="quote-range quote-range--nasdaq quote-range--missing" id="nasdaqBaseline" aria-label="QQQ quote range unavailable"></div>
-              <em id="nasdaqNote">Nasdaq 100 ETF</em>
-            </div>
-            <button class="market-regime weather-na" id="marketRegimeToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
-              <span>Regime</span>
-              <b id="marketRegime">--</b>
-              <small id="marketRegimeSummary">Regime read</small>
-              <em id="marketRegimeMix">Waiting for market evidence</em>
-              <strong>View details</strong>
+            <span>Market Regime</span>
+            <span class="panel-time" id="regimeAsOf">--</span>
+            <button class="panel-chevron" id="regimeDetailToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
+              Detail
             </button>
+          </div>
+          <div class="regime-summary weather-na" id="regimeSummaryCard">
+            <span>Market regime</span>
+            <b id="marketRegime">--</b>
+            <small id="marketRegimeSummary">Regime read</small>
+            <em id="marketRegimeMix">Waiting for market evidence</em>
           </div>
           <div class="regime-detail-panel" id="regimeDetailPanel" hidden>
             <div class="regime-indicators" id="regimeIndicators"></div>
+            <div class="source-inline" id="regimeQualityRemarks" role="status" hidden>
+              <span>Data quality</span>
+              <b id="regimeQualityText">--</b>
+            </div>
           </div>
         </article>
 
-        <article class="panel hero-panel canary-hero" id="canaryHero">
-          <div class="panel-head panel-head--hero">
+        <article class="panel signal-panel canary-hero" id="canaryHero">
+          <div class="panel-head">
             <span>Portfolio Canary</span>
-            <button class="panel-chevron panel-chevron--light" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
+            <span class="panel-time" id="canaryAsOf">--</span>
+            <button class="panel-chevron" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
               Show detail
             </button>
           </div>
           <div class="canary-hero__grid">
             <div class="canary-hero__copy">
-              <span class="hero-time" id="canaryAsOf">--</span>
+              <span class="canary-summary-label">Canary posture</span>
               <strong id="canaryAction">--</strong>
               <p id="canarySummary">Waiting for canary snapshot.</p>
             </div>
           </div>
-          <div class="canary-actions" aria-label="Canary quick actions">
-            <button class="canary-action canary-action--primary" id="quickReviewBlockersButton" type="button">
-              <span>Review blockers</span>
-              <small>Open evidence</small>
-            </button>
-            <button class="canary-action" id="quickRiskPlanButton" type="button">
-              <span>Risk plan</span>
-              <small>Refresh review set</small>
-            </button>
-            <button class="canary-action" id="quickHeldActionsButton" type="button">
-              <span>Held actions</span>
-              <small>Purge / restore</small>
-            </button>
-            <button class="canary-action" id="quickAlertsButton" type="button">
-              <span>Alerts</span>
-              <small>Watch + act</small>
+          <div class="canary-summary-actions">
+            <span class="severity-pill" id="canarySeverity">--</span>
+            <button class="text-button canary-mitigation-button" id="canaryMitigationButton" type="button" disabled>
+              Mitigation plan
             </button>
           </div>
-          <div class="underlying-book underlying-book--canary" id="underlyingBook">
-            <div class="underlying-book__head">
-              <div>
-                <span>Underlyings</span>
-                <b id="underlyingBookCount">No underlyings</b>
-              </div>
-              <small id="underlyingBookStatus">Held and virtual purge-book records</small>
-            </div>
-            <div class="underlying-book__list" id="underlyingBookList"></div>
-          </div>
-          <span class="severity-pill" id="canarySeverity">--</span>
           <div class="alert-focus" id="selectedAlertPanel" hidden>
             <div>
               <span>Selected alert</span>
@@ -231,6 +191,24 @@
             <div class="order-preview" id="orderPreviewPanel" hidden></div>
           </div>
           <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
+            <div class="canary-actions" aria-label="Canary quick actions">
+              <button class="canary-action canary-action--primary" id="quickReviewBlockersButton" type="button">
+                <span>Review blockers</span>
+                <small>Open evidence</small>
+              </button>
+              <button class="canary-action" id="quickRiskPlanButton" type="button">
+                <span>Mitigation plan</span>
+                <small>Open or refresh</small>
+              </button>
+              <button class="canary-action" id="quickHeldActionsButton" type="button">
+                <span>Held actions</span>
+                <small>Open underlyings</small>
+              </button>
+              <button class="canary-action" id="quickAlertsButton" type="button">
+                <span>Alerts</span>
+                <small>Watch + act</small>
+              </button>
+            </div>
             <div class="detail-grid" id="canaryDetailGrid"></div>
             <div class="held-stress" id="heldStressPanel" hidden>
               <div class="held-stress__head">
@@ -242,6 +220,30 @@
             <div class="detail-list" id="canaryDrivers"></div>
           </div>
         </article>
+
+        <details class="panel underlying-panel" id="underlyingPanel">
+          <summary class="panel-head">
+            <span>Underlyings</span>
+            <span class="panel-time" id="underlyingBookFreshness">--</span>
+            <span class="panel-chevron panel-chevron--summary" aria-hidden="true"></span>
+          </summary>
+          <div class="underlying-book" id="underlyingBook">
+            <div class="underlying-book__head">
+              <div>
+                <span>Held and purged</span>
+                <b id="underlyingBookCount">No underlyings</b>
+              </div>
+              <small id="underlyingBookStatus">Held and virtual purge-book records</small>
+            </div>
+            <div class="underlying-bulk-actions" aria-label="Underlying bulk actions">
+              <button class="underlying-action underlying-action--purge" id="purgeAllUnderlyingsButton" type="button">Purge</button>
+              <button class="underlying-action underlying-action--restore" id="restoreAllUnderlyingsButton" type="button">Restore</button>
+              <button class="underlying-action underlying-action--build" id="buildAllUnderlyingsButton" type="button">Build</button>
+            </div>
+            <div class="underlying-action-result" id="underlyingActionResult" hidden></div>
+            <div class="underlying-book__list" id="underlyingBookList"></div>
+          </div>
+        </details>
 
         <article class="panel portfolio-panel">
           <div class="panel-head">
@@ -312,7 +314,27 @@
                 <button type="button" data-alert-filter="info">Info</button>
               </span>
             </div>
-            <div class="list" id="alertsList"></div>
+            <section class="alert-section" aria-label="Current signal">
+              <div class="alert-section__head">
+                <span>Current Signal</span>
+                <b id="currentSignalCount">0</b>
+              </div>
+              <div class="list" id="currentSignalList"></div>
+            </section>
+            <section class="alert-section" aria-label="Alert history">
+              <div class="alert-section__head">
+                <span>Alert History</span>
+                <b id="alertHistoryCount">0</b>
+              </div>
+              <div class="list" id="alertHistoryList"></div>
+            </section>
+            <details class="previous-alerts" id="previousContextAlerts">
+              <summary>
+                <span>Previous Context</span>
+                <b id="previousContextCount">0</b>
+              </summary>
+              <div class="list" id="previousContextList"></div>
+            </details>
             <div class="alerts-toolbar">
               <span id="alertsHint">No alert history yet.</span>
               <button class="text-button" id="clearAlertsButton" type="button">Clear alerts</button>
@@ -345,31 +367,6 @@
             <div class="orders-list" id="ordersOpenList"></div>
           </div>
         </details>
-
-        <details class="panel tools" id="toolsPanel" hidden open>
-          <summary class="panel-head">
-            <span class="panel-title-with-icon">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m14.5 5.5 4-4 2 2-4 4"></path>
-                <path d="M13 7 4.5 15.5a3 3 0 0 0 4.25 4.25L17 11"></path>
-                <path d="m7.5 14.5 3 3"></path>
-              </svg>
-              Debug tools
-            </span>
-            <span>Development only</span>
-          </summary>
-          <div class="tools-body">
-            <div class="tool-grid">
-              <button type="button" data-tool="snapshot"><span>Snap &amp; Save</span><small>Capture current snapshot</small></button>
-              <button type="button" data-tool="status"><span>App Diagnostics</span><small>Health, subsystems, data quality</small></button>
-              <button type="button" data-tool="events"><span>Event Stream</span><small>SSE subscribers and latest events</small></button>
-              <button type="button" data-tool="auth"><span>Auth State</span><small>Paired devices and session state</small></button>
-              <button type="button" data-tool="push"><span>Push Relay</span><small>Subscription and delivery state</small></button>
-              <button type="button" data-tool="relay"><span>Relay Status</span><small>Local relay diagnostics</small></button>
-            </div>
-            <pre id="toolOutput" hidden>{}</pre>
-          </div>
-        </details>
       </section>
 
       <footer class="sync-strip" id="syncStrip" hidden>
@@ -379,6 +376,6 @@
         <span class="sync-strip__auto">Auto</span>
       </footer>
     </main>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=spa-remediation-errors-20260605" type="module"></script>
   </body>
 </html>

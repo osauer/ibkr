@@ -44,9 +44,8 @@ IBKR_CANARY_ICON_CROP=y,x,height,width \
 web/app/generate-icons.sh
 ```
 
-The `/tools` surface is deliberately boring: status, snapshot, events, auth,
-push, and relay diagnostics only. Trading workflows, HTTP MCP, and production
-relay hosting are future work.
+Trading workflows, HTTP MCP, debug diagnostics, and production relay hosting are
+future work.
 
 Design and architecture notes live in
 [`docs/design/mobile-app-mvp.md`](../../docs/design/mobile-app-mvp.md).

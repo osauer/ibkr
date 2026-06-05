@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +20,10 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		quotes: map[string]rpc.Quote{
 			"SPY": {Symbol: "SPY", Price: new(500.0), ChangePct: new(0.4), DataType: rpc.MarketDataLive},
 			"QQQ": {Symbol: "QQQ", Price: new(420.0), ChangePct: new(0.5), DataType: rpc.MarketDataLive},
+			"IWM": {Symbol: "IWM", Price: new(210.0), ChangePct: new(0.2), DataType: rpc.MarketDataLive},
 			"VIX": {Symbol: "VIX", Price: new(18.0), ChangePct: new(-2.0), DataType: rpc.MarketDataLive},
+			"HYG": {Symbol: "HYG", Price: new(78.0), ChangePct: new(0.1), DataType: rpc.MarketDataLive},
+			"TLT": {Symbol: "TLT", Price: new(92.0), ChangePct: new(-0.1), DataType: rpc.MarketDataLive},
 		},
 		regime:  &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}, Composite: rpc.RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterRankedCount: 6}},
 		canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
@@ -49,7 +53,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Canary == nil || snap.Canary.Fingerprint.Key != "fp-1" {
 		t.Fatalf("canary missing from snapshot: %#v", snap.Canary)
 	}
-	if snap.Quotes == nil || len(snap.Quotes.Quotes) != 3 || snap.Quotes.Quotes["QQQ"].Symbol != "QQQ" {
+	if snap.Quotes == nil || len(snap.Quotes.Quotes) != 6 || snap.Quotes.Quotes["QQQ"].Symbol != "QQQ" || snap.Quotes.Quotes["TLT"].Symbol != "TLT" {
 		t.Fatalf("market quotes missing from snapshot: %#v", snap.Quotes)
 	}
 	if snap.Regime == nil || snap.Regime.Fingerprint.Key != "regime-1" {
@@ -244,18 +248,68 @@ func TestMergeMarketQuotesPreservesLastGoodStreamQuote(t *testing.T) {
 	}
 }
 
+func TestPollOnceIncludesHeldUnderlyingQuotes(t *testing.T) {
+	t.Parallel()
+	aaplPrice := 207.42
+	stock := rpc.PositionView{Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1}
+	client := &fakeClient{
+		status:    &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
+		calendar:  &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
+		account:   &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
+		positions: &rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{{Underlying: "AAPL", Stock: &stock}}, Portfolio: &rpc.PositionsPortfolio{}},
+		quotes: map[string]rpc.Quote{
+			"AAPL": {Symbol: "AAPL", Price: &aaplPrice, DataType: rpc.MarketDataLive},
+		},
+		regime:  &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
+		canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
+		trading: &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+	}
+	svc := New(client, time.Minute, time.Minute)
+
+	snap := svc.PollOnce(context.Background())
+	got := snap.Quotes.Quotes["AAPL"]
+	if got.Price == nil || *got.Price != aaplPrice {
+		t.Fatalf("AAPL quote missing from market_quotes: %#v", snap.Quotes)
+	}
+	var routed rpc.ContractParams
+	for _, call := range client.QuoteCalls() {
+		if call.Symbol == "AAPL" {
+			routed = call
+			break
+		}
+	}
+	if routed.Symbol != "AAPL" || routed.SecType != "STK" || routed.Currency != "USD" {
+		t.Fatalf("AAPL quote routed as %#v, want STK/USD", routed)
+	}
+}
+
+func TestMarketQuoteErrorIncludesDynamicSymbols(t *testing.T) {
+	t.Parallel()
+	got := marketQuoteError(map[string]string{
+		"aapl": "snapshot timeout",
+		"SPY":  "farm disconnected",
+	})
+	want := "SPY: farm disconnected | AAPL: snapshot timeout"
+	if got != want {
+		t.Fatalf("marketQuoteError()=%q, want %q", got, want)
+	}
+}
+
 type fakeClient struct {
 	status    *rpc.HealthResult
 	calendar  *rpc.MarketCalendarResult
 	account   *rpc.AccountResult
 	positions *rpc.PositionsResult
 	quotes    map[string]rpc.Quote
+	quoteErrs map[string]error
 	regime    *rpc.RegimeMonitorResult
 	canary    *rpc.CanaryResult
 	trading   *rpc.TradingStatus
 
 	canaryBlock <-chan struct{}
 	quoteBlock  <-chan struct{}
+	quoteMu     sync.Mutex
+	quoteCalls  []rpc.ContractParams
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
@@ -282,8 +336,23 @@ func (c *fakeClient) Quote(_ context.Context, contract rpc.ContractParams) (*rpc
 	if c.quoteBlock != nil {
 		<-c.quoteBlock
 	}
-	q := c.quotes[contract.Symbol]
+	c.quoteMu.Lock()
+	c.quoteCalls = append(c.quoteCalls, contract)
+	c.quoteMu.Unlock()
+	if err := c.quoteErrs[contract.Symbol]; err != nil {
+		return nil, err
+	}
+	q, ok := c.quotes[contract.Symbol]
+	if !ok {
+		q = rpc.Quote{Symbol: contract.Symbol, Contract: contract, DataType: rpc.MarketDataLive}
+	}
 	return &q, nil
+}
+
+func (c *fakeClient) QuoteCalls() []rpc.ContractParams {
+	c.quoteMu.Lock()
+	defer c.quoteMu.Unlock()
+	return append([]rpc.ContractParams(nil), c.quoteCalls...)
 }
 
 func (c *fakeClient) StreamQuote(context.Context, rpc.ContractParams, func(rpc.Frame) error) error {
@@ -330,5 +399,21 @@ func (c *fakeClient) OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.Ord
 }
 
 func (c *fakeClient) OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) PurgeStatus(context.Context, rpc.PurgeStatusParams) (*rpc.PurgeStatusResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) PurgeExecute(context.Context, rpc.PurgeExecuteParams) (*rpc.PurgeExecuteResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) PurgeRestorePreview(context.Context, rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) PurgeRestoreExecute(context.Context, rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error) {
 	return nil, nil
 }

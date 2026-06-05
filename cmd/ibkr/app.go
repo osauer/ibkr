@@ -203,6 +203,6 @@ func printAppUsage(w *os.File) {
 	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--state-dir PATH]")
 	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots, debug-only /tools,")
+	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots,")
 	fmt.Fprintln(w, "and opt-in canary Web Push subscriptions. Pairing URLs are short-lived.")
 }
