@@ -42,6 +42,7 @@ type Snapshot struct {
 	Regime    *rpc.RegimeMonitorResult  `json:"regime,omitempty"`
 	Canary    *rpc.CanaryResult         `json:"canary,omitempty"`
 	Trading   *rpc.TradingStatus        `json:"trading,omitempty"`
+	Settings  *rpc.PlatformSettings     `json:"settings,omitempty"`
 	Errors    []SourceError             `json:"errors,omitempty"`
 	Sources   map[string]SourceMeta     `json:"sources,omitempty"`
 }
@@ -256,6 +257,17 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources["trading"] = SourceMeta{UpdatedAt: now}
 		if s.changed("trading", trading) {
 			events = append(events, Event{Type: "trading", Data: trading})
+		}
+	}
+	if settings, err := s.client.Settings(ctx); err != nil {
+		errors = append(errors, sourceErr("settings", err, now))
+		snap.Sources["settings"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		settings.MarketData.Quality = marketDataQualityFromSnapshot(snap, now)
+		snap.Settings = settings
+		snap.Sources["settings"] = SourceMeta{UpdatedAt: now}
+		if s.changed("settings", settings) {
+			events = append(events, Event{Type: "settings", Data: settings})
 		}
 	}
 	if pollCanary {
@@ -767,6 +779,64 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Sources = maps.Clone(in.Sources)
 	out.Quotes = cloneMarketQuotes(in.Quotes)
 	out.Regime = cloneRegimeMonitor(in.Regime)
+	out.Settings = clonePlatformSettings(in.Settings)
+	return out
+}
+
+func clonePlatformSettings(in *rpc.PlatformSettings) *rpc.PlatformSettings {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Trading.Status != nil {
+		status := *in.Trading.Status
+		status.Blockers = append([]rpc.TradingBlocker(nil), in.Trading.Status.Blockers...)
+		out.Trading.Status = &status
+	}
+	out.MarketData.Quality.QuoteCounts = maps.Clone(in.MarketData.Quality.QuoteCounts)
+	out.MarketData.Quality.DataQuality = append([]rpc.DataQualityHealth(nil), in.MarketData.Quality.DataQuality...)
+	return &out
+}
+
+func marketDataQualityFromSnapshot(snap Snapshot, now time.Time) rpc.PlatformMarketDataQuality {
+	out := rpc.PlatformMarketDataQuality{
+		Status:     "unknown",
+		Summary:    "no observed market-data snapshot yet",
+		Access:     rpc.SettingsAccessRead,
+		Source:     rpc.SettingsSourceObserved,
+		Reason:     "observed from live quote/status surfaces; entitlements are never stored",
+		ObservedAt: now,
+	}
+	if snap.Status != nil {
+		out.DataQuality = append(out.DataQuality, snap.Status.DataQuality...)
+	}
+	counts := map[string]int{}
+	if snap.Quotes != nil {
+		for _, q := range snap.Quotes.Quotes {
+			key := strings.TrimSpace(q.DataType)
+			if key == "" {
+				key = rpc.MarketDataLive
+			}
+			counts[key]++
+		}
+	}
+	if len(counts) > 0 {
+		out.QuoteCounts = counts
+	}
+	switch {
+	case len(out.DataQuality) > 0:
+		out.Status = "degraded"
+		out.Summary = "observed decision surfaces report degraded data quality"
+	case len(counts) == 0:
+		out.Status = "unknown"
+		out.Summary = "no quote feed state observed yet"
+	case counts[rpc.MarketDataDelayed] > 0 || counts[rpc.MarketDataDelayedFrozen] > 0:
+		out.Status = "delayed"
+		out.Summary = "one or more observed quotes are delayed"
+	default:
+		out.Status = "ok"
+		out.Summary = "observed quotes look live or usable"
+	}
 	return out
 }
 

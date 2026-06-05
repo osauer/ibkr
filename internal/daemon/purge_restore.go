@@ -212,10 +212,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 		res.Message = "load open purge orders: " + err.Error()
 		return res, nil
 	}
-	cfg := config.Trading{}.WithDefaults()
-	if s.cfg != nil {
-		cfg = s.cfg.Trading.WithDefaults()
-	}
+	cfg := s.effectiveTradingConfig()
 	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -267,6 +264,13 @@ func (s *Server) purgeRestorePreviewBlockers(status rpc.TradingStatus) []rpc.Tra
 			Code:    "trading_disabled",
 			Message: "trading is disabled",
 			Action:  "Enable [trading] before broker WhatIf preview.",
+		})
+	}
+	if !s.purgeRestoreEnabled() {
+		blockers = append(blockers, rpc.TradingBlocker{
+			Code:    "purge_restore_disabled",
+			Message: "purge/restore actions are disabled in platform settings",
+			Action:  "Run `ibkr settings set features.purge_restore.enabled=true` before using purge/restore.",
 		})
 	}
 	for _, blocker := range status.Blockers {

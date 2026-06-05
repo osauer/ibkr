@@ -26,6 +26,7 @@ ibkr watch
 ibkr calendar --market us --date 2026-05-25
 ibkr quote SPY --watch
 ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
+ibkr settings show
 ```
 
 Or connect it to Claude Desktop, Claude Code, Cursor, Continue, Zed, or any MCP host and ask:
@@ -88,6 +89,7 @@ For v1.0.0+ releases, the installer, `ibkr update`, and the MCPB release asset a
 - **Dealer gamma.** Production-ready SPX/SPXW-canonical zero-gamma and concentration view, with SPY used as corroborating context when its option surface is usable. A fresh, rankable SPX result is the stable headline signal; SPY-only is a labeled proxy. Treat the signed level as a regime hint, not a precise trading level.
 - **Risk regime.** One call returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, SPX-canonical dealer gamma, and S&P 500 breadth. Heavy rows report `computing` instead of pretending stale data is fresh.
 - **Portfolio canary.** `ibkr canary` and MCP `ibkr_canary` produce a stateless `market regime × portfolio shape` monitor with `action`, `market_confirmation`, `portfolio_fit`, `input_health`, planner readiness, stable fingerprints, and supporting `signals[]`. It also emits bounded `portfolio.held_stress[]` rows for material held underlyings when existing positions data shows held-name daily P&L shock, near-expiry held-option delta concentration, or held-name liquidity degradation. Account-only risk stays evidence, not a canary DEFEND trigger; DEFEND requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Use `ibkr canary --details` for the full evidence rows.
+- **Platform settings.** `ibkr settings show` and MCP `ibkr_settings` report runtime preferences, trading/build capability, account mode, and compact observed market-data quality with `access`, `source`, and read-only reasons. `ibkr settings set features.purge_restore.enabled=false` disables purge/restore write actions while leaving `purge status` readable.
 
 Every data command supports `--json`. `ibkr restart --json` is also useful for scripts: it reports whether a daemon was already running, old/new PIDs, whether `--force` was used, and the post-start `status.health` snapshot. Lifecycle commands such as `setup`, `update`, `restart`, `mcp`, and `daemon` are for local operation and transport setup.
 
@@ -168,6 +170,7 @@ $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency
 $ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
 $ ibkr canary --json | jq '{action, market_confirmation, portfolio_fit, held_stress: .portfolio.held_stress}'
+$ ibkr settings show --json | jq '.features.purge_restore.enabled'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 ```
@@ -176,7 +179,7 @@ $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 
 ### Mobile app
 
-`ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, and debug-only tools. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
+`ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, alerts, and settings. The app has Monitor, Positions (coming later), Alerts, and Settings tabs; Settings can toggle purge/restore write actions and shows trading/build/market-data state. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
 
 See [web/app/README.md](web/app/README.md) for the short operator notes and [docs/design/mobile-app-mvp.md](docs/design/mobile-app-mvp.md) for the MVP design.
 
@@ -223,6 +226,8 @@ This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP client
 For normal read-only use, no config file is required. The daemon TCP-probes `4001` (Gateway live), `4002` (Gateway paper), `7496` (TWS live), `7497` (TWS paper), picks the first responder, and falls over to alternates if the first one accepts TCP but never completes the handshake. The account is auto-detected via `managedAccounts`. Default client ID is `15`.
 
 `config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
+
+Runtime platform preferences are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading enablement, account, client ID, live acknowledgements, and MCP trading mode stay in TOML/build-controlled surfaces.
 
 For example, this read-only config pins TWS live and leaves everything else automatic:
 

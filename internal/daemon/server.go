@@ -254,6 +254,10 @@ type Server struct {
 	// broker lifecycle evidence, not from preview/send attempts, so restore
 	// cannot double a position merely because a local file was edited.
 	purgeLedger *purgeLedgerStore
+	// platformSettings persists daemon-owned runtime preferences. Gateway,
+	// account, trading enablement, and build capability stay config/build
+	// owned; this store only carries settings ibkr may edit at runtime.
+	platformSettings *platformSettingsStore
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
 	// gated place handler exists.
@@ -360,6 +364,7 @@ func New(opts Options) *Server {
 	s.installTradingReadinessStore()
 	s.installOrderJournalStore()
 	s.installPurgeLedgerStore()
+	s.installPlatformSettingsStore()
 	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
@@ -425,6 +430,20 @@ func (s *Server) installPurgeLedgerStore() {
 		return
 	}
 	s.purgeLedger = newPurgeLedgerStore(path, s.now)
+}
+
+func (s *Server) installPlatformSettingsStore() {
+	path, err := defaultPlatformSettingsPath()
+	if err != nil {
+		s.warnf("platform settings: resolve state path: %v (runtime settings disabled)", err)
+		return
+	}
+	store, err := newPlatformSettingsStore(path)
+	if err != nil {
+		s.warnf("platform settings: %v (runtime settings disabled)", err)
+		return
+	}
+	s.platformSettings = store
 }
 
 func (s *Server) installOrderTokenSigner() {
@@ -1956,6 +1975,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodTradingStatus:
 		s.unary(req, enc, func() (any, error) { return s.handleTradingStatus(), nil })
+	case rpc.MethodSettingsGet:
+		s.unary(req, enc, func() (any, error) { return s.handleSettingsGet() })
+	case rpc.MethodSettingsUpdate:
+		s.unary(req, enc, func() (any, error) { return s.handleSettingsUpdate(ctx, req) })
 	case rpc.MethodOrdersOpen:
 		s.unary(req, enc, func() (any, error) { return s.handleOrdersOpen(ctx, req) })
 	case rpc.MethodOrderStatus:
@@ -2077,7 +2100,7 @@ func unaryDeadline(method string) time.Duration {
 		return 55 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0

@@ -16,7 +16,6 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -250,10 +249,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		replaceView = view
 	}
 
-	cfg := config.Trading{}.WithDefaults()
-	if s.cfg != nil {
-		cfg = s.cfg.Trading.WithDefaults()
-	}
+	cfg := s.effectiveTradingConfig()
 	action, err := normalizeOrderAction(p.Action)
 	if err != nil {
 		return nil, err

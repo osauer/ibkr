@@ -21,6 +21,7 @@ import (
 	"github.com/osauer/ibkr/internal/app/orderreview"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
+	"github.com/osauer/ibkr/internal/rpc"
 	appweb "github.com/osauer/ibkr/web/app"
 )
 
@@ -73,6 +74,8 @@ func Register(deps Dependencies) {
 
 	srv.GET("/api/bootstrap", h.requireAuth(h.handleBootstrap))
 	srv.GET("/api/snapshot", h.requireAuth(h.handleSnapshot))
+	srv.GET("/api/settings", h.requireAuth(h.handleGetSettings))
+	srv.PATCH("/api/settings", h.requireAuth(h.handlePatchSettings))
 	srv.GET("/api/market-calendar", h.requireAuth(h.handleMarketCalendar))
 	srv.GET("/api/events", h.requireAuth(h.handleEvents))
 	srv.GET("/api/alerts/settings", h.requireAuth(h.handleGetAlertSettings))
@@ -217,6 +220,7 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"version":           h.deps.Version,
 		"public_url":        h.deps.PublicURL,
 		"snapshot":          h.deps.Live.Snapshot(),
+		"settings":          h.settingsSnapshot(r.Context()),
 		"alert_settings":    h.deps.Store.AlertSettings(),
 		"alerts":            h.deps.Store.AlertHistory(20),
 		"order_review_sets": h.currentOrderReviewSets(10),
@@ -225,6 +229,62 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"vapid_public_key":  vapid.PublicKey,
 		"auth":              h.authStatus(r),
 	})
+}
+
+func (h *handler) settingsSnapshot(ctx context.Context) *rpc.PlatformSettings {
+	settings, err := h.deps.Daemon.Settings(ctx)
+	if err != nil {
+		snap := h.deps.Live.Snapshot()
+		return snap.Settings
+	}
+	snap := h.deps.Live.Snapshot()
+	if snap.Settings != nil {
+		settings.MarketData = snap.Settings.MarketData
+	}
+	return settings
+}
+
+func (h *handler) handleGetSettings(w nethttp.ResponseWriter, r *nethttp.Request) {
+	settings, err := h.deps.Daemon.Settings(r.Context())
+	if err != nil {
+		writeDaemonSettingsError(w, err)
+		return
+	}
+	snap := h.deps.Live.Snapshot()
+	if snap.Settings != nil {
+		settings.MarketData = snap.Settings.MarketData
+	}
+	writeJSON(w, settings)
+}
+
+func (h *handler) handlePatchSettings(w nethttp.ResponseWriter, r *nethttp.Request) {
+	defer r.Body.Close()
+	var raw json.RawMessage
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	settings, err := h.deps.Daemon.UpdateSettings(r.Context(), raw)
+	if err != nil {
+		writeDaemonSettingsError(w, err)
+		return
+	}
+	snap := h.deps.Live.Snapshot()
+	if snap.Settings != nil {
+		settings.MarketData = snap.Settings.MarketData
+	}
+	writeJSON(w, settings)
+}
+
+func writeDaemonSettingsError(w nethttp.ResponseWriter, err error) {
+	var rpcErr *rpc.Error
+	if errors.As(err, &rpcErr) && rpcErr.Code == rpc.CodeBadRequest {
+		writeError(w, nethttp.StatusBadRequest, rpcErr.Message)
+		return
+	}
+	writeError(w, nethttp.StatusBadGateway, err.Error())
 }
 
 func (h *handler) currentOrderReviewSets(limit int) []orderreview.Set {

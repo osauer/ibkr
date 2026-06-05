@@ -29,6 +29,8 @@ const (
 	MethodMarketCalendar      = "market.calendar"
 	MethodStatusHealth        = "status.health"
 	MethodTradingStatus       = "trading.status"
+	MethodSettingsGet         = "settings.get"
+	MethodSettingsUpdate      = "settings.update"
 	MethodOrdersOpen          = "orders.open"
 	MethodOrderStatus         = "order.status"
 	MethodOrderPreview        = "order.preview"

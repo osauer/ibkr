@@ -123,8 +123,13 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function handleExpandablePanelTap(event, which)",
 		`$("regimePanel").addEventListener("click"`,
 		`$("canaryHero").addEventListener("click"`,
-		`"trading", "regime", "canary"`,
+		`"trading", "settings", "regime", "canary"`,
 		"function setupLiveRefreshLoop()",
+		"function setupBottomTabs()",
+		"function renderTabs()",
+		"function renderSettings()",
+		"function setPurgeRestoreEnabled(enabled)",
+		"function purgeRestoreSettingEnabled()",
 		"function refreshBootstrapIfSSEUnavailable()",
 		"function renderAccountDailyPnlPct(account = {})",
 		"function accountDailyPnlPct(account = {})",
@@ -159,6 +164,11 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	}
 	for _, want := range []string{
 		`id="bannerStack"`,
+		`id="bottomTabs"`,
+		`data-tab="monitor"`,
+		`data-tab="positions" aria-disabled="true" disabled`,
+		`data-tab="alerts"`,
+		`data-tab="settings"`,
 		`id="accountPanel"`,
 		`id="dailyPnlPct"`,
 		`id="underlyingPanel" data-open="false"`,
@@ -174,6 +184,11 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`id="portfolioPanel" data-open="false"`,
 		`Delta posture`,
 		`id="portfolioDeltaMeaning"`,
+		`id="alertsTab" data-tab-panel="alerts"`,
+		`id="settingsTab" data-tab-panel="settings"`,
+		`id="purgeRestoreToggle"`,
+		`id="settingsTradingLimits"`,
+		`id="settingsMarketDataStatus"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index.html missing mobile dashboard contract %q", want)
@@ -200,6 +215,10 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".portfolio-delta-posture",
 		".portfolio-panel .panel-chevron",
 		".portfolio-detail-panel",
+		".bottom-tabs",
+		".bottom-tab.active",
+		".settings-panel",
+		".toggle-switch input:checked + span",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)

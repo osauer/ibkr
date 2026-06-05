@@ -61,6 +61,19 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_settings",
+		Title:       "IBKR Platform Settings",
+		Description: "Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading enablement/mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.",
+		JSONSchema:  schemaObject(nil, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
+			var res rpc.PlatformSettings
+			if err := conn.Call(ctx, rpc.MethodSettingsGet, nil, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_orders_open",
 		Title:       "IBKR Open Orders",
 		Description: "Read locally journaled open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open or when the user asks for open orders. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for creating a new preview token (use `ibkr_order_preview`) and NOT for submitting, modifying, or cancelling an order.",
