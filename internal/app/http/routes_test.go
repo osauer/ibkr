@@ -89,9 +89,38 @@ func TestPairingBootstrap(t *testing.T) {
 	if boot["version"] != "test-version" {
 		t.Fatalf("version=%v, want test-version", boot["version"])
 	}
+	if boot["settings"] == nil {
+		t.Fatalf("bootstrap missing settings: %#v", boot)
+	}
 	snapshot, ok := boot["snapshot"].(map[string]any)
 	if !ok || snapshot["market_calendar"] == nil {
 		t.Fatalf("bootstrap snapshot missing market_calendar: %#v", boot["snapshot"])
+	}
+}
+
+func TestSettingsGetPatchRequiresAuthAndRejectsReadOnly(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	unauth := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	unauthRes := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRes, unauth)
+	if unauthRes.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth status=%d, want 401", unauthRes.Code)
+	}
+	cookie := routeSessionCookie(t, handler)
+	getReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	getReq.AddCookie(cookie)
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("settings get status=%d, want 200; body=%s", getRes.Code, getRes.Body.String())
+	}
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader([]byte(`{"trading":{"enabled":true}}`)))
+	patchReq.AddCookie(cookie)
+	patchRes := httptest.NewRecorder()
+	handler.ServeHTTP(patchRes, patchReq)
+	if patchRes.Code != http.StatusBadRequest {
+		t.Fatalf("settings patch status=%d, want 400; body=%s", patchRes.Code, patchRes.Body.String())
 	}
 }
 
@@ -714,6 +743,37 @@ func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error
 		CanModify:       false,
 		CanCancel:       false,
 	}, nil
+}
+
+func (routeFakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) {
+	return &rpc.PlatformSettings{
+		Kind: "ibkr.platform_settings",
+		Features: rpc.PlatformFeatureSettings{
+			PurgeRestore: rpc.PurgeRestoreSettings{
+				Enabled: rpc.SettingsBool{Value: true, Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime},
+			},
+		},
+		Trading: rpc.PlatformTradingSettings{
+			Enabled: rpc.SettingsBool{Value: true, Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceConfig},
+			Limits: rpc.TradingLimitSettings{
+				MaxNotional: rpc.SettingsFloat{Value: 10000, Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceConfig, Reason: "stable build"},
+			},
+		},
+		MarketData: rpc.PlatformMarketDataSetting{
+			Quality: rpc.PlatformMarketDataQuality{Status: "ok", Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceObserved},
+		},
+	}, nil
+}
+
+func (routeFakeClient) UpdateSettings(_ context.Context, patch json.RawMessage) (*rpc.PlatformSettings, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &obj); err != nil {
+		return nil, err
+	}
+	if _, ok := obj["trading"]; ok {
+		return nil, &rpc.Error{Code: rpc.CodeBadRequest, Message: "settings field trading.enabled is read-only"}
+	}
+	return routeFakeClient{}.Settings(context.Background())
 }
 
 func (routeFakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {

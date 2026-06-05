@@ -207,6 +207,8 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodRegimeSnapshot, cliDefault},
 		{rpc.MethodStatusHealth, cliDefault},
 		{rpc.MethodTradingStatus, cliDefault},
+		{rpc.MethodSettingsGet, cliDefault},
+		{rpc.MethodSettingsUpdate, cliDefault},
 		{rpc.MethodOrdersOpen, cliDefault},
 		{rpc.MethodOrderStatus, cliDefault},
 		{rpc.MethodOrderPreview, cliDefault},

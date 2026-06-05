@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**21 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**22 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -15,6 +15,12 @@ Daemon + gateway health snapshot: connection state, account, server version, mem
 ## `ibkr_trading_status`
 
 Local trading gate status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, explicit capability booleans (`can_preview`, `can_transmit`, `can_modify`, `can_cancel`), MCP write mode, live override status, open-order count, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.
+
+*No parameters.*
+
+## `ibkr_settings`
+
+Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading enablement/mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.
 
 *No parameters.*
 

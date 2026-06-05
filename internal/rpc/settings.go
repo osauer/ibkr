@@ -1,0 +1,101 @@
+package rpc
+
+import "time"
+
+const (
+	SettingsAccessRead  = "read"
+	SettingsAccessWrite = "write"
+
+	SettingsSourceRuntime  = "runtime"
+	SettingsSourceConfig   = "config"
+	SettingsSourceBuild    = "build"
+	SettingsSourceObserved = "observed"
+)
+
+type SettingsBool struct {
+	Value  bool   `json:"value"`
+	Access string `json:"access"`
+	Source string `json:"source"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type SettingsFloat struct {
+	Value  float64 `json:"value"`
+	Access string  `json:"access"`
+	Source string  `json:"source"`
+	Reason string  `json:"reason,omitempty"`
+}
+
+type SettingsInt struct {
+	Value  int    `json:"value"`
+	Access string `json:"access"`
+	Source string `json:"source"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type SettingsString struct {
+	Value  string `json:"value"`
+	Access string `json:"access"`
+	Source string `json:"source"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type PlatformSettings struct {
+	Kind       string                    `json:"kind"`
+	Features   PlatformFeatureSettings   `json:"features"`
+	Trading    PlatformTradingSettings   `json:"trading"`
+	MarketData PlatformMarketDataSetting `json:"market_data"`
+	Build      PlatformBuildSettings     `json:"build"`
+	AsOf       time.Time                 `json:"as_of"`
+}
+
+type PlatformFeatureSettings struct {
+	PurgeRestore PurgeRestoreSettings `json:"purge_restore"`
+}
+
+type PurgeRestoreSettings struct {
+	Enabled SettingsBool `json:"enabled"`
+}
+
+type PlatformTradingSettings struct {
+	Enabled              SettingsBool         `json:"enabled"`
+	Mode                 SettingsString       `json:"mode"`
+	Account              SettingsString       `json:"account"`
+	Endpoint             SettingsString       `json:"endpoint"`
+	ClientID             SettingsInt          `json:"client_id"`
+	MCPTrading           SettingsString       `json:"mcp_trading"`
+	PreviewRequired      SettingsBool         `json:"preview_required"`
+	LiveOverride         SettingsString       `json:"live_override"`
+	BuildWritesAvailable SettingsBool         `json:"build_writes_available"`
+	Limits               TradingLimitSettings `json:"limits"`
+	Status               *TradingStatus       `json:"status,omitempty"`
+}
+
+type TradingLimitSettings struct {
+	MaxNotional             SettingsFloat `json:"max_notional"`
+	MaxOptionContracts      SettingsInt   `json:"max_option_contracts"`
+	AllowStockShort         SettingsBool  `json:"allow_stock_short"`
+	AllowOptionSellToOpen   SettingsBool  `json:"allow_option_sell_to_open"`
+	AllowOptionMarketOrders SettingsBool  `json:"allow_option_market_orders"`
+}
+
+type PlatformMarketDataSetting struct {
+	Quality PlatformMarketDataQuality `json:"quality"`
+}
+
+type PlatformMarketDataQuality struct {
+	Status      string              `json:"status"`
+	Summary     string              `json:"summary,omitempty"`
+	QuoteCounts map[string]int      `json:"quote_counts,omitempty"`
+	DataQuality []DataQualityHealth `json:"data_quality,omitempty"`
+	Access      string              `json:"access"`
+	Source      string              `json:"source"`
+	Reason      string              `json:"reason,omitempty"`
+	ObservedAt  time.Time           `json:"observed_at,omitzero"`
+}
+
+type PlatformBuildSettings struct {
+	Channel                 SettingsString `json:"channel"`
+	TradingWritesAvailable  SettingsBool   `json:"trading_writes_available"`
+	ExperimentalTradingNote string         `json:"experimental_trading_note,omitempty"`
+}

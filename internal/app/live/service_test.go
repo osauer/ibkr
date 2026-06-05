@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -62,9 +63,12 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Trading == nil || !snap.Trading.CanPreview {
 		t.Fatalf("trading missing from snapshot: %#v", snap.Trading)
 	}
+	if snap.Settings == nil || !snap.Settings.Features.PurgeRestore.Enabled.Value {
+		t.Fatalf("settings missing from snapshot: %#v", snap.Settings)
+	}
 
 	seen := map[string]bool{}
-	for range 9 {
+	for range 10 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -72,7 +76,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_quotes", "trading", "regime", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_quotes", "trading", "settings", "regime", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -372,6 +376,24 @@ func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.
 
 func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return c.trading, nil
+}
+
+func (c *fakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) {
+	return &rpc.PlatformSettings{
+		Kind: "ibkr.platform_settings",
+		Features: rpc.PlatformFeatureSettings{
+			PurgeRestore: rpc.PurgeRestoreSettings{
+				Enabled: rpc.SettingsBool{Value: true, Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime},
+			},
+		},
+		MarketData: rpc.PlatformMarketDataSetting{
+			Quality: rpc.PlatformMarketDataQuality{Status: "unknown", Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceObserved},
+		},
+	}, nil
+}
+
+func (c *fakeClient) UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error) {
+	return c.Settings(context.Background())
 }
 
 func (c *fakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {

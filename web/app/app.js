@@ -34,6 +34,8 @@ const state = {
   underlyingBusy: "",
   latestPurgeStatus: null,
   fallbackRefreshBusy: false,
+  settings: null,
+  activeTab: normalizedTab(localStorage.getItem("ibkrActiveTab") || "monitor"),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -53,6 +55,7 @@ async function main() {
   }
   await bootstrap();
   setupMarketSelect();
+  setupBottomTabs();
   setupLiveRefreshLoop();
 }
 
@@ -106,6 +109,8 @@ async function fetchBootstrap() {
 
 function applyBootstrap(data) {
   state.snapshot = data.snapshot;
+  state.settings = data.settings || data.snapshot?.settings || state.settings;
+  if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
   state.alertSettings = data.alert_settings || state.alertSettings;
   state.alerts = data.alerts || [];
   state.orderReviewSets = data.order_review_sets || [];
@@ -114,6 +119,8 @@ function applyBootstrap(data) {
   $("pairingPanel").hidden = true;
   $("accountPanel").hidden = false;
   $("underlyingPanel").hidden = false;
+  $("tabPanels").hidden = false;
+  $("bottomTabs").hidden = false;
   $("dashboard").hidden = false;
   $("alertsPanel").hidden = false;
   setConnection("Connected", true);
@@ -222,11 +229,12 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "regime", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "settings", "regime", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
       if (type !== "snapshot") state.snapshot = { ...(state.snapshot || {}), [type]: data };
+      if (type === "snapshot" || type === "settings") state.settings = type === "settings" ? data : data.settings || state.settings;
       state.lastEventAt = Date.now();
       setConnection("Connected", true);
       renderAll();
@@ -297,7 +305,166 @@ function renderAll() {
   renderSourceBanners(snap);
   renderAlertMode();
   renderAlerts();
+  renderSettings();
+  renderTabs();
   renderSyncStrip(snap);
+}
+
+function normalizedTab(tab) {
+  if (tab === "alerts" || tab === "settings") return tab;
+  return "monitor";
+}
+
+function setupBottomTabs() {
+  for (const button of document.querySelectorAll("[data-tab]")) {
+    button.addEventListener("click", () => {
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") {
+        setActiveTab("monitor");
+        return;
+      }
+      setActiveTab(button.dataset.tab || "monitor");
+    });
+  }
+  setActiveTab(state.activeTab, { persist: false });
+}
+
+function setActiveTab(tab, options = {}) {
+  state.activeTab = normalizedTab(tab);
+  if (options.persist !== false) {
+    localStorage.setItem("ibkrActiveTab", state.activeTab);
+  }
+  renderTabs();
+}
+
+function renderTabs() {
+  const active = normalizedTab(state.activeTab);
+  if (active !== state.activeTab) {
+    state.activeTab = active;
+    localStorage.setItem("ibkrActiveTab", active);
+  }
+  for (const panel of document.querySelectorAll("[data-tab-panel]")) {
+    panel.hidden = panel.dataset.tabPanel !== active;
+  }
+  for (const button of document.querySelectorAll("[data-tab]")) {
+    const selected = button.dataset.tab === active;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+}
+
+function currentSettings() {
+  return state.settings || state.snapshot?.settings || {};
+}
+
+function purgeRestoreSettingEnabled() {
+  const setting = currentSettings().features?.purge_restore?.enabled;
+  return setting?.value !== false;
+}
+
+function renderSettings() {
+  const settings = currentSettings();
+  if (!settings || !settings.kind) return;
+  state.settings = settings;
+  const purge = settings.features?.purge_restore?.enabled || {};
+  $("settingsAsOf").textContent = shortTime(settings.as_of);
+  $("purgeRestoreSettingState").textContent = purge.value === false ? "Disabled" : "Enabled";
+  $("purgeRestoreSettingMeta").textContent = settingMeta(purge);
+  const toggle = $("purgeRestoreToggle");
+  toggle.checked = purge.value !== false;
+  toggle.disabled = purge.access !== "write";
+  toggle.title = purge.reason || "Runtime preference";
+
+  const trading = settings.trading || {};
+  const status = trading.status || state.snapshot?.trading || {};
+  $("settingsTradingStatus").textContent = tradingStatusSettingsLabel(trading, status);
+  $("settingsTradingMeta").textContent = [trading.mode?.value, trading.account?.value].filter(Boolean).join(" / ") || "Config-owned";
+  $("settingsTradingLimits").textContent = tradingLimitSummary(trading.limits || {});
+  $("settingsTradingLimitsMeta").textContent = tradingLimitMeta(trading.limits || {});
+  const quality = settings.market_data?.quality || {};
+  $("settingsMarketDataStatus").textContent = labelize(quality.status || "unknown");
+  $("settingsMarketDataMeta").textContent = quality.summary || "Observed compact summary";
+  $("settingsBuildStatus").textContent = settings.build?.channel?.value || "stable";
+  $("settingsBuildMeta").textContent = settings.build?.experimental_trading_note || "Build-controlled capability";
+}
+
+function settingMeta(field = {}) {
+  const access = field.access || "read";
+  const source = field.source || "observed";
+  return field.reason ? `${access}/${source}: ${field.reason}` : `${access}/${source}`;
+}
+
+function tradingStatusSettingsLabel(trading = {}, status = {}) {
+  if (trading.enabled?.value === false || status.enabled === false) return "Disabled";
+  if (status.blocked) return "Blocked";
+  if (status.can_transmit) return "Write ready";
+  if (status.can_preview) return "Preview ready";
+  return "Read-only";
+}
+
+function tradingLimitSummary(limits = {}) {
+  const notional = limits.max_notional?.value;
+  const optionQty = limits.max_option_contracts?.value;
+  const parts = [];
+  if (typeof notional === "number") parts.push(money(notional, "USD"));
+  if (typeof optionQty === "number") parts.push(`${optionQty} opt`);
+  return parts.join(" / ") || "--";
+}
+
+function tradingLimitMeta(limits = {}) {
+  const fields = [limits.max_notional, limits.max_option_contracts, limits.allow_stock_short, limits.allow_option_sell_to_open].filter(Boolean);
+  const writable = fields.some((field) => field.access === "write");
+  const firstReason = fields.map((field) => field.reason).find(Boolean);
+  if (writable) return "Runtime overrides writable";
+  return firstReason || "Config/build controlled";
+}
+
+async function setPurgeRestoreEnabled(enabled) {
+  const previous = purgeRestoreSettingEnabled();
+  state.settings = {
+    ...currentSettings(),
+    features: {
+      ...(currentSettings().features || {}),
+      purge_restore: {
+        ...(currentSettings().features?.purge_restore || {}),
+        enabled: {
+          ...(currentSettings().features?.purge_restore?.enabled || {}),
+          value: enabled,
+        },
+      },
+    },
+  };
+  if (state.snapshot) state.snapshot.settings = state.settings;
+  renderSettings();
+  renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ features: { purge_restore: { enabled } } }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    state.settings = await res.json();
+    if (state.snapshot) state.snapshot.settings = state.settings;
+  } catch (err) {
+    state.settings = {
+      ...currentSettings(),
+      features: {
+        ...(currentSettings().features || {}),
+        purge_restore: {
+          ...(currentSettings().features?.purge_restore || {}),
+          enabled: {
+            ...(currentSettings().features?.purge_restore?.enabled || {}),
+            value: previous,
+          },
+        },
+      },
+    };
+    if (state.snapshot) state.snapshot.settings = state.settings;
+    state.underlyingNotice = "Settings update failed: " + err.message;
+  }
+  renderSettings();
+  renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
 }
 
 function ensureRegimeCanaryExpansion(canary = {}) {
@@ -602,11 +769,12 @@ function renderUnderlyingExpansion() {
 }
 
 function canWriteUnderlyings(trading = {}) {
-  return Boolean(trading.enabled && trading.can_transmit && trading.account && trading.mode);
+  return Boolean(purgeRestoreSettingEnabled() && trading.enabled && trading.can_transmit && trading.account && trading.mode);
 }
 
 function underlyingWriteReason(action, hasRows, trading = {}) {
   if (!hasRows) return "No matching underlying rows";
+  if (!purgeRestoreSettingEnabled()) return "Purge/restore is disabled in Settings";
   if (!trading.enabled) return "Trading is disabled";
   if (!trading.can_transmit) return "Broker writes are not enabled by trading.status";
   if (!trading.account) return "Broker-write account unavailable";
@@ -4019,8 +4187,7 @@ $("quickHeldActionsButton").addEventListener("click", () => {
   $("underlyingPanel").scrollIntoView({ block: "nearest" });
 });
 $("quickAlertsButton").addEventListener("click", () => {
-  $("alertsPanel").open = true;
-  $("alertsPanel").scrollIntoView({ block: "nearest" });
+  setActiveTab("alerts");
 });
 $("clearSelectedAlertButton").addEventListener("click", () => {
   state.selectedAlertID = null;
@@ -4058,6 +4225,9 @@ $("portfolioDetailToggle").addEventListener("click", () => {
 });
 $("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);
 $("clearAlertsButton").addEventListener("click", clearAlerts);
+$("purgeRestoreToggle").addEventListener("change", (event) => {
+  setPurgeRestoreEnabled(event.currentTarget.checked);
+});
 
 async function enablePush() {
   if (!canUseWebPush()) {
@@ -4326,11 +4496,9 @@ function setConnection(text, ok) {
 
 function showPairing(text) {
   $("pairingPanel").hidden = false;
-  $("dashboard").hidden = true;
-  $("alertsPanel").hidden = true;
+  $("tabPanels").hidden = true;
+  $("bottomTabs").hidden = true;
   $("accountPanel").hidden = true;
-  $("underlyingPanel").hidden = true;
-  $("ordersPanel").hidden = true;
   $("bannerStack").hidden = true;
   $("syncStrip").hidden = true;
   $("pairingText").textContent = text;

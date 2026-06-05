@@ -116,7 +116,8 @@
         </div>
       </section>
 
-      <section class="dashboard" id="dashboard" hidden>
+      <section class="tab-panels" id="tabPanels" hidden>
+      <section class="dashboard tab-panel" id="dashboard" data-tab-panel="monitor" role="tabpanel" aria-labelledby="tabMonitor">
         <article class="panel signal-panel regime-panel weather-na" id="regimePanel">
           <div class="panel-head">
             <span>Market Regime</span>
@@ -310,6 +311,41 @@
           </div>
         </article>
 
+        <details class="panel orders-panel" id="ordersPanel" hidden open>
+          <summary class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7h14"></path>
+                <path d="M5 12h14"></path>
+                <path d="M5 17h8"></path>
+              </svg>
+              Open Orders
+            </span>
+            <span class="panel-time" id="ordersAsOf">--</span>
+          </summary>
+          <div class="orders-body">
+            <div class="orders-list" id="ordersOpenList"></div>
+          </div>
+        </details>
+      </section>
+
+      <section class="tab-panel tab-panel--positions" id="positionsTab" data-tab-panel="positions" role="tabpanel" aria-labelledby="tabPositions" hidden>
+        <article class="panel coming-panel">
+          <div class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 8.5h16"></path>
+                <path d="M7 8.5V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2.5"></path>
+                <path d="M5 8.5v10A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-10"></path>
+              </svg>
+              Positions
+            </span>
+          </div>
+          <p>Coming later.</p>
+        </article>
+      </section>
+
+      <section class="tab-panel tab-panel--alerts" id="alertsTab" data-tab-panel="alerts" role="tabpanel" aria-labelledby="tabAlerts" hidden>
         <details class="panel alerts-panel" id="alertsPanel" hidden open>
           <summary class="panel-head">
             <span class="panel-title-with-icon">
@@ -365,24 +401,97 @@
             </div>
           </div>
         </details>
+      </section>
 
-        <details class="panel orders-panel" id="ordersPanel" hidden open>
-          <summary class="panel-head">
+      <section class="tab-panel tab-panel--settings" id="settingsTab" data-tab-panel="settings" role="tabpanel" aria-labelledby="tabSettings" hidden>
+        <article class="panel settings-panel">
+          <div class="panel-head">
             <span class="panel-title-with-icon">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 7h14"></path>
-                <path d="M5 12h14"></path>
-                <path d="M5 17h8"></path>
+                <path d="M4 7h7"></path>
+                <path d="M15 7h5"></path>
+                <circle cx="13" cy="7" r="2"></circle>
+                <path d="M4 17h5"></path>
+                <path d="M13 17h7"></path>
+                <circle cx="11" cy="17" r="2"></circle>
               </svg>
-              Open Orders
+              Settings
             </span>
-            <span class="panel-time" id="ordersAsOf">--</span>
-          </summary>
-          <div class="orders-body">
-            <div class="orders-list" id="ordersOpenList"></div>
+            <span class="panel-time" id="settingsAsOf">--</span>
           </div>
-        </details>
+          <div class="settings-stack">
+            <div class="settings-row settings-row--toggle">
+              <div>
+                <span>Purge/restore</span>
+                <b id="purgeRestoreSettingState">--</b>
+                <small id="purgeRestoreSettingMeta">Runtime preference</small>
+              </div>
+              <label class="toggle-switch" title="Toggle purge/restore write actions">
+                <input id="purgeRestoreToggle" type="checkbox">
+                <span></span>
+              </label>
+            </div>
+            <div class="settings-grid">
+              <div class="settings-cell">
+                <span>Trading</span>
+                <b id="settingsTradingStatus">--</b>
+                <small id="settingsTradingMeta">--</small>
+              </div>
+              <div class="settings-cell">
+                <span>Limits</span>
+                <b id="settingsTradingLimits">--</b>
+                <small id="settingsTradingLimitsMeta">--</small>
+              </div>
+              <div class="settings-cell">
+                <span>Market data</span>
+                <b id="settingsMarketDataStatus">--</b>
+                <small id="settingsMarketDataMeta">--</small>
+              </div>
+              <div class="settings-cell">
+                <span>Build</span>
+                <b id="settingsBuildStatus">--</b>
+                <small id="settingsBuildMeta">--</small>
+              </div>
+            </div>
+          </div>
+        </article>
       </section>
+      </section>
+
+      <nav class="bottom-tabs" id="bottomTabs" aria-label="Primary" hidden>
+        <button class="bottom-tab" id="tabMonitor" type="button" data-tab="monitor" aria-selected="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 13h3l2-6 4 10 2-5h5"></path>
+          </svg>
+          <span>Monitor</span>
+        </button>
+        <button class="bottom-tab" id="tabPositions" type="button" data-tab="positions" aria-disabled="true" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 8.5h16"></path>
+            <path d="M7 8.5V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2.5"></path>
+            <path d="M5 8.5v10A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-10"></path>
+          </svg>
+          <span>Positions</span>
+        </button>
+        <button class="bottom-tab" id="tabAlerts" type="button" data-tab="alerts" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6.5 10.5a5.5 5.5 0 0 1 11 0c0 5 2 5.5 2 7H4.5c0-1.5 2-2 2-7Z"></path>
+            <path d="M10 20a2.3 2.3 0 0 0 4 0"></path>
+          </svg>
+          <span>Alerts</span>
+        </button>
+        <button class="bottom-tab" id="tabSettings" type="button" data-tab="settings" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h7"></path>
+            <path d="M15 7h5"></path>
+            <circle cx="13" cy="7" r="2"></circle>
+            <path d="M4 17h5"></path>
+            <path d="M13 17h7"></path>
+            <circle cx="11" cy="17" r="2"></circle>
+          </svg>
+          <span>Settings</span>
+        </button>
+      </nav>
 
       <footer class="sync-strip" id="syncStrip" hidden>
         <span class="sync-strip__state" id="syncStatusState">standby</span>

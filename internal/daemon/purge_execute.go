@@ -145,6 +145,9 @@ func (s *Server) purgeExecuteBlockers(status rpc.TradingStatus) []rpc.TradingBlo
 	if !status.Enabled {
 		add("trading_disabled", "trading is disabled", "Enable [trading] before broker writes.")
 	}
+	if !s.purgeRestoreEnabled() {
+		add("purge_restore_disabled", "purge/restore actions are disabled in platform settings", "Run `ibkr settings set features.purge_restore.enabled=true` before using purge/restore.")
+	}
 	if !s.orderPaperWritesEnabled() {
 		add("order_writes_unavailable", "order writes are unavailable in this build", "Rebuild the daemon with the trading write capability.")
 	}

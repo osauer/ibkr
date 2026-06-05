@@ -23,6 +23,8 @@ type Client interface {
 	Canary(context.Context) (*rpc.CanaryResult, error)
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
+	Settings(context.Context) (*rpc.PlatformSettings, error)
+	UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error)
 	RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error)
 	OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error)
 	OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error)
@@ -141,6 +143,22 @@ func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.Reg
 func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {
 	var out rpc.TradingStatus
 	if err := c.call(ctx, rpc.MethodTradingStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) Settings(ctx context.Context) (*rpc.PlatformSettings, error) {
+	var out rpc.PlatformSettings
+	if err := c.call(ctx, rpc.MethodSettingsGet, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) UpdateSettings(ctx context.Context, patch json.RawMessage) (*rpc.PlatformSettings, error) {
+	var out rpc.PlatformSettings
+	if err := c.call(ctx, rpc.MethodSettingsUpdate, patch, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
