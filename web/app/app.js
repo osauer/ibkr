@@ -12,6 +12,7 @@ const state = {
   regimeDetailOpen: false,
   regimeCanaryExpansionInitialized: false,
   detailPreferenceSet: false,
+  underlyingDetailOpen: false,
   portfolioDetailOpen: false,
   accountExposureOpen: false,
   selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
@@ -289,6 +290,28 @@ function setRegimeCanaryExpansion(which, open) {
   renderCanaryMitigation(state.snapshot?.canary || {});
 }
 
+function panelTapIgnored(target) {
+  return Boolean(target?.closest?.([
+    "button",
+    "a",
+    "input",
+    "select",
+    "textarea",
+    "label",
+    "summary",
+    ".detail-panel",
+    ".regime-detail-panel",
+    ".order-review",
+    ".alert-focus",
+  ].join(",")));
+}
+
+function handleExpandablePanelTap(event, which) {
+  if (panelTapIgnored(event.target)) return;
+  const open = which === "regime" ? !state.regimeDetailOpen : !state.canaryDetailOpen;
+  setRegimeCanaryExpansion(which, open);
+}
+
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
   const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
@@ -413,7 +436,7 @@ function renderUnderlyings(positions = {}, account = {}) {
   }
   const panel = $("underlyingPanel");
   if (panel && (state.underlyingBusy || state.underlyingNotice)) {
-    panel.open = true;
+    state.underlyingDetailOpen = true;
   }
   renderUnderlyingBulkActions(rows);
 
@@ -422,10 +445,12 @@ function renderUnderlyings(positions = {}, account = {}) {
     empty.className = "underlying-book__empty";
     empty.textContent = "No held or virtual underlyings.";
     list.replaceChildren(empty);
+    renderUnderlyingExpansion();
     return;
   }
 
   list.replaceChildren(...rows.map((row) => underlyingBookRow(row, baseCurrency)));
+  renderUnderlyingExpansion();
 }
 
 function renderUnderlyingBulkActions(rows) {
@@ -442,6 +467,22 @@ function setUnderlyingActionButtonState(id, enabled, reason) {
   if (!button) return;
   button.disabled = !enabled;
   button.title = enabled ? reason : reason || "Unavailable";
+}
+
+function setUnderlyingExpansion(open) {
+  state.underlyingDetailOpen = Boolean(open);
+  renderUnderlyingExpansion();
+}
+
+function renderUnderlyingExpansion() {
+  const panel = $("underlyingPanel");
+  const listPanel = $("underlyingBookListPanel");
+  const button = $("underlyingDetailToggle");
+  if (!panel || !listPanel || !button) return;
+  panel.dataset.open = String(state.underlyingDetailOpen);
+  listPanel.hidden = !state.underlyingDetailOpen;
+  button.textContent = state.underlyingDetailOpen ? "Hide underlyings" : "Show underlyings";
+  button.setAttribute("aria-expanded", String(state.underlyingDetailOpen));
 }
 
 function canWriteUnderlyings(trading = {}) {
@@ -1123,7 +1164,7 @@ function canarySummaryText(canary, snap = {}) {
   const fallback = canary.summary || "Waiting for canary snapshot.";
   if (!canaryInputCheckBlocksAction(canary)) return fallback;
 
-  const verdict = cleanDetail(canary.market?.regime_verdict);
+  const verdict = cleanDetail(canary.market?.regime_posture?.label || canary.market?.regime_verdict);
   const prefix = verdict === "--" ? "Market read" : verdict;
   const issues = canaryInputIssueSummary(canary, snap);
   const issueLine = issues ? `check ${issues}` : "check input health";
@@ -1169,7 +1210,7 @@ function marketExplanation(canary) {
       tone: "warn",
     };
   }
-  const verdict = cleanDetail(canary.market?.regime_verdict);
+  const verdict = cleanDetail(canary.market?.regime_posture?.label || canary.market?.regime_verdict);
   return {
     label: "Market",
     title: verdict === "--" ? "No clear market stress" : verdict,
@@ -1286,7 +1327,7 @@ function renderMarketContext(snap) {
   const market = canary.market || {};
   const quotes = snap.market_quotes?.quotes || {};
   const strip = $("marketQuoteStrip");
-  const symbols = ["SPY", "QQQ", "IWM", "VIX", "HYG", "TLT"];
+  const symbols = ["SPY", "VIX", "QQQ", "IWM", "HYG", "TLT"];
   strip.replaceChildren(...symbols.map((symbol) => marketQuoteCell(symbol, quoteBySymbol(quotes, symbol), market, snap.market_quotes)));
 }
 
@@ -1374,13 +1415,14 @@ function renderRegimePanel(snap) {
   const canary = snap.canary || {};
   const market = canary.market || {};
   const indicators = canary.market_indicators || [];
+  const posture = regimePosture(snap, canary, market);
   const regimeStatus = marketRegimeStatusLine(snap, canary, market, indicators);
-  $("marketRegime").textContent = marketRegimeLabel(market, indicators, canary);
+  $("marketRegime").textContent = marketRegimeLabel(posture);
   $("marketRegimeSummary").textContent = regimeStatus.summary;
   $("marketRegimeMix").textContent = regimeStatus.detail;
   $("marketRegimeMix").title = regimeStatus.title;
   $("regimeAsOf").textContent = latestRegimeRead(canary, indicators);
-  renderMarketWeather(market, indicators);
+  renderMarketWeather(posture);
   renderRegimeDetail(indicators, snap, canary);
 }
 
@@ -1450,20 +1492,46 @@ function quoteChangePct(quote) {
   return null;
 }
 
-function marketRegimeLabel(market, indicators, canary = {}) {
-  const tone = marketWeatherTone(market, indicators);
-  if (tone === "red") return "Risk-off";
-  if (tone === "amber" && marketHasDataGaps(market) && canaryNeedsInputCheck(canary)) {
-    const verdict = cleanDetail(market.regime_verdict);
-    if (verdict.toLowerCase().includes("normal")) return "Normal + gaps";
-    return "Data gaps";
+function regimePosture(snap = {}, canary = {}, market = {}) {
+  for (const candidate of [snap.regime?.posture, market.regime_posture, canary.market?.regime_posture]) {
+    const normalized = normalizeRegimePosture(candidate);
+    if (normalized) return normalized;
   }
-  if (tone === "green") return "Normal";
-  const verdict = cleanDetail(market.regime_verdict);
-  if (tone === "amber") {
-    return verdict.toLowerCase().includes("stress") ? "Stress" : "Mixed";
-  }
-  return verdict === "--" ? "--" : labelize(verdict);
+  const label = cleanDetail(snap.regime?.summary?.label || snap.regime?.composite?.verdict || market.regime_verdict);
+  if (label === "--") return { label: "--", tone: "na" };
+  return { label, tone: legacyRegimeTone(label) };
+}
+
+function normalizeRegimePosture(candidate) {
+  if (!candidate || typeof candidate !== "object") return null;
+  const label = cleanDetail(candidate.label);
+  const tone = String(candidate.tone || "").trim().toLowerCase();
+  if (label === "--" && !tone) return null;
+  return {
+    label,
+    tone: tone || legacyRegimeTone(label),
+    stage: candidate.stage || "",
+    severity: candidate.severity || "",
+    readiness: candidate.readiness || "",
+    confidence: candidate.confidence || "",
+    evidence: candidate.evidence || "",
+  };
+}
+
+function legacyRegimeTone(label) {
+  const lower = String(label || "").toLowerCase();
+  if (!lower || lower === "--") return "na";
+  if (lower.includes("full risk-off")) return "risk_off";
+  if (lower.includes("broad stress")) return "stress";
+  if (lower.includes("stress signal") || lower.includes("elevated stress") || lower.includes("watch")) return "watch";
+  if (lower.includes("insufficient") || lower.includes("no usable") || lower.includes("no ranked")) return "data_quality";
+  if (lower.includes("normal") || lower.includes("constructive")) return "normal";
+  return "watch";
+}
+
+function marketRegimeLabel(posture = {}) {
+  const label = cleanDetail(posture.label);
+  return label === "--" ? "--" : labelize(label);
 }
 
 function marketRegimeStatusLine(snap, canary, market, indicators) {
@@ -1520,8 +1588,8 @@ function latestRegimeRead(canary, indicators) {
   return fallback || "Waiting for regime timestamp";
 }
 
-function renderMarketWeather(market, indicators) {
-  const tone = marketWeatherTone(market, indicators);
+function renderMarketWeather(posture = {}) {
+  const tone = regimeWeatherClass(posture.tone);
   const card = $("regimeSummaryCard");
   const panel = $("regimePanel");
   card.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
@@ -1530,32 +1598,19 @@ function renderMarketWeather(market, indicators) {
   panel.classList.add("weather-" + tone);
 }
 
-function marketWeatherTone(market, indicators) {
-  const redClusters = Number(market.red_clusters || 0);
-  const yellowClusters = Number(market.yellow_clusters || 0);
-  const rankedClusters = Number(market.ranked_clusters || 0);
-  const cautionLists = [
-    market.ambiguous_clusters,
-    market.partial_clusters,
-    market.computing_clusters,
-    market.degraded_clusters,
-    market.stale_clusters,
-    market.unconfirmed_red_cluster_names,
-  ];
-  if (redClusters > 0) return "red";
-  if (yellowClusters > 0 || cautionLists.some((items) => Array.isArray(items) && items.length > 0)) return "amber";
-  if (rankedClusters > 0) return "green";
-
-  const statuses = (indicators || []).map((indicator) => indicatorStatusClass(indicator.status));
-  if (statuses.includes("red")) return "red";
-  if (statuses.some((status) => ["amber", "context", "na"].includes(status))) return "amber";
-  if (statuses.includes("green")) return "green";
-
-  const verdict = String(market.regime_verdict || "").toLowerCase();
-  if (!verdict) return "na";
-  if (verdict.includes("broad stress") || verdict.includes("stress signal") || verdict.includes("red")) return "red";
-  if (verdict.includes("normal") || verdict.includes("green") || verdict.includes("constructive")) return "green";
-  return "amber";
+function regimeWeatherClass(tone) {
+  switch (String(tone || "").toLowerCase()) {
+    case "normal":
+      return "green";
+    case "stress":
+    case "risk_off":
+      return "red";
+    case "watch":
+    case "data_quality":
+      return "amber";
+    default:
+      return "na";
+  }
 }
 
 function marketHasDataGaps(market = {}) {
@@ -1727,7 +1782,7 @@ function renderRegimeDetail(indicators, snap = {}, canary = {}) {
 function regimeFallbackIndicators(snap = {}, canary = {}) {
   const market = canary.market || {};
   const status = marketRegimeStatusLine(snap, canary, market, []);
-  const tone = marketWeatherTone(market, []);
+  const tone = regimeWeatherClass(regimePosture(snap, canary, market).tone);
   const rows = [{
     name: "Regime status",
     status: tone === "red" ? "red" : tone === "green" ? "green" : tone === "amber" ? "amber" : "na",
@@ -2144,20 +2199,39 @@ function detailFact(fact) {
 
 function renderSourceBanners(snap) {
   const snapshotErrors = (snap.errors || []).filter((err) => err.source !== "market_quotes");
-  const summary = snapshotIssueSummary(snapshotErrors);
+  const summary = snapshotIssueSummary(snapshotErrors, snap);
   setBanner("snapshotErrorBanner", "snapshotErrorText", summary.text, summary.title);
   $("bannerStack").hidden = snapshotErrors.length === 0;
 }
 
-function snapshotIssueSummary(errors) {
+function snapshotIssueSummary(errors, snap = {}) {
   if (!errors.length) return { text: "", title: "" };
   const sources = [...new Set(errors.map((err) => snapshotSourceLabel(err.source)).filter(Boolean))];
   const sourceText = humanList(sources, 3);
   const title = errors.map((err) => `${err.source}: ${err.message}`).join(" | ");
+  const gateway = gatewayIssueText(snap);
+  if (gateway) {
+    return { text: gateway, title };
+  }
   return {
     text: `${sourceText || "Data"} feed interrupted; showing last good snapshot.`,
     title,
   };
+}
+
+function gatewayIssueText(snap = {}) {
+  const direct = String(snap.status?.last_error || "").trim();
+  const source = direct || (snap.errors || []).map((err) => err.message).find((msg) => /client id .*already in use/i.test(String(msg || ""))) || "";
+  if (!source) return "";
+  let text = String(source)
+    .replace(/^gateway_unavailable:\s*/i, "")
+    .replace(/^ibkr connection unavailable:\s*/i, "")
+    .replace(/^ibkr:\s*client id already in use:\s*/i, "")
+    .trim();
+  if (!/client id .*already in use/i.test(text)) return "";
+  text = text.charAt(0).toUpperCase() + text.slice(1);
+  if (!/[.!?]$/.test(text)) text += ".";
+  return text;
 }
 
 function snapshotSourceLabel(source) {
@@ -3664,7 +3738,7 @@ $("quickReviewBlockersButton").addEventListener("click", () => {
 $("canaryMitigationButton").addEventListener("click", openMitigationPlan);
 $("quickRiskPlanButton").addEventListener("click", openMitigationPlan);
 $("quickHeldActionsButton").addEventListener("click", () => {
-  $("underlyingPanel").open = true;
+  setUnderlyingExpansion(true);
   $("underlyingPanel").scrollIntoView({ block: "nearest" });
 });
 $("quickAlertsButton").addEventListener("click", () => {
@@ -3682,6 +3756,15 @@ $("previewOrdersButton").addEventListener("click", previewOrderReviewSet);
 $("transmitSelectedButton").addEventListener("click", transmitSelectedOrders);
 $("regimeDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("regime", !state.regimeDetailOpen);
+});
+$("regimePanel").addEventListener("click", (event) => {
+  handleExpandablePanelTap(event, "regime");
+});
+$("canaryHero").addEventListener("click", (event) => {
+  handleExpandablePanelTap(event, "canary");
+});
+$("underlyingDetailToggle").addEventListener("click", () => {
+  setUnderlyingExpansion(!state.underlyingDetailOpen);
 });
 $("buildAllUnderlyingsButton").addEventListener("click", () => {
   runUnderlyingAction("build", { all: true });

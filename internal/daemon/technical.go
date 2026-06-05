@@ -46,7 +46,7 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	route, routed, err := technicalRoute(p)
 	if err != nil {

@@ -32,7 +32,7 @@ type Gateway struct {
 	Host string `toml:"host"`
 	// Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery.
 	Port *int `toml:"port"`
-	// ClientID pins the IBKR API clientID for the primary connection (default 15); collisions with another running ibkr process auto-walk to the next free ID via the SDK's retry path.
+	// ClientID pins the IBKR API clientID for the primary connection (default 15); collisions are treated as a stale-client/operator issue and are not auto-walked to neighboring reserved IDs.
 	ClientID *int `toml:"client_id"`
 	// BreadthClientID is the IBKR clientID used by the dedicated
 	// historical-bar connector that backs the SPX breadth refresh.
@@ -40,10 +40,9 @@ type Gateway struct {
 	// own connection so breadth's 503-name fan-out runs against a
 	// separate 40-msg/sec and 60-historical/10-min rate-limit budget
 	// rather than competing with interactive RPCs and the gamma
-	// option-leg fan-out on the primary client. Collision with the
-	// primary cid is handled by the existing MaxClientIDRetries
-	// fall-through in pkg/ibkr — bulk silently increments to the next
-	// free ID, same as primary does.
+	// option-leg fan-out on the primary client. Collisions are treated
+	// as stale-client/operator issues, not silently shifted to another
+	// role's reserved ID.
 	BreadthClientID *int `toml:"breadth_client_id"`
 	// Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts.
 	Account string `toml:"account"`
@@ -78,10 +77,7 @@ func (g Gateway) ClientIDOrDefault() int {
 
 // BreadthClientIDOrDefault returns the clientID for the bulk-historical
 // breadth connector. Default 16 — one above the primary default — so a
-// fresh install gets two non-colliding IDs without any config tweak.
-// Collision with the primary cid is non-fatal: the pkg/ibkr handshake's
-// MaxClientIDRetries fall-through walks the bulk attempt to the next
-// free ID.
+// fresh install gets two non-colliding role-owned IDs without any config tweak.
 func (g Gateway) BreadthClientIDOrDefault() int {
 	if g.BreadthClientID == nil {
 		return 16

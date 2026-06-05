@@ -26,7 +26,7 @@ import (
 func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, error) {
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	raw, err := c.RequestAccountSummary(ctx, 8*time.Second)
 	if err != nil {
@@ -180,7 +180,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	positions, err := c.GetCachedPositions()
 	if err != nil {
@@ -1668,7 +1668,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
@@ -3094,7 +3094,7 @@ func (s *Server) handleScanRun(ctx context.Context, req *rpc.Request) (*rpc.Scan
 
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	res := &rpc.ScanResult{
 		Preset: presetName,
@@ -3392,7 +3392,7 @@ func (s *Server) handleScanParams(ctx context.Context, req *rpc.Request) (*rpc.S
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	params, err := c.RunScannerParameters(ctx, 10*time.Second)
 	if err != nil {
@@ -3669,7 +3669,7 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 	}
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 	bars, err := c.FetchHistoricalDailyBars(sym, days, 30*time.Second)
 	if err != nil {

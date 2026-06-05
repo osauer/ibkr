@@ -1,6 +1,8 @@
 package ibkr
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,6 +56,26 @@ func TestConnection_WaitForPositionsEnd(t *testing.T) {
 			t.Errorf("Should return immediately, took %v", elapsed)
 		}
 	})
+}
+
+func TestHandleSystemNotificationClientIDInUseSetsLastError(t *testing.T) {
+	t.Parallel()
+	conn := &Connection{config: &ConnectionConfig{ClientID: 15}}
+	var body []byte
+	body = protoAppendInt32(body, 3, 326)
+	body = protoAppendString(body, 4, "Unable to connect as the client id is already in use. Retry with a unique client id.")
+
+	conn.handleSystemNotification([]string{"", string(body)})
+
+	conn.statusMu.RLock()
+	err := conn.lastError
+	conn.statusMu.RUnlock()
+	if !errors.Is(err, errClientIDInUse) {
+		t.Fatalf("lastError = %v, want errClientIDInUse", err)
+	}
+	if !strings.Contains(err.Error(), "gateway client ID 15 is already in use") {
+		t.Fatalf("lastError = %q, want operator-facing client ID diagnosis", err.Error())
+	}
 }
 
 func TestConnection_WaitForAccountSummaryEnd(t *testing.T) {

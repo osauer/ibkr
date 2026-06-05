@@ -79,6 +79,14 @@ var (
 	marketLogger     = logging.Component("IBKR MarketData")
 )
 
+func clientIDInUseError(clientID int, gatewayMsg string) error {
+	msg := fmt.Sprintf("gateway client ID %d is already in use; stop the stale IBKR API client or choose a free [gateway].client_id", clientID)
+	if strings.TrimSpace(gatewayMsg) != "" {
+		msg += ": " + strings.TrimSpace(gatewayMsg)
+	}
+	return fmt.Errorf("%w: %s", errClientIDInUse, msg)
+}
+
 func (s ConnectionStatus) String() string {
 	switch s {
 	case StatusDisconnected:
@@ -114,8 +122,8 @@ type ConnectionConfig struct {
 	// If provided, all connections in the pool share the same interceptor (recommended).
 	WireInterceptor *WireInterceptor
 
-	// Client ID retry settings
-	MaxClientIDRetries int // Max attempts to find free client ID (default 5)
+	// startAPI retry settings for the configured client ID.
+	MaxClientIDRetries int // Max attempts for transient startAPI failures (default 5)
 
 	// Reconnection settings (from hedge patterns)
 	AutoReconnect     bool
@@ -637,66 +645,44 @@ func isClientIDInUseError(err error) bool {
 	return errors.Is(err, errClientIDInUse)
 }
 
-// Connect establishes connection to IBKR Gateway with automatic client ID retry
+// Connect establishes connection to IBKR Gateway with the configured client ID.
 func (c *Connection) Connect(ctx context.Context) error {
-	originalClientID := c.config.ClientID
-	currentClientID := originalClientID
+	clientID := c.config.ClientID
 
-	// Limit to 5 retries max
+	// Limit to 5 retries max. Retries are for transient startAPI/handshake
+	// failures on the same configured ID; a 326 collision is terminal because
+	// neighboring IDs are reserved for other ibkr lanes.
 	maxRetries := max(min(c.config.MaxClientIDRetries, 5), 1)
 
 	connectLogger.Infof("Starting connection process with Client ID %d, MaxRetries=%d",
-		originalClientID, maxRetries)
+		clientID, maxRetries)
 
 	for attempt := range maxRetries {
-		c.config.ClientID = currentClientID
+		c.config.ClientID = clientID
 		connectLogger.Infof("Attempting connection with Client ID %d (attempt %d/%d)",
-			currentClientID, attempt+1, maxRetries)
+			clientID, attempt+1, maxRetries)
 
 		err := c.connectWithClientID(ctx)
 		if err == nil {
-			// Success!
-			if currentClientID != originalClientID {
-				connectLogger.Infof("Successfully connected with Client ID %d (original was %d)",
-					currentClientID, originalClientID)
-			}
 			return nil
 		}
 
+		if errors.Is(err, errClientIDInUse) {
+			connectLogger.Errorf("Client ID %d already in use; not auto-walking to another reserved client ID", clientID)
+			return err
+		}
+
 		if errors.Is(err, errStartAPIFailed) {
-			connectLogger.Warnf("startAPI failed for Client ID %d; retrying", currentClientID)
+			connectLogger.Warnf("startAPI failed for Client ID %d; retrying", clientID)
 			continue
 		}
 
-		// Client-ID collision (gateway error 326): try the next sequential
-		// ID. The sentinel decouples this branch from the human-readable
-		// error wording, which has historically varied across gateway
-		// builds.
-		if errors.Is(err, errClientIDInUse) {
-			// Client ID in use, try next sequential ID
-			prevClientID := currentClientID
-			currentClientID++
-
-			// IBKR has a max client ID limit (typically 999)
-			// Wrap around to 1 if we exceed it, but skip the original ID
-			if currentClientID > 999 {
-				currentClientID = 1
-			}
-			// Skip original ID if we wrapped around to it
-			if currentClientID == originalClientID && originalClientID < 999 {
-				currentClientID++
-			}
-
-			connectLogger.Warnf("Client ID %d already in use, trying next: %d",
-				prevClientID, currentClientID)
-		} else {
-			// Non-client ID error, return immediately
-			connectLogger.Errorf("Connection failed with non-client ID error: %v", err)
-			return err
-		}
+		// Non-client ID error, return immediately.
+		connectLogger.Errorf("Connection failed with non-client ID error: %v", err)
+		return err
 	}
 
-	return fmt.Errorf("failed to connect after %d attempts, all client IDs tried were in use", maxRetries)
+	return fmt.Errorf("failed to connect after %d attempts with client ID %d", maxRetries, clientID)
 }
 
 // connectWithClientID attempts connection with specific client ID
@@ -2038,7 +2024,7 @@ func (c *Connection) handleErrorMessage(fields []string) {
 		// matching this exact format string.
 		ibkrLogger.Infof("[cid=%d] System notice: %s", c.config.ClientID, errorMsg)
 		c.statusMu.Lock()
-		c.lastError = fmt.Errorf("%w: code 326: %s", errClientIDInUse, errorMsg)
+		c.lastError = clientIDInUseError(c.config.ClientID, errorMsg)
 		c.statusMu.Unlock()
 	} else if code == 200 {
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
@@ -2566,6 +2552,11 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	msgText := note.message
 	if context != "" {
 		msgText = fmt.Sprintf("%s | frame=%s", msgText, context)
+	}
+	if note.code == 326 {
+		c.statusMu.Lock()
+		c.lastError = clientIDInUseError(c.config.ClientID, note.message)
+		c.statusMu.Unlock()
 	}
 
 	if note.timestamp.IsZero() {

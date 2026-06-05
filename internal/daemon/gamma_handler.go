@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
-
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -47,7 +45,7 @@ func (s *Server) handleGammaZeroSPX(ctx context.Context, req *rpc.Request) (*rpc
 
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, ibkrlib.ErrIBKRUnavailable
+		return nil, s.gatewayUnavailableError()
 	}
 
 	// Scope: which underlying(s) to compute. Empty defaults to combined

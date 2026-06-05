@@ -130,7 +130,7 @@ func TestAccountMismatchesConnectedAllowsAggregateManagedAccount(t *testing.T) {
 	}
 }
 
-func TestTradingStatusBlocksClientIDAutoWalk(t *testing.T) {
+func TestTradingStatusBlocksClientIDMismatch(t *testing.T) {
 	t.Parallel()
 	port := 4002
 	clientID := 31
@@ -140,8 +140,8 @@ func TestTradingStatusBlocksClientIDAutoWalk(t *testing.T) {
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 32, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
-	if !hasTradingBlocker(st, "gateway_client_id_autowalked") {
-		t.Fatalf("missing client-id auto-walk blocker in %+v", st.Blockers)
+	if !hasTradingBlocker(st, "gateway_client_id_mismatch") {
+		t.Fatalf("missing client-id mismatch blocker in %+v", st.Blockers)
 	}
 	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
 		t.Fatalf("blocked capabilities should all be false: %+v", st)

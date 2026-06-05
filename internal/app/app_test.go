@@ -28,3 +28,15 @@ func TestNewRejectsSecondAppForSameStateDir(t *testing.T) {
 		t.Fatalf("second New error = %v", err)
 	}
 }
+
+func TestDefaultOptionsMarksPublicURLFromEnv(t *testing.T) {
+	t.Setenv("IBKR_APP_PUBLIC_URL", " http://example.test:8765/ ")
+
+	opts := DefaultOptions("test")
+	if !opts.PublicURLFromEnv {
+		t.Fatalf("PublicURLFromEnv = false, want true")
+	}
+	if opts.PublicURL != "http://example.test:8765" {
+		t.Fatalf("PublicURL = %q, want trimmed env value", opts.PublicURL)
+	}
+}

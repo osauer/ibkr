@@ -297,6 +297,87 @@ func TestRunRestartAppCoreDoesNotTreatDifferentArgsAsRespawn(t *testing.T) {
 	}
 }
 
+func TestRunRestartAppCoreOverridesAddrAndClearsStalePublicURL(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{
+		app:        true,
+		jsonOut:    true,
+		timeout:    time.Second,
+		appAddr:    "0.0.0.0:8765",
+		appAddrSet: true,
+		out:        &out,
+		err:        &errBuf,
+	}
+	findCalls := 0
+	startArgs := []string{}
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			findCalls++
+			if findCalls == 1 {
+				return appProcess{
+					PID:     71,
+					Command: "/tmp/ibkr app --addr 127.0.0.1:8765 --public-url http://127.0.0.1:8765 --state-dir /tmp/app-state",
+					Args:    []string{"app", "--addr", "127.0.0.1:8765", "--public-url", "http://127.0.0.1:8765", "--state-dir", "/tmp/app-state"},
+				}, nil
+			}
+			return appProcess{PID: 72, Command: "ibkr app", Args: []string{"app"}}, nil
+		},
+		stop: func(int, time.Duration) error {
+			return nil
+		},
+		start: func(_ context.Context, args []string) (int, error) {
+			startArgs = append([]string(nil), args...)
+			return 73, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	want := "app --state-dir /tmp/app-state --addr 0.0.0.0:8765"
+	if strings.Join(startArgs, " ") != want {
+		t.Fatalf("start args = %q, want %q", strings.Join(startArgs, " "), want)
+	}
+	var res appRestartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if strings.Join(res.Args, " ") != want {
+		t.Fatalf("result args = %q, want %q", strings.Join(res.Args, " "), want)
+	}
+}
+
+func TestAppArgsWithRestartOverridesKeepsExplicitPublicURL(t *testing.T) {
+	t.Parallel()
+
+	opts := &restartOptions{
+		appAddr:         "0.0.0.0:8765",
+		appAddrSet:      true,
+		appPublicURL:    "http://192.168.1.42:8765",
+		appPublicURLSet: true,
+	}
+	got := appArgsWithRestartOverrides(
+		[]string{"app", "--addr=127.0.0.1:8765", "--public-url=http://127.0.0.1:8765"},
+		opts,
+	)
+	want := "app --addr 0.0.0.0:8765 --public-url http://192.168.1.42:8765"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("args = %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+func TestAppValueArgReadsSplitAndEqualsForms(t *testing.T) {
+	t.Parallel()
+
+	if got := appValueArg([]string{"app", "--addr", "0.0.0.0:8765"}, "addr"); got != "0.0.0.0:8765" {
+		t.Fatalf("split addr = %q", got)
+	}
+	if got := appValueArg([]string{"app", "serve", "--addr=127.0.0.1:8765"}, "addr"); got != "127.0.0.1:8765" {
+		t.Fatalf("equals addr = %q", got)
+	}
+}
+
 func TestAppCommandArgsIgnoresPairCommand(t *testing.T) {
 	t.Parallel()
 
@@ -342,5 +423,16 @@ func TestRunRestartRejectsUnexpectedArgument(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "unexpected argument") {
 		t.Fatalf("stderr missing argument error:\n%s", errBuf.String())
+	}
+}
+
+func TestRunRestartAppFlagOverridesRequireApp(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	exit := RunRestart(context.Background(), []string{"--addr", "0.0.0.0:8765"}, &out, &errBuf)
+	if exit != 2 {
+		t.Fatalf("exit = %d, want 2", exit)
+	}
+	if !strings.Contains(errBuf.String(), "require --app") {
+		t.Fatalf("stderr missing --app requirement:\n%s", errBuf.String())
 	}
 }

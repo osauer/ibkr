@@ -754,7 +754,7 @@ func contractMultiplier(contract rpc.ContractParams) int {
 func (s *Server) previewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
 	c := s.gatewayConnector()
 	if c == nil {
-		return rpc.OrderPositionImpact{}, ibkrlib.ErrIBKRUnavailable
+		return rpc.OrderPositionImpact{}, s.gatewayUnavailableError()
 	}
 	positions, err := c.GetCachedPositions()
 	if err != nil {
