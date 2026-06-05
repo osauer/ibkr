@@ -220,9 +220,18 @@ This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP client
 
 ## Configure
 
-No config file is required. The daemon TCP-probes `4001` (Gateway live), `4002` (Gateway paper), `7496` (TWS live), `7497` (TWS paper), picks the first responder, and falls over to alternates if the first one accepts TCP but never completes the handshake. The account is auto-detected via `managedAccounts`. Default client ID is `15`.
+For normal read-only use, no config file is required. The daemon TCP-probes `4001` (Gateway live), `4002` (Gateway paper), `7496` (TWS live), `7497` (TWS paper), picks the first responder, and falls over to alternates if the first one accepts TCP but never completes the handshake. The account is auto-detected via `managedAccounts`. Default client ID is `15`.
 
-Write a config to **pin** a dimension. Anything you write is binding; anything you omit stays auto. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
+`config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
+
+For example, this read-only config pins TWS live and leaves everything else automatic:
+
+```toml
+[gateway]
+port = 7496
+```
+
+The fuller example below shows the available read-only pins:
 
 ```toml
 [gateway]
@@ -246,11 +255,14 @@ limit    = 20
 
 **TLS semantics.** A pinned `tls` value (true or false) is strict. An omitted `tls` means "auto": plain first, TLS on no-handshake-data.
 
-**Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[spx]`, `[scans.<name>]`.
+**Trading config is opt-in and experimental.** Stable `ibkr` releases are read-only. Trading builds, when built or published separately, are experimental and provided as-is for explicit operator testing. Keep trading config inactive as `~/.config/ibkr/config.toml.trading`; it has no effect with that suffix. To activate it, a human or explicitly instructed local agent removes the `.trading` suffix so the file becomes `~/.config/ibkr/config.toml`, verifies the pinned account and endpoint, then runs `ibkr restart`. The example template lives at [examples/config.toml.trading](examples/config.toml.trading).
+
+**Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[trading]`, `[spx]`, `[scans.<name>]`.
 
 References:
 
 - [Configuration reference](docs/reference/config.md) for TOML sections and `IBKR_*` environment variables.
+- [Experimental trading config](docs/guides/trading-preview.md) for the inactive `config.toml.trading` pattern and release-channel expectations.
 - [Concepts](docs/concepts.md) for breadth, gamma, and regime interpretation.
 - [Agentic use](docs/guides/agentic-use.md) for Claude and MCP workflows.
 - [Marketplace readiness](docs/guides/marketplace-readiness.md) for packaging notes.
@@ -290,7 +302,7 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 ## Safety
 
-`ibkr` is the stable no-broker-write line. It exposes read tools plus preview-only stock/ETF order drafts; preview tokens are local artifacts and are not broker orders. Five independent layers refuse broker writes:
+`ibkr` is the stable no-broker-write line. It exposes read tools plus preview-only stock/ETF order drafts; preview tokens are local artifacts and are not broker orders. Experimental trading builds are separate, as-is, and not part of the stable update or MCP marketplace path. Five independent layers refuse broker writes in the stable line:
 
 1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from `Connection.PlaceOrder`, `Connection.CancelOrder`, `Connector.SubmitOrder`, and `Connector.CancelOrder` before any wire write. The raw encoder is available only to explicit downstream forks built with `-tags trading`.
 2. The daemon's write-handler dispatch returns `ErrTradingDisabled` for place/cancel RPCs ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)); preview can mint a token but reports `submit_eligible=false` unless broker WhatIf is accepted.

@@ -1,6 +1,6 @@
 # Marketplace readiness
 
-Last reviewed: 2026-06-03 21:50 CEST
+Last reviewed: 2026-06-05 08:18 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
@@ -15,7 +15,8 @@ Always include these qualifiers:
 - Requires IB Gateway or TWS running locally.
 - Requires an IBKR Pro account; IBKR Lite does not include TWS API access.
 - The plugin/skill does not ship the binary; users install `ibkr` separately.
-- Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel broker-write interface. If an approval-gated execution layer ships, update this sentence and the safety metadata before promotion.
+- Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel broker-write interface.
+- Trading builds, if published, are experimental, as-is, and separate from the stable read-only release channel. Do not promote them through MCP marketplaces until the execution, approval, and safety metadata are reviewed for that channel.
 - Data returned by MCP tools can include account-sensitive balances, positions, and P&L.
 
 ## Anthropic / Claude Code
@@ -89,6 +90,20 @@ ibkr regime --json
 ```
 
 For a Claude Code release, reinstall from the marketplace path and confirm the SessionStart hook is quiet when binary and plugin major.minor match.
+
+## Experimental Trading Preview
+
+The stable marketplace story stays read-only. A trading-capable build should be treated as a separate preview channel, not as a hidden variant of the normal binary.
+
+Minimum product rules before publishing a trading preview:
+
+- Name the channel and assets distinctly, for example `ibkr-trading-preview`, so users do not confuse it with stable `ibkr`.
+- Mark the build experimental and provided as-is in README, release notes, download pages, and any CLI status surface that can report the channel.
+- Keep trading config inactive as `config.toml.trading`. Activation requires removing the `.trading` suffix, verifying pinned account and endpoint fields, and restarting the daemon.
+- Publish paper-trading capability before live trading. Live trading needs its own approval, paper-smoke, audit, and rollback story.
+- Keep MCP broker writes out of the preview until there is a separate human-confirmation and nonce model for MCP.
+- Tighten updater asset matching before attaching experimental tarballs to any release that stable `ibkr update` can see.
+- Run a trading-tag test and smoke matrix separate from the stable read-only release smoke.
 
 ## Anthropic / Claude Desktop MCPB
 
