@@ -65,17 +65,8 @@ Main PWA dashboard:
 - Canary state and alert history.
 - Alert mode: `none`, `act_only`, `watch_and_act`.
 
-Debug-only `/tools`:
-
-- `status`: daemon/gateway health from the current snapshot.
-- `snapshot`: raw app snapshot.
-- `events`: SSE subscriber count and last event timestamps.
-- `auth`: current device/session/grant status.
-- `push`: push subscriptions and last push result.
-- `relay`: relay state.
-
-No quote, chain, scan, size, regime, or trading forms are exposed in `/tools`.
-No HTTP MCP is implemented in the MVP.
+No debug diagnostics, quote, chain, scan, size, regime, trading forms, or HTTP
+MCP are implemented in the MVP.
 
 ## Security Model
 

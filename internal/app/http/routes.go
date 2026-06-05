@@ -88,16 +88,21 @@ func Register(deps Dependencies) {
 	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
 	srv.POST("/api/orders/{id}/preview-modify", h.requireAuth(h.handleOrderPreviewModify))
 	srv.POST("/api/orders/{id}/modify", h.requireAuth(h.handleOrderModify))
+	srv.GET("/api/purge/status", h.requireAuth(h.handlePurgeStatus))
+	srv.POST("/api/purge/execute", h.requireAuth(h.handlePurgeExecute))
+	srv.POST("/api/purge/restore/preview", h.requireAuth(h.handlePurgeRestorePreview))
+	srv.POST("/api/purge/restore/execute", h.requireAuth(h.handlePurgeRestoreExecute))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
-	srv.POST("/api/tools/{name}", h.requireAuth(h.handleTool))
 }
 
 func (h *handler) serveIndex(w nethttp.ResponseWriter, r *nethttp.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
 	nethttp.ServeFileFS(w, r, appweb.Files, "index.html")
 }
 
 func (h *handler) serveStatic(w nethttp.ResponseWriter, r *nethttp.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
 	h.web.ServeHTTP(w, r)
 }
 
@@ -379,33 +384,6 @@ func (h *handler) handlePushDelete(w nethttp.ResponseWriter, r *nethttp.Request)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
-}
-
-func (h *handler) handleTool(w nethttp.ResponseWriter, r *nethttp.Request) {
-	name := r.PathValue("name")
-	switch name {
-	case "status":
-		if snap := h.deps.Live.Snapshot(); snap.Status != nil {
-			writeJSON(w, snap.Status)
-			return
-		}
-		writeJSON(w, map[string]any{"status": "unavailable", "snapshot": h.deps.Live.Snapshot()})
-	case "snapshot":
-		writeJSON(w, h.deps.Live.Snapshot())
-	case "events":
-		writeJSON(w, h.deps.Live.Diagnostics())
-	case "auth":
-		writeJSON(w, h.authStatus(r))
-	case "push":
-		writeJSON(w, map[string]any{
-			"subscriptions": h.deps.Store.PushSubscriptions(),
-			"last_push":     h.deps.Store.LastPush(),
-		})
-	case "relay":
-		writeJSON(w, h.deps.Relay.Status())
-	default:
-		writeError(w, nethttp.StatusNotFound, "unknown debug tool "+name)
-	}
 }
 
 func (h *handler) requireAuth(next nethttp.HandlerFunc) nethttp.HandlerFunc {

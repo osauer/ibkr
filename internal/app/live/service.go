@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -231,7 +232,7 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap = s.publishSnapshot(now, snap, errors, events)
 		events = nil
 	}
-	if quotes, err := s.marketQuotes(ctx, now); err != nil {
+	if quotes, err := s.marketQuotes(ctx, now, snap.Positions); err != nil {
 		errors = append(errors, sourceErr("market_quotes", err, now))
 		snap.Sources["market_quotes"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
 		if quotes != nil {
@@ -333,20 +334,35 @@ var marketQuoteContracts = []marketQuoteContract{
 		contract: rpc.ContractParams{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
 	},
 	{
+		label:    "IWM",
+		contract: rpc.ContractParams{Symbol: "IWM", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+	},
+	{
 		label:    "VIX",
 		contract: rpc.ContractParams{Symbol: "VIX", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"},
 	},
+	{
+		label:    "HYG",
+		contract: rpc.ContractParams{Symbol: "HYG", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+	},
+	{
+		label:    "TLT",
+		contract: rpc.ContractParams{Symbol: "TLT", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+	},
 }
 
-func (s *Service) marketQuotes(ctx context.Context, now time.Time) (*MarketQuotes, error) {
+const maxUnderlyingQuoteContracts = 24
+
+func (s *Service) marketQuotes(ctx context.Context, now time.Time, positions *rpc.PositionsResult) (*MarketQuotes, error) {
 	type result struct {
 		label string
 		quote *rpc.Quote
 		err   error
 	}
-	results := make(chan result, len(marketQuoteContracts))
+	contracts := marketQuoteContractsFor(positions)
+	results := make(chan result, len(contracts))
 	var wg sync.WaitGroup
-	for _, item := range marketQuoteContracts {
+	for _, item := range contracts {
 		wg.Go(func() {
 			quote, err := s.client.Quote(ctx, item.contract)
 			results <- result{label: item.label, quote: quote, err: err}
@@ -379,6 +395,142 @@ func (s *Service) marketQuotes(ctx context.Context, now time.Time) (*MarketQuote
 		return out, errors.New(marketQuoteError(out.Errors))
 	}
 	return out, nil
+}
+
+func marketQuoteContractsFor(positions *rpc.PositionsResult) []marketQuoteContract {
+	out := make([]marketQuoteContract, 0, len(marketQuoteContracts)+maxUnderlyingQuoteContracts)
+	seen := map[string]bool{}
+	for _, item := range marketQuoteContracts {
+		label := normalizeQuoteLabel(item.label)
+		if label == "" || seen[label] {
+			continue
+		}
+		out = append(out, item)
+		seen[label] = true
+	}
+	if positions == nil {
+		return out
+	}
+	added := 0
+	for _, group := range positions.ByUnderlying {
+		if added >= maxUnderlyingQuoteContracts {
+			break
+		}
+		item, ok := underlyingQuoteContract(group)
+		if !ok {
+			continue
+		}
+		label := normalizeQuoteLabel(item.label)
+		if label == "" || seen[label] {
+			continue
+		}
+		item.label = label
+		item.contract.Symbol = label
+		out = append(out, item)
+		seen[label] = true
+		added++
+	}
+	return out
+}
+
+func underlyingQuoteContract(group rpc.PositionGroup) (marketQuoteContract, bool) {
+	symbol := normalizeQuoteLabel(group.Underlying)
+	if symbol == "" && group.Stock != nil {
+		symbol = normalizeQuoteLabel(group.Stock.Symbol)
+	}
+	if symbol == "" && len(group.Options) > 0 {
+		symbol = normalizeQuoteLabel(group.Options[0].Symbol)
+	}
+	if symbol == "" {
+		return marketQuoteContract{}, false
+	}
+
+	if group.Stock != nil {
+		contract := stockPositionQuoteContract(*group.Stock)
+		contract.Symbol = symbol
+		if contract.Currency == "" {
+			contract.Currency = underlyingGroupCurrency(group)
+		}
+		return marketQuoteContract{label: symbol, contract: contract}, true
+	}
+
+	contract := fallbackUnderlyingQuoteContract(symbol, underlyingGroupCurrency(group))
+	return marketQuoteContract{label: symbol, contract: contract}, true
+}
+
+func stockPositionQuoteContract(stock rpc.PositionView) rpc.ContractParams {
+	contract := rpc.ContractParams{
+		ConID:        stock.ConID,
+		Symbol:       normalizeQuoteLabel(stock.Symbol),
+		SecType:      requestQuoteSecType(stock.SecType),
+		Exchange:     strings.ToUpper(strings.TrimSpace(stock.Exchange)),
+		Currency:     normalizeQuoteLabel(stock.Currency),
+		LocalSymbol:  strings.TrimSpace(stock.LocalSymbol),
+		TradingClass: strings.TrimSpace(stock.TradingClass),
+		Multiplier:   stock.Multiplier,
+	}
+	if contract.SecType == "" {
+		contract.SecType = "STK"
+	}
+	if contract.Currency == "" {
+		contract.Currency = "USD"
+	}
+	if contract.Exchange == "" && contract.ConID == 0 {
+		contract.Exchange = "SMART"
+	}
+	return contract
+}
+
+func fallbackUnderlyingQuoteContract(symbol, currency string) rpc.ContractParams {
+	contract := rpc.ContractParams{
+		Symbol:   symbol,
+		SecType:  "STK",
+		Exchange: "SMART",
+		Currency: normalizeQuoteLabel(currency),
+	}
+	if contract.Currency == "" {
+		contract.Currency = "USD"
+	}
+	if index, ok := indexUnderlyingContracts[symbol]; ok {
+		return index
+	}
+	return contract
+}
+
+var indexUnderlyingContracts = map[string]rpc.ContractParams{
+	"SPX": {Symbol: "SPX", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"},
+	"NDX": {Symbol: "NDX", SecType: "IND", Exchange: "NASDAQ", PrimaryExch: "NASDAQ", Currency: "USD"},
+	"RUT": {Symbol: "RUT", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"},
+	"VIX": {Symbol: "VIX", SecType: "IND", Exchange: "CBOE", PrimaryExch: "CBOE", Currency: "USD"},
+}
+
+func requestQuoteSecType(secType string) string {
+	switch strings.ToUpper(strings.TrimSpace(secType)) {
+	case "STK", "STOCK", "":
+		return "STK"
+	case "IND", "INDEX":
+		return "IND"
+	default:
+		return ""
+	}
+}
+
+func underlyingGroupCurrency(group rpc.PositionGroup) string {
+	if group.Stock != nil {
+		if ccy := normalizeQuoteLabel(group.Stock.Currency); ccy != "" {
+			return ccy
+		}
+	}
+	for _, option := range group.Options {
+		if ccy := normalizeQuoteLabel(option.Currency); ccy != "" {
+			return ccy
+		}
+	}
+	return "USD"
+}
+
+func normalizeQuoteLabel(value string) string {
+	return strings.ToUpper(strings.TrimSpace(value))
 }
 
 func (s *Service) applyMarketQuoteFrame(label string, frame rpc.Frame) {
@@ -509,9 +661,30 @@ func marketQuoteError(errs map[string]string) string {
 	if len(errs) == 0 {
 		return ""
 	}
+	normalized := map[string]string{}
+	for symbol, msg := range errs {
+		if label := normalizeQuoteLabel(symbol); label != "" && msg != "" {
+			normalized[label] = msg
+		}
+	}
 	parts := make([]string, 0, len(errs))
-	for _, symbol := range []string{"SPY", "QQQ", "VIX"} {
-		if msg := errs[symbol]; msg != "" {
+	seen := map[string]bool{}
+	for _, symbol := range []string{"SPY", "QQQ", "IWM", "VIX", "HYG", "TLT"} {
+		if msg := normalized[symbol]; msg != "" {
+			parts = append(parts, symbol+": "+msg)
+			seen[symbol] = true
+		}
+	}
+	rest := make([]string, 0, len(errs))
+	for symbol := range normalized {
+		if symbol != "" && !seen[symbol] {
+			rest = append(rest, symbol)
+			seen[symbol] = true
+		}
+	}
+	slices.Sort(rest)
+	for _, symbol := range rest {
+		if msg := normalized[symbol]; msg != "" {
 			parts = append(parts, symbol+": "+msg)
 		}
 	}
