@@ -1,5 +1,12 @@
 # Project rules
 
+## Architecture primers
+Fresh sessions should read `docs/architecture.md` for the repo layer map and
+`docs/design/platform-settings.md` before changing settings/config/state
+surfaces. The platform settings mechanism is cross-cutting by design: daemon
+state owns runtime preferences, TOML/build own trading capability, and adapters
+must not duplicate daemon policy.
+
 ## Done means
 `make check && make smoke` pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.
 
