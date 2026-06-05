@@ -1,0 +1,41 @@
+# Experimental trading config template.
+#
+# This file is inert while named config.toml.trading. To activate it, move it to
+# ~/.config/ibkr/config.toml, verify every pinned value, then run:
+#
+#   ibkr restart
+#   ibkr trading status
+#
+# Stable ibkr releases are read-only. Trading builds are experimental,
+# provided as-is, and intended for explicit operator testing.
+
+[gateway]
+# Pick one concrete endpoint. Do not rely on auto-detection when trading.
+# TWS paper:      7497
+# IB Gateway paper: 4002
+# TWS live:       7496
+# IB Gateway live: 4001
+port = 7497
+
+# Trading requires a pinned client ID and a concrete account.
+client_id = 15
+account = "DU1234567"
+
+[trading]
+enabled = true
+mode = "paper"
+require_preview = true
+
+max_notional = 10000
+max_option_contracts = 5
+
+allow_stock_short = false
+allow_option_sell_to_open = false
+allow_option_market_orders = false
+
+# MCP broker writes stay disabled in the preview template.
+mcp_enabled = false
+
+# Live experiments require deliberate live acknowledgement fields. This
+# template does not include a live override. Add live fields only after
+# verifying the exact live account, endpoint, and required paper-smoke evidence.

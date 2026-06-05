@@ -116,11 +116,13 @@ type Daemon struct {
 	LogLevel string `toml:"log_level"`
 }
 
-// Trading holds local order-entry gates. A missing [trading] section is
-// intentionally non-trading; TWS / Gateway broker permissions remain the final
+// Trading holds local order-entry gates for experimental trading builds.
+// Stable ibkr releases are read-only; a missing [trading] section is
+// intentionally non-trading. Treat active trading config as an explicit,
+// as-is operator override. TWS / Gateway broker permissions remain the final
 // authority even after these local gates pass.
 type Trading struct {
-	// Enabled controls whether any order preview/place/modify/cancel command can progress beyond the local gate (default false).
+	// Enabled controls whether an experimental trading build may let order preview/place/modify/cancel commands progress beyond the local gate (default false).
 	Enabled bool `toml:"enabled"`
 	// Mode selects the target account class for local safety checks: "paper" (default) or "live".
 	Mode string `toml:"mode"`
@@ -136,7 +138,7 @@ type Trading struct {
 	AllowOptionSellToOpen bool `toml:"allow_option_sell_to_open"`
 	// AllowOptionMarketOrders permits option market orders when true. Default false; first trading release still blocks this.
 	AllowOptionMarketOrders bool `toml:"allow_option_market_orders"`
-	// AllowLive is the explicit local live-trading override. Default false.
+	// AllowLive is the explicit local live-trading override for experimental, as-is trading builds. Default false.
 	AllowLive bool `toml:"allow_live"`
 	// LiveAckAccount must match the pinned live account before live writes are allowed.
 	LiveAckAccount string `toml:"live_ack_account"`
