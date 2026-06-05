@@ -6,7 +6,7 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
+[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
 
 **Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
@@ -227,7 +227,7 @@ For normal read-only use, no config file is required. The daemon TCP-probes `400
 
 `config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
 
-Runtime platform preferences are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading enablement, account, client ID, live acknowledgements, and MCP trading mode stay in TOML/build-controlled surfaces.
+[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading enablement, account, client ID, live acknowledgements, and MCP trading mode stay in TOML/build-controlled surfaces.
 
 For example, this read-only config pins TWS live and leaves everything else automatic:
 
