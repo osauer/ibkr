@@ -123,9 +123,32 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function handleExpandablePanelTap(event, which)",
 		`$("regimePanel").addEventListener("click"`,
 		`$("canaryHero").addEventListener("click"`,
+		`"trading", "regime", "canary"`,
+		"function setupLiveRefreshLoop()",
+		"function refreshBootstrapIfSSEUnavailable()",
+		"function renderAccountDailyPnlPct(account = {})",
+		"function accountDailyPnlPct(account = {})",
 		"function setUnderlyingExpansion(open)",
 		"function renderUnderlyingExpansion()",
+		"function handleUnderlyingPanelTap(event)",
+		"function underlyingHeldDailyPnlTotals(rows, baseCurrency)",
+		"function compareUnderlyingRows(a, b)",
+		"function heldUnderlyingChange(group, quote, price)",
+		"function heldUnderlyingDailyPnl(group, baseCurrency, currency)",
+		"function quoteChange(quote)",
+		"function signedDisplayMoney(value, currency)",
+		"const pnl = heldUnderlyingDailyPnl(group, baseCurrency, currency);",
+		`source: "daily P/L"`,
+		`group.group_daily_pnl_base`,
+		"function marketQuoteChangeClass(symbol, change)",
+		"function handlePortfolioPanelTap(event)",
+		"function setPortfolioExpansion(open)",
+		"function portfolioDeltaPosture(portfolio = {}, account = {})",
+		"function regimePostureDetailTone(posture = {})",
 		`$("underlyingDetailToggle").addEventListener("click"`,
+		`$("underlyingPanel").addEventListener("click", handleUnderlyingPanelTap);`,
+		`$("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);`,
+		"change: heldUnderlyingChange(group, quote, price.value)",
 		"function gatewayIssueText(snap = {})",
 		"snap.status?.last_error",
 		"client id .*already in use",
@@ -137,12 +160,20 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	for _, want := range []string{
 		`id="bannerStack"`,
 		`id="accountPanel"`,
+		`id="dailyPnlPct"`,
 		`id="underlyingPanel" data-open="false"`,
 		`id="underlyingDetailToggle"`,
+		`Winner daily P/L`,
+		`id="underlyingWinnerPnl"`,
+		`Loser daily P/L`,
+		`id="underlyingLoserPnl"`,
 		`Purge all!`,
 		`Restore all`,
 		`Rebuild all`,
 		`id="underlyingBookListPanel" hidden`,
+		`id="portfolioPanel" data-open="false"`,
+		`Delta posture`,
+		`id="portfolioDeltaMeaning"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index.html missing mobile dashboard contract %q", want)
@@ -159,10 +190,59 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"background: var(--red);",
 		"color: #fff;",
 		`.underlying-panel[data-open="true"] .panel-chevron::after`,
+		".underlying-pnl-summary",
+		".underlying-pnl-card--winner",
+		".underlying-pnl-card--loser",
+		".underlying-row__metric--change",
+		"touch-action: manipulation;",
 		".underlying-book__list-panel",
+		".account-pnl-pct",
+		".portfolio-delta-posture",
+		".portfolio-panel .panel-chevron",
+		".portfolio-detail-panel",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
 		}
 	}
+}
+
+func TestUnderlyingWinnerLoserTotalsUseDailyPnl(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	for _, name := range []string{
+		"underlyingHeldDailyPnlTotals",
+		"heldUnderlyingDailyPnl",
+	} {
+		body := jsFunctionBlock(t, js, name)
+		lower := strings.ToLower(body)
+		if !strings.Contains(lower, "daily") {
+			t.Fatalf("%s must aggregate daily P/L", name)
+		}
+		for _, forbidden := range []string{"group_unrealized_pnl", "unrealized_pnl_base"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("%s must aggregate daily P/L, not open/unrealized field %q", name, forbidden)
+			}
+		}
+	}
+	if strings.Contains(js, "heldUnderlyingQuoteMarkedPnl") || strings.Contains(js, "heldUnderlyingQuotePnlAdjustment") {
+		t.Fatalf("underlying winner/loser totals must use broker daily P/L, not client quote-marked estimates")
+	}
+}
+
+func jsFunctionBlock(t *testing.T, js, name string) string {
+	t.Helper()
+	start := strings.Index(js, "function "+name+"(")
+	if start < 0 {
+		t.Fatalf("app.js missing function %s", name)
+	}
+	next := strings.Index(js[start+1:], "\nfunction ")
+	if next < 0 {
+		return js[start:]
+	}
+	return js[start : start+1+next]
 }

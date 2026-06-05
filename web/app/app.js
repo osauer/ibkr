@@ -33,6 +33,7 @@ const state = {
   underlyingNotice: "",
   underlyingBusy: "",
   latestPurgeStatus: null,
+  fallbackRefreshBusy: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -52,10 +53,20 @@ async function main() {
   }
   await bootstrap();
   setupMarketSelect();
+  setupLiveRefreshLoop();
+}
+
+function setupLiveRefreshLoop() {
   setInterval(() => {
     const snap = state.snapshot || {};
     renderTopbar(snap);
     renderSyncStrip(snap);
+    if (state.snapshot) {
+      renderAccountPanel(snap.account || {}, snap.positions || {}, snap.canary || {});
+      renderUnderlyings(snap.positions || {}, snap.account || {});
+      renderPortfolioRisk(snap.positions || {}, snap.account || {});
+    }
+    refreshBootstrapIfSSEUnavailable();
   }, 1000);
 }
 
@@ -204,14 +215,19 @@ function connectEvents() {
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
   }
+  if (typeof EventSource === "undefined") {
+    setConnection("Polling", false);
+    return;
+  }
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "regime", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
       if (type !== "snapshot") state.snapshot = { ...(state.snapshot || {}), [type]: data };
+      state.lastEventAt = Date.now();
       setConnection("Connected", true);
       renderAll();
       if (type === "canary") {
@@ -220,6 +236,22 @@ function connectEvents() {
     });
   }
   es.onerror = () => scheduleEventRecovery();
+}
+
+async function refreshBootstrapIfSSEUnavailable() {
+  if (!state.snapshot || state.fallbackRefreshBusy || !sseUnavailable()) return;
+  state.fallbackRefreshBusy = true;
+  try {
+    await bootstrap({ quiet: true });
+  } finally {
+    state.fallbackRefreshBusy = false;
+  }
+}
+
+function sseUnavailable() {
+  if (!state.eventSource || !state.connectionOK) return true;
+  if (typeof EventSource !== "undefined" && state.eventSource.readyState !== EventSource.OPEN) return true;
+  return false;
 }
 
 function scheduleEventRecovery() {
@@ -301,6 +333,10 @@ function panelTapIgnored(target) {
     "summary",
     ".detail-panel",
     ".regime-detail-panel",
+    ".underlying-book__list-panel",
+    ".underlying-bulk-actions",
+    ".underlying-action-result",
+    ".portfolio-detail-panel",
     ".order-review",
     ".alert-focus",
   ].join(",")));
@@ -310,6 +346,16 @@ function handleExpandablePanelTap(event, which) {
   if (panelTapIgnored(event.target)) return;
   const open = which === "regime" ? !state.regimeDetailOpen : !state.canaryDetailOpen;
   setRegimeCanaryExpansion(which, open);
+}
+
+function handleUnderlyingPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setUnderlyingExpansion(!state.underlyingDetailOpen);
+}
+
+function handlePortfolioPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setPortfolioExpansion(!state.portfolioDetailOpen);
 }
 
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
@@ -323,6 +369,7 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
   renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
   renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
+  renderAccountDailyPnlPct(account);
   $("accountLabel").textContent = accountContext.accountLabel;
   $("tradingEnvPill").textContent = accountContext.modeLabel;
   $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
@@ -350,6 +397,29 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
     portfolio.fx_base_currency || baseCurrency,
   ), hasNumericValue(portfolio.fx_sensitivity_per_pct));
   renderAccountLargestExposure(portfolio, canary, baseCurrency);
+}
+
+function renderAccountDailyPnlPct(account = {}) {
+  const el = $("dailyPnlPct");
+  if (!el) return;
+  const value = accountDailyPnlPct(account);
+  el.className = "account-pnl-pct " + signedClass(value);
+  el.textContent = typeof value === "number" ? `${signedPct(value)} today` : "--";
+  el.title = "Daily P/L as a percentage of estimated start-of-day net liquidation";
+}
+
+function accountDailyPnlPct(account = {}) {
+  if (typeof account.daily_pnl !== "number") return null;
+  const startOfDay = firstNumber(
+    account.net_liquidation_start_of_day,
+    account.previous_net_liquidation,
+    typeof account.net_liquidation === "number" ? account.net_liquidation - account.daily_pnl : null,
+  );
+  const denominator = typeof startOfDay === "number" && startOfDay > 0
+    ? startOfDay
+    : account.net_liquidation;
+  if (typeof denominator !== "number" || denominator <= 0) return null;
+  return (account.daily_pnl / denominator) * 100;
 }
 
 function renderAccountLargestExposure(portfolio = {}, canary = {}, baseCurrency = "USD") {
@@ -425,12 +495,17 @@ function renderUnderlyings(positions = {}, account = {}) {
   const heldSymbols = rows.filter((row) => !row.virtual).slice(0, 3).map((row) => row.symbol);
   const heldLabel = heldSymbols.length > 0 ? ` · ${heldSymbols.join(", ")}${heldCount > heldSymbols.length ? ` +${heldCount - heldSymbols.length}` : ""}` : "";
   const quoteSummary = underlyingQuoteSummary(rows);
-  count.textContent = rows.length === 0
-    ? "No underlyings"
-    : `${heldCount} held / ${virtualCount} purged${heldLabel}`;
-  status.textContent = state.underlyingNotice
-    || quoteSummary
-    || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
+  renderUnderlyingPnlSummary(underlyingHeldDailyPnlTotals(rows, baseCurrency));
+  if (count) {
+    count.textContent = rows.length === 0
+      ? "No underlyings"
+      : `${heldCount} held / ${virtualCount} purged${heldLabel}`;
+  }
+  if (status) {
+    status.textContent = state.underlyingNotice
+      || quoteSummary
+      || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
+  }
   if (freshness) {
     freshness.textContent = positions.as_of ? shortTime(positions.as_of) : "freshness pending";
   }
@@ -467,6 +542,47 @@ function setUnderlyingActionButtonState(id, enabled, reason) {
   if (!button) return;
   button.disabled = !enabled;
   button.title = enabled ? reason : reason || "Unavailable";
+}
+
+function renderUnderlyingPnlSummary(totals) {
+  setUnderlyingSummaryPnl("underlyingWinnerPnl", totals.winner, totals.winnerCurrency);
+  setUnderlyingSummaryPnl("underlyingLoserPnl", totals.loser, totals.loserCurrency);
+}
+
+function setUnderlyingSummaryPnl(id, value, currency) {
+  const el = $(id);
+  if (!el) return;
+  if (typeof value === "number" && !state.accountValueVisible) {
+    el.className = "signed is-private";
+    el.textContent = "******";
+    return;
+  }
+  el.className = signedClass(value);
+  el.textContent = displayMoney(value, currency);
+}
+
+function underlyingHeldDailyPnlTotals(rows, baseCurrency) {
+  const totals = {
+    winner: null,
+    winnerCurrency: "",
+    loser: null,
+    loserCurrency: "",
+  };
+  for (const row of rows) {
+    if (row.virtual || typeof row.pnl !== "number" || row.pnl === 0) continue;
+    if (row.pnl > 0) {
+      totals.winner = (totals.winner || 0) + row.pnl;
+      totals.winnerCurrency = mergeCurrency(totals.winnerCurrency, row.pnlCurrency || baseCurrency);
+    } else {
+      totals.loser = (totals.loser || 0) + row.pnl;
+      totals.loserCurrency = mergeCurrency(totals.loserCurrency, row.pnlCurrency || baseCurrency);
+    }
+  }
+  return {
+    ...totals,
+    winnerCurrency: totals.winnerCurrency || baseCurrency,
+    loserCurrency: totals.loserCurrency || baseCurrency,
+  };
 }
 
 function setUnderlyingExpansion(open) {
@@ -512,10 +628,28 @@ function underlyingBookRows(positions, baseCurrency) {
     }
     rows.set(row.symbol, row);
   }
-  return [...rows.values()].sort((a, b) => {
-    if (a.virtual !== b.virtual) return a.virtual ? 1 : -1;
-    return a.symbol.localeCompare(b.symbol);
-  });
+  return [...rows.values()].sort(compareUnderlyingRows);
+}
+
+function compareUnderlyingRows(a, b) {
+  if (a.virtual !== b.virtual) return a.virtual ? 1 : -1;
+  const aPnl = underlyingSortPnl(a);
+  const bPnl = underlyingSortPnl(b);
+  const aRank = underlyingPnlSortRank(aPnl);
+  const bRank = underlyingPnlSortRank(bPnl);
+  if (aRank !== bRank) return aRank - bRank;
+  if (aRank === 0) return aPnl - bPnl || a.symbol.localeCompare(b.symbol);
+  if (aRank === 1) return bPnl - aPnl || a.symbol.localeCompare(b.symbol);
+  return a.symbol.localeCompare(b.symbol);
+}
+
+function underlyingSortPnl(row) {
+  return row.virtual ? row.pnl : row.dailyPnl;
+}
+
+function underlyingPnlSortRank(value) {
+  if (typeof value !== "number" || value === 0) return 2;
+  return value < 0 ? 0 : 1;
 }
 
 function heldUnderlyingRows(positions, baseCurrency) {
@@ -526,7 +660,7 @@ function heldUnderlyingRows(positions, baseCurrency) {
     const quote = quoteState.quote;
     const price = heldUnderlyingPrice(group, quote);
     const currency = heldUnderlyingCurrency(group, quote, baseCurrency);
-    const pnl = heldUnderlyingPnl(group, baseCurrency, currency);
+    const pnl = heldUnderlyingDailyPnl(group, baseCurrency, currency);
     const stockCount = group.stock ? 1 : 0;
     const optionCount = (group.options || []).length;
     const row = {
@@ -535,10 +669,13 @@ function heldUnderlyingRows(positions, baseCurrency) {
       price: price.value,
       priceSource: price.source,
       priceAt: price.at,
+      change: heldUnderlyingChange(group, quote, price.value),
       changePct: heldUnderlyingChangePct(group, quote, price.value),
       pnl: pnl.value,
       pnlCurrency: pnl.currency,
       pnlSource: pnl.source,
+      dailyPnl: pnl.value,
+      dailyPnlCurrency: pnl.currency,
       quote,
       quoteError: quoteState.error,
       held: true,
@@ -582,6 +719,26 @@ function heldUnderlyingChangePct(group, quote, price) {
   return null;
 }
 
+function heldUnderlyingChange(group, quote, price) {
+  const marketChange = quoteChange(quote);
+  if (typeof marketChange === "number") return marketChange;
+  const stockChange = firstNumber(group.stock?.quote_change, group.stock?.regular_change, group.stock?.day_change);
+  if (typeof stockChange === "number") return stockChange;
+  const prevClose = heldUnderlyingPrevClose(group, quote);
+  if (typeof price === "number" && typeof prevClose === "number") {
+    return price - prevClose;
+  }
+  return null;
+}
+
+function heldUnderlyingPrevClose(group, quote) {
+  const marketPrevClose = quotePrevClose(quote);
+  if (typeof marketPrevClose === "number") return marketPrevClose;
+  const stockPrevClose = firstNumber(group.stock?.prev_close, group.stock?.regular_close, group.stock?.prior_regular_close);
+  if (typeof stockPrevClose === "number") return stockPrevClose;
+  return firstNumber(...(group.options || []).map((option) => option.prev_close));
+}
+
 function heldUnderlyingCurrency(group, quote, baseCurrency) {
   const quoteCurrency = normalizeCurrency(quote?.currency || quote?.contract?.currency);
   if (quoteCurrency) return quoteCurrency;
@@ -592,18 +749,18 @@ function heldUnderlyingCurrency(group, quote, baseCurrency) {
   return baseCurrency;
 }
 
-function heldUnderlyingPnl(group, baseCurrency, currency) {
-  if (typeof group.group_unrealized_pnl_base === "number") {
-    return { value: group.group_unrealized_pnl_base, currency: baseCurrency, source: "unrealized P/L" };
+function heldUnderlyingDailyPnl(group, baseCurrency, currency) {
+  if (typeof group.group_daily_pnl_base === "number") {
+    return { value: group.group_daily_pnl_base, currency: baseCurrency, source: "daily P/L" };
   }
   const rows = [group.stock, ...(group.options || [])].filter(Boolean);
-  if (rows.length > 0 && rows.every((row) => typeof row.unrealized_pnl_base === "number")) {
-    return { value: rows.reduce((sum, row) => sum + row.unrealized_pnl_base, 0), currency: baseCurrency, source: "unrealized P/L" };
+  if (rows.length > 0 && rows.every((row) => typeof row.daily_pnl_base === "number")) {
+    return { value: rows.reduce((sum, row) => sum + row.daily_pnl_base, 0), currency: baseCurrency, source: "daily P/L" };
   }
-  if (typeof group.group_unrealized_pnl_ccy === "number") {
-    return { value: group.group_unrealized_pnl_ccy, currency, source: "unrealized P/L" };
+  if (rows.length > 0 && rows.every((row) => typeof row.daily_pnl_ccy === "number")) {
+    return { value: rows.reduce((sum, row) => sum + row.daily_pnl_ccy, 0), currency, source: "daily P/L" };
   }
-  return { value: null, currency: baseCurrency, source: "no P/L" };
+  return { value: null, currency: baseCurrency, source: "daily P/L pending" };
 }
 
 function purgedUnderlyingRows(positions, baseCurrency) {
@@ -618,6 +775,7 @@ function purgedUnderlyingRows(positions, baseCurrency) {
       price: null,
       priceSource: "",
       priceAt: "",
+      change: null,
       changePct: null,
       pnl: null,
       pnlCurrency: "",
@@ -643,9 +801,13 @@ function purgedUnderlyingRows(positions, baseCurrency) {
         row.priceSource = quoteSourceLabel(quoteState.quote, "IBKR quote");
         row.priceAt = quoteTimestamp(quoteState.quote);
       }
-      const quoteChange = quoteChangePct(quoteState.quote);
-      if (typeof quoteChange === "number") {
-        row.changePct = quoteChange;
+      const quotePct = quoteChangePct(quoteState.quote);
+      if (typeof quotePct === "number") {
+        row.changePct = quotePct;
+      }
+      const marketChange = quoteChange(quoteState.quote);
+      if (typeof marketChange === "number") {
+        row.change = marketChange;
       }
       const quoteCurrency = normalizeCurrency(quoteState.quote.currency || quoteState.quote.contract?.currency);
       if (quoteCurrency) {
@@ -663,6 +825,10 @@ function purgedUnderlyingRows(positions, baseCurrency) {
     const change = firstNumber(entry.quote_change_pct, entry.change_pct, entry.day_change_pct, entry.regular_change_pct);
     if (typeof change === "number" && row.changePct === null) {
       row.changePct = change;
+    }
+    const absoluteChange = firstNumber(entry.quote_change, entry.change, entry.day_change, entry.regular_change);
+    if (typeof absoluteChange === "number" && row.change === null) {
+      row.change = absoluteChange;
     }
     const pnl = purgeEntryPnl(entry);
     if (typeof pnl.value === "number") {
@@ -896,12 +1062,14 @@ function underlyingBookRow(row, baseCurrency) {
   price.append(priceValue, priceNote);
 
   const change = document.createElement("div");
-  change.className = "underlying-row__metric";
+  change.className = "underlying-row__metric underlying-row__metric--change";
   const changeValue = document.createElement("b");
-  changeValue.className = signedClass(row.changePct);
-  changeValue.textContent = signedPct(row.changePct);
+  const changeTone = typeof row.change === "number" ? row.change : row.changePct;
+  changeValue.className = signedClass(changeTone);
+  changeValue.textContent = signedDisplayMoney(row.change, row.currency);
   const changeNote = document.createElement("small");
-  changeNote.textContent = "% change";
+  changeNote.className = signedClass(row.changePct);
+  changeNote.textContent = typeof row.changePct === "number" ? `${signedPct(row.changePct)} day` : "% change";
   change.append(changeValue, changeNote);
 
   const pnl = document.createElement("div");
@@ -1009,6 +1177,12 @@ function displayMoney(value, currency) {
   }
   const amount = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
   return ccy ? `${amount} ${ccy}` : amount;
+}
+
+function signedDisplayMoney(value, currency) {
+  if (typeof value !== "number") return "--";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return sign + displayMoney(Math.abs(value), currency);
 }
 
 function currentAccountContext(account = {}) {
@@ -1210,13 +1384,39 @@ function marketExplanation(canary) {
       tone: "warn",
     };
   }
-  const verdict = cleanDetail(canary.market?.regime_posture?.label || canary.market?.regime_verdict);
+  const posture = normalizeRegimePosture(canary.market?.regime_posture) || {
+    label: cleanDetail(canary.market?.regime_verdict),
+    tone: legacyRegimeTone(canary.market?.regime_verdict),
+  };
+  const verdict = cleanDetail(posture.label || canary.market?.regime_verdict);
+  const readiness = String(posture.readiness || "").toLowerCase();
+  const hasGaps = marketHasDataGaps(canary.market || {}) ||
+    ["blocked", "degraded", "failed", "partial", "warming"].includes(readiness) ||
+    String(posture.tone || "").toLowerCase() === "data_quality";
+  const postureTone = regimePostureDetailTone(posture);
+  const tone = hasGaps && (postureTone === "ok" || postureTone === "neutral") ? "warn" : postureTone;
+  const body = tone === "warn" || hasGaps
+    ? "Market stress is not confirmed, but the regime read has watch or data-quality warnings."
+    : "The broad-market regime is not giving a fully confirmed canary trigger.";
   return {
     label: "Market",
     title: verdict === "--" ? "No clear market stress" : verdict,
-    body: "The broad-market regime is not giving a fully confirmed canary trigger.",
-    tone: "ok",
+    body,
+    tone,
   };
+}
+
+function regimePostureDetailTone(posture = {}) {
+  switch (regimeWeatherClass(posture.tone)) {
+    case "red":
+      return "risk";
+    case "amber":
+      return "warn";
+    case "green":
+      return "ok";
+    default:
+      return "neutral";
+  }
 }
 
 function portfolioExplanation(canary) {
@@ -1354,7 +1554,7 @@ function marketQuoteCell(symbol, quote, market, marketQuotes) {
   const value = document.createElement("strong");
   value.textContent = hasPrice ? numberRead(price) : "--";
   const changeEl = document.createElement("span");
-  changeEl.className = "market-change " + signedClass(change);
+  changeEl.className = "market-change " + marketQuoteChangeClass(symbol, change);
   changeEl.textContent = typeof change === "number" ? signedPct(change) : "--";
   valueLine.append(value, changeEl);
 
@@ -1368,6 +1568,10 @@ function marketQuoteCell(symbol, quote, market, marketQuotes) {
     : source.textContent;
   cell.append(head, valueLine, source);
   return cell;
+}
+
+function marketQuoteChangeClass(symbol, change) {
+  return signedClass(normalizeSymbol(symbol) === "VIX" && typeof change === "number" ? -change : change);
 }
 
 function marketQuoteInterruptedLine(quote, marketQuotes, hasPrice) {
@@ -1488,6 +1692,18 @@ function quoteChangePct(quote) {
   const prev = quotePrevClose(quote);
   if (typeof price === "number" && typeof prev === "number" && prev !== 0) {
     return (price - prev) / prev * 100;
+  }
+  return null;
+}
+
+function quoteChange(quote) {
+  if (!quote) return null;
+  const explicit = firstNumber(quote.quote_change, quote.change, quote.regular_change);
+  if (typeof explicit === "number") return explicit;
+  const price = quotePrice(quote);
+  const prev = quotePrevClose(quote);
+  if (typeof price === "number" && typeof prev === "number") {
+    return price - prev;
   }
   return null;
 }
@@ -1951,10 +2167,7 @@ function heldStressFlagLabel(value) {
 function renderPortfolioRisk(positions, account) {
   const portfolio = positions.portfolio || {};
   const baseCurrency = portfolio.base_currency || account.base_currency || "USD";
-  renderSensitiveText("portfolioDollarDelta", riskMoney(
-    portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy,
-    portfolio.dollar_delta_base_currency || portfolio.dollar_delta_ccy_currency || baseCurrency,
-  ), hasNumericValue(portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy));
+  renderPortfolioDeltaPosture(portfolio, account);
   renderSensitiveText("portfolioDailyTheta", riskMoney(
     portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
     portfolio.daily_theta_base_currency || portfolio.daily_theta_ccy_currency || baseCurrency,
@@ -1993,6 +2206,58 @@ function renderPortfolioRisk(positions, account) {
     }
     return row;
   }));
+}
+
+function renderPortfolioDeltaPosture(portfolio, account) {
+  const posture = portfolioDeltaPosture(portfolio, account);
+  const value = $("portfolioDollarDelta");
+  if (!value) return;
+  value.textContent = posture.label;
+  value.className = "portfolio-delta-posture " + posture.tone;
+  const meaning = $("portfolioDeltaMeaning");
+  if (meaning) {
+    meaning.textContent = posture.detail;
+  }
+}
+
+function portfolioDeltaPosture(portfolio = {}, account = {}) {
+  const delta = portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy;
+  const nlv = portfolio.net_liquidation_base ?? account.net_liquidation;
+  if (typeof delta !== "number") {
+    return {
+      label: "Delta unavailable",
+      detail: "Waiting for portfolio Greeks or stock exposure.",
+      tone: "neutral",
+    };
+  }
+  const ratio = typeof nlv === "number" && nlv > 0 ? Math.abs(delta) / nlv : null;
+  const direction = delta > 0 ? "Long-biased" : delta < 0 ? "Short-biased" : "Flat";
+  if (ratio === null) {
+    return {
+      label: direction,
+      detail: "Market sensitivity is available in detail.",
+      tone: "neutral",
+    };
+  }
+  if (ratio >= 1) {
+    return {
+      label: "High delta risk",
+      detail: `${direction}; detail has the private estimate.`,
+      tone: "risk",
+    };
+  }
+  if (ratio >= 0.35) {
+    return {
+      label: "Moderate delta",
+      detail: `${direction}; watch broad-market moves.`,
+      tone: "warn",
+    };
+  }
+  return {
+    label: "Low delta",
+    detail: `${direction}; broad-market sensitivity is contained.`,
+    tone: "ok",
+  };
 }
 
 function exposureComposition(positions, account, portfolio, baseCurrency) {
@@ -2103,10 +2368,22 @@ function exposureLegendItem(label, value) {
 function renderPortfolioDetail(portfolio, positions, baseCurrency) {
   const panel = $("portfolioDetailPanel");
   const button = $("portfolioDetailToggle");
+  const wrapper = $("portfolioPanel");
+  wrapper.dataset.open = String(state.portfolioDetailOpen);
   panel.hidden = !state.portfolioDetailOpen;
   button.setAttribute("aria-expanded", String(state.portfolioDetailOpen));
+  button.textContent = state.portfolioDetailOpen ? "Hide detail" : "Detail";
   if (!state.portfolioDetailOpen) return;
   $("portfolioDetailList").replaceChildren(...portfolioDetailRows(portfolio, positions, baseCurrency).map(detailFact));
+}
+
+function setPortfolioExpansion(open) {
+  state.portfolioDetailOpen = Boolean(open);
+  renderPortfolioDetail(
+    state.snapshot?.positions?.portfolio || {},
+    state.snapshot?.positions || {},
+    state.snapshot?.account?.base_currency || "USD",
+  );
 }
 
 function portfolioDetailRows(portfolio, positions, baseCurrency) {
@@ -3766,6 +4043,7 @@ $("canaryHero").addEventListener("click", (event) => {
 $("underlyingDetailToggle").addEventListener("click", () => {
   setUnderlyingExpansion(!state.underlyingDetailOpen);
 });
+$("underlyingPanel").addEventListener("click", handleUnderlyingPanelTap);
 $("buildAllUnderlyingsButton").addEventListener("click", () => {
   runUnderlyingAction("build", { all: true });
 });
@@ -3776,9 +4054,9 @@ $("restoreAllUnderlyingsButton").addEventListener("click", () => {
   runUnderlyingAction("restore", { all: true });
 });
 $("portfolioDetailToggle").addEventListener("click", () => {
-  state.portfolioDetailOpen = !state.portfolioDetailOpen;
-  renderPortfolioDetail(state.snapshot?.positions?.portfolio || {}, state.snapshot?.positions || {}, state.snapshot?.account?.base_currency || "USD");
+  setPortfolioExpansion(!state.portfolioDetailOpen);
 });
+$("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);
 $("clearAlertsButton").addEventListener("click", clearAlerts);
 
 async function enablePush() {

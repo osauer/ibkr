@@ -165,11 +165,12 @@ func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
 	if confidence == "" {
 		confidence = strings.TrimSpace(r.Summary.Confidence)
 	}
+	tone := regimePostureTone(r.Composite, r.Lifecycle)
 	return RegimePosture{
 		Label:      label,
-		Tone:       regimePostureTone(r.Composite, r.Lifecycle),
+		Tone:       tone,
 		Stage:      strings.TrimSpace(r.Lifecycle.Stage),
-		Severity:   strings.TrimSpace(r.Lifecycle.Severity),
+		Severity:   regimePostureSeverity(r.Lifecycle, tone),
 		Readiness:  strings.TrimSpace(r.Lifecycle.Readiness),
 		Confidence: confidence,
 		Evidence:   strings.TrimSpace(r.Summary.Evidence),
@@ -213,9 +214,18 @@ func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
 		return RegimeToneStress
 	case LifecycleConfirmedStress, LifecycleForcedDefense:
 		return RegimeToneStress
+	}
+	if regimeLifecycleReadinessDegraded(lifecycle.Readiness) {
+		return RegimeToneDataQuality
+	}
+	switch lifecycle.Stage {
 	case LifecycleEarlyWarning, LifecycleStabilization:
 		return RegimeToneWatch
-	case LifecycleOpportunity:
+	}
+	if c.ClusterYellowCount > 0 {
+		return RegimeToneWatch
+	}
+	if lifecycle.Stage == LifecycleOpportunity {
 		return RegimeToneNormal
 	}
 	switch label {
@@ -227,6 +237,29 @@ func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
 		return RegimeToneDataQuality
 	default:
 		return RegimeToneNormal
+	}
+}
+
+func regimePostureSeverity(lifecycle LifecycleState, tone string) string {
+	severity := strings.TrimSpace(lifecycle.Severity)
+	if severity == "" {
+		severity = "observe"
+	}
+	if severity == "observe" {
+		switch tone {
+		case RegimeToneWatch, RegimeToneDataQuality:
+			return "watch"
+		}
+	}
+	return severity
+}
+
+func regimeLifecycleReadinessDegraded(readiness string) bool {
+	switch strings.ToLower(strings.TrimSpace(readiness)) {
+	case "blocked", "degraded", "failed", "partial", "warming":
+		return true
+	default:
+		return false
 	}
 }
 
