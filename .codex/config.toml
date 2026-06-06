@@ -1,0 +1,26 @@
+# Project-scoped Codex settings for the IBKR repo.
+# Loaded only after this project is trusted by Codex.
+
+[features]
+hooks = true
+multi_agent = true
+
+[agents]
+max_threads = 4
+
+[agents.trading_safety_reviewer]
+description = "Read-only review of broker-adjacent semantics, trading safety, data quality, and gates."
+config_file = "./agents/trading-safety-reviewer.toml"
+
+[agents.spa_authority_reviewer]
+description = "Read-only review of Canary SPA authority, live snapshot semantics, and rendered QA gates."
+config_file = "./agents/spa-authority-reviewer.toml"
+
+[mcp_servers.ibkr]
+command = "ibkr"
+args = ["mcp"]
+startup_timeout_sec = 10
+tool_timeout_sec = 60
+enabled = true
+required = false
+default_tools_approval_mode = "auto"
