@@ -80,6 +80,58 @@ func TestOrderPlaceRejectsRejectedWhatIfTokenBeforeBrokerSend(t *testing.T) {
 	}
 }
 
+func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("blocked live mode must be rejected before broker hook")
+		return nil
+	}
+	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{
+		Enabled:         true,
+		Mode:            config.TradingModeLive,
+		PreviewRequired: true,
+		Account:         "U1234567",
+		Endpoint:        "127.0.0.1:4001",
+		ClientID:        31,
+		Blockers: []rpc.TradingBlocker{{
+			Code:    "live_not_allowed",
+			Message: "live trading requires an explicit local override",
+			Action:  "Set [trading].allow_live = true.",
+		}},
+	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay})
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "explicit local override") {
+		t.Fatalf("submitConfiguredOrder err = %v, want live-readiness trading refusal", err)
+	}
+}
+
+func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	var sent bool
+	srv.orderPlaceBroker = func(_ context.Context, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+		sent = true
+		if contract.Symbol != "MSFT" || order.Account != "U1234567" {
+			t.Fatalf("broker hook contract/order = %+v / %+v", contract, order)
+		}
+		return nil
+	}
+	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{
+		Enabled:         true,
+		Mode:            config.TradingModeLive,
+		PreviewRequired: true,
+		Account:         "U1234567",
+		Endpoint:        "127.0.0.1:4001",
+		ClientID:        31,
+	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Account: "U1234567"})
+	if err != nil {
+		t.Fatalf("submitConfiguredOrder err = %v", err)
+	}
+	if !sent {
+		t.Fatal("broker hook was not called for authorized live route")
+	}
+}
+
 func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})

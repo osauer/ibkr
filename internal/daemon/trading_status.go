@@ -152,23 +152,81 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		}
 	}
 
+	if !tr.PreviewRequired() {
+		add("preview_required_disabled", "broker writes require submit-eligible preview tokens", "Set [trading].require_preview = true.")
+	}
+
 	status.Blocked = len(status.Blockers) > 0
 	status.CanPreview = tr.Enabled && !status.Blocked && tr.PreviewRequired()
-	paperWriteReady := tr.Mode == config.TradingModePaper && status.CanPreview && s.orderPaperWritesEnabled()
-	status.CanTransmit = paperWriteReady
-	status.CanModify = paperWriteReady
-	status.CanCancel = paperWriteReady
+	writeReady := s.brokerWriteAuthorization(status).Allowed
+	status.CanTransmit = writeReady
+	status.CanModify = writeReady
+	status.CanCancel = writeReady
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}
 	return status
 }
 
-func (s *Server) orderPaperWritesEnabled() bool {
+func (s *Server) orderBrokerWritesEnabled() bool {
 	if s != nil && s.orderWritesEnabled != nil {
 		return s.orderWritesEnabled()
 	}
 	return orderWritesAvailable
+}
+
+type brokerWriteAuthorization struct {
+	Status   rpc.TradingStatus
+	Route    string
+	Allowed  bool
+	Blockers []rpc.TradingBlocker
+}
+
+func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteAuthorization {
+	auth := brokerWriteAuthorization{Status: status, Route: status.Mode}
+	var blockers []rpc.TradingBlocker
+	add := func(code, message, action string) {
+		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{
+			Code:    code,
+			Message: message,
+			Action:  action,
+		})
+	}
+	if !status.Enabled {
+		add("trading_disabled", "trading is disabled", "Enable [trading] before broker writes.")
+	}
+	for _, blocker := range status.Blockers {
+		blockers = appendTradingBlockerOnce(blockers, blocker)
+	}
+	if status.Blocked && len(status.Blockers) == 0 {
+		add("trading_blocked", "trading status is blocked", "Refresh trading status and resolve the active blocker before broker writes.")
+	}
+	switch status.Mode {
+	case config.TradingModePaper, config.TradingModeLive:
+	default:
+		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", status.Mode), "Set [trading].mode to paper or live.")
+	}
+	if !status.PreviewRequired {
+		add("preview_required_disabled", "broker writes require submit-eligible preview tokens", "Set [trading].require_preview = true.")
+	}
+	if !s.orderBrokerWritesEnabled() {
+		add("order_writes_unavailable", "order writes are unavailable in this build", "Rebuild the daemon with the trading write capability.")
+	}
+	if s == nil || s.orderJournal == nil {
+		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the daemon state directory before enabling trading.")
+	}
+	auth.Blockers = blockers
+	auth.Allowed = len(blockers) == 0
+	return auth
+}
+
+func appendTradingBlockerOnce(blockers []rpc.TradingBlocker, next rpc.TradingBlocker) []rpc.TradingBlocker {
+	for _, blocker := range blockers {
+		if blocker.Code == next.Code {
+			return blockers
+		}
+	}
+	return append(blockers, next)
 }
 
 func (s *Server) connectedGatewayAccount() string {

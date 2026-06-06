@@ -236,7 +236,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	replaceID := strings.TrimSpace(p.ReplaceID)
 	if replaceID != "" {
 		if !status.CanModify {
-			return nil, fmt.Errorf("%w: paper modify is not available", ErrTradingDisabled)
+			return nil, fmt.Errorf("%w: broker modify is not available", ErrTradingDisabled)
 		}
 		view, err := s.openOrderViewForWrite(replaceID, status)
 		if err != nil {

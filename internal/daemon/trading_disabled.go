@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/osauer/ibkr/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
@@ -30,7 +31,14 @@ func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
 	return 0, ErrTradingDisabled
 }
 
-func (s *Server) submitConfiguredOrder(ctx context.Context, _ rpc.TradingStatus, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingStatus, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	auth := s.brokerWriteAuthorization(status)
+	if !auth.Allowed {
+		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+	}
 	if s.orderPlaceBroker != nil {
 		return s.orderPlaceBroker(ctx, contract, order)
 	}

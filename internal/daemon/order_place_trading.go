@@ -39,14 +39,25 @@ func (s *Server) handleOrderCancel(ctx context.Context, req *rpc.Request) (*rpc.
 	return s.cancelOrder(ctx, p)
 }
 
+func (s *Server) currentBrokerWriteAuthorization() brokerWriteAuthorization {
+	if s == nil {
+		auth := brokerWriteAuthorization{}
+		auth.Blockers = appendTradingBlockerOnce(auth.Blockers, rpc.TradingBlocker{
+			Code:    "trading_disabled",
+			Message: "trading daemon is unavailable",
+			Action:  "Start the ibkr daemon before broker writes.",
+		})
+		return auth
+	}
+	return s.brokerWriteAuthorization(s.currentTradingStatus())
+}
+
 func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
-	status, err := s.paperWriteStatus()
-	if err != nil {
-		return nil, err
+	auth := s.currentBrokerWriteAuthorization()
+	if !auth.Allowed {
+		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
-	if !status.CanTransmit {
-		return nil, fmt.Errorf("%w: paper transmit is not available", ErrTradingDisabled)
-	}
+	status := auth.Status
 	payload, err := s.verifyPreviewTokenForPlace(p.PreviewToken)
 	if err != nil {
 		return nil, err
@@ -56,10 +67,10 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 		return nil, err
 	}
 	now := s.orderNow()
-	confirm := previewTokenConfirmedEvent(payload, reservedOrderID, now, "preview token confirmed for paper broker transmit")
+	confirm := previewTokenConfirmedEvent(payload, reservedOrderID, now, fmt.Sprintf("preview token confirmed for %s broker transmit", auth.Route))
 	attempt := orderJournalEventForDraft(payload.Draft, orderJournalEventSendAttempted, status, payload.TokenID, reservedOrderID, now)
 	attempt.SendState = orderSendStateSendAttempted
-	attempt.Message = "paper broker placeOrder transmit attempted"
+	attempt.Message = fmt.Sprintf("%s broker placeOrder transmit attempted", auth.Route)
 	if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(confirm, attempt); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
 	}
@@ -69,9 +80,9 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 	order.OrderID = reservedOrderID
 	order.ClientID = status.ClientID
 	order.Account = status.Account
-	if err := s.submitPaperOrder(ctx, paperGateFromStatus(status), contract, order); err != nil {
+	if err := s.submitConfiguredOrder(ctx, status, contract, order); err != nil {
 		s.appendOrderSendError(payload.Draft, status, payload.TokenID, reservedOrderID, err)
-		return nil, fmt.Errorf("paper order transmit: %w", err)
+		return nil, fmt.Errorf("%s order transmit: %w", auth.Route, err)
 	}
 
 	return &rpc.OrderPlaceResult{
@@ -86,19 +97,17 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 		Draft:           payload.Draft,
 		LifecycleStatus: rpc.OrderLifecyclePendingSubmit,
 		SendState:       orderSendStateSendAttempted,
-		Message:         "paper broker placeOrder transmit attempted; waiting for broker lifecycle callback",
+		Message:         fmt.Sprintf("%s broker placeOrder transmit attempted; waiting for broker lifecycle callback", auth.Route),
 		AsOf:            s.orderNow(),
 	}, nil
 }
 
 func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
-	status, err := s.paperWriteStatus()
-	if err != nil {
-		return nil, err
+	auth := s.currentBrokerWriteAuthorization()
+	if !auth.Allowed {
+		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
-	if !status.CanModify {
-		return nil, fmt.Errorf("%w: paper modify is not available", ErrTradingDisabled)
-	}
+	status := auth.Status
 	view, err := s.openOrderViewForWrite(p.ID, status)
 	if err != nil {
 		return nil, err
@@ -122,11 +131,11 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 	modifiedDraft.OrderRef = view.OrderRef
 	modifiedDraft.Contract = modifyContractForView(view, modifiedDraft.Contract)
 	modifiedDraft.OutsideRTH = view.OutsideRTH
-	confirm := previewTokenConfirmedEvent(payload, view.ReservedOrderID, now, "preview token confirmed for paper broker modify")
+	confirm := previewTokenConfirmedEvent(payload, view.ReservedOrderID, now, fmt.Sprintf("preview token confirmed for %s broker modify", auth.Route))
 	confirm.OrderRef = view.OrderRef
 	modify := orderJournalEventForDraft(modifiedDraft, orderJournalEventModifyRequested, status, payload.TokenID, view.ReservedOrderID, now)
 	modify.SendState = orderSendStateSendAttempted
-	modify.Message = "paper broker placeOrder modify attempted"
+	modify.Message = fmt.Sprintf("%s broker modify attempted", auth.Route)
 	if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(confirm, modify); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
 	}
@@ -136,9 +145,9 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 	order.OrderID = view.ReservedOrderID
 	order.ClientID = status.ClientID
 	order.Account = status.Account
-	if err := s.submitPaperOrder(ctx, paperGateFromStatus(status), contract, order); err != nil {
+	if err := s.submitConfiguredOrder(ctx, status, contract, order); err != nil {
 		s.appendOrderSendError(modifiedDraft, status, payload.TokenID, view.ReservedOrderID, err)
-		return nil, fmt.Errorf("paper order modify: %w", err)
+		return nil, fmt.Errorf("%s order modify: %w", auth.Route, err)
 	}
 
 	return &rpc.OrderModifyResult{
@@ -153,19 +162,17 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 		Draft:           modifiedDraft,
 		LifecycleStatus: rpc.OrderLifecycleSubmitted,
 		SendState:       orderSendStateSendAttempted,
-		Message:         "paper broker modify attempted; waiting for broker lifecycle callback",
+		Message:         fmt.Sprintf("%s broker modify attempted; waiting for broker lifecycle callback", auth.Route),
 		AsOf:            s.orderNow(),
 	}, nil
 }
 
 func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc.OrderCancelResult, error) {
-	status, err := s.paperWriteStatus()
-	if err != nil {
-		return nil, err
+	auth := s.currentBrokerWriteAuthorization()
+	if !auth.Allowed {
+		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
-	if !status.CanCancel {
-		return nil, fmt.Errorf("%w: paper cancel is not available", ErrTradingDisabled)
-	}
+	status := auth.Status
 	view, err := s.openOrderViewForWrite(p.ID, status)
 	if err != nil {
 		return nil, err
@@ -180,13 +187,13 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 	now := s.orderNow()
 	cancelEvent := orderJournalEventFromView(view, orderJournalEventCancelRequested, now)
 	cancelEvent.SendState = orderSendStateSendAttempted
-	cancelEvent.Message = "paper broker cancel attempted"
+	cancelEvent.Message = fmt.Sprintf("%s broker cancel attempted", auth.Route)
 	if err := s.orderJournal.Append(cancelEvent); err != nil {
 		return nil, fmt.Errorf("%w: append cancel journal: %v", ErrTradingDisabled, err)
 	}
-	if err := s.cancelPaperOrder(ctx, paperGateFromStatus(status), view.ReservedOrderID); err != nil {
+	if err := s.cancelConfiguredOrder(ctx, status, view.ReservedOrderID); err != nil {
 		s.appendOrderSendError(orderDraftFromView(view), status, view.PreviewTokenID, view.ReservedOrderID, err)
-		return nil, fmt.Errorf("paper order cancel: %w", err)
+		return nil, fmt.Errorf("%s order cancel: %w", auth.Route, err)
 	}
 	view.LastEvent = orderJournalEventCancelRequested
 	view.SendState = orderSendStateSendAttempted
@@ -202,32 +209,9 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 		Status:          view.Status,
 		LifecycleStatus: view.LifecycleStatus,
 		SendState:       view.SendState,
-		Message:         "paper broker cancel attempted; waiting for broker cancellation status",
+		Message:         fmt.Sprintf("%s broker cancel attempted; waiting for broker cancellation status", auth.Route),
 		AsOf:            s.orderNow(),
 	}, nil
-}
-
-func (s *Server) paperWriteStatus() (rpc.TradingStatus, error) {
-	if s == nil {
-		return rpc.TradingStatus{}, ErrTradingDisabled
-	}
-	s.mu.Lock()
-	ep := s.endpoint
-	s.mu.Unlock()
-	status := s.tradingStatus(ep)
-	if !status.Enabled {
-		return rpc.TradingStatus{}, fmt.Errorf("%w: enable [trading] before order writes", ErrTradingDisabled)
-	}
-	if status.Blocked {
-		return rpc.TradingStatus{}, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(status.Blockers))
-	}
-	if status.Mode != config.TradingModePaper {
-		return rpc.TradingStatus{}, fmt.Errorf("%w: order writes are paper-only in this release", ErrTradingDisabled)
-	}
-	if s.orderJournal == nil {
-		return rpc.TradingStatus{}, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
-	}
-	return status, nil
 }
 
 func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
@@ -262,6 +246,10 @@ func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingSt
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	auth := s.brokerWriteAuthorization(status)
+	if !auth.Allowed {
+		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+	}
 	if s.orderPlaceBroker != nil {
 		return s.orderPlaceBroker(ctx, contract, order)
 	}
@@ -269,10 +257,14 @@ func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingSt
 	if c == nil {
 		return s.gatewayUnavailableError()
 	}
-	if status.Mode == config.TradingModeLive {
+	switch auth.Route {
+	case config.TradingModePaper:
+		return c.SubmitPaperOrder(paperGateFromStatus(status), contract, order)
+	case config.TradingModeLive:
 		return c.SubmitOrder(contract, order)
+	default:
+		return fmt.Errorf("%w: trading mode %q is invalid", ErrTradingDisabled, auth.Route)
 	}
-	return c.SubmitPaperOrder(paperGateFromStatus(status), contract, order)
 }
 
 func (s *Server) cancelPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGate, orderID int) error {
@@ -287,6 +279,31 @@ func (s *Server) cancelPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGa
 		return s.gatewayUnavailableError()
 	}
 	return c.CancelPaperOrder(gate, orderID)
+}
+
+func (s *Server) cancelConfiguredOrder(ctx context.Context, status rpc.TradingStatus, orderID int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	auth := s.brokerWriteAuthorization(status)
+	if !auth.Allowed {
+		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+	}
+	if s.orderCancelBroker != nil {
+		return s.orderCancelBroker(ctx, orderID)
+	}
+	c := s.gatewayConnector()
+	if c == nil {
+		return s.gatewayUnavailableError()
+	}
+	switch auth.Route {
+	case config.TradingModePaper:
+		return c.CancelPaperOrder(paperGateFromStatus(status), orderID)
+	case config.TradingModeLive:
+		return c.CancelOrder(orderID)
+	default:
+		return fmt.Errorf("%w: trading mode %q is invalid", ErrTradingDisabled, auth.Route)
+	}
 }
 
 func (s *Server) verifyPreviewTokenForModify(token string, view rpc.OrderView) (orderPreviewTokenPayload, error) {

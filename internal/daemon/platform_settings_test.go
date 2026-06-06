@@ -66,7 +66,7 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 
 func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	t.Parallel()
-	srv := newPlatformSettingsTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newPlatformSettingsTestServer(t, config.Trading{Enabled: false, Mode: config.TradingModePaper})
 
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"bogus":true}`)}); err == nil {
 		t.Fatal("unknown top-level field succeeded")
@@ -76,7 +76,7 @@ func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	}
 	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":5000}}}`)})
 	if err == nil {
-		t.Fatal("stable build trading limit write succeeded")
+		t.Fatal("trading limit write succeeded while trading disabled")
 	}
 	if !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("limit write error = %v, want read-only", err)

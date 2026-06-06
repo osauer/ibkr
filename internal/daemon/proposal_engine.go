@@ -345,6 +345,10 @@ func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreview
 		return rpc.TradeProposalPreviewResult{Proposal: prop, Blockers: blockers, AsOf: now}, nil
 	}
 	e.appendEvent(proposalEventForProposal("previewed", prop, now, preview.PreviewTokenID, preview.Draft.OrderRef, "proposal previewed"))
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) > 0 {
+		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
+		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
+	}
 	return rpc.TradeProposalPreviewResult{Accepted: true, Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: preview.SubmitEligible, Preview: sanitizeProposalPreview(preview), AsOf: now}, nil
 }
 
@@ -368,6 +372,10 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Blockers: blockers, AsOf: now}, nil
 	}
 	e.appendEvent(proposalEventForProposal("previewed", prop, now, preview.PreviewTokenID, preview.Draft.OrderRef, "proposal fast-path previewed"))
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) > 0 {
+		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+	}
 	if !preview.SubmitEligible {
 		blockers := []rpc.TradingBlocker{{Code: "preview_not_submit_eligible", Message: "broker WhatIf did not make this proposal submit-eligible"}}
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
@@ -407,8 +415,14 @@ func (e *proposalEngine) revalidatedProposal(ctx context.Context, key, revision 
 	if err != nil && len(snap.Proposals) == 0 {
 		return rpc.TradeProposal{}, snap.Blockers, err
 	}
+	if len(snap.Blockers) > 0 && len(snap.Proposals) == 0 {
+		return rpc.TradeProposal{}, snap.Blockers, nil
+	}
 	if snap.PolicyStatus.Status == rpc.ProtectionPolicyStatusDrift || snap.PolicyStatus.Status == rpc.ProtectionPolicyStatusError {
 		return rpc.TradeProposal{}, snap.PolicyStatus.Blockers, nil
+	}
+	if len(snap.AutoTrade.Blockers) > 0 {
+		return rpc.TradeProposal{}, snap.AutoTrade.Blockers, nil
 	}
 	if snap.Revision != revision {
 		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "stale_revision", Message: "proposal revision is stale; refresh proposals before preview or submit"}}, nil
@@ -430,6 +444,54 @@ func selectedProposalQty(prop rpc.TradeProposal, requested int) int {
 		return prop.Quantity
 	}
 	return max(1, min(requested, prop.MaxQuantity))
+}
+
+func proposalPreviewSafetyBlockers(prop rpc.TradeProposal, preview *rpc.OrderPreviewResult) []rpc.TradingBlocker {
+	var blockers []rpc.TradingBlocker
+	add := func(code, message, action string) {
+		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{Code: code, Message: message, Action: action})
+	}
+	if preview == nil {
+		add("proposal_preview_missing", "proposal preview result is unavailable", "Refresh and preview the proposal again before submit.")
+		return blockers
+	}
+	if !proposalCloseReduceEffect(prop.PositionEffect) {
+		add("proposal_effect_not_close_reduce", fmt.Sprintf("proposal effect %q is not close/reduce", prop.PositionEffect), "Refresh proposals so the daemon can rebuild a close/reduce-only recommendation.")
+	}
+	if !proposalCloseReduceEffect(preview.Position.Effect) {
+		add("preview_effect_not_close_reduce", fmt.Sprintf("preview effect %q is not close/reduce", preview.Position.Effect), "Refresh positions and preview again; proposal submit cannot open, increase, or flip exposure.")
+	}
+	if !proposalSupportedSecType(prop.SecType) || !proposalSupportedSecType(preview.Draft.Contract.SecType) {
+		add("unsupported_security_type", "protection proposals support single-leg STK/ETF/OPT orders only", "Use a manual workflow for unsupported instruments.")
+	}
+	if preview.Draft.OrderType != rpc.OrderTypeLMT {
+		add("unsupported_order_type", fmt.Sprintf("proposal order type %q is not LMT", preview.Draft.OrderType), "Refresh proposals and preview a limit order.")
+	}
+	if preview.Draft.TIF != rpc.OrderTIFDay {
+		add("unsupported_tif", fmt.Sprintf("proposal time-in-force %q is not DAY", preview.Draft.TIF), "Refresh proposals and preview a DAY order.")
+	}
+	if strings.EqualFold(preview.Draft.Contract.SecType, "OPT") && preview.Draft.OutsideRTH {
+		add("option_outside_rth", "option protection proposals must not request outside_rth", "Refresh proposals and preview during the supported option session.")
+	}
+	if preview.Draft.Quantity <= 0 || preview.Draft.Quantity > prop.MaxQuantity {
+		add("quantity_outside_position", fmt.Sprintf("proposal preview quantity %d exceeds close/reduce cap %d", preview.Draft.Quantity, prop.MaxQuantity), "Refresh positions and preview a quantity within the current position.")
+	}
+	if !strings.EqualFold(preview.Draft.Action, prop.Action) {
+		add("action_drift", fmt.Sprintf("preview action %q does not match proposal action %q", preview.Draft.Action, prop.Action), "Refresh proposals and preview again.")
+	}
+	if strings.TrimSpace(preview.Draft.Source) != proposalOrderSource {
+		add("source_drift", "proposal preview source does not match the protection proposal engine", "Refresh proposals and preview again.")
+	}
+	return blockers
+}
+
+func proposalCloseReduceEffect(effect string) bool {
+	switch effect {
+	case rpc.OrderPositionEffectClose, rpc.OrderPositionEffectReduce:
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeProposalPreview(in *rpc.OrderPreviewResult) *rpc.TradeProposalOrderPreview {
