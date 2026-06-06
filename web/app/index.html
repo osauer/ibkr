@@ -19,7 +19,6 @@
             <h1 aria-label="Canary IBKR"><span>Canary</span><sub aria-hidden="true">IBKR</sub></h1>
           </div>
         </div>
-        <p class="app-subtitle">Portfolio Risk Monitor</p>
       </header>
 
       <section class="market-strip" aria-live="polite">
@@ -220,6 +219,35 @@
               <div class="held-stress__list" id="heldStressList"></div>
             </div>
             <div class="detail-list" id="canaryDrivers"></div>
+          </div>
+        </article>
+
+        <article class="panel protection-panel" id="protectionPanel" data-open="false">
+          <div class="panel-head">
+            <span>Protection</span>
+            <span class="panel-time" id="protectionAsOf">--</span>
+            <button class="panel-chevron" id="protectionToggle" type="button" aria-expanded="false" aria-controls="protectionDetailPanel">
+              Show proposals
+            </button>
+          </div>
+          <div class="protection-summary">
+            <div>
+              <span>Theta/day</span>
+              <b id="protectionTheta">--</b>
+            </div>
+            <div>
+              <span>Risk over target</span>
+              <b id="protectionRiskExcess">--</b>
+            </div>
+            <div>
+              <span>Actions</span>
+              <b id="protectionActions">--</b>
+            </div>
+            <button class="text-button protection-auto" id="protectionAutoButton" type="button" disabled>Auto</button>
+          </div>
+          <div class="detail-panel protection-detail" id="protectionDetailPanel" hidden>
+            <div class="source-inline" id="protectionReason" hidden></div>
+            <div class="protection-rows" id="protectionRows"></div>
           </div>
         </article>
 
@@ -451,6 +479,16 @@
                 <span>Build</span>
                 <b id="settingsBuildStatus">--</b>
                 <small id="settingsBuildMeta">--</small>
+              </div>
+              <div class="settings-cell">
+                <span>Protection</span>
+                <b id="settingsProtectionStatus">--</b>
+                <small id="settingsProtectionMeta">--</small>
+              </div>
+              <div class="settings-cell">
+                <span>Policy</span>
+                <b id="settingsPolicyStatus">--</b>
+                <small id="settingsPolicyMeta">--</small>
               </div>
             </div>
           </div>

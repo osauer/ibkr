@@ -322,6 +322,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Strategy:   strategy,
 		OrderRef:   previewOrderRef(now),
 		OpenClose:  orderOpenCloseForEffect(position.Effect),
+		Source:     strings.TrimSpace(p.Source),
 	}
 	if scope == rpc.OrderTokenScopeModify {
 		if err := validateModifyDraft(replaceView, draft); err != nil {
@@ -383,6 +384,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Quantity:       float64(draft.Quantity),
 		LimitPrice:     draft.LimitPrice,
 		OpenClose:      draft.OpenClose,
+		Source:         draft.Source,
 		Message:        previewWhatIfJournalMessage(whatIf),
 	}); err != nil {
 		return nil, fmt.Errorf("%w: append preview journal: %v", ErrTradingDisabled, err)

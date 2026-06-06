@@ -65,6 +65,23 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 	if err := s.purgeLedger.ApplyOrderFill(journalEvent); err != nil {
 		s.warnf("apply purge ledger fill: %v", err)
 	}
+	if journalEvent.Source == proposalOrderSource && s.proposalOutcomes != nil && journalEvent.Filled > 0 {
+		var submitted proposalEvent
+		if s.tradeProposals != nil && s.tradeProposals.store != nil {
+			if ev, ok, err := s.tradeProposals.store.FindSubmittedEvent(journalEvent.OrderRef, journalEvent.PreviewTokenID); err != nil {
+				s.warnf("lookup submitted proposal event: %v", err)
+			} else if ok {
+				submitted = ev
+			}
+		}
+		if submitted.PolicyID == "" {
+			s.warnf("skip proposal outcome fill: no submitted proposal event for order_ref=%s token_id=%s", journalEvent.OrderRef, journalEvent.PreviewTokenID)
+			return
+		}
+		if err := s.proposalOutcomes.AppendMark(proposalOutcomeFilledFromJournal(journalEvent, submitted, now)); err != nil {
+			s.warnf("append proposal outcome fill: %v", err)
+		}
+	}
 }
 
 func (s *Server) enrichOrderLifecycleEventFromJournal(ev *orderJournalEvent) {

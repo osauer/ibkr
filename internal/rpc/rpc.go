@@ -2854,6 +2854,7 @@ type OrderPreviewParams struct {
 	OutsideRTH bool           `json:"outside_rth,omitempty"`
 	ReplaceID  string         `json:"replace_id,omitempty"`
 	TimeoutMs  int            `json:"timeout_ms,omitempty"`
+	Source     string         `json:"source,omitempty"`
 }
 
 // OrderDraft is the canonical local intent bound into a preview token.
@@ -2868,6 +2869,7 @@ type OrderDraft struct {
 	Strategy   string         `json:"strategy"`
 	OrderRef   string         `json:"order_ref"`
 	OpenClose  string         `json:"open_close,omitempty"`
+	Source     string         `json:"source,omitempty"`
 }
 
 // OrderQuoteSnapshot captures the market-data inputs used by preview pricing.

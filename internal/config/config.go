@@ -150,6 +150,17 @@ type Trading struct {
 	MCPNonceTTL duration `toml:"mcp_nonce_ttl"`
 }
 
+type AutoTrade struct {
+	ProposalsEnabled *bool    `toml:"proposals_enabled"`
+	Enabled          bool     `toml:"enabled"`
+	AutoSubmit       bool     `toml:"auto_submit"`
+	PolicyFile       string   `toml:"policy_file"`
+	HotReload        *bool    `toml:"hot_reload"`
+	ReloadInterval   duration `toml:"reload_interval"`
+	ProposalCadence  duration `toml:"proposal_cadence"`
+	FastPathEnabled  *bool    `toml:"fast_path_enabled"`
+}
+
 const (
 	TradingModePaper = "paper"
 	TradingModeLive  = "live"
@@ -158,6 +169,58 @@ const (
 	MCPModePaperWrite = "paper-write"
 	MCPModeLiveWrite  = "live-write"
 )
+
+func (a AutoTrade) WithDefaults() AutoTrade {
+	if a.PolicyFile == "" {
+		a.PolicyFile = "~/.config/ibkr/policies/protection-policy.toml"
+	}
+	if a.HotReload == nil {
+		v := true
+		a.HotReload = &v
+	}
+	if a.ReloadInterval == 0 {
+		a.ReloadInterval = duration(30 * time.Second)
+	}
+	if a.ProposalCadence == 0 {
+		a.ProposalCadence = duration(15 * time.Minute)
+	}
+	return a
+}
+
+func (a AutoTrade) ProposalsEnabledResolved() bool {
+	if a.ProposalsEnabled == nil {
+		return true
+	}
+	return *a.ProposalsEnabled
+}
+
+func (a AutoTrade) FastPathEnabledResolved() bool {
+	if a.FastPathEnabled == nil {
+		return true
+	}
+	return *a.FastPathEnabled
+}
+
+func (a AutoTrade) HotReloadEnabled() bool {
+	if a.HotReload == nil {
+		return true
+	}
+	return *a.HotReload
+}
+
+func (a AutoTrade) ReloadIntervalDuration() time.Duration {
+	if a.ReloadInterval == 0 {
+		return 30 * time.Second
+	}
+	return a.ReloadInterval.Std()
+}
+
+func (a AutoTrade) ProposalCadenceDuration() time.Duration {
+	if a.ProposalCadence == 0 {
+		return 15 * time.Minute
+	}
+	return a.ProposalCadence.Std()
+}
 
 // WithDefaults returns t with default values applied without granting trading.
 func (t Trading) WithDefaults() Trading {
@@ -256,22 +319,24 @@ type Scan struct {
 
 // Config is the on-disk shape of ~/.config/ibkr/config.toml.
 type Config struct {
-	Gateway Gateway         `toml:"gateway"`
-	Daemon  Daemon          `toml:"daemon"`
-	Trading Trading         `toml:"trading"`
-	SPX     SPX             `toml:"spx"`
-	Scans   map[string]Scan `toml:"scans"`
+	Gateway   Gateway         `toml:"gateway"`
+	Daemon    Daemon          `toml:"daemon"`
+	Trading   Trading         `toml:"trading"`
+	AutoTrade AutoTrade       `toml:"auto_trade"`
+	SPX       SPX             `toml:"spx"`
+	Scans     map[string]Scan `toml:"scans"`
 }
 
 // Resolved is the validated, defaults-applied view a daemon actually uses.
 // Gateway carries the raw (pointer-fielded) user input; discovery happens
 // later in internal/discover and produces concrete values.
 type Resolved struct {
-	Gateway Gateway
-	Daemon  Daemon
-	Trading Trading
-	SPX     SPX
-	Scans   map[string]Scan
+	Gateway   Gateway
+	Daemon    Daemon
+	Trading   Trading
+	AutoTrade AutoTrade
+	SPX       SPX
+	Scans     map[string]Scan
 }
 
 // duration is a time.Duration that decodes from a TOML string ("5m").
@@ -338,7 +403,7 @@ func Load(path string) (*Config, error) {
 		for i, k := range undecoded {
 			keys[i] = k.String()
 		}
-		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
+		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
 }
@@ -365,11 +430,12 @@ func (c *Config) Resolve() (*Resolved, error) {
 	}
 
 	return &Resolved{
-		Gateway: c.Gateway,
-		Daemon:  dae,
-		Trading: c.Trading.WithDefaults(),
-		SPX:     c.SPX,
-		Scans:   scans,
+		Gateway:   c.Gateway,
+		Daemon:    dae,
+		Trading:   c.Trading.WithDefaults(),
+		AutoTrade: c.AutoTrade.WithDefaults(),
+		SPX:       c.SPX,
+		Scans:     scans,
 	}, nil
 }
 

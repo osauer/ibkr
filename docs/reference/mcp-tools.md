@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**22 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**23 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -248,6 +248,17 @@ Read-only risk response planner for the current account and held portfolio. Use 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `mode` | string | no | planner mode; default auto lets margin/P&L act signals escalate even when canary headline is watch |
+
+## `ibkr_proposals`
+
+Read daemon-owned protection proposals for existing positions. Use when the user asks what close/reduce-only actions ibkr currently recommends for theta hygiene or risk reduction, or asks why proposal automation is blocked. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview, submit, place, modify, cancel, transmit, or expose raw preview tokens. For existing holdings use `ibkr_positions`; for broad risk evidence use `ibkr_canary` or `ibkr_regime`; for local order-entry readiness use `ibkr_trading_status`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `refresh` | boolean | no | when true, ask the daemon to recompute proposals before returning; otherwise returns the latest daemon snapshot |
+| `show` | boolean | no | when true, records a shown audit event for returned proposal rows |
 
 ## `ibkr_size`
 

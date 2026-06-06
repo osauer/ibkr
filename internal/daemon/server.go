@@ -254,10 +254,17 @@ type Server struct {
 	// broker lifecycle evidence, not from preview/send attempts, so restore
 	// cannot double a position merely because a local file was edited.
 	purgeLedger *purgeLedgerStore
+	// proposalOutcomes is the append-only measurement book for protection
+	// proposals. It records submitted/fill/mark evidence keyed to proposal
+	// identity and order-journal refs without storing raw preview tokens.
+	proposalOutcomes *proposalOutcomeStore
 	// platformSettings persists daemon-owned runtime preferences. Gateway,
 	// account, trading enablement, and build capability stay config/build
 	// owned; this store only carries settings ibkr may edit at runtime.
-	platformSettings *platformSettingsStore
+	platformSettings   *platformSettingsStore
+	protectionPolicies *protectionPolicyManager
+	tradeProposals     *proposalEngine
+	proposalsStarted   sync.Once
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
 	// gated place handler exists.
@@ -364,7 +371,10 @@ func New(opts Options) *Server {
 	s.installTradingReadinessStore()
 	s.installOrderJournalStore()
 	s.installPurgeLedgerStore()
+	s.installProposalOutcomeStore()
 	s.installPlatformSettingsStore()
+	s.installProtectionPolicyManager()
+	s.installProposalEngine()
 	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
@@ -969,6 +979,14 @@ func (s *Server) Start(ctx context.Context) error {
 		s.connectInFlight = true
 		s.mu.Unlock()
 		go s.runConnectAttempt(serverCtx, ep)
+	}
+	if s.protectionPolicies != nil {
+		go s.protectionPolicies.Run(serverCtx, s.logger.Infof)
+	}
+	if s.tradeProposals != nil {
+		s.proposalsStarted.Do(func() {
+			go s.tradeProposals.Run(serverCtx)
+		})
 	}
 	// Breadth scheduler launches from postConnectSetup behind a
 	// sync.Once — the cold-start bootstrap fan-out depends on a live
@@ -1975,6 +1993,18 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodTradingStatus:
 		s.unary(req, enc, func() (any, error) { return s.handleTradingStatus(), nil })
+	case rpc.MethodAutoTradeStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleAutoTradeStatus(), nil })
+	case rpc.MethodTradeProposalsSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSnapshot(req), nil })
+	case rpc.MethodTradeProposalsRefresh:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsRefresh(ctx, req) })
+	case rpc.MethodTradeProposalsPreview:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsPreview(ctx, req) })
+	case rpc.MethodTradeProposalsSubmit:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSubmit(ctx, req) })
+	case rpc.MethodTradeProposalsIgnore:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsIgnore(req), nil })
 	case rpc.MethodSettingsGet:
 		s.unary(req, enc, func() (any, error) { return s.handleSettingsGet() })
 	case rpc.MethodSettingsUpdate:
@@ -2096,11 +2126,11 @@ func unaryDeadline(method string) time.Duration {
 		// a fast quote path on a v203 TWS session; leave enough room for
 		// it while still beating the CLI's default 60 s unary ceiling.
 		return 55 * time.Second
-	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute:
+	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute, rpc.MethodTradeProposalsRefresh, rpc.MethodTradeProposalsPreview, rpc.MethodTradeProposalsSubmit:
 		return 55 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodAutoTradeStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodTradeProposalsSnapshot, rpc.MethodTradeProposalsIgnore, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0

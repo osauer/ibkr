@@ -68,7 +68,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	for range 10 {
+	for range 12 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -76,7 +76,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_quotes", "trading", "settings", "regime", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -376,6 +376,30 @@ func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.
 
 func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return c.trading, nil
+}
+
+func (c *fakeClient) AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error) {
+	return &rpc.AutoTradeStatus{ProposalsEnabled: true, FastPathEnabled: true}, nil
+}
+
+func (c *fakeClient) TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error) {
+	return &rpc.TradeProposalSnapshot{Kind: rpc.TradeProposalSnapshotKind, SchemaVersion: rpc.TradeProposalSnapshotSchemaVersion, Revision: "empty", Proposals: []rpc.TradeProposal{}}, nil
+}
+
+func (c *fakeClient) TradeProposalsRefresh(context.Context, rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error) {
+	return c.TradeProposalsSnapshot(context.Background(), rpc.TradeProposalSnapshotParams{})
+}
+
+func (c *fakeClient) TradeProposalsPreview(context.Context, rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) TradeProposalsSubmit(context.Context, rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error) {
+	return nil, nil
 }
 
 func (c *fakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) {

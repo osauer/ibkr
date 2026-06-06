@@ -295,6 +295,10 @@ func nullableInt(raw json.RawMessage) (*int, error) {
 func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rpc.PlatformSettings {
 	data := s.platformSettings.snapshot()
 	trading := s.effectiveTradingConfig()
+	autoTrade := config.AutoTrade{}.WithDefaults()
+	if s.cfg != nil {
+		autoTrade = s.cfg.AutoTrade.WithDefaults()
+	}
 	status := s.currentTradingStatus()
 	limitsWritable, limitReason := s.tradingLimitWritability()
 	purgeEnabled := true
@@ -338,6 +342,16 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 				AllowOptionMarketOrders: settingsBool(trading.AllowOptionMarketOrders, limitAccess, limitSource(data.Trading.AllowOptionMarketOrders != nil), limitReason),
 			},
 			Status: &status,
+		},
+		AutoTrade: rpc.PlatformAutoTradeSettings{
+			ProposalsEnabled: settingsBool(autoTrade.ProposalsEnabledResolved(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].proposals_enabled in config.toml"),
+			Enabled:          settingsBool(autoTrade.Enabled, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "future autonomous gate; set [auto_trade].enabled in config.toml"),
+			AutoSubmit:       settingsBool(autoTrade.AutoSubmit, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "future autonomous submit gate; set [auto_trade].auto_submit in config.toml"),
+			FastPathEnabled:  settingsBool(autoTrade.FastPathEnabledResolved(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].fast_path_enabled in config.toml"),
+			PolicyFile:       settingsString(autoTrade.PolicyFile, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].policy_file in config.toml"),
+			HotReload:        settingsBool(autoTrade.HotReloadEnabled(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].hot_reload in config.toml"),
+			ReloadInterval:   settingsString(autoTrade.ReloadIntervalDuration().String(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].reload_interval in config.toml"),
+			ProposalCadence:  settingsString(autoTrade.ProposalCadenceDuration().String(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].proposal_cadence in config.toml"),
 		},
 		MarketData: rpc.PlatformMarketDataSetting{Quality: observedMarketDataQuality(observed)},
 		Build: rpc.PlatformBuildSettings{

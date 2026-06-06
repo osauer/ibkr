@@ -15,6 +15,7 @@ const state = {
   underlyingDetailOpen: false,
   portfolioDetailOpen: false,
   accountExposureOpen: false,
+  protectionOpen: false,
   selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
   marketCalendarOverride: null,
   selectedAlertID: null,
@@ -68,6 +69,7 @@ function setupLiveRefreshLoop() {
       renderAccountPanel(snap.account || {}, snap.positions || {}, snap.canary || {});
       renderUnderlyings(snap.positions || {}, snap.account || {});
       renderPortfolioRisk(snap.positions || {}, snap.account || {});
+      renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {});
     }
     refreshBootstrapIfSSEUnavailable();
   }, 1000);
@@ -229,7 +231,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "settings", "regime", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -285,7 +287,7 @@ function renderAll() {
   renderAccountPanel(account, positions, canary);
   renderUnderlyings(positions, account);
   renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
-  $("positionsAsOf").textContent = shortTime(positions.as_of);
+  renderFreshnessTimestamp("positionsAsOf", positions.as_of, { staleMinutes: 15 });
   $("stockCount").textContent = (positions.stocks || []).length;
   $("optionCount").textContent = (positions.options || []).length;
   $("baseCurrency").textContent = account.base_currency || positions.portfolio?.base_currency || "--";
@@ -297,6 +299,7 @@ function renderAll() {
   renderSelectedAlert();
   renderOrderReview();
   renderCanaryMitigation(canary);
+  renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {});
   renderOpenOrders();
   renderMarketContext(snap);
   renderRegimePanel(snap);
@@ -345,6 +348,8 @@ function renderTabs() {
   for (const panel of document.querySelectorAll("[data-tab-panel]")) {
     panel.hidden = panel.dataset.tabPanel !== active;
   }
+  const accountPanel = $("accountPanel");
+  if (accountPanel) accountPanel.hidden = active === "settings";
   for (const button of document.querySelectorAll("[data-tab]")) {
     const selected = button.dataset.tab === active;
     button.classList.toggle("active", selected);
@@ -366,7 +371,7 @@ function renderSettings() {
   if (!settings || !settings.kind) return;
   state.settings = settings;
   const purge = settings.features?.purge_restore?.enabled || {};
-  $("settingsAsOf").textContent = shortTime(settings.as_of);
+  renderFreshnessTimestamp("settingsAsOf", settings.as_of, { staleMinutes: 15 });
   $("purgeRestoreSettingState").textContent = purge.value === false ? "Disabled" : "Enabled";
   $("purgeRestoreSettingMeta").textContent = settingMeta(purge);
   const toggle = $("purgeRestoreToggle");
@@ -385,6 +390,7 @@ function renderSettings() {
   $("settingsMarketDataMeta").textContent = quality.summary || "Observed compact summary";
   $("settingsBuildStatus").textContent = settings.build?.channel?.value || "stable";
   $("settingsBuildMeta").textContent = settings.build?.experimental_trading_note || "Build-controlled capability";
+  renderProtectionSettings(settings.auto_trade || {}, state.snapshot?.auto_trade || {});
 }
 
 function settingMeta(field = {}) {
@@ -416,6 +422,39 @@ function tradingLimitMeta(limits = {}) {
   const firstReason = fields.map((field) => field.reason).find(Boolean);
   if (writable) return "Runtime overrides writable";
   return firstReason || "Config/build controlled";
+}
+
+function renderProtectionSettings(autoTrade = {}, status = {}) {
+  const proposals = autoTrade.proposals_enabled || {};
+  const fastPath = autoTrade.fast_path_enabled || {};
+  const autoEnabled = autoTrade.enabled || {};
+  const autoSubmit = autoTrade.auto_submit || {};
+  const policy = status.policy || {};
+  const hotReload = autoTrade.hot_reload || {};
+  const cadence = autoTrade.proposal_cadence?.value || status.proposal_cadence || "";
+  const reload = autoTrade.reload_interval?.value || status.reload_interval || "";
+  $("settingsProtectionStatus").textContent = proposals.value === false ? "Proposals off" : "Manual proposals on";
+  $("settingsProtectionMeta").textContent = [
+    fastPath.value === false ? "fast path off" : "fast path on",
+    autoEnabled.value ? "auto enabled" : "auto off",
+    autoSubmit.value ? "submit on" : "submit off",
+    cadence ? `cadence ${cadence}` : "",
+  ].filter(Boolean).join(" / ") || "Config-owned";
+  $("settingsPolicyStatus").textContent = policy.policy_id
+    ? `${policy.policy_id} v${policy.policy_version || "--"}`
+    : settingsPolicyFileLabel(autoTrade.policy_file?.value);
+  $("settingsPolicyMeta").textContent = [
+    policy.status ? `status ${labelize(policy.status)}` : "",
+    hotReload.value === false ? "hot reload off" : "hot reload on",
+    reload ? `reload ${reload}` : "",
+  ].filter(Boolean).join(" / ") || settingMeta(autoTrade.policy_file || {});
+}
+
+function settingsPolicyFileLabel(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Policy file";
+  const normalized = raw.replaceAll("\\", "/");
+  return normalized.split("/").filter(Boolean).pop() || raw;
 }
 
 async function setPurgeRestoreEnabled(enabled) {
@@ -525,6 +564,16 @@ function handlePortfolioPanelTap(event) {
   setPortfolioExpansion(!state.portfolioDetailOpen);
 }
 
+function handleProtectionPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setProtectionExpansion(!state.protectionOpen);
+}
+
+function setProtectionExpansion(open) {
+  state.protectionOpen = Boolean(open);
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {});
+}
+
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
   const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
@@ -540,7 +589,7 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   $("accountLabel").textContent = accountContext.accountLabel;
   $("tradingEnvPill").textContent = accountContext.modeLabel;
   $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
-  $("accountAsOf").textContent = account.as_of ? `fresh ${shortTime(account.as_of)}` : "freshness pending";
+  renderFreshnessTimestamp("accountAsOf", account.as_of, { staleMinutes: 15 });
 
   const button = $("accountPrivacyToggle");
   button.classList.toggle("is-visible", state.accountValueVisible);
@@ -674,7 +723,7 @@ function renderUnderlyings(positions = {}, account = {}) {
       || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
   }
   if (freshness) {
-    freshness.textContent = positions.as_of ? shortTime(positions.as_of) : "freshness pending";
+    renderFreshnessTimestamp(freshness, positions.as_of, { staleMinutes: 15 });
   }
   const panel = $("underlyingPanel");
   if (panel && (state.underlyingBusy || state.underlyingNotice)) {
@@ -1425,6 +1474,167 @@ function renderCanaryMitigation(canary = {}) {
   button.title = gate.reason;
 }
 
+function renderProtectionPanel(proposals = {}, autoTrade = {}) {
+  const panel = $("protectionPanel");
+  const detail = $("protectionDetailPanel");
+  const toggle = $("protectionToggle");
+  const rows = proposals.proposals || [];
+  const counts = proposals.counts || {};
+  panel.dataset.open = String(state.protectionOpen);
+  detail.hidden = !state.protectionOpen;
+  toggle.textContent = state.protectionOpen ? "Hide proposals" : "Show proposals";
+  toggle.setAttribute("aria-expanded", String(state.protectionOpen));
+  renderProtectionTimestamp(proposals);
+  $("protectionTheta").textContent = typeof counts.theta_per_day === "number" ? money(counts.theta_per_day, "") : "--";
+  $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number"
+    ? money(counts.risk_reduction_excess_notional, protectionRiskExcessCurrency(counts))
+    : "--";
+  $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
+  const autoButton = $("protectionAutoButton");
+  autoButton.disabled = true;
+  autoButton.title = autoTrade.auto_submit ? "Autonomous submit is not available in MVP" : "Manual confirmation required";
+  const reason = protectionReason(proposals, autoTrade);
+  const reasonEl = $("protectionReason");
+  reasonEl.textContent = reason;
+  reasonEl.hidden = !reason;
+  if (!state.protectionOpen) return;
+  $("protectionRows").replaceChildren(...rows.map(protectionRow));
+}
+
+function renderProtectionTimestamp(proposals = {}) {
+  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes: 15 });
+}
+
+function protectionReason(proposals = {}, autoTrade = {}) {
+  const blocker = (proposals.blockers || autoTrade.blockers || [])[0];
+  if (blocker) return `${blocker.code}: ${blocker.message}`;
+  if (autoTrade.policy?.status && autoTrade.policy.status !== "active" && autoTrade.policy.status !== "default") {
+    return `Policy ${autoTrade.policy.status}`;
+  }
+  return autoTrade.fast_path_enabled === false ? "Fast path disabled" : "";
+}
+
+function protectionRow(proposal) {
+  const row = document.createElement("div");
+  row.className = "protection-row";
+  const blocked = (proposal.blockers || []).length > 0;
+  const tradability = protectionTradabilityGate(proposal);
+  const copy = document.createElement("div");
+  const bucket = document.createElement("span");
+  bucket.textContent = labelize(proposal.bucket || "--");
+  const title = document.createElement("b");
+  title.textContent = protectionProposalTitle(proposal);
+  const reason = document.createElement("small");
+  reason.textContent = proposal.reason || "";
+  copy.append(bucket, title, reason);
+  const actions = document.createElement("div");
+  actions.className = "protection-row__actions";
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = proposal.action === "BUY" ? "protection-buy" : "protection-sell";
+  submit.textContent = proposal.action === "BUY" ? "Buy" : "Sell";
+  submit.disabled = blocked || !tradability.ready;
+  submit.title = blocked ? protectionBlockerText(proposal) : tradability.reason;
+  submit.addEventListener("click", () => submitProtectionProposal(proposal));
+  const ignore = document.createElement("button");
+  ignore.type = "button";
+  ignore.className = "protection-ignore";
+  ignore.textContent = "Ignore";
+  ignore.title = "Ignore this proposal; no market order is sent";
+  ignore.addEventListener("click", () => ignoreProtectionProposal(proposal));
+  actions.append(submit, ignore);
+  row.append(copy, actions);
+  return row;
+}
+
+function protectionProposalTitle(proposal = {}) {
+  return [
+    proposal.action || "--",
+    proposal.quantity || 0,
+    proposal.symbol || "--",
+    protectionContractLabel(proposal.contract || {}),
+  ].filter(Boolean).join(" ");
+}
+
+function protectionContractLabel(contract = {}) {
+  if (String(contract.sec_type || "").toUpperCase() !== "OPT") return "";
+  const right = String(contract.right || "").trim().toUpperCase();
+  const strike = typeof contract.strike === "number" && contract.strike > 0 ? formatStrike(contract.strike) : "";
+  const expiry = formatExpiry(contract.expiry || "");
+  const optionSide = strike && right ? `${strike}${right}` : right || strike;
+  return [expiry, optionSide].filter(Boolean).join(" ");
+}
+
+function protectionTradabilityGate(proposal = {}) {
+  const calendar = currentMarketCalendar(state.snapshot || {});
+  const session = calendar?.session;
+  if (!session) {
+    return { ready: false, reason: "Trading disabled until market calendar is available" };
+  }
+  if (session.is_open) {
+    return { ready: true, reason: "Selected market is currently tradable" };
+  }
+  const label = marketSessionLabel(calendar);
+  const market = label.phase || label.text || "selected market is closed";
+  return { ready: false, reason: `Disabled while ${market}; Ignore remains available` };
+}
+
+function protectionBlockerText(proposal = {}) {
+  const blockers = proposal.blockers || [];
+  if (blockers.length === 0) return "Proposal is blocked";
+  return blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
+}
+
+function protectionRiskExcessCurrency(counts = {}) {
+  const currency = String(counts.risk_reduction_excess_currency || "").trim().toUpperCase();
+  if (currency && currency !== "MIX") return currency;
+  return "USD";
+}
+
+function formatStrike(value) {
+  if (typeof value !== "number") return "";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function formatExpiry(value) {
+  const raw = String(value || "").trim();
+  if (/^\d{8}$/.test(raw)) {
+    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+  }
+  return raw;
+}
+
+async function submitProtectionProposal(proposal) {
+  const res = await fetch("/api/proposals/submit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ key: proposal.key, revision: proposal.revision, quantity: proposal.quantity, fast_path: true }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  await refreshProtectionProposals();
+}
+
+async function ignoreProtectionProposal(proposal) {
+  const res = await fetch("/api/proposals/ignore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ key: proposal.key, revision: proposal.revision }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  await refreshProtectionProposals();
+}
+
+async function refreshProtectionProposals() {
+  const res = await fetch("/api/proposals/refresh", { method: "POST", credentials: "include" });
+  if (res.ok) {
+    const proposals = await res.json();
+    state.snapshot = { ...(state.snapshot || {}), proposals };
+    renderAll();
+  }
+}
+
 function mitigationPlanGate(canary = {}) {
   const set = activeOrderReviewSet();
   if (set) {
@@ -1676,18 +1886,7 @@ function readinessExplanation(canary) {
 }
 
 function renderCanaryTimestamp(canary) {
-  const el = $("canaryAsOf");
-  const at = parseDate(canary.as_of);
-  if (!at) {
-    el.textContent = "no timestamp";
-    el.classList.add("stale");
-    return;
-  }
-  const ageMS = Date.now() - at.getTime();
-  const ageMinutes = Math.max(0, Math.floor(ageMS / 60000));
-  const stale = ageMinutes >= 5;
-  el.textContent = `${stale ? "stale" : "updated"} ${shortTime(canary.as_of)} · ${ageLabel(ageMinutes)}`;
-  el.classList.toggle("stale", stale);
+  renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5 });
 }
 
 function renderMarketContext(snap) {
@@ -1793,7 +1992,9 @@ function renderRegimePanel(snap) {
   $("marketRegimeSummary").textContent = regimeStatus.summary;
   $("marketRegimeMix").textContent = regimeStatus.detail;
   $("marketRegimeMix").title = regimeStatus.title;
-  $("regimeAsOf").textContent = latestRegimeRead(canary, indicators);
+  renderFreshnessTimestamp("regimeAsOf", latestRegimeTimestamp(canary, indicators), {
+    staleMinutes: 60,
+  });
   renderMarketWeather(posture);
   renderRegimeDetail(indicators, snap, canary);
 }
@@ -1949,6 +2150,12 @@ function marketRegimeMix(market, indicators) {
 }
 
 function latestRegimeRead(canary, indicators) {
+  const latest = latestRegimeTimestamp(canary, indicators);
+  if (latest) return shortTimeWithZone(latest.toISOString());
+  return latestRegimeTimestampFallback(canary, indicators) || "Waiting for regime timestamp";
+}
+
+function latestRegimeTimestamp(canary, indicators) {
   const sourceAsOf = canary.source_as_of || {};
   const candidates = [
     sourceAsOf.regime,
@@ -1959,17 +2166,25 @@ function latestRegimeRead(canary, indicators) {
     ...indicators.map((indicator) => indicator.as_of),
   ].filter(Boolean);
   let latest = null;
-  let fallback = "";
   for (const candidate of candidates) {
     const parsed = parseDate(candidate);
     if (parsed && (!latest || parsed > latest)) {
       latest = parsed;
-      continue;
     }
-    if (!fallback) fallback = String(candidate);
   }
-  if (latest) return shortTimeWithZone(latest.toISOString());
-  return fallback || "Waiting for regime timestamp";
+  return latest;
+}
+
+function latestRegimeTimestampFallback(canary, indicators) {
+  const sourceAsOf = canary.source_as_of || {};
+  return [
+    sourceAsOf.regime,
+    sourceAsOf.market_regime,
+    canary.regime_as_of,
+    canary.market?.regime_as_of,
+    canary.as_of,
+    ...indicators.map((indicator) => indicator.as_of),
+  ].map((candidate) => String(candidate || "").trim()).find(Boolean) || "";
 }
 
 function renderMarketWeather(posture = {}) {
@@ -2633,11 +2848,11 @@ function detailFact(fact) {
   const row = document.createElement("div");
   row.className = "detail-fact " + (fact.tone || "neutral");
   const label = document.createElement("span");
-  label.textContent = fact.label;
+  label.textContent = labelize(fact.label);
   const title = document.createElement("b");
-  title.textContent = fact.title || "--";
+  title.textContent = cleanDetail(fact.title || "--");
   const body = document.createElement("p");
-  body.textContent = fact.body || "";
+  body.textContent = cleanDetail(fact.body || "");
   row.append(label, title, body);
   return row;
 }
@@ -3281,7 +3496,7 @@ function renderOpenOrders() {
   const list = $("ordersOpenList");
   const orders = state.ordersOpen?.orders || [];
   if (panel) panel.hidden = orders.length === 0;
-  $("ordersAsOf").textContent = state.ordersOpen?.as_of ? shortTime(state.ordersOpen.as_of) : "--";
+  renderFreshnessTimestamp("ordersAsOf", state.ordersOpen?.as_of, { staleMinutes: 15, fallback: "--" });
   if (orders.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-row";
@@ -4176,6 +4391,10 @@ $("accountLargestExposureToggle").addEventListener("click", () => {
 $("canaryDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("canary", !state.canaryDetailOpen);
 });
+$("protectionToggle").addEventListener("click", () => {
+  setProtectionExpansion(!state.protectionOpen);
+});
+$("protectionPanel").addEventListener("click", (event) => handleProtectionPanelTap(event));
 $("quickReviewBlockersButton").addEventListener("click", () => {
   setRegimeCanaryExpansion("canary", true);
   $("canaryDetailPanel").scrollIntoView({ block: "nearest" });
@@ -4461,6 +4680,23 @@ function ageLabel(minutes) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return rest === 0 ? `${hours}h old` : `${hours}h ${rest}m old`;
+}
+
+function renderFreshnessTimestamp(target, value, options = {}) {
+  const el = typeof target === "string" ? $(target) : target;
+  if (!el) return;
+  const at = value instanceof Date ? value : parseDate(value);
+  if (!at) {
+    el.textContent = options.fallback || "no timestamp";
+    el.classList.add("stale");
+    return;
+  }
+  const ageMS = Date.now() - at.getTime();
+  const ageMinutes = Math.max(0, Math.floor(ageMS / 60000));
+  const staleMinutes = typeof options.staleMinutes === "number" ? options.staleMinutes : 15;
+  const stale = ageMinutes >= staleMinutes;
+  el.textContent = `${stale ? "stale" : "updated"} ${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`;
+  el.classList.toggle("stale", stale);
 }
 
 function parseDate(value) {

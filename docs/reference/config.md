@@ -8,6 +8,14 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 
 | Section | Field | Type | Description |
 |---------|-------|------|-------------|
+| `[auto_trade]` | `auto_submit` | `bool` |  |
+| `[auto_trade]` | `enabled` | `bool` |  |
+| `[auto_trade]` | `fast_path_enabled` | `*bool` |  |
+| `[auto_trade]` | `hot_reload` | `*bool` |  |
+| `[auto_trade]` | `policy_file` | `string` |  |
+| `[auto_trade]` | `proposal_cadence` | `duration` |  |
+| `[auto_trade]` | `proposals_enabled` | `*bool` |  |
+| `[auto_trade]` | `reload_interval` | `duration` |  |
 | `[daemon]` | `idle_timeout` | `duration` | IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like "1h" or "0s"); set "0s" to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under `ibkr daemon --foreground`. |
 | `[daemon]` | `log_level` | `string` | LogLevel is the daemon's log verbosity — one of "debug", "info" (default), "warn", or "error". |
 | `[gateway]` | `account` | `string` | Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts. |

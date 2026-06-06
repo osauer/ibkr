@@ -123,7 +123,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function handleExpandablePanelTap(event, which)",
 		`$("regimePanel").addEventListener("click"`,
 		`$("canaryHero").addEventListener("click"`,
-		`"trading", "settings", "regime", "canary"`,
+		`"trading", "auto_trade", "proposals", "settings", "regime", "canary"`,
 		"function setupLiveRefreshLoop()",
 		"function setupBottomTabs()",
 		"function renderTabs()",

@@ -745,6 +745,30 @@ func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error
 	}, nil
 }
 
+func (routeFakeClient) AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error) {
+	return &rpc.AutoTradeStatus{ProposalsEnabled: true, FastPathEnabled: true}, nil
+}
+
+func (routeFakeClient) TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error) {
+	return &rpc.TradeProposalSnapshot{Kind: rpc.TradeProposalSnapshotKind, SchemaVersion: rpc.TradeProposalSnapshotSchemaVersion, Revision: "empty", Proposals: []rpc.TradeProposal{}}, nil
+}
+
+func (routeFakeClient) TradeProposalsRefresh(context.Context, rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error) {
+	return routeFakeClient{}.TradeProposalsSnapshot(context.Background(), rpc.TradeProposalSnapshotParams{})
+}
+
+func (routeFakeClient) TradeProposalsPreview(context.Context, rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error) {
+	return &rpc.TradeProposalPreviewResult{Accepted: true, PreviewTokenID: "tok-1"}, nil
+}
+
+func (routeFakeClient) TradeProposalsSubmit(context.Context, rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error) {
+	return &rpc.TradeProposalSubmitResult{Accepted: false, Blockers: []rpc.TradingBlocker{{Code: "test", Message: "blocked"}}}, nil
+}
+
+func (routeFakeClient) TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error) {
+	return &rpc.TradeProposalIgnoreResult{Accepted: true, Key: "proposal"}, nil
+}
+
 func (routeFakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) {
 	return &rpc.PlatformSettings{
 		Kind: "ibkr.platform_settings",

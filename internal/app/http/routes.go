@@ -95,6 +95,11 @@ func Register(deps Dependencies) {
 	srv.POST("/api/purge/execute", h.requireAuth(h.handlePurgeExecute))
 	srv.POST("/api/purge/restore/preview", h.requireAuth(h.handlePurgeRestorePreview))
 	srv.POST("/api/purge/restore/execute", h.requireAuth(h.handlePurgeRestoreExecute))
+	srv.GET("/api/proposals", h.requireAuth(h.handleProposalsSnapshot))
+	srv.POST("/api/proposals/refresh", h.requireAuth(h.handleProposalsRefresh))
+	srv.POST("/api/proposals/preview", h.requireAuth(h.handleProposalsPreview))
+	srv.POST("/api/proposals/submit", h.requireAuth(h.handleProposalsSubmit))
+	srv.POST("/api/proposals/ignore", h.requireAuth(h.handleProposalsIgnore))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
 }

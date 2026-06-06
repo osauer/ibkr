@@ -23,6 +23,12 @@ type Client interface {
 	Canary(context.Context) (*rpc.CanaryResult, error)
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
+	AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error)
+	TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error)
+	TradeProposalsRefresh(context.Context, rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error)
+	TradeProposalsPreview(context.Context, rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error)
+	TradeProposalsSubmit(context.Context, rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error)
+	TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error)
 	Settings(context.Context) (*rpc.PlatformSettings, error)
 	UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error)
 	RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error)
@@ -143,6 +149,54 @@ func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.Reg
 func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {
 	var out rpc.TradingStatus
 	if err := c.call(ctx, rpc.MethodTradingStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) AutoTradeStatus(ctx context.Context) (*rpc.AutoTradeStatus, error) {
+	var out rpc.AutoTradeStatus
+	if err := c.call(ctx, rpc.MethodAutoTradeStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsSnapshot(ctx context.Context, params rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error) {
+	var out rpc.TradeProposalSnapshot
+	if err := c.call(ctx, rpc.MethodTradeProposalsSnapshot, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsRefresh(ctx context.Context, params rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error) {
+	var out rpc.TradeProposalSnapshot
+	if err := c.call(ctx, rpc.MethodTradeProposalsRefresh, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsPreview(ctx context.Context, params rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error) {
+	var out rpc.TradeProposalPreviewResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsPreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsSubmit(ctx context.Context, params rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error) {
+	var out rpc.TradeProposalSubmitResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsSubmit, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsIgnore(ctx context.Context, params rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error) {
+	var out rpc.TradeProposalIgnoreResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsIgnore, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
