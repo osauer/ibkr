@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
@@ -138,26 +137,12 @@ func (s *Server) currentTradingStatus() rpc.TradingStatus {
 }
 
 func (s *Server) purgeExecuteBlockers(status rpc.TradingStatus) []rpc.TradingBlocker {
-	blockers := append([]rpc.TradingBlocker{}, status.Blockers...)
+	blockers := s.brokerWriteAuthorization(status).Blockers
 	add := func(code, message, action string) {
-		blockers = append(blockers, rpc.TradingBlocker{Code: code, Message: message, Action: action})
-	}
-	if !status.Enabled {
-		add("trading_disabled", "trading is disabled", "Enable [trading] before broker writes.")
+		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{Code: code, Message: message, Action: action})
 	}
 	if !s.purgeRestoreEnabled() {
 		add("purge_restore_disabled", "purge/restore actions are disabled in platform settings", "Run `ibkr settings set features.purge_restore.enabled=true` before using purge/restore.")
-	}
-	if !s.orderPaperWritesEnabled() {
-		add("order_writes_unavailable", "order writes are unavailable in this build", "Rebuild the daemon with the trading write capability.")
-	}
-	if s.orderJournal == nil {
-		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the daemon state directory before enabling trading.")
-	}
-	switch status.Mode {
-	case config.TradingModePaper, config.TradingModeLive:
-	default:
-		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", status.Mode), "Set [trading].mode to paper or live.")
 	}
 	return blockers
 }

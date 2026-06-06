@@ -43,6 +43,32 @@ func TestPurgeExecuteUsesFreshStockQuantity(t *testing.T) {
 	}
 }
 
+func TestPurgeExecuteBlockersUseBrokerWriteAuthorization(t *testing.T) {
+	t.Parallel()
+	srv := newPurgeExecuteTestServer(t)
+	blockers := srv.purgeExecuteBlockers(rpc.TradingStatus{
+		Enabled:         true,
+		Mode:            config.TradingModeLive,
+		PreviewRequired: true,
+		CanPreview:      true,
+		CanTransmit:     false,
+		Account:         "U1234567",
+		Endpoint:        "127.0.0.1:4001",
+		ClientID:        31,
+		Blockers: []rpc.TradingBlocker{{
+			Code:    "live_not_allowed",
+			Message: "live trading requires an explicit local override",
+			Action:  "Set [trading].allow_live = true.",
+		}},
+	})
+	if !hasBlocker(blockers, "live_not_allowed") {
+		t.Fatalf("blockers = %+v, want live_not_allowed", blockers)
+	}
+	if hasBlocker(blockers, "paper_writes_only") {
+		t.Fatalf("blockers = %+v, did not expect a paper-only gate", blockers)
+	}
+}
+
 func TestPurgeExecuteFlatWhenNoCurrentPositionsMatch(t *testing.T) {
 	t.Parallel()
 	flat := newPurgeExecuteTestServer(t)

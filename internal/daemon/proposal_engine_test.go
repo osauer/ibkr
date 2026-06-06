@@ -107,6 +107,60 @@ func TestProposalPreviewParamsCarryOrderSource(t *testing.T) {
 	}
 }
 
+func TestProposalPreviewSafetyBlocksOpenEffect(t *testing.T) {
+	prop := rpc.TradeProposal{
+		Action:         rpc.OrderActionSell,
+		MaxQuantity:    1,
+		PositionEffect: rpc.OrderPositionEffectClose,
+		SecType:        "STK",
+	}
+	preview := &rpc.OrderPreviewResult{
+		Mode: "paper",
+		Draft: rpc.OrderDraft{
+			Action:    rpc.OrderActionSell,
+			Contract:  rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			Quantity:  1,
+			OrderType: rpc.OrderTypeLMT,
+			TIF:       rpc.OrderTIFDay,
+			Source:    proposalOrderSource,
+		},
+		Position: rpc.OrderPositionImpact{Effect: rpc.OrderPositionEffectOpen},
+	}
+	blockers := proposalPreviewSafetyBlockers(prop, preview)
+	if !hasBlocker(blockers, "preview_effect_not_close_reduce") {
+		t.Fatalf("blockers = %+v, want preview_effect_not_close_reduce", blockers)
+	}
+}
+
+func TestProposalPreviewSafetyDoesNotOwnExecutionRoute(t *testing.T) {
+	prop := rpc.TradeProposal{
+		Action:         rpc.OrderActionBuy,
+		MaxQuantity:    1,
+		PositionEffect: rpc.OrderPositionEffectClose,
+		SecType:        "OPT",
+	}
+	preview := &rpc.OrderPreviewResult{
+		Mode: "live",
+		Draft: rpc.OrderDraft{
+			Action:     rpc.OrderActionBuy,
+			Contract:   rpc.ContractParams{Symbol: "SPY", SecType: "OPT", Exchange: "SMART", Currency: "USD", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100},
+			Quantity:   1,
+			OrderType:  rpc.OrderTypeLMT,
+			TIF:        rpc.OrderTIFDay,
+			OutsideRTH: false,
+			Source:     proposalOrderSource,
+		},
+		Position: rpc.OrderPositionImpact{Effect: rpc.OrderPositionEffectClose},
+	}
+	blockers := proposalPreviewSafetyBlockers(prop, preview)
+	if hasBlocker(blockers, "proposal_not_paper") {
+		t.Fatalf("blockers = %+v, proposal safety should not own paper/live routing", blockers)
+	}
+	if len(blockers) != 0 {
+		t.Fatalf("blockers = %+v, want route-neutral proposal safety", blockers)
+	}
+}
+
 func TestProposalRevisionIgnoresRegimeLifecycleChurn(t *testing.T) {
 	policy := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
 	sources := rpc.TradeProposalSourceFingerprints{

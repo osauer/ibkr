@@ -172,6 +172,28 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 	}
 }
 
+func TestTradingStatusBlocksWhenPreviewRequirementDisabled(t *testing.T) {
+	t.Parallel()
+	port := 4002
+	clientID := 31
+	requirePreview := false
+	srv := &Server{
+		cfg: &config.Resolved{
+			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
+			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper, RequirePreview: &requirePreview}.WithDefaults(),
+		},
+		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+	}
+	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
+
+	if !hasTradingBlocker(st, "preview_required_disabled") {
+		t.Fatalf("missing preview requirement blocker in %+v", st.Blockers)
+	}
+	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+		t.Fatalf("preview-disabled capabilities should all be false: %+v", st)
+	}
+}
+
 func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 	t.Parallel()
 	port := 7497
@@ -281,8 +303,11 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	if st.LiveOverride != rpc.TradingLiveOverrideReady {
 		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
 	}
-	if !st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
-		t.Fatalf("live-ready capabilities should remain preview-only in this release: %+v", st)
+	if !st.CanPreview {
+		t.Fatalf("live-ready gate should allow preview: %+v", st)
+	}
+	if st.CanTransmit != orderWritesAvailable || st.CanModify != orderWritesAvailable || st.CanCancel != orderWritesAvailable {
+		t.Fatalf("write capabilities mismatch build mode: %+v", st)
 	}
 }
 
