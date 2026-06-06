@@ -1,0 +1,130 @@
+# Project execpolicy rules for IBKR work.
+#
+# These rules are intentionally narrower than a global `ibkr` allow rule. The
+# hook in ../hooks/ibkr-pre-tool-use.sh handles cases that prefix rules cannot
+# express, such as flags appearing after symbols.
+
+prefix_rule(
+    pattern = ["ibkr", ["status", "version", "account", "positions", "quote", "calendar", "watch", "chain", "history", "scan", "size", "technical", "breadth", "gamma", "regime", "canary"]],
+    decision = "allow",
+    justification = "Read-only IBKR account, market-data, screen, regime, canary, and sizing commands are routine project work.",
+    match = [
+        "ibkr status --json",
+        "ibkr quote AAPL --json",
+        "ibkr regime --json",
+        "ibkr canary --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "order", ["preview", "status"]],
+    decision = "allow",
+    justification = "Preview/status order commands are non-submitting read surfaces.",
+    match = [
+        "ibkr order preview --symbol AAPL --action BUY --quantity 1 --json",
+        "ibkr order status --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "orders", ["open", "status"]],
+    decision = "allow",
+    justification = "Open/status order commands are read-only journal surfaces.",
+    match = [
+        "ibkr orders open --json",
+        "ibkr orders status --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "trading", "status"],
+    decision = "allow",
+    justification = "Trading status reports local capability and acknowledgements without placing orders.",
+    match = [
+        "ibkr trading status --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "restart"],
+    decision = "allow",
+    justification = "The repo requires a CLI restart after installing daemon/CLI changes.",
+    match = [
+        "ibkr restart --timeout 15s",
+        "ibkr restart --timeout 15s --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["make", ["help", "check", "smoke", "install", "restart-daemon", "app-check", "app-refresh", "app-refresh-smoke", "app-smoke", "app-lifecycle-smoke", "docs-check", "docs-regen", "test"]],
+    decision = "allow",
+    justification = "Standard project verification and local refresh commands.",
+    match = [
+        "make help",
+        "make check",
+        "make docs-check",
+        "make smoke",
+        "make restart-daemon",
+        "make app-refresh-smoke APP_SMOKE_BROWSER=webkit",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", ["trade", "trades", "submit", "place", "cancel", "close", "modify", "transmit"]],
+    decision = "forbidden",
+    justification = "Codex must not place, modify, cancel, close, submit, or transmit broker orders. Use order preview/status reads only.",
+    match = [
+        "ibkr submit --token abc",
+        "ibkr cancel 123",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "order", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
+    decision = "forbidden",
+    justification = "Order mutation verbs are blocked for Codex. Use 'ibkr order preview' or 'ibkr order status'.",
+    match = [
+        "ibkr order submit --token abc",
+        "ibkr order cancel 123",
+    ],
+    not_match = [
+        "ibkr order preview --symbol AAPL --action BUY --quantity 1",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "orders", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
+    decision = "forbidden",
+    justification = "Order journal mutation verbs are blocked for Codex. Use 'ibkr orders open' or status reads.",
+    match = [
+        "ibkr orders cancel 123",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "trading", ["enable", "disable", "submit", "place", "cancel", "close", "modify", "transmit", "execute"]],
+    decision = "forbidden",
+    justification = "Trading capability changes and broker mutation verbs require a human-run command, not Codex automation.",
+    match = [
+        "ibkr trading enable --ack-live",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "purge", "--all"],
+    decision = "prompt",
+    justification = "Purge execution is destructive-adjacent; require explicit human approval and prefer dry-run/status first.",
+    match = [
+        "ibkr purge --all",
+    ],
+)
+
+prefix_rule(
+    pattern = ["pkill", "-f"],
+    decision = "prompt",
+    justification = "Use 'ibkr restart --timeout 15s' for normal daemon restarts; pkill is only for broken/stuck daemon recovery.",
+    match = [
+        "pkill -f ibkr daemon",
+        "pkill -f 'ibkr daemon'",
+    ],
+)

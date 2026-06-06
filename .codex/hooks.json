@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|exec_command|shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env bash \"$(git rev-parse --show-toplevel)/.codex/hooks/ibkr-pre-tool-use.sh\"",
+            "timeout": 10,
+            "statusMessage": "Checking ibkr command safety"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash|exec_command|shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env bash \"$(git rev-parse --show-toplevel)/.codex/hooks/ibkr-pre-tool-use.sh\"",
+            "timeout": 10,
+            "statusMessage": "Checking ibkr approval safety"
+          }
+        ]
+      }
+    ]
+  }
+}
