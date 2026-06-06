@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v1.7.0 — 2026-06-04 20:28 CEST
+## v1.7.0 — 2026-06-06 07:46 CEST
 
 ### What's new
 
@@ -22,7 +22,7 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### Fixed
 
-- Refreshed the S&P 500 constituent list as of 2026-06-04, replacing `EPAM` with `FDXF`.
+- Refreshed the S&P 500 constituent list as of 2026-06-06, replacing `EPAM` with `FDXF`.
 - Guarded paper preview readiness and stabilized the mobile app server baseline before first release readiness.
 
 ## v1.6.1 — 2026-06-03 14:53 CEST
