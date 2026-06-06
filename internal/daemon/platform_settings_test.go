@@ -25,6 +25,15 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 	if got.Features.PurgeRestore.Enabled.Access != rpc.SettingsAccessWrite {
 		t.Fatalf("purge_restore.enabled access = %q, want write", got.Features.PurgeRestore.Enabled.Access)
 	}
+	if !got.AutoTrade.ProposalsEnabled.Value {
+		t.Fatal("auto_trade.proposals_enabled default = false, want true")
+	}
+	if got.AutoTrade.ProposalsEnabled.Access != rpc.SettingsAccessRead || got.AutoTrade.ProposalsEnabled.Source != rpc.SettingsSourceConfig {
+		t.Fatalf("auto_trade.proposals_enabled meta = %s/%s, want read/config", got.AutoTrade.ProposalsEnabled.Access, got.AutoTrade.ProposalsEnabled.Source)
+	}
+	if !got.AutoTrade.FastPathEnabled.Value {
+		t.Fatal("auto_trade.fast_path_enabled default = false, want true")
+	}
 
 	patch := mustRaw(t, map[string]any{
 		"features": map[string]any{"purge_restore": map[string]any{"enabled": false}},

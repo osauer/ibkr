@@ -685,6 +685,33 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_proposals",
+		Title:       "IBKR Protection Proposals",
+		Description: "Read daemon-owned protection proposals for existing positions. Use when the user asks what close/reduce-only actions ibkr currently recommends for theta hygiene or risk reduction, or asks why proposal automation is blocked. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview, submit, place, modify, cancel, transmit, or expose raw preview tokens. For existing holdings use `ibkr_positions`; for broad risk evidence use `ibkr_canary` or `ibkr_regime`; for local order-entry readiness use `ibkr_trading_status`.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"refresh": json.RawMessage(`{"type":"boolean","description":"when true, ask the daemon to recompute proposals before returning; otherwise returns the latest daemon snapshot"}`),
+			"show":    json.RawMessage(`{"type":"boolean","description":"when true, records a shown audit event for returned proposal rows"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				Refresh bool `json:"refresh"`
+				Show    bool `json:"show"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.TradeProposalSnapshot
+			if in.Refresh {
+				if err := conn.Call(ctx, rpc.MethodTradeProposalsRefresh, rpc.TradeProposalRefreshParams{Show: in.Show}, &res); err != nil {
+					return nil, err
+				}
+			} else if err := conn.Call(ctx, rpc.MethodTradeProposalsSnapshot, rpc.TradeProposalSnapshotParams{Show: in.Show}, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_size",
 		Title:       "IBKR Position Size",
 		Description: "Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.",

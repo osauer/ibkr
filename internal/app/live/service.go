@@ -32,19 +32,21 @@ type Service struct {
 }
 
 type Snapshot struct {
-	Version   int64                     `json:"version"`
-	UpdatedAt time.Time                 `json:"updated_at,omitzero"`
-	Status    *rpc.HealthResult         `json:"status,omitempty"`
-	Calendar  *rpc.MarketCalendarResult `json:"market_calendar,omitempty"`
-	Account   *rpc.AccountResult        `json:"account,omitempty"`
-	Positions *rpc.PositionsResult      `json:"positions,omitempty"`
-	Quotes    *MarketQuotes             `json:"market_quotes,omitempty"`
-	Regime    *rpc.RegimeMonitorResult  `json:"regime,omitempty"`
-	Canary    *rpc.CanaryResult         `json:"canary,omitempty"`
-	Trading   *rpc.TradingStatus        `json:"trading,omitempty"`
-	Settings  *rpc.PlatformSettings     `json:"settings,omitempty"`
-	Errors    []SourceError             `json:"errors,omitempty"`
-	Sources   map[string]SourceMeta     `json:"sources,omitempty"`
+	Version   int64                      `json:"version"`
+	UpdatedAt time.Time                  `json:"updated_at,omitzero"`
+	Status    *rpc.HealthResult          `json:"status,omitempty"`
+	Calendar  *rpc.MarketCalendarResult  `json:"market_calendar,omitempty"`
+	Account   *rpc.AccountResult         `json:"account,omitempty"`
+	Positions *rpc.PositionsResult       `json:"positions,omitempty"`
+	Quotes    *MarketQuotes              `json:"market_quotes,omitempty"`
+	Regime    *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
+	Canary    *rpc.CanaryResult          `json:"canary,omitempty"`
+	Trading   *rpc.TradingStatus         `json:"trading,omitempty"`
+	AutoTrade *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
+	Proposals *rpc.TradeProposalSnapshot `json:"proposals,omitempty"`
+	Settings  *rpc.PlatformSettings      `json:"settings,omitempty"`
+	Errors    []SourceError              `json:"errors,omitempty"`
+	Sources   map[string]SourceMeta      `json:"sources,omitempty"`
 }
 
 type MarketQuotes struct {
@@ -257,6 +259,26 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources["trading"] = SourceMeta{UpdatedAt: now}
 		if s.changed("trading", trading) {
 			events = append(events, Event{Type: "trading", Data: trading})
+		}
+	}
+	if autoTrade, err := s.client.AutoTradeStatus(ctx); err != nil {
+		errors = append(errors, sourceErr("auto_trade", err, now))
+		snap.Sources["auto_trade"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.AutoTrade = autoTrade
+		snap.Sources["auto_trade"] = SourceMeta{UpdatedAt: now}
+		if s.changed("auto_trade", autoTrade) {
+			events = append(events, Event{Type: "auto_trade", Data: autoTrade})
+		}
+	}
+	if proposals, err := s.client.TradeProposalsSnapshot(ctx, rpc.TradeProposalSnapshotParams{}); err != nil {
+		errors = append(errors, sourceErr("proposals", err, now))
+		snap.Sources["proposals"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.Proposals = proposals
+		snap.Sources["proposals"] = SourceMeta{UpdatedAt: now}
+		if s.changed("proposals", proposals) {
+			events = append(events, Event{Type: "proposals", Data: proposals})
 		}
 	}
 	if settings, err := s.client.Settings(ctx); err != nil {
@@ -780,6 +802,18 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Quotes = cloneMarketQuotes(in.Quotes)
 	out.Regime = cloneRegimeMonitor(in.Regime)
 	out.Settings = clonePlatformSettings(in.Settings)
+	if in.AutoTrade != nil {
+		autoTrade := *in.AutoTrade
+		autoTrade.Blockers = append([]rpc.TradingBlocker(nil), in.AutoTrade.Blockers...)
+		autoTrade.Policy.Blockers = append([]rpc.TradingBlocker(nil), in.AutoTrade.Policy.Blockers...)
+		out.AutoTrade = &autoTrade
+	}
+	if in.Proposals != nil {
+		proposals := *in.Proposals
+		proposals.Proposals = append([]rpc.TradeProposal(nil), in.Proposals.Proposals...)
+		proposals.Blockers = append([]rpc.TradingBlocker(nil), in.Proposals.Blockers...)
+		out.Proposals = &proposals
+	}
 	return out
 }
 

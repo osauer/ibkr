@@ -62,6 +62,24 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Trading.MCPNonceTTLDuration() != 5*time.Minute {
 		t.Errorf("trading mcp_nonce_ttl = %v, want 5m", res.Trading.MCPNonceTTLDuration())
 	}
+	if !res.AutoTrade.ProposalsEnabledResolved() {
+		t.Error("manual proposals should default enabled")
+	}
+	if res.AutoTrade.Enabled {
+		t.Error("autonomous auto_trade should default disabled")
+	}
+	if res.AutoTrade.AutoSubmit {
+		t.Error("auto_submit should default disabled")
+	}
+	if !res.AutoTrade.FastPathEnabledResolved() {
+		t.Error("manual fast path should default enabled")
+	}
+	if res.AutoTrade.ReloadIntervalDuration() != 30*time.Second {
+		t.Errorf("auto_trade reload_interval = %v, want 30s", res.AutoTrade.ReloadIntervalDuration())
+	}
+	if res.AutoTrade.ProposalCadenceDuration() != 15*time.Minute {
+		t.Errorf("auto_trade proposal_cadence = %v, want 15m", res.AutoTrade.ProposalCadenceDuration())
+	}
 	if _, ok := res.Scans["top-movers"]; !ok {
 		t.Errorf("top-movers preset missing from defaults")
 	}

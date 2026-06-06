@@ -386,6 +386,7 @@ func orderJournalEventForDraft(draft rpc.OrderDraft, eventType string, status rp
 		Quantity:        float64(draft.Quantity),
 		LimitPrice:      draft.LimitPrice,
 		OpenClose:       draft.OpenClose,
+		Source:          draft.Source,
 	}
 }
 

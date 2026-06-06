@@ -44,6 +44,7 @@ type PlatformSettings struct {
 	Kind       string                    `json:"kind"`
 	Features   PlatformFeatureSettings   `json:"features"`
 	Trading    PlatformTradingSettings   `json:"trading"`
+	AutoTrade  PlatformAutoTradeSettings `json:"auto_trade"`
 	MarketData PlatformMarketDataSetting `json:"market_data"`
 	Build      PlatformBuildSettings     `json:"build"`
 	AsOf       time.Time                 `json:"as_of"`
@@ -69,6 +70,17 @@ type PlatformTradingSettings struct {
 	BuildWritesAvailable SettingsBool         `json:"build_writes_available"`
 	Limits               TradingLimitSettings `json:"limits"`
 	Status               *TradingStatus       `json:"status,omitempty"`
+}
+
+type PlatformAutoTradeSettings struct {
+	ProposalsEnabled SettingsBool   `json:"proposals_enabled"`
+	Enabled          SettingsBool   `json:"enabled"`
+	AutoSubmit       SettingsBool   `json:"auto_submit"`
+	FastPathEnabled  SettingsBool   `json:"fast_path_enabled"`
+	PolicyFile       SettingsString `json:"policy_file"`
+	HotReload        SettingsBool   `json:"hot_reload"`
+	ReloadInterval   SettingsString `json:"reload_interval"`
+	ProposalCadence  SettingsString `json:"proposal_cadence"`
 }
 
 type TradingLimitSettings struct {
