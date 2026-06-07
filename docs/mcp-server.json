@@ -1,7 +1,7 @@
 {
   "name": "ibkr",
   "title": "IBKR MCP Server",
-  "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
+  "description": "IBKR broker flavor of canary: a local Interactive Brokers MCP server, experimental beta CLI, and Go TWS API for portfolio risk review, trading research, risk checks, and market workflows through IB Gateway or TWS.",
   "homepage": "https://osauer.dev/ibkr/",
   "repository": "https://github.com/osauer/ibkr",
   "license": "MIT",
@@ -43,7 +43,7 @@
     "S&P 500 breadth",
     "SPY+SPX dealer gamma",
     "broad-market stress lifecycle",
-    "portfolio canary lifecycle",
+    "canary portfolio lifecycle",
     "stock and ETF quote resources"
   ],
   "safety": {
@@ -51,9 +51,12 @@
     "can_place_orders": false,
     "can_modify_orders": false,
     "can_cancel_orders": false,
-    "summary": "Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface."
+    "summary": "Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel/transmit broker-write interface. Trading-adjacent purge/restore controls are experimental and constrained."
   },
   "keywords": [
+    "canary",
+    "canary for IBKR",
+    "portfolio canary",
     "Interactive Brokers",
     "IBKR",
     "TWS API",

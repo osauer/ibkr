@@ -5,17 +5,15 @@ import (
 	nethttp "net/http"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
 type purgeActionRequest struct {
-	PurgeID        string   `json:"purge_id,omitempty"`
-	All            bool     `json:"all,omitempty"`
-	Symbols        []string `json:"symbols,omitempty"`
-	Scale          float64  `json:"scale,omitempty"`
-	ConfirmAccount string   `json:"confirm_account,omitempty"`
-	ConfirmMode    string   `json:"confirm_mode,omitempty"`
+	PurgeID string   `json:"purge_id,omitempty"`
+	All     bool     `json:"all,omitempty"`
+	Symbols []string `json:"symbols,omitempty"`
+	Scale   float64  `json:"scale,omitempty"`
+	BrokerWriteConfirmation
 }
 
 func (h *handler) handlePurgeStatus(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -112,26 +110,8 @@ func (h *handler) decodePurgeActionRequest(w nethttp.ResponseWriter, r *nethttp.
 }
 
 func (h *handler) requirePurgeWriteConfirmation(r *nethttp.Request, req purgeActionRequest) error {
-	status, err := h.deps.Daemon.TradingStatus(r.Context())
-	if err != nil {
-		return err
-	}
-	if status.Mode == config.TradingModeDisabled {
-		return &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "trading is disabled"}
-	}
-	if !status.CanWrite {
-		return &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "broker writes are not enabled by trading.status"}
-	}
-	if strings.TrimSpace(status.Account) == "" || strings.TrimSpace(status.Mode) == "" {
-		return &rpc.Error{Code: rpc.CodeBadRequest, Message: "current trading account and mode are required"}
-	}
-	if !strings.EqualFold(strings.TrimSpace(req.ConfirmAccount), strings.TrimSpace(status.Account)) {
-		return &rpc.Error{Code: rpc.CodeBadRequest, Message: "confirm_account must match current trading account"}
-	}
-	if !strings.EqualFold(strings.TrimSpace(req.ConfirmMode), strings.TrimSpace(status.Mode)) {
-		return &rpc.Error{Code: rpc.CodeBadRequest, Message: "confirm_mode must match current trading mode"}
-	}
-	return nil
+	_, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation)
+	return err
 }
 
 func writePurgeConfirmationError(w nethttp.ResponseWriter, err error) {

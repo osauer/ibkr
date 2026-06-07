@@ -81,56 +81,6 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["ibkr", "proposals", "submit"],
-    decision = "prompt",
-    justification = "Protection proposal submit can transmit broker orders. The project hook permits it only when trading.status reports a ready paper gate; live and unknown routes stay blocked.",
-    match = [
-        "ibkr proposals submit --key abc --revision sha256:abc",
-    ],
-)
-
-prefix_rule(
-    pattern = ["ibkr", ["trade", "trades", "submit", "place", "cancel", "close", "modify", "transmit"]],
-    decision = "prompt",
-    justification = "Broker mutation verbs are allowed for Codex only through the project hook's daemon-reported paper gate. Live and unknown routes stay blocked.",
-    match = [
-        "ibkr submit --token abc",
-        "ibkr cancel 123",
-    ],
-)
-
-prefix_rule(
-    pattern = ["ibkr", "order", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "prompt",
-    justification = "Order mutation verbs pass only when the project hook verifies trading.status is a ready paper route with the matching capability. Live and unknown routes stay blocked.",
-    match = [
-        "ibkr order submit --token abc",
-        "ibkr order cancel 123",
-    ],
-    not_match = [
-        "ibkr order preview --symbol AAPL --action BUY --quantity 1",
-    ],
-)
-
-prefix_rule(
-    pattern = ["ibkr", "orders", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "prompt",
-    justification = "Order journal mutation verbs pass only when the project hook verifies trading.status is a ready paper route with the matching capability. Live and unknown routes stay blocked.",
-    match = [
-        "ibkr orders cancel 123",
-    ],
-)
-
-prefix_rule(
-    pattern = ["ibkr", "trading", ["enable", "disable", "submit", "place", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "prompt",
-    justification = "Trading capability changes stay operator-owned; broker mutation verbs pass only when the project hook verifies a ready paper route. Live and unknown routes stay blocked.",
-    match = [
-        "ibkr trading enable --ack-live",
-    ],
-)
-
-prefix_rule(
     pattern = ["ibkr", "purge", "--all"],
     decision = "prompt",
     justification = "Purge execution is destructive-adjacent; require explicit human approval and prefer dry-run/status first.",
