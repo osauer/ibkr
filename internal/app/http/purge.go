@@ -5,6 +5,7 @@ import (
 	nethttp "net/http"
 	"strings"
 
+	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -115,10 +116,10 @@ func (h *handler) requirePurgeWriteConfirmation(r *nethttp.Request, req purgeAct
 	if err != nil {
 		return err
 	}
-	if !status.Enabled {
+	if status.Mode == config.TradingModeDisabled {
 		return &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "trading is disabled"}
 	}
-	if !status.CanTransmit {
+	if !status.CanWrite {
 		return &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "broker writes are not enabled by trading.status"}
 	}
 	if strings.TrimSpace(status.Account) == "" || strings.TrimSpace(status.Mode) == "" {

@@ -259,11 +259,12 @@ type Server struct {
 	// identity and order-journal refs without storing raw preview tokens.
 	proposalOutcomes *proposalOutcomeStore
 	// platformSettings persists daemon-owned runtime preferences. Gateway,
-	// account, trading enablement, and build capability stay config/build
-	// owned; this store only carries settings ibkr may edit at runtime.
+	// account, trading mode, and build capability stay config/build owned;
+	// this store only carries settings ibkr may edit at runtime.
 	platformSettings   *platformSettingsStore
 	protectionPolicies *protectionPolicyManager
 	tradeProposals     *proposalEngine
+	marketEvents       *marketEventCache
 	proposalsStarted   sync.Once
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
@@ -375,6 +376,7 @@ func New(opts Options) *Server {
 	s.installPlatformSettingsStore()
 	s.installProtectionPolicyManager()
 	s.installProposalEngine()
+	s.installMarketEventCache()
 	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
 	s.installGammaZeroCache()
@@ -1989,6 +1991,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleGammaZeroSPX(ctx, req) })
 	case rpc.MethodRegimeSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
+	case rpc.MethodMarketEventsSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleMarketEventsSnapshot(ctx, req) })
 	case rpc.MethodStatusHealth:
 		s.unary(req, enc, func() (any, error) { return s.handleStatusHealth(), nil })
 	case rpc.MethodTradingStatus:
@@ -2105,6 +2109,8 @@ func unaryDeadline(method string) time.Duration {
 		// instantly after the first call of the day. 45 s leaves slack
 		// for the historical-bars worst-case on first call.
 		return 45 * time.Second
+	case rpc.MethodMarketEventsSnapshot:
+		return 20 * time.Second
 	case rpc.MethodScanRun:
 		// Up to 35 s scanner-subscription budget (off-hours cold-start
 		// for HIGH_OPEN_GAP / TOP_PERC_GAIN / HIGH_OPT_IMP_VOLAT_OVER_HIST

@@ -4,6 +4,17 @@ This is the small PWA served by `ibkr app`. It is meant for the thing you want
 on a phone: is the local IBKR setup alive, what does the account look like, and
 is the portfolio canary asking for attention?
 
+The Protection panel shows proposal-bound market-event chips when halt, LULD,
+borrow, fee, or Reg SHO flags affect current protection proposals. Active halt
+and active LULD chips are hard blockers; recent halt/LULD and borrow/Reg SHO/fee
+chips are evidence tags. A reducing short `BUY` proposal is labeled `Buy to
+cover`.
+
+The Underlyings panel shows held-name market-event tags in the hero and row
+tags for affected symbols, including long holdings where borrow pressure is
+observational squeeze context. Stale or unknown sources stay visible with
+source/as-of detail instead of disappearing.
+
 Start the app host on the Mac that runs TWS or IB Gateway:
 
 ```sh

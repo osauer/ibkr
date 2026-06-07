@@ -47,6 +47,42 @@ func TestPreviewLimitRejectsDelayedPatientLimit(t *testing.T) {
 	}
 }
 
+func TestPreviewIBKRContractOmitsStockMultiplier(t *testing.T) {
+	t.Parallel()
+
+	stock := previewIBKRContract(rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD", Multiplier: 1})
+	if stock.Multiplier != 0 {
+		t.Fatalf("stock multiplier = %d, want omitted", stock.Multiplier)
+	}
+
+	option := previewIBKRContract(rpc.ContractParams{Symbol: "AAPL", SecType: "OPT", Exchange: "SMART", Currency: "USD", Expiry: "20260619", Right: "C", Strike: 200, Multiplier: 100})
+	if option.Multiplier != 100 {
+		t.Fatalf("option multiplier = %d, want 100", option.Multiplier)
+	}
+}
+
+func TestPreviewIBKROrderForStatusBindsAccountAndClient(t *testing.T) {
+	t.Parallel()
+
+	order := previewIBKROrderForStatus(
+		rpc.OrderDraft{
+			Action:     rpc.OrderActionBuy,
+			Quantity:   1,
+			OrderType:  rpc.OrderTypeLMT,
+			LimitPrice: 1,
+			TIF:        rpc.OrderTIFDay,
+			OrderRef:   "ibkr-20260607-050000",
+		},
+		rpc.TradingStatus{
+			Account:  "DU1234567",
+			ClientID: 31,
+		},
+	)
+	if order.Account != "DU1234567" || order.ClientID != 31 {
+		t.Fatalf("order account/client = %q/%d, want DU1234567/31", order.Account, order.ClientID)
+	}
+}
+
 func TestClassifyPositionEffectBlocksShortFlip(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -250,7 +286,7 @@ func TestOrderTokenSignerRejectsTamperedAndExpired(t *testing.T) {
 
 func TestOrderPreviewDisabledGateFailsBeforeMarketData(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: false, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeDisabled})
 	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
 		t.Fatal("quote hook should not be called while trading is disabled")
 		return rpc.OrderQuoteSnapshot{}, nil
@@ -268,7 +304,7 @@ func TestOrderPreviewDisabledGateFailsBeforeMarketData(t *testing.T) {
 
 func TestOrderPreviewPaperMintsTokenAndJournal(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	bid, ask := 100.10, 100.15
 	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
 		if c.Symbol != "AAPL" || c.Exchange != "SMART" || c.Currency != "USD" {
@@ -344,7 +380,7 @@ func TestOrderPreviewPaperMintsTokenAndJournal(t *testing.T) {
 func TestOrderPreviewReplaceMintsModifyScopedToken(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 28, 8, 45, 0, 0, time.UTC)
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
 	srv.now = func() time.Time { return now }
 	srv.orderWritesEnabled = func() bool { return true }
 	srv.orderPreviewQuote = fixedPreviewQuote(99, 101)
@@ -405,7 +441,7 @@ func TestOrderPreviewReplaceMintsModifyScopedToken(t *testing.T) {
 
 func TestOrderPreviewBindsAcceptedBrokerWhatIf(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 1, rpc.OrderPositionEffectOpen)
 	commission := 1.25
@@ -497,7 +533,7 @@ func TestRpcWhatIfResultFromBrokerMapsSubmitEligibility(t *testing.T) {
 
 func TestConfirmPreviewTokenForPlaceRequiresAcceptedWhatIf(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	token := mintPreviewTokenForConfirmTest(t, srv, previewWhatIfUnavailable())
 
 	_, err := srv.confirmPreviewTokenForPlace(token)
@@ -515,7 +551,7 @@ func TestConfirmPreviewTokenForPlaceRequiresAcceptedWhatIf(t *testing.T) {
 
 func TestConfirmPreviewTokenForPlaceIsSingleUse(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	token := mintPreviewTokenForConfirmTest(t, srv, rpc.OrderWhatIfResult{
 		Status:            rpc.OrderWhatIfStatusAccepted,
 		Available:         true,
@@ -544,7 +580,7 @@ func TestConfirmPreviewTokenForPlaceIsSingleUse(t *testing.T) {
 
 func TestConfirmPreviewTokenForPlaceRejectsGateMismatch(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	token := mintPreviewTokenForConfirmTest(t, srv, rpc.OrderWhatIfResult{
 		Status:            rpc.OrderWhatIfStatusAccepted,
 		Available:         true,
@@ -560,7 +596,7 @@ func TestConfirmPreviewTokenForPlaceRejectsGateMismatch(t *testing.T) {
 
 func TestOrderPreviewRejectsMaxNotional(t *testing.T) {
 	t.Parallel()
-	tr := config.Trading{Enabled: true, Mode: config.TradingModePaper, MaxNotional: 500}
+	tr := config.Trading{Mode: config.TradingModePaper, MaxNotional: 500}
 	srv := newOrderPreviewTestServer(t, tr)
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 6, rpc.OrderPositionEffectOpen)
@@ -580,7 +616,7 @@ func TestOrderPreviewRejectsMaxNotional(t *testing.T) {
 
 func TestOrderPreviewRejectsStockFlipUnlessEnabled(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, -1, rpc.OrderPositionEffectFlip)
 
@@ -599,7 +635,7 @@ func TestOrderPreviewRejectsStockFlipUnlessEnabled(t *testing.T) {
 
 func TestOrderPreviewAllowsSingleLegOption(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	bid := 2.05
 	ask := 2.15
 	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {

@@ -3813,7 +3813,7 @@ func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int,
 		contract.PrimaryExch = ""
 	}
 
-	return c.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
+	return c.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233,236", false, false)
 }
 
 // RequestMarketDataWithContract issues reqMktData for the given contract.
@@ -4222,7 +4222,7 @@ func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol st
 		TradingClass: tradingClassHint,
 	}
 
-	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,165,221,233", false, false)...)
+	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,165,221,233,236", false, false)...)
 
 	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
@@ -4288,7 +4288,7 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 	}
 	normalizeResolvedOptionMarketDataContract(&contract)
 
-	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,221", false, false)...)
+	msg := c.encodeMsg(c.buildReqMktDataFields(contract, reqID, "100,101,104,106,221,236", false, false)...)
 
 	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)

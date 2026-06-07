@@ -46,15 +46,12 @@ func TestPurgeExecuteUsesFreshStockQuantity(t *testing.T) {
 func TestPurgeExecuteBlockersUseBrokerWriteAuthorization(t *testing.T) {
 	t.Parallel()
 	srv := newPurgeExecuteTestServer(t)
-	blockers := srv.purgeExecuteBlockers(rpc.TradingStatus{
-		Enabled:         true,
-		Mode:            config.TradingModeLive,
-		PreviewRequired: true,
-		CanPreview:      true,
-		CanTransmit:     false,
-		Account:         "U1234567",
-		Endpoint:        "127.0.0.1:4001",
-		ClientID:        31,
+	blockers := srv.purgeExecuteBlockers(rpc.TradingStatus{Mode: config.TradingModeLive,
+		CanPreview: true,
+		CanWrite:   false,
+		Account:    "U1234567",
+		Endpoint:   "127.0.0.1:4001",
+		ClientID:   31,
 		Blockers: []rpc.TradingBlocker{{
 			Code:    "live_not_allowed",
 			Message: "live trading requires an explicit local override",
@@ -169,7 +166,7 @@ func TestPurgeExecuteMatchesOptionByConID(t *testing.T) {
 
 func newPurgeExecuteTestServer(t *testing.T) *Server {
 	t.Helper()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderWritesEnabled = func() bool { return true }
 	nextID := 1000
 	srv.orderReserveBrokerID = func(context.Context) (int, error) {

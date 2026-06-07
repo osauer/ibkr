@@ -240,7 +240,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.addPurgeRestoreLeg(ctx, res, row, positions, openByLeg, cfg, timeout, scale)
+		s.addPurgeRestoreLeg(ctx, res, status, row, positions, openByLeg, cfg, timeout, scale)
 	}
 	if len(res.Blockers) > 0 || res.SkippedLegs > 0 || res.ErrorLegs > 0 {
 		res.Status = purgeRestoreStatusBlocked
@@ -259,11 +259,11 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 
 func (s *Server) purgeRestorePreviewBlockers(status rpc.TradingStatus) []rpc.TradingBlocker {
 	var blockers []rpc.TradingBlocker
-	if !status.Enabled {
+	if status.Mode == config.TradingModeDisabled {
 		blockers = append(blockers, rpc.TradingBlocker{
 			Code:    "trading_disabled",
 			Message: "trading is disabled",
-			Action:  "Enable [trading] before broker WhatIf preview.",
+			Action:  `Set [trading].mode to "paper" or "live" before broker WhatIf preview.`,
 		})
 	}
 	if !s.purgeRestoreEnabled() {
@@ -282,7 +282,7 @@ func (s *Server) purgeRestorePreviewBlockers(status rpc.TradingStatus) []rpc.Tra
 	return blockers
 }
 
-func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreResult, row purgeLedgerRow, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, cfg config.Trading, timeout time.Duration, scale float64) {
+func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreResult, status rpc.TradingStatus, row purgeLedgerRow, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, cfg config.Trading, timeout time.Duration, scale float64) {
 	normalizePurgeLedgerRow(&row)
 	leg := rpc.PurgeRestoreLeg{
 		LegID:           row.LegID,
@@ -357,7 +357,7 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		OrderRef:   purgeRestoreOrderRef(s.orderNow()),
 		OpenClose:  orderOpenCloseForEffect(position.Effect),
 	}
-	whatIf, err := s.fetchPreviewWhatIf(ctx, draft)
+	whatIf, err := s.fetchPreviewWhatIf(ctx, status, draft)
 	if err != nil {
 		addPurgeRestoreError(res, leg, "what-if: "+err.Error())
 		return

@@ -747,6 +747,7 @@ p {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .panel-title-with-icon svg {
@@ -1926,6 +1927,62 @@ p {
   background: var(--red-soft);
 }
 
+.market-flag-rail,
+.market-flag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.market-flag-rail {
+  padding: 2px 0 1px;
+}
+
+.market-flag-row {
+  margin-top: 1px;
+}
+
+.market-flag-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 790;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-flag-chip--hard {
+  border-color: rgba(255, 55, 51, 0.34);
+  background: var(--red-soft);
+  color: #ba2723;
+}
+
+.market-flag-chip--friction {
+  border-color: rgba(255, 181, 33, 0.48);
+  background: rgba(255, 181, 33, 0.14);
+  color: #8e5c00;
+}
+
+.market-flag-chip--context {
+  border-color: rgba(18, 104, 219, 0.26);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.market-flag-chip--muted {
+  border-color: rgba(120, 132, 150, 0.28);
+  background: rgba(120, 132, 150, 0.1);
+  color: var(--muted);
+}
+
 .underlying-book__list-panel {
   display: grid;
   gap: 8px;
@@ -2042,6 +2099,7 @@ p {
 .underlying-row__title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
 }
@@ -2315,7 +2373,7 @@ p {
 .protection-row__actions button {
   border: 0;
   border-radius: 8px;
-  min-width: 68px;
+  min-width: 78px;
   min-height: 44px;
   padding: 8px 10px;
   font-weight: 700;
@@ -2471,7 +2529,7 @@ p {
 
 .exposure-visual__legend {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 7px 9px;
 }
 
@@ -2513,6 +2571,8 @@ p {
 .exposure-visual__label,
 .exposure-visual__value {
   display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .exposure-visual__value {
@@ -2707,6 +2767,8 @@ p {
 }
 
 .open-order-row span {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted-2);
   font-size: 13px;
@@ -3423,7 +3485,13 @@ p {
   }
 
   .alerts-panel summary.panel-head {
-    grid-template-columns: 1fr;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .orders-panel summary.panel-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .alert-active-count {

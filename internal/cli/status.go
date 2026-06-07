@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -81,7 +82,7 @@ func renderStatusText(env *Env, res *rpc.HealthResult) {
 	if len(res.Subsystems) > 0 {
 		statusRow(env, out, "Subsystems", formatSubsystemsValue(env, res.Subsystems))
 	}
-	if res.Trading.LocalGate != "" {
+	if res.Trading.Mode != "" {
 		statusRow(env, out, "Trading", formatTradingStatusValue(env, res.Trading))
 	}
 	if len(res.DataQuality) > 0 {
@@ -190,7 +191,7 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		}
 	case membersRefreshNeedsAttention(res.Members):
 		return statusConcern{Text: "SPX members refresh " + res.Members.RefreshState, Level: statusConcernWarn}
-	case res.Trading.Enabled && res.Trading.Blocked:
+	case res.Trading.Mode != config.TradingModeDisabled && res.Trading.Blocked:
 		return statusConcern{Text: "Trading blocked: " + firstTradingBlockerMessage(res.Trading), Level: statusConcernWarn}
 	case len(res.BackgroundTasks) > 0:
 		return statusConcern{Text: "Background work: " + formatBackgroundTasks(res.BackgroundTasks), Level: statusConcernNotice}

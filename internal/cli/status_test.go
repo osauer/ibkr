@@ -480,9 +480,8 @@ func TestNextConcernPriority(t *testing.T) {
 			in: rpc.HealthResult{
 				Connected: true,
 				Trading: rpc.TradingStatus{
-					Enabled:   true,
-					LocalGate: rpc.TradingLocalGatePaper,
-					Blocked:   true,
+					Mode:    "paper",
+					Blocked: true,
 					Blockers: []rpc.TradingBlocker{{
 						Code:    "gateway_account_unpinned",
 						Message: "order submission requires a pinned account",
@@ -598,7 +597,7 @@ func TestStatusVerdict(t *testing.T) {
 			name: "trading blocked",
 			in: rpc.HealthResult{
 				Connected: true,
-				Trading:   rpc.TradingStatus{Enabled: true, LocalGate: rpc.TradingLocalGatePaper, Blocked: true},
+				Trading:   rpc.TradingStatus{Mode: "paper", Blocked: true},
 			},
 			want: "ATTENTION",
 		},

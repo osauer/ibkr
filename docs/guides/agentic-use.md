@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-06-04 07:42 CEST
+Updated: 2026-06-07 08:48 CEST
 
 `ibkr mcp` makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -14,7 +14,7 @@ The plugin manifest (`.claude-plugin/plugin.json`) is registered when you instal
 ibkr status                   # daemon health, gateway connection, data freshness
 ```
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_order_preview` ↔ `ibkr order preview`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_market_events` ↔ `ibkr market-events`, `ibkr_order_preview` ↔ `ibkr order preview`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -36,9 +36,17 @@ Returns a stateless market-context portfolio monitor for scheduled stress checks
 
 The tool is deliberately high-precision: a standalone pre-market SPY drawdown or VIX spike can raise `watch`, while `defend` requires confirmed market pressure, vulnerable portfolio fit, and clean enough inputs. Account-only margin or P&L facts remain evidence; they do not become a canary DEFEND action by themselves. Missing, stale, degraded, warming, or computing inputs become explicit input-health rows instead of being treated as safe.
 
-Held-underlying stress appears in `portfolio.held_stress[]` only when a material held name has a real positions-derived condition: held-name daily P&L shock, near-expiry held-option delta concentration, or held-name quote/option bid-ask degradation. These probes do not call option chains, scanners, borrow feeds, or external flow sources. Without independent market confirmation they are rebalance/watch context, not market-stress confirmation.
+Held-underlying stress appears in `portfolio.held_stress[]` only when a material held name has a real positions-derived condition: held-name daily P&L shock, near-expiry held-option delta concentration, or held-name quote/option bid-ask degradation. For held-name market-structure context, use `ibkr_market_events`; the canary consumes that signal as supporting context, not as a standalone trigger. See [Concepts → Canary](../concepts.md#canary) for the fuller policy.
 
 For a scheduler-friendly prompt that preserves action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
+
+### "Does CRWV have borrow, Reg SHO, LULD, or halt context?"
+
+→ Claude invokes `ibkr_market_events` with `{"symbol":"CRWV"}`.
+
+Returns market-event flags for requested or held stock/ETF symbols: IBKR shortable-share inventory, IBKR short-stock availability fee rate, Nasdaq Reg SHO threshold-list membership, and active/recent Nasdaq LULD or regulatory/news halts. The response carries `flags[]`, `by_symbol`, `source_health[]`, `warning_details[]`, and a semantic `fingerprint`.
+
+Claude should report active flags as context and safety gates, not as standalone trade ideas. Unknown source health means unavailable evidence, not inactive. Borrow inventory and fee stress are only proposal modifiers for existing short buy-to-cover reductions; they do not justify opening or adding long exposure. Active halt/LULD flags block protection preview/submit; recent halt/LULD flags require fresh quote context.
 
 ### "Show me my SPY positions and any options on them."
 

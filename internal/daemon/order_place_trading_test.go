@@ -16,7 +16,7 @@ import (
 
 func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderReserveBrokerID = func(context.Context) (int, error) { return 1001, nil }
 	var sentOrder *ibkrlib.RawOrder
 	srv.orderPlaceBroker = func(_ context.Context, _ *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
@@ -58,7 +58,7 @@ func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 
 func TestOrderPlaceRejectsRejectedWhatIfTokenBeforeBrokerSend(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderReserveBrokerID = func(context.Context) (int, error) {
 		t.Fatal("order ID should not be reserved for rejected WhatIf token")
 		return 0, nil
@@ -82,18 +82,15 @@ func TestOrderPlaceRejectsRejectedWhatIfTokenBeforeBrokerSend(t *testing.T) {
 
 func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
 		t.Fatal("blocked live mode must be rejected before broker hook")
 		return nil
 	}
-	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{
-		Enabled:         true,
-		Mode:            config.TradingModeLive,
-		PreviewRequired: true,
-		Account:         "U1234567",
-		Endpoint:        "127.0.0.1:4001",
-		ClientID:        31,
+	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{Mode: config.TradingModeLive,
+		Account:  "U1234567",
+		Endpoint: "127.0.0.1:4001",
+		ClientID: 31,
 		Blockers: []rpc.TradingBlocker{{
 			Code:    "live_not_allowed",
 			Message: "live trading requires an explicit local override",
@@ -107,7 +104,7 @@ func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 
 func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	var sent bool
 	srv.orderPlaceBroker = func(_ context.Context, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
 		sent = true
@@ -116,13 +113,10 @@ func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
 		}
 		return nil
 	}
-	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{
-		Enabled:         true,
-		Mode:            config.TradingModeLive,
-		PreviewRequired: true,
-		Account:         "U1234567",
-		Endpoint:        "127.0.0.1:4001",
-		ClientID:        31,
+	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{Mode: config.TradingModeLive,
+		Account:  "U1234567",
+		Endpoint: "127.0.0.1:4001",
+		ClientID: 31,
 	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Account: "U1234567"})
 	if err != nil {
 		t.Fatalf("submitConfiguredOrder err = %v", err)
@@ -134,7 +128,7 @@ func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
 
 func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	now := time.Date(2026, 5, 28, 9, 0, 0, 0, time.UTC)
 	srv.now = func() time.Time { return now }
 	if err := srv.orderJournal.Append(orderJournalEvent{
@@ -183,7 +177,7 @@ func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 
 func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	now := time.Date(2026, 5, 28, 9, 0, 0, 0, time.UTC)
 	srv.now = func() time.Time { return now }
 	if err := srv.orderJournal.Append(orderJournalEvent{

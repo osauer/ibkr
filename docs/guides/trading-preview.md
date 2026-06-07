@@ -1,6 +1,6 @@
 # Experimental trading config
 
-Updated: 2026-06-05 08:18 CEST
+Updated: 2026-06-07 08:48 CEST
 
 Stable `ibkr` is read-only. It can read account and market data, compute risk context, size positions, and preview stock/ETF LMT order drafts without broker submission. It does not place, modify, cancel, or transmit broker orders.
 
@@ -39,13 +39,23 @@ When trading is enabled, the daemon expects these values to be pinned:
 - `[gateway].port`
 - `[gateway].account`
 - `[gateway].client_id`
-- `[trading].enabled = true`
-- `[trading].mode = "paper"` or `"live"`
-- `[trading].require_preview = true`
+- `[trading].mode = "paper"` or `"live"`; absent or `"disabled"` means no order entry
+
+Every broker write requires a submit-eligible preview token; this is invariant, not a config switch.
 
 Paper mode should use a paper endpoint or account, such as TWS paper on `7497` or a `DU...` account.
 
 Live mode is intentionally heavier. It requires a live-looking endpoint and account, a live override, matching live acknowledgement fields, and fresh paper-smoke evidence from the paired paper setup. Do not enable live trading from a copied template; fill the fields deliberately for the account and endpoint in front of you.
+
+## Protection Market Flags
+
+Protection proposals consume daemon market-event flags as context and safety gates. The proposal snapshot carries `source_fingerprints.market_events`, a top-level `market_events` snapshot, proposal `market_flags`, and `counts.market_flags` so UI and agents can tell when active flag changes require proposal revalidation.
+
+Active `halt_regulatory_or_news` and active `luld_pause` are hard blockers for preview/submit. Recent halt/LULD flags remain visible as warning tags and should be paired with fresh quote context before acting.
+
+Borrow flags are modifier-only. `borrow_inventory_tight` and `borrow_fee_extreme` can strengthen context for a proposal that buys to cover an existing short, but they must not create standalone long sells or buy-add proposals. `reg_sho_threshold` is regulatory context unless paired with an existing reduce/cover proposal.
+
+User-facing proposal copy should render any reducing short `BUY` as `Buy to cover`. V1 has no opportunities panel; squeeze-like context remains observational in Underlyings.
 
 ## Release Channel
 

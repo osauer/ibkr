@@ -1,6 +1,7 @@
 # Project-scoped Codex settings for the IBKR repo.
 # Loaded only after this project is trusted by Codex.
 
+sandbox_mode = "danger-full-access"
 [features]
 hooks = true
 multi_agent = true

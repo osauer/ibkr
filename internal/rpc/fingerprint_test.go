@@ -90,6 +90,46 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 	}
 }
 
+func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	base := MarketEventsResult{
+		Kind:          MarketEventsKind,
+		SchemaVersion: MarketEventsSchemaVersion,
+		AsOf:          now,
+		Symbols:       []string{"CRWV"},
+		Flags: []MarketEventFlag{{
+			ID:         MarketEventRegSHOThreshold,
+			Symbol:     "CRWV",
+			Label:      "Reg SHO",
+			Status:     MarketEventStatusActive,
+			Severity:   MarketEventSeverityWatch,
+			Role:       MarketEventRoleContext,
+			Source:     "Nasdaq",
+			AsOf:       now,
+			ObservedAt: now,
+			Details:    []string{"raw prose ignored"},
+		}},
+		SourceHealth: []SourceHealth{{Source: "reg_sho_threshold", Status: SourceStatusOK, Confidence: "high"}},
+	}
+	first := BuildMarketEventsFingerprint(&base)
+	changedTime := base
+	changedTime.AsOf = now.Add(time.Minute)
+	changedTime.Flags = slices.Clone(base.Flags)
+	changedTime.Flags[0].ObservedAt = now.Add(time.Minute)
+	changedTime.Flags[0].Details = []string{"different ignored prose"}
+	if second := BuildMarketEventsFingerprint(&changedTime); first != second {
+		t.Fatalf("fingerprint changed on timestamp/prose-only mutation: %v != %v", first, second)
+	}
+
+	changedStatus := base
+	changedStatus.Flags = slices.Clone(base.Flags)
+	changedStatus.Flags[0].Status = MarketEventStatusRecent
+	if BuildMarketEventsFingerprint(&changedStatus) == first {
+		t.Fatal("fingerprint did not change when flag status changed")
+	}
+}
+
 func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.T) {
 	t.Parallel()
 	spyDrop := -2.0

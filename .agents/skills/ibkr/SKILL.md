@@ -1,25 +1,27 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, and preview-only order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. Never place, modify, cancel, close, submit, or transmit broker orders.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. Paper broker writes may be used only when the project hook verifies a ready daemon-reported paper gate; live broker writes are always blocked.
 ---
 
-Updated: 2026-06-06 06:54 CEST
+Updated: 2026-06-07 07:41 CEST
 
 ## Contract
 
 Use this skill when the user asks about their IBKR account, positions, exposure,
 daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
-market breadth, portfolio canary posture, or explicit preview-only order status.
+market breadth, portfolio canary posture, order preview, order status, or
+paper-gated order execution.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
 workflow explicitly needs CLI output. Parse JSON before answering.
 
-The CLI and MCP surfaces are read-oriented for agents. Never claim that an order
-was placed. Never attempt broker mutations: place, modify, cancel, close, submit,
-transmit, enable live trading, or run destructive purge execution. Order preview
-can mint a local token; `token_minted` is not the same as `submit_eligible`.
+The MCP surface remains read-oriented for agents. The CLI may run paper broker
+writes only when the project PreToolUse hook verifies `ibkr trading status
+--json` is a ready paper route with `can_write=true`. Never attempt live broker mutations, enable live
+trading, or run destructive purge execution. Order preview can mint a local
+token; `token_minted` is not the same as `submit_eligible`.
 
 ## Output Discipline
 

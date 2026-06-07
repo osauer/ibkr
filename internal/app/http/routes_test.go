@@ -166,14 +166,14 @@ func TestOrderReviewSetCreatePreviewAndReadOnlyOrders(t *testing.T) {
 		t.Fatalf("create status=%d, want 200; body=%s", createRes.Code, createRes.Body.String())
 	}
 	var set struct {
-		ID           string `json:"id"`
-		Revision     string `json:"revision"`
-		SourceKind   string `json:"source_kind"`
-		Intent       string `json:"intent"`
-		Capabilities struct {
-			CanPreview  bool `json:"can_preview"`
-			CanTransmit bool `json:"can_transmit"`
-		} `json:"capabilities"`
+		ID              string `json:"id"`
+		Revision        string `json:"revision"`
+		SourceKind      string `json:"source_kind"`
+		Intent          string `json:"intent"`
+		CapturedTrading struct {
+			CanPreview bool `json:"can_preview"`
+			CanWrite   bool `json:"can_write"`
+		} `json:"captured_trading"`
 		Rows []struct {
 			RowID            string   `json:"row_id"`
 			ProposedQuantity int      `json:"proposed_quantity"`
@@ -190,8 +190,8 @@ func TestOrderReviewSetCreatePreviewAndReadOnlyOrders(t *testing.T) {
 	if set.SourceKind != "risk_plan" || set.Intent != "mitigate_risk" {
 		t.Fatalf("review set source/intent = %s/%s", set.SourceKind, set.Intent)
 	}
-	if !set.Capabilities.CanPreview || set.Capabilities.CanTransmit {
-		t.Fatalf("unexpected capabilities: %#v", set.Capabilities)
+	if !set.CapturedTrading.CanPreview || set.CapturedTrading.CanWrite {
+		t.Fatalf("unexpected captured trading: %#v", set.CapturedTrading)
 	}
 	if len(set.Rows) != 1 || set.Rows[0].Action != rpc.OrderActionSell || !set.Rows[0].Included {
 		t.Fatalf("unexpected rows: %#v", set.Rows)
@@ -283,7 +283,7 @@ func TestOrderReviewSetPreviewRejectsStaleRevision(t *testing.T) {
 				TIF:            rpc.OrderTIFDay,
 			}},
 		}},
-	}, rpc.TradingStatus{CanPreview: true, PreviewRequired: true}, time.Now().UTC())
+	}, rpc.TradingStatus{CanPreview: true}, time.Now().UTC())
 	stale.Revision = "rev_stale"
 	if err := store.RecordOrderReviewSet(stale); err != nil {
 		t.Fatalf("RecordOrderReviewSet: %v", err)
@@ -313,15 +313,15 @@ func TestOrderReviewSetMatchesCurrentSnapshotOnly(t *testing.T) {
 	}
 	current := orderreview.Set{
 		CanaryFingerprint: "fp-1",
-		Capabilities:      rpc.TradingStatus{Account: "DU123", Mode: "paper"},
+		CapturedTrading:   rpc.TradingStatus{Account: "DU123", Mode: "paper"},
 	}
 	if !orderReviewSetMatchesSnapshot(current, snap) {
 		t.Fatalf("current set should match snapshot")
 	}
 	for name, set := range map[string]orderreview.Set{
-		"fingerprint": {CanaryFingerprint: "fp-old", Capabilities: current.Capabilities},
-		"account":     {CanaryFingerprint: "fp-1", Capabilities: rpc.TradingStatus{Account: "DU999", Mode: "paper"}},
-		"mode":        {CanaryFingerprint: "fp-1", Capabilities: rpc.TradingStatus{Account: "DU123", Mode: "live"}},
+		"fingerprint": {CanaryFingerprint: "fp-old", CapturedTrading: current.CapturedTrading},
+		"account":     {CanaryFingerprint: "fp-1", CapturedTrading: rpc.TradingStatus{Account: "DU999", Mode: "paper"}},
+		"mode":        {CanaryFingerprint: "fp-1", CapturedTrading: rpc.TradingStatus{Account: "DU123", Mode: "live"}},
 	} {
 		if orderReviewSetMatchesSnapshot(set, snap) {
 			t.Fatalf("%s-stale set should not match snapshot", name)
@@ -331,7 +331,8 @@ func TestOrderReviewSetMatchesCurrentSnapshotOnly(t *testing.T) {
 
 func TestOrderReviewSetTransmitRequiresTradingCapability(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(t).Handler()
+	client := &routeBlockedWriteSpyClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
 	cookie := routeSessionCookie(t, handler)
 	set := createRouteReviewSet(t, handler, cookie)
 	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
@@ -343,8 +344,11 @@ func TestOrderReviewSetTransmitRequiresTradingCapability(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("transmit status=%d, want 400; body=%s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "can_transmit=false") {
+	if !strings.Contains(res.Body.String(), "can_write=false") {
 		t.Fatalf("transmit response missing capability reason: %s", res.Body.String())
+	}
+	if client.placeCalls != 0 {
+		t.Fatalf("OrderPlace was called despite can_write=false: %d", client.placeCalls)
 	}
 }
 
@@ -692,6 +696,16 @@ func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
 
 type routeFakeClient struct{}
 
+type routeBlockedWriteSpyClient struct {
+	routeFakeClient
+	placeCalls int
+}
+
+func (c *routeBlockedWriteSpyClient) OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+	c.placeCalls++
+	return &rpc.OrderPlaceResult{Accepted: true}, nil
+}
+
 func (routeFakeClient) Status(context.Context) (*rpc.HealthResult, error) {
 	return &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497}, nil
 }
@@ -720,6 +734,10 @@ func (routeFakeClient) StreamQuote(context.Context, rpc.ContractParams, func(rpc
 	return nil
 }
 
+func (routeFakeClient) MarketEvents(context.Context, rpc.MarketEventsParams) (*rpc.MarketEventsResult, error) {
+	return &rpc.MarketEventsResult{Kind: rpc.MarketEventsKind, SchemaVersion: rpc.MarketEventsSchemaVersion, Fingerprint: rpc.Fingerprint{Key: "market-events-1"}}, nil
+}
+
 func (routeFakeClient) Canary(context.Context) (*rpc.CanaryResult, error) {
 	return &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}}, nil
 }
@@ -732,16 +750,12 @@ func (routeFakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rp
 
 func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return &rpc.TradingStatus{
-		Enabled:         true,
-		Mode:            "paper",
-		Account:         "DU123",
-		Endpoint:        "127.0.0.1:7497",
-		ClientID:        7,
-		PreviewRequired: true,
-		CanPreview:      true,
-		CanTransmit:     false,
-		CanModify:       false,
-		CanCancel:       false,
+		Mode:       "paper",
+		Account:    "DU123",
+		Endpoint:   "127.0.0.1:7497",
+		ClientID:   7,
+		CanPreview: true,
+		CanWrite:   false,
 	}, nil
 }
 
@@ -778,7 +792,7 @@ func (routeFakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) 
 			},
 		},
 		Trading: rpc.PlatformTradingSettings{
-			Enabled: rpc.SettingsBool{Value: true, Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceConfig},
+			Mode: rpc.SettingsString{Value: "paper", Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceConfig},
 			Limits: rpc.TradingLimitSettings{
 				MaxNotional: rpc.SettingsFloat{Value: 10000, Access: rpc.SettingsAccessRead, Source: rpc.SettingsSourceConfig, Reason: "stable build"},
 			},
@@ -795,7 +809,7 @@ func (routeFakeClient) UpdateSettings(_ context.Context, patch json.RawMessage) 
 		return nil, err
 	}
 	if _, ok := obj["trading"]; ok {
-		return nil, &rpc.Error{Code: rpc.CodeBadRequest, Message: "settings field trading.enabled is read-only"}
+		return nil, &rpc.Error{Code: rpc.CodeBadRequest, Message: "settings field trading.mode is read-only"}
 	}
 	return routeFakeClient{}.Settings(context.Background())
 }
@@ -940,16 +954,12 @@ type routeWriteFakeClient struct {
 
 func (routeWriteFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return &rpc.TradingStatus{
-		Enabled:         true,
-		Mode:            "paper",
-		Account:         "DU123",
-		Endpoint:        "127.0.0.1:7497",
-		ClientID:        7,
-		PreviewRequired: true,
-		CanPreview:      true,
-		CanTransmit:     true,
-		CanModify:       true,
-		CanCancel:       true,
+		Mode:       "paper",
+		Account:    "DU123",
+		Endpoint:   "127.0.0.1:7497",
+		ClientID:   7,
+		CanPreview: true,
+		CanWrite:   true,
 	}, nil
 }
 

@@ -48,7 +48,7 @@ func connectionSegment(snap live.Snapshot) string {
 
 func tradingSegment(snap live.Snapshot) string {
 	switch {
-	case snap.Trading.CanTransmit:
+	case snap.Trading.CanWrite:
 		return styleOK("trade submit")
 	case snap.Trading.CanPreview:
 		return styleWarn("trade preview")

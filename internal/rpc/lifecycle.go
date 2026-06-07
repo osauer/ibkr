@@ -24,6 +24,14 @@ const (
 )
 
 const (
+	SourceStatusOK       = "ok"
+	SourceStatusPartial  = "partial"
+	SourceStatusStale    = "stale"
+	SourceStatusUnknown  = "unknown"
+	SourceStatusDegraded = "degraded"
+)
+
+const (
 	RegimeToneNormal      = "normal"
 	RegimeToneWatch       = "watch"
 	RegimeToneStress      = "stress"

@@ -11,10 +11,11 @@ import (
 // risk-data path: account margin, portfolio exposure, and market regime stay
 // single-source-of-truth.
 type CanaryInput struct {
-	Account   AccountResult
-	Positions PositionsResult
-	Regime    RegimeSnapshotResult
-	Now       time.Time
+	Account      AccountResult
+	Positions    PositionsResult
+	Regime       RegimeSnapshotResult
+	MarketEvents MarketEventsResult
+	Now          time.Time
 }
 
 // CanaryResult is the compact scheduled-monitor payload. The canary is
@@ -52,15 +53,17 @@ type CanaryResult struct {
 }
 
 type CanarySourceAsOf struct {
-	Account   time.Time `json:"account,omitzero"`
-	Positions time.Time `json:"positions,omitzero"`
-	Regime    time.Time `json:"regime,omitzero"`
+	Account      time.Time `json:"account,omitzero"`
+	Positions    time.Time `json:"positions,omitzero"`
+	Regime       time.Time `json:"regime,omitzero"`
+	MarketEvents time.Time `json:"market_events,omitzero"`
 }
 
 type CanarySourceFingerprints struct {
-	Account   *Fingerprint `json:"account,omitempty"`
-	Positions *Fingerprint `json:"positions,omitempty"`
-	Regime    *Fingerprint `json:"regime,omitempty"`
+	Account      *Fingerprint `json:"account,omitempty"`
+	Positions    *Fingerprint `json:"positions,omitempty"`
+	Regime       *Fingerprint `json:"regime,omitempty"`
+	MarketEvents *Fingerprint `json:"market_events,omitempty"`
 }
 
 type CanaryRow struct {
@@ -100,16 +103,17 @@ type CanaryPortfolioSummary struct {
 // material held underlyings. It deliberately avoids option-chain fan-out; all
 // fields come from the existing positions/account snapshot.
 type CanaryHeldStress struct {
-	Underlying            string          `json:"underlying"`
-	MaterialReasons       []string        `json:"material_reasons,omitempty"`
-	MarketValuePctNLV     *float64        `json:"market_value_pct_nlv,omitempty"`
-	DeltaPctNLV           *float64        `json:"delta_pct_nlv,omitempty"`
-	DailyPnLPctNLV        *float64        `json:"daily_pnl_pct_nlv,omitempty"`
-	NearExpiryDeltaPctNLV *float64        `json:"near_expiry_delta_pct_nlv,omitempty"`
-	NearExpiryGamma       *float64        `json:"near_expiry_gamma,omitempty"`
-	NearExpiryMinDTE      *int            `json:"near_expiry_min_dte,omitempty"`
-	LiquidityFlags        []string        `json:"liquidity_flags,omitempty"`
-	SignalIDs             []risk.SignalID `json:"signal_ids,omitempty"`
+	Underlying            string            `json:"underlying"`
+	MaterialReasons       []string          `json:"material_reasons,omitempty"`
+	MarketValuePctNLV     *float64          `json:"market_value_pct_nlv,omitempty"`
+	DeltaPctNLV           *float64          `json:"delta_pct_nlv,omitempty"`
+	DailyPnLPctNLV        *float64          `json:"daily_pnl_pct_nlv,omitempty"`
+	NearExpiryDeltaPctNLV *float64          `json:"near_expiry_delta_pct_nlv,omitempty"`
+	NearExpiryGamma       *float64          `json:"near_expiry_gamma,omitempty"`
+	NearExpiryMinDTE      *int              `json:"near_expiry_min_dte,omitempty"`
+	LiquidityFlags        []string          `json:"liquidity_flags,omitempty"`
+	MarketFlags           []MarketEventFlag `json:"market_flags,omitempty"`
+	SignalIDs             []risk.SignalID   `json:"signal_ids,omitempty"`
 }
 
 type CanaryMarketSummary struct {

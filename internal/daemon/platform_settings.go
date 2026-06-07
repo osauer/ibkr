@@ -325,13 +325,11 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 			},
 		},
 		Trading: rpc.PlatformTradingSettings{
-			Enabled:              settingsBool(status.Enabled, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [trading].enabled in config.toml"),
-			Mode:                 settingsString(status.Mode, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [trading].mode in config.toml"),
+			Mode:                 settingsString(status.Mode, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, `set [trading].mode in config.toml to "disabled", "paper", or "live"`),
 			Account:              settingsString(status.Account, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [gateway].account in config.toml"),
 			Endpoint:             settingsString(status.Endpoint, rpc.SettingsAccessRead, rpc.SettingsSourceObserved, "observed from daemon gateway discovery/config"),
 			ClientID:             settingsInt(status.ClientID, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [gateway].client_id in config.toml"),
 			MCPTrading:           settingsString(status.MCPTrading, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [trading].mcp_* in config.toml"),
-			PreviewRequired:      settingsBool(status.PreviewRequired, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [trading].require_preview in config.toml"),
 			LiveOverride:         settingsString(status.LiveOverride, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set live acknowledgements in config.toml"),
 			BuildWritesAvailable: settingsBool(orderWritesAvailable, rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "controlled by the ibkr build"),
 			Limits: rpc.TradingLimitSettings{
@@ -341,7 +339,6 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 				AllowOptionSellToOpen:   settingsBool(trading.AllowOptionSellToOpen, limitAccess, limitSource(data.Trading.AllowOptionSellToOpen != nil), limitReason),
 				AllowOptionMarketOrders: settingsBool(trading.AllowOptionMarketOrders, limitAccess, limitSource(data.Trading.AllowOptionMarketOrders != nil), limitReason),
 			},
-			Status: &status,
 		},
 		AutoTrade: rpc.PlatformAutoTradeSettings{
 			ProposalsEnabled: settingsBool(autoTrade.ProposalsEnabledResolved(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].proposals_enabled in config.toml"),
@@ -361,7 +358,7 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 		AsOf: s.orderNow(),
 	}
 	if orderWritesAvailable {
-		out.Build.ExperimentalTradingNote = "experimental trading build; runtime limit overrides are writable only when [trading].enabled is true"
+		out.Build.ExperimentalTradingNote = "experimental trading build; runtime limit overrides are writable only when [trading].mode is paper or live"
 	} else {
 		out.Build.ExperimentalTradingNote = "stable read-only build; trading limit edits are disabled"
 	}
@@ -399,8 +396,8 @@ func (s *Server) tradingLimitWritability() (bool, string) {
 	if s != nil && s.cfg != nil {
 		tr = s.cfg.Trading.WithDefaults()
 	}
-	if !tr.Enabled {
-		return false, "enable [trading].enabled in config.toml before editing runtime safety limits"
+	if !tr.OrderEntryEnabled() {
+		return false, `set [trading].mode to "paper" or "live" before editing runtime safety limits`
 	}
 	return true, ""
 }

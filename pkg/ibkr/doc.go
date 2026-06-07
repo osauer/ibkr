@@ -21,8 +21,8 @@
 //   - Market data, snapshot: reqMktData (1) with snapshot=true.
 //     Entry point: [Connector.FetchMarketSnapshot].
 //   - Market data, streaming: reqMktData (1) with snapshot=false; default
-//     generic-tick list 100,101,104,106,165 (option volume, OI, HV,
-//     averaged IV, Misc Stats 13/26/52w highs/lows).
+//     generic-tick list 100,101,104,106,165,236 (option volume, OI, HV,
+//     averaged IV, Misc Stats 13/26/52w highs/lows, shortable shares).
 //     Entry points: [Connector.SubscribeMarketData],
 //     [Connector.EnsureMarketDataSubscription], [Connector.GetMarketData].
 //   - Option chains: reqSecDefOptParams (78), tickOptionComputation (21).

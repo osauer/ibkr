@@ -16,7 +16,7 @@ import (
 func TestPurgeRestorePreviewIsAllOrNone(t *testing.T) {
 	t.Parallel()
 
-	srv := newPurgeRestoreTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	aapl := purgeLedgerTestStockContract()
 	msft := aapl
 	msft.ConID = 272093
@@ -65,7 +65,7 @@ func TestPurgeRestorePreviewIsAllOrNone(t *testing.T) {
 func TestPurgeRestoreExecuteRecomputesWhatIfAndSendFailureLeavesLedger(t *testing.T) {
 	t.Parallel()
 
-	srv := newPurgeRestoreTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	contract := purgeLedgerTestStockContract()
 	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-test", "leg-aapl", contract, rpc.OrderActionSell, 1, 100)
 	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return nil, nil }
@@ -109,9 +109,7 @@ func TestPurgeRestoreExecuteRecomputesWhatIfAndSendFailureLeavesLedger(t *testin
 func TestPurgeRestorePaperNeutralStockAndOption(t *testing.T) {
 	t.Parallel()
 
-	srv := newPurgeRestoreTestServer(t, config.Trading{
-		Enabled:               true,
-		Mode:                  config.TradingModePaper,
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper,
 		AllowOptionSellToOpen: true,
 		MaxNotional:           100_000,
 		MaxOptionContracts:    10,

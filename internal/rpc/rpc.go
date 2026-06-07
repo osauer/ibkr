@@ -2732,13 +2732,6 @@ type HealthResult struct {
 }
 
 const (
-	TradingLocalGateDisabled = "disabled"
-	TradingLocalGatePaper    = "paper"
-	TradingLocalGateLive     = "live"
-
-	BrokerTradingGateUnknown          = "unknown"
-	BrokerTradingGatePaperSmokePassed = "paper-smoke-passed"
-
 	TradingMCPDisabled = "disabled"
 	TradingMCPPreview  = "preview-only"
 	TradingMCPPaper    = "paper-write"
@@ -2759,10 +2752,7 @@ type TradingBlocker struct {
 // separate from broker permission: TWS / IB Gateway can still reject writes
 // after all local gates pass.
 type TradingStatus struct {
-	Enabled            bool             `json:"enabled"`
 	Mode               string           `json:"mode"`
-	LocalGate          string           `json:"local_gate"`
-	BrokerGate         string           `json:"broker_gate"`
 	Endpoint           string           `json:"endpoint,omitempty"`
 	GatewayHost        string           `json:"gateway_host,omitempty"`
 	GatewayPort        int              `json:"gateway_port,omitempty"`
@@ -2772,11 +2762,8 @@ type TradingStatus struct {
 	ClientID           int              `json:"client_id,omitempty"`
 	ClientIDOrigin     string           `json:"client_id_origin,omitempty"`
 	MCPTrading         string           `json:"mcp_trading"`
-	PreviewRequired    bool             `json:"preview_required"`
 	CanPreview         bool             `json:"can_preview"`
-	CanTransmit        bool             `json:"can_transmit"`
-	CanModify          bool             `json:"can_modify"`
-	CanCancel          bool             `json:"can_cancel"`
+	CanWrite           bool             `json:"can_write"`
 	OpenOrders         int              `json:"open_orders,omitempty"`
 	LastOrderEvent     string           `json:"last_order_event,omitempty"`
 	PaperSmoke         string           `json:"paper_smoke,omitempty"`

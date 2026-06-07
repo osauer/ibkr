@@ -67,9 +67,9 @@ function setupLiveRefreshLoop() {
     renderSyncStrip(snap);
     if (state.snapshot) {
       renderAccountPanel(snap.account || {}, snap.positions || {}, snap.canary || {});
-      renderUnderlyings(snap.positions || {}, snap.account || {});
+      renderUnderlyings(snap.positions || {}, snap.account || {}, snap.market_events || {});
       renderPortfolioRisk(snap.positions || {}, snap.account || {});
-      renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {});
+      renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
     }
     refreshBootstrapIfSSEUnavailable();
   }, 1000);
@@ -231,7 +231,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -285,7 +285,7 @@ function renderAll() {
   ensureRegimeCanaryExpansion(canary);
   renderTopbar(snap);
   renderAccountPanel(account, positions, canary);
-  renderUnderlyings(positions, account);
+  renderUnderlyings(positions, account, snap.market_events || {});
   renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
   renderFreshnessTimestamp("positionsAsOf", positions.as_of, { staleMinutes: 15 });
   $("stockCount").textContent = (positions.stocks || []).length;
@@ -299,7 +299,7 @@ function renderAll() {
   renderSelectedAlert();
   renderOrderReview();
   renderCanaryMitigation(canary);
-  renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {});
+  renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
   renderOpenOrders();
   renderMarketContext(snap);
   renderRegimePanel(snap);
@@ -380,7 +380,7 @@ function renderSettings() {
   toggle.title = purge.reason || "Runtime preference";
 
   const trading = settings.trading || {};
-  const status = trading.status || state.snapshot?.trading || {};
+  const status = state.snapshot?.trading || {};
   $("settingsTradingStatus").textContent = tradingStatusSettingsLabel(trading, status);
   $("settingsTradingMeta").textContent = [trading.mode?.value, trading.account?.value].filter(Boolean).join(" / ") || "Config-owned";
   $("settingsTradingLimits").textContent = tradingLimitSummary(trading.limits || {});
@@ -400,9 +400,9 @@ function settingMeta(field = {}) {
 }
 
 function tradingStatusSettingsLabel(trading = {}, status = {}) {
-  if (trading.enabled?.value === false || status.enabled === false) return "Disabled";
+  if ((status.mode || trading.mode?.value) === "disabled") return "Disabled";
   if (status.blocked) return "Blocked";
-  if (status.can_transmit) return "Write ready";
+  if (status.can_write) return "Write ready";
   if (status.can_preview) return "Preview ready";
   return "Read-only";
 }
@@ -697,12 +697,12 @@ function heldStressMetricRow(stress) {
   return row;
 }
 
-function renderUnderlyings(positions = {}, account = {}) {
+function renderUnderlyings(positions = {}, account = {}, marketEvents = {}) {
   const list = $("underlyingBookList");
   if (!list) return;
 
   const baseCurrency = normalizeCurrency(account.base_currency || positions.portfolio?.base_currency || "USD") || "USD";
-  const rows = underlyingBookRows(positions, baseCurrency);
+  const rows = underlyingBookRows(positions, baseCurrency, marketEvents);
   const heldCount = rows.filter((row) => !row.virtual).length;
   const virtualCount = rows.length - heldCount;
   const count = $("underlyingBookCount");
@@ -712,6 +712,7 @@ function renderUnderlyings(positions = {}, account = {}) {
   const heldLabel = heldSymbols.length > 0 ? ` · ${heldSymbols.join(", ")}${heldCount > heldSymbols.length ? ` +${heldCount - heldSymbols.length}` : ""}` : "";
   const quoteSummary = underlyingQuoteSummary(rows);
   renderUnderlyingPnlSummary(underlyingHeldDailyPnlTotals(rows, baseCurrency));
+  renderMarketFlagRail("underlyingFlagRail", underlyingHeroMarketFlags(rows, marketEvents));
   if (count) {
     count.textContent = rows.length === 0
       ? "No underlyings"
@@ -818,25 +819,25 @@ function renderUnderlyingExpansion() {
 }
 
 function canWriteUnderlyings(trading = {}) {
-  return Boolean(purgeRestoreSettingEnabled() && trading.enabled && trading.can_transmit && trading.account && trading.mode);
+  return Boolean(purgeRestoreSettingEnabled() && trading.mode && trading.mode !== "disabled" && trading.can_write && trading.account);
 }
 
 function underlyingWriteReason(action, hasRows, trading = {}) {
   if (!hasRows) return "No matching underlying rows";
   if (!purgeRestoreSettingEnabled()) return "Purge/restore is disabled in Settings";
-  if (!trading.enabled) return "Trading is disabled";
-  if (!trading.can_transmit) return "Broker writes are not enabled by trading.status";
+  if (!trading.mode || trading.mode === "disabled") return "Trading is disabled";
+  if (!trading.can_write) return "Broker writes are not enabled by trading.status";
   if (!trading.account) return "Broker-write account unavailable";
   if (!trading.mode) return "Trading mode unavailable";
   return `${action} after confirming ${trading.mode}/${trading.account}`;
 }
 
-function underlyingBookRows(positions, baseCurrency) {
+function underlyingBookRows(positions, baseCurrency, marketEvents = {}) {
   const rows = new Map();
-  for (const row of heldUnderlyingRows(positions, baseCurrency)) {
+  for (const row of heldUnderlyingRows(positions, baseCurrency, marketEvents)) {
     rows.set(row.symbol, row);
   }
-  for (const row of purgedUnderlyingRows(positions, baseCurrency)) {
+  for (const row of purgedUnderlyingRows(positions, baseCurrency, marketEvents)) {
     const existing = rows.get(row.symbol);
     if (existing) {
       existing.hasPurgeRecord = true;
@@ -869,7 +870,7 @@ function underlyingPnlSortRank(value) {
   return value < 0 ? 0 : 1;
 }
 
-function heldUnderlyingRows(positions, baseCurrency) {
+function heldUnderlyingRows(positions, baseCurrency, marketEvents = {}) {
   return (positions.by_underlying || []).map((group) => {
     const symbol = normalizeSymbol(group.underlying || group.stock?.symbol || group.options?.[0]?.symbol);
     if (!symbol) return null;
@@ -901,6 +902,7 @@ function heldUnderlyingRows(positions, baseCurrency) {
       stockCount,
       optionCount,
       detail: underlyingPositionDetail(stockCount, optionCount),
+      marketFlags: marketEventFlagsForSymbol(symbol, marketEvents),
     };
     row.quoteStatus = underlyingQuoteStatus(row);
     return row;
@@ -980,7 +982,7 @@ function heldUnderlyingDailyPnl(group, baseCurrency, currency) {
   return { value: null, currency: baseCurrency, source: "daily P/L pending" };
 }
 
-function purgedUnderlyingRows(positions, baseCurrency) {
+function purgedUnderlyingRows(positions, baseCurrency, marketEvents = {}) {
   const rows = new Map();
   for (const entry of purgeBookEntries(positions)) {
     const symbol = normalizeSymbol(entry.underlying || entry.symbol || entry.ticker || entry.contract?.symbol);
@@ -1005,6 +1007,7 @@ function purgedUnderlyingRows(positions, baseCurrency) {
       legCount: 0,
       purgeIDs: new Set(),
       detail: "",
+      marketFlags: marketEventFlagsForSymbol(symbol, marketEvents),
     };
     const currency = normalizeCurrency(entry.currency || entry.trading_currency || entry.contract?.currency || entry.base_currency);
     if (currency) {
@@ -1066,6 +1069,7 @@ function purgedUnderlyingRows(positions, baseCurrency) {
       purgeLabel: row.purgeIDs.size > 0 ? [...row.purgeIDs].slice(0, 2).join(", ") : "purge book",
       detail: `${row.legCount} purged ${row.legCount === 1 ? "leg" : "legs"}`,
     };
+    out.marketFlags = marketEventFlagsForSymbol(out.symbol, marketEvents);
     out.quoteStatus = underlyingQuoteStatus(out);
     return out;
   });
@@ -1266,6 +1270,8 @@ function underlyingBookRow(row, baseCurrency) {
   const detail = document.createElement("small");
   detail.textContent = row.detail;
   identity.append(title, detail);
+  const flagRow = marketFlagRow(row.marketFlags || []);
+  if (flagRow) identity.append(flagRow);
 
   const price = document.createElement("div");
   const quoteStatus = row.quoteStatus || underlyingQuoteStatus(row);
@@ -1326,6 +1332,140 @@ function underlyingMarker(label, tone) {
   marker.className = "underlying-marker underlying-marker--" + tone;
   marker.textContent = label;
   return marker;
+}
+
+function renderMarketFlagRail(id, items) {
+  const rail = $(id);
+  if (!rail) return;
+  const chips = (items || []).map((item) => item.sourceHealth ? marketSourceHealthChip(item.sourceHealth) : marketFlagChip(item.flag, item.options || {})).filter(Boolean);
+  rail.hidden = chips.length === 0;
+  rail.replaceChildren(...chips);
+}
+
+function marketFlagRow(flags) {
+  const active = (flags || []).filter(marketEventFlagVisible);
+  if (active.length === 0) return null;
+  const row = document.createElement("div");
+  row.className = "market-flag-row";
+  row.replaceChildren(...active.map((flag) => marketFlagChip(flag, { compact: true })));
+  return row;
+}
+
+function marketFlagChip(flag = {}, options = {}) {
+  if (!flag || !flag.id) return null;
+  const chip = document.createElement("span");
+  chip.className = `market-flag-chip market-flag-chip--${marketEventTone(flag)}`;
+  chip.textContent = options.label || marketEventLabel(flag, options);
+  chip.title = marketEventTitle(flag);
+  return chip;
+}
+
+function marketSourceHealthChip(health = {}) {
+  if (!marketEventHealthVisible(health)) return null;
+  const chip = document.createElement("span");
+  chip.className = "market-flag-chip market-flag-chip--muted";
+  chip.textContent = `${marketEventSourceLabel(health.source)} ${labelize(health.status || "unknown")}`;
+  chip.title = [
+    health.source,
+    health.as_of ? `as of ${shortTimeWithZone(health.as_of)}` : "",
+    ...(health.notes || []),
+  ].filter(Boolean).join(" · ");
+  return chip;
+}
+
+function marketEventFlagsForSymbol(symbol, events = {}) {
+  const target = normalizeSymbol(symbol);
+  if (!target) return [];
+  const bySymbol = events.by_symbol || {};
+  for (const [key, flags] of Object.entries(bySymbol)) {
+    if (normalizeSymbol(key) === target) {
+      return (flags || []).filter(marketEventFlagVisible);
+    }
+  }
+  return [];
+}
+
+function marketEventFlagVisible(flag = {}) {
+  const status = String(flag.status || "").toLowerCase();
+  return status === "active" || status === "recent" || status === "stale" || status === "unknown" || status === "degraded";
+}
+
+function marketEventHealthVisible(health = {}) {
+  const status = String(health.status || "").toLowerCase();
+  return status === "unknown" || status === "stale" || status === "degraded" || status === "partial" || status === "error" || status === "unavailable";
+}
+
+function underlyingHeroMarketFlags(rows, events = {}) {
+  const heldSymbols = new Set(rows.filter((row) => !row.virtual).map((row) => row.symbol));
+  const counts = new Map();
+  for (const row of rows) {
+    if (row.virtual || !heldSymbols.has(row.symbol)) continue;
+    for (const flag of row.marketFlags || []) {
+      if (!marketEventFlagVisible(flag)) continue;
+      const key = flag.id;
+      const existing = counts.get(key) || { flag, count: 0 };
+      existing.count += 1;
+      counts.set(key, existing);
+    }
+  }
+  const items = [...counts.values()].map(({ flag, count }) => ({
+    flag,
+    options: { label: `${flag.label || marketEventIDLabel(flag.id)} ${count}` },
+  }));
+  if (items.length > 0) return items;
+  return marketEventHealthItems(events);
+}
+
+function marketEventHealthItems(events = {}) {
+  return (events.source_health || []).filter(marketEventHealthVisible).map((sourceHealth) => ({ sourceHealth }));
+}
+
+function marketEventLabel(flag = {}, options = {}) {
+  const base = flag.label || marketEventIDLabel(flag.id);
+  if (options.compact) return base;
+  return base;
+}
+
+function marketEventIDLabel(id = "") {
+  switch (id) {
+    case "borrow_inventory_tight": return "Borrow tight";
+    case "borrow_fee_extreme": return "Fee extreme";
+    case "reg_sho_threshold": return "Reg SHO";
+    case "luld_pause":
+    case "luld_pause_recent": return "LULD";
+    case "halt_regulatory_or_news": return "Halt";
+    default: return labelize(id || "flag");
+  }
+}
+
+function marketEventTone(flag = {}) {
+  const status = String(flag.status || "").toLowerCase();
+  if (status === "unknown" || status === "stale" || status === "degraded") return "muted";
+  const severity = String(flag.severity || "").toLowerCase();
+  if (severity === "block") return "hard";
+  if (severity === "act" || severity === "watch") return "friction";
+  if (severity === "context") return "context";
+  return "muted";
+}
+
+function marketEventTitle(flag = {}) {
+  return [
+    flag.symbol,
+    flag.status ? labelize(flag.status) : "",
+    flag.source || "",
+    flag.as_of ? `as of ${shortTimeWithZone(flag.as_of)}` : "",
+    ...(flag.details || []),
+  ].filter(Boolean).join(" · ");
+}
+
+function marketEventSourceLabel(source = "") {
+  const normalized = String(source || "").toLowerCase();
+  if (normalized.includes("borrow_inventory")) return "Borrow";
+  if (normalized.includes("borrow_fee")) return "Fee";
+  if (normalized.includes("reg_sho")) return "Reg SHO";
+  if (normalized.includes("halt")) return "Halts";
+  if (normalized.includes("market_events")) return "Flags";
+  return labelize(source || "Source");
 }
 
 function underlyingActionButton(label, enabled, row, action) {
@@ -1421,8 +1561,6 @@ function currentAccountContext(account = {}) {
     account.environment,
     trading.mode,
     status.trading?.mode,
-    trading.local_gate,
-    status.trading?.local_gate,
   ].map((value) => String(value || "").trim()).find((value) => /paper|live/i.test(value));
   const modeLabel = modeSource
     ? modeSource.toLowerCase().includes("paper") ? "Paper" : "Live"
@@ -1474,7 +1612,7 @@ function renderCanaryMitigation(canary = {}) {
   button.title = gate.reason;
 }
 
-function renderProtectionPanel(proposals = {}, autoTrade = {}) {
+function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}) {
   const panel = $("protectionPanel");
   const detail = $("protectionDetailPanel");
   const toggle = $("protectionToggle");
@@ -1490,6 +1628,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}) {
     ? money(counts.risk_reduction_excess_notional, protectionRiskExcessCurrency(counts))
     : "--";
   $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
+  renderMarketFlagRail("protectionFlagRail", protectionHeroMarketFlags(rows, marketEvents));
   const autoButton = $("protectionAutoButton");
   autoButton.disabled = true;
   autoButton.title = autoTrade.auto_submit ? "Autonomous submit is not available in MVP" : "Manual confirmation required";
@@ -1527,12 +1666,14 @@ function protectionRow(proposal) {
   const reason = document.createElement("small");
   reason.textContent = proposal.reason || "";
   copy.append(bucket, title, reason);
+  const flagRow = marketFlagRow(proposal.market_flags || []);
+  if (flagRow) copy.append(flagRow);
   const actions = document.createElement("div");
   actions.className = "protection-row__actions";
   const submit = document.createElement("button");
   submit.type = "button";
   submit.className = proposal.action === "BUY" ? "protection-buy" : "protection-sell";
-  submit.textContent = proposal.action === "BUY" ? "Buy" : "Sell";
+  submit.textContent = protectionActionLabel(proposal);
   submit.disabled = blocked || !tradability.ready;
   submit.title = blocked ? protectionBlockerText(proposal) : tradability.reason;
   submit.addEventListener("click", () => submitProtectionProposal(proposal));
@@ -1549,11 +1690,43 @@ function protectionRow(proposal) {
 
 function protectionProposalTitle(proposal = {}) {
   return [
-    proposal.action || "--",
+    protectionActionLabel(proposal),
     proposal.quantity || 0,
     proposal.symbol || "--",
     protectionContractLabel(proposal.contract || {}),
   ].filter(Boolean).join(" ");
+}
+
+function protectionActionLabel(proposal = {}) {
+  if (proposalIsBuyToCover(proposal)) return "Buy to cover";
+  return String(proposal.action || "--").toUpperCase() === "BUY" ? "Buy" : "Sell";
+}
+
+function proposalIsBuyToCover(proposal = {}) {
+  const action = String(proposal.action || "").toUpperCase();
+  const effect = String(proposal.position_effect || "").toLowerCase();
+  return action === "BUY" &&
+    Number(proposal.position_quantity || 0) < 0 &&
+    (effect === "close" || effect === "reduce");
+}
+
+function protectionHeroMarketFlags(rows = [], marketEvents = {}) {
+  const counts = new Map();
+  for (const proposal of rows) {
+    for (const flag of proposal.market_flags || []) {
+      if (!marketEventFlagVisible(flag)) continue;
+      const key = flag.id;
+      const existing = counts.get(key) || { flag, count: 0 };
+      existing.count += 1;
+      counts.set(key, existing);
+    }
+  }
+  const items = [...counts.values()].map(({ flag, count }) => ({
+    flag,
+    options: { label: `${flag.label || marketEventIDLabel(flag.id)} ${count}` },
+  }));
+  if (items.length > 0) return items;
+  return marketEventHealthItems(marketEvents);
 }
 
 function protectionContractLabel(contract = {}) {
@@ -1630,7 +1803,7 @@ async function refreshProtectionProposals() {
   const res = await fetch("/api/proposals/refresh", { method: "POST", credentials: "include" });
   if (res.ok) {
     const proposals = await res.json();
-    state.snapshot = { ...(state.snapshot || {}), proposals };
+    state.snapshot = { ...(state.snapshot || {}), proposals, market_events: proposals.market_events || state.snapshot?.market_events };
     renderAll();
   }
 }
@@ -3318,7 +3491,7 @@ function previewRowsByID(preview) {
 function reviewTransmitGate(set, trading, selected) {
   if (!set) return { ready: false, reason: "Create or refresh a mitigation plan first" };
   if (reviewSetIsStale(set)) return { ready: false, reason: "Refresh the stale mitigation plan before transmitting" };
-  if (!trading.can_transmit) return { ready: false, reason: "Transmit is not enabled by trading.status" };
+  if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
   if ((selected || []).length === 0) return { ready: false, reason: "Select at least one row before transmitting" };
   const preview = activeOrderPreview(set);
   if (!preview) return { ready: false, reason: "Preview selected rows first" };
@@ -3348,7 +3521,7 @@ function renderOrderReview() {
   renderCanaryMitigation(state.snapshot?.canary || {});
   if (!shouldShow) return;
 
-  const trading = state.snapshot?.trading || set?.capabilities || {};
+  const trading = state.snapshot?.trading || set?.captured_trading || {};
   $("orderReviewTitle").textContent = "Mitigation plan";
   $("orderReviewMeta").textContent = set
     ? `${(set.rows || []).length} review row${(set.rows || []).length === 1 ? "" : "s"} · updated ${shortTime(set.updated_at || set.created_at)}`
@@ -3684,7 +3857,7 @@ async function previewOrderReviewSet() {
 async function transmitSelectedOrders() {
   const set = activeOrderReviewSet();
   if (!set) return;
-  const trading = state.snapshot?.trading || set.capabilities || {};
+  const trading = state.snapshot?.trading || set.captured_trading || {};
   const selected = selectedReviewRows(set);
   const gate = reviewTransmitGate(set, trading, selected);
   if (!gate.ready) {
@@ -3868,7 +4041,7 @@ function orderReductionMax(order) {
 
 function orderModifyGate(order, trading) {
   if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
-  if (!trading.can_modify) return { ready: false, reason: "Modify is not enabled by trading.status" };
+  if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
   if ("modify_eligible" in order && order.modify_eligible !== true) return { ready: false, reason: "This order is not modify eligible" };
   if (order.open === false) return { ready: false, reason: "Only open orders can be modified" };
   if (String(order.order_type || "LMT").toUpperCase() !== "LMT") return { ready: false, reason: "Canary mitigation UI only supports LMT price changes" };
@@ -3878,7 +4051,7 @@ function orderModifyGate(order, trading) {
 
 function orderCancelGate(order, trading) {
   if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
-  if (!trading.can_cancel) return { ready: false, reason: "Cancel is not enabled by trading.status" };
+  if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
   if ("cancel_eligible" in order && order.cancel_eligible !== true) return { ready: false, reason: "This order is not cancel eligible" };
   if (order.open === false) return { ready: false, reason: "Only open orders can be cancelled" };
   return { ready: true, reason: "Cancel this journal-backed open order after confirmation" };
@@ -4070,7 +4243,7 @@ function capabilityLine(trading, set) {
   if (reviewSetIsStale(set)) return "Stale review set for a previous canary/account context. Refresh before preview.";
   const bits = [
     trading.can_preview ? "preview ready" : "preview blocked",
-    trading.can_transmit ? "transmit ready" : "transmit disabled",
+    trading.can_write ? "write ready" : "write disabled",
     trading.open_orders ? `${trading.open_orders} open` : "",
   ].filter(Boolean);
   const blockers = (trading.blockers || []).map((blocker) => blocker.message || blocker.code).filter(Boolean);
@@ -4103,7 +4276,7 @@ function reviewSetIsStale(set) {
   const current = currentCanaryFingerprint();
   const canaryChanged = Boolean(set?.canary_fingerprint && current && set.canary_fingerprint !== current);
   const trading = state.snapshot?.trading || {};
-  const setCaps = set?.capabilities || {};
+  const setCaps = set?.captured_trading || {};
   const accountChanged = Boolean(setCaps.account && trading.account && setCaps.account !== trading.account);
   const modeChanged = Boolean(setCaps.mode && trading.mode && setCaps.mode !== trading.mode);
   return canaryChanged || accountChanged || modeChanged;
@@ -4115,8 +4288,8 @@ function transmitConfirmationText(set, preview, selected, trading) {
   const lines = [
     "Transmit selected orders?",
     "",
-    `Mode: ${labelize(firstPreview?.mode || trading.mode || set.capabilities?.mode || "--")}`,
-    `Account: ${firstPreview?.account || trading.account || set.capabilities?.account || "--"}`,
+    `Mode: ${labelize(firstPreview?.mode || trading.mode || set.captured_trading?.mode || "--")}`,
+    `Account: ${firstPreview?.account || trading.account || set.captured_trading?.account || "--"}`,
     `Endpoint: ${venueLabel(firstPreview || trading)}`,
     "",
     "Selected rows:",

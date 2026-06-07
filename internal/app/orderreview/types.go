@@ -21,7 +21,7 @@ type Set struct {
 	CanaryFingerprint  string                       `json:"canary_fingerprint,omitempty"`
 	SourceFingerprints rpc.CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
 	Rows               []Row                        `json:"rows"`
-	Capabilities       rpc.TradingStatus            `json:"capabilities"`
+	CapturedTrading    rpc.TradingStatus            `json:"captured_trading"`
 	LatestPreview      *Preview                     `json:"latest_preview,omitempty"`
 	CreatedAt          time.Time                    `json:"created_at"`
 	UpdatedAt          time.Time                    `json:"updated_at"`
@@ -61,14 +61,14 @@ type RiskImpact struct {
 }
 
 type Preview struct {
-	ID           string            `json:"id"`
-	SetID        string            `json:"set_id"`
-	SetRevision  string            `json:"set_revision"`
-	Rows         []PreviewRow      `json:"rows"`
-	SubmitReady  bool              `json:"submit_ready"`
-	Blockers     []string          `json:"blockers,omitempty"`
-	Capabilities rpc.TradingStatus `json:"capabilities"`
-	AsOf         time.Time         `json:"as_of"`
+	ID              string            `json:"id"`
+	SetID           string            `json:"set_id"`
+	SetRevision     string            `json:"set_revision"`
+	Rows            []PreviewRow      `json:"rows"`
+	SubmitReady     bool              `json:"submit_ready"`
+	Blockers        []string          `json:"blockers,omitempty"`
+	CapturedTrading rpc.TradingStatus `json:"captured_trading"`
+	AsOf            time.Time         `json:"as_of"`
 }
 
 type PreviewRow struct {

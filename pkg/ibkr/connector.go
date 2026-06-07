@@ -181,10 +181,15 @@ type Subscription struct {
 	// zero OI" from "gateway has not delivered the OI tick yet".
 	OpenInt         int64
 	OpenIntObserved bool
-	PrevClose       float64
-	Open            float64
-	High            float64
-	Low             float64
+	// ShortableShares is generic tick 236. ShortableObserved distinguishes
+	// "IBKR observed zero shares available" from "this subscription has not
+	// delivered borrow inventory".
+	ShortableShares   int64
+	ShortableObserved bool
+	PrevClose         float64
+	Open              float64
+	High              float64
+	Low               float64
 	// Week-range highs/lows arrive via generic tick 165 (Misc Stats) as
 	// tickPrice messages with tick types 15-20. Captured here so consumers
 	// (notably scan-row enrichment, where 52w range is a standard column)
@@ -1779,7 +1784,7 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 		var err error
 		switch {
 		case ready:
-			reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
+			reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233,236", false, false)
 		case contract.PrimaryExch != "":
 			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, contract.PrimaryExch)
 		default:
@@ -1860,7 +1865,7 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 	reqID := 0
 	if c.conn != nil && c.conn.IsConnected() {
 		var err error
-		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
+		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233,236", false, false)
 		if err != nil {
 			c.logWarn("Failed to request market data for %s: %v", key, err)
 			return key, err
@@ -1979,7 +1984,7 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 			err   error
 		)
 
-		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233", false, false)
+		reqID, err = c.conn.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233,236", false, false)
 		if err != nil {
 			return 0, err
 		}
@@ -3089,7 +3094,8 @@ func (c *Connector) handleTickPrice(fields []string) {
 	sub.LastTime = time.Now()
 }
 
-// handleTickGeneric processes generic tick updates (e.g., 106 = option implied vol).
+// handleTickGeneric processes generic tick updates such as 106 (option
+// implied vol) and 236 (shortable shares).
 func (c *Connector) handleTickGeneric(fields []string) {
 	// Expected format: [msgID, version, reqID, tickType, value]
 	if len(fields) < 5 {
@@ -3111,9 +3117,10 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		return
 	}
 
-	// 106 = Option Implied Volatility (averaged across the chain — the
-	// "IV of the underlying" that retail platforms display).
-	if tickType == 106 && val > 0 {
+	switch {
+	case tickType == 106 && val > 0:
+		// 106 = Option Implied Volatility (averaged across the chain — the
+		// "IV of the underlying" that retail platforms display).
 		iv := val
 		if iv > 1.5 { // normalize percent inputs
 			iv = iv / 100.0
@@ -3128,6 +3135,15 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		if sub, ok := c.subscriptions[symbol]; ok {
 			sub.IV = iv
 			sub.LastTime = time.Now()
+		}
+		c.subMu.Unlock()
+	case tickType == 236 && val >= 0:
+		c.subMu.Lock()
+		if sub, ok := c.subscriptions[symbol]; ok {
+			sub.ShortableShares = int64(val)
+			sub.ShortableObserved = true
+			sub.LastTime = time.Now()
+			sub.Observed = true
 		}
 		c.subMu.Unlock()
 	}
@@ -4732,30 +4748,32 @@ func (c *Connector) GetMarketData() map[string]*MarketData {
 
 	for symbol, sub := range c.subscriptions {
 		data[symbol] = &MarketData{
-			Symbol:          symbol,
-			Bid:             sub.Bid,
-			Ask:             sub.Ask,
-			Last:            sub.LastPrice,
-			MarkPrice:       sub.MarkPrice,
-			BidSize:         int(sub.BidSize),
-			AskSize:         int(sub.AskSize),
-			Volume:          sub.Volume,
-			AvgVolume:       sub.AvgVolume,
-			LastTradeTime:   sub.LastTradeTime,
-			OpenInt:         sub.OpenInt,
-			OpenIntObserved: sub.OpenIntObserved,
-			Close:           sub.PrevClose,
-			Open:            sub.Open,
-			High:            sub.High,
-			Low:             sub.Low,
-			Week13Low:       sub.Week13Low,
-			Week13High:      sub.Week13High,
-			Week26Low:       sub.Week26Low,
-			Week26High:      sub.Week26High,
-			Week52Low:       sub.Week52Low,
-			Week52High:      sub.Week52High,
-			IV:              sub.IV,
-			Timestamp:       sub.LastTime,
+			Symbol:            symbol,
+			Bid:               sub.Bid,
+			Ask:               sub.Ask,
+			Last:              sub.LastPrice,
+			MarkPrice:         sub.MarkPrice,
+			BidSize:           int(sub.BidSize),
+			AskSize:           int(sub.AskSize),
+			Volume:            sub.Volume,
+			AvgVolume:         sub.AvgVolume,
+			LastTradeTime:     sub.LastTradeTime,
+			OpenInt:           sub.OpenInt,
+			OpenIntObserved:   sub.OpenIntObserved,
+			ShortableShares:   sub.ShortableShares,
+			ShortableObserved: sub.ShortableObserved,
+			Close:             sub.PrevClose,
+			Open:              sub.Open,
+			High:              sub.High,
+			Low:               sub.Low,
+			Week13Low:         sub.Week13Low,
+			Week13High:        sub.Week13High,
+			Week26Low:         sub.Week26Low,
+			Week26High:        sub.Week26High,
+			Week52Low:         sub.Week52Low,
+			Week52High:        sub.Week52High,
+			IV:                sub.IV,
+			Timestamp:         sub.LastTime,
 		}
 	}
 

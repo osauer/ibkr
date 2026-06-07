@@ -211,6 +211,70 @@ func TestPreviewOrderWhatIfModernServerSendsProtobufWhatIfAndWaitsForOpenOrder(t
 	}
 }
 
+func TestConnectorPreviewOrderWhatIfBindsRawOrderAccountAndClientID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ClientID = 31
+	conn := NewConnection(cfg)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
+	conn.nextOrderID = 88
+
+	var buf bytes.Buffer
+	conn.writer = bufio.NewWriter(&buf)
+
+	c := NewConnector(&ConnectorConfig{BaseConfig: cfg})
+	c.conn = conn
+	c.ready = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	type outcome struct {
+		result OrderWhatIfResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := c.PreviewOrderWhatIf(ctx,
+			&Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			&RawOrder{
+				ClientID:  44,
+				Account:   "DU123456",
+				Action:    "BUY",
+				TotalQty:  2,
+				OrderType: "LMT",
+				LmtPrice:  425.50,
+				TIF:       "DAY",
+				OrderRef:  "connector-preview-test",
+			},
+		)
+		done <- outcome{result: result, err: err}
+	}()
+
+	waitForWhatIfFrame(t, &buf)
+	payload := extractFramePayload(t, &buf)
+	summary, err := parsePlaceOrderProtoSummary(payload[4:])
+	if err != nil {
+		t.Fatalf("parse protobuf placeOrder summary: %v", err)
+	}
+	if summary.orderID != 88 || summary.account != "DU123456" || summary.clientID != 44 {
+		t.Fatalf("protobuf gate binding summary = %+v, want order 88 DU123456 client 44", summary)
+	}
+	if !summary.whatIf {
+		t.Fatalf("protobuf flags whatIf=%v, want true", summary.whatIf)
+	}
+
+	cancel()
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("PreviewOrderWhatIf err = %v", got.err)
+	}
+	if got.result.Status == "" {
+		t.Fatalf("PreviewOrderWhatIf returned empty status")
+	}
+}
+
 func TestEncodePlaceOrderProtoSupportsOptionClose(t *testing.T) {
 	order := &IBKROrder{
 		OrderID:      88,

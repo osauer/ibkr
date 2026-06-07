@@ -162,7 +162,15 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 	if fp, ok := e.regimeFingerprint(ctx); ok {
 		sources.Regime = &fp
 	}
-	proposals := e.generate(policy, policyStatus, pos, sources, now)
+	marketEvents := e.marketEventsSnapshot(ctx, pos)
+	if marketEvents != nil {
+		fp := marketEvents.Fingerprint
+		if fp.Key == "" {
+			fp = rpc.BuildMarketEventsFingerprint(marketEvents)
+		}
+		sources.MarketEvents = &fp
+	}
+	proposals := e.generate(policy, policyStatus, pos, sources, marketEvents, now)
 	slices.SortStableFunc(proposals, func(a, b rpc.TradeProposal) int {
 		if a.Score > b.Score {
 			return -1
@@ -190,6 +198,7 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		AutoTrade:          autoStatus,
 		Trading:            autoStatus.Trading,
 		SourceFingerprints: sources,
+		MarketEvents:       marketEvents,
 		Proposals:          proposals,
 		Counts:             proposalCounts(proposals),
 	}
@@ -197,23 +206,43 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 	return snap, nil
 }
 
-func (e *proposalEngine) generate(policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, now time.Time) []rpc.TradeProposal {
+func (e *proposalEngine) generate(policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, now time.Time) []rpc.TradeProposal {
 	var out []rpc.TradeProposal
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
-			if p, ok := thetaProposal(policy, status, row, sources, now); ok && !e.isIgnored(p.Key) {
-				out = append(out, p)
+			if p, ok := thetaProposal(policy, status, row, sources, now); ok {
+				applyMarketEventFlagsToProposal(&p, marketEvents)
+				if !e.isIgnored(p.Key) {
+					out = append(out, p)
+				}
 			}
 		}
 	}
 	if policy.Buckets.RiskReduction.Enabled {
 		for _, group := range pos.ByUnderlying {
-			if p, ok := riskReductionProposal(policy, status, group, sources, now); ok && !e.isIgnored(p.Key) {
-				out = append(out, p)
+			if p, ok := riskReductionProposal(policy, status, group, sources, now); ok {
+				applyMarketEventFlagsToProposal(&p, marketEvents)
+				if !e.isIgnored(p.Key) {
+					out = append(out, p)
+				}
 			}
 		}
 	}
 	return out
+}
+
+func (e *proposalEngine) marketEventsSnapshot(ctx context.Context, pos *rpc.PositionsResult) *rpc.MarketEventsResult {
+	if e == nil || e.server == nil {
+		return nil
+	}
+	symbols := marketEventSymbolsFromPositions(pos)
+	if len(symbols) == 0 {
+		return nil
+	}
+	eventsCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	res := e.server.marketEventsForSymbols(eventsCtx, symbols)
+	return &res
 }
 
 func (e *proposalEngine) regimeFingerprint(ctx context.Context) (rpc.Fingerprint, bool) {
@@ -329,6 +358,78 @@ func baseProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, so
 		p.Notional = math.Abs(row.Mark) * float64(qty) * float64(max(row.Multiplier, 1))
 	}
 	return p
+}
+
+func applyMarketEventFlagsToProposal(prop *rpc.TradeProposal, events *rpc.MarketEventsResult) {
+	if prop == nil || events == nil {
+		return
+	}
+	flags := proposalMarketEventFlags(*prop, events)
+	if len(flags) == 0 {
+		return
+	}
+	prop.MarketFlags = flags
+	for _, flag := range flags {
+		switch {
+		case flag.ID == rpc.MarketEventHaltRegulatoryOrNews && flag.Status == rpc.MarketEventStatusActive:
+			marketEventBlockProposal(prop, flag, "active halt")
+		case flag.ID == rpc.MarketEventLULDRecent && flag.Status == rpc.MarketEventStatusActive:
+			marketEventBlockProposal(prop, flag, "active LULD pause")
+		}
+	}
+}
+
+func proposalMarketEventFlags(prop rpc.TradeProposal, events *rpc.MarketEventsResult) []rpc.MarketEventFlag {
+	if events == nil || events.BySymbol == nil {
+		return nil
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(prop.Symbol))
+	if symbol == "" {
+		return nil
+	}
+	out := []rpc.MarketEventFlag{}
+	for _, flag := range events.BySymbol[symbol] {
+		if !proposalMarketEventFlagApplies(prop, flag) {
+			continue
+		}
+		out = append(out, flag)
+	}
+	slices.SortFunc(out, func(a, b rpc.MarketEventFlag) int {
+		if c := cmpMarketEventSeverity(a.Severity, b.Severity); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out
+}
+
+func proposalMarketEventFlagApplies(prop rpc.TradeProposal, flag rpc.MarketEventFlag) bool {
+	switch flag.ID {
+	case rpc.MarketEventHaltRegulatoryOrNews, rpc.MarketEventLULDRecent:
+		return flag.Status == rpc.MarketEventStatusActive || flag.Status == rpc.MarketEventStatusRecent
+	case rpc.MarketEventRegSHOThreshold:
+		return proposalCloseReduceEffect(prop.PositionEffect)
+	case rpc.MarketEventBorrowInventoryTight, rpc.MarketEventBorrowFeeExtreme:
+		return prop.PositionQuantity < 0 &&
+			strings.EqualFold(prop.Action, rpc.OrderActionBuy) &&
+			proposalCloseReduceEffect(prop.PositionEffect)
+	default:
+		return flag.Status == rpc.MarketEventStatusActive || flag.Status == rpc.MarketEventStatusRecent
+	}
+}
+
+func marketEventBlockProposal(prop *rpc.TradeProposal, flag rpc.MarketEventFlag, reason string) {
+	prop.State = rpc.TradeProposalStateBlocked
+	code := "market_event_" + flag.ID
+	message := fmt.Sprintf("%s is %s for %s", flag.Label, reason, flag.Symbol)
+	if flag.Source != "" {
+		message += " (" + flag.Source + ")"
+	}
+	prop.Blockers = appendTradingBlockerOnce(prop.Blockers, rpc.TradingBlocker{
+		Code:    code,
+		Message: message + "; refresh proposals after the market event clears.",
+		Action:  "Wait for fresh tradability context before previewing or submitting this protection proposal.",
+	})
 }
 
 func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreviewParams) (rpc.TradeProposalPreviewResult, error) {
@@ -579,6 +680,7 @@ func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
 		if len(p.Blockers) == 0 {
 			out.Actionable++
 		}
+		out.MarketFlags += len(p.MarketFlags)
 		switch p.Bucket {
 		case rpc.TradeProposalBucketThetaHygiene:
 			out.ThetaHygiene++
@@ -674,7 +776,25 @@ func proposalSupportedSecType(secType string) bool {
 func cloneProposalSnapshot(in rpc.TradeProposalSnapshot) rpc.TradeProposalSnapshot {
 	out := in
 	out.Proposals = append([]rpc.TradeProposal(nil), in.Proposals...)
+	for i := range out.Proposals {
+		out.Proposals[i].Details = append([]string(nil), in.Proposals[i].Details...)
+		out.Proposals[i].MarketFlags = append([]rpc.MarketEventFlag(nil), in.Proposals[i].MarketFlags...)
+		out.Proposals[i].Blockers = append([]rpc.TradingBlocker(nil), in.Proposals[i].Blockers...)
+	}
 	out.Blockers = append([]rpc.TradingBlocker(nil), in.Blockers...)
+	if in.MarketEvents != nil {
+		events := *in.MarketEvents
+		events.Flags = append([]rpc.MarketEventFlag(nil), in.MarketEvents.Flags...)
+		events.SourceHealth = append([]rpc.SourceHealth(nil), in.MarketEvents.SourceHealth...)
+		events.WarningDetails = append([]rpc.DataWarning(nil), in.MarketEvents.WarningDetails...)
+		if in.MarketEvents.BySymbol != nil {
+			events.BySymbol = make(map[string][]rpc.MarketEventFlag, len(in.MarketEvents.BySymbol))
+			for sym, flags := range in.MarketEvents.BySymbol {
+				events.BySymbol[sym] = append([]rpc.MarketEventFlag(nil), flags...)
+			}
+		}
+		out.MarketEvents = &events
+	}
 	return out
 }
 

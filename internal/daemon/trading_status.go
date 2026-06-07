@@ -52,21 +52,17 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	}
 
 	status := rpc.TradingStatus{
-		Enabled:         tr.Enabled,
-		Mode:            tr.Mode,
-		LocalGate:       rpc.TradingLocalGateDisabled,
-		BrokerGate:      rpc.BrokerTradingGateUnknown,
-		GatewayHost:     host,
-		GatewayPort:     port,
-		Endpoint:        endpointString(host, port),
-		PortOrigin:      string(ep.PortOrigin),
-		Account:         account,
-		AccountOrigin:   originPinnedOrAuto(cfg.Gateway.Account != ""),
-		ClientID:        clientID,
-		ClientIDOrigin:  originPinnedOrDefault(cfg.Gateway.ClientID != nil),
-		MCPTrading:      tradingMCPStatus(tr),
-		PreviewRequired: tr.PreviewRequired(),
-		LiveOverride:    rpc.TradingLiveOverrideBlocked,
+		Mode:           tr.Mode,
+		GatewayHost:    host,
+		GatewayPort:    port,
+		Endpoint:       endpointString(host, port),
+		PortOrigin:     string(ep.PortOrigin),
+		Account:        account,
+		AccountOrigin:  originPinnedOrAuto(cfg.Gateway.Account != ""),
+		ClientID:       clientID,
+		ClientIDOrigin: originPinnedOrDefault(cfg.Gateway.ClientID != nil),
+		MCPTrading:     tradingMCPStatus(tr),
+		LiveOverride:   rpc.TradingLiveOverrideBlocked,
 	}
 	if status.PortOrigin == "" {
 		if cfg.Gateway.Port != nil {
@@ -75,11 +71,10 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 			status.PortOrigin = string(discover.OriginDiscovered)
 		}
 	}
-	if !tr.Enabled {
+	if tr.Mode == config.TradingModeDisabled {
 		return status
 	}
 
-	status.LocalGate = tr.Mode
 	add := func(code, message, action string) {
 		status.Blockers = append(status.Blockers, rpc.TradingBlocker{
 			Code:    code,
@@ -98,7 +93,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 	switch tr.Mode {
 	case config.TradingModePaper, config.TradingModeLive:
 	default:
-		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", tr.Mode), "Set [trading].mode to paper or live.")
+		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", tr.Mode), "Set [trading].mode to disabled, paper, or live.")
 	}
 	if cfg.Gateway.Port == nil {
 		add("gateway_port_unpinned", "order submission requires a pinned gateway port", "Set [gateway].port.")
@@ -145,23 +140,14 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 			status.PaperSmokeClientID = check.Evidence.ClientID
 			status.PaperSmokeVersion = check.Evidence.Version
 		}
-		if check.Status == tradingPaperSmokeStatusValid {
-			status.BrokerGate = rpc.BrokerTradingGatePaperSmokePassed
-		} else {
+		if check.Status != tradingPaperSmokeStatusValid {
 			add(paperSmokeBlockerCode(check.Status), check.Message, check.Action)
 		}
 	}
 
-	if !tr.PreviewRequired() {
-		add("preview_required_disabled", "broker writes require submit-eligible preview tokens", "Set [trading].require_preview = true.")
-	}
-
 	status.Blocked = len(status.Blockers) > 0
-	status.CanPreview = tr.Enabled && !status.Blocked && tr.PreviewRequired()
-	writeReady := s.brokerWriteAuthorization(status).Allowed
-	status.CanTransmit = writeReady
-	status.CanModify = writeReady
-	status.CanCancel = writeReady
+	status.CanPreview = tr.OrderEntryEnabled() && !status.Blocked
+	status.CanWrite = s.brokerWriteAuthorization(status).Allowed
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}
@@ -192,8 +178,8 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 			Action:  action,
 		})
 	}
-	if !status.Enabled {
-		add("trading_disabled", "trading is disabled", "Enable [trading] before broker writes.")
+	if status.Mode == config.TradingModeDisabled {
+		add("trading_disabled", "trading is disabled", `Set [trading].mode to "paper" or "live" before broker writes.`)
 	}
 	for _, blocker := range status.Blockers {
 		blockers = appendTradingBlockerOnce(blockers, blocker)
@@ -202,12 +188,9 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 		add("trading_blocked", "trading status is blocked", "Refresh trading status and resolve the active blocker before broker writes.")
 	}
 	switch status.Mode {
-	case config.TradingModePaper, config.TradingModeLive:
+	case config.TradingModeDisabled, config.TradingModePaper, config.TradingModeLive:
 	default:
-		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", status.Mode), "Set [trading].mode to paper or live.")
-	}
-	if !status.PreviewRequired {
-		add("preview_required_disabled", "broker writes require submit-eligible preview tokens", "Set [trading].require_preview = true.")
+		add("invalid_mode", fmt.Sprintf("trading mode %q is invalid", status.Mode), "Set [trading].mode to disabled, paper, or live.")
 	}
 	if !s.orderBrokerWritesEnabled() {
 		add("order_writes_unavailable", "order writes are unavailable in this build", "Rebuild the daemon with the trading write capability.")

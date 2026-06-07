@@ -20,6 +20,7 @@ type Client interface {
 	Positions(context.Context) (*rpc.PositionsResult, error)
 	Quote(context.Context, rpc.ContractParams) (*rpc.Quote, error)
 	StreamQuote(context.Context, rpc.ContractParams, func(rpc.Frame) error) error
+	MarketEvents(context.Context, rpc.MarketEventsParams) (*rpc.MarketEventsResult, error)
 	Canary(context.Context) (*rpc.CanaryResult, error)
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
@@ -117,6 +118,14 @@ func (c Real) StreamQuote(ctx context.Context, contract rpc.ContractParams, onFr
 		}
 		return nil
 	})
+}
+
+func (c Real) MarketEvents(ctx context.Context, params rpc.MarketEventsParams) (*rpc.MarketEventsResult, error) {
+	var out rpc.MarketEventsResult
+	if err := c.call(ctx, rpc.MethodMarketEventsSnapshot, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c Real) Canary(ctx context.Context) (*rpc.CanaryResult, error) {

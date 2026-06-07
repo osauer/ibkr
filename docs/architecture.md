@@ -8,9 +8,9 @@ state; every other surface is an adapter over typed RPC contracts.
 - `pkg/ibkr` is the low-level Interactive Brokers client. Keep protocol, socket,
   and TWS/Gateway details here.
 - `internal/daemon` is the long-running owner of the gateway connection, caches,
-  schedulers, journals, and XDG state files. It serves newline-delimited JSON-RPC
-  over a local Unix socket and must stay useful when the gateway is disconnected
-  whenever a method is state/config-only.
+  schedulers, journals, market-event source caches, and XDG state files. It
+  serves newline-delimited JSON-RPC over a local Unix socket and must stay useful
+  when the gateway is disconnected whenever a method is state/config-only.
 - `internal/rpc` is the contract layer: method names plus request/response
   structs shared by daemon, CLI, app, and MCP. Add fields here before teaching
   surfaces to render them.
@@ -26,8 +26,8 @@ state; every other surface is an adapter over typed RPC contracts.
 ## State
 
 Configuration in TOML/env/build flags is operator-owned and should remain the
-source of truth for gateway identity, trading enablement, live acknowledgements,
-and build capability. Daemon XDG state is runtime-owned and may hold caches,
+source of truth for gateway identity, trading mode, live acknowledgements, and
+build capability. Daemon XDG state is runtime-owned and may hold caches,
 journals, observed facts, and user preferences. Never persist broker
 entitlements; expose only observed quality on read surfaces.
 
@@ -46,3 +46,7 @@ For a new capability, start with ownership: config, daemon state, observed
 snapshot, or build flag. Then update `internal/rpc`, daemon behavior, tests, CLI,
 HTTP/app live snapshot, MCP if LLM-visible, SPA if user-visible, and generated
 docs when MCP/config references change.
+
+Market-event flags are daemon-owned observed context. Adapters render or filter
+the typed `market_events.snapshot` result; they do not refetch Reg SHO, halt,
+borrow-inventory, or borrow-fee sources or duplicate proposal-blocking policy.

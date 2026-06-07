@@ -38,14 +38,8 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Daemon.LogLevel != "info" {
 		t.Errorf("default log_level = %q, want info", res.Daemon.LogLevel)
 	}
-	if res.Trading.Enabled {
-		t.Error("trading should default disabled")
-	}
-	if res.Trading.Mode != TradingModePaper {
-		t.Errorf("trading mode = %q, want %q", res.Trading.Mode, TradingModePaper)
-	}
-	if !res.Trading.PreviewRequired() {
-		t.Error("trading preview should default required")
+	if res.Trading.Mode != TradingModeDisabled {
+		t.Errorf("trading mode = %q, want %q", res.Trading.Mode, TradingModeDisabled)
 	}
 	if res.Trading.MaxNotional != 10000 {
 		t.Errorf("trading max_notional = %v, want 10000", res.Trading.MaxNotional)
@@ -101,9 +95,7 @@ idle_timeout = "10m"
 log_level    = "debug"
 
 [trading]
-enabled = true
 mode = "live"
-require_preview = true
 max_notional = 25000
 max_option_contracts = 3
 allow_stock_short = true
@@ -156,14 +148,8 @@ timeout    = "30s"
 	if res.Daemon.LogLevel != "debug" {
 		t.Errorf("log_level = %q, want debug", res.Daemon.LogLevel)
 	}
-	if !res.Trading.Enabled {
-		t.Error("Trading.Enabled should parse true")
-	}
 	if res.Trading.Mode != TradingModeLive {
 		t.Errorf("Trading.Mode = %q, want %q", res.Trading.Mode, TradingModeLive)
-	}
-	if !res.Trading.PreviewRequired() {
-		t.Error("Trading.RequirePreview should parse true")
 	}
 	if res.Trading.MaxNotional != 25000 {
 		t.Errorf("Trading.MaxNotional = %v, want 25000", res.Trading.MaxNotional)

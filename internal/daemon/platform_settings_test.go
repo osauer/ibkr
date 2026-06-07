@@ -66,13 +66,13 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 
 func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	t.Parallel()
-	srv := newPlatformSettingsTestServer(t, config.Trading{Enabled: false, Mode: config.TradingModePaper})
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeDisabled})
 
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"bogus":true}`)}); err == nil {
 		t.Fatal("unknown top-level field succeeded")
 	}
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"enabled":true}}`)}); err == nil {
-		t.Fatal("read-only trading.enabled write succeeded")
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"mode":"paper"}}`)}); err == nil {
+		t.Fatal("read-only trading.mode write succeeded")
 	}
 	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":5000}}}`)})
 	if err == nil {
@@ -85,15 +85,15 @@ func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 
 func TestPlatformSettingsPurgeDisabledBlocksPurgeWrites(t *testing.T) {
 	t.Parallel()
-	srv := newPlatformSettingsTestServer(t, config.Trading{Enabled: true, Mode: config.TradingModePaper})
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"features":{"purge_restore":{"enabled":false}}}`)}); err != nil {
 		t.Fatalf("disable purge_restore: %v", err)
 	}
-	blockers := srv.purgeExecuteBlockers(rpc.TradingStatus{Enabled: true, Mode: config.TradingModePaper})
+	blockers := srv.purgeExecuteBlockers(rpc.TradingStatus{Mode: config.TradingModePaper})
 	if !hasBlocker(blockers, "purge_restore_disabled") {
 		t.Fatalf("purge blockers missing purge_restore_disabled: %#v", blockers)
 	}
-	preview := srv.purgeRestorePreviewBlockers(rpc.TradingStatus{Enabled: true, Mode: config.TradingModePaper})
+	preview := srv.purgeRestorePreviewBlockers(rpc.TradingStatus{Mode: config.TradingModePaper})
 	if !hasBlocker(preview, "purge_restore_disabled") {
 		t.Fatalf("restore preview blockers missing purge_restore_disabled: %#v", preview)
 	}
