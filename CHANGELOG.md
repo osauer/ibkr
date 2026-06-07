@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.7.1 — 2026-06-07 11:25 CEST
+
+### What's new
+
+- Public MCP Registry and MCPB metadata now present the broker flavor as `canary ibkr`, link to the polished public site, and carry the raster Canary icon in the bundle.
+
+### Added
+
+- Added the 512px Canary icon to the MCPB manifest so compatible clients can show the branded app icon during install and browsing.
+
+### Changed
+
+- Updated MCP Registry title and website metadata to point users at the public canary site instead of the raw GitHub repository.
+- Updated MCPB display name, homepage, and documentation links while keeping the executable, CLI, MCP server name, and broker-facing `ibkr` command surface unchanged.
+
 ## v1.7.0 — 2026-06-06 07:46 CEST
 
 ### What's new
