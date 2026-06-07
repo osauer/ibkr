@@ -49,6 +49,8 @@ func runAppServe(args []string) int {
 	}
 	addr := fs.String("addr", opts.Addr, "HTTP listen address")
 	publicURL := fs.String("public-url", opts.PublicURL, "trusted browser-visible base URL")
+	remote := fs.Bool("remote", opts.Remote, "enable the outbound Cloudflare Worker relay")
+	remoteURL := fs.String("remote-url", opts.RemoteURL, "Cloudflare Worker relay base URL")
 	stateDir := fs.String("state-dir", opts.StateDir, "local app state directory")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -61,6 +63,8 @@ func runAppServe(args []string) int {
 		return 2
 	}
 	opts.Addr = strings.TrimSpace(*addr)
+	opts.Remote = *remote
+	opts.RemoteURL = strings.TrimRight(strings.TrimSpace(*remoteURL), "/")
 	if flagWasSet(fs, "public-url") {
 		opts.PublicURL = strings.TrimRight(strings.TrimSpace(*publicURL), "/")
 	} else if !opts.PublicURLFromEnv {
@@ -76,7 +80,7 @@ func runAppServe(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Fprintf(os.Stdout, "ibkr app serving %s (listen %s)\n", opts.PublicURL, opts.Addr)
+	fmt.Fprintf(os.Stdout, "ibkr app serving %s (listen %s)\n", app.Options.PublicURL, app.Options.Addr)
 	fmt.Fprintln(os.Stdout, "Pair a phone with: ibkr app pair")
 	if err := app.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "ibkr app: %v\n", err)
@@ -205,7 +209,7 @@ func printAppUsage(w *os.File) {
 	fmt.Fprintln(w, "ibkr app - run the paired mobile PWA application layer.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--state-dir PATH]")
+	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--remote] [--remote-url URL] [--state-dir PATH]")
 	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots,")

@@ -61,7 +61,15 @@ func New(opts Options) (*App, error) {
 		opts.PollEvery,
 		opts.CanaryEvery,
 	)
-	relayClient := relay.Noop{PublicURL: opts.PublicURL}
+	relayClient, err := newRelayClient(opts)
+	if err != nil {
+		return nil, err
+	}
+	if worker, ok := relayClient.(interface{ PublicURL() string }); ok {
+		if publicURL := strings.TrimSpace(worker.PublicURL()); publicURL != "" {
+			opts.PublicURL = publicURL
+		}
+	}
 	monitor := alerts.Monitor{
 		Store:  store,
 		Sender: push.WebPushSender{Subscriber: "mailto:ibkr-app@localhost"},
@@ -80,6 +88,24 @@ func New(opts Options) (*App, error) {
 	app.lock = lock
 	lock = nil
 	return app, nil
+}
+
+func newRelayClient(opts Options) (relay.Client, error) {
+	if !opts.Remote {
+		return relay.Noop{PublicURL: opts.PublicURL}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	originURL := "http://" + LoopbackAddrForLocalConnect(opts.Addr)
+	client, err := relay.NewWorker(ctx, relay.WorkerOptions{
+		BaseURL:   opts.RemoteURL,
+		OriginURL: originURL,
+		Version:   opts.Version,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("remote relay: %w", err)
+	}
+	return client, nil
 }
 
 func acquireAppLock(stateDir string) (*xdgcache.Lock, error) {
@@ -138,6 +164,7 @@ func (a *App) Run(ctx context.Context) error {
 	liveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.Live.Start(liveCtx)
+	go a.Relay.Run(liveCtx)
 	go func() {
 		<-ctx.Done()
 		_ = a.Server.Stop()

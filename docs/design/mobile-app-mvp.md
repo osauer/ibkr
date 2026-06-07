@@ -1,6 +1,6 @@
 # ibkr Mobile App MVP
 
-Updated: 2026-06-03 15:11 CEST
+Updated: 2026-06-07 22:11 CEST
 
 ## Goal
 
@@ -17,8 +17,8 @@ The MVP proves these boundaries:
   cache and SSE fanout.
 - Canary alerts are explicitly enabled by the user and pushed with redacted
   payloads.
-- The relay interface exists, but production relay hosting and HTTP MCP are not
-  part of this release.
+- Remote access can use the Cloudflare Worker relay; HTTP MCP is not part of
+  this release.
 
 ## First Connection
 
@@ -43,10 +43,12 @@ The MVP proves these boundaries:
 
 ```mermaid
 flowchart LR
-  Phone["iPhone PWA"] -->|"HTTPS relay or LAN dev"| App["ibkr app HyperServe"]
+  Phone["iPhone PWA"] -->|"LAN dev HTTP"| App["ibkr app HyperServe"]
+  Phone -->|"Remote HTTPS"| Relay["Cloudflare Worker relay"]
+  Relay -->|"Routes HTTP/SSE"| App
+  App -->|"Outbound connector"| Relay
   App -->|"Unix socket RPC"| Daemon["ibkr daemon"]
   Daemon -->|"TWS/GW API"| TWS["IBKR TWS/Gateway"]
-  App -->|"SSE /api/events"| Phone
   App -->|"Web Push canary alerts"| Push["Browser push service"]
   Push --> Phone
 ```
@@ -102,7 +104,8 @@ Threats considered for MVP:
 - `internal/app/live`: polling, snapshot cache, change detection, fanout.
 - `internal/app/alerts`: canary alert policy, dedupe, redaction.
 - `internal/app/push`: Web Push sender and subscription validation.
-- `internal/app/relay`: relay interface and no-op MVP implementation.
+- `internal/app/relay`: outbound remote relay connector and pairing URL routing.
+- `cloudflare/remote-relay`: Cloudflare Worker + Durable Object relay transport.
 - `web/app`: PWA assets, service worker, manifest.
 
 These boundaries are intentionally small so future agents can work in one layer
@@ -110,7 +113,6 @@ without editing daemon, MCP, CLI renderers, or browser code unnecessarily.
 
 ## Deferred
 
-- Production relay contract and hosting.
 - HTTP MCP over the app transport.
 - Mac-side pairing approval UI.
 - Device-management UI and revocation workflow.

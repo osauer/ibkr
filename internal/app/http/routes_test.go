@@ -98,6 +98,40 @@ func TestPairingBootstrap(t *testing.T) {
 	}
 }
 
+func TestPairingSessionUsesRelayURLWithoutExplicitOverride(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClientAndRelay(t, routeFakeClient{}, routeTestRelay{route: "r_route"}).Handler()
+
+	pairReq := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte("{}")))
+	pairReq.RemoteAddr = "127.0.0.1:12345"
+	pairRes := httptest.NewRecorder()
+	handler.ServeHTTP(pairRes, pairReq)
+	if pairRes.Code != http.StatusOK {
+		t.Fatalf("pair status=%d, want 200; body=%s", pairRes.Code, pairRes.Body.String())
+	}
+	var pairing auth.PairingSession
+	if err := json.NewDecoder(pairRes.Body).Decode(&pairing); err != nil {
+		t.Fatalf("decode pairing: %v", err)
+	}
+	if !strings.Contains(pairing.URL, "remote=r_route") {
+		t.Fatalf("pairing URL = %q, want relay route", pairing.URL)
+	}
+
+	explicitReq := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte(`{"public_url":"http://127.0.0.1:8765"}`)))
+	explicitReq.RemoteAddr = "127.0.0.1:12345"
+	explicitRes := httptest.NewRecorder()
+	handler.ServeHTTP(explicitRes, explicitReq)
+	if explicitRes.Code != http.StatusOK {
+		t.Fatalf("explicit pair status=%d, want 200; body=%s", explicitRes.Code, explicitRes.Body.String())
+	}
+	if err := json.NewDecoder(explicitRes.Body).Decode(&pairing); err != nil {
+		t.Fatalf("decode explicit pairing: %v", err)
+	}
+	if strings.Contains(pairing.URL, "remote=r_route") {
+		t.Fatalf("explicit pairing URL = %q, want no relay rewrite", pairing.URL)
+	}
+}
+
 func TestSettingsGetPatchRequiresAuthAndRejectsReadOnly(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t).Handler()
@@ -620,6 +654,11 @@ func newTestHandler(t *testing.T) *hyperserve.Server {
 
 func newTestHandlerWithClient(t *testing.T, fakeClient daemonclient.Client) *hyperserve.Server {
 	t.Helper()
+	return newTestHandlerWithClientAndRelay(t, fakeClient, relay.Noop{PublicURL: "https://relay.example"})
+}
+
+func newTestHandlerWithClientAndRelay(t *testing.T, fakeClient daemonclient.Client, relayClient relay.Client) *hyperserve.Server {
+	t.Helper()
 	store, err := state.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -645,11 +684,28 @@ func newTestHandlerWithClient(t *testing.T, fakeClient daemonclient.Client) *hyp
 		Auth:      authMgr,
 		Daemon:    fakeClient,
 		Live:      liveSvc,
-		Relay:     relay.Noop{PublicURL: "https://relay.example"},
+		Relay:     relayClient,
 		PublicURL: "https://relay.example",
 		Version:   "test-version",
 	})
 	return srv
+}
+
+type routeTestRelay struct {
+	route string
+}
+
+func (r routeTestRelay) Run(context.Context) {}
+
+func (r routeTestRelay) Status() relay.Status {
+	return relay.Status{Mode: "test", URL: "https://relay.example", Connected: true}
+}
+
+func (r routeTestRelay) PairingURL(raw string) string {
+	if strings.Contains(raw, "?") {
+		return raw + "&remote=" + r.route
+	}
+	return raw + "?remote=" + r.route
 }
 
 type routeReviewSetRef struct {

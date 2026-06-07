@@ -40,3 +40,16 @@ func TestDefaultOptionsMarksPublicURLFromEnv(t *testing.T) {
 		t.Fatalf("PublicURL = %q, want trimmed env value", opts.PublicURL)
 	}
 }
+
+func TestDefaultOptionsRemoteEnv(t *testing.T) {
+	t.Setenv("IBKR_APP_REMOTE", "yes")
+	t.Setenv("IBKR_APP_REMOTE_URL", " https://remote.example.test/ ")
+
+	opts := DefaultOptions("test")
+	if !opts.Remote {
+		t.Fatalf("Remote = false, want true")
+	}
+	if opts.RemoteURL != "https://remote.example.test" {
+		t.Fatalf("RemoteURL = %q, want trimmed remote URL", opts.RemoteURL)
+	}
+}

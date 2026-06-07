@@ -20,6 +20,8 @@ type Options struct {
 	Addr             string
 	PublicURL        string
 	PublicURLFromEnv bool
+	Remote           bool
+	RemoteURL        string
 	StateDir         string
 	SocketPath       string
 	Version          string
@@ -45,10 +47,19 @@ func DefaultOptions(version string) Options {
 	if publicURL == "" {
 		publicURL = PublicURLForAddr(addr)
 	}
+	// docgen:env IBKR_APP_REMOTE | Enable the outbound Cloudflare Worker relay for `ibkr app`, making pairing URLs reachable through the public relay origin.
+	remote := parseBoolEnv(os.Getenv("IBKR_APP_REMOTE"))
+	// docgen:env IBKR_APP_REMOTE_URL | Cloudflare Worker relay base URL for `ibkr app --remote`. Defaults to `https://remote.osauer.dev`.
+	remoteURL := strings.TrimRight(strings.TrimSpace(os.Getenv("IBKR_APP_REMOTE_URL")), "/")
+	if remoteURL == "" {
+		remoteURL = relayDefaultURL()
+	}
 	return Options{
 		Addr:             addr,
 		PublicURL:        publicURL,
 		PublicURLFromEnv: publicURLFromEnv,
+		Remote:           remote,
+		RemoteURL:        remoteURL,
 		StateDir:         stateDir,
 		SocketPath:       dial.DefaultSocketPath(),
 		Version:          version,
@@ -56,6 +67,19 @@ func DefaultOptions(version string) Options {
 		PollEvery:        DefaultPollEvery,
 		CanaryEvery:      DefaultCanaryEvery,
 	}
+}
+
+func parseBoolEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func relayDefaultURL() string {
+	return "https://remote.osauer.dev"
 }
 
 func defaultStateDir() string {

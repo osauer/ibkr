@@ -134,7 +134,8 @@ func (h *handler) handleStartPairing(w nethttp.ResponseWriter, r *nethttp.Reques
 			return
 		}
 	}
-	if strings.TrimSpace(req.PublicURL) != "" {
+	explicitPublicURL := strings.TrimSpace(req.PublicURL) != ""
+	if explicitPublicURL {
 		clean, err := cleanPairingPublicURL(req.PublicURL)
 		if err != nil {
 			writeError(w, nethttp.StatusBadRequest, err.Error())
@@ -146,6 +147,9 @@ func (h *handler) handleStartPairing(w nethttp.ResponseWriter, r *nethttp.Reques
 	if err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
+	}
+	if !explicitPublicURL {
+		session.URL = h.deps.Relay.PairingURL(session.URL)
 	}
 	writeJSON(w, session)
 }

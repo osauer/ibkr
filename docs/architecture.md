@@ -19,7 +19,10 @@ state; every other surface is an adapter over typed RPC contracts.
 - `internal/mcp` is an LLM-facing adapter over daemon RPC. Tool descriptions are
   part of the product surface and must explain when to invoke or avoid a tool.
 - `internal/app` serves the paired PWA, owns app auth/pairing/push state, polls
-  daemon RPC into a live snapshot, and streams updates to the browser.
+  daemon RPC into a live snapshot, streams updates to the browser, and owns the
+  optional outbound remote relay connector.
+- `cloudflare/remote-relay` is the hosted transport relay for remote app access.
+  It is transport only: pairing/auth/session validation remain in `internal/app`.
 - `web/app` is the embedded no-build SPA. Keep global account/market/sync state
   outside tab content; use existing inline SVG and CSS patterns.
 
@@ -39,6 +42,11 @@ routes, security hardening, and SSE formatting. See HyperServe's own
 and [SSE ADR](https://github.com/osauer/hyperserve/blob/v1.2.0/docs/0010-server-sent-events-support.md).
 In this repo, route registration lives in `internal/app/http/routes.go`; business
 state still comes from app stores or daemon RPC, not from HTTP handlers.
+
+Remote app access uses an outbound connector from `internal/app/relay` to the
+Cloudflare Worker. The Worker must not create pairing sessions, hold device
+grants, or talk to the daemon; it only routes allowed HTTP/SSE traffic back to
+the local app process.
 
 ## Change Flow
 
