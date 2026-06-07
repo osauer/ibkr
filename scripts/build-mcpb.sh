@@ -33,6 +33,7 @@ mcpb() {
 
 rm -rf "$stage" "$bundle" "$stable_bundle"
 mkdir -p "$stage/server/bin"
+install -m 0644 web/app/icon-512.png "$stage/icon.png"
 
 for target in $targets; do
     tarball="${dist_dir}/ibkr-${version}-${target}.tar.gz"
@@ -88,10 +89,17 @@ cat > "$stage/manifest.json" <<JSON
   "\$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
   "manifest_version": "0.4",
   "name": "ibkr",
-  "display_name": "ibkr",
+  "display_name": "canary ibkr",
   "version": "$semver",
   "description": "No-broker-write Interactive Brokers MCP server for account, market analysis, and preview-only drafts.",
   "long_description": "ibkr packages a local no-broker-write Interactive Brokers (IBKR) MCP server for Claude Desktop and other MCPB-compatible clients. It exposes account, positions, quotes, watchlists, option chains, scanners, technical screens, breadth, dealer gamma, risk-regime context, and preview-only stock/ETF order drafts through the local ibkr CLI. It cannot place, modify, cancel, or transmit broker orders.",
+  "icon": "icon.png",
+  "icons": [
+    {
+      "src": "icon.png",
+      "size": "512x512"
+    }
+  ],
   "author": {
     "name": "Oliver Sauer",
     "url": "https://github.com/osauer"
@@ -100,8 +108,8 @@ cat > "$stage/manifest.json" <<JSON
     "type": "git",
     "url": "https://github.com/osauer/ibkr"
   },
-  "homepage": "https://github.com/osauer/ibkr",
-  "documentation": "https://github.com/osauer/ibkr/blob/main/docs/guides/agentic-use.md",
+  "homepage": "https://osauer.dev/ibkr/",
+  "documentation": "https://osauer.dev/ibkr/guides/agentic-use.html",
   "support": "https://github.com/osauer/ibkr/issues",
   "server": {
     "type": "binary",
