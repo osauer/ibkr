@@ -13,12 +13,13 @@ architecture primers. Use read-only project subagents for exploration/review,
 then keep implementation writes in the main session unless the user explicitly
 asks for parallel implementation.
 
-Public marketing/site pages for `osauer.dev/ibkr` are not deployed from this
-product repo. Before editing or pushing public site copy, verify the publishing
-path in `/Users/osauer/dev/osauer.dev` and `/Users/osauer/dev/osauer.github.io`.
-Use `osauer.dev` for source markdown plus deployable `public/ibkr/` output, and
-push `osauer.github.io` when the user wants the live GitHub Pages site updated.
-Do not assume changes under this repo's `docs/` directory update the live site.
+Public marketing/site pages for `osauer.dev/ibkr` are deployed from this
+product repo's GitHub Pages config, currently `main:/docs` with
+`html_url=https://osauer.dev/ibkr/`. Before editing or pushing public site copy,
+verify the active publisher with `gh api repos/osauer/ibkr/pages` and a live
+header check on `https://osauer.dev/ibkr/`; do not infer publisher ownership from
+similarly named static folders in `/Users/osauer/dev/osauer.github.io` or
+`/Users/osauer/dev/osauer.dev`.
 
 Before daemon/CLI/MCP/trading semantic changes, use
 `docs/templates/daemon-cli-trading-contract.md`. Before Canary SPA semantic or
