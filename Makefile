@@ -352,7 +352,7 @@ release-verify: ## Smoke-test the local bin/ibkr against a live gateway (called 
 	fi
 	./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
 
-release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one live-gateway daemon session
+release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one reachable TWS/Gateway daemon session
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-smoke: RELEASE_VERSION is required, e.g. make release-smoke RELEASE_VERSION=v0.15.1" >&2; \
 		exit 1; \
@@ -373,7 +373,7 @@ smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 # of clobbering that stamp with a `git describe` rebuild via the smoke
 # dep chain.
 #
-# Drives bin/ibkr against a live gateway with the wire interceptor
+# Drives bin/ibkr against a reachable TWS/Gateway session with the wire interceptor
 # enabled and asserts per-command protocol-level invariants — catches
 # bugs the unit suite can't see (e.g. the v0.24.x productionLegFetcher
 # bug where the gateway sent the right ticks but the daemon read the
@@ -386,8 +386,8 @@ smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 #                              without paper-account IBKR access.
 #   SMOKE_STRICT=1 → FAIL when no gateway is up; the release path passes
 #                    this so a vanished gateway can't silently bypass
-#                    the wire gate ("we must exercise TWS — not doing so
-#                    is a failed release").
+#                    the wire gate. Paper TWS/Gateway is accepted because
+#                    the smoke is read-only.
 SMOKE_STRICT ?= 0
 
 # SPX_EXPECTED_REACHABLE — default ON in this repo because this is the
@@ -406,7 +406,7 @@ smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild)
 	fi
 	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 
-smoke: build smoke-only ## Wire-level smoke vs. a live gateway (rebuilds bin/ibkr; SKIP if no gateway)
+smoke: build smoke-only ## Wire-level smoke vs. reachable TWS/Gateway (rebuilds bin/ibkr; SKIP if no gateway)
 
 release-binaries: ## Cross-compile release tarballs + MCPB into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -561,8 +561,8 @@ version: ## Print the version string the next build would embed
 # - HEAD not synced with origin/<MAIN_BRANCH> (tag would point at a commit
 #   GitHub doesn't have)
 # - tag already exists locally or on origin
-# Sequence: gate → build with VERSION override → smoke against live
-# gateway → create annotated tag → push tag. The smoke runs BEFORE
+# Sequence: gate → build with VERSION override → smoke against reachable
+# TWS/Gateway → create annotated tag → push tag. The smoke runs BEFORE
 # tagging so a gateway failure leaves no orphan tag to clean up; the
 # build target accepts VERSION=$(RELEASE_VERSION) so the smoke daemon
 # stamps the target version even before the tag exists.
@@ -633,7 +633,7 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# script asserts `bin/ibkr version == $(RELEASE_VERSION)`, so the
 	@# stamp has to match.
 	$(MAKE) build VERSION=$(RELEASE_VERSION)
-	@# Binding live-gateway JSON + wire smoke against the freshly-stamped
+	@# Binding TWS/Gateway JSON + wire smoke against the freshly-stamped
 	@# binary. Runs one isolated daemon session and fails on no gateway.
 	$(MAKE) release-smoke RELEASE_VERSION=$(RELEASE_VERSION) SMOKE_STRICT=1
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # release-smoke.sh - run the release JSON contract checks and wire-level
-# invariants against one isolated live-gateway daemon.
+# invariants against one isolated reachable TWS/Gateway daemon.
 #
 # This folds the release path's former `release-verify` + `smoke-only`
 # sequence into a single daemon session. That keeps the same quality
@@ -30,18 +30,19 @@ if [[ ! -x "$ASSERT" ]]; then
 fi
 
 GATEWAY_HOST="${IBKR_TEST_HOST:-127.0.0.1}"
-GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
 if [[ ! "$GATEWAY_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     echo "release-smoke: invalid IBKR_TEST_HOST: $GATEWAY_HOST" >&2
-    exit 2
-fi
-if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
-    echo "release-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
     exit 2
 fi
 STRICT="${IBKR_SMOKE_STRICT:-0}"
 JSON_TIMEOUT="${IBKR_RELEASE_VERIFY_TIMEOUT:-15}"
 WIRE_TIMEOUT="${IBKR_SMOKE_TIMEOUT:-60}"
+SMOKE_CLIENT_ID="${IBKR_SMOKE_CLIENT_ID:-$((200 + ($$ % 600)))}"
+if [[ ! "$SMOKE_CLIENT_ID" =~ ^[0-9]+$ ]] || (( SMOKE_CLIENT_ID < 1 || SMOKE_CLIENT_ID > 998 )); then
+    echo "release-smoke: invalid IBKR_SMOKE_CLIENT_ID: $SMOKE_CLIENT_ID" >&2
+    exit 2
+fi
+BREADTH_CLIENT_ID=$((SMOKE_CLIENT_ID + 1))
 
 python_extract='
 import json, sys
@@ -134,12 +135,38 @@ if [[ "$actual_version" != "$EXPECTED" ]]; then
     exit 1
 fi
 
-if ! timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${GATEWAY_PORT}" 2>/dev/null; then
+GATEWAY_PORT="${IBKR_TEST_PORT:-}"
+if [[ -n "$GATEWAY_PORT" ]]; then
+    if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
+        echo "release-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
+        exit 2
+    fi
+    probe_ports=("$GATEWAY_PORT")
+else
+    # Preserve the old TWS-live preference, then accept TWS/Gateway paper:
+    # this release smoke is read-only and still proves real API/wire contracts.
+    read -r -a probe_ports <<<"${IBKR_TEST_PORTS:-7496 7497 4001 4002}"
+fi
+
+GATEWAY_PORT=""
+for port in "${probe_ports[@]}"; do
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        echo "release-smoke: invalid probe port: $port" >&2
+        exit 2
+    fi
+    if timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${port}" 2>/dev/null; then
+        GATEWAY_PORT="$port"
+        break
+    fi
+done
+
+if [[ -z "$GATEWAY_PORT" ]]; then
+    candidates="${probe_ports[*]}"
     if [[ "$STRICT" == "1" ]]; then
-        echo "release-smoke: FAIL - no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT} (STRICT mode; release path must exercise TWS)" >&2
+        echo "release-smoke: FAIL - no gateway reachable at ${GATEWAY_HOST} ports ${candidates} (STRICT mode; release path must exercise TWS/Gateway)" >&2
         exit 1
     fi
-    echo "release-smoke: SKIP - no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT}"
+    echo "release-smoke: SKIP - no gateway reachable at ${GATEWAY_HOST} ports ${candidates}"
     exit 0
 fi
 echo "release-smoke: gateway present at ${GATEWAY_HOST}:${GATEWAY_PORT}"
@@ -150,9 +177,20 @@ SOCKET="$SMOKE_DIR/ibkr.sock"
 LOG="$SMOKE_DIR/ibkr-daemon.log"
 LOCK="$SMOKE_DIR/ibkr.lock"
 WIRE_LOG="$SMOKE_DIR/wire.jsonl"
+CONFIG="$SMOKE_DIR/config.toml"
+
+cat > "$CONFIG" <<EOF
+[gateway]
+host = "$GATEWAY_HOST"
+port = $GATEWAY_PORT
+client_id = $SMOKE_CLIENT_ID
+breadth_client_id = $BREADTH_CLIENT_ID
+tls = false
+EOF
 
 export IBKR_SOCKET="$SOCKET"
 export IBKR_LOG="$LOG"
+export IBKR_CONFIG="$CONFIG"
 export IBKR_WIRE_INTERCEPTOR=1
 export IBKR_WIRE_LOG_PATH="$WIRE_LOG"
 export IBKR_WIRE_RING_SIZE=4096
@@ -179,6 +217,7 @@ trap cleanup EXIT INT TERM
 
 echo "release-smoke: isolated daemon -> $SOCKET"
 echo "release-smoke: wire log -> $WIRE_LOG"
+echo "release-smoke: client IDs -> primary=$SMOKE_CLIENT_ID breadth=$BREADTH_CLIENT_ID"
 
 stop_existing_daemons release-smoke
 

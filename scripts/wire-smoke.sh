@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# wire-smoke.sh — exercise the freshly-built ibkr binary against a live
-# IBKR Gateway with the wire interceptor enabled, and assert per-command
+# wire-smoke.sh — exercise the freshly-built ibkr binary against a reachable
+# IBKR Gateway/TWS session with the wire interceptor enabled, and assert per-command
 # protocol-level invariants.
 #
 # This catches the kind of regression where the daemon "works" by
@@ -25,7 +25,10 @@
 #   scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 #
 # Environment hooks:
-#   IBKR_TEST_PORT          — gateway port to probe (default: 7496 TWS live)
+#   IBKR_TEST_PORT          — gateway port to probe (default: auto-probe
+#                             7496/7497/4001/4002)
+#   IBKR_TEST_PORTS         — space-separated auto-probe candidate ports when
+#                             IBKR_TEST_PORT is unset
 #   IBKR_TEST_HOST          — gateway host (default: 127.0.0.1)
 #   IBKR_SMOKE_CLIENT_ID    — primary client ID for the isolated smoke daemon
 #                             (default: process-derived ID in the 200-799 range)
@@ -57,13 +60,8 @@ if [[ ! -x "$ASSERT" ]]; then
 fi
 
 GATEWAY_HOST="${IBKR_TEST_HOST:-127.0.0.1}"
-GATEWAY_PORT="${IBKR_TEST_PORT:-7496}"
 if [[ ! "$GATEWAY_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     echo "wire-smoke: invalid IBKR_TEST_HOST: $GATEWAY_HOST" >&2
-    exit 2
-fi
-if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
-    echo "wire-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
     exit 2
 fi
 SMOKE_CLIENT_ID="${IBKR_SMOKE_CLIENT_ID:-$((200 + ($$ % 600)))}"
@@ -85,12 +83,38 @@ PER_CMD_TIMEOUT="${IBKR_SMOKE_TIMEOUT:-60}"
 # release can't silently bypass the wire gate. The probe uses bash's
 # /dev/tcp to avoid a netcat dependency.
 STRICT="${IBKR_SMOKE_STRICT:-0}"
-if ! timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${GATEWAY_PORT}" 2>/dev/null; then
+GATEWAY_PORT="${IBKR_TEST_PORT:-}"
+if [[ -n "$GATEWAY_PORT" ]]; then
+    if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( GATEWAY_PORT < 1 || GATEWAY_PORT > 65535 )); then
+        echo "wire-smoke: invalid IBKR_TEST_PORT: $GATEWAY_PORT" >&2
+        exit 2
+    fi
+    probe_ports=("$GATEWAY_PORT")
+else
+    # Preserve the old TWS-live preference, then accept TWS/Gateway paper
+    # because the smoke is read-only and wire-equivalent for these checks.
+    read -r -a probe_ports <<<"${IBKR_TEST_PORTS:-7496 7497 4001 4002}"
+fi
+
+GATEWAY_PORT=""
+for port in "${probe_ports[@]}"; do
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        echo "wire-smoke: invalid probe port: $port" >&2
+        exit 2
+    fi
+    if timeout 2 bash -c "exec 3<>/dev/tcp/${GATEWAY_HOST}/${port}" 2>/dev/null; then
+        GATEWAY_PORT="$port"
+        break
+    fi
+done
+
+if [[ -z "$GATEWAY_PORT" ]]; then
+    candidates="${probe_ports[*]}"
     if [[ "$STRICT" == "1" ]]; then
-        echo "wire-smoke: FAIL — no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT} (STRICT mode; release path must exercise TWS)" >&2
+        echo "wire-smoke: FAIL — no gateway reachable at ${GATEWAY_HOST} ports ${candidates} (STRICT mode; release path must exercise TWS/Gateway)" >&2
         exit 1
     fi
-    echo "wire-smoke: SKIP — no gateway reachable at ${GATEWAY_HOST}:${GATEWAY_PORT}"
+    echo "wire-smoke: SKIP — no gateway reachable at ${GATEWAY_HOST} ports ${candidates}"
     exit 0
 fi
 echo "wire-smoke: gateway present at ${GATEWAY_HOST}:${GATEWAY_PORT}"
