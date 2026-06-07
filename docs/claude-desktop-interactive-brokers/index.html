@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Claude Desktop Interactive Brokers setup | ibkr</title>
-  <meta name="description" content="Claude Desktop can read Interactive Brokers account and market context through the local ibkr MCP server. The recommended path is the MCP Bundle (.mcpb)...">
+  <title>Claude Desktop Install for Interactive Brokers | ibkr</title>
+  <meta name="description" content="Install ibkr for Claude Desktop on Mac with the MCPB bundle. Review prerequisites, download the real bundle, enable IB Gateway or TWS API access, and run the first Claude check.">
   <link rel="canonical" href="https://osauer.dev/ibkr/claude-desktop-interactive-brokers/">
   <script type="application/ld+json">
 {
@@ -15,9 +15,9 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-28T04:47:00+02:00",
-    "description": "Claude Desktop can read Interactive Brokers account and market context through the local ibkr MCP server. The recommended path is the MCP Bundle (.mcpb)...",
-    "headline": "Claude Desktop Interactive Brokers setup",
+    "dateModified": "2026-06-07T20:23:00+02:00",
+    "description": "Install ibkr for Claude Desktop on Mac with the MCPB bundle. Review prerequisites, download the real bundle, enable IB Gateway or TWS API access, and run the first Claude check.",
+    "headline": "Claude Desktop Install for Interactive Brokers",
     "isPartOf": {
       "@type": "SoftwareApplication",
       "name": "ibkr",
@@ -131,6 +131,26 @@
       text-align: left;
     }
     .doc th { color: var(--ink); background: #ece7db; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      border: 1px solid #075f52;
+      border-radius: 7px;
+      background: var(--green);
+      color: #fffdf7;
+      padding: 0 18px;
+      font-weight: 750;
+      text-decoration: none;
+    }
+    .button:hover { background: var(--green-dark); }
+    .callout {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper-strong);
+      padding: 16px 18px;
+    }
     footer {
       border-top: 1px solid var(--line);
       background: var(--paper-strong);
@@ -156,22 +176,39 @@
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="claude-desktop-interactive-brokers-setup">Claude Desktop Interactive Brokers setup</h1>
-<p>Updated: 2026-05-28 04:47 CEST</p>
-<p>Claude Desktop can read Interactive Brokers account and market context through the local <code>ibkr</code> MCP server. The recommended path is the MCP Bundle (<code>.mcpb</code>) release asset, which packages the <code>ibkr</code> binary for Claude Desktop and runs it locally through stdio.</p>
+<h1 id="claude-desktop-install-for-interactive-brokers">Claude Desktop Install for Interactive Brokers</h1>
+<p>Updated: 2026-06-07 20:23 CEST</p>
+<p>This is the Mac install path for using Claude Desktop with Interactive Brokers through <code>ibkr</code>. The MCP Bundle (<code>.mcpb</code>) packages the <code>ibkr</code> MCP server for Claude Desktop, but it does not install Interactive Brokers software or enable broker API access for you.</p>
 <p>This page is for searches such as &#34;Claude Desktop Interactive Brokers&#34;, &#34;Claude Desktop IBKR MCP&#34;, &#34;IBKR Claude Desktop MCP&#34;, and &#34;connect Claude to IBKR&#34;.</p>
 <p>If search results show Interactive Brokers&#39; IBKR Desktop trading platform, that is a different product. This page is about Claude Desktop using the local <code>ibkr mcp</code> server through IB Gateway or TWS.</p>
-<h2 id="fast-path-mcp-bundle">Fast path: MCP Bundle</h2>
-<p>Download the latest bundle:</p>
-<pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
-<p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or install it from Claude Desktop settings. Fully quit and relaunch Claude Desktop after installation so it starts the bundled server process.</p>
-<h2 id="prerequisites">Prerequisites</h2>
+<h2 id="what-the-download-installs">What the download installs</h2>
+<p>The MCPB installs an <code>ibkr</code> Claude Desktop extension. On Mac, the bundle carries both Apple Silicon and Intel binaries and Claude runs the bundled server locally through stdio.</p>
+<p>It does not install Claude Desktop, IB Gateway, TWS, an IBKR account, or market-data entitlements. Those must already be available on the Mac before Claude can read account or market context.</p>
+<p><a class="button" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download ibkr.mcpb</a></p>
+<h2 id="mac-prerequisites">Mac prerequisites</h2>
 <ul>
-<li>IB Gateway 10.37 or newer, or Trader Workstation (TWS), running locally.</li>
-<li>An IBKR Pro account with TWS API access.</li>
-<li>API socket access enabled in the local IBKR application.</li>
-<li>macOS or Linux for the bundled binary. Windows users can use WSL with the shell install path.</li>
+<li>Claude Desktop installed on the Mac.</li>
+<li>IB Gateway 10.37 or newer, or Trader Workstation (TWS), installed and running locally.</li>
+<li>An IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</li>
+<li>API socket access enabled in IB Gateway or TWS.</li>
+<li>Market-data permissions for any quotes, option chains, or scanner data you expect Claude to read.</li>
 </ul>
+<h2 id="install-steps-in-claude-desktop">Install steps in Claude Desktop</h2>
+<ol>
+<li>Start IB Gateway or TWS and log in to the account you want Claude to read.</li>
+<li>Confirm API socket access is enabled in the IBKR app. The default local ports are auto-discovered.</li>
+<li>Download <code>ibkr.mcpb</code> using the button above.</li>
+<li>Open the downloaded <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings &gt; Extensions &gt; Advanced settings &gt; Install Extension.</li>
+<li>Review the extension details and approve the install in Claude Desktop.</li>
+<li>Fully quit Claude Desktop with Command-Q, then reopen it so Claude starts the bundled <code>ibkr</code> MCP server.</li>
+</ol>
+<h2 id="first-checks">First checks</h2>
+<p>With Claude Desktop relaunched and IB Gateway or TWS still running, start a new Claude chat and ask one simple account or market question:</p>
+<blockquote><p>What is in my IBKR account?</p></blockquote>
+<p>If Claude reports that the gateway is unreachable, leave Claude open, verify that IB Gateway or TWS is logged in with API access enabled, then fully quit and reopen Claude Desktop again.</p>
+<div class="callout">
+<p><strong>Safety boundary:</strong> Claude can read account and market context through this server. The bundled MCP surface does not expose tools to place, modify, cancel, or transmit broker orders.</p>
+</div>
 <h2 id="what-claude-can-ask-through-ibkr">What Claude can ask through ibkr</h2>
 <ul>
 <li>&#34;What&#39;s in my IBKR account?&#34;</li>
@@ -183,10 +220,10 @@
 </ul>
 <p>Claude receives structured account and market data from <code>ibkr mcp</code>; it does not receive an order-entry tool.</p>
 <h2 id="shell-managed-alternative">Shell-managed alternative</h2>
-<p>If you want one shared shell-managed binary for Claude Desktop, Cursor, Continue, Zed, and terminal use:</p>
+<p>Most Claude Desktop users on Mac should use the MCPB above. Use the shell-managed path only if you specifically want one shared binary for Claude Desktop, Cursor, Continue, Zed, and terminal use:</p>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop</code></pre>
-<p>Restart Claude Desktop after upgrading the binary. MCP hosts cache the spawned server process until the host exits.</p>
+<p>Restart Claude Desktop after upgrading the binary. MCP hosts cache the spawned server process until the host exits. MCPB installs carry their own embedded binary, so update the MCPB path by downloading and reinstalling the latest <code>ibkr.mcpb</code>.</p>
 <h2 id="references">References</h2>
 <ul>
 <li><a href="https://osauer.dev/ibkr/ibkr-mcp/">IBKR MCP server</a> for the exact local MCP server overview.</li>
