@@ -147,14 +147,22 @@ type Trading struct {
 }
 
 type AutoTrade struct {
-	ProposalsEnabled *bool    `toml:"proposals_enabled"`
-	Enabled          bool     `toml:"enabled"`
-	AutoSubmit       bool     `toml:"auto_submit"`
-	PolicyFile       string   `toml:"policy_file"`
-	HotReload        *bool    `toml:"hot_reload"`
-	ReloadInterval   duration `toml:"reload_interval"`
-	ProposalCadence  duration `toml:"proposal_cadence"`
-	FastPathEnabled  *bool    `toml:"fast_path_enabled"`
+	// ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path.
+	ProposalsEnabled *bool `toml:"proposals_enabled"`
+	// Enabled controls the experimental auto-trade supervisor; default false, and stable builds remain preview/read-only unless trading config and build capability allow more.
+	Enabled bool `toml:"enabled"`
+	// AutoSubmit allows the experimental supervisor to submit eligible proposals automatically; default false and ignored unless trading writes are explicitly enabled.
+	AutoSubmit bool `toml:"auto_submit"`
+	// PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml.
+	PolicyFile string `toml:"policy_file"`
+	// HotReload controls whether policy changes are reloaded while the daemon runs; default true.
+	HotReload *bool `toml:"hot_reload"`
+	// ReloadInterval controls how often the daemon checks policy-file changes; default 30s.
+	ReloadInterval duration `toml:"reload_interval"`
+	// ProposalCadence controls how often the daemon refreshes protection proposals; default 15m.
+	ProposalCadence duration `toml:"proposal_cadence"`
+	// FastPathEnabled allows experimental proposal refreshes to bypass slower review cadence when new risk evidence arrives; default false unless explicitly enabled.
+	FastPathEnabled *bool `toml:"fast_path_enabled"`
 }
 
 const (

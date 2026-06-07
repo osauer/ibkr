@@ -6,17 +6,16 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
-  explicitly requests an order preview/status read, or asks for a paper-gated order write. Paper broker writes
-  may be used only when the project hook verifies a ready daemon-reported paper gate; live
+  or explicitly requests an order preview/status read. Codex broker writes are blocked; live
   broker writes are always blocked.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*) Bash(ibkr order place*) Bash(ibkr order modify*) Bash(ibkr order cancel*)
+  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-07 08:48 CEST
+Updated: 2026-06-07 10:34 CEST
 
 ## When to use
 
@@ -47,9 +46,8 @@ If the user explicitly asks for a stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from
 `submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
 minted token submit-eligible. If the user explicitly asks to place, modify, or
-cancel a paper order, first run `ibkr trading status --json`; proceed only when
-the project hook's paper gate allows the command. Refuse live or unknown routes.
-Do not invent or simulate trade execution.
+cancel an order, refuse and tell them a human must run broker-write commands
+outside Codex. Do not invent or simulate trade execution.
 
 ## Output discipline
 
@@ -169,8 +167,8 @@ a code prefix when applicable:
 - `bad_request` → wrong arguments or unknown preset. Show the user the usage
   hint emitted on stderr.
 - `trading_disabled` → an order verb failed the daemon trading gate. Surface the
-  blocker exactly; paper writes require a ready paper route and submit-eligible
-  preview token, while live writes remain blocked.
+  blocker exactly; broker writes require a human-run command outside Codex, a
+  ready trading route, and a submit-eligible preview token.
 
 For `breadth`, `gamma`, and `regime`, the JSON carries a per-row `state` /
 `status` field rather than an error code — the CLI exits 0 because the

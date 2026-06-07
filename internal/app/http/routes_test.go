@@ -337,18 +337,66 @@ func TestOrderReviewSetTransmitRequiresTradingCapability(t *testing.T) {
 	set := createRouteReviewSet(t, handler, cookie)
 	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
 	req.AddCookie(cookie)
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("transmit status=%d, want 400; body=%s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "can_write=false") {
+	if !strings.Contains(res.Body.String(), "broker writes are not enabled") {
 		t.Fatalf("transmit response missing capability reason: %s", res.Body.String())
 	}
 	if client.placeCalls != 0 {
 		t.Fatalf("OrderPlace was called despite can_write=false: %d", client.placeCalls)
+	}
+}
+
+func TestOrderWritesRequireCurrentConfirmation(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+	set := createRouteReviewSet(t, handler, cookie)
+	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
+
+	for name, tc := range map[string]struct {
+		method string
+		path   string
+		body   string
+	}{
+		"transmit_missing": {
+			method: http.MethodPost,
+			path:   "/api/order-review-sets/" + set.ID + "/transmit",
+			body:   `{}`,
+		},
+		"transmit_wrong_account": {
+			method: http.MethodPost,
+			path:   "/api/order-review-sets/" + set.ID + "/transmit",
+			body:   `{"confirm_account":"DU999","confirm_mode":"paper"}`,
+		},
+		"cancel_missing": {
+			method: http.MethodPost,
+			path:   "/api/orders/ord-1/cancel",
+			body:   `{}`,
+		},
+		"modify_wrong_mode": {
+			method: http.MethodPost,
+			path:   "/api/orders/ord-1/modify",
+			body:   `{"preview_token":"modify-token","confirm_account":"DU123","confirm_mode":"live"}`,
+		},
+		"proposal_submit_missing": {
+			method: http.MethodPost,
+			path:   "/api/proposals/submit",
+			body:   `{"key":"proposal","revision":"rev-1"}`,
+		},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader([]byte(tc.body)))
+		req.AddCookie(cookie)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d, want 400; body=%s", name, res.Code, res.Body.String())
+		}
 	}
 }
 
@@ -359,7 +407,7 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 	set := createRouteReviewSet(t, handler, cookie)
 	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
 
-	transmitReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", nil)
+	transmitReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
 	transmitReq.AddCookie(cookie)
 	transmitRes := httptest.NewRecorder()
 	handler.ServeHTTP(transmitRes, transmitReq)
@@ -379,7 +427,7 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 		t.Fatalf("unexpected transmit response: %#v", transmit)
 	}
 
-	cancelReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/cancel", nil)
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/cancel", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
 	cancelReq.AddCookie(cookie)
 	cancelRes := httptest.NewRecorder()
 	handler.ServeHTTP(cancelRes, cancelReq)
@@ -403,7 +451,7 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 		t.Fatalf("unexpected modify preview draft: %#v", modPreview.Draft)
 	}
 
-	modifyBody := bytes.NewReader([]byte(`{"preview_token":"modify-token"}`))
+	modifyBody := bytes.NewReader([]byte(`{"preview_token":"modify-token","confirm_account":"DU123","confirm_mode":"paper"}`))
 	modifyReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/modify", modifyBody)
 	modifyReq.AddCookie(cookie)
 	modifyRes := httptest.NewRecorder()

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TWS MCP server for Interactive Brokers | ibkr</title>
+  <title>TWS MCP server for Interactive Brokers | canary</title>
   <meta name="description" content="ibkr can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code,...">
   <link rel="canonical" href="https://osauer.dev/ibkr/tws-mcp-server/">
   <script type="application/ld+json">
@@ -20,7 +20,7 @@
     "headline": "TWS MCP server for Interactive Brokers",
     "isPartOf": {
       "@type": "SoftwareApplication",
-      "name": "ibkr",
+      "name": "canary",
       "url": "https://osauer.dev/ibkr/"
     },
     "url": "https://osauer.dev/ibkr/tws-mcp-server/"
@@ -147,7 +147,7 @@
 <body>
   <div class="topline"></div>
   <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="../index.html">ibkr</a>
+    <a class="brand" href="../index.html">canary</a>
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
@@ -164,7 +164,7 @@
 <pre><code>MCP host -&gt; ibkr mcp -&gt; local ibkr daemon -&gt; TWS API socket -&gt; Interactive Brokers account data</code></pre>
 <p><code>ibkr</code> auto-discovers the standard local ports, including TWS paper and live ports. You can also pin host, port, client ID, account, and TLS settings in the local config file when auto-discovery is not what you want.</p>
 <h2 id="tws-versus-ib-gateway">TWS versus IB Gateway</h2>
-<p>Use TWS when you already want the desktop platform open. Use IB Gateway when you want a lighter background process for API access. The MCP surface is the same either way: read-only account, positions, quotes, calendars, option chains, scanners, sizing, breadth, gamma, broad-market regime lifecycle, and portfolio canary lifecycle tools.</p>
+<p>Use TWS when you already want the desktop platform open. Use IB Gateway when you want a lighter background process for API access. The MCP surface is the same either way: read-only account, positions, quotes, calendars, option chains, scanners, sizing, breadth, gamma, broad-market regime lifecycle, and canary portfolio lifecycle tools.</p>
 <h2 id="install-for-an-mcp-host">Install for an MCP host</h2>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr status
@@ -191,6 +191,6 @@ ibkr setup claude-desktop</code></pre>
 <h2 id="read-only-by-design">Read-only by design</h2>
 <p>The TWS connection can expose sensitive brokerage state. <code>ibkr mcp</code> keeps the interface narrow: it has no order-entry, order-modification, or order-cancellation tool.</p>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">canary</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>
 </html>

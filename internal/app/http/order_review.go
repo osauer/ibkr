@@ -21,6 +21,10 @@ type orderReviewPreviewRequest struct {
 	Rows     []orderReviewRowEdit `json:"rows"`
 }
 
+type orderReviewTransmitRequest struct {
+	BrokerWriteConfirmation
+}
+
 type orderReviewRowEdit struct {
 	RowID    string `json:"row_id"`
 	Included bool   `json:"included"`
@@ -47,6 +51,11 @@ type orderModifyPreviewRequest struct {
 
 type orderModifyRequest struct {
 	PreviewToken string `json:"preview_token"`
+	BrokerWriteConfirmation
+}
+
+type orderCancelRequest struct {
+	BrokerWriteConfirmation
 }
 
 func (h *handler) handleCreateOrderReviewSet(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -118,6 +127,11 @@ func (h *handler) handlePreviewOrderReviewSet(w nethttp.ResponseWriter, r *netht
 }
 
 func (h *handler) handleTransmitOrderReviewSet(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req orderReviewTransmitRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
 	set, ok := h.deps.Store.OrderReviewSet(r.PathValue("id"))
 	if !ok {
 		writeError(w, nethttp.StatusNotFound, "order review set not found")
@@ -128,9 +142,9 @@ func (h *handler) handleTransmitOrderReviewSet(w nethttp.ResponseWriter, r *neth
 		writeError(w, nethttp.StatusBadRequest, "order review set has no preview")
 		return
 	}
-	trading, err := h.deps.Daemon.TradingStatus(r.Context())
+	trading, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation)
 	if err != nil {
-		writeError(w, nethttp.StatusBadGateway, err.Error())
+		writeBrokerWriteConfirmationError(w, err)
 		return
 	}
 	rows, err := validateTransmitPreview(set, *preview, *trading, time.Now().UTC())
@@ -180,6 +194,15 @@ func (h *handler) handleOrderStatus(w nethttp.ResponseWriter, r *nethttp.Request
 }
 
 func (h *handler) handleOrderCancel(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req orderCancelRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
+		writeBrokerWriteConfirmationError(w, err)
+		return
+	}
 	res, err := h.deps.Daemon.OrderCancel(r.Context(), rpc.OrderCancelParams{ID: r.PathValue("id"), TimeoutMs: 10000})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())
@@ -224,6 +247,10 @@ func (h *handler) handleOrderModify(w nethttp.ResponseWriter, r *nethttp.Request
 	}
 	if strings.TrimSpace(req.PreviewToken) == "" {
 		writeError(w, nethttp.StatusBadRequest, "preview_token required")
+		return
+	}
+	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
+		writeBrokerWriteConfirmationError(w, err)
 		return
 	}
 	res, err := h.deps.Daemon.OrderModify(r.Context(), rpc.OrderModifyParams{
