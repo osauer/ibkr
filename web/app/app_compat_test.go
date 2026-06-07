@@ -162,6 +162,8 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function setupLiveRefreshLoop()",
 		"function setupBottomTabs()",
 		"function renderTabs()",
+		"function resetViewportScroll()",
+		`window.addEventListener("resize", resetViewportScroll)`,
 		"function renderSettings()",
 		"function setPurgeRestoreEnabled(enabled)",
 		"function purgeRestoreSettingEnabled()",
@@ -199,6 +201,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	}
 	for _, want := range []string{
 		`id="bannerStack"`,
+		`id="appScroll"`,
 		`id="bottomTabs"`,
 		`data-tab="monitor"`,
 		`data-tab="positions" aria-disabled="true" disabled`,
@@ -250,7 +253,14 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".portfolio-delta-posture",
 		".portfolio-panel .panel-chevron",
 		".portfolio-detail-panel",
+		".app-scroll",
+		"overflow-y: auto;",
+		"overscroll-behavior: contain;",
 		".bottom-tabs",
+		".bottom-tabs {\n  position: relative;",
+		"--bottom-tab-safe: 0px;",
+		"@media (display-mode: standalone), (display-mode: fullscreen)",
+		"--bottom-tab-safe: env(safe-area-inset-bottom);",
 		".bottom-tab.active",
 		".settings-panel",
 		".toggle-switch input:checked + span",
@@ -258,6 +268,9 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
 		}
+	}
+	if strings.Contains(css, ".bottom-tabs {\n  position: fixed;") {
+		t.Fatalf("bottom tabs must be pinned by shell layout, not floated over app content")
 	}
 }
 
@@ -285,6 +298,45 @@ func TestUnderlyingWinnerLoserTotalsUseDailyPnl(t *testing.T) {
 	}
 	if strings.Contains(js, "heldUnderlyingQuoteMarkedPnl") || strings.Contains(js, "heldUnderlyingQuotePnlAdjustment") {
 		t.Fatalf("underlying winner/loser totals must use broker daily P/L, not client quote-marked estimates")
+	}
+}
+
+func TestAppJSAccountPrivacyMasksUnderlyingPnl(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"function setAccountValueVisible(visible)",
+		"function syncAccountPrivacyState()",
+		"function sensitiveDisplayMoney(value, currency)",
+		"function sensitiveMoneyHidden(value)",
+		"function privacyMask()",
+		`window.addEventListener("storage"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing account privacy contract %q", want)
+		}
+	}
+	summary := jsFunctionBlock(t, js, "setUnderlyingSummaryPnl")
+	for _, want := range []string{
+		"if (sensitiveMoneyHidden(value))",
+		"el.textContent = privacyMask();",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("setUnderlyingSummaryPnl must use privacy helper %q", want)
+		}
+	}
+	row := jsFunctionBlock(t, js, "underlyingBookRow")
+	for _, want := range []string{
+		`pnlValue.className = sensitiveMoneyHidden(row.pnl) ? "is-private" : signedClass(row.pnl);`,
+		`pnlValue.textContent = sensitiveDisplayMoney(row.pnl, row.pnlCurrency || baseCurrency);`,
+	} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("underlyingBookRow must use privacy helper %q", want)
+		}
 	}
 }
 
