@@ -42,6 +42,7 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 async function main() {
+  resetViewportScroll();
   await navigator.serviceWorker?.register("/service-worker.js");
   const pair = new URLSearchParams(location.search).get("pair");
   const nonce = new URLSearchParams(location.search).get("nonce");
@@ -55,6 +56,7 @@ async function main() {
     }
   }
   await bootstrap();
+  resetViewportScroll();
   setupMarketSelect();
   setupBottomTabs();
   setupLiveRefreshLoop();
@@ -282,6 +284,7 @@ function renderAll() {
   const account = snap.account || {};
   const positions = snap.positions || {};
   const canary = snap.canary || {};
+  syncAccountPrivacyState();
   ensureRegimeCanaryExpansion(canary);
   renderTopbar(snap);
   renderAccountPanel(account, positions, canary);
@@ -354,6 +357,26 @@ function renderTabs() {
     const selected = button.dataset.tab === active;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
+  }
+}
+
+function setAccountValueVisible(visible) {
+  state.accountValueVisible = Boolean(visible);
+  localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
+  renderAll();
+}
+
+function syncAccountPrivacyState() {
+  document.body.dataset.accountValues = state.accountValueVisible ? "visible" : "hidden";
+}
+
+function resetViewportScroll() {
+  const shell = document.querySelector(".shell");
+  if (shell && (shell.scrollTop !== 0 || shell.scrollLeft !== 0)) {
+    shell.scrollTo(0, 0);
+  }
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
   }
 }
 
@@ -576,14 +599,14 @@ function setProtectionExpansion(open) {
 
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
-  const hasValue = hasSnapshot && typeof account.net_liquidation === "number";
+  const hasValue = hasSnapshot && hasNumericValue(account.net_liquidation);
   const accountContext = currentAccountContext(account);
   const value = $("netLiquidation");
   value.textContent = state.accountValueVisible || !hasValue
     ? compactMoney(account.net_liquidation, account.base_currency)
-    : "******";
+    : privacyMask();
   value.classList.toggle("is-private", !state.accountValueVisible && hasValue);
-  renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && typeof account.buying_power === "number");
+  renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && hasNumericValue(account.buying_power));
   renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
   renderAccountDailyPnlPct(account);
   $("accountLabel").textContent = accountContext.accountLabel;
@@ -676,12 +699,8 @@ function exposureMetricRow(exposure, baseCurrency) {
   const pctText = typeof exposure.market_value_pct_nlv === "number" ? ` ${pct(exposure.market_value_pct_nlv)}` : "";
   label.textContent = `${exposure.underlying || "--"}${pctText}`;
   const value = document.createElement("b");
-  value.textContent = state.accountValueVisible
-    ? money(exposure.market_value_base, exposure.base_currency || baseCurrency)
-    : "******";
-  if (!state.accountValueVisible && typeof exposure.market_value_base === "number") {
-    value.className = "is-private";
-  }
+  value.textContent = sensitiveDisplayMoney(exposure.market_value_base, exposure.base_currency || baseCurrency);
+  value.className = sensitiveMoneyHidden(exposure.market_value_base) ? "is-private" : "";
   row.append(label, value);
   return row;
 }
@@ -769,9 +788,14 @@ function renderUnderlyingPnlSummary(totals) {
 function setUnderlyingSummaryPnl(id, value, currency) {
   const el = $(id);
   if (!el) return;
-  if (typeof value === "number" && !state.accountValueVisible) {
+  if (!hasNumericValue(value)) {
+    el.className = "signed";
+    el.textContent = "--";
+    return;
+  }
+  if (sensitiveMoneyHidden(value)) {
     el.className = "signed is-private";
-    el.textContent = "******";
+    el.textContent = privacyMask();
     return;
   }
   el.className = signedClass(value);
@@ -1298,8 +1322,8 @@ function underlyingBookRow(row, baseCurrency) {
   const pnl = document.createElement("div");
   pnl.className = "underlying-row__metric underlying-row__metric--pnl";
   const pnlValue = document.createElement("b");
-  pnlValue.className = signedClass(row.pnl) + (!state.accountValueVisible && typeof row.pnl === "number" ? " is-private" : "");
-  pnlValue.textContent = typeof row.pnl === "number" && !state.accountValueVisible ? "******" : displayMoney(row.pnl, row.pnlCurrency || baseCurrency);
+  pnlValue.className = sensitiveMoneyHidden(row.pnl) ? "is-private" : signedClass(row.pnl);
+  pnlValue.textContent = sensitiveDisplayMoney(row.pnl, row.pnlCurrency || baseCurrency);
   const pnlNote = document.createElement("small");
   pnlNote.textContent = row.pnlSource || "P/L";
   pnl.append(pnlValue, pnlNote);
@@ -1527,7 +1551,7 @@ function mergeCurrency(left, right) {
 }
 
 function displayMoney(value, currency) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   const ccy = normalizeCurrency(currency);
   if (/^[A-Z]{3}$/.test(ccy) && ccy !== "MIX") {
     return money(value, ccy);
@@ -1537,7 +1561,7 @@ function displayMoney(value, currency) {
 }
 
 function signedDisplayMoney(value, currency) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   const sign = value > 0 ? "+" : value < 0 ? "-" : "";
   return sign + displayMoney(Math.abs(value), currency);
 }
@@ -2748,10 +2772,8 @@ function renderPortfolioRisk(positions, account) {
     const pctText = typeof exposure.market_value_pct_nlv === "number" ? ` ${pct(exposure.market_value_pct_nlv)}` : "";
     label.textContent = exposure.underlying + pctText;
     const value = document.createElement("b");
-    value.textContent = state.accountValueVisible
-      ? money(exposure.market_value_base, exposure.base_currency || baseCurrency)
-      : "******";
-    value.className = "exposure-value";
+    value.textContent = sensitiveDisplayMoney(exposure.market_value_base, exposure.base_currency || baseCurrency);
+    value.className = "exposure-value" + (sensitiveMoneyHidden(exposure.market_value_base) ? " is-private" : "");
     row.append(label, value);
     const pnl = exposure.daily_pnl_base ?? exposure.unrealized_pnl_base;
     if (state.accountValueVisible && typeof pnl === "number") {
@@ -4553,9 +4575,7 @@ document.querySelectorAll("[data-alert-filter]").forEach((button) => {
 $("enablePushButton").addEventListener("click", enablePush);
 $("retryAuthButton").addEventListener("click", bootstrap);
 $("accountPrivacyToggle").addEventListener("click", () => {
-  state.accountValueVisible = !state.accountValueVisible;
-  localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
-  renderAll();
+  setAccountValueVisible(!state.accountValueVisible);
 });
 $("accountLargestExposureToggle").addEventListener("click", () => {
   state.accountExposureOpen = !state.accountExposureOpen;
@@ -4725,12 +4745,12 @@ function bytesToB64url(bytes) {
 }
 
 function money(value, currency) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
 }
 
 function compactMoney(value, currency) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   const abs = Math.abs(value);
   if (abs >= 1000000) {
     return `${currency || "USD"} ${(value / 1000000).toFixed(abs >= 10000000 ? 1 : 2)}m`;
@@ -4747,7 +4767,7 @@ function compactMoney(value, currency) {
 function renderSignedMoney(id, value, currency) {
   const el = $(id);
   el.className = signedClass(value);
-  el.textContent = typeof value === "number" ? money(value, currency) : "--";
+  el.textContent = hasNumericValue(value) ? money(value, currency) : "--";
 }
 
 function renderSensitiveSignedMoney(id, value, currency) {
@@ -4757,9 +4777,9 @@ function renderSensitiveSignedMoney(id, value, currency) {
     el.textContent = "--";
     return;
   }
-  if (!state.accountValueVisible) {
+  if (sensitiveMoneyHidden(value)) {
     el.className = "signed is-private";
-    el.textContent = "******";
+    el.textContent = privacyMask();
     return;
   }
   el.className = signedClass(value);
@@ -4775,7 +4795,7 @@ function renderSensitiveText(id, value, hasValue) {
   }
   if (!state.accountValueVisible) {
     el.classList.add("is-private");
-    el.textContent = "******";
+    el.textContent = privacyMask();
     return;
   }
   el.classList.remove("is-private");
@@ -4784,11 +4804,24 @@ function renderSensitiveText(id, value, hasValue) {
 
 function sensitiveMoney(value, currency) {
   if (!hasNumericValue(value)) return "--";
-  return state.accountValueVisible ? money(value, currency) : "******";
+  return state.accountValueVisible ? money(value, currency) : privacyMask();
+}
+
+function sensitiveDisplayMoney(value, currency) {
+  if (!hasNumericValue(value)) return "--";
+  return state.accountValueVisible ? displayMoney(value, currency) : privacyMask();
+}
+
+function sensitiveMoneyHidden(value) {
+  return hasNumericValue(value) && !state.accountValueVisible;
+}
+
+function privacyMask() {
+  return "******";
 }
 
 function hasNumericValue(value) {
-  return typeof value === "number";
+  return Number.isFinite(value);
 }
 
 function firstNumber(...values) {
@@ -4796,23 +4829,23 @@ function firstNumber(...values) {
 }
 
 function signedClass(value) {
-  if (typeof value !== "number" || value === 0) return "signed";
+  if (!hasNumericValue(value) || value === 0) return "signed";
   return "signed " + (value > 0 ? "ok" : "risk");
 }
 
 function signedTone(value, inverse = false) {
-  if (typeof value !== "number" || value === 0) return "neutral";
+  if (!hasNumericValue(value) || value === 0) return "neutral";
   const good = inverse ? value > 0 : value >= 0;
   return good ? "ok" : "risk";
 }
 
 function numberRead(value) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   return new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 }
 
 function riskMoney(value, currency) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   const amount = new Intl.NumberFormat(undefined, {
     maximumFractionDigits: 0,
     minimumFractionDigits: 0,
@@ -4821,17 +4854,17 @@ function riskMoney(value, currency) {
 }
 
 function pct(value) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   return value.toFixed(1) + "%";
 }
 
 function wholePct(value) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   return Math.round(value) + "%";
 }
 
 function signedPct(value) {
-  if (typeof value !== "number") return "--";
+  if (!hasNumericValue(value)) return "--";
   const sign = value > 0 ? "+" : "";
   return sign + value.toFixed(2) + "%";
 }
@@ -4913,6 +4946,14 @@ function showPairing(text) {
   $("pairingText").textContent = text;
   setConnection("Locked", false);
 }
+
+window.addEventListener("storage", (event) => {
+  if (event.key !== "ibkrAccountValueVisible") return;
+  state.accountValueVisible = event.newValue === "true";
+  renderAll();
+});
+window.addEventListener("resize", resetViewportScroll);
+window.addEventListener("orientationchange", resetViewportScroll);
 
 main().catch((err) => {
   console.error(err);
