@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Portfolio review with Claude and IBKR | canary</title>
+  <title>Portfolio review with Claude and IBKR | ibkr</title>
   <meta name="description" content="ibkr mcp lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a...">
   <link rel="canonical" href="https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/">
   <script type="application/ld+json">
@@ -20,7 +20,7 @@
     "headline": "Portfolio review with Claude and IBKR",
     "isPartOf": {
       "@type": "SoftwareApplication",
-      "name": "canary",
+      "name": "ibkr",
       "url": "https://osauer.dev/ibkr/"
     },
     "url": "https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/"
@@ -147,7 +147,7 @@
 <body>
   <div class="topline"></div>
   <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="../index.html">canary</a>
+    <a class="brand" href="../index.html">ibkr</a>
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
@@ -195,7 +195,7 @@ risk-regime lifecycle. Rank the risks I should inspect today, explain the eviden
 behind each one, and separate observations from possible next actions. Do not
 place or imply orders.</code></pre>
 <p>For a deeper review, use the full example prompt and let Claude decide which MCP calls are needed before it writes the answer.</p>
-<p>For a scheduled canary check that preserves lifecycle stage, planner readiness, source health, fingerprints, confidence, rows, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
+<p>For a scheduled stress check that preserves lifecycle stage, planner readiness, source health, fingerprints, confidence, rows, and warnings, use <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md">examples/ibkr_portfolio_canary_prompt.md</a>.</p>
 <h2 id="what-a-useful-answer-looks-like">What a useful answer looks like</h2>
 <p>A strong review is compact, evidence-led, and explicit about missing data. It should read like a desk note, not a stream of tool output.</p>
 <p>Sanitized sample:</p>
@@ -222,7 +222,10 @@ Next review steps
 <h2 id="how-to-install">How to install</h2>
 <p>Claude Desktop users can install the MCP Bundle:</p>
 <pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
-<p>Shell, Cursor, Continue, Zed, and generic MCP users can install the experimental beta CLI:</p>
+<p>Claude Code users can install the plugin:</p>
+<pre><code>/plugin marketplace add osauer/ibkr
+/plugin install ibkr@ibkr</code></pre>
+<p>Shell, Cursor, Continue, Zed, and generic MCP users can install the binary:</p>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr status</code></pre>
 <p>Generic MCP configuration:</p>
@@ -244,6 +247,6 @@ ibkr status</code></pre>
 <li><a href="../reference/mcp-tools.html">MCP tools reference</a> for exact tool schemas.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">canary</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>
 </html>
