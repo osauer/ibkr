@@ -628,12 +628,12 @@
         <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Turn portfolio, options, quotes, scanners, breadth, gamma, regime, and data-quality checks into review workflows an assistant can actually use.</p>
         <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
-          <a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a>
+          <a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a>
           <a class="button" href="#install">Install other clients</a>
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
           <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
         </div>
-        <p class="install-note">Claude Desktop: open the <code>.mcpb</code> file, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin, then install the local <code>ibkr</code> binary.</p>
+        <p class="install-note">Claude Desktop: review the Mac prerequisites, install the MCPB from the setup page, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin, then install the local <code>ibkr</code> binary.</p>
       </div>
       <div class="hero-media">
         <div class="hero-shot">
@@ -766,8 +766,8 @@
         </article>
         <article class="feature">
           <small>Claude Desktop</small>
-          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Interactive Brokers setup</a></h3>
-          <p>Install the MCPB and connect Claude Desktop to your local IBKR session.</p>
+          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></h3>
+          <p>Mac-focused prerequisites, MCPB download, Claude Desktop install steps, and first-run checks.</p>
         </article>
         <article class="feature">
           <small>IBKR Claude Desktop MCP</small>
@@ -806,11 +806,11 @@
       <div>
         <div class="section-head">
           <h2 id="install-title">Install for Claude Desktop or shell.</h2>
-          <p>Claude Desktop users should start with the MCP Bundle release asset. Claude Code users can install the plugin plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
+          <p>Claude Desktop users should start with the guided install page. Claude Code users can install the plugin plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
         </div>
         <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
-        <p><a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a></p>
-        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings &gt; Extensions &gt; Install Extension. macOS and Linux are supported; Windows users can use WSL with the shell path.</p>
+        <p><a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></p>
+        <p>The Claude Desktop path explains what the MCPB bundles, what still needs to be running locally, and the exact Mac install and restart steps.</p>
       </div>
       <pre><code># Claude Code plugin
 /plugin marketplace add osauer/ibkr

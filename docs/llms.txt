@@ -24,7 +24,7 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 - [Interactive Brokers MCP server page](https://osauer.dev/ibkr/interactive-brokers-mcp-server/)
 - [TWS MCP server](https://osauer.dev/ibkr/tws-mcp-server/)
 - [IB Gateway MCP server](https://osauer.dev/ibkr/ib-gateway-mcp/)
-- [Claude Desktop Interactive Brokers setup](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/)
+- [Claude Desktop Install](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/)
 - [IBKR Claude Desktop MCP setup](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/)
 - [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/)
 - [Best IBKR MCP server for Claude Code](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/)
