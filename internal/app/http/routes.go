@@ -321,10 +321,10 @@ func orderReviewSetMatchesSnapshot(set orderreview.Set, snap live.Snapshot) bool
 	if snap.Trading == nil {
 		return true
 	}
-	if set.Capabilities.Account != "" && snap.Trading.Account != "" && set.Capabilities.Account != snap.Trading.Account {
+	if set.CapturedTrading.Account != "" && snap.Trading.Account != "" && set.CapturedTrading.Account != snap.Trading.Account {
 		return false
 	}
-	if set.Capabilities.Mode != "" && snap.Trading.Mode != "" && set.Capabilities.Mode != snap.Trading.Mode {
+	if set.CapturedTrading.Mode != "" && snap.Trading.Mode != "" && set.CapturedTrading.Mode != snap.Trading.Mode {
 		return false
 	}
 	return true

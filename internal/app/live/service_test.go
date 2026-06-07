@@ -17,7 +17,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		status:    &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
 		calendar:  &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
 		account:   &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
-		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{}},
+		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "CRWV", SecType: "STK"}}},
 		quotes: map[string]rpc.Quote{
 			"SPY": {Symbol: "SPY", Price: new(500.0), ChangePct: new(0.4), DataType: rpc.MarketDataLive},
 			"QQQ": {Symbol: "QQQ", Price: new(420.0), ChangePct: new(0.5), DataType: rpc.MarketDataLive},
@@ -26,9 +26,10 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			"HYG": {Symbol: "HYG", Price: new(78.0), ChangePct: new(0.1), DataType: rpc.MarketDataLive},
 			"TLT": {Symbol: "TLT", Price: new(92.0), ChangePct: new(-0.1), DataType: rpc.MarketDataLive},
 		},
-		regime:  &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}, Composite: rpc.RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterRankedCount: 6}},
-		canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
-		trading: &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		regime:       &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}, Composite: rpc.RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterRankedCount: 6}},
+		canary:       &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
+		marketEvents: &rpc.MarketEventsResult{Kind: rpc.MarketEventsKind, SchemaVersion: rpc.MarketEventsSchemaVersion, Fingerprint: rpc.Fingerprint{Key: "market-events-1"}},
+		trading:      &rpc.TradingStatus{CanPreview: true},
 	}
 	svc := New(client, time.Minute, time.Minute)
 	ch, release := svc.Subscribe()
@@ -57,6 +58,9 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Quotes == nil || len(snap.Quotes.Quotes) != 6 || snap.Quotes.Quotes["QQQ"].Symbol != "QQQ" || snap.Quotes.Quotes["TLT"].Symbol != "TLT" {
 		t.Fatalf("market quotes missing from snapshot: %#v", snap.Quotes)
 	}
+	if snap.MarketEvents == nil || snap.MarketEvents.Fingerprint.Key != "market-events-1" {
+		t.Fatalf("market events missing from snapshot: %#v", snap.MarketEvents)
+	}
 	if snap.Regime == nil || snap.Regime.Fingerprint.Key != "regime-1" {
 		t.Fatalf("regime missing from snapshot: %#v", snap.Regime)
 	}
@@ -68,7 +72,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	for range 12 {
+	for range 13 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -76,7 +80,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -109,7 +113,7 @@ func TestStartPublishesStatusBeforeFullPollCompletes(t *testing.T) {
 		quotes:      map[string]rpc.Quote{"SPY": {Symbol: "SPY", Price: new(500.0)}},
 		regime:      &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
 		canary:      &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
-		trading:     &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		trading:     &rpc.TradingStatus{CanPreview: true},
 		canaryBlock: canaryBlock,
 	}
 	svc := New(client, time.Hour, time.Hour)
@@ -158,7 +162,7 @@ func TestPollOncePublishesPositionsBeforeMarketQuotesComplete(t *testing.T) {
 		quotes:     map[string]rpc.Quote{"SPY": {Symbol: "SPY", Price: new(500.0)}},
 		regime:     &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
 		canary:     &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
-		trading:    &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		trading:    &rpc.TradingStatus{CanPreview: true},
 		quoteBlock: quoteBlock,
 	}
 	svc := New(client, time.Hour, time.Hour)
@@ -266,7 +270,7 @@ func TestPollOnceIncludesHeldUnderlyingQuotes(t *testing.T) {
 		},
 		regime:  &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}},
 		canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
-		trading: &rpc.TradingStatus{CanPreview: true, PreviewRequired: true},
+		trading: &rpc.TradingStatus{CanPreview: true},
 	}
 	svc := New(client, time.Minute, time.Minute)
 
@@ -300,15 +304,16 @@ func TestMarketQuoteErrorIncludesDynamicSymbols(t *testing.T) {
 }
 
 type fakeClient struct {
-	status    *rpc.HealthResult
-	calendar  *rpc.MarketCalendarResult
-	account   *rpc.AccountResult
-	positions *rpc.PositionsResult
-	quotes    map[string]rpc.Quote
-	quoteErrs map[string]error
-	regime    *rpc.RegimeMonitorResult
-	canary    *rpc.CanaryResult
-	trading   *rpc.TradingStatus
+	status       *rpc.HealthResult
+	calendar     *rpc.MarketCalendarResult
+	account      *rpc.AccountResult
+	positions    *rpc.PositionsResult
+	quotes       map[string]rpc.Quote
+	quoteErrs    map[string]error
+	regime       *rpc.RegimeMonitorResult
+	canary       *rpc.CanaryResult
+	marketEvents *rpc.MarketEventsResult
+	trading      *rpc.TradingStatus
 
 	canaryBlock <-chan struct{}
 	quoteBlock  <-chan struct{}
@@ -361,6 +366,10 @@ func (c *fakeClient) QuoteCalls() []rpc.ContractParams {
 
 func (c *fakeClient) StreamQuote(context.Context, rpc.ContractParams, func(rpc.Frame) error) error {
 	return nil
+}
+
+func (c *fakeClient) MarketEvents(context.Context, rpc.MarketEventsParams) (*rpc.MarketEventsResult, error) {
+	return c.marketEvents, nil
 }
 
 func (c *fakeClient) Canary(context.Context) (*rpc.CanaryResult, error) {

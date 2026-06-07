@@ -113,17 +113,13 @@ type Daemon struct {
 }
 
 // Trading holds local order-entry gates for experimental trading builds.
-// Stable ibkr releases are read-only; a missing [trading] section is
-// intentionally non-trading. Treat active trading config as an explicit,
-// as-is operator override. TWS / Gateway broker permissions remain the final
-// authority even after these local gates pass.
+// Stable ibkr releases are read-only; a missing [trading] section resolves to
+// mode="disabled". Treat active trading config as an explicit, as-is operator
+// override. TWS / Gateway broker permissions remain the final authority even
+// after these local gates pass.
 type Trading struct {
-	// Enabled controls whether an experimental trading build may let order preview/place/modify/cancel commands progress beyond the local gate (default false).
-	Enabled bool `toml:"enabled"`
-	// Mode selects the target account class for local safety checks: "paper" (default) or "live".
+	// Mode selects the local order-entry state: "disabled" (default), "paper", or "live".
 	Mode string `toml:"mode"`
-	// RequirePreview forces every write through a submit-eligible preview token. Defaults to true; false is invalid for the shipped trading release.
-	RequirePreview *bool `toml:"require_preview"`
 	// MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency.
 	MaxNotional float64 `toml:"max_notional"`
 	// MaxOptionContracts caps first-release single-leg option quantity; default 5.
@@ -162,8 +158,9 @@ type AutoTrade struct {
 }
 
 const (
-	TradingModePaper = "paper"
-	TradingModeLive  = "live"
+	TradingModeDisabled = "disabled"
+	TradingModePaper    = "paper"
+	TradingModeLive     = "live"
 
 	MCPModePreview    = "preview"
 	MCPModePaperWrite = "paper-write"
@@ -225,11 +222,7 @@ func (a AutoTrade) ProposalCadenceDuration() time.Duration {
 // WithDefaults returns t with default values applied without granting trading.
 func (t Trading) WithDefaults() Trading {
 	if t.Mode == "" {
-		t.Mode = TradingModePaper
-	}
-	if t.RequirePreview == nil {
-		v := true
-		t.RequirePreview = &v
+		t.Mode = TradingModeDisabled
 	}
 	if t.MaxNotional == 0 {
 		t.MaxNotional = 10000
@@ -249,12 +242,10 @@ func (t Trading) WithDefaults() Trading {
 	return t
 }
 
-// PreviewRequired reports the resolved preview-token requirement.
-func (t Trading) PreviewRequired() bool {
-	if t.RequirePreview == nil {
-		return true
-	}
-	return *t.RequirePreview
+// OrderEntryEnabled reports whether the configured trading mode can progress
+// beyond read-only status/preview diagnostics.
+func (t Trading) OrderEntryEnabled() bool {
+	return t.Mode == TradingModePaper || t.Mode == TradingModeLive
 }
 
 // PaperSmokeMaxAgeDuration returns the resolved paper-smoke freshness window.

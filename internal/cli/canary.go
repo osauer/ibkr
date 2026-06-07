@@ -38,15 +38,24 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	if regimeFingerprint.Key == "" {
 		regimeFingerprint = rpc.BuildRegimeFingerprint(&in.Regime)
 	}
+	marketEventsFingerprint := in.MarketEvents.Fingerprint
+	if marketEventsFingerprint.Key == "" && canaryHasMarketEventsInput(in.MarketEvents) {
+		marketEventsFingerprint = rpc.BuildMarketEventsFingerprint(&in.MarketEvents)
+	}
+	sourceAsOf := CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf, MarketEvents: in.MarketEvents.AsOf}
+	sourceFingerprints := CanarySourceFingerprints{Account: &accountFingerprint, Positions: &positionsFingerprint, Regime: &regimeFingerprint}
+	if marketEventsFingerprint.Key != "" {
+		sourceFingerprints.MarketEvents = &marketEventsFingerprint
+	}
 	res := CanaryResult{
 		AsOf:               now,
-		SourceAsOf:         CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf},
-		SourceFingerprints: CanarySourceFingerprints{Account: &accountFingerprint, Positions: &positionsFingerprint, Regime: &regimeFingerprint},
+		SourceAsOf:         sourceAsOf,
+		SourceFingerprints: sourceFingerprints,
 		Policy:             canaryPolicy.PolicyProfile(),
 		PolicyProfile:      canaryPolicy.PolicyProfile(),
 		PolicyVersion:      canaryPolicy.PolicyVersion(),
 		PolicyFingerprint:  rpc.Fingerprint{Version: risk.PolicyFingerprintVersion, Key: canaryPolicy.FingerprintKey()},
-		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions, now),
+		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions, in.MarketEvents, now),
 		Market:             summarizeCanaryMarket(in.Regime, now),
 		MarketIndicators:   canaryMarketIndicators(in.Regime, now),
 		NotExecution:       "Read-only canary snapshot; no orders are placed by ibkr.",
@@ -79,12 +88,12 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	overall := canaryOverallRow(res.Direction, res.Severity, res.Summary, res.Market, res.Portfolio)
 	res.Rows = append([]CanaryRow{overall}, rows...)
 	res.Warnings = canaryWarnings(res.Market, in.Regime, now)
-	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, res.InputHealth, res.Market)
+	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, marketEventsFingerprint, res.InputHealth, res.Market)
 	res.Fingerprint = rpc.BuildCanaryFingerprint(&res)
 	return res
 }
 
-func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, now time.Time) CanaryPortfolioSummary {
+func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, marketEvents rpc.MarketEventsResult, now time.Time) CanaryPortfolioSummary {
 	out := CanaryPortfolioSummary{
 		BaseCurrency:   acct.BaseCurrency,
 		NetLiquidation: acct.NetLiquidation,
@@ -132,11 +141,11 @@ func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, n
 			}
 		}
 	}
-	out.HeldStress = canaryHeldStressSummaries(acct, pos, now)
+	out.HeldStress = canaryHeldStressSummaries(acct, pos, marketEvents, now)
 	return out
 }
 
-func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, now time.Time) []rpc.CanaryHeldStress {
+func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, marketEvents rpc.MarketEventsResult, now time.Time) []rpc.CanaryHeldStress {
 	if acct.NetLiquidation <= 0 {
 		return nil
 	}
@@ -230,6 +239,7 @@ func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, 
 	out := []rpc.CanaryHeldStress{}
 	for _, underlying := range order {
 		s := builders[underlying]
+		s.MarketFlags = canaryHeldMarketFlags(underlying, marketEvents)
 		s.MaterialReasons = canaryHeldStressMaterialReasons(*s)
 		s.SignalIDs = canaryHeldStressSignalIDs(*s)
 		if len(s.MaterialReasons) == 0 || len(s.SignalIDs) == 0 {
@@ -243,6 +253,27 @@ func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, 
 	if len(out) > canaryHeldStressLimit {
 		out = out[:canaryHeldStressLimit]
 	}
+	return out
+}
+
+func canaryHeldMarketFlags(underlying string, events rpc.MarketEventsResult) []rpc.MarketEventFlag {
+	underlying = strings.ToUpper(strings.TrimSpace(underlying))
+	if underlying == "" || events.BySymbol == nil {
+		return nil
+	}
+	out := []rpc.MarketEventFlag{}
+	for _, flag := range events.BySymbol[underlying] {
+		switch flag.Status {
+		case rpc.MarketEventStatusActive, rpc.MarketEventStatusRecent:
+			out = append(out, flag)
+		}
+	}
+	slices.SortFunc(out, func(a, b rpc.MarketEventFlag) int {
+		if c := strings.Compare(a.Symbol, b.Symbol); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return out
 }
 
@@ -1960,12 +1991,51 @@ func canaryRegimeWarningCluster(w rpc.RegimeWarning) string {
 	}
 }
 
-func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
-	return []rpc.SourceHealth{
+func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
+	out := []rpc.SourceHealth{
 		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
 		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
 		canaryRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
+	if canaryHasMarketEventsInput(in.MarketEvents) {
+		out = append(out, canaryMarketEventsSourceHealth(in.MarketEvents, now, marketEventsFP))
+	}
+	return out
+}
+
+func canaryHasMarketEventsInput(events rpc.MarketEventsResult) bool {
+	return events.Kind != "" ||
+		!events.AsOf.IsZero() ||
+		len(events.Symbols) > 0 ||
+		len(events.Flags) > 0 ||
+		len(events.SourceHealth) > 0 ||
+		len(events.WarningDetails) > 0
+}
+
+func canaryMarketEventsSourceHealth(events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+	status := rpc.RegimeStatusOK
+	confidence := "medium"
+	notes := []string{}
+	if len(events.Flags) > 0 {
+		notes = append(notes, fmt.Sprintf("%d active/recent market-event flags", len(events.Flags)))
+	}
+	if len(events.WarningDetails) > 0 {
+		status = "degraded"
+		confidence = "medium-low"
+		notes = append(notes, "one or more market-event sources are unavailable")
+	}
+	for _, health := range events.SourceHealth {
+		switch health.Status {
+		case rpc.MarketEventStatusUnknown, rpc.MarketEventStatusStale, rpc.MarketEventStatusDegraded, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+			if status == rpc.RegimeStatusOK {
+				status = "degraded"
+				confidence = "medium-low"
+			}
+		}
+	}
+	health := canaryTimedSourceHealth("market_events", events.AsOf, now, fp, status, confidence)
+	health.Notes = notes
+	return health
 }
 
 func canaryInputHealthConfidence(inputHealth string) string {
@@ -2421,15 +2491,81 @@ func FetchCanarySnapshotWithRegime(ctx context.Context, conn interface {
 	if err := conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &regime); err != nil {
 		return CanaryResult{}, rpc.PositionsResult{}, rpc.RegimeSnapshotResult{}, fmt.Errorf("regime: %w", err)
 	}
+	marketEvents := fetchCanaryMarketEvents(ctx, conn, pos)
 	if acct.DailyPnL == nil {
 		var refreshed rpc.AccountResult
 		if err := conn.Call(ctx, rpc.MethodAccountSummary, nil, &refreshed); err == nil && refreshed.DailyPnL != nil {
 			acct = refreshed
 		}
 	}
-	canary := ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime})
+	canary := ComputeCanary(CanaryInput{Account: acct, Positions: pos, Regime: regime, MarketEvents: marketEvents})
 	rpc.CompactRegimeSnapshot(&regime)
 	return canary, pos, regime, nil
+}
+
+func fetchCanaryMarketEvents(ctx context.Context, conn interface {
+	Call(context.Context, string, any, any) error
+}, pos rpc.PositionsResult) rpc.MarketEventsResult {
+	symbols := canaryMarketEventSymbols(pos)
+	if len(symbols) == 0 {
+		return rpc.MarketEventsResult{}
+	}
+	var out rpc.MarketEventsResult
+	if err := conn.Call(ctx, rpc.MethodMarketEventsSnapshot, rpc.MarketEventsParams{Symbols: symbols}, &out); err != nil {
+		now := time.Now().UTC()
+		out = rpc.MarketEventsResult{
+			Kind:          rpc.MarketEventsKind,
+			SchemaVersion: rpc.MarketEventsSchemaVersion,
+			AsOf:          now,
+			Symbols:       symbols,
+			SourceHealth: []rpc.SourceHealth{{
+				Source:               "market_events",
+				Status:               rpc.MarketEventStatusUnknown,
+				AsOf:                 now,
+				Confidence:           "low",
+				FingerprintStability: rpc.FingerprintStabilitySemanticBuckets,
+				Notes:                []string{err.Error()},
+			}},
+			WarningDetails: []rpc.DataWarning{{
+				Code:     "market_events_unavailable",
+				Scope:    "market_events",
+				Severity: "data_quality",
+				Message:  "Market-event snapshot unavailable: " + err.Error(),
+				Impact:   "Held-name market-event flags remain unknown, not inactive.",
+				Action:   "Retry market-events before relying on absence of halt, LULD, Reg SHO, or borrow pressure tags.",
+			}},
+			NotExecution: "Market-event flags are observed context and daemon safety gates; no orders are placed by ibkr.",
+		}
+		out.Fingerprint = rpc.BuildMarketEventsFingerprint(&out)
+	}
+	return out
+}
+
+func canaryMarketEventSymbols(pos rpc.PositionsResult) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(value string) {
+		sym := strings.ToUpper(strings.TrimSpace(value))
+		if sym == "" || seen[sym] {
+			return
+		}
+		seen[sym] = true
+		out = append(out, sym)
+	}
+	for _, stock := range pos.Stocks {
+		add(stock.Symbol)
+	}
+	for _, group := range pos.ByUnderlying {
+		add(group.Underlying)
+		if group.Stock != nil {
+			add(group.Stock.Symbol)
+		}
+		for _, opt := range group.Options {
+			add(opt.Symbol)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func renderCanaryText(env *Env, out io.Writer, r *CanaryResult) int {

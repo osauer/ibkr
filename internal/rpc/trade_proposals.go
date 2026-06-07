@@ -60,9 +60,10 @@ type AutoTradeStatus struct {
 }
 
 type TradeProposalSourceFingerprints struct {
-	Account   *Fingerprint `json:"account,omitempty"`
-	Positions *Fingerprint `json:"positions,omitempty"`
-	Regime    *Fingerprint `json:"regime,omitempty"`
+	Account      *Fingerprint `json:"account,omitempty"`
+	Positions    *Fingerprint `json:"positions,omitempty"`
+	Regime       *Fingerprint `json:"regime,omitempty"`
+	MarketEvents *Fingerprint `json:"market_events,omitempty"`
 }
 
 type TradeProposalSnapshot struct {
@@ -78,6 +79,7 @@ type TradeProposalSnapshot struct {
 	AutoTrade          AutoTradeStatus                 `json:"auto_trade"`
 	Trading            TradingStatus                   `json:"trading"`
 	SourceFingerprints TradeProposalSourceFingerprints `json:"source_fingerprints,omitzero"`
+	MarketEvents       *MarketEventsResult             `json:"market_events,omitempty"`
 	Proposals          []TradeProposal                 `json:"proposals"`
 	Counts             TradeProposalCounts             `json:"counts"`
 	Blockers           []TradingBlocker                `json:"blockers,omitempty"`
@@ -89,6 +91,7 @@ type TradeProposalCounts struct {
 	Actionable                  int     `json:"actionable"`
 	ThetaHygiene                int     `json:"theta_hygiene"`
 	RiskReduction               int     `json:"risk_reduction"`
+	MarketFlags                 int     `json:"market_flags,omitempty"`
 	ThetaPerDay                 float64 `json:"theta_per_day,omitempty"`
 	RiskReductionExcessNotional float64 `json:"risk_reduction_excess_notional,omitempty"`
 	RiskReductionExcessCurrency string  `json:"risk_reduction_excess_currency,omitempty"`
@@ -119,6 +122,7 @@ type TradeProposal struct {
 	RiskExcessNotional float64                         `json:"risk_excess_notional,omitempty"`
 	RiskExcessCurrency string                          `json:"risk_excess_currency,omitempty"`
 	MarketValuePctNLV  *float64                        `json:"market_value_pct_nlv,omitempty"`
+	MarketFlags        []MarketEventFlag               `json:"market_flags,omitempty"`
 	LimitPrice         *float64                        `json:"limit_price,omitempty"`
 	PolicyID           string                          `json:"policy_id,omitempty"`
 	PolicyVersion      int                             `json:"policy_version,omitempty"`

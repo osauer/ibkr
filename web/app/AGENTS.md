@@ -90,3 +90,19 @@ When regime label, tone, readiness, or indicator state conflict, ask a
 trading/risk agent to judge the UI posture and diagnose missing data. Prefer
 fixing the canonical backend posture or data-quality surface over CSS-only UI
 overrides.
+
+## Market Event Flags
+
+Market-event UI is compact evidence, not a new action surface. Protection hero
+chips show active proposal-bound categories; Underlyings hero chips show active
+held-name categories and counts. Row tags should carry source/as-of detail for
+halt, LULD, borrow inventory, borrow fee, and Reg SHO flags.
+
+Use red/soft-red for hard blockers such as active halt or active LULD, amber for
+execution/carry friction such as borrow tight, fee extreme, and Reg SHO,
+neutral/blue for context-only future flags, and muted gray for stale/unknown
+source states.
+
+V1 is reduce-only. Do not add an opportunities panel, buy-add controls, or
+standalone squeeze recommendations. When a proposal is a reducing short `BUY`,
+render it as `Buy to cover`.

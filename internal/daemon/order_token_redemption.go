@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -59,8 +60,8 @@ func (s *Server) verifyPreviewTokenForCurrentGate(token string) (orderPreviewTok
 	ep := s.endpoint
 	s.mu.Unlock()
 	status := s.tradingStatus(ep)
-	if !status.Enabled {
-		return orderPreviewTokenPayload{}, fmt.Errorf("%w: enable [trading] before confirming order preview token", ErrTradingDisabled)
+	if status.Mode == config.TradingModeDisabled {
+		return orderPreviewTokenPayload{}, fmt.Errorf("%w: set [trading].mode to paper or live before confirming order preview token", ErrTradingDisabled)
 	}
 	if status.Blocked {
 		return orderPreviewTokenPayload{}, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(status.Blockers))

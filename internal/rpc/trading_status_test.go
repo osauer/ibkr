@@ -14,6 +14,9 @@ func TestTradingStatusJSONOmitsMissingPaperSmokeTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
+	if strings.Contains(string(data), `"enabled"`) {
+		t.Fatalf("trading status should not expose legacy enabled field: %s", data)
+	}
 	if strings.Contains(string(data), "paper_smoke_at") {
 		t.Fatalf("paper_smoke_at should be absent when no evidence exists: %s", data)
 	}

@@ -24,7 +24,7 @@ func TestSettingsPatchFromAssignmentBuildsNestedPatch(t *testing.T) {
 
 func TestSettingsPatchFromAssignmentRejectsUnknownKey(t *testing.T) {
 	t.Parallel()
-	if _, err := settingsPatchFromAssignment("trading.enabled=true"); err == nil {
+	if _, err := settingsPatchFromAssignment("trading.mode=paper"); err == nil {
 		t.Fatal("unsupported read-only key succeeded")
 	}
 }

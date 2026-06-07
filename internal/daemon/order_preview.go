@@ -16,6 +16,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
+	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -222,8 +223,8 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	ep := s.endpoint
 	s.mu.Unlock()
 	status := s.tradingStatus(ep)
-	if !status.Enabled {
-		return nil, fmt.Errorf("%w: enable [trading] before order preview", ErrTradingDisabled)
+	if status.Mode == config.TradingModeDisabled {
+		return nil, fmt.Errorf("%w: set [trading].mode to paper or live before order preview", ErrTradingDisabled)
 	}
 	if status.Blocked {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(status.Blockers))
@@ -235,7 +236,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	var replaceView rpc.OrderView
 	replaceID := strings.TrimSpace(p.ReplaceID)
 	if replaceID != "" {
-		if !status.CanModify {
+		if !status.CanWrite {
 			return nil, fmt.Errorf("%w: broker modify is not available", ErrTradingDisabled)
 		}
 		view, err := s.openOrderViewForWrite(replaceID, status)
@@ -332,9 +333,9 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	}
 	var whatIf rpc.OrderWhatIfResult
 	if scope == rpc.OrderTokenScopeModify {
-		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, replaceView, draft)
+		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, status, replaceView, draft)
 	} else {
-		whatIf, err = s.fetchPreviewWhatIf(ctx, draft)
+		whatIf, err = s.fetchPreviewWhatIf(ctx, status, draft)
 	}
 	if err != nil {
 		return nil, err
@@ -439,7 +440,7 @@ func (s *Server) fetchPreviewPositionImpact(ctx context.Context, contract rpc.Co
 	return s.previewPositionImpact(ctx, contract, action, qty)
 }
 
-func (s *Server) fetchPreviewWhatIf(ctx context.Context, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+func (s *Server) fetchPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
 	if s.orderPreviewWhatIf != nil {
 		return s.orderPreviewWhatIf(ctx, draft)
 	}
@@ -449,14 +450,14 @@ func (s *Server) fetchPreviewWhatIf(ctx context.Context, draft rpc.OrderDraft) (
 	}
 	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
 	defer cancel()
-	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrder(draft))
+	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status))
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
 	}
 	return rpcWhatIfResultFromBroker(result), nil
 }
 
-func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, view rpc.OrderView, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, view rpc.OrderView, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
 	if s.orderPreviewWhatIf != nil {
 		return s.orderPreviewWhatIf(ctx, draft)
 	}
@@ -466,7 +467,7 @@ func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, view rpc.OrderVie
 	}
 	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
 	defer cancel()
-	result, err := c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrder(draft), view.ReservedOrderID)
+	result, err := c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status), view.ReservedOrderID)
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
 	}
@@ -486,6 +487,10 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 	if currency == "" {
 		currency = "USD"
 	}
+	multiplier := contract.Multiplier
+	if secType != "OPT" {
+		multiplier = 0
+	}
 	return &ibkrlib.Contract{
 		ConID:        contract.ConID,
 		Symbol:       strings.ToUpper(strings.TrimSpace(contract.Symbol)),
@@ -498,7 +503,7 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 		Expiry:       strings.TrimSpace(contract.Expiry),
 		Strike:       contract.Strike,
 		Right:        strings.ToUpper(strings.TrimSpace(contract.Right)),
-		Multiplier:   contract.Multiplier,
+		Multiplier:   multiplier,
 	}
 }
 
@@ -513,6 +518,13 @@ func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
 		OutsideRth: draft.OutsideRTH,
 		OpenClose:  strings.ToUpper(strings.TrimSpace(draft.OpenClose)),
 	}
+}
+
+func previewIBKROrderForStatus(draft rpc.OrderDraft, status rpc.TradingStatus) *ibkrlib.RawOrder {
+	order := previewIBKROrder(draft)
+	order.Account = status.Account
+	order.ClientID = status.ClientID
+	return order
 }
 
 func rpcWhatIfResultFromBroker(result ibkrlib.OrderWhatIfResult) rpc.OrderWhatIfResult {

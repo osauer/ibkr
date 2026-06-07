@@ -1,6 +1,6 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-06-04 07:42 CEST
+Last reviewed: 2026-06-07 08:48 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
@@ -21,12 +21,18 @@ composite counts, lifecycle stage/severity/readiness buckets, warning
 codes/scopes/severities, high-level data quality, source-health buckets, and
 gamma/breadth semantic state.
 
+`market_events.snapshot` emits `market-events-fp-v1` from requested symbols,
+semantic flag categories/statuses/severities/roles/sources, and source-health
+buckets. It excludes timestamps, exact rates/share counts inside the same flag
+classification, source prose, and rendering order.
+
 `canary` emits `canary-fp-v1` from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
 primary drivers, signal semantics including held-underlying stress buckets,
 classified market state, source-health buckets, row titles/states, and
 `source_fingerprints.account`,
-`source_fingerprints.positions`, and `source_fingerprints.regime`.
+`source_fingerprints.positions`, `source_fingerprints.regime`, and
+`source_fingerprints.market_events`.
 
 Regime also exposes a nested `lifecycle.fingerprint` for consumers that dedupe
 by broad-market lifecycle transition rather than by the full regime snapshot.
@@ -34,6 +40,30 @@ Canary is stateless and does not expose a canary lifecycle fingerprint. Source
 fingerprints and source-health entries use semantic buckets only; timestamps,
 tiny raw-value movement inside a bucket, and prose changes must not churn the
 hash.
+
+## Market events
+
+`market_events.snapshot` returns `MarketEventsResult` for explicit symbols or,
+when symbols are omitted, held stock/ETF underlyings from the positions snapshot.
+The result contains `flags[]`, `by_symbol`, `source_health[]`,
+`warning_details[]`, `fingerprint`, and `not_execution`.
+
+`MarketEventFlag.id` is one of `borrow_inventory_tight`,
+`borrow_fee_extreme`, `reg_sho_threshold`, `luld_pause`, or
+`halt_regulatory_or_news`. Event `status` uses event terms such as `active` and
+`recent`; source freshness uses `source_health[].status` values such as `ok`,
+`stale`, `unknown`, or `degraded`.
+
+Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes
+from IBKR short-stock availability fee-rate evidence and emits
+`borrow_fee_extreme` only at or above 50% annualized. Reg SHO V1 uses Nasdaq's
+threshold list, so non-Nasdaq listing-exchange absence remains outside coverage.
+LULD and halt context comes from Nasdaq trade-halt evidence.
+
+Flags are context and safety gates, not execution authority. Active halt/LULD
+can block proposal preview/submit; borrow flags modify existing short
+buy-to-cover reductions only; `reg_sho_threshold` is regulatory context unless
+paired with an existing reduce/cover proposal.
 
 | Capability | Wire opcodes | Library entry point | Status |
 |---|---|---|---|

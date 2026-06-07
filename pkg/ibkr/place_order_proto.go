@@ -385,6 +385,7 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 		"strike="+formatProtoSummaryFloat(summary.strike),
 		"right="+summary.right,
 		"multiplier="+summary.multiplier,
+		"clientID="+strconv.Itoa(summary.clientID),
 		"action="+summary.action,
 		"qty="+summary.quantity,
 		"orderType="+summary.orderType,
@@ -409,6 +410,7 @@ type placeOrderProtoSummary struct {
 	strike     float64
 	right      string
 	multiplier string
+	clientID   int
 	action     string
 	quantity   string
 	orderType  string
@@ -475,6 +477,12 @@ func parseContractProtoSummary(body []byte, summary *placeOrderProtoSummary) err
 func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error {
 	return forEachProtoField(body, func(fieldNumber, wireType int, value []byte) error {
 		switch fieldNumber {
+		case 1:
+			v, err := protoVarintValue(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.clientID = int(v)
 		case 5:
 			summary.action = string(value)
 		case 6:

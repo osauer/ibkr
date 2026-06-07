@@ -182,6 +182,88 @@ func TestProposalRevisionIgnoresRegimeLifecycleChurn(t *testing.T) {
 	}
 }
 
+func TestProposalRevisionTracksMarketEventFingerprint(t *testing.T) {
+	policy := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
+	sources := rpc.TradeProposalSourceFingerprints{
+		Account:      &rpc.Fingerprint{Version: rpc.AccountFingerprintVersion, Key: "sha256:account"},
+		Positions:    &rpc.Fingerprint{Version: rpc.PositionsFingerprintVersion, Key: "sha256:positions"},
+		MarketEvents: &rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-a"},
+	}
+	proposals := []rpc.TradeProposal{{Key: "risk_reduction:abc", Quantity: 1, PositionEffect: rpc.OrderPositionEffectReduce}}
+	a := proposalRevision(policy, sources, proposals)
+	sources.MarketEvents = &rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-b"}
+	if b := proposalRevision(policy, sources, proposals); b == a {
+		t.Fatalf("revision did not change on market-event fingerprint change: %s", b)
+	}
+}
+
+func TestMarketEventHardBlockerBlocksProposal(t *testing.T) {
+	prop := rpc.TradeProposal{
+		Symbol:         "CRWV",
+		Action:         rpc.OrderActionSell,
+		PositionEffect: rpc.OrderPositionEffectReduce,
+	}
+	events := &rpc.MarketEventsResult{BySymbol: map[string][]rpc.MarketEventFlag{
+		"CRWV": {{
+			ID:       rpc.MarketEventHaltRegulatoryOrNews,
+			Symbol:   "CRWV",
+			Label:    "Halt",
+			Status:   rpc.MarketEventStatusActive,
+			Severity: rpc.MarketEventSeverityBlock,
+			Role:     rpc.MarketEventRoleHardBlocker,
+			Source:   "Nasdaq trade halt RSS",
+		}},
+	}}
+	applyMarketEventFlagsToProposal(&prop, events)
+	if prop.State != rpc.TradeProposalStateBlocked {
+		t.Fatalf("state=%q, want blocked", prop.State)
+	}
+	if !hasBlocker(prop.Blockers, "market_event_"+rpc.MarketEventHaltRegulatoryOrNews) {
+		t.Fatalf("blockers=%+v, want market-event blocker", prop.Blockers)
+	}
+}
+
+func TestBorrowMarketFlagOnlyAppliesToShortBuyToCover(t *testing.T) {
+	for _, flag := range []rpc.MarketEventFlag{
+		{
+			ID:       rpc.MarketEventBorrowInventoryTight,
+			Symbol:   "CRWV",
+			Label:    "Borrow tight",
+			Status:   rpc.MarketEventStatusActive,
+			Severity: rpc.MarketEventSeverityWatch,
+			Role:     rpc.MarketEventRoleProposalModifier,
+		},
+		{
+			ID:       rpc.MarketEventBorrowFeeExtreme,
+			Symbol:   "CRWV",
+			Label:    "Fee extreme",
+			Status:   rpc.MarketEventStatusActive,
+			Severity: rpc.MarketEventSeverityAct,
+			Role:     rpc.MarketEventRoleProposalModifier,
+		},
+	} {
+		events := &rpc.MarketEventsResult{BySymbol: map[string][]rpc.MarketEventFlag{"CRWV": {flag}}}
+		longSell := rpc.TradeProposal{
+			Symbol:           "CRWV",
+			Action:           rpc.OrderActionSell,
+			PositionQuantity: 100,
+			PositionEffect:   rpc.OrderPositionEffectReduce,
+		}
+		if got := proposalMarketEventFlags(longSell, events); len(got) != 0 {
+			t.Fatalf("long sell %s flags=%+v, want none", flag.ID, got)
+		}
+		shortCover := rpc.TradeProposal{
+			Symbol:           "CRWV",
+			Action:           rpc.OrderActionBuy,
+			PositionQuantity: -100,
+			PositionEffect:   rpc.OrderPositionEffectReduce,
+		}
+		if got := proposalMarketEventFlags(shortCover, events); len(got) != 1 || got[0].ID != flag.ID {
+			t.Fatalf("short cover %s flags=%+v, want borrow flag", flag.ID, got)
+		}
+	}
+}
+
 func TestProposalOutcomeMarksAreIdempotentPerProposalDate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trade-proposal-outcomes.jsonl")
 	store := newProposalOutcomeStore(path)

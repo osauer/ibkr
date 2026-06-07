@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -53,19 +54,17 @@ func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "IBKR Trading  %s\n", env.statusBadge(tradingStatusVerdict(*st)))
 	fmt.Fprintln(out)
-	statusRow(env, out, "Local gate", formatTradingLocalGate(env, *st))
-	statusRow(env, out, "Broker gate", nonEmpty(st.BrokerGate, rpc.BrokerTradingGateUnknown))
+	statusRow(env, out, "Mode", formatTradingMode(env, *st))
 	statusRow(env, out, "Endpoint", nonEmpty(st.Endpoint, "auto-detect"))
 	statusRow(env, out, "Account", nonEmpty(st.Account, "auto-detect")+" ("+nonEmpty(st.AccountOrigin, "auto")+")")
 	statusRow(env, out, "Client ID", fmt.Sprintf("%d (%s)", st.ClientID, nonEmpty(st.ClientIDOrigin, "default")))
 	statusRow(env, out, "MCP trading", nonEmpty(st.MCPTrading, rpc.TradingMCPDisabled))
-	statusRow(env, out, "Preview req", fmt.Sprint(st.PreviewRequired))
 	statusRow(env, out, "Capabilities", formatTradingCapabilities(*st))
 	statusRow(env, out, "Open orders", fmt.Sprint(st.OpenOrders))
 	if st.LastOrderEvent != "" {
 		statusRow(env, out, "Last event", st.LastOrderEvent)
 	}
-	if st.LocalGate == rpc.TradingLocalGateLive {
+	if st.Mode == config.TradingModeLive {
 		statusRow(env, out, "Live override", nonEmpty(st.LiveOverride, rpc.TradingLiveOverrideBlocked))
 		if st.PaperSmoke != "" {
 			statusRow(env, out, "Paper smoke", formatPaperSmokeValue(*st))
@@ -85,7 +84,7 @@ func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 }
 
 func formatTradingCapabilities(st rpc.TradingStatus) string {
-	return fmt.Sprintf("preview=%v transmit=%v modify=%v cancel=%v", st.CanPreview, st.CanTransmit, st.CanModify, st.CanCancel)
+	return fmt.Sprintf("preview=%v write=%v", st.CanPreview, st.CanWrite)
 }
 
 func formatPaperSmokeValue(st rpc.TradingStatus) string {
@@ -104,7 +103,7 @@ func formatPaperSmokeValue(st rpc.TradingStatus) string {
 
 func tradingStatusVerdict(st rpc.TradingStatus) statusConcern {
 	switch {
-	case !st.Enabled:
+	case st.Mode == config.TradingModeDisabled:
 		return statusConcern{Text: "DISABLED", Level: statusConcernNotice}
 	case st.Blocked:
 		return statusConcern{Text: "BLOCKED", Level: statusConcernWarn}
@@ -113,24 +112,24 @@ func tradingStatusVerdict(st rpc.TradingStatus) statusConcern {
 	}
 }
 
-func formatTradingLocalGate(env *Env, st rpc.TradingStatus) string {
-	if !st.Enabled {
-		return env.dim(rpc.TradingLocalGateDisabled)
+func formatTradingMode(env *Env, st rpc.TradingStatus) string {
+	if st.Mode == config.TradingModeDisabled {
+		return env.dim(config.TradingModeDisabled)
 	}
 	if st.Blocked {
-		return env.yellow(st.LocalGate + " blocked")
+		return env.yellow(st.Mode + " blocked")
 	}
-	if st.LocalGate == rpc.TradingLocalGateLive {
-		return env.yellow(st.LocalGate + " ready")
+	if st.Mode == config.TradingModeLive {
+		return env.yellow(st.Mode + " ready")
 	}
-	return env.green(st.LocalGate + " ready")
+	return env.green(nonEmpty(st.Mode, "unknown") + " ready")
 }
 
 func formatTradingStatusValue(env *Env, st rpc.TradingStatus) string {
-	if st.LocalGate == "" {
+	if st.Mode == "" {
 		return env.dim("unknown")
 	}
-	if !st.Enabled {
+	if st.Mode == config.TradingModeDisabled {
 		return env.dim("disabled")
 	}
 	if st.Blocked {
@@ -138,10 +137,10 @@ func formatTradingStatusValue(env *Env, st rpc.TradingStatus) string {
 		if len(st.Blockers) > 0 {
 			msg += ": " + st.Blockers[0].Message
 		}
-		return env.yellow(st.LocalGate + " " + msg)
+		return env.yellow(st.Mode + " " + msg)
 	}
-	if st.LocalGate == rpc.TradingLocalGateLive {
+	if st.Mode == config.TradingModeLive {
 		return env.yellow("live ready")
 	}
-	return env.green(st.LocalGate + " ready")
+	return env.green(st.Mode + " ready")
 }

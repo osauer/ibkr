@@ -50,7 +50,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_trading_status",
 		Title:       "IBKR Trading Status",
-		Description: "Local trading gate status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, explicit capability booleans (`can_preview`, `can_transmit`, `can_modify`, `can_cancel`), MCP write mode, live override status, open-order count, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.",
+		Description: "Local trading status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, explicit `can_preview` and `can_write` booleans, MCP write mode, live override status, open-order count, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.TradingStatus
@@ -63,7 +63,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_settings",
 		Title:       "IBKR Platform Settings",
-		Description: "Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading enablement/mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.",
+		Description: "Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.PlatformSettings
@@ -455,6 +455,26 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_market_events",
+		Title:       "IBKR Market Events",
+		Description: "Read observed market-event flags for held or requested stock/ETF symbols: borrow inventory tightness from IBKR shortable-share data when available, extreme annualized borrow fee from IBKR short-stock availability when observed, Reg SHO threshold-list membership from official Nasdaq files, and active/recent LULD or regulatory/news halts from Nasdaq's trade-halt feed. Use when the user asks whether a held name has market-structure, borrow, threshold, LULD, or halt context that should annotate protection proposals or underlyings. Returns typed flags with `status`, `severity`, `role`, source/as-of metadata, source_health, warning_details, and a semantic fingerprint. Unknown or unavailable data stays unknown/null and must not be treated as inactive; absence of Nasdaq Reg SHO flags is not proof for non-Nasdaq threshold feeds. This tool is read-only and does NOT place, preview, submit, modify, cancel, size, or recommend opening exposure. NOT for current prices (use `ibkr_quote`), NOT for held position sizing/P&L (use `ibkr_positions`), and NOT for broad-market regime (use `ibkr_regime`).",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"symbols": json.RawMessage(`{"type":"array","items":{"type":"string"},"description":"optional stock/ETF symbols to evaluate, e.g. [\"CRWV\",\"GME\"]; omit to use held underlyings from the daemon positions snapshot"}`),
+			"symbol":  schemaString("optional single symbol or comma-separated symbols; equivalent to symbols for simple calls"),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.MarketEventsParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.MarketEventsResult
+			if err := conn.Call(ctx, rpc.MethodMarketEventsSnapshot, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_scan",
 		Title:       "IBKR Market Scanner",
 		Description: "Run a market scanner. Three call shapes: (1) preset by name — `{preset: \"top-movers\"}` — for the configured shortcuts; (2) ad-hoc — `{type: \"HIGH_LAST_VS_EMA50\", exchange: \"STK.US.MAJOR\", instrument: \"STK\"}` for US stock breakouts, `{type: \"MOST_ACTIVE_USD\", exchange: \"STK.US.MAJOR\", instrument: \"STK\"}` for broad liquid activity, or `{type: \"HIGH_VS_52W_HL\", exchange: \"STK.EU.IBIS\", instrument: \"STOCK.EU\"}` for German/Xetra stocks; (3) empty `{}` — enumerates the configured presets so the agent can pick one. For common known scan codes such as `HIGH_LAST_VS_EMA50`, `HIGH_LAST_VS_EMA200`, `HIGH_VS_52W_HL`, `MOST_ACTIVE_USD`, and `HOT_BY_VOLUME`, call this tool directly and reserve `ibkr_scan_params` for unfamiliar codes, regional uncertainty, or unsupported-code/location errors. Each row is enriched with last/prev_close/change/change_pct/volume/iv/week_52_high/week_52_low plus instrument_tags and data_type/feed_type/price_at/price_as_of/volume_phase/warning_details via per-row market-data subscriptions the daemon issues automatically (IBKR's scanner protocol returns only rank+symbol). `instrument_tags` flags known ETFs/leveraged ETPs that IBKR may still return from stock scans; when the user asks for non-ETF single-name ideas, drop rows tagged `etf` or `leveraged_etp`. Missing tags mean unknown, not confirmed common stock. Scanner enrichment can be the slowest step because it briefly subscribes to each returned row; use small `limit` values and stop after one weak/noisy scan instead of stacking rescue scans. Use `min_price`, `min_volume`, `min_dollar_volume`, `exclude_penny`, and `require_live` to suppress micro-cap/off-hours noise before the result reaches the agent. Nil fields mean the gateway didn't deliver the corresponding tick within the enrichment window — common off-hours, and IV is nil for symbols without actively-traded options. Ad-hoc rows are capped at 50.",
@@ -621,11 +641,11 @@ var Tools = []Tool{
 			"`signals[]` carries stable IDs, direction (`defensive`, `constructive`, `rebalance`, `mixed`, `data_quality`), per-signal posture, severity (`observe`, `watch`, `act`, `urgent`), observed values, thresholds, targets, confidence impact, and blocking degraded or stale inputs. Signals are supporting evidence; do not infer a DEFEND action from account-only or portfolio-only signals when top-level `action` says otherwise.",
 			"`market_indicators[]` lists each regime indicator with `status` (`green`, `amber`, `red`, `context`, `n/a`), `as_of`, `reading`, and a short decision comment; context-only gamma appears here as `context` evidence rather than degraded input health.",
 			"`market.regime_posture` is the canonical market-regime display/policy read from `ibkr_regime`; render its `label` and `tone` instead of deriving risk-off from raw cluster counts.",
-			"`fingerprint` is the semantic alert identity for monitor dedupe/recovery; `source_fingerprints.account`, `.positions`, and `.regime` record the classified input buckets consumed by this canary run; `source_health[]` records each source's `as_of`, freshness/degraded/stale/partial status, confidence, max-age cadence, and semantic-bucket fingerprint stability.",
+			"`fingerprint` is the semantic alert identity for monitor dedupe/recovery; `source_fingerprints.account`, `.positions`, `.regime`, and `.market_events` record the classified input buckets consumed by this canary run; `source_health[]` records each source's `as_of`, freshness/degraded/stale/partial status, confidence, max-age cadence, and semantic-bucket fingerprint stability.",
 			"High-precision policy: market tape is confirmed only by market evidence (SPY/VIX or independent regime clusters), not by margin pressure; DEFEND requires confirmed market pressure, vulnerable portfolio fit, and clean enough input health. Medium/low input health caps the headline at WATCH or CONFIRM_INPUTS.",
 			"Standalone portfolio limit breaches and held-underlying stress become rebalance/watch context rather than market-stress alerts; stale account or positions snapshots block dependent margin, P&L, exposure, concentration, held-stress, and option signals with explicit `blocked_by` sources.",
 			"Context-only gamma is context/unranked evidence, not degraded input health; blocked, unavailable, degraded, or computing gamma/breadth becomes explicit input-health evidence, not a false safe/false red signal. Stale/degraded/partial confirming clusters cannot upgrade `market_confirmation` to confirmed until refreshed.",
-			"Works pre-market and after hours by relying on account, positions, and regime freshness/status metadata; it does not call option chains, scanners, borrow/short-interest feeds, or external flow sources, and it refuses to escalate solely on incomplete computed surfaces.",
+			"Works pre-market and after hours by relying on account, positions, regime, and daemon market-event freshness/status metadata; it does not call option chains, scanners, short-interest feeds, paid borrow vendors, or external flow sources, and it refuses to escalate solely on incomplete computed surfaces.",
 			"This tool is read-only and does NOT place, preview, submit, modify, cancel, draft, size, or select orders.",
 			"NOT for detailed diagnostics — use `ibkr_regime`, `ibkr_positions`, or `ibkr_account` when you need underlying evidence; use `ibkr_positions` for held-option warnings such as `mark_outside_bid_ask`, `options_closed`, per-leg greeks, quote freshness, and the full by-underlying ledger.",
 		}, " "),

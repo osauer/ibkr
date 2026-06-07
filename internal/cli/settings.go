@@ -165,7 +165,7 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 	fmt.Fprintf(out, "IBKR Settings  %s\n", env.statusBadge(settingsVerdict(*st)))
 	fmt.Fprintln(out)
 	statusRow(env, out, "Purge/restore", formatSettingsBool(env, st.Features.PurgeRestore.Enabled))
-	statusRow(env, out, "Trading", formatSettingsBool(env, st.Trading.Enabled)+" / "+st.Trading.Mode.Value)
+	statusRow(env, out, "Trading", nonEmpty(st.Trading.Mode.Value, "disabled"))
 	statusRow(env, out, "Endpoint", nonEmpty(st.Trading.Endpoint.Value, "unknown"))
 	statusRow(env, out, "Account", nonEmpty(st.Trading.Account.Value, "unknown"))
 	statusRow(env, out, "MCP trading", nonEmpty(st.Trading.MCPTrading.Value, "disabled"))

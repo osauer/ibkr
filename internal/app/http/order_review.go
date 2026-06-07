@@ -108,7 +108,7 @@ func (h *handler) handlePreviewOrderReviewSet(w nethttp.ResponseWriter, r *netht
 		return
 	}
 	set.LatestPreview = &preview
-	set.Capabilities = preview.Capabilities
+	set.CapturedTrading = preview.CapturedTrading
 	set.UpdatedAt = preview.AsOf
 	if err := h.deps.Store.RecordOrderReviewSet(set); err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
@@ -277,7 +277,7 @@ func buildRiskPlanReviewSet(plan rpc.RiskPlanResult, trading rpc.TradingStatus, 
 		CanaryFingerprint:  canaryFingerprint,
 		SourceFingerprints: plan.SourceFingerprints,
 		Rows:               rows,
-		Capabilities:       trading,
+		CapturedTrading:    trading,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
@@ -358,11 +358,11 @@ func (h *handler) previewReviewSetRows(ctx context.Context, set orderreview.Set,
 		return orderreview.Preview{}, set, err
 	}
 	preview := orderreview.Preview{
-		ID:           "orp_" + shortHash(fmt.Sprintf("%s|%s|%d", set.ID, set.Revision, time.Now().UnixNano())),
-		SetID:        set.ID,
-		SetRevision:  set.Revision,
-		Capabilities: *trading,
-		AsOf:         time.Now().UTC(),
+		ID:              "orp_" + shortHash(fmt.Sprintf("%s|%s|%d", set.ID, set.Revision, time.Now().UnixNano())),
+		SetID:           set.ID,
+		SetRevision:     set.Revision,
+		CapturedTrading: *trading,
+		AsOf:            time.Now().UTC(),
 	}
 	selected := 0
 	for i := range set.Rows {
@@ -454,8 +454,8 @@ func validateReviewRowEdit(row orderreview.Row, qty int, included bool) []string
 }
 
 func validateTransmitPreview(set orderreview.Set, preview orderreview.Preview, trading rpc.TradingStatus, now time.Time) ([]orderreview.PreviewRow, error) {
-	if !trading.CanTransmit {
-		return nil, fmt.Errorf("trading.status can_transmit=false")
+	if !trading.CanWrite {
+		return nil, fmt.Errorf("trading.status can_write=false")
 	}
 	if preview.SetID != set.ID {
 		return nil, fmt.Errorf("preview set_id does not match review set")

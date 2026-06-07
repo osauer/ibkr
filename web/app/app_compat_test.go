@@ -41,6 +41,41 @@ func TestAppJSPushControlsUseCapabilityHelpers(t *testing.T) {
 	}
 }
 
+func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	renderSettings := jsFunctionBlock(t, js, "renderSettings")
+	if !strings.Contains(renderSettings, "const status = state.snapshot?.trading || {};") {
+		t.Fatalf("renderSettings must use live snapshot trading status, not settings.trading.status")
+	}
+	if strings.Contains(renderSettings, "trading.status") {
+		t.Fatalf("renderSettings must not read embedded settings.trading.status")
+	}
+	for _, name := range []string{
+		"tradingStatusSettingsLabel",
+		"canWriteUnderlyings",
+		"underlyingWriteReason",
+		"reviewTransmitGate",
+		"orderModifyGate",
+		"orderCancelGate",
+		"capabilityLine",
+	} {
+		body := jsFunctionBlock(t, js, name)
+		if !strings.Contains(body, "can_write") {
+			t.Fatalf("%s must use can_write", name)
+		}
+	}
+	for _, old := range []string{"local_gate", "can_transmit", "can_modify", "can_cancel", "preview_required"} {
+		if strings.Contains(js, old) {
+			t.Fatalf("app.js still references removed trading field %q", old)
+		}
+	}
+}
+
 func TestAppJSConfirmInputsUsesTraderSafeCopy(t *testing.T) {
 	t.Parallel()
 	data, err := Files.ReadFile("app.js")
@@ -250,6 +285,34 @@ func TestUnderlyingWinnerLoserTotalsUseDailyPnl(t *testing.T) {
 	}
 	if strings.Contains(js, "heldUnderlyingQuoteMarkedPnl") || strings.Contains(js, "heldUnderlyingQuotePnlAdjustment") {
 		t.Fatalf("underlying winner/loser totals must use broker daily P/L, not client quote-marked estimates")
+	}
+}
+
+func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		`case "borrow_fee_extreme": return "Fee extreme";`,
+		"function marketFlagChip(flag = {}, options = {})",
+		"function marketEventTone(flag = {})",
+		`if (severity === "act" || severity === "watch") return "friction";`,
+		"function marketEventTitle(flag = {})",
+		"function marketEventFlagsForSymbol(symbol, events = {})",
+		"function underlyingHeroMarketFlags(rows, events = {})",
+		"function protectionHeroMarketFlags(rows = [], marketEvents = {})",
+		"marketFlagRow(row.marketFlags || [])",
+		"marketFlagRow(proposal.market_flags || [])",
+		"function protectionActionLabel(proposal = {})",
+		`if (proposalIsBuyToCover(proposal)) return "Buy to cover";`,
+		"function proposalIsBuyToCover(proposal = {})",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing borrow-fee market-event rendering contract %q", want)
+		}
 	}
 }
 

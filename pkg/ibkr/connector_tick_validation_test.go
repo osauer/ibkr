@@ -680,6 +680,23 @@ func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	}
 }
 
+func TestHandleTickGenericShortableSharesRoutesToMarketData(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[9] = "CRWV"
+	c.subscriptions["CRWV"] = &Subscription{Symbol: "CRWV"}
+	c.subMu.Unlock()
+
+	c.handleTickGeneric([]string{"45", "1", "9", "236", "750"})
+	md := c.GetMarketData()["CRWV"]
+	if md == nil {
+		t.Fatal("market data missing for CRWV")
+	}
+	if !md.ShortableObserved || md.ShortableShares != 750 {
+		t.Fatalf("shortable tick = observed %v shares %d, want true/750", md.ShortableObserved, md.ShortableShares)
+	}
+}
+
 // TestGetMarketData_SurfacesWeekRangeAndIV pins the daemon-facing read
 // path: scan-row enrichment polls GetMarketData() and copies into the
 // row. If a future refactor accidentally drops the new fields from the

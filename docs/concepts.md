@@ -1,6 +1,6 @@
 # Concepts
 
-Updated: 2026-06-04 07:42 CEST
+Updated: 2026-06-07 08:48 CEST
 
 What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
@@ -62,7 +62,29 @@ The high-precision rule is intentional: broad-market stress must be confirmed by
 - near-expiry held-option delta concentration
 - held-name stock quote or option bid/ask degradation
 
-Canary does not call option chains, scanners, borrow feeds, short-interest feeds, or external flow sources. For deeper diagnosis, use `ibkr_positions`, `ibkr_regime`, or `ibkr_account`; canary is the alert boundary, not the investigation.
+Canary does not call option chains, scanners, short-interest feeds, paid borrow vendors, or external flow sources. It consumes the daemon's market-event context for held-name tags and alert fingerprints, but those flags remain context/safety gates rather than standalone execution advice. For deeper diagnosis, use `ibkr_positions`, `ibkr_regime`, `ibkr_market_events`, or `ibkr_account`; canary is the alert boundary, not the investigation.
+
+---
+
+## Market Events
+
+Market events answer a single-name context question: *does this held or requested stock/ETF have borrow, threshold-list, LULD, or halt evidence that should affect risk review or protection proposals?*
+
+V1 flags are reduce-only context and gates. They can annotate, prioritize, or block an existing protection proposal, but they never create buy-to-open, buy-add, or opportunity recommendations. When a `BUY` proposal reduces an existing short, the user-facing copy is `Buy to cover`.
+
+The five V1 flags are:
+
+- `borrow_inventory_tight` — IBKR shortable-share inventory crossed the V1 tight/scarce thresholds. This strengthens buy-to-cover context for existing shorts and is observational for long holdings.
+- `borrow_fee_extreme` — IBKR short-stock availability reports an annualized fee rate of at least 50%. This is emitted only from observed fee-rate evidence, not inferred from low inventory.
+- `reg_sho_threshold` — the symbol appears on the Nasdaq Reg SHO threshold list. V1 names the source scope explicitly; non-Nasdaq listing-exchange threshold feeds are outside coverage, so absence is not universal non-threshold proof.
+- `luld_pause` — a Nasdaq trade-halt reason indicates an active or recent LULD pause. Active LULD blocks proposal preview/submit; recent LULD is a warning requiring fresh quote context.
+- `halt_regulatory_or_news` — a regulatory/news halt is active or recent. Active halts are hard blockers; recent halts are warning tags.
+
+Unknown and null mean unavailable, not false or zero. Source health reports whether each feed is `ok`, `stale`, `unknown`, or `degraded`; stale/unknown source health must stay visible because it changes how much confidence absence of a flag deserves.
+
+Rule 201 / short-sale restriction is not a V1 protection driver. If added later, it should be context-only unless the order path is directly short-sale relevant.
+
+`ibkr market-events --symbol CRWV --json` evaluates explicit symbols. Omitting symbols evaluates held stock/ETF underlyings, which requires a usable positions snapshot from the daemon/gateway.
 
 ---
 

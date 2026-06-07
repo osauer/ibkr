@@ -34,9 +34,9 @@ reveals the underlying default/config value again.
 Purge/restore is enabled by default. Disabling it blocks purge/restore write
 actions across CLI, RPC, API, and SPA, while `purge.status` remains readable.
 
-Trading enablement is never writable here. Stable builds expose trading and
-limits as read-only. Experimental trading builds may edit safety limits only
-after `[trading].enabled` is already true in TOML.
+Trading mode is never writable here. Stable builds expose trading and limits as
+read-only. Experimental trading builds may edit safety limits only after
+`[trading].mode` is set to `paper` or `live` in TOML.
 
 Market-data settings never store subscription entitlements. The settings surface
 shows a compact observed-quality summary from live quote/status data; row-level

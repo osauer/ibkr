@@ -32,21 +32,22 @@ type Service struct {
 }
 
 type Snapshot struct {
-	Version   int64                      `json:"version"`
-	UpdatedAt time.Time                  `json:"updated_at,omitzero"`
-	Status    *rpc.HealthResult          `json:"status,omitempty"`
-	Calendar  *rpc.MarketCalendarResult  `json:"market_calendar,omitempty"`
-	Account   *rpc.AccountResult         `json:"account,omitempty"`
-	Positions *rpc.PositionsResult       `json:"positions,omitempty"`
-	Quotes    *MarketQuotes              `json:"market_quotes,omitempty"`
-	Regime    *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
-	Canary    *rpc.CanaryResult          `json:"canary,omitempty"`
-	Trading   *rpc.TradingStatus         `json:"trading,omitempty"`
-	AutoTrade *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
-	Proposals *rpc.TradeProposalSnapshot `json:"proposals,omitempty"`
-	Settings  *rpc.PlatformSettings      `json:"settings,omitempty"`
-	Errors    []SourceError              `json:"errors,omitempty"`
-	Sources   map[string]SourceMeta      `json:"sources,omitempty"`
+	Version      int64                      `json:"version"`
+	UpdatedAt    time.Time                  `json:"updated_at,omitzero"`
+	Status       *rpc.HealthResult          `json:"status,omitempty"`
+	Calendar     *rpc.MarketCalendarResult  `json:"market_calendar,omitempty"`
+	Account      *rpc.AccountResult         `json:"account,omitempty"`
+	Positions    *rpc.PositionsResult       `json:"positions,omitempty"`
+	Quotes       *MarketQuotes              `json:"market_quotes,omitempty"`
+	MarketEvents *rpc.MarketEventsResult    `json:"market_events,omitempty"`
+	Regime       *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
+	Canary       *rpc.CanaryResult          `json:"canary,omitempty"`
+	Trading      *rpc.TradingStatus         `json:"trading,omitempty"`
+	AutoTrade    *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
+	Proposals    *rpc.TradeProposalSnapshot `json:"proposals,omitempty"`
+	Settings     *rpc.PlatformSettings      `json:"settings,omitempty"`
+	Errors       []SourceError              `json:"errors,omitempty"`
+	Sources      map[string]SourceMeta      `json:"sources,omitempty"`
 }
 
 type MarketQuotes struct {
@@ -235,6 +236,18 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap = s.publishSnapshot(now, snap, errors, events)
 		events = nil
 	}
+	if symbols := liveMarketEventSymbols(snap.Positions); len(symbols) > 0 {
+		if marketEvents, err := s.client.MarketEvents(ctx, rpc.MarketEventsParams{Symbols: symbols}); err != nil {
+			errors = append(errors, sourceErr("market_events", err, now))
+			snap.Sources["market_events"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+		} else {
+			snap.MarketEvents = marketEvents
+			snap.Sources["market_events"] = SourceMeta{UpdatedAt: now}
+			if s.changed("market_events", marketEvents) {
+				events = append(events, Event{Type: "market_events", Data: marketEvents})
+			}
+		}
+	}
 	if quotes, err := s.marketQuotes(ctx, now, snap.Positions); err != nil {
 		errors = append(errors, sourceErr("market_quotes", err, now))
 		snap.Sources["market_quotes"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
@@ -334,6 +347,36 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	for _, ev := range events {
 		s.publish(ev)
 	}
+	return out
+}
+
+func liveMarketEventSymbols(positions *rpc.PositionsResult) []string {
+	if positions == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(value string) {
+		sym := normalizeQuoteLabel(value)
+		if sym == "" || seen[sym] {
+			return
+		}
+		seen[sym] = true
+		out = append(out, sym)
+	}
+	for _, stock := range positions.Stocks {
+		add(stock.Symbol)
+	}
+	for _, group := range positions.ByUnderlying {
+		add(group.Underlying)
+		if group.Stock != nil {
+			add(group.Stock.Symbol)
+		}
+		for _, opt := range group.Options {
+			add(opt.Symbol)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -800,6 +843,19 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Errors = append([]SourceError(nil), in.Errors...)
 	out.Sources = maps.Clone(in.Sources)
 	out.Quotes = cloneMarketQuotes(in.Quotes)
+	if in.MarketEvents != nil {
+		events := *in.MarketEvents
+		events.Flags = append([]rpc.MarketEventFlag(nil), in.MarketEvents.Flags...)
+		events.SourceHealth = append([]rpc.SourceHealth(nil), in.MarketEvents.SourceHealth...)
+		events.WarningDetails = append([]rpc.DataWarning(nil), in.MarketEvents.WarningDetails...)
+		if in.MarketEvents.BySymbol != nil {
+			events.BySymbol = make(map[string][]rpc.MarketEventFlag, len(in.MarketEvents.BySymbol))
+			for sym, flags := range in.MarketEvents.BySymbol {
+				events.BySymbol[sym] = append([]rpc.MarketEventFlag(nil), flags...)
+			}
+		}
+		out.MarketEvents = &events
+	}
 	out.Regime = cloneRegimeMonitor(in.Regime)
 	out.Settings = clonePlatformSettings(in.Settings)
 	if in.AutoTrade != nil {
@@ -811,6 +867,11 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	if in.Proposals != nil {
 		proposals := *in.Proposals
 		proposals.Proposals = append([]rpc.TradeProposal(nil), in.Proposals.Proposals...)
+		for i := range proposals.Proposals {
+			proposals.Proposals[i].Details = append([]string(nil), in.Proposals.Proposals[i].Details...)
+			proposals.Proposals[i].MarketFlags = append([]rpc.MarketEventFlag(nil), in.Proposals.Proposals[i].MarketFlags...)
+			proposals.Proposals[i].Blockers = append([]rpc.TradingBlocker(nil), in.Proposals.Proposals[i].Blockers...)
+		}
 		proposals.Blockers = append([]rpc.TradingBlocker(nil), in.Proposals.Blockers...)
 		out.Proposals = &proposals
 	}
@@ -822,11 +883,6 @@ func clonePlatformSettings(in *rpc.PlatformSettings) *rpc.PlatformSettings {
 		return nil
 	}
 	out := *in
-	if in.Trading.Status != nil {
-		status := *in.Trading.Status
-		status.Blockers = append([]rpc.TradingBlocker(nil), in.Trading.Status.Blockers...)
-		out.Trading.Status = &status
-	}
 	out.MarketData.Quality.QuoteCounts = maps.Clone(in.MarketData.Quality.QuoteCounts)
 	out.MarketData.Quality.DataQuality = append([]rpc.DataQualityHealth(nil), in.MarketData.Quality.DataQuality...)
 	return &out

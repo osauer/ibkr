@@ -75,12 +75,76 @@ if has_re '(^|[[:space:]/])ibkr[[:space:]]+daemon[[:space:]]+(purge|reset|wipe)(
   block "Daemon destructive maintenance must be run by the user, not by Codex."
 fi
 
+require_paper_write_gate() {
+  local capability="$1"
+  local status
+  local mode
+  local account
+  local endpoint
+  local blocked
+  local can_do
+  local blockers
+
+  if ! status="$(timeout 10s ibkr trading status --json 2>/dev/null)"; then
+    block "Broker write command blocked: could not read ibkr trading status. Paper writes require a ready daemon-reported paper gate."
+  fi
+
+  mode="$(printf '%s' "$status" | jq -r '.mode // ""')"
+  account="$(printf '%s' "$status" | jq -r '.account // ""')"
+  endpoint="$(printf '%s' "$status" | jq -r '.endpoint // ""')"
+  blocked="$(printf '%s' "$status" | jq -r '.blocked // false')"
+  can_do="$(printf '%s' "$status" | jq -r --arg capability "$capability" '.[$capability] // false')"
+
+  if [[ "$mode" == "disabled" ]]; then
+    return 0
+  fi
+  if [[ "$mode" != "paper" ]]; then
+    block "Broker write command blocked: Codex may only use paper writes; non-disabled ${mode:-unknown} routes stay blocked by the Codex hook. endpoint=${endpoint:-unknown} account=${account:-unknown}."
+  fi
+  if [[ "$account" != DU* ]]; then
+    block "Broker write command blocked: paper writes require a DU paper account, got account=${account:-unknown}."
+  fi
+  if [[ "$endpoint" != *":4002" && "$endpoint" != *":7497" ]]; then
+    block "Broker write command blocked: paper writes require a paper endpoint (4002/7497), got endpoint=${endpoint:-unknown}."
+  fi
+  if [[ "$blocked" != "false" ]]; then
+    blockers="$(printf '%s' "$status" | jq -r '[.blockers[]?.code] | join(", ")')"
+    block "Broker write command blocked: trading.status is blocked (${blockers:-no blocker code reported})."
+  fi
+  if [[ "$can_do" != "true" ]]; then
+    block "Broker write command blocked: trading.status ${capability}=false for paper route endpoint=${endpoint:-unknown} account=${account:-unknown}."
+  fi
+}
+
 if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|orders[[:space:]]+(open|status)|trading[[:space:]]+status)([[:space:]]|$)'; then
   exit 0
 fi
 
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+proposals[[:space:]]+submit([[:space:]]|$)'; then
+  require_paper_write_gate "can_write"
+  exit 0
+fi
+
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+(place|submit|execute)([[:space:]]|$)' ||
+  has_re '(^|[[:space:]/])ibkr[[:space:]]+(submit|place|transmit)([[:space:]]|$)'; then
+  require_paper_write_gate "can_write"
+  exit 0
+fi
+
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+modify([[:space:]]|$)' ||
+  has_re '(^|[[:space:]/])ibkr[[:space:]]+modify([[:space:]]|$)'; then
+  require_paper_write_gate "can_write"
+  exit 0
+fi
+
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+(cancel|close)([[:space:]]|$)' ||
+  has_re '(^|[[:space:]/])ibkr[[:space:]]+(cancel|close)([[:space:]]|$)'; then
+  require_paper_write_gate "can_write"
+  exit 0
+fi
+
 if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order|orders|trading|trade|trades|submit|place|cancel|close|modify|transmit)([[:space:]]|$)'; then
-  block "Broker mutation verbs are blocked for Codex. Use preview/status reads only."
+  block "Broker mutation verbs are blocked unless the daemon reports a ready paper trading gate. Live and unknown routes are always blocked for Codex."
 fi
 
 exit 0

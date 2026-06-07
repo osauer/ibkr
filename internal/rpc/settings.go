@@ -59,17 +59,14 @@ type PurgeRestoreSettings struct {
 }
 
 type PlatformTradingSettings struct {
-	Enabled              SettingsBool         `json:"enabled"`
 	Mode                 SettingsString       `json:"mode"`
 	Account              SettingsString       `json:"account"`
 	Endpoint             SettingsString       `json:"endpoint"`
 	ClientID             SettingsInt          `json:"client_id"`
 	MCPTrading           SettingsString       `json:"mcp_trading"`
-	PreviewRequired      SettingsBool         `json:"preview_required"`
 	LiveOverride         SettingsString       `json:"live_override"`
 	BuildWritesAvailable SettingsBool         `json:"build_writes_available"`
 	Limits               TradingLimitSettings `json:"limits"`
-	Status               *TradingStatus       `json:"status,omitempty"`
 }
 
 type PlatformAutoTradeSettings struct {

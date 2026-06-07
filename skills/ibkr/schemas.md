@@ -1589,6 +1589,71 @@ Use `ibkr regime --explain` to get the spec's per-indicator threshold
 prose printed alongside each row, or `ibkr regime --json --explain` for
 the full JSON methodology payload.
 
+## market-events
+
+`ibkr market-events [--symbol SYM[,SYM...]] [SYM ...] --json` — observed
+single-name market-event context for held or requested stock/ETF symbols.
+Omitting symbols evaluates held stock/ETF underlyings from the daemon positions
+snapshot.
+
+**MCP params** (`ibkr_market_events`): optional `symbol` string or `symbols`
+array. Omit both to use held underlyings.
+
+```json
+{
+  "kind": "ibkr.market_events",
+  "schema_version": "market-events-v1",
+  "as_of": "2026-06-07T06:48:00Z",
+  "symbols": ["CRWV"],
+  "flags": [
+    {
+      "id": "borrow_fee_extreme",
+      "symbol": "CRWV",
+      "label": "Fee extreme",
+      "status": "active",
+      "severity": "act",
+      "role": "proposal_modifier",
+      "source": "IBKR short stock availability",
+      "source_url": "ftp://ftp3.interactivebrokers.com/usa.txt",
+      "as_of": "2026-06-07T13:45:03Z",
+      "observed_at": "2026-06-07T06:48:00Z",
+      "value": 75.25,
+      "unit": "pct_annualized",
+      "details": ["fee_rate=75.2500%", "available=1500", "USD"]
+    }
+  ],
+  "by_symbol": {"CRWV": [{"id": "borrow_fee_extreme"}]},
+  "source_health": [
+    {"source": "borrow_inventory", "status": "ok", "confidence": "medium",
+     "fingerprint_stability": "semantic_buckets_only"},
+    {"source": "borrow_fee", "status": "ok", "confidence": "medium",
+     "fingerprint_stability": "semantic_buckets_only"},
+    {"source": "reg_sho_threshold", "status": "ok", "confidence": "high",
+     "notes": ["Nasdaq-listed threshold securities source; non-Nasdaq listing-exchange threshold feeds remain outside V1."],
+     "fingerprint_stability": "semantic_buckets_only"}
+  ],
+  "fingerprint": {"version": "market-events-fp-v1", "key": "sha256:..."},
+  "not_execution": "Market-event flags are observed context and daemon safety gates; no orders are placed by ibkr."
+}
+```
+
+Field meanings:
+
+- `flags[].id` is one of `borrow_inventory_tight`, `borrow_fee_extreme`,
+  `reg_sho_threshold`, `luld_pause`, or `halt_regulatory_or_news`.
+- `flags[].status` describes the event (`active`, `recent`). Source freshness
+  is separate in `source_health[]` as `ok`, `stale`, `unknown`, or `degraded`.
+- `borrow_fee_extreme` requires observed IBKR fee-rate evidence at or above 50%
+  annualized. Do not infer it from low shortable-share inventory.
+- `by_symbol` is a render/index convenience over `flags[]`; do not treat a
+  missing key as proof that all sources were healthy.
+- Unknown/null source data is unavailable, not false or zero. Check
+  `source_health[]` before relying on absence of a flag.
+- Flags are reduce-only context. Borrow flags can modify existing short
+  buy-to-cover reductions; active halt/LULD blocks preview/submit;
+  `reg_sho_threshold` is regulatory context. V1 never creates buy-add or
+  open-exposure recommendations.
+
 ## canary
 
 `ibkr canary --json` — portfolio-aware stress lifecycle for monitor loops and
@@ -1611,7 +1676,8 @@ regime itself.
   "source_fingerprints": {
     "account": {"version": "account-fp-v1", "key": "sha256:..."},
     "positions": {"version": "positions-fp-v1", "key": "sha256:..."},
-    "regime": {"version": "regime-fp-v1", "key": "sha256:..."}
+    "regime": {"version": "regime-fp-v1", "key": "sha256:..."},
+    "market_events": {"version": "market-events-fp-v1", "key": "sha256:..."}
   },
   "source_health": [
     {"source": "account", "status": "ok", "age_seconds": 15,
@@ -1685,9 +1751,10 @@ Field meanings:
 - `signals[]` is the canonical machine evidence. Use `id`, `direction`,
   `posture`, `severity`, `observed`, `threshold`, `target`, `confidence`, and
   `blocked_by`; do not parse `rows[].guidance` for automation.
-- `source_fingerprints` identifies the semantic account, positions, and regime
-  buckets consumed by the canary run. `fingerprint` identifies the whole alert
-  posture; `lifecycle.fingerprint` identifies just the lifecycle transition.
+- `source_fingerprints` identifies the semantic account, positions, regime, and
+  market-event buckets consumed by the canary run. `fingerprint` identifies the
+  whole alert posture; `lifecycle.fingerprint` identifies just the lifecycle
+  transition.
 - `source_health[]` is the freshness/readiness surface for orchestration. During
   regular trading/pre-market, sources are expected to be fresh on a roughly
   five-minute cadence; outside trading, the max-age window is wider. Always

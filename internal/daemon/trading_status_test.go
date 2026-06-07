@@ -16,19 +16,13 @@ func TestTradingStatusDefaultDisabled(t *testing.T) {
 	srv := &Server{cfg: &config.Resolved{}}
 	st := srv.tradingStatus(discover.Endpoint{})
 
-	if st.Enabled {
-		t.Fatal("default trading status should be disabled")
-	}
-	if st.LocalGate != rpc.TradingLocalGateDisabled {
-		t.Fatalf("LocalGate = %q, want disabled", st.LocalGate)
+	if st.Mode != config.TradingModeDisabled {
+		t.Fatalf("Mode = %q, want disabled", st.Mode)
 	}
 	if st.Blocked {
 		t.Fatalf("disabled trading should not render as blocked: %+v", st.Blockers)
 	}
-	if !st.PreviewRequired {
-		t.Fatal("preview should default required")
-	}
-	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+	if st.CanPreview || st.CanWrite {
 		t.Fatalf("disabled capabilities should all be false: %+v", st)
 	}
 }
@@ -36,7 +30,7 @@ func TestTradingStatusDefaultDisabled(t *testing.T) {
 func TestTradingStatusBlocksEnabledWithoutPinnedGateway(t *testing.T) {
 	t.Parallel()
 	srv := &Server{cfg: &config.Resolved{
-		Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 15})
 
@@ -53,7 +47,7 @@ func TestTradingStatusBlocksPaperModeOnLiveLookingEndpoint(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
-		Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
@@ -94,14 +88,14 @@ func TestTradingStatusBlocksAggregateAccount(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "All"},
-		Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 7497, ClientID: 31, Account: "All", PortOrigin: discover.OriginPinned})
 
 	if !hasTradingBlocker(st, "gateway_account_not_concrete") {
 		t.Fatalf("missing aggregate account blocker in %+v", st.Blockers)
 	}
-	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+	if st.CanPreview || st.CanWrite {
 		t.Fatalf("blocked capabilities should all be false: %+v", st)
 	}
 }
@@ -136,14 +130,14 @@ func TestTradingStatusBlocksClientIDMismatch(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-		Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 32, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
 	if !hasTradingBlocker(st, "gateway_client_id_mismatch") {
 		t.Fatalf("missing client-id mismatch blocker in %+v", st.Blockers)
 	}
-	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
+	if st.CanPreview || st.CanWrite {
 		t.Fatalf("blocked capabilities should all be false: %+v", st)
 	}
 }
@@ -155,7 +149,7 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 	srv := &Server{
 		cfg: &config.Resolved{
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
 		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
 	}
@@ -167,30 +161,8 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 	if !st.CanPreview {
 		t.Fatalf("ready paper gate should allow preview: %+v", st)
 	}
-	if st.CanTransmit != orderWritesAvailable || st.CanModify != orderWritesAvailable || st.CanCancel != orderWritesAvailable {
+	if st.CanWrite != orderWritesAvailable {
 		t.Fatalf("write capabilities mismatch build mode: %+v", st)
-	}
-}
-
-func TestTradingStatusBlocksWhenPreviewRequirementDisabled(t *testing.T) {
-	t.Parallel()
-	port := 4002
-	clientID := 31
-	requirePreview := false
-	srv := &Server{
-		cfg: &config.Resolved{
-			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper, RequirePreview: &requirePreview}.WithDefaults(),
-		},
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
-	}
-	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
-
-	if !hasTradingBlocker(st, "preview_required_disabled") {
-		t.Fatalf("missing preview requirement blocker in %+v", st.Blockers)
-	}
-	if st.CanPreview || st.CanTransmit || st.CanModify || st.CanCancel {
-		t.Fatalf("preview-disabled capabilities should all be false: %+v", st)
 	}
 }
 
@@ -201,7 +173,7 @@ func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 	srv := &Server{
 		cfg: &config.Resolved{
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-			Trading: config.Trading{Enabled: true, Mode: config.TradingModePaper}.WithDefaults(),
+			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
 		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
 	}
@@ -221,7 +193,7 @@ func TestTradingStatusLiveModeRequiresOverrideAndReadiness(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
-		Trading: config.Trading{Enabled: true, Mode: config.TradingModeLive}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
@@ -238,9 +210,7 @@ func TestTradingStatusBlocksLiveModeOnPaperLookingEndpoint(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-		Trading: config.Trading{
-			Enabled:         true,
-			Mode:            config.TradingModeLive,
+		Trading: config.Trading{Mode: config.TradingModeLive,
 			AllowLive:       true,
 			LiveAckAccount:  "DU1234567",
 			LiveAckEndpoint: "127.0.0.1:4002",
@@ -273,9 +243,7 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	srv := &Server{
 		cfg: &config.Resolved{
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
-			Trading: config.Trading{
-				Enabled:         true,
-				Mode:            config.TradingModeLive,
+			Trading: config.Trading{Mode: config.TradingModeLive,
 				AllowLive:       true,
 				LiveAckAccount:  "U1234567",
 				LiveAckEndpoint: "127.0.0.1:4001",
@@ -297,16 +265,13 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	if st.PaperSmokeAt == nil || !st.PaperSmokeAt.Equal(now.Add(-time.Hour)) {
 		t.Fatalf("PaperSmokeAt = %s", st.PaperSmokeAt)
 	}
-	if st.BrokerGate != rpc.BrokerTradingGatePaperSmokePassed {
-		t.Fatalf("BrokerGate = %q, want paper-smoke-passed", st.BrokerGate)
-	}
 	if st.LiveOverride != rpc.TradingLiveOverrideReady {
 		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
 	}
 	if !st.CanPreview {
 		t.Fatalf("live-ready gate should allow preview: %+v", st)
 	}
-	if st.CanTransmit != orderWritesAvailable || st.CanModify != orderWritesAvailable || st.CanCancel != orderWritesAvailable {
+	if st.CanWrite != orderWritesAvailable {
 		t.Fatalf("write capabilities mismatch build mode: %+v", st)
 	}
 }

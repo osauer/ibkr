@@ -5,12 +5,13 @@
 # express, such as flags appearing after symbols.
 
 prefix_rule(
-    pattern = ["ibkr", ["status", "version", "account", "positions", "quote", "calendar", "watch", "chain", "history", "scan", "size", "technical", "breadth", "gamma", "regime", "canary"]],
+    pattern = ["ibkr", ["status", "version", "account", "positions", "quote", "calendar", "watch", "chain", "history", "scan", "size", "technical", "market-events", "breadth", "gamma", "regime", "canary"]],
     decision = "allow",
     justification = "Read-only IBKR account, market-data, screen, regime, canary, and sizing commands are routine project work.",
     match = [
         "ibkr status --json",
         "ibkr quote AAPL --json",
+        "ibkr market-events --symbol CRWV --json",
         "ibkr regime --json",
         "ibkr canary --json",
     ],
@@ -46,6 +47,16 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["ibkr", "proposals", ["snapshot", "refresh", "preview"]],
+    decision = "allow",
+    justification = "Protection proposal snapshot/refresh/preview are read-only or preview-backed safety surfaces; submit remains forbidden.",
+    match = [
+        "ibkr proposals refresh --json",
+        "ibkr proposals preview --key abc --revision sha256:abc --json",
+    ],
+)
+
+prefix_rule(
     pattern = ["ibkr", "restart"],
     decision = "allow",
     justification = "The repo requires a CLI restart after installing daemon/CLI changes.",
@@ -70,9 +81,18 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["ibkr", "proposals", "submit"],
+    decision = "prompt",
+    justification = "Protection proposal submit can transmit broker orders. The project hook permits it only when trading.status reports a ready paper gate; live and unknown routes stay blocked.",
+    match = [
+        "ibkr proposals submit --key abc --revision sha256:abc",
+    ],
+)
+
+prefix_rule(
     pattern = ["ibkr", ["trade", "trades", "submit", "place", "cancel", "close", "modify", "transmit"]],
-    decision = "forbidden",
-    justification = "Codex must not place, modify, cancel, close, submit, or transmit broker orders. Use order preview/status reads only.",
+    decision = "prompt",
+    justification = "Broker mutation verbs are allowed for Codex only through the project hook's daemon-reported paper gate. Live and unknown routes stay blocked.",
     match = [
         "ibkr submit --token abc",
         "ibkr cancel 123",
@@ -81,8 +101,8 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "order", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "forbidden",
-    justification = "Order mutation verbs are blocked for Codex. Use 'ibkr order preview' or 'ibkr order status'.",
+    decision = "prompt",
+    justification = "Order mutation verbs pass only when the project hook verifies trading.status is a ready paper route with the matching capability. Live and unknown routes stay blocked.",
     match = [
         "ibkr order submit --token abc",
         "ibkr order cancel 123",
@@ -94,8 +114,8 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "orders", ["place", "submit", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "forbidden",
-    justification = "Order journal mutation verbs are blocked for Codex. Use 'ibkr orders open' or status reads.",
+    decision = "prompt",
+    justification = "Order journal mutation verbs pass only when the project hook verifies trading.status is a ready paper route with the matching capability. Live and unknown routes stay blocked.",
     match = [
         "ibkr orders cancel 123",
     ],
@@ -103,8 +123,8 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "trading", ["enable", "disable", "submit", "place", "cancel", "close", "modify", "transmit", "execute"]],
-    decision = "forbidden",
-    justification = "Trading capability changes and broker mutation verbs require a human-run command, not Codex automation.",
+    decision = "prompt",
+    justification = "Trading capability changes stay operator-owned; broker mutation verbs pass only when the project hook verifies a ready paper route. Live and unknown routes stay blocked.",
     match = [
         "ibkr trading enable --ack-live",
     ],

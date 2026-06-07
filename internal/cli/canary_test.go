@@ -1002,6 +1002,33 @@ func TestComputeCanaryFingerprintIncludesSourceRegimeFingerprint(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryFingerprintIncludesSourceMarketEventsFingerprint(t *testing.T) {
+	t.Parallel()
+	regime := healthyCanaryRegime()
+	first := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  regime,
+		MarketEvents: rpc.MarketEventsResult{
+			Kind:        rpc.MarketEventsKind,
+			Fingerprint: rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-a"},
+		},
+	})
+	second := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Regime:  regime,
+		MarketEvents: rpc.MarketEventsResult{
+			Kind:        rpc.MarketEventsKind,
+			Fingerprint: rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-b"},
+		},
+	})
+	if first.SourceFingerprints.MarketEvents == nil || first.SourceFingerprints.MarketEvents.Key != "sha256:market-a" {
+		t.Fatalf("source market-events fingerprint missing: %+v", first.SourceFingerprints.MarketEvents)
+	}
+	if first.Fingerprint == second.Fingerprint {
+		t.Fatal("canary fingerprint did not change when source market-events fingerprint changed")
+	}
+}
+
 func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()

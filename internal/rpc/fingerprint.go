@@ -19,6 +19,45 @@ const (
 	CanaryFingerprintVersion    = "canary-fp-v1"
 )
 
+// BuildMarketEventsFingerprint returns the semantic identity of current
+// market-event flags. It deliberately ignores timestamps, source prose, and
+// exact numeric values except their classified flag status.
+func BuildMarketEventsFingerprint(r *MarketEventsResult) Fingerprint {
+	if r == nil {
+		return semanticFingerprint(MarketEventsFingerprintVersion, nil)
+	}
+	flags := make([]marketEventFlagFingerprint, 0, len(r.Flags))
+	for _, flag := range r.Flags {
+		flags = append(flags, marketEventFlagFingerprint{
+			ID:       cleanString(flag.ID),
+			Symbol:   cleanString(flag.Symbol),
+			Status:   cleanString(flag.Status),
+			Severity: cleanString(flag.Severity),
+			Role:     cleanString(flag.Role),
+			Source:   cleanString(flag.Source),
+		})
+	}
+	slices.SortFunc(flags, func(a, b marketEventFlagFingerprint) int {
+		if c := cmp.Compare(a.Symbol, b.Symbol); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ID, b.ID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Status, b.Status)
+	})
+	projection := struct {
+		Symbols []string                     `json:"symbols,omitempty"`
+		Flags   []marketEventFlagFingerprint `json:"flags,omitempty"`
+		Sources []sourceHealthFingerprint    `json:"sources,omitempty"`
+	}{
+		Symbols: cleanSorted(r.Symbols),
+		Flags:   flags,
+		Sources: sourceHealthFingerprints(r.SourceHealth),
+	}
+	return semanticFingerprint(MarketEventsFingerprintVersion, projection)
+}
+
 // BuildRegimeFingerprint returns the semantic identity of a regime snapshot.
 // It hashes classified state only: bands, statuses, composite counts, warning
 // codes/scopes/severities, and high-level data quality. It deliberately ignores
@@ -108,6 +147,9 @@ func BuildCanaryFingerprint(r *CanaryResult) Fingerprint {
 	}
 	if r.SourceFingerprints.Regime != nil {
 		projection.Source.Regime = *r.SourceFingerprints.Regime
+	}
+	if r.SourceFingerprints.MarketEvents != nil {
+		projection.Source.MarketEvents = *r.SourceFingerprints.MarketEvents
 	}
 	return semanticFingerprint(CanaryFingerprintVersion, projection)
 }
@@ -309,9 +351,10 @@ type canaryFingerprintProjection struct {
 }
 
 type canarySourceFingerprint struct {
-	Account   Fingerprint `json:"account,omitzero"`
-	Positions Fingerprint `json:"positions,omitzero"`
-	Regime    Fingerprint `json:"regime,omitzero"`
+	Account      Fingerprint `json:"account,omitzero"`
+	Positions    Fingerprint `json:"positions,omitzero"`
+	Regime       Fingerprint `json:"regime,omitzero"`
+	MarketEvents Fingerprint `json:"market_events,omitzero"`
 }
 
 type lifecycleFingerprintProjection struct {
@@ -333,6 +376,15 @@ type sourceHealthFingerprint struct {
 	Status               string `json:"status"`
 	Confidence           string `json:"confidence,omitempty"`
 	FingerprintStability string `json:"fingerprint_stability,omitempty"`
+}
+
+type marketEventFlagFingerprint struct {
+	ID       string `json:"id"`
+	Symbol   string `json:"symbol"`
+	Status   string `json:"status"`
+	Severity string `json:"severity"`
+	Role     string `json:"role"`
+	Source   string `json:"source,omitempty"`
 }
 
 type canaryMarketFingerprint struct {
