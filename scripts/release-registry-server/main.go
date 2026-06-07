@@ -13,6 +13,8 @@ import (
 
 var releaseVersionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$`)
 
+const maxRegistryDescriptionLen = 100
+
 type registryServer struct {
 	Schema      string             `json:"$schema,omitempty"`
 	Name        string             `json:"name"`
@@ -70,6 +72,9 @@ func run(args []string) error {
 	}
 	if server.Name == "" || server.Description == "" {
 		return fmt.Errorf("server.json must define name and description")
+	}
+	if len(server.Description) > maxRegistryDescriptionLen {
+		return fmt.Errorf("server.json description must be <= %d characters for MCP Registry (got %d)", maxRegistryDescriptionLen, len(server.Description))
 	}
 	server.Version = version
 
