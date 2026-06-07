@@ -184,6 +184,8 @@ $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 
 `ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, alerts, and settings. The app has Monitor, Positions (coming later), Alerts, and Settings tabs; Settings can toggle purge/restore write actions and shows trading/build/market-data state. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
 
+For access away from the LAN without router setup, run `ibkr app --remote` to use the Cloudflare Worker relay at `remote.osauer.dev`, then run `ibkr app pair` as usual.
+
 See [web/app/README.md](web/app/README.md) for the short operator notes and [docs/design/mobile-app-mvp.md](docs/design/mobile-app-mvp.md) for the MVP design.
 
 ### Go and other agent SDKs

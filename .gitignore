@@ -9,6 +9,11 @@
 __pycache__/
 *.pyc
 
+# Cloudflare Worker local artifacts
+cloudflare/remote-relay/node_modules/
+cloudflare/remote-relay/.wrangler/
+cloudflare/remote-relay/.dev.vars
+
 # OS / editor noise
 **/.DS_Store
 .idea/

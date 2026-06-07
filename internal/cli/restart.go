@@ -35,6 +35,10 @@ type restartOptions struct {
 	appAddrSet      bool
 	appPublicURL    string
 	appPublicURLSet bool
+	appRemote       bool
+	appRemoteSet    bool
+	appRemoteURL    string
+	appRemoteURLSet bool
 	appStateDir     string
 	appStateDirSet  bool
 	out             io.Writer
@@ -115,19 +119,23 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.DurationVar(&opts.timeout, "timeout", restartDefaultTimeout, "how long to wait for graceful process stop before failing or forcing")
 	fs.StringVar(&opts.appAddr, "addr", "", "app listen address to use with --app")
 	fs.StringVar(&opts.appPublicURL, "public-url", "", "app public URL to use with --app")
+	fs.BoolVar(&opts.appRemote, "remote", false, "enable the outbound Cloudflare Worker relay with --app")
+	fs.StringVar(&opts.appRemoteURL, "remote-url", "", "Cloudflare Worker relay base URL to use with --app")
 	fs.StringVar(&opts.appStateDir, "state-dir", "", "app state directory to use with --app")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	opts.appAddrSet = restartFlagWasSet(fs, "addr")
 	opts.appPublicURLSet = restartFlagWasSet(fs, "public-url")
+	opts.appRemoteSet = restartFlagWasSet(fs, "remote")
+	opts.appRemoteURLSet = restartFlagWasSet(fs, "remote-url")
 	opts.appStateDirSet = restartFlagWasSet(fs, "state-dir")
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "ibkr restart: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	if !opts.app && (opts.appAddrSet || opts.appPublicURLSet || opts.appStateDirSet) {
-		fmt.Fprintln(stderr, "ibkr restart: --addr, --public-url, and --state-dir require --app")
+	if !opts.app && (opts.appAddrSet || opts.appPublicURLSet || opts.appRemoteSet || opts.appRemoteURLSet || opts.appStateDirSet) {
+		fmt.Fprintln(stderr, "ibkr restart: --addr, --public-url, --remote, --remote-url, and --state-dir require --app")
 		return 2
 	}
 	if opts.timeout <= 0 {
@@ -348,8 +356,35 @@ func appArgsWithRestartOverrides(args []string, opts *restartOptions) []string {
 	if opts.appPublicURLSet {
 		out = setAppValueArg(out, "public-url", strings.TrimSpace(opts.appPublicURL))
 	}
+	if opts.appRemoteSet {
+		if opts.appRemote {
+			out = setAppBoolArg(out, "remote")
+		} else {
+			out = removeAppBoolArg(out, "remote")
+		}
+	}
+	if opts.appRemoteURLSet {
+		out = setAppValueArg(out, "remote-url", strings.TrimSpace(opts.appRemoteURL))
+	}
 	if opts.appStateDirSet {
 		out = setAppValueArg(out, "state-dir", strings.TrimSpace(opts.appStateDir))
+	}
+	return out
+}
+
+func setAppBoolArg(args []string, name string) []string {
+	out := removeAppBoolArg(args, name)
+	return append(out, "--"+name)
+}
+
+func removeAppBoolArg(args []string, name string) []string {
+	flagName := "--" + name
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+			continue
+		}
+		out = append(out, arg)
 	}
 	return out
 }

@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-06-05 17:42 CEST
+Updated: 2026-06-07 22:09 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -32,6 +32,40 @@ ibkr app pair --public-url http://127.0.0.1:8765 --json
 Use plain `ibkr app pair` for the phone so the running app host's configured
 public URL is used. Do not run the shared app host with `--addr 127.0.0.1:8765`
 when a phone needs to pair too.
+
+## Remote Relay
+
+Remote mode keeps the normal app host local, then opens an outbound connector to
+`https://remote.osauer.dev`:
+
+```sh
+ibkr app --remote
+```
+
+In another shell:
+
+```sh
+ibkr app pair
+```
+
+The printed pairing URL uses the relay origin and includes a `remote=` route id.
+
+Restart the supervised/shared app in remote mode:
+
+```sh
+ibkr restart --app --remote
+```
+
+Install or refresh the macOS LaunchAgent in remote mode:
+
+```sh
+ibkr setup app --remote
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.osauer.ibkr-app.plist
+```
+
+Remote mode needs the Mac, TWS/Gateway, `ibkr app --remote`, and the Cloudflare
+Worker route to stay up. The app exposes relay connection state in
+`/api/bootstrap` under `relay`.
 
 ## Restart
 

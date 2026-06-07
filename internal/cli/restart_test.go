@@ -367,6 +367,35 @@ func TestAppArgsWithRestartOverridesKeepsExplicitPublicURL(t *testing.T) {
 	}
 }
 
+func TestAppArgsWithRestartOverridesRemoteFlags(t *testing.T) {
+	t.Parallel()
+
+	opts := &restartOptions{
+		appRemote:       true,
+		appRemoteSet:    true,
+		appRemoteURL:    "https://remote.example.test",
+		appRemoteURLSet: true,
+	}
+	got := appArgsWithRestartOverrides(
+		[]string{"app", "--addr", "0.0.0.0:8765", "--remote-url=https://old.example.test"},
+		opts,
+	)
+	want := "app --addr 0.0.0.0:8765 --remote --remote-url https://remote.example.test"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("args = %q, want %q", strings.Join(got, " "), want)
+	}
+
+	opts.appRemote = false
+	got = appArgsWithRestartOverrides(
+		[]string{"app", "--remote", "--remote-url", "https://remote.example.test"},
+		opts,
+	)
+	want = "app --remote-url https://remote.example.test"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("disable remote args = %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
 func TestAppValueArgReadsSplitAndEqualsForms(t *testing.T) {
 	t.Parallel()
 
@@ -428,7 +457,7 @@ func TestRunRestartRejectsUnexpectedArgument(t *testing.T) {
 
 func TestRunRestartAppFlagOverridesRequireApp(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	exit := RunRestart(context.Background(), []string{"--addr", "0.0.0.0:8765"}, &out, &errBuf)
+	exit := RunRestart(context.Background(), []string{"--remote"}, &out, &errBuf)
 	if exit != 2 {
 		t.Fatalf("exit = %d, want 2", exit)
 	}

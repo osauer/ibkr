@@ -47,6 +47,8 @@ Read at process startup. Override TOML config where applicable; see the per-var 
 |----------|-------------|
 | `IBKR_APP_ADDR` | HTTP listen address for `ibkr app`. Defaults to `0.0.0.0:8765` so a paired phone on the LAN can reach the app. |
 | `IBKR_APP_PUBLIC_URL` | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available. |
+| `IBKR_APP_REMOTE` | Enable the outbound Cloudflare Worker relay for `ibkr app`, making pairing URLs reachable through the public relay origin. |
+| `IBKR_APP_REMOTE_URL` | Cloudflare Worker relay base URL for `ibkr app --remote`. Defaults to `https://remote.osauer.dev`. |
 | `IBKR_APP_STATE_DIR` | Directory for `ibkr app` paired devices, alert settings, VAPID keys, and alert history. Defaults to `$XDG_STATE_HOME/ibkr/app` or `$HOME/.local/state/ibkr/app`. |
 | `IBKR_COLOR` | Force terminal colour on (`always`), off (`never`); any other value defers to NO_COLOR + TTY detection. |
 | `IBKR_CONFIG` | Override the config.toml path. Defaults to `$XDG_CONFIG_HOME/ibkr/config.toml` or `$HOME/.config/ibkr/config.toml`. |

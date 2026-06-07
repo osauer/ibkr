@@ -135,3 +135,27 @@ func TestClaudeDesktopConfigPathPlatforms(t *testing.T) {
 		}
 	}
 }
+
+func TestAppLaunchAgentPlistRemoteArgs(t *testing.T) {
+	t.Parallel()
+
+	plist := string(appLaunchAgentPlist(
+		"/usr/local/bin/ibkr",
+		"/tmp/app.log",
+		"/tmp/app.err.log",
+		appLaunchAgentOptions{Remote: true, RemoteURL: "https://remote.example.test"},
+	))
+	for _, want := range []string{
+		"<string>/usr/local/bin/ibkr</string>",
+		"<string>app</string>",
+		"<string>--remote</string>",
+		"<string>--remote-url</string>",
+		"<string>https://remote.example.test</string>",
+		"<string>/tmp/app.log</string>",
+		"<string>/tmp/app.err.log</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Fatalf("plist missing %q:\n%s", want, plist)
+		}
+	}
+}

@@ -12,10 +12,13 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -26,6 +29,7 @@ func runSetup(args []string) int {
 			fmt.Println("ibkr setup — write local integration config.")
 			fmt.Println()
 			fmt.Println("Usage: ibkr setup [client]")
+			fmt.Println("       ibkr setup app [--remote] [--remote-url URL]")
 			fmt.Println()
 			fmt.Println("Supported clients:")
 			fmt.Println("  claude-desktop  (default)")
@@ -42,7 +46,7 @@ func runSetup(args []string) int {
 	case "claude-desktop":
 		return setupClaudeDesktop()
 	case "app":
-		return setupAppLaunchAgent()
+		return setupAppLaunchAgent(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ibkr setup: unknown client %q\n", target)
 		fmt.Fprintln(os.Stderr, "supported: claude-desktop, app")
@@ -171,7 +175,39 @@ func mergeIbkrMCPEntry(cfg map[string]any, binPath string) ([]byte, error) {
 	return out, nil
 }
 
-func setupAppLaunchAgent() int {
+type appLaunchAgentOptions struct {
+	Remote    bool
+	RemoteURL string
+}
+
+func setupAppLaunchAgent(args []string) int {
+	opts := appLaunchAgentOptions{}
+	fs := flag.NewFlagSet("ibkr setup app", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {
+		fmt.Println("ibkr setup app - install the ibkr app macOS LaunchAgent.")
+		fmt.Println()
+		fmt.Println("Usage: ibkr setup app [--remote] [--remote-url URL]")
+		fmt.Println()
+		fmt.Println("Flags:")
+		fs.VisitAll(func(f *flag.Flag) {
+			fmt.Fprintf(os.Stdout, "  --%-12s  %s (default %q)\n", f.Name, f.Usage, f.DefValue)
+		})
+	}
+	fs.BoolVar(&opts.Remote, "remote", false, "enable the outbound Cloudflare Worker relay")
+	fs.StringVar(&opts.RemoteURL, "remote-url", "", "Cloudflare Worker relay base URL")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "ibkr setup app: %v\n", err)
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "ibkr setup app: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	opts.RemoteURL = strings.TrimRight(strings.TrimSpace(opts.RemoteURL), "/")
 	if runtime.GOOS != "darwin" {
 		fmt.Fprintf(os.Stderr, "ibkr setup app: macOS LaunchAgents are not available on %s\n", runtime.GOOS)
 		return 1
@@ -214,7 +250,7 @@ func setupAppLaunchAgent() int {
 		fmt.Fprintf(os.Stderr, "ibkr setup app: read %s: %v\n", plistPath, err)
 		return 1
 	}
-	if err := os.WriteFile(plistPath, appLaunchAgentPlist(binPath, outPath, errPath), 0o644); err != nil {
+	if err := os.WriteFile(plistPath, appLaunchAgentPlist(binPath, outPath, errPath, opts), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "ibkr setup app: write %s: %v\n", plistPath, err)
 		return 1
 	}
@@ -230,7 +266,7 @@ func setupAppLaunchAgent() int {
 	return 0
 }
 
-func appLaunchAgentPlist(binPath, outPath, errPath string) []byte {
+func appLaunchAgentPlist(binPath, outPath, errPath string, opts appLaunchAgentOptions) []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -241,6 +277,13 @@ func appLaunchAgentPlist(binPath, outPath, errPath string) []byte {
 	b.WriteString("  <array>\n")
 	writePlistArrayString(&b, binPath)
 	writePlistArrayString(&b, "app")
+	if opts.Remote {
+		writePlistArrayString(&b, "--remote")
+	}
+	if opts.RemoteURL != "" {
+		writePlistArrayString(&b, "--remote-url")
+		writePlistArrayString(&b, opts.RemoteURL)
+	}
 	b.WriteString("  </array>\n")
 	b.WriteString("  <key>RunAtLoad</key>\n")
 	b.WriteString("  <true/>\n")
