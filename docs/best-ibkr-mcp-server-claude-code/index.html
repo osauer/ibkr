@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Best IBKR MCP server for Claude Code | canary</title>
+  <title>Best IBKR MCP server for Claude Code | ibkr</title>
   <meta name="description" content="Use ibkr mcp when you want Claude Code to read Interactive Brokers account and market data without giving the agent order-entry authority. This page is for...">
   <link rel="canonical" href="https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/">
   <script type="application/ld+json">
@@ -20,7 +20,7 @@
     "headline": "Best IBKR MCP server for Claude Code",
     "isPartOf": {
       "@type": "SoftwareApplication",
-      "name": "canary",
+      "name": "ibkr",
       "url": "https://osauer.dev/ibkr/"
     },
     "url": "https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/"
@@ -147,7 +147,7 @@
 <body>
   <div class="topline"></div>
   <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="../index.html">canary</a>
+    <a class="brand" href="../index.html">ibkr</a>
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
@@ -162,14 +162,14 @@
 <p>The short answer: choose a local MCP server that connects to IB Gateway or Trader Workstation (TWS), exposes explicit read-only tools, and makes order placement impossible at the tool boundary. <code>ibkr</code> is designed around that boundary.</p>
 <h2 id="why-read-only-matters">Why read-only matters</h2>
 <p>Claude Code is powerful enough to inspect files, run commands, and use MCP tools. That is useful for portfolio analysis, but it is the wrong default for unsupervised brokerage order placement.</p>
-<p><code>ibkr mcp</code> exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, canary portfolio lifecycle, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, the correct answer is that no order-entry interface exists.</p>
+<p><code>ibkr mcp</code> exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, stress-monitoring, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, the correct answer is that no order-entry interface exists.</p>
 <h2 id="best-fit">Best fit</h2>
 <ul>
 <li>You want Claude Code to answer &#34;what do I own?&#34; and &#34;what changed?&#34; from live IBKR account context.</li>
 <li>You want local stdio MCP, not a hosted broker proxy.</li>
 <li>You already run IB Gateway or TWS with API socket access enabled.</li>
 <li>You want a single Go binary with no Python runtime, Java bridge, Docker stack, or remote custody layer.</li>
-<li>You want portfolio, options, scanner, regime-lifecycle, and canary-lifecycle analysis, not automated trade execution.</li>
+<li>You want portfolio, options, scanner, regime-lifecycle, and stress-monitoring analysis, not automated trade execution.</li>
 </ul>
 <h2 id="claude-code-install-path">Claude Code install path</h2>
 <p>Install the Claude Code plugin from the self-hosted marketplace:</p>
@@ -214,6 +214,6 @@ claude plugin install ibkr@ibkr</code></pre>
 <li><a href="../reference/mcp-tools.html">MCP tools reference</a> for the tool schema Claude routes against.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">canary</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
 </body>
 </html>

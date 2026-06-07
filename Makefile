@@ -40,7 +40,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -363,6 +363,13 @@ release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one re
 	fi
 	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/release-smoke.sh bin/ibkr $(RELEASE_VERSION) bin/wire-assert
 
+release-site-check: ## Require osauer.dev/ibkr static site sync for non-patch releases
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "release-site-check: RELEASE_VERSION is required, e.g. make release-site-check RELEASE_VERSION=v1.8.0" >&2; \
+		exit 1; \
+	fi
+	./scripts/check-release-site-sync.sh $(RELEASE_VERSION)
+
 smoke-build: ## Compile the bin/wire-assert helper used by `make smoke`
 	@mkdir -p bin
 	go build -o bin/wire-assert ./cmd/wire-assert
@@ -609,6 +616,9 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# no Keep-a-Changelog subsection) fails here, not after refresh-spx /
 	@# test / build / smoke have already run.
 	$(MAKE) changelog-lint RELEASE_VERSION=$(RELEASE_VERSION)
+	@# Non-patch releases change the public product surface enough that the
+	@# static osauer.dev/ibkr pages must be synced and pushed before tagging.
+	$(MAKE) release-site-check RELEASE_VERSION=$(RELEASE_VERSION)
 	@# Refresh the S&P-500 membership list from Wikipedia. The release
 	@# flow runs this on every cut so every tagged binary carries a
 	@# current list; a same-day refresh that produces no diff is a no-op.

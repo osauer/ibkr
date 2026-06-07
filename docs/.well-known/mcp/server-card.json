@@ -2,8 +2,8 @@
   "serverInfo": {
     "name": "ibkr",
     "title": "IBKR MCP Server",
-    "version": "1.7.0",
-    "description": "IBKR broker flavor of canary: a local Interactive Brokers MCP server, experimental beta CLI, and Go TWS API for portfolio risk review, trading research, risk checks, and market workflows through IB Gateway or TWS.",
+    "version": "1.7.1",
+    "description": "Local Interactive Brokers MCP server for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
     "homepage": "https://osauer.dev/ibkr/",
     "repository": "https://github.com/osauer/ibkr",
     "license": "MIT"
@@ -213,7 +213,7 @@
     },
     {
       "name": "ibkr_canary",
-      "description": "Portfolio stress canary for scheduled lifecycle, readiness, source-health, and escalation checks.",
+      "description": "Portfolio-aware stress check for scheduled review, readiness, source health, and attention states.",
       "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
     },
     {
@@ -248,7 +248,7 @@
     "canPlaceOrders": false,
     "canModifyOrders": false,
     "canCancelOrders": false,
-    "summary": "Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel/transmit broker-write interface. Trading-adjacent purge/restore controls are experimental and constrained."
+    "summary": "Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface."
   },
   "links": {
     "portfolioReview": "https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",
@@ -260,16 +260,13 @@
     "downloadMCPB": "https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb"
   },
   "keywords": [
-    "canary",
-    "canary for IBKR",
-    "portfolio canary",
     "IBKR MCP",
     "Interactive Brokers MCP server",
     "portfolio review with Claude and IBKR",
     "Claude IBKR portfolio review",
     "Interactive Brokers portfolio analysis AI",
     "agentic IBKR portfolio analysis",
-    "portfolio stress canary",
+    "portfolio stress checks",
     "agentic trading research",
     "TWS MCP server",
     "IB Gateway MCP",

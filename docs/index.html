@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>canary for IBKR, TWS, and Claude</title>
-  <meta name="description" content="canary is a local portfolio risk monitor with an ibkr CLI and MCP broker flavor for Claude, Cursor, Zed, TWS, and IB Gateway workflows.">
+  <title>IBKR MCP Server for TWS and Claude</title>
+  <meta name="description" content="Connect Interactive Brokers TWS or IB Gateway to Claude, Cursor, and Zed for read-only portfolio analysis, quotes, risk checks, and trading research.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
+  <link rel="icon" type="image/png" href="social/canary-icon.png">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="canary for IBKR portfolio workflows">
-  <meta property="og:description" content="A local portfolio canary with an ibkr CLI and MCP broker flavor for Claude Desktop, Claude Code, Cursor, Zed, TWS, and IB Gateway workflows.">
+  <meta property="og:title" content="IBKR MCP server for TWS and portfolio workflows">
+  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts for portfolio analysis, risk checks, and trading research.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="canary for IBKR portfolio workflows">
-  <meta name="twitter:description" content="Portfolio risk monitoring and agentic research on live TWS or IB Gateway data through the ibkr CLI and MCP broker flavor.">
+  <meta name="twitter:title" content="IBKR MCP server for TWS and portfolio workflows">
+  <meta name="twitter:description" content="Agentic IBKR portfolio analysis and trading research on live TWS or IB Gateway data.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
   <script type="application/ld+json">
@@ -25,10 +26,8 @@
     "@graph": [
       {
         "@type": "SoftwareApplication",
-        "name": "canary",
+        "name": "ibkr",
         "alternateName": [
-          "canary for IBKR",
-          "canary ibkr",
           "IBKR MCP Server",
           "IBKR MCP TWS",
           "IBKR TWS MCP Server",
@@ -41,7 +40,7 @@
           "osauer ibkr"
         ],
         "url": "https://osauer.dev/ibkr/",
-        "description": "Local portfolio canary with an ibkr CLI, MCP server, and Go TWS API broker flavor for agentic portfolio analysis, trading research, risk checks, and market workflows.",
+        "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.",
         "author": {
           "@type": "Person",
           "name": "Oliver Sauer",
@@ -55,8 +54,8 @@
         "applicationCategory": "FinanceApplication",
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.7.0",
-        "dateModified": "2026-06-07T10:34:00+02:00",
+        "softwareVersion": "1.7.1",
+        "dateModified": "2026-06-07T13:30:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -71,14 +70,14 @@
           "https://pkg.go.dev/github.com/osauer/ibkr"
         ],
         "isAccessibleForFree": true,
-        "keywords": "canary, canary ibkr, canary for IBKR, portfolio canary, ibkr osauer, osauer ibkr, IBKR MCP, IBKR MCP TWS, ibkr mcp tws, IBKR TWS MCP server, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, portfolio review with Claude and IBKR, Claude IBKR portfolio review, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
+        "keywords": "ibkr osauer, osauer ibkr, IBKR MCP, IBKR MCP TWS, ibkr mcp tws, IBKR TWS MCP server, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, portfolio review with Claude and IBKR, Claude IBKR portfolio review, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
         "featureList": [
-          "Portfolio canary workflow layer",
+          "Agentic portfolio analysis workflow layer",
           "Prompted portfolio review with Claude and IBKR",
           "Interactive Brokers TWS and IB Gateway support",
           "Account and positions tools",
           "Stock and ETF quote resources",
-          "Options, scanners, breadth, gamma, risk-regime, canary portfolio lifecycle, and sizing tools",
+          "Options, scanners, breadth, gamma, risk-regime, portfolio stress monitoring, and sizing tools",
           "Read-side MCP boundary with no order-entry tools"
         ]
       },
@@ -96,10 +95,10 @@
         "mainEntity": [
           {
             "@type": "Question",
-            "name": "What is canary for IBKR?",
+            "name": "What is the IBKR MCP server?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "canary is a local portfolio risk monitor. Its IBKR broker flavor ships as the ibkr CLI and ibkr mcp server so Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts can analyze Interactive Brokers account and market data through IB Gateway or TWS."
+              "text": "ibkr mcp is a local Model Context Protocol server that lets Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts analyze Interactive Brokers account and market data through IB Gateway or TWS."
             }
           },
           {
@@ -134,7 +133,7 @@
           {
             "@type": "ListItem",
             "position": 1,
-            "name": "canary",
+            "name": "ibkr",
             "item": "https://osauer.dev/ibkr/"
           }
         ]
@@ -205,11 +204,21 @@
     }
 
     .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
       color: var(--ink);
       font-size: 28px;
       font-weight: 800;
       letter-spacing: 0;
       text-decoration: none;
+    }
+
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      box-shadow: 0 8px 18px rgba(16, 24, 39, 0.12);
     }
 
     .nav-links {
@@ -284,6 +293,7 @@
       border-radius: 8px;
       color: var(--ink);
       font-weight: 750;
+      text-align: center;
       text-decoration: none;
       background: transparent;
     }
@@ -292,6 +302,26 @@
       border-color: var(--green);
       background: var(--green);
       color: #fff;
+    }
+
+    .install-note {
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .hero-media {
+      display: grid;
+      gap: 18px;
+      justify-items: start;
+    }
+
+    .hero-icon {
+      width: 108px;
+      height: 108px;
+      border: 1px solid rgba(16, 24, 39, 0.12);
+      border-radius: 22px;
+      box-shadow: 0 18px 38px rgba(16, 24, 39, 0.18);
     }
 
     .hero-shot {
@@ -383,6 +413,11 @@
       margin: 0;
       color: var(--muted);
       font-size: 16px;
+    }
+
+    .feature code,
+    .install-note code {
+      overflow-wrap: anywhere;
     }
 
     .feature-grid {
@@ -494,6 +529,12 @@
         max-width: 760px;
       }
 
+      .hero-icon {
+        width: 94px;
+        height: 94px;
+        border-radius: 19px;
+      }
+
       .trust-grid,
       .proof-grid,
       .feature-grid {
@@ -555,6 +596,12 @@
         max-width: 320px;
       }
 
+      .hero-icon {
+        width: 76px;
+        height: 76px;
+        border-radius: 16px;
+      }
+
       section {
         padding: 58px 0;
       }
@@ -584,7 +631,7 @@
   <div class="topline"></div>
 
   <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="https://osauer.dev/ibkr/" aria-label="canary home">canary</a>
+    <a class="brand" href="https://osauer.dev/ibkr/" aria-label="ibkr home"><img src="social/canary-icon.png" width="192" height="192" alt="">ibkr</a>
     <nav class="nav-links" aria-label="Page">
       <a href="#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
@@ -596,18 +643,23 @@
   <main>
     <section class="wrap hero" aria-labelledby="hero-title">
       <div>
-        <p class="eyebrow">canary for IBKR workflows</p>
-        <h1 id="hero-title">Portfolio canary for agentic risk review.</h1>
-        <p class="lead">canary watches local broker context and turns portfolio, options, quotes, scanners, breadth, gamma, market regime, and source health into reviewable stress checks. The IBKR broker flavor is the <code>ibkr</code> CLI and <code>ibkr mcp</code> server for TWS, IB Gateway, Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</p>
-        <p class="safety">The public MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
+        <p class="eyebrow">Agentic IBKR workflows</p>
+        <h1 id="hero-title">IBKR MCP server for portfolio analysis and trading research</h1>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Turn portfolio, options, quotes, scanners, breadth, gamma, regime, and data-quality checks into review workflows an assistant can actually use.</p>
+        <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
-          <a class="button primary" href="#install">Install</a>
+          <a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a>
+          <a class="button" href="#install">Install other clients</a>
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
           <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
         </div>
+        <p class="install-note">Claude Desktop: open the <code>.mcpb</code> file, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin, then install the local <code>ibkr</code> binary.</p>
       </div>
-      <div class="hero-shot">
-        <img src="social/regime.png" width="1280" height="650" alt="Terminal screenshot of ibkr regime showing volatility, credit, funding, FX, gamma, and breadth indicators">
+      <div class="hero-media">
+        <img class="hero-icon" src="social/canary-icon.png" width="192" height="192" alt="Canary app icon">
+        <div class="hero-shot">
+          <img src="social/regime.png" width="1280" height="650" alt="Terminal screenshot of ibkr regime showing volatility, credit, funding, FX, gamma, and breadth indicators">
+        </div>
       </div>
     </section>
 
@@ -619,15 +671,15 @@
         </div>
         <div class="trust-item">
           <strong>Agent-ready</strong>
-          <span>The IBKR flavor runs as <code>ibkr mcp</code>, a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
+          <span>Runs as a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
         </div>
         <div class="trust-item">
-          <strong>Canary depth</strong>
-          <span>Portfolio review, options diagnostics, scanners, scheduled stress checks, gamma, breadth, and regime context in one local tool.</span>
+          <strong>Review depth</strong>
+          <span>Portfolio review, options diagnostics, scanners, scheduled stress checks, gamma, breadth, and regime context in one tool.</span>
         </div>
         <div class="trust-item">
           <strong>Go binary</strong>
-          <span>One installable <code>ibkr</code> CLI with a local daemon and a clean-room Go TWS protocol library.</span>
+          <span>One installable CLI with a local daemon and a clean-room Go TWS protocol library.</span>
         </div>
       </div>
     </div>
@@ -640,12 +692,12 @@
       <div class="proof-grid">
         <article class="proof">
           <img src="social/regime.png" width="1280" height="650" loading="lazy" alt="ibkr regime terminal output">
-          <h3>Market regime</h3>
+          <h3>Risk regime</h3>
           <p>One dashboard for volatility, credit, funding, FX carry, dealer gamma, and S&amp;P 500 breadth.</p>
         </article>
         <article class="proof">
           <img src="social/canary.png" width="1280" height="760" loading="lazy" alt="synthetic ibkr canary terminal output">
-          <h3>Canary state</h3>
+          <h3>Stress monitor</h3>
           <p>Scheduled lifecycle, readiness, source-health, and stress checks from account, exposure, regime, and data-quality gates.</p>
         </article>
         <article class="proof">
@@ -671,7 +723,7 @@
         <li>What is in my IBKR account?</li>
         <li>Show my SPY exposure, including option deltas.</li>
         <li>How does the market regime look today?</li>
-        <li>Should the canary stay quiet, watch risk, or escalate attention?</li>
+        <li>Is today a normal review, a watch day, or a data-quality problem?</li>
         <li>Is Xetra open on Whit Monday?</li>
         <li>Are dealers supporting or amplifying today's SPY move?</li>
         <li>What expiries are listed for SPY and what is the implied move?</li>
@@ -681,18 +733,18 @@
 
     <section class="wrap" aria-labelledby="surfaces-title">
       <div class="section-head">
-        <h2 id="surfaces-title">One canary, three local surfaces.</h2>
+        <h2 id="surfaces-title">One local tool, three ways to use it.</h2>
       </div>
       <div class="feature-grid">
         <article class="feature">
           <small>MCP server</small>
           <h3>For AI assistants</h3>
-          <p><code>ibkr mcp</code> exposes account, quote, calendar, chain, scanner, sizing, breadth, gamma, regime, and canary tools to MCP clients for analysis and scheduled-monitoring workflows.</p>
+          <p><code>ibkr mcp</code> exposes account, quote, calendar, chain, scanner, sizing, breadth, gamma, regime, and stress-monitoring tools to MCP clients for analysis and scheduled-review workflows.</p>
         </article>
         <article class="feature">
-          <small>Beta terminal CLI</small>
+          <small>Terminal CLI</small>
           <h3>For fast checks</h3>
-          <p>Run beta CLI commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr canary</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON.</p>
+          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr canary</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON; the CLI is useful, but the Claude/MCP path is the main path.</p>
         </article>
         <article class="feature">
           <small>Go library</small>
@@ -705,7 +757,7 @@
     <section class="wrap" aria-labelledby="search-paths-title">
       <div class="section-head">
         <h2 id="search-paths-title">Popular setup paths.</h2>
-        <p>Use the page that matches the phrase you searched for; all paths install the same local canary IBKR flavor through <code>ibkr mcp</code>.</p>
+        <p>Use the page that matches the phrase you searched for; all paths install the same local <code>ibkr mcp</code> workflow surface.</p>
       </div>
       <div class="feature-grid">
         <article class="feature">
@@ -775,13 +827,17 @@
       <div>
         <div class="section-head">
           <h2 id="install-title">Install for Claude Desktop or shell.</h2>
-          <p>Claude Desktop users can install the MCP Bundle release asset directly. Shell and generic MCP users can install the experimental beta CLI and configure a local stdio server.</p>
+          <p>Claude Desktop users should start with the MCP Bundle release asset. Claude Code users can install the plugin plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
         </div>
         <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
         <p><a class="button primary" href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">Download MCPB for Claude Desktop</a></p>
-        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings → Extensions → Install Extension. macOS and Linux are supported; Windows users can use WSL with the shell path.</p>
+        <p>Open the <code>.mcpb</code> file with Claude Desktop, drag it into Claude Desktop, or use Settings &gt; Extensions &gt; Install Extension. macOS and Linux are supported; Windows users can use WSL with the shell path.</p>
       </div>
-      <pre><code># Shell, Cursor, Continue, Zed, generic MCP hosts
+      <pre><code># Claude Code plugin
+/plugin marketplace add osauer/ibkr
+/plugin install ibkr@ibkr
+
+# Shell, Cursor, Continue, Zed, generic MCP hosts
 curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
 ibkr setup claude-desktop
 
@@ -791,16 +847,16 @@ ibkr setup claude-desktop
 
     <section class="wrap" aria-labelledby="faq-title">
       <div class="section-head">
-        <h2 id="faq-title">Canary IBKR FAQ.</h2>
+        <h2 id="faq-title">IBKR MCP FAQ.</h2>
       </div>
       <div class="feature-grid">
         <article class="feature">
-          <h3>What is canary for IBKR?</h3>
-          <p>canary is the product. The IBKR broker flavor is exposed as the <code>ibkr</code> CLI and <code>ibkr mcp</code> server for Interactive Brokers account and market-data workflows.</p>
+          <h3>What is the IBKR MCP server?</h3>
+          <p><code>ibkr mcp</code> is a local Model Context Protocol server for Interactive Brokers account and market-data workflows.</p>
         </article>
         <article class="feature">
           <h3>Can it place orders?</h3>
-          <p>No. The bundled CLI and MCP server expose account and market data, but no place, modify, or cancel order tools. Experimental trading-adjacent features such as purge/restore stay constrained and operator-controlled.</p>
+          <p>No. The bundled CLI and MCP server expose account and market data, but no place, modify, or cancel order tools.</p>
         </article>
         <article class="feature">
           <h3>Does it use TWS or IB Gateway?</h3>
