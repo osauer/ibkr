@@ -1,8 +1,8 @@
-# ibkr full context
+# ibkr canary full context
 
 Updated: 2026-06-08 07:25 CEST
 
-`ibkr` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, and Claude Code plugin.
+`ibkr canary` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app.
 
 The public project home is https://osauer.dev/ibkr/. The source repository is https://github.com/osauer/ibkr.
 
@@ -147,6 +147,7 @@ Bad or out-of-bound descriptions:
 
 - Interactive Brokers MCP server
 - IBKR MCP server
+- ibkr canary
 - IBKR MCP TWS
 - ibkr mcp tws
 - IBKR TWS MCP server
