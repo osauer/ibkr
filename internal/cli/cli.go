@@ -174,7 +174,7 @@ func init() {
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
 		{"trading", "Local trading gate status and configuration", "ibkr trading status [--json]", runTrading},
 		{"settings", "Runtime platform preferences and observed read-only state", "ibkr settings show [--json] | ibkr settings set features.purge_restore.enabled=true|false", runSettings},
-		{"orders", "Read local order lifecycle state without transmitting orders", "ibkr orders open [--account ACCOUNT] [--json]", runOrders},
+		{"orders", "Read current-context local order lifecycle state without transmitting orders", "ibkr orders open [--json]", runOrders},
 		{"order", "Preview, paper-place, modify, cancel, or inspect gated orders", "ibkr order preview buy|sell SYMBOL QTY [--limit PRICE|--strategy patient-limit] [--tif DAY] [--json] | ibkr order place --preview-token TOKEN [--json] | ibkr order modify ID --preview-token TOKEN [--json] | ibkr order cancel ID [--json] | ibkr order status ID [--json]", runOrder},
 		{"app", "Run the paired mobile PWA application layer", "ibkr app [--addr HOST:PORT] | ibkr app pair", nil},                                                  // dispatched in cmd/ibkr/main.go — long-lived app server
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server

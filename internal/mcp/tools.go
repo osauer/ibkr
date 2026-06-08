@@ -76,10 +76,8 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_orders_open",
 		Title:       "IBKR Open Orders",
-		Description: "Read locally journaled open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open or when the user asks for open orders. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for creating a new preview token (use `ibkr_order_preview`) and NOT for submitting, modifying, or cancelling an order.",
-		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"account": schemaString("optional account filter; omit to show all locally journaled accounts"),
-		}, nil),
+		Description: "Read current broker account/mode open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open for the currently connected broker context, or when the user asks for open orders. Paper/test journal rows are intentionally not returned while connected to live, and live rows are intentionally not returned while connected to paper. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for historical audit across old accounts or modes, NOT for creating a new preview token (use `ibkr_order_preview`), and NOT for submitting, modifying, or cancelling an order.",
+		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in rpc.OrdersOpenParams
 			if err := unmarshalArgs(args, &in); err != nil {

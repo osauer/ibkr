@@ -53,7 +53,7 @@ func TestPurgeRestorePreviewIsAllOrNone(t *testing.T) {
 	if res.Status != purgeRestoreStatusBlocked || res.SelectedLegs != 2 || res.SubmittedLegs != 0 || len(res.Blockers) == 0 {
 		t.Fatalf("restore result = %+v, want blocked all-or-none preflight", res)
 	}
-	rows, totals, err := srv.purgeLedger.Snapshot("", "")
+	rows, totals, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after blocked restore: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPurgeRestoreExecuteRecomputesWhatIfAndSendFailureLeavesLedger(t *testin
 	if executed.Status != purgeRestoreStatusError || executed.SubmittedLegs != 0 || executed.ErrorLegs != 1 {
 		t.Fatalf("execute result = %+v, want send error without submission", executed)
 	}
-	rows, totals, err := srv.purgeLedger.Snapshot("", "")
+	rows, totals, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after send failure: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestPurgeRestorePaperNeutralStockAndOption(t *testing.T) {
 			AvgFillPrice: order.LimitPrice,
 		})
 	}
-	rows, totals, err := srv.purgeLedger.Snapshot("", "purge-neutral")
+	rows, totals, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "purge-neutral")
 	if err != nil {
 		t.Fatalf("neutral snapshot: %v", err)
 	}

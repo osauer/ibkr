@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -16,6 +17,7 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 	now := time.Date(2026, 6, 4, 18, 45, 0, 0, time.UTC)
 	srv := &Server{
 		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, Account: "DU123"},
 		now:          func() time.Time { return now },
 	}
 	events := []orderJournalEvent{
@@ -28,6 +30,7 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 			OrderRef:        "purge-order-1",
 			ReservedOrderID: 1001,
 			Account:         "DU123",
+			Mode:            rpc.AccountModePaper,
 			Symbol:          "SAP",
 			SecType:         "STK",
 			Action:          rpc.OrderActionSell,
@@ -93,6 +96,7 @@ func TestPurgeStatusIncludesRestoreOrders(t *testing.T) {
 	now := time.Date(2026, 6, 4, 18, 50, 0, 0, time.UTC)
 	srv := &Server{
 		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, Account: "DU123"},
 		now:          func() time.Time { return now },
 	}
 	if err := srv.orderJournal.Append(orderJournalEvent{
@@ -104,6 +108,7 @@ func TestPurgeStatusIncludesRestoreOrders(t *testing.T) {
 		OrderRef:        "restore-order-1",
 		ReservedOrderID: 1002,
 		Account:         "DU123",
+		Mode:            rpc.AccountModePaper,
 		Symbol:          "SAP",
 		SecType:         "STK",
 		Action:          rpc.OrderActionBuy,

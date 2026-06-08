@@ -2816,10 +2816,8 @@ const (
 	OrderLifecycleUnknownReconcileRequired = "unknown_reconcile_required"
 )
 
-// OrdersOpenParams filters the read-only local order lifecycle view.
-type OrdersOpenParams struct {
-	Account string `json:"account,omitempty"`
-}
+// OrdersOpenParams reads the current broker account/mode open-order view.
+type OrdersOpenParams struct{}
 
 // OrderStatusParams identifies one journal-backed order view by order ref,
 // IBKR order ID, or permanent ID.
@@ -3093,6 +3091,7 @@ type PurgeLedgerRow struct {
 	SecType             string         `json:"sec_type"`
 	Contract            ContractParams `json:"contract"`
 	Account             string         `json:"account,omitempty"`
+	Mode                string         `json:"mode,omitempty"`
 	Currency            string         `json:"currency,omitempty"`
 	OriginalSide        string         `json:"original_side"`
 	OriginalQuantity    float64        `json:"original_quantity"`

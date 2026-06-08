@@ -25,14 +25,18 @@ func (s *Server) handlePurgeStatus(_ context.Context, req *rpc.Request) (*rpc.Pu
 	if err != nil {
 		return nil, err
 	}
-	rows, totals, err := s.purgeLedger.Snapshot(strings.TrimSpace(p.Account), strings.TrimSpace(p.PurgeID))
+	scope := s.currentBrokerStateScope()
+	if strings.TrimSpace(p.Account) != "" {
+		scope.Account = strings.TrimSpace(p.Account)
+	}
+	rows, totals, err := s.purgeLedger.Snapshot(scope, strings.TrimSpace(p.PurgeID))
 	if err != nil {
 		return nil, err
 	}
 	res := &rpc.PurgeStatusResult{
 		Kind:    "ibkr.purge_status",
 		PurgeID: strings.TrimSpace(p.PurgeID),
-		Account: strings.TrimSpace(p.Account),
+		Account: scope.Account,
 		Status:  purgeStatusNoOrders,
 		Rows:    rows,
 		Totals:  totals,
@@ -49,7 +53,7 @@ func (s *Server) handlePurgeStatus(_ context.Context, req *rpc.Request) (*rpc.Pu
 		if res.PurgeID != "" && !strings.EqualFold(view.PurgeID, res.PurgeID) {
 			continue
 		}
-		if res.Account != "" && !strings.EqualFold(view.Account, res.Account) {
+		if !orderViewMatchesBrokerScope(view, scope) {
 			continue
 		}
 		res.TotalOrders++

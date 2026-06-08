@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/discover"
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -84,6 +88,90 @@ func TestBuildOrderViewsTerminalStatusNotOpen(t *testing.T) {
 	}
 	if views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleCancelled {
 		t.Fatalf("terminal view = open:%v %s, want closed cancelled: %+v", views[0].Open, views[0].LifecycleStatus, views[0])
+	}
+}
+
+func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 8, 18, 30, 0, 0, time.UTC)
+	srv := &Server{
+		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint: discover.Endpoint{
+			Host:    "127.0.0.1",
+			Port:    7496,
+			Account: "All",
+		},
+		now: func() time.Time { return now },
+	}
+	events := []orderJournalEvent{
+		{
+			At:              now.Add(-time.Hour),
+			Type:            orderJournalEventBrokerAcknowledged,
+			OrderRef:        "paper-sap",
+			ReservedOrderID: 7,
+			Account:         "DU3136804",
+			Endpoint:        "127.0.0.1:7497",
+			Mode:            rpc.AccountModePaper,
+			Symbol:          "SAP",
+			SecType:         "STK",
+			Action:          rpc.OrderActionBuy,
+			OrderType:       rpc.OrderTypeLMT,
+			TIF:             rpc.OrderTIFDay,
+			Quantity:        1,
+			Remaining:       1,
+			Status:          "Submitted",
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              now,
+			Type:            orderJournalEventBrokerAcknowledged,
+			OrderRef:        "live-aapl",
+			ReservedOrderID: 8,
+			Account:         "U1234567",
+			Endpoint:        "127.0.0.1:7496",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "AAPL",
+			SecType:         "STK",
+			Action:          rpc.OrderActionSell,
+			OrderType:       rpc.OrderTypeLMT,
+			TIF:             rpc.OrderTIFDay,
+			Quantity:        1,
+			Remaining:       1,
+			Status:          "Submitted",
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+	}
+	if err := srv.orderJournal.AppendAll(events); err != nil {
+		t.Fatalf("append orders: %v", err)
+	}
+	raw, err := json.Marshal(rpc.OrdersOpenParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := srv.handleOrdersOpen(context.Background(), &rpc.Request{Params: raw})
+	if err != nil {
+		t.Fatalf("handleOrdersOpen: %v", err)
+	}
+	if len(res.Orders) != 0 {
+		t.Fatalf("aggregate open orders = %+v, want no concrete-account rows", res.Orders)
+	}
+
+	srv.endpoint.Account = "U1234567"
+	res, err = srv.handleOrdersOpen(context.Background(), &rpc.Request{Params: raw})
+	if err != nil {
+		t.Fatalf("handleOrdersOpen concrete account: %v", err)
+	}
+	if len(res.Orders) != 1 || res.Orders[0].OrderRef != "live-aapl" {
+		t.Fatalf("concrete account open orders = %+v, want only current live row", res.Orders)
+	}
+
+	status, err := srv.handleOrderStatus(context.Background(), &rpc.Request{Params: mustJSON(t, rpc.OrderStatusParams{ID: "paper-sap"})})
+	if err != nil {
+		t.Fatalf("paper order status: %v", err)
+	}
+	if status.Found {
+		t.Fatalf("paper order status found in live context: %+v", status)
 	}
 }
 
@@ -433,4 +521,13 @@ func TestBuildOrderViewsModifyBrokerErrorPreservesWorkingOrder(t *testing.T) {
 	if got.ModifyEligible || got.CancelEligible {
 		t.Fatalf("reconcile-required order should not be write-eligible: %+v", got)
 	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

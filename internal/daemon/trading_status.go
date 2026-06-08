@@ -317,7 +317,25 @@ func (s *Server) orderJournalSummary() (orderJournalSummary, error) {
 	if s == nil || s.orderJournal == nil {
 		return orderJournalSummary{}, fmt.Errorf("order journal is not configured")
 	}
-	return s.orderJournal.Summary()
+	events, err := s.orderJournal.LoadEvents(0)
+	if err != nil {
+		return orderJournalSummary{}, err
+	}
+	var last orderJournalEvent
+	for _, ev := range events {
+		last = ev
+	}
+	scope := s.currentBrokerStateScope()
+	var summary orderJournalSummary
+	for _, view := range buildOrderViews(events) {
+		if view.Open && orderViewMatchesBrokerScope(view, scope) {
+			summary.OpenOrders++
+		}
+	}
+	if !last.At.IsZero() {
+		summary.LastEvent = fmt.Sprintf("%s %s at %s", last.Type, orderJournalEventLabel(last), last.At.Format(time.RFC3339))
+	}
+	return summary, nil
 }
 
 func paperSmokeBlockerCode(status string) string {

@@ -110,7 +110,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.Message = "load open purge orders: " + err.Error()
 		return res, nil
 	}
-	activeByLegSide, err := s.activePurgeLedgerQuantityByLegSide(status.Account)
+	activeByLegSide, err := s.activePurgeLedgerQuantityByLegSide(brokerStateScope{Account: status.Account, Mode: status.Mode})
 	if err != nil {
 		res.Status = purgeExecuteStatusError
 		res.ErrorLegs = len(legs)
@@ -250,12 +250,12 @@ func purgeNoCurrentPositionMessage(symbols []string) string {
 	return "no current positions matched purge target"
 }
 
-func (s *Server) activePurgeLedgerQuantityByLegSide(account string) (map[string]float64, error) {
+func (s *Server) activePurgeLedgerQuantityByLegSide(scope brokerStateScope) (map[string]float64, error) {
 	out := map[string]float64{}
 	if s == nil || s.purgeLedger == nil {
 		return out, nil
 	}
-	rows, _, err := s.purgeLedger.Snapshot(strings.TrimSpace(account), "")
+	rows, _, err := s.purgeLedger.Snapshot(scope, "")
 	if err != nil {
 		return nil, err
 	}
