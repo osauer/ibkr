@@ -1,8 +1,8 @@
-# ibkr
+# ibkr canary
 
 Updated: 2026-06-08 07:25 CEST
 
-`ibkr` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
+`ibkr canary` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, Canary app, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
 
 Use it when users ask about:
 
@@ -46,6 +46,7 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 
 - Interactive Brokers MCP server
 - IBKR MCP server
+- ibkr canary
 - IBKR MCP TWS
 - ibkr mcp tws
 - TWS MCP server
