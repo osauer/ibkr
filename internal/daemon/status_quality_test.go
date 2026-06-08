@@ -11,6 +11,9 @@ import (
 func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)
+	hyg := 81.0
+	hyg50 := 80.0
+	weekly := -0.4
 	res := &rpc.RegimeSnapshotResult{
 		AsOf: now,
 		VIXTermStructure: rpc.RegimeVIXTerm{
@@ -20,7 +23,9 @@ func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 			Status: rpc.RegimeStatusOK,
 		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
-			Status: rpc.RegimeStatusStale,
+			Status:   rpc.RegimeStatusStale,
+			HYGPrice: &hyg,
+			HYG50DMA: &hyg50,
 		},
 		CreditSpreads: rpc.RegimeCreditSpreads{
 			Status: rpc.RegimeStatusOK,
@@ -29,7 +34,8 @@ func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 			Status: rpc.RegimeStatusOK,
 		},
 		USDJPY: rpc.RegimeUSDJPY{
-			Status: rpc.RegimeStatusStale,
+			Status:       rpc.RegimeStatusStale,
+			WeeklyChange: &weekly,
 		},
 		GammaZero: rpc.RegimeGammaZero{
 			Status: rpc.RegimeStatusOK,
@@ -73,6 +79,7 @@ func TestRegimeStatusQualityClustersStaleInputs(t *testing.T) {
 func TestRegimeStatusQualityClustersPartialInputs(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.June, 1, 15, 0, 0, 0, time.UTC)
+	vvix := 102.0
 	res := &rpc.RegimeSnapshotResult{
 		AsOf: now,
 		VIXTermStructure: rpc.RegimeVIXTerm{
@@ -80,6 +87,7 @@ func TestRegimeStatusQualityClustersPartialInputs(t *testing.T) {
 		},
 		VolOfVol: rpc.RegimeVolOfVol{
 			Status: rpc.RegimeStatusStale,
+			Last:   &vvix,
 		},
 		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{
 			Status: rpc.RegimeStatusOK,
