@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest a new workflow, app capability, CLI command, MCP tool, or documentation improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow you want, not only the implementation. Please avoid broker-sensitive account details.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where would this fit?
+      options:
+        - Canary app
+        - Remote Canary app beta
+        - CLI
+        - MCP server
+        - Install or update
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Explain the job, workflow, or friction in plain language.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would good look like?
+      description: Describe the result, screen, command, or assistant behavior you would expect.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround
+      description: Optional. Tell me how you handle this today.
+  - type: dropdown
+    id: sensitivity
+    attributes:
+      label: Does this involve broker-sensitive data?
+      options:
+        - "No"
+        - "Maybe"
+        - "Yes, I will share details privately instead"
+    validations:
+      required: true
