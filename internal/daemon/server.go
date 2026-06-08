@@ -295,6 +295,11 @@ type Server struct {
 	// business day, so persisting the last good CSV across daemon restarts
 	// prevents routine HTTP flaps from making credit/funding rows vanish.
 	regimeSeries *regimeSeriesCache
+	// regimeHistory memoises daily HMDS bars used as slow baselines for
+	// regime rows. These values rank HYG 50-DMA, SPY 52w high fallback,
+	// and USD/JPY weekly change; transient HMDS failures must not make
+	// the high-impact regime surface flap between ranked and unranked.
+	regimeHistory *regimeHistoryCache
 	// lastRegimeQuality latches the cluster-level data-quality summary
 	// from the most recent regime snapshot. status.health reads this
 	// without re-running the regime fan-out, so `ibkr status` can disclose
@@ -379,6 +384,7 @@ func New(opts Options) *Server {
 	s.installMarketEventCache()
 	s.installOrderTokenSigner()
 	s.installRegimeSeriesCache()
+	s.installRegimeHistoryCache()
 	s.installGammaZeroCache()
 	return s
 }
@@ -479,6 +485,15 @@ func (s *Server) installRegimeSeriesCache() {
 		return
 	}
 	s.regimeSeries = newRegimeSeriesCache(dir)
+}
+
+func (s *Server) installRegimeHistoryCache() {
+	dir, err := regimeHistoryCacheDefaultDir()
+	if err != nil {
+		s.logger.Warnf("regime history cache: resolve dir: %v (persistence disabled)", err)
+		return
+	}
+	s.regimeHistory = newRegimeHistoryCache(dir)
 }
 
 // infof / warnf are nil-safe wrappers around s.logger. The tests that

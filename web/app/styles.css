@@ -1602,15 +1602,20 @@ p {
 
 .account-panel {
   display: grid;
-  gap: 12px;
+  gap: 13px;
   min-height: 0;
   margin: 0 0 10px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
 }
 
 .account-panel__top {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
   align-items: center;
 }
 
@@ -1631,7 +1636,7 @@ p {
 .account-panel__identity b {
   overflow: hidden;
   color: var(--ink);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 760;
   line-height: 1.08;
   text-overflow: ellipsis;
@@ -1662,6 +1667,12 @@ p {
 
 .account-privacy-toggle {
   margin-left: auto;
+}
+
+.account-overview-toggle {
+  min-width: 86px;
+  justify-content: center;
+  padding-inline: 11px;
 }
 
 .account-privacy-toggle.is-visible {
@@ -1743,13 +1754,14 @@ p {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-bottom: 0;
+  padding-top: 2px;
 }
 
 .account-primary {
   display: grid;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
-  padding: 0 13px;
+  padding: 0 14px;
   border-left: 1px solid var(--line-soft);
 }
 
@@ -1771,7 +1783,7 @@ p {
   min-width: 0;
   overflow: hidden;
   color: var(--ink);
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 720;
   line-height: 1.05;
   text-overflow: ellipsis;
@@ -1795,6 +1807,12 @@ p {
 
 .account-pnl-pct.risk {
   color: #c52a26;
+}
+
+.account-overview-detail {
+  display: grid;
+  gap: 10px;
+  padding-top: 3px;
 }
 
 .account-risk-strip {

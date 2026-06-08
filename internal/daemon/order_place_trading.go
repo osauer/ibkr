@@ -225,7 +225,21 @@ func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
 	if c == nil {
 		return 0, s.gatewayUnavailableError()
 	}
-	return c.ReserveOrderID()
+	id, err := c.ReserveOrderID()
+	if err != nil {
+		return 0, err
+	}
+	floor, err := maxReservedBrokerOrderID(s.orderJournal)
+	if err != nil {
+		return 0, err
+	}
+	for id <= floor {
+		id, err = c.ReserveOrderID()
+		if err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
 }
 
 func (s *Server) submitPaperOrder(ctx context.Context, gate ibkrlib.PaperOrderGate, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {

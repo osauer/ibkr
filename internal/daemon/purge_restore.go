@@ -284,11 +284,13 @@ func (s *Server) purgeRestorePreviewBlockers(status rpc.TradingStatus) []rpc.Tra
 
 func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreResult, status rpc.TradingStatus, row purgeLedgerRow, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, cfg config.Trading, timeout time.Duration, scale float64) {
 	normalizePurgeLedgerRow(&row)
+	restoreContract := row.Contract
+	normalisePositionStockRoute(&restoreContract)
 	leg := rpc.PurgeRestoreLeg{
 		LegID:           row.LegID,
 		Symbol:          row.Symbol,
 		SecType:         row.SecType,
-		Contract:        row.Contract,
+		Contract:        restoreContract,
 		Action:          row.RestoreAction,
 		RemainingBefore: row.RemainingQuantity,
 		Status:          purgeRestoreStatusBlocked,
@@ -308,7 +310,7 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		return
 	}
 	leg.Quantity = int(qty)
-	currentQty := positionQuantityForContract(positions, row.Contract)
+	currentQty := positionQuantityForContract(positions, restoreContract)
 	if purgeSideFlipped(row.OriginalSide, currentQty) {
 		addPurgeRestoreSkipped(res, leg, "current portfolio side is opposite the purged original side")
 		return
@@ -317,29 +319,29 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		addPurgeRestoreSkipped(res, leg, "current portfolio already contains restored quantity not reflected in purge ledger")
 		return
 	}
-	quote, err := s.fetchPreviewQuote(ctx, row.Contract, timeout)
+	quote, err := s.fetchPreviewQuote(ctx, restoreContract, timeout)
 	if err != nil {
 		addPurgeRestoreError(res, leg, "quote: "+err.Error())
 		return
 	}
 	leg.Quote = quote
-	limit, err := previewLimitPrice(row.RestoreAction, rpc.OrderStrategyPatientLimit, nil, quote)
+	limit, err := purgeAggressiveLimit(row.RestoreAction, restoreContract, quote)
 	if err != nil {
 		addPurgeRestoreError(res, leg, "pricing: "+err.Error())
 		return
 	}
 	leg.LimitPrice = limit
-	position := restorePositionImpact(row.Contract, currentQty, row.RestoreAction, leg.Quantity)
+	position := restorePositionImpact(restoreContract, currentQty, row.RestoreAction, leg.Quantity)
 	leg.Position = position
-	if restorePolicyBlocker(row.Contract, row.RestoreAction, position, cfg) != "" {
-		addPurgeRestoreSkipped(res, leg, restorePolicyBlocker(row.Contract, row.RestoreAction, position, cfg))
+	if restorePolicyBlocker(restoreContract, row.RestoreAction, position, cfg) != "" {
+		addPurgeRestoreSkipped(res, leg, restorePolicyBlocker(restoreContract, row.RestoreAction, position, cfg))
 		return
 	}
-	if strings.EqualFold(row.Contract.SecType, "OPT") && leg.Quantity > cfg.MaxOptionContracts {
+	if strings.EqualFold(restoreContract.SecType, "OPT") && leg.Quantity > cfg.MaxOptionContracts {
 		addPurgeRestoreSkipped(res, leg, fmt.Sprintf("option quantity %d exceeds [trading].max_option_contracts %d", leg.Quantity, cfg.MaxOptionContracts))
 		return
 	}
-	estimated := float64(leg.Quantity) * limit * float64(contractMultiplier(row.Contract))
+	estimated := float64(leg.Quantity) * limit * float64(contractMultiplier(restoreContract))
 	if estimated > cfg.MaxNotional {
 		addPurgeRestoreSkipped(res, leg, fmt.Sprintf("restore notional %.2f exceeds [trading].max_notional %.2f", estimated, cfg.MaxNotional))
 		return
@@ -348,12 +350,12 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 	leg.ShadowPnL = purgeRestoreLegShadowPnL(row, limit, float64(leg.Quantity))
 	draft := rpc.OrderDraft{
 		Action:     row.RestoreAction,
-		Contract:   row.Contract,
+		Contract:   restoreContract,
 		Quantity:   leg.Quantity,
 		OrderType:  rpc.OrderTypeLMT,
 		LimitPrice: limit,
 		TIF:        rpc.OrderTIFDay,
-		Strategy:   rpc.OrderStrategyPatientLimit,
+		Strategy:   "restore-aggressive-limit",
 		OrderRef:   purgeRestoreOrderRef(s.orderNow()),
 		OpenClose:  orderOpenCloseForEffect(position.Effect),
 	}
@@ -482,9 +484,29 @@ func (s *Server) openPurgeOrdersByLeg(account string) (map[string][]rpc.OrderVie
 		if !strings.EqualFold(view.Source, purgeExecuteSource) && !strings.EqualFold(view.Source, purgeRestoreSource) {
 			continue
 		}
-		out[view.LegID] = append(out[view.LegID], view)
+		for _, legID := range purgeOrderViewLegIDCandidates(view) {
+			out[legID] = append(out[legID], view)
+		}
 	}
 	return out, nil
+}
+
+func purgeOrderViewLegIDCandidates(view rpc.OrderView) []string {
+	contract := rpc.ContractParams{
+		ConID:        view.ConID,
+		Symbol:       view.Symbol,
+		SecType:      view.SecType,
+		Exchange:     view.Exchange,
+		PrimaryExch:  view.PrimaryExch,
+		Currency:     view.Currency,
+		LocalSymbol:  view.LocalSymbol,
+		TradingClass: view.TradingClass,
+		Expiry:       view.Expiry,
+		Strike:       view.Strike,
+		Right:        view.Right,
+		Multiplier:   view.Multiplier,
+	}
+	return purgeLegIDCandidates(view.LegID, purgeLegIDForContract(contract), purgeLegacyLegIDForContract(contract))
 }
 
 func addPurgeRestoreSkipped(res *rpc.PurgeRestoreResult, leg rpc.PurgeRestoreLeg, reason string) {

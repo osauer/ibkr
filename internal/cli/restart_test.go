@@ -168,6 +168,118 @@ func TestRunRestartCoreTimeoutWithoutForceFails(t *testing.T) {
 	}
 }
 
+func TestRunRestartAllCoreRestartsDaemonAndRunningApp(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	daemonStopped := 0
+	appStopped := 0
+	appFindCalls := 0
+	appStartCalled := false
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			return update.DaemonProcess{PID: 41, Command: "/tmp/ibkr daemon", SocketPath: "sock", LockPath: "lock"}, nil
+		},
+		stop: func(pid int, _ time.Duration) error {
+			daemonStopped = pid
+			return nil
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			return 42, rpc.HealthResult{DaemonVersion: "test", Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7496, ClientID: 15}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			appFindCalls++
+			if appFindCalls == 1 {
+				return appProcess{
+					PID:     51,
+					Command: "/tmp/ibkr app --remote",
+					Args:    []string{"app", "--remote"},
+				}, nil
+			}
+			return appProcess{
+				PID:     52,
+				Command: "/tmp/ibkr app --remote",
+				Args:    []string{"app", "--remote"},
+			}, nil
+		},
+		stop: func(pid int, _ time.Duration) error {
+			appStopped = pid
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			appStartCalled = true
+			return 0, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if daemonStopped != 41 {
+		t.Fatalf("daemonStopped = %d, want 41", daemonStopped)
+	}
+	if appStopped != 51 {
+		t.Fatalf("appStopped = %d, want 51", appStopped)
+	}
+	if appStartCalled {
+		t.Fatal("manual app start should not run when supervisor respawned the app")
+	}
+	var res restartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.Action != "restarted" || res.Target != "daemon" || res.OldPID != 41 || res.NewPID != 42 || !res.Graceful {
+		t.Fatalf("daemon result = %+v", res)
+	}
+	if res.App == nil {
+		t.Fatalf("app result missing: %+v", res)
+	}
+	if res.App.Action != "restarted" || res.App.Target != "app" || res.App.OldPID != 51 || res.App.NewPID != 52 || !res.App.Graceful {
+		t.Fatalf("app result = %+v", *res.App)
+	}
+	if strings.Join(res.App.Args, " ") != "app --remote" {
+		t.Fatalf("app args = %q", strings.Join(res.App.Args, " "))
+	}
+}
+
+func TestRunRestartAllCoreSkipsAppWhenNotRunning(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	appStartCalled := false
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			return update.DaemonProcess{}, update.ErrDaemonNotRunning
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			return 61, rpc.HealthResult{DaemonVersion: "test"}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{}, errAppNotRunning
+		},
+		start: func(context.Context, []string) (int, error) {
+			appStartCalled = true
+			return 0, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if appStartCalled {
+		t.Fatal("plain restart should not start a new app when none was running")
+	}
+	var res restartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.App != nil {
+		t.Fatalf("app result = %+v, want omitted", res.App)
+	}
+}
+
 func TestRunRestartAppCoreStartsWhenNoAppWasRunning(t *testing.T) {
 	t.Parallel()
 

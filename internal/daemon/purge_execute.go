@@ -103,6 +103,20 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.AsOf = s.orderNow()
 		return res, nil
 	}
+	openByLeg, err := s.openPurgeOrdersByLeg(status.Account)
+	if err != nil {
+		res.Status = purgeExecuteStatusError
+		res.ErrorLegs = len(legs)
+		res.Message = "load open purge orders: " + err.Error()
+		return res, nil
+	}
+	activeByLegSide, err := s.activePurgeLedgerQuantityByLegSide(status.Account)
+	if err != nil {
+		res.Status = purgeExecuteStatusError
+		res.ErrorLegs = len(legs)
+		res.Message = "load active purge ledger rows: " + err.Error()
+		return res, nil
+	}
 
 	for _, leg := range legs {
 		if err := ctx.Err(); err != nil {
@@ -110,7 +124,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.executePurgeLeg(ctx, status, positions, res, leg)
+		s.executePurgeLeg(ctx, status, positions, openByLeg, activeByLegSide, res, leg)
 	}
 
 	if res.SubmittedLegs > 0 && wait > 0 {
@@ -140,6 +154,9 @@ func (s *Server) purgeExecuteBlockers(status rpc.TradingStatus) []rpc.TradingBlo
 	blockers := s.brokerWriteAuthorization(status).Blockers
 	add := func(code, message, action string) {
 		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{Code: code, Message: message, Action: action})
+	}
+	if s == nil || s.purgeLedger == nil {
+		add("purge_ledger_unavailable", "purge execution requires a writable daemon purge ledger", "Fix the daemon state directory before purging positions.")
 	}
 	if !s.purgeRestoreEnabled() {
 		add("purge_restore_disabled", "purge/restore actions are disabled in platform settings", "Run `ibkr settings set features.purge_restore.enabled=true` before using purge/restore.")
@@ -233,17 +250,61 @@ func purgeNoCurrentPositionMessage(symbols []string) string {
 	return "no current positions matched purge target"
 }
 
-func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, positions []*ibkrlib.RawPosition, res *rpc.PurgeExecuteResult, leg rpc.PurgeExecuteLeg) {
+func (s *Server) activePurgeLedgerQuantityByLegSide(account string) (map[string]float64, error) {
+	out := map[string]float64{}
+	if s == nil || s.purgeLedger == nil {
+		return out, nil
+	}
+	rows, _, err := s.purgeLedger.Snapshot(strings.TrimSpace(account), "")
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.RemainingQuantity <= 0 || row.LegID == "" {
+			continue
+		}
+		legID := purgeLegIDForContract(row.Contract)
+		if legID == "" {
+			legID = row.LegID
+		}
+		out[purgeLedgerCoverageKey(legID, row.OriginalSide)] += row.RemainingQuantity
+	}
+	return out, nil
+}
+
+func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, activeByLegSide map[string]float64, res *rpc.PurgeExecuteResult, leg rpc.PurgeExecuteLeg) {
 	contract, currentQty, found := currentPurgePosition(positions, leg)
 	if !found || currentQty == 0 {
 		addPurgeSkipped(res, leg, "already flat")
 		return
 	}
+	currentSide := purgeOriginalSideForQuantity(currentQty)
+	if leg.OriginalSide == "" {
+		leg.OriginalSide = currentSide
+	}
+	inputLegID := strings.TrimSpace(leg.LegID)
+	leg.LegID = purgeLegIDForContract(contract)
+	legIDs := purgeLegIDCandidates(inputLegID, leg.LegID, purgeLegacyLegIDForContract(contract))
+	leg.Symbol = contract.Symbol
+	leg.SecType = contract.SecType
+	leg.Contract = contract
 	if purgeSideFlipped(leg.OriginalSide, currentQty) {
 		addPurgeSkipped(res, leg, "current position side no longer matches selected purge leg")
 		return
 	}
 	qty := math.Abs(currentQty)
+	if purgeOpenOrderExists(openByLeg, legIDs) {
+		addPurgeSkipped(res, leg, "open purge/restore order exists for this ledger row")
+		return
+	}
+	if covered := activePurgeLedgerCoveredQuantity(activeByLegSide, legIDs, currentSide); covered > 0 {
+		if qty <= covered+1e-9 {
+			addPurgeSkipped(res, leg, "current quantity already covered by active purge ledger")
+			return
+		}
+		qty -= covered
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%s: reduced purge quantity by %.4g already covered in active purge ledger", purgeExecuteLegLabel(leg), covered))
+	}
 	if math.Trunc(qty) != qty {
 		addPurgeSkipped(res, leg, "fractional current quantity cannot use the integer order path")
 		return
@@ -316,6 +377,62 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 	res.Orders = append(res.Orders, purgeOrderResult(leg, draft, orderID, quote, orderSendStateSendAttempted, "purge broker placeOrder transmit attempted; waiting for broker lifecycle callback"))
 }
 
+func purgeOriginalSideForQuantity(qty float64) string {
+	if qty < 0 {
+		return purgeOriginalSideShort
+	}
+	return purgeOriginalSideLong
+}
+
+func purgeLedgerCoverageKey(legID, originalSide string) string {
+	return strings.TrimSpace(legID) + "|" + strings.ToUpper(strings.TrimSpace(originalSide))
+}
+
+func purgeLegIDCandidates(values ...string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func purgeOpenOrderExists(openByLeg map[string][]rpc.OrderView, legIDs []string) bool {
+	for _, legID := range legIDs {
+		if len(openByLeg[legID]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func activePurgeLedgerCoveredQuantity(activeByLegSide map[string]float64, legIDs []string, originalSide string) float64 {
+	var covered float64
+	for _, legID := range legIDs {
+		covered += activeByLegSide[purgeLedgerCoverageKey(legID, originalSide)]
+	}
+	return covered
+}
+
+func purgeExecuteLegLabel(leg rpc.PurgeExecuteLeg) string {
+	if strings.EqualFold(leg.Contract.SecType, "OPT") {
+		expiry := leg.Contract.Expiry
+		if len(expiry) == 8 {
+			expiry = expiry[2:]
+		}
+		return fmt.Sprintf("%s %s %s %.2f", leg.Contract.Symbol, expiry, leg.Contract.Right, leg.Contract.Strike)
+	}
+	if leg.Contract.Symbol != "" {
+		return leg.Contract.Symbol
+	}
+	return leg.Symbol
+}
+
 func currentPurgePosition(positions []*ibkrlib.RawPosition, leg rpc.PurgeExecuteLeg) (rpc.ContractParams, float64, bool) {
 	for _, pos := range positions {
 		if pos == nil || !purgePositionMatchesLeg(*pos, leg) {
@@ -355,7 +472,8 @@ func purgePositionMatchesLeg(pos ibkrlib.RawPosition, leg rpc.PurgeExecuteLeg) b
 		strings.EqualFold(pos.Contract.Right, leg.Contract.Right) &&
 		optionalEqual(pos.Contract.Currency, leg.Contract.Currency) &&
 		optionalEqual(pos.Contract.TradingClass, leg.Contract.TradingClass) &&
-		optionalEqual(pos.Contract.LocalSymbol, leg.Contract.LocalSymbol)
+		optionalEqual(pos.Contract.LocalSymbol, leg.Contract.LocalSymbol) &&
+		optionalMultiplierEqual(pos.Contract.Multiplier, leg.Contract.Multiplier)
 }
 
 func purgeStockPositionMatches(pos ibkrlib.Contract, want rpc.ContractParams) bool {
@@ -386,7 +504,13 @@ func optionalEqual(a, b string) bool {
 	return a == "" || b == "" || strings.EqualFold(a, b)
 }
 
+func optionalMultiplierEqual(a, b int) bool {
+	return a <= 0 || b <= 0 || a == b
+}
+
 func contractParamsFromRawPosition(pos ibkrlib.RawPosition, fallback rpc.ContractParams) rpc.ContractParams {
+	rawMultiplier := pos.Contract.Multiplier
+	fallbackMultiplier := fallback.Multiplier
 	c := rpc.ContractParams{
 		ConID:        pos.Contract.ConID,
 		Symbol:       strings.ToUpper(strings.TrimSpace(pos.Contract.Symbol)),
@@ -399,7 +523,6 @@ func contractParamsFromRawPosition(pos ibkrlib.RawPosition, fallback rpc.Contrac
 		Expiry:       strings.TrimSpace(pos.Contract.Expiry),
 		Strike:       pos.Contract.Strike,
 		Right:        strings.ToUpper(strings.TrimSpace(pos.Contract.Right)),
-		Multiplier:   max(pos.Contract.Multiplier, fallback.Multiplier),
 	}
 	if c.SecType == "" {
 		c.SecType = fallback.SecType
@@ -422,10 +545,47 @@ func contractParamsFromRawPosition(pos ibkrlib.RawPosition, fallback rpc.Contrac
 	if c.Currency == "" {
 		c.Currency = "USD"
 	}
-	if c.Multiplier == 0 {
-		c.Multiplier = contractMultiplier(c)
+	normalisePositionStockRoute(&c)
+	switch strings.ToUpper(strings.TrimSpace(c.SecType)) {
+	case "STK", "ETF":
+		c.Multiplier = 1
+	case "OPT":
+		if rawMultiplier > 0 {
+			c.Multiplier = rawMultiplier
+		} else if fallbackMultiplier > 0 {
+			c.Multiplier = fallbackMultiplier
+		} else {
+			c.Multiplier = 100
+		}
+	default:
+		if rawMultiplier > 0 {
+			c.Multiplier = rawMultiplier
+		} else if fallbackMultiplier > 0 {
+			c.Multiplier = fallbackMultiplier
+		} else {
+			c.Multiplier = contractMultiplier(c)
+		}
 	}
 	return c
+}
+
+func normalisePositionStockRoute(c *rpc.ContractParams) {
+	if c == nil {
+		return
+	}
+	switch strings.ToUpper(strings.TrimSpace(c.SecType)) {
+	case "STK", "ETF":
+	default:
+		return
+	}
+	exchange := strings.ToUpper(strings.TrimSpace(c.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(c.PrimaryExch))
+	if primary == "" && exchange != "" && exchange != "SMART" {
+		c.PrimaryExch = exchange
+	}
+	if exchange == "" || exchange != "SMART" {
+		c.Exchange = "SMART"
+	}
 }
 
 func purgeSideFlipped(originalSide string, currentQty float64) bool {
@@ -458,13 +618,17 @@ func purgeAggressiveLimit(action string, contract rpc.ContractParams, quote rpc.
 	bid := *quote.Bid
 	ask := *quote.Ask
 	mid := (bid + ask) / 2
-	tick := purgePriceTick(contract, mid)
+	tick := purgeQuoteTick(contract, bid, ask, mid)
 	cushion := max(2*tick, 0.25*(ask-bid))
+	steps := math.Ceil(cushion / tick)
+	if steps < 1 {
+		steps = 1
+	}
 	switch action {
 	case rpc.OrderActionBuy:
-		return roundPrice(math.Ceil((ask+cushion)/tick) * tick), nil
+		return roundPrice(ask + steps*tick), nil
 	case rpc.OrderActionSell:
-		price := math.Floor((bid-cushion)/tick) * tick
+		price := bid - steps*tick
 		if price < tick {
 			return 0, fmt.Errorf("aggressive sell limit would be below minimum tick")
 		}
@@ -472,6 +636,18 @@ func purgeAggressiveLimit(action string, contract rpc.ContractParams, quote rpc.
 	default:
 		return 0, fmt.Errorf("action must be BUY or SELL")
 	}
+}
+
+func purgeQuoteTick(contract rpc.ContractParams, bid, ask, price float64) float64 {
+	fallback := purgePriceTick(contract, price)
+	if strings.EqualFold(contract.SecType, "OPT") {
+		return fallback
+	}
+	spread := roundPrice(ask - bid)
+	if spread > 0 && spread <= 0.1 {
+		return spread
+	}
+	return fallback
 }
 
 func purgePriceTick(contract rpc.ContractParams, price float64) float64 {
@@ -482,6 +658,27 @@ func purgePriceTick(contract rpc.ContractParams, price float64) float64 {
 }
 
 func purgeLegIDForContract(c rpc.ContractParams) string {
+	return purgeLegIDForContractWithMultiplier(c, true)
+}
+
+func purgeLegacyLegIDForContract(c rpc.ContractParams) string {
+	return purgeLegIDForContractWithMultiplier(c, false)
+}
+
+func purgeLegIDForContractWithMultiplier(c rpc.ContractParams, includeMultiplier bool) string {
+	if c.ConID > 0 {
+		parts := []string{
+			strings.ToUpper(strings.TrimSpace(c.Symbol)),
+			strings.ToUpper(strings.TrimSpace(c.SecType)),
+			strconv.Itoa(c.ConID),
+			strings.ToUpper(strings.TrimSpace(c.Currency)),
+		}
+		if includeMultiplier {
+			parts = append(parts, strconv.Itoa(c.Multiplier))
+		}
+		sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+		return "leg_" + hex.EncodeToString(sum[:])[:12]
+	}
 	parts := []string{
 		strings.ToUpper(strings.TrimSpace(c.Symbol)),
 		strings.ToUpper(strings.TrimSpace(c.SecType)),
@@ -494,6 +691,9 @@ func purgeLegIDForContract(c rpc.ContractParams) string {
 		strings.TrimSpace(c.Expiry),
 		fmt.Sprintf("%.4f", c.Strike),
 		strings.ToUpper(strings.TrimSpace(c.Right)),
+	}
+	if includeMultiplier {
+		parts = append(parts, strconv.Itoa(c.Multiplier))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return "leg_" + hex.EncodeToString(sum[:])[:12]
@@ -609,7 +809,7 @@ func purgeExecuteFinalStatus(res rpc.PurgeExecuteResult) string {
 		return purgeExecuteStatusError
 	}
 	for _, skipped := range res.Skipped {
-		if skipped.Reason != "already flat" {
+		if !purgeExecuteSkippedReasonIsIdempotent(skipped.Reason) {
 			if res.SubmittedLegs > 0 {
 				return purgeExecuteStatusPartial
 			}
@@ -622,11 +822,25 @@ func purgeExecuteFinalStatus(res rpc.PurgeExecuteResult) string {
 	return purgeExecuteStatusFlat
 }
 
+func purgeExecuteSkippedReasonIsIdempotent(reason string) bool {
+	switch reason {
+	case "already flat",
+		"open purge/restore order exists for this ledger row",
+		"current quantity already covered by active purge ledger":
+		return true
+	default:
+		return false
+	}
+}
+
 func purgeExecuteMessage(res rpc.PurgeExecuteResult) string {
 	switch res.Status {
 	case purgeExecuteStatusSubmitted:
 		return fmt.Sprintf("submitted %d purge order(s)", res.SubmittedLegs)
 	case purgeExecuteStatusFlat:
+		if len(res.Skipped) > 0 {
+			return "selected purge legs are already flat or already covered by active purge state"
+		}
 		return "selected purge legs are already flat"
 	case purgeExecuteStatusPartial:
 		return fmt.Sprintf("submitted %d purge order(s); %d leg(s) need attention", res.SubmittedLegs, res.SkippedLegs)

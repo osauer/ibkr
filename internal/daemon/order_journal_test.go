@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +101,30 @@ func TestOrderJournalSummaryCountsNonTerminalLatestState(t *testing.T) {
 	}
 	if !strings.Contains(summary.LastEvent, "closed") {
 		t.Fatalf("LastEvent = %q, want closed order ref", summary.LastEvent)
+	}
+}
+
+func TestMaxReservedBrokerOrderID(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "order-journal.jsonl")
+	store := newOrderJournalStore(path)
+	now := time.Date(2026, 6, 8, 8, 55, 0, 0, time.UTC)
+	for _, id := range []int{10, 15, 12} {
+		if err := store.Append(orderJournalEvent{
+			At:              now,
+			Type:            orderJournalEventSendAttempted,
+			OrderRef:        "ord-" + strconv.Itoa(id),
+			ReservedOrderID: id,
+			SendState:       orderSendStateSendAttempted,
+		}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	got, err := maxReservedBrokerOrderID(store)
+	if err != nil {
+		t.Fatalf("maxReservedBrokerOrderID: %v", err)
+	}
+	if got != 15 {
+		t.Fatalf("max reserved id = %d, want 15", got)
 	}
 }

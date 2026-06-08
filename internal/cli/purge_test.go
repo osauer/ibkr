@@ -442,6 +442,36 @@ func TestPurgeLegIDStableAcrossQuantity(t *testing.T) {
 	}
 }
 
+func TestPurgeContractInstrumentKeyIncludesConIDAndMultiplier(t *testing.T) {
+	t.Parallel()
+
+	standard := rpc.ContractParams{
+		ConID:        0,
+		Symbol:       "SPY",
+		SecType:      "OPT",
+		Exchange:     "SMART",
+		Currency:     "USD",
+		LocalSymbol:  "SPY  260619C00520000",
+		TradingClass: "SPY",
+		Expiry:       "20260619",
+		Strike:       520,
+		Right:        "C",
+		Multiplier:   100,
+	}
+	mini := standard
+	mini.Multiplier = 10
+	if purgeContractInstrumentKey(standard) == purgeContractInstrumentKey(mini) {
+		t.Fatalf("instrument key should distinguish option multipliers")
+	}
+	withConID := standard
+	withConID.ConID = 777001
+	otherConID := standard
+	otherConID.ConID = 777002
+	if purgeContractInstrumentKey(withConID) == purgeContractInstrumentKey(otherConID) {
+		t.Fatalf("instrument key should distinguish option ConIDs")
+	}
+}
+
 func TestPurgeSubcommandIndexHandlesHoistedFlags(t *testing.T) {
 	t.Parallel()
 

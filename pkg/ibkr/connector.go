@@ -4713,7 +4713,7 @@ func (c *Connector) dispatchOrderLifecycle(ev OrderLifecycleEvent) {
 func orderBrokerErrorStatus(code int, message string) string {
 	msg := strings.ToLower(message)
 	switch {
-	case code == 201 || code == 321 || code == 103:
+	case code == 201 || code == 321 || code == 103 || code == 110:
 		return "Rejected"
 	case strings.Contains(msg, "reject") || strings.Contains(msg, "duplicate order id"):
 		return "Rejected"

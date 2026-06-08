@@ -888,7 +888,27 @@ func purgeContractFromPosition(p rpc.PositionView) rpc.ContractParams {
 	if c.Currency == "" {
 		c.Currency = "USD"
 	}
+	normalisePurgePositionStockRoute(&c)
 	return c
+}
+
+func normalisePurgePositionStockRoute(c *rpc.ContractParams) {
+	if c == nil {
+		return
+	}
+	switch strings.ToUpper(strings.TrimSpace(c.SecType)) {
+	case "STK", "ETF":
+	default:
+		return
+	}
+	exchange := strings.ToUpper(strings.TrimSpace(c.Exchange))
+	primary := strings.ToUpper(strings.TrimSpace(c.PrimaryExch))
+	if primary == "" && exchange != "" && exchange != "SMART" {
+		c.PrimaryExch = exchange
+	}
+	if exchange == "" || exchange != "SMART" {
+		c.Exchange = "SMART"
+	}
 }
 
 func purgeExitPrice(p rpc.PositionView, action string) (float64, string, []string) {
@@ -1748,6 +1768,7 @@ func purgeContractInstrumentKey(c rpc.ContractParams) string {
 	parts := []string{
 		strings.ToUpper(strings.TrimSpace(c.Symbol)),
 		strings.ToUpper(strings.TrimSpace(c.SecType)),
+		strconv.Itoa(c.ConID),
 		strings.ToUpper(strings.TrimSpace(c.Exchange)),
 		strings.ToUpper(strings.TrimSpace(c.PrimaryExch)),
 		strings.ToUpper(strings.TrimSpace(c.Currency)),
@@ -1756,6 +1777,7 @@ func purgeContractInstrumentKey(c rpc.ContractParams) string {
 		strings.TrimSpace(c.Expiry),
 		strconv.FormatFloat(c.Strike, 'f', 4, 64),
 		strings.ToUpper(strings.TrimSpace(c.Right)),
+		strconv.Itoa(c.Multiplier),
 	}
 	return strings.Join(parts, "|")
 }

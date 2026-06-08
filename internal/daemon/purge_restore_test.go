@@ -171,6 +171,54 @@ func TestPurgeRestorePaperNeutralStockAndOption(t *testing.T) {
 	}
 }
 
+func TestPurgeRestoreRoutesStockLedgerExecutionVenue(t *testing.T) {
+	t.Parallel()
+
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 100_000})
+	contract := purgeLedgerTestStockContract()
+	contract.Symbol = "SAP"
+	contract.Exchange = "TGATE"
+	contract.PrimaryExch = "IBIS"
+	contract.Currency = "EUR"
+	contract.LocalSymbol = "SAP"
+	contract.TradingClass = "XETRA"
+	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-sap", "leg-sap", contract, rpc.OrderActionSell, 1, 159.24)
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return nil, nil }
+	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		if c.Exchange != "SMART" || c.PrimaryExch != "IBIS" || c.Multiplier != 1 {
+			t.Fatalf("quote contract = %+v, want SMART/IBIS stock multiplier 1", c)
+		}
+		return purgeRestoreQuote(159.20, 159.22), nil
+	}
+	srv.orderPreviewWhatIf = func(_ context.Context, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		if draft.Contract.Exchange != "SMART" || draft.Contract.PrimaryExch != "IBIS" {
+			t.Fatalf("WhatIf contract = %+v, want SMART/IBIS", draft.Contract)
+		}
+		if draft.LimitPrice != 159.26 || draft.Strategy != "restore-aggressive-limit" {
+			t.Fatalf("WhatIf draft limit/strategy = %.4f/%s, want 159.2600/restore-aggressive-limit", draft.LimitPrice, draft.Strategy)
+		}
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+	srv.orderReserveBrokerID = func(context.Context) (int, error) { return 1001, nil }
+	var sentContract *ibkrlib.Contract
+	srv.orderPlaceBroker = func(_ context.Context, contract *ibkrlib.Contract, _ *ibkrlib.RawOrder) error {
+		copy := *contract
+		sentContract = &copy
+		return nil
+	}
+
+	res, err := srv.executePurgeRestore(context.Background(), rpc.PurgeRestoreParams{All: true, Scale: 1, WaitMs: 1})
+	if err != nil {
+		t.Fatalf("executePurgeRestore: %v", err)
+	}
+	if res.Status != purgeRestoreStatusSubmitted || res.SubmittedLegs != 1 {
+		t.Fatalf("restore result = %+v, want submitted", res)
+	}
+	if sentContract == nil || sentContract.Exchange != "SMART" || sentContract.PrimaryExch != "IBIS" || sentContract.Multiplier != 0 {
+		t.Fatalf("sent contract = %+v, want SMART/IBIS with omitted stock multiplier", sentContract)
+	}
+}
+
 func newPurgeRestoreTestServer(t *testing.T, trading config.Trading) *Server {
 	t.Helper()
 	srv := newPurgeExecuteTestServer(t)

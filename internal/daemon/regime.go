@@ -40,7 +40,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		return nil, s.gatewayUnavailableError()
 	}
 
-	deps := productionRegimeDeps(c, s.logger.Warnf, s.regimeSeries)
+	deps := productionRegimeDeps(c, s.logger.Warnf, s.regimeSeries, s.regimeHistory)
 	res := runRegimeFanout(
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
@@ -311,7 +311,7 @@ type regimeDeps struct {
 // productionRegimeDeps wires the deps struct to the live connector.
 // Tests pass a hand-rolled regimeDeps with closures returning canned
 // values instead.
-func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any), seriesCache *regimeSeriesCache) *regimeDeps {
+func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, args ...any), seriesCache *regimeSeriesCache, historyCache *regimeHistoryCache) *regimeDeps {
 	officialSeries := fetchOfficialRegimeSeries
 	if seriesCache != nil {
 		officialSeries = func(ctx context.Context, seriesID string) ([]regimeSeriesPoint, error) {
@@ -326,6 +326,9 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
 		},
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
+			if historyCache != nil {
+				return historyCache.fetch(ctx, sym, days, c.FetchHistoricalDailyBarsCtx)
+			}
 			return c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
 		},
 		officialSeries: officialSeries,
@@ -618,7 +621,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		sma := averageClose(bars, 50)
 		if sma > 0 {
 			out.HYG50DMA = new(sma)
-			out.HYG50DMAQuality = derivedQuality(now, "HYG 50-bar SMA")
+			out.HYG50DMAQuality = derivedQuality(historyBarAsOf(bars[len(bars)-1], now), "HYG 50-bar SMA")
 		}
 	}
 

@@ -327,6 +327,16 @@ async function exerciseAccountPanel(page) {
   if (panel.accountHasUnderlyingBook) {
     throw new Error("account panel should not contain the underlyings subledger");
   }
+  const accountDetailInitiallyHidden = await page.locator("#accountOverviewDetail").evaluate((detail) => detail.hidden);
+  if (!accountDetailInitiallyHidden) {
+    throw new Error("account overview detail should start folded");
+  }
+  await page.locator("#accountOverviewToggle").click();
+  await page.waitForFunction(() => {
+    const toggle = document.getElementById("accountOverviewToggle");
+    const detail = document.getElementById("accountOverviewDetail");
+    return toggle?.getAttribute("aria-expanded") === "true" && detail && !detail.hidden;
+  }, { timeout: 5000 });
   const exposureDisabled = await page.locator("#accountLargestExposureToggle").evaluate((button) => button.disabled);
   if (!exposureDisabled) {
     await page.locator("#accountLargestExposureToggle").click();
@@ -341,6 +351,7 @@ async function exerciseAccountPanel(page) {
     account: panel.accountLabel,
     mode: panel.pill,
     account_has_underlying_book: panel.accountHasUnderlyingBook,
+    detail_initially_folded: accountDetailInitiallyHidden,
     exposure_detail_disabled: exposureDisabled,
   };
 }
@@ -825,7 +836,7 @@ async function exerciseAlertHistory(page) {
     hint: document.getElementById("alertsHint")?.textContent || "",
   }));
   let selected = false;
-  const firstAlert = page.locator("#currentSignalList .alert-row, #alertHistoryList .alert-row, #previousContextList .alert-row").first();
+  const firstAlert = page.locator("#currentSignalList .alert-row:visible, #alertHistoryList .alert-row:visible, #previousContextList .alert-row:visible").first();
   if ((await firstAlert.count()) > 0) {
     await firstAlert.click();
     await page.waitForFunction(() => {
