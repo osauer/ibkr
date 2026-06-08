@@ -377,23 +377,44 @@ func gammaStatusQualityScope(c *rpc.GammaZeroComputed) string {
 
 func staleRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
 	candidates := []struct {
-		name     string
-		statuses []string
+		name string
+		rows []regimeClusterQualityRow
 	}{
-		{name: "vol", statuses: []string{r.VIXTermStructure.Status, r.VolOfVol.Status}},
-		{name: "credit", statuses: []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}},
-		{name: "funding", statuses: []string{r.FundingStress.Status}},
-		{name: "FX", statuses: []string{r.USDJPY.Status}},
-		{name: "gamma", statuses: []string{r.GammaZero.Status}},
-		{name: "breadth", statuses: []string{r.Breadth.Status}},
+		{name: "vol", rows: []regimeClusterQualityRow{
+			{status: r.VIXTermStructure.Status, band: bandForVIX(r.VIXTermStructure)},
+			{status: r.VolOfVol.Status, band: bandForVolOfVol(r.VolOfVol)},
+		}},
+		{name: "credit", rows: []regimeClusterQualityRow{
+			{status: r.HYGSPYDivergence.Status, band: bandForHYGSPY(r.HYGSPYDivergence)},
+			{status: r.CreditSpreads.Status, band: bandForCreditSpreads(r.CreditSpreads)},
+		}},
+		{name: "funding", rows: []regimeClusterQualityRow{{status: r.FundingStress.Status, band: bandForFundingStress(r.FundingStress)}}},
+		{name: "FX", rows: []regimeClusterQualityRow{{status: r.USDJPY.Status, band: bandForUSDJPY(r.USDJPY)}}},
+		{name: "gamma", rows: []regimeClusterQualityRow{{status: r.GammaZero.Status, band: bandForGamma(r.GammaZero)}}},
+		{name: "breadth", rows: []regimeClusterQualityRow{{status: r.Breadth.Status, band: bandForBreadth(r.Breadth)}}},
 	}
 	out := []string{}
 	for _, c := range candidates {
-		if hasRegimeStatus(c.statuses, rpc.RegimeStatusStale) {
+		if clusterEvidenceIsStale(c.rows) {
 			out = append(out, c.name)
 		}
 	}
 	return out
+}
+
+type regimeClusterQualityRow struct {
+	status string
+	band   string
+}
+
+func clusterEvidenceIsStale(rows []regimeClusterQualityRow) bool {
+	stale := false
+	for _, row := range rows {
+		if row.status == rpc.RegimeStatusStale {
+			stale = true
+		}
+	}
+	return stale
 }
 
 func partialRegimeClusters(r *rpc.RegimeSnapshotResult) []string {
