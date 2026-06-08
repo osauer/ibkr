@@ -218,7 +218,7 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.Filled != 0 {
 		view.Filled = ev.Filled
 	}
-	if ev.Remaining != 0 {
+	if ev.Remaining != 0 || orderJournalEventCarriesZeroRemaining(ev) {
 		view.Remaining = ev.Remaining
 	}
 	if ev.AvgFillPrice != 0 {
@@ -247,6 +247,14 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 		view.UpdatedAt = ev.At
 		view.LastEvent = ev.Type
 	}
+}
+
+func orderJournalEventCarriesZeroRemaining(ev orderJournalEvent) bool {
+	if ev.Remaining != 0 {
+		return true
+	}
+	return strings.EqualFold(ev.Status, "Filled") ||
+		(strings.EqualFold(ev.Status, "Cancelled") && ev.Filled == ev.Quantity && ev.Quantity > 0)
 }
 
 func brokerErrorShouldPreserveWorkingOrder(view rpc.OrderView, ev orderJournalEvent) bool {
@@ -397,6 +405,9 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 	case orderJournalEventCancelRequested:
 		return rpc.OrderLifecyclePendingCancel
 	case orderJournalEventBrokerError:
+		if brokerErrorIsTerminalReject(ev.Message) {
+			return rpc.OrderLifecycleRejected
+		}
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledUnknown:
 		return rpc.OrderLifecycleUnknownReconcileRequired
@@ -410,6 +421,12 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 
 func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
 	if view.LastEvent == orderJournalEventBrokerError && view.SendState == orderSendStateUncertainSend {
+		if view.Status != "" {
+			return rpc.OrderLifecycleUnknownReconcileRequired
+		}
+		if brokerErrorIsTerminalReject(view.LastMessage) {
+			return rpc.OrderLifecycleRejected
+		}
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	}
 	if view.Status != "" {
@@ -436,6 +453,14 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
 		}
 		return rpc.OrderLifecyclePreviewed
 	}
+}
+
+func brokerErrorIsTerminalReject(message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(msg, "broker error 110:") ||
+		strings.Contains(msg, "price does not conform to the minimum price variation") ||
+		strings.Contains(msg, "duplicate order id") ||
+		strings.Contains(msg, "reject")
 }
 
 func mapBrokerOrderLifecycleStatus(status string, filled, remaining float64) string {
@@ -553,8 +578,10 @@ func orderJournalCanonicalKey(ev orderJournalEvent, aliases map[string]string) s
 
 func orderJournalKeyAliases(events []orderJournalEvent) map[string]string {
 	aliases := map[string]string{}
+	ambiguousOrderIDs := ambiguousReservedOrderIDs(events)
+	prelinkedOrderIDs := reservedOrderIDsWithPrelinkedBrokerOnlyEvents(events)
 	for _, ev := range events {
-		keys := orderJournalIdentityKeys(ev)
+		keys := orderJournalIdentityKeysForAliases(ev, ambiguousOrderIDs, prelinkedOrderIDs)
 		if len(keys) == 0 {
 			continue
 		}
@@ -590,12 +617,57 @@ func orderJournalKeyAliases(events []orderJournalEvent) map[string]string {
 	return aliases
 }
 
-func orderJournalIdentityKeys(ev orderJournalEvent) []string {
+func ambiguousReservedOrderIDs(events []orderJournalEvent) map[int]bool {
+	refsByOrderID := map[int]map[string]bool{}
+	for _, ev := range events {
+		if ev.ReservedOrderID == 0 || ev.OrderRef == "" {
+			continue
+		}
+		refs := refsByOrderID[ev.ReservedOrderID]
+		if refs == nil {
+			refs = map[string]bool{}
+			refsByOrderID[ev.ReservedOrderID] = refs
+		}
+		refs[ev.OrderRef] = true
+	}
+	out := map[int]bool{}
+	for orderID, refs := range refsByOrderID {
+		if len(refs) > 1 {
+			out[orderID] = true
+		}
+	}
+	return out
+}
+
+func reservedOrderIDsWithPrelinkedBrokerOnlyEvents(events []orderJournalEvent) map[int]bool {
+	firstRefIndex := map[int]int{}
+	for i, ev := range events {
+		if ev.ReservedOrderID == 0 || ev.OrderRef == "" {
+			continue
+		}
+		if _, exists := firstRefIndex[ev.ReservedOrderID]; !exists {
+			firstRefIndex[ev.ReservedOrderID] = i
+		}
+	}
+	out := map[int]bool{}
+	for i, ev := range events {
+		if ev.ReservedOrderID == 0 || ev.OrderRef != "" {
+			continue
+		}
+		refIndex, exists := firstRefIndex[ev.ReservedOrderID]
+		if exists && i < refIndex {
+			out[ev.ReservedOrderID] = true
+		}
+	}
+	return out
+}
+
+func orderJournalIdentityKeysForAliases(ev orderJournalEvent, ambiguousOrderIDs, prelinkedOrderIDs map[int]bool) []string {
 	keys := make([]string, 0, 3)
 	if ev.OrderRef != "" {
 		keys = append(keys, "ref:"+ev.OrderRef)
 	}
-	if ev.ReservedOrderID != 0 {
+	if ev.ReservedOrderID != 0 && !(ev.OrderRef != "" && (ambiguousOrderIDs[ev.ReservedOrderID] || prelinkedOrderIDs[ev.ReservedOrderID])) {
 		keys = append(keys, "order:"+strconv.Itoa(ev.ReservedOrderID))
 	}
 	if ev.PermID != 0 {

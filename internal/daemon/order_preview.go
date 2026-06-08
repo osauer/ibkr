@@ -752,13 +752,20 @@ func roundPrice(price float64) float64 {
 }
 
 func contractMultiplier(contract rpc.ContractParams) int {
-	if contract.Multiplier > 0 {
-		return contract.Multiplier
-	}
-	if strings.EqualFold(contract.SecType, "OPT") {
+	switch strings.ToUpper(strings.TrimSpace(contract.SecType)) {
+	case "STK", "ETF":
+		return 1
+	case "OPT":
+		if contract.Multiplier > 0 {
+			return contract.Multiplier
+		}
 		return 100
+	default:
+		if contract.Multiplier > 0 {
+			return contract.Multiplier
+		}
+		return 1
 	}
-	return 1
 }
 
 func (s *Server) previewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
@@ -859,6 +866,9 @@ func optionPositionQuantity(positions []*ibkrlib.RawPosition, contract rpc.Contr
 			continue
 		}
 		if wantTradingClass != "" && pos.Contract.TradingClass != "" && !strings.EqualFold(pos.Contract.TradingClass, wantTradingClass) {
+			continue
+		}
+		if !optionalMultiplierEqual(pos.Contract.Multiplier, contract.Multiplier) {
 			continue
 		}
 		return pos.Position

@@ -53,20 +53,21 @@ type restartDeps struct {
 }
 
 type restartResult struct {
-	Action     string           `json:"action"`
-	Target     string           `json:"target"`
-	WasRunning bool             `json:"was_running"`
-	Started    bool             `json:"started"`
-	Forced     bool             `json:"forced"`
-	Graceful   bool             `json:"graceful"`
-	OldPID     int              `json:"old_pid,omitempty"`
-	NewPID     int              `json:"new_pid,omitempty"`
-	OldCommand string           `json:"old_command,omitempty"`
-	Foreground bool             `json:"foreground,omitempty"`
-	SocketPath string           `json:"socket_path"`
-	LockPath   string           `json:"lock_path"`
-	Health     rpc.HealthResult `json:"health"`
-	ElapsedMS  int64            `json:"elapsed_ms"`
+	Action     string            `json:"action"`
+	Target     string            `json:"target"`
+	WasRunning bool              `json:"was_running"`
+	Started    bool              `json:"started"`
+	Forced     bool              `json:"forced"`
+	Graceful   bool              `json:"graceful"`
+	OldPID     int               `json:"old_pid,omitempty"`
+	NewPID     int               `json:"new_pid,omitempty"`
+	OldCommand string            `json:"old_command,omitempty"`
+	Foreground bool              `json:"foreground,omitempty"`
+	SocketPath string            `json:"socket_path"`
+	LockPath   string            `json:"lock_path"`
+	Health     rpc.HealthResult  `json:"health"`
+	App        *appRestartResult `json:"app,omitempty"`
+	ElapsedMS  int64             `json:"elapsed_ms"`
 }
 
 type appProcess struct {
@@ -80,6 +81,12 @@ type appRestartDeps struct {
 	stop  func(int, time.Duration) error
 	kill  func(int, time.Duration) error
 	start func(context.Context, []string) (int, error)
+}
+
+type appRestartBehavior struct {
+	startWhenMissing bool
+	prefix           string
+	pairHint         bool
 }
 
 type appRestartResult struct {
@@ -115,7 +122,7 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs := flagSet(env, "restart")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable restart result")
 	fs.BoolVar(&opts.force, "force", false, "send SIGKILL if graceful SIGTERM does not stop the target process before --timeout")
-	fs.BoolVar(&opts.app, "app", false, "restart the HyperServe app process instead of the daemon")
+	fs.BoolVar(&opts.app, "app", false, "restart/start only the HyperServe app process instead of the daemon")
 	fs.DurationVar(&opts.timeout, "timeout", restartDefaultTimeout, "how long to wait for graceful process stop before failing or forcing")
 	fs.StringVar(&opts.appAddr, "addr", "", "app listen address to use with --app")
 	fs.StringVar(&opts.appPublicURL, "public-url", "", "app public URL to use with --app")
@@ -150,15 +157,59 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			start: startAppProcess,
 		})
 	}
-	return runRestartCore(ctx, &opts, restartDeps{
-		find:           update.FindDaemonProcess,
-		stop:           update.StopDaemon,
-		kill:           update.KillDaemon,
-		startAndHealth: startDaemonAndFetchHealth,
-	})
+	return runRestartAllCore(ctx, &opts,
+		restartDeps{
+			find:           update.FindDaemonProcess,
+			stop:           update.StopDaemon,
+			kill:           update.KillDaemon,
+			startAndHealth: startDaemonAndFetchHealth,
+		},
+		appRestartDeps{
+			find:  findAppProcess,
+			stop:  stopAppProcess,
+			kill:  killAppProcess,
+			start: startAppProcess,
+		},
+	)
 }
 
 func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps) int {
+	res, exit := restartDaemon(ctx, opts, deps)
+	if exit != 0 {
+		return exit
+	}
+	if opts.jsonOut {
+		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+	}
+	renderRestartStarted(opts.out, res)
+	return 0
+}
+
+func runRestartAllCore(ctx context.Context, opts *restartOptions, daemonDeps restartDeps, appDeps appRestartDeps) int {
+	res, exit := restartDaemon(ctx, opts, daemonDeps)
+	if exit != 0 {
+		return exit
+	}
+	if !opts.jsonOut {
+		renderRestartStarted(opts.out, res)
+	}
+	appRes, appRan, appExit := restartApp(ctx, opts, appDeps, appRestartBehavior{
+		startWhenMissing: false,
+		prefix:           "ibkr restart",
+	})
+	if appExit != 0 {
+		return appExit
+	}
+	if appRan {
+		res.App = &appRes
+	}
+	if opts.jsonOut {
+		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+	}
+	return 0
+}
+
+func restartDaemon(ctx context.Context, opts *restartOptions, deps restartDeps) (restartResult, int) {
 	startedAt := time.Now()
 	socketPath := dial.DefaultSocketPath()
 	lockPath := dial.LockPath(socketPath)
@@ -186,14 +237,14 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 				if !opts.force && errors.Is(stopErr, update.ErrStopTimeout) {
 					fmt.Fprintln(opts.err, "ibkr restart: re-run with --force to send SIGKILL after the graceful timeout")
 				}
-				return 1
+				return res, 1
 			}
 			if !opts.jsonOut {
 				fmt.Fprintf(opts.out, "ibkr restart: daemon pid %d ignored SIGTERM; forcing SIGKILL\n", proc.PID)
 			}
 			if err := deps.kill(proc.PID, opts.timeout); err != nil {
 				fmt.Fprintf(opts.err, "ibkr restart: %v\n", err)
-				return 1
+				return res, 1
 			}
 			res.Forced = true
 		} else {
@@ -213,27 +264,41 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 		}
 	default:
 		fmt.Fprintf(opts.err, "ibkr restart: %v\n", err)
-		return 1
+		return res, 1
 	}
 
 	newPID, health, err := deps.startAndHealth(ctx, socketPath, opts.err, opts.jsonOut)
 	if err != nil {
 		fmt.Fprintf(opts.err, "ibkr restart: start daemon: %v\n", err)
-		return 1
+		return res, 1
 	}
 	res.Started = true
 	res.NewPID = newPID
 	res.Health = health
 	res.ElapsedMS = time.Since(startedAt).Milliseconds()
-
-	if opts.jsonOut {
-		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
-	}
-	renderRestartStarted(opts.out, res)
-	return 0
+	return res, 0
 }
 
 func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestartDeps) int {
+	res, _, exit := restartApp(ctx, opts, deps, appRestartBehavior{
+		startWhenMissing: true,
+		prefix:           "ibkr restart --app",
+		pairHint:         true,
+	})
+	if exit != 0 {
+		return exit
+	}
+	if opts.jsonOut {
+		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+	}
+	return 0
+}
+
+func restartApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, behavior appRestartBehavior) (appRestartResult, bool, int) {
+	prefix := strings.TrimSpace(behavior.prefix)
+	if prefix == "" {
+		prefix = "ibkr restart --app"
+	}
 	startedAt := time.Now()
 	res := appRestartResult{Action: "started", Target: "app", Args: []string{"app"}}
 	args := []string{"app"}
@@ -261,18 +326,18 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 		stopErr := deps.stop(proc.PID, opts.timeout)
 		if stopErr != nil {
 			if !opts.force || !errors.Is(stopErr, errAppStopTimeout) {
-				fmt.Fprintf(opts.err, "ibkr restart --app: %v\n", stopErr)
+				fmt.Fprintf(opts.err, "%s: %v\n", prefix, stopErr)
 				if !opts.force && errors.Is(stopErr, errAppStopTimeout) {
-					fmt.Fprintln(opts.err, "ibkr restart --app: re-run with --force to send SIGKILL after the graceful timeout")
+					fmt.Fprintf(opts.err, "%s: re-run with --force to send SIGKILL after the graceful timeout\n", prefix)
 				}
-				return 1
+				return res, true, 1
 			}
 			if !opts.jsonOut {
-				fmt.Fprintf(opts.out, "ibkr restart --app: app pid %d ignored SIGTERM; forcing SIGKILL\n", proc.PID)
+				fmt.Fprintf(opts.out, "%s: app pid %d ignored SIGTERM; forcing SIGKILL\n", prefix, proc.PID)
 			}
 			if err := deps.kill(proc.PID, opts.timeout); err != nil {
-				fmt.Fprintf(opts.err, "ibkr restart --app: %v\n", err)
-				return 1
+				fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
+				return res, true, 1
 			}
 			res.Forced = true
 		} else {
@@ -283,50 +348,58 @@ func runRestartAppCore(ctx context.Context, opts *restartOptions, deps appRestar
 			if res.Forced {
 				mode = "with SIGKILL"
 			}
-			fmt.Fprintf(opts.out, "ibkr restart --app: stopped app pid %d %s\n", proc.PID, mode)
+			fmt.Fprintf(opts.out, "%s: stopped app pid %d %s\n", prefix, proc.PID, mode)
 		}
 		if restarted, ok, err := waitForAppRespawn(ctx, deps.find, args, 2*time.Second); err != nil {
-			fmt.Fprintf(opts.err, "ibkr restart --app: %v\n", err)
-			return 1
+			fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
+			return res, true, 1
 		} else if ok {
 			res.Started = true
 			res.NewPID = restarted.PID
 			res.ElapsedMS = time.Since(startedAt).Milliseconds()
-			if opts.jsonOut {
-				return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+			if !opts.jsonOut {
+				fmt.Fprintf(opts.out, "%s: app respawned by supervisor pid %d\n", prefix, restarted.PID)
 			}
-			fmt.Fprintf(opts.out, "ibkr restart --app: app respawned by supervisor pid %d\n", restarted.PID)
-			return 0
+			return res, true, 0
 		}
 		if !opts.jsonOut {
-			fmt.Fprintln(opts.out, "ibkr restart --app: starting app")
+			fmt.Fprintf(opts.out, "%s: starting app\n", prefix)
 		}
 	case errors.Is(err, errAppNotRunning):
 		finalizeArgs()
+		if !behavior.startWhenMissing {
+			res.Action = "not_running"
+			res.ElapsedMS = time.Since(startedAt).Milliseconds()
+			if !opts.jsonOut {
+				fmt.Fprintf(opts.out, "%s: no app was running; app not restarted\n", prefix)
+			}
+			return res, false, 0
+		}
 		if !opts.jsonOut {
-			fmt.Fprintln(opts.out, "ibkr restart --app: no app was running; starting app")
+			fmt.Fprintf(opts.out, "%s: no app was running; starting app\n", prefix)
 		}
 	default:
-		fmt.Fprintf(opts.err, "ibkr restart --app: %v\n", err)
-		return 1
+		fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
+		return res, false, 1
 	}
 
 	finalizeArgs()
 	newPID, err := deps.start(ctx, args)
 	if err != nil {
-		fmt.Fprintf(opts.err, "ibkr restart --app: start app: %v\n", err)
-		return 1
+		fmt.Fprintf(opts.err, "%s: start app: %v\n", prefix, err)
+		return res, true, 1
 	}
 	res.Started = true
 	res.NewPID = newPID
 	res.Args = append([]string(nil), args...)
 	res.ElapsedMS = time.Since(startedAt).Milliseconds()
-	if opts.jsonOut {
-		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+	if !opts.jsonOut {
+		fmt.Fprintf(opts.out, "%s: started app pid %d\n", prefix, newPID)
+		if behavior.pairHint {
+			fmt.Fprintf(opts.out, "%s: pair a phone with `ibkr app pair`\n", prefix)
+		}
 	}
-	fmt.Fprintf(opts.out, "ibkr restart --app: started app pid %d\n", newPID)
-	fmt.Fprintln(opts.out, "ibkr restart --app: pair a phone with `ibkr app pair`")
-	return 0
+	return res, true, 0
 }
 
 func restartFlagWasSet(fs *flag.FlagSet, name string) bool {

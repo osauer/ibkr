@@ -57,6 +57,16 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["ibkr", "order", ["place", "submit", "execute", "modify", "cancel", "close"]],
+    decision = "allow",
+    justification = "Paper broker-write practice is allowed when the project hook confirms trading.status is paper/write-ready; live and unknown states remain blocked by the hook.",
+    match = [
+        "ibkr order place --preview-token TOKEN --json",
+        "ibkr order cancel ORDER_ID --json",
+    ],
+)
+
+prefix_rule(
     pattern = ["ibkr", "restart"],
     decision = "allow",
     justification = "The repo requires a CLI restart after installing daemon/CLI changes.",
@@ -82,10 +92,29 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "purge", "--all"],
-    decision = "prompt",
-    justification = "Purge execution is destructive-adjacent; require explicit human approval and prefer dry-run/status first.",
+    decision = "allow",
+    justification = "Paper purge execution is allowed when the project hook confirms trading.status is paper/write-ready; live and unknown states remain blocked by the hook.",
     match = [
         "ibkr purge --all",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "purge", "execute"],
+    decision = "allow",
+    justification = "Paper purge execution is allowed when the project hook confirms trading.status is paper/write-ready; live and unknown states remain blocked by the hook.",
+    match = [
+        "ibkr purge execute --all --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "purge", "restore"],
+    decision = "allow",
+    justification = "Restore preview is read-only; restore execution is allowed only when the project hook confirms trading.status is paper/write-ready.",
+    match = [
+        "ibkr purge restore --all --json",
+        "ibkr purge restore --all --execute --json",
     ],
 )
 

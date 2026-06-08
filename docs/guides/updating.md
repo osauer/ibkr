@@ -24,22 +24,22 @@ Use `ibkr restart` when you changed daemon-loaded config, installed a new binary
 ibkr restart
 ```
 
-The command verifies the pidfile holder is really an `ibkr daemon` process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. If no daemon was running, it starts one and says so.
+The command verifies the pidfile holder is really an `ibkr daemon` process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. It also refreshes an already-running `ibkr app` host, preserving app flags such as `--remote`; if no app host is running, it leaves the app stopped. If no daemon was running, it starts one and says so.
 
 `--force` is an explicit fallback for a daemon that ignores SIGTERM:
 
 ```sh
 ibkr restart --force          # escalate to SIGKILL only after graceful timeout
 ibkr restart --timeout 30s    # wait longer before failing or forcing
-ibkr restart --json           # scriptable result: old/new PID, force/graceful flags, health snapshot
-ibkr restart --app            # gracefully restart/start the HyperServe app process
+ibkr restart --json           # scriptable result: daemon health plus any refreshed app process
+ibkr restart --app            # app-only restart/start for the HyperServe app process
 ```
 
-JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed."
+JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed." When an app host was running, JSON also includes an `app` object with its old/new PID and preserved args.
 
-`ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
+`ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial, plus any currently running local or remote app host. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
 
-`ibkr restart --app` targets the long-running `ibkr app` HyperServe process instead of the daemon. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr` or `--public-url`, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts `ibkr app` with default/env configuration.
+`ibkr restart --app` targets only the long-running `ibkr app` HyperServe process. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr`, `--public-url`, or `--remote`, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts `ibkr app` with default/env configuration.
 
 ### Release integrity
 

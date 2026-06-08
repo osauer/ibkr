@@ -59,6 +59,9 @@
           <div class="account-panel__identity">
             <b id="accountLabel">--</b>
           </div>
+          <button class="panel-chevron account-overview-toggle" id="accountOverviewToggle" type="button" aria-expanded="false" aria-controls="accountOverviewDetail">
+            Detail
+          </button>
           <button class="icon-button account-privacy-toggle" id="accountPrivacyToggle" type="button" aria-label="Show account values" aria-pressed="false" title="Show account values">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"></path>
@@ -82,26 +85,28 @@
             <small id="dailyPnlPct">--</small>
           </div>
         </div>
-        <div class="account-risk-strip">
-          <div class="account-risk-item">
-            <span>Net $ Delta</span>
-            <b id="accountRiskDelta">--</b>
+        <div class="account-overview-detail" id="accountOverviewDetail" hidden>
+          <div class="account-risk-strip">
+            <div class="account-risk-item">
+              <span>Net $ Delta</span>
+              <b id="accountRiskDelta">--</b>
+            </div>
+            <div class="account-risk-item">
+              <span>Theta/day</span>
+              <b id="accountRiskTheta">--</b>
+            </div>
+            <div class="account-risk-item">
+              <span>FX 1%</span>
+              <b id="accountRiskFx">--</b>
+            </div>
+            <button class="account-risk-item account-risk-item--button" id="accountLargestExposureToggle" type="button" aria-expanded="false" aria-controls="accountLargestExposurePanel">
+              <span>Largest exposure</span>
+              <b id="accountLargestExposureLabel">--</b>
+            </button>
           </div>
-          <div class="account-risk-item">
-            <span>Theta/day</span>
-            <b id="accountRiskTheta">--</b>
+          <div class="account-exposure-panel" id="accountLargestExposurePanel" hidden>
+            <div class="exposure-list" id="accountLargestExposureList"></div>
           </div>
-          <div class="account-risk-item">
-            <span>FX 1%</span>
-            <b id="accountRiskFx">--</b>
-          </div>
-          <button class="account-risk-item account-risk-item--button" id="accountLargestExposureToggle" type="button" aria-expanded="false" aria-controls="accountLargestExposurePanel">
-            <span>Largest exposure</span>
-            <b id="accountLargestExposureLabel">--</b>
-          </button>
-        </div>
-        <div class="account-exposure-panel" id="accountLargestExposurePanel" hidden>
-          <div class="exposure-list" id="accountLargestExposureList"></div>
         </div>
         <span class="sr-only" id="cushion">--</span>
       </article>

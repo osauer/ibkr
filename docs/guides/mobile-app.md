@@ -70,13 +70,18 @@ Worker route to stay up. The app exposes relay connection state in
 ## Restart
 
 ```sh
-ibkr restart --app
+ibkr restart
 ```
 
-This sends SIGTERM to the existing `ibkr app` process so HyperServe can shut
-down gently. It preserves the old app flags such as `--addr`, `--public-url`,
+This restarts the shared daemon and, when an `ibkr app` process is already
+running, sends SIGTERM to that app process so HyperServe can shut down gently.
+It preserves the old app flags such as `--addr`, `--public-url`, `--remote`,
 and `--state-dir`. If launchd respawns the app, the command reports the
-supervised PID and does not start a duplicate.
+supervised PID and does not start a duplicate. If no app is running, plain
+`ibkr restart` leaves the app stopped.
+
+Use `ibkr restart --app` for app-only restart/start workflows, including cases
+where no app is running yet.
 
 To switch an old local-only app host back to the shared local-preview plus
 phone mode:

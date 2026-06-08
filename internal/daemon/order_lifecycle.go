@@ -92,23 +92,47 @@ func (s *Server) enrichOrderLifecycleEventFromJournal(ev *orderJournalEvent) {
 	if err != nil {
 		return
 	}
-	for _, view := range views {
-		if !orderJournalEventMatchesView(*ev, view) {
-			continue
-		}
+	if view, ok := orderJournalViewForLifecycleEvent(*ev, views); ok {
 		copyOrderJournalIdentityFromView(ev, view)
-		return
 	}
 }
 
-func orderJournalEventMatchesView(ev orderJournalEvent, view rpc.OrderView) bool {
-	if ev.ReservedOrderID != 0 && view.ReservedOrderID == ev.ReservedOrderID {
-		return true
+func orderJournalViewForLifecycleEvent(ev orderJournalEvent, views []rpc.OrderView) (rpc.OrderView, bool) {
+	if ev.OrderRef != "" {
+		for _, view := range views {
+			if view.OrderRef == ev.OrderRef {
+				return view, true
+			}
+		}
 	}
-	if ev.OrderRef != "" && view.OrderRef == ev.OrderRef {
-		return true
+	if ev.PermID != 0 {
+		for _, view := range views {
+			if view.PermID == ev.PermID {
+				return view, true
+			}
+		}
 	}
-	return ev.PermID != 0 && view.PermID == ev.PermID
+	if ev.ReservedOrderID == 0 {
+		return rpc.OrderView{}, false
+	}
+	matches := make([]rpc.OrderView, 0, 1)
+	openMatches := make([]rpc.OrderView, 0, 1)
+	for _, view := range views {
+		if view.ReservedOrderID != ev.ReservedOrderID {
+			continue
+		}
+		matches = append(matches, view)
+		if view.Open {
+			openMatches = append(openMatches, view)
+		}
+	}
+	if len(openMatches) == 1 {
+		return openMatches[0], true
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return rpc.OrderView{}, false
 }
 
 func copyOrderJournalIdentityFromView(ev *orderJournalEvent, view rpc.OrderView) {

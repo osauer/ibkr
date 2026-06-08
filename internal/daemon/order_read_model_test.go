@@ -87,6 +87,39 @@ func TestBuildOrderViewsTerminalStatusNotOpen(t *testing.T) {
 	}
 }
 
+func TestBuildOrderViewsFilledClearsStaleRemaining(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 6, 8, 9, 2, 0, 0, time.UTC)
+	views := buildOrderViews([]orderJournalEvent{
+		{
+			At:              base,
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "restore-filled",
+			ReservedOrderID: 24,
+			Status:          "Submitted",
+			Quantity:        1,
+			Remaining:       1,
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              base.Add(time.Second),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "restore-filled",
+			ReservedOrderID: 24,
+			Status:          "Filled",
+			Filled:          1,
+			Remaining:       0,
+			SendState:       orderSendStateTerminal,
+		},
+	})
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	if views[0].Remaining != 0 || views[0].LifecycleStatus != rpc.OrderLifecycleFilled || views[0].Open {
+		t.Fatalf("filled view = %+v, want remaining=0 closed filled", views[0])
+	}
+}
+
 func TestOrderLifecycleApiPendingIsNotWriteEligible(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 5, 28, 9, 30, 0, 0, time.UTC)
@@ -268,6 +301,82 @@ func TestOrderJournalEventFromLifecycleBrokerError(t *testing.T) {
 	}
 	if views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleRejected || !strings.Contains(views[0].LastMessage, "advanced_reject_json") {
 		t.Fatalf("view = %+v, want closed rejected with broker message", views[0])
+	}
+}
+
+func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
+	t.Parallel()
+	oldAt := time.Date(2026, 6, 4, 14, 35, 35, 0, time.UTC)
+	newAt := time.Date(2026, 6, 8, 8, 51, 51, 0, time.UTC)
+	events := []orderJournalEvent{
+		{
+			At:              oldAt,
+			Type:            orderJournalEventStatusUpdated,
+			ReservedOrderID: 11,
+			PermID:          1995374765,
+			Status:          "Filled",
+			Filled:          1,
+			AvgFillPrice:    49.51,
+			LastFillPrice:   49.51,
+			SendState:       orderSendStateTerminal,
+		},
+		{
+			At:              newAt,
+			Type:            orderJournalEventSendAttempted,
+			OrderRef:        "purge-20260608-sap",
+			ReservedOrderID: 11,
+			Source:          purgeExecuteSource,
+			LegID:           "leg_sap",
+			Symbol:          "SAP",
+			SecType:         "STK",
+			Action:          rpc.OrderActionSell,
+			Quantity:        1,
+			LimitPrice:      159.53,
+			SendState:       orderSendStateSendAttempted,
+		},
+		{
+			At:              newAt.Add(time.Second),
+			Type:            orderJournalEventBrokerError,
+			OrderRef:        "purge-20260608-sap",
+			ReservedOrderID: 11,
+			Source:          purgeExecuteSource,
+			LegID:           "leg_sap",
+			Symbol:          "SAP",
+			SecType:         "STK",
+			Action:          rpc.OrderActionSell,
+			Quantity:        1,
+			LimitPrice:      159.53,
+			SendState:       orderSendStateUncertainSend,
+			Message:         "broker error 110: The price does not conform to the minimum price variation for this contract.",
+		},
+	}
+
+	views := buildOrderViews(events)
+	if len(views) != 2 {
+		t.Fatalf("views = %d, want old broker-only row plus new purge row: %+v", len(views), views)
+	}
+	var purgeView, oldView *rpc.OrderView
+	for i := range views {
+		switch views[i].OrderRef {
+		case "purge-20260608-sap":
+			purgeView = &views[i]
+		case "":
+			oldView = &views[i]
+		}
+	}
+	if purgeView == nil || purgeView.Open || purgeView.LifecycleStatus != rpc.OrderLifecycleRejected || purgeView.Filled != 0 || purgeView.AvgFillPrice != 0 {
+		t.Fatalf("purge view = %+v, want closed rejected without old fill fields", purgeView)
+	}
+	if oldView == nil || oldView.Open || oldView.LifecycleStatus != rpc.OrderLifecycleFilled || oldView.Filled != 1 {
+		t.Fatalf("old view = %+v, want separate filled broker-only row", oldView)
+	}
+
+	eventsByKey := buildOrderEventsByKey(events)
+	if got := len(eventsByKey["ref:purge-20260608-sap"]); got != 2 {
+		t.Fatalf("purge canonical events = %d, want 2: %+v", got, eventsByKey)
+	}
+	if got := len(eventsByKey["order:11"]); got != 1 {
+		t.Fatalf("broker-only canonical events = %d, want 1: %+v", got, eventsByKey)
 	}
 }
 

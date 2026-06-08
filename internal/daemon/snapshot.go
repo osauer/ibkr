@@ -57,10 +57,10 @@ func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symb
 // contract-resolution round-trip; one combined call is cheaper.
 //
 // Returns (price, prevClose, week52High, dataType). Price uses the same
-// last→mid→bid→ask priority as briefSnapshotPrice. PrevClose carries
-// tick 9 (previous regular-session close) when it lands in the same
-// subscribe window — the regime HYG/SPY indicator uses it to populate
-// the dashboard's SPY day-change header.
+// last→mid→bid→ask→mark→close priority as briefSnapshotPriceWithClose.
+// PrevClose carries tick 9 (previous regular-session close) when it
+// lands in the same subscribe window — the regime HYG/SPY indicator
+// uses it to populate the dashboard's SPY day-change header.
 func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose, week52High float64, dataType string) {
 	if c == nil {
 		return 0, 0, 0, ""
@@ -72,7 +72,7 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104", "165"})
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
-	var bid, ask, last float64
+	var bid, ask, last, mark float64
 	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
 		if d.Bid > 0 {
 			bid = d.Bid
@@ -82,6 +82,9 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 		}
 		if d.Last > 0 {
 			last = d.Last
+		}
+		if d.MarkPrice > 0 {
+			mark = d.MarkPrice
 		}
 		if d.Close > 0 {
 			prevClose = d.Close
@@ -93,14 +96,14 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 		// UnsubscribeMarketData fires (defer above), the connector's
 		// symbol→reqID mapping is gone and the type would always read
 		// "unknown".
-		if dataType == "" && (bid > 0 || ask > 0 || last > 0) {
+		if dataType == "" && (bid > 0 || ask > 0 || last > 0 || mark > 0 || prevClose > 0) {
 			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
 		}
 		// Done only when both the price triple is summarised AND
 		// Week52High has arrived. On timeout, pollMarketData returns
 		// DeadlineExceeded and the caller gets whatever did land
 		// (price may be set even if week52High didn't).
-		return (last > 0 || (bid > 0 && ask > 0)) && week52High > 0
+		return (last > 0 || (bid > 0 && ask > 0) || mark > 0) && week52High > 0
 	})
 
 	switch {
@@ -112,6 +115,10 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 		price = bid
 	case ask > 0:
 		price = ask
+	case mark > 0:
+		price = mark
+	case prevClose > 0:
+		price = prevClose
 	}
 	return price, prevClose, week52High, dataType
 }

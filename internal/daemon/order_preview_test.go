@@ -61,6 +61,17 @@ func TestPreviewIBKRContractOmitsStockMultiplier(t *testing.T) {
 	}
 }
 
+func TestContractMultiplierForcesStockToOne(t *testing.T) {
+	t.Parallel()
+
+	if got := contractMultiplier(rpc.ContractParams{Symbol: "SAP", SecType: "STK", Multiplier: 100}); got != 1 {
+		t.Fatalf("stock multiplier = %d, want 1", got)
+	}
+	if got := contractMultiplier(rpc.ContractParams{Symbol: "SPY", SecType: "OPT", Multiplier: 10}); got != 10 {
+		t.Fatalf("option multiplier = %d, want 10", got)
+	}
+}
+
 func TestPreviewIBKROrderForStatusBindsAccountAndClient(t *testing.T) {
 	t.Parallel()
 

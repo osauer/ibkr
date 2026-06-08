@@ -48,7 +48,7 @@ help: ## List available targets
 		$(MAKEFILE_LIST)
 	@echo
 	@echo "Common flow:  make fmt && make check && make test && make build"
-	@echo "Daemon flow:  make install restart-daemon   (FORCE=1 adds ibkr restart --force)"
+	@echo "Daemon flow:  make install restart-daemon   (FORCE=1 adds ibkr restart --force; refreshes any running app)"
 	@echo "Release flow: make release RELEASE_VERSION=vX.Y.Z   (clean tree + HEAD == origin/$(MAIN_BRANCH))"
 	@echo "              tags + pushes + cross-compiles + creates GitHub Release with binaries attached"
 
@@ -61,9 +61,9 @@ install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin)
 	install -m 0755 bin/ibkr  $(PREFIX)/bin/ibkr
 	@echo "Installed ibkr to $(PREFIX)/bin"
 	@echo "Make sure $(PREFIX)/bin is on your PATH."
-	@echo "Restart a running daemon with: $(PREFIX)/bin/ibkr restart"
+	@echo "Restart the daemon and any running app with: $(PREFIX)/bin/ibkr restart"
 
-restart-daemon: install ## Install, then gracefully restart/start daemon (FORCE=1 escalates to --force)
+restart-daemon: install ## Install, restart/start daemon, and refresh any running app (FORCE=1 escalates to --force)
 	$(PREFIX)/bin/ibkr restart --timeout $(RESTART_TIMEOUT) $(if $(FORCE),--force,)
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
@@ -177,13 +177,9 @@ plugin-check: ## Validate plugin/marketplace manifests with `claude plugin valid
 	claude plugin validate .
 	@$(MAKE) --no-print-directory hook-regex-check
 
-# Single-source gate for the trading-verb defense. The PreToolUse hook is
-# duplicated across hooks/hooks.json (the bundled plugin) and
-# settings/ibkr.settings.json (the user-copyable settings template); both
-# must run the same jq regex against `.tool_input.command`, otherwise the
-# defense drifts between distribution paths. Strips the human-readable
-# label prefix before diffing so the two commands can name themselves
-# distinctly in their failure-closed messages.
+# Single-source gate for the trading-verb defense. The bundled plugin and the
+# user-copyable settings template must invoke the same PreToolUse hook command,
+# otherwise paper/live write policy drifts between distribution paths.
 hook-regex-check: ## Ensure plugin + settings PreToolUse regexes match
 	@command -v jq >/dev/null 2>&1 || { echo "jq missing on PATH; install jq or skip"; exit 1; }
 	@plugin=$$(jq -r '.hooks.PreToolUse[0].hooks[0].command' hooks/hooks.json | sed "s/'ibkr plugin: /'LABEL: /"); \

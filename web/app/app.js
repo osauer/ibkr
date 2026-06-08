@@ -12,6 +12,7 @@ const state = {
   regimeDetailOpen: false,
   regimeCanaryExpansionInitialized: false,
   detailPreferenceSet: false,
+  accountOverviewOpen: false,
   underlyingDetailOpen: false,
   portfolioDetailOpen: false,
   accountExposureOpen: false,
@@ -565,6 +566,7 @@ function panelTapIgnored(target) {
     ".underlying-book__list-panel",
     ".underlying-bulk-actions",
     ".underlying-action-result",
+    ".account-overview-detail",
     ".portfolio-detail-panel",
     ".order-review",
     ".alert-focus",
@@ -592,12 +594,29 @@ function handleProtectionPanelTap(event) {
   setProtectionExpansion(!state.protectionOpen);
 }
 
+function handleAccountPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setAccountOverviewExpansion(!state.accountOverviewOpen);
+}
+
+function setAccountOverviewExpansion(open) {
+  state.accountOverviewOpen = Boolean(open);
+  renderAccountPanel(state.snapshot?.account || {}, state.snapshot?.positions || {}, state.snapshot?.canary || {});
+}
+
 function setProtectionExpansion(open) {
   state.protectionOpen = Boolean(open);
   renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {});
 }
 
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
+  const detail = $("accountOverviewDetail");
+  const detailToggle = $("accountOverviewToggle");
+  detail.hidden = !state.accountOverviewOpen;
+  detailToggle.textContent = state.accountOverviewOpen ? "Hide detail" : "Detail";
+  detailToggle.setAttribute("aria-expanded", String(state.accountOverviewOpen));
+  $("accountPanel").dataset.open = String(state.accountOverviewOpen);
+
   const hasSnapshot = Boolean(account.as_of || account.account_id || account.base_currency);
   const hasValue = hasSnapshot && hasNumericValue(account.net_liquidation);
   const accountContext = currentAccountContext(account);
@@ -1265,10 +1284,11 @@ function readLocalPurgeBook() {
 }
 
 function purgeEntryPnl(entry) {
-  const direct = firstNumber(entry.group_unrealized_pnl_base, entry.unrealized_pnl_base, entry.pnl_base, entry.pnl, entry.shadow_saved);
+  const direct = firstNumber(entry.current_shadow_pnl, entry.shadow_pnl, entry.group_unrealized_pnl_base, entry.unrealized_pnl_base, entry.pnl_base, entry.pnl, entry.shadow_saved);
   const currency = normalizeCurrency(entry.pnl_currency || entry.base_currency || entry.currency || entry.contract?.currency);
   if (typeof direct === "number") {
-    return { value: direct, currency, source: typeof entry.shadow_saved === "number" ? "shadow P/L" : "unrealized P/L" };
+    const shadow = typeof entry.current_shadow_pnl === "number" || typeof entry.shadow_pnl === "number" || typeof entry.shadow_saved === "number";
+    return { value: direct, currency, source: shadow ? "shadow P/L" : "unrealized P/L" };
   }
   const restore = firstNumber(entry.current_restore_value, entry.estimated_value);
   const exit = firstNumber(entry.exit_value);
@@ -4581,6 +4601,10 @@ $("accountLargestExposureToggle").addEventListener("click", () => {
   state.accountExposureOpen = !state.accountExposureOpen;
   renderAccountPanel(state.snapshot?.account || {}, state.snapshot?.positions || {}, state.snapshot?.canary || {});
 });
+$("accountOverviewToggle").addEventListener("click", () => {
+  setAccountOverviewExpansion(!state.accountOverviewOpen);
+});
+$("accountPanel").addEventListener("click", (event) => handleAccountPanelTap(event));
 $("canaryDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("canary", !state.canaryDetailOpen);
 });
