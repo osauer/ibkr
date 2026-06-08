@@ -1,0 +1,59 @@
+name: Bug report
+description: Report something reproducible in ibkr canary, the CLI, MCP server, or Canary app.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Please do not include account numbers, order ids, tokens, hostnames, screenshots with balances, or other broker-sensitive details.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did this happen?
+      options:
+        - Canary app
+        - Remote Canary app beta
+        - CLI
+        - MCP server
+        - Install or update
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ibkr version
+      description: Run `ibkr version` if available.
+      placeholder: "v1.8.0"
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Tell me what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Keep this short and concrete.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Safe diagnostics
+      description: Paste redacted output only. Remove account ids, order ids, balances, positions, tokens, hostnames, and gateway details first.
+      render: shell
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, MCP client, and whether you use TWS or IB Gateway.
+      placeholder: "macOS 15, Safari, Claude Desktop, IB Gateway"

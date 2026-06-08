@@ -1,0 +1,42 @@
+name: General feedback
+description: Share workflow friction, confusing copy, app reactions, or a question.
+title: "[Feedback]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is for comments that are not a clear bug or feature request. Please keep account numbers, balances, positions, order ids, tokens, hostnames, and screenshots with broker data out of public issues.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of feedback is this?
+      options:
+        - Workflow friction
+        - Confusing output or copy
+        - Question
+        - App impression
+        - Documentation comment
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did you notice it?
+      options:
+        - Canary app
+        - Remote Canary app beta
+        - CLI
+        - MCP server
+        - Website or docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: message
+    attributes:
+      label: Feedback
+      description: Short and direct is fine.
+    validations:
+      required: true
