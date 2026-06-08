@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Remote App Beta for IBKR</title>
+  <meta name="description" content="Experimental remote access for the Canary IBKR mobile web app through a TLS-protected relay, with local pairing and session authorization on your Mac.">
+  <link rel="canonical" href="https://osauer.dev/ibkr/canary-remote/">
+  <link rel="icon" type="image/png" href="../social/canary-icon.png">
+
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://osauer.dev/ibkr/canary-remote/">
+  <meta property="og:title" content="Canary Remote App Beta">
+  <meta property="og:description" content="A short beta guide for pairing the Canary IBKR app through the remote relay.">
+  <meta property="og:image" content="https://osauer.dev/ibkr/social/canary-app-mobile.png">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Canary Remote App Beta",
+    "description": "Experimental remote access for the Canary IBKR mobile web app through a TLS-protected relay, with local pairing and session authorization on your Mac.",
+    "dateModified": "2026-06-08T07:25:00+02:00",
+    "author": {
+      "@type": "Person",
+      "name": "Oliver Sauer",
+      "url": "https://github.com/osauer"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "ibkr",
+      "url": "https://osauer.dev/ibkr/"
+    }
+  }
+  </script>
+
+  <style>
+    :root {
+      --paper: #f7f5ef;
+      --paper-strong: #fffdf7;
+      --ink: #101827;
+      --muted: #42526a;
+      --line: #d8d2c4;
+      --green: #087f6b;
+      --green-dark: #055f52;
+      --blue: #245dbb;
+      --amber: #9a5b00;
+      --red: #ba2424;
+      --terminal: #0e1626;
+      --terminal-line: #26364c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+
+    a {
+      color: var(--green-dark);
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.18em;
+    }
+
+    .topline {
+      height: 12px;
+      background: var(--green);
+    }
+
+    .wrap {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 0 14px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-decoration: none;
+    }
+
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      box-shadow: 0 8px 18px rgba(16, 24, 39, 0.12);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(320px, 0.75fr);
+      gap: 44px;
+      align-items: center;
+      padding: 28px 0 54px;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(42px, 5vw, 64px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 720px;
+      margin: 22px 0 0;
+      color: #26364d;
+      font-size: clamp(18px, 1.6vw, 20px);
+      line-height: 1.38;
+    }
+
+    .beta {
+      max-width: 720px;
+      margin: 20px 0 0;
+      color: var(--red);
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 28px 0 0;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      color: var(--ink);
+      font-weight: 750;
+      text-align: center;
+      text-decoration: none;
+      background: transparent;
+    }
+
+    .button.primary {
+      border-color: var(--green);
+      background: var(--green);
+      color: #fff;
+    }
+
+    .phone-shot {
+      width: min(360px, 100%);
+      justify-self: center;
+      border: 1px solid var(--terminal-line);
+      border-radius: 28px;
+      box-shadow: 0 20px 48px rgba(16, 24, 39, 0.22);
+    }
+
+    section {
+      padding: 64px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      max-width: 760px;
+      margin-bottom: 28px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.06;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    .feature {
+      min-height: 190px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper-strong);
+    }
+
+    .feature small {
+      display: block;
+      margin-bottom: 14px;
+      color: var(--amber);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .feature h3 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .feature p,
+    .steps li {
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .feature p {
+      margin: 10px 0 0;
+    }
+
+    .screens {
+      display: grid;
+      grid-template-columns: minmax(220px, 0.38fr) minmax(0, 0.62fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .screens img {
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      box-shadow: 0 18px 42px rgba(16, 24, 39, 0.16);
+    }
+
+    .screens img:first-child {
+      border-radius: 28px;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 24px;
+      border: 1px solid var(--terminal-line);
+      border-radius: 8px;
+      background: var(--terminal);
+      color: #f4f7fb;
+      font: 16px/1.55 Menlo, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .steps {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    .steps li {
+      margin: 0 0 12px;
+    }
+
+    code {
+      overflow-wrap: anywhere;
+    }
+
+    footer {
+      padding: 36px 0 54px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    footer .wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: start;
+    }
+
+    footer p {
+      margin: 0;
+      max-width: 840px;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 16px;
+    }
+
+    @media (max-width: 920px) {
+      .hero,
+      .screens {
+        grid-template-columns: 1fr;
+      }
+
+      .feature-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .phone-shot {
+        justify-self: start;
+      }
+    }
+
+    @media (max-width: 660px) {
+      .wrap {
+        width: min(100% - 28px, 1120px);
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px 0 10px;
+      }
+
+      .nav-links {
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        font-size: 14px;
+      }
+
+      h1 {
+        font-size: 38px;
+      }
+
+      .lead {
+        font-size: 16px;
+      }
+
+      section {
+        padding: 52px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline"></div>
+
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="../" aria-label="ibkr home"><img src="../social/canary-icon.png" width="192" height="192" alt="">ibkr</a>
+    <nav class="nav-links" aria-label="Page">
+      <a href="../">Home</a>
+      <a href="https://github.com/osauer/ibkr/blob/main/docs/guides/mobile-app.md">Mobile guide</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="wrap hero" aria-labelledby="hero-title">
+      <div>
+        <h1 id="hero-title">Canary remote app beta</h1>
+        <p class="lead">Canary can now pair a phone through a remote HTTPS relay while the app, broker session, and authorization still run from your Mac. It is meant for early users who already understand the local IBKR setup and want mobile access away from the LAN.</p>
+        <p class="beta">Experimental beta: for now, relay-agent operation is maintainer-assisted and may change without compatibility promises.</p>
+        <div class="actions" aria-label="Main actions">
+          <a class="button primary" href="#start">Start remote mode</a>
+          <a class="button" href="#security">Security model</a>
+          <a class="button" href="#screenshots">Screenshots</a>
+        </div>
+      </div>
+      <img class="phone-shot" src="../social/canary-app-mobile.png" width="780" height="1688" alt="Canary mobile app monitor screen showing market regime and portfolio canary cards">
+    </section>
+
+    <section class="wrap" aria-labelledby="what-title">
+      <div class="section-head">
+        <h2 id="what-title">What this adds.</h2>
+        <p>The remote path keeps the local-first design, but makes the paired PWA reachable from outside your home network.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>Remote access</small>
+          <h3>Phone pairing through the relay</h3>
+          <p>The printed pairing URL uses the remote origin and a short route id, so a phone can open Canary without being on the same LAN.</p>
+        </article>
+        <article class="feature">
+          <small>Local control</small>
+          <h3>Your Mac still owns the session</h3>
+          <p>The relay forwards allowed app traffic only. Pairing creation, device grants, sessions, and broker data access remain in the local app process.</p>
+        </article>
+        <article class="feature">
+          <small>Beta shape</small>
+          <h3>Small, explicit, reversible</h3>
+          <p>The feature is intentionally narrow while the relay operations, failure modes, and install flow are proven with early users.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" id="start" aria-labelledby="start-title">
+      <div class="section-head">
+        <h2 id="start-title">Start the remote server.</h2>
+        <p>Run the app in remote mode on the Mac that already has TWS or IB Gateway running.</p>
+      </div>
+      <pre><code>ibkr app --remote
+
+# in another shell
+ibkr app pair</code></pre>
+    </section>
+
+    <section class="wrap" aria-labelledby="pairing-title">
+      <div class="section-head">
+        <h2 id="pairing-title">Pair and use it.</h2>
+      </div>
+      <ol class="steps">
+        <li>Start TWS or IB Gateway locally and make sure <code>ibkr status</code> is healthy enough for app reads.</li>
+        <li>Run <code>ibkr app --remote</code>. The app opens an outbound connector to the relay; you do not expose an inbound port on your Mac.</li>
+        <li>Run <code>ibkr app pair</code> and open the printed URL on the phone. The URL includes a short-lived pairing id, nonce, and relay route.</li>
+        <li>Use the Monitor, Positions, Alerts, and Settings tabs from the PWA. Market and account values still come from your local IBKR session.</li>
+        <li>For a supervised app host, restart in remote mode with <code>ibkr restart --app --remote</code>.</li>
+      </ol>
+    </section>
+
+    <section class="wrap" id="security" aria-labelledby="security-title">
+      <div class="section-head">
+        <h2 id="security-title">Security model.</h2>
+        <p>Remote access uses TLS-protected transport: the phone connects to the relay over HTTPS, and the Mac connector uses WSS. Network intermediaries between the phone, relay, and Mac connector cannot read the traffic without breaking TLS.</p>
+        <p>The relay is transport only, not the owner of your broker session. The local app creates pairing sessions, validates device proof, sets the session cookie, and talks to the daemon. The current relay is not an extra app-layer end-to-end encryption boundary, so treat the operated relay as trusted beta infrastructure.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>Encrypted transit</small>
+          <h3>HTTPS and WSS</h3>
+          <p>The default remote origin is <code>https://remote.osauer.dev</code>; the connector URL is upgraded to <code>wss://</code>.</p>
+        </article>
+        <article class="feature">
+          <small>Local auth</small>
+          <h3>Pairing stays on your Mac</h3>
+          <p>Remote requests cannot create pairing sessions. That local-control action is accepted only from the Mac-side app.</p>
+        </article>
+        <article class="feature">
+          <small>No broker custody</small>
+          <h3>No hosted IBKR login</h3>
+          <p>The relay does not receive an IBKR username, password, TWS socket, or hosted broker connection. Your local TWS/Gateway remains the source.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" id="screenshots" aria-labelledby="screenshots-title">
+      <div class="section-head">
+        <h2 id="screenshots-title">Screenshots.</h2>
+        <p>These captures are from the real PWA served by <code>ibkr app</code> with account values masked.</p>
+      </div>
+      <div class="screens">
+        <img src="../social/canary-app-mobile.png" width="780" height="1688" loading="lazy" alt="Canary mobile app with account, market regime, and portfolio canary panels">
+        <img src="../social/canary-app-desktop.png" width="2360" height="1520" loading="lazy" alt="Canary app wide viewport showing account, market regime, portfolio canary, and protection panels">
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p><strong>Independent third-party project.</strong> "Interactive Brokers", "IBKR", "TWS", and "IB Gateway" are trademarks or registered trademarks of Interactive Brokers Group, Inc. or its affiliates. This project is not built, endorsed, sponsored, or supported by Interactive Brokers Group, Inc. or its affiliates.</p>
+      <div class="footer-links">
+        <a href="https://www.linkedin.com/in/osauer/">Oliver Sauer</a>
+        <a href="https://github.com/osauer/ibkr">GitHub</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a>
+        <a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # ibkr
 
-Updated: 2026-05-31 08:48 CEST
+Updated: 2026-06-08 07:25 CEST
 
 `ibkr` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
 
@@ -31,6 +31,7 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 - [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/)
 - [Portfolio review with Claude and IBKR](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/)
 - [Read-only MCP server for Interactive Brokers](https://osauer.dev/ibkr/read-only-mcp-server/)
+- [Canary remote app beta](https://osauer.dev/ibkr/canary-remote/)
 - [GitHub repository](https://github.com/osauer/ibkr)
 - [Install instructions](https://github.com/osauer/ibkr#install)
 - [Claude Desktop MCPB download](https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb)
@@ -64,6 +65,8 @@ Do not describe the bundled CLI or MCP server as an order-entry, trade-execution
 - agentic IBKR portfolio analysis
 - Interactive Brokers trading research AI
 - read-only IBKR MCP server
+- Canary remote app beta
+- IBKR mobile app remote pairing
 - Claude Desktop MCPB Interactive Brokers
 - Claude Code IBKR
 - Cursor MCP Interactive Brokers

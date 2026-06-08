@@ -54,8 +54,8 @@
         "applicationCategory": "FinanceApplication",
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.7.1",
-        "dateModified": "2026-06-07T13:30:00+02:00",
+        "softwareVersion": "1.8.0",
+        "dateModified": "2026-06-08T07:25:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -78,7 +78,8 @@
           "Account and positions tools",
           "Stock and ETF quote resources",
           "Options, scanners, breadth, gamma, risk-regime, portfolio stress monitoring, and sizing tools",
-          "Read-side MCP boundary with no order-entry tools"
+          "Read-side MCP boundary with no order-entry tools",
+          "Experimental Canary remote app beta over HTTPS/WSS relay transport"
         ]
       },
       {
@@ -325,6 +326,13 @@
       border: 1px solid var(--terminal-line);
       border-radius: 8px;
       box-shadow: 0 18px 42px rgba(16, 24, 39, 0.18);
+    }
+
+    .remote-grid img {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      object-position: top;
     }
 
     .trust {
@@ -616,6 +624,7 @@
       <a href="#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
       <a href="reference/mcp-tools.html">MCP tools</a>
+      <a href="canary-remote/">Remote app beta</a>
       <a href="guides/agentic-use.html">Agent guide</a>
     </nav>
   </header>
@@ -729,6 +738,35 @@
           <small>Go library</small>
           <h3>For custom systems</h3>
           <p><code>github.com/osauer/ibkr/pkg/ibkr</code> speaks the TWS protocol directly with no Python bridge and no IBKR jars.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" aria-labelledby="remote-title">
+      <div class="section-head">
+        <h2 id="remote-title">Experimental remote Canary app.</h2>
+        <p>The paired Canary PWA can now run through a beta HTTPS relay when you want phone access away from the LAN. The app and broker session still live on your Mac; the relay is transport-only and currently maintainer-assisted for early users.</p>
+      </div>
+      <div class="proof-grid remote-grid">
+        <article class="proof">
+          <img src="social/canary-app-mobile.png" width="780" height="1688" loading="lazy" alt="Canary mobile app monitor screen">
+          <h3>Mobile monitor</h3>
+          <p>Market regime, portfolio canary, protection, alerts, positions, and settings in the paired PWA.</p>
+        </article>
+        <article class="proof">
+          <img src="social/canary-app-desktop.png" width="2360" height="1520" loading="lazy" alt="Canary app wide viewport">
+          <h3>Remote beta</h3>
+          <p>Start <code>ibkr app --remote</code>, pair the phone, and keep TWS or IB Gateway running on the Mac.</p>
+        </article>
+        <article class="feature">
+          <small>Security</small>
+          <h3>TLS-protected transport</h3>
+          <p>The phone uses HTTPS and the Mac connector uses WSS, so network intermediaries cannot read the traffic. Pairing and session authorization remain local to the app.</p>
+        </article>
+        <article class="feature">
+          <small>Guide</small>
+          <h3><a href="canary-remote/">Canary remote app beta</a></h3>
+          <p>Short setup notes, relay caveats, pairing flow, screenshots, and the current beta security model.</p>
         </article>
       </div>
     </section>

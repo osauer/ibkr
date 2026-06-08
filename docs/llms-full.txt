@@ -1,6 +1,6 @@
 # ibkr full context
 
-Updated: 2026-05-31 08:48 CEST
+Updated: 2026-06-08 07:25 CEST
 
 `ibkr` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, and Claude Code plugin.
 
@@ -72,6 +72,7 @@ Claude Code plugin path:
 - Analyze Interactive Brokers portfolio with AI: https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/
 - Portfolio review with Claude and IBKR: https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/
 - Read-only MCP server: https://osauer.dev/ibkr/read-only-mcp-server/
+- Canary remote app beta: https://osauer.dev/ibkr/canary-remote/
 
 ## Reference Pages
 
@@ -82,6 +83,7 @@ Claude Code plugin path:
 - Configuration reference: https://osauer.dev/ibkr/reference/config.html
 - TWS protocol coverage: https://osauer.dev/ibkr/reference/protocol.html
 - Concepts: https://osauer.dev/ibkr/concepts.html
+- Canary remote app beta: https://osauer.dev/ibkr/canary-remote/
 - XML sitemap: https://osauer.dev/ibkr/sitemap.xml
 - Short LLM index: https://osauer.dev/ibkr/llms.txt
 - MCP discovery JSON: https://osauer.dev/ibkr/.well-known/mcp/server.json

@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.8.0 — 2026-06-08 07:25 CEST
+
+### What's new
+
+- Canary remote app access is now documented as an experimental beta, with screenshots, remote start and pairing notes, and a concise TLS/local-auth security model.
+
+### Added
+
+- Added the public Canary remote app beta page at `osauer.dev/ibkr/canary-remote/`.
+- Added real Canary PWA screenshots for mobile and wide viewports to the public site.
+
+### Changed
+
+- Updated the public landing page, sitemap, LLM indexes, MCP discovery metadata, and plugin version metadata for the `v1.8.0` feature release.
+
 ## v1.7.1 — 2026-06-07 11:25 CEST
 
 ### What's new
