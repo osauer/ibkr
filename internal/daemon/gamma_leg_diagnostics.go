@@ -35,6 +35,14 @@ func buildGammaLegDiagnostics(underlying string, legs []legData, spot float64) *
 
 func gammaLegDiagnosticCounts(leg legData, gamma, absGEX float64) rpc.GammaLegDiagnosticCounts {
 	counts := rpc.GammaLegDiagnosticCounts{PricedLegs: 1}
+	switch leg.ivSource {
+	case gammaIVSourceLiveMid:
+		counts.DerivedLiveMidLegs = 1
+	case gammaIVSourcePrevClose:
+		counts.DerivedPrevCloseLegs = 1
+	default:
+		counts.ModelTickLegs = 1
+	}
 	if leg.oiObserved {
 		counts.OpenInterestObservedLegs = 1
 	}
@@ -88,6 +96,9 @@ func mergeGammaLegDiagnosticMap(dst, src map[string]rpc.GammaLegDiagnosticCounts
 func addGammaLegDiagnosticCounts(a, b rpc.GammaLegDiagnosticCounts) rpc.GammaLegDiagnosticCounts {
 	return rpc.GammaLegDiagnosticCounts{
 		PricedLegs:               a.PricedLegs + b.PricedLegs,
+		ModelTickLegs:            a.ModelTickLegs + b.ModelTickLegs,
+		DerivedLiveMidLegs:       a.DerivedLiveMidLegs + b.DerivedLiveMidLegs,
+		DerivedPrevCloseLegs:     a.DerivedPrevCloseLegs + b.DerivedPrevCloseLegs,
 		OpenInterestObservedLegs: a.OpenInterestObservedLegs + b.OpenInterestObservedLegs,
 		OILiveObservedLegs:       a.OILiveObservedLegs + b.OILiveObservedLegs,
 		OICarriedForwardLegs:     a.OICarriedForwardLegs + b.OICarriedForwardLegs,
@@ -126,8 +137,9 @@ func formatGammaLegDiagnosticMap(m map[string]rpc.GammaLegDiagnosticCounts) stri
 }
 
 func formatGammaLegDiagnosticCounts(c rpc.GammaLegDiagnosticCounts) string {
-	return fmt.Sprintf("priced=%d oi_seen=%d oi>0=%d gamma>0=%d abs_gex>0=%d oi_live=%d oi_carried=%d",
-		c.PricedLegs, c.OpenInterestObservedLegs, c.OpenInterestLegs, c.GammaPositiveLegs, c.AbsGEXLegs,
+	return fmt.Sprintf("priced=%d model_tick_iv=%d derived_mid_iv=%d derived_close_iv=%d oi_seen=%d oi>0=%d gamma>0=%d abs_gex>0=%d oi_live=%d oi_carried=%d",
+		c.PricedLegs, c.ModelTickLegs, c.DerivedLiveMidLegs, c.DerivedPrevCloseLegs,
+		c.OpenInterestObservedLegs, c.OpenInterestLegs, c.GammaPositiveLegs, c.AbsGEXLegs,
 		c.OILiveObservedLegs, c.OICarriedForwardLegs)
 }
 

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -162,8 +163,8 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 	if rankability == rpc.GammaRankabilityBlocked || rankability == rpc.GammaRankabilityUnavailable {
 		status = "partial"
 	}
-	if env.Result != nil && env.Result.Quality != nil && env.Result.Quality.RankabilityReason != "" {
-		summary += " (" + env.Result.Quality.RankabilityReason + ")"
+	if reason := gammaStatusRankabilityReason(env.Result); reason != "" {
+		summary += " (" + reason + ")"
 	} else if gammaHasSPYUnavailable(env.Result) {
 		summary = "degraded: SPY excluded"
 	} else if gammaHasSPXUnavailable(env.Result) {
@@ -189,6 +190,34 @@ func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool
 		DegradedClusters: []string{"gamma"},
 		AsOf:             env.Result.AsOf,
 	}, true
+}
+
+func gammaStatusRankabilityReason(c *rpc.GammaZeroComputed) string {
+	if c == nil || c.Quality == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(c.Quality.RankabilityReason)
+	if !strings.EqualFold(reason, "spx_coverage: SPX slice is not rankable") {
+		return reason
+	}
+	spx, ok := c.Quality.ByUnderlying["SPX"]
+	if !ok {
+		return reason
+	}
+	if gammaQualityHasBlocker(&spx, "derived_iv_share") || gammaQualityHasBlocker(&spx, "model_source") {
+		if spx.Coverage.DerivedIVPct > 0 {
+			return "spx_coverage: SPX model source blocked: " + formatStatusPct(spx.Coverage.DerivedIVPct) + " of priced legs used derived IV"
+		}
+		return "spx_coverage: SPX model source blocked"
+	}
+	if spx.RankabilityReason != "" {
+		return "spx_coverage: SPX " + spx.RankabilityReason
+	}
+	return reason
+}
+
+func formatStatusPct(v float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f%%", v), "0"), ".")
 }
 
 func gammaEnvelopeAsOf(env rpc.GammaZeroSPXResult) time.Time {

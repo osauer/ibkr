@@ -391,6 +391,27 @@ func TestGammaQualitySPXOIDegradationBlocksCombined(t *testing.T) {
 	}
 }
 
+func TestGammaQualityCombinedNamesSPXModelSourceBlocker(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.DerivedIVLegs = spx.PricedLegCount
+	spx.DerivedPrevCloseLegs = spx.PricedLegCount
+	spx.ModelTickLegs = 0
+	spx.Warnings = []string{"all_iv_derived"}
+	combined := combineGammaResults(spy, spx)
+
+	annotateGammaQuality(combined, now)
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityBlocked {
+		t.Fatalf("combined rankability = %q, want blocked: %+v", got, combined.Quality)
+	}
+	if !strings.Contains(combined.Quality.RankabilityReason, "SPX model source blocked") ||
+		!strings.Contains(combined.Quality.RankabilityReason, "100.0%") {
+		t.Fatalf("combined rankability reason = %q, want SPX model-source blocker", combined.Quality.RankabilityReason)
+	}
+}
+
 func TestGammaQualityCoverageReportsLiveAndCarriedOI(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)

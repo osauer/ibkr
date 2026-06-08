@@ -933,10 +933,13 @@ func TestBSIVFallback_AssemblesLegFromSyntheticPrice(t *testing.T) {
 				price = callPx - spot + strike // r=q=0 parity
 			}
 
-			r := bsIVFallback(spot, now, expiryYMD, "", strike, tc.right, 123, true, price)
+			r := bsIVFallback(spot, now, expiryYMD, "", strike, tc.right, 123, true, price, gammaIVSourcePrevClose)
 
 			if !r.OK || !r.IVDerived {
 				t.Fatalf("expected OK=true IVDerived=true, got %+v", r)
+			}
+			if r.IVSource != gammaIVSourcePrevClose {
+				t.Fatalf("IVSource = %q, want %q", r.IVSource, gammaIVSourcePrevClose)
 			}
 			if r.OI != 123 {
 				t.Errorf("OI threaded through: got %d, want 123", r.OI)
@@ -973,7 +976,7 @@ func TestBSIVFallback_RefusalCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := bsIVFallback(737.0, now, tc.expiryYMD, "", 735.0, "P", 100, true, tc.price)
+			r := bsIVFallback(737.0, now, tc.expiryYMD, "", 735.0, "P", 100, true, tc.price, gammaIVSourcePrevClose)
 			if r.OK || r.IVDerived || r.OI != 0 || r.IV != 0 {
 				t.Errorf("%s should return empty legResult, got %+v", tc.why, r)
 			}
@@ -1203,9 +1206,9 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 	t.Parallel()
 	const spot = 5000.0
 	legs := []legData{
-		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, oi: 10_000, oiObserved: true},
-		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, oi: 0, oiObserved: true},
-		{expiryYMD: "20260619", dte: 0.10, strike: 5100, right: "C", tradingClass: "SPX", isCall: true, iv: 0, oi: 20_000, oiObserved: true},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5000, right: "C", tradingClass: "SPXW", isCall: true, iv: 0.20, ivSource: gammaIVSourceModelTick, oi: 10_000, oiObserved: true},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5050, right: "P", tradingClass: "SPXW", isCall: false, iv: 0.21, ivSource: gammaIVSourceLiveMid, oi: 0, oiObserved: true},
+		{expiryYMD: "20260619", dte: 0.10, strike: 5100, right: "C", tradingClass: "SPX", isCall: true, iv: 0, ivSource: gammaIVSourcePrevClose, oi: 20_000, oiObserved: true},
 	}
 
 	got := buildGammaLegDiagnostics("spx", legs, spot)
@@ -1214,6 +1217,9 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 	}
 	wantTotal := rpc.GammaLegDiagnosticCounts{
 		PricedLegs:               3,
+		ModelTickLegs:            1,
+		DerivedLiveMidLegs:       1,
+		DerivedPrevCloseLegs:     1,
 		OpenInterestObservedLegs: 3,
 		OpenInterestLegs:         2,
 		GammaPositiveLegs:        2,
@@ -1227,6 +1233,8 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 	}
 	wantSPXW := rpc.GammaLegDiagnosticCounts{
 		PricedLegs:               2,
+		ModelTickLegs:            1,
+		DerivedLiveMidLegs:       1,
 		OpenInterestObservedLegs: 2,
 		OpenInterestLegs:         1,
 		GammaPositiveLegs:        2,
@@ -1237,6 +1245,7 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 	}
 	wantSPX := rpc.GammaLegDiagnosticCounts{
 		PricedLegs:               1,
+		DerivedPrevCloseLegs:     1,
 		OpenInterestObservedLegs: 1,
 		OpenInterestLegs:         1,
 	}
@@ -1246,9 +1255,9 @@ func TestBuildGammaLegDiagnosticsSplitsContributionFunnel(t *testing.T) {
 
 	formatted := formatGammaLegDiagnostics(got)
 	for _, want := range []string{
-		"total priced=3 oi_seen=3 oi>0=2 gamma>0=2 abs_gex>0=1",
-		"SPX priced=1 oi_seen=1 oi>0=1 gamma>0=0 abs_gex>0=0",
-		"SPXW priced=2 oi_seen=2 oi>0=1 gamma>0=2 abs_gex>0=1",
+		"total priced=3 model_tick_iv=1 derived_mid_iv=1 derived_close_iv=1 oi_seen=3 oi>0=2 gamma>0=2 abs_gex>0=1",
+		"SPX priced=1 model_tick_iv=0 derived_mid_iv=0 derived_close_iv=1 oi_seen=1 oi>0=1 gamma>0=0 abs_gex>0=0",
+		"SPXW priced=2 model_tick_iv=1 derived_mid_iv=1 derived_close_iv=0 oi_seen=2 oi>0=1 gamma>0=2 abs_gex>0=1",
 	} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted diagnostics %q missing %q", formatted, want)
@@ -1322,7 +1331,7 @@ func TestGammaCollectionDiagnosticsReportsCapsFailuresAndOISource(t *testing.T) 
 	d.noteStrikeSelection(picked[0], 100, 80, true, maxGammaStrikesPerExpiry)
 	d.notePrewarm("SPXW", "20260605", 160, 2, nil)
 	d.noteRequested(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7600, right: "C"})
-	d.notePriced(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7600, right: "C"}, 100, true, false, true, time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC))
+	d.notePriced(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7600, right: "C"}, gammaIVSourceModelTick, 100, true, false, true, time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC))
 	d.noteFailure(gammaLegSpec{expiryYMD: "20260605", tradingClass: "SPXW", strike: 7610, right: "P"}, gammaLegFailureTimeout)
 
 	rows := d.finish(2 * time.Second)
@@ -1331,7 +1340,7 @@ func TestGammaCollectionDiagnosticsReportsCapsFailuresAndOISource(t *testing.T) 
 	}
 	row := rows[0]
 	if row.QualifiedContracts != 160 || row.RequestedLegs != 1 || row.PricedLegs != 1 ||
-		row.OICarriedForwardLegs != 1 || row.Timeouts != 1 || row.ContractMissingLegs != 2 ||
+		row.ModelTickLegs != 1 || row.OICarriedForwardLegs != 1 || row.Timeouts != 1 || row.ContractMissingLegs != 2 ||
 		!row.StrikeCapTruncated || !row.ExpiryCapTruncated || row.OISourceStatus != gammaOISourceCarriedForward {
 		t.Fatalf("diagnostic row = %+v", row)
 	}
@@ -1363,7 +1372,7 @@ func TestGammaCollectionDiagnosticsConcurrentUpdates(t *testing.T) {
 			for i := range perWorker {
 				d.noteRequested(j)
 				if i%2 == 0 {
-					d.notePriced(j, 100, true, true, false, observedAt.Add(time.Duration(w*perWorker+i)*time.Millisecond))
+					d.notePriced(j, gammaIVSourceModelTick, 100, true, true, false, observedAt.Add(time.Duration(w*perWorker+i)*time.Millisecond))
 				} else {
 					d.noteFailure(j, gammaLegFailureTimeout)
 				}
@@ -1380,7 +1389,7 @@ func TestGammaCollectionDiagnosticsConcurrentUpdates(t *testing.T) {
 	wantRequested := workers * perWorker
 	wantPriced := workers * perWorker / 2
 	if row.RequestedLegs != wantRequested || row.PricedLegs != wantPriced ||
-		row.OILiveObservedLegs != wantPriced || row.OIPositiveLegs != wantPriced ||
+		row.ModelTickLegs != wantPriced || row.OILiveObservedLegs != wantPriced || row.OIPositiveLegs != wantPriced ||
 		row.Timeouts != wantPriced || row.OISourceStatus != gammaOISourceLiveObserved {
 		t.Fatalf("concurrent diagnostic row = %+v, want req=%d priced/live/positive/timeouts=%d",
 			row, wantRequested, wantPriced)

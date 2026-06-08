@@ -29,7 +29,7 @@ import (
 //   - TopStrikes: merged + sorted + top-K. With the 100× per-contract
 //     scaling SPX rows will dominate; the renderer's INDEX column
 //     makes the imbalance visible rather than hidden.
-//   - Expirations, LegCount, PricedLegCount, DerivedIVLegs, and
+//   - Expirations, LegCount, PricedLegCount, IV-source counters, and
 //     LegDiagnostics: unioned / summed for the diagnostic footer.
 //   - Warnings: unioned across spy + spx then deduped. They hydrate into
 //     WarningDetails before the result leaves the cache.
@@ -92,6 +92,9 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		LegCount:                spy.LegCount + spx.LegCount,
 		PricedLegCount:          spy.PricedLegCount + spx.PricedLegCount,
 		DerivedIVLegs:           spy.DerivedIVLegs + spx.DerivedIVLegs,
+		ModelTickLegs:           spy.ModelTickLegs + spx.ModelTickLegs,
+		DerivedLiveMidLegs:      spy.DerivedLiveMidLegs + spx.DerivedLiveMidLegs,
+		DerivedPrevCloseLegs:    spy.DerivedPrevCloseLegs + spx.DerivedPrevCloseLegs,
 		LegDiagnostics:          combineGammaLegDiagnostics(spy.LegDiagnostics, spx.LegDiagnostics),
 		CollectionDiagnostics:   append(append([]rpc.GammaCollectionDiagnostic{}, spy.CollectionDiagnostics...), spx.CollectionDiagnostics...),
 		Expirations:             dedupeStrings(append(append([]string{}, spy.Expirations...), spx.Expirations...)),

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +266,51 @@ func TestGammaStatusQualityTreatsContextOnlyAsContextNotDegraded(t *testing.T) {
 	})
 	if ok {
 		t.Fatalf("gammaStatusQuality = %+v, want no high-level degraded data quality for context-only gamma", got)
+	}
+}
+
+func TestGammaStatusQualityNamesCombinedSPXModelSourceBlocker(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 2, 15, 0, 0, 0, time.UTC)
+	got, ok := gammaStatusQuality(rpc.GammaZeroSPXResult{
+		Status: rpc.GammaZeroStatusReady,
+		Result: &rpc.GammaZeroComputed{
+			Scope: rpc.GammaZeroScopeCombined,
+			AsOf:  now,
+			Quality: &rpc.GammaSignalQuality{
+				Rankability:       rpc.GammaRankabilityBlocked,
+				RankabilityReason: "spx_coverage: SPX slice is not rankable",
+				ByUnderlying: map[string]rpc.GammaSignalQuality{
+					"SPX": {
+						Rankability:       rpc.GammaRankabilityBlocked,
+						RankabilityReason: "derived_iv_share: 100.0% of priced legs used derived IV",
+						Coverage: rpc.GammaQualityCoverage{
+							PricedLegs:   865,
+							DerivedIVPct: 100,
+						},
+						Blockers: []string{
+							"derived_iv_share: 100.0% of priced legs used derived IV",
+							"model_source: no gateway model IV ticks landed; all IVs were derived from quotes/closes",
+						},
+					},
+				},
+			},
+			Summary: &rpc.GammaZeroSummary{Confidence: "degraded"},
+		},
+	})
+	if !ok {
+		t.Fatal("gammaStatusQuality ok=false, want true")
+	}
+	if got.Surface != "gamma" || got.Status != "partial" {
+		t.Fatalf("quality header = %+v, want gamma partial", got)
+	}
+	for _, want := range []string{"SPX model source blocked", "100.0% of priced legs used derived IV"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Fatalf("summary = %q, missing %q", got.Summary, want)
+		}
+	}
+	if strings.Contains(got.Summary, "SPX slice is not rankable") {
+		t.Fatalf("summary should not preserve generic combined blocker: %q", got.Summary)
 	}
 }
 

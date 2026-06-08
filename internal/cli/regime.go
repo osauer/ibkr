@@ -882,7 +882,7 @@ func regimeReadLine(c regimeComposite) string {
 	case c.clusterRed >= 3:
 		return "Broad stress is confirmed across independent groups."
 	case c.clusterRed > 0:
-		return "Stress is visible, but not broad enough to dominate the read."
+		return "One or more stress groups are red, but independent confirmation is not strong enough to dominate the read."
 	case c.clusterYellow > 0:
 		return "Watch conditions are visible; not a confirmed broad stress regime."
 	default:
@@ -1797,7 +1797,7 @@ func regimeGammaQualityReason(q *rpc.GammaSignalQuality) string {
 		}
 		return gammaPlainQualityReason(q)
 	case rpc.GammaRankabilityBlocked:
-		return "coverage not clean enough"
+		return gammaPlainQualityReason(q)
 	case rpc.GammaRankabilityUnavailable:
 		return "gamma unavailable"
 	default:
@@ -1976,8 +1976,8 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, di
 					denom = res.LegCount
 				}
 				renderExplainKV(env, out, "Model note", fmt.Sprintf(
-					"%d/%d priced legs used derived IV from option quote/close fallback.",
-					res.DerivedIVLegs, denom), nil)
+					"%d/%d priced legs used derived IV from option quote/close fallback%s.",
+					res.DerivedIVLegs, denom, gammaIVSourceSplitSuffix(res)), nil)
 			}
 		}
 		if read := explainReadNote(e.name); read != "" {
@@ -2031,7 +2031,7 @@ func regimeGammaDataNote(c *rpc.GammaZeroComputed, diagnostics bool) string {
 		}
 	}
 	for _, d := range details {
-		if d.Code == "cache_stale_off_hours" {
+		if d.Code == "cache_stale_off_hours" || d.Code == "all_iv_derived" {
 			return formatRegimeGammaDataNote(d, diagnostics)
 		}
 	}
@@ -2048,6 +2048,8 @@ func formatRegimeGammaDataNote(d rpc.GammaWarningDetail, diagnostics bool) strin
 			return "SPX is unavailable; proxy gamma is awareness-only for S&P market structure."
 		case code == "cache_stale_off_hours":
 			return "Cached after-hours gamma is stale; refresh during option hours for a fresh market-structure read."
+		case code == "all_iv_derived":
+			return "SPX model IV ticks did not land; gamma is visible as context but does not vote."
 		}
 	}
 	msg := strings.TrimSpace(d.Message)

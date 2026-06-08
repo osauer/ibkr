@@ -812,6 +812,9 @@ type StrikeConcentration struct {
 // from an observed zero-OI tick.
 type GammaLegDiagnosticCounts struct {
 	PricedLegs               int `json:"priced_legs"`
+	ModelTickLegs            int `json:"model_tick_legs,omitempty"`
+	DerivedLiveMidLegs       int `json:"derived_live_mid_legs,omitempty"`
+	DerivedPrevCloseLegs     int `json:"derived_prev_close_legs,omitempty"`
 	OpenInterestObservedLegs int `json:"oi_observed_legs,omitempty"`
 	OILiveObservedLegs       int `json:"oi_live_observed_legs,omitempty"`
 	OICarriedForwardLegs     int `json:"oi_carried_forward_legs,omitempty"`
@@ -841,6 +844,9 @@ type GammaCollectionDiagnostic struct {
 	QualifiedContracts       int    `json:"qualified_contracts"`
 	RequestedLegs            int    `json:"requested_legs"`
 	PricedLegs               int    `json:"priced_legs"`
+	ModelTickLegs            int    `json:"model_tick_legs,omitempty"`
+	DerivedLiveMidLegs       int    `json:"derived_live_mid_legs,omitempty"`
+	DerivedPrevCloseLegs     int    `json:"derived_prev_close_legs,omitempty"`
 	MarketDataGenericTicks   string `json:"market_data_generic_ticks,omitempty"`
 	OIGenericTickRequested   bool   `json:"oi_generic_tick_101_requested,omitempty"`
 	OILiveObservedLegs       int    `json:"oi_live_observed_legs,omitempty"`
@@ -900,6 +906,9 @@ type GammaSignalQuality struct {
 // gates. Ratios are percentages in human units (95.0 means 95%).
 type GammaQualityCoverage struct {
 	PricedLegs           int     `json:"priced_legs"`
+	ModelTickLegs        int     `json:"model_tick_legs,omitempty"`
+	DerivedLiveMidLegs   int     `json:"derived_live_mid_legs,omitempty"`
+	DerivedPrevCloseLegs int     `json:"derived_prev_close_legs,omitempty"`
 	OIObservedLegs       int     `json:"oi_observed_legs"`
 	OILiveObservedLegs   int     `json:"oi_live_observed_legs,omitempty"`
 	OICarriedForwardLegs int     `json:"oi_carried_forward_legs,omitempty"`
@@ -1108,6 +1117,15 @@ type GammaZeroComputed struct {
 	// IVs" disclosure so readers can tell those IVs came from option
 	// quote/close inversion rather than live model ticks.
 	DerivedIVLegs int `json:"derived_iv_legs,omitempty"`
+	// ModelTickLegs counts priced legs whose IV came from IBKR's
+	// option model-computation tick. DerivedLiveMidLegs and
+	// DerivedPrevCloseLegs split the BS-IV fallback by price anchor:
+	// live bid/ask midpoint versus prior-session option close. The
+	// split is optional and additive; legacy consumers can continue to
+	// read DerivedIVLegs as the total fallback count.
+	ModelTickLegs        int `json:"model_tick_legs,omitempty"`
+	DerivedLiveMidLegs   int `json:"derived_live_mid_legs,omitempty"`
+	DerivedPrevCloseLegs int `json:"derived_prev_close_legs,omitempty"`
 	// LegDiagnostics explains how priced legs flowed through the
 	// GEX-contribution funnel. It is especially useful when a forced
 	// off-hours run prices legs but every row has missing/zero OI.
