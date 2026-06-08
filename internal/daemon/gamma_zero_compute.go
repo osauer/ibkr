@@ -209,6 +209,7 @@ type legData struct {
 	tradingClass string // "SPY" | "SPX" | "SPXW" | …
 	isCall       bool
 	iv           float64
+	ivSource     string
 	oi           int64
 	oiObserved   bool
 	oiLive       bool
@@ -258,6 +259,7 @@ type legResult struct {
 	IV         float64
 	Gamma      float64
 	IVDerived  bool
+	IVSource   string
 	OK         bool
 	Throttle   bool
 	Failure    string
@@ -270,6 +272,9 @@ const (
 	gammaLegFailureFarm                 = "farm"
 	gammaLegFailureEntitlement          = "entitlement"
 	gammaLegFailureSubscriptionRejected = "subscription_reject"
+	gammaIVSourceModelTick              = "model_tick"
+	gammaIVSourceLiveMid                = "derived_live_mid"
+	gammaIVSourcePrevClose              = "derived_prev_close"
 	gammaOISourceLiveObserved           = "live_observed"
 	gammaOISourceCarriedForward         = "carried_forward"
 	gammaOISourceMissing                = "missing"
@@ -434,21 +439,24 @@ func productionLegFetcher(
 		oi, oiObserved := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() (int64, bool) {
 			return optionOpenInterest(c, key)
 		})
-		return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, OK: true}
+		return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, IVSource: gammaIVSourceModelTick, OK: true}
 	}
 	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
 	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
 	var price float64
+	var ivSource string
 	if hasQuote && bid > 0 && ask > 0 {
 		price = (bid + ask) / 2
+		ivSource = gammaIVSourceLiveMid
 	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
 		price = px
+		ivSource = gammaIVSourcePrevClose
 	}
 	oi, oiObserved := waitForOptionOpenInterest(ctx, time.Now().Add(optionOpenInterestGrace), func() (int64, bool) {
 		return optionOpenInterest(c, key)
 	})
-	fallback := bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, oiObserved, price)
+	fallback := bsIVFallback(snapshotSpot, snapshotAt, expiryYMD, tradingClass, strike, right, oi, oiObserved, price, ivSource)
 	if !fallback.OK {
 		fallback.Failure = gammaLegFailureTimeout
 	}
@@ -543,7 +551,7 @@ func waitForOptionOpenInterest(ctx context.Context, deadline time.Time, read fun
 // solving from yesterday's close at 14:00 ET on expiry day must use
 // the 09:30 ET instant (already past) and yield dte=0, not over-state
 // gamma against a 16:00 instant that doesn't apply to this class.
-func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, tradingClass string, strike float64, right string, oi int64, oiObserved bool, price float64) legResult {
+func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, tradingClass string, strike float64, right string, oi int64, oiObserved bool, price float64, ivSource string) legResult {
 	dte := dteYears(expiryYMD, tradingClass, snapshotAt)
 	if dte <= 0 || price <= 0 {
 		return legResult{}
@@ -552,8 +560,36 @@ func bsIVFallback(snapshotSpot float64, snapshotAt time.Time, expiryYMD, trading
 	if iv <= 0 {
 		return legResult{}
 	}
+	if ivSource == "" {
+		ivSource = gammaIVSourcePrevClose
+	}
 	gamma := bsGamma(snapshotSpot, strike, dte, iv, 0, 0)
-	return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, IVDerived: true, OK: true}
+	return legResult{OI: oi, OIObserved: oiObserved, IV: iv, Gamma: gamma, IVDerived: true, IVSource: ivSource, OK: true}
+}
+
+func gammaIVSource(r legResult) string {
+	switch r.IVSource {
+	case gammaIVSourceModelTick, gammaIVSourceLiveMid, gammaIVSourcePrevClose:
+		return r.IVSource
+	}
+	if r.IVDerived {
+		return gammaIVSourcePrevClose
+	}
+	return gammaIVSourceModelTick
+}
+
+func countGammaIVSources(legs []legData) (modelTick, derivedMid, derivedClose int) {
+	for _, leg := range legs {
+		switch leg.ivSource {
+		case gammaIVSourceLiveMid:
+			derivedMid++
+		case gammaIVSourcePrevClose:
+			derivedClose++
+		default:
+			modelTick++
+		}
+	}
+	return modelTick, derivedMid, derivedClose
 }
 
 // computeGammaZeroFor runs the full Phase 2 compute for one underlying.
@@ -848,14 +884,17 @@ func computeGammaZeroFor(
 	// is bounded at one append per completed leg (cheap relative to the
 	// per-leg roundtrip).
 	var (
-		legs           []legData
-		mu             sync.Mutex
-		done           atomic.Int32
-		noContract     atomic.Int32
-		derivedIVs     atomic.Int32
-		throttledAbort atomic.Bool
-		earlyAbort     atomic.Bool
-		total          = int32(len(jobs))
+		legs            []legData
+		mu              sync.Mutex
+		done            atomic.Int32
+		noContract      atomic.Int32
+		derivedIVs      atomic.Int32
+		modelTickIVs    atomic.Int32
+		derivedMidIVs   atomic.Int32
+		derivedCloseIVs atomic.Int32
+		throttledAbort  atomic.Bool
+		earlyAbort      atomic.Bool
+		total           = int32(len(jobs))
 	)
 
 	// Early-abort watchdog. After earlyAbortAfter elapses, if zero legs
@@ -906,8 +945,16 @@ func computeGammaZeroFor(
 			collection.noteFailure(j, gammaLegFailureTimeout)
 			return
 		}
-		if r.IVDerived {
+		ivSource := gammaIVSource(r)
+		switch ivSource {
+		case gammaIVSourceLiveMid:
 			derivedIVs.Add(1)
+			derivedMidIVs.Add(1)
+		case gammaIVSourcePrevClose:
+			derivedIVs.Add(1)
+			derivedCloseIVs.Add(1)
+		default:
+			modelTickIVs.Add(1)
 		}
 		oi, oiObserved, oiLive, oiCarried, oiObservedAt := gammaOIForLegResult(
 			sym, j.tradingClass, j.expiryYMD, j.strike, j.right, r, oiState, spotAt)
@@ -917,7 +964,7 @@ func computeGammaZeroFor(
 			liveOIUpdates[key] = gammaOIRecordForLeg(sym, j.tradingClass, j.expiryYMD, j.strike, j.right, oi, oiObservedAt)
 			mu.Unlock()
 		}
-		collection.notePriced(j, oi, oiObserved, oiLive, oiCarried, oiObservedAt)
+		collection.notePriced(j, ivSource, oi, oiObserved, oiLive, oiCarried, oiObservedAt)
 		mu.Lock()
 		legs = append(legs, legData{
 			expiryYMD:       j.expiryYMD,
@@ -927,6 +974,7 @@ func computeGammaZeroFor(
 			tradingClass:    j.tradingClass,
 			isCall:          j.right == "C",
 			iv:              r.IV,
+			ivSource:        ivSource,
 			oi:              oi,
 			oiObserved:      oiObserved,
 			oiLive:          oiLive,
@@ -967,8 +1015,8 @@ func computeGammaZeroFor(
 			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return usable IV/pricing", len(jobs))
 		}
 	}
-	log.Infof("gamma.fanout.done landed=%d/%d derived_iv=%d elapsed=%s",
-		len(legs), len(jobs), derivedIVs.Load(), fanoutElapsed)
+	log.Infof("gamma.fanout.done landed=%d/%d model_tick_iv=%d derived_mid_iv=%d derived_close_iv=%d derived_iv=%d elapsed=%s",
+		len(legs), len(jobs), modelTickIVs.Load(), derivedMidIVs.Load(), derivedCloseIVs.Load(), derivedIVs.Load(), fanoutElapsed)
 	progress.Store(85)
 
 	// 6-7. Sweep + aggregate.
@@ -1167,6 +1215,9 @@ func computeGammaZeroFor(
 		LegCount:                len(gexLegs),
 		PricedLegCount:          len(legs),
 		DerivedIVLegs:           derivedCount,
+		ModelTickLegs:           int(modelTickIVs.Load()),
+		DerivedLiveMidLegs:      int(derivedMidIVs.Load()),
+		DerivedPrevCloseLegs:    int(derivedCloseIVs.Load()),
 		LegDiagnostics:          legDiagnostics,
 		CollectionDiagnostics:   collection.finish(time.Since(startWall)),
 		Warnings:                warnings,
@@ -1183,8 +1234,8 @@ func computeGammaZeroFor(
 	if zg != nil {
 		zeroGammaStr = fmt.Sprintf("%.2f", *zg)
 	}
-	log.Infof("gamma.done gex_legs=%d priced_legs=%d/%d derived_iv=%d spot=%.2f zero_gamma=%s sign=%s elapsed=%s",
-		len(gexLegs), len(legs), len(jobs), derivedCount, spot, zeroGammaStr, gammaSign,
+	log.Infof("gamma.done gex_legs=%d priced_legs=%d/%d model_tick_iv=%d derived_mid_iv=%d derived_close_iv=%d derived_iv=%d spot=%.2f zero_gamma=%s sign=%s elapsed=%s",
+		len(gexLegs), len(legs), len(jobs), res.ModelTickLegs, res.DerivedLiveMidLegs, res.DerivedPrevCloseLegs, derivedCount, spot, zeroGammaStr, gammaSign,
 		time.Since(startWall).Round(time.Millisecond))
 	if err := validateGammaComputed(res); err != nil {
 		return nil, err
@@ -1218,6 +1269,7 @@ func gammaSourceFailureDiagnostic(
 	if derivedIVs > 0 && int(derivedIVs) == len(legs) {
 		warnings = append(warnings, "all_iv_derived")
 	}
+	modelTickIVs, derivedMidIVs, derivedCloseIVs := countGammaIVSources(legs)
 	out := &rpc.GammaZeroComputed{
 		SpotUnderlying:        spot,
 		SpotAt:                spotAt,
@@ -1232,6 +1284,9 @@ func gammaSourceFailureDiagnostic(
 		LegCount:              0,
 		PricedLegCount:        len(legs),
 		DerivedIVLegs:         int(derivedIVs),
+		ModelTickLegs:         modelTickIVs,
+		DerivedLiveMidLegs:    derivedMidIVs,
+		DerivedPrevCloseLegs:  derivedCloseIVs,
 		LegDiagnostics:        legDiagnostics,
 		CollectionDiagnostics: collection,
 		Warnings:              warnings,
@@ -1820,7 +1875,7 @@ func (d *gammaCollectionDiagnostics) noteRequested(j gammaLegSpec) {
 	}
 }
 
-func (d *gammaCollectionDiagnostics) notePriced(j gammaLegSpec, oi int64, oiObserved, oiLive, oiCarried bool, observedAt time.Time) {
+func (d *gammaCollectionDiagnostics) notePriced(j gammaLegSpec, ivSource string, oi int64, oiObserved, oiLive, oiCarried bool, observedAt time.Time) {
 	if d == nil {
 		return
 	}
@@ -1831,6 +1886,14 @@ func (d *gammaCollectionDiagnostics) notePriced(j gammaLegSpec, oi int64, oiObse
 		return
 	}
 	row.PricedLegs++
+	switch ivSource {
+	case gammaIVSourceLiveMid:
+		row.DerivedLiveMidLegs++
+	case gammaIVSourcePrevClose:
+		row.DerivedPrevCloseLegs++
+	default:
+		row.ModelTickLegs++
+	}
 	switch {
 	case oiLive:
 		row.OILiveObservedLegs++

@@ -360,8 +360,9 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Action = gammaOIMissingAction(d.Scope, session)
 	case code == "all_iv_derived":
 		d.Severity = "data_quality"
-		d.Message = "All implied volatilities were back-solved instead of supplied by the gateway model tick."
-		d.Impact = "The result is more model-dependent, often because the option market was not actively quoting."
+		d.Message = "No gateway model IV ticks landed; all implied volatilities were back-solved."
+		d.Impact = gammaIVSourceImpact(c)
+		d.Action = "Treat gamma as non-voting until IBKR model-computation ticks resume; inspect gateway/farm notices and active market-data subscription pressure."
 	case code == "strike_budget_capped":
 		d.Severity = "methodology"
 		d.Message = "The strike fan-out was capped to the nearest 80 listed strikes per expiry."
@@ -400,6 +401,27 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Message = code
 	}
 	return d
+}
+
+func gammaIVSourceImpact(c *rpc.GammaZeroComputed) string {
+	if c == nil {
+		return "The result is more model-dependent because every priced leg used quote/close inversion."
+	}
+	denom := c.PricedLegCount
+	if denom == 0 {
+		denom = c.LegCount
+	}
+	var parts []string
+	if c.DerivedLiveMidLegs > 0 {
+		parts = append(parts, fmt.Sprintf("%d live bid/ask midpoint", c.DerivedLiveMidLegs))
+	}
+	if c.DerivedPrevCloseLegs > 0 {
+		parts = append(parts, fmt.Sprintf("%d prior option close", c.DerivedPrevCloseLegs))
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("The result is more model-dependent because %d/%d priced legs used quote/close inversion instead of IBKR model-computation ticks.", c.DerivedIVLegs, denom)
+	}
+	return fmt.Sprintf("The result is more model-dependent: %d/%d priced legs used quote/close inversion (%s) instead of IBKR model-computation ticks.", c.DerivedIVLegs, denom, strings.Join(parts, ", "))
 }
 
 func gammaOIObservedCount(c *rpc.GammaZeroComputed) int {

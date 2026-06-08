@@ -456,6 +456,37 @@ func TestRenderGamma_DefaultFiltersDiagnosticDataNotes(t *testing.T) {
 	}
 }
 
+func TestRenderGamma_DefaultSurfacesAllDerivedIVDataQuality(t *testing.T) {
+	t.Parallel()
+	fix := gammaReadyFixture()
+	fix.Result.PerIndex["SPX"].DerivedIVLegs = 865
+	fix.Result.PerIndex["SPX"].PricedLegCount = 865
+	fix.Result.PerIndex["SPX"].DerivedPrevCloseLegs = 865
+	fix.Result.PerIndex["SPX"].WarningDetails = []rpc.GammaWarningDetail{{
+		Code:     "all_iv_derived",
+		Scope:    "SPX",
+		Severity: "data_quality",
+		Message:  "No gateway model IV ticks landed; all implied volatilities were back-solved.",
+		Impact:   "The result is more model-dependent: 865/865 priced legs used quote/close inversion (865 prior option close) instead of IBKR model-computation ticks.",
+	}}
+
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if code := renderGammaText(env, fix, false); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Context:",
+		"No gateway model IV ticks landed",
+		"865/865 priced legs",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default render missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderGamma_DefaultRendersCacheFallbackAsSourceNote(t *testing.T) {
 	t.Parallel()
 	fix := gammaReadyFixture()

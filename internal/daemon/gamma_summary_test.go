@@ -211,6 +211,24 @@ func TestGammaWarningDetailStrikeBudgetCapped(t *testing.T) {
 	}
 }
 
+func TestGammaWarningDetailAllDerivedIVNamesModelTickFailure(t *testing.T) {
+	t.Parallel()
+	got := gammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope:                rpc.GammaZeroScopeSPX,
+		PricedLegCount:       865,
+		DerivedIVLegs:        865,
+		DerivedPrevCloseLegs: 865,
+	}, "all_iv_derived")
+	if got.Severity != "data_quality" || got.Scope != "SPX" {
+		t.Fatalf("warning detail = %+v, want SPX data_quality warning", got)
+	}
+	for _, want := range []string{"No gateway model IV ticks landed", "865/865 priced legs", "865 prior option close", "non-voting"} {
+		if !strings.Contains(got.Message+" "+got.Impact+" "+got.Action, want) {
+			t.Fatalf("warning detail missing %q: %+v", want, got)
+		}
+	}
+}
+
 func TestGammaWarningDetailOIMissingNamesAPIDiagnostic(t *testing.T) {
 	t.Parallel()
 	got := gammaWarningDetail(&rpc.GammaZeroComputed{

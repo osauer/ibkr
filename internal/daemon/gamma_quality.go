@@ -147,9 +147,9 @@ func gammaQualityCombinedGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 	case spx.Quality.Rankability == rpc.GammaRankabilityRankable:
 		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGatePass, "SPX slice rankable")
 	case spx.Quality.Rankability == rpc.GammaRankabilityContextOnly:
-		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateContext, "SPX slice is context only")
+		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateContext, gammaCombinedSPXQualityReason(spx.Quality, "SPX slice is context only"))
 	default:
-		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, "SPX slice is not rankable")
+		gammaQualityAddGate(q, "spx_coverage", rpc.GammaQualityGateBlock, gammaCombinedSPXQualityReason(spx.Quality, "SPX slice is not rankable"))
 	}
 	switch {
 	case spy == nil:
@@ -174,6 +174,35 @@ func gammaQualityCombinedGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 		}
 	}
 	gammaQualityCommonModelGates(q, c)
+}
+
+func gammaCombinedSPXQualityReason(q *rpc.GammaSignalQuality, fallback string) string {
+	if q == nil {
+		return fallback
+	}
+	if gammaQualityHasBlocker(q, "derived_iv_share") || gammaQualityHasBlocker(q, "model_source") {
+		if q.Coverage.DerivedIVPct > 0 {
+			return fmt.Sprintf("SPX model source blocked: %.1f%% of priced legs used derived IV", q.Coverage.DerivedIVPct)
+		}
+		return "SPX model source blocked: IVs came from quote/close fallback"
+	}
+	if q.RankabilityReason != "" {
+		return "SPX " + q.RankabilityReason
+	}
+	return fallback
+}
+
+func gammaQualityHasBlocker(q *rpc.GammaSignalQuality, gate string) bool {
+	if q == nil {
+		return false
+	}
+	prefix := gate + ":"
+	for _, blocker := range q.Blockers {
+		if strings.HasPrefix(blocker, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func gammaQualitySingleGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComputed) {
@@ -294,7 +323,7 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 		case code == "throttled":
 			gammaQualityAddGate(q, "gateway_pacing", rpc.GammaQualityGateBlock, "gateway throttled option fan-out")
 		case code == "all_iv_derived":
-			gammaQualityAddGate(q, "model_source", rpc.GammaQualityGateBlock, "all IVs were derived from quotes/closes")
+			gammaQualityAddGate(q, "model_source", rpc.GammaQualityGateBlock, "no gateway model IV ticks landed; all IVs were derived from quotes/closes")
 		case code == "oi_missing":
 			scope := gammaQualityScope(c)
 			if scope == "SPX" {
@@ -408,13 +437,16 @@ func gammaQualityCoverage(c *rpc.GammaZeroComputed) rpc.GammaQualityCoverage {
 
 func gammaQualityCoverageNumbers(c *rpc.GammaZeroComputed, priced, oiObserved, oiPositive, gexLegs int) rpc.GammaQualityCoverage {
 	out := rpc.GammaQualityCoverage{
-		PricedLegs:          priced,
-		OIObservedLegs:      oiObserved,
-		OIPositiveLegs:      oiPositive,
-		GEXLegs:             gexLegs,
-		DerivedIVPct:        percent(float64(c.DerivedIVLegs), float64(max(priced, 0))),
-		TopConcentrationPct: c.TopConcentrationPct,
-		ExpirationCount:     len(c.Expirations),
+		PricedLegs:           priced,
+		ModelTickLegs:        c.ModelTickLegs,
+		DerivedLiveMidLegs:   c.DerivedLiveMidLegs,
+		DerivedPrevCloseLegs: c.DerivedPrevCloseLegs,
+		OIObservedLegs:       oiObserved,
+		OIPositiveLegs:       oiPositive,
+		GEXLegs:              gexLegs,
+		DerivedIVPct:         percent(float64(c.DerivedIVLegs), float64(max(priced, 0))),
+		TopConcentrationPct:  c.TopConcentrationPct,
+		ExpirationCount:      len(c.Expirations),
 	}
 	out.OIObservedPct = percent(float64(oiObserved), float64(priced))
 	out.OIPositivePct = percent(float64(oiPositive), float64(priced))
