@@ -27,7 +27,6 @@ func runOrders(ctx context.Context, env *Env, args []string) int {
 func runOrdersOpen(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "orders")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	account := fs.String("account", "", "filter to one account")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -36,10 +35,10 @@ func runOrdersOpen(ctx context.Context, env *Env, args []string) int {
 		rest = rest[1:]
 	}
 	if len(rest) != 0 {
-		return fail(env, "orders open: usage is `ibkr orders open [--account ACCOUNT]`")
+		return fail(env, "orders open: usage is `ibkr orders open [--json]`")
 	}
 	var res rpc.OrdersOpenResult
-	if err := env.Conn.Call(ctx, rpc.MethodOrdersOpen, rpc.OrdersOpenParams{Account: strings.TrimSpace(*account)}, &res); err != nil {
+	if err := env.Conn.Call(ctx, rpc.MethodOrdersOpen, rpc.OrdersOpenParams{}, &res); err != nil {
 		return fail(env, "orders open: %v", err)
 	}
 	if *jsonOut {

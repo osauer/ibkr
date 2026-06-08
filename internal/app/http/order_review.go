@@ -172,7 +172,7 @@ func (h *handler) handleTransmitOrderReviewSet(w nethttp.ResponseWriter, r *neth
 }
 
 func (h *handler) handleOrdersOpen(w nethttp.ResponseWriter, r *nethttp.Request) {
-	res, err := h.deps.Daemon.OrdersOpen(r.Context(), rpc.OrdersOpenParams{Account: strings.TrimSpace(r.URL.Query().Get("account"))})
+	res, err := h.deps.Daemon.OrdersOpen(r.Context(), rpc.OrdersOpenParams{})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())
 		return

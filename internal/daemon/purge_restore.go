@@ -139,7 +139,7 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 	}
 	res.Status = purgeRestoreFinalStatus(*res)
 	res.Message = purgeRestoreMessage(*res)
-	rows, _, err := s.purgeLedger.Snapshot(status.Account, strings.TrimSpace(p.PurgeID))
+	rows, _, err := s.purgeLedger.Snapshot(brokerStateScope{Account: status.Account, Mode: status.Mode}, strings.TrimSpace(p.PurgeID))
 	if err == nil {
 		res.LedgerRows = rows
 	}
@@ -223,7 +223,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 	} else if len(symbols) == 0 {
 		return nil, errBadRequest("restore requires a symbol or all=true")
 	}
-	selected := selectPurgeLedgerRows(rows, status.Account, p.PurgeID, symbols)
+	selected := selectPurgeLedgerRows(rows, brokerStateScope{Account: status.Account, Mode: status.Mode}, p.PurgeID, symbols)
 	res.SelectedLegs = len(selected)
 	for _, row := range selected {
 		res.LedgerRows = append(res.LedgerRows, purgeLedgerRowToRPC(row))
@@ -427,7 +427,7 @@ func purgeRestoreLegShadowPnL(row purgeLedgerRow, restorePrice, qty float64) flo
 	return (purgeAvg - restorePrice) * qty * multiplier * sign
 }
 
-func selectPurgeLedgerRows(rows []purgeLedgerRow, account, purgeID string, symbols []string) []purgeLedgerRow {
+func selectPurgeLedgerRows(rows []purgeLedgerRow, scope brokerStateScope, purgeID string, symbols []string) []purgeLedgerRow {
 	symbolSet := map[string]bool{}
 	for _, symbol := range symbols {
 		symbolSet[strings.ToUpper(strings.TrimSpace(symbol))] = true
@@ -438,7 +438,7 @@ func selectPurgeLedgerRows(rows []purgeLedgerRow, account, purgeID string, symbo
 		if row.RemainingQuantity <= 0 {
 			continue
 		}
-		if account != "" && row.Account != "" && !strings.EqualFold(row.Account, account) {
+		if !purgeLedgerRowMatchesBrokerScope(row, scope) {
 			continue
 		}
 		if purgeID != "" && !strings.EqualFold(purgeID, "active") && !strings.EqualFold(row.PurgeID, purgeID) {

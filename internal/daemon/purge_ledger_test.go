@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	}, contract)); err != nil {
 		t.Fatalf("send attempt ApplyOrderFill: %v", err)
 	}
-	rows, totals, err := store.Snapshot("", "")
+	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after send attempt: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	if err := store.ApplyOrderFill(purgePartial); err != nil {
 		t.Fatalf("duplicate purge fill: %v", err)
 	}
-	rows, _, err = store.Snapshot("", "")
+	rows, _, err = store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after partial purge: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	if err := store.ApplyOrderFill(purgeFull); err != nil {
 		t.Fatalf("full purge fill: %v", err)
 	}
-	rows, _, err = store.Snapshot("", "")
+	rows, _, err = store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after full purge: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	if err := store.ApplyOrderFill(restorePartial); err != nil {
 		t.Fatalf("duplicate restore fill: %v", err)
 	}
-	rows, _, err = store.Snapshot("", "")
+	rows, _, err = store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after partial restore: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	if err := store.ApplyOrderFill(restoreFull); err != nil {
 		t.Fatalf("full restore fill: %v", err)
 	}
-	rows, totals, err = store.Snapshot("", "")
+	rows, totals, err = store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after full restore: %v", err)
 	}
@@ -114,12 +115,75 @@ func TestPurgeLedgerShadowPnLForShortRows(t *testing.T) {
 	if err := store.ApplyOrderFill(restoreFill); err != nil {
 		t.Fatalf("short restore fill: %v", err)
 	}
-	rows, totals, err := store.Snapshot("", "")
+	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("short snapshot: %v", err)
 	}
 	if len(rows) != 1 || rows[0].OriginalSide != purgeOriginalSideShort || rows[0].ShadowPnL != -10 || totals.ShadowPnL != -10 {
 		t.Fatalf("short row/totals = %+v / %+v", rows, totals)
+	}
+}
+
+func TestPurgeLedgerSnapshotFiltersByBrokerScopeMode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 8, 18, 45, 0, 0, time.UTC)
+	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	contract := purgeLedgerTestStockContract()
+
+	paper := purgeLedgerFillEvent(purgeExecuteSource, "paper-purge", "purge-paper", "leg-aapl", contract, rpc.OrderActionSell, 1, 1, 100)
+	paper.Account = "DU7654321"
+	paper.Mode = rpc.AccountModePaper
+	live := purgeLedgerFillEvent(purgeExecuteSource, "live-purge", "purge-live", "leg-aapl", contract, rpc.OrderActionSell, 2, 2, 101)
+	live.Account = "U1234567"
+	live.Mode = rpc.AccountModeLive
+	if err := store.ApplyOrderFill(paper); err != nil {
+		t.Fatalf("paper fill: %v", err)
+	}
+	if err := store.ApplyOrderFill(live); err != nil {
+		t.Fatalf("live fill: %v", err)
+	}
+
+	rows, totals, err := store.Snapshot(brokerStateScope{Account: "All", Mode: rpc.AccountModeLive}, "")
+	if err != nil {
+		t.Fatalf("live aggregate snapshot: %v", err)
+	}
+	if len(rows) != 0 || totals.PurgedQuantity != 0 {
+		t.Fatalf("live aggregate rows=%+v totals=%+v, want no concrete-account rows", rows, totals)
+	}
+	rows, totals, err = store.Snapshot(brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive}, "")
+	if err != nil {
+		t.Fatalf("live account snapshot: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PurgeID != "purge-live" || rows[0].Mode != rpc.AccountModeLive || totals.PurgedQuantity != 2 {
+		t.Fatalf("live account rows=%+v totals=%+v, want only live row", rows, totals)
+	}
+	rows, totals, err = store.Snapshot(brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, "")
+	if err != nil {
+		t.Fatalf("paper account snapshot: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PurgeID != "purge-paper" || rows[0].Mode != rpc.AccountModePaper || totals.PurgedQuantity != 1 {
+		t.Fatalf("paper rows=%+v totals=%+v, want only paper row", rows, totals)
+	}
+}
+
+func TestPurgeLedgerOldSchemaIsReset(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "purge-ledger.json")
+	if err := os.WriteFile(path, []byte(`{"kind":"ibkr.purge_ledger","schema_version":"purge-ledger-v1","rows":[{"leg_id":"old","symbol":"SAP"}]}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write old ledger: %v", err)
+	}
+	store := newPurgeLedgerStore(path, func() time.Time { return time.Date(2026, 6, 8, 18, 50, 0, 0, time.UTC) })
+	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
+	if err != nil {
+		t.Fatalf("snapshot old schema: %v", err)
+	}
+	if len(rows) != 0 || totals.ActiveRows != 0 {
+		t.Fatalf("old schema rows=%+v totals=%+v, want reset empty ledger", rows, totals)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("old ledger file still exists or stat failed err=%v", err)
 	}
 }
 
@@ -156,7 +220,7 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 	}, contract)); err != nil {
 		t.Fatalf("append purge send: %v", err)
 	}
-	rows, _, err := srv.purgeLedger.Snapshot("", "")
+	rows, _, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot before lifecycle: %v", err)
 	}
@@ -174,7 +238,7 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 		Remaining:    0,
 		AvgFillPrice: 100,
 	})
-	rows, _, err = srv.purgeLedger.Snapshot("", "")
+	rows, _, err = srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after purge lifecycle: %v", err)
 	}
@@ -213,7 +277,7 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 		Remaining:    0,
 		AvgFillPrice: 90,
 	})
-	rows, totals, err := srv.purgeLedger.Snapshot("", "")
+	rows, totals, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
 		t.Fatalf("snapshot after restore lifecycle: %v", err)
 	}
@@ -233,6 +297,7 @@ func purgeLedgerFillEvent(source, orderRef, purgeID, legID string, contract rpc.
 		PurgeID:      purgeID,
 		LegID:        legID,
 		Account:      "DU123",
+		Mode:         rpc.AccountModePaper,
 		Action:       action,
 		OrderType:    rpc.OrderTypeLMT,
 		TIF:          rpc.OrderTIFDay,

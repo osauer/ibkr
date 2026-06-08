@@ -26,13 +26,9 @@ Read ibkr's platform settings and observed state: runtime user preferences such 
 
 ## `ibkr_orders_open`
 
-Read locally journaled open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open or when the user asks for open orders. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for creating a new preview token (use `ibkr_order_preview`) and NOT for submitting, modifying, or cancelling an order.
+Read current broker account/mode open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open for the currently connected broker context, or when the user asks for open orders. Paper/test journal rows are intentionally not returned while connected to live, and live rows are intentionally not returned while connected to paper. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for historical audit across old accounts or modes, NOT for creating a new preview token (use `ibkr_order_preview`), and NOT for submitting, modifying, or cancelling an order.
 
-**Parameters:**
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `account` | string | no | optional account filter; omit to show all locally journaled accounts |
+*No parameters.*
 
 ## `ibkr_order_status`
 

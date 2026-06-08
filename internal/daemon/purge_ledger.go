@@ -15,7 +15,7 @@ import (
 
 const (
 	purgeLedgerKind          = "ibkr.purge_ledger"
-	purgeLedgerSchemaVersion = "purge-ledger-v1"
+	purgeLedgerSchemaVersion = "purge-ledger-v2"
 
 	purgeLedgerStatusActive   = "active"
 	purgeLedgerStatusRestored = "restored"
@@ -43,6 +43,7 @@ type purgeLedgerRow struct {
 	SecType             string                          `json:"sec_type"`
 	Contract            rpc.ContractParams              `json:"contract"`
 	Account             string                          `json:"account,omitempty"`
+	Mode                string                          `json:"mode,omitempty"`
 	Currency            string                          `json:"currency,omitempty"`
 	OriginalSide        string                          `json:"original_side"`
 	OriginalQuantity    float64                         `json:"original_quantity"`
@@ -79,7 +80,7 @@ func newPurgeLedgerStore(path string, now func() time.Time) *purgeLedgerStore {
 	return &purgeLedgerStore{Path: path, now: now}
 }
 
-func (s *purgeLedgerStore) Snapshot(account, purgeID string) ([]rpc.PurgeLedgerRow, rpc.PurgeLedgerTotals, error) {
+func (s *purgeLedgerStore) Snapshot(scope brokerStateScope, purgeID string) ([]rpc.PurgeLedgerRow, rpc.PurgeLedgerTotals, error) {
 	if s == nil {
 		return nil, rpc.PurgeLedgerTotals{}, nil
 	}
@@ -91,7 +92,7 @@ func (s *purgeLedgerStore) Snapshot(account, purgeID string) ([]rpc.PurgeLedgerR
 	}
 	rows := make([]rpc.PurgeLedgerRow, 0, len(ledger.Rows))
 	for _, row := range ledger.Rows {
-		if account != "" && !strings.EqualFold(row.Account, account) {
+		if !purgeLedgerRowMatchesBrokerScope(row, scope) {
 			continue
 		}
 		if purgeID != "" && !strings.EqualFold(row.PurgeID, purgeID) {
@@ -152,7 +153,9 @@ func applyPurgeLedgerFill(ledger *purgeLedgerFile, ev orderJournalEvent, now tim
 		legID = purgeLegIDForContract(contractParamsFromJournalEvent(ev))
 	}
 	idx := slices.IndexFunc(ledger.Rows, func(row purgeLedgerRow) bool {
-		return row.LegID == legID
+		return row.LegID == legID &&
+			strings.EqualFold(row.Account, ev.Account) &&
+			strings.EqualFold(row.Mode, ev.Mode)
 	})
 	if idx < 0 {
 		if ev.Source != purgeExecuteSource {
@@ -207,6 +210,7 @@ func purgeLedgerRowFromPurgeFill(ev orderJournalEvent, legID string, now time.Ti
 		SecType:           contract.SecType,
 		Contract:          contract,
 		Account:           ev.Account,
+		Mode:              ev.Mode,
 		Currency:          contract.Currency,
 		OriginalSide:      originalSide,
 		OriginalQuantity:  originalQty,
@@ -345,6 +349,7 @@ func purgeLedgerRowToRPC(row purgeLedgerRow) rpc.PurgeLedgerRow {
 		SecType:             row.SecType,
 		Contract:            row.Contract,
 		Account:             row.Account,
+		Mode:                row.Mode,
 		Currency:            row.Currency,
 		OriginalSide:        row.OriginalSide,
 		OriginalQuantity:    row.OriginalQuantity,
@@ -436,6 +441,14 @@ func (s *purgeLedgerStore) loadLocked() (purgeLedgerFile, error) {
 		return purgeLedgerFile{}, fmt.Errorf("decode purge ledger: %w", err)
 	}
 	if ledger.Kind != purgeLedgerKind || ledger.SchemaVersion != purgeLedgerSchemaVersion {
+		if ledger.Kind == purgeLedgerKind {
+			_ = os.Remove(s.Path)
+			return purgeLedgerFile{
+				Kind:          purgeLedgerKind,
+				SchemaVersion: purgeLedgerSchemaVersion,
+				UpdatedAt:     s.currentTime(),
+			}, nil
+		}
 		return purgeLedgerFile{}, fmt.Errorf("purge ledger is %q/%q, want %q/%q", ledger.Kind, ledger.SchemaVersion, purgeLedgerKind, purgeLedgerSchemaVersion)
 	}
 	return ledger, nil

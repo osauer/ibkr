@@ -22,10 +22,10 @@ func (s *Server) handleOrdersOpen(_ context.Context, req *rpc.Request) (*rpc.Ord
 	if err != nil {
 		return nil, err
 	}
-	account := strings.TrimSpace(p.Account)
+	scope := s.currentBrokerStateScope()
 	out := make([]rpc.OrderView, 0, len(views))
 	for _, v := range views {
-		if account != "" && !strings.EqualFold(v.Account, account) {
+		if !orderViewMatchesBrokerScope(v, scope) {
 			continue
 		}
 		if v.Open {
@@ -49,8 +49,12 @@ func (s *Server) handleOrderStatus(_ context.Context, req *rpc.Request) (*rpc.Or
 	if err != nil {
 		return nil, err
 	}
+	scope := s.currentBrokerStateScope()
 	for _, view := range views {
 		if !orderViewMatchesID(view, id) {
+			continue
+		}
+		if !orderViewMatchesBrokerScope(view, scope) {
 			continue
 		}
 		events := append([]rpc.OrderEvent{}, eventsByKey[orderViewKey(view)]...)
