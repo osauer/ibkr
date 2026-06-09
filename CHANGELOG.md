@@ -2,11 +2,12 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v1.8.0 — 2026-06-08 07:25 CEST
+## v1.8.0 — 2026-06-09 06:12 CEST
 
 ### What's new
 
 - Canary remote app access is now documented as an experimental beta, with screenshots, remote start and pairing notes, and a concise TLS/local-auth security model.
+- The daemon now avoids the app-driven market-data wakeup/logging loop that could make laptops hot and grow `ibkr-daemon.log` aggressively.
 
 ### Added
 
@@ -16,6 +17,12 @@ All notable changes to this project are documented here. The project adheres to 
 ### Changed
 
 - Updated the public landing page, sitemap, LLM indexes, MCP discovery metadata, and plugin version metadata for the `v1.8.0` feature release.
+
+### Fixed
+
+- Fixed rate-limiter token waits so queued broker requests sleep until their reserved refill time instead of waking every 10 ms under load.
+- Reduced routine market-data request, subscription, tick, and data-type logs from info to debug.
+- Stopped the app's 5-second snapshot poll from re-requesting baseline market quotes when fresh streamed quote data is already present.
 
 ## v1.7.1 — 2026-06-07 11:25 CEST
 

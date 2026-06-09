@@ -291,6 +291,32 @@ func TestPollOnceIncludesHeldUnderlyingQuotes(t *testing.T) {
 	}
 }
 
+func TestMarketQuoteContractsSkipFreshStreamedBaselines(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	existing := &MarketQuotes{
+		AsOf:   now.Add(-time.Second),
+		Quotes: map[string]rpc.Quote{},
+	}
+	for _, item := range marketQuoteContracts {
+		label := normalizeQuoteLabel(item.label)
+		existing.Quotes[label] = rpc.Quote{
+			Symbol:       label,
+			QuotePriceAt: now.Add(-time.Second),
+			AsOf:         now.Add(-time.Second),
+		}
+	}
+	stock := rpc.PositionView{Symbol: "AAPL", SecType: rpc.SecTypeStock, Currency: "USD", Multiplier: 1}
+	positions := &rpc.PositionsResult{
+		ByUnderlying: []rpc.PositionGroup{{Underlying: "AAPL", Stock: &stock}},
+	}
+
+	got := marketQuoteContractsFor(positions, existing, now, 15*time.Second)
+	if len(got) != 1 || got[0].label != "AAPL" {
+		t.Fatalf("contracts=%#v, want only held AAPL after fresh baselines", got)
+	}
+}
+
 func TestMarketQuoteErrorIncludesDynamicSymbols(t *testing.T) {
 	t.Parallel()
 	got := marketQuoteError(map[string]string{

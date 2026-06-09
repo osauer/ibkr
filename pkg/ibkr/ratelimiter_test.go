@@ -42,6 +42,41 @@ func TestRateLimiterCircuitBreakerTriggers(t *testing.T) {
 	}
 }
 
+func TestTokenBucketReservationsStaggerWaiters(t *testing.T) {
+	tb := NewTokenBucket(10, 40)
+	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	tb.mu.Lock()
+	tb.tokens = 0
+	tb.lastRefill = now
+	tb.mu.Unlock()
+
+	delay, reserved := tb.reserve(1, now)
+	if !reserved {
+		t.Fatalf("first waiter did not reserve a future token")
+	}
+	if delay < 24*time.Millisecond || delay > 26*time.Millisecond {
+		t.Fatalf("first delay=%s, want about 25ms", delay)
+	}
+
+	delay, reserved = tb.reserve(1, now)
+	if !reserved {
+		t.Fatalf("second waiter did not reserve a future token")
+	}
+	if delay < 49*time.Millisecond || delay > 51*time.Millisecond {
+		t.Fatalf("second delay=%s, want about 50ms", delay)
+	}
+}
+
+func TestTokenBucketRejectsImpossibleWait(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := NewTokenBucket(1, 1).WaitForTokens(ctx, 2)
+	if err == nil || !strings.Contains(err.Error(), "exceeds bucket capacity") {
+		t.Fatalf("WaitForTokens err=%v, want capacity error", err)
+	}
+}
+
 // TestRateLimiterStopRace exercises concurrent Submit/Stop. Before the fix,
 // Stop closed requestQueue while Submit and the retry goroutine could still
 // send to it, occasionally panicking with "send on closed channel".

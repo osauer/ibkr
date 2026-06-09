@@ -248,7 +248,7 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			}
 		}
 	}
-	if quotes, err := s.marketQuotes(ctx, now, snap.Positions); err != nil {
+	if quotes, err := s.marketQuotes(ctx, now, snap.Positions, snap.Quotes); err != nil {
 		errors = append(errors, sourceErr("market_quotes", err, now))
 		snap.Sources["market_quotes"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
 		if quotes != nil {
@@ -430,13 +430,14 @@ var marketQuoteContracts = []marketQuoteContract{
 
 const maxUnderlyingQuoteContracts = 24
 
-func (s *Service) marketQuotes(ctx context.Context, now time.Time, positions *rpc.PositionsResult) (*MarketQuotes, error) {
+func (s *Service) marketQuotes(ctx context.Context, now time.Time, positions *rpc.PositionsResult, existing *MarketQuotes) (*MarketQuotes, error) {
 	type result struct {
 		label string
 		quote *rpc.Quote
 		err   error
 	}
-	contracts := marketQuoteContractsFor(positions)
+	freshFor := max(2*s.pollEvery, 15*time.Second)
+	contracts := marketQuoteContractsFor(positions, existing, now, freshFor)
 	results := make(chan result, len(contracts))
 	var wg sync.WaitGroup
 	for _, item := range contracts {
@@ -474,7 +475,7 @@ func (s *Service) marketQuotes(ctx context.Context, now time.Time, positions *rp
 	return out, nil
 }
 
-func marketQuoteContractsFor(positions *rpc.PositionsResult) []marketQuoteContract {
+func marketQuoteContractsFor(positions *rpc.PositionsResult, existing *MarketQuotes, now time.Time, freshFor time.Duration) []marketQuoteContract {
 	out := make([]marketQuoteContract, 0, len(marketQuoteContracts)+maxUnderlyingQuoteContracts)
 	seen := map[string]bool{}
 	for _, item := range marketQuoteContracts {
@@ -482,8 +483,11 @@ func marketQuoteContractsFor(positions *rpc.PositionsResult) []marketQuoteContra
 		if label == "" || seen[label] {
 			continue
 		}
-		out = append(out, item)
 		seen[label] = true
+		if marketQuoteFresh(existing, label, now, freshFor) {
+			continue
+		}
+		out = append(out, item)
 	}
 	if positions == nil {
 		return out
@@ -508,6 +512,43 @@ func marketQuoteContractsFor(positions *rpc.PositionsResult) []marketQuoteContra
 		added++
 	}
 	return out
+}
+
+func marketQuoteFresh(existing *MarketQuotes, label string, now time.Time, maxAge time.Duration) bool {
+	if existing == nil || maxAge <= 0 {
+		return false
+	}
+	quote, ok := existing.Quotes[normalizeQuoteLabel(label)]
+	if !ok {
+		return false
+	}
+	at := quoteFreshnessTime(quote)
+	if at.IsZero() {
+		at = existing.AsOf
+	}
+	if at.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if at.After(now) {
+		return true
+	}
+	return now.Sub(at) <= maxAge
+}
+
+func quoteFreshnessTime(quote rpc.Quote) time.Time {
+	switch {
+	case !quote.QuotePriceAt.IsZero():
+		return quote.QuotePriceAt
+	case !quote.PriceAt.IsZero():
+		return quote.PriceAt
+	case !quote.AsOf.IsZero():
+		return quote.AsOf
+	default:
+		return time.Time{}
+	}
 }
 
 func underlyingQuoteContract(group rpc.PositionGroup) (marketQuoteContract, bool) {

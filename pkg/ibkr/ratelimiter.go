@@ -96,38 +96,92 @@ func NewTokenBucket(capacity int, refillRate float64) *TokenBucket {
 
 // TryAcquire attempts to acquire n tokens, returns true if successful
 func (tb *TokenBucket) TryAcquire(n int) bool {
+	if n <= 0 {
+		return true
+	}
+
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
-	// Refill tokens based on elapsed time
-	now := time.Now()
-	elapsed := now.Sub(tb.lastRefill).Seconds()
-	tb.tokens = min(float64(tb.capacity), tb.tokens+elapsed*tb.refillRate)
-	tb.lastRefill = now
-
-	// Check if we have enough tokens
-	if tb.tokens >= float64(n) {
-		tb.tokens -= float64(n)
-		return true
+	tb.refillLocked(time.Now())
+	if tb.tokens < float64(n) {
+		return false
 	}
-	return false
+	tb.tokens -= float64(n)
+	return true
 }
 
 // WaitForTokens blocks until n tokens are available
 func (tb *TokenBucket) WaitForTokens(ctx context.Context, n int) error {
-	ticker := time.NewTicker(10 * time.Millisecond) // Check every 10ms
-	defer ticker.Stop()
+	if n <= 0 {
+		return nil
+	}
+	if n > tb.capacity {
+		return fmt.Errorf("token request %d exceeds bucket capacity %d", n, tb.capacity)
+	}
 
 	for {
+		delay, reserved := tb.reserve(n, time.Now())
+		if delay == 0 {
+			return nil
+		}
+
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if reserved {
+				tb.cancelReservation(n, time.Now())
+			}
 			return ctx.Err()
-		case <-ticker.C:
-			if tb.TryAcquire(n) {
+		case <-timer.C:
+			if reserved {
 				return nil
 			}
 		}
 	}
+}
+
+func (tb *TokenBucket) reserve(n int, now time.Time) (time.Duration, bool) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	tb.refillLocked(now)
+
+	if tb.tokens >= float64(n) {
+		tb.tokens -= float64(n)
+		return 0, true
+	}
+	if tb.refillRate <= 0 {
+		return time.Second, false
+	}
+
+	needed := float64(n) - tb.tokens
+	delay := max(time.Duration(needed/tb.refillRate*float64(time.Second)), time.Millisecond)
+	tb.tokens -= float64(n)
+	return delay, true
+}
+
+func (tb *TokenBucket) refillLocked(now time.Time) {
+	elapsed := now.Sub(tb.lastRefill).Seconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	tb.tokens = min(float64(tb.capacity), tb.tokens+elapsed*tb.refillRate)
+	tb.lastRefill = now
+}
+
+func (tb *TokenBucket) cancelReservation(n int, now time.Time) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	tb.refillLocked(now)
+	tb.tokens = min(float64(tb.capacity), tb.tokens+float64(n))
 }
 
 // Semaphore limits concurrent operations
