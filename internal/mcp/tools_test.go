@@ -277,9 +277,6 @@ func TestMonitorProfileInitializeAndToolsList(t *testing.T) {
 	if !strings.Contains(initResp.Result.Instructions, "Use `ibkr_canary` first") {
 		t.Fatalf("monitor instructions should steer first call to ibkr_canary: %q", initResp.Result.Instructions)
 	}
-	if !strings.Contains(initResp.Result.Instructions, "call `ibkr_risk_plan` only after canary") {
-		t.Fatalf("monitor instructions should expose risk-plan only after canary readiness: %q", initResp.Result.Instructions)
-	}
 	if !strings.Contains(initResp.Result.Instructions, "call `ibkr_status` only") {
 		t.Fatalf("monitor instructions should keep ibkr_status diagnostic-only: %q", initResp.Result.Instructions)
 	}
@@ -299,7 +296,7 @@ func TestMonitorProfileInitializeAndToolsList(t *testing.T) {
 	for _, tool := range listResp.Result.Tools {
 		got = append(got, tool.Name)
 	}
-	want := []string{"ibkr_canary", "ibkr_risk_plan", "ibkr_status"}
+	want := []string{"ibkr_canary", "ibkr_status"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("monitor tools = %v, want %v", got, want)
 	}

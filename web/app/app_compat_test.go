@@ -59,10 +59,8 @@ func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 		"tradingStatusSettingsLabel",
 		"canWriteUnderlyings",
 		"underlyingWriteReason",
-		"reviewTransmitGate",
 		"orderModifyGate",
 		"orderCancelGate",
-		"capabilityLine",
 	} {
 		body := jsFunctionBlock(t, js, name)
 		if !strings.Contains(body, "can_write") {

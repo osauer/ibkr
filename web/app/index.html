@@ -163,9 +163,6 @@
           </div>
           <div class="canary-summary-actions">
             <span class="severity-pill" id="canarySeverity">--</span>
-            <button class="text-button canary-mitigation-button" id="canaryMitigationButton" type="button" disabled>
-              Mitigation plan
-            </button>
           </div>
           <div class="alert-focus" id="selectedAlertPanel" hidden>
             <div>
@@ -176,36 +173,11 @@
             </div>
             <button class="text-button text-button--dark" id="clearSelectedAlertButton" type="button">Clear</button>
           </div>
-          <div class="order-review" id="orderReviewPanel" hidden>
-            <div class="order-review__head">
-              <div>
-                <span>Mitigation plan</span>
-                <b id="orderReviewTitle">Order review set</b>
-                <small id="orderReviewMeta">Waiting for risk plan</small>
-              </div>
-              <button class="text-button text-button--dark" id="refreshOrderReviewButton" type="button">Refresh</button>
-            </div>
-            <div class="order-review__status" id="orderReviewStatus">Preview unavailable</div>
-            <div class="order-review__rows" id="orderReviewRows"></div>
-            <div class="order-review__footer">
-              <span id="orderReviewSummary">No selected rows</span>
-              <div class="order-review__actions">
-                <button class="text-button text-button--dark" id="resetOrderReviewButton" type="button">Reset</button>
-                <button class="text-button text-button--dark" id="previewOrdersButton" type="button">Preview orders</button>
-                <button class="text-button text-button--dark" id="transmitSelectedButton" type="button" disabled>Transmit selected</button>
-              </div>
-            </div>
-            <div class="order-preview" id="orderPreviewPanel" hidden></div>
-          </div>
           <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
             <div class="canary-actions" aria-label="Canary quick actions">
               <button class="canary-action canary-action--primary" id="quickReviewBlockersButton" type="button">
                 <span>Review blockers</span>
                 <small>Open evidence</small>
-              </button>
-              <button class="canary-action" id="quickRiskPlanButton" type="button">
-                <span>Mitigation plan</span>
-                <small>Open or refresh</small>
               </button>
               <button class="canary-action" id="quickHeldActionsButton" type="button">
                 <span>Held actions</span>

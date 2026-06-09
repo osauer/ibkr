@@ -21,7 +21,7 @@ ibkr status
 ibkr positions --by underlying
 ibkr regime
 ibkr canary
-ibkr market-events --symbol CRWV --json
+ibkr market-events --symbol GME --json
 ibkr watch IBM --add
 ibkr watch
 ibkr calendar --market us --date 2026-05-25
@@ -172,7 +172,7 @@ $ ibkr quote MBG --market de --json | jq '{sym: .symbol, ccy: .contract.currency
 $ ibkr calendar --market us-options --date 2026-11-27 --json | jq '.session'
 $ ibkr positions --by underlying --json | jq '.portfolio.effective_delta'
 $ ibkr canary --json | jq '{action, market_confirmation, portfolio_fit, held_stress: .portfolio.held_stress}'
-$ ibkr market-events --symbol CRWV --json | jq '{flags, source_health, fingerprint}'
+$ ibkr market-events --symbol GME --json | jq '{flags, source_health, fingerprint}'
 $ ibkr settings show --json | jq '.features.purge_restore.enabled'
 $ ibkr chain NVDA --json | jq '.expiries[] | select(.iv > 0.6)'
 $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1

@@ -183,7 +183,7 @@ func TestRenderPositions_OptionsCarryDayPnL(t *testing.T) {
 	d := -245.00
 	res := &rpc.PositionsResult{
 		Options: []rpc.PositionView{
-			{Symbol: "RDDT", Right: "C", Strike: 165, Expiry: "20260618",
+			{Symbol: "XYZ", Right: "C", Strike: 165, Expiry: "20260618",
 				Quantity: 5, AvgCost: 8.11, Mark: 7.62,
 				MarketValue: 3810, UnrealizedPnL: -245, DailyPnL: &d},
 		},

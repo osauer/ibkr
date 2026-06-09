@@ -18,7 +18,6 @@ import (
 	"github.com/osauer/ibkr/internal/app/auth"
 	"github.com/osauer/ibkr/internal/app/daemonclient"
 	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/app/orderreview"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -82,10 +81,6 @@ func Register(deps Dependencies) {
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
 	srv.GET("/api/alerts", h.requireAuth(h.handleAlerts))
 	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
-	srv.POST("/api/order-review-sets", h.requireAuth(h.handleCreateOrderReviewSet))
-	srv.GET("/api/order-review-sets/{id}", h.requireAuth(h.handleGetOrderReviewSet))
-	srv.POST("/api/order-review-sets/{id}/preview", h.requireAuth(h.handlePreviewOrderReviewSet))
-	srv.POST("/api/order-review-sets/{id}/transmit", h.requireAuth(h.handleTransmitOrderReviewSet))
 	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
 	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
 	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
@@ -226,17 +221,16 @@ func (h *handler) handleAuthSession(w nethttp.ResponseWriter, r *nethttp.Request
 func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) {
 	vapid, _ := h.deps.Store.VAPID()
 	writeJSON(w, map[string]any{
-		"version":           h.deps.Version,
-		"public_url":        h.deps.PublicURL,
-		"snapshot":          h.deps.Live.Snapshot(),
-		"settings":          h.settingsSnapshot(r.Context()),
-		"alert_settings":    h.deps.Store.AlertSettings(),
-		"alerts":            h.deps.Store.AlertHistory(20),
-		"order_review_sets": h.currentOrderReviewSets(10),
-		"last_push":         h.deps.Store.LastPush(),
-		"relay":             h.deps.Relay.Status(),
-		"vapid_public_key":  vapid.PublicKey,
-		"auth":              h.authStatus(r),
+		"version":          h.deps.Version,
+		"public_url":       h.deps.PublicURL,
+		"snapshot":         h.deps.Live.Snapshot(),
+		"settings":         h.settingsSnapshot(r.Context()),
+		"alert_settings":   h.deps.Store.AlertSettings(),
+		"alerts":           h.deps.Store.AlertHistory(20),
+		"last_push":        h.deps.Store.LastPush(),
+		"relay":            h.deps.Relay.Status(),
+		"vapid_public_key": vapid.PublicKey,
+		"auth":             h.authStatus(r),
 	})
 }
 
@@ -294,44 +288,6 @@ func writeDaemonSettingsError(w nethttp.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, nethttp.StatusBadGateway, err.Error())
-}
-
-func (h *handler) currentOrderReviewSets(limit int) []orderreview.Set {
-	snap := h.deps.Live.Snapshot()
-	if snap.Canary == nil || snap.Canary.Fingerprint.Key == "" {
-		return nil
-	}
-	sets := h.deps.Store.OrderReviewSets(0)
-	out := make([]orderreview.Set, 0, min(limit, len(sets)))
-	for _, set := range sets {
-		if !orderReviewSetMatchesSnapshot(set, snap) {
-			continue
-		}
-		out = append(out, set)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out
-}
-
-func orderReviewSetMatchesSnapshot(set orderreview.Set, snap live.Snapshot) bool {
-	if snap.Canary == nil || snap.Canary.Fingerprint.Key == "" {
-		return false
-	}
-	if set.CanaryFingerprint == "" || set.CanaryFingerprint != snap.Canary.Fingerprint.Key {
-		return false
-	}
-	if snap.Trading == nil {
-		return true
-	}
-	if set.CapturedTrading.Account != "" && snap.Trading.Account != "" && set.CapturedTrading.Account != snap.Trading.Account {
-		return false
-	}
-	if set.CapturedTrading.Mode != "" && snap.Trading.Mode != "" && set.CapturedTrading.Mode != snap.Trading.Mode {
-		return false
-	}
-	return true
 }
 
 func (h *handler) handleSnapshot(w nethttp.ResponseWriter, _ *nethttp.Request) {

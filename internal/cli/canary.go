@@ -850,7 +850,7 @@ func canaryPnLShockRow(p CanaryPortfolioSummary) CanaryRow {
 	evidence := fmt.Sprintf("daily P&L %+.1f%% NLV", pct)
 	if absPct >= canaryPolicy.DailyPnLActPct {
 		if pct < 0 {
-			return canaryRow("Portfolio P&L shock", risk.DirectionDefensive, risk.SeverityAct, "Large daily loss; run a defensive risk plan and protect liquidity.", evidence)
+			return canaryRow("Portfolio P&L shock", risk.DirectionDefensive, risk.SeverityAct, "Large daily loss; review defensive actions and protect liquidity.", evidence)
 		}
 		return canaryRow("Portfolio P&L shock", risk.DirectionDefensive, risk.SeverityWatch, "Large daily gain; protect gains and avoid accidental chase-risk.", evidence)
 	}
@@ -1271,7 +1271,7 @@ func canaryPlannerReadinessFromAction(action string, severity risk.SignalSeverit
 func canaryDecisionSummary(r CanaryResult) string {
 	switch r.Action {
 	case canaryActionDefend:
-		return "Market stress is confirmed against a vulnerable portfolio; run a defensive risk plan."
+		return "Market stress is confirmed against a vulnerable portfolio; review defensive actions."
 	case canaryActionWatch:
 		if r.PortfolioFit == canaryPortfolioFitLow {
 			if r.MarketConfirmation == canaryMarketConfirmed {
@@ -3189,25 +3189,25 @@ func canaryPlannerStepText(mode risk.PlannerMode, readiness risk.PlannerReadines
 		if readiness == risk.PlannerReadinessBlocked {
 			return "Confirm data before defend"
 		}
-		return "Run risk-plan defend"
+		return "Review defensive actions"
 	case risk.PlannerModeStage:
-		return "Stage risk-plan"
+		return "Stage defensive review"
 	case risk.PlannerModeDeploy:
 		if readiness == risk.PlannerReadinessBlocked {
 			return "Confirm data before deploy"
 		}
-		return "Run risk-plan deploy"
+		return "Review deployment actions"
 	case risk.PlannerModeRebalance:
 		if readiness == risk.PlannerReadinessBlocked {
 			return "Confirm data before rebalance"
 		}
-		return "Run risk-plan rebalance"
+		return "Review rebalance actions"
 	case risk.PlannerModeConfirmData:
 		return "Confirm data"
 	default:
 		if readiness == risk.PlannerReadinessWatch {
 			return "Watch"
 		}
-		return "No risk-plan"
+		return "No follow-up"
 	}
 }

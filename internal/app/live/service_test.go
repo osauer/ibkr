@@ -17,7 +17,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		status:    &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497},
 		calendar:  &rpc.MarketCalendarResult{Market: "us_equity", Session: rpc.MarketSession{State: "regular", IsOpen: true}},
 		account:   &rpc.AccountResult{BaseCurrency: "USD", NetLiquidation: 100000},
-		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "CRWV", SecType: "STK"}}},
+		positions: &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: "STK"}}},
 		quotes: map[string]rpc.Quote{
 			"SPY": {Symbol: "SPY", Price: new(500.0), ChangePct: new(0.4), DataType: rpc.MarketDataLive},
 			"QQQ": {Symbol: "QQQ", Price: new(420.0), ChangePct: new(0.5), DataType: rpc.MarketDataLive},
@@ -453,10 +453,6 @@ func (c *fakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) {
 
 func (c *fakeClient) UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error) {
 	return c.Settings(context.Background())
-}
-
-func (c *fakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {
-	return nil, nil
 }
 
 func (c *fakeClient) OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {

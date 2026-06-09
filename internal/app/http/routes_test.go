@@ -22,7 +22,6 @@ import (
 	"github.com/osauer/ibkr/internal/app/auth"
 	"github.com/osauer/ibkr/internal/app/daemonclient"
 	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/app/orderreview"
 	"github.com/osauer/ibkr/internal/app/relay"
 	"github.com/osauer/ibkr/internal/app/state"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -187,85 +186,10 @@ func TestClearAlertHistory(t *testing.T) {
 	}
 }
 
-func TestOrderReviewSetCreatePreviewAndReadOnlyOrders(t *testing.T) {
+func TestOrdersOpenHTTPAdapter(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t).Handler()
 	cookie := routeSessionCookie(t, handler)
-
-	createReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets", nil)
-	createReq.AddCookie(cookie)
-	createRes := httptest.NewRecorder()
-	handler.ServeHTTP(createRes, createReq)
-	if createRes.Code != http.StatusOK {
-		t.Fatalf("create status=%d, want 200; body=%s", createRes.Code, createRes.Body.String())
-	}
-	var set struct {
-		ID              string `json:"id"`
-		Revision        string `json:"revision"`
-		SourceKind      string `json:"source_kind"`
-		Intent          string `json:"intent"`
-		CapturedTrading struct {
-			CanPreview bool `json:"can_preview"`
-			CanWrite   bool `json:"can_write"`
-		} `json:"captured_trading"`
-		Rows []struct {
-			RowID            string   `json:"row_id"`
-			ProposedQuantity int      `json:"proposed_quantity"`
-			EditableQuantity int      `json:"editable_quantity"`
-			MaxQuantity      int      `json:"max_quantity"`
-			Included         bool     `json:"included"`
-			Action           string   `json:"action"`
-			Blockers         []string `json:"blockers"`
-		} `json:"rows"`
-	}
-	if err := json.NewDecoder(createRes.Body).Decode(&set); err != nil {
-		t.Fatalf("decode create: %v", err)
-	}
-	if set.SourceKind != "risk_plan" || set.Intent != "mitigate_risk" {
-		t.Fatalf("review set source/intent = %s/%s", set.SourceKind, set.Intent)
-	}
-	if !set.CapturedTrading.CanPreview || set.CapturedTrading.CanWrite {
-		t.Fatalf("unexpected captured trading: %#v", set.CapturedTrading)
-	}
-	if len(set.Rows) != 1 || set.Rows[0].Action != rpc.OrderActionSell || !set.Rows[0].Included {
-		t.Fatalf("unexpected rows: %#v", set.Rows)
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"revision": set.Revision,
-		"rows": []map[string]any{{
-			"row_id":   set.Rows[0].RowID,
-			"included": true,
-			"quantity": 2,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("marshal preview: %v", err)
-	}
-	previewReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/preview", bytes.NewReader(body))
-	previewReq.AddCookie(cookie)
-	previewRes := httptest.NewRecorder()
-	handler.ServeHTTP(previewRes, previewReq)
-	if previewRes.Code != http.StatusOK {
-		t.Fatalf("preview status=%d, want 200; body=%s", previewRes.Code, previewRes.Body.String())
-	}
-	var preview struct {
-		Preview struct {
-			SubmitReady bool `json:"submit_ready"`
-			Rows        []struct {
-				RowID          string `json:"row_id"`
-				TokenMinted    bool   `json:"token_minted"`
-				SubmitEligible bool   `json:"submit_eligible"`
-				WhatIfStatus   string `json:"what_if_status"`
-			} `json:"rows"`
-		} `json:"preview"`
-	}
-	if err := json.NewDecoder(previewRes.Body).Decode(&preview); err != nil {
-		t.Fatalf("decode preview: %v", err)
-	}
-	if !preview.Preview.SubmitReady || len(preview.Preview.Rows) != 1 || !preview.Preview.Rows[0].TokenMinted {
-		t.Fatalf("unexpected preview: %#v", preview.Preview)
-	}
 
 	openReq := httptest.NewRequest(http.MethodGet, "/api/orders/open", nil)
 	openReq.AddCookie(cookie)
@@ -274,115 +198,12 @@ func TestOrderReviewSetCreatePreviewAndReadOnlyOrders(t *testing.T) {
 	if openRes.Code != http.StatusOK {
 		t.Fatalf("orders open status=%d, want 200; body=%s", openRes.Code, openRes.Body.String())
 	}
-}
-
-func TestOrderReviewSetPreviewRejectsStaleRevision(t *testing.T) {
-	t.Parallel()
-	store, err := state.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
+	var open rpc.OrdersOpenResult
+	if err := json.NewDecoder(openRes.Body).Decode(&open); err != nil {
+		t.Fatalf("decode orders open: %v", err)
 	}
-	authMgr := auth.NewManager(store, time.Minute)
-	fakeClient := routeFakeClient{}
-	liveSvc := live.New(fakeClient, time.Minute, time.Minute)
-	srv, err := hyperserve.NewServer(hyperserve.WithAddr("127.0.0.1:0"), hyperserve.WithSuppressBanner(true))
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	Register(Dependencies{
-		Server:    srv,
-		Store:     store,
-		Auth:      authMgr,
-		Daemon:    fakeClient,
-		Live:      liveSvc,
-		Relay:     relay.Noop{PublicURL: "https://relay.example"},
-		PublicURL: "https://relay.example",
-		Version:   "test-version",
-	})
-	handler := srv.Handler()
-	cookie := routeSessionCookie(t, handler)
-	stale := buildRiskPlanReviewSet(rpc.RiskPlanResult{
-		PlanID:                     "plan-1",
-		RefreshedCanaryFingerprint: rpc.Fingerprint{Key: "fp-1"},
-		Candidates: []rpc.RiskPlanCandidate{{
-			ID:     "candidate-1",
-			Status: rpc.RiskPlanCandidatePreviewable,
-			Legs: []rpc.RiskPlanCandidateLeg{{
-				Action:         "SELL",
-				Contract:       rpc.ContractParams{Symbol: "SPY", SecType: "STK"},
-				Quantity:       1,
-				HeldQuantity:   10,
-				PositionEffect: rpc.OrderPositionEffectReduce,
-				OrderType:      rpc.OrderTypeLMT,
-				TIF:            rpc.OrderTIFDay,
-			}},
-		}},
-	}, rpc.TradingStatus{CanPreview: true}, time.Now().UTC())
-	stale.Revision = "rev_stale"
-	if err := store.RecordOrderReviewSet(stale); err != nil {
-		t.Fatalf("RecordOrderReviewSet: %v", err)
-	}
-	body := bytes.NewReader([]byte(`{"revision":"rev_stale","rows":[{"row_id":"candidate-1:1","included":true,"quantity":1}]}`))
-	req := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+stale.ID+"/preview", body)
-	req.AddCookie(cookie)
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusConflict {
-		t.Fatalf("status=%d, want 409; body=%s", res.Code, res.Body.String())
-	}
-	var got map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
-		t.Fatalf("decode rebase: %v", err)
-	}
-	if got["code"] != "rebase_required" || got["current_set"] == nil {
-		t.Fatalf("unexpected rebase response: %#v", got)
-	}
-}
-
-func TestOrderReviewSetMatchesCurrentSnapshotOnly(t *testing.T) {
-	t.Parallel()
-	snap := live.Snapshot{
-		Canary:  &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}},
-		Trading: &rpc.TradingStatus{Account: "DU123", Mode: "paper"},
-	}
-	current := orderreview.Set{
-		CanaryFingerprint: "fp-1",
-		CapturedTrading:   rpc.TradingStatus{Account: "DU123", Mode: "paper"},
-	}
-	if !orderReviewSetMatchesSnapshot(current, snap) {
-		t.Fatalf("current set should match snapshot")
-	}
-	for name, set := range map[string]orderreview.Set{
-		"fingerprint": {CanaryFingerprint: "fp-old", CapturedTrading: current.CapturedTrading},
-		"account":     {CanaryFingerprint: "fp-1", CapturedTrading: rpc.TradingStatus{Account: "DU999", Mode: "paper"}},
-		"mode":        {CanaryFingerprint: "fp-1", CapturedTrading: rpc.TradingStatus{Account: "DU123", Mode: "live"}},
-	} {
-		if orderReviewSetMatchesSnapshot(set, snap) {
-			t.Fatalf("%s-stale set should not match snapshot", name)
-		}
-	}
-}
-
-func TestOrderReviewSetTransmitRequiresTradingCapability(t *testing.T) {
-	t.Parallel()
-	client := &routeBlockedWriteSpyClient{}
-	handler := newTestHandlerWithClient(t, client).Handler()
-	cookie := routeSessionCookie(t, handler)
-	set := createRouteReviewSet(t, handler, cookie)
-	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
-	req.AddCookie(cookie)
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("transmit status=%d, want 400; body=%s", res.Code, res.Body.String())
-	}
-	if !strings.Contains(res.Body.String(), "broker writes are not enabled") {
-		t.Fatalf("transmit response missing capability reason: %s", res.Body.String())
-	}
-	if client.placeCalls != 0 {
-		t.Fatalf("OrderPlace was called despite can_write=false: %d", client.placeCalls)
+	if len(open.Orders) != 1 || open.Orders[0].OrderRef != "ord-1" {
+		t.Fatalf("unexpected open orders: %#v", open.Orders)
 	}
 }
 
@@ -390,24 +211,12 @@ func TestOrderWritesRequireCurrentConfirmation(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
 	cookie := routeSessionCookie(t, handler)
-	set := createRouteReviewSet(t, handler, cookie)
-	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
 
 	for name, tc := range map[string]struct {
 		method string
 		path   string
 		body   string
 	}{
-		"transmit_missing": {
-			method: http.MethodPost,
-			path:   "/api/order-review-sets/" + set.ID + "/transmit",
-			body:   `{}`,
-		},
-		"transmit_wrong_account": {
-			method: http.MethodPost,
-			path:   "/api/order-review-sets/" + set.ID + "/transmit",
-			body:   `{"confirm_account":"DU999","confirm_mode":"paper"}`,
-		},
 		"cancel_missing": {
 			method: http.MethodPost,
 			path:   "/api/orders/ord-1/cancel",
@@ -438,28 +247,6 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
 	cookie := routeSessionCookie(t, handler)
-	set := createRouteReviewSet(t, handler, cookie)
-	previewRouteReviewSet(t, handler, cookie, set.ID, set.Revision, set.RowID)
-
-	transmitReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+set.ID+"/transmit", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
-	transmitReq.AddCookie(cookie)
-	transmitRes := httptest.NewRecorder()
-	handler.ServeHTTP(transmitRes, transmitReq)
-	if transmitRes.Code != http.StatusOK {
-		t.Fatalf("transmit status=%d, want 200; body=%s", transmitRes.Code, transmitRes.Body.String())
-	}
-	var transmit struct {
-		Rows []struct {
-			RowID  string                `json:"row_id"`
-			Result *rpc.OrderPlaceResult `json:"result"`
-		} `json:"rows"`
-	}
-	if err := json.NewDecoder(transmitRes.Body).Decode(&transmit); err != nil {
-		t.Fatalf("decode transmit: %v", err)
-	}
-	if len(transmit.Rows) != 1 || transmit.Rows[0].RowID != set.RowID || transmit.Rows[0].Result == nil || !transmit.Rows[0].Result.Accepted {
-		t.Fatalf("unexpected transmit response: %#v", transmit)
-	}
 
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/cancel", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
 	cancelReq.AddCookie(cookie)
@@ -708,59 +495,6 @@ func (r routeTestRelay) PairingURL(raw string) string {
 	return raw + "?remote=" + r.route
 }
 
-type routeReviewSetRef struct {
-	ID       string
-	Revision string
-	RowID    string
-}
-
-func createRouteReviewSet(t *testing.T, handler http.Handler, cookie *http.Cookie) routeReviewSetRef {
-	t.Helper()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets", nil)
-	createReq.AddCookie(cookie)
-	createRes := httptest.NewRecorder()
-	handler.ServeHTTP(createRes, createReq)
-	if createRes.Code != http.StatusOK {
-		t.Fatalf("create status=%d, want 200; body=%s", createRes.Code, createRes.Body.String())
-	}
-	var set struct {
-		ID       string `json:"id"`
-		Revision string `json:"revision"`
-		Rows     []struct {
-			RowID string `json:"row_id"`
-		} `json:"rows"`
-	}
-	if err := json.NewDecoder(createRes.Body).Decode(&set); err != nil {
-		t.Fatalf("decode create: %v", err)
-	}
-	if set.ID == "" || set.Revision == "" || len(set.Rows) == 0 {
-		t.Fatalf("unexpected created set: %#v", set)
-	}
-	return routeReviewSetRef{ID: set.ID, Revision: set.Revision, RowID: set.Rows[0].RowID}
-}
-
-func previewRouteReviewSet(t *testing.T, handler http.Handler, cookie *http.Cookie, setID, revision, rowID string) {
-	t.Helper()
-	body, err := json.Marshal(map[string]any{
-		"revision": revision,
-		"rows": []map[string]any{{
-			"row_id":   rowID,
-			"included": true,
-			"quantity": 2,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("marshal preview: %v", err)
-	}
-	previewReq := httptest.NewRequest(http.MethodPost, "/api/order-review-sets/"+setID+"/preview", bytes.NewReader(body))
-	previewReq.AddCookie(cookie)
-	previewRes := httptest.NewRecorder()
-	handler.ServeHTTP(previewRes, previewReq)
-	if previewRes.Code != http.StatusOK {
-		t.Fatalf("preview status=%d, want 200; body=%s", previewRes.Code, previewRes.Body.String())
-	}
-}
-
 func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	pairReq := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte("{}")))
@@ -799,16 +533,6 @@ func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
 }
 
 type routeFakeClient struct{}
-
-type routeBlockedWriteSpyClient struct {
-	routeFakeClient
-	placeCalls int
-}
-
-func (c *routeBlockedWriteSpyClient) OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
-	c.placeCalls++
-	return &rpc.OrderPlaceResult{Accepted: true}, nil
-}
 
 func (routeFakeClient) Status(context.Context) (*rpc.HealthResult, error) {
 	return &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497}, nil
@@ -916,33 +640,6 @@ func (routeFakeClient) UpdateSettings(_ context.Context, patch json.RawMessage) 
 		return nil, &rpc.Error{Code: rpc.CodeBadRequest, Message: "settings field trading.mode is read-only"}
 	}
 	return routeFakeClient{}.Settings(context.Background())
-}
-
-func (routeFakeClient) RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {
-	limit := 450.25
-	return &rpc.RiskPlanResult{
-		PlanID:                     "plan-1",
-		RefreshedCanaryFingerprint: rpc.Fingerprint{Key: "fp-1"},
-		SourceFingerprints:         rpc.CanarySourceFingerprints{Account: &rpc.Fingerprint{Key: "acct-1"}},
-		Candidates: []rpc.RiskPlanCandidate{{
-			ID:      "candidate-1",
-			Status:  rpc.RiskPlanCandidatePreviewable,
-			Subject: "Trim concentration",
-			Reason:  "reduce single-name exposure",
-			Legs: []rpc.RiskPlanCandidateLeg{{
-				Action:              "SELL",
-				Contract:            rpc.ContractParams{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
-				Quantity:            3,
-				HeldQuantity:        10,
-				PositionEffect:      rpc.OrderPositionEffectReduce,
-				OrderType:           rpc.OrderTypeLMT,
-				TIF:                 rpc.OrderTIFDay,
-				LimitStrategy:       rpc.OrderStrategyPatientLimit,
-				EstimatedLimitPrice: &limit,
-				MarketValueBase:     1350.75,
-			}},
-		}},
-	}, nil
 }
 
 func (routeFakeClient) OrderPreview(_ context.Context, params rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {

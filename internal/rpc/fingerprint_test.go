@@ -97,10 +97,10 @@ func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
 		Kind:          MarketEventsKind,
 		SchemaVersion: MarketEventsSchemaVersion,
 		AsOf:          now,
-		Symbols:       []string{"CRWV"},
+		Symbols:       []string{"XYZ"},
 		Flags: []MarketEventFlag{{
 			ID:         MarketEventRegSHOThreshold,
-			Symbol:     "CRWV",
+			Symbol:     "XYZ",
 			Label:      "Reg SHO",
 			Status:     MarketEventStatusActive,
 			Severity:   MarketEventSeverityWatch,

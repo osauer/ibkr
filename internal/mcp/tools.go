@@ -429,7 +429,7 @@ var Tools = []Tool{
 		Title:       "IBKR Technical Screen",
 		Description: "One-call technical and relative-strength screen for equity / ETF symbols. Use for weekly stock screening questions such as \"is IREN above its 50/200-DMA?\", \"rank these names vs SPY\", \"is this extended from the 200-DMA?\", or \"does this pass liquidity?\" Returns price, SMA50/SMA200, percent distance from those moving averages, 21/63/126-trading-bar returns, 63/126-bar RS versus the benchmark (symbol return minus benchmark return), ATR14/ATR%, avg_volume_20d, avg_dollar_volume_20d, trend_state, data_quality, and missing_reasons. Values ending in `_pct` and `return_*` are decimal fractions (0.10 = 10%). For German/Xetra equities set `market:\"de\"`; for ETF resolver gaps use `primary_exchange:\"ARCA\"` or an explicit exchange/currency. Large batches can return partial rows with warning_details, so agents should cap screening batches and drop rows with data_quality != ok. Uses daily bars only; not for live quotes (use `ibkr_quote`) and not for options (use `ibkr_chain`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"symbols":          json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"ASTS\",\"IREN\",\"BB\"]"}`),
+			"symbols":          json.RawMessage(`{"type":"array","items":{"type":"string"},"minItems":1,"description":"ticker symbols, e.g. [\"AAPL\",\"MSFT\",\"NVDA\"]"}`),
 			"benchmark":        schemaString("relative-strength benchmark, default SPY"),
 			"lookback_days":    json.RawMessage(`{"type":"integer","minimum":30,"maximum":800,"description":"calendar-day history lookback; default 420, enough for 200-DMA and 126 trading-bar returns"}`),
 			"market":           json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional route for symbols, not the benchmark; omit/use us for SMART/USD, use de for Xetra/IBIS EUR equities"}`),
@@ -457,7 +457,7 @@ var Tools = []Tool{
 		Title:       "IBKR Market Events",
 		Description: "Read observed market-event flags for held or requested stock/ETF symbols: borrow inventory tightness from IBKR shortable-share data when available, extreme annualized borrow fee from IBKR short-stock availability when observed, Reg SHO threshold-list membership from official Nasdaq files, and active/recent LULD or regulatory/news halts from Nasdaq's trade-halt feed. Use when the user asks whether a held name has market-structure, borrow, threshold, LULD, or halt context that should annotate protection proposals or underlyings. Returns typed flags with `status`, `severity`, `role`, source/as-of metadata, source_health, warning_details, and a semantic fingerprint. Unknown or unavailable data stays unknown/null and must not be treated as inactive; absence of Nasdaq Reg SHO flags is not proof for non-Nasdaq threshold feeds. This tool is read-only and does NOT place, preview, submit, modify, cancel, size, or recommend opening exposure. NOT for current prices (use `ibkr_quote`), NOT for held position sizing/P&L (use `ibkr_positions`), and NOT for broad-market regime (use `ibkr_regime`).",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"symbols": json.RawMessage(`{"type":"array","items":{"type":"string"},"description":"optional stock/ETF symbols to evaluate, e.g. [\"CRWV\",\"GME\"]; omit to use held underlyings from the daemon positions snapshot"}`),
+			"symbols": json.RawMessage(`{"type":"array","items":{"type":"string"},"description":"optional stock/ETF symbols to evaluate, e.g. [\"AAPL\",\"GME\"]; omit to use held underlyings from the daemon positions snapshot"}`),
 			"symbol":  schemaString("optional single symbol or comma-separated symbols; equivalent to symbols for simple calls"),
 		}, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
@@ -634,7 +634,7 @@ var Tools = []Tool{
 			"Use when the user asks how current market weather interacts with the held portfolio, whether to watch/stage/defend/rebalance/deploy, or when orchestration needs a stable alert fingerprint for this snapshot.",
 			"NOT for account-only risk such as margin breach, cash, buying power, or daily P&L in isolation — use `ibkr_account` or a dedicated account-risk workflow for that. Canary evidence may include margin/P&L facts, but the headline canary action is gated by market confirmation plus portfolio fit.",
 			"Returns `action` (`stand_down`, `watch`, `defend`, `rebalance`, `deploy`, `confirm_inputs`), `market_confirmation` (`none`, `partial`, `confirmed`, `blocked`), `portfolio_fit` (`low`, `medium`, `high`, `unknown`), and `input_health` (`ok`, `warming`, `degraded`, `failed`) so agents can explain whether a risk recommendation is market-confirmed or only contextual.",
-			"Also returns `direction`, `severity`, `planner_mode_hint` (`none`, `stage`, `defend`, `rebalance`, `deploy`, `confirm_data`), and `planner_readiness` (`none`, `watch`, `prestage`, `ready`, `blocked`) so downstream risk-plan orchestration can consume the trigger without parsing prose.",
+			"Also returns `direction`, `severity`, `planner_mode_hint` (`none`, `stage`, `defend`, `rebalance`, `deploy`, `confirm_data`), and `planner_readiness` (`none`, `watch`, `prestage`, `ready`, `blocked`) so monitor workflows can explain whether the snapshot is actionable, staged, or data-blocked without parsing prose.",
 			"`portfolio.held_stress[]` is a bounded positions-only held-underlying stress surface for material names: held-name daily P&L shock, near-expiry held-option delta concentration, and held-name quote/option bid-ask degradation. It is emitted only when an existing held underlying is material and a stress condition is present.",
 			"`signals[]` carries stable IDs, direction (`defensive`, `constructive`, `rebalance`, `mixed`, `data_quality`), per-signal posture, severity (`observe`, `watch`, `act`, `urgent`), observed values, thresholds, targets, confidence impact, and blocking degraded or stale inputs. Signals are supporting evidence; do not infer a DEFEND action from account-only or portfolio-only signals when top-level `action` says otherwise.",
 			"`market_indicators[]` lists each regime indicator with `status` (`green`, `amber`, `red`, `context`, `n/a`), `as_of`, `reading`, and a short decision comment; context-only gamma appears here as `context` evidence rather than degraded input health.",
@@ -670,34 +670,6 @@ var Tools = []Tool{
 			}
 			if in.View == rpc.ViewAlert {
 				return json.Marshal(rpc.CompactCanaryAlert(&res, &positions))
-			}
-			return json.Marshal(res)
-		},
-	},
-	{
-		Name:  "ibkr_risk_plan",
-		Title: "IBKR Risk Plan",
-		Description: strings.Join([]string{
-			"Read-only risk response planner for the current account and held portfolio. Use after `ibkr_canary` when canary says to stage, defend, rebalance, or when the user asks what to reduce to get back inside policy.",
-			"It refreshes account, positions, and regime, recomputes the canary, binds the plan to `policy_profile`, `policy_version`, `policy_fingerprint`, canary/source fingerprints, then emits reduce-only candidate intents for expert review.",
-			"Candidates may include existing stock/ETF reductions and held-option close/reduce actions only. They expose before/after risk estimates, DTE, greeks, bid/ask spread checks, hedge-preservation warnings, realized-P&L estimates, slippage estimates, and explicit blocked reasons.",
-			"NOT for order preview, order placement, order submission, cancellation, modification, or token minting. Use the human CLI handoff `ibkr order preview --from-plan ... --candidate ...` after expert selection; this MCP tool cannot create submit-capable tokens and never executes trades.",
-			"NOT for broad-market-only weather — use `ibkr_regime`; NOT for raw held-position inspection — use `ibkr_positions`; NOT for account-only cash/margin facts — use `ibkr_account`.",
-		}, " "),
-		MonitorDescription: "Read-only planner to call after `ibkr_canary` returns a planner-ready/stage/defend/rebalance state. Emits candidate intents only; no preview tokens or order submission.",
-		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"mode": schemaEnum([]string{rpc.RiskPlanModeAuto, rpc.RiskPlanModeDefend, rpc.RiskPlanModeRebalance, rpc.RiskPlanModeStage, rpc.RiskPlanModeConfirmData, rpc.RiskPlanModeDeploy}, "planner mode; default auto lets margin/P&L act signals escalate even when canary headline is watch"),
-		}, nil),
-		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
-			var in struct {
-				Mode string `json:"mode"`
-			}
-			if err := unmarshalArgs(args, &in); err != nil {
-				return nil, err
-			}
-			res, err := cli.FetchRiskPlan(ctx, conn, in.Mode, nil)
-			if err != nil {
-				return nil, err
 			}
 			return json.Marshal(res)
 		},

@@ -9,8 +9,6 @@ import (
 	"slices"
 	"sync"
 	"time"
-
-	"github.com/osauer/ibkr/internal/app/orderreview"
 )
 
 const (
@@ -33,7 +31,6 @@ type Data struct {
 	VAPID             *VAPIDKeys          `json:"vapid,omitempty"`
 	LastPush          *PushAttempt        `json:"last_push,omitempty"`
 	ProposalAudit     []ProposalAuditItem `json:"proposal_audit,omitempty"`
-	OrderReviewSets   []orderreview.Set   `json:"order_review_sets,omitempty"`
 }
 
 type DeviceGrant struct {
@@ -252,49 +249,6 @@ func (s *Store) HasAlertFingerprint(fp string) bool {
 	return false
 }
 
-func (s *Store) RecordOrderReviewSet(set orderreview.Set) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.data.OrderReviewSets {
-		if s.data.OrderReviewSets[i].ID == set.ID {
-			if set.CreatedAt.IsZero() {
-				set.CreatedAt = s.data.OrderReviewSets[i].CreatedAt
-			}
-			s.data.OrderReviewSets[i] = set
-			return s.save()
-		}
-	}
-	s.data.OrderReviewSets = append([]orderreview.Set{set}, s.data.OrderReviewSets...)
-	if len(s.data.OrderReviewSets) > 50 {
-		s.data.OrderReviewSets = s.data.OrderReviewSets[:50]
-	}
-	return s.save()
-}
-
-func (s *Store) OrderReviewSet(id string) (orderreview.Set, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, set := range s.data.OrderReviewSets {
-		if set.ID == id {
-			return cloneOrderReviewSet(set), true
-		}
-	}
-	return orderreview.Set{}, false
-}
-
-func (s *Store) OrderReviewSets(limit int) []orderreview.Set {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if limit <= 0 || limit > len(s.data.OrderReviewSets) {
-		limit = len(s.data.OrderReviewSets)
-	}
-	out := make([]orderreview.Set, limit)
-	for i := range limit {
-		out[i] = cloneOrderReviewSet(s.data.OrderReviewSets[i])
-	}
-	return out
-}
-
 func (s *Store) RecordPush(attempt PushAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -372,10 +326,6 @@ func copyData(in Data) Data {
 	out.PushSubscriptions = append([]PushSubscription(nil), in.PushSubscriptions...)
 	out.AlertHistory = append([]AlertRecord(nil), in.AlertHistory...)
 	out.ProposalAudit = append([]ProposalAuditItem(nil), in.ProposalAudit...)
-	out.OrderReviewSets = make([]orderreview.Set, len(in.OrderReviewSets))
-	for i := range in.OrderReviewSets {
-		out.OrderReviewSets[i] = cloneOrderReviewSet(in.OrderReviewSets[i])
-	}
 	if in.VAPID != nil {
 		v := *in.VAPID
 		out.VAPID = &v
@@ -383,17 +333,6 @@ func copyData(in Data) Data {
 	if in.LastPush != nil {
 		p := *in.LastPush
 		out.LastPush = &p
-	}
-	return out
-}
-
-func cloneOrderReviewSet(in orderreview.Set) orderreview.Set {
-	out := in
-	out.Rows = append([]orderreview.Row(nil), in.Rows...)
-	if in.LatestPreview != nil {
-		preview := *in.LatestPreview
-		preview.Rows = append([]orderreview.PreviewRow(nil), in.LatestPreview.Rows...)
-		out.LatestPreview = &preview
 	}
 	return out
 }

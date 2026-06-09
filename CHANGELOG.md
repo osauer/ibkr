@@ -43,14 +43,14 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### What's new
 
-- The mobile web app now has a fuller trader workflow for market context, portfolio risk, canary state, order review, and purge-book handling.
+- The mobile web app now has a fuller trader workflow for market context, portfolio risk, canary state, order status, and purge-book handling.
 - Stock and ETF order drafts now support preview-only broker WhatIf review surfaces while preserving the no-transmit execution boundary.
 - Release data now carries the latest S&P 500 membership refresh for breadth and market-regime calculations.
 
 ### Added
 
 - Added mobile PWA screens for lifecycle smoke coverage, risk dashboard controls, market context, held-stress canary context, purge workflow, and paper-trading review flows.
-- Added read-only risk-plan and preview-only order workflow surfaces that expose reviewable broker feedback without placing, modifying, canceling, or transmitting orders.
+- Added preview-only order workflow surfaces that expose reviewable broker feedback without placing, modifying, canceling, or transmitting orders.
 
 ### Changed
 
@@ -108,7 +108,7 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### What's new
 
-- `ibkr regime` and `ibkr canary` now emit stress-lifecycle states for downstream risk-plan orchestration: quiet, early warning, confirmed stress, panic or forced defense, stabilization, opportunity, and data-quality blocking.
+- `ibkr regime` and `ibkr canary` now emit stress-lifecycle states for downstream risk monitoring: quiet, early warning, confirmed stress, panic or forced defense, stabilization, opportunity, and data-quality blocking.
 - Canary now carries portfolio-aware source health and semantic source fingerprints for account, positions, and consumed regime state, so schedulers can dedupe alerts and preserve provenance without hashing raw JSON.
 - The backtest harness now reports before/after metrics, event-level metrics, early-warning lead time, lifecycle precision and recall, canary category slices, and canary lift over regime-only portfolio stress detection.
 

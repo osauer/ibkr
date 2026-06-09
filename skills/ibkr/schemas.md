@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-06-02 06:26 CEST
+Updated: 2026-06-09 07:38 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -803,7 +803,7 @@ Daily granularity only; intraday bars are not implemented.
 
 ## technical
 
-`ibkr technical ASTS,IREN,BB --benchmark SPY --json`
+`ibkr technical AAPL,MSFT,NVDA --benchmark SPY --json`
 
 ```json
 {
@@ -1604,11 +1604,11 @@ array. Omit both to use held underlyings.
   "kind": "ibkr.market_events",
   "schema_version": "market-events-v1",
   "as_of": "2026-06-07T06:48:00Z",
-  "symbols": ["CRWV"],
+  "symbols": ["GME"],
   "flags": [
     {
       "id": "borrow_fee_extreme",
-      "symbol": "CRWV",
+      "symbol": "GME",
       "label": "Fee extreme",
       "status": "active",
       "severity": "act",
@@ -1622,7 +1622,7 @@ array. Omit both to use held underlyings.
       "details": ["fee_rate=75.2500%", "available=1500", "USD"]
     }
   ],
-  "by_symbol": {"CRWV": [{"id": "borrow_fee_extreme"}]},
+  "by_symbol": {"GME": [{"id": "borrow_fee_extreme"}]},
   "source_health": [
     {"source": "borrow_inventory", "status": "ok", "confidence": "medium",
      "fingerprint_stability": "semantic_buckets_only"},
@@ -1656,10 +1656,10 @@ Field meanings:
 
 ## canary
 
-`ibkr canary --json` — portfolio-aware stress lifecycle for monitor loops and
-downstream risk-plan orchestration. It reads account, positions, and the current
-regime, then emits posture/readiness/evidence only. It never selects trades,
-sizes hedges, previews orders, or executes.
+`ibkr canary --json` — portfolio-aware stress lifecycle for monitor loops. It
+reads account, positions, and the current regime, then emits
+posture/readiness/evidence only. It never selects trades, sizes hedges, previews
+orders, or executes.
 
 **MCP params** (`ibkr_canary`): none — the tool fetches account, positions, and
 regime itself.
@@ -1746,8 +1746,8 @@ Field meanings:
   `opportunity`, or `data_quality`. It is the high-level stress-lifecycle
   bucket; use `readiness` to decide whether a downstream planner should act,
   prestage, watch, or block on data.
-- `planner_mode_hint` and `planner_readiness` are the risk-plan handoff. They
-  are intentionally not orders or trade recommendations.
+- `planner_mode_hint` and `planner_readiness` are posture/readiness evidence.
+  They are intentionally not orders or trade recommendations.
 - `signals[]` is the canonical machine evidence. Use `id`, `direction`,
   `posture`, `severity`, `observed`, `threshold`, `target`, `confidence`, and
   `blocked_by`; do not parse `rows[].guidance` for automation.
