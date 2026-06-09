@@ -1778,7 +1778,7 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			c.mktDataTypeMu.Lock()
 			c.mktDataType[rid] = dt
 			c.mktDataTypeMu.Unlock()
-			ibkrLogger.Infof("[cid=%d] MarketDataType notice: reqID=%d, type=%d", c.config.ClientID, rid, dt)
+			ibkrLogger.Debugf("[cid=%d] MarketDataType notice: reqID=%d, type=%d", c.config.ClientID, rid, dt)
 		}
 	case msgSystemNotification:
 		c.handleSystemNotification(fields)
@@ -3862,7 +3862,7 @@ func (c *Connection) requestMarketDataWithContract(ctx context.Context, contract
 		cleanup = beforeSend(reqID)
 	}
 
-	marketLogger.Infof("Requesting market data for %s (ReqID: %d, SecType: %s, Exchange: %s, Primary: %s, ConID: %d)",
+	marketLogger.Debugf("Requesting market data for %s (ReqID: %d, SecType: %s, Exchange: %s, Primary: %s, ConID: %d)",
 		contractCopy.Symbol, reqID, contractCopy.SecType, contractCopy.Exchange, contractCopy.PrimaryExch, contractCopy.ConID)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {
@@ -4227,7 +4227,7 @@ func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol st
 	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
 		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
 	}
-	marketLogger.Infof("Requesting market data for %s (ReqID: %d, SecType: %s, Exch: %s, Primary: %s)",
+	marketLogger.Debugf("Requesting market data for %s (ReqID: %d, SecType: %s, Exch: %s, Primary: %s)",
 		symbol, reqID, secType, exchange, contract.PrimaryExch)
 
 	if err := c.sendMessageWithType(msg, RequestTypeMarketData); err != nil {

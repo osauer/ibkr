@@ -1827,7 +1827,7 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 	}
 	c.subMu.Unlock()
 
-	marketDataLogger.Infof("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
+	marketDataLogger.Debugf("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
 
 	return nil
 }
@@ -1895,7 +1895,7 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 	}
 	c.subMu.Unlock()
 
-	marketDataLogger.Infof("%s: Subscribed to routed market data for %s (ReqID: %d)", c.name, key, reqID)
+	marketDataLogger.Debugf("%s: Subscribed to routed market data for %s (ReqID: %d)", c.name, key, reqID)
 	return key, nil
 }
 
@@ -2024,7 +2024,7 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 				return false, err
 			}
 			sub.ReqID = reqID
-			marketDataLogger.Infof("%s: Refreshed market data subscription for %s (ReqID: %d)", c.name, symbol, reqID)
+			marketDataLogger.Debugf("%s: Refreshed market data subscription for %s (ReqID: %d)", c.name, symbol, reqID)
 			return true, nil
 		}
 		// Already subscribed and fresh enough
@@ -2052,7 +2052,7 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 		RejectCh: make(chan SubscriptionRejection, 1),
 	}
 	c.subscriptions[symbol] = sub
-	marketDataLogger.Infof("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
+	marketDataLogger.Debugf("%s: Subscribed to market data for %s (ReqID: %d)", c.name, symbol, reqID)
 	return true, nil
 }
 
@@ -2099,7 +2099,7 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 		}
 	}
 
-	marketDataLogger.Infof("%s: Unsubscribed from market data for %s", c.name, symbol)
+	marketDataLogger.Debugf("%s: Unsubscribed from market data for %s", c.name, symbol)
 	return nil
 }
 
@@ -3024,7 +3024,7 @@ func (c *Connector) handleTickPrice(fields []string) {
 
 	// Log important ticks only if price > 0
 	if (isImportantTick || tickType == 225) && price > 0 {
-		marketDataLogger.Infof("%s %s: %.2f", symbol, tickTypeName, price)
+		marketDataLogger.Debugf("%s %s: %.2f", symbol, tickTypeName, price)
 	}
 
 	// Update subscription data based on tick type
