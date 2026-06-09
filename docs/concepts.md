@@ -84,7 +84,7 @@ Unknown and null mean unavailable, not false or zero. Source health reports whet
 
 Rule 201 / short-sale restriction is not a V1 protection driver. If added later, it should be context-only unless the order path is directly short-sale relevant.
 
-`ibkr market-events --symbol CRWV --json` evaluates explicit symbols. Omitting symbols evaluates held stock/ETF underlyings, which requires a usable positions snapshot from the daemon/gateway.
+`ibkr market-events --symbol GME --json` evaluates explicit symbols. Omitting symbols evaluates held stock/ETF underlyings, which requires a usable positions snapshot from the daemon/gateway.
 
 ---
 

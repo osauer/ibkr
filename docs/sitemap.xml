@@ -145,12 +145,6 @@
     <priority>0.4</priority>
   </url>
   <url>
-    <loc>https://osauer.dev/ibkr/design/risk-plan-orchestration.html</loc>
-    <lastmod>2026-06-07</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.4</priority>
-  </url>
-  <url>
     <loc>https://osauer.dev/ibkr/specs/regime-backtest-plan.html</loc>
     <lastmod>2026-06-07</lastmod>
     <changefreq>monthly</changefreq>

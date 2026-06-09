@@ -450,7 +450,7 @@ func TestComputeCanaryHeldUnderlyingPnLShockRebalancesWithoutMarketConfirmation(
 			AsOf: time.Now(),
 			Portfolio: &rpc.PositionsPortfolio{
 				ExposureBase: []rpc.UnderlyingExposure{{
-					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+					Underlying: "XYZ", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
 				}},
 			},
 		},
@@ -466,13 +466,13 @@ func TestComputeCanaryHeldUnderlyingPnLShockRebalancesWithoutMarketConfirmation(
 	if !ok {
 		t.Fatalf("missing held P&L shock signal: %+v", res.Signals)
 	}
-	if sig.Subject != "BB" || sig.Direction != risk.DirectionRebalance || sig.Severity != risk.SeverityWatch {
-		t.Fatalf("held P&L signal = %+v, want BB rebalance/watch", sig)
+	if sig.Subject != "XYZ" || sig.Direction != risk.DirectionRebalance || sig.Severity != risk.SeverityWatch {
+		t.Fatalf("held P&L signal = %+v, want XYZ rebalance/watch", sig)
 	}
-	if len(res.Portfolio.HeldStress) != 1 || res.Portfolio.HeldStress[0].Underlying != "BB" {
-		t.Fatalf("held_stress = %+v, want one BB row", res.Portfolio.HeldStress)
+	if len(res.Portfolio.HeldStress) != 1 || res.Portfolio.HeldStress[0].Underlying != "XYZ" {
+		t.Fatalf("held_stress = %+v, want one XYZ row", res.Portfolio.HeldStress)
 	}
-	if !rowContainsEvidence(res.Rows, "Held-name stress", "BB daily P&L -2.5% NLV") {
+	if !rowContainsEvidence(res.Rows, "Held-name stress", "XYZ daily P&L -2.5% NLV") {
 		t.Fatalf("expected held-name evidence, rows: %+v", res.Rows)
 	}
 }
@@ -488,7 +488,7 @@ func TestComputeCanaryHeldOptionExpiryConcentrationRebalances(t *testing.T) {
 		Positions: rpc.PositionsResult{
 			AsOf: now,
 			Options: []rpc.PositionView{{
-				Symbol:     "BB",
+				Symbol:     "XYZ",
 				SecType:    rpc.SecTypeOption,
 				Quantity:   10,
 				Multiplier: 100,
@@ -509,8 +509,8 @@ func TestComputeCanaryHeldOptionExpiryConcentrationRebalances(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing held option expiry signal: %+v", res.Signals)
 	}
-	if sig.Subject != "BB" || sig.Direction != risk.DirectionRebalance || sig.Observed == nil || *sig.Observed != 30 {
-		t.Fatalf("held option signal = %+v, want BB rebalance at 30%% NLV", sig)
+	if sig.Subject != "XYZ" || sig.Direction != risk.DirectionRebalance || sig.Observed == nil || *sig.Observed != 30 {
+		t.Fatalf("held option signal = %+v, want XYZ rebalance at 30%% NLV", sig)
 	}
 	if res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh {
 		t.Fatalf("decision = action %s fit %s, want rebalance/high", res.Action, res.PortfolioFit)
@@ -518,7 +518,7 @@ func TestComputeCanaryHeldOptionExpiryConcentrationRebalances(t *testing.T) {
 	if got := res.Portfolio.HeldStress[0].NearExpiryMinDTE; got == nil || *got != 5 {
 		t.Fatalf("near_expiry_min_dte = %v, want 5", got)
 	}
-	if !rowContainsEvidence(res.Rows, "Held-name stress", "BB near-expiry delta 30% NLV at 5 DTE") {
+	if !rowContainsEvidence(res.Rows, "Held-name stress", "XYZ near-expiry delta 30% NLV at 5 DTE") {
 		t.Fatalf("expected held option evidence, rows: %+v", res.Rows)
 	}
 }
@@ -531,11 +531,11 @@ func TestComputeCanaryHeldLiquidityDegradedIsDataQualityOnly(t *testing.T) {
 		Positions: rpc.PositionsResult{
 			AsOf: time.Now(),
 			Stocks: []rpc.PositionView{{
-				Symbol: "BB", SecType: rpc.SecTypeStock, Quantity: 1_000, SpreadPct: &spread, QuoteQuality: "firm",
+				Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 1_000, SpreadPct: &spread, QuoteQuality: "firm",
 			}},
 			Portfolio: &rpc.PositionsPortfolio{
 				ExposureBase: []rpc.UnderlyingExposure{{
-					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0),
+					Underlying: "XYZ", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0),
 				}},
 			},
 		},
@@ -561,7 +561,7 @@ func TestComputeCanarySignalsExposureAndDecisionShape(t *testing.T) {
 		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
 			DollarDeltaBase: &delta,
 			ExposureBase: []rpc.UnderlyingExposure{{
-				Underlying: "NOW", MarketValueBase: 40_000, MarketValuePctNLV: new(40.0), DollarDeltaBase: new(140_000.0),
+				Underlying: "LMN", MarketValueBase: 40_000, MarketValuePctNLV: new(40.0), DollarDeltaBase: new(140_000.0),
 			}},
 		}},
 		Regime: healthyCanaryRegime(),
@@ -931,7 +931,7 @@ func TestComputeCanaryJSONCarriesHeldStress(t *testing.T) {
 			AsOf: time.Now(),
 			Portfolio: &rpc.PositionsPortfolio{
 				ExposureBase: []rpc.UnderlyingExposure{{
-					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+					Underlying: "XYZ", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
 				}},
 			},
 		},
@@ -954,8 +954,8 @@ func TestComputeCanaryJSONCarriesHeldStress(t *testing.T) {
 		t.Fatalf("held_stress missing/malformed: %#v", portfolio["held_stress"])
 	}
 	first, ok := held[0].(map[string]any)
-	if !ok || first["underlying"] != "BB" || first["daily_pnl_pct_nlv"] == nil || first["signal_ids"] == nil {
-		t.Fatalf("held_stress[0] = %#v, want BB stress with daily P&L and signal IDs", held[0])
+	if !ok || first["underlying"] != "XYZ" || first["daily_pnl_pct_nlv"] == nil || first["signal_ids"] == nil {
+		t.Fatalf("held_stress[0] = %#v, want XYZ stress with daily P&L and signal IDs", held[0])
 	}
 }
 
@@ -1386,7 +1386,7 @@ func TestComputeCanaryStalePositionsBlockHeldStressAction(t *testing.T) {
 			AsOf: now.Add(-2 * time.Hour),
 			Portfolio: &rpc.PositionsPortfolio{
 				ExposureBase: []rpc.UnderlyingExposure{{
-					Underlying: "BB", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
+					Underlying: "XYZ", MarketValueBase: 30_000, MarketValuePctNLV: new(30.0), DailyPnLBase: &dailyLoss,
 				}},
 			},
 		},
@@ -1607,7 +1607,7 @@ func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 	for _, want := range []string{
 		"Action     WATCH",
 		"Guidance   Market stress is confirmed, but current portfolio exposure is low; keep watch without staging reductions.",
-		"Next step  Stage risk-plan",
+		"Next step  Stage defensive review",
 		"Why this fired",
 		"Market weather",
 		"Portfolio shape",

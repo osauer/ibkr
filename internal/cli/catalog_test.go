@@ -43,7 +43,6 @@ func TestCatalogValueFlagsDriveHoisting(t *testing.T) {
 		"only", "scale", "market", "exchange", "primary", "currency", "instrument", "log",
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
 		"min-dte", "max-dte", "target-dte", "class",
-		"mode", "from-canary", "from-plan", "candidate",
 		"account", "preview-token", "strategy", "tif", "replace-order",
 		"addr", "public-url", "state-dir", "config", "socket",
 		"profile", "view", "wait",

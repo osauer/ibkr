@@ -40,9 +40,9 @@ Held-underlying stress appears in `portfolio.held_stress[]` only when a material
 
 For a scheduler-friendly prompt that preserves action, market confirmation, portfolio fit, input health, readiness, source health, fingerprints, and warnings, use [examples/ibkr_portfolio_canary_prompt.md](https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_canary_prompt.md). The current tool returns the decision surface; notifications, circuit breakers, and broker-specific automation policies are intentionally left to the host or user workflow.
 
-### "Does CRWV have borrow, Reg SHO, LULD, or halt context?"
+### "Does GME have borrow, Reg SHO, LULD, or halt context?"
 
-→ Claude invokes `ibkr_market_events` with `{"symbol":"CRWV"}`.
+→ Claude invokes `ibkr_market_events` with `{"symbol":"GME"}`.
 
 Returns market-event flags for requested or held stock/ETF symbols: IBKR shortable-share inventory, IBKR short-stock availability fee rate, Nasdaq Reg SHO threshold-list membership, and active/recent Nasdaq LULD or regulatory/news halts. The response carries `flags[]`, `by_symbol`, `source_health[]`, `warning_details[]`, and a semantic `fingerprint`.
 

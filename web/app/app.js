@@ -22,14 +22,6 @@ const state = {
   selectedAlertID: null,
   alertFilter: "all",
   clearedAlertFingerprint: localStorage.getItem("ibkrClearedAlertFingerprint") || "",
-  orderReviewSets: [],
-  activeOrderReviewSetID: null,
-  orderReviewEdits: {},
-  orderReviewLoading: false,
-  orderReviewError: "",
-  orderPreview: null,
-  orderTransmitLoading: false,
-  orderTransmitResult: null,
   ordersOpen: null,
   openOrderEdits: {},
   underlyingNotice: "",
@@ -118,8 +110,6 @@ function applyBootstrap(data) {
   if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
   state.alertSettings = data.alert_settings || state.alertSettings;
   state.alerts = data.alerts || [];
-  state.orderReviewSets = data.order_review_sets || [];
-  state.activeOrderReviewSetID = state.orderReviewSets[0]?.id || null;
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
   $("accountPanel").hidden = false;
@@ -301,8 +291,6 @@ function renderAll() {
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
-  renderOrderReview();
-  renderCanaryMitigation(canary);
   renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
   renderOpenOrders();
   renderMarketContext(snap);
@@ -548,8 +536,6 @@ function setRegimeCanaryExpansion(which, open) {
   }
   renderRegimePanel(state.snapshot || {});
   renderCanaryDetail(state.snapshot?.canary || {});
-  renderOrderReview();
-  renderCanaryMitigation(state.snapshot?.canary || {});
 }
 
 function panelTapIgnored(target) {
@@ -568,7 +554,6 @@ function panelTapIgnored(target) {
     ".underlying-action-result",
     ".account-overview-detail",
     ".portfolio-detail-panel",
-    ".order-review",
     ".alert-focus",
   ].join(",")));
 }
@@ -1648,14 +1633,6 @@ function renderCanaryDetail(canary) {
   }));
 }
 
-function renderCanaryMitigation(canary = {}) {
-  const button = $("canaryMitigationButton");
-  const gate = mitigationPlanGate(canary);
-  button.disabled = !gate.ready;
-  button.textContent = state.orderReviewLoading ? "Refreshing..." : "Mitigation plan";
-  button.title = gate.reason;
-}
-
 function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}) {
   const panel = $("protectionPanel");
   const detail = $("protectionDetailPanel");
@@ -1849,44 +1826,6 @@ async function refreshProtectionProposals() {
     const proposals = await res.json();
     state.snapshot = { ...(state.snapshot || {}), proposals, market_events: proposals.market_events || state.snapshot?.market_events };
     renderAll();
-  }
-}
-
-function mitigationPlanGate(canary = {}) {
-  const set = activeOrderReviewSet();
-  if (set) {
-    return { ready: true, reason: "Open the current mitigation plan" };
-  }
-  if (state.orderReviewLoading) {
-    return { ready: false, reason: "Refreshing mitigation plan" };
-  }
-  if (!canary || !canary.as_of) {
-    return { ready: false, reason: "Waiting for a current Canary snapshot" };
-  }
-  if (canaryInputCheckBlocksAction(canary)) {
-    return { ready: false, reason: canaryInputCheckSentence(canary) };
-  }
-  const readiness = String(canary.planner_readiness || canary.planner_mode_hint || "").toLowerCase();
-  const action = String(canary.action || "").toLowerCase();
-  const severity = String(canary.severity || "").toLowerCase();
-  const canBuild = readiness.includes("ready") ||
-    ["defend", "rebalance", "trim", "purge", "restore"].includes(action) ||
-    severity === "act";
-  return canBuild
-    ? { ready: true, reason: "Create a mitigation plan from the current Canary snapshot" }
-    : { ready: false, reason: "No mitigation plan is available for the current Canary state" };
-}
-
-async function openMitigationPlan() {
-  const gate = mitigationPlanGate(state.snapshot?.canary || {});
-  if (!gate.ready) return;
-  setRegimeCanaryExpansion("canary", true);
-  if (!activeOrderReviewSet()) {
-    await refreshOrderReviewSet();
-  }
-  const panel = $("orderReviewPanel");
-  if (!panel.hidden) {
-    panel.scrollIntoView({ block: "nearest" });
   }
 }
 
@@ -3454,7 +3393,6 @@ function alertRowElement(alert) {
     state.selectedAlertID = alert.id;
     renderAlerts();
     renderSelectedAlert();
-    if (!activeOrderReviewSet()) refreshOrderReviewSet();
     $("selectedAlertPanel").scrollIntoView({ block: "nearest" });
   });
   const text = document.createElement("div");
@@ -3498,212 +3436,6 @@ function renderSelectedAlert() {
     ? "not valid for current daemon context"
     : alert.preview ? "current canary snapshot"
     : alert.created_at ? `recorded ${shortTime(alert.created_at)}` : "recorded --";
-}
-
-function activeOrderReviewSet() {
-  const currentSets = state.orderReviewSets.filter((set) => !reviewSetIsStale(set));
-  return currentSets.find((set) => set.id === state.activeOrderReviewSetID) || currentSets[0] || null;
-}
-
-function activeOrderPreview(set) {
-  if (!set) return null;
-  for (const preview of [state.orderPreview, set.latest_preview]) {
-    if (preview?.set_id === set.id && preview?.set_revision === set.revision) {
-      return preview;
-    }
-  }
-  return null;
-}
-
-function selectedReviewRows(set) {
-  return (set?.rows || []).filter((row) => {
-    const edit = rowEdit(row);
-    return edit.included && Number(edit.quantity || 0) > 0;
-  });
-}
-
-function previewRowsByID(preview) {
-  const out = new Map();
-  for (const row of preview?.rows || []) {
-    out.set(row.row_id, row);
-  }
-  return out;
-}
-
-function reviewTransmitGate(set, trading, selected) {
-  if (!set) return { ready: false, reason: "Create or refresh a mitigation plan first" };
-  if (reviewSetIsStale(set)) return { ready: false, reason: "Refresh the stale mitigation plan before transmitting" };
-  if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
-  if ((selected || []).length === 0) return { ready: false, reason: "Select at least one row before transmitting" };
-  const preview = activeOrderPreview(set);
-  if (!preview) return { ready: false, reason: "Preview selected rows first" };
-  if (!preview.submit_ready) return { ready: false, reason: "Latest preview is not submit-ready" };
-  const previewRows = previewRowsByID(preview);
-  for (const row of selected) {
-    const edit = rowEdit(row);
-    const previewRow = previewRows.get(row.row_id);
-    if (!previewRow || !previewRow.included || previewRow.quantity !== Number(edit.quantity || 0)) {
-      return { ready: false, reason: `Preview ${contractLabel(row.contract)} again after selection changes` };
-    }
-    if (!previewRow.submit_eligible) {
-      return { ready: false, reason: `${contractLabel(row.contract)} is not submit eligible` };
-    }
-    if (!previewToken(previewRow.preview)) {
-      return { ready: false, reason: `${contractLabel(row.contract)} has no preview token` };
-    }
-  }
-  return { ready: true, reason: "Transmit selected rows after confirmation" };
-}
-
-function renderOrderReview() {
-  const panel = $("orderReviewPanel");
-  const set = activeOrderReviewSet();
-  const shouldShow = state.canaryDetailOpen && Boolean(set || state.orderReviewLoading || state.orderReviewError || state.orderPreview);
-  panel.hidden = !shouldShow;
-  renderCanaryMitigation(state.snapshot?.canary || {});
-  if (!shouldShow) return;
-
-  const trading = state.snapshot?.trading || set?.captured_trading || {};
-  $("orderReviewTitle").textContent = "Mitigation plan";
-  $("orderReviewMeta").textContent = set
-    ? `${(set.rows || []).length} review row${(set.rows || []).length === 1 ? "" : "s"} · updated ${shortTime(set.updated_at || set.created_at)}`
-    : "Create a review set from the latest canary context";
-  $("orderReviewStatus").textContent = capabilityLine(trading, set);
-  $("refreshOrderReviewButton").disabled = state.orderReviewLoading;
-
-  const rows = set?.rows || [];
-  $("orderReviewRows").replaceChildren(...rows.map(orderReviewRowElement));
-  if (rows.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "order-review__empty";
-    empty.textContent = state.orderReviewLoading ? "Refreshing risk plan." : "No review rows yet.";
-    $("orderReviewRows").replaceChildren(empty);
-  }
-
-  const selected = selectedReviewRows(set);
-  const totalQty = selected.reduce((sum, row) => sum + rowEdit(row).quantity, 0);
-  $("orderReviewSummary").textContent = selected.length === 0
-    ? "No selected rows"
-    : `${selected.length} selected / ${totalQty} units`;
-  $("resetOrderReviewButton").disabled = !set || state.orderReviewLoading || state.orderTransmitLoading;
-  $("previewOrdersButton").disabled = !set || !trading.can_preview || selected.length === 0 || state.orderReviewLoading || state.orderTransmitLoading;
-  $("previewOrdersButton").title = !set ? "Create a review set first" : !trading.can_preview ? "Preview is not enabled by trading.status" : selected.length === 0 ? "Select at least one row" : "Preview selected rows";
-  const transmitGate = reviewTransmitGate(set, trading, selected);
-  $("transmitSelectedButton").disabled = !transmitGate.ready || state.orderReviewLoading || state.orderTransmitLoading;
-  $("transmitSelectedButton").title = state.orderTransmitLoading ? "Transmit in progress" : transmitGate.reason;
-
-  renderOrderPreview();
-}
-
-function orderReviewRowElement(row) {
-  const edit = rowEdit(row);
-  const item = document.createElement("div");
-  item.className = "order-review-row";
-  if (!edit.included || edit.quantity === 0) item.classList.add("excluded");
-
-  const include = document.createElement("input");
-  include.type = "checkbox";
-  include.checked = edit.included;
-  include.setAttribute("aria-label", `Include ${row.contract?.symbol || row.row_id}`);
-  include.addEventListener("change", () => {
-    state.orderReviewEdits[row.row_id] = { ...edit, included: include.checked, quantity: include.checked ? Math.max(1, edit.quantity || row.editable_quantity || row.proposed_quantity || 1) : 0 };
-    state.orderPreview = null;
-    state.orderTransmitResult = null;
-    renderOrderReview();
-  });
-
-  const main = document.createElement("div");
-  main.className = "order-review-row__main";
-  const title = document.createElement("b");
-  title.textContent = `${row.action || "--"} ${contractLabel(row.contract)}`;
-  const rationale = document.createElement("p");
-  rationale.textContent = row.rationale || "Risk-plan row";
-  main.append(title, rationale);
-
-  const meta = document.createElement("div");
-  meta.className = "order-review-row__meta";
-  meta.append(metaPill(`Proposed ${row.proposed_quantity || 0}`));
-  meta.append(metaPill(`${row.order_type || "LMT"} ${priceLabel(row.limit_price)}`));
-  meta.append(metaPill(row.tif || "DAY"));
-  if (row.position_effect) meta.append(metaPill(labelize(row.position_effect)));
-
-  const qty = document.createElement("input");
-  qty.type = "number";
-  qty.min = "0";
-  qty.max = String(row.max_quantity ?? row.proposed_quantity ?? 0);
-  qty.step = "1";
-  qty.value = String(edit.quantity ?? 0);
-  qty.addEventListener("input", () => {
-    const next = Math.max(0, Math.trunc(Number(qty.value || 0)));
-    state.orderReviewEdits[row.row_id] = { ...edit, included: next > 0 && edit.included, quantity: next };
-    state.orderPreview = null;
-    state.orderTransmitResult = null;
-    renderOrderReview();
-  });
-
-  const blockers = document.createElement("div");
-  blockers.className = "order-review-row__blockers";
-  blockers.textContent = (row.blockers || []).join(" / ");
-  blockers.hidden = (row.blockers || []).length === 0;
-
-  item.append(include, main, meta, qty, blockers);
-  return item;
-}
-
-function renderOrderPreview() {
-  const panel = $("orderPreviewPanel");
-  const set = activeOrderReviewSet();
-  const preview = activeOrderPreview(set);
-  if (!preview && !state.orderReviewError && !state.orderTransmitResult) {
-    panel.hidden = true;
-    panel.replaceChildren();
-    return;
-  }
-  panel.hidden = false;
-  const children = [];
-  if (state.orderReviewError) {
-    const banner = document.createElement("div");
-    banner.className = "order-preview__banner";
-    banner.textContent = state.orderReviewError;
-    children.push(banner);
-  }
-  if (preview) {
-    const head = document.createElement("div");
-    head.className = "order-preview__head";
-    head.innerHTML = `<b>${preview.submit_ready ? "Submit-ready preview" : "Preview needs attention"}</b><span>${shortTime(preview.as_of)}</span>`;
-    children.push(head);
-    for (const row of preview.rows || []) {
-      const item = document.createElement("div");
-      item.className = "order-preview-row";
-      item.classList.toggle("order-preview-row--blocked", row.included && !row.submit_eligible);
-      const title = document.createElement("b");
-      title.textContent = row.draft
-        ? `${row.draft.action} ${row.quantity} ${contractLabel(row.draft.contract)}`
-        : `${row.row_id} / ${row.quantity}`;
-      const detail = document.createElement("p");
-      detail.textContent = previewRowLine(row);
-      const token = document.createElement("small");
-      token.textContent = row.preview?.preview_token_id ? `token ${row.preview.preview_token_id}` : "no submit token";
-      item.append(title, detail, token);
-      const transmit = transmitRowResult(row.row_id);
-      if (transmit) {
-        const result = document.createElement("small");
-        result.className = "order-result-line " + (transmit.failure || transmit.result?.accepted === false ? "risk" : "ok");
-        result.textContent = transmit.failure
-          ? `Transmit failed: ${transmit.failure}`
-          : `Transmit row result: ${transmit.result?.accepted ? "accepted" : "not accepted"}${transmit.result?.message ? " / " + transmit.result.message : ""}`;
-        item.append(result);
-      }
-      children.push(item);
-    }
-  }
-  if (state.orderTransmitResult) {
-    const summary = document.createElement("div");
-    summary.className = "order-preview__banner order-preview__banner--result";
-    summary.textContent = transmitResultSummary(state.orderTransmitResult);
-    children.push(summary);
-  }
-  panel.replaceChildren(...children);
 }
 
 function renderOpenOrders() {
@@ -3813,126 +3545,6 @@ function orderActionButton(label, enabled, reason) {
   button.disabled = !enabled;
   button.title = enabled ? label : reason || `${label} unavailable`;
   return button;
-}
-
-function rowEdit(row) {
-  return state.orderReviewEdits[row.row_id] || {
-    included: row.included,
-    quantity: row.editable_quantity ?? row.proposed_quantity ?? 0,
-  };
-}
-
-function resetOrderReviewEdits() {
-  state.orderReviewEdits = {};
-  state.orderPreview = null;
-  state.orderTransmitResult = null;
-  state.orderReviewError = "";
-  renderOrderReview();
-}
-
-async function refreshOrderReviewSet() {
-  state.orderReviewLoading = true;
-  state.orderReviewError = "";
-  state.orderTransmitResult = null;
-  renderOrderReview();
-  try {
-    const res = await fetch("/api/order-review-sets", { method: "POST", credentials: "include" });
-    if (!res.ok) throw new Error(await res.text());
-    const set = await res.json();
-    upsertOrderReviewSet(set);
-    state.activeOrderReviewSetID = set.id;
-    resetOrderReviewEdits();
-  } catch (err) {
-    state.orderReviewError = err.message;
-    renderOrderReview();
-  } finally {
-    state.orderReviewLoading = false;
-    renderOrderReview();
-  }
-}
-
-async function previewOrderReviewSet() {
-  const set = activeOrderReviewSet();
-  if (!set) return;
-  if (reviewSetIsStale(set)) {
-    state.orderReviewError = "Review set is stale for the current canary/account context. Refresh before previewing.";
-    renderOrderReview();
-    return;
-  }
-  state.orderReviewLoading = true;
-  state.orderReviewError = "";
-  renderOrderReview();
-  const rows = (set.rows || []).map((row) => {
-    const edit = rowEdit(row);
-    return { row_id: row.row_id, included: Boolean(edit.included), quantity: Number(edit.quantity || 0) };
-  });
-  try {
-    const res = await fetch(`/api/order-review-sets/${encodeURIComponent(set.id)}/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ revision: set.revision, rows }),
-    });
-    const body = await res.json();
-    if (res.status === 409 && body.code === "rebase_required") {
-      upsertOrderReviewSet(body.current_set);
-      state.activeOrderReviewSetID = body.current_set.id;
-      state.orderReviewEdits = {};
-      state.orderPreview = null;
-      state.orderReviewError = "Proposal changed. Review the refreshed rows before previewing.";
-      return;
-    }
-    if (!res.ok) throw new Error(body.error || JSON.stringify(body));
-    upsertOrderReviewSet(body.set);
-    state.activeOrderReviewSetID = body.set.id;
-    state.orderPreview = body.preview;
-    state.orderTransmitResult = null;
-    await refreshOpenOrders();
-  } catch (err) {
-    state.orderReviewError = err.message;
-  } finally {
-    state.orderReviewLoading = false;
-    renderOrderReview();
-  }
-}
-
-async function transmitSelectedOrders() {
-  const set = activeOrderReviewSet();
-  if (!set) return;
-  const trading = state.snapshot?.trading || set.captured_trading || {};
-  const selected = selectedReviewRows(set);
-  const gate = reviewTransmitGate(set, trading, selected);
-  if (!gate.ready) {
-    state.orderReviewError = gate.reason;
-    renderOrderReview();
-    return;
-  }
-  if (!window.confirm(transmitConfirmationText(set, activeOrderPreview(set), selected, trading))) {
-    return;
-  }
-  state.orderTransmitLoading = true;
-  state.orderReviewError = "";
-  state.orderTransmitResult = null;
-  renderOrderReview();
-  try {
-    const res = await fetch(`/api/order-review-sets/${encodeURIComponent(set.id)}/transmit`, {
-      method: "POST",
-      credentials: "include",
-    });
-    const body = await readJSONOrText(res);
-    if (!res.ok) throw new Error(body.error || body.message || String(body));
-    state.orderTransmitResult = body;
-    if (body.orders_open) {
-      state.ordersOpen = body.orders_open;
-      renderOpenOrders();
-    }
-    await refreshOpenOrders();
-  } catch (err) {
-    state.orderReviewError = err.message;
-  } finally {
-    state.orderTransmitLoading = false;
-    renderOrderReview();
-  }
 }
 
 async function previewOrderModify(order) {
@@ -4049,12 +3661,6 @@ async function refreshOpenOrders() {
   }
 }
 
-function upsertOrderReviewSet(set) {
-  if (!set?.id) return;
-  const next = state.orderReviewSets.filter((item) => item.id !== set.id);
-  state.orderReviewSets = [set, ...next].slice(0, 10);
-}
-
 function orderIdentity(order) {
   return String(order.order_ref || order.reserved_order_id || order.perm_id || order.preview_token_id || order.symbol || "").trim();
 }
@@ -4142,17 +3748,6 @@ function modifyPreviewLine(preview) {
     warningMessages(preview.warnings).join(" / "),
   ].filter(Boolean);
   return "Preview change: " + parts.join(" / ");
-}
-
-function transmitRowResult(rowID) {
-  return (state.orderTransmitResult?.rows || []).find((row) => row.row_id === rowID) || null;
-}
-
-function transmitResultSummary(result) {
-  const rows = result?.rows || [];
-  const accepted = rows.filter((row) => row.result?.accepted).length;
-  const failed = rows.filter((row) => row.failure || row.result?.accepted === false).length;
-  return `Transmit returned per-row results: ${accepted} accepted, ${failed} failed. This is not all-or-nothing.`;
 }
 
 function previewToken(preview) {
@@ -4280,18 +3875,6 @@ function renderUnderlyingActionResult(result = {}) {
   panel.textContent = lines.join(" / ") || purgeResultSummary(result);
 }
 
-function capabilityLine(trading, set) {
-  if (!set) return "Create or refresh the review set before preview.";
-  if (reviewSetIsStale(set)) return "Stale review set for a previous canary/account context. Refresh before preview.";
-  const bits = [
-    trading.can_preview ? "preview ready" : "preview blocked",
-    trading.can_write ? "write ready" : "write disabled",
-    trading.open_orders ? `${trading.open_orders} open` : "",
-  ].filter(Boolean);
-  const blockers = (trading.blockers || []).map((blocker) => blocker.message || blocker.code).filter(Boolean);
-  return [...bits, ...blockers].join(" / ") || "Trading status unavailable";
-}
-
 function currentCanaryFingerprint() {
   return state.snapshot?.canary?.fingerprint?.key || "";
 }
@@ -4312,36 +3895,6 @@ function staleAlertReason(alert) {
   if (alert?.account && trading.account && alert.account !== trading.account) return "previous account";
   if (alert?.mode && trading.mode && alert.mode !== trading.mode) return "previous mode";
   return "previous context";
-}
-
-function reviewSetIsStale(set) {
-  const current = currentCanaryFingerprint();
-  const canaryChanged = Boolean(set?.canary_fingerprint && current && set.canary_fingerprint !== current);
-  const trading = state.snapshot?.trading || {};
-  const setCaps = set?.captured_trading || {};
-  const accountChanged = Boolean(setCaps.account && trading.account && setCaps.account !== trading.account);
-  const modeChanged = Boolean(setCaps.mode && trading.mode && setCaps.mode !== trading.mode);
-  return canaryChanged || accountChanged || modeChanged;
-}
-
-function transmitConfirmationText(set, preview, selected, trading) {
-  const previewRows = previewRowsByID(preview);
-  const firstPreview = selected.map((row) => previewRows.get(row.row_id)?.preview).find(Boolean);
-  const lines = [
-    "Transmit selected orders?",
-    "",
-    `Mode: ${labelize(firstPreview?.mode || trading.mode || set.captured_trading?.mode || "--")}`,
-    `Account: ${firstPreview?.account || trading.account || set.captured_trading?.account || "--"}`,
-    `Endpoint: ${venueLabel(firstPreview || trading)}`,
-    "",
-    "Selected rows:",
-  ];
-  for (const row of selected) {
-    const previewRow = previewRows.get(row.row_id) || {};
-    lines.push(" - " + orderConfirmationLine(row, previewRow));
-  }
-  lines.push("", "Rows transmit independently; this is not all-or-nothing.");
-  return lines.join("\n");
 }
 
 function modifyConfirmationText(order, preview) {
@@ -4371,23 +3924,6 @@ function cancelConfirmationText(order, trading) {
   ].join("\n");
 }
 
-function orderConfirmationLine(row, previewRow) {
-  const preview = previewRow.preview || {};
-  const draft = previewRow.draft || preview.draft || {};
-  const warnings = [
-    ...warningMessages(preview.warnings),
-    ...(previewRow.warnings || []),
-    preview.what_if?.message || "",
-  ].filter(Boolean).join(" / ") || "--";
-  return [
-    `${draft.action || row.action || "--"} ${previewRow.quantity || rowEdit(row).quantity || "--"} ${contractLabel(draft.contract || row.contract)}`,
-    `${draft.order_type || row.order_type || "LMT"} ${priceLabel(draft.limit_price || row.limit_price)} ${draft.tif || row.tif || "DAY"}`,
-    `WhatIf ${previewRow.what_if_status || preview.what_if?.status || "--"}`,
-    `warning/message ${warnings}`,
-    `submit ${previewRow.submit_eligible ? "eligible" : "not eligible"} / ${preview.preview_token_id ? "token " + preview.preview_token_id : "no token"}`,
-  ].join(" / ");
-}
-
 function warningMessages(warnings = []) {
   return warnings.map((warning) => {
     if (!warning) return "";
@@ -4402,30 +3938,8 @@ function venueLabel(value = {}) {
   return "broker endpoint unavailable";
 }
 
-function metaPill(text) {
-  const pill = document.createElement("span");
-  pill.textContent = text || "--";
-  return pill;
-}
-
-function contractLabel(contract = {}) {
-  if (contract.local_symbol) return contract.local_symbol;
-  if (!contract.symbol) return "--";
-  if (contract.sec_type === "OPT") return `${contract.symbol} ${contract.expiry || ""} ${contract.right || ""}${contract.strike || ""}`.trim();
-  return contract.symbol;
-}
-
 function priceLabel(value) {
   return typeof value === "number" ? value.toFixed(2) : "auto";
-}
-
-function previewRowLine(row) {
-  const parts = [];
-  parts.push(row.submit_eligible ? "submit eligible" : "not submit eligible");
-  if (row.what_if_status) parts.push(`WhatIf ${row.what_if_status}`);
-  if (row.blockers?.length) parts.push(row.blockers.join(" / "));
-  if (row.failure) parts.push(row.failure);
-  return parts.join(" / ");
 }
 
 async function refreshAlerts() {
@@ -4616,9 +4130,7 @@ $("quickReviewBlockersButton").addEventListener("click", () => {
   setRegimeCanaryExpansion("canary", true);
   $("canaryDetailPanel").scrollIntoView({ block: "nearest" });
 });
-$("canaryMitigationButton").addEventListener("click", openMitigationPlan);
-$("quickRiskPlanButton").addEventListener("click", openMitigationPlan);
-$("quickHeldActionsButton").addEventListener("click", () => {
+  $("quickHeldActionsButton").addEventListener("click", () => {
   setUnderlyingExpansion(true);
   $("underlyingPanel").scrollIntoView({ block: "nearest" });
 });
@@ -4630,11 +4142,7 @@ $("clearSelectedAlertButton").addEventListener("click", () => {
   renderAlerts();
   renderSelectedAlert();
 });
-$("refreshOrderReviewButton").addEventListener("click", refreshOrderReviewSet);
-$("resetOrderReviewButton").addEventListener("click", resetOrderReviewEdits);
-$("previewOrdersButton").addEventListener("click", previewOrderReviewSet);
-$("transmitSelectedButton").addEventListener("click", transmitSelectedOrders);
-$("regimeDetailToggle").addEventListener("click", () => {
+  $("regimeDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("regime", !state.regimeDetailOpen);
 });
 $("regimePanel").addEventListener("click", (event) => {

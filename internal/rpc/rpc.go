@@ -1091,7 +1091,7 @@ type GammaZeroComputed struct {
 	// SweepLowAbs / SweepHighAbs are the absolute spot bounds of the
 	// sweep window in dollars: SpotUnderlying × (1 ± Params.SweepRangePct).
 	// Surfaced for renderers that want to print "γ-zero outside swept
-	// range $A.AA–$B.BB" without re-deriving the multiplication.
+	// range $A.AA-$C.CC" without re-deriving the multiplication.
 	SweepLowAbs  float64 `json:"sweep_low_abs,omitempty"`
 	SweepHighAbs float64 `json:"sweep_high_abs,omitempty"`
 

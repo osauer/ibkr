@@ -166,7 +166,6 @@ func init() {
 		{"gamma", "Combined SPY+SPX dealer zero-gamma estimate (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--diagnostics] [--json]", runGamma},
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
-		{"risk-plan", "Read-only risk mitigation planner from canary + current portfolio", "ibkr risk-plan [--mode auto|defend|rebalance|stage|confirm-data|deploy] [--from-canary PATH] [--json]", runRiskPlan},
 		{"proposals", "Daemon-owned close/reduce-only protection proposals", "ibkr proposals status|refresh|list|preview|submit|ignore [--json]", runProposals},
 		{"purge", "Emergency fast-path close for current stock/ETF and single-leg option positions", "ibkr purge SYMBOL|'*' [--bypass-preview=true] [--wait 2s] [--json] | ibkr purge --all [--bypass-preview=true] [--wait 2s] [--json] | ibkr purge restore SYMBOL|'*' [--scale 0.5] [--execute] [--json] | ibkr purge status [PURGE_ID] [--json] | ibkr purge monitor [PURGE_ID] [--watch --rate 1s] | ibkr purge dry-run [--json]", runPurge},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},

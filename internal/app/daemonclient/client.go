@@ -32,7 +32,6 @@ type Client interface {
 	TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error)
 	Settings(context.Context) (*rpc.PlatformSettings, error)
 	UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error)
-	RiskPlan(context.Context, string, *rpc.CanaryResult) (*rpc.RiskPlanResult, error)
 	OrderPreview(context.Context, rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error)
 	OrderPlace(context.Context, rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error)
 	OrderModify(context.Context, rpc.OrderModifyParams) (*rpc.OrderModifyResult, error)
@@ -222,19 +221,6 @@ func (c Real) Settings(ctx context.Context) (*rpc.PlatformSettings, error) {
 func (c Real) UpdateSettings(ctx context.Context, patch json.RawMessage) (*rpc.PlatformSettings, error) {
 	var out rpc.PlatformSettings
 	if err := c.call(ctx, rpc.MethodSettingsUpdate, patch, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c Real) RiskPlan(ctx context.Context, mode string, trigger *rpc.CanaryResult) (*rpc.RiskPlanResult, error) {
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	out, err := cli.FetchRiskPlan(ctx, conn, mode, trigger)
-	if err != nil {
 		return nil, err
 	}
 	return &out, nil

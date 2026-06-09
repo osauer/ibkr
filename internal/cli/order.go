@@ -23,9 +23,6 @@ func runOrder(ctx context.Context, env *Env, args []string) int {
 	args = append(append([]string{}, args[:subIdx]...), args[subIdx+1:]...)
 	switch sub {
 	case "preview":
-		if orderPreviewFromPlanArgs(args) {
-			return runOrderPreviewFromPlan(ctx, env, args)
-		}
 		return runOrderPreview(ctx, env, args)
 	case "status":
 		return runOrderStatus(ctx, env, args)
@@ -48,15 +45,6 @@ func orderSubcommandIndex(args []string) int {
 		}
 	}
 	return -1
-}
-
-func orderPreviewFromPlanArgs(args []string) bool {
-	for _, arg := range args {
-		if arg == "--from-plan" || strings.HasPrefix(arg, "--from-plan=") || arg == "--candidate" || strings.HasPrefix(arg, "--candidate=") {
-			return true
-		}
-	}
-	return false
 }
 
 func runOrderPreview(ctx context.Context, env *Env, args []string) int {

@@ -8,9 +8,9 @@ import (
 
 const PolicyFingerprintVersion = "risk-policy-fp-v1"
 
-// Policy holds the shared risk thresholds used by live monitors and planners.
-// The first version is intentionally small: it captures the canary's current
-// policy in one place so risk-plan can consume the same vocabulary later.
+// Policy holds the shared risk thresholds used by live monitors and protection
+// proposal policy. The first version is intentionally small: it captures the
+// canary's current policy vocabulary in one place.
 type Policy struct {
 	Name    string `json:"name"`
 	Profile string `json:"profile"`
