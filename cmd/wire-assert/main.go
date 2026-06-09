@@ -18,7 +18,8 @@
 //	chain-iv-source          — ≥1 OPTION_COMPUTATION (msg 21) with non-NaN IV
 //	gamma-noflag             — gamma --no-wait returns terminal status, never pending
 //	gamma-premarket-derived  — in loose mode, the gamma envelope reports
-//	                           derived_iv_legs > 0 (proves BS-IV fallback fired)
+//	                           derived_iv_legs > 0 or model_tick_legs > 0
+//	                           (off-hours pricing path landed)
 //	regime-subs              — MarketDataType notice for each of VIX/VIX3M/HYG/SPY/USDJPY
 //	account-summary          — reqAccountSummary OUT + accountSummary IN
 //	status-handshake         — at least one MarketDataType notice (58) inbound
@@ -226,7 +227,7 @@ func catalogue() []checkEntry {
 		{"chain-iv-source", "after ibkr chain SPY --width 5: ≥1 OPTION_COMPUTATION (msg 21) with non-NaN IV from any OPT reqID", checkChainIVSource},
 		{"regime-subs", "after ibkr regime: MarketDataType notice for each of VIX/VIX3M/HYG/SPY/USDJPY", checkRegimeSubs},
 		{"gamma-noflag", "after ibkr gamma --no-wait: terminal status (ready or known error), never pending", checkGammaNoFlag},
-		{"gamma-premarket-derived", "in loose mode, gamma envelope JSON reports derived_iv_legs > 0 (BS-IV fallback fired)", checkGammaPremarketDerived},
+		{"gamma-premarket-derived", "in loose mode, gamma envelope JSON reports derived_iv_legs > 0 or model_tick_legs > 0 (off-hours pricing path landed)", checkGammaPremarketDerived},
 	}
 }
 
@@ -502,11 +503,11 @@ func checkGammaNoFlag(in checkInputs) CheckResult {
 }
 
 // checkGammaPremarketDerived asserts that a completed gamma compute
-// off-hours used the BS-IV Newton-Raphson fallback for ≥1 leg. Inspects
-// the JSON envelope passed via --gamma-envelope-path (the daemon's
-// response from `ibkr gamma --wait …`), not the wire frames — the
-// derived_iv_legs counter is a daemon-internal aggregation that has no
-// wire-frame representation.
+// off-hours found at least one priced leg through either the BS-IV
+// Newton-Raphson fallback or a gateway model tick. Inspects the JSON
+// envelope passed via --gamma-envelope-path (the daemon's response
+// from `ibkr gamma --wait …`), not the wire frames — these counters are
+// daemon-internal aggregations that have no wire-frame representation.
 //
 // Strict mode (live): the check is skipped (model engine is active,
 // fallback need not fire). The wire-smoke script only runs this check
@@ -515,8 +516,8 @@ func checkGammaNoFlag(in checkInputs) CheckResult {
 // In loose mode without a usable envelope (no completed compute,
 // gamma is still pending, or the envelope has Status != "ready"), the
 // check passes with an explanatory observation rather than fails —
-// the assertion is "if a result is available, the fallback was used",
-// not "the compute must complete before this check runs."
+// the assertion is "if a result is available, it used a valid pricing
+// path", not "the compute must complete before this check runs."
 func checkGammaPremarketDerived(in checkInputs) CheckResult {
 	if !in.Loose {
 		return CheckResult{OK: true, Observed: "strict mode: skipped (BS-IV fallback only required off-hours)"}
@@ -534,6 +535,7 @@ func checkGammaPremarketDerived(in checkInputs) CheckResult {
 		Status        string `json:"status"`
 		LegCount      int    `json:"leg_count"`
 		DerivedIVLegs int    `json:"derived_iv_legs"`
+		ModelTickLegs int    `json:"model_tick_legs"`
 	}
 	type env struct {
 		Status string    `json:"status"`
@@ -552,12 +554,12 @@ func checkGammaPremarketDerived(in checkInputs) CheckResult {
 		// errored compute doesn't tell us anything about the fallback).
 		return CheckResult{OK: true, Observed: fmt.Sprintf("envelope status=%q (no completed result to inspect)", e.Status)}
 	}
-	if e.Result.DerivedIVLegs == 0 {
+	if e.Result.DerivedIVLegs == 0 && e.Result.ModelTickLegs == 0 {
 		return CheckResult{
-			Expected:   "derived_iv_legs > 0 in loose mode (BS-IV fallback should have fired)",
-			Observed:   fmt.Sprintf("derived_iv_legs=0 with leg_count=%d", e.Result.LegCount),
-			Hypothesis: "the gateway delivered model ticks despite frozen/off-hours mode (rare but possible on recently-traded names), OR the fallback failed to fire. Check internal/daemon/gamma_zero_compute.go productionLegFetcher Stage 2b.",
+			Expected:   "derived_iv_legs > 0 or model_tick_legs > 0 in loose mode",
+			Observed:   fmt.Sprintf("derived_iv_legs=0 model_tick_legs=0 with leg_count=%d", e.Result.LegCount),
+			Hypothesis: "neither the gateway model engine nor the BS-IV fallback priced a leg. Check internal/daemon/gamma_zero_compute.go productionLegFetcher Stage 2b.",
 		}
 	}
-	return CheckResult{OK: true, Observed: fmt.Sprintf("derived_iv_legs=%d/%d", e.Result.DerivedIVLegs, e.Result.LegCount)}
+	return CheckResult{OK: true, Observed: fmt.Sprintf("derived_iv_legs=%d model_tick_legs=%d leg_count=%d", e.Result.DerivedIVLegs, e.Result.ModelTickLegs, e.Result.LegCount)}
 }

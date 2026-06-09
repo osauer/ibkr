@@ -331,17 +331,17 @@ assert_wire gamma-noflag
 
 # 10. gamma-premarket-derived — only meaningful in loose mode (off-hours).
 # Block on the compute via the default `gamma --json` path (~50s wait),
-# poll a few times if still computing, then assert derived_iv_legs > 0
-# proves the BS-IV Newton-Raphson fallback fired. Strict mode skips
-# internally — the model engine is active during RTH and the fallback
-# isn't expected to engage.
+# poll a few times if still computing, then assert either derived_iv_legs
+# or model_tick_legs proves that at least one off-hours pricing path
+# landed. Strict mode skips internally — the model engine is active during
+# RTH and the fallback isn't expected to engage.
 #
 # Polling: the daemon's per-RPC deadline is 55s, so `gamma --json`
 # returns Status=computing if the compute outlives the budget. We poll
 # up to 5 times (≈4-5 min total) to give the compute room to complete
 # on a cold contract cache.
 if [[ "${LOOSE:-0}" -eq 1 ]]; then
-    echo "  [gamma (loose: BS-IV fallback assertion)]..."
+    echo "  [gamma (loose: off-hours pricing assertion)]..."
     GAMMA_ENV="$SMOKE_DIR/gamma-envelope.json"
     for attempt in 1 2 3 4 5; do
         LAST_CMD_EXIT=0

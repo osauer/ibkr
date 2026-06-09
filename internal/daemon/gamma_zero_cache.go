@@ -1070,6 +1070,9 @@ func (c *gammaZeroCache) withCachedSPXFallback(scope string, env rpc.GammaZeroSP
 	if spxEnv.Status != rpc.GammaZeroStatusReady || spxEnv.Result == nil {
 		return env
 	}
+	if !gammaSliceFreshEnoughForFallback(spxEnv.Result, now) {
+		return env
+	}
 
 	spyCopy := cloneGammaComputed(spy)
 	spxCopy := cloneGammaComputed(spxEnv.Result)
@@ -1106,6 +1109,24 @@ func gammaSPYForFallback(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 		return c.PerIndex["SPY"]
 	}
 	return nil
+}
+
+func gammaSliceFreshEnoughForFallback(c *rpc.GammaZeroComputed, now time.Time) bool {
+	if c == nil {
+		return false
+	}
+	copy := cloneGammaComputed(c)
+	hydrateGammaComputed(copy)
+	annotateGammaQuality(copy, now)
+	if copy.Quality == nil {
+		return false
+	}
+	switch copy.Quality.Freshness {
+	case "fresh", "closed_session_cache":
+		return true
+	default:
+		return false
+	}
 }
 
 func gammaSPXForFallback(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {

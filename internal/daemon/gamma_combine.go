@@ -284,6 +284,9 @@ func computeGammaCombined(
 		if spxErr != nil {
 			return nil, fmt.Errorf("zero-gamma: SPY phase: %w; SPX phase: %w", err, spxErr)
 		}
+		if ok, reason := gammaOneSidedFallbackUsableForCombined(spxRes, time.Now()); !ok {
+			return spxRes, fmt.Errorf("zero-gamma: SPY phase: %w; SPX fallback not usable: %s", err, reason)
+		}
 		spxRes.Warnings = append(spxRes.Warnings, "spy_unavailable:"+summarizeGammaPhaseFailure(err))
 		return hydrateGammaComputed(spxRes), nil
 	}
@@ -292,6 +295,9 @@ func computeGammaCombined(
 	if spxErr != nil {
 		if s != nil && s.logger != nil {
 			s.logger.Warnf("gamma.combine.spx_unavailable err=%v (degrading to SPY-only)", spxErr)
+		}
+		if ok, reason := gammaOneSidedFallbackUsableForCombined(spyRes, time.Now()); !ok {
+			return spyRes, fmt.Errorf("zero-gamma: SPX phase: %w; SPY fallback not usable: %s", spxErr, reason)
 		}
 		spyRes.Warnings = append(spyRes.Warnings, "spx_unavailable:"+summarizeGammaPhaseFailure(spxErr))
 		return hydrateGammaComputed(spyRes), nil
@@ -302,6 +308,27 @@ func computeGammaCombined(
 		return nil, fmt.Errorf("zero-gamma: combine produced nil result")
 	}
 	return hydrateGammaComputed(combined), nil
+}
+
+func gammaOneSidedFallbackUsableForCombined(result *rpc.GammaZeroComputed, now time.Time) (bool, string) {
+	if result == nil {
+		return false, "result is missing"
+	}
+	c := cloneGammaComputed(result)
+	hydrateGammaComputed(c)
+	annotateGammaQuality(c, now)
+	if c.Quality == nil {
+		return false, "quality is missing"
+	}
+	switch c.Quality.Rankability {
+	case rpc.GammaRankabilityRankable, rpc.GammaRankabilityContextOnly:
+		return true, ""
+	default:
+		if c.Quality.RankabilityReason != "" {
+			return false, c.Quality.RankabilityReason
+		}
+		return false, c.Quality.Rankability
+	}
 }
 
 // summarizeSPXFailure turns an SPX-phase error into the short token
@@ -342,6 +369,8 @@ func summarizeGammaPhaseFailure(err error) string {
 		return "no_data"
 	case strings.Contains(msg, "throttled"):
 		return "throttled"
+	case strings.Contains(msg, "low usable leg count"):
+		return "low_coverage"
 	case strings.Contains(msg, "no usable GEX legs"), strings.Contains(msg, "zero gamma_total_abs/profile/top_strikes"):
 		return "zero_magnitude"
 	}

@@ -411,7 +411,7 @@ func TestGammaZeroCache_CombinedSnapshotUsesCachedSPXFallback(t *testing.T) {
 	}
 }
 
-func TestGammaZeroCache_CombinedSnapshotUsesPriorSPXFallbackDuringRTH(t *testing.T) {
+func TestGammaZeroCache_CombinedSnapshotRejectsPriorSPXFallbackDuringRTH(t *testing.T) {
 	c := newGammaZeroCache()
 	now := time.Date(2026, 6, 2, 14, 12, 0, 0, time.UTC)
 	if cls := gammaClassifySession(now); cls != rpc.SessionRTH {
@@ -447,23 +447,23 @@ func TestGammaZeroCache_CombinedSnapshotUsesPriorSPXFallbackDuringRTH(t *testing
 		t.Fatalf("Status = %q, want ready", env.Status)
 	}
 	got := env.Result
-	if got == nil || got.Scope != rpc.GammaZeroScopeCombined {
-		t.Fatalf("Result scope = %+v, want combined", got)
+	if got == nil || got.Scope != rpc.GammaZeroScopeSPY {
+		t.Fatalf("Result scope = %+v, want current SPY-only degraded result", got)
 	}
-	if got.PerIndex["SPX"] == nil {
-		t.Fatalf("fallback result missing SPX slice: %+v", got.PerIndex)
+	if got.PerIndex["SPX"] != nil {
+		t.Fatalf("stale prior-session SPX fallback was merged into current result: %+v", got.PerIndex["SPX"])
 	}
-	if !got.AsOf.Equal(spxAsOf) {
-		t.Fatalf("combined AsOf = %v, want prior SPX fallback as_of %v", got.AsOf, spxAsOf)
+	if !got.AsOf.Equal(spyAsOf) {
+		t.Fatalf("result AsOf = %v, want current SPY as_of %v", got.AsOf, spyAsOf)
 	}
-	if got.Quality == nil || got.Quality.Rankability != rpc.GammaRankabilityBlocked {
-		t.Fatalf("quality = %+v, want blocked freshness for prior SPX fallback", got.Quality)
+	if got.Quality == nil || got.Quality.Rankability == rpc.GammaRankabilityRankable {
+		t.Fatalf("quality = %+v, want degraded SPY proxy", got.Quality)
 	}
-	if !hasGammaWarning(got.WarningDetails, "spx_cache_fallback:timeout") {
-		t.Fatalf("top-level warning_details missing SPX cache fallback: %+v", got.WarningDetails)
+	if !hasGammaWarning(got.WarningDetails, "spx_unavailable:timeout") {
+		t.Fatalf("current SPX failure warning missing: %+v", got.WarningDetails)
 	}
-	if hasGammaWarning(got.WarningDetails, "spx_unavailable:timeout") {
-		t.Fatalf("fallback result should not say SPX is excluded: %+v", got.WarningDetails)
+	if hasGammaWarning(got.WarningDetails, "spx_cache_fallback:timeout") {
+		t.Fatalf("stale SPX fallback should not be advertised: %+v", got.WarningDetails)
 	}
 }
 

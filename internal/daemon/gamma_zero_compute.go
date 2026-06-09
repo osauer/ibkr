@@ -799,30 +799,26 @@ func computeGammaZeroFor(
 	prewarmTotal := 0
 	prewarmComplete := make(map[string]bool, len(picked))
 	prewarmBlocksFallback := make(map[string]bool, len(picked))
-	if gammaDirectListedOptionMarketData(sym) {
-		log.Infof("gamma.prewarm.skip underlying=%s reason=direct_listed_option_market_data", sym)
-	} else {
-		for class, ymds := range expsByClass {
-			prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
-			for _, r := range prewarmResults {
-				key := gammaPrewarmKey(class, r.Expiry)
-				prewarmComplete[key] = r.Err == nil && r.Dropped == 0
-				prewarmBlocksFallback[key] = gammaPrewarmFailureBlocksFallback(r.Err)
-				collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
-				if r.Err != nil {
-					log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
-						class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
-					continue
-				}
-				if r.Dropped > 0 {
-					log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
-						class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-					continue
-				}
-				log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
-					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-				prewarmTotal += r.Cached
+	for class, ymds := range expsByClass {
+		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
+		for _, r := range prewarmResults {
+			key := gammaPrewarmKey(class, r.Expiry)
+			prewarmComplete[key] = r.Err == nil && r.Dropped == 0
+			prewarmBlocksFallback[key] = r.Dropped > 0 || gammaPrewarmFailureBlocksFallback(r.Err)
+			collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
+			if r.Err != nil {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
+				continue
 			}
+			if r.Dropped > 0 {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+				continue
+			}
+			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
+				class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+			prewarmTotal += r.Cached
 		}
 	}
 	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
@@ -1064,6 +1060,14 @@ func computeGammaZeroFor(
 		)
 		return diagnostic, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma (%s)",
 			len(legs), formatGammaLegDiagnostics(legDiagnostics))
+	}
+	if len(legs) < gammaMinPricedLegs || len(gexLegs) < gammaMinGEXLegs {
+		diagnostic := gammaSourceFailureDiagnostic(
+			sym, spot, spotAt, picked, legs, derivedIVs.Load(), legDiagnostics, collection.finish(time.Since(startWall)),
+			params, startWall, now(),
+		)
+		return diagnostic, fmt.Errorf("zero-gamma: low usable leg count: %d priced legs/%d OI-weighted GEX legs; need at least %d/%d (%s)",
+			len(legs), len(gexLegs), gammaMinPricedLegs, gammaMinGEXLegs, formatGammaLegDiagnostics(legDiagnostics))
 	}
 
 	for _, l := range gexLegs {
@@ -1750,11 +1754,8 @@ func gammaPrewarmKey(tradingClass, expiryYMD string) string {
 	return strings.ToUpper(strings.TrimSpace(tradingClass)) + "|" + strings.TrimSpace(expiryYMD)
 }
 
-func gammaKeepJobAfterPrewarm(sym string, prewarmComplete bool, cached bool) bool {
+func gammaKeepJobAfterPrewarm(_ string, prewarmComplete bool, cached bool) bool {
 	if prewarmComplete {
-		return cached
-	}
-	if gammaDirectListedOptionMarketData(sym) {
 		return cached
 	}
 	return true
@@ -1771,14 +1772,14 @@ func gammaPrewarmFailureBlocksFallback(err error) bool {
 	if err == nil {
 		return false
 	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline") {
+		return true
+	}
 	if classifyGammaLegFailure(err) != gammaLegFailureContractMissing {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "returned zero contract details")
-}
-
-func gammaDirectListedOptionMarketData(sym string) bool {
-	return strings.EqualFold(strings.TrimSpace(sym), "SPY")
+	return strings.Contains(lower, "returned zero contract details")
 }
 
 type gammaCollectionDiagnostics struct {

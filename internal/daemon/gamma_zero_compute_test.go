@@ -615,11 +615,11 @@ func TestGammaKeepJobAfterPrewarm(t *testing.T) {
 		want            bool
 	}{
 		{
-			name:            "spy_incomplete_requires_cache",
+			name:            "spy_incomplete_keeps_resolution_fallback",
 			symbol:          "SPY",
 			prewarmComplete: false,
 			cached:          false,
-			want:            false,
+			want:            true,
 		},
 		{
 			name:            "spy_incomplete_keeps_cached",
@@ -663,7 +663,7 @@ func TestGammaKeepJobAfterPrewarm(t *testing.T) {
 
 func TestGammaShouldKeepJobAfterPrewarmBlocksZeroDetailFallback(t *testing.T) {
 	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, false, true); got {
-		t.Fatal("authoritative zero-detail prewarm should not fall back to per-leg resolution")
+		t.Fatal("blocked prewarm fallback should not fall back to per-leg resolution")
 	}
 	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, true, true); !got {
 		t.Fatal("cached contract should still be usable when prewarm fallback is blocked")
@@ -680,6 +680,9 @@ func TestGammaPrewarmZeroContractDetailsClassifiesAsContractMissing(t *testing.T
 	}
 	if !gammaPrewarmFailureBlocksFallback(err) {
 		t.Fatal("zero-detail prewarm should block per-leg fallback")
+	}
+	if !gammaPrewarmFailureBlocksFallback(errors.New("prewarm timeout after 30s (cached 3 so far)")) {
+		t.Fatal("timed-out prewarm should block per-leg fallback for uncached contracts")
 	}
 
 	picked := []pickedExpiration{{
