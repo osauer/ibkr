@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -359,5 +360,67 @@ func TestCombineGammaResultsKeepsWarningsPerIndex(t *testing.T) {
 	if len(combined.PerIndex["SPY"].Warnings) != 2 || len(combined.PerIndex["SPX"].Warnings) != 2 {
 		t.Fatalf("per-index warnings were not preserved: spy=%v spx=%v",
 			combined.PerIndex["SPY"].Warnings, combined.PerIndex["SPX"].Warnings)
+	}
+}
+
+func TestGammaOneSidedFallbackUsableForCombinedRejectsBlockedQuality(t *testing.T) {
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+	result := gammaCombineFallbackFixture(now.Add(-5*time.Minute), 1, 1)
+
+	ok, reason := gammaOneSidedFallbackUsableForCombined(result, now)
+	if ok {
+		t.Fatal("one-leg fallback should not be usable for a combined ready result")
+	}
+	if reason == "" {
+		t.Fatal("blocked fallback should include the quality reason")
+	}
+}
+
+func TestGammaOneSidedFallbackUsableForCombinedAcceptsContextOnly(t *testing.T) {
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+	result := gammaCombineFallbackFixture(now.Add(-5*time.Minute), gammaMinPricedLegs, gammaMinGEXLegs)
+
+	ok, reason := gammaOneSidedFallbackUsableForCombined(result, now)
+	if !ok {
+		t.Fatalf("context-only fallback should remain usable, reason=%q", reason)
+	}
+}
+
+func TestSummarizeGammaPhaseFailureLowUsableLegCount(t *testing.T) {
+	err := errors.New("zero-gamma: low usable leg count: 1 priced legs/1 OI-weighted GEX legs; need at least 100/25")
+	if got := summarizeGammaPhaseFailure(err); got != "low_coverage" {
+		t.Fatalf("summarizeGammaPhaseFailure = %q, want low_coverage", got)
+	}
+}
+
+func gammaCombineFallbackFixture(asOf time.Time, pricedLegs, gexLegs int) *rpc.GammaZeroComputed {
+	return &rpc.GammaZeroComputed{
+		Scope:          rpc.GammaZeroScopeSPY,
+		AsOf:           asOf,
+		GammaTotalAbs:  1,
+		LegCount:       gexLegs,
+		PricedLegCount: pricedLegs,
+		LegCount0DTE:   1,
+		LegCount1to7:   1,
+		LegCountTerm:   1,
+		LegDiagnostics: &rpc.GammaLegDiagnostics{
+			Total: rpc.GammaLegDiagnosticCounts{
+				PricedLegs:        pricedLegs,
+				OpenInterestLegs:  pricedLegs,
+				GammaPositiveLegs: pricedLegs,
+				AbsGEXLegs:        gexLegs,
+			},
+			ByUnderlying: map[string]rpc.GammaLegDiagnosticCounts{
+				"SPY": {
+					PricedLegs:        pricedLegs,
+					OpenInterestLegs:  pricedLegs,
+					GammaPositiveLegs: pricedLegs,
+					AbsGEXLegs:        gexLegs,
+				},
+			},
+		},
+		SkewFitQuality: map[string]rpc.SkewFitInfo{
+			"20260619": {RSquared: 0.95},
+		},
 	}
 }

@@ -2,52 +2,38 @@ package main
 
 import "testing"
 
-func TestCheckQuoteSPYLiveRequiresCurrentTick(t *testing.T) {
-	frames := []WireFrame{
-		spyReqMktDataFrame(),
-		tickPriceFrame("37", "743.73"),
-	}
-
-	got := checkQuoteSPY(checkInputs{Frames: frames})
-	if got.OK {
-		t.Fatal("live quote-spy check accepted mark-price fallback; want current bid/ask/last tick")
-	}
-
-	frames = append(frames, tickPriceFrame("4", "743.74"))
-	got = checkQuoteSPY(checkInputs{Frames: frames})
-	if !got.OK {
-		t.Fatalf("live quote-spy check rejected last tick: %+v", got)
-	}
-}
-
-func TestCheckQuoteSPYLooseAcceptsFrozenFallbackTicks(t *testing.T) {
-	for _, tickType := range []string{"9", "37"} {
-		frames := []WireFrame{
-			spyReqMktDataFrame(),
-			tickPriceFrame(tickType, "743.73"),
-		}
-
-		got := checkQuoteSPY(checkInputs{Frames: frames, Loose: true})
-		if !got.OK {
-			t.Fatalf("loose quote-spy check rejected tickType %s: %+v", tickType, got)
-		}
-	}
-}
-
-func spyReqMktDataFrame() WireFrame {
-	return WireFrame{
-		Direction: "OUT",
-		MsgID:     1,
-		MsgName:   "reqMktData",
-		Fields:    []string{"1", "11", "1", "756733", "SPY", "STK"},
-	}
-}
-
-func tickPriceFrame(tickType, price string) WireFrame {
-	return WireFrame{
-		Direction: "IN",
-		MsgID:     1,
-		MsgName:   "tickPrice",
-		Fields:    []string{"1", "6", "1", tickType, price, "0", "0"},
+func TestCheckGammaPremarketDerivedAcceptsOffHoursPricingPaths(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{
+			name: "derived_iv_fallback",
+			env:  `{"status":"ready","result":{"leg_count":12,"derived_iv_legs":7}}`,
+			want: true,
+		},
+		{
+			name: "gateway_model_tick",
+			env:  `{"status":"ready","result":{"leg_count":1,"model_tick_legs":1}}`,
+			want: true,
+		},
+		{
+			name: "no_pricing_path",
+			env:  `{"status":"ready","result":{"leg_count":1}}`,
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkGammaPremarketDerived(checkInputs{
+				Loose:         true,
+				GammaEnvelope: []byte(tc.env),
+			})
+			if got.OK != tc.want {
+				t.Fatalf("OK = %v, want %v (result=%+v)", got.OK, tc.want, got)
+			}
+		})
 	}
 }

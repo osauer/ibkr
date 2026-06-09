@@ -496,7 +496,7 @@ run_wire_cli gamma "$WIRE_TIMEOUT" gamma --no-wait --json
 assert_wire gamma-noflag "$LAST_WIRE_OFFSET"
 
 if [[ "${LOOSE:-0}" -eq 1 ]]; then
-    echo "  [10] gamma (loose: BS-IV fallback assertion)..."
+    echo "  [10] gamma (loose: off-hours pricing assertion)..."
     GAMMA_ENV="$SMOKE_DIR/gamma-envelope.json"
     for attempt in 1 2 3 4 5; do
         run_wire_cli gamma_wait 60 gamma --json
