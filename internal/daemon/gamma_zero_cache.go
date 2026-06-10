@@ -98,6 +98,47 @@ type gammaSlot struct {
 	lastErrAt      time.Time
 	lastErrSummary string // shortened single-line summary for rendering
 	lastErrResult  *rpc.GammaZeroComputed
+	// errStreak / lastFailAt drive the escalating retry gate
+	// (retryAllowed). Every finished computation bumps or resets them in
+	// noteJobOutcome; cancelled jobs are excluded there so a force()
+	// supersede or daemon shutdown doesn't count as gateway sickness.
+	// lastFailAt carries the failed job's startedAt, matching the
+	// startedAt-based age semantics gammaErrorRetryTTL documents.
+	errStreak  int
+	lastFailAt time.Time
+}
+
+// retryAllowed reports whether the slot's failure streak permits another
+// automatic compute/refresh attempt at now. Gates ALL non-force spawn
+// paths in kickOrJoin — the same-session error retry, the prior-session
+// rollover refresh, and the soft-TTL/boundary refresh. The latter two had
+// no time gate at all, which is what turned the June 9 secdef-farm outage
+// into a respawn storm: the daemon's 1-minute refresh scheduler reaped
+// each failed refresh and immediately spawned the next ~35 s burn,
+// ~60 times an hour, for the rest of the session. force() stays exempt
+// by design.
+func (s *gammaSlot) retryAllowed(now time.Time) bool {
+	if s.errStreak == 0 {
+		return true
+	}
+	return now.Sub(s.lastFailAt) >= gammaRetryBackoff(s.errStreak)
+}
+
+// gammaRetryBackoff converts a consecutive-failure count into the quiet
+// period required before the next automatic attempt: 60 s, 2 m, 4 m,
+// 8 m, then capped at gammaErrorRetryMaxTTL. The cap equals softTTLRTH,
+// so post-outage recovery latency is no worse than the system's normal
+// refresh cadence. The d <= 0 branch guards shift overflow on absurd
+// streaks.
+func gammaRetryBackoff(streak int) time.Duration {
+	if streak <= 1 {
+		return gammaErrorRetryTTL
+	}
+	d := gammaErrorRetryTTL << (streak - 1)
+	if d <= 0 || d > gammaErrorRetryMaxTTL {
+		return gammaErrorRetryMaxTTL
+	}
+	return d
 }
 
 // getOrCreateSlotLocked returns the slot for scope, creating an empty
@@ -165,8 +206,17 @@ type gammaComputation struct {
 //
 // 60 s is long enough to dampen retry storms against a genuinely down
 // gateway while short enough that a one-shot blip clears on the
-// user's next normal poll.
+// user's next normal poll. Consecutive failures escalate from this
+// base via gammaRetryBackoff — the flat 60 s alone proved insufficient
+// against a daylong farm outage (2026-06-09: secdef farm broken from
+// 09:33 ET; periodic pollers re-kicked a doomed ~35 s compute every
+// poll for hours).
 const gammaErrorRetryTTL = 60 * time.Second
+
+// gammaErrorRetryMaxTTL caps the escalating retry gate. Matches
+// softTTLRTH so a recovered gateway is picked up within one normal
+// refresh window even at full escalation.
+const gammaErrorRetryMaxTTL = 15 * time.Minute
 
 // Session-aware soft TTL: the age at which a cached successful
 // compute triggers a background refresh. The served value is still
@@ -509,20 +559,27 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 	// they are not known-good values.
 	if slot.current != nil && slot.current.sessionKey != key &&
 		slot.current.isDone() && slot.current.err == nil && slot.current.result != nil {
-		if slot.refresh == nil {
+		// retryAllowed: without it, a failed refresh reaped above is
+		// respawned by the very same call, at poll rate, for as long as
+		// the gateway stays sick (observed June 9 post-restart: the
+		// LoadStale-seeded prior-day result kept this path hot).
+		if slot.refresh == nil && slot.retryAllowed(now) {
 			slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
 		}
 		return slot.current, false
 	}
 
 	if slot.current != nil && slot.current.sessionKey == key {
-		// Same session — but a cached error past the retry TTL must NOT
+		// Same session — but a cached error past the retry gate must NOT
 		// block fresh attempts. Without this check, a one-shot
 		// gateway-side timeout poisons every regime/gamma call for the
 		// rest of the NY trading session. In-flight jobs (isDone=false)
 		// always pass through to the shared singleflight regardless of
-		// age; success results stay sticky for the whole session.
-		if slot.current.isDone() && slot.current.err != nil && now.Sub(slot.current.startedAt) >= gammaErrorRetryTTL {
+		// age; success results stay sticky for the whole session. The
+		// gate escalates with the slot's consecutive-failure streak
+		// (60 s first retry, doubling to a 15-min cap) so a daylong
+		// outage costs ~30 attempts instead of ~700.
+		if slot.current.isDone() && slot.current.err != nil && slot.retryAllowed(now) {
 			// Retain the failure context so the next render of the
 			// "computing" row can surface "retry of <error> at HH:MM:SS"
 			// instead of silently switching to a clean Computing state.
@@ -550,7 +607,12 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		// the signal. softTTL returns math.MaxInt64 for Closed so the
 		// age check can never fire there, and the explicit
 		// currentClass check below skips the boundary path.
-		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil {
+		// retryAllowed also gates this path: once current is past the
+		// soft TTL, the trigger condition stays true on every poll while
+		// refreshes keep failing (a failed refresh never advances
+		// current.startedAt) — the streak gate is what stops that from
+		// respawning a doomed ~35 s compute per scheduler tick.
+		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil && slot.retryAllowed(now) {
 			currentClass := gammaClassifySession(now)
 			if currentClass != rpc.SessionClosed {
 				cachedClass := gammaClassifySession(slot.current.startedAt)
@@ -656,6 +718,12 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 
 	go func() {
 		defer close(job.done)
+		// Failure-streak accounting. Deliberately registered between the
+		// done-close and the panic guard (LIFO order: guard finalises
+		// job.err first, then this observes it, then done closes).
+		// bgCtx.Err() != nil marks cancellation — force() supersede or
+		// daemon shutdown — which says nothing about gateway health.
+		defer func() { c.noteJobOutcome(job, bgCtx.Err() != nil) }()
 		// Best-effort panic guard: a math bug or nil pointer deep in
 		// the compute pipeline shouldn't take down the daemon. The
 		// recovered error becomes job.err, which surfaces to callers
@@ -696,6 +764,47 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 	}()
 
 	return job
+}
+
+// noteJobOutcome records a finished computation in its slot's failure
+// streak: an error bumps the streak and stamps lastFailAt with the
+// job's kickoff time (matching the startedAt-based age semantics the
+// gammaErrorRetryTTL comment documents); a success resets both. The
+// completion goroutine is the single place a job transitions to done,
+// so the accounting runs exactly once per job with no dedupe — and it
+// counts current, refresh, and force jobs uniformly: each is one
+// observation of gateway health. Cancelled jobs are skipped entirely;
+// a force() supersede or daemon shutdown is not a gateway failure.
+func (c *gammaZeroCache) noteJobOutcome(job *gammaComputation, cancelled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	slot := c.slots[job.scope]
+	if slot == nil {
+		return
+	}
+	if job.err != nil {
+		if cancelled {
+			return
+		}
+		slot.errStreak++
+		slot.lastFailAt = job.startedAt
+		return
+	}
+	slot.errStreak = 0
+	slot.lastFailAt = time.Time{}
+}
+
+// resetRetryBackoff zeroes every slot's failure streak. Called on
+// gateway (re)connect: farm outages end with a reconnect handshake, so
+// the first attempt after one shouldn't sit out a 15-minute escalated
+// quiet period earned against the dead connection.
+func (c *gammaZeroCache) resetRetryBackoff() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, slot := range c.slots {
+		slot.errStreak = 0
+		slot.lastFailAt = time.Time{}
+	}
 }
 
 // startLocked allocates and launches a fresh compute, assigning the

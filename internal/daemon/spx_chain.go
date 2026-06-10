@@ -22,6 +22,25 @@ type pickedExpiration struct {
 	capTruncated bool
 }
 
+// expiryStrikesClassedFetcher is the one connector capability
+// buildPickedExpirations needs; an interface so the grid-fallback path
+// is testable without a live gateway.
+type expiryStrikesClassedFetcher interface {
+	FetchOptionExpiryStrikesClassed(symbol string, timeout time.Duration) (map[string][]ibkrlib.ExpiryClassedStrikes, error)
+}
+
+// gammaExpiriesFetchTimeout bounds the reqSecDefOptParams round trip.
+// The SPX classed response (~36 dates × SPX+SPXW × thousands of
+// strikes) streams in over tens of seconds under a sluggish sec-def
+// farm — measured 2026-06-10 pre-market: 30.3 s end to end via `ibkr
+// chain SPX`, which runs the same call under MethodChainExpiries' 50 s
+// unary budget and succeeded while the gamma path's previous 30 s
+// timeout expired ~0.3 s short and reported "SPX skipped" for the
+// session. 45 s keeps headroom inside the compute while staying under
+// the chain handler's budget; a genuinely dead farm now falls back to
+// the persisted expiry grid instead of burning the wait every retry.
+const gammaExpiriesFetchTimeout = 45 * time.Second
+
 // buildPickedExpirations enumerates the expirations + strikes to compute
 // over. For sym=="SPX" it walks the classed enumeration (SPX-AM monthlies
 // + SPXW-PM weeklies) under per-class settlement cutoffs. For everything
@@ -32,15 +51,33 @@ type pickedExpiration struct {
 // classes — for SPX, the 6-expiry cap covers SPX + SPXW combined, so a
 // quarterly third-Friday + 5 nearest SPXW weeklies is the typical
 // picked set.
-func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, expiryCount int) ([]pickedExpiration, error) {
+//
+// The classed grid comes from a live reqSecDefOptParams when possible;
+// when that fails AND grids holds a recent prior fetch, the cached grid
+// is used instead and the non-nil expiryGridFallbackInfo reports its
+// age (selection below re-applies all date/settlement filters against
+// spotAt, so a stale grid cannot resurrect a settled expiry). A
+// successful live fetch is recorded into grids for future outages.
+func buildPickedExpirations(c expiryStrikesClassedFetcher, sym string, spotAt time.Time, expiryCount int, grids *expiryGridStore, log gammaLogf) ([]pickedExpiration, *expiryGridFallbackInfo, error) {
+	classed, err := c.FetchOptionExpiryStrikesClassed(sym, gammaExpiriesFetchTimeout)
+	var fallbackInfo *expiryGridFallbackInfo
+	if err != nil {
+		cached, asOf, ok := grids.fallback(sym, spotAt)
+		if !ok {
+			return nil, nil, err
+		}
+		classed = cached
+		fallbackInfo = &expiryGridFallbackInfo{asOf: asOf, liveErr: err}
+	} else if storeErr := grids.noteFetched(sym, classed, spotAt); storeErr != nil {
+		// Best-effort store; a rejected partial grid or write failure
+		// must not affect the live compute using the live data.
+		log.Warnf("gamma.expiries: keep cached grid: %v", storeErr)
+	}
+	if len(classed) == 0 {
+		return nil, nil, fmt.Errorf("gateway returned no %s expirations", sym)
+	}
+
 	if sym == "SPX" {
-		classed, err := c.FetchOptionExpiryStrikesClassed(sym, 30*time.Second)
-		if err != nil {
-			return nil, err
-		}
-		if len(classed) == 0 {
-			return nil, fmt.Errorf("gateway returned no SPX expirations")
-		}
 		candidates := classedSPXCandidateSpecs(classed, spotAt)
 		specs := pickSPXExpirationSlots(candidates, spotAt.In(newYorkLocation()), expiryCount)
 		expiryCapTruncated := expiryCount > 0 && len(candidates) > len(specs)
@@ -54,7 +91,7 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 				capTruncated: expiryCapTruncated,
 			})
 		}
-		return out, nil
+		return out, fallbackInfo, nil
 	}
 
 	// SPY/equity path. Use classed secDef data here too: IBKR can list
@@ -63,18 +100,11 @@ func buildPickedExpirations(c *ibkrlib.Connector, sym string, spotAt time.Time, 
 	// exactly what trips the gateway pacing guard. The default selector
 	// mirrors `ibkr chain`: prefer the symbol class when present, otherwise
 	// use the only/first listed class for that date.
-	classed, err := c.FetchOptionExpiryStrikesClassed(sym, 30*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	if len(classed) == 0 {
-		return nil, fmt.Errorf("gateway returned no %s expirations", sym)
-	}
 	out := pickDefaultClassedExpirations(sym, classed, spotAt, expiryCount)
 	if len(out) == 0 {
-		return nil, fmt.Errorf("gateway returned no usable %s expirations", sym)
+		return nil, nil, fmt.Errorf("gateway returned no usable %s expirations", sym)
 	}
-	return out, nil
+	return out, fallbackInfo, nil
 }
 
 func pickDefaultClassedExpirations(sym string, classed map[string][]ibkrlib.ExpiryClassedStrikes, spotAt time.Time, expiryCount int) []pickedExpiration {

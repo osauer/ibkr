@@ -673,6 +673,7 @@ func computeGammaZeroFor(
 	progress *atomic.Int32,
 	logger gammaLogger,
 	oiStore *gammaOpenInterestStore,
+	grids *expiryGridStore,
 ) (*rpc.GammaZeroComputed, error) {
 	if c == nil {
 		return nil, ibkrlib.ErrIBKRUnavailable
@@ -713,10 +714,10 @@ func computeGammaZeroFor(
 	_ = last
 
 	// 2. Expirations + strikes. The secDefOptParams response is large
-	// and streams in over several seconds. 30 s mirrors the per-method
-	// budget the existing handleChainExpiries handler runs with for
-	// the same call (server.go's unaryDeadline for MethodChainExpiries
-	// is 50 s).
+	// and streams in over tens of seconds for SPX — see
+	// gammaExpiriesFetchTimeout for the measured budget rationale. A
+	// failed live fetch falls back to the persisted expiry grid when a
+	// recent one exists (expiries_stale warning discloses the age).
 	//
 	// Branch on underlying: SPX is multi-class (SPX-AM monthlies +
 	// SPXW-PM weeklies share third-Friday dates as distinct contracts),
@@ -725,12 +726,16 @@ func computeGammaZeroFor(
 	// existing merged-across-classes path; tradingClass on each leg is
 	// just the symbol.
 	progress.Store(5)
-	picked, err := buildPickedExpirations(c, sym, spotAt, params.ExpiryCount)
+	picked, gridFallback, err := buildPickedExpirations(c, sym, spotAt, params.ExpiryCount, grids, log)
 	if err != nil {
 		return nil, fmt.Errorf("zero-gamma: fetch %s expiries: %w", sym, err)
 	}
 	if len(picked) == 0 {
 		return nil, fmt.Errorf("zero-gamma: no usable %s expirations after 0DTE filtering", sym)
+	}
+	if gridFallback != nil {
+		log.Warnf("gamma.expiries: %s live fetch failed (%v); using cached grid as_of=%s (%dd old)",
+			sym, gridFallback.liveErr, gridFallback.asOf.Format(time.RFC3339), gridFallback.staleDays(spotAt))
 	}
 	progress.Store(10)
 
@@ -1131,6 +1136,13 @@ func computeGammaZeroFor(
 	}
 	if strikeBudgetCapped {
 		warnings = append(warnings, "strike_budget_capped")
+	}
+	if gridFallback != nil {
+		// Provenance disclosure: legs were enumerated from a cached
+		// expiry grid because the live secdef fetch failed. The legs
+		// themselves still priced live — quality gates decide how much
+		// the grid's age matters (gamma_quality.go, expiries_stale).
+		warnings = append(warnings, fmt.Sprintf("expiries_stale:%dd", gridFallback.staleDays(spotAt)))
 	}
 	if zg == nil {
 		warnings = append(warnings, "no_crossing_in_window")

@@ -1776,3 +1776,173 @@ func TestGammaZeroCache_OffHoursColdReportsRejectedPersistedCache(t *testing.T) 
 		t.Fatalf("cold action should suggest --force, got %q", env.ColdAction)
 	}
 }
+
+// TestGammaZeroCache_RetryBackoffEscalates pins the escalating retry
+// gate: consecutive failures double the quiet period (60s, 2m, 4m, …,
+// 15m cap) and a success resets it. The flat 60s gate alone turned the
+// 2026-06-09 daylong secdef-farm outage into ~700 doomed ~35s computes;
+// the streak caps that at ~30.
+func TestGammaZeroCache_RetryBackoffEscalates(t *testing.T) {
+	c := newGammaZeroCache()
+	t0 := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC) // 10:00 ET, RTH
+
+	var computeRuns atomic.Int32
+	errCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		computeRuns.Add(1)
+		return nil, errors.New("secdef farm broken")
+	}
+
+	scope := rpc.GammaZeroScopeCombined
+	j1, fresh := c.kickOrJoin(context.Background(), scope, t0, 300, errCompute)
+	<-j1.done
+	if !fresh || computeRuns.Load() != 1 {
+		t.Fatalf("first kick: fresh=%v runs=%d", fresh, computeRuns.Load())
+	}
+
+	// Streak 1 → 60s gate (unchanged base behavior).
+	t1 := t0.Add(gammaErrorRetryTTL + time.Second)
+	j2, fresh := c.kickOrJoin(context.Background(), scope, t1, 300, errCompute)
+	<-j2.done
+	if !fresh || computeRuns.Load() != 2 {
+		t.Fatalf("second kick past base TTL: fresh=%v runs=%d", fresh, computeRuns.Load())
+	}
+
+	// Streak 2 → 2-minute gate: another 61s is NOT enough.
+	t2 := t1.Add(gammaErrorRetryTTL + time.Second)
+	j3, fresh := c.kickOrJoin(context.Background(), scope, t2, 300, errCompute)
+	if fresh || j3 != j2 || computeRuns.Load() != 2 {
+		t.Errorf("streak-2 gate must hold at +61s: fresh=%v runs=%d", fresh, computeRuns.Load())
+	}
+
+	// 2 minutes past the second failure: allowed again.
+	t3 := t1.Add(2*gammaErrorRetryTTL + time.Second)
+	j4, fresh := c.kickOrJoin(context.Background(), scope, t3, 300, errCompute)
+	<-j4.done
+	if !fresh || computeRuns.Load() != 3 {
+		t.Errorf("streak-2 gate should release at +2m: fresh=%v runs=%d", fresh, computeRuns.Load())
+	}
+
+	// Success resets the streak.
+	okCompute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		computeRuns.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5050}, nil
+	}
+	t4 := t3.Add(4*gammaErrorRetryTTL + time.Second) // past streak-3 gate
+	j5, fresh := c.kickOrJoin(context.Background(), scope, t4, 300, okCompute)
+	<-j5.done
+	if !fresh || j5.err != nil {
+		t.Fatalf("recovery kick: fresh=%v err=%v", fresh, j5.err)
+	}
+	c.mu.Lock()
+	streak := c.slots[scope].errStreak
+	c.mu.Unlock()
+	if streak != 0 {
+		t.Errorf("success should reset errStreak, got %d", streak)
+	}
+}
+
+// TestGammaZeroCache_BackoffTable pins the gammaRetryBackoff curve,
+// including the softTTLRTH-aligned cap and the shift-overflow guard.
+func TestGammaZeroCache_BackoffTable(t *testing.T) {
+	cases := []struct {
+		streak int
+		want   time.Duration
+	}{
+		{0, gammaErrorRetryTTL},
+		{1, gammaErrorRetryTTL},
+		{2, 2 * time.Minute},
+		{3, 4 * time.Minute},
+		{4, 8 * time.Minute},
+		{5, gammaErrorRetryMaxTTL},
+		{12, gammaErrorRetryMaxTTL},
+		{70, gammaErrorRetryMaxTTL}, // shift overflow guard
+	}
+	for _, tc := range cases {
+		if got := gammaRetryBackoff(tc.streak); got != tc.want {
+			t.Errorf("gammaRetryBackoff(%d) = %s, want %s", tc.streak, got, tc.want)
+		}
+	}
+}
+
+// TestGammaZeroCache_SoftTTLRefreshBackoffAfterFailure pins the fix for
+// the June 9 respawn storm: a stale-but-good current whose refreshes
+// keep failing must NOT respawn a refresh on every poll. The soft-TTL
+// trigger condition stays true forever in that state (a failed refresh
+// never advances current.startedAt), so without the streak gate the
+// daemon's 1-minute scheduler reaps and respawns a doomed compute per
+// tick.
+func TestGammaZeroCache_SoftTTLRefreshBackoffAfterFailure(t *testing.T) {
+	c := newGammaZeroCache()
+	t0 := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		if computeRuns.Add(1) == 1 {
+			return &rpc.GammaZeroComputed{SpotUnderlying: 5000}, nil
+		}
+		return nil, errors.New("gateway sick")
+	}
+
+	scope := rpc.GammaZeroScopeCombined
+	j1, _ := c.kickOrJoin(context.Background(), scope, t0, 300, compute)
+	<-j1.done
+	if j1.err != nil {
+		t.Fatalf("seed compute failed: %v", j1.err)
+	}
+
+	// Past soft TTL: serve stale, spawn refresh (which fails).
+	pastTTL := t0.Add(softTTLRTH + time.Second)
+	if job, fresh := c.kickOrJoin(context.Background(), scope, pastTTL, 300, compute); fresh || job != j1 {
+		t.Fatalf("past softTTL should serve stale current")
+	}
+	// Wait for the failed refresh to finish its streak accounting.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		streak := c.slots[scope].errStreak
+		c.mu.Unlock()
+		if streak == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Scheduler-cadence polls within the gate: reap the failed refresh,
+	// but do NOT respawn. Before the fix every one of these spawned a
+	// fresh doomed compute.
+	for i := 1; i <= 3; i++ {
+		tick := pastTTL.Add(time.Duration(i) * 10 * time.Second)
+		if job, fresh := c.kickOrJoin(context.Background(), scope, tick, 300, compute); fresh || job != j1 {
+			t.Fatalf("tick %d: stale current should keep serving without a new kick", i)
+		}
+	}
+	if got := computeRuns.Load(); got != 2 {
+		t.Fatalf("within backoff: compute ran %d times, want 2 (seed + one failed refresh)", got)
+	}
+
+	// Past the streak-1 gate (60s from the refresh kickoff): one more
+	// attempt is allowed.
+	retryAt := pastTTL.Add(gammaErrorRetryTTL + time.Second)
+	if _, fresh := c.kickOrJoin(context.Background(), scope, retryAt, 300, compute); fresh {
+		t.Fatalf("soft-TTL refresh respawn must stay a background refresh, not a fresh current kick")
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if computeRuns.Load() == 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := computeRuns.Load(); got != 3 {
+		t.Fatalf("past backoff: compute ran %d times, want 3 (gate released exactly once)", got)
+	}
+
+	// resetRetryBackoff (gateway reconnect) re-arms immediately.
+	c.resetRetryBackoff()
+	c.mu.Lock()
+	streak := c.slots[scope].errStreak
+	c.mu.Unlock()
+	if streak != 0 {
+		t.Errorf("resetRetryBackoff should zero the streak, got %d", streak)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -33,9 +34,53 @@ const (
 	marketEventsRecentHaltWindow    = 24 * time.Hour
 	marketEventsBorrowTightShares   = 10_000
 	marketEventsBorrowExtremeShares = 1_000
+
+	// marketEventsBorrowPollWorkers bounds the concurrent shortable-tick
+	// polls. Each worker is a passive tick-wait on one held market-data
+	// subscription, so 8 in flight is negligible against the gateway's
+	// slot pool; runBounded caps workers at len(symbols) for small books.
+	// Sequential polling made every canary run pay symbols ×
+	// marketEventsBorrowPollBudget for books whose names never deliver
+	// tick 236 (observed: 3 EUR names → +7.5 s per run, and the proposal
+	// engine's 8 s market-events context expiring mid-snapshot).
+	marketEventsBorrowPollWorkers = 8
+
+	// marketEvents*RetryAfter gate re-fetch attempts after a source
+	// failure. Without failure memory a blocked endpoint re-burns its
+	// full timeout on EVERY market-events snapshot — observed with
+	// ftp3.interactivebrokers.com:21 filtered by the local network: a
+	// 10 s dial hang per canary run, forever. Halts retries sooner than
+	// the others because it is the active-halt/LULD detector — a
+	// transient failure shouldn't blind it for long — and one timeout
+	// per minute is an acceptable cap.
+	marketEventsHaltsRetryAfter     = time.Minute
+	marketEventsRegSHORetryAfter    = 15 * time.Minute
+	marketEventsBorrowFeeRetryAfter = 15 * time.Minute
+
+	// marketEventsFTPDialTimeout bounds the borrow-fee FTP connect. A
+	// healthy connect is ~100 ms; filtered networks silently drop the
+	// SYN, and the previous 10 s dial timeout gated the first snapshot
+	// of every retry window. The transfer itself keeps the wider 10 s
+	// deadline — usa.txt is a multi-MB file.
+	marketEventsFTPDialTimeout = 4 * time.Second
 )
 
-var marketEventsHTTPClient = &http.Client{Timeout: 10 * time.Second}
+var marketEventsHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	// Nasdaq's symdir endpoints 302-redirect to an HTML error page when
+	// a dated file does not exist (e.g. today's Reg SHO threshold list
+	// before its evening publication). Following the redirect yields an
+	// HTTP 200 HTML body that parses as an EMPTY success — caching "no
+	// threshold symbols" for 12 h and never reaching the most recent
+	// real file. Refusing redirects turns the 302 into a status error
+	// so the dated-file walk proceeds to the prior day.
+	CheckRedirect: marketEventsNoRedirect,
+}
+
+func marketEventsNoRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
 var fetchIBKRBorrowFees = fetchIBKRBorrowFeesFTP
 
 type marketEventCache struct {
@@ -46,6 +91,51 @@ type marketEventCache struct {
 	regSHOFreshFor time.Duration
 	haltsFreshFor  time.Duration
 	now            func() time.Time
+
+	// shortableAbsent remembers symbols whose shortable tick (236) did
+	// not arrive within a full poll budget, keyed to the NY session the
+	// absence was observed in. Non-US listings never deliver the tick,
+	// so without this memory every market-events snapshot re-burns
+	// marketEventsBorrowPollBudget per dead symbol. Session-scoped
+	// rather than TTL'd: the one realistic event that makes a dead tick
+	// start flowing is a gateway/farm reconnect, which clears the map
+	// via clearShortableAbsence from postConnectSetup.
+	shortableAbsent map[string]string // symbol → nySessionKey of observation
+
+	// *FailedAt remember the last failed fetch per external source so
+	// the marketEvents*RetryAfter windows can suppress immediate
+	// re-fetches. Zero value = no recent failure. Cleared on success.
+	regSHOFailedAt     time.Time
+	haltsFailedAt      time.Time
+	borrowFeesFailedAt time.Time
+}
+
+// shortableAbsentThisSession reports whether sym's shortable tick was
+// already observed absent during the given NY session.
+func (c *marketEventCache) shortableAbsentThisSession(sym, session string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.shortableAbsent[sym] == session
+}
+
+// rememberShortableAbsent records that sym ran a full poll budget this
+// session without the shortable tick arriving.
+func (c *marketEventCache) rememberShortableAbsent(sym, session string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shortableAbsent == nil {
+		c.shortableAbsent = make(map[string]string)
+	}
+	c.shortableAbsent[sym] = session
+}
+
+// clearShortableAbsence drops all absence records. Called on gateway
+// (re)connect: a fresh handshake is the event after which a previously
+// silent shortable feed can plausibly start delivering.
+func (c *marketEventCache) clearShortableAbsence() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.shortableAbsent = nil
 }
 
 type marketEventRegSHOEntry struct {
@@ -188,7 +278,7 @@ func (c *marketEventCache) snapshot(ctx context.Context, symbols []string, subs 
 		}
 	}
 
-	borrowHealth := marketEventBorrowInventory(ctx, symbols, subs, connector, now, &res)
+	borrowHealth := c.borrowInventory(ctx, symbols, subs, connector, now, &res)
 	res.SourceHealth = append(res.SourceHealth, borrowHealth)
 	borrowFees, borrowFeeHealth, err := c.loadBorrowFees(ctx, now)
 	res.SourceHealth = append(res.SourceHealth, borrowFeeHealth)
@@ -230,25 +320,44 @@ func (c *marketEventCache) loadRegSHO(ctx context.Context, now time.Time) (marke
 		c.mu.Unlock()
 		return entry, marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusOK, entry.AsOf, now, marketEventsRegSHOMaxAge, "high", regSHOSourceNotes()), nil
 	}
+	if !c.regSHOFailedAt.IsZero() && now.Sub(c.regSHOFailedAt) <= marketEventsRegSHORetryAfter {
+		cached := cloneRegSHOEntry(c.regSHO)
+		c.mu.Unlock()
+		return regSHOFallback(cached, now, errMarketEventRetrySuppressed)
+	}
 	c.mu.Unlock()
 
 	entry, err := fetchLatestNasdaqRegSHO(ctx, now)
 	if err != nil {
 		c.mu.Lock()
+		c.regSHOFailedAt = now
 		cached := cloneRegSHOEntry(c.regSHO)
 		c.mu.Unlock()
-		if len(cached.Symbols) > 0 {
-			age := now.Sub(cached.FetchedAt)
-			health := marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusStale, cached.AsOf, now, marketEventsRegSHOMaxAge, "medium-low", []string{"using stale cached Nasdaq Reg SHO threshold list: " + err.Error()})
-			health.AgeSeconds = int64(age.Seconds())
-			return cached, health, nil
-		}
-		return marketEventRegSHOEntry{}, marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusUnknown, now, now, marketEventsRegSHOMaxAge, "low", []string{err.Error()}), err
+		return regSHOFallback(cached, now, err)
 	}
 	c.mu.Lock()
 	c.regSHO = cloneRegSHOEntry(entry)
+	c.regSHOFailedAt = time.Time{}
 	c.mu.Unlock()
 	return entry, marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusOK, entry.AsOf, now, marketEventsRegSHOMaxAge, "high", regSHOSourceNotes()), nil
+}
+
+// errMarketEventRetrySuppressed marks the "recent failure, retry window
+// still open" path: the source served stale-or-unknown WITHOUT paying
+// another fetch timeout. The message lands in source-health notes and
+// warning details so the suppression is visible, not silent.
+var errMarketEventRetrySuppressed = errors.New("recent fetch failure; retry suppressed")
+
+// regSHOFallback serves the stale cached list when one exists, the
+// unknown-health envelope otherwise. Shared by the fetch-error and
+// retry-suppressed paths so both degrade identically.
+func regSHOFallback(cached marketEventRegSHOEntry, now time.Time, cause error) (marketEventRegSHOEntry, rpc.SourceHealth, error) {
+	if len(cached.Symbols) > 0 {
+		health := marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusStale, cached.AsOf, now, marketEventsRegSHOMaxAge, "medium-low", []string{"using stale cached Nasdaq Reg SHO threshold list: " + cause.Error()})
+		health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
+		return cached, health, nil
+	}
+	return marketEventRegSHOEntry{}, marketEventSourceHealth("reg_sho_threshold", rpc.SourceStatusUnknown, now, now, marketEventsRegSHOMaxAge, "low", []string{cause.Error()}), cause
 }
 
 func (c *marketEventCache) loadHalts(ctx context.Context, now time.Time) (marketEventHaltsEntry, rpc.SourceHealth, error) {
@@ -258,25 +367,37 @@ func (c *marketEventCache) loadHalts(ctx context.Context, now time.Time) (market
 		c.mu.Unlock()
 		return entry, marketEventSourceHealth("trading_halts", rpc.SourceStatusOK, entry.AsOf, now, c.haltsFreshFor, "high", nil), nil
 	}
+	if !c.haltsFailedAt.IsZero() && now.Sub(c.haltsFailedAt) <= marketEventsHaltsRetryAfter {
+		cached := cloneHaltsEntry(c.halts)
+		c.mu.Unlock()
+		return haltsFallback(cached, now, c.haltsFreshFor, errMarketEventRetrySuppressed)
+	}
 	c.mu.Unlock()
 
 	entry, err := fetchNasdaqTradeHalts(ctx)
 	if err != nil {
 		c.mu.Lock()
+		c.haltsFailedAt = now
 		cached := cloneHaltsEntry(c.halts)
 		c.mu.Unlock()
-		if len(cached.Records) > 0 {
-			health := marketEventSourceHealth("trading_halts", rpc.SourceStatusStale, cached.AsOf, now, c.haltsFreshFor, "medium-low", []string{"using stale cached Nasdaq trade-halt RSS feed: " + err.Error()})
-			health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
-			return cached, health, nil
-		}
-		return marketEventHaltsEntry{}, marketEventSourceHealth("trading_halts", rpc.SourceStatusUnknown, now, now, c.haltsFreshFor, "low", []string{err.Error()}), err
+		return haltsFallback(cached, now, c.haltsFreshFor, err)
 	}
 	entry.FetchedAt = now
 	c.mu.Lock()
 	c.halts = cloneHaltsEntry(entry)
+	c.haltsFailedAt = time.Time{}
 	c.mu.Unlock()
 	return entry, marketEventSourceHealth("trading_halts", rpc.SourceStatusOK, entry.AsOf, now, c.haltsFreshFor, "high", nil), nil
+}
+
+// haltsFallback mirrors regSHOFallback for the trade-halts feed.
+func haltsFallback(cached marketEventHaltsEntry, now time.Time, freshFor time.Duration, cause error) (marketEventHaltsEntry, rpc.SourceHealth, error) {
+	if len(cached.Records) > 0 {
+		health := marketEventSourceHealth("trading_halts", rpc.SourceStatusStale, cached.AsOf, now, freshFor, "medium-low", []string{"using stale cached Nasdaq trade-halt RSS feed: " + cause.Error()})
+		health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
+		return cached, health, nil
+	}
+	return marketEventHaltsEntry{}, marketEventSourceHealth("trading_halts", rpc.SourceStatusUnknown, now, now, freshFor, "low", []string{cause.Error()}), cause
 }
 
 func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
@@ -286,25 +407,38 @@ func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (m
 		c.mu.Unlock()
 		return entry, marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"}), nil
 	}
+	if !c.borrowFeesFailedAt.IsZero() && now.Sub(c.borrowFeesFailedAt) <= marketEventsBorrowFeeRetryAfter {
+		cached := cloneBorrowFeeEntry(c.borrowFees)
+		c.mu.Unlock()
+		return borrowFeesFallback(cached, now, errMarketEventRetrySuppressed)
+	}
 	c.mu.Unlock()
 
 	entry, err := fetchIBKRBorrowFees(ctx)
 	if err != nil {
 		c.mu.Lock()
+		c.borrowFeesFailedAt = now
 		cached := cloneBorrowFeeEntry(c.borrowFees)
 		c.mu.Unlock()
-		if len(cached.Symbols) > 0 {
-			health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusStale, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"using stale cached IBKR short-stock availability: " + err.Error()})
-			health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
-			return cached, health, nil
-		}
-		return marketEventBorrowFeeEntry{}, marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{err.Error()}), err
+		return borrowFeesFallback(cached, now, err)
 	}
 	entry.FetchedAt = now
 	c.mu.Lock()
 	c.borrowFees = cloneBorrowFeeEntry(entry)
+	c.borrowFeesFailedAt = time.Time{}
 	c.mu.Unlock()
 	return entry, marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"}), nil
+}
+
+// borrowFeesFallback mirrors regSHOFallback for the IBKR short-stock
+// availability file.
+func borrowFeesFallback(cached marketEventBorrowFeeEntry, now time.Time, cause error) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+	if len(cached.Symbols) > 0 {
+		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusStale, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"using stale cached IBKR short-stock availability: " + cause.Error()})
+		health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
+		return cached, health, nil
+	}
+	return marketEventBorrowFeeEntry{}, marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{cause.Error()}), cause
 }
 
 func fetchLatestNasdaqRegSHO(ctx context.Context, now time.Time) (marketEventRegSHOEntry, error) {
@@ -477,7 +611,7 @@ func parseIBKRBorrowFeeAsOf(rawDate, rawTime string) time.Time {
 }
 
 func fetchFTPFile(ctx context.Context, addr, user, pass, path string) (string, error) {
-	dialer := net.Dialer{Timeout: 10 * time.Second}
+	dialer := net.Dialer{Timeout: marketEventsFTPDialTimeout}
 	control, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return "", err
@@ -813,28 +947,69 @@ func marketEventLULDReason(reason string) bool {
 	}
 }
 
-func marketEventBorrowInventory(ctx context.Context, symbols []string, subs *subManager, connector *ibkrlib.Connector, now time.Time, res *rpc.MarketEventsResult) rpc.SourceHealth {
+func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string, subs *subManager, connector *ibkrlib.Connector, now time.Time, res *rpc.MarketEventsResult) rpc.SourceHealth {
 	if connector == nil || subs == nil {
 		return marketEventSourceHealth("borrow_inventory", rpc.SourceStatusUnknown, now, now, 2*time.Minute, "low", []string{"IBKR gateway is unavailable; shortable-share inventory is unknown"})
 	}
-	var observed, tight int
-	for _, sym := range symbols {
-		holdCtx, cancel := context.WithTimeout(ctx, marketEventsBorrowPollBudget)
-		release, err := subs.Hold(holdCtx, sym)
-		if err == nil {
-			_ = pollMarketData(holdCtx, connector, sym, time.Now().Add(marketEventsBorrowPollBudget), func(md *ibkrlib.MarketData) bool {
-				return md.ShortableObserved
-			})
-			if md := connector.GetMarketData()[sym]; md != nil && md.ShortableObserved {
-				observed++
-				if flag, ok := marketEventBorrowInventoryFlag(sym, *md, now); ok {
-					tight++
-					res.Flags = append(res.Flags, flag)
-				}
-			}
-			release()
+	session := nySessionKey(now)
+
+	// Per-symbol probe results land in index-addressed slots so the
+	// bounded workers never share mutable state; flags are merged after
+	// the fan-out (res.Flags gets a global sort downstream anyway).
+	type borrowProbe struct {
+		observed bool
+		hasFlag  bool
+		flag     rpc.MarketEventFlag
+	}
+	probes := make([]borrowProbe, len(symbols))
+	var jobs []int
+	skipped := 0
+	for i, sym := range symbols {
+		if c.shortableAbsentThisSession(sym, session) {
+			skipped++
+			continue
 		}
-		cancel()
+		jobs = append(jobs, i)
+	}
+	runBounded(jobs, marketEventsBorrowPollWorkers, func(i int) {
+		sym := symbols[i]
+		holdCtx, cancel := context.WithTimeout(ctx, marketEventsBorrowPollBudget)
+		defer cancel()
+		release, err := subs.Hold(holdCtx, sym)
+		if err != nil {
+			return
+		}
+		defer release()
+		pollErr := pollMarketData(holdCtx, connector, sym, time.Now().Add(marketEventsBorrowPollBudget), func(md *ibkrlib.MarketData) bool {
+			return md.ShortableObserved
+		})
+		if md := connector.GetMarketData()[sym]; md != nil && md.ShortableObserved {
+			probes[i].observed = true
+			if flag, ok := marketEventBorrowInventoryFlag(sym, *md, now); ok {
+				probes[i].hasFlag = true
+				probes[i].flag = flag
+			}
+			return
+		}
+		// Tick absent. Record the per-session absence only when this
+		// probe genuinely ran out its own budget (or the gateway
+		// terminally rejected the subscription) while the parent request
+		// was still alive — an expired parent context says nothing about
+		// the symbol.
+		if ctx.Err() == nil && pollErr != nil {
+			c.rememberShortableAbsent(sym, session)
+		}
+	})
+
+	var observed, tight int
+	for i := range probes {
+		if probes[i].observed {
+			observed++
+		}
+		if probes[i].hasFlag {
+			tight++
+			res.Flags = append(res.Flags, probes[i].flag)
+		}
 	}
 	status := rpc.SourceStatusUnknown
 	confidence := "low"
@@ -846,6 +1021,9 @@ func marketEventBorrowInventory(ctx context.Context, symbols []string, subs *sub
 		if tight == 0 {
 			notes = append(notes, "no tight borrow-inventory flags crossed V1 thresholds")
 		}
+	}
+	if skipped > 0 {
+		notes = append(notes, fmt.Sprintf("skipped %d symbols whose shortable tick was already absent this session", skipped))
 	}
 	return marketEventSourceHealth("borrow_inventory", status, now, now, 2*time.Minute, confidence, notes)
 }
