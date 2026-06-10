@@ -46,6 +46,12 @@ type platformTradingSettingsData struct {
 	AllowStockShort         *bool    `json:"allow_stock_short,omitempty"`
 	AllowOptionSellToOpen   *bool    `json:"allow_option_sell_to_open,omitempty"`
 	AllowOptionMarketOrders *bool    `json:"allow_option_market_orders,omitempty"`
+	// Freeze is the runtime trading brake: true blocks every new broker
+	// write (place/modify/purge/restore/proposals) via
+	// brokerWriteAuthorization while cancels stay allowed. Unlike the
+	// limits above it is not gated on tradingLimitWritability — a brake
+	// must engage even when order entry is otherwise misconfigured.
+	Freeze *bool `json:"freeze,omitempty"`
 }
 
 func defaultPlatformSettingsPath() (string, error) {
@@ -245,6 +251,12 @@ func applyTradingSettingsPatch(next *platformSettingsData, raw json.RawMessage, 
 	}
 	for key, raw := range obj {
 		switch key {
+		case "freeze":
+			v, err := nullableBool(raw)
+			if err != nil {
+				return errBadRequest("trading.freeze must be true, false, or null")
+			}
+			next.Trading.Freeze = v
 		case "limits":
 			if !writable {
 				return errBadRequest("trading.limits is read-only: " + reason)
@@ -369,6 +381,7 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 			},
 		},
 		Trading: rpc.PlatformTradingSettings{
+			Freeze:               settingsBool(s.tradingFrozen(), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "runtime brake: true blocks new broker writes; cancels stay allowed"),
 			Mode:                 settingsString(status.Mode, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, `set [trading].mode in config.toml to "disabled", "paper", or "live"`),
 			Account:              settingsString(status.Account, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [gateway].account in config.toml"),
 			Endpoint:             settingsString(status.Endpoint, rpc.SettingsAccessRead, rpc.SettingsSourceObserved, "observed from daemon gateway discovery/config"),
@@ -487,6 +500,16 @@ func (s *Server) stockProtectionEnabled() bool {
 		return true
 	}
 	return *data.Features.StockProtection.Enabled
+}
+
+// tradingFrozen reports the runtime trading brake. Default (unset/null) is
+// not frozen; only an explicit trading.freeze=true engages it.
+func (s *Server) tradingFrozen() bool {
+	if s == nil {
+		return false
+	}
+	data := s.platformSettings.snapshot()
+	return data.Trading.Freeze != nil && *data.Trading.Freeze
 }
 
 type platformSettingsObserved struct {

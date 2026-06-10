@@ -206,16 +206,15 @@ func runPurgeTicker(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "purge")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	all := fs.Bool("all", false, "target all open positions")
-	bypassPreview := fs.Bool("bypass-preview", true, "bypass order preview/WhatIf and use the purge fast path")
 	wait := fs.Duration("wait", 2*time.Second, "wait briefly for immediate broker lifecycle callbacks after sending")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge SYMBOL|'*' [--bypass-preview=true] [--wait 2s] [--json] or ibkr purge --all [--bypass-preview=true] [--wait 2s] [--json]")
+	target, err := purgeTargetArg(*all, fs.Args(), "ibkr purge SYMBOL|'*' [--wait 2s] [--json] or ibkr purge --all [--wait 2s] [--json]")
 	if err != nil {
 		return fail(env, "purge: %v", err)
 	}
-	return runPurgeDirect(ctx, env, "purge", target, *bypassPreview, *wait, *jsonOut)
+	return runPurgeDirect(ctx, env, "purge", target, *wait, *jsonOut)
 }
 
 func runPurgeDryRun(ctx context.Context, env *Env, args []string) int {
@@ -399,19 +398,18 @@ func runPurgeExecute(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "purge")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	all := fs.Bool("all", false, "target all open positions")
-	bypassPreview := fs.Bool("bypass-preview", true, "bypass order preview/WhatIf and use the purge fast path")
 	wait := fs.Duration("wait", 2*time.Second, "wait briefly for immediate broker lifecycle callbacks after sending")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
-	target, err := purgeOptionalTargetArg(*all, fs.Args(), "ibkr purge execute [SYMBOL|'*'|--all] [--bypass-preview=true] [--wait 2s] [--json]")
+	target, err := purgeOptionalTargetArg(*all, fs.Args(), "ibkr purge execute [SYMBOL|'*'|--all] [--wait 2s] [--json]")
 	if err != nil {
 		return fail(env, "purge execute: %v", err)
 	}
-	return runPurgeDirect(ctx, env, "purge execute", target, *bypassPreview, *wait, *jsonOut)
+	return runPurgeDirect(ctx, env, "purge execute", target, *wait, *jsonOut)
 }
 
-func runPurgeDirect(ctx context.Context, env *Env, verb string, target purgeTarget, bypassPreview bool, wait time.Duration, jsonOut bool) int {
+func runPurgeDirect(ctx context.Context, env *Env, verb string, target purgeTarget, wait time.Duration, jsonOut bool) int {
 	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, verb)
 	if !ok {
 		return fail(env, "%s: live confirmation aborted", verb)
@@ -421,7 +419,6 @@ func runPurgeDirect(ctx context.Context, env *Env, verb string, target purgeTarg
 		PurgeID:          purgeBookID(time.Now()),
 		All:              target.All,
 		Symbols:          target.onlySymbols(),
-		BypassPreview:    &bypassPreview,
 		WaitMs:           int(wait.Milliseconds()),
 		Origin:           env.Origin,
 		LiveConfirmation: liveConfirmation,

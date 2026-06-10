@@ -172,6 +172,25 @@ type brokerWriteAuthorization struct {
 	Blockers []rpc.TradingBlocker
 }
 
+// tradingFrozenBlockerCode marks the runtime trading-freeze blocker so the
+// cancel path can recognise and strip it (see forCancel).
+const tradingFrozenBlockerCode = "trading_frozen"
+
+// forCancel strips the runtime trading-freeze blocker from a write
+// authorization: a freeze stops new and modified orders but must never
+// strand an open order that needs cancelling.
+func (auth brokerWriteAuthorization) forCancel() brokerWriteAuthorization {
+	kept := make([]rpc.TradingBlocker, 0, len(auth.Blockers))
+	for _, blocker := range auth.Blockers {
+		if blocker.Code != tradingFrozenBlockerCode {
+			kept = append(kept, blocker)
+		}
+	}
+	auth.Blockers = kept
+	auth.Allowed = len(kept) == 0
+	return auth
+}
+
 func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteAuthorization {
 	auth := brokerWriteAuthorization{Status: status, Route: status.Mode}
 	var blockers []rpc.TradingBlocker
@@ -201,6 +220,9 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 	}
 	if s == nil || s.orderJournal == nil {
 		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the daemon state directory before enabling trading.")
+	}
+	if s.tradingFrozen() {
+		add(tradingFrozenBlockerCode, "trading writes are frozen by runtime platform settings", "Run `ibkr settings set trading.freeze=false` to resume broker writes; cancels remain allowed while frozen.")
 	}
 	auth.Blockers = blockers
 	auth.Allowed = len(blockers) == 0

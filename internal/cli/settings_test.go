@@ -47,3 +47,22 @@ func TestSettingsSubcommandIndexHandlesHoistedFlags(t *testing.T) {
 		t.Fatalf("settingsSubcommandIndex(--json set ...) = %d, want 1", got)
 	}
 }
+
+func TestSettingsPatchFromAssignmentTradingFreeze(t *testing.T) {
+	t.Parallel()
+	raw, err := settingsPatchFromAssignment("trading.freeze=true")
+	if err != nil {
+		t.Fatalf("settingsPatchFromAssignment(trading.freeze=true): %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	trading := got["trading"].(map[string]any)
+	if trading["freeze"] != true {
+		t.Fatalf("trading.freeze = %#v, want true", trading["freeze"])
+	}
+	if _, err := settingsPatchFromAssignment("trading.freeze=2"); err == nil {
+		t.Fatal("non-boolean trading.freeze accepted")
+	}
+}

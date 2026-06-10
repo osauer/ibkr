@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -377,4 +379,90 @@ func newPurgeExecuteTestServer(t *testing.T) *Server {
 		return nextID, nil
 	}
 	return srv
+}
+
+func TestPurgeExecuteSkipsStaleAndClosedSessionQuotes(t *testing.T) {
+	t.Parallel()
+	srv := newPurgeExecuteTestServer(t)
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) {
+		return []*ibkrlib.RawPosition{
+			{Contract: ibkrlib.Contract{ConID: 111, Symbol: "AAA", SecType: "STK", Exchange: "SMART", Currency: "USD"}, Position: 1},
+			{Contract: ibkrlib.Contract{ConID: 222, Symbol: "BBB", SecType: "STK", Exchange: "SMART", Currency: "USD"}, Position: 2},
+		}, nil
+	}
+	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		bid, ask := 100.0, 101.0
+		if c.Symbol == "AAA" {
+			return rpc.OrderQuoteSnapshot{Symbol: c.Symbol, Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive, Stale: true, StaleReason: "no tick in 120s"}, nil
+		}
+		// Empty DataType passes rpc.IsLiveDataType; the session context is
+		// the only honest signal that this book is unpriceable.
+		return rpc.OrderQuoteSnapshot{Symbol: c.Symbol, Bid: &bid, Ask: &ask, SessionContext: &rpc.MarketSession{Market: "us_equities", IsOpen: false, Reason: "weekend"}}, nil
+	}
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("no broker order may be sent off a stale or session-closed quote")
+		return nil
+	}
+
+	res, err := srv.executePurge(context.Background(), rpc.PurgeExecuteParams{All: true, WaitMs: 1})
+	if err != nil {
+		t.Fatalf("executePurge: %v", err)
+	}
+	if res.Status != purgeExecuteStatusBlocked || res.SubmittedLegs != 0 || res.SkippedLegs != 2 || res.ErrorLegs != 0 {
+		t.Fatalf("result = %+v, want blocked with 2 skipped legs", res)
+	}
+	reasons := map[string]string{}
+	for _, skipped := range res.Skipped {
+		reasons[skipped.Symbol] = skipped.Reason
+	}
+	if reasons["AAA"] != "quote is stale: no tick in 120s" {
+		t.Fatalf("AAA skip reason = %q, want stale reason", reasons["AAA"])
+	}
+	if reasons["BBB"] != "market session is closed: weekend" {
+		t.Fatalf("BBB skip reason = %q, want session-closed reason", reasons["BBB"])
+	}
+}
+
+func TestPurgeExecutePrefetchesQuotesWithBoundedFanOut(t *testing.T) {
+	t.Parallel()
+	srv := newPurgeExecuteTestServer(t)
+	const legCount = 12
+	positions := make([]*ibkrlib.RawPosition, 0, legCount)
+	for i := range legCount {
+		positions = append(positions, &ibkrlib.RawPosition{
+			Contract: ibkrlib.Contract{ConID: 1000 + i, Symbol: fmt.Sprintf("SYM%02d", i), SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			Position: 1,
+		})
+	}
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return positions, nil }
+	var inFlight, maxInFlight, calls atomic.Int32
+	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		calls.Add(1)
+		cur := inFlight.Add(1)
+		for {
+			seen := maxInFlight.Load()
+			if cur <= seen || maxInFlight.CompareAndSwap(seen, cur) {
+				break
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		inFlight.Add(-1)
+		bid, ask := 100.0, 101.0
+		return rpc.OrderQuoteSnapshot{Symbol: c.Symbol, Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}, nil
+	}
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error { return nil }
+
+	res, err := srv.executePurge(context.Background(), rpc.PurgeExecuteParams{All: true, WaitMs: 1})
+	if err != nil {
+		t.Fatalf("executePurge: %v", err)
+	}
+	if res.Status != purgeExecuteStatusSubmitted || res.SubmittedLegs != legCount {
+		t.Fatalf("result = %+v, want %d submitted legs", res, legCount)
+	}
+	if got := calls.Load(); got != legCount {
+		t.Fatalf("quote fetches = %d, want exactly %d (one prefetch per leg, no per-leg refetch)", got, legCount)
+	}
+	if got := maxInFlight.Load(); got < 2 || got > purgeQuoteWorkers {
+		t.Fatalf("max concurrent quote fetches = %d, want 2..%d", got, purgeQuoteWorkers)
+	}
 }

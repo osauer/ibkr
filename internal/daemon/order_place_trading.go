@@ -191,7 +191,7 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 }
 
 func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc.OrderCancelResult, error) {
-	auth := s.currentBrokerWriteAuthorization()
+	auth := s.currentBrokerWriteAuthorization().forCancel()
 	if !auth.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
@@ -323,7 +323,7 @@ func (s *Server) cancelConfiguredOrder(ctx context.Context, status rpc.TradingSt
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	auth := s.brokerWriteAuthorization(status)
+	auth := s.brokerWriteAuthorization(status).forCancel()
 	if !auth.Allowed {
 		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}

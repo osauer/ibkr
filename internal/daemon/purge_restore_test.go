@@ -320,3 +320,75 @@ func purgeLedgerTestOptionContract() rpc.ContractParams {
 		Multiplier:   100,
 	}
 }
+
+func TestPurgeRestoreBlockedMessageNamesCleanSubset(t *testing.T) {
+	t.Parallel()
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	aapl := purgeLedgerTestStockContract()
+	msft := aapl
+	msft.ConID = 272093
+	msft.Symbol = "MSFT"
+	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-test", "leg-aapl", aapl, rpc.OrderActionSell, 2, 100)
+	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-test", "leg-msft", msft, rpc.OrderActionSell, 2, 200)
+
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return nil, nil }
+	srv.orderPreviewQuote = fixedPreviewQuote(99, 101)
+	srv.orderPreviewWhatIf = func(_ context.Context, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		if strings.EqualFold(draft.Contract.Symbol, "MSFT") {
+			return rpc.OrderWhatIfResult{
+				Status:            rpc.OrderWhatIfStatusRejected,
+				Available:         true,
+				RequiredForSubmit: true,
+				Message:           "broker rejected",
+			}, nil
+		}
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+
+	res, err := srv.executePurgeRestore(context.Background(), rpc.PurgeRestoreParams{All: true, Scale: 1, WaitMs: 1})
+	if err != nil {
+		t.Fatalf("executePurgeRestore: %v", err)
+	}
+	if res.Status != purgeRestoreStatusBlocked {
+		t.Fatalf("status = %q, want blocked", res.Status)
+	}
+	want := "1 leg(s) previewed clean and can restore separately: `ibkr purge restore AAPL --execute`"
+	if !strings.Contains(res.Message, want) {
+		t.Fatalf("blocked message = %q, want it to contain %q", res.Message, want)
+	}
+
+	// Preview path carries the same hint without --execute, plus the scale.
+	preview, err := srv.previewPurgeRestore(context.Background(), rpc.PurgeRestoreParams{All: true, Scale: 0.5})
+	if err != nil {
+		t.Fatalf("previewPurgeRestore: %v", err)
+	}
+	if !strings.Contains(preview.Message, "`ibkr purge restore AAPL --scale 0.5`") {
+		t.Fatalf("preview blocked message = %q, want clean-subset hint with scale", preview.Message)
+	}
+}
+
+func TestPurgeRestoreSkipsStaleQuoteBeforeWhatIf(t *testing.T) {
+	t.Parallel()
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-test", "leg-aapl", purgeLedgerTestStockContract(), rpc.OrderActionSell, 1, 100)
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return nil, nil }
+	srv.orderPreviewQuote = func(_ context.Context, c rpc.ContractParams, _ time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		bid, ask := 99.0, 101.0
+		return rpc.OrderQuoteSnapshot{Symbol: c.Symbol, Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive, Stale: true, StaleReason: "tick age 300s"}, nil
+	}
+	srv.orderPreviewWhatIf = func(_ context.Context, _ rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		t.Fatal("stale quotes must skip the leg before broker WhatIf")
+		return rpc.OrderWhatIfResult{}, nil
+	}
+
+	res, err := srv.previewPurgeRestore(context.Background(), rpc.PurgeRestoreParams{All: true, Scale: 1})
+	if err != nil {
+		t.Fatalf("previewPurgeRestore: %v", err)
+	}
+	if res.Status != purgeRestoreStatusBlocked || res.SkippedLegs != 1 {
+		t.Fatalf("result = %+v, want blocked with 1 skipped leg", res)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Reason != "quote is stale: tick age 300s" {
+		t.Fatalf("skip = %+v, want stale-quote reason", res.Skipped)
+	}
+}
