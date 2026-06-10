@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -1774,6 +1775,107 @@ func TestGammaZeroCache_OffHoursColdReportsRejectedPersistedCache(t *testing.T) 
 	}
 	if !strings.Contains(env.ColdAction, "--force") {
 		t.Fatalf("cold action should suggest --force, got %q", env.ColdAction)
+	}
+}
+
+// recordingGammaLogger captures formatted log lines for assertion.
+// Safe for concurrent use — ensureLoaded may fire from any of the
+// racing entry-point callers.
+type recordingGammaLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *recordingGammaLogger) Infof(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func (l *recordingGammaLogger) Warnf(format string, args ...any) {
+	l.Infof(format, args...)
+}
+
+func (l *recordingGammaLogger) count(substr string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, line := range l.lines {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestGammaZeroCache_PersistedLoadOncePerScope pins the lazy
+// once-per-process persisted read. Construction must not touch the
+// store: daemon.New runs before Server.Start acquires the instance
+// lock, so every autospawn race loser builds a full Server, and an
+// eager load made each loser re-read the store and re-log "loaded
+// persisted result" into the shared daemon log (2026-06-09: ~10
+// interleaved triples per spawn burst). And N concurrent plus repeated
+// entry-point calls must trigger exactly one store read — one INFO
+// line — per scope.
+func TestGammaZeroCache_PersistedLoadOncePerScope(t *testing.T) {
+	dir := t.TempDir()
+	store := newGammaZeroStore(dir)
+	now := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC) // Tuesday 10:00 ET, RTH
+	asOf := now.Add(-5 * time.Minute)                    // within softTTL — no refresh kicks
+	for _, scope := range knownGammaScopes {
+		r := helperGammaResult(asOf)
+		r.Scope = scope
+		if scope == rpc.GammaZeroScopeCombined {
+			spy := helperGammaResult(asOf)
+			spy.Scope = rpc.GammaZeroScopeSPY
+			spx := helperGammaResult(asOf)
+			spx.Scope = rpc.GammaZeroScopeSPX
+			r.PerIndex = map[string]*rpc.GammaZeroComputed{"SPY": spy, "SPX": spx}
+		}
+		if err := store.Save(scope, nySessionKey(asOf), r); err != nil {
+			t.Fatalf("Save scope=%s: %v", scope, err)
+		}
+	}
+
+	rec := &recordingGammaLogger{}
+	c := newGammaZeroCacheWithStore(store, now, rec)
+	if got := rec.count("loaded persisted result"); got != 0 {
+		t.Fatalf("construction read the store: %d load lines, want 0 (autospawn losers must stay off the store)", got)
+	}
+
+	var kicked atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		kicked.Add(1)
+		return helperGammaResult(now), nil
+	}
+	var wg sync.WaitGroup
+	for i := range 12 {
+		scope := knownGammaScopes[i%len(knownGammaScopes)]
+		wg.Go(func() {
+			c.kickOrJoin(context.Background(), scope, now, 300, compute)
+			c.snapshotCurrent(scope, func() time.Time { return now })
+		})
+	}
+	wg.Wait()
+	// Repeated sequential calls after the concurrent wave must not
+	// re-read either.
+	for _, scope := range knownGammaScopes {
+		c.snapshotCurrent(scope, func() time.Time { return now })
+	}
+	c.IsComputing()
+
+	if kicked.Load() != 0 {
+		t.Errorf("fresh same-session persisted results must not kick computes, kicked=%d", kicked.Load())
+	}
+	for _, scope := range knownGammaScopes {
+		// Trailing " session=" keeps scope=spy from matching scope=spy+spx.
+		want := fmt.Sprintf("loaded persisted result scope=%s session=", scope)
+		if got := rec.count(want); got != 1 {
+			t.Errorf("load lines for scope=%s: got %d, want exactly 1", scope, got)
+		}
+	}
+	if got := rec.count("gamma cache:"); got != len(knownGammaScopes) {
+		t.Errorf("total gamma cache log lines: got %d, want %d (one load per scope, no warnings)", got, len(knownGammaScopes))
 	}
 }
 
