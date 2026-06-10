@@ -134,11 +134,10 @@ if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|or
   exit 0
 fi
 
-# Paper-smoke mints the last live-trading precondition; the daemon refuses
-# agent origins regardless, this just fails the attempt earlier and clearer.
-if has_re '(^|[[:space:]/])ibkr[[:space:]]+trading[[:space:]]+paper-smoke([[:space:]]|$)'; then
-  block "Paper-smoke produces the last live-trading precondition and must be run by the user from an interactive terminal, not from an agent session."
-fi
+# Paper-smoke transmits a 1-share round-trip on the paper route (open to
+# agents by policy). Since 2026-06-10 its evidence is a release-pipeline
+# quality gate, not a runtime live precondition, so there is no agent
+# block here — it falls through to the paper-write policy below.
 
 if has_re '(^|[[:space:]/])ibkr[[:space:]]+proposals[[:space:]]+submit([[:space:]]|$)'; then
   allow_only_paper_write_or_block

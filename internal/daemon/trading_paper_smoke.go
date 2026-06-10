@@ -47,11 +47,15 @@ func (s *Server) runPaperSmoke(ctx context.Context, p rpc.TradingPaperSmokeParam
 	if s == nil {
 		return nil, ErrTradingDisabled
 	}
-	// Paper-smoke mints the last live precondition, so the human-origin
-	// policy applies even though the order transmits on the paper route.
-	if !originIsHuman(p.Origin) {
-		return nil, fmt.Errorf("%w: paper-smoke produces live-trading evidence and is blocked for agent-origin requests; a human must run `ibkr trading paper-smoke` from an interactive terminal", ErrTradingDisabled)
-	}
+	// Origin note: paper-smoke is deliberately open to automated origins.
+	// As of 2026-06-10 the evidence is a release-pipeline quality gate
+	// (make release runs the smoke at version bump and aborts on failure),
+	// not a runtime live precondition — live enablement rests on the
+	// TWS-side API toggle, the trading-capable binary, and the config
+	// pins/acks. With nothing unlocked by the evidence, an origin
+	// restriction here would only obstruct release automation. The order
+	// itself transmits on the paper route, which is open to agents by
+	// policy.
 	if !s.paperSmokeMu.TryLock() {
 		return nil, errBadRequest("a paper-smoke run is already in progress")
 	}

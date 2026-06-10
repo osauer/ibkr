@@ -65,17 +65,28 @@ func paperSmokeTestEvent(srv *Server, eventType, orderRef string, orderID int, b
 	}
 }
 
-func TestPaperSmokeRefusesAgentOrigin(t *testing.T) {
+// TestPaperSmokeAcceptsAnyOrigin pins the 2026-06-10 re-gating: the smoke
+// is a release-pipeline quality gate (run automatically at version bump),
+// not a runtime live precondition, so automated origins must be able to
+// run it and produce evidence.
+func TestPaperSmokeAcceptsAnyOrigin(t *testing.T) {
 	t.Parallel()
-	srv, path := newPaperSmokeTestServer(t)
 	for _, origin := range []string{"", rpc.OrderOriginAgent, "mystery-origin"} {
-		_, err := srv.runPaperSmoke(context.Background(), rpc.TradingPaperSmokeParams{Origin: origin})
-		if err == nil || !strings.Contains(err.Error(), "agent-origin") {
-			t.Fatalf("origin %q: err = %v, want agent-origin refusal", origin, err)
+		srv, path := newPaperSmokeTestServer(t)
+		res, err := srv.runPaperSmoke(context.Background(), rpc.TradingPaperSmokeParams{Origin: origin})
+		if err != nil && strings.Contains(err.Error(), "origin") {
+			t.Fatalf("origin %q: err = %v, want no origin refusal", origin, err)
 		}
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("evidence file should not exist after refusals, stat err = %v", err)
+		// The bare fixture has no broker, so the run proceeds past the
+		// (removed) origin gate and fails at transmit — which still
+		// records evidence. The contract under test is only that no
+		// origin is refused pre-flight.
+		if res == nil {
+			t.Fatalf("origin %q: res = nil err = %v, want an attempted run", origin, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("origin %q: evidence file missing after attempted run: %v", origin, err)
+		}
 	}
 }
 

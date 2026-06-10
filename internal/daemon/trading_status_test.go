@@ -3,6 +3,7 @@ package daemon
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,10 +205,20 @@ func TestTradingStatusLiveModeRequiresOverrideAndReadiness(t *testing.T) {
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
-	for _, code := range []string{"live_not_allowed", "live_account_ack_mismatch", "live_endpoint_ack_mismatch", "paper_smoke_missing"} {
+	for _, code := range []string{"live_not_allowed", "live_account_ack_mismatch", "live_endpoint_ack_mismatch"} {
 		if !hasTradingBlocker(st, code) {
 			t.Fatalf("missing blocker %q in %+v", code, st.Blockers)
 		}
+	}
+	// Re-gated 2026-06-10: paper-smoke evidence is informational, never a
+	// live blocker - the smoke is enforced in the release pipeline instead.
+	for _, b := range st.Blockers {
+		if strings.HasPrefix(b.Code, "paper_smoke") {
+			t.Fatalf("paper-smoke must not block live readiness, got %+v", st.Blockers)
+		}
+	}
+	if st.PaperSmoke != tradingPaperSmokeStatusMissing {
+		t.Fatalf("paper-smoke status should still be reported informationally, got %q", st.PaperSmoke)
 	}
 }
 

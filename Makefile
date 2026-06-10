@@ -17,7 +17,13 @@ DATE     ?= $(shell TZ=UTC date +%Y-%m-%dT%H:%M:%SZ)
 STRIP_LDFLAGS = -s -w
 
 LDFLAGS = $(STRIP_LDFLAGS) -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
-GO_TAGS ?=
+# Local builds are broker-write capable by default (2026-06-10 decision):
+# the developer machine always gets the trading binary, so a plain
+# `make install` can no longer silently downgrade a trading install.
+# Public release artefacts build BOTH variants explicitly in
+# scripts/build-release-target.sh; `make build GO_TAGS=""` still produces
+# a read-only binary (and says so via the banner below).
+GO_TAGS ?= trading
 GO_BUILD_TAGS = $(if $(strip $(GO_TAGS)),-tags '$(GO_TAGS)',)
 
 # Install location for `make install`. Defaults to ~/.local/bin (XDG
@@ -435,7 +441,7 @@ smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild)
 
 smoke: build smoke-only ## Wire-level smoke vs. reachable TWS/Gateway (rebuilds bin/ibkr; SKIP if no gateway)
 
-release-binaries: ## Cross-compile release tarballs + MCPB into dist/ — needs RELEASE_VERSION=vX.Y.Z
+release-binaries: ## Cross-compile read-only + trading tarballs and the (read-only) MCPB into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-binaries: RELEASE_VERSION is required, e.g. make release-binaries RELEASE_VERSION=v0.6.0" >&2; \
 		exit 1; \
@@ -472,6 +478,10 @@ release-checksums: ## Sign SHA256SUMS for tarballs and MCPB assets
 		echo "release-checksums: missing release tarballs in $(DIST_DIR)" >&2; \
 		exit 1; \
 	fi
+	@if ! ls $(DIST_DIR)/ibkr-trading-$(RELEASE_VERSION)-*.tar.gz >/dev/null 2>&1; then \
+		echo "release-checksums: missing trading-variant tarballs in $(DIST_DIR)" >&2; \
+		exit 1; \
+	fi
 	@if [ ! -f "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" ]; then \
 		echo "release-checksums: missing $(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb; run make release-mcpb" >&2; \
 		exit 1; \
@@ -480,7 +490,7 @@ release-checksums: ## Sign SHA256SUMS for tarballs and MCPB assets
 		echo "release-checksums: missing $(DIST_DIR)/ibkr.mcpb; run make release-mcpb" >&2; \
 		exit 1; \
 	fi
-	@( cd $(DIST_DIR) && shasum -a 256 ibkr-$(RELEASE_VERSION)-*.tar.gz ibkr-$(RELEASE_VERSION).mcpb ibkr.mcpb > SHA256SUMS )
+	@( cd $(DIST_DIR) && shasum -a 256 ibkr-$(RELEASE_VERSION)-*.tar.gz ibkr-trading-$(RELEASE_VERSION)-*.tar.gz ibkr-$(RELEASE_VERSION).mcpb ibkr.mcpb > SHA256SUMS )
 	@command -v gpg >/dev/null 2>&1 || { \
 		echo "release-checksums: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
 		exit 1; \
@@ -666,6 +676,12 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# Binding TWS/Gateway JSON + wire smoke against the freshly-stamped
 	@# binary. Runs one isolated daemon session and fails on no gateway.
 	$(MAKE) release-smoke RELEASE_VERSION=$(RELEASE_VERSION) SMOKE_STRICT=1
+	@# Binding paper-trading smoke (2026-06-10 decision): the order
+	@# pipeline is verified automatically per release — place/ack/cancel
+	@# a 1-share paper round-trip via an isolated daemon pinned to the
+	@# local PAPER session. No SKIP: a missing paper login aborts the
+	@# release. This replaces the human-certified runtime live gate.
+	./scripts/release-paper-smoke.sh bin/ibkr
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	@$(MAKE) release-binaries RELEASE_VERSION=$(RELEASE_VERSION) || { \

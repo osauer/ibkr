@@ -45,7 +45,7 @@ Every broker write requires a submit-eligible preview token; this is invariant, 
 
 Paper mode should use a paper endpoint or account, such as TWS paper on `7497` or a `DU...` account.
 
-Live mode is intentionally heavier. It requires a live-looking endpoint and account, a live override, matching live acknowledgement fields, and fresh paper-smoke evidence from the paired paper setup. Do not enable live trading from a copied template; fill the fields deliberately for the account and endpoint in front of you.
+Live mode is intentionally heavier. It requires a live-looking endpoint and account, a live override, and matching live acknowledgement fields. Do not enable live trading from a copied template; fill the fields deliberately for the account and endpoint in front of you. Paper-smoke evidence is reported in trading status as context but does not gate live mode: the smoke is enforced in the release pipeline instead (`make release` runs it at version bump and aborts on failure).
 
 ## Protection Market Flags
 

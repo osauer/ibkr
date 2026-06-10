@@ -52,8 +52,7 @@ Honest limits of this interlock:
 - It is a **safety interlock, not a security boundary**. Origin is asserted
   by the calling process; any same-uid process can forge it, call the daemon
   socket directly, or edit the config. The live acknowledgement stack
-  (`allow_live`, account/endpoint acks, paper-smoke evidence) still applies
-  on top.
+  (`allow_live`, account/endpoint acks) still applies on top.
 - **Cancel is exempt** from the live agent block (refusing a cancel can
   strand a worse position), but note the asymmetry: cancelling a protective
   stop *removes* protection. Cancels journal their origin; a future
@@ -61,12 +60,14 @@ Honest limits of this interlock:
 - An agent driving the paired PWA inherits the `human-paired-device` origin;
   pairing approval on the phone is the human act that scopes that risk.
 - **Paper-smoke evidence is MAC'd, not secret.** `ibkr trading paper-smoke`
-  (human-origin-only, since it mints the last live precondition) writes
-  evidence signed with the order-token HMAC key, so the live gate rejects
-  hand-written or edited `trading-readiness.json` files. The key lives in
-  the same user-owned state directory, so this too is an interlock against
-  casual forgery and accidental edits — a same-uid adversary can read the
-  key and sign their own evidence.
+  writes evidence signed with the order-token HMAC key, so hand-written or
+  edited `trading-readiness.json` files surface as `unsigned` in trading
+  status. Since 2026-06-10 the evidence is a release-pipeline quality gate
+  (`make release` runs the smoke at version bump and aborts on failure),
+  not a runtime live precondition — live enablement rests on the TWS-side
+  API toggle, the trading-capable binary, and the config pins and
+  acknowledgements. The MAC remains an interlock against casual forgery
+  and accidental edits of the status display, nothing more.
 
 ## Release integrity (v1.0.0+)
 
