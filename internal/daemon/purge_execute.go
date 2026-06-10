@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -74,7 +75,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.Blockers = append(res.Blockers, rpc.TradingBlocker{
 			Code:    "purge_preview_mode_unavailable",
 			Message: "purge currently supports the fast path only",
-			Action:  "Run `ibkr purge` with the default preview bypass.",
+			Action:  "Omit bypass_preview from the request (or send true); the purge fast path is the only supported mode.",
 		})
 		res.Message = res.Blockers[0].Message
 		return res, nil
@@ -131,13 +132,18 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		return res, nil
 	}
 
+	plans := make([]purgeLegPlan, 0, len(legs))
 	for _, leg := range legs {
+		plans = append(plans, s.planPurgeLeg(positions, openByLeg, foreignOpen, activeByLegSide, leg))
+	}
+	quotes := s.prefetchPurgeLegQuotes(ctx, plans)
+	for _, plan := range plans {
 		if err := ctx.Err(); err != nil {
 			res.Status = purgeExecuteStatusError
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.executePurgeLeg(ctx, status, positions, openByLeg, foreignOpen, activeByLegSide, res, leg)
+		s.executePurgeLeg(ctx, status, quotes, res, plan)
 	}
 
 	if res.SubmittedLegs > 0 && wait > 0 {
@@ -322,11 +328,39 @@ func foreignOpenOrderForContract(orders []rpc.OrderView, contract rpc.ContractPa
 	return rpc.OrderView{}, false
 }
 
-func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, foreignOpen []rpc.OrderView, activeByLegSide map[string]float64, res *rpc.PurgeExecuteResult, leg rpc.PurgeExecuteLeg) {
+// purgeQuoteTimeout bounds each per-leg pricing snapshot; it matches the
+// preview path's default quote budget.
+const purgeQuoteTimeout = 5 * time.Second
+
+// purgeQuoteWorkers bounds the pre-submission quote fan-out. 4 mirrors
+// positionsPrewarmWorkers — the gateway throttles subscribe churn beyond
+// that.
+const purgeQuoteWorkers = 4
+
+type purgeQuoteResult struct {
+	quote rpc.OrderQuoteSnapshot
+	err   error
+}
+
+// purgeLegPlan is the pre-quote evaluation of one purge leg: either a skip
+// reason, or a normalised leg ready for pricing and submission. Splitting
+// planning from submission lets the quote fan-out run only for legs that
+// will actually submit — idempotent retries must not touch the gateway.
+type purgeLegPlan struct {
+	leg     rpc.PurgeExecuteLeg
+	skip    string
+	warning string
+	action  string
+	qty     float64
+}
+
+// planPurgeLeg runs every cheap local check (position match, side flip,
+// open orders, ledger coverage, quantity, action, security type) and
+// normalises the leg identity. It performs no gateway IO.
+func (s *Server) planPurgeLeg(positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, foreignOpen []rpc.OrderView, activeByLegSide map[string]float64, leg rpc.PurgeExecuteLeg) purgeLegPlan {
 	contract, currentQty, found := currentPurgePosition(positions, leg)
 	if !found || currentQty == 0 {
-		addPurgeSkipped(res, leg, "already flat")
-		return
+		return purgeLegPlan{leg: leg, skip: "already flat"}
 	}
 	if contract.MinTick <= 0 {
 		// Cache-only: the emergency path never waits on a contract-details
@@ -343,49 +377,103 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 	leg.Symbol = contract.Symbol
 	leg.SecType = contract.SecType
 	leg.Contract = contract
+	plan := purgeLegPlan{leg: leg}
 	if purgeSideFlipped(leg.OriginalSide, currentQty) {
-		addPurgeSkipped(res, leg, "current position side no longer matches selected purge leg")
-		return
+		plan.skip = "current position side no longer matches selected purge leg"
+		return plan
 	}
 	qty := math.Abs(currentQty)
 	if purgeOpenOrderExists(openByLeg, legIDs) {
-		addPurgeSkipped(res, leg, "open purge/restore order exists for this ledger row")
-		return
+		plan.skip = "open purge/restore order exists for this ledger row"
+		return plan
 	}
 	if foreign, ok := foreignOpenOrderForContract(foreignOpen, contract); ok {
-		addPurgeSkipped(res, leg, fmt.Sprintf("open order %s (%s) already works this contract; cancel it first with `ibkr order cancel %s` so the close cannot double", foreign.OrderRef, nonEmptyString(foreign.OrderType, "order"), foreign.OrderRef))
-		return
+		plan.skip = fmt.Sprintf("open order %s (%s) already works this contract; cancel it first with `ibkr order cancel %s` so the close cannot double", foreign.OrderRef, nonEmptyString(foreign.OrderType, "order"), foreign.OrderRef)
+		return plan
 	}
 	if covered := activePurgeLedgerCoveredQuantity(activeByLegSide, legIDs, currentSide); covered > 0 {
 		if qty <= covered+1e-9 {
-			addPurgeSkipped(res, leg, "current quantity already covered by active purge ledger")
-			return
+			plan.skip = "current quantity already covered by active purge ledger"
+			return plan
 		}
 		qty -= covered
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%s: reduced purge quantity by %.4g already covered in active purge ledger", purgeExecuteLegLabel(leg), covered))
+		plan.warning = fmt.Sprintf("%s: reduced purge quantity by %.4g already covered in active purge ledger", purgeExecuteLegLabel(leg), covered)
 	}
 	if math.Trunc(qty) != qty {
-		addPurgeSkipped(res, leg, "fractional current quantity cannot use the integer order path")
-		return
+		plan.skip = "fractional current quantity cannot use the integer order path"
+		return plan
 	}
 	action := rpc.OrderActionSell
 	if currentQty < 0 {
 		action = rpc.OrderActionBuy
 	}
 	if leg.PurgeAction != "" && !strings.EqualFold(leg.PurgeAction, action) {
-		addPurgeSkipped(res, leg, "current position action no longer matches selected purge leg")
-		return
+		plan.skip = "current position action no longer matches selected purge leg"
+		return plan
 	}
 	if !purgeContractSupported(contract) {
-		addPurgeSkipped(res, leg, "unsupported security type for purge execute")
+		plan.skip = "unsupported security type for purge execute"
+		return plan
+	}
+	plan.action = action
+	plan.qty = qty
+	return plan
+}
+
+// prefetchPurgeLegQuotes snapshots pricing quotes for every submittable leg
+// up front with a bounded fan-out. Sequential fetches at 5 s each could not
+// cover an 11+ leg book inside the 55 s purge.execute deadline, turning a
+// full emergency close into a PARTIAL one.
+func (s *Server) prefetchPurgeLegQuotes(ctx context.Context, plans []purgeLegPlan) map[string]purgeQuoteResult {
+	type job struct {
+		legID    string
+		contract rpc.ContractParams
+	}
+	jobs := make([]job, 0, len(plans))
+	seen := map[string]bool{}
+	for _, plan := range plans {
+		if plan.skip != "" || plan.leg.LegID == "" || seen[plan.leg.LegID] {
+			continue
+		}
+		seen[plan.leg.LegID] = true
+		jobs = append(jobs, job{legID: plan.leg.LegID, contract: plan.leg.Contract})
+	}
+	out := make(map[string]purgeQuoteResult, len(jobs))
+	var mu sync.Mutex
+	runBounded(jobs, purgeQuoteWorkers, func(j job) {
+		quote, err := s.fetchPreviewQuote(ctx, j.contract, purgeQuoteTimeout)
+		mu.Lock()
+		out[j.legID] = purgeQuoteResult{quote: quote, err: err}
+		mu.Unlock()
+	})
+	return out
+}
+
+func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, quotes map[string]purgeQuoteResult, res *rpc.PurgeExecuteResult, plan purgeLegPlan) {
+	leg := plan.leg
+	if plan.warning != "" {
+		res.Warnings = append(res.Warnings, plan.warning)
+	}
+	if plan.skip != "" {
+		addPurgeSkipped(res, leg, plan.skip)
 		return
 	}
-
-	quote, err := s.fetchPreviewQuote(ctx, contract, 5*time.Second)
+	contract := leg.Contract
+	cached, ok := quotes[leg.LegID]
+	quote, err := cached.quote, cached.err
+	if !ok {
+		quote, err = s.fetchPreviewQuote(ctx, contract, purgeQuoteTimeout)
+	}
 	if err != nil {
 		addPurgeError(res, leg, "quote: "+err.Error())
 		return
 	}
+	if reason := purgeQuoteSkipReason(quote); reason != "" {
+		addPurgeSkipped(res, leg, reason)
+		return
+	}
+	action := plan.action
+	qty := plan.qty
 	limit, err := purgeAggressiveLimit(action, contract, quote)
 	if err != nil {
 		addPurgeError(res, leg, "pricing: "+err.Error())
@@ -665,6 +753,27 @@ func purgeContractSupported(contract rpc.ContractParams) bool {
 	default:
 		return false
 	}
+}
+
+// purgeQuoteSkipReason reports why a snapshot is unsafe to price an
+// aggressive close from, beyond the live-data-type check inside
+// purgeAggressiveLimit: IsLiveDataType("") is true while a fresh
+// subscription has not reported feed state yet, so an empty DataType proves
+// nothing — the gateway's stale flag and the session calendar do.
+func purgeQuoteSkipReason(quote rpc.OrderQuoteSnapshot) string {
+	if quote.Stale {
+		if reason := strings.TrimSpace(quote.StaleReason); reason != "" {
+			return "quote is stale: " + reason
+		}
+		return "quote is stale"
+	}
+	if sc := quote.SessionContext; sc != nil && !sc.IsOpen {
+		if reason := strings.TrimSpace(sc.Reason); reason != "" {
+			return "market session is closed: " + reason
+		}
+		return "market session is closed"
+	}
+	return ""
 }
 
 func purgeAggressiveLimit(action string, contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot) (float64, error) {

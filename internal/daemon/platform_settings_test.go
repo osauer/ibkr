@@ -190,3 +190,61 @@ func hasBlocker(blockers []rpc.TradingBlocker, code string) bool {
 	}
 	return false
 }
+
+func TestPlatformSettingsTradingFreezeBlocksWritesAllowsCancels(t *testing.T) {
+	t.Parallel()
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv.orderWritesEnabled = func() bool { return true }
+	srv.orderJournal = newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))
+
+	if srv.tradingFrozen() {
+		t.Fatal("tradingFrozen default = true, want false")
+	}
+	got, err := srv.handleSettingsGet()
+	if err != nil {
+		t.Fatalf("handleSettingsGet: %v", err)
+	}
+	if got.Trading.Freeze.Value || got.Trading.Freeze.Access != rpc.SettingsAccessWrite || got.Trading.Freeze.Source != rpc.SettingsSourceRuntime {
+		t.Fatalf("freeze setting = %+v, want writable runtime false", got.Trading.Freeze)
+	}
+
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+		t.Fatalf("engage freeze: %v", err)
+	}
+	if !srv.tradingFrozen() {
+		t.Fatal("tradingFrozen after freeze=true patch = false, want true")
+	}
+
+	status := rpc.TradingStatus{Mode: config.TradingModePaper}
+	auth := srv.brokerWriteAuthorization(status)
+	if auth.Allowed || !hasBlocker(auth.Blockers, tradingFrozenBlockerCode) {
+		t.Fatalf("frozen write authorization = %+v, want trading_frozen blocker", auth)
+	}
+	cancelAuth := auth.forCancel()
+	if !cancelAuth.Allowed || hasBlocker(cancelAuth.Blockers, tradingFrozenBlockerCode) {
+		t.Fatalf("frozen cancel authorization = %+v, want allowed", cancelAuth)
+	}
+	if !hasBlocker(srv.purgeExecuteBlockers(status), tradingFrozenBlockerCode) {
+		t.Fatal("purge execute blockers missing trading_frozen while frozen")
+	}
+
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":null}}`)}); err != nil {
+		t.Fatalf("reset freeze: %v", err)
+	}
+	if srv.tradingFrozen() {
+		t.Fatal("tradingFrozen after freeze=null reset = true, want false")
+	}
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":"yes"}}`)}); err == nil {
+		t.Fatal("non-boolean trading.freeze accepted")
+	}
+
+	// The brake is deliberately not gated on tradingLimitWritability: it
+	// must engage even while order entry is disabled or misconfigured.
+	disabled := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeDisabled})
+	if _, err := disabled.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+		t.Fatalf("freeze while trading disabled: %v", err)
+	}
+	if !disabled.tradingFrozen() {
+		t.Fatal("freeze did not engage while trading disabled")
+	}
+}

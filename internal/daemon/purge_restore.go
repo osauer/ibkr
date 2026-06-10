@@ -250,7 +250,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 	if len(res.Blockers) > 0 || res.SkippedLegs > 0 || res.ErrorLegs > 0 {
 		res.Status = purgeRestoreStatusBlocked
 		if res.Message == "" {
-			res.Message = "restore is blocked; no broker orders were submitted"
+			res.Message = purgeRestoreBlockedMessage(res, execute, scale)
 		}
 		return res, nil
 	}
@@ -330,6 +330,10 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		return
 	}
 	leg.Quote = quote
+	if reason := purgeQuoteSkipReason(quote); reason != "" {
+		addPurgeRestoreSkipped(res, leg, reason)
+		return
+	}
 	limit, err := purgeAggressiveLimit(row.RestoreAction, restoreContract, quote)
 	if err != nil {
 		addPurgeRestoreError(res, leg, "pricing: "+err.Error())
@@ -616,6 +620,56 @@ func purgeRestoreFinalStatus(res rpc.PurgeRestoreResult) string {
 		return purgeRestoreStatusBlocked
 	}
 	return purgeRestoreStatusFlat
+}
+
+// purgeRestoreBlockedMessage names the invocation that still works when the
+// all-or-nothing preflight blocks: restore is deliberately conservative (one
+// bad leg blocks the whole batch so the book never partially re-enters), but
+// the operator should not have to diff leg lists to find the clean subset.
+// Only symbols whose legs ALL previewed clean are suggested — a symbol with
+// one clean and one blocked leg would just block again.
+func purgeRestoreBlockedMessage(res *rpc.PurgeRestoreResult, execute bool, scale float64) string {
+	const base = "restore is blocked; no broker orders were submitted"
+	blocked := map[string]bool{}
+	cleanOrder := make([]string, 0, len(res.Legs))
+	cleanSeen := map[string]bool{}
+	for _, leg := range res.Legs {
+		symbol := strings.ToUpper(strings.TrimSpace(leg.Symbol))
+		if symbol == "" {
+			continue
+		}
+		if leg.Status == rpc.OrderWhatIfStatusAccepted {
+			if !cleanSeen[symbol] {
+				cleanSeen[symbol] = true
+				cleanOrder = append(cleanOrder, symbol)
+			}
+			continue
+		}
+		blocked[symbol] = true
+	}
+	symbols := make([]string, 0, len(cleanOrder))
+	for _, symbol := range cleanOrder {
+		if !blocked[symbol] {
+			symbols = append(symbols, symbol)
+		}
+	}
+	if len(symbols) == 0 {
+		return base
+	}
+	legCount := 0
+	for _, leg := range res.Legs {
+		if leg.Status == rpc.OrderWhatIfStatusAccepted && !blocked[strings.ToUpper(strings.TrimSpace(leg.Symbol))] {
+			legCount++
+		}
+	}
+	cmd := "ibkr purge restore " + strings.Join(symbols, " ")
+	if scale != 1 {
+		cmd += fmt.Sprintf(" --scale %g", scale)
+	}
+	if execute {
+		cmd += " --execute"
+	}
+	return fmt.Sprintf("%s; %d leg(s) previewed clean and can restore separately: `%s`", base, legCount, cmd)
 }
 
 func purgeRestoreMessage(res rpc.PurgeRestoreResult) string {

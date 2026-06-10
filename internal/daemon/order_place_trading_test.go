@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -497,4 +498,67 @@ func mintModifyPreviewTokenForWriteTest(t *testing.T, srv *Server, view rpc.Orde
 		t.Fatalf("mint modify preview token: %v", err)
 	}
 	return token
+}
+
+func TestTradingFreezeBlocksPlaceAllowsCancel(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	store, err := newPlatformSettingsStore(filepath.Join(t.TempDir(), "platform-settings.json"))
+	if err != nil {
+		t.Fatalf("newPlatformSettingsStore: %v", err)
+	}
+	srv.platformSettings = store
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+		t.Fatalf("engage freeze: %v", err)
+	}
+	if err := srv.orderJournal.Append(orderJournalEvent{
+		At:              now.Add(-time.Minute),
+		Type:            orderJournalEventBrokerAcknowledged,
+		OrderRef:        "ord-1",
+		PreviewTokenID:  "tok-1",
+		ReservedOrderID: 1001,
+		ClientID:        31,
+		Account:         "DU1234567",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Symbol:          "AAPL",
+		SecType:         "STK",
+		Action:          "BUY",
+		OrderType:       rpc.OrderTypeLMT,
+		TIF:             rpc.OrderTIFDay,
+		Quantity:        1,
+		LimitPrice:      100,
+		Status:          "Submitted",
+		SendState:       orderSendStateBrokerAcknowledged,
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("placeOrder must not reach the broker while frozen")
+		return nil
+	}
+	var cancelled int
+	srv.orderCancelBroker = func(_ context.Context, orderID int) error {
+		cancelled = orderID
+		return nil
+	}
+
+	_, err = srv.placeOrder(context.Background(), rpc.OrderPlaceParams{PreviewToken: "tok"})
+	if err == nil || !strings.Contains(err.Error(), "frozen") {
+		t.Fatalf("placeOrder while frozen err = %v, want trading_frozen block", err)
+	}
+	_, err = srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-1", PreviewToken: "tok"})
+	if err == nil || !strings.Contains(err.Error(), "frozen") {
+		t.Fatalf("modifyOrder while frozen err = %v, want trading_frozen block", err)
+	}
+
+	res, err := srv.cancelOrder(context.Background(), rpc.OrderCancelParams{ID: "ord-1"})
+	if err != nil {
+		t.Fatalf("cancelOrder while frozen err = %v, want success", err)
+	}
+	if !res.Accepted || cancelled != 1001 || res.LifecycleStatus != rpc.OrderLifecyclePendingCancel {
+		t.Fatalf("cancel result = %+v cancelled=%d, want accepted pending-cancel", res, cancelled)
+	}
 }

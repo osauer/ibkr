@@ -153,6 +153,13 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 			}
 		}
 		return marshalPatch([]string{"features", "stock_protection", "enabled"}, value)
+	case "trading.freeze":
+		if value != nil {
+			if _, ok := value.(bool); !ok {
+				return nil, fmt.Errorf("%s must be true, false, or null", key)
+			}
+		}
+		return marshalPatch([]string{"trading", "freeze"}, value)
 	case "trading.limits.max_notional":
 		return marshalPatch([]string{"trading", "limits", "max_notional"}, value)
 	case "trading.limits.max_option_contracts":
@@ -193,6 +200,7 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 	fmt.Fprintln(out)
 	statusRow(env, out, "Purge/restore", formatSettingsBool(env, st.Features.PurgeRestore.Enabled))
 	statusRow(env, out, "Stock protection", formatSettingsBool(env, st.Features.StockProtection.Enabled))
+	statusRow(env, out, "Trading freeze", formatSettingsBool(env, st.Trading.Freeze))
 	statusRow(env, out, "Trading", nonEmpty(st.Trading.Mode.Value, "disabled"))
 	statusRow(env, out, "Endpoint", nonEmpty(st.Trading.Endpoint.Value, "unknown"))
 	statusRow(env, out, "Account", nonEmpty(st.Trading.Account.Value, "unknown"))
@@ -213,6 +221,9 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 }
 
 func settingsVerdict(st rpc.PlatformSettings) statusConcern {
+	if st.Trading.Freeze.Value {
+		return statusConcern{Text: "FROZEN", Level: statusConcernWarn}
+	}
 	if !st.Features.PurgeRestore.Enabled.Value {
 		return statusConcern{Text: "LIMITED", Level: statusConcernNotice}
 	}

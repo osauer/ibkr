@@ -52,7 +52,7 @@ func TestCatalogValueFlagsDriveHoisting(t *testing.T) {
 			t.Fatalf("isValueFlag(%q)=false, want true", name)
 		}
 	}
-	for _, name := range []string{"json", "watch", "force", "details", "all", "save", "record", "execute", "require-live", "exclude-penny", "profiles", "bypass-preview"} {
+	for _, name := range []string{"json", "watch", "force", "details", "all", "save", "record", "execute", "require-live", "exclude-penny", "profiles"} {
 		if isValueFlag(name) {
 			t.Fatalf("isValueFlag(%q)=true, want false", name)
 		}
