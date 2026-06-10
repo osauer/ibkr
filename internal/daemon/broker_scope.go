@@ -46,7 +46,34 @@ func (s *Server) currentBrokerStateScope() brokerStateScope {
 
 func brokerScopeAccountConcrete(account string) bool {
 	account = strings.TrimSpace(account)
-	return account != "" && !strings.EqualFold(account, "All")
+	if account == "" || strings.EqualFold(account, "All") {
+		return false
+	}
+	// A managedAccounts frame can carry several accounts (comma-separated)
+	// for multi-account logins. That is a session aggregate, not a single
+	// account identity — anything that does not trim to one token is
+	// non-concrete and scoped state fails closed.
+	return !strings.ContainsAny(account, ", \t")
+}
+
+// brokerScopeConcrete reports whether the scope names one concrete account
+// with a known paper/live mode — the only identity scoped trading state may
+// bind to.
+func brokerScopeConcrete(scope brokerStateScope) bool {
+	if !brokerScopeAccountConcrete(scope.Account) {
+		return false
+	}
+	switch scope.Mode {
+	case rpc.AccountModePaper, rpc.AccountModeLive:
+		return true
+	default:
+		return false
+	}
+}
+
+func sameBrokerScope(a, b brokerStateScope) bool {
+	return strings.EqualFold(strings.TrimSpace(a.Account), strings.TrimSpace(b.Account)) &&
+		strings.EqualFold(strings.TrimSpace(a.Mode), strings.TrimSpace(b.Mode))
 }
 
 func brokerScopedModeMatches(rowMode, scopeMode string) bool {

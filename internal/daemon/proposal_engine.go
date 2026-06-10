@@ -24,13 +24,19 @@ const (
 )
 
 type proposalEngine struct {
-	mu       sync.Mutex
-	server   *Server
-	store    *proposalStore
-	cadence  time.Duration
-	now      func() time.Time
+	mu      sync.Mutex
+	server  *Server
+	store   *proposalStore
+	cadence time.Duration
+	now     func() time.Time
+	// scope resolves the connected broker session identity. Test seam;
+	// nil falls back to server.currentBrokerStateScope.
+	scope    func() brokerStateScope
 	snapshot rpc.TradeProposalSnapshot
-	ignored  map[string]struct{}
+	// ignored is keyed by scopedIgnoreKey (account|mode|proposal key):
+	// proposal keys hash contract identity only, so an unscoped set would
+	// suppress the same contract across paper/live sessions.
+	ignored map[string]struct{}
 }
 
 type proposalStore struct {
@@ -76,8 +82,15 @@ func (s *Server) installProposalEngine() {
 		ignored: map[string]struct{}{},
 	}
 	if snap, err := e.store.LoadCurrent(); err == nil && snap.Kind != "" {
-		snap.LoadedFromState = true
-		e.snapshot = snap
+		if proposalSnapshotAdoptable(snap) {
+			snap.LoadedFromState = true
+			e.snapshot = snap
+		} else {
+			// Legacy/unscoped snapshot (e.g. account_id "All" from the
+			// pre-v2 era): fail closed and let the first refresh
+			// regenerate for the connected session.
+			s.warnf("trade proposals: ignoring persisted snapshot without a concrete account/mode scope (account %q mode %q); regenerating on first refresh", snap.AccountID, snap.AccountMode)
+		}
 	}
 	s.tradeProposals = e
 }
@@ -109,6 +122,22 @@ func (e *proposalEngine) Snapshot(show bool) rpc.TradeProposalSnapshot {
 	if snap.Kind == "" {
 		snap = emptyProposalSnapshot(e.clock())
 	}
+	// Serve guard: proposals are generated from one account/mode session
+	// and must never surface under another (paper proposals shown on a
+	// live session was the originating incident). Proposal-free shells
+	// carry session-independent blockers and pass through unchanged.
+	if len(snap.Proposals) > 0 {
+		scope := e.currentScope()
+		if blockers := proposalScopeBlockers(snap.AccountID, snap.AccountMode, scope); len(blockers) > 0 {
+			shell := emptyProposalSnapshot(e.clock())
+			if brokerScopeConcrete(scope) {
+				shell.AccountID = scope.Account
+				shell.AccountMode = scope.Mode
+			}
+			shell.Blockers = blockers
+			return shell
+		}
+	}
 	if show {
 		e.appendShownEvents(snap)
 	}
@@ -137,15 +166,31 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		e.appendEvent(proposalEvent{At: now, Type: "policy-" + policyStatus.Status, PolicyID: policyStatus.PolicyID, PolicyVersion: policyStatus.PolicyVersion, PolicyFingerprint: policyStatus.Fingerprint, Message: policyStatus.Message})
 		return snap, nil
 	}
+	// Bind the refresh to the connected session identity before touching
+	// any account data. The aggregate "All" (or an empty / multi-account
+	// managedAccounts list, or an unknown paper/live mode) is not an
+	// account identity — proposals scoped to it would survive paper/live
+	// session switches, which is exactly the leak this gate prevents.
+	scope := e.currentScope()
+	if !brokerScopeConcrete(scope) {
+		snap := emptyProposalSnapshot(now)
+		snap.AutoTrade = autoStatus
+		snap.PolicyStatus = policyStatus
+		snap.Blockers = []rpc.TradingBlocker{proposalScopeUnscopedBlocker(scope)}
+		e.installSnapshot(snap, show)
+		return snap, nil
+	}
 	acct, err := e.server.handleAccountSummary(ctx)
 	if err != nil {
 		blockers := []rpc.TradingBlocker{{Code: "account_unavailable", Message: err.Error()}}
-		if snap, ok := e.preserveSnapshotOnRefreshFailure(autoStatus, policyStatus, blockers, show); ok {
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, autoStatus, policyStatus, blockers, show); ok {
 			return snap, nil
 		}
 		snap := emptyProposalSnapshot(now)
 		snap.AutoTrade = autoStatus
 		snap.PolicyStatus = policyStatus
+		snap.AccountID = scope.Account
+		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
 		e.installSnapshot(snap, show)
 		return snap, err
@@ -153,13 +198,14 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 	pos, err := e.server.handlePositionsList(ctx, &rpc.Request{})
 	if err != nil {
 		blockers := []rpc.TradingBlocker{{Code: "positions_unavailable", Message: err.Error()}}
-		if snap, ok := e.preserveSnapshotOnRefreshFailure(autoStatus, policyStatus, blockers, show); ok {
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, autoStatus, policyStatus, blockers, show); ok {
 			return snap, nil
 		}
 		snap := emptyProposalSnapshot(now)
 		snap.AutoTrade = autoStatus
 		snap.PolicyStatus = policyStatus
-		snap.AccountID = acct.AccountID
+		snap.AccountID = scope.Account
+		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
 		e.installSnapshot(snap, show)
 		return snap, err
@@ -178,7 +224,7 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		sources.MarketEvents = &fp
 	}
-	proposals := e.generate(policy, policyStatus, pos, sources, marketEvents, now)
+	proposals := e.generate(policy, policyStatus, pos, sources, marketEvents, scope, now)
 	slices.SortStableFunc(proposals, func(a, b rpc.TradeProposal) int {
 		if a.Score > b.Score {
 			return -1
@@ -188,7 +234,7 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		return strings.Compare(a.Key, b.Key)
 	})
-	revision := proposalRevision(policyStatus.Fingerprint, sources, proposals)
+	revision := proposalRevision(policyStatus.Fingerprint, sources, scope, proposals)
 	for i := range proposals {
 		proposals[i].Rank = i + 1
 		proposals[i].Revision = revision
@@ -198,7 +244,8 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		SchemaVersion:      rpc.TradeProposalSnapshotSchemaVersion,
 		AsOf:               now,
 		Revision:           revision,
-		AccountID:          acct.AccountID,
+		AccountID:          scope.Account,
+		AccountMode:        scope.Mode,
 		PolicyID:           policy.PolicyID,
 		PolicyVersion:      policy.PolicyVersion,
 		PolicyFingerprint:  policyStatus.Fingerprint,
@@ -210,17 +257,35 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 		Proposals:          proposals,
 		Counts:             proposalCounts(proposals),
 	}
-	e.installSnapshot(snap, show)
-	return snap, nil
+	return e.installScoped(snap, scope, show), nil
 }
 
-func (e *proposalEngine) generate(policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, now time.Time) []rpc.TradeProposal {
+// installScoped re-resolves the broker scope immediately before publishing a
+// generated snapshot. The un-pinned gateway can reconnect to a different TWS
+// session while Refresh fetches account/position data; installing that data
+// under the scope resolved at refresh start would persist proposals labeled
+// with one session's identity but built from another's positions. Fail
+// closed with a proposal-free shell instead.
+func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope brokerStateScope, show bool) rpc.TradeProposalSnapshot {
+	if current := e.currentScope(); !sameBrokerScope(current, scope) {
+		shell := emptyProposalSnapshot(snap.AsOf)
+		shell.AutoTrade = snap.AutoTrade
+		shell.PolicyStatus = snap.PolicyStatus
+		shell.Blockers = proposalScopeBlockers(scope.Account, scope.Mode, current)
+		e.installSnapshot(shell, show)
+		return shell
+	}
+	e.installSnapshot(snap, show)
+	return snap
+}
+
+func (e *proposalEngine) generate(policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
 	var out []rpc.TradeProposal
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
 			if p, ok := thetaProposal(policy, status, row, sources, now); ok {
 				applyMarketEventFlagsToProposal(&p, marketEvents)
-				if !e.isIgnored(p.Key) {
+				if !e.isIgnored(scope, p.Key) {
 					out = append(out, p)
 				}
 			}
@@ -230,7 +295,7 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 		for _, group := range pos.ByUnderlying {
 			if p, ok := riskReductionProposal(policy, status, group, sources, now); ok {
 				applyMarketEventFlagsToProposal(&p, marketEvents)
-				if !e.isIgnored(p.Key) {
+				if !e.isIgnored(scope, p.Key) {
 					out = append(out, p)
 				}
 			}
@@ -248,7 +313,7 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 					for _, b := range e.duplicateProtectiveBlockers(p) {
 						proposalBlock(&p, b.Code, b.Message)
 					}
-					if !e.isIgnored(p.Key) {
+					if !e.isIgnored(scope, p.Key) {
 						out = append(out, p)
 					}
 				}
@@ -259,7 +324,7 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 			for _, row := range pos.Options {
 				if p, ok := trailingStopOptionProposal(policy, status, row, sources, now, multiLegBySymbol[strings.ToUpper(strings.TrimSpace(row.Symbol))], e.resolveRowMinTick(row)); ok {
 					applyMarketEventFlagsToProposal(&p, marketEvents)
-					if !e.isIgnored(p.Key) {
+					if !e.isIgnored(scope, p.Key) {
 						out = append(out, p)
 					}
 				}
@@ -732,6 +797,15 @@ func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.Trad
 	if snap.LoadedFromState || e.clock().Sub(snap.AsOf) > maxAge {
 		return rpc.TradeProposal{}, nil, false
 	}
+	// The fast path may only act on a cached snapshot generated under the
+	// currently-connected account/mode session. Mismatch or an unscoped
+	// session fails closed; proposal-free shells carry session-independent
+	// blockers and are handled below.
+	if len(snap.Proposals) > 0 {
+		if blockers := proposalScopeBlockers(snap.AccountID, snap.AccountMode, e.currentScope()); len(blockers) > 0 {
+			return rpc.TradeProposal{}, blockers, true
+		}
+	}
 	if len(snap.Blockers) > 0 && len(snap.Proposals) == 0 {
 		return rpc.TradeProposal{}, snap.Blockers, true
 	}
@@ -897,10 +971,15 @@ func previewNotSubmitEligibleBlockers() []rpc.TradingBlocker {
 func (e *proposalEngine) Ignore(p rpc.TradeProposalIgnoreParams) rpc.TradeProposalIgnoreResult {
 	now := e.clock()
 	key := strings.TrimSpace(p.Key)
+	scope := e.currentScope()
 	e.mu.Lock()
-	e.ignored[key] = struct{}{}
+	e.ignored[scopedIgnoreKey(scope, key)] = struct{}{}
 	e.mu.Unlock()
-	e.appendEvent(proposalEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "proposal ignored"})
+	ev := proposalEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "proposal ignored"}
+	if brokerScopeConcrete(scope) {
+		ev.AccountID = scope.Account
+	}
+	e.appendEvent(ev)
 	return rpc.TradeProposalIgnoreResult{Accepted: true, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "proposal ignored", AsOf: now}
 }
 
@@ -1169,11 +1248,21 @@ func (e *proposalEngine) replaceSnapshot(snap rpc.TradeProposalSnapshot) {
 	}
 }
 
-func (e *proposalEngine) preserveSnapshotOnRefreshFailure(autoStatus rpc.AutoTradeStatus, policyStatus rpc.ProtectionPolicyStatus, blockers []rpc.TradingBlocker, show bool) (rpc.TradeProposalSnapshot, bool) {
+func (e *proposalEngine) preserveSnapshotOnRefreshFailure(scope brokerStateScope, autoStatus rpc.AutoTradeStatus, policyStatus rpc.ProtectionPolicyStatus, blockers []rpc.TradingBlocker, show bool) (rpc.TradeProposalSnapshot, bool) {
 	e.mu.Lock()
 	snap := cloneProposalSnapshot(e.snapshot)
 	e.mu.Unlock()
 	if !proposalSnapshotUsable(snap) || !sameProposalPolicy(snap, policyStatus) {
+		return rpc.TradeProposalSnapshot{}, false
+	}
+	// Preserving last-good proposals through a transient fetch failure is
+	// only safe when they were generated for the same session: a paper
+	// snapshot preserved through the reconnect blips of a paper→live
+	// switch would resurface paper proposals under live.
+	if !sameBrokerScope(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode}, scope) {
+		if e.server != nil {
+			e.server.warnf("trade proposals: dropping preserved snapshot on refresh failure: snapshot scope %q/%q does not match connected session %q/%q", snap.AccountID, snap.AccountMode, scope.Account, scope.Mode)
+		}
 		return rpc.TradeProposalSnapshot{}, false
 	}
 	snap.AutoTrade = autoStatus
@@ -1233,16 +1322,72 @@ func proposalEventForProposal(eventType string, prop rpc.TradeProposal, at time.
 }
 
 func (e *proposalEngine) appendEvent(ev proposalEvent) {
+	if ev.AccountID == "" {
+		e.mu.Lock()
+		ev.AccountID = e.snapshot.AccountID
+		e.mu.Unlock()
+	}
 	if err := e.store.AppendEvent(ev); err != nil {
 		e.server.warnf("trade proposals: append event: %v", err)
 	}
 }
 
-func (e *proposalEngine) isIgnored(key string) bool {
+func (e *proposalEngine) isIgnored(scope brokerStateScope, key string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, ok := e.ignored[key]
+	_, ok := e.ignored[scopedIgnoreKey(scope, key)]
 	return ok
+}
+
+func scopedIgnoreKey(scope brokerStateScope, key string) string {
+	return strings.ToUpper(strings.TrimSpace(scope.Account)) + "|" + strings.ToLower(strings.TrimSpace(scope.Mode)) + "|" + key
+}
+
+// currentScope resolves the connected broker session identity (account +
+// paper/live mode) that scoped proposal state binds to.
+func (e *proposalEngine) currentScope() brokerStateScope {
+	if e == nil {
+		return brokerStateScope{}
+	}
+	if e.scope != nil {
+		return e.scope()
+	}
+	return e.server.currentBrokerStateScope()
+}
+
+// proposalSnapshotAdoptable reports whether a persisted snapshot may seed
+// the in-memory state at startup. The gate is the scope being concrete,
+// not the schema version string: legacy v1 snapshots have no account_mode
+// and "All"-scoped snapshots have no concrete account, so both fail closed
+// and the first refresh regenerates state for the connected session.
+func proposalSnapshotAdoptable(snap rpc.TradeProposalSnapshot) bool {
+	return snap.Kind == rpc.TradeProposalSnapshotKind &&
+		brokerScopeConcrete(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode})
+}
+
+// proposalScopeBlockers reports why a snapshot bound to snapAccount/snapMode
+// must not be served or acted on under the current broker scope; nil means
+// it matches.
+func proposalScopeBlockers(snapAccount, snapMode string, scope brokerStateScope) []rpc.TradingBlocker {
+	if !brokerScopeConcrete(scope) {
+		return []rpc.TradingBlocker{proposalScopeUnscopedBlocker(scope)}
+	}
+	if !sameBrokerScope(brokerStateScope{Account: snapAccount, Mode: snapMode}, scope) {
+		return []rpc.TradingBlocker{{
+			Code:    "proposal_scope_mismatch",
+			Message: fmt.Sprintf("proposal snapshot was generated for account %q mode %q but the connected session is account %q mode %q", snapAccount, snapMode, scope.Account, scope.Mode),
+			Action:  "Refresh proposals to regenerate them for the connected session.",
+		}}
+	}
+	return nil
+}
+
+func proposalScopeUnscopedBlocker(scope brokerStateScope) rpc.TradingBlocker {
+	return rpc.TradingBlocker{
+		Code:    "account_identity_unscoped",
+		Message: fmt.Sprintf("connected session has no concrete single-account identity (observed account %q mode %q); protection proposals are scoped per account and paper/live mode", scope.Account, scope.Mode),
+		Action:  "Reconnect TWS/Gateway with a single concrete account, then refresh proposals.",
+	}
 }
 
 func (e *proposalEngine) clock() time.Time {
@@ -1279,7 +1424,7 @@ func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
 	return out
 }
 
-func proposalRevision(policy rpc.Fingerprint, sources rpc.TradeProposalSourceFingerprints, proposals []rpc.TradeProposal) string {
+func proposalRevision(policy rpc.Fingerprint, sources rpc.TradeProposalSourceFingerprints, scope brokerStateScope, proposals []rpc.TradeProposal) string {
 	stableSources := sources
 	// Regime and market-event evidence are informative for ranking and blockers,
 	// but their source-health fields can advance between list and preview. Keep
@@ -1287,11 +1432,17 @@ func proposalRevision(policy rpc.Fingerprint, sources rpc.TradeProposalSourceFin
 	// not false-stale while refreshed proposals still carry live blockers.
 	stableSources.Regime = nil
 	stableSources.MarketEvents = nil
+	// Account/mode enter the revision directly: the account and positions
+	// fingerprints hash risk *buckets*, so two sessions with bucket-equal
+	// exposure could otherwise collide on the same revision across a
+	// paper/live switch.
 	projection := struct {
 		Policy   rpc.Fingerprint                     `json:"policy"`
+		Account  string                              `json:"account"`
+		Mode     string                              `json:"mode"`
 		Sources  rpc.TradeProposalSourceFingerprints `json:"sources"`
 		Proposal []string                            `json:"proposal"`
-	}{Policy: policy, Sources: stableSources}
+	}{Policy: policy, Account: strings.ToUpper(strings.TrimSpace(scope.Account)), Mode: strings.ToLower(strings.TrimSpace(scope.Mode)), Sources: stableSources}
 	for _, p := range proposals {
 		projection.Proposal = append(projection.Proposal, p.Key+":"+strconv.Itoa(p.Quantity)+":"+p.PositionEffect)
 	}

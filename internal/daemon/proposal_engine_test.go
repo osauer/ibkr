@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/config"
+	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -226,11 +228,16 @@ func TestProposalEnginePreservesSnapshotOnTransientRefreshFailure(t *testing.T) 
 			eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
 		},
 		now: func() time.Time { return now },
+		scope: func() brokerStateScope {
+			return brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
+		},
 		snapshot: rpc.TradeProposalSnapshot{
 			Kind:              rpc.TradeProposalSnapshotKind,
 			SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
 			AsOf:              oldAt,
 			Revision:          "sha256:rev",
+			AccountID:         "DU1234567",
+			AccountMode:       rpc.AccountModePaper,
 			PolicyID:          "protection-mvp",
 			PolicyVersion:     1,
 			PolicyFingerprint: policyFP,
@@ -246,6 +253,7 @@ func TestProposalEnginePreservesSnapshotOnTransientRefreshFailure(t *testing.T) 
 	}
 
 	snap, ok := engine.preserveSnapshotOnRefreshFailure(
+		brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper},
 		rpc.AutoTradeStatus{Trading: rpc.TradingStatus{Mode: "paper", CanPreview: true}},
 		rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault, PolicyID: "protection-mvp", PolicyVersion: 1, Fingerprint: policyFP},
 		[]rpc.TradingBlocker{{Code: "account_unavailable", Message: "ibkr connection unavailable"}},
@@ -581,6 +589,8 @@ func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
 			SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
 			AsOf:              now,
 			Revision:          "sha256:rev",
+			AccountID:         "DU1234567",
+			AccountMode:       rpc.AccountModePaper,
 			PolicyID:          "protection-mvp",
 			PolicyVersion:     1,
 			PolicyFingerprint: policyFingerprint,
@@ -658,6 +668,8 @@ func TestTrailingStopFastPathPreviewGTCEndToEnd(t *testing.T) {
 			SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
 			AsOf:              now,
 			Revision:          "sha256:rev",
+			AccountID:         "DU1234567",
+			AccountMode:       rpc.AccountModePaper,
 			PolicyID:          "protection-mvp",
 			PolicyVersion:     1,
 			PolicyFingerprint: policyFingerprint,
@@ -726,6 +738,8 @@ func TestTrailingStopPreviewBlocksWhenWhatIfNotSubmitEligible(t *testing.T) {
 			SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
 			AsOf:              now,
 			Revision:          "sha256:rev",
+			AccountID:         "DU1234567",
+			AccountMode:       rpc.AccountModePaper,
 			PolicyID:          "protection-mvp",
 			PolicyVersion:     1,
 			PolicyFingerprint: policyFingerprint,
@@ -782,6 +796,7 @@ func preservedProposalSnapshot(now time.Time, prop rpc.TradeProposal, blockers [
 		AsOf:              now,
 		Revision:          prop.Revision,
 		AccountID:         "DU1234567",
+		AccountMode:       rpc.AccountModePaper,
 		PolicyID:          prop.PolicyID,
 		PolicyVersion:     prop.PolicyVersion,
 		PolicyFingerprint: prop.PolicyFingerprint,
@@ -877,14 +892,15 @@ func TestProposalRevisionIgnoresRegimeLifecycleChurn(t *testing.T) {
 		Regime:    &rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime-a"},
 	}
 	proposals := []rpc.TradeProposal{{Key: "theta_hygiene:abc", Quantity: 1, PositionEffect: rpc.OrderPositionEffectClose}}
-	a := proposalRevision(policy, sources, proposals)
+	scope := brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}
+	a := proposalRevision(policy, sources, scope, proposals)
 	sources.Regime = &rpc.Fingerprint{Version: rpc.RegimeFingerprintVersion, Key: "sha256:regime-b"}
-	b := proposalRevision(policy, sources, proposals)
+	b := proposalRevision(policy, sources, scope, proposals)
 	if a != b {
 		t.Fatalf("revision changed on regime-only churn: %s != %s", a, b)
 	}
 	sources.Positions = &rpc.Fingerprint{Version: rpc.PositionsFingerprintVersion, Key: "sha256:positions-b"}
-	c := proposalRevision(policy, sources, proposals)
+	c := proposalRevision(policy, sources, scope, proposals)
 	if c == a {
 		t.Fatalf("revision did not change on positions fingerprint change: %s", c)
 	}
@@ -898,9 +914,10 @@ func TestProposalRevisionIgnoresMarketEventSourceChurn(t *testing.T) {
 		MarketEvents: &rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-a"},
 	}
 	proposals := []rpc.TradeProposal{{Key: "risk_reduction:abc", Quantity: 1, PositionEffect: rpc.OrderPositionEffectReduce}}
-	a := proposalRevision(policy, sources, proposals)
+	scope := brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}
+	a := proposalRevision(policy, sources, scope, proposals)
 	sources.MarketEvents = &rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-b"}
-	if b := proposalRevision(policy, sources, proposals); b != a {
+	if b := proposalRevision(policy, sources, scope, proposals); b != a {
 		t.Fatalf("revision changed on market-event-only churn: %s != %s", a, b)
 	}
 }
@@ -1064,5 +1081,377 @@ func TestProposalFillOutcomeCarriesPolicyIdentity(t *testing.T) {
 	}
 	if mark.ExecutionPnL != 5 {
 		t.Fatalf("execution pnl=%.2f, want 5.00", mark.ExecutionPnL)
+	}
+}
+
+// newProposalScopeTestServer builds the minimal Server a proposalEngine
+// Refresh needs before it touches the gateway: resolved config (trading mode
+// defaults to disabled, so tradingStatus never reaches the order journal),
+// an embedded-default protection policy, and a discovery endpoint that
+// currentBrokerStateScope falls back to while no connector is attached.
+func newProposalScopeTestServer(t *testing.T, ep discover.Endpoint, now time.Time) *Server {
+	t.Helper()
+	pm := newProtectionPolicyManager("", false, time.Second, func() time.Time { return now })
+	pm.reload()
+	return &Server{
+		cfg:                &config.Resolved{},
+		protectionPolicies: pm,
+		endpoint:           ep,
+		now:                func() time.Time { return now },
+	}
+}
+
+func newProposalScopeTestEngine(t *testing.T, srv *Server) *proposalEngine {
+	t.Helper()
+	return &proposalEngine{
+		server:  srv,
+		store:   testProposalStore(t),
+		now:     srv.now,
+		ignored: map[string]struct{}{},
+	}
+}
+
+func scopedTestSnapshot(account, mode string, asOf time.Time) rpc.TradeProposalSnapshot {
+	return rpc.TradeProposalSnapshot{
+		Kind:          rpc.TradeProposalSnapshotKind,
+		SchemaVersion: rpc.TradeProposalSnapshotSchemaVersion,
+		AsOf:          asOf,
+		Revision:      "sha256:test",
+		AccountID:     account,
+		AccountMode:   mode,
+		Proposals: []rpc.TradeProposal{{
+			Key:            "theta_hygiene:abc",
+			Revision:       "sha256:test",
+			State:          rpc.TradeProposalStateGenerated,
+			Bucket:         rpc.TradeProposalBucketThetaHygiene,
+			Symbol:         "SAP",
+			SecType:        "STK",
+			Action:         rpc.OrderActionSell,
+			Quantity:       1,
+			MaxQuantity:    1,
+			PositionEffect: rpc.OrderPositionEffectClose,
+		}},
+	}
+}
+
+func TestBrokerScopeConcreteRejectsAggregateIdentities(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		scope brokerStateScope
+		want  bool
+	}{
+		{"paper account", brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, true},
+		{"live account", brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive}, true},
+		{"aggregate All", brokerStateScope{Account: "All", Mode: rpc.AccountModeLive}, false},
+		{"aggregate All padded", brokerStateScope{Account: " All ", Mode: rpc.AccountModeLive}, false},
+		{"empty account", brokerStateScope{Account: "", Mode: rpc.AccountModeLive}, false},
+		{"multi-account list", brokerStateScope{Account: "DU7654321,U1234567", Mode: rpc.AccountModeLive}, false},
+		{"unknown mode", brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeUnknown}, false},
+		{"empty mode", brokerStateScope{Account: "U1234567", Mode: ""}, false},
+	}
+	for _, tc := range cases {
+		if got := brokerScopeConcrete(tc.scope); got != tc.want {
+			t.Errorf("%s: brokerScopeConcrete(%+v) = %v, want %v", tc.name, tc.scope, got, tc.want)
+		}
+	}
+}
+
+func TestProposalRefreshRejectsUnscopedAccountIdentity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	// Aggregate "All" account on a live port: the exact identity the
+	// leaked snapshot was persisted under. The nil connector means a
+	// pass-through gate would fail with account_unavailable instead —
+	// asserting on the blocker code proves the scope gate runs first.
+	srv := newProposalScopeTestServer(t, discover.Endpoint{Host: "127.0.0.1", Port: 7496, Account: "All"}, now)
+	e := newProposalScopeTestEngine(t, srv)
+
+	snap, err := e.Refresh(context.Background(), false)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if len(snap.Proposals) != 0 {
+		t.Fatalf("proposals = %+v, want none", snap.Proposals)
+	}
+	if !hasBlocker(snap.Blockers, "account_identity_unscoped") {
+		t.Fatalf("blockers = %+v, want account_identity_unscoped", snap.Blockers)
+	}
+	if hasBlocker(snap.Blockers, "account_unavailable") {
+		t.Fatalf("blockers = %+v, scope gate must run before the account summary", snap.Blockers)
+	}
+	if snap.AccountID != "" || snap.AccountMode != "" {
+		t.Fatalf("unscoped shell stamped with identity %q/%q, want empty", snap.AccountID, snap.AccountMode)
+	}
+}
+
+func TestProposalSnapshotServeRefusesScopeMismatch(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	e.snapshot = scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
+	e.scope = func() brokerStateScope { return brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive} }
+
+	got := e.Snapshot(true)
+	if len(got.Proposals) != 0 {
+		t.Fatalf("served %d paper proposals into a live session", len(got.Proposals))
+	}
+	if !hasBlocker(got.Blockers, "proposal_scope_mismatch") {
+		t.Fatalf("blockers = %+v, want proposal_scope_mismatch", got.Blockers)
+	}
+	if got.AccountID != "U1234567" || got.AccountMode != rpc.AccountModeLive {
+		t.Fatalf("refusal shell identity %q/%q, want connected session", got.AccountID, got.AccountMode)
+	}
+	// Refusal must not mark the stored proposals as shown nor overwrite
+	// the stored snapshot/persisted file with the shell.
+	if raw, err := os.ReadFile(e.store.eventsPath); err == nil && strings.Contains(string(raw), `"shown"`) {
+		t.Fatalf("refused serve appended shown events: %s", raw)
+	}
+	if _, err := os.Stat(e.store.currentPath); !os.IsNotExist(err) {
+		t.Fatalf("refused serve persisted a snapshot: stat err=%v", err)
+	}
+	if e.snapshot.AccountID != "DU7654321" || len(e.snapshot.Proposals) != 1 {
+		t.Fatalf("refused serve mutated stored snapshot: %+v", e.snapshot)
+	}
+
+	// Matching session serves the stored proposals (case-insensitively).
+	e.scope = func() brokerStateScope { return brokerStateScope{Account: "du7654321", Mode: rpc.AccountModePaper} }
+	got = e.Snapshot(false)
+	if len(got.Proposals) != 1 || len(got.Blockers) != 0 {
+		t.Fatalf("matching scope refused: proposals=%d blockers=%+v", len(got.Proposals), got.Blockers)
+	}
+}
+
+func TestProposalSnapshotServeRefusesWhenCurrentScopeUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	e.snapshot = scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
+	e.scope = func() brokerStateScope { return brokerStateScope{} }
+
+	got := e.Snapshot(false)
+	if len(got.Proposals) != 0 {
+		t.Fatalf("served proposals while session identity is unknown: %+v", got.Proposals)
+	}
+	if !hasBlocker(got.Blockers, "account_identity_unscoped") {
+		t.Fatalf("blockers = %+v, want account_identity_unscoped (not a fabricated mismatch)", got.Blockers)
+	}
+}
+
+func TestProposalServeGuardPassesBlockerShells(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	shell := emptyProposalSnapshot(now)
+	shell.Blockers = []rpc.TradingBlocker{{Code: "proposals_disabled", Message: "manual protection proposals are disabled by config"}}
+	e.snapshot = shell
+	e.scope = func() brokerStateScope { return brokerStateScope{} }
+
+	got := e.Snapshot(false)
+	if !hasBlocker(got.Blockers, "proposals_disabled") {
+		t.Fatalf("blockers = %+v, want session-independent shell served as-is", got.Blockers)
+	}
+}
+
+func TestProposalInstallScopedFailsClosedOnScopeChange(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	// Session switched between refresh-start (paper scope the data was
+	// fetched under) and install: the generated snapshot must never be
+	// installed or persisted.
+	e.scope = func() brokerStateScope { return brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive} }
+	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
+
+	got := e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false)
+	if len(got.Proposals) != 0 || !hasBlocker(got.Blockers, "proposal_scope_mismatch") {
+		t.Fatalf("installScoped result = %+v, want proposal_scope_mismatch shell", got)
+	}
+	raw, err := os.ReadFile(e.store.currentPath)
+	if err != nil {
+		t.Fatalf("read persisted snapshot: %v", err)
+	}
+	if !strings.Contains(string(raw), "proposal_scope_mismatch") || strings.Contains(string(raw), "theta_hygiene:abc") {
+		t.Fatalf("persisted snapshot carries stale-scope proposals: %s", raw)
+	}
+
+	// Stable scope installs the generated snapshot unchanged.
+	e.scope = func() brokerStateScope { return brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper} }
+	got = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false)
+	if len(got.Proposals) != 1 || len(got.Blockers) != 0 {
+		t.Fatalf("stable scope install = %+v, want generated snapshot", got)
+	}
+}
+
+func TestInstallProposalEngineFailsClosedOnLegacySnapshot(t *testing.T) {
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	writeCurrent := func(t *testing.T, body string) *Server {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", dir)
+		path := filepath.Join(dir, "ibkr", "trade-proposals-current.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+		srv.installProposalEngine()
+		return srv
+	}
+
+	// The exact unscoped shape from the originating incident: schema v1,
+	// account_id "All", no account_mode.
+	legacy := `{"kind":"ibkr.trade_proposal_snapshot","schema_version":"trade-proposal-snapshot-v1","as_of":"2026-06-10T12:54:00Z","revision":"sha256:legacy","account_id":"All","policy_id":"protection-mvp","policy_status":{"status":"default"},"auto_trade":{"trading":{},"proposals_enabled":true,"enabled":false,"auto_submit":false,"fast_path_enabled":true,"hot_reload":true,"blocked":false,"policy":{"status":"default"}},"trading":{},"proposals":[{"key":"theta_hygiene:abc","revision":"sha256:legacy","state":"generated","bucket":"theta_hygiene","rank":1,"symbol":"SAP","sec_type":"STK","action":"SELL","quantity":1,"max_quantity":1,"position_quantity":1,"position_effect":"close","order_type":"LMT","tif":"DAY","outside_rth":false,"contract":{"symbol":"SAP"},"reason":"test"}],"counts":{"total":1,"actionable":1,"theta_hygiene":1,"risk_reduction":0}}`
+	srv := writeCurrent(t, legacy)
+	if srv.tradeProposals == nil {
+		t.Fatal("proposal engine not installed")
+	}
+	if got := srv.tradeProposals.snapshot; got.Kind != "" {
+		t.Fatalf("legacy unscoped snapshot adopted at load: %+v", got)
+	}
+
+	scoped, err := json.Marshal(scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv = writeCurrent(t, string(scoped))
+	if got := srv.tradeProposals.snapshot; !got.LoadedFromState || got.AccountID != "DU7654321" || got.AccountMode != rpc.AccountModePaper {
+		t.Fatalf("scoped v2 snapshot not adopted: %+v", got)
+	}
+
+	shell, err := json.Marshal(emptyProposalSnapshot(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv = writeCurrent(t, string(shell))
+	if got := srv.tradeProposals.snapshot; got.Kind != "" {
+		t.Fatalf("identity-less v2 shell adopted at load: %+v", got)
+	}
+}
+
+func TestProposalSubmitBlockedOnUnscopedAccountIdentity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{Host: "127.0.0.1", Port: 7496, Account: "All"}, now)
+	e := newProposalScopeTestEngine(t, srv)
+
+	res, err := e.Submit(context.Background(), rpc.TradeProposalSubmitParams{Key: "theta_hygiene:abc", Revision: "sha256:test", FastPath: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if res.Accepted {
+		t.Fatal("submit accepted under unscoped account identity")
+	}
+	if !hasBlocker(res.Blockers, "account_identity_unscoped") {
+		t.Fatalf("blockers = %+v, want account_identity_unscoped", res.Blockers)
+	}
+	if res.Preview != nil || res.Place != nil {
+		t.Fatalf("submit reached preview/place despite unscoped identity: %+v", res)
+	}
+}
+
+func TestProposalFastPathPreviewRefusesScopeMismatch(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	e.snapshot = scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
+	e.scope = func() brokerStateScope { return brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive} }
+
+	prop, blockers, ok := e.fastPathPreviewProposal("theta_hygiene:abc", "sha256:test")
+	if !ok {
+		t.Fatal("fast path fell through to revalidation; scope mismatch must fail closed in the fast path")
+	}
+	if prop.Key != "" {
+		t.Fatalf("fast path returned a foreign-session proposal: %+v", prop)
+	}
+	if !hasBlocker(blockers, "proposal_scope_mismatch") {
+		t.Fatalf("blockers = %+v, want proposal_scope_mismatch", blockers)
+	}
+}
+
+func TestProposalPreserveOnFailureDropsForeignScopeSnapshot(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
+	snap.PolicyStatus = rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault}
+	e.snapshot = snap
+
+	// Paper→live switch with a transient account fetch failure: the old
+	// paper snapshot must not be preserved into the live session.
+	_, ok := e.preserveSnapshotOnRefreshFailure(
+		brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive},
+		rpc.AutoTradeStatus{},
+		rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault},
+		[]rpc.TradingBlocker{{Code: "account_unavailable", Message: "transient"}},
+		false,
+	)
+	if ok {
+		t.Fatal("foreign-scope snapshot preserved across a session switch")
+	}
+
+	// Same session: preservation still works.
+	preserved, ok := e.preserveSnapshotOnRefreshFailure(
+		brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper},
+		rpc.AutoTradeStatus{},
+		rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault},
+		[]rpc.TradingBlocker{{Code: "account_unavailable", Message: "transient"}},
+		false,
+	)
+	if !ok || len(preserved.Proposals) != 1 {
+		t.Fatalf("same-scope snapshot not preserved: ok=%v %+v", ok, preserved)
+	}
+}
+
+func TestProposalIgnoreIsScopedPerAccountMode(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	paper := brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}
+	live := brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive}
+
+	e.scope = func() brokerStateScope { return paper }
+	e.Ignore(rpc.TradeProposalIgnoreParams{Key: "theta_hygiene:abc", Reason: "test"})
+	if !e.isIgnored(paper, "theta_hygiene:abc") {
+		t.Fatal("ignore not effective in its own scope")
+	}
+	if e.isIgnored(live, "theta_hygiene:abc") {
+		t.Fatal("paper ignore suppressed the same contract on the live session")
+	}
+
+	// Ignores recorded while the session identity is unknown must never
+	// suppress proposals in a concrete session.
+	e.scope = func() brokerStateScope { return brokerStateScope{} }
+	e.Ignore(rpc.TradeProposalIgnoreParams{Key: "theta_hygiene:def"})
+	if e.isIgnored(paper, "theta_hygiene:def") || e.isIgnored(live, "theta_hygiene:def") {
+		t.Fatal("unscoped ignore leaked into a concrete session")
+	}
+}
+
+func TestProposalRevisionChangesWithScope(t *testing.T) {
+	t.Parallel()
+	policy := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
+	sources := rpc.TradeProposalSourceFingerprints{
+		Account:   &rpc.Fingerprint{Version: rpc.AccountFingerprintVersion, Key: "sha256:account"},
+		Positions: &rpc.Fingerprint{Version: rpc.PositionsFingerprintVersion, Key: "sha256:positions"},
+	}
+	proposals := []rpc.TradeProposal{{Key: "theta_hygiene:abc", Quantity: 1, PositionEffect: rpc.OrderPositionEffectClose}}
+	paper := proposalRevision(policy, sources, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, proposals)
+	live := proposalRevision(policy, sources, brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive}, proposals)
+	if paper == live {
+		t.Fatalf("revision identical across sessions with bucket-equal sources: %s", paper)
+	}
+	again := proposalRevision(policy, sources, brokerStateScope{Account: "du7654321", Mode: rpc.AccountModePaper}, proposals)
+	if paper != again {
+		t.Fatalf("revision not case-stable for the same scope: %s != %s", paper, again)
 	}
 }
