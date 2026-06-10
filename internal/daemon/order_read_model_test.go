@@ -417,6 +417,41 @@ func TestOrderViewWriteEligibilityRequiresBrokerConfirmedState(t *testing.T) {
 	}
 }
 
+func TestOrderViewModifyEligibleTrailTIF(t *testing.T) {
+	t.Parallel()
+	base := rpc.OrderView{
+		Open:            true,
+		ReservedOrderID: 1001,
+		SecType:         "STK",
+		SendState:       orderSendStateBrokerAcknowledged,
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+	}
+	cases := []struct {
+		name      string
+		orderType string
+		secType   string
+		tif       string
+		want      bool
+	}{
+		{"lmt day", rpc.OrderTypeLMT, "STK", rpc.OrderTIFDay, true},
+		{"lmt gtc stays ineligible", rpc.OrderTypeLMT, "STK", rpc.OrderTIFGTC, false},
+		{"trail day", rpc.OrderTypeTRAIL, "STK", rpc.OrderTIFDay, true},
+		{"trail gtc", rpc.OrderTypeTRAIL, "STK", rpc.OrderTIFGTC, true},
+		{"trail limit gtc", rpc.OrderTypeTRAILLIMIT, "STK", rpc.OrderTIFGTC, true},
+		{"option trail stays ineligible", rpc.OrderTypeTRAIL, "OPT", rpc.OrderTIFGTC, false},
+		{"unsupported order type", "STP", "STK", rpc.OrderTIFDay, false},
+	}
+	for _, tc := range cases {
+		view := base
+		view.OrderType = tc.orderType
+		view.SecType = tc.secType
+		view.TIF = tc.tif
+		if got := orderViewModifyEligible(view); got != tc.want {
+			t.Fatalf("%s: orderViewModifyEligible = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestOrderJournalEventFromLifecycle(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 5, 28, 9, 31, 0, 0, time.UTC)

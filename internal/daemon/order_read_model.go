@@ -656,13 +656,24 @@ func orderViewIsOpen(view rpc.OrderView) bool {
 }
 
 func orderViewModifyEligible(view rpc.OrderView) bool {
-	return view.Open &&
-		view.ReservedOrderID > 0 &&
-		orderViewBrokerConfirmedForWrite(view) &&
-		view.LifecycleStatus != rpc.OrderLifecyclePendingCancel &&
-		strings.EqualFold(view.SecType, "STK") &&
-		strings.EqualFold(view.OrderType, rpc.OrderTypeLMT) &&
-		strings.EqualFold(view.TIF, rpc.OrderTIFDay)
+	if !view.Open ||
+		view.ReservedOrderID <= 0 ||
+		!orderViewBrokerConfirmedForWrite(view) ||
+		view.LifecycleStatus == rpc.OrderLifecyclePendingCancel ||
+		!strings.EqualFold(view.SecType, "STK") {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(view.OrderType)) {
+	case rpc.OrderTypeLMT:
+		return strings.EqualFold(view.TIF, rpc.OrderTIFDay)
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		// Protective trails are amended in place (same broker order ID) so a
+		// re-price never opens an unprotected cancel/replace window. Live
+		// protection policy issues GTC trails, so GTC stays modify-eligible.
+		return strings.EqualFold(view.TIF, rpc.OrderTIFDay) || strings.EqualFold(view.TIF, rpc.OrderTIFGTC)
+	default:
+		return false
+	}
 }
 
 func orderViewCancelEligible(view rpc.OrderView) bool {

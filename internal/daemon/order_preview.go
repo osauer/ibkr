@@ -49,20 +49,23 @@ type orderPreviewTokenPayload struct {
 }
 
 type orderPreviewReplaceTarget struct {
-	OrderRef        string  `json:"order_ref,omitempty"`
-	ReservedOrderID int     `json:"reserved_order_id,omitempty"`
-	PermID          int     `json:"perm_id,omitempty"`
-	ClientID        int     `json:"client_id,omitempty"`
-	Account         string  `json:"account,omitempty"`
-	Endpoint        string  `json:"endpoint,omitempty"`
-	Mode            string  `json:"mode,omitempty"`
-	Status          string  `json:"status,omitempty"`
-	LifecycleStatus string  `json:"lifecycle_status,omitempty"`
-	Quantity        float64 `json:"quantity,omitempty"`
-	Filled          float64 `json:"filled,omitempty"`
-	Remaining       float64 `json:"remaining,omitempty"`
-	LimitPrice      float64 `json:"limit_price,omitempty"`
-	OutsideRTH      bool    `json:"outside_rth,omitempty"`
+	OrderRef        string              `json:"order_ref,omitempty"`
+	ReservedOrderID int                 `json:"reserved_order_id,omitempty"`
+	PermID          int                 `json:"perm_id,omitempty"`
+	ClientID        int                 `json:"client_id,omitempty"`
+	Account         string              `json:"account,omitempty"`
+	Endpoint        string              `json:"endpoint,omitempty"`
+	Mode            string              `json:"mode,omitempty"`
+	Status          string              `json:"status,omitempty"`
+	LifecycleStatus string              `json:"lifecycle_status,omitempty"`
+	OrderType       string              `json:"order_type,omitempty"`
+	TIF             string              `json:"tif,omitempty"`
+	Quantity        float64             `json:"quantity,omitempty"`
+	Filled          float64             `json:"filled,omitempty"`
+	Remaining       float64             `json:"remaining,omitempty"`
+	LimitPrice      float64             `json:"limit_price,omitempty"`
+	Trail           *rpc.OrderTrailSpec `json:"trail,omitempty"`
+	OutsideRTH      bool                `json:"outside_rth,omitempty"`
 }
 
 type orderTokenSigner struct {
@@ -277,6 +280,11 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		return nil, errBadRequest("order preview supports LMT, TRAIL, and TRAIL LIMIT orders only")
 	}
 	tif := strings.ToUpper(strings.TrimSpace(p.TIF))
+	if tif == "" && scope == rpc.OrderTokenScopeModify {
+		// Modify previews freeze TIF to the open order; defaulting to DAY here
+		// would reject every GTC protective-trail replacement at the draft gate.
+		tif = strings.ToUpper(strings.TrimSpace(replaceView.TIF))
+	}
 	if tif == "" {
 		tif = rpc.OrderTIFDay
 	}
@@ -1283,10 +1291,13 @@ func replaceTargetFromView(view rpc.OrderView) orderPreviewReplaceTarget {
 		Mode:            view.Mode,
 		Status:          view.Status,
 		LifecycleStatus: view.LifecycleStatus,
+		OrderType:       view.OrderType,
+		TIF:             view.TIF,
 		Quantity:        view.Quantity,
 		Filled:          view.Filled,
 		Remaining:       view.Remaining,
 		LimitPrice:      view.LimitPrice,
+		Trail:           cloneTrailSpec(view.Trail),
 		OutsideRTH:      view.OutsideRTH,
 	}
 }

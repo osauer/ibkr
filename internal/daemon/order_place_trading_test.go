@@ -308,6 +308,168 @@ func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 	}
 }
 
+func seedTrailGTCOrderJournal(t *testing.T, srv *Server, now time.Time) {
+	t.Helper()
+	if err := srv.orderJournal.Append(orderJournalEvent{
+		At:              now.Add(-time.Minute),
+		Type:            orderJournalEventBrokerAcknowledged,
+		OrderRef:        "ord-trail",
+		PreviewTokenID:  "tok-1",
+		ReservedOrderID: 1001,
+		ClientID:        31,
+		Account:         "DU1234567",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Symbol:          "DTE",
+		SecType:         "STK",
+		Exchange:        "IBIS",
+		Currency:        "EUR",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeTRAIL,
+		TIF:             rpc.OrderTIFGTC,
+		Quantity:        5,
+		Remaining:       5,
+		Trail: &rpc.OrderTrailSpec{
+			Basis:            rpc.OrderTrailBasisInstrumentPrice,
+			OffsetType:       rpc.OrderTrailOffsetPercent,
+			TrailingPercent:  new(3.0),
+			InitialStopPrice: 198.5,
+		},
+		Status:    "Submitted",
+		SendState: orderSendStateBrokerAcknowledged,
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+}
+
+func trailGTCOrderViewForToken() rpc.OrderView {
+	return rpc.OrderView{
+		OrderRef:        "ord-trail",
+		ReservedOrderID: 1001,
+		ClientID:        31,
+		Account:         "DU1234567",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            "paper",
+		Symbol:          "DTE",
+		SecType:         "STK",
+		Exchange:        "IBIS",
+		Currency:        "EUR",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeTRAIL,
+		TIF:             rpc.OrderTIFGTC,
+		Quantity:        5,
+		Remaining:       5,
+		Trail: &rpc.OrderTrailSpec{
+			Basis:            rpc.OrderTrailBasisInstrumentPrice,
+			OffsetType:       rpc.OrderTrailOffsetPercent,
+			TrailingPercent:  new(3.0),
+			InitialStopPrice: 198.5,
+		},
+		Status:          "Submitted",
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+		SendState:       orderSendStateBrokerAcknowledged,
+	}
+}
+
+func trailGTCModifyDraft() rpc.OrderDraft {
+	return rpc.OrderDraft{
+		Action:    rpc.OrderActionSell,
+		Contract:  rpc.ContractParams{Symbol: "DTE", SecType: "STK", Exchange: "IBIS", Currency: "EUR"},
+		Quantity:  5,
+		OrderType: rpc.OrderTypeTRAIL,
+		TIF:       rpc.OrderTIFGTC,
+		Strategy:  rpc.OrderStrategyBrokerTrail,
+		OrderRef:  "ibkr-20260610-090000",
+		Trail: &rpc.OrderTrailSpec{
+			Basis:            rpc.OrderTrailBasisInstrumentPrice,
+			OffsetType:       rpc.OrderTrailOffsetPercent,
+			TrailingPercent:  new(2.0),
+			InitialStopPrice: 199.25,
+		},
+	}
+}
+
+func TestOrderModifyTrailGTCAmendsInPlace(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	seedTrailGTCOrderJournal(t, srv, now)
+	var sentOrder *ibkrlib.RawOrder
+	srv.orderPlaceBroker = func(_ context.Context, _ *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+		copy := *order
+		sentOrder = &copy
+		return nil
+	}
+
+	token := mintModifyPreviewTokenForWriteTest(t, srv, trailGTCOrderViewForToken(), trailGTCModifyDraft())
+	res, err := srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-trail", PreviewToken: token})
+	if err != nil {
+		t.Fatalf("modifyOrder err = %v", err)
+	}
+	if !res.Accepted || res.ReservedOrderID != 1001 || res.OrderRef != "ord-trail" {
+		t.Fatalf("modify result = %+v, want amend bound to broker order 1001", res)
+	}
+	if sentOrder == nil || sentOrder.OrderID != 1001 {
+		t.Fatalf("sent order = %+v, want re-transmit on broker order ID 1001", sentOrder)
+	}
+	if sentOrder.OrderType != rpc.OrderTypeTRAIL || sentOrder.TIF != rpc.OrderTIFGTC ||
+		sentOrder.TrailingPercent != 2 || sentOrder.TrailStopPrice != 199.25 || sentOrder.LmtPrice != 0 {
+		t.Fatalf("sent order = %+v, want GTC TRAIL 2%% stop 199.25 without limit price", sentOrder)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Type != orderJournalEventModifyRequested || last.OrderRef != "ord-trail" || last.ReservedOrderID != 1001 {
+		t.Fatalf("last event = %+v, want modify-requested on the original order", last)
+	}
+	if last.Trail == nil || last.Trail.TrailingPercent == nil || *last.Trail.TrailingPercent != 2 {
+		t.Fatalf("modify event trail = %+v, want re-priced trail journaled", last.Trail)
+	}
+}
+
+func TestOrderModifyTrailRejectsTIFChange(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	seedTrailGTCOrderJournal(t, srv, now)
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("broker modify should not run for TIF change")
+		return nil
+	}
+
+	draft := trailGTCModifyDraft()
+	draft.TIF = rpc.OrderTIFDay
+	token := mintModifyPreviewTokenForWriteTest(t, srv, trailGTCOrderViewForToken(), draft)
+	_, err := srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-trail", PreviewToken: token})
+	if err == nil || !strings.Contains(err.Error(), "cannot change time-in-force") {
+		t.Fatalf("modifyOrder err = %v, want TIF-change refusal", err)
+	}
+}
+
+func TestOrderModifyTrailRejectsStaleTrailBinding(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	seedTrailGTCOrderJournal(t, srv, now)
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("broker modify should not run for a stale trail binding")
+		return nil
+	}
+
+	staleView := trailGTCOrderViewForToken()
+	staleView.Trail.InitialStopPrice = 195
+	token := mintModifyPreviewTokenForWriteTest(t, srv, staleView, trailGTCModifyDraft())
+	_, err := srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-trail", PreviewToken: token})
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "trail fields changed") {
+		t.Fatalf("modifyOrder err = %v, want stale trail-binding refusal", err)
+	}
+}
+
 func mintModifyPreviewTokenForWriteTest(t *testing.T, srv *Server, view rpc.OrderView, draft rpc.OrderDraft) string {
 	t.Helper()
 	token, _, _, err := srv.orderTokens.mint(orderPreviewTokenPayload{

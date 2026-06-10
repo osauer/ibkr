@@ -14,6 +14,7 @@ type orderModifyPreviewRequest struct {
 	Quantity   int                 `json:"quantity"`
 	OrderType  string              `json:"order_type,omitempty"`
 	LimitPrice *float64            `json:"limit_price,omitempty"`
+	Trail      *rpc.OrderTrailSpec `json:"trail,omitempty"`
 	Strategy   string              `json:"strategy,omitempty"`
 	TIF        string              `json:"tif,omitempty"`
 	OutsideRTH *bool               `json:"outside_rth,omitempty"`
@@ -156,9 +157,22 @@ func modifyPreviewParamsFromRequest(order rpc.OrderView, req orderModifyPreviewR
 	tif := defaultString(req.TIF, order.TIF)
 	tif = defaultString(tif, rpc.OrderTIFDay)
 	limit := req.LimitPrice
-	if limit == nil && order.LimitPrice > 0 {
-		v := order.LimitPrice
-		limit = &v
+	trail := req.Trail
+	strategy := req.Strategy
+	if strings.EqualFold(orderType, rpc.OrderTypeTRAIL) || strings.EqualFold(orderType, rpc.OrderTypeTRAILLIMIT) {
+		// Trail previews reject explicit limit prices; a quantity-only change
+		// re-sends the order's current trail intent.
+		limit = nil
+		if trail == nil {
+			trail = order.Trail
+		}
+		strategy = defaultString(strategy, rpc.OrderStrategyBrokerTrail)
+	} else {
+		if limit == nil && order.LimitPrice > 0 {
+			v := order.LimitPrice
+			limit = &v
+		}
+		strategy = defaultString(strategy, rpc.OrderStrategyPatientLimit)
 	}
 	outsideRTH := false
 	if req.OutsideRTH != nil {
@@ -170,7 +184,8 @@ func modifyPreviewParamsFromRequest(order rpc.OrderView, req orderModifyPreviewR
 		Quantity:   req.Quantity,
 		OrderType:  orderType,
 		LimitPrice: limit,
-		Strategy:   defaultString(req.Strategy, rpc.OrderStrategyPatientLimit),
+		Trail:      trail,
+		Strategy:   strategy,
 		TIF:        tif,
 		OutsideRTH: outsideRTH,
 		ReplaceID:  order.OrderRef,
