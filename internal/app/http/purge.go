@@ -13,6 +13,10 @@ type purgeActionRequest struct {
 	All     bool     `json:"all,omitempty"`
 	Symbols []string `json:"symbols,omitempty"`
 	Scale   float64  `json:"scale,omitempty"`
+	// LiveConfirmation carries the user-typed "live/<account>" phrase the
+	// daemon requires for human-origin live writes. Client-typed, never
+	// auto-filled; paper submits leave it empty.
+	LiveConfirmation string `json:"live_confirmation,omitempty"`
 	BrokerWriteConfirmation
 }
 
@@ -64,12 +68,13 @@ func (h *handler) handlePurgeExecute(w nethttp.ResponseWriter, r *nethttp.Reques
 	}
 	bypassPreview := true
 	res, err := h.deps.Daemon.PurgeExecute(r.Context(), rpc.PurgeExecuteParams{
-		PurgeID:       strings.TrimSpace(req.PurgeID),
-		All:           req.All,
-		Symbols:       symbols,
-		BypassPreview: &bypassPreview,
-		WaitMs:        2000,
-		Origin:        rpc.OrderOriginPairedDevice,
+		PurgeID:          strings.TrimSpace(req.PurgeID),
+		All:              req.All,
+		Symbols:          symbols,
+		BypassPreview:    &bypassPreview,
+		WaitMs:           2000,
+		Origin:           rpc.OrderOriginPairedDevice,
+		LiveConfirmation: strings.TrimSpace(req.LiveConfirmation),
 	})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())
@@ -134,11 +139,12 @@ func purgeRestoreParams(req purgeActionRequest) (rpc.PurgeRestoreParams, error) 
 		scale = 1
 	}
 	return rpc.PurgeRestoreParams{
-		PurgeID: strings.TrimSpace(req.PurgeID),
-		All:     req.All,
-		Symbols: symbols,
-		Scale:   scale,
-		Origin:  rpc.OrderOriginPairedDevice,
+		PurgeID:          strings.TrimSpace(req.PurgeID),
+		All:              req.All,
+		Symbols:          symbols,
+		Scale:            scale,
+		Origin:           rpc.OrderOriginPairedDevice,
+		LiveConfirmation: strings.TrimSpace(req.LiveConfirmation),
 	}, nil
 }
 

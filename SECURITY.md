@@ -60,6 +60,13 @@ Honest limits of this interlock:
   tightening can restrict agent cancels to agent-placed orders.
 - An agent driving the paired PWA inherits the `human-paired-device` origin;
   pairing approval on the phone is the human act that scopes that risk.
+- **Paper-smoke evidence is MAC'd, not secret.** `ibkr trading paper-smoke`
+  (human-origin-only, since it mints the last live precondition) writes
+  evidence signed with the order-token HMAC key, so the live gate rejects
+  hand-written or edited `trading-readiness.json` files. The key lives in
+  the same user-owned state directory, so this too is an interlock against
+  casual forgery and accidental edits — a same-uid adversary can read the
+  key and sign their own evidence.
 
 ## Release integrity (v1.0.0+)
 

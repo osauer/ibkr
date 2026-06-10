@@ -29,6 +29,7 @@ const (
 	MethodMarketCalendar      = "market.calendar"
 	MethodStatusHealth        = "status.health"
 	MethodTradingStatus       = "trading.status"
+	MethodTradingPaperSmoke   = "trading.paper_smoke"
 	MethodSettingsGet         = "settings.get"
 	MethodSettingsUpdate      = "settings.update"
 	MethodOrdersOpen          = "orders.open"
@@ -2801,6 +2802,49 @@ type TradingStatus struct {
 	LiveOverride       string           `json:"live_override,omitempty"`
 	Blocked            bool             `json:"blocked"`
 	Blockers           []TradingBlocker `json:"blockers,omitempty"`
+}
+
+// TradingPaperSmokeParams is the input for MethodTradingPaperSmoke: a
+// daemon-observed paper order round-trip (place a 1-share far-off-market
+// LMT, wait for broker acknowledgement, cancel, wait for the cancel to
+// confirm) that produces the MAC'd evidence the live gate requires.
+type TradingPaperSmokeParams struct {
+	// TimeoutMs caps the wait for broker acknowledgement. 0 means the
+	// daemon default (30 s); values are capped daemon-side (60 s) so the
+	// whole round-trip stays under the per-method deadline.
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+	// Origin identifies who is asking (OrderOrigin*). Paper-smoke mints
+	// the last live precondition, so non-human origins are refused even
+	// though the order itself transmits on the paper route.
+	Origin string `json:"origin,omitempty"`
+}
+
+// TradingPaperSmokeResult reports the round-trip outcome. Passed means the
+// daemon observed both the broker acknowledgement and the cancel
+// confirmation and saved signed evidence; any other outcome after a
+// transmit attempt saves result=failed evidence, deliberately revoking
+// prior valid evidence (fail closed).
+type TradingPaperSmokeResult struct {
+	Passed                bool          `json:"passed"`
+	Result                string        `json:"result"`
+	Mode                  string        `json:"mode"`
+	Account               string        `json:"account,omitempty"`
+	Endpoint              string        `json:"endpoint,omitempty"`
+	ClientID              int           `json:"client_id,omitempty"`
+	Version               string        `json:"version,omitempty"`
+	Symbol                string        `json:"symbol,omitempty"`
+	OrderRef              string        `json:"order_ref,omitempty"`
+	ReservedOrderID       int           `json:"reserved_order_id,omitempty"`
+	LimitPrice            float64       `json:"limit_price,omitempty"`
+	Quantity              int           `json:"quantity,omitempty"`
+	AckLifecycleStatus    string        `json:"ack_lifecycle_status,omitempty"`
+	CancelLifecycleStatus string        `json:"cancel_lifecycle_status,omitempty"`
+	EvidenceSaved         bool          `json:"evidence_saved"`
+	EvidenceAt            *time.Time    `json:"evidence_at,omitempty"`
+	EvidenceMaxAge        string        `json:"evidence_max_age,omitempty"`
+	Message               string        `json:"message,omitempty"`
+	Warnings              []DataWarning `json:"warnings,omitempty"`
+	AsOf                  time.Time     `json:"as_of"`
 }
 
 const (

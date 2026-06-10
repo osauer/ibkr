@@ -2426,6 +2426,15 @@ async function submitProtectionProposal(proposal) {
     renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
     return;
   }
+  const liveConfirmation = liveWriteConfirmation("proposal submit");
+  if (liveConfirmation === null) {
+    state.protectionSubmits = {
+      ...state.protectionSubmits,
+      [previewKey]: { blockers: [{ code: "confirmation_cancelled", message: "typed live confirmation was cancelled or mistyped" }], as_of: new Date().toISOString() },
+    };
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+    return;
+  }
   state.protectionSubmitBusy = previewKey;
   state.protectionConfirmKey = "";
   state.protectionSubmits = {
@@ -2446,6 +2455,7 @@ async function submitProtectionProposal(proposal) {
         timeout_ms: protectionPreviewTimeoutMs(proposal),
         confirm_account: confirmation.account,
         confirm_mode: confirmation.mode,
+        live_confirmation: liveConfirmation || undefined,
       }),
     });
     const body = await readJSONOrText(res);
@@ -2473,6 +2483,21 @@ function protectionWriteConfirmation(proposal = {}) {
   const trading = state.snapshot?.trading || {};
   if (!trading.mode || !trading.account) return null;
   return { account: trading.account, mode: trading.mode };
+}
+
+// liveWriteConfirmation collects the typed "live/<account>" phrase the daemon
+// requires from human origins for live broker writes. Paper and unknown modes
+// need none and return "". Returns null when the user declines or mistypes —
+// the daemon would refuse the write anyway, so abort before transmitting.
+function liveWriteConfirmation(verb) {
+  const trading = state.snapshot?.trading || {};
+  if (trading.mode !== "live") return "";
+  const expected = `live/${trading.account}`;
+  const got = window.prompt([
+    `LIVE broker write (${verb}) against ${trading.account}.`,
+    `Type ${expected} to confirm.`,
+  ].join("\n"));
+  return got === expected ? expected : null;
 }
 
 function protectionWriteConfirmationLabel() {
@@ -4413,6 +4438,10 @@ async function applyOrderModify(order) {
     renderOpenOrders();
     return;
   }
+  const modifyLiveConfirmation = liveWriteConfirmation("order modify");
+  if (modifyLiveConfirmation === null) {
+    return;
+  }
   edit.busy = "modify";
   edit.error = "";
   renderOpenOrders();
@@ -4425,6 +4454,7 @@ async function applyOrderModify(order) {
         preview_token: edit.preview.preview_token,
         confirm_account: modifyConfirmation.account,
         confirm_mode: modifyConfirmation.mode,
+        live_confirmation: modifyLiveConfirmation || undefined,
       }),
     });
     const body = await readJSONOrText(res);
@@ -4645,6 +4675,7 @@ async function runUnderlyingAction(action, target = {}) {
     if (!confirmation) return;
     body.confirm_account = confirmation.account;
     body.confirm_mode = confirmation.mode;
+    if (confirmation.liveConfirmation) body.live_confirmation = confirmation.liveConfirmation;
   }
 
   state.underlyingBusy = action;
@@ -4703,7 +4734,14 @@ function underlyingWriteConfirmation(action, label) {
     renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
     return null;
   }
-  return { account: trading.account, mode: trading.mode };
+  // On a live gate the typed phrase is verbatim "live/<account>" — exactly
+  // the live confirmation the daemon requires; forward it instead of
+  // prompting twice.
+  return {
+    account: trading.account,
+    mode: trading.mode,
+    liveConfirmation: trading.mode === "live" ? got : "",
+  };
 }
 
 function purgeResultSummary(result = {}) {

@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -18,17 +21,29 @@ const (
 	tradingPaperSmokeStatusMismatch     = "mismatch"
 	tradingPaperSmokeStatusFailed       = "failed"
 	tradingPaperSmokeStatusUnreadable   = "unreadable"
+	tradingPaperSmokeStatusUnsigned     = "unsigned"
 	tradingPaperSmokeEndpointClassPaper = "paper"
 	tradingPaperSmokeResultPassed       = "passed"
+	tradingPaperSmokeResultFailed       = "failed"
+
+	// tradingPaperSmokeMACPrefix domain-separates evidence MACs from preview
+	// tokens, which share the same key but MAC a bare base64 JSON body that
+	// can never start with this prefix.
+	tradingPaperSmokeMACPrefix = "ibkr-paper-smoke-v1."
 )
 
 type tradingReadinessStore struct {
-	Path string
+	Path   string
+	signer *orderTokenSigner
 }
 
 type tradingReadinessFile struct {
 	Version    int                        `json:"version"`
 	PaperSmoke *tradingPaperSmokeEvidence `json:"paper_smoke,omitempty"`
+	// PaperSmokeMAC authenticates PaperSmoke as daemon-authored. It sits
+	// beside the evidence, not inside it, so the MAC input is simply the
+	// marshalled evidence object. Older binaries ignore the field.
+	PaperSmokeMAC string `json:"paper_smoke_mac,omitempty"`
 }
 
 type tradingPaperSmokeEvidence struct {
@@ -52,8 +67,38 @@ func defaultTradingReadinessPath() (string, error) {
 	return defaultTradingStatePath("trading-readiness.json")
 }
 
-func newTradingReadinessStore(path string) *tradingReadinessStore {
-	return &tradingReadinessStore{Path: path}
+func newTradingReadinessStore(path string, signer *orderTokenSigner) *tradingReadinessStore {
+	return &tradingReadinessStore{Path: path, signer: signer}
+}
+
+// signPaperSmoke MACs daemon-authored paper-smoke evidence with the order
+// preview token key. Same-uid processes can read that key, so this is an
+// interlock against hand-edited evidence, not a security boundary.
+func (s *orderTokenSigner) signPaperSmoke(ev tradingPaperSmokeEvidence) (string, error) {
+	if s == nil || len(s.key) == 0 {
+		return "", fmt.Errorf("paper-smoke evidence signer is not configured")
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return "", fmt.Errorf("marshal paper-smoke evidence: %w", err)
+	}
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(tradingPaperSmokeMACPrefix + base64.RawURLEncoding.EncodeToString(raw)))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// verifyPaperSmoke re-marshals the loaded evidence and compares MACs.
+// time.Time round-trips RFC3339Nano deterministically, so
+// verify-by-re-marshal is stable across save/load cycles.
+func (s *orderTokenSigner) verifyPaperSmoke(ev tradingPaperSmokeEvidence, mac string) bool {
+	if mac == "" {
+		return false
+	}
+	want, err := s.signPaperSmoke(ev)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal([]byte(want), []byte(mac))
 }
 
 func (s *tradingReadinessStore) Load() (*tradingReadinessFile, error) {
@@ -84,9 +129,14 @@ func (s *tradingReadinessStore) SavePaperSmoke(ev tradingPaperSmokeEvidence) err
 	if s == nil || s.Path == "" {
 		return fmt.Errorf("trading readiness path is empty")
 	}
+	mac, err := s.signer.signPaperSmoke(ev)
+	if err != nil {
+		return err
+	}
 	f := tradingReadinessFile{
-		Version:    tradingReadinessFileVersion,
-		PaperSmoke: &ev,
+		Version:       tradingReadinessFileVersion,
+		PaperSmoke:    &ev,
+		PaperSmokeMAC: mac,
 	}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -120,6 +170,14 @@ func (s *tradingReadinessStore) CheckPaperSmoke(liveAccount, liveEndpoint string
 		}
 	}
 	ev := f.PaperSmoke
+	if s.signer == nil || !s.signer.verifyPaperSmoke(*ev, f.PaperSmokeMAC) {
+		return tradingPaperSmokeCheck{
+			Status:   tradingPaperSmokeStatusUnsigned,
+			Message:  "paper-smoke evidence is not signed by this daemon",
+			Action:   "Run `ibkr trading paper-smoke`; hand-written evidence is not accepted.",
+			Evidence: ev,
+		}
+	}
 	if ev.Result != tradingPaperSmokeResultPassed {
 		return tradingPaperSmokeCheck{
 			Status:   tradingPaperSmokeStatusFailed,
