@@ -14,7 +14,7 @@ has_re() {
 }
 
 if ! command -v jq >/dev/null 2>&1; then
-  block "jq is required so the project hook can inspect Codex tool payloads before broker-adjacent commands run."
+  block "jq is required so the project hook can inspect agent tool payloads before broker-adjacent commands run."
 fi
 
 command_line="$(
@@ -116,7 +116,7 @@ if has_re '(^|[[:space:]/])ibkr[[:space:]]+purge([[:space:]]|$)'; then
 fi
 
 if has_re '(^|[[:space:]/])ibkr[[:space:]]+daemon[[:space:]]+(purge|reset|wipe)([[:space:]]|$)'; then
-  block "Daemon destructive maintenance must be run by the user, not by Codex."
+  block "Daemon destructive maintenance must be run by the user, not by an agent session."
 fi
 
 if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order|orders|trading|trade|trades|proposals)([[:space:]]|$)' &&

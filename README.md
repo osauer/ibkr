@@ -146,7 +146,7 @@ claude plugin marketplace add osauer/ibkr
 claude plugin install ibkr@ibkr
 ```
 
-The plugin carries a skill, a `PreToolUse` hook that permits preview/status order reads while hard-blocking broker-write verbs and shell command chaining (failing closed if `jq` is missing from PATH), and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read and preview-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, copy `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand.
+The plugin carries a skill, a `PreToolUse` hook that permits preview/status order reads, blocks shell command chaining, and refuses broker-write verbs unless the daemon reports a paper-ready trading state — live, disabled, blocked, and unknown states are always refused (failing closed if `jq` is missing from PATH) — and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read and preview-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, merge `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand — it is permissions-only: read/preview patterns are allowed, and broker-write verbs plus destructive purge/daemon maintenance carry explicit deny rules.
 
 **The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install](#install). The two have independent release cadences and independent update paths:
 
@@ -316,8 +316,8 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from `Connection.PlaceOrder`, `Connection.CancelOrder`, `Connector.SubmitOrder`, and `Connector.CancelOrder` before any wire write. The raw encoder is available only to explicit downstream forks built with `-tags trading`.
 2. The daemon's write-handler dispatch returns `ErrTradingDisabled` for place/cancel RPCs ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)); preview can mint a token but reports `submit_eligible=false` unless broker WhatIf is accepted.
-3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) denies broker-write verbs while allowing `order preview`, `order status`, `orders open`, and `trading status`.
-4. The plugin's `PreToolUse` hook hard-blocks broker-write patterns and fails closed if `jq` is missing from PATH.
+3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) allowlists read/preview `ibkr` patterns only and carries explicit deny rules for broker-write verbs (`order place/submit/execute/modify/cancel/close`, `proposals submit`) and destructive purge/daemon maintenance.
+4. The plugin's `PreToolUse` hook blocks shell chaining and refuses broker-write patterns unless the daemon reports a paper-ready trading state, failing closed if `jq` is missing from PATH.
 5. A unit test in `internal/mcp` allows only preview/read-model order tools and refuses unallowlisted order/trade/cancel/submit/place tool names.
 
 Per [semver](https://semver.org/), v1.x keeps broker writes unavailable. Preview-only CLI, JSON, and MCP additions may appear as documented minor additions.

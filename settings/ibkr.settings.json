@@ -5,41 +5,41 @@
       "Bash(ibkr positions*)",
       "Bash(ibkr quote*)",
       "Bash(ibkr calendar*)",
+      "Bash(ibkr watch --json*)",
       "Bash(ibkr watch --list*)",
+      "Bash(ibkr watch --quotes*)",
       "Bash(ibkr watch --watch*)",
+      "Bash(ibkr watch --timeout*)",
       "Bash(ibkr chain*)",
       "Bash(ibkr history*)",
       "Bash(ibkr scan*)",
       "Bash(ibkr size*)",
+      "Bash(ibkr technical*)",
       "Bash(ibkr breadth*)",
       "Bash(ibkr gamma*)",
       "Bash(ibkr regime*)",
+      "Bash(ibkr canary*)",
+      "Bash(ibkr market-events*)",
       "Bash(ibkr trading status*)",
       "Bash(ibkr orders open*)",
       "Bash(ibkr order status*)",
       "Bash(ibkr order preview*)",
-      "Bash(ibkr order place*)",
-      "Bash(ibkr order modify*)",
-      "Bash(ibkr order cancel*)",
-      "Bash(ibkr purge --all*)",
-      "Bash(ibkr purge execute*)",
-      "Bash(ibkr purge restore*)",
       "Bash(ibkr status*)",
       "Bash(ibkr version*)"
     ],
-    "deny": []
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/ibkr-pre-tool-use.sh\""
-          }
-        ]
-      }
+    "deny": [
+      "Bash(ibkr order place*)",
+      "Bash(ibkr order submit*)",
+      "Bash(ibkr order execute*)",
+      "Bash(ibkr order modify*)",
+      "Bash(ibkr order cancel*)",
+      "Bash(ibkr order close*)",
+      "Bash(ibkr proposals submit*)",
+      "Bash(ibkr purge execute*)",
+      "Bash(ibkr purge --all*)",
+      "Bash(ibkr daemon purge*)",
+      "Bash(ibkr daemon reset*)",
+      "Bash(ibkr daemon wipe*)"
     ]
   }
 }

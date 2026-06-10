@@ -6,7 +6,7 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
-  or explicitly requests an order preview/status read. Codex broker writes are blocked; live
+  or explicitly requests an order preview/status read. Agent broker writes are blocked; live
   broker writes are always blocked.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
@@ -15,7 +15,7 @@ allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-09 07:38 CEST
+Updated: 2026-06-10 07:21 CEST
 
 ## When to use
 
@@ -47,7 +47,7 @@ If the user explicitly asks for a stock/ETF order draft, use
 `submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
 minted token submit-eligible. If the user explicitly asks to place, modify, or
 cancel an order, refuse and tell them a human must run broker-write commands
-outside Codex. Do not invent or simulate trade execution.
+outside the agent session. Do not invent or simulate trade execution.
 
 ## Output discipline
 
@@ -167,8 +167,8 @@ a code prefix when applicable:
 - `bad_request` → wrong arguments or unknown preset. Show the user the usage
   hint emitted on stderr.
 - `trading_disabled` → an order verb failed the daemon trading gate. Surface the
-  blocker exactly; broker writes require a human-run command outside Codex, a
-  ready trading route, and a submit-eligible preview token.
+  blocker exactly; broker writes require a human-run command outside the agent
+  session, a ready trading route, and a submit-eligible preview token.
 
 For `breadth`, `gamma`, and `regime`, the JSON carries a per-row `state` /
 `status` field rather than an error code — the CLI exits 0 because the
