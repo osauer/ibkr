@@ -383,13 +383,39 @@ func validateModifyPreviewTarget(target orderPreviewReplaceTarget, view rpc.Orde
 	if target.Status != view.Status || target.LifecycleStatus != view.LifecycleStatus {
 		return fmt.Errorf("modify preview token target status changed from %s/%s to %s/%s", target.Status, target.LifecycleStatus, view.Status, view.LifecycleStatus)
 	}
+	if target.OrderType != "" && view.OrderType != "" && !strings.EqualFold(target.OrderType, view.OrderType) {
+		return fmt.Errorf("modify preview token target order type changed from %s to %s", target.OrderType, view.OrderType)
+	}
+	if target.TIF != "" && view.TIF != "" && !strings.EqualFold(target.TIF, view.TIF) {
+		return fmt.Errorf("modify preview token target time-in-force changed from %s to %s", target.TIF, view.TIF)
+	}
 	if !sameOrderFloat(target.Quantity, view.Quantity) || !sameOrderFloat(target.Filled, view.Filled) || !sameOrderFloat(target.Remaining, view.Remaining) || !sameOrderFloat(target.LimitPrice, view.LimitPrice) {
 		return fmt.Errorf("modify preview token target quantities/prices changed; preview the replacement again")
+	}
+	if !sameOrderTrail(target.Trail, view.Trail) {
+		return fmt.Errorf("modify preview token target trail fields changed; preview the replacement again")
 	}
 	if target.OutsideRTH != view.OutsideRTH {
 		return fmt.Errorf("modify preview token target outside_rth changed; preview the replacement again")
 	}
 	return nil
+}
+
+func sameOrderTrail(a, b *rpc.OrderTrailSpec) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameOrderFloat(a.InitialStopPrice, b.InitialStopPrice) &&
+		sameOrderFloatPtr(a.TrailingPercent, b.TrailingPercent) &&
+		sameOrderFloatPtr(a.TrailingAmount, b.TrailingAmount) &&
+		sameOrderFloatPtr(a.LimitOffset, b.LimitOffset)
+}
+
+func sameOrderFloatPtr(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameOrderFloat(*a, *b)
 }
 
 func sameOrderFloat(a, b float64) bool {

@@ -58,16 +58,34 @@ func validateModifyDraft(view rpc.OrderView, draft rpc.OrderDraft) error {
 	if !strings.EqualFold(view.Action, draft.Action) {
 		return errBadRequest("order modify cannot change action")
 	}
-	if !strings.EqualFold(view.OrderType, rpc.OrderTypeLMT) || !strings.EqualFold(draft.OrderType, rpc.OrderTypeLMT) {
-		return errBadRequest("order modify supports LMT orders only")
+	viewType := strings.ToUpper(strings.TrimSpace(view.OrderType))
+	draftType := strings.ToUpper(strings.TrimSpace(draft.OrderType))
+	switch viewType {
+	case rpc.OrderTypeLMT, rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+	default:
+		return errBadRequest("order modify supports LMT, TRAIL, and TRAIL LIMIT orders only")
 	}
-	if !strings.EqualFold(view.TIF, rpc.OrderTIFDay) || !strings.EqualFold(draft.TIF, rpc.OrderTIFDay) {
+	if viewType != draftType {
+		return errBadRequest("order modify cannot change order type")
+	}
+	if !strings.EqualFold(view.TIF, draft.TIF) {
+		return errBadRequest("order modify cannot change time-in-force")
+	}
+	if isTrailOrderType(viewType) {
+		if !strings.EqualFold(view.TIF, rpc.OrderTIFDay) && !strings.EqualFold(view.TIF, rpc.OrderTIFGTC) {
+			return errBadRequest("order modify supports DAY or GTC time-in-force for TRAIL orders")
+		}
+	} else if !strings.EqualFold(view.TIF, rpc.OrderTIFDay) {
 		return errBadRequest("order modify supports DAY time-in-force only")
 	}
 	if draft.OutsideRTH != view.OutsideRTH {
 		return errBadRequest("order modify cannot change outside_rth")
 	}
-	if draft.LimitPrice <= 0 || math.IsNaN(draft.LimitPrice) || math.IsInf(draft.LimitPrice, 0) {
+	if isTrailOrderType(draftType) {
+		if err := validateModifyTrailDraft(draftType, draft); err != nil {
+			return err
+		}
+	} else if draft.LimitPrice <= 0 || math.IsNaN(draft.LimitPrice) || math.IsInf(draft.LimitPrice, 0) {
 		return errBadRequest("order modify requires a positive limit price")
 	}
 	maxQty := view.Remaining
@@ -82,6 +100,44 @@ func validateModifyDraft(view rpc.OrderView, draft rpc.OrderDraft) error {
 	}
 	if err := validateModifyContractRouting(view, draft.Contract); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateModifyTrailDraft gates the replacement intent for a broker-side
+// trailing stop: the trail offset, initial stop, and (for TRAIL LIMIT) limit
+// offset may change; everything else is frozen by validateModifyDraft.
+func validateModifyTrailDraft(orderType string, draft rpc.OrderDraft) error {
+	if draft.LimitPrice != 0 {
+		return errBadRequest("order modify TRAIL draft must not include limit_price")
+	}
+	trail := draft.Trail
+	if trail == nil {
+		return errBadRequest("order modify requires trail fields for TRAIL orders")
+	}
+	hasPercent := trail.TrailingPercent != nil
+	hasAmount := trail.TrailingAmount != nil
+	if hasPercent == hasAmount {
+		return errBadRequest("order modify trail requires exactly one of trailing_percent or trailing_amount")
+	}
+	if hasPercent && !positiveFinite(*trail.TrailingPercent) {
+		return errBadRequest("order modify trailing_percent must be positive")
+	}
+	if hasAmount && !positiveFinite(*trail.TrailingAmount) {
+		return errBadRequest("order modify trailing_amount must be positive")
+	}
+	if !positiveFinite(trail.InitialStopPrice) {
+		return errBadRequest("order modify requires a positive initial stop price")
+	}
+	switch orderType {
+	case rpc.OrderTypeTRAIL:
+		if trail.LimitOffset != nil {
+			return errBadRequest("order modify TRAIL draft must not include limit_offset")
+		}
+	case rpc.OrderTypeTRAILLIMIT:
+		if trail.LimitOffset == nil || !positiveFinite(*trail.LimitOffset) {
+			return errBadRequest("order modify TRAIL LIMIT draft requires positive limit_offset")
+		}
 	}
 	return nil
 }

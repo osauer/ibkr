@@ -4295,27 +4295,22 @@ function openOrderRowElement(order) {
     renderOpenOrders();
   });
 
-  const price = document.createElement("input");
-  price.type = "number";
-  price.min = "0";
-  price.step = "0.01";
-  price.value = typeof edit.limit_price === "number" ? String(edit.limit_price) : "";
-  price.placeholder = "Limit";
-  price.setAttribute("aria-label", `Limit price for ${order.symbol || id}`);
-  price.disabled = !modifyGate.ready || edit.busy;
-  price.addEventListener("change", () => {
-    const next = Number(price.value || 0);
-    edit.limit_price = Number.isFinite(next) && next > 0 ? next : null;
-    edit.preview = null;
-    edit.result = null;
-    edit.error = "";
-    renderOpenOrders();
-  });
+  const priceInputs = orderIsTrail(order)
+    ? [
+        order.trail?.trailing_amount > 0
+          ? orderEditNumberInput(order, edit, modifyGate, "trailing_amount", "Trailing amount", "Trail amt")
+          : orderEditNumberInput(order, edit, modifyGate, "trailing_percent", "Trailing percent", "Trail %"),
+        orderEditNumberInput(order, edit, modifyGate, "initial_stop", "Initial stop price", "Stop"),
+        ...(String(order.order_type || "").toUpperCase() === "TRAIL LIMIT"
+          ? [orderEditNumberInput(order, edit, modifyGate, "limit_offset", "Limit offset", "Offset")]
+          : []),
+      ]
+    : [orderEditNumberInput(order, edit, modifyGate, "limit_price", "Limit price", "Limit")];
 
   const fixed = document.createElement("span");
   fixed.className = "open-order-row__fixed";
   fixed.textContent = `${order.order_type || "LMT"} / ${order.tif || "DAY"} / ${order.action || "--"}`;
-  editBox.append(qty, price, fixed);
+  editBox.append(qty, ...priceInputs, fixed);
 
   const controls = document.createElement("div");
   controls.className = "open-order-row__controls";
@@ -4333,6 +4328,26 @@ function openOrderRowElement(order) {
 
   row.append(main, editBox, controls, status);
   return row;
+}
+
+function orderEditNumberInput(order, edit, modifyGate, field, label, placeholder) {
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "0";
+  input.step = "0.01";
+  input.value = typeof edit[field] === "number" ? String(edit[field]) : "";
+  input.placeholder = placeholder;
+  input.setAttribute("aria-label", `${label} for ${order.symbol || orderIdentity(order)}`);
+  input.disabled = !modifyGate.ready || edit.busy;
+  input.addEventListener("change", () => {
+    const next = Number(input.value || 0);
+    edit[field] = Number.isFinite(next) && next > 0 ? next : null;
+    edit.preview = null;
+    edit.result = null;
+    edit.error = "";
+    renderOpenOrders();
+  });
+  return input;
 }
 
 function orderActionButton(label, enabled, reason) {
@@ -4490,6 +4505,10 @@ function openOrderEdit(order) {
     state.openOrderEdits[id] = {
       quantity: orderReductionMax(order) || 1,
       limit_price: order.limit_price > 0 ? order.limit_price : null,
+      trailing_percent: order.trail?.trailing_percent > 0 ? order.trail.trailing_percent : null,
+      trailing_amount: order.trail?.trailing_amount > 0 ? order.trail.trailing_amount : null,
+      initial_stop: order.trail?.initial_stop_price > 0 ? order.trail.initial_stop_price : null,
+      limit_offset: order.trail?.limit_offset > 0 ? order.trail.limit_offset : null,
       preview: null,
       result: null,
       cancelResult: null,
@@ -4511,9 +4530,18 @@ function orderModifyGate(order, trading) {
   if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
   if ("modify_eligible" in order && order.modify_eligible !== true) return { ready: false, reason: "This order is not modify eligible" };
   if (order.open === false) return { ready: false, reason: "Only open orders can be modified" };
-  if (String(order.order_type || "LMT").toUpperCase() !== "LMT") return { ready: false, reason: "Canary mitigation UI only supports LMT price changes" };
+  const orderType = String(order.order_type || "LMT").toUpperCase();
+  if (orderType !== "LMT" && orderType !== "TRAIL" && orderType !== "TRAIL LIMIT") {
+    return { ready: false, reason: "Canary mitigation UI supports LMT, TRAIL, and TRAIL LIMIT changes" };
+  }
   if (orderReductionMax(order) <= 0) return { ready: false, reason: "No remaining quantity available to reduce" };
+  if (orderIsTrail(order)) return { ready: true, reason: "Preview a reduction-only quantity or trail re-price; the broker order ID is kept" };
   return { ready: true, reason: "Preview a reduction-only quantity or LMT price change" };
+}
+
+function orderIsTrail(order) {
+  const orderType = String(order.order_type || "").toUpperCase();
+  return orderType === "TRAIL" || orderType === "TRAIL LIMIT";
 }
 
 function orderCancelGate(order, trading) {
@@ -4525,13 +4553,24 @@ function orderCancelGate(order, trading) {
 }
 
 function modifyPreviewBody(order, edit) {
-  const limit = Number(edit.limit_price || 0);
-  return {
+  const body = {
     action: order.action || "",
     quantity: Math.min(orderReductionMax(order) || 1, Math.max(1, Math.trunc(Number(edit.quantity || 1)))),
-    limit_price: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+    order_type: order.order_type || "LMT",
     tif: order.tif || "DAY",
   };
+  if (orderIsTrail(order)) {
+    const trail = {};
+    if (edit.trailing_amount > 0) trail.trailing_amount = edit.trailing_amount;
+    else if (edit.trailing_percent > 0) trail.trailing_percent = edit.trailing_percent;
+    if (edit.initial_stop > 0) trail.initial_stop_price = edit.initial_stop;
+    if (String(order.order_type || "").toUpperCase() === "TRAIL LIMIT" && edit.limit_offset > 0) trail.limit_offset = edit.limit_offset;
+    body.trail = trail;
+  } else {
+    const limit = Number(edit.limit_price || 0);
+    body.limit_price = Number.isFinite(limit) && limit > 0 ? limit : undefined;
+  }
+  return body;
 }
 
 function modifyPreviewReady(preview) {
@@ -4724,7 +4763,7 @@ function modifyConfirmationText(order, preview) {
     `Mode: ${labelize(preview.mode || order.mode || "--")}`,
     `Account: ${preview.account || order.account || "--"}`,
     `Endpoint: ${venueLabel(preview || order)}`,
-    `Order: ${preview.draft?.action || order.action || "--"} ${preview.draft?.quantity || "--"} ${preview.draft?.contract?.symbol || order.symbol || "--"} ${preview.draft?.order_type || order.order_type || "LMT"} ${priceLabel(preview.draft?.limit_price || order.limit_price)} ${preview.draft?.tif || order.tif || "DAY"}`,
+    `Order: ${preview.draft?.action || order.action || "--"} ${preview.draft?.quantity || "--"} ${preview.draft?.contract?.symbol || order.symbol || "--"} ${preview.draft?.order_type || order.order_type || "LMT"} ${preview.draft?.trail ? trailLabel(preview.draft.trail) : priceLabel(preview.draft?.limit_price || order.limit_price)} ${preview.draft?.tif || order.tif || "DAY"}`,
     `WhatIf: ${preview.what_if?.status || "--"}${preview.what_if?.message ? " / " + preview.what_if.message : ""}`,
     `Broker warning/message: ${warnings}`,
     `Submit eligibility: ${preview.submit_eligible ? "eligible" : "not eligible"} / ${preview.preview_token_id ? "token " + preview.preview_token_id : "no token"}`,
@@ -4738,7 +4777,7 @@ function cancelConfirmationText(order, trading) {
     `Mode: ${labelize(order.mode || trading.mode || "--")}`,
     `Account: ${order.account || trading.account || "--"}`,
     `Endpoint: ${venueLabel(order.endpoint ? order : trading)}`,
-    `Order: ${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"} ${order.order_type || "LMT"} ${priceLabel(order.limit_price)} ${order.tif || "DAY"}`,
+    `Order: ${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"} ${order.order_type || "LMT"} ${order.trail ? trailLabel(order.trail) : priceLabel(order.limit_price)} ${order.tif || "DAY"}`,
     `Status: ${[order.lifecycle_status, order.send_state, order.last_message].filter(Boolean).join(" / ") || "--"}`,
   ].join("\n");
 }
@@ -4759,6 +4798,16 @@ function venueLabel(value = {}) {
 
 function priceLabel(value) {
   return typeof value === "number" ? value.toFixed(2) : "auto";
+}
+
+function trailLabel(trail) {
+  if (!trail) return "auto";
+  const parts = [];
+  if (trail.trailing_percent > 0) parts.push(`trail ${trail.trailing_percent}%`);
+  if (trail.trailing_amount > 0) parts.push(`trail ${priceLabel(trail.trailing_amount)}`);
+  if (trail.initial_stop_price > 0) parts.push(`stop ${priceLabel(trail.initial_stop_price)}`);
+  if (trail.limit_offset > 0) parts.push(`offset ${priceLabel(trail.limit_offset)}`);
+  return parts.join(" ") || "trail auto";
 }
 
 async function refreshAlerts() {
