@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.9.0 — 2026-06-10 21:55 CEST
+
+### What's new
+
+- Releases now ship two variants per platform: the standard downloads (installer, MCPB, plain `ibkr` tarballs) remain read-only builds, while a clearly marked `ibkr-trading` tarball carries broker-write capability behind explicit opt-in warnings.
+- Broker writes now carry an origin: live routes refuse agent origins and require a typed `live/<account>` confirmation from a human, while paper accounts stay fully open for agent-driven testing.
+- Protective trailing stops can be re-priced in place — modify keeps broker queue position instead of cancel-and-replace — and live protection trails follow a GTC policy so they no longer expire at the end of each session.
+- A new freeze switch (`ibkr settings set trading.freeze=true`) instantly blocks all new broker writes while keeping cancels available.
+- The remote app no longer goes dark after seven days: routes slide their expiry while connected, and the connector re-registers automatically when a route expires.
+- Market-risk tooling is faster and survives off-hours outages: canary warm runs dropped from ~20 s to ~2 s, and SPX dealer zero-gamma falls back to a persisted expiry grid when IBKR's secdef farm is down.
+
+### Added
+
+- Added a trading-capable release variant (`ibkr-trading-*`) with an in-tarball trading warning; both variants are covered by the signed SHA256SUMS.
+- Added `ibkr trading paper-smoke`: a daemon-observed paper round-trip (place, broker ack, cancel through the production order path) that records signed evidence; releases run it as a binding gate before tagging.
+- Added agent-origin gating for broker writes with journaled origins and typed live confirmations; the paper-aware PreToolUse hook and trimmed settings deny list ship in `hooks/` and `settings/`.
+- Added in-place modify for protective TRAIL and TRAIL LIMIT orders across CLI, web UI, and previews, eliminating the unprotected window between cancel-ack and re-place.
+- Added policy-driven GTC time-in-force for protective trailing stops; broker error 135 heals expired GTC zombies.
+- Added the `trading.freeze` runtime switch blocking new broker writes while cancel paths stay open.
+- Added a persisted last-good expiry/strike grid per underlying so dealer zero-gamma keeps computing (flagged stale, capped at five days) through secdef-farm outages.
+
+### Changed
+
+- Local builds default to trading-capable; an explicit `GO_TAGS=""` still produces the read-only binary with its capability banner.
+- Trade proposals are scoped to the account and paper/live mode they were generated under; serving, fast-path submit, and persisted-snapshot adoption fail closed on mismatch, and a paper ignore can no longer suppress a live proposal.
+- Remote routes slide their expiry on every authenticated connector connect; the connector cycles its websocket at half the route TTL, re-registers on HTTP 410, and expired pairing sessions are reaped every minute.
+- Purge execute plans all legs first and prefetches leg quotes in parallel so emergency closes of large books finish inside the deadline; purge and restore refuse stale or session-closed quotes.
+- Blocked `purge restore --all` runs now name the exact working invocation for the clean subset of symbols.
+- Gamma refresh paths back off with a doubling delay (60 s to 15 min) on repeated failure instead of respawning doomed computes every scheduler tick.
+- Market-events probes run in parallel and remember per-source failures so a blocked endpoint stops re-burning its timeout on every snapshot.
+- The landing page and MCP server pages now state that standard downloads are read-only builds and describe the trading variant as a separate explicit opt-in.
+
+### Removed
+
+- Removed the risk-plan surfaces.
+- Removed the decoy `--bypass-preview` CLI flag; the RPC parameter remains for API compatibility.
+- Removed the human-certified runtime live gate tied to paper-smoke evidence; runtime live enablement now rests on the TWS-side API toggle, a trading-capable binary, and the existing config pins and acknowledgements.
+
+### Fixed
+
+- Fixed daemon autospawn race losers re-reading and re-logging the gamma persisted cache and breadth members cache; each loads exactly once, in the winning daemon, on first use.
+- Fixed duplicate protective-order suppression and day-order expiry inference so journal zombies neither display as open nor block re-protection.
+- Fixed cross-venue tick handling by resolving the broker minimum tick per contract and clamping stocks to the 0.01 floor.
+- Fixed a double-submit race with a daemon-wide broker-write mutex, and the daemon no longer idle-exits while orders are working.
+- Fixed the gamma expiries timeout (30 s to 45 s) that reported SPX as skipped on healthy-but-slow secdef responses.
+- Fixed Reg SHO threshold fetches following Nasdaq redirects into HTML so missing dated files fail properly instead of caching an empty list for 12 hours.
+- Fixed the S&P 500 membership refresher re-fetching Wikipedia on every breadth-touching call when the content had not changed.
+
+### Engineering notes
+
+- Integration lifecycle tests register daemon teardown via `t.Cleanup` plus a detached reaper in `TestMain`, so interrupted runs leave no orphaned test daemons.
+- Release tooling now validates the changelog entry, requires a pushed site update for non-patch releases, and runs the paper round-trip before tagging; vet, staticcheck, and tests cover the trading build tag.
+- Claude artifacts were re-worded agent-agnostic; the hook-regex check was replaced by a hook-version drift gate.
+- The relay worker's sliding-TTL change requires a separate, manually gated deploy; the Go connector self-heals against the undeployed worker.
+
 ## v1.8.0 — 2026-06-09 06:12 CEST
 
 ### What's new
