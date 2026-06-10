@@ -18,8 +18,14 @@ const (
 	ProtectionPolicyStatusError    = "error"
 	ProtectionPolicyStatusDisabled = "disabled"
 
-	TradeProposalSnapshotKind          = "ibkr.trade_proposal_snapshot"
-	TradeProposalSnapshotSchemaVersion = "trade-proposal-snapshot-v1"
+	TradeProposalSnapshotKind = "ibkr.trade_proposal_snapshot"
+	// TradeProposalSnapshotSchemaVersion v2 adds account/mode scoping:
+	// account_id is a concrete single account (never the "All" aggregate)
+	// and account_mode records the paper/live session the proposals were
+	// generated under. Adoption of a persisted snapshot at daemon startup
+	// gates on the scope being concrete, not on this version string, so
+	// v1 snapshots (which lack account_mode) fail closed automatically.
+	TradeProposalSnapshotSchemaVersion = "trade-proposal-snapshot-v2"
 
 	TradeProposalBucketThetaHygiene  = "theta_hygiene"
 	TradeProposalBucketRiskReduction = "risk_reduction"
@@ -73,6 +79,7 @@ type TradeProposalSnapshot struct {
 	AsOf               time.Time                       `json:"as_of"`
 	Revision           string                          `json:"revision"`
 	AccountID          string                          `json:"account_id,omitempty"`
+	AccountMode        string                          `json:"account_mode,omitempty"`
 	PolicyID           string                          `json:"policy_id,omitempty"`
 	PolicyVersion      int                             `json:"policy_version,omitempty"`
 	PolicyFingerprint  Fingerprint                     `json:"policy_fingerprint,omitzero"`
