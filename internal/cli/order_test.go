@@ -60,6 +60,46 @@ func TestRenderOrderPreviewShowsTokenAndSubmitEligibility(t *testing.T) {
 	}
 }
 
+func TestPreviewCLIOrderTypeAndTrailDraftSummary(t *testing.T) {
+	t.Parallel()
+	got, err := previewCLIOrderType("", true, true)
+	if err != nil {
+		t.Fatalf("previewCLIOrderType: %v", err)
+	}
+	if got != rpc.OrderTypeTRAILLIMIT {
+		t.Fatalf("default trail-limit order type = %q, want TRAIL LIMIT", got)
+	}
+	got, err = previewCLIOrderType("trail-limit", false, false)
+	if err != nil {
+		t.Fatalf("previewCLIOrderType trail-limit: %v", err)
+	}
+	if got != rpc.OrderTypeTRAILLIMIT {
+		t.Fatalf("normalized trail-limit order type = %q, want TRAIL LIMIT", got)
+	}
+	if _, err := previewCLIOrderType("LMT", true, false); err == nil || !strings.Contains(err.Error(), "cannot include trail") {
+		t.Fatalf("previewCLIOrderType LMT+trail err = %v, want contradiction", err)
+	}
+
+	pct, offset := 2.0, 0.05
+	summary := formatOrderDraftSummary(rpc.OrderDraft{
+		Action:    rpc.OrderActionSell,
+		Contract:  rpc.ContractParams{Symbol: "SPY"},
+		Quantity:  10,
+		OrderType: rpc.OrderTypeTRAILLIMIT,
+		TIF:       rpc.OrderTIFDay,
+		Trail: &rpc.OrderTrailSpec{
+			TrailingPercent:  &pct,
+			InitialStopPrice: 98,
+			LimitOffset:      &offset,
+		},
+	})
+	for _, want := range []string{"SELL 10 SPY TRAIL LIMIT", "trail 2%", "stop 98.0000", "limit_offset 0.0500"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("draft summary %q missing %q", summary, want)
+		}
+	}
+}
+
 func TestHoistFlagsKeepsReplaceOrderValue(t *testing.T) {
 	t.Parallel()
 	got := hoistFlags([]string{"preview", "--replace-order", "6", "--market", "de", "buy", "MBG", "1"})

@@ -219,6 +219,35 @@ func TestPurgeRestoreRoutesStockLedgerExecutionVenue(t *testing.T) {
 	}
 }
 
+func TestPurgeRestoreWhatIfUsesRequestedTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := newPurgeRestoreTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 100_000})
+	contract := purgeLedgerTestStockContract()
+	seedPurgeLedgerFill(t, srv.purgeLedger, "purge-timeout", "leg-aapl", contract, rpc.OrderActionSell, 1, 100)
+	srv.purgeRefreshPositions = func() ([]*ibkrlib.RawPosition, error) { return nil, nil }
+	srv.orderPreviewQuote = fixedPreviewQuote(99, 101)
+	srv.orderPreviewWhatIf = func(ctx context.Context, _ rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("WhatIf context missing deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining < 55*time.Second {
+			t.Fatalf("WhatIf deadline remaining = %s, want caller timeout near 60s rather than default 5s", remaining)
+		}
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+
+	res, err := srv.previewPurgeRestore(context.Background(), rpc.PurgeRestoreParams{Symbols: []string{"AAPL"}, Scale: 1, TimeoutMs: 60_000})
+	if err != nil {
+		t.Fatalf("previewPurgeRestore: %v", err)
+	}
+	if res.Status != purgeRestoreStatusPreview || res.SelectedLegs != 1 {
+		t.Fatalf("restore preview = %+v, want one accepted leg", res)
+	}
+}
+
 func newPurgeRestoreTestServer(t *testing.T, trading config.Trading) *Server {
 	t.Helper()
 	srv := newPurgeExecuteTestServer(t)

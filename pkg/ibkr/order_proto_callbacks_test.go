@@ -21,6 +21,10 @@ type testOpenOrderProtoCallback struct {
 	Quantity           string
 	OrderType          string
 	LimitPrice         float64
+	AuxPrice           float64
+	TrailingPercent    float64
+	TrailStopPrice     float64
+	LmtPriceOffset     float64
 	TIF                string
 	Account            string
 	OrderRef           string
@@ -108,6 +112,46 @@ func TestDecodeMessageV203OpenOrderProtoCallback(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageV203OpenOrderProtoCallbackPreservesTrailFields(t *testing.T) {
+	t.Parallel()
+	conn := NewConnection(DefaultConfig())
+	defer conn.rateLimiter.Stop()
+	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
+
+	fields := conn.decodeMessage(encodeOpenOrderProtoCallbackForTest(testOpenOrderProtoCallback{
+		OrderID:         78,
+		PermID:          987655,
+		ClientID:        31,
+		Symbol:          "SPY",
+		SecType:         "STK",
+		Exchange:        "SMART",
+		Currency:        "USD",
+		LocalSymbol:     "SPY",
+		TradingClass:    "SPY",
+		Action:          "SELL",
+		Quantity:        "10",
+		OrderType:       "TRAIL LIMIT",
+		TrailingPercent: 2,
+		TrailStopPrice:  98,
+		LmtPriceOffset:  0.05,
+		TIF:             "DAY",
+		Account:         "DU123456",
+		OrderRef:        "trail-test",
+		Transmit:        true,
+		Status:          "Submitted",
+	}))
+	if summaryFieldValue(fields, "trailingPercent=") != "2" || summaryFieldValue(fields, "trailStopPrice=") != "98" || summaryFieldValue(fields, "lmtPriceOffset=") != "0.05" {
+		t.Fatalf("decoded trail fields = %#v", fields)
+	}
+	ev, ok := ParseOrderLifecycleEvent(fields)
+	if !ok {
+		t.Fatalf("ParseOrderLifecycleEvent ok=false for fields %#v", fields)
+	}
+	if ev.OrderType != "TRAIL LIMIT" || ev.TrailingPercent != 2 || ev.TrailStopPrice != 98 || ev.LmtPriceOffset != 0.05 {
+		t.Fatalf("event trail fields = %+v", ev)
+	}
+}
+
 func TestDecodeMessageV203OrderStatusProtoCallback(t *testing.T) {
 	t.Parallel()
 	conn := NewConnection(DefaultConfig())
@@ -176,7 +220,18 @@ func encodeOpenOrderProtoCallbackForTest(f testOpenOrderProtoCallback) []byte {
 	order = protoAppendString(order, 5, f.Action)
 	order = protoAppendString(order, 6, f.Quantity)
 	order = protoAppendString(order, 8, f.OrderType)
-	order = protoAppendDouble(order, 9, f.LimitPrice)
+	if f.LimitPrice != 0 {
+		order = protoAppendDouble(order, 9, f.LimitPrice)
+	}
+	if f.AuxPrice != 0 {
+		order = protoAppendDouble(order, 10, f.AuxPrice)
+	}
+	if f.TrailingPercent != 0 {
+		order = protoAppendDouble(order, 22, f.TrailingPercent)
+	}
+	if f.TrailStopPrice != 0 {
+		order = protoAppendDouble(order, 23, f.TrailStopPrice)
+	}
 	order = protoAppendString(order, 11, f.TIF)
 	order = protoAppendString(order, 12, f.Account)
 	if f.OutsideRth {
@@ -188,6 +243,9 @@ func encodeOpenOrderProtoCallbackForTest(f testOpenOrderProtoCallback) []byte {
 	}
 	if f.Transmit {
 		order = protoAppendBool(order, 66, true)
+	}
+	if f.LmtPriceOffset != 0 {
+		order = protoAppendDouble(order, 99, f.LmtPriceOffset)
 	}
 
 	var state []byte

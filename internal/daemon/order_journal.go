@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 const (
@@ -41,51 +43,52 @@ type orderJournalStore struct {
 }
 
 type orderJournalEvent struct {
-	Version         int       `json:"version"`
-	At              time.Time `json:"at"`
-	Type            string    `json:"type"`
-	OrderRef        string    `json:"order_ref,omitempty"`
-	PreviewTokenID  string    `json:"preview_token_id,omitempty"`
-	ReservedOrderID int       `json:"reserved_order_id,omitempty"`
-	ClientID        int       `json:"client_id,omitempty"`
-	PermID          int       `json:"perm_id,omitempty"`
-	Account         string    `json:"account,omitempty"`
-	Endpoint        string    `json:"endpoint,omitempty"`
-	Mode            string    `json:"mode,omitempty"`
-	Source          string    `json:"source,omitempty"`
-	PurgeID         string    `json:"purge_id,omitempty"`
-	LegID           string    `json:"leg_id,omitempty"`
-	BypassPreview   bool      `json:"bypass_preview,omitempty"`
-	Symbol          string    `json:"symbol,omitempty"`
-	SecType         string    `json:"sec_type,omitempty"`
-	ConID           int       `json:"con_id,omitempty"`
-	Exchange        string    `json:"exchange,omitempty"`
-	PrimaryExch     string    `json:"primary_exch,omitempty"`
-	Currency        string    `json:"currency,omitempty"`
-	LocalSymbol     string    `json:"local_symbol,omitempty"`
-	TradingClass    string    `json:"trading_class,omitempty"`
-	Expiry          string    `json:"expiry,omitempty"`
-	Strike          float64   `json:"strike,omitempty"`
-	Right           string    `json:"right,omitempty"`
-	Multiplier      int       `json:"multiplier,omitempty"`
-	Action          string    `json:"action,omitempty"`
-	OrderType       string    `json:"order_type,omitempty"`
-	TIF             string    `json:"tif,omitempty"`
-	OutsideRTH      bool      `json:"outside_rth,omitempty"`
-	Quantity        float64   `json:"quantity,omitempty"`
-	LimitPrice      float64   `json:"limit_price,omitempty"`
-	OpenClose       string    `json:"open_close,omitempty"`
-	Status          string    `json:"status,omitempty"`
-	Filled          float64   `json:"filled,omitempty"`
-	Remaining       float64   `json:"remaining,omitempty"`
-	AvgFillPrice    float64   `json:"avg_fill_price,omitempty"`
-	LastFillPrice   float64   `json:"last_fill_price,omitempty"`
-	WhyHeld         string    `json:"why_held,omitempty"`
-	MktCapPrice     float64   `json:"mkt_cap_price,omitempty"`
-	ExecID          string    `json:"exec_id,omitempty"`
-	ExecTime        string    `json:"exec_time,omitempty"`
-	SendState       string    `json:"send_state,omitempty"`
-	Message         string    `json:"message,omitempty"`
+	Version         int                 `json:"version"`
+	At              time.Time           `json:"at"`
+	Type            string              `json:"type"`
+	OrderRef        string              `json:"order_ref,omitempty"`
+	PreviewTokenID  string              `json:"preview_token_id,omitempty"`
+	ReservedOrderID int                 `json:"reserved_order_id,omitempty"`
+	ClientID        int                 `json:"client_id,omitempty"`
+	PermID          int                 `json:"perm_id,omitempty"`
+	Account         string              `json:"account,omitempty"`
+	Endpoint        string              `json:"endpoint,omitempty"`
+	Mode            string              `json:"mode,omitempty"`
+	Source          string              `json:"source,omitempty"`
+	PurgeID         string              `json:"purge_id,omitempty"`
+	LegID           string              `json:"leg_id,omitempty"`
+	BypassPreview   bool                `json:"bypass_preview,omitempty"`
+	Symbol          string              `json:"symbol,omitempty"`
+	SecType         string              `json:"sec_type,omitempty"`
+	ConID           int                 `json:"con_id,omitempty"`
+	Exchange        string              `json:"exchange,omitempty"`
+	PrimaryExch     string              `json:"primary_exch,omitempty"`
+	Currency        string              `json:"currency,omitempty"`
+	LocalSymbol     string              `json:"local_symbol,omitempty"`
+	TradingClass    string              `json:"trading_class,omitempty"`
+	Expiry          string              `json:"expiry,omitempty"`
+	Strike          float64             `json:"strike,omitempty"`
+	Right           string              `json:"right,omitempty"`
+	Multiplier      int                 `json:"multiplier,omitempty"`
+	Action          string              `json:"action,omitempty"`
+	OrderType       string              `json:"order_type,omitempty"`
+	TIF             string              `json:"tif,omitempty"`
+	OutsideRTH      bool                `json:"outside_rth,omitempty"`
+	Quantity        float64             `json:"quantity,omitempty"`
+	LimitPrice      float64             `json:"limit_price,omitempty"`
+	Trail           *rpc.OrderTrailSpec `json:"trail,omitempty"`
+	OpenClose       string              `json:"open_close,omitempty"`
+	Status          string              `json:"status,omitempty"`
+	Filled          float64             `json:"filled,omitempty"`
+	Remaining       float64             `json:"remaining,omitempty"`
+	AvgFillPrice    float64             `json:"avg_fill_price,omitempty"`
+	LastFillPrice   float64             `json:"last_fill_price,omitempty"`
+	WhyHeld         string              `json:"why_held,omitempty"`
+	MktCapPrice     float64             `json:"mkt_cap_price,omitempty"`
+	ExecID          string              `json:"exec_id,omitempty"`
+	ExecTime        string              `json:"exec_time,omitempty"`
+	SendState       string              `json:"send_state,omitempty"`
+	Message         string              `json:"message,omitempty"`
 }
 
 type orderJournalSummary struct {

@@ -80,6 +80,16 @@ func renderTradingStatusText(env *Env, st *rpc.TradingStatus) {
 			}
 		}
 	}
+	if len(st.WriteBlockers) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Write blockers:")
+		for _, b := range st.WriteBlockers {
+			fmt.Fprintf(out, "  - %s: %s\n", b.Code, b.Message)
+			if b.Action != "" {
+				fmt.Fprintf(out, "    action: %s\n", b.Action)
+			}
+		}
+	}
 	fmt.Fprintln(out)
 }
 

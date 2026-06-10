@@ -30,7 +30,12 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	}
 	raw, err := c.RequestAccountSummary(ctx, 8*time.Second)
 	if err != nil {
-		return nil, err
+		if cached := c.CachedAccountSummary(); cached != nil {
+			s.logger.Debugf("account summary one-shot failed; using cached account update snapshot: %v", err)
+			raw = cached
+		} else {
+			return nil, err
+		}
 	}
 	res := &rpc.AccountResult{
 		AccountID:    raw.AccountID,
@@ -402,6 +407,8 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		p.QuoteChange = q.QuoteChange
 		p.QuoteChangePct = q.QuoteChangePct
 		p.PrevClose = closeAnchor
+		p.Bid = q.Bid
+		p.Ask = q.Ask
 		p.DayHigh = q.DayHigh
 		p.DayLow = q.DayLow
 		p.Week52High = q.Week52High

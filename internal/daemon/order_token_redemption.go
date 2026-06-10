@@ -117,6 +117,7 @@ func previewTokenConfirmedEvent(payload orderPreviewTokenPayload, reservedOrderI
 		OutsideRTH:      payload.Draft.OutsideRTH,
 		Quantity:        float64(payload.Draft.Quantity),
 		LimitPrice:      payload.Draft.LimitPrice,
+		Trail:           cloneTrailSpec(payload.Draft.Trail),
 		OpenClose:       payload.Draft.OpenClose,
 		Source:          payload.Draft.Source,
 		Message:         strings.TrimSpace(message),

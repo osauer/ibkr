@@ -28,10 +28,15 @@ type platformSettingsData struct {
 }
 
 type platformFeatureSettingsData struct {
-	PurgeRestore platformPurgeRestoreSettingsData `json:"purge_restore"`
+	PurgeRestore    platformPurgeRestoreSettingsData    `json:"purge_restore"`
+	StockProtection platformStockProtectionSettingsData `json:"stock_protection"`
 }
 
 type platformPurgeRestoreSettingsData struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type platformStockProtectionSettingsData struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
@@ -194,6 +199,23 @@ func applyFeatureSettingsPatch(next *platformSettingsData, raw json.RawMessage) 
 					return errBadRequest("unknown settings field features.purge_restore." + pkey)
 				}
 			}
+		case "stock_protection":
+			var stock map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &stock); err != nil {
+				return errBadRequest("features.stock_protection must be an object")
+			}
+			for skey, sraw := range stock {
+				switch skey {
+				case "enabled":
+					v, err := nullableBool(sraw)
+					if err != nil {
+						return errBadRequest("features.stock_protection.enabled must be true, false, or null")
+					}
+					next.Features.StockProtection.Enabled = v
+				default:
+					return errBadRequest("unknown settings field features.stock_protection." + skey)
+				}
+			}
 		default:
 			return errBadRequest("unknown settings field features." + key)
 		}
@@ -306,6 +328,10 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 	if data.Features.PurgeRestore.Enabled != nil {
 		purgeEnabled = *data.Features.PurgeRestore.Enabled
 	}
+	stockProtectionEnabled := true
+	if data.Features.StockProtection.Enabled != nil {
+		stockProtectionEnabled = *data.Features.StockProtection.Enabled
+	}
 	limitAccess := rpc.SettingsAccessRead
 	if limitsWritable {
 		limitAccess = rpc.SettingsAccessWrite
@@ -322,6 +348,9 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 		Features: rpc.PlatformFeatureSettings{
 			PurgeRestore: rpc.PurgeRestoreSettings{
 				Enabled: rpc.SettingsBool{Value: purgeEnabled, Access: rpc.SettingsAccessWrite, Source: purgeSource},
+			},
+			StockProtection: rpc.StockProtectionSettings{
+				Enabled: rpc.SettingsBool{Value: stockProtectionEnabled, Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime},
 			},
 		},
 		Trading: rpc.PlatformTradingSettings{
@@ -435,6 +464,14 @@ func (s *Server) purgeRestoreEnabled() bool {
 		return true
 	}
 	return *data.Features.PurgeRestore.Enabled
+}
+
+func (s *Server) stockProtectionEnabled() bool {
+	data := s.platformSettings.snapshot()
+	if data.Features.StockProtection.Enabled == nil {
+		return true
+	}
+	return *data.Features.StockProtection.Enabled
 }
 
 type platformSettingsObserved struct {

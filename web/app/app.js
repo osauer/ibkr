@@ -19,11 +19,21 @@ const state = {
   protectionOpen: false,
   selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
   marketCalendarOverride: null,
+  proposalMarketCalendars: {},
+  proposalMarketCalendarBusy: {},
   selectedAlertID: null,
   alertFilter: "all",
   clearedAlertFingerprint: localStorage.getItem("ibkrClearedAlertFingerprint") || "",
   ordersOpen: null,
   openOrderEdits: {},
+  protectionPreviewBusy: "",
+  protectionPreviews: {},
+  protectionConfirmKey: "",
+  protectionSubmitBusy: "",
+  protectionSubmits: {},
+  protectionSnapshotBusy: false,
+  protectionSnapshotLastAt: 0,
+  protectionSnapshotNotice: "",
   underlyingNotice: "",
   underlyingBusy: "",
   latestPurgeStatus: null,
@@ -36,6 +46,7 @@ const $ = (id) => document.getElementById(id);
 
 async function main() {
   resetViewportScroll();
+  setupBottomTabs();
   await navigator.serviceWorker?.register("/service-worker.js");
   const pair = new URLSearchParams(location.search).get("pair");
   const nonce = new URLSearchParams(location.search).get("nonce");
@@ -311,14 +322,27 @@ function normalizedTab(tab) {
 }
 
 function setupBottomTabs() {
-  for (const button of document.querySelectorAll("[data-tab]")) {
-    button.addEventListener("click", () => {
+  const tabs = $("bottomTabs");
+  if (!tabs) return;
+  if (tabs.dataset.bound !== "true") {
+    const activate = (event) => {
+      const button = event.target.closest("[data-tab]");
+      if (!button || !tabs.contains(button)) return;
+      if (event.type === "pointerup" && event.pointerType === "mouse") return;
+      if (event.type === "click" && Date.now() - Number(tabs.dataset.lastPointerActivation || 0) < 600) return;
+      if (event.type === "pointerup") {
+        tabs.dataset.lastPointerActivation = String(Date.now());
+        event.preventDefault();
+      }
       if (button.disabled || button.getAttribute("aria-disabled") === "true") {
         setActiveTab("monitor");
         return;
       }
       setActiveTab(button.dataset.tab || "monitor");
-    });
+    };
+    tabs.addEventListener("click", activate);
+    tabs.addEventListener("pointerup", activate);
+    tabs.dataset.bound = "true";
   }
   setActiveTab(state.activeTab, { persist: false });
 }
@@ -378,11 +402,17 @@ function purgeRestoreSettingEnabled() {
   return setting?.value !== false;
 }
 
+function stockProtectionSettingEnabled() {
+  const setting = currentSettings().features?.stock_protection?.enabled;
+  return setting?.value !== false;
+}
+
 function renderSettings() {
   const settings = currentSettings();
   if (!settings || !settings.kind) return;
   state.settings = settings;
   const purge = settings.features?.purge_restore?.enabled || {};
+  const stockProtection = settings.features?.stock_protection?.enabled || {};
   renderFreshnessTimestamp("settingsAsOf", settings.as_of, { staleMinutes: 15 });
   $("purgeRestoreSettingState").textContent = purge.value === false ? "Disabled" : "Enabled";
   $("purgeRestoreSettingMeta").textContent = settingMeta(purge);
@@ -390,6 +420,12 @@ function renderSettings() {
   toggle.checked = purge.value !== false;
   toggle.disabled = purge.access !== "write";
   toggle.title = purge.reason || "Runtime preference";
+  $("stockProtectionSettingState").textContent = stockProtection.value === false ? "Disabled" : "Enabled";
+  $("stockProtectionSettingMeta").textContent = settingMeta(stockProtection);
+  const stockToggle = $("stockProtectionToggle");
+  stockToggle.checked = stockProtection.value !== false;
+  stockToggle.disabled = stockProtection.access !== "write";
+  stockToggle.title = stockProtection.reason || "Runtime preference";
 
   const trading = settings.trading || {};
   const status = state.snapshot?.trading || {};
@@ -516,6 +552,55 @@ async function setPurgeRestoreEnabled(enabled) {
   }
   renderSettings();
   renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+}
+
+async function setStockProtectionEnabled(enabled) {
+  const previous = stockProtectionSettingEnabled();
+  state.settings = {
+    ...currentSettings(),
+    features: {
+      ...(currentSettings().features || {}),
+      stock_protection: {
+        ...(currentSettings().features?.stock_protection || {}),
+        enabled: {
+          ...(currentSettings().features?.stock_protection?.enabled || {}),
+          value: enabled,
+        },
+      },
+    },
+  };
+  if (state.snapshot) state.snapshot.settings = state.settings;
+  renderSettings();
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ features: { stock_protection: { enabled } } }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    state.settings = await res.json();
+    if (state.snapshot) state.snapshot.settings = state.settings;
+  } catch (err) {
+    state.settings = {
+      ...currentSettings(),
+      features: {
+        ...(currentSettings().features || {}),
+        stock_protection: {
+          ...(currentSettings().features?.stock_protection || {}),
+          enabled: {
+            ...(currentSettings().features?.stock_protection?.enabled || {}),
+            value: previous,
+          },
+        },
+      },
+    };
+    if (state.snapshot) state.snapshot.settings = state.settings;
+    state.underlyingNotice = "Settings update failed: " + err.message;
+  }
+  renderSettings();
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
 }
 
 function ensureRegimeCanaryExpansion(canary = {}) {
@@ -854,7 +939,7 @@ function underlyingWriteReason(action, hasRows, trading = {}) {
   if (!hasRows) return "No matching underlying rows";
   if (!purgeRestoreSettingEnabled()) return "Purge/restore is disabled in Settings";
   if (!trading.mode || trading.mode === "disabled") return "Trading is disabled";
-  if (!trading.can_write) return "Broker writes are not enabled by trading.status";
+  if (!trading.can_write) return protectionWriteUnavailableReason(trading);
   if (!trading.account) return "Broker-write account unavailable";
   if (!trading.mode) return "Trading mode unavailable";
   return `${action} after confirming ${trading.mode}/${trading.account}`;
@@ -1419,6 +1504,49 @@ function marketEventFlagVisible(flag = {}) {
   return status === "active" || status === "recent" || status === "stale" || status === "unknown" || status === "degraded";
 }
 
+function protectionEffectiveMarketFlags(proposal = {}, events = {}) {
+  const out = [];
+  const seen = new Set();
+  const add = (flag = {}) => {
+    if (!marketEventFlagVisible(flag)) return;
+    const key = `${flag.id || ""}|${flag.symbol || ""}|${flag.status || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(flag);
+  };
+  for (const flag of proposal.market_flags || []) add(flag);
+  for (const flag of marketEventFlagsForSymbol(proposal.symbol || proposal.contract?.symbol, events)) add(flag);
+  return out;
+}
+
+function protectionEffectiveBlockers(proposal = {}, events = {}) {
+  const blockers = [...(proposal.blockers || [])];
+  const snapshotBlocker = proposalSnapshotBlocker();
+  if (snapshotBlocker) blockers.unshift(snapshotBlocker);
+  const eventBlocker = protectionMarketEventBlocker(proposal, events);
+  if (eventBlocker) blockers.unshift(eventBlocker);
+  return blockers;
+}
+
+function proposalSnapshotBlocker() {
+  return (state.snapshot?.proposals?.blockers || [])[0] || null;
+}
+
+function protectionMarketEventBlocker(proposal = {}, events = {}) {
+  for (const flag of protectionEffectiveMarketFlags(proposal, events)) {
+    const id = String(flag.id || "");
+    const status = String(flag.status || "").toLowerCase();
+    if (status !== "active") continue;
+    if (id === "halt_regulatory_or_news" || id === "luld_pause" || flag.role === "hard_blocker" || flag.severity === "block") {
+      return {
+        code: `market_event_${id || "blocker"}`,
+        message: `${flag.label || marketEventIDLabel(id)} is active for ${flag.symbol || proposal.symbol || "this symbol"}; refresh proposals after it clears`,
+      };
+    }
+  }
+  return null;
+}
+
 function marketEventHealthVisible(health = {}) {
   const status = String(health.status || "").toLowerCase();
   return status === "unknown" || status === "stale" || status === "degraded" || status === "partial" || status === "error" || status === "unavailable";
@@ -1655,10 +1783,15 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   autoButton.title = autoTrade.auto_submit ? "Autonomous submit is not available in MVP" : "Manual confirmation required";
   const reason = protectionReason(proposals, autoTrade);
   const reasonEl = $("protectionReason");
-  reasonEl.textContent = reason;
-  reasonEl.hidden = !reason;
+  const refreshReason = protectionSnapshotRefreshReason();
+  const reasonText = [reason, refreshReason].filter(Boolean).join(" · ");
+  reasonEl.textContent = reasonText;
+  reasonEl.hidden = !reasonText;
   if (!state.protectionOpen) return;
   $("protectionRows").replaceChildren(...rows.map(protectionRow));
+  if (protectionNeedsSnapshotSync(proposals, autoTrade)) {
+    queueProtectionSnapshotSync();
+  }
 }
 
 function renderProtectionTimestamp(proposals = {}) {
@@ -1674,53 +1807,338 @@ function protectionReason(proposals = {}, autoTrade = {}) {
   return autoTrade.fast_path_enabled === false ? "Fast path disabled" : "";
 }
 
+function protectionSnapshotRefreshReason() {
+  if (state.protectionSnapshotBusy) return "Refreshing proposals";
+  return state.protectionSnapshotNotice || "";
+}
+
+function protectionNeedsSnapshotSync(proposals = {}, autoTrade = {}) {
+  if (!state.protectionOpen || state.protectionSnapshotBusy) return false;
+  if (autoTrade.proposals_enabled === false) return false;
+  const policyStatus = String(proposals.policy_status?.status || autoTrade.policy?.status || "").toLowerCase();
+  if (policyStatus === "disabled") return false;
+  const revision = String(proposals.revision || "");
+  const blockerCodes = [
+    ...(proposals.blockers || []),
+    ...(autoTrade.blockers || []),
+  ].map((blocker) => String(blocker.code || ""));
+  if (blockerCodes.some(protectionTransientSnapshotBlocker)) return true;
+  if ((proposals.proposals || []).length > 0) return false;
+  return !revision || revision === "empty";
+}
+
+function protectionTransientSnapshotBlocker(code = "") {
+  return [
+    "account_unavailable",
+    "positions_unavailable",
+    "trading_status_unavailable",
+    "market_events_unavailable",
+  ].includes(code);
+}
+
+function queueProtectionSnapshotSync() {
+  const now = Date.now();
+  if (state.protectionSnapshotBusy || now - state.protectionSnapshotLastAt < 10000) return;
+  state.protectionSnapshotBusy = true;
+  state.protectionSnapshotLastAt = now;
+  state.protectionSnapshotNotice = "";
+  setTimeout(() => {
+    syncProtectionSnapshot();
+  }, 0);
+}
+
+async function syncProtectionSnapshot() {
+  try {
+    const res = await fetch("/api/proposals", { credentials: "include", cache: "no-store" });
+    if (!res.ok) throw new Error(await res.text());
+    const proposals = await res.json();
+    applyProtectionSnapshot(proposals);
+    const proposalCount = proposals.counts?.total ?? (proposals.proposals || []).length;
+    state.protectionSnapshotNotice = proposalCount > 0 ? "" : "No protection proposals available yet";
+  } catch (err) {
+    state.protectionSnapshotNotice = "Proposal refresh failed: " + shortPreviewMessage(err.message);
+  } finally {
+    state.protectionSnapshotBusy = false;
+    renderAll();
+  }
+}
+
 function protectionRow(proposal) {
   const row = document.createElement("div");
   row.className = "protection-row";
-  const blocked = (proposal.blockers || []).length > 0;
-  const tradability = protectionTradabilityGate(proposal);
+  const marketEvents = state.snapshot?.market_events || {};
+  const effectiveBlockers = protectionEffectiveBlockers(proposal, marketEvents);
+  const blocked = effectiveBlockers.length > 0;
+  const previewFlow = protectionUsesPreviewFlow(proposal);
+  const tradability = previewFlow ? protectionPreviewGate(proposal) : protectionSubmitGate(proposal);
+  const previewKey = protectionPreviewStateKey(proposal);
+  const previewBusy = state.protectionPreviewBusy === previewKey;
+  const previewResult = state.protectionPreviews[previewKey] || null;
+  const finalSubmitGate = previewFlow ? protectionPreviewSubmitGate(proposal, previewResult) : null;
+  const submitConfirming = state.protectionConfirmKey === previewKey;
+  const submitBusy = state.protectionSubmitBusy === previewKey;
+  const submitResult = state.protectionSubmits[previewKey] || null;
   const copy = document.createElement("div");
+  copy.className = "protection-row__copy";
   const bucket = document.createElement("span");
-  bucket.textContent = labelize(proposal.bucket || "--");
+  bucket.className = "protection-row__bucket";
+  bucket.textContent = protectionBucketLabel(proposal);
   const title = document.createElement("b");
+  title.className = "protection-row__title";
   title.textContent = protectionProposalTitle(proposal);
+  copy.append(bucket, title);
+  const trailText = protectionTrailText(proposal);
+  if (trailText) {
+    const trail = document.createElement("small");
+    trail.className = "protection-row__trail";
+    trail.textContent = trailText;
+    copy.append(trail);
+  }
+  const blockerText = blocked ? protectionBlockerText({ ...proposal, blockers: effectiveBlockers }) : "";
+  if (blockerText) {
+    const blocker = document.createElement("small");
+    blocker.className = "protection-row__blocker";
+    blocker.textContent = blockerText;
+    copy.append(blocker);
+  }
+  const previewText = protectionPreviewText(previewResult, proposal);
+  if (previewText) {
+    const preview = document.createElement("small");
+    preview.className = "protection-row__preview";
+    preview.textContent = previewText;
+    copy.append(preview);
+  }
+  const submitStateText = previewFlow ? protectionSubmitStateText({
+    result: submitResult,
+    gate: finalSubmitGate,
+    busy: submitBusy,
+    previewResult,
+    proposal,
+    confirming: submitConfirming,
+  }) : "";
+  if (submitStateText) {
+    const submitState = document.createElement("small");
+    submitState.className = protectionSubmitStateClass({ result: submitResult, gate: finalSubmitGate, busy: submitBusy });
+    submitState.textContent = submitStateText;
+    copy.append(submitState);
+  }
   const reason = document.createElement("small");
-  reason.textContent = proposal.reason || "";
-  copy.append(bucket, title, reason);
-  const flagRow = marketFlagRow(proposal.market_flags || []);
+  reason.className = "protection-row__reason";
+  reason.textContent = protectionReasonText(proposal);
+  copy.append(reason);
+  const flagRow = marketFlagRow(protectionEffectiveMarketFlags(proposal, marketEvents));
   if (flagRow) copy.append(flagRow);
   const actions = document.createElement("div");
   actions.className = "protection-row__actions";
-  const submit = document.createElement("button");
-  submit.type = "button";
-  submit.className = proposal.action === "BUY" ? "protection-buy" : "protection-sell";
-  submit.textContent = protectionActionLabel(proposal);
-  submit.disabled = blocked || !tradability.ready;
-  submit.title = blocked ? protectionBlockerText(proposal) : tradability.reason;
-  submit.addEventListener("click", () => submitProtectionProposal(proposal));
+  const primary = document.createElement("button");
+  primary.type = "button";
+  primary.className = previewFlow ? "protection-preview" : proposal.action === "BUY" ? "protection-buy" : "protection-sell";
+  primary.textContent = previewBusy ? "Previewing" : protectionSubmitLabel(proposal);
+  primary.disabled = blocked || previewBusy || submitBusy || !tradability.ready;
+  primary.title = protectionButtonTitle(proposal, { blocked, previewBusy, tradability });
+  primary.addEventListener("click", () => {
+    if (previewFlow) {
+      previewProtectionProposal(proposal);
+      return;
+    }
+    submitProtectionProposal(proposal);
+  });
+  actions.append(primary);
+  if (previewFlow && (submitResult || submitBusy || (previewResult && !previewResult.pending))) {
+    const finalSubmit = document.createElement("button");
+    finalSubmit.type = "button";
+    finalSubmit.className = submitConfirming ? "protection-submit protection-submit--confirm" : "protection-submit";
+    finalSubmit.textContent = submitBusy ? "Submitting" : submitConfirming ? "Confirm stop" : "Submit stop";
+    finalSubmit.disabled = blocked || previewBusy || submitBusy || !finalSubmitGate.ready;
+    finalSubmit.title = protectionSubmitButtonTitle({ blocked, previewBusy, submitBusy, gate: finalSubmitGate, confirming: submitConfirming });
+    finalSubmit.addEventListener("click", () => {
+      if (!submitConfirming) {
+        state.protectionConfirmKey = previewKey;
+        renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+        return;
+      }
+      submitProtectionProposal(proposal);
+    });
+    actions.append(finalSubmit);
+  }
   const ignore = document.createElement("button");
   ignore.type = "button";
   ignore.className = "protection-ignore";
   ignore.textContent = "Ignore";
   ignore.title = "Ignore this proposal; no market order is sent";
   ignore.addEventListener("click", () => ignoreProtectionProposal(proposal));
-  actions.append(submit, ignore);
+  actions.append(ignore);
   row.append(copy, actions);
   return row;
 }
 
 function protectionProposalTitle(proposal = {}) {
   return [
-    protectionActionLabel(proposal),
+    protectionSideLabel(proposal),
     proposal.quantity || 0,
     proposal.symbol || "--",
     protectionContractLabel(proposal.contract || {}),
   ].filter(Boolean).join(" ");
 }
 
+function protectionSubmitLabel(proposal = {}) {
+  if (proposal.bucket === "trailing_stop") return "Preview stop";
+  return protectionActionLabel(proposal);
+}
+
+function protectionUsesPreviewFlow(proposal = {}) {
+  return proposal.bucket === "trailing_stop";
+}
+
+function protectionButtonTitle(proposal = {}, gate = {}) {
+  if (gate.blocked) return protectionBlockerText(proposal);
+  if (gate.previewBusy) return "Broker WhatIf preview is running; no order has been placed";
+  if (!gate.tradability?.ready) return gate.tradability?.reason || "Protection action is unavailable";
+  return protectionActionTitle(proposal, gate.tradability.reason);
+}
+
+function protectionSideLabel(proposal = {}) {
+  if (proposal.bucket !== "trailing_stop") return protectionActionLabel(proposal);
+  if (proposalIsBuyToCover(proposal)) return "Buy to cover stop";
+  return String(proposal.action || "--").toUpperCase() === "BUY" ? "Buy stop" : "Sell stop";
+}
+
+function protectionBucketLabel(proposal = {}) {
+  if (proposal.bucket === "trailing_stop") return "Broker stop";
+  return labelize(proposal.bucket || "--");
+}
+
 function protectionActionLabel(proposal = {}) {
   if (proposalIsBuyToCover(proposal)) return "Buy to cover";
   return String(proposal.action || "--").toUpperCase() === "BUY" ? "Buy" : "Sell";
+}
+
+function protectionActionTitle(proposal = {}, fallback = "") {
+  if (proposal.bucket === "trailing_stop" && String(proposal.action || "").toUpperCase() === "SELL") {
+    return "Preview a broker trailing stop sell order. Once submitted, IBKR maintains the stop and raises it as the instrument price rises above the submission reference.";
+  }
+  if (proposal.bucket === "trailing_stop" && String(proposal.action || "").toUpperCase() === "BUY") {
+    return "Preview a broker trailing stop buy-to-close order. Once submitted, IBKR maintains the stop as the instrument price moves in favor of the short position.";
+  }
+  return fallback || "Preview this protection proposal";
+}
+
+function protectionReasonText(proposal = {}) {
+  if (proposal.bucket === "trailing_stop") {
+    const policy = protectionTrailPolicyLabel(proposal);
+    if (String(proposal.action || "").toUpperCase() === "SELL") {
+      return policy
+        ? `Broker-managed stop; IBKR lifts it as price rises above submission reference (policy ${policy})`
+        : "Broker-managed stop; IBKR lifts it as price rises above submission reference";
+    }
+    return policy
+      ? `Broker-managed stop; IBKR adjusts it as price moves in favor (policy ${policy})`
+      : "Broker-managed stop; IBKR adjusts it as price moves in favor";
+  }
+  return proposal.reason || "";
+}
+
+function protectionTrailText(proposal = {}) {
+  const trail = proposal.trail || null;
+  if (!trail) return "";
+  const orderType = String(proposal.order_type || "TRAIL").toUpperCase();
+  const offset = protectionTrailOffsetLabel(trail);
+  const live = protectionLiveTrailStop(proposal, trail);
+  const parts = [
+    orderType === "TRAIL LIMIT" ? "TRAIL LIMIT order" : "TRAIL order",
+    live ? `quote ${live.quoteLabel} ${numberRead(live.reference)}` : "",
+    live?.quoteInfo || "",
+    offset,
+  ].filter(Boolean);
+  if (live && protectionStopChanged(trail.initial_stop_price, live.stop)) {
+    parts.push(`stop ${numberRead(live.stop)}`);
+  } else if (hasNumericValue(trail.initial_stop_price) && trail.initial_stop_price > 0) {
+    parts.push(`stop ${numberRead(trail.initial_stop_price)}`);
+  } else if (live) {
+    parts.push(`stop ${numberRead(live.stop)}`);
+  }
+  if (hasNumericValue(trail.limit_offset)) {
+    parts.push(`limit offset ${numberRead(trail.limit_offset)}`);
+  }
+  return parts.join(" · ");
+}
+
+function protectionTrailOffsetLabel(trail = {}) {
+  if (hasNumericValue(trail.trailing_percent)) return `offset ${pct(trail.trailing_percent)}`;
+  if (hasNumericValue(trail.trailing_amount)) return `offset ${numberRead(trail.trailing_amount)}`;
+  return "";
+}
+
+function protectionTrailPolicyLabel(proposal = {}) {
+  for (const value of proposal.details || []) {
+    const match = String(value || "").match(/trail=([0-9.]+%)/i);
+    if (match) return match[1];
+  }
+  const reason = String(proposal.reason || "");
+  const match = reason.match(/([0-9.]+%)/);
+  return match ? match[1] : "";
+}
+
+function protectionLiveTrailStop(proposal = {}, trail = {}) {
+  const symbol = proposal.symbol || proposal.contract?.symbol;
+  const action = String(proposal.action || "").toUpperCase();
+  const secType = String(proposal.sec_type || proposal.contract?.sec_type || "").toUpperCase();
+  const quote = secType === "OPT" ? null : quoteBySymbol(state.snapshot?.market_quotes?.quotes || {}, symbol);
+  const quoteLabel = protectionReferenceLabel(proposal);
+  const inferredReference = protectionInferredReference(proposal, trail, action);
+  const reference = quote
+    ? action === "BUY"
+      ? firstNumber(quote.ask, quote.ask_price, inferredReference)
+      : firstNumber(quote.bid, quote.bid_price, inferredReference)
+    : inferredReference;
+  if (!hasNumericValue(reference) || reference <= 0) return null;
+  const offset = hasNumericValue(trail.trailing_percent)
+    ? reference * trail.trailing_percent / 100
+    : trail.trailing_amount;
+  if (!hasNumericValue(offset) || offset <= 0) return null;
+  const stop = quote
+    ? action === "BUY" ? reference + offset : Math.max(reference - offset, 0.0001)
+    : hasNumericValue(trail.initial_stop_price) ? trail.initial_stop_price : action === "BUY" ? reference + offset : Math.max(reference - offset, 0.0001);
+  return { reference, quoteLabel, stop, quoteInfo: protectionQuoteStatusLabel(quote) };
+}
+
+function protectionReferenceLabel(proposal = {}) {
+  const action = String(proposal.action || "").toUpperCase();
+  const secType = String(proposal.sec_type || proposal.contract?.sec_type || "").toUpperCase();
+  if (secType === "OPT") return action === "BUY" ? "ask premium" : "bid premium";
+  return action === "BUY" ? "ask" : "bid";
+}
+
+function protectionInferredReference(proposal = {}, trail = {}, action = "") {
+  const amount = hasNumericValue(trail.trailing_amount) ? trail.trailing_amount : null;
+  const percent = hasNumericValue(trail.trailing_percent) ? trail.trailing_percent : null;
+  const stop = hasNumericValue(trail.initial_stop_price) ? trail.initial_stop_price : null;
+  if (amount && stop) {
+    return action === "BUY" ? Math.max(stop - amount, 0.0001) : stop + amount;
+  }
+  if (percent && stop) {
+    const ratio = percent / 100;
+    if (action === "BUY") return Math.max(stop / (1 + ratio), 0.0001);
+    if (ratio < 1) return Math.max(stop / (1 - ratio), 0.0001);
+  }
+  return null;
+}
+
+function protectionQuoteStatusLabel(quote = null) {
+  if (!quote) return "";
+  const parts = [];
+  const dataType = String(quote.data_type || "").toLowerCase();
+  if (quote.stale || quote.stale_reason) parts.push("stale");
+  else if (dataType.includes("delayed")) parts.push("delayed");
+  else if (dataType.includes("frozen")) parts.push("frozen");
+  if (quote.price_as_of) parts.push(quote.price_as_of);
+  else if (quote.price_at) parts.push(shortTimeWithZone(quote.price_at));
+  return parts.join(" ");
+}
+
+function protectionStopChanged(snapshotStop, liveStop) {
+  if (!hasNumericValue(snapshotStop) || !hasNumericValue(liveStop)) return false;
+  return Math.abs(snapshotStop - liveStop) >= Math.max(0.01, Math.abs(snapshotStop) * 0.0025);
 }
 
 function proposalIsBuyToCover(proposal = {}) {
@@ -1751,26 +2169,210 @@ function protectionHeroMarketFlags(rows = [], marketEvents = {}) {
 }
 
 function protectionContractLabel(contract = {}) {
-  if (String(contract.sec_type || "").toUpperCase() !== "OPT") return "";
+  if (String(contract.sec_type || "").toUpperCase() !== "OPT") {
+    const currency = String(contract.currency || "").trim().toUpperCase();
+    const market = proposalMarketLabel(proposalMarketKey({ contract }));
+    const primary = String(contract.primary_exchange || contract.primary_exch || contract.exchange || "").trim().toUpperCase();
+    if (currency || primary) return [currency, market === "US market" ? "" : market, primary && primary !== "SMART" ? primary : ""].filter(Boolean).join(" ");
+    return "";
+  }
   const right = String(contract.right || "").trim().toUpperCase();
   const strike = typeof contract.strike === "number" && contract.strike > 0 ? formatStrike(contract.strike) : "";
   const expiry = formatExpiry(contract.expiry || "");
   const optionSide = strike && right ? `${strike}${right}` : right || strike;
-  return [expiry, optionSide].filter(Boolean).join(" ");
+  const currency = String(contract.currency || "").trim().toUpperCase();
+  return [expiry, optionSide, currency].filter(Boolean).join(" ");
 }
 
-function protectionTradabilityGate(proposal = {}) {
-  const calendar = currentMarketCalendar(state.snapshot || {});
+function protectionPreviewGate(proposal = {}) {
+  const trading = state.snapshot?.trading || {};
+  const blocker = protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})[0];
+  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (!trading.can_preview) return { ready: false, reason: "Broker preview is not enabled by trading.status" };
+  return { ready: true, reason: "Preview this protection proposal with broker WhatIf; no order is placed" };
+}
+
+function protectionSubmitGate(proposal = {}) {
+  const trading = state.snapshot?.trading || {};
+  const blocker = protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})[0];
+  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (!trading.can_write) return { ready: false, reason: protectionWriteUnavailableReason(trading) };
+  const calendar = protectionMarketCalendar(proposal);
   const session = calendar?.session;
   if (!session) {
-    return { ready: false, reason: "Trading disabled until market calendar is available" };
+    return { ready: true, reason: `${proposalMarketLabel(proposalMarketKey(proposal))} calendar unavailable; broker WhatIf remains the submit authority` };
   }
   if (session.is_open) {
-    return { ready: true, reason: "Selected market is currently tradable" };
+    return { ready: true, reason: `${proposalMarketLabel(proposalMarketKey(proposal))} is currently tradable` };
   }
   const label = marketSessionLabel(calendar);
-  const market = label.phase || label.text || "selected market is closed";
-  return { ready: false, reason: `Disabled while ${market}; Ignore remains available` };
+  const market = label.phase || label.text || `${proposalMarketLabel(proposalMarketKey(proposal))} is closed`;
+  return { ready: true, reason: `${market}; broker may queue the stop after fresh WhatIf` };
+}
+
+function protectionPreviewSubmitGate(proposal = {}, previewResult = null) {
+  if (!previewResult) return { ready: false, reason: "Run preview first" };
+  if (previewResult.pending) return { ready: false, reason: "Broker WhatIf preview is still running" };
+  const blocker = (previewResult.blockers || [])[0];
+  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (!protectionPreviewSubmitEligible(previewResult)) {
+    return { ready: false, reason: protectionPreviewSubmitBlockedReason(previewResult) };
+  }
+  if (protectionPreviewStale(previewResult, proposal)) {
+    return { ready: false, reason: "Live suggestion changed; preview again before submitting" };
+  }
+  const writeGate = protectionSubmitGate(proposal);
+  if (!writeGate.ready) return writeGate;
+  return { ready: true, reason: "Submit the stop after confirmation; the daemon runs a fresh broker WhatIf before placing it" };
+}
+
+function protectionWriteUnavailableReason(trading = {}) {
+  const blocker = (trading.write_blockers || trading.blockers || [])[0];
+  if (blocker?.code || blocker?.message) {
+    return `${blocker.code || "write_blocked"}: ${blocker.message || "broker writes are not enabled"}`;
+  }
+  if (trading.mode === "paper") return "Paper preview is enabled, but broker writes are not enabled for this build/session";
+  return "Broker writes are not enabled by trading.status";
+}
+
+function protectionPreviewStateKey(proposal = {}) {
+  return `${proposal.key || ""}@${proposal.revision || ""}`;
+}
+
+function protectionPreviewText(result = null, proposal = {}) {
+  if (!result) return "";
+  if (result.local && result.pending) {
+    return `Stop draft ready; broker WhatIf running · ${protectionStopDraftSummary(proposal)}`;
+  }
+  if (result.pending) return "Previewing broker WhatIf; no order is placed";
+  const blocker = (result.blockers || [])[0];
+  if (blocker) return `Preview blocked; no order placed · ${blocker.code}: ${blocker.message}`;
+  const preview = result.preview || {};
+  const whatIfStatus = String(preview.what_if?.status || "").trim();
+  const submitEligible = result.submit_eligible || preview.submit_eligible;
+  const whatIfAccepted = whatIfStatus.toLowerCase() === "accepted";
+  const parts = [
+    protectionPreviewOutcomeLabel({ submitEligible, whatIfAccepted, whatIfStatus, accepted: result.accepted }),
+    submitEligible ? "submit eligible" : "not submit eligible",
+  ];
+  const tokenID = result.preview_token_id || preview.preview_token_id || "";
+  if (tokenID) parts.push(`token ${shortPreviewTokenID(tokenID)}`);
+  const expiresAt = result.preview_token_expires_at || preview.preview_token_expires_at || "";
+  if (expiresAt) parts.push(`expires ${shortTimeWithZone(expiresAt)}`);
+  const whatIfDetails = protectionWhatIfDetails(preview.what_if || {});
+  if (whatIfDetails) parts.push(whatIfDetails);
+  if (!submitEligible && whatIfStatus && whatIfAccepted) parts.push("WhatIf accepted");
+  if (!submitEligible && preview.what_if?.message) parts.push(shortPreviewMessage(preview.what_if.message));
+  if (protectionPreviewStale(result, proposal)) parts.push("live suggestion changed");
+  return parts.filter(Boolean).join(" · ");
+}
+
+function protectionPreviewOutcomeLabel({ submitEligible = false, whatIfAccepted = false, whatIfStatus = "", accepted = false } = {}) {
+  if (submitEligible) return "Broker WhatIf accepted; no order placed";
+  if (whatIfStatus) return `Broker WhatIf ${labelize(whatIfStatus)}; no order placed`;
+  if (accepted) return "Draft previewed; no order placed";
+  return "Preview returned; no order placed";
+}
+
+function protectionPreviewSubmitEligible(result = {}) {
+  return Boolean(result.submit_eligible || result.preview?.submit_eligible);
+}
+
+function protectionPreviewSubmitBlockedReason(result = {}) {
+  const preview = result.preview || {};
+  const whatIf = preview.what_if || {};
+  if (whatIf.message) return shortPreviewMessage(whatIf.message);
+  if (whatIf.status) return `Broker WhatIf ${labelize(whatIf.status)}`;
+  if (preview.token_minted === false) return "Broker preview did not mint a submit token";
+  return "Broker WhatIf is not submit eligible";
+}
+
+function protectionWhatIfDetails(whatIf = {}) {
+  const margin = whatIf.margin || {};
+  const currency = margin.currency || margin.commission_currency || "USD";
+  const parts = [];
+  if (hasNumericValue(margin.commission)) {
+    parts.push(`commission ${compactMoney(margin.commission, margin.commission_currency || currency)}`);
+  }
+  if (hasNumericValue(margin.initial_margin_after)) {
+    parts.push(`init margin ${compactMoney(margin.initial_margin_after, currency)}`);
+  }
+  if (margin.warning_text) parts.push(shortPreviewMessage(margin.warning_text));
+  return parts.join(" · ");
+}
+
+function protectionSubmitStateText({ result = null, gate = {}, busy = false, previewResult = null, confirming = false } = {}) {
+  if (busy) return "Submitting stop; fresh broker WhatIf running";
+  if (result) return protectionSubmitResultText(result);
+  if (!previewResult) return "";
+  if (previewResult.pending) return "";
+  if (!gate.ready) return `Submit blocked · ${gate.reason}`;
+  if (!protectionPreviewSubmitEligible(previewResult)) return `Submit unavailable · ${protectionPreviewSubmitBlockedReason(previewResult)}`;
+  if (confirming) return `Confirm broker write to ${protectionWriteConfirmationLabel()}; fresh WhatIf runs first`;
+  return "Ready to submit; click Submit stop to confirm the broker write";
+}
+
+function protectionSubmitStateClass({ result = null, gate = {}, busy = false } = {}) {
+  const classes = ["protection-row__submit-state"];
+  if (busy) {
+    classes.push("protection-row__submit-state--pending");
+  } else if (result?.accepted || result?.place?.accepted) {
+    classes.push("protection-row__submit-state--ready");
+  } else if (result?.blockers?.length || (gate && gate.ready === false)) {
+    classes.push("protection-row__submit-state--blocked");
+  } else {
+    classes.push("protection-row__submit-state--ready");
+  }
+  return classes.join(" ");
+}
+
+function protectionSubmitResultText(result = {}) {
+  if (result.local && result.pending) return "Submitting stop; fresh broker WhatIf running";
+  const blocker = (result.blockers || [])[0];
+  if (blocker) return `Submit blocked · ${blocker.code}: ${blocker.message}`;
+  const orderRef = result.order_ref || result.place?.order_ref || "";
+  const placeStatus = result.place?.lifecycle_status || result.place?.status || result.place?.send_state || "";
+  if (result.accepted || result.place?.accepted) {
+    return ["Submitted to broker", orderRef ? `order ${orderRef}` : "", placeStatus].filter(Boolean).join(" · ");
+  }
+  const message = result.message || result.place?.message || "";
+  return message ? `Submit returned · ${message}` : "Submit returned without an accepted broker order";
+}
+
+function protectionSubmitButtonTitle({ blocked = false, previewBusy = false, submitBusy = false, gate = {}, confirming = false } = {}) {
+  if (blocked) return "Proposal is blocked";
+  if (previewBusy) return "Broker WhatIf preview is still running";
+  if (submitBusy) return "Submitting stop order";
+  if (!gate.ready) return gate.reason || "Submit unavailable";
+  if (confirming) return `Submit the stop to ${protectionWriteConfirmationLabel()}; the daemon runs a fresh broker WhatIf first`;
+  return gate.reason || "Submit the previewed stop order";
+}
+
+function protectionPreviewStale(result = {}, proposal = {}) {
+  const boundTrail = result.preview?.draft?.trail || result.proposal?.trail || null;
+  const liveTrail = proposal.trail || null;
+  if (!boundTrail || !liveTrail) return false;
+  const live = protectionLiveTrailStop(proposal, liveTrail);
+  if (!live) return false;
+  return protectionStopChanged(boundTrail.initial_stop_price, live.stop);
+}
+
+function shortPreviewTokenID(tokenID = "") {
+  const value = String(tokenID || "");
+  return value.length > 18 ? `${value.slice(0, 18)}...` : value;
+}
+
+function shortPreviewMessage(message = "") {
+  const value = String(message || "").replace(/\s+/g, " ").trim();
+  return value.length > 80 ? `${value.slice(0, 77)}...` : value;
+}
+
+function protectionStopDraftSummary(proposal = {}) {
+  const parts = [
+    protectionProposalTitle(proposal),
+    protectionTrailText(proposal),
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function protectionBlockerText(proposal = {}) {
@@ -1799,14 +2401,134 @@ function formatExpiry(value) {
 }
 
 async function submitProtectionProposal(proposal) {
-  const res = await fetch("/api/proposals/submit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify({ key: proposal.key, revision: proposal.revision, quantity: proposal.quantity, fast_path: true }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  await refreshProtectionProposals();
+  const previewKey = protectionPreviewStateKey(proposal);
+  const previewResult = state.protectionPreviews[previewKey] || null;
+  const gate = protectionUsesPreviewFlow(proposal) ? protectionPreviewSubmitGate(proposal, previewResult) : protectionSubmitGate(proposal);
+  if (!gate.ready) {
+    state.protectionSubmits = {
+      ...state.protectionSubmits,
+      [previewKey]: { blockers: [{ code: "submit_gate_blocked", message: gate.reason }], as_of: new Date().toISOString() },
+    };
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+    return;
+  }
+  if (protectionUsesPreviewFlow(proposal) && state.protectionConfirmKey !== previewKey) {
+    state.protectionConfirmKey = previewKey;
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+    return;
+  }
+  const confirmation = protectionWriteConfirmation(proposal);
+  if (!confirmation) {
+    state.protectionSubmits = {
+      ...state.protectionSubmits,
+      [previewKey]: { blockers: [{ code: "confirmation_cancelled", message: "broker submit confirmation was cancelled" }], as_of: new Date().toISOString() },
+    };
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+    return;
+  }
+  state.protectionSubmitBusy = previewKey;
+  state.protectionConfirmKey = "";
+  state.protectionSubmits = {
+    ...state.protectionSubmits,
+    [previewKey]: { local: true, pending: true, proposal, as_of: new Date().toISOString() },
+  };
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+  try {
+    const res = await fetch("/api/proposals/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        key: proposal.key,
+        revision: proposal.revision,
+        quantity: proposal.quantity,
+        fast_path: true,
+        timeout_ms: protectionPreviewTimeoutMs(proposal),
+        confirm_account: confirmation.account,
+        confirm_mode: confirmation.mode,
+      }),
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    state.protectionSubmits = {
+      ...state.protectionSubmits,
+      [previewKey]: body,
+    };
+    await refreshOpenOrders();
+  } catch (err) {
+    state.protectionSubmits = {
+      ...state.protectionSubmits,
+      [previewKey]: {
+        blockers: [{ code: "submit_failed", message: err.message }],
+        as_of: new Date().toISOString(),
+      },
+    };
+  } finally {
+    if (state.protectionSubmitBusy === previewKey) state.protectionSubmitBusy = "";
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+  }
+}
+
+function protectionWriteConfirmation(proposal = {}) {
+  const trading = state.snapshot?.trading || {};
+  if (!trading.mode || !trading.account) return null;
+  return { account: trading.account, mode: trading.mode };
+}
+
+function protectionWriteConfirmationLabel() {
+  const trading = state.snapshot?.trading || {};
+  return [trading.mode, trading.account].filter(Boolean).join("/") || "broker account";
+}
+
+async function previewProtectionProposal(proposal) {
+  const previewKey = protectionPreviewStateKey(proposal);
+  state.protectionPreviewBusy = previewKey;
+  if (state.protectionConfirmKey === previewKey) state.protectionConfirmKey = "";
+  state.protectionPreviews = {
+    ...state.protectionPreviews,
+    [previewKey]: {
+      local: true,
+      pending: true,
+      proposal,
+      as_of: new Date().toISOString(),
+    },
+  };
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+  try {
+    const res = await fetch("/api/proposals/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        key: proposal.key,
+        revision: proposal.revision,
+        quantity: proposal.quantity,
+        timeout_ms: protectionPreviewTimeoutMs(proposal),
+        fast_path: proposal.bucket === "trailing_stop",
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const result = await res.json();
+    state.protectionPreviews = {
+      ...state.protectionPreviews,
+      [previewKey]: result,
+    };
+  } catch (err) {
+    state.protectionPreviews = {
+      ...state.protectionPreviews,
+      [previewKey]: {
+        blockers: [{ code: "preview_failed", message: err.message }],
+        as_of: new Date().toISOString(),
+      },
+    };
+  } finally {
+    if (state.protectionPreviewBusy === previewKey) state.protectionPreviewBusy = "";
+    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+  }
+}
+
+function protectionPreviewTimeoutMs(proposal = {}) {
+  return proposal.bucket === "trailing_stop" ? 5000 : 10000;
 }
 
 async function ignoreProtectionProposal(proposal) {
@@ -1824,9 +2546,19 @@ async function refreshProtectionProposals() {
   const res = await fetch("/api/proposals/refresh", { method: "POST", credentials: "include" });
   if (res.ok) {
     const proposals = await res.json();
-    state.snapshot = { ...(state.snapshot || {}), proposals, market_events: proposals.market_events || state.snapshot?.market_events };
+    applyProtectionSnapshot(proposals);
     renderAll();
   }
+}
+
+function applyProtectionSnapshot(proposals = {}) {
+  state.snapshot = {
+    ...(state.snapshot || {}),
+    proposals,
+    auto_trade: proposals.auto_trade || state.snapshot?.auto_trade,
+    trading: proposals.trading || state.snapshot?.trading,
+    market_events: proposals.market_events || state.snapshot?.market_events,
+  };
 }
 
 function canaryExplanationCards(canary) {
@@ -3102,6 +3834,72 @@ function currentMarketCalendar(snap) {
   return state.marketCalendarOverride || snap.market_calendar;
 }
 
+function protectionMarketCalendar(proposal = {}) {
+  const market = proposalMarketKey(proposal);
+  const current = currentMarketCalendar(state.snapshot || {});
+  if (marketCalendarMatches(current, market)) return current;
+  if (Object.hasOwn(state.proposalMarketCalendars, market)) return state.proposalMarketCalendars[market];
+  queueProposalMarketCalendarSync(market);
+  return null;
+}
+
+function proposalMarketKey(proposal = {}) {
+  const contract = proposal.contract || {};
+  const explicit = String(contract.market || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  const secType = String(contract.sec_type || proposal.sec_type || "").trim().toUpperCase();
+  if (secType === "OPT") return "us-options";
+  const primary = String(contract.primary_exchange || contract.primary_exch || contract.exchange || "").trim().toUpperCase();
+  if (primary === "IBIS" || primary === "XETRA") return "de";
+  return "us";
+}
+
+function proposalMarketLabel(market = "") {
+  switch (String(market || "").toLowerCase()) {
+    case "de":
+      return "Xetra";
+    case "us-options":
+      return "US options";
+    default:
+      return "US market";
+  }
+}
+
+function marketCalendarMatches(calendar, market = "") {
+  if (!calendar) return false;
+  const got = String(calendar.market || calendar.session?.market || "").toLowerCase();
+  const want = String(market || "us").toLowerCase();
+  const aliases = {
+    us: ["us", "us_equity", "us-equity"],
+    "us-options": ["us-options", "us_options", "us_option", "us-options"],
+    de: ["de", "xetra", "de_xetra", "de-xetra"],
+  };
+  return (aliases[want] || [want]).includes(got);
+}
+
+function queueProposalMarketCalendarSync(market = "") {
+  const key = String(market || "us").toLowerCase();
+  if (Object.hasOwn(state.proposalMarketCalendars, key) || state.proposalMarketCalendarBusy[key]) return;
+  state.proposalMarketCalendarBusy = { ...state.proposalMarketCalendarBusy, [key]: true };
+  fetch(`/api/market-calendar?market=${encodeURIComponent(key)}`, { credentials: "include" })
+    .then((res) => {
+      if (!res.ok) throw new Error("market calendar unavailable");
+      return res.json();
+    })
+    .then((calendar) => {
+      state.proposalMarketCalendars = { ...state.proposalMarketCalendars, [key]: calendar };
+    })
+    .catch(() => {
+      state.proposalMarketCalendars = { ...state.proposalMarketCalendars, [key]: null };
+    })
+    .finally(() => {
+      const busy = { ...state.proposalMarketCalendarBusy };
+      delete busy[key];
+      state.proposalMarketCalendarBusy = busy;
+      renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
+    });
+}
+
 function setupMarketSelect() {
   const select = $("marketSelect");
   if (!select) return;
@@ -4171,6 +4969,9 @@ $("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);
 $("clearAlertsButton").addEventListener("click", clearAlerts);
 $("purgeRestoreToggle").addEventListener("change", (event) => {
   setPurgeRestoreEnabled(event.currentTarget.checked);
+});
+$("stockProtectionToggle").addEventListener("change", (event) => {
+  setStockProtectionEnabled(event.currentTarget.checked);
 });
 
 async function enablePush() {

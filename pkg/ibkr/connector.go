@@ -2105,19 +2105,22 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 
 // RawOrder represents an IBKR order
 type RawOrder struct {
-	OrderID    int
-	ClientID   int
-	PermID     int
-	Action     string // BUY or SELL
-	TotalQty   int
-	OrderType  string // MKT, LMT, STP, etc.
-	LmtPrice   float64
-	AuxPrice   float64 // Stop price for stop orders
-	TIF        string  // Time in force: DAY, GTC, IOC, etc.
-	Account    string
-	OrderRef   string // Our internal order ID
-	OutsideRth bool   // Allow execution outside regular trading hours
-	OpenClose  string // O=open, C=close
+	OrderID         int
+	ClientID        int
+	PermID          int
+	Action          string // BUY or SELL
+	TotalQty        int
+	OrderType       string // MKT, LMT, STP, etc.
+	LmtPrice        float64
+	AuxPrice        float64 // Stop price for stop orders
+	TrailStopPrice  float64
+	TrailingPercent float64
+	LmtPriceOffset  float64
+	TIF             string // Time in force: DAY, GTC, IOC, etc.
+	Account         string
+	OrderRef        string // Our internal order ID
+	OutsideRth      bool   // Allow execution outside regular trading hours
+	OpenClose       string // O=open, C=close
 }
 
 // SubmitOrder submits an order to IBKR
@@ -2153,33 +2156,36 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 
 	// Convert to IBKROrder for the connection
 	ibkrOrder := &IBKROrder{
-		OrderID:      order.OrderID,
-		ClientID:     order.ClientID,
-		PermID:       order.PermID,
-		ConID:        contract.ConID,
-		Symbol:       contract.Symbol,
-		SecType:      contract.SecType,
-		Expiry:       contract.Expiry,
-		Strike:       contract.Strike,
-		Right:        contract.Right,
-		Multiplier:   multiplierToString(contract.Multiplier),
-		Exchange:     contract.Exchange,
-		PrimaryExch:  contract.PrimaryExch,
-		Currency:     contract.Currency,
-		LocalSymbol:  contract.LocalSymbol,
-		TradingClass: contract.TradingClass,
-		Action:       order.Action,
-		TotalQty:     order.TotalQty,
-		OrderType:    order.OrderType,
-		LmtPrice:     order.LmtPrice,
-		AuxPrice:     order.AuxPrice,
-		TIF:          order.TIF,
-		OrderRef:     order.OrderRef,
-		OutsideRth:   order.OutsideRth,
-		Account:      order.Account,
-		Transmit:     true,
-		OpenClose:    strings.ToUpper(strings.TrimSpace(order.OpenClose)),
-		Origin:       0,
+		OrderID:         order.OrderID,
+		ClientID:        order.ClientID,
+		PermID:          order.PermID,
+		ConID:           contract.ConID,
+		Symbol:          contract.Symbol,
+		SecType:         contract.SecType,
+		Expiry:          contract.Expiry,
+		Strike:          contract.Strike,
+		Right:           contract.Right,
+		Multiplier:      multiplierToString(contract.Multiplier),
+		Exchange:        contract.Exchange,
+		PrimaryExch:     contract.PrimaryExch,
+		Currency:        contract.Currency,
+		LocalSymbol:     contract.LocalSymbol,
+		TradingClass:    contract.TradingClass,
+		Action:          order.Action,
+		TotalQty:        order.TotalQty,
+		OrderType:       order.OrderType,
+		LmtPrice:        order.LmtPrice,
+		AuxPrice:        order.AuxPrice,
+		TrailStopPrice:  order.TrailStopPrice,
+		TrailingPercent: order.TrailingPercent,
+		LmtPriceOffset:  order.LmtPriceOffset,
+		TIF:             order.TIF,
+		OrderRef:        order.OrderRef,
+		OutsideRth:      order.OutsideRth,
+		Account:         order.Account,
+		Transmit:        true,
+		OpenClose:       strings.ToUpper(strings.TrimSpace(order.OpenClose)),
+		Origin:          0,
 	}
 	if ibkrOrder.OpenClose == "" {
 		ibkrOrder.OpenClose = "O"
@@ -2191,6 +2197,10 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 		localID = brokerID
 	}
 	now := time.Now()
+	stopPrice := order.AuxPrice
+	if order.TrailStopPrice != 0 {
+		stopPrice = order.TrailStopPrice
+	}
 	coreOrder := &Order{
 		ID:              localID,
 		BrokerID:        brokerID,
@@ -2199,7 +2209,7 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 		Quantity:        float64(order.TotalQty),
 		OrderType:       mapIBOrderType(order.OrderType),
 		LimitPrice:      order.LmtPrice,
-		StopPrice:       order.AuxPrice,
+		StopPrice:       stopPrice,
 		TimeInForce:     mapIBTimeInForce(order.TIF),
 		Status:          OrderStatusPending,
 		CreatedAt:       now,

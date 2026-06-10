@@ -8,7 +8,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/styles.css?v=daily-underlyings-20260605">
+    <link rel="stylesheet" href="/styles.css?v=protection-submit-flow-20260609">
   </head>
   <body>
     <main class="shell">
@@ -439,6 +439,28 @@
                 <span></span>
               </label>
             </div>
+            <div class="settings-row settings-row--toggle">
+              <div>
+                <span>Stock protection</span>
+                <b id="stockProtectionSettingState">--</b>
+                <small id="stockProtectionSettingMeta">Runtime preference</small>
+              </div>
+              <label class="toggle-switch" title="Toggle stock and ETF protection proposals">
+                <input id="stockProtectionToggle" type="checkbox">
+                <span></span>
+              </label>
+            </div>
+            <a class="settings-row settings-row--link" href="https://osauer.dev/ibkr/feedback/?source=canary-app" target="_blank" rel="noopener">
+              <div>
+                <span>Feedback</span>
+                <b>Share feedback or report issues</b>
+                <small>Bug, feature request, private email, or app comment.</small>
+              </div>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 17 17 7"></path>
+                <path d="M9 7h8v8"></path>
+              </svg>
+            </a>
             <div class="settings-grid">
               <div class="settings-cell">
                 <span>Trading</span>
@@ -519,6 +541,6 @@
         </button>
       </nav>
     </main>
-    <script src="/app.js?v=daily-underlyings-20260605" type="module"></script>
+    <script src="/app.js?v=trailing-stop-submit-flow-20260609" type="module"></script>
   </body>
 </html>

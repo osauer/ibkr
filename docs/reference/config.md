@@ -10,7 +10,7 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 |---------|-------|------|-------------|
 | `[auto_trade]` | `auto_submit` | `bool` | AutoSubmit allows the experimental supervisor to submit eligible proposals automatically; default false and ignored unless trading writes are explicitly enabled. |
 | `[auto_trade]` | `enabled` | `bool` | Enabled controls the experimental auto-trade supervisor; default false, and stable builds remain preview/read-only unless trading config and build capability allow more. |
-| `[auto_trade]` | `fast_path_enabled` | `*bool` | FastPathEnabled allows experimental proposal refreshes to bypass slower review cadence when new risk evidence arrives; default false unless explicitly enabled. |
+| `[auto_trade]` | `fast_path_enabled` | `*bool` | FastPathEnabled allows manual proposal preview/submit to use the immediate revalidation path; default true so paper protection stops remain usable. |
 | `[auto_trade]` | `hot_reload` | `*bool` | HotReload controls whether policy changes are reloaded while the daemon runs; default true. |
 | `[auto_trade]` | `policy_file` | `string` | PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml. |
 | `[auto_trade]` | `proposal_cadence` | `duration` | ProposalCadence controls how often the daemon refreshes protection proposals; default 15m. |

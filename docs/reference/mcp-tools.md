@@ -20,7 +20,7 @@ Local trading status: whether order entry is disabled, paper-ready, live-ready, 
 
 ## `ibkr_settings`
 
-Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.
+Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore and stock-protection enablement, read-only trading mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore or stock trailing-stop protection is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.
 
 *No parameters.*
 
@@ -42,21 +42,31 @@ Read one locally journaled order's lifecycle and audit events by order ref, IBKR
 
 ## `ibkr_order_preview`
 
-Preview a locally gated stock/ETF LMT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`. This tool validates the local trading gate, pinned endpoint/account/client ID, LMT-only order type, max notional, stock short/flip policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a future separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For market context without token minting use `ibkr_quote`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.
+Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, max notional, stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `action` | string | **yes** | order side; buy increases or closes short exposure, sell reduces/closes long exposure unless stock shorting is explicitly enabled |
-| `limit` | number | no | optional explicit LMT price. Omit to use the default patient-limit strategy from live bid/ask. |
+| `action` | string | **yes** | order side; buy increases or closes short exposure, sell reduces/closes long exposure unless the local policy allows the opening effect |
+| `expiry` | string | no | option expiry as YYYYMMDD. Required for sec_type OPT. |
+| `initial_stop_price` | number | no | optional initial trail stop price. Omit to bind the stop from fresh bid/ask during preview. |
+| `limit` | number | no | optional explicit LMT price. Do not send with TRAIL or TRAIL LIMIT; use limit_offset for TRAIL LIMIT. |
+| `limit_offset` | number | no | TRAIL LIMIT offset from the dynamic stop. Required for TRAIL LIMIT and rejected for plain TRAIL. |
 | `market` | string | no | optional stock routing shortcut; omit or use "us" for SMART/USD, use "de" for German/Xetra EUR equities via SMART with primary_exchange=IBIS |
-| `outside_rth` | boolean | no | whether the draft allows outside regular trading hours. Default false; set true only when the human explicitly asks. |
-| `quantity` | integer | **yes** | share quantity; must be positive |
-| `strategy` | string | no | pricing strategy. Defaults to patient-limit when limit is omitted and explicit-limit when limit is supplied. |
-| `symbol` | string | **yes** | stock or ETF ticker symbol; options are intentionally not accepted by this preview slice |
-| `tif` | string | no | time in force; only DAY is accepted in this slice |
+| `order_type` | string | no | broker order type. Defaults to LMT, or TRAIL/TRAIL LIMIT when trail fields are supplied. |
+| `outside_rth` | boolean | no | whether the draft allows outside regular trading hours. Default false; option protection previews should keep this false. |
+| `quantity` | integer | **yes** | share or option-contract quantity; must be positive |
+| `right` | string | no | option right. Required for sec_type OPT. |
+| `sec_type` | string | no | security type. Defaults to STK unless option fields are present. |
+| `strategy` | string | no | pricing strategy. Defaults to patient-limit for LMT and broker-trail for TRAIL/TRAIL LIMIT. |
+| `strike` | number | no | option strike. Required for sec_type OPT. |
+| `symbol` | string | **yes** | underlying ticker symbol |
+| `tif` | string | no | time in force; only DAY is accepted |
 | `timeout_ms` | integer | no | quote snapshot timeout; default 5000 ms |
+| `trail_offset_type` | string | no | trail offset unit. Usually omit and let trailing_percent/trailing_amount choose it. |
+| `trailing_amount` | number | no | absolute broker trail amount in the contract currency. |
+| `trailing_percent` | number | no | IBKR trailing percent in percent units: 2 means 2%, 0.50 means 0.50%. |
 
 ## `ibkr_account`
 

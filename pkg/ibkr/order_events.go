@@ -16,47 +16,50 @@ const (
 // daemon reconciliation. It is intentionally independent from Connector.Order
 // mutation: socket writes do not imply broker acknowledgement.
 type OrderLifecycleEvent struct {
-	Type          string
-	OrderID       int
-	PermID        int
-	ClientID      int
-	RequestID     int
-	Status        string
-	ErrorCode     int
-	Message       string
-	Symbol        string
-	SecType       string
-	Expiry        string
-	Strike        float64
-	Right         string
-	Multiplier    int
-	Exchange      string
-	Currency      string
-	LocalSymbol   string
-	TradingClass  string
-	Action        string
-	TotalQuantity float64
-	OrderType     string
-	LimitPrice    float64
-	AuxPrice      float64
-	TIF           string
-	OutsideRth    bool
-	WhatIf        bool
-	Filled        float64
-	Remaining     float64
-	AvgFillPrice  float64
-	LastFillPrice float64
-	WhyHeld       string
-	MktCapPrice   float64
-	ExecID        string
-	ExecTime      string
-	Account       string
-	ExecutionSide string
-	Shares        float64
-	Price         float64
-	CumQty        float64
-	OrderRef      string
-	Raw           []string
+	Type            string
+	OrderID         int
+	PermID          int
+	ClientID        int
+	RequestID       int
+	Status          string
+	ErrorCode       int
+	Message         string
+	Symbol          string
+	SecType         string
+	Expiry          string
+	Strike          float64
+	Right           string
+	Multiplier      int
+	Exchange        string
+	Currency        string
+	LocalSymbol     string
+	TradingClass    string
+	Action          string
+	TotalQuantity   float64
+	OrderType       string
+	LimitPrice      float64
+	AuxPrice        float64
+	TrailingPercent float64
+	TrailStopPrice  float64
+	LmtPriceOffset  float64
+	TIF             string
+	OutsideRth      bool
+	WhatIf          bool
+	Filled          float64
+	Remaining       float64
+	AvgFillPrice    float64
+	LastFillPrice   float64
+	WhyHeld         string
+	MktCapPrice     float64
+	ExecID          string
+	ExecTime        string
+	Account         string
+	ExecutionSide   string
+	Shares          float64
+	Price           float64
+	CumQty          float64
+	OrderRef        string
+	Raw             []string
 }
 
 // ParseOrderLifecycleEvent parses the three broker callbacks that move product
@@ -197,33 +200,36 @@ func parseExecDetailsEvent(fields []string) (OrderLifecycleEvent, bool) {
 
 func parseOpenOrderProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
 	ev := OrderLifecycleEvent{
-		Type:          OrderLifecycleEventOpenOrder,
-		OrderID:       orderEventInt(summaryFieldValue(fields, "orderId=")),
-		PermID:        orderEventInt(summaryFieldValue(fields, "permId=")),
-		ClientID:      orderEventInt(summaryFieldValue(fields, "clientId=")),
-		Symbol:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "symbol="))),
-		SecType:       strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "secType="))),
-		Expiry:        strings.TrimSpace(summaryFieldValue(fields, "expiry=")),
-		Strike:        orderEventFloat(summaryFieldValue(fields, "strike=")),
-		Right:         strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "right="))),
-		Multiplier:    orderEventInt(summaryFieldValue(fields, "multiplier=")),
-		Exchange:      strings.TrimSpace(summaryFieldValue(fields, "exchange=")),
-		Currency:      strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "currency="))),
-		LocalSymbol:   strings.TrimSpace(summaryFieldValue(fields, "localSymbol=")),
-		TradingClass:  strings.TrimSpace(summaryFieldValue(fields, "tradingClass=")),
-		Action:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "action="))),
-		TotalQuantity: orderEventFloat(summaryFieldValue(fields, "qty=")),
-		OrderType:     strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "orderType="))),
-		LimitPrice:    orderEventFloat(summaryFieldValue(fields, "lmtPrice=")),
-		AuxPrice:      orderEventFloat(summaryFieldValue(fields, "auxPrice=")),
-		TIF:           strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "tif="))),
-		OutsideRth:    protoSummaryBool(fields, "outsideRth="),
-		WhatIf:        protoSummaryBool(fields, "whatIf="),
-		Account:       strings.TrimSpace(summaryFieldValue(fields, "account=")),
-		OrderRef:      strings.TrimSpace(summaryFieldValue(fields, "orderRef=")),
-		Status:        strings.TrimSpace(summaryFieldValue(fields, "status=")),
-		Message:       orderEventWarningMessage(fields),
-		Raw:           append([]string{}, fields...),
+		Type:            OrderLifecycleEventOpenOrder,
+		OrderID:         orderEventInt(summaryFieldValue(fields, "orderId=")),
+		PermID:          orderEventInt(summaryFieldValue(fields, "permId=")),
+		ClientID:        orderEventInt(summaryFieldValue(fields, "clientId=")),
+		Symbol:          strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "symbol="))),
+		SecType:         strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "secType="))),
+		Expiry:          strings.TrimSpace(summaryFieldValue(fields, "expiry=")),
+		Strike:          orderEventFloat(summaryFieldValue(fields, "strike=")),
+		Right:           strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "right="))),
+		Multiplier:      orderEventInt(summaryFieldValue(fields, "multiplier=")),
+		Exchange:        strings.TrimSpace(summaryFieldValue(fields, "exchange=")),
+		Currency:        strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "currency="))),
+		LocalSymbol:     strings.TrimSpace(summaryFieldValue(fields, "localSymbol=")),
+		TradingClass:    strings.TrimSpace(summaryFieldValue(fields, "tradingClass=")),
+		Action:          strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "action="))),
+		TotalQuantity:   orderEventFloat(summaryFieldValue(fields, "qty=")),
+		OrderType:       strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "orderType="))),
+		LimitPrice:      orderEventFloat(summaryFieldValue(fields, "lmtPrice=")),
+		AuxPrice:        orderEventFloat(summaryFieldValue(fields, "auxPrice=")),
+		TrailingPercent: orderEventFloat(summaryFieldValue(fields, "trailingPercent=")),
+		TrailStopPrice:  orderEventFloat(summaryFieldValue(fields, "trailStopPrice=")),
+		LmtPriceOffset:  orderEventFloat(summaryFieldValue(fields, "lmtPriceOffset=")),
+		TIF:             strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "tif="))),
+		OutsideRth:      protoSummaryBool(fields, "outsideRth="),
+		WhatIf:          protoSummaryBool(fields, "whatIf="),
+		Account:         strings.TrimSpace(summaryFieldValue(fields, "account=")),
+		OrderRef:        strings.TrimSpace(summaryFieldValue(fields, "orderRef=")),
+		Status:          strings.TrimSpace(summaryFieldValue(fields, "status=")),
+		Message:         orderEventWarningMessage(fields),
+		Raw:             append([]string{}, fields...),
 	}
 	return ev, ev.OrderID > 0
 }

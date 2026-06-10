@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +52,28 @@ func TestProtectionPolicyInvalidHigherVersionBlocksWrites(t *testing.T) {
 	}
 }
 
+func TestProtectionPolicyTrailingStopDefaultsAndValidation(t *testing.T) {
+	t.Parallel()
+	policy := defaultProtectionPolicy()
+	if !policy.Buckets.TrailingStop.Enabled || !policy.Buckets.TrailingStop.StockETF.Enabled {
+		t.Fatalf("stock/ETF trailing defaults disabled: %+v", policy.Buckets.TrailingStop)
+	}
+	if policy.Buckets.TrailingStop.Options.Enabled {
+		t.Fatal("option trailing stop default enabled, want opt-in")
+	}
+	if raw := string(mustMarshalJSON(t, policy.Authority)); strings.Contains(raw, "paper_only") {
+		t.Fatalf("authority JSON still exposes paper_only: %s", raw)
+	}
+	if err := validateProtectionPolicy(policy); err != nil {
+		t.Fatalf("default policy invalid: %v", err)
+	}
+
+	policy.Buckets.TrailingStop.StockETF.DefaultPct = 20
+	if err := validateProtectionPolicy(policy); err == nil || !strings.Contains(err.Error(), "trailing_stop.stock_etf") {
+		t.Fatalf("invalid stock trail bounds err=%v, want trailing_stop.stock_etf", err)
+	}
+}
+
 func writePolicy(t *testing.T, path string, version int, theta float64) {
 	t.Helper()
 	body := []byte(`kind = "ibkr.protection_policy"
@@ -59,7 +83,6 @@ policy_version = ` + strconv.Itoa(version) + `
 profile = "theta-priority-mvp"
 
 [authority]
-paper_only = true
 close_reduce_only = true
 auto_submit = false
 
@@ -77,4 +100,13 @@ max_order_notional = 10000.0
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustMarshalJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return raw
 }

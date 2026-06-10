@@ -66,3 +66,37 @@ func TestRenderTradingStatusTextBlocked(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderTradingStatusTextWriteBlockers(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderTradingStatusText(env, &rpc.TradingStatus{
+		Mode:           "paper",
+		Endpoint:       "127.0.0.1:7497",
+		Account:        "DU1234567",
+		AccountOrigin:  "pinned",
+		ClientID:       15,
+		ClientIDOrigin: "pinned",
+		MCPTrading:     rpc.TradingMCPDisabled,
+		CanPreview:     true,
+		CanWrite:       false,
+		WriteBlockers: []rpc.TradingBlocker{{
+			Code:    "order_writes_unavailable",
+			Message: "order writes are unavailable in this build",
+			Action:  "Rebuild the daemon with the trading write capability.",
+		}},
+	})
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Trading  READY",
+		"Capabilities   preview=true write=false",
+		"Write blockers:",
+		"order_writes_unavailable: order writes are unavailable in this build",
+		"action: Rebuild the daemon with the trading write capability.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("trading status missing %q:\n%s", want, got)
+		}
+	}
+}

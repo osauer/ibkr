@@ -7,18 +7,27 @@ import (
 
 func TestSettingsPatchFromAssignmentBuildsNestedPatch(t *testing.T) {
 	t.Parallel()
-	raw, err := settingsPatchFromAssignment("features.purge_restore.enabled=false")
-	if err != nil {
-		t.Fatalf("settingsPatchFromAssignment: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal patch: %v", err)
-	}
-	features := got["features"].(map[string]any)
-	purge := features["purge_restore"].(map[string]any)
-	if purge["enabled"] != false {
-		t.Fatalf("enabled = %#v, want false", purge["enabled"])
+	for _, tc := range []struct {
+		assignment string
+		feature    string
+		want       any
+	}{
+		{"features.purge_restore.enabled=false", "purge_restore", false},
+		{"features.stock_protection.enabled=null", "stock_protection", nil},
+	} {
+		raw, err := settingsPatchFromAssignment(tc.assignment)
+		if err != nil {
+			t.Fatalf("settingsPatchFromAssignment(%q): %v", tc.assignment, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal patch: %v", err)
+		}
+		features := got["features"].(map[string]any)
+		feature := features[tc.feature].(map[string]any)
+		if feature["enabled"] != tc.want {
+			t.Fatalf("%s enabled = %#v, want %#v", tc.feature, feature["enabled"], tc.want)
+		}
 	}
 }
 

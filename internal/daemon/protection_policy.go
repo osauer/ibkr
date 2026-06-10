@@ -32,7 +32,6 @@ type protectionPolicy struct {
 }
 
 type protectionPolicyAuthority struct {
-	PaperOnly       bool `toml:"paper_only" json:"paper_only"`
 	CloseReduceOnly bool `toml:"close_reduce_only" json:"close_reduce_only"`
 	AutoSubmit      bool `toml:"auto_submit" json:"auto_submit"`
 }
@@ -40,6 +39,7 @@ type protectionPolicyAuthority struct {
 type protectionPolicyBuckets struct {
 	ThetaHygiene  protectionThetaPolicy `toml:"theta_hygiene" json:"theta_hygiene"`
 	RiskReduction protectionRiskPolicy  `toml:"risk_reduction" json:"risk_reduction"`
+	TrailingStop  protectionTrailPolicy `toml:"trailing_stop" json:"trailing_stop"`
 }
 
 type protectionThetaPolicy struct {
@@ -53,6 +53,35 @@ type protectionRiskPolicy struct {
 	Enabled                bool    `toml:"enabled" json:"enabled"`
 	SingleNameTargetPctNLV float64 `toml:"single_name_target_pct_nlv" json:"single_name_target_pct_nlv"`
 	MaxOrderNotional       float64 `toml:"max_order_notional" json:"max_order_notional"`
+}
+
+type protectionTrailPolicy struct {
+	Enabled  bool                        `toml:"enabled" json:"enabled"`
+	StockETF protectionTrailAssetPolicy  `toml:"stock_etf" json:"stock_etf"`
+	Options  protectionTrailOptionPolicy `toml:"options" json:"options"`
+}
+
+type protectionTrailAssetPolicy struct {
+	Enabled           bool    `toml:"enabled" json:"enabled"`
+	OrderType         string  `toml:"order_type" json:"order_type"`
+	DefaultPct        float64 `toml:"default_pct" json:"default_pct"`
+	MinPct            float64 `toml:"min_pct" json:"min_pct"`
+	MaxPct            float64 `toml:"max_pct" json:"max_pct"`
+	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
+	LimitOffsetAbs    float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
+}
+
+type protectionTrailOptionPolicy struct {
+	Enabled               bool    `toml:"enabled" json:"enabled"`
+	OrderType             string  `toml:"order_type" json:"order_type"`
+	DefaultPct            float64 `toml:"default_pct" json:"default_pct"`
+	MinPct                float64 `toml:"min_pct" json:"min_pct"`
+	MaxPct                float64 `toml:"max_pct" json:"max_pct"`
+	MaxSpreadPctOfMid     float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
+	MinTrailAbs           float64 `toml:"min_trail_abs" json:"min_trail_abs"`
+	SpreadMultiple        float64 `toml:"spread_multiple" json:"spread_multiple"`
+	LimitOffsetAbs        float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
+	AllowShortProfitTrail bool    `toml:"allow_short_profit_trail" json:"allow_short_profit_trail"`
 }
 
 type protectionPolicyManager struct {
@@ -207,7 +236,7 @@ func (m *protectionPolicyManager) loadPolicy() (protectionPolicy, string, error)
 		}
 		return protectionPolicy{}, "file", fmt.Errorf("unknown protection policy key(s): %s", strings.Join(keys, ", "))
 	}
-	applyProtectionPolicyDefaults(&p)
+	applyProtectionPolicyDefaults(&p, &md)
 	if err := validateProtectionPolicy(p); err != nil {
 		return protectionPolicy{}, "file", err
 	}
@@ -222,7 +251,6 @@ func defaultProtectionPolicy() protectionPolicy {
 		PolicyVersion: 1,
 		Profile:       "theta-priority-mvp",
 		Authority: protectionPolicyAuthority{
-			PaperOnly:       true,
 			CloseReduceOnly: true,
 			AutoSubmit:      false,
 		},
@@ -238,11 +266,34 @@ func defaultProtectionPolicy() protectionPolicy {
 				SingleNameTargetPctNLV: 25.0,
 				MaxOrderNotional:       10000.0,
 			},
+			TrailingStop: protectionTrailPolicy{
+				Enabled: true,
+				StockETF: protectionTrailAssetPolicy{
+					Enabled:           true,
+					OrderType:         rpc.OrderTypeTRAIL,
+					DefaultPct:        8.0,
+					MinPct:            2.0,
+					MaxPct:            15.0,
+					MaxSpreadPctOfMid: 2.0,
+				},
+				Options: protectionTrailOptionPolicy{
+					Enabled:               false,
+					OrderType:             rpc.OrderTypeTRAILLIMIT,
+					DefaultPct:            30.0,
+					MinPct:                20.0,
+					MaxPct:                50.0,
+					MaxSpreadPctOfMid:     25.0,
+					MinTrailAbs:           0.10,
+					SpreadMultiple:        2.0,
+					LimitOffsetAbs:        0.05,
+					AllowShortProfitTrail: false,
+				},
+			},
 		},
 	}
 }
 
-func applyProtectionPolicyDefaults(p *protectionPolicy) {
+func applyProtectionPolicyDefaults(p *protectionPolicy, md *toml.MetaData) {
 	if p == nil {
 		return
 	}
@@ -254,6 +305,17 @@ func applyProtectionPolicyDefaults(p *protectionPolicy) {
 	}
 	if p.Profile == "" {
 		p.Profile = p.PolicyID
+	}
+	defaults := defaultProtectionPolicy()
+	if md != nil && !md.IsDefined("buckets", "trailing_stop") {
+		p.Buckets.TrailingStop = defaults.Buckets.TrailingStop
+		return
+	}
+	if md != nil && md.IsDefined("buckets", "trailing_stop") && !md.IsDefined("buckets", "trailing_stop", "stock_etf") {
+		p.Buckets.TrailingStop.StockETF = defaults.Buckets.TrailingStop.StockETF
+	}
+	if md != nil && md.IsDefined("buckets", "trailing_stop") && !md.IsDefined("buckets", "trailing_stop", "options") {
+		p.Buckets.TrailingStop.Options = defaults.Buckets.TrailingStop.Options
 	}
 }
 
@@ -269,9 +331,6 @@ func validateProtectionPolicy(p protectionPolicy) error {
 	}
 	if p.PolicyVersion <= 0 {
 		return fmt.Errorf("protection policy policy_version must be positive")
-	}
-	if !p.Authority.PaperOnly {
-		return fmt.Errorf("protection policy authority.paper_only must be true in MVP")
 	}
 	if !p.Authority.CloseReduceOnly {
 		return fmt.Errorf("protection policy authority.close_reduce_only must be true in MVP")
@@ -298,7 +357,68 @@ func validateProtectionPolicy(p protectionPolicy) error {
 			return fmt.Errorf("risk_reduction.max_order_notional must be positive")
 		}
 	}
+	if p.Buckets.TrailingStop.Enabled {
+		if err := validateTrailAssetPolicy("trailing_stop.stock_etf", p.Buckets.TrailingStop.StockETF); err != nil {
+			return err
+		}
+		if err := validateTrailOptionPolicy("trailing_stop.options", p.Buckets.TrailingStop.Options); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateTrailAssetPolicy(prefix string, p protectionTrailAssetPolicy) error {
+	if !p.Enabled {
+		return nil
+	}
+	if !supportedTrailOrderType(p.OrderType) {
+		return fmt.Errorf("%s.order_type must be TRAIL or TRAIL LIMIT", prefix)
+	}
+	if p.DefaultPct <= 0 || p.MinPct <= 0 || p.MaxPct <= 0 || p.MinPct > p.DefaultPct || p.DefaultPct > p.MaxPct {
+		return fmt.Errorf("%s percent bounds must satisfy 0 < min_pct <= default_pct <= max_pct", prefix)
+	}
+	if p.MaxSpreadPctOfMid <= 0 {
+		return fmt.Errorf("%s.max_spread_pct_of_mid must be positive", prefix)
+	}
+	if strings.EqualFold(p.OrderType, rpc.OrderTypeTRAILLIMIT) && p.LimitOffsetAbs <= 0 {
+		return fmt.Errorf("%s.limit_offset_abs must be positive for TRAIL LIMIT", prefix)
+	}
+	return nil
+}
+
+func validateTrailOptionPolicy(prefix string, p protectionTrailOptionPolicy) error {
+	if !p.Enabled {
+		return nil
+	}
+	if !supportedTrailOrderType(p.OrderType) {
+		return fmt.Errorf("%s.order_type must be TRAIL or TRAIL LIMIT", prefix)
+	}
+	if p.DefaultPct <= 0 || p.MinPct <= 0 || p.MaxPct <= 0 || p.MinPct > p.DefaultPct || p.DefaultPct > p.MaxPct {
+		return fmt.Errorf("%s percent bounds must satisfy 0 < min_pct <= default_pct <= max_pct", prefix)
+	}
+	if p.MaxSpreadPctOfMid <= 0 {
+		return fmt.Errorf("%s.max_spread_pct_of_mid must be positive", prefix)
+	}
+	if p.MinTrailAbs <= 0 {
+		return fmt.Errorf("%s.min_trail_abs must be positive", prefix)
+	}
+	if p.SpreadMultiple <= 0 {
+		return fmt.Errorf("%s.spread_multiple must be positive", prefix)
+	}
+	if strings.EqualFold(p.OrderType, rpc.OrderTypeTRAILLIMIT) && p.LimitOffsetAbs <= 0 {
+		return fmt.Errorf("%s.limit_offset_abs must be positive for TRAIL LIMIT", prefix)
+	}
+	return nil
+}
+
+func supportedTrailOrderType(orderType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(orderType)) {
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		return true
+	default:
+		return false
+	}
 }
 
 func protectionPolicyStatus(p protectionPolicy, status, source, message string, at time.Time) rpc.ProtectionPolicyStatus {

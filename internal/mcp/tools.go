@@ -63,7 +63,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_settings",
 		Title:       "IBKR Platform Settings",
-		Description: "Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore enablement, read-only trading mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.",
+		Description: "Read ibkr's platform settings and observed state: runtime user preferences such as purge/restore and stock-protection enablement, read-only trading mode/account/build capability, trading safety limits with access/source metadata, and compact observed market-data quality. Use when the user asks what ibkr features are enabled, whether purge/restore or stock trailing-stop protection is available, why a setting is read-only, or what build/channel controls trading writes. This tool is read-only and cannot change settings; there is intentionally no MCP settings write tool in v1. NOT for placing, previewing, modifying, or cancelling orders — use `ibkr_trading_status` first and `ibkr_order_preview` only for tokenized previews. NOT for detailed per-instrument quote truth — use `ibkr_quote`, `ibkr_chain`, or `ibkr_positions` rows.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.PlatformSettings
@@ -112,46 +112,97 @@ var Tools = []Tool{
 	{
 		Name:         "ibkr_order_preview",
 		Title:        "IBKR Order Preview",
-		Description:  "Preview a locally gated stock/ETF LMT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`. This tool validates the local trading gate, pinned endpoint/account/client ID, LMT-only order type, max notional, stock short/flip policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a future separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For market context without token minting use `ibkr_quote`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
+		Description:  "Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, max notional, stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
 		ReadOnlyHint: new(false),
 		JSONSchema: schemaObject(map[string]json.RawMessage{
-			"action":      schemaEnum([]string{"buy", "sell"}, "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless stock shorting is explicitly enabled"),
-			"symbol":      schemaString("stock or ETF ticker symbol; options are intentionally not accepted by this preview slice"),
-			"quantity":    json.RawMessage(`{"type":"integer","minimum":1,"description":"share quantity; must be positive"}`),
-			"limit":       json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional explicit LMT price. Omit to use the default patient-limit strategy from live bid/ask."}`),
-			"strategy":    schemaEnum([]string{"patient-limit", "explicit-limit"}, "pricing strategy. Defaults to patient-limit when limit is omitted and explicit-limit when limit is supplied."),
-			"tif":         schemaEnum([]string{"DAY"}, "time in force; only DAY is accepted in this slice"),
-			"outside_rth": json.RawMessage(`{"type":"boolean","description":"whether the draft allows outside regular trading hours. Default false; set true only when the human explicitly asks."}`),
-			"timeout_ms":  json.RawMessage(`{"type":"integer","minimum":100,"description":"quote snapshot timeout; default 5000 ms"}`),
-			"market":      json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
+			"action":             schemaEnum([]string{"buy", "sell"}, "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless the local policy allows the opening effect"),
+			"symbol":             schemaString("underlying ticker symbol"),
+			"quantity":           json.RawMessage(`{"type":"integer","minimum":1,"description":"share or option-contract quantity; must be positive"}`),
+			"sec_type":           schemaEnum([]string{"STK", "ETF", "OPT"}, "security type. Defaults to STK unless option fields are present."),
+			"expiry":             schemaString("option expiry as YYYYMMDD. Required for sec_type OPT."),
+			"right":              schemaEnum([]string{"C", "P"}, "option right. Required for sec_type OPT."),
+			"strike":             json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"option strike. Required for sec_type OPT."}`),
+			"order_type":         schemaEnum([]string{"LMT", "TRAIL", "TRAIL LIMIT"}, "broker order type. Defaults to LMT, or TRAIL/TRAIL LIMIT when trail fields are supplied."),
+			"limit":              json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional explicit LMT price. Do not send with TRAIL or TRAIL LIMIT; use limit_offset for TRAIL LIMIT."}`),
+			"strategy":           schemaEnum([]string{"patient-limit", "explicit-limit", "broker-trail"}, "pricing strategy. Defaults to patient-limit for LMT and broker-trail for TRAIL/TRAIL LIMIT."),
+			"trail_offset_type":  schemaEnum([]string{"percent", "amount"}, "trail offset unit. Usually omit and let trailing_percent/trailing_amount choose it."),
+			"trailing_percent":   json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"IBKR trailing percent in percent units: 2 means 2%, 0.50 means 0.50%."}`),
+			"trailing_amount":    json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"absolute broker trail amount in the contract currency."}`),
+			"initial_stop_price": json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional initial trail stop price. Omit to bind the stop from fresh bid/ask during preview."}`),
+			"limit_offset":       json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"TRAIL LIMIT offset from the dynamic stop. Required for TRAIL LIMIT and rejected for plain TRAIL."}`),
+			"tif":                schemaEnum([]string{"DAY"}, "time in force; only DAY is accepted"),
+			"outside_rth":        json.RawMessage(`{"type":"boolean","description":"whether the draft allows outside regular trading hours. Default false; option protection previews should keep this false."}`),
+			"timeout_ms":         json.RawMessage(`{"type":"integer","minimum":100,"description":"quote snapshot timeout; default 5000 ms"}`),
+			"market":             json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
 		}, []string{"action", "symbol", "quantity"}),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in struct {
-				Action     string   `json:"action"`
-				Symbol     string   `json:"symbol"`
-				Quantity   int      `json:"quantity"`
-				Limit      *float64 `json:"limit"`
-				Strategy   string   `json:"strategy"`
-				TIF        string   `json:"tif"`
-				OutsideRTH bool     `json:"outside_rth"`
-				TimeoutMs  int      `json:"timeout_ms"`
-				Market     string   `json:"market"`
+				Action           string   `json:"action"`
+				Symbol           string   `json:"symbol"`
+				Quantity         int      `json:"quantity"`
+				SecType          string   `json:"sec_type"`
+				Expiry           string   `json:"expiry"`
+				Right            string   `json:"right"`
+				Strike           float64  `json:"strike"`
+				OrderType        string   `json:"order_type"`
+				Limit            *float64 `json:"limit"`
+				Strategy         string   `json:"strategy"`
+				TrailOffsetType  string   `json:"trail_offset_type"`
+				TrailingPercent  *float64 `json:"trailing_percent"`
+				TrailingAmount   *float64 `json:"trailing_amount"`
+				InitialStopPrice float64  `json:"initial_stop_price"`
+				LimitOffset      *float64 `json:"limit_offset"`
+				TIF              string   `json:"tif"`
+				OutsideRTH       bool     `json:"outside_rth"`
+				TimeoutMs        int      `json:"timeout_ms"`
+				Market           string   `json:"market"`
 			}
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
+			}
+			secType := strings.ToUpper(strings.TrimSpace(in.SecType))
+			if secType == "" {
+				secType = "STK"
+				if strings.TrimSpace(in.Expiry) != "" || strings.TrimSpace(in.Right) != "" || in.Strike > 0 {
+					secType = "OPT"
+				}
+			}
+			orderType, err := normalizeMCPPreviewOrderType(in.OrderType, in.TrailingPercent != nil || in.TrailingAmount != nil || in.InitialStopPrice > 0, in.LimitOffset != nil)
+			if err != nil {
+				return nil, err
+			}
+			multiplier := 0
+			if secType == "OPT" {
+				multiplier = 100
+			}
+			var trail *rpc.OrderTrailSpec
+			if orderType == rpc.OrderTypeTRAIL || orderType == rpc.OrderTypeTRAILLIMIT {
+				trail = &rpc.OrderTrailSpec{
+					Basis:            rpc.OrderTrailBasisInstrumentPrice,
+					OffsetType:       strings.ToLower(strings.TrimSpace(in.TrailOffsetType)),
+					TrailingPercent:  in.TrailingPercent,
+					TrailingAmount:   in.TrailingAmount,
+					InitialStopPrice: in.InitialStopPrice,
+					LimitOffset:      in.LimitOffset,
+				}
 			}
 			var res rpc.OrderPreviewResult
 			params := rpc.OrderPreviewParams{
 				Action: strings.ToUpper(strings.TrimSpace(in.Action)),
 				Contract: rpc.ContractParams{
-					Symbol:   strings.ToUpper(strings.TrimSpace(in.Symbol)),
-					SecType:  "STK",
-					Market:   strings.TrimSpace(in.Market),
-					Currency: "USD",
+					Symbol:     strings.ToUpper(strings.TrimSpace(in.Symbol)),
+					SecType:    secType,
+					Market:     strings.TrimSpace(in.Market),
+					Currency:   "USD",
+					Expiry:     strings.TrimSpace(in.Expiry),
+					Right:      strings.ToUpper(strings.TrimSpace(in.Right)),
+					Strike:     in.Strike,
+					Multiplier: multiplier,
 				},
 				Quantity:   in.Quantity,
-				OrderType:  rpc.OrderTypeLMT,
+				OrderType:  orderType,
 				LimitPrice: in.Limit,
+				Trail:      trail,
 				Strategy:   strings.TrimSpace(in.Strategy),
 				TIF:        strings.ToUpper(strings.TrimSpace(in.TIF)),
 				OutsideRTH: in.OutsideRTH,
@@ -846,6 +897,33 @@ func watchlistQuoteContract(sym string, h *rpc.WatchlistHolding) rpc.ContractPar
 		}
 	}
 	return c
+}
+
+func normalizeMCPPreviewOrderType(raw string, hasTrail, hasLimitOffset bool) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(raw))
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	switch normalized {
+	case rpc.OrderTypeLMT:
+		if hasTrail || hasLimitOffset {
+			return "", fmt.Errorf("LMT order_type cannot include trail fields")
+		}
+		return normalized, nil
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		return normalized, nil
+	case "":
+		if hasLimitOffset {
+			return rpc.OrderTypeTRAILLIMIT, nil
+		}
+		if hasTrail {
+			return rpc.OrderTypeTRAIL, nil
+		}
+	}
+	if normalized == "" {
+		return rpc.OrderTypeLMT, nil
+	}
+	return "", fmt.Errorf("order_type must be LMT, TRAIL, or TRAIL LIMIT")
 }
 
 // ExcludedCLI is the set of cli.Commands() names that intentionally have no

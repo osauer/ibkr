@@ -161,7 +161,9 @@ type AutoTrade struct {
 	ReloadInterval duration `toml:"reload_interval"`
 	// ProposalCadence controls how often the daemon refreshes protection proposals; default 15m.
 	ProposalCadence duration `toml:"proposal_cadence"`
-	// FastPathEnabled allows experimental proposal refreshes to bypass slower review cadence when new risk evidence arrives; default false unless explicitly enabled.
+	// FastPathEnabled allows manual proposal preview/submit to use the immediate
+	// revalidation path; default true so paper protection stops remain usable.
+	// Trading write and live-ack gates still own broker-submit authority.
 	FastPathEnabled *bool `toml:"fast_path_enabled"`
 }
 

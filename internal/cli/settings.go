@@ -126,6 +126,13 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 			}
 		}
 		return marshalPatch([]string{"features", "purge_restore", "enabled"}, value)
+	case "features.stock_protection.enabled":
+		if value != nil {
+			if _, ok := value.(bool); !ok {
+				return nil, fmt.Errorf("%s must be true, false, or null", key)
+			}
+		}
+		return marshalPatch([]string{"features", "stock_protection", "enabled"}, value)
 	case "trading.limits.max_notional":
 		return marshalPatch([]string{"trading", "limits", "max_notional"}, value)
 	case "trading.limits.max_option_contracts":
@@ -165,6 +172,7 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 	fmt.Fprintf(out, "IBKR Settings  %s\n", env.statusBadge(settingsVerdict(*st)))
 	fmt.Fprintln(out)
 	statusRow(env, out, "Purge/restore", formatSettingsBool(env, st.Features.PurgeRestore.Enabled))
+	statusRow(env, out, "Stock protection", formatSettingsBool(env, st.Features.StockProtection.Enabled))
 	statusRow(env, out, "Trading", nonEmpty(st.Trading.Mode.Value, "disabled"))
 	statusRow(env, out, "Endpoint", nonEmpty(st.Trading.Endpoint.Value, "unknown"))
 	statusRow(env, out, "Account", nonEmpty(st.Trading.Account.Value, "unknown"))
@@ -186,6 +194,9 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 
 func settingsVerdict(st rpc.PlatformSettings) statusConcern {
 	if !st.Features.PurgeRestore.Enabled.Value {
+		return statusConcern{Text: "LIMITED", Level: statusConcernNotice}
+	}
+	if !st.Features.StockProtection.Enabled.Value {
 		return statusConcern{Text: "LIMITED", Level: statusConcernNotice}
 	}
 	if st.MarketData.Quality.Status == "degraded" || st.MarketData.Quality.Status == "delayed" {

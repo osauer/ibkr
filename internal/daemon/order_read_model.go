@@ -213,6 +213,9 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.LimitPrice != 0 {
 		view.LimitPrice = ev.LimitPrice
 	}
+	if ev.Trail != nil {
+		view.Trail = cloneTrailSpec(ev.Trail)
+	}
 	if ev.OpenClose != "" {
 		view.OpenClose = ev.OpenClose
 	}
@@ -307,6 +310,7 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		OutsideRTH:      ev.OutsideRTH,
 		Quantity:        ev.Quantity,
 		LimitPrice:      ev.LimitPrice,
+		Trail:           cloneTrailSpec(ev.Trail),
 		OpenClose:       ev.OpenClose,
 		Status:          ev.Status,
 		LifecycleStatus: mapOrderJournalLifecycleStatus(ev),
@@ -347,6 +351,7 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		OutsideRTH:      ev.OutsideRth,
 		Quantity:        ev.TotalQuantity,
 		LimitPrice:      ev.LimitPrice,
+		Trail:           trailSpecFromLifecycle(ev),
 		Status:          ev.Status,
 		Filled:          ev.Filled,
 		Remaining:       ev.Remaining,
@@ -391,6 +396,32 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		return orderJournalEvent{}, false
 	}
 	return out, out.ReservedOrderID > 0 || out.OrderRef != "" || out.PermID > 0
+}
+
+func trailSpecFromLifecycle(ev ibkrlib.OrderLifecycleEvent) *rpc.OrderTrailSpec {
+	switch strings.ToUpper(strings.TrimSpace(ev.OrderType)) {
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+	default:
+		return nil
+	}
+	trail := &rpc.OrderTrailSpec{
+		Basis:            rpc.OrderTrailBasisInstrumentPrice,
+		InitialStopPrice: ev.TrailStopPrice,
+	}
+	if ev.TrailingPercent > 0 {
+		trail.OffsetType = rpc.OrderTrailOffsetPercent
+		trail.TrailingPercent = cloneFloat64Ptr(&ev.TrailingPercent)
+	} else if ev.AuxPrice > 0 {
+		trail.OffsetType = rpc.OrderTrailOffsetAmount
+		trail.TrailingAmount = cloneFloat64Ptr(&ev.AuxPrice)
+	}
+	if ev.LmtPriceOffset > 0 {
+		trail.LimitOffset = cloneFloat64Ptr(&ev.LmtPriceOffset)
+	}
+	if trail.InitialStopPrice <= 0 && trail.TrailingPercent == nil && trail.TrailingAmount == nil && trail.LimitOffset == nil {
+		return nil
+	}
+	return trail
 }
 
 func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {

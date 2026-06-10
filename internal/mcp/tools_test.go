@@ -132,6 +132,20 @@ func TestTradingToolAllowlist(t *testing.T) {
 	}
 }
 
+func TestNormalizeMCPPreviewOrderTypeRejectsLMTTrailContradiction(t *testing.T) {
+	t.Parallel()
+	if _, err := normalizeMCPPreviewOrderType("LMT", true, false); err == nil || !strings.Contains(err.Error(), "cannot include trail") {
+		t.Fatalf("normalizeMCPPreviewOrderType LMT+trail err = %v, want contradiction", err)
+	}
+	got, err := normalizeMCPPreviewOrderType("", true, true)
+	if err != nil {
+		t.Fatalf("normalizeMCPPreviewOrderType default trail-limit: %v", err)
+	}
+	if got != rpc.OrderTypeTRAILLIMIT {
+		t.Fatalf("normalizeMCPPreviewOrderType default = %q, want TRAIL LIMIT", got)
+	}
+}
+
 func TestToolsHaveDirectoryAnnotations(t *testing.T) {
 	t.Parallel()
 	for _, tool := range Tools {

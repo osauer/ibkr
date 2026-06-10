@@ -20,15 +20,27 @@ func (s *Server) currentBrokerStateScope() brokerStateScope {
 	c := s.connector
 	s.mu.Unlock()
 
-	account := strings.TrimSpace(ep.Account)
-	if c != nil {
+	account := ""
+	port := ep.Port
+	if s.cfg != nil {
+		account = strings.TrimSpace(s.cfg.Gateway.Account)
+		if port == 0 && s.cfg.Gateway.Port != nil {
+			port = *s.cfg.Gateway.Port
+		}
+	}
+	if account == "" {
+		account = strings.TrimSpace(ep.Account)
+	}
+	if c != nil && !brokerScopeAccountConcrete(account) {
 		if connected := strings.TrimSpace(c.AccountID()); connected != "" {
-			account = connected
+			if brokerScopeAccountConcrete(connected) {
+				account = connected
+			}
 		}
 	}
 	return brokerStateScope{
 		Account: account,
-		Mode:    accountModeForStatus(ep.Port, account),
+		Mode:    accountModeForStatus(port, account),
 	}
 }
 

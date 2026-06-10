@@ -51,10 +51,15 @@ type PlatformSettings struct {
 }
 
 type PlatformFeatureSettings struct {
-	PurgeRestore PurgeRestoreSettings `json:"purge_restore"`
+	PurgeRestore    PurgeRestoreSettings    `json:"purge_restore"`
+	StockProtection StockProtectionSettings `json:"stock_protection"`
 }
 
 type PurgeRestoreSettings struct {
+	Enabled SettingsBool `json:"enabled"`
+}
+
+type StockProtectionSettings struct {
 	Enabled SettingsBool `json:"enabled"`
 }
 

@@ -164,6 +164,13 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 	if st.CanWrite != orderWritesAvailable {
 		t.Fatalf("write capabilities mismatch build mode: %+v", st)
 	}
+	if orderWritesAvailable {
+		if len(st.WriteBlockers) > 0 {
+			t.Fatalf("write-ready status should not expose write blockers: %+v", st.WriteBlockers)
+		}
+	} else if !hasTradingWriteBlocker(st, "order_writes_unavailable") {
+		t.Fatalf("missing write blocker for non-trading build: %+v", st.WriteBlockers)
+	}
 }
 
 func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
@@ -274,10 +281,23 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	if st.CanWrite != orderWritesAvailable {
 		t.Fatalf("write capabilities mismatch build mode: %+v", st)
 	}
+	if orderWritesAvailable {
+		if len(st.WriteBlockers) > 0 {
+			t.Fatalf("write-ready status should not expose write blockers: %+v", st.WriteBlockers)
+		}
+	} else if !hasTradingWriteBlocker(st, "order_writes_unavailable") {
+		t.Fatalf("missing write blocker for non-trading build: %+v", st.WriteBlockers)
+	}
 }
 
 func hasTradingBlocker(st rpc.TradingStatus, code string) bool {
 	return slices.ContainsFunc(st.Blockers, func(b rpc.TradingBlocker) bool {
+		return b.Code == code
+	})
+}
+
+func hasTradingWriteBlocker(st rpc.TradingStatus, code string) bool {
+	return slices.ContainsFunc(st.WriteBlockers, func(b rpc.TradingBlocker) bool {
 		return b.Code == code
 	})
 }

@@ -244,6 +244,23 @@ func (c *Connector) AccountSummaryRaw() map[string]string {
 	return conn.GetAccountSummary()
 }
 
+// CachedAccountSummary returns the connector's current account-summary cache
+// parsed through the same typed path as RequestAccountSummary. It does not
+// issue a gateway request and returns nil until the streaming account update
+// path has delivered at least one core account value.
+func (c *Connector) CachedAccountSummary() *RawAccountSummary {
+	raw := c.AccountSummaryRaw()
+	if len(raw) == 0 {
+		return nil
+	}
+	summary := parseAccountSummary(raw, c.AccountID())
+	if summary.NetLiquidation == nil && summary.BuyingPower == nil &&
+		summary.AvailableFunds == nil && summary.TotalCashValue == nil {
+		return nil
+	}
+	return summary
+}
+
 // extractCurrencyLedger walks the raw map for `<field>_<CCY>` entries
 // matching the canonical IBKR $LEDGER fields and aggregates them by
 // currency. The "BASE" pseudo-currency entry IBKR also emits is
