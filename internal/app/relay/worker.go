@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,21 @@ import (
 )
 
 const DefaultWorkerURL = "https://remote.osauer.dev"
+
+// defaultRouteTTL mirrors ROUTE_TTL_MS in the Cloudflare relay worker. The
+// relay slides the route's expiry window on every authenticated connector
+// connection, so reconnecting at half the TTL keeps an idle-but-connected
+// route alive indefinitely without minting a new route_id.
+const defaultRouteTTL = 7 * 24 * time.Hour
+
+// minCycleEvery floors the forced reconnect interval so a misbehaving relay
+// (tiny or clock-skewed expires_at) cannot make the connector hot-cycle.
+const minCycleEvery = time.Minute
+
+// errRouteExpired marks a connect attempt rejected with HTTP 410: the relay
+// reaped the route (e.g. the Mac was offline past the TTL) and only a fresh
+// registration — with a NEW route_id — can restore remote access.
+var errRouteExpired = errors.New("remote relay route expired")
 
 type WorkerOptions struct {
 	BaseURL    string
@@ -33,15 +49,16 @@ type Worker struct {
 	version    string
 	httpClient *http.Client
 
+	// mu guards the route fields too: register() runs again after a 410
+	// while HTTP handlers concurrently read PairingURL/PublicURL/Status.
+	mu           sync.RWMutex
 	routeID      string
 	publicURL    string
 	connectorURL string
 	token        string
-	expiresAt    time.Time
-
-	mu        sync.RWMutex
-	connected bool
-	message   string
+	cycleEvery   time.Duration
+	connected    bool
+	message      string
 }
 
 type registerRequest struct {
@@ -120,42 +137,93 @@ func (w *Worker) register(ctx context.Context) error {
 	if rr.RouteID == "" || rr.PublicURL == "" || rr.ConnectorURL == "" || rr.Token == "" {
 		return fmt.Errorf("register remote relay: incomplete response %#v", rr)
 	}
+	cycle := defaultRouteTTL / 2
+	if ttl := time.Until(rr.ExpiresAt); !rr.ExpiresAt.IsZero() && ttl > 0 {
+		cycle = ttl / 2
+	}
+	cycle = max(cycle, minCycleEvery)
+	w.mu.Lock()
 	w.routeID = rr.RouteID
 	w.publicURL = strings.TrimRight(rr.PublicURL, "/")
 	w.connectorURL = rr.ConnectorURL
 	w.token = rr.Token
-	w.expiresAt = rr.ExpiresAt
-	w.setStatus(false, "registered remote relay route")
+	w.cycleEvery = cycle
+	w.connected = false
+	w.message = "registered remote relay route"
+	w.mu.Unlock()
 	return nil
 }
 
 func (w *Worker) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		if err := w.connectOnce(ctx); err != nil && ctx.Err() == nil {
-			w.setStatus(false, err.Error())
-			timer := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
+		// Force the connection to cycle at half the route TTL: the relay
+		// slides the route's expiry window on every authenticated connector
+		// connection, so a long-lived quiet connection must reconnect
+		// periodically or the route ages into the 410 reaper.
+		attemptCtx, cancelAttempt := context.WithCancel(ctx)
+		cycleTimer := time.AfterFunc(w.cycleDuration(), cancelAttempt)
+		err := w.connectOnce(attemptCtx)
+		cycled := !cycleTimer.Stop() // Stop() == false: the cycle deadline fired.
+		cancelAttempt()
+		if ctx.Err() != nil {
+			return // parent cancelled: real shutdown, not a forced cycle
+		}
+		if cycled {
+			backoff = time.Second
+			continue // reconnect promptly so the relay-side TTL slides
+		}
+		if errors.Is(err, errRouteExpired) {
+			regErr := w.register(ctx)
+			if regErr == nil {
+				w.mu.RLock()
+				routeID := w.routeID
+				w.mu.RUnlock()
+				log.Printf("ibkr app relay: route expired at the relay and was re-registered as %s; previously paired devices must re-pair (their old remote route is gone)", routeID)
+				backoff = time.Second
+				continue
 			}
-			backoff = min(backoff*2, 30*time.Second)
+			err = fmt.Errorf("relay route expired; re-register failed: %w", regErr)
+		}
+		if err == nil {
+			backoff = time.Second
 			continue
 		}
-		backoff = time.Second
+		w.setStatus(false, err.Error())
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 30*time.Second)
 	}
 }
 
+func (w *Worker) cycleDuration() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.cycleEvery <= 0 {
+		return defaultRouteTTL / 2
+	}
+	return w.cycleEvery
+}
+
 func (w *Worker) connectOnce(ctx context.Context) error {
+	w.mu.RLock()
+	connectorURL, token := w.connectorURL, w.token
+	w.mu.RUnlock()
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+w.token)
-	conn, res, err := websocket.Dial(ctx, w.connectorURL, &websocket.DialOptions{
+	header.Set("Authorization", "Bearer "+token)
+	conn, res, err := websocket.Dial(ctx, connectorURL, &websocket.DialOptions{
 		HTTPClient: w.httpClient,
 		HTTPHeader: header,
 	})
 	if err != nil {
+		if res != nil && res.StatusCode == http.StatusGone {
+			return fmt.Errorf("connect remote relay: %s: %w", res.Status, errRouteExpired)
+		}
 		if res != nil {
 			return fmt.Errorf("connect remote relay: %s: %w", res.Status, err)
 		}
@@ -230,7 +298,7 @@ func (w *Worker) serveRequest(ctx context.Context, reqFrame frame, send frameSen
 	}
 	copyForwardHeaders(localReq.Header, reqFrame.Headers)
 	localReq.Header.Set("X-Forwarded-Proto", "https")
-	if u, err := url.Parse(w.publicURL); err == nil && u.Host != "" {
+	if u, err := url.Parse(w.PublicURL()); err == nil && u.Host != "" {
 		localReq.Header.Set("X-Forwarded-Host", u.Host)
 		localReq.Host = u.Host
 	}
@@ -281,7 +349,13 @@ func (w *Worker) Status() Status {
 }
 
 func (w *Worker) PairingURL(raw string) string {
-	if w == nil || w.routeID == "" {
+	if w == nil {
+		return raw
+	}
+	w.mu.RLock()
+	routeID := w.routeID
+	w.mu.RUnlock()
+	if routeID == "" {
 		return raw
 	}
 	u, err := url.Parse(raw)
@@ -290,7 +364,7 @@ func (w *Worker) PairingURL(raw string) string {
 	}
 	q := u.Query()
 	if q.Get("remote") == "" {
-		q.Set("remote", w.routeID)
+		q.Set("remote", routeID)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
@@ -300,6 +374,8 @@ func (w *Worker) PublicURL() string {
 	if w == nil {
 		return ""
 	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	return w.publicURL
 }
 

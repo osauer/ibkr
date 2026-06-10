@@ -165,6 +165,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer cancel()
 	go a.Live.Start(liveCtx)
 	go a.Relay.Run(liveCtx)
+	go a.Auth.StartReaper(liveCtx, time.Minute)
 	go func() {
 		<-ctx.Done()
 		_ = a.Server.Stop()

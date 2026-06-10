@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestWorkerPairingURLAddsRemoteRoute(t *testing.T) {
@@ -94,5 +100,201 @@ func TestWorkerServeRequestForwardsAllowedPath(t *testing.T) {
 	}
 	if !payload["ok"] || frames[2].Type != "response_end" {
 		t.Fatalf("unexpected response frames: %#v", frames)
+	}
+}
+
+// fakeRegisterJSON mimics the relay's /api/register response, pointing the
+// connector websocket URL back at the fake relay server.
+func fakeRegisterJSON(baseURL, routeID string, expiresAt time.Time) []byte {
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http")
+	return fmt.Appendf(nil,
+		`{"route_id":%q,"public_url":%q,"connector_url":%q,"connector_token":%q,"expires_at":%q}`,
+		routeID, baseURL, wsURL+"/api/connect?route_id="+routeID, "tok-"+routeID,
+		expiresAt.UTC().Format(time.RFC3339))
+}
+
+// acceptAndHold upgrades the connection, calls onAccept, then holds the
+// connection open until the connector closes it (forced cycle or shutdown).
+func acceptAndHold(wr http.ResponseWriter, r *http.Request, onAccept func()) {
+	conn, err := websocket.Accept(wr, r, nil)
+	if err != nil {
+		return
+	}
+	if onAccept != nil {
+		onAccept()
+	}
+	_, _, _ = conn.Read(r.Context())
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestWorkerRunCyclesConnectionToSlideRouteTTL(t *testing.T) {
+	t.Parallel()
+
+	var accepts atomic.Int64
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, _ *http.Request) {
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, "r_cycle", time.Now().Add(defaultRouteTTL)))
+	})
+	mux.HandleFunc("/api/connect", func(wr http.ResponseWriter, r *http.Request) {
+		acceptAndHold(wr, r, func() { accepts.Add(1) })
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	w.mu.Lock()
+	w.cycleEvery = 50 * time.Millisecond // bypass the prod minCycleEvery floor
+	w.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+
+	// Three accepts within 2s prove forced cycles reconnect promptly with
+	// reset backoff (the backoff path would only manage two: 0s, 1s, 3s).
+	deadline := time.Now().Add(2 * time.Second)
+	for accepts.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("relay accepted %d connector connections, want >= 3 (forced cycle must reconnect without backoff)", accepts.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return after parent cancel")
+	}
+}
+
+func TestWorkerRunReRegistersOnGoneRoute(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu        sync.Mutex
+		registers int
+		goneSent  bool
+	)
+	connected := make(chan struct{}, 4)
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		registers++
+		routeID := fmt.Sprintf("r_%d", registers)
+		mu.Unlock()
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, routeID, time.Now().Add(defaultRouteTTL)))
+	})
+	mux.HandleFunc("/api/connect", func(wr http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		first := !goneSent
+		goneSent = true
+		mu.Unlock()
+		if first {
+			// Simulate a reaped route: the Mac was offline past the TTL.
+			wr.Header().Set("Content-Type", "application/json")
+			wr.WriteHeader(http.StatusGone)
+			_, _ = wr.Write([]byte(`{"error":"route expired"}`))
+			return
+		}
+		acceptAndHold(wr, r, func() { connected <- struct{}{} })
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	if got := w.PairingURL("https://relay.example/pair.html?pair=p"); !strings.Contains(got, "remote=r_1") {
+		t.Fatalf("initial PairingURL = %q, want remote=r_1", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("connector did not reconnect after 410 re-register")
+	}
+	mu.Lock()
+	gotRegisters := registers
+	mu.Unlock()
+	if gotRegisters != 2 {
+		t.Fatalf("registers = %d, want 2 (one at construction, one after 410)", gotRegisters)
+	}
+	if got := w.PairingURL("https://relay.example/pair.html?pair=p"); !strings.Contains(got, "remote=r_2") {
+		t.Fatalf("PairingURL after re-register = %q, want remote=r_2 (new pairings must use the fresh route)", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return after parent cancel")
+	}
+}
+
+func TestWorkerRunReturnsOnParentCancel(t *testing.T) {
+	t.Parallel()
+
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, _ *http.Request) {
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, "r_stop", time.Now().Add(defaultRouteTTL)))
+	})
+	mux.HandleFunc("/api/connect", func(wr http.ResponseWriter, r *http.Request) {
+		acceptAndHold(wr, r, nil)
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !w.Status().Connected {
+		if time.Now().After(deadline) {
+			t.Fatalf("connector never connected: %#v", w.Status())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return after parent cancel")
+	}
+	if w.Status().Connected {
+		t.Fatalf("status still connected after shutdown: %#v", w.Status())
 	}
 }
