@@ -40,3 +40,4 @@ CLAUDE.md
 
 # GitHub Pages serves https://osauer.dev/ibkr/ from /docs on main, so generated
 # page artifacts under docs/ must stay visible to git.
+tmp/
