@@ -278,6 +278,33 @@ func purgeRestoreQuote(bid, ask float64) rpc.OrderQuoteSnapshot {
 	}
 }
 
+func TestRestoreScaledQuantitySnapsFloatArtifacts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		remaining float64
+		scale     float64
+		wantQty   int
+		wantOK    bool
+	}{
+		{name: "float artifact 100*0.07 snaps to 7", remaining: 100, scale: 0.07, wantQty: 7, wantOK: true},
+		{name: "thirds snap to integer", remaining: 3, scale: 1.0 / 3.0, wantQty: 1, wantOK: true},
+		{name: "exact half scale", remaining: 100, scale: 0.5, wantQty: 50, wantOK: true},
+		{name: "genuinely fractional remains rejected", remaining: 10.5, scale: 1, wantQty: 0, wantOK: false},
+		{name: "sub-share product rejected", remaining: 1, scale: 0.4, wantQty: 0, wantOK: false},
+		{name: "zero rejected", remaining: 0, scale: 1, wantQty: 0, wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			qty, ok := restoreScaledQuantity(tc.remaining, tc.scale)
+			if qty != tc.wantQty || ok != tc.wantOK {
+				t.Fatalf("restoreScaledQuantity(%v, %v) = (%d, %v), want (%d, %v)",
+					tc.remaining, tc.scale, qty, ok, tc.wantQty, tc.wantOK)
+			}
+		})
+	}
+}
+
 func purgeLedgerTestOptionContract() rpc.ContractParams {
 	return rpc.ContractParams{
 		ConID:        777001,

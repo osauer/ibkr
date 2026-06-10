@@ -55,6 +55,7 @@ type orderJournalEvent struct {
 	Endpoint        string              `json:"endpoint,omitempty"`
 	Mode            string              `json:"mode,omitempty"`
 	Source          string              `json:"source,omitempty"`
+	Origin          string              `json:"origin,omitempty"`
 	PurgeID         string              `json:"purge_id,omitempty"`
 	LegID           string              `json:"leg_id,omitempty"`
 	BypassPreview   bool                `json:"bypass_preview,omitempty"`

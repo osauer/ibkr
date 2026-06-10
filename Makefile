@@ -55,6 +55,11 @@ help: ## List available targets
 build: ## Compile bin/ibkr with version stamped via ldflags
 	@mkdir -p bin
 	go build $(GO_BUILD_TAGS) -ldflags '$(LDFLAGS)' -o bin/ibkr ./cmd/ibkr
+	@case " $(GO_TAGS) " in (*" trading "*) ;; (*) \
+		echo "NOTE: built WITHOUT broker-write capability (read-only daemon)."; \
+		echo "      Installing this over a trading build silently downgrades it."; \
+		echo "      For order placement build with: make install GO_TAGS=trading"; \
+	;; esac
 
 install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin)
 	install -d $(PREFIX)/bin
@@ -159,8 +164,9 @@ gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
 		exit 1; \
 	fi
 
-vet-check: ## Run go vet
+vet-check: ## Run go vet (both default and trading-tag builds)
 	go vet ./...
+	go vet -tags trading ./internal/... ./pkg/...
 
 staticcheck-check: ## Run staticcheck
 	go tool staticcheck ./...
@@ -306,9 +312,10 @@ test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library)
 # this layer carries the goroutines (subscriptions, idle timer, signal
 # handlers); race detector earns its slot here. Integration tests skip
 # cleanly when no IBKR gateway is reachable.
-test-daemon: ## Run internal/... and test/integration/... under -race
+test-daemon: ## Run internal/... and test/integration/... under -race (incl. trading-tag write path)
 	go test -race -count=1 -timeout=240s ./internal/...
 	go test -race -count=1 -timeout=420s ./test/integration/...
+	go test -race -count=1 -timeout=240s -tags trading ./internal/daemon/...
 
 # Install the Claude Code skill bundle directly under ~/.claude/skills/.
 # Dogfood path only — end users get the skill via `/plugin install ibkr`.

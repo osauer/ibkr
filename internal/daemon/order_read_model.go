@@ -10,6 +10,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 
+	"github.com/osauer/ibkr/internal/marketcal"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -76,7 +77,75 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 	if err != nil {
 		return nil, nil, err
 	}
-	return buildOrderViews(events), buildOrderEventsByKey(events), nil
+	views := buildOrderViews(events)
+	eventsByKey := buildOrderEventsByKey(events)
+	inferDayOrderExpiry(views, eventsByKey, s.orderNow())
+	return views, eventsByKey, nil
+}
+
+// inferDayOrderExpiry marks non-terminal stock/ETF DAY orders whose effective
+// session closed well in the past as expired_inferred. The daemon never
+// requests a broker open-order snapshot, so a missed terminal callback would
+// otherwise leave the row "open" on every read surface forever — and the
+// duplicate-protection blocker would then refuse to re-protect that symbol.
+// The state is local calendar inference, never broker-confirmed: rows are
+// closed for display and duplicate-suppression but stay cancel-ineligible.
+func inferDayOrderExpiry(views []rpc.OrderView, eventsByKey map[string][]rpc.OrderEvent, now time.Time) {
+	cal := marketcal.New()
+	for i := range views {
+		view := &views[i]
+		if !view.Open || !strings.EqualFold(view.TIF, rpc.OrderTIFDay) {
+			continue
+		}
+		if !strings.EqualFold(view.SecType, "STK") && !strings.EqualFold(view.SecType, "ETF") {
+			continue
+		}
+		placed := orderViewPlacedAt(*view, eventsByKey)
+		if placed.IsZero() {
+			continue
+		}
+		deadline, ok := dayOrderSessionDeadline(cal, *view, placed)
+		// One hour of margin past the close absorbs late broker callbacks.
+		if !ok || now.Before(deadline.Add(time.Hour)) {
+			continue
+		}
+		view.LifecycleStatus = rpc.OrderLifecycleExpiredInferred
+		view.Open = false
+		view.ModifyEligible = false
+		view.CancelEligible = false
+		view.LastMessage = "DAY order is past its session close; expiry inferred locally (not broker-confirmed)"
+	}
+}
+
+func orderViewPlacedAt(view rpc.OrderView, eventsByKey map[string][]rpc.OrderEvent) time.Time {
+	if view.OrderRef != "" {
+		if events := eventsByKey["ref:"+view.OrderRef]; len(events) > 0 {
+			return events[0].At
+		}
+	}
+	return view.UpdatedAt
+}
+
+// dayOrderSessionDeadline returns the close of the first session whose close
+// follows placement. An order placed off-hours works the *next* session, so
+// placement-day inference would mark it dead prematurely and let the
+// duplicate-suppression layer place a doubled order at the open.
+func dayOrderSessionDeadline(cal *marketcal.Calendar, view rpc.OrderView, placed time.Time) (time.Time, bool) {
+	market := quoteMarketForStockContract(rpc.ContractParams{
+		Exchange:    view.Exchange,
+		PrimaryExch: view.PrimaryExch,
+	})
+	ses, err := cal.SessionAt(market, placed)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if !ses.Close.IsZero() && placed.Before(ses.Close) {
+		return ses.Close, true
+	}
+	if ses.NextClose != nil {
+		return *ses.NextClose, true
+	}
+	return time.Time{}, false
 }
 
 func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
@@ -455,6 +524,17 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 }
 
 func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
+	if view.LastEvent == orderJournalEventBrokerError && brokerErrorProvesOrderGone(view.LastMessage) {
+		// The broker answered a write aimed at this order ID with "can't
+		// find order": whatever happened while the daemon was not
+		// listening — fill, broker-side cancel, expiry — the order is not
+		// working now, and that overrides any sticky earlier Status. This
+		// is the only self-heal a stale GTC row has (GTC is deliberately
+		// excluded from calendar expiry inference); without it the row
+		// stays open forever and permanently blocks re-protecting the
+		// symbol.
+		return rpc.OrderLifecycleInactive
+	}
 	if view.LastEvent == orderJournalEventBrokerError && view.SendState == orderSendStateUncertainSend {
 		if view.Status != "" {
 			return rpc.OrderLifecycleUnknownReconcileRequired
@@ -488,6 +568,16 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
 		}
 		return rpc.OrderLifecyclePreviewed
 	}
+}
+
+// brokerErrorProvesOrderGone matches IBKR error 135 ("Can't find order
+// with id …"), the broker's statement that the targeted order does not
+// exist on its books. The journaled message keeps the raw broker text, so
+// the fill-vs-cancelled ambiguity stays visible in the audit trail.
+func brokerErrorProvesOrderGone(message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(msg, "broker error 135:") ||
+		strings.Contains(msg, "can't find order")
 }
 
 func brokerErrorIsTerminalReject(message string) bool {
@@ -540,7 +630,7 @@ func brokerOrderStatusIsUncertainPending(status string) bool {
 
 func orderLifecycleStatusIsTerminal(status string) bool {
 	switch status {
-	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive:
+	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive, rpc.OrderLifecycleExpiredInferred:
 		return true
 	default:
 		return false

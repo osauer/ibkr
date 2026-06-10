@@ -291,6 +291,10 @@ type ContractParams struct {
 	Strike       float64 `json:"strike,omitempty"`
 	Right        string  `json:"right,omitempty"` // C | P
 	Multiplier   int     `json:"multiplier,omitempty"`
+	// MinTick is the venue minimum price increment, enriched daemon-side from
+	// broker contract details when known. Zero means unresolved: price
+	// rounding falls back to a static grid (US 0.01 / EUR MiFID band).
+	MinTick float64 `json:"min_tick,omitempty"`
 }
 
 // QuoteSnapshotParams is the input for MethodQuoteSnapshot.
@@ -2808,6 +2812,10 @@ const (
 	OrderTypeTRAILLIMIT = "TRAIL LIMIT"
 
 	OrderTIFDay = "DAY"
+	// OrderTIFGTC persists until filled or cancelled. Accepted for broker
+	// trail orders only: a protective stop that dies at the session close
+	// is absent exactly when the overnight gap it covers opens up.
+	OrderTIFGTC = "GTC"
 
 	OrderStrategyPatientLimit  = "patient-limit"
 	OrderStrategyExplicitLimit = "explicit-limit"
@@ -2816,6 +2824,14 @@ const (
 	OrderTrailBasisInstrumentPrice = "instrument_price"
 	OrderTrailOffsetPercent        = "percent"
 	OrderTrailOffsetAmount         = "amount"
+
+	// Request origins for broker writes. Adapters stamp every write request;
+	// the daemon refuses agent-origin writes when the trading gate routes
+	// live. A missing or unknown origin is treated as OrderOriginAgent, so
+	// new adapters must opt in to a human origin.
+	OrderOriginAgent        = "agent"
+	OrderOriginHumanTTY     = "human-tty"
+	OrderOriginPairedDevice = "human-paired-device"
 
 	OrderPositionEffectOpen      = "open"
 	OrderPositionEffectIncrease  = "increase"
@@ -2842,6 +2858,11 @@ const (
 	OrderLifecycleRejected                 = "rejected"
 	OrderLifecycleInactive                 = "inactive"
 	OrderLifecycleUnknownReconcileRequired = "unknown_reconcile_required"
+	// OrderLifecycleExpiredInferred marks a DAY order whose effective session
+	// closed without a terminal broker callback. The daemon never receives a
+	// broker open-order snapshot, so this is local calendar inference — never
+	// broker-confirmed — and such rows stay cancel- and modify-ineligible.
+	OrderLifecycleExpiredInferred = "expired_inferred"
 )
 
 // OrdersOpenParams reads the current broker account/mode open-order view.
@@ -2991,15 +3012,22 @@ type OrderPreviewResult struct {
 type OrderPlaceParams struct {
 	PreviewToken string `json:"preview_token"`
 	TimeoutMs    int    `json:"timeout_ms,omitempty"`
+	// Origin identifies who is asking (OrderOrigin*); live routes refuse
+	// agent origins. LiveConfirmation carries the typed "live/<account>"
+	// phrase a human origin must supply for live writes.
+	Origin           string `json:"origin,omitempty"`
+	LiveConfirmation string `json:"live_confirmation,omitempty"`
 }
 
 // OrderModifyParams applies a constrained modify to a locally tracked open
 // order. The preview token must describe the replacement draft; the daemon
 // reuses the existing broker order ID instead of creating a new one.
 type OrderModifyParams struct {
-	ID           string `json:"id"`
-	PreviewToken string `json:"preview_token"`
-	TimeoutMs    int    `json:"timeout_ms,omitempty"`
+	ID               string `json:"id"`
+	PreviewToken     string `json:"preview_token"`
+	TimeoutMs        int    `json:"timeout_ms,omitempty"`
+	Origin           string `json:"origin,omitempty"`
+	LiveConfirmation string `json:"live_confirmation,omitempty"`
 }
 
 // OrderCancelParams requests cancellation of a locally tracked order. Cancel
@@ -3008,6 +3036,11 @@ type OrderModifyParams struct {
 type OrderCancelParams struct {
 	ID        string `json:"id"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	// Origin is journaled for audit. Cancel is exempt from the live
+	// agent-origin block: refusing a cancel can never reduce risk less than
+	// allowing it, though cancelling a protective stop does remove
+	// protection — see SECURITY.md.
+	Origin string `json:"origin,omitempty"`
 }
 
 type OrderPlaceResult struct {
@@ -3028,12 +3061,14 @@ type OrderPlaceResult struct {
 }
 
 type PurgeExecuteParams struct {
-	PurgeID       string            `json:"purge_id"`
-	All           bool              `json:"all,omitempty"`
-	Symbols       []string          `json:"symbols,omitempty"`
-	Legs          []PurgeExecuteLeg `json:"legs,omitempty"`
-	BypassPreview *bool             `json:"bypass_preview,omitempty"`
-	WaitMs        int               `json:"wait_ms,omitempty"`
+	PurgeID          string            `json:"purge_id"`
+	All              bool              `json:"all,omitempty"`
+	Symbols          []string          `json:"symbols,omitempty"`
+	Legs             []PurgeExecuteLeg `json:"legs,omitempty"`
+	BypassPreview    *bool             `json:"bypass_preview,omitempty"`
+	WaitMs           int               `json:"wait_ms,omitempty"`
+	Origin           string            `json:"origin,omitempty"`
+	LiveConfirmation string            `json:"live_confirmation,omitempty"`
 }
 
 type PurgeExecuteLeg struct {
@@ -3160,12 +3195,14 @@ type PurgeLedgerRow struct {
 }
 
 type PurgeRestoreParams struct {
-	PurgeID   string   `json:"purge_id,omitempty"`
-	All       bool     `json:"all,omitempty"`
-	Symbols   []string `json:"symbols,omitempty"`
-	Scale     float64  `json:"scale,omitempty"`
-	WaitMs    int      `json:"wait_ms,omitempty"`
-	TimeoutMs int      `json:"timeout_ms,omitempty"`
+	PurgeID          string   `json:"purge_id,omitempty"`
+	All              bool     `json:"all,omitempty"`
+	Symbols          []string `json:"symbols,omitempty"`
+	Scale            float64  `json:"scale,omitempty"`
+	WaitMs           int      `json:"wait_ms,omitempty"`
+	TimeoutMs        int      `json:"timeout_ms,omitempty"`
+	Origin           string   `json:"origin,omitempty"`
+	LiveConfirmation string   `json:"live_confirmation,omitempty"`
 }
 
 type PurgeRestoreResult struct {

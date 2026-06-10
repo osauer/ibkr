@@ -43,13 +43,13 @@ command_line="$(
 
 command_line="${command_line#"${command_line%%[![:space:]]*}"}"
 command_line="${command_line%"${command_line##*[![:space:]]}"}"
+# Normalize trivial quoting ('ibkr' / "ibkr") so quoted invocations cannot
+# slip past the verb matching below.
+command_line="${command_line//\'/}"
+command_line="${command_line//\"/}"
 
 if [[ -z "$command_line" ]] || ! has_re '(^|[[:space:]/])ibkr([[:space:]]|$)'; then
   exit 0
-fi
-
-if [[ "$command_line" == *$'\n'* || "$command_line" =~ [\;\&\|\<\>\`] || "$command_line" =~ \$\( ]]; then
-  block "Run broker-adjacent ibkr commands directly, without shell composition, pipes, redirection, command substitution, or chained commands."
 fi
 
 trading_status_json() {
@@ -84,6 +84,12 @@ paper_write_status_summary() {
 }
 
 allow_only_paper_write_or_block() {
+  # Broker-write invocations must be a single plain command: composition can
+  # smuggle a second write past the verb matching above. Read-only ibkr
+  # commands keep their pipes and redirects.
+  if [[ "$command_line" == *$'\n'* || "$command_line" =~ [\;\&\|\<\>\`] || "$command_line" =~ \$\( ]]; then
+    block "Run broker-write ibkr commands directly, without shell composition, pipes, redirection, command substitution, or chained commands."
+  fi
   if paper_writes_ready; then
     exit 0
   fi

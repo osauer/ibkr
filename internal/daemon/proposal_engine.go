@@ -243,8 +243,11 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 		}
 		if policy.Buckets.TrailingStop.StockETF.Enabled {
 			for _, row := range pos.Stocks {
-				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled); ok {
+				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row)); ok {
 					applyMarketEventFlagsToProposal(&p, marketEvents)
+					for _, b := range e.duplicateProtectiveBlockers(p) {
+						proposalBlock(&p, b.Code, b.Message)
+					}
 					if !e.isIgnored(p.Key) {
 						out = append(out, p)
 					}
@@ -254,7 +257,7 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 		if policy.Buckets.TrailingStop.Options.Enabled {
 			multiLegBySymbol := multiLegOptionSymbols(pos.Options)
 			for _, row := range pos.Options {
-				if p, ok := trailingStopOptionProposal(policy, status, row, sources, now, multiLegBySymbol[strings.ToUpper(strings.TrimSpace(row.Symbol))]); ok {
+				if p, ok := trailingStopOptionProposal(policy, status, row, sources, now, multiLegBySymbol[strings.ToUpper(strings.TrimSpace(row.Symbol))], e.resolveRowMinTick(row)); ok {
 					applyMarketEventFlagsToProposal(&p, marketEvents)
 					if !e.isIgnored(p.Key) {
 						out = append(out, p)
@@ -378,22 +381,31 @@ func riskReductionProposal(policy protectionPolicy, status rpc.ProtectionPolicyS
 	return p, true
 }
 
-func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, stockProtectionEnabled bool) (rpc.TradeProposal, bool) {
+func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, stockProtectionEnabled bool, minTick float64) (rpc.TradeProposal, bool) {
 	secType := strings.ToUpper(strings.TrimSpace(row.SecType))
 	if secType != rpc.SecTypeStock && secType != "STK" && secType != "ETF" || row.Quantity == 0 {
 		return rpc.TradeProposal{}, false
 	}
 	cfg := policy.Buckets.TrailingStop.StockETF
-	qty := int(math.Ceil(math.Abs(row.Quantity)))
+	qty, fractionalRemainder := closeReduceQuantity(row.Quantity)
+	if qty == 0 {
+		return rpc.TradeProposal{}, false
+	}
 	action := rpc.OrderActionSell
 	if row.Quantity < 0 {
 		action = rpc.OrderActionBuy
 	}
 	reference := trailingStopReferencePrice(row, action)
 	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketTrailingStop, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("broker-side trailing stop at %.1f%% below/above the instrument price", cfg.DefaultPct))
+	p.Contract.MinTick = minTick
+	p.TIF = policy.Buckets.TrailingStop.effectiveTIF()
+	if fractionalRemainder > 0 {
+		p.Details = append(p.Details, fmt.Sprintf("fractional %.4g shares stay unprotected under the integer order path", fractionalRemainder))
+	}
 	applyTrailToProposal(&p, cfg.OrderType, cfg.DefaultPct, reference, action, cfg.LimitOffsetAbs)
 	p.Score = math.Abs(row.MarketValue)
 	p.Details = append(p.Details, fmt.Sprintf("trail=%.1f%%", cfg.DefaultPct))
+	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, false))
 	if !stockProtectionEnabled {
 		proposalBlock(&p, "stock_protection_disabled", "stock/ETF protection is disabled in platform settings")
 	}
@@ -406,7 +418,7 @@ func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPol
 	return p, true
 }
 
-func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, multiLeg bool) (rpc.TradeProposal, bool) {
+func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, multiLeg bool, minTick float64) (rpc.TradeProposal, bool) {
 	if !strings.EqualFold(row.SecType, "OPTION") && !strings.EqualFold(row.SecType, "OPT") || row.Quantity == 0 {
 		return rpc.TradeProposal{}, false
 	}
@@ -418,9 +430,12 @@ func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPo
 	}
 	reference, spreadAbs, ok := optionTrailReference(row, action)
 	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketTrailingStop, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("broker-side option premium trailing stop at %.1f%%", cfg.DefaultPct))
+	p.Contract.MinTick = minTick
+	p.TIF = policy.Buckets.TrailingStop.effectiveTIF()
 	applyTrailToProposal(&p, cfg.OrderType, cfg.DefaultPct, reference, action, cfg.LimitOffsetAbs)
 	p.Score = math.Abs(row.MarketValue)
 	p.Details = append(p.Details, fmt.Sprintf("premium trail=%.1f%%", cfg.DefaultPct))
+	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, true))
 	if row.Quantity < 0 && !cfg.AllowShortProfitTrail {
 		proposalBlock(&p, "short_option_trail_disabled", "short-option trailing stops require explicit buy-to-close profit-trail policy")
 	}
@@ -566,11 +581,20 @@ func proposalContractFromPosition(row rpc.PositionView, secType string) rpc.Cont
 		Right:        row.Right,
 		Multiplier:   row.Multiplier,
 	}
-	if (secType == "STK" || secType == "ETF") && strings.EqualFold(strings.TrimSpace(row.Exchange), "IBIS") {
-		contract.Market = "de"
+	if secType == "STK" || secType == "ETF" {
+		// msgPortfolioValue stores the *primary* exchange under row.Exchange
+		// (documented wire quirk); routing a protective order directly to it
+		// forfeits SMART routing. Route SMART and keep the venue as
+		// PrimaryExch — ConID anchors contract identity either way.
+		primary := strings.ToUpper(strings.TrimSpace(row.Exchange))
+		if primary != "" && primary != "SMART" {
+			contract.PrimaryExch = primary
+		}
 		contract.Exchange = "SMART"
-		contract.PrimaryExch = "IBIS"
-		contract.Currency = nonEmptyString(row.Currency, "EUR")
+		if primary == "IBIS" {
+			contract.Market = "de"
+			contract.Currency = nonEmptyString(row.Currency, "EUR")
+		}
 	}
 	return contract
 }
@@ -665,6 +689,10 @@ func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreview
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
 	}
+	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
+		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
+		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
+	}
 	if !preview.SubmitEligible {
 		blockers := previewNotSubmitEligibleBlockers()
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
@@ -691,6 +719,17 @@ func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.Trad
 	snap := cloneProposalSnapshot(e.snapshot)
 	e.mu.Unlock()
 	if snap.Kind == "" || snap.Revision == "" {
+		return rpc.TradeProposal{}, nil, false
+	}
+	// The fast path serves the cached snapshot; cap its age so a daemon
+	// restart (LoadedFromState) or a stalled refresh can never preview
+	// against arbitrarily old trail numbers. Falling out of the fast path
+	// lands on full revalidation, which is the safe slow path.
+	maxAge := 2 * e.cadence
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+	if snap.LoadedFromState || e.clock().Sub(snap.AsOf) > maxAge {
 		return rpc.TradeProposal{}, nil, false
 	}
 	if len(snap.Blockers) > 0 && len(snap.Proposals) == 0 {
@@ -744,12 +783,16 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
+	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
+		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+	}
 	if !preview.SubmitEligible {
 		blockers := previewNotSubmitEligibleBlockers()
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
-	place, err := e.server.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs})
+	place, err := e.server.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs, Origin: p.Origin, LiveConfirmation: p.LiveConfirmation})
 	if err != nil {
 		blockers := []rpc.TradingBlocker{{Code: "submit_failed", Message: err.Error()}}
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, err)
@@ -762,6 +805,85 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		}
 	}
 	return rpc.TradeProposalSubmitResult{Accepted: place.Accepted, Proposal: prop, Preview: sanitizeProposalPreview(preview), Place: place, PreviewTokenID: preview.PreviewTokenID, OrderRef: place.OrderRef, Message: place.Message, AsOf: e.clock()}, nil
+}
+
+// resolveRowMinTick returns the broker-reported minimum increment for a held
+// position's contract, fetched once per conID and cached for the daemon
+// lifetime. Generation and preview must round trail prices on the same grid:
+// the proposal-vs-preview drift gate compares them exactly.
+func (e *proposalEngine) resolveRowMinTick(row rpc.PositionView) float64 {
+	if e == nil || e.server == nil {
+		return 0
+	}
+	return e.server.resolveContractMinTick(context.Background(), rpc.ContractParams{
+		ConID:    row.ConID,
+		Symbol:   row.Symbol,
+		SecType:  row.SecType,
+		Currency: row.Currency,
+	}, previewMinTickTimeout)
+}
+
+// closeReduceQuantity sizes a close/reduce order for a possibly fractional
+// position: floor the magnitude (protect 10 of 10.5 shares) instead of
+// ceiling it, which would classify as a flip and be blocked with errors that
+// never mention fractions. The remainder is surfaced in proposal details.
+func closeReduceQuantity(position float64) (int, float64) {
+	abs := math.Abs(position)
+	qty := int(math.Floor(abs + 1e-9))
+	remainder := abs - float64(qty)
+	if remainder < 1e-9 {
+		remainder = 0
+	}
+	return qty, remainder
+}
+
+// duplicateProtectiveBlockers blocks a proposal when an open journaled order
+// already works the same contract and side: submitting would double the stop,
+// and a double fill flips the position. Inferred-expired and terminal rows do
+// not count (see inferDayOrderExpiry), so a stale zombie cannot block
+// re-protection forever.
+func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal) []rpc.TradingBlocker {
+	if e == nil || e.server == nil {
+		return nil
+	}
+	views, _, err := e.server.loadOrderViews()
+	if err != nil {
+		// Journal unavailability blocks the write path through the trading
+		// gate on its own; the duplicate check just can't help here.
+		return nil
+	}
+	for _, v := range views {
+		if !v.Open || !strings.EqualFold(v.Action, p.Action) {
+			continue
+		}
+		if !orderViewMatchesProposalContract(v, p) {
+			continue
+		}
+		return []rpc.TradingBlocker{{
+			Code:    "existing_protective_order",
+			Message: fmt.Sprintf("open order %s already works %s %s (%s)", v.OrderRef, p.Action, p.Symbol, nonEmptyString(v.OrderType, "order")),
+			Action:  fmt.Sprintf("Keep the standing protection, or cancel it first with `ibkr order cancel %s` before submitting a replacement.", v.OrderRef),
+		}}
+	}
+	return nil
+}
+
+func orderViewMatchesProposalContract(v rpc.OrderView, p rpc.TradeProposal) bool {
+	if v.ConID != 0 && p.Contract.ConID != 0 {
+		return v.ConID == p.Contract.ConID
+	}
+	return strings.EqualFold(v.Symbol, p.Symbol) && equivalentStockSecType(v.SecType, p.SecType)
+}
+
+func equivalentStockSecType(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s == "ETF" {
+			return "STK"
+		}
+		return s
+	}
+	return norm(a) == norm(b)
 }
 
 func previewNotSubmitEligibleBlockers() []rpc.TradingBlocker {
@@ -824,7 +946,29 @@ func proposalOrderPreviewParams(prop rpc.TradeProposal, qty, timeoutMs int) rpc.
 		strategy = rpc.OrderStrategyBrokerTrail
 	}
 	trail := cloneTrailSpec(prop.Trail)
-	return rpc.OrderPreviewParams{Action: prop.Action, Contract: prop.Contract, Quantity: qty, OrderType: orderType, Trail: trail, Strategy: strategy, TIF: rpc.OrderTIFDay, OutsideRTH: prop.OutsideRTH, TimeoutMs: timeoutMs, Source: proposalOrderSource}
+	return rpc.OrderPreviewParams{Action: prop.Action, Contract: prop.Contract, Quantity: qty, OrderType: orderType, Trail: trail, Strategy: strategy, TIF: proposalTIF(prop), OutsideRTH: prop.OutsideRTH, TimeoutMs: timeoutMs, Source: proposalOrderSource}
+}
+
+// proposalTIF normalizes a proposal's TIF for preview params and the
+// drift gate; proposals persisted before the field existed mean DAY.
+func proposalTIF(prop rpc.TradeProposal) string {
+	tif := strings.ToUpper(strings.TrimSpace(prop.TIF))
+	if tif == "" {
+		return rpc.OrderTIFDay
+	}
+	return tif
+}
+
+// trailingStopTIFDetail spells out the lifetime consequence of the bucket
+// TIF on the proposal itself, where the operator reviews it.
+func trailingStopTIFDetail(tif string, optionPremiumTrail bool) string {
+	if strings.EqualFold(tif, rpc.OrderTIFGTC) {
+		if optionPremiumTrail {
+			return "tif=GTC: stop persists until filled or cancelled; theta decay alone walks the premium into the stop eventually"
+		}
+		return "tif=GTC: stop persists across sessions until filled or cancelled"
+	}
+	return "tif=DAY: stop expires at the session close and does not cover overnight gaps; set tif = \"GTC\" in [buckets.trailing_stop] to persist"
 }
 
 func selectedProposalQty(prop rpc.TradeProposal, requested int) int {
@@ -855,8 +999,12 @@ func proposalPreviewSafetyBlockers(prop rpc.TradeProposal, preview *rpc.OrderPre
 	if !proposalSupportedOrderType(preview.Draft.OrderType) {
 		add("unsupported_order_type", fmt.Sprintf("proposal order type %q is not supported", preview.Draft.OrderType), "Refresh proposals and preview a supported close/reduce order.")
 	}
-	if preview.Draft.TIF != rpc.OrderTIFDay {
-		add("unsupported_tif", fmt.Sprintf("proposal time-in-force %q is not DAY", preview.Draft.TIF), "Refresh proposals and preview a DAY order.")
+	previewTIF := strings.ToUpper(strings.TrimSpace(preview.Draft.TIF))
+	switch {
+	case previewTIF != rpc.OrderTIFDay && previewTIF != rpc.OrderTIFGTC:
+		add("unsupported_tif", fmt.Sprintf("proposal time-in-force %q is not DAY or GTC", preview.Draft.TIF), "Refresh proposals and preview a supported time-in-force.")
+	case previewTIF != proposalTIF(prop):
+		add("tif_drift", fmt.Sprintf("preview time-in-force %q does not match proposal time-in-force %q", preview.Draft.TIF, proposalTIF(prop)), "Refresh proposals and preview again.")
 	}
 	if strings.EqualFold(preview.Draft.Contract.SecType, "OPT") && preview.Draft.OutsideRTH {
 		add("option_outside_rth", "option protection proposals must not request outside_rth", "Refresh proposals and preview during the supported option session.")

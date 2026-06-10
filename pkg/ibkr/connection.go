@@ -4423,6 +4423,45 @@ func optionContractRouteLabel(contract Contract) string {
 	return exchange + "+" + primary
 }
 
+// fetchContractDetailFirst returns the first contractData frame the gateway
+// emits for the request — enough for venue facts like MinTick that are
+// identical across candidate routes. Option resolution needs the
+// candidate-preference logic in fetchOptionContractDetail instead.
+func (c *Connection) fetchContractDetailFirst(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	detailsCh := make(chan ContractDetailsLite, 1)
+	serverVersion := c.serverVersion
+	reqID := c.GetNextRequestID()
+	dataHandlerID := c.RegisterHandler(msgContractData, func(fields []string) {
+		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
+			select {
+			case detailsCh <- *lite:
+			default:
+			}
+		}
+	})
+	defer c.UnregisterHandler(msgContractData, dataHandlerID)
+
+	if err := c.sendContractDetailsRequest(contract, reqID); err != nil {
+		return nil, err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case detail := <-detailsCh:
+		return &detail, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("contract details timeout for %s", contract.Symbol)
+	}
+}
+
 func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second

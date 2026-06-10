@@ -26,7 +26,14 @@ import (
 type Env struct {
 	Stdout io.Writer
 	Stderr io.Writer
-	Conn   *dial.Conn
+	// Stdin is the interactive input used for live-write confirmation
+	// prompts. Nil in tests and non-interactive helper paths.
+	Stdin io.Reader
+	Conn  *dial.Conn
+	// Origin is this process's broker-write origin classification
+	// (rpc.OrderOrigin*), resolved once in cmd/ibkr via DetectWriteOrigin.
+	// Empty classifies as agent at the daemon (fail closed).
+	Origin string
 	// Version is the running CLI version stamped by cmd/ibkr. Empty in
 	// renderer tests and local-only helper paths that do not need parity
 	// checks against the daemon.

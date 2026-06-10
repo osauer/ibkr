@@ -69,6 +69,7 @@ func (h *handler) handlePurgeExecute(w nethttp.ResponseWriter, r *nethttp.Reques
 		Symbols:       symbols,
 		BypassPreview: &bypassPreview,
 		WaitMs:        2000,
+		Origin:        rpc.OrderOriginPairedDevice,
 	})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())
@@ -137,6 +138,7 @@ func purgeRestoreParams(req purgeActionRequest) (rpc.PurgeRestoreParams, error) 
 		All:     req.All,
 		Symbols: symbols,
 		Scale:   scale,
+		Origin:  rpc.OrderOriginPairedDevice,
 	}, nil
 }
 

@@ -130,6 +130,13 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 	if err := json.Unmarshal(req.Params, &patch); err != nil {
 		return nil, errBadRequest("decode settings patch: " + err.Error())
 	}
+	origin := ""
+	if raw, ok := patch["origin"]; ok {
+		delete(patch, "origin")
+		if err := json.Unmarshal(raw, &origin); err != nil {
+			return nil, errBadRequest("decode settings origin: " + err.Error())
+		}
+	}
 	if len(patch) == 0 {
 		health := s.handleStatusHealth()
 		out := s.platformSettingsSnapshot(&platformSettingsObserved{
@@ -138,7 +145,7 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 		})
 		return &out, nil
 	}
-	if err := s.applyPlatformSettingsPatch(patch); err != nil {
+	if err := s.applyPlatformSettingsPatch(patch, origin); err != nil {
 		return nil, err
 	}
 	health := s.handleStatusHealth()
@@ -149,12 +156,20 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 	return &out, nil
 }
 
-func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage) error {
+func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, origin string) error {
 	for key := range patch {
 		switch key {
 		case "features", "trading":
 		default:
 			return errBadRequest("unknown settings field " + key)
+		}
+	}
+	if _, ok := patch["trading"]; ok {
+		// Trading safety limits are part of the broker-write surface: when
+		// the configured route is live, agent-origin sessions may not loosen
+		// them. Paper keeps the full path open for testing.
+		if s.cfg.Trading.Mode == config.TradingModeLive && !originIsHuman(origin) {
+			return errBadRequest("live trading settings are blocked for agent-origin requests; a human must change trading limits from an interactive terminal")
 		}
 	}
 	limitsWritable, reason := s.tradingLimitWritability()

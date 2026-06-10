@@ -892,6 +892,25 @@ type ContractDetailsLite struct {
 	TimeZoneID   string
 	TradingHours string
 	LiquidHours  string
+	// MinTick is the venue's minimum price increment for the contract.
+	// Zero means the gateway did not report one.
+	MinTick float64
+}
+
+// ContractDetailsFirst fetches the first contractData frame the gateway
+// returns for the contract — sufficient for venue facts such as MinTick.
+// Callers needing option-candidate preference must use the option resolver.
+func (c *Connector) ContractDetailsFirst(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
+	if !c.isConnected() {
+		return nil, fmt.Errorf("not connected to IBKR")
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return nil, fmt.Errorf("no active connection")
+	}
+	return conn.fetchContractDetailFirst(ctx, contract, timeout)
 }
 
 func mergeContractDetailsLite(base, incoming ContractDetailsLite) ContractDetailsLite {
@@ -921,6 +940,9 @@ func mergeContractDetailsLite(base, incoming ContractDetailsLite) ContractDetail
 	}
 	if base.LiquidHours == "" && incoming.LiquidHours != "" {
 		base.LiquidHours = incoming.LiquidHours
+	}
+	if base.MinTick == 0 && incoming.MinTick > 0 {
+		base.MinTick = incoming.MinTick
 	}
 	return base
 }
@@ -1628,7 +1650,11 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 
 	conID := parseIntSafe(safeGet(fields, idx))
 	idx++
-	idx++ // min tick
+	minTick := 0.0
+	if v, err := strconv.ParseFloat(strings.TrimSpace(safeGet(fields, idx)), 64); err == nil && v > 0 {
+		minTick = v
+	}
+	idx++
 
 	if serverVersion >= minServerVerMdSizeMultiplier && serverVersion < minServerVerSizeRules {
 		idx++ // md size multiplier (deprecated)
@@ -1683,6 +1709,7 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		TimeZoneID:   timeZoneID,
 		TradingHours: tradingHours,
 		LiquidHours:  liquidHours,
+		MinTick:      minTick,
 	}, true
 }
 

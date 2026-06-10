@@ -183,11 +183,13 @@ type TradeProposalOrderPreview struct {
 }
 
 type TradeProposalSubmitParams struct {
-	Key       string `json:"key"`
-	Revision  string `json:"revision"`
-	Quantity  int    `json:"quantity,omitempty"`
-	FastPath  bool   `json:"fast_path,omitempty"`
-	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	Key              string `json:"key"`
+	Revision         string `json:"revision"`
+	Quantity         int    `json:"quantity,omitempty"`
+	FastPath         bool   `json:"fast_path,omitempty"`
+	TimeoutMs        int    `json:"timeout_ms,omitempty"`
+	Origin           string `json:"origin,omitempty"`
+	LiveConfirmation string `json:"live_confirmation,omitempty"`
 }
 
 type TradeProposalSubmitResult struct {

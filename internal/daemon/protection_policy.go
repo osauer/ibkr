@@ -56,7 +56,12 @@ type protectionRiskPolicy struct {
 }
 
 type protectionTrailPolicy struct {
-	Enabled  bool                        `toml:"enabled" json:"enabled"`
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// TIF applies to every trailing-stop proposal in this bucket: DAY or
+	// GTC, empty means DAY. omitempty keeps the unset value out of the
+	// policy fingerprint, so existing policy files and the embedded
+	// default keep their fingerprints across the upgrade.
+	TIF      string                      `toml:"tif" json:"tif,omitempty"`
 	StockETF protectionTrailAssetPolicy  `toml:"stock_etf" json:"stock_etf"`
 	Options  protectionTrailOptionPolicy `toml:"options" json:"options"`
 }
@@ -357,6 +362,14 @@ func validateProtectionPolicy(p protectionPolicy) error {
 			return fmt.Errorf("risk_reduction.max_order_notional must be positive")
 		}
 	}
+	// Checked even when the bucket is disabled: tif is a closed two-value
+	// enum, the zero value is always valid, and rejecting a typo at
+	// file-write time beats rejecting it later when the bucket is
+	// switched on.
+	if tif := strings.TrimSpace(p.Buckets.TrailingStop.TIF); tif != "" &&
+		!strings.EqualFold(tif, rpc.OrderTIFDay) && !strings.EqualFold(tif, rpc.OrderTIFGTC) {
+		return fmt.Errorf("trailing_stop.tif %q is invalid; use DAY or GTC", p.Buckets.TrailingStop.TIF)
+	}
 	if p.Buckets.TrailingStop.Enabled {
 		if err := validateTrailAssetPolicy("trailing_stop.stock_etf", p.Buckets.TrailingStop.StockETF); err != nil {
 			return err
@@ -410,6 +423,16 @@ func validateTrailOptionPolicy(prefix string, p protectionTrailOptionPolicy) err
 		return fmt.Errorf("%s.limit_offset_abs must be positive for TRAIL LIMIT", prefix)
 	}
 	return nil
+}
+
+// effectiveTIF resolves the bucket TIF for proposal generation: GTC when
+// the policy says so, DAY otherwise (including unset). Other values never
+// reach here — validateProtectionPolicy rejects the file.
+func (p protectionTrailPolicy) effectiveTIF() string {
+	if strings.EqualFold(strings.TrimSpace(p.TIF), rpc.OrderTIFGTC) {
+		return rpc.OrderTIFGTC
+	}
+	return rpc.OrderTIFDay
 }
 
 func supportedTrailOrderType(orderType string) bool {

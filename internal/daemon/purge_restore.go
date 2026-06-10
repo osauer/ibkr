@@ -41,6 +41,8 @@ func (s *Server) handlePurgeRestoreExecute(ctx context.Context, req *rpc.Request
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
+	s.brokerWriteMu.Lock()
+	defer s.brokerWriteMu.Unlock()
 	return s.executePurgeRestore(ctx, p)
 }
 
@@ -177,6 +179,9 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 	blockers := s.purgeRestorePreviewBlockers(status)
 	if execute {
 		blockers = s.purgeExecuteBlockers(status)
+		for _, blocker := range liveOriginBlockers(status, p.Origin, p.LiveConfirmation) {
+			blockers = appendTradingBlockerOnce(blockers, blocker)
+		}
 	}
 	if len(blockers) > 0 {
 		res.Blockers = blockers
@@ -304,12 +309,12 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		addPurgeRestoreSkipped(res, leg, "open purge/restore order exists for this ledger row")
 		return
 	}
-	qty := row.RemainingQuantity * scale
-	if qty <= 0 || math.Trunc(qty) != qty {
+	qty, ok := restoreScaledQuantity(row.RemainingQuantity, scale)
+	if !ok {
 		addPurgeRestoreSkipped(res, leg, "restore quantity is fractional under the current integer order path")
 		return
 	}
-	leg.Quantity = int(qty)
+	leg.Quantity = qty
 	currentQty := positionQuantityForContract(positions, restoreContract)
 	if purgeSideFlipped(row.OriginalSide, currentQty) {
 		addPurgeRestoreSkipped(res, leg, "current portfolio side is opposite the purged original side")
@@ -507,6 +512,21 @@ func purgeOrderViewLegIDCandidates(view rpc.OrderView) []string {
 		Multiplier:   view.Multiplier,
 	}
 	return purgeLegIDCandidates(view.LegID, purgeLegIDForContract(contract), purgeLegacyLegIDForContract(contract))
+}
+
+// restoreScaledQuantity returns the integer order quantity for a scaled
+// restore and whether the product is usable. Float products like 100*0.07
+// land at 7.000000000000001; values within 1e-9 of an integer snap to it
+// before the fractional check.
+func restoreScaledQuantity(remaining, scale float64) (int, bool) {
+	qty := remaining * scale
+	if rounded := math.Round(qty); math.Abs(qty-rounded) < 1e-9 {
+		qty = rounded
+	}
+	if qty <= 0 || math.Trunc(qty) != qty {
+		return 0, false
+	}
+	return int(qty), true
 }
 
 func addPurgeRestoreSkipped(res *rpc.PurgeRestoreResult, leg rpc.PurgeRestoreLeg, reason string) {

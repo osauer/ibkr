@@ -316,6 +316,10 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 		Version:    "test",
 		Logger:     NewLogger(&bytes.Buffer{}, "error"),
 	})
+	// Hermetic journal: New() resolves the host's XDG state path, and a real
+	// open order there would (correctly) veto idle shutdown via the
+	// open-orders background task.
+	srv.orderJournal = newOrderJournalStore(filepath.Join(dir, "order-journal.jsonl"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -386,6 +390,8 @@ func TestStartDoesNotLaunchBreadthBeforePostConnect(t *testing.T) {
 		Version:    "test",
 		Logger:     NewLogger(&bytes.Buffer{}, "error"),
 	})
+	// Hermetic journal — see TestStartOpensSocketBeforeGatewayHandshake.
+	srv.orderJournal = newOrderJournalStore(filepath.Join(shortTempDir(t), "order-journal.jsonl"))
 
 	// Replace the production breadth engine with a test one whose
 	// fetcher records every invocation. If postConnectSetup correctly

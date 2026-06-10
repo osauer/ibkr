@@ -55,6 +55,8 @@ func (s *Server) handleTradeProposalsSubmit(ctx context.Context, req *rpc.Reques
 	if s.tradeProposals == nil {
 		return &rpc.TradeProposalSubmitResult{Accepted: false, AsOf: s.orderNow(), Blockers: []rpc.TradingBlocker{{Code: "proposal_engine_unavailable", Message: "proposal engine is unavailable"}}}, nil
 	}
+	s.brokerWriteMu.Lock()
+	defer s.brokerWriteMu.Unlock()
 	res, err := s.tradeProposals.Submit(ctx, p)
 	return &res, err
 }

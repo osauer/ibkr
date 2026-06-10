@@ -20,6 +20,8 @@ func (s *Server) handleOrderPlace(ctx context.Context, req *rpc.Request) (*rpc.O
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
+	s.brokerWriteMu.Lock()
+	defer s.brokerWriteMu.Unlock()
 	return s.placeOrder(ctx, p)
 }
 
@@ -28,6 +30,8 @@ func (s *Server) handleOrderModify(ctx context.Context, req *rpc.Request) (*rpc.
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
+	s.brokerWriteMu.Lock()
+	defer s.brokerWriteMu.Unlock()
 	return s.modifyOrder(ctx, p)
 }
 
@@ -52,8 +56,23 @@ func (s *Server) currentBrokerWriteAuthorization() brokerWriteAuthorization {
 	return s.brokerWriteAuthorization(s.currentTradingStatus())
 }
 
-func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+// brokerWriteAuthorizationForRequest is the request-time write gate: the
+// origin-agnostic authorization (which also feeds trading-status CanWrite)
+// plus the live origin policy for this specific request.
+func (s *Server) brokerWriteAuthorizationForRequest(origin, liveConfirmation string) brokerWriteAuthorization {
 	auth := s.currentBrokerWriteAuthorization()
+	if s == nil {
+		return auth
+	}
+	for _, blocker := range liveOriginBlockers(auth.Status, origin, liveConfirmation) {
+		auth.Blockers = appendTradingBlockerOnce(auth.Blockers, blocker)
+		auth.Allowed = false
+	}
+	return auth
+}
+
+func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
+	auth := s.brokerWriteAuthorizationForRequest(p.Origin, p.LiveConfirmation)
 	if !auth.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
@@ -61,6 +80,9 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 	payload, err := s.verifyPreviewTokenForPlace(p.PreviewToken)
 	if err != nil {
 		return nil, err
+	}
+	if msg := s.trailRedemptionGuard(ctx, payload.Draft); msg != "" {
+		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, msg)
 	}
 	reservedOrderID, err := s.reserveBrokerOrderID(ctx)
 	if err != nil {
@@ -70,6 +92,7 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 	confirm := previewTokenConfirmedEvent(payload, reservedOrderID, now, fmt.Sprintf("preview token confirmed for %s broker transmit", auth.Route))
 	attempt := orderJournalEventForDraft(payload.Draft, orderJournalEventSendAttempted, status, payload.TokenID, reservedOrderID, now)
 	attempt.SendState = orderSendStateSendAttempted
+	attempt.Origin = normalizedWriteOrigin(p.Origin)
 	attempt.Message = fmt.Sprintf("%s broker placeOrder transmit attempted", auth.Route)
 	if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(confirm, attempt); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
@@ -103,7 +126,7 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 }
 
 func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
-	auth := s.currentBrokerWriteAuthorization()
+	auth := s.brokerWriteAuthorizationForRequest(p.Origin, p.LiveConfirmation)
 	if !auth.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
@@ -187,6 +210,7 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 	now := s.orderNow()
 	cancelEvent := orderJournalEventFromView(view, orderJournalEventCancelRequested, now)
 	cancelEvent.SendState = orderSendStateSendAttempted
+	cancelEvent.Origin = normalizedWriteOrigin(p.Origin)
 	cancelEvent.Message = fmt.Sprintf("%s broker cancel attempted", auth.Route)
 	if err := s.orderJournal.Append(cancelEvent); err != nil {
 		return nil, fmt.Errorf("%w: append cancel journal: %v", ErrTradingDisabled, err)
