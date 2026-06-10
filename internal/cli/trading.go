@@ -24,9 +24,70 @@ func runTrading(ctx context.Context, env *Env, args []string) int {
 	switch sub {
 	case "status":
 		return runTradingStatus(ctx, env, args)
+	case "paper-smoke":
+		return runTradingPaperSmoke(ctx, env, args)
 	default:
-		return fail(env, "trading: unknown subcommand %q (try `ibkr trading status`)", sub)
+		return fail(env, "trading: unknown subcommand %q (try `ibkr trading status` or `ibkr trading paper-smoke`)", sub)
 	}
+}
+
+func runTradingPaperSmoke(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "trading paper-smoke")
+	timeout := fs.Duration("timeout", 30*time.Second, "maximum wait for broker acknowledgement")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	var res rpc.TradingPaperSmokeResult
+	if err := env.Conn.Call(ctx, rpc.MethodTradingPaperSmoke, rpc.TradingPaperSmokeParams{TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin}, &res); err != nil {
+		return fail(env, "trading paper-smoke: %v", err)
+	}
+	if *jsonOut {
+		printJSON(env, res)
+	} else {
+		renderTradingPaperSmokeText(env, &res)
+	}
+	if res.Passed {
+		return 0
+	}
+	return 1
+}
+
+func renderTradingPaperSmokeText(env *Env, res *rpc.TradingPaperSmokeResult) {
+	out := env.Stdout
+	verdict := statusConcern{Text: "PASSED", Level: statusConcernNone}
+	if !res.Passed {
+		verdict = statusConcern{Text: "FAILED", Level: statusConcernWarn}
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "IBKR Paper Smoke  %s\n", env.statusBadge(verdict))
+	fmt.Fprintln(out)
+	statusRow(env, out, "Gate", fmt.Sprintf("%s %s via %s (client %d)", nonEmpty(res.Mode, "unknown"), nonEmpty(res.Account, "unknown"), nonEmpty(res.Endpoint, "unknown"), res.ClientID))
+	order := fmt.Sprintf("BUY %d %s LMT %.2f DAY", res.Quantity, res.Symbol, res.LimitPrice)
+	if res.OrderRef != "" {
+		order += " (" + res.OrderRef + ")"
+	}
+	statusRow(env, out, "Order", order)
+	if res.ReservedOrderID != 0 {
+		statusRow(env, out, "Broker ID", fmt.Sprint(res.ReservedOrderID))
+	}
+	statusRow(env, out, "Ack", nonEmpty(res.AckLifecycleStatus, "none"))
+	statusRow(env, out, "Cancel", nonEmpty(res.CancelLifecycleStatus, "none"))
+	if res.EvidenceSaved && res.EvidenceAt != nil {
+		statusRow(env, out, "Evidence", fmt.Sprintf("%s at %s (max age %s)", res.Result, res.EvidenceAt.Format(time.RFC3339), res.EvidenceMaxAge))
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(out, "  %s\n", env.dim(w.Code+": "+w.Message))
+	}
+	if res.Message != "" {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, res.Message)
+	}
+	if res.Passed {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, env.dim("Evidence is bound to this binary version; rerun after every install."))
+	}
+	fmt.Fprintln(out)
 }
 
 func runTradingStatus(ctx context.Context, env *Env, args []string) int {

@@ -235,7 +235,7 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	port := 4001
 	clientID := 31
 	now := time.Date(2026, 5, 28, 7, 0, 0, 0, time.UTC)
-	store := newTradingReadinessStore(filepath.Join(t.TempDir(), "trading-readiness.json"))
+	store := newTradingReadinessStore(filepath.Join(t.TempDir(), "trading-readiness.json"), newTestPaperSmokeSigner(t))
 	if err := store.SavePaperSmoke(tradingPaperSmokeEvidence{
 		Account:       "DU1234567",
 		Endpoint:      "127.0.0.1:4002",

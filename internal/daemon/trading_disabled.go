@@ -24,6 +24,10 @@ func (s *Server) handleOrderCancel(_ context.Context, _ *rpc.Request) (any, erro
 	return nil, ErrTradingDisabled
 }
 
+func (s *Server) handleTradingPaperSmoke(_ context.Context, _ *rpc.Request) (any, error) {
+	return nil, ErrTradingDisabled
+}
+
 func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
 	if s.orderReserveBrokerID != nil {
 		return s.orderReserveBrokerID(ctx)

@@ -27,6 +27,8 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		_ = s.orderReserveBrokerID
 		_ = s.orderPlaceBroker
 		_ = s.orderCancelBroker
+		_ = &s.paperSmokeMu
+		_ = s.paperSmokeCancelBudgetOverride
 	}
 	var cfg config.Resolved
 	if s != nil && s.cfg != nil {
@@ -429,6 +431,8 @@ func paperSmokeBlockerCode(status string) string {
 		return "paper_smoke_failed"
 	case tradingPaperSmokeStatusUnreadable:
 		return "paper_smoke_unreadable"
+	case tradingPaperSmokeStatusUnsigned:
+		return "paper_smoke_unsigned"
 	default:
 		return "paper_smoke_missing"
 	}

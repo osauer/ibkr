@@ -214,6 +214,12 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"confirm_mode: modifyConfirmation.mode",
 		"confirm_account: cancelConfirmation.account",
 		"confirm_mode: cancelConfirmation.mode",
+		// Live writes carry the user-typed "live/<account>" phrase the daemon
+		// requires from human origins; paper bodies omit the field.
+		"function liveWriteConfirmation(verb)",
+		"live_confirmation: liveConfirmation || undefined",
+		"live_confirmation: modifyLiveConfirmation || undefined",
+		"if (confirmation.liveConfirmation) body.live_confirmation = confirmation.liveConfirmation",
 		"Submit blocked",
 		"write_blockers",
 		"Broker preview is not enabled by trading.status",

@@ -185,7 +185,7 @@ func main() {
 	// classified daemon error reaches the user instead of a raw socket
 	// timeout from cancelling the in-flight request.
 	if !isStreamingInvocation(cmd, rest) {
-		budget := unaryInvocationBudget(cmd)
+		budget := unaryInvocationBudget(cmd, rest)
 		var dlCancel context.CancelFunc
 		ctx, dlCancel = context.WithTimeout(ctx, budget)
 		defer dlCancel()
@@ -195,9 +195,15 @@ func main() {
 	os.Exit(cli.Run(ctx, env, cmd, rest))
 }
 
-func unaryInvocationBudget(cmd string) time.Duration {
+func unaryInvocationBudget(cmd string, rest []string) time.Duration {
 	if cmd == "scan" || cmd == "technical" || cmd == "canary" {
 		return parseDurationOr(cliLongUnaryTimeout, 90*time.Second)
+	}
+	// The daemon-side MethodTradingPaperSmoke deadline is 100 s (preview,
+	// place, ack wait, detached cancel budget); the CLI ceiling must exceed
+	// it so the classified daemon error reaches the user.
+	if cmd == "trading" && len(rest) > 0 && rest[0] == "paper-smoke" {
+		return 120 * time.Second
 	}
 	return parseDurationOr(cliUnaryTimeout, 60*time.Second)
 }
