@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -179,6 +180,93 @@ func TestHTTPDeviceSecretRejectsWrongSecret(t *testing.T) {
 	}
 	if _, err := mgr.CompleteChallenge("device-1", challenge.Challenge, "", testDeviceSecret()); err == nil {
 		t.Fatalf("wrong HTTP device secret unexpectedly succeeded")
+	}
+}
+
+func TestReapDropsExpiredEntriesAndKeepsLiveOnes(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	mgr := NewManager(store, time.Minute)
+	mgr.now = func() time.Time { return now }
+	if err := store.AddDevice(state.DeviceGrant{ID: "device-1", CreatedAt: now}); err != nil {
+		t.Fatalf("AddDevice: %v", err)
+	}
+
+	oldPairing, err := mgr.StartPairing("https://relay.example") // expires now+1m
+	if err != nil {
+		t.Fatalf("StartPairing: %v", err)
+	}
+	oldChallenge, err := mgr.StartChallenge("device-1") // expires now+2m
+	if err != nil {
+		t.Fatalf("StartChallenge: %v", err)
+	}
+	oldSession, err := mgr.newSession("device-1", now) // expires now+12h
+	if err != nil {
+		t.Fatalf("newSession: %v", err)
+	}
+
+	later := now.Add(SessionTTL + time.Minute)
+	mgr.now = func() time.Time { return later }
+	keepPairing, err := mgr.StartPairing("https://relay.example")
+	if err != nil {
+		t.Fatalf("StartPairing (live): %v", err)
+	}
+	keepChallenge, err := mgr.StartChallenge("device-1")
+	if err != nil {
+		t.Fatalf("StartChallenge (live): %v", err)
+	}
+	keepSession, err := mgr.newSession("device-1", later)
+	if err != nil {
+		t.Fatalf("newSession (live): %v", err)
+	}
+
+	mgr.reap(mgr.now().UTC())
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if _, ok := mgr.pairing[oldPairing.ID]; ok {
+		t.Fatalf("expired pairing session survived reap")
+	}
+	if _, ok := mgr.challenges[oldChallenge.Challenge]; ok {
+		t.Fatalf("expired challenge survived reap")
+	}
+	if _, ok := mgr.sessions[oldSession.Token]; ok {
+		t.Fatalf("expired session survived reap")
+	}
+	if _, ok := mgr.pairing[keepPairing.ID]; !ok {
+		t.Fatalf("live pairing session was reaped")
+	}
+	if _, ok := mgr.challenges[keepChallenge.Challenge]; !ok {
+		t.Fatalf("live challenge was reaped")
+	}
+	if _, ok := mgr.sessions[keepSession.Token]; !ok {
+		t.Fatalf("live session was reaped")
+	}
+}
+
+func TestStartReaperStopsOnContextCancel(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := NewManager(store, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mgr.StartReaper(ctx, time.Millisecond)
+	}()
+	time.Sleep(5 * time.Millisecond) // let it tick a few times
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("StartReaper did not stop on context cancel")
 	}
 }
 

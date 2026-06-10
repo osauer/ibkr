@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"strings"
 	"sync"
@@ -224,6 +226,34 @@ func (m *Manager) Authenticate(token string) (Session, bool) {
 	}
 	_ = m.store.SetDeviceSeen(s.DeviceID, now)
 	return s, true
+}
+
+// StartReaper prunes expired pairing sessions, challenges, and sessions every
+// interval until ctx is cancelled. The maps are otherwise pruned only lazily
+// on access, and a session token that is never presented again (the phone
+// always uses its newest token) would leak forever.
+func (m *Manager) StartReaper(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Minute
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.reap(m.now().UTC())
+		}
+	}
+}
+
+func (m *Manager) reap(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	maps.DeleteFunc(m.pairing, func(_ string, s PairingSession) bool { return now.After(s.ExpiresAt) })
+	maps.DeleteFunc(m.challenges, func(_ string, c Challenge) bool { return now.After(c.ExpiresAt) })
+	maps.DeleteFunc(m.sessions, func(_ string, s Session) bool { return now.After(s.ExpiresAt) })
 }
 
 func (m *Manager) newSession(deviceID string, now time.Time) (Session, error) {

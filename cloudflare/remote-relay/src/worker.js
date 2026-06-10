@@ -21,7 +21,11 @@ export default {
     const routeID = url.searchParams.get("remote") || readCookie(request.headers.get("Cookie") || "", ROUTE_COOKIE);
     if (!routeID) return json({ error: "remote route required" }, 400);
     const response = await routeStub(env, routeID).fetch(request);
-    if (!url.searchParams.get("remote")) return response;
+    // Re-set the route cookie on every addressed request, cookie- or
+    // query-addressed: the route TTL slides while the Mac stays connected,
+    // and the installed PWA (start_url "/") addresses the relay by cookie
+    // only — without this refresh the cookie's 7-day Max-Age would expire
+    // under an otherwise healthy route.
     const routed = new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
@@ -64,6 +68,11 @@ export class RelaySession {
     if (!expected || token !== expected) {
       return json({ error: "unauthorized" }, 401);
     }
+    // Slide the route TTL on every authenticated connector (re)connection so
+    // a live Mac keeps the existing route_id (and its paired phones) alive
+    // past the initial 7-day window. The Go connector force-cycles its
+    // connection at half the TTL to keep this sliding even when idle.
+    await this.slideExpiry();
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
@@ -161,6 +170,10 @@ export class RelaySession {
   async expired() {
     const raw = await this.state.storage.get(EXPIRES_AT_KEY);
     return !!raw && Date.parse(raw) <= Date.now();
+  }
+
+  async slideExpiry() {
+    await this.state.storage.put(EXPIRES_AT_KEY, new Date(Date.now() + ROUTE_TTL_MS).toISOString());
   }
 }
 
