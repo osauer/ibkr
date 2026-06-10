@@ -573,13 +573,17 @@ func (s *Server) installContractStore() {
 // reconnect without re-instantiation, mirroring the primary-thunk
 // pattern.
 //
-// Members seeding: prefers the runtime-refreshed cache file
-// (`~/.cache/ibkr/spx-members/sp500-members.json`) over the embedded
-// list, so a daemon installed from a months-old release that has
-// since cached a fresher list serves current membership immediately.
-// Falls back to the embedded list on missing/corrupt/sanity-failed
-// file. Logs the source on startup so a human triaging breadth values
-// can confirm which list is in play.
+// Members seeding: resolveBreadthMembers, deferred via
+// spx.Options.MembersFn to the engine's first actual members use —
+// not read at construction. daemon.New runs before Server.Start
+// acquires the single-instance flock, so every autospawn race loser
+// builds a full Server; an eager read here made each loser re-read
+// the members cache and append its own "loaded N members from cache"
+// INFO line to the shared daemon log (2026-06-09: ~10 interleaved
+// lines per spawn burst, same mechanism as the gamma persisted-cache
+// fix). The winning daemon logs the source exactly once, on first
+// breadth use, so a human triaging breadth values can still confirm
+// which list is in play.
 func (s *Server) installBreadthEngine() {
 	dir, err := spx.DefaultDir()
 	if err != nil {
@@ -587,21 +591,28 @@ func (s *Server) installBreadthEngine() {
 		return
 	}
 	fetcher := newBreadthFetcher(s.breadthGatewayConnector)
+	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger, MembersFn: s.resolveBreadthMembers})
+}
 
-	var members []string
+// resolveBreadthMembers is the deferred members source for the breadth
+// engine (see installBreadthEngine for why it must not run at
+// construction). Prefers the runtime-refreshed cache file
+// (`~/.cache/ibkr/spx-members/sp500-members.json`) over the embedded
+// list, so a daemon installed from a months-old release that has
+// since cached a fresher list serves current membership immediately.
+// Falls back to the embedded list on missing/corrupt/sanity-failed
+// file. Logs the chosen source — the engine's sync.Once gate
+// guarantees at most one line per process lifetime.
+func (s *Server) resolveBreadthMembers() []string {
 	if path, perr := spx.MembersDefaultPath(); perr == nil {
 		if loaded, asOf, ok := spx.LoadExternal(path); ok {
-			members = loaded
 			s.infof("breadth: loaded %d members from cache (as_of %s)", len(loaded), asOf.Format("2006-01-02"))
+			return loaded
 		}
 	}
-	if len(members) == 0 {
-		embedded, asOf := spx.MemberList()
-		members = embedded
-		s.infof("breadth: using embedded members list (%d names, as_of %s)", len(embedded), asOf.Format("2006-01-02"))
-	}
-
-	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger, Members: members})
+	embedded, asOf := spx.MemberList()
+	s.infof("breadth: using embedded members list (%d names, as_of %s)", len(embedded), asOf.Format("2006-01-02"))
+	return embedded
 }
 
 // installMembersRefresher stands up the runtime SPX-members refresher.

@@ -2,6 +2,8 @@ package spx
 
 import (
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -61,5 +63,61 @@ func TestEngineNewFallsBackToEmbedded(t *testing.T) {
 	embedded, _ := MemberList()
 	if !slices.Equal(got, embedded) {
 		t.Error("Engine should fall back to MemberList() when Options.Members is empty")
+	}
+}
+
+// TestEngineMembersFnDeferredOnce pins the lazy members resolution:
+// construction must not invoke MembersFn (autospawn race losers build
+// an Engine but never use it), concurrent first uses share exactly one
+// invocation, and a SetMembers push after the load stays final.
+func TestEngineMembersFnDeferredOnce(t *testing.T) {
+	var calls atomic.Int32
+	custom := []string{"AAA", "BBB", "CCC"}
+	e := New(NewStore(t.TempDir()), stubBarFetcher{}, Options{MembersFn: func() []string {
+		calls.Add(1)
+		return slices.Clone(custom)
+	}})
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("MembersFn ran at construction: %d calls, want 0", got)
+	}
+
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Go(func() { e.Members() })
+	}
+	wg.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Errorf("MembersFn calls after concurrent first use: got %d, want exactly 1", got)
+	}
+	if got := e.Members(); !slices.Equal(got, custom) {
+		t.Errorf("Members() = %v, want deferred list %v", got, custom)
+	}
+
+	pushed := []string{"ZZZ"}
+	if changed := e.SetMembers(pushed); !changed {
+		t.Error("SetMembers should report change against the deferred list")
+	}
+	if got := e.Members(); !slices.Equal(got, pushed) {
+		t.Errorf("Members() after refresher push = %v, want %v", got, pushed)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("MembersFn re-ran after SetMembers: got %d calls, want 1", got)
+	}
+}
+
+// TestEngineMembersOptionWinsOverFn: an explicit Members list resolves
+// eagerly and the deferred fn is never consulted.
+func TestEngineMembersOptionWinsOverFn(t *testing.T) {
+	var calls atomic.Int32
+	custom := []string{"AAA", "BBB"}
+	e := New(NewStore(t.TempDir()), stubBarFetcher{}, Options{
+		Members:   custom,
+		MembersFn: func() []string { calls.Add(1); return []string{"NOPE"} },
+	})
+	if got := e.Members(); !slices.Equal(got, custom) {
+		t.Errorf("Members() = %v, want explicit list %v", got, custom)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("MembersFn ran despite explicit Members: %d calls, want 0", got)
 	}
 }
