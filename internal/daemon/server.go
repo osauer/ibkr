@@ -157,6 +157,11 @@ type Server struct {
 	// tick-101 observations update it, so pre-market/RTH recalcs can carry a
 	// known OI state without zero-substituting unknowns.
 	gammaOI *gammaOpenInterestStore
+	// gammaGrids persists the last successful classed expiry/strike grid
+	// per underlying so the gamma compute can ride out sec-def farm
+	// outages on a recent prior grid instead of losing the SPX canonical
+	// signal for the session (observed 2026-06-09, IBKR code 2157).
+	gammaGrids *expiryGridStore
 	// gammaStarted guards the boot-time prewarm so it only fires once
 	// per Server lifetime. postConnectSetup runs once per successful
 	// candidate (including post-reconnect), so without this Once a
@@ -420,6 +425,7 @@ func (s *Server) installGammaZeroCache() {
 	}
 	s.zeroGamma = newGammaZeroCacheWithStore(newGammaZeroStore(dir), time.Now(), s.logger)
 	s.gammaOI = newGammaOpenInterestStore(dir)
+	s.gammaGrids = newExpiryGridStore(dir)
 }
 
 // installStreakStore constructs the regime-streak persistence layer.
@@ -1372,6 +1378,18 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// hanging when the market is closed.
 	if err := a.SetMarketDataType(2); err != nil {
 		s.logger.Warnf("SetMarketDataType(frozen) failed: %v", err)
+	}
+	// A fresh handshake is the one event after which a previously
+	// silent shortable feed (tick 236) can plausibly start delivering —
+	// drop the market-events absence memory so the next snapshot
+	// re-probes every held symbol. Same reasoning for the gamma retry
+	// backoff: a farm outage ends with a reconnect, so the first compute
+	// after one shouldn't sit out an escalated quiet period.
+	if s.marketEvents != nil {
+		s.marketEvents.clearShortableAbsence()
+	}
+	if s.zeroGamma != nil {
+		s.zeroGamma.resetRetryBackoff()
 	}
 	// Start the streaming account+portfolio subscription so position
 	// rows carry live mark/value/P&L.

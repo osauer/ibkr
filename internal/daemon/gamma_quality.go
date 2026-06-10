@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -351,10 +352,40 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 			gammaQualityAddGate(q, "spx_cache_fallback", rpc.GammaQualityGatePass, "SPX slice served from cache; freshness and coverage gates decide rankability")
 		case strings.HasPrefix(code, "skew_fallback:"):
 			gammaQualityAddGate(q, "skew_fallback", rpc.GammaQualityGateContext, "one expiry fell back to sticky-IV")
+		case strings.HasPrefix(code, "expiries_stale:"):
+			// Legs were enumerated from a cached expiry grid because the
+			// live secdef fetch failed; the legs themselves priced live.
+			// A grid a few calendar days old (≤ the weekend-spanning
+			// threshold) only lags dailies listed since the snapshot —
+			// disclose and pass. Older grids degrade to context so a
+			// long outage can't quietly masquerade as full coverage.
+			age := strings.TrimPrefix(code, "expiries_stale:")
+			if gammaExpiryStaleWithinPassWindow(age) {
+				gammaQualityAddGate(q, "expiry_grid", rpc.GammaQualityGatePass, "expiry grid served from cache ("+age+" old); option legs priced live")
+			} else {
+				gammaQualityAddGate(q, "expiry_grid", rpc.GammaQualityGateContext, "expiry grid stale ("+age+"); coverage may lag newly listed expiries")
+			}
 		case strings.Contains(code, "timeout"), strings.Contains(code, "pacing"), strings.Contains(code, "farm"):
 			gammaQualityAddGate(q, "gateway_health", rpc.GammaQualityGateBlock, "gateway/data-farm warning: "+raw)
 		}
 	}
+}
+
+// gammaExpiryStalePassDays is the calendar-day grid age up to which an
+// expiries_stale warning still passes the expiry_grid quality gate.
+// Three calendar days keeps a Monday compute on Friday's grid (one
+// trading session old) rankable; beyond that the gate degrades to
+// context-only.
+const gammaExpiryStalePassDays = 3
+
+// gammaExpiryStaleWithinPassWindow parses the "<N>d" age bucket from an
+// expiries_stale warning. Unparseable ages fail closed (context-only).
+func gammaExpiryStaleWithinPassWindow(age string) bool {
+	days, err := strconv.Atoi(strings.TrimSuffix(age, "d"))
+	if err != nil {
+		return false
+	}
+	return days >= 0 && days <= gammaExpiryStalePassDays
 }
 
 func gammaFinalizeRankability(q *rpc.GammaSignalQuality) {

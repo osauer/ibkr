@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -277,4 +278,155 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// TestMarketEventCacheShortableAbsence pins the session-scoped negative
+// cache behind the borrow-inventory polls: a symbol observed absent in
+// one NY session is skipped for that session only, and a gateway
+// reconnect (clearShortableAbsence) re-arms the probe immediately.
+// Without this memory, every market-events snapshot re-burned the full
+// poll budget per non-US name whose shortable tick never arrives.
+func TestMarketEventCacheShortableAbsence(t *testing.T) {
+	t.Parallel()
+	cache := newMarketEventCache(nil)
+	sessionA := "2026-06-09"
+	sessionB := "2026-06-10"
+
+	if cache.shortableAbsentThisSession("DTE", sessionA) {
+		t.Fatal("fresh cache should not report absence")
+	}
+	cache.rememberShortableAbsent("DTE", sessionA)
+	if !cache.shortableAbsentThisSession("DTE", sessionA) {
+		t.Error("absence recorded for session A should skip within session A")
+	}
+	if cache.shortableAbsentThisSession("DTE", sessionB) {
+		t.Error("absence from session A must not carry into session B")
+	}
+	if cache.shortableAbsentThisSession("SAP", sessionA) {
+		t.Error("absence is per-symbol")
+	}
+
+	cache.clearShortableAbsence()
+	if cache.shortableAbsentThisSession("DTE", sessionA) {
+		t.Error("clearShortableAbsence (reconnect) should re-arm the probe")
+	}
+}
+
+// TestMarketEventBorrowFeeFailureMemory pins the retry-suppression
+// window: after a failed fetch (observed live: ftp3.interactivebrokers
+// port 21 filtered → full dial-timeout hang), snapshots within
+// marketEventsBorrowFeeRetryAfter must NOT re-attempt the fetch — the
+// hang was being re-paid on every canary run. Past the window, exactly
+// one retry fires; success clears the memory.
+func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	cache := newMarketEventCache(func() time.Time { return now })
+
+	var fetchCalls int
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{}, errors.New("dial tcp: i/o timeout")
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+
+	if _, health, err := cache.loadBorrowFees(context.Background(), now); err == nil || health.Status != rpc.SourceStatusUnknown {
+		t.Fatalf("first failure: err=%v status=%s", err, health.Status)
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("first call: fetch ran %d times, want 1", fetchCalls)
+	}
+
+	// Within the retry window: no fetch attempt, same degraded health.
+	within := now.Add(marketEventsBorrowFeeRetryAfter - time.Minute)
+	if _, health, err := cache.loadBorrowFees(context.Background(), within); err == nil || health.Status != rpc.SourceStatusUnknown {
+		t.Fatalf("suppressed call: err=%v status=%s", err, health.Status)
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("suppressed call must not re-fetch: fetch ran %d times", fetchCalls)
+	}
+
+	// Past the window: one retry, now succeeding, clears the memory.
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{
+			AsOf:    now,
+			Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
+		}, nil
+	}
+	past := now.Add(marketEventsBorrowFeeRetryAfter + time.Minute)
+	if _, health, err := cache.loadBorrowFees(context.Background(), past); err != nil || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("recovery call: err=%v status=%s", err, health.Status)
+	}
+	if fetchCalls != 2 {
+		t.Fatalf("recovery: fetch ran %d times, want 2", fetchCalls)
+	}
+	if !cache.borrowFeesFailedAt.IsZero() {
+		t.Fatal("success should clear the failure memory")
+	}
+
+	// Stale-cache variant: a later failure serves the cached list
+	// without retrying inside the window.
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{}, errors.New("network down again")
+	}
+	expired := past.Add(marketEventsBorrowFeeFreshFor + time.Minute)
+	if entry, health, err := cache.loadBorrowFees(context.Background(), expired); err != nil || health.Status != rpc.SourceStatusStale || len(entry.Symbols) == 0 {
+		t.Fatalf("stale fallback after failure: err=%v status=%s symbols=%d", err, health.Status, len(entry.Symbols))
+	}
+	if fetchCalls != 3 {
+		t.Fatalf("stale-fallback failure: fetch ran %d times, want 3", fetchCalls)
+	}
+	if entry, health, err := cache.loadBorrowFees(context.Background(), expired.Add(time.Minute)); err != nil || health.Status != rpc.SourceStatusStale || len(entry.Symbols) == 0 {
+		t.Fatalf("suppressed stale fallback: err=%v status=%s symbols=%d", err, health.Status, len(entry.Symbols))
+	}
+	if fetchCalls != 3 {
+		t.Fatalf("suppressed stale fallback must not re-fetch: fetch ran %d times", fetchCalls)
+	}
+}
+
+// TestRegSHODatedWalkSkipsRedirect pins the 302 handling: Nasdaq
+// redirects missing dated threshold files to an HTML error page, and
+// following it parsed as an EMPTY success — caching "no threshold
+// symbols" for 12h and never reaching the newest real file. The
+// no-redirect policy turns the 302 into a status error so the walk
+// proceeds to the prior day.
+func TestRegSHODatedWalkSkipsRedirect(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	body := strings.Join([]string{
+		"Symbol|Security Name|Market Category|Reg SHO Threshold Flag|Rule3210",
+		"CRWV|CoreWeave Inc.|Q|Y|N",
+		"20260609180000",
+		"",
+	}, "\n")
+	orig := marketEventsHTTPClient
+	marketEventsHTTPClient = &http.Client{
+		CheckRedirect: marketEventsNoRedirect,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "20260610") {
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://www.nasdaqtrader.com/Error.aspx"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+			if strings.Contains(req.URL.Path, "20260609") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			}
+			return nil, errors.New("unexpected URL " + req.URL.String())
+		}),
+	}
+	t.Cleanup(func() { marketEventsHTTPClient = orig })
+
+	entry, err := fetchLatestNasdaqRegSHO(context.Background(), now)
+	if err != nil {
+		t.Fatalf("dated walk should land on the prior day's file: %v", err)
+	}
+	if _, ok := entry.Symbols["CRWV"]; !ok {
+		t.Fatalf("expected the 2026-06-09 file's symbols, got %+v", entry.Symbols)
+	}
 }

@@ -256,6 +256,37 @@ func TestRefresherNoSwapOnUnchanged(t *testing.T) {
 	}
 }
 
+// TestRefresherUnchangedBumpsStaleDiskDate: unchanged list but the
+// on-disk as_of lags today → fetchAndSwap bumps the file's date so
+// needsCatchup()/TriggerIfRolledOver stop re-fetching Wikipedia on
+// every breadth-touching request (observed loop: six unchanged days,
+// 450+ fetches).
+func TestRefresherUnchangedBumpsStaleDiskDate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, MembersFilename)
+	eng := freshEngine(t)
+	current := eng.Members()
+	weekAgo := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	if err := SaveExternal(path, current, weekAgo); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ff := &fakeFetcher{members: current, asOf: time.Now().UTC()}
+
+	r := NewRefresher(RefresherOptions{Engine: eng, CachePath: path, Fetch: ff.fn})
+	if !r.needsCatchup() {
+		t.Fatal("precondition: stale on-disk file should report needsCatchup")
+	}
+	r.TriggerNow(context.Background())
+	waitForFlight(t, r, time.Second)
+
+	if r.State() != RefreshHealthy {
+		t.Errorf("state: want healthy, got %s", r.State())
+	}
+	if r.needsCatchup() {
+		t.Error("unchanged fetch should bump the on-disk as_of so catch-up stops re-firing")
+	}
+}
+
 // TestRefresherCatchupOnStartup: on-disk file's as_of older than today
 // → Run() fires a fetch on entry.
 func TestRefresherCatchupOnStartup(t *testing.T) {

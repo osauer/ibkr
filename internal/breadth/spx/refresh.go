@@ -279,12 +279,25 @@ func (r *Refresher) fetchAndSwap(ctx context.Context, reason string) {
 	}
 
 	// Compare against the in-process snapshot before doing any work.
-	// Identical list → no swap, no cache rewrite, no engine SetMembers
-	// (steady-state daily fetch hits unchanged HTML — wasted byte
-	// shouldn't ripple into a noisy cache write or downstream
-	// invalidation churn).
+	// Identical list → no swap, no engine SetMembers (steady-state daily
+	// fetch hits unchanged HTML — the no-op shouldn't ripple into
+	// downstream invalidation churn).
+	//
+	// The on-disk as_of DOES get bumped when it lags today's session:
+	// needsCatchup() reads the file, so a date frozen at the last list
+	// change makes TriggerIfRolledOver re-fetch Wikipedia on every
+	// breadth-touching request until the S&P 500 membership itself moves
+	// (observed: 450+ fetches over six unchanged days). One small write
+	// per day records "verified against Wikipedia at T" and stops the
+	// loop; an absent file stays absent (needsCatchup is false there by
+	// design).
 	current := r.engine.Members()
 	if slices.Equal(current, symbols) {
+		if r.needsCatchup() {
+			if err := SaveExternal(r.cachePath, symbols, asOf); err != nil {
+				r.warnf("members: save to %s: %v (catch-up date bump skipped)", r.cachePath, err)
+			}
+		}
 		r.mu.Lock()
 		r.lastFetch = r.clock()
 		r.state = RefreshHealthy

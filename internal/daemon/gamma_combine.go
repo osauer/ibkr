@@ -430,7 +430,7 @@ func runUnderlyingPhase(
 	if s != nil {
 		logger = s.logger
 	}
-	return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, innerProg, logger, s.gammaOI)
+	return computeGammaZeroFor(bgCtx, c, underlying, params, productionLegFetcher, time.Now, innerProg, logger, s.gammaOI, s.gammaGrids)
 }
 
 // gammaScopeForRequest maps the requested scope onto the actual
