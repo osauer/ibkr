@@ -31,7 +31,14 @@ import (
 // lifecycleEnv returns the env slice + paths a CLI invocation should use
 // to keep its daemon isolated from the rest of the system. The directory
 // lives under /tmp to stay inside macOS's 104-char Unix-socket path limit.
-func lifecycleEnv(t *testing.T) (env []string, socketPath, logPath string, cleanup func()) {
+//
+// Teardown is registered here via t.Cleanup — not returned for the caller
+// to defer — so it runs on Fatal, Error, and in-test panic alike, and no
+// test can forget it: kill whichever daemon holds the lock at teardown
+// time (tests kill and respawn daemons mid-flight; the lock always names
+// the latest). Exits where no Go code runs at all (go test -timeout panic,
+// SIGKILL of the test binary) are covered by the reaper in TestMain.
+func lifecycleEnv(t *testing.T) (env []string, socketPath, logPath string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "ibkr-lifecycle-")
 	if err != nil {
@@ -43,23 +50,33 @@ func lifecycleEnv(t *testing.T) (env []string, socketPath, logPath string, clean
 		"IBKR_SOCKET="+socketPath,
 		"IBKR_LOG="+logPath,
 	)
-	cleanup = func() {
-		// Best-effort: kill any daemon that survived the test's own cleanup.
+	t.Cleanup(func() {
 		if pid := dial.LockHolderPID(dial.LockPath(socketPath)); pid > 0 {
-			if proc, err := os.FindProcess(pid); err == nil {
-				_ = proc.Signal(syscall.SIGTERM)
-				deadline := time.Now().Add(3 * time.Second)
-				for time.Now().Before(deadline) && dial.IsProcessAlive(pid) {
-					time.Sleep(50 * time.Millisecond)
-				}
-				if dial.IsProcessAlive(pid) {
-					_ = proc.Signal(syscall.SIGKILL)
-				}
-			}
+			killDaemonTree(pid)
 		}
 		_ = os.RemoveAll(dir)
+	})
+	return env, socketPath, logPath
+}
+
+// killDaemonTree terminates a daemon and anything it spawned. Autospawned
+// daemons run under Setsid (internal/dial/autospawn.go), making the daemon
+// its own process-group leader, so kill(-pid) reaches the whole group;
+// fall back to the bare PID for a daemon that isn't a group leader.
+func killDaemonTree(pid int) {
+	signalGroup := func(sig syscall.Signal) {
+		if err := syscall.Kill(-pid, sig); err != nil {
+			_ = syscall.Kill(pid, sig)
+		}
 	}
-	return env, socketPath, logPath, cleanup
+	signalGroup(syscall.SIGTERM)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && dial.IsProcessAlive(pid) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dial.IsProcessAlive(pid) {
+		signalGroup(syscall.SIGKILL)
+	}
 }
 
 // runCLI invokes the built CLI with the given args under the lifecycle env.
@@ -129,8 +146,7 @@ func waitForDaemonExit(socketPath string, timeout time.Duration) bool {
 // elsewhere.
 func TestLifecycle_CleanCycle(t *testing.T) {
 	t.Parallel()
-	env, socketPath, _, cleanup := lifecycleEnv(t)
-	defer cleanup()
+	env, socketPath, _ := lifecycleEnv(t)
 
 	// Cold autospawn — should succeed and leave the daemon running.
 	out, code := runCLI(t, env, 30*time.Second, "status", "--json")
@@ -182,8 +198,7 @@ func TestLifecycle_CleanCycle(t *testing.T) {
 // surface the cryptic "socket did not appear" error.
 func TestLifecycle_KillThenReinvoke(t *testing.T) {
 	t.Parallel()
-	env, socketPath, _, cleanup := lifecycleEnv(t)
-	defer cleanup()
+	env, socketPath, _ := lifecycleEnv(t)
 
 	// First invocation autospawns the daemon. Use --json so the exit code
 	// reflects "CLI reached the daemon," not "gateway is connected" — the
@@ -230,8 +245,7 @@ func TestLifecycle_KillThenReinvoke(t *testing.T) {
 
 func TestLifecycle_RestartStartsWhenAbsent(t *testing.T) {
 	t.Parallel()
-	env, socketPath, _, cleanup := lifecycleEnv(t)
-	defer cleanup()
+	env, socketPath, _ := lifecycleEnv(t)
 
 	out, code := runCLI(t, env, 30*time.Second, "restart", "--json")
 	if code != 0 {
@@ -256,8 +270,7 @@ func TestLifecycle_RestartStartsWhenAbsent(t *testing.T) {
 
 func TestLifecycle_RestartReplacesRunningDaemon(t *testing.T) {
 	t.Parallel()
-	env, socketPath, _, cleanup := lifecycleEnv(t)
-	defer cleanup()
+	env, socketPath, _ := lifecycleEnv(t)
 
 	if _, code := runCLI(t, env, 30*time.Second, "status", "--json"); code != 0 {
 		t.Fatalf("seed status exit=%d", code)
@@ -298,8 +311,7 @@ func TestLifecycle_RestartReplacesRunningDaemon(t *testing.T) {
 // command + log tail), not the bare timeout message.
 func TestLifecycle_StuckDaemonProducesActionableError(t *testing.T) {
 	t.Parallel()
-	env, socketPath, _, cleanup := lifecycleEnv(t)
-	defer cleanup()
+	env, socketPath, _ := lifecycleEnv(t)
 
 	// First spawn a real daemon so it acquires the lock cleanly. --json
 	// so we don't trip the new "exit 1 on degraded gateway" behavior in
