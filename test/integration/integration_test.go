@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -41,6 +42,13 @@ var (
 	sharedCLI     string
 	sharedStop    func()
 	sharedSkipped bool
+
+	// reaperPipe holds the write end of the watchdog pipe for the life of
+	// the test process. Never written to — its only job is to be closed by
+	// the kernel when this process dies, which is what wakes the reaper.
+	// The package-level reference keeps the GC finalizer from closing it
+	// early.
+	reaperPipe *os.File
 )
 
 const (
@@ -64,6 +72,14 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	sharedCLI = cli
+
+	// Last-resort teardown for exits where no Go code runs at all (go
+	// test -timeout panic, SIGKILL): a detached reaper kills every daemon
+	// spawned from this run's binary the moment this process dies. The
+	// in-process paths below (signal handler, stop(), per-test t.Cleanup)
+	// remain the prompt, file-removing cleanup; the reaper is the backstop
+	// that keeps daemons from accumulating and wedging TWS.
+	startReaper(cli)
 
 	if !probeGatewayReachable() {
 		sharedSkipped = true
@@ -93,9 +109,9 @@ func TestMain(m *testing.M) {
 
 	// Route SIGINT/SIGTERM through stop() so a Ctrl-C on `go test` (or any
 	// signal short of SIGKILL) tears the spawned daemon down rather than
-	// orphaning it. SIGKILL is unrecoverable — nothing we can do there. The
-	// goroutine exits when stop() runs to completion below or when the
-	// process dies.
+	// orphaning it. SIGKILL skips all of this — that's what the reaper
+	// started above is for. The goroutine exits when stop() runs to
+	// completion below or when the process dies.
 	sigC := make(chan os.Signal, 1)
 	signal.Notify(sigC, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -130,6 +146,45 @@ func daemonReachedGateway(socketPath string) bool {
 		return false
 	}
 	return res.Connected && res.ServerVersion > 0
+}
+
+// startReaper launches a detached watchdog that kills every daemon spawned
+// from this run's binary once the test process is gone. The watchdog blocks
+// reading a pipe whose write end only this process holds (spawned daemons
+// don't inherit it — Go marks non-stdio fds close-on-exec), so it fires on
+// ANY exit: clean, t.Fatal, panic, go test -timeout, Ctrl-C, even SIGKILL —
+// exactly the paths where t.Cleanup and TestMain teardown never run. It
+// lives in its own session so a terminal Ctrl-C doesn't take it down along
+// with the suite before it can sweep.
+//
+// The kill pattern "<binpath> daemon" matches both the shared daemon
+// (launchSharedDaemon) and anything the lifecycle tests autospawn through
+// the CLI, and nothing else: the binary path is unique to this run's temp
+// dir. SIGTERM first so daemons unlink their socket/lock files; SIGKILL the
+// stragglers (e.g. a SIGSTOPped daemon from the stuck-daemon test) two
+// seconds later. The pattern travels via the environment, not argv —
+// embedding it in argv would make the shell match its own pkill -f pattern
+// and kill itself mid-sweep.
+func startReaper(cliBin string) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		_, _ = os.Stderr.WriteString("integration: reaper pipe failed (daemons may outlive an aborted run): " + err.Error() + "\n")
+		return
+	}
+	cmd := exec.Command("/bin/sh", "-c",
+		`cat >/dev/null; pkill -TERM -f "$IBKR_REAP_PATTERN"; sleep 2; pkill -KILL -f "$IBKR_REAP_PATTERN"; exit 0`)
+	cmd.Env = append(os.Environ(), "IBKR_REAP_PATTERN="+regexp.QuoteMeta(cliBin)+" daemon")
+	cmd.Stdin = r
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		_, _ = os.Stderr.WriteString("integration: reaper start failed (daemons may outlive an aborted run): " + err.Error() + "\n")
+		return
+	}
+	_ = r.Close()
+	reaperPipe = w
+	go func() { _ = cmd.Process.Release() }()
 }
 
 func probeGatewayReachable() bool {
