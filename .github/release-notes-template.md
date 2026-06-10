@@ -35,6 +35,12 @@ ibkr positions --by underlying
 
 See the [README](https://github.com/osauer/ibkr#readme) for the full feature menu and the troubleshooting matrix. Read-only by construction; the [Safety](https://github.com/osauer/ibkr#safety) section walks through the four guards.
 
+## ⚠️ Broker-write capable build (`ibkr-trading-*` tarballs)
+
+Everything above — the installer, the MCPB bundle, and the plain `ibkr-__VERSION__-*` tarballs — is **read-only by construction**: order transmission is not compiled in.
+
+The `ibkr-trading-__VERSION__-*` tarballs are different: **that binary can place, modify, and cancel orders with your broker** once you configure the trading gates (`[trading]` mode, pinned gateway endpoint and account, and — for live — an explicit override plus typed acknowledgements). Only download it if you intend to trade through `ibkr`. Before enabling anything, read [SECURITY.md](https://github.com/osauer/ibkr/blob/main/SECURITY.md) and the [trading preview guide](https://github.com/osauer/ibkr/blob/main/docs/guides/trading-preview.md), start against a paper account, and verify with `ibkr trading status`. Each release's order pipeline is exercised by an automated paper-trading round-trip before tagging.
+
 ---
 
 ### Paranoid? Inspect the installer before running it

@@ -142,9 +142,12 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 			status.PaperSmokeClientID = check.Evidence.ClientID
 			status.PaperSmokeVersion = check.Evidence.Version
 		}
-		if check.Status != tradingPaperSmokeStatusValid {
-			add(paperSmokeBlockerCode(check.Status), check.Message, check.Action)
-		}
+		// Paper-smoke evidence is informational only (surfaced in the
+		// status fields above), not a live blocker. Since 2026-06-10 the
+		// smoke is enforced in the release pipeline — `make release` runs
+		// it at version bump and aborts on failure — so runtime live
+		// enablement rests on the TWS API toggle, the trading-capable
+		// binary, and the config pins/acks checked above.
 	}
 
 	status.Blocked = len(status.Blockers) > 0
@@ -419,21 +422,4 @@ func (s *Server) orderJournalSummary() (orderJournalSummary, error) {
 		summary.LastEvent = fmt.Sprintf("%s %s at %s", last.Type, orderJournalEventLabel(last), last.At.Format(time.RFC3339))
 	}
 	return summary, nil
-}
-
-func paperSmokeBlockerCode(status string) string {
-	switch status {
-	case tradingPaperSmokeStatusStale:
-		return "paper_smoke_stale"
-	case tradingPaperSmokeStatusMismatch:
-		return "paper_smoke_mismatch"
-	case tradingPaperSmokeStatusFailed:
-		return "paper_smoke_failed"
-	case tradingPaperSmokeStatusUnreadable:
-		return "paper_smoke_unreadable"
-	case tradingPaperSmokeStatusUnsigned:
-		return "paper_smoke_unsigned"
-	default:
-		return "paper_smoke_missing"
-	}
 }

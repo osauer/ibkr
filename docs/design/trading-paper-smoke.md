@@ -1,7 +1,35 @@
-# `ibkr trading paper-smoke` — the live-gate evidence producer
+# `ibkr trading paper-smoke` — the release-gate order-pipeline smoke
 
-Updated: 2026-06-10 13:17 CEST
-Status: reviewed — implementing with review deltas (limit offset 0.98 not 0.75;
+Updated: 2026-06-10 17:05 CEST
+Status: shipped, then re-gated same day by owner decision (see Revision below)
+
+## Revision 2026-06-10 — release-time gate, no human ceremony
+
+Owner decision after shipping: the runtime gate stack was too deep (TWS API
+toggle + build flag + config pins/acks + human-certified evidence). The smoke
+itself stays — it is the only end-to-end proof the order pipeline works — but
+it moves from a runtime live precondition to a **release-pipeline quality
+gate**:
+
+- `make release` runs the smoke automatically at version bump and aborts the
+  release on failure. It requires a reachable **paper** session at release
+  time, by construction.
+- `CheckPaperSmoke` no longer contributes live blockers; trading status still
+  reports the evidence fields informationally (including `unsigned` for
+  hand-edited files).
+- The human-origin-only restriction on the producer and the repo-hook agent
+  block are removed: with nothing unlocked by the evidence at runtime, the
+  restriction only obstructed release automation. The paper order itself
+  rides the agent-open paper route.
+- Runtime live enablement = TWS-side API toggle + trading-capable binary +
+  config (pinned endpoint/account, `mode=live`, `allow_live`, both live
+  acks). The agent-origin live block and typed `live/<account>` confirmation
+  are unchanged.
+
+Sections below describe the original human-certified design and remain as
+the implementation record; read them through the revision above.
+
+Original status: reviewed — implementing with review deltas (limit offset 0.98 not 0.75;
 single ack-wait knob + detached fixed-budget cancel phase; JSON+base64 MAC
 payload instead of pipe-join; `--symbol` dropped; smoke-run mutex; direct
 broker cancel fallback for the not-yet-acknowledged case since
