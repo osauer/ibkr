@@ -7,11 +7,13 @@ surfaces. The platform settings mechanism is cross-cutting by design: daemon
 state owns runtime preferences, TOML/build own trading capability, and adapters
 must not duplicate daemon policy.
 
-## Codex workflow
-For larger Codex sessions, read `docs/guides/codex-workflow.md` after the
-architecture primers. Use read-only project subagents for exploration/review,
-then keep implementation writes in the main session unless the user explicitly
-asks for parallel implementation.
+## Rules for every agent
+These apply to any coding agent working in this repo (Claude Code, Codex, or
+other), not just one tool.
+
+Use read-only subagents for exploration/review, then keep implementation
+writes in the main session unless the user explicitly asks for parallel
+implementation.
 
 Public marketing/site pages for `osauer.dev/ibkr` are deployed from this
 product repo's GitHub Pages config, currently `main:/docs` with
@@ -25,12 +27,16 @@ Before daemon/CLI/MCP/trading semantic changes, use
 `docs/templates/daemon-cli-trading-contract.md`. Before Canary SPA semantic or
 rendered-flow changes, use `docs/templates/spa-authority-matrix.md`.
 
+The Makefile is the canonical target inventory. Run `make help` before using an
+unfamiliar project target instead of relying on duplicated target lists.
+
+## Codex workflow
+For larger Codex sessions, read `docs/guides/codex-workflow.md` after the
+architecture primers.
+
 The repo has a project `.codex` layer with hooks, rules, and custom agents.
 When those files change, inspect/trust hooks with `/hooks` in the next Codex
 session so broker-adjacent guardrails actually run.
-
-The Makefile is the canonical target inventory. Run `make help` before using an
-unfamiliar project target instead of relying on duplicated target lists.
 
 ## Done means
 `make check && make smoke` pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.

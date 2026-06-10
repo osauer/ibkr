@@ -40,7 +40,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-regex-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check changelog-check changelog-lint changelog-stub
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -175,19 +175,36 @@ govulncheck-check: ## Run govulncheck
 plugin-check: ## Validate plugin/marketplace manifests with `claude plugin validate`
 	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code or skip with: make check plugin-check= "; exit 1; }
 	claude plugin validate .
-	@$(MAKE) --no-print-directory hook-regex-check
+	@$(MAKE) --no-print-directory hook-version-check
 
-# Single-source gate for the trading-verb defense. The bundled plugin and the
-# user-copyable settings template must invoke the same PreToolUse hook command,
-# otherwise paper/live write policy drifts between distribution paths.
-hook-regex-check: ## Ensure plugin + settings PreToolUse regexes match
+# Drift gate for the session-start hook's fallback plugin version. When
+# CLAUDE_PLUGIN_ROOT is unset the hook compares the binary against this
+# hardcoded constant instead of plugin.json, and its skew warning keys on
+# major.minor — so major.minor is what must stay in lockstep. The old
+# "bump it manually at release time" convention drifted (constant 1.0.3
+# vs plugin 1.8.0), hence a gate. Fails closed if the assignment line is
+# missing or duplicated, so restructuring the hook can't silently skip it.
+hook-version-check: ## Ensure session-start.sh fallback version tracks .claude-plugin/plugin.json (major.minor)
 	@command -v jq >/dev/null 2>&1 || { echo "jq missing on PATH; install jq or skip"; exit 1; }
-	@plugin=$$(jq -r '.hooks.PreToolUse[0].hooks[0].command' hooks/hooks.json | sed "s/'ibkr plugin: /'LABEL: /"); \
-	settings=$$(jq -r '.hooks.PreToolUse[0].hooks[0].command' settings/ibkr.settings.json | sed "s/'ibkr settings: /'LABEL: /"); \
-	if [ "$$plugin" != "$$settings" ]; then \
-		echo "hooks/hooks.json and settings/ibkr.settings.json PreToolUse commands differ:" >&2; \
-		echo "  plugin:   $$plugin" >&2; \
-		echo "  settings: $$settings" >&2; \
+	@fallback=$$(sed -n 's/.*&& plugin_semver="\([0-9][0-9.]*\)".*/\1/p' hooks/session-start.sh); \
+	count=$$(printf '%s\n' "$$fallback" | grep -c .); \
+	if [ "$$count" -ne 1 ]; then \
+		echo "hook-version-check: expected exactly one fallback plugin_semver=\"X.Y.Z\" assignment in hooks/session-start.sh, found $$count" >&2; \
+		echo "update the extraction pattern in this target if the hook was restructured" >&2; \
+		exit 1; \
+	fi; \
+	plugin=$$(jq -r '.version // empty' .claude-plugin/plugin.json); \
+	fb_mm=$$(printf '%s' "$$fallback" | awk -F. 'NF>=2 {print $$1 "." $$2}'); \
+	plg_mm=$$(printf '%s' "$$plugin" | awk -F. 'NF>=2 {print $$1 "." $$2}'); \
+	if [ -z "$$fb_mm" ] || [ -z "$$plg_mm" ]; then \
+		echo "hook-version-check: could not parse major.minor (fallback=$$fallback, plugin.json=$$plugin)" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$fb_mm" != "$$plg_mm" ]; then \
+		echo "hooks/session-start.sh fallback plugin_semver and .claude-plugin/plugin.json disagree on major.minor:" >&2; \
+		echo "  fallback: $$fallback (major.minor $$fb_mm)" >&2; \
+		echo "  plugin:   $$plugin (major.minor $$plg_mm)" >&2; \
+		echo "bump the constant in hooks/session-start.sh to match plugin.json" >&2; \
 		exit 1; \
 	fi
 

@@ -30,12 +30,14 @@ bin_semver=$(printf '%s' "$bin_raw" | sed -E 's/^v//; s/-[0-9]+-g[a-f0-9]+(-dirt
 # CLAUDE_PLUGIN_ROOT on the hook process automatically when the hook fires from
 # an installed plugin (per https://docs.claude.com/en/docs/claude-code/hooks).
 # Fall back to a hardcoded constant for development / unexpected unset cases;
-# the constant is bumped alongside .claude-plugin/plugin.json at release time.
+# `make hook-version-check` (chained from plugin-check, so part of every
+# `make check` and release) fails when the constant's major.minor drifts
+# from .claude-plugin/plugin.json.
 plugin_semver=""
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
 	plugin_semver=$(jq -r '.version // empty' "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null)
 fi
-[ -z "$plugin_semver" ] && plugin_semver="1.0.3"
+[ -z "$plugin_semver" ] && plugin_semver="1.8.0"
 
 bin_mm=$(printf '%s' "$bin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')
 plg_mm=$(printf '%s' "$plugin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')
