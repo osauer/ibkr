@@ -73,6 +73,19 @@ type Server struct {
 	version    string
 	now        func() time.Time
 
+	// brokerWriteMu serializes the check-then-act sections of every broker
+	// write entry point (proposal submit, order place/modify, purge execute,
+	// restore execute). These are seconds-long, low-frequency operations;
+	// serialization is the correctness tool against double-submit TOCTOU
+	// races, not a throughput concern. Cancel stays outside so a protective
+	// cancel is never queued behind a long purge.
+	brokerWriteMu sync.Mutex
+
+	// minTickByConID caches broker-reported minimum price increments per
+	// contract (see resolveContractMinTick).
+	minTickMu      sync.Mutex
+	minTickByConID map[int]float64
+
 	listener net.Listener
 
 	mu               sync.Mutex
@@ -2281,7 +2294,30 @@ func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	if s.regimePrewarming.Load() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm", Status: "computing"})
 	}
+	if open := s.openBrokerOrderCount(); open > 0 {
+		// A daemon that idle-exits while protective stops are working goes
+		// dark on fills, cancels, and the order journal exactly when they
+		// matter; stay up while any non-terminal order is on the books.
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "open-orders", Status: fmt.Sprintf("%d working", open)})
+	}
 	return tasks
+}
+
+// openBrokerOrderCount reports the number of non-terminal journaled orders.
+// Zero on any journal problem: idle shutdown must not be blocked by a broken
+// state directory.
+func (s *Server) openBrokerOrderCount() int {
+	views, _, err := s.loadOrderViews()
+	if err != nil {
+		return 0
+	}
+	open := 0
+	for _, v := range views {
+		if v.Open {
+			open++
+		}
+	}
+	return open
 }
 
 // isBusy reports whether the daemon has daemon-internal background work

@@ -45,6 +45,7 @@ Read at process startup. Override TOML config where applicable; see the per-var 
 
 | Variable | Description |
 |----------|-------------|
+| `IBKR_AGENT_CONTEXT` | When set (any value), broker writes from this process are classified as agent-origin. The variable can only restrict: no environment variable can claim a human origin, and live routes refuse agent-origin writes. |
 | `IBKR_APP_ADDR` | HTTP listen address for `ibkr app`. Defaults to `0.0.0.0:8765` so a paired phone on the LAN can reach the app. |
 | `IBKR_APP_PUBLIC_URL` | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available. |
 | `IBKR_APP_REMOTE` | Enable the outbound Cloudflare Worker relay for `ibkr app`, making pairing URLs reachable through the public relay origin. |

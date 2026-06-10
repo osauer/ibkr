@@ -112,7 +112,7 @@ var Tools = []Tool{
 	{
 		Name:         "ibkr_order_preview",
 		Title:        "IBKR Order Preview",
-		Description:  "Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, max notional, stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order; broker writes require a separate place/modify/cancel path, a matching submit-eligible preview token, and human confirmation. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
+		Description:  "Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. TIF `GTC` is accepted for TRAIL and TRAIL LIMIT drafts only — protective stops meant to survive the session close — while LMT stays DAY-only. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, max notional, stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order and returns only the redacted `preview_token_id`, never the raw submit-capable token; broker writes require a separate place/modify/cancel path with its own origin-gated token, and live routes refuse agent-origin writes outright. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
 		ReadOnlyHint: new(false),
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"action":             schemaEnum([]string{"buy", "sell"}, "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless the local policy allows the opening effect"),
@@ -130,7 +130,7 @@ var Tools = []Tool{
 			"trailing_amount":    json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"absolute broker trail amount in the contract currency."}`),
 			"initial_stop_price": json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"optional initial trail stop price. Omit to bind the stop from fresh bid/ask during preview."}`),
 			"limit_offset":       json.RawMessage(`{"type":"number","exclusiveMinimum":0,"description":"TRAIL LIMIT offset from the dynamic stop. Required for TRAIL LIMIT and rejected for plain TRAIL."}`),
-			"tif":                schemaEnum([]string{"DAY"}, "time in force; only DAY is accepted"),
+			"tif":                schemaEnum([]string{"DAY", "GTC"}, "time in force. DAY (default) expires at the session close; GTC persists until filled or cancelled and is accepted for TRAIL and TRAIL LIMIT orders only."),
 			"outside_rth":        json.RawMessage(`{"type":"boolean","description":"whether the draft allows outside regular trading hours. Default false; option protection previews should keep this false."}`),
 			"timeout_ms":         json.RawMessage(`{"type":"integer","minimum":100,"description":"quote snapshot timeout; default 5000 ms"}`),
 			"market":             json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
@@ -214,6 +214,12 @@ var Tools = []Tool{
 			if err := conn.Call(ctx, rpc.MethodOrderPreview, params, &res); err != nil {
 				return nil, err
 			}
+			// Raw submit-capable tokens never cross MCP (matching the
+			// proposal surface's sanitizeProposalPreview): the token ID is
+			// enough to correlate with CLI and journal evidence, and an
+			// agent must mint its own token through the origin-gated CLI
+			// path to place even a paper order.
+			res.PreviewToken = ""
 			return json.Marshal(res)
 		},
 	},
@@ -728,7 +734,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_proposals",
 		Title:       "IBKR Protection Proposals",
-		Description: "Read daemon-owned protection proposals for existing positions. Use when the user asks what close/reduce-only actions ibkr currently recommends for theta hygiene or risk reduction, or asks why proposal automation is blocked. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview, submit, place, modify, cancel, transmit, or expose raw preview tokens. For existing holdings use `ibkr_positions`; for broad risk evidence use `ibkr_canary` or `ibkr_regime`; for local order-entry readiness use `ibkr_trading_status`.",
+		Description: "Read daemon-owned protection proposals for existing positions. Use when the user asks what protective actions ibkr currently recommends — broker-side trailing stops (TRAIL/TRAIL LIMIT for stocks/ETFs and, when policy opts in, single-leg option premium trails; each row carries the trail spec and computed initial stop), theta hygiene (close/reduce short-dated options), or single-name risk reduction — or asks why a proposal is blocked (per-row blockers include codes like stock_protection_disabled with remediation text). This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview, submit, place, modify, cancel, transmit, or expose raw preview tokens. For existing holdings use `ibkr_positions`; for broad risk evidence use `ibkr_canary` or `ibkr_regime`; for local order-entry readiness use `ibkr_trading_status`.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"refresh": json.RawMessage(`{"type":"boolean","description":"when true, ask the daemon to recompute proposals before returning; otherwise returns the latest daemon snapshot"}`),
 			"show":    json.RawMessage(`{"type":"boolean","description":"when true, records a shown audit event for returned proposal rows"}`),

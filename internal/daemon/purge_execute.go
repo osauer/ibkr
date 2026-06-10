@@ -31,6 +31,8 @@ func (s *Server) handlePurgeExecute(ctx context.Context, req *rpc.Request) (*rpc
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
+	s.brokerWriteMu.Lock()
+	defer s.brokerWriteMu.Unlock()
 	return s.executePurge(ctx, p)
 }
 
@@ -77,7 +79,11 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.Message = res.Blockers[0].Message
 		return res, nil
 	}
-	if blockers := s.purgeExecuteBlockers(status); len(blockers) > 0 {
+	blockers := s.purgeExecuteBlockers(status)
+	for _, blocker := range liveOriginBlockers(status, p.Origin, p.LiveConfirmation) {
+		blockers = appendTradingBlockerOnce(blockers, blocker)
+	}
+	if len(blockers) > 0 {
 		res.Blockers = blockers
 		res.Message = firstTradingBlockerMessage(blockers)
 		return res, nil
@@ -110,6 +116,13 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.Message = "load open purge orders: " + err.Error()
 		return res, nil
 	}
+	foreignOpen, err := s.foreignOpenOrders(status.Account)
+	if err != nil {
+		res.Status = purgeExecuteStatusError
+		res.ErrorLegs = len(legs)
+		res.Message = "load open orders: " + err.Error()
+		return res, nil
+	}
 	activeByLegSide, err := s.activePurgeLedgerQuantityByLegSide(brokerStateScope{Account: status.Account, Mode: status.Mode})
 	if err != nil {
 		res.Status = purgeExecuteStatusError
@@ -124,7 +137,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.executePurgeLeg(ctx, status, positions, openByLeg, activeByLegSide, res, leg)
+		s.executePurgeLeg(ctx, status, positions, openByLeg, foreignOpen, activeByLegSide, res, leg)
 	}
 
 	if res.SubmittedLegs > 0 && wait > 0 {
@@ -272,11 +285,53 @@ func (s *Server) activePurgeLedgerQuantityByLegSide(scope brokerStateScope) (map
 	return out, nil
 }
 
-func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, activeByLegSide map[string]float64, res *rpc.PurgeExecuteResult, leg rpc.PurgeExecuteLeg) {
+// foreignOpenOrders returns open journaled orders for this account that purge
+// did not place itself — e.g. protective trailing stops from the proposal
+// engine. Closing a position while one rests would leave an orphaned stop
+// whose later trigger flips the account short.
+func (s *Server) foreignOpenOrders(account string) ([]rpc.OrderView, error) {
+	views, _, err := s.loadOrderViews()
+	if err != nil {
+		return nil, err
+	}
+	var foreign []rpc.OrderView
+	for _, v := range views {
+		if !v.Open || v.Source == purgeExecuteSource || v.Source == purgeRestoreSource {
+			continue
+		}
+		if account != "" && v.Account != "" && !strings.EqualFold(v.Account, account) {
+			continue
+		}
+		foreign = append(foreign, v)
+	}
+	return foreign, nil
+}
+
+func foreignOpenOrderForContract(orders []rpc.OrderView, contract rpc.ContractParams) (rpc.OrderView, bool) {
+	for _, v := range orders {
+		if contract.ConID != 0 && v.ConID != 0 {
+			if v.ConID == contract.ConID {
+				return v, true
+			}
+			continue
+		}
+		if strings.EqualFold(v.Symbol, contract.Symbol) && strings.EqualFold(v.SecType, contract.SecType) {
+			return v, true
+		}
+	}
+	return rpc.OrderView{}, false
+}
+
+func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, positions []*ibkrlib.RawPosition, openByLeg map[string][]rpc.OrderView, foreignOpen []rpc.OrderView, activeByLegSide map[string]float64, res *rpc.PurgeExecuteResult, leg rpc.PurgeExecuteLeg) {
 	contract, currentQty, found := currentPurgePosition(positions, leg)
 	if !found || currentQty == 0 {
 		addPurgeSkipped(res, leg, "already flat")
 		return
+	}
+	if contract.MinTick <= 0 {
+		// Cache-only: the emergency path never waits on a contract-details
+		// fetch; previews and proposal refreshes warm this cache.
+		contract.MinTick = s.cachedContractMinTick(contract.ConID)
 	}
 	currentSide := purgeOriginalSideForQuantity(currentQty)
 	if leg.OriginalSide == "" {
@@ -295,6 +350,10 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 	qty := math.Abs(currentQty)
 	if purgeOpenOrderExists(openByLeg, legIDs) {
 		addPurgeSkipped(res, leg, "open purge/restore order exists for this ledger row")
+		return
+	}
+	if foreign, ok := foreignOpenOrderForContract(foreignOpen, contract); ok {
+		addPurgeSkipped(res, leg, fmt.Sprintf("open order %s (%s) already works this contract; cancel it first with `ibkr order cancel %s` so the close cannot double", foreign.OrderRef, nonEmptyString(foreign.OrderType, "order"), foreign.OrderRef))
 		return
 	}
 	if covered := activePurgeLedgerCoveredQuantity(activeByLegSide, legIDs, currentSide); covered > 0 {
@@ -651,6 +710,9 @@ func purgeQuoteTick(contract rpc.ContractParams, bid, ask, price float64) float6
 }
 
 func purgePriceTick(contract rpc.ContractParams, price float64) float64 {
+	if contract.MinTick > 0 {
+		return contract.MinTick
+	}
 	if strings.EqualFold(contract.SecType, "OPT") {
 		return 0.01
 	}

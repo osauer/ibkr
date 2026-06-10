@@ -207,6 +207,57 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 	return auth
 }
 
+// normalizedWriteOrigin maps any request origin onto the journaled audit
+// value: the known human origins pass through, everything else is "agent".
+func normalizedWriteOrigin(origin string) string {
+	if originIsHuman(origin) {
+		return origin
+	}
+	return rpc.OrderOriginAgent
+}
+
+// originIsHuman reports whether a request origin represents a human in the
+// loop. Unknown or empty origins classify as agent so new adapters must opt
+// in to a human origin.
+func originIsHuman(origin string) bool {
+	switch origin {
+	case rpc.OrderOriginHumanTTY, rpc.OrderOriginPairedDevice:
+		return true
+	}
+	return false
+}
+
+// liveWriteConfirmationPhrase is the exact phrase a human origin must supply
+// with a live broker write.
+func liveWriteConfirmationPhrase(account string) string {
+	return "live/" + account
+}
+
+// liveOriginBlockers layers per-request origin policy over the routed mode:
+// live routes refuse agent origins outright (no override) and require the
+// typed confirmation phrase from human origins. Paper carries no origin
+// blockers so agents can exercise the full order path against paper TWS.
+func liveOriginBlockers(status rpc.TradingStatus, origin, liveConfirmation string) []rpc.TradingBlocker {
+	if status.Mode != config.TradingModeLive {
+		return nil
+	}
+	if !originIsHuman(origin) {
+		return []rpc.TradingBlocker{{
+			Code:    "live_agent_origin_blocked",
+			Message: "live broker writes are blocked for agent-origin requests",
+			Action:  "Agent sessions may place broker orders on paper only. A human must run this write from an interactive terminal.",
+		}}
+	}
+	if want := liveWriteConfirmationPhrase(status.Account); liveConfirmation != want {
+		return []rpc.TradingBlocker{{
+			Code:    "live_confirmation_required",
+			Message: "live broker writes require the typed live confirmation phrase",
+			Action:  fmt.Sprintf("Re-run interactively and type %q when prompted.", want),
+		}}
+	}
+	return nil
+}
+
 func appendTradingBlockerOnce(blockers []rpc.TradingBlocker, next rpc.TradingBlocker) []rpc.TradingBlocker {
 	for _, blocker := range blockers {
 		if blocker.Code == next.Code {
@@ -331,7 +382,11 @@ func (s *Server) orderJournalSummary() (orderJournalSummary, error) {
 	}
 	scope := s.currentBrokerStateScope()
 	var summary orderJournalSummary
-	for _, view := range buildOrderViews(events) {
+	views := buildOrderViews(events)
+	// Same inference pass as the orders view: a calendar-expired DAY order
+	// must not be counted open here while the list shows it closed.
+	inferDayOrderExpiry(views, buildOrderEventsByKey(events), s.orderNow())
+	for _, view := range views {
 		if view.Open && orderViewMatchesBrokerScope(view, scope) {
 			summary.OpenOrders++
 		}

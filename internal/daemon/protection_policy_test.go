@@ -74,6 +74,88 @@ func TestProtectionPolicyTrailingStopDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestProtectionPolicyTrailingStopTIF(t *testing.T) {
+	t.Parallel()
+	def := defaultProtectionPolicy()
+	if def.Buckets.TrailingStop.TIF != "" || def.Buckets.TrailingStop.effectiveTIF() != rpc.OrderTIFDay {
+		t.Fatalf("default tif = %q (effective %q), want unset/DAY", def.Buckets.TrailingStop.TIF, def.Buckets.TrailingStop.effectiveTIF())
+	}
+	// omitempty keeps the unset value out of the fingerprint JSON, so
+	// pre-tif policy files keep their fingerprints across the upgrade.
+	if raw := string(mustMarshalJSON(t, def.Buckets)); strings.Contains(raw, `"tif"`) {
+		t.Fatalf("unset tif leaks into fingerprint JSON: %s", raw)
+	}
+
+	gtc := def
+	gtc.Buckets.TrailingStop.TIF = "gtc"
+	if gtc.Buckets.TrailingStop.effectiveTIF() != rpc.OrderTIFGTC {
+		t.Fatalf("effectiveTIF(gtc) = %q, want GTC", gtc.Buckets.TrailingStop.effectiveTIF())
+	}
+	if err := validateProtectionPolicy(gtc); err != nil {
+		t.Fatalf("lowercase gtc policy invalid: %v", err)
+	}
+	if fingerprintProtectionPolicy(gtc).Key == fingerprintProtectionPolicy(def).Key {
+		t.Fatal("setting tif must change the policy fingerprint")
+	}
+
+	bad := def
+	bad.Buckets.TrailingStop.TIF = "IOC"
+	if err := validateProtectionPolicy(bad); err == nil || !strings.Contains(err.Error(), "trailing_stop.tif") {
+		t.Fatalf("invalid tif err = %v, want trailing_stop.tif", err)
+	}
+	bad.Buckets.TrailingStop.Enabled = false
+	if err := validateProtectionPolicy(bad); err == nil || !strings.Contains(err.Error(), "trailing_stop.tif") {
+		t.Fatalf("disabled-bucket invalid tif err = %v, want rejection at file-write time", err)
+	}
+}
+
+func TestProtectionPolicyFileTIFGTCParses(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "policy.toml")
+	body := `kind = "ibkr.protection_policy"
+schema_version = 1
+policy_id = "protection-mvp"
+policy_version = 2
+profile = "theta-priority-mvp"
+
+[authority]
+close_reduce_only = true
+auto_submit = false
+
+[buckets.theta_hygiene]
+enabled = true
+max_dte = 21
+min_abs_theta_per_day = 5.0
+max_spread_pct_of_mid = 25.0
+
+[buckets.risk_reduction]
+enabled = true
+single_name_target_pct_nlv = 25.0
+max_order_notional = 10000.0
+
+[buckets.trailing_stop]
+enabled = true
+tif = "GTC"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pm := newProtectionPolicyManager(path, false, time.Second, time.Now)
+	pm.reload()
+	p, st := pm.Active()
+	if st.Status != rpc.ProtectionPolicyStatusActive {
+		t.Fatalf("policy status = %q (%s), want active", st.Status, st.Message)
+	}
+	if p.Buckets.TrailingStop.effectiveTIF() != rpc.OrderTIFGTC {
+		t.Fatalf("file tif effective = %q, want GTC", p.Buckets.TrailingStop.effectiveTIF())
+	}
+	// [buckets.trailing_stop] present without sub-tables: stock_etf and
+	// options sub-policies must be backfilled from the embedded default.
+	if !p.Buckets.TrailingStop.StockETF.Enabled {
+		t.Fatalf("stock_etf defaults not backfilled: %+v", p.Buckets.TrailingStop)
+	}
+}
+
 func writePolicy(t *testing.T, path string, version int, theta float64) {
 	t.Helper()
 	body := []byte(`kind = "ibkr.protection_policy"

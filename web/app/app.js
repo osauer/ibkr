@@ -4392,6 +4392,12 @@ async function applyOrderModify(order) {
   if (!window.confirm(modifyConfirmationText(order, edit.preview))) {
     return;
   }
+  const modifyConfirmation = protectionWriteConfirmation();
+  if (!modifyConfirmation) {
+    edit.error = "Trading account/mode unavailable; cannot confirm broker write.";
+    renderOpenOrders();
+    return;
+  }
   edit.busy = "modify";
   edit.error = "";
   renderOpenOrders();
@@ -4400,7 +4406,11 @@ async function applyOrderModify(order) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ preview_token: edit.preview.preview_token }),
+      body: JSON.stringify({
+        preview_token: edit.preview.preview_token,
+        confirm_account: modifyConfirmation.account,
+        confirm_mode: modifyConfirmation.mode,
+      }),
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));
@@ -4428,13 +4438,24 @@ async function cancelOpenOrder(order) {
   if (!window.confirm(cancelConfirmationText(order, trading))) {
     return;
   }
+  const cancelConfirmation = protectionWriteConfirmation();
+  if (!cancelConfirmation) {
+    edit.error = "Trading account/mode unavailable; cannot confirm broker write.";
+    renderOpenOrders();
+    return;
+  }
   edit.busy = "cancel";
   edit.error = "";
   renderOpenOrders();
   try {
     const res = await fetch(`/api/orders/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       credentials: "include",
+      body: JSON.stringify({
+        confirm_account: cancelConfirmation.account,
+        confirm_mode: cancelConfirmation.mode,
+      }),
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));

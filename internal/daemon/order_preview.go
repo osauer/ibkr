@@ -260,6 +260,9 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if err != nil {
 		return nil, err
 	}
+	if contract.MinTick <= 0 {
+		contract.MinTick = s.resolveContractMinTick(ctx, contract, previewMinTickTimeout)
+	}
 	if p.Quantity <= 0 {
 		return nil, errBadRequest("quantity must be positive")
 	}
@@ -277,8 +280,8 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if tif == "" {
 		tif = rpc.OrderTIFDay
 	}
-	if tif != rpc.OrderTIFDay {
-		return nil, errBadRequest("order preview supports DAY time-in-force only")
+	if tif != rpc.OrderTIFDay && !(tif == rpc.OrderTIFGTC && isTrailOrderType(orderType)) {
+		return nil, errBadRequest("order preview supports DAY time-in-force, or GTC for TRAIL and TRAIL LIMIT orders")
 	}
 
 	timeout := orderPreviewTimeout(p.TimeoutMs)
@@ -782,10 +785,16 @@ func previewTrailSpec(action, orderType string, raw *rpc.OrderTrailSpec, contrac
 		out.LimitOffset = &offset
 	}
 	if out.InitialStopPrice <= 0 {
-		if reference, err := trailQuoteReferencePrice(action, quote); err == nil && reference > 0 {
-			offset := trailOffsetAmount(out, reference)
-			out.InitialStopPrice = trailingStopInitialPriceForContract(action, reference, offset, contract)
+		reference, err := trailQuoteReferencePrice(action, quote)
+		if err != nil {
+			// The wire validators reject trailStopPrice <= 0, so a draft
+			// without a seedable stop can never transmit — surface the real
+			// reason (no live reference) instead of a confusing broker
+			// "trail stop price required" failure later.
+			return nil, fmt.Errorf("%w; provide initial_stop_price explicitly or retry with live bid/ask", err)
 		}
+		offset := trailOffsetAmount(out, reference)
+		out.InitialStopPrice = trailingStopInitialPriceForContract(action, reference, offset, contract)
 	} else if !positiveFinite(out.InitialStopPrice) {
 		return nil, errBadRequest("initial_stop_price must be positive")
 	} else {
@@ -953,6 +962,13 @@ func roundPrice(price float64) float64 {
 }
 
 func trailMinimumTick(contract rpc.ContractParams, price float64) float64 {
+	// Prefer the broker-reported venue increment (MiFID-banded grids on
+	// Xetra make the static 0.01 wrong for e.g. EUR names above €100 —
+	// broker error 110 at WhatIf/place). Zero means unresolved: fall back
+	// to the static US-style grid and let WhatIf fail closed.
+	if contract.MinTick > 0 {
+		return contract.MinTick
+	}
 	switch strings.ToUpper(strings.TrimSpace(contract.SecType)) {
 	case "STK", "ETF":
 		return 0.01

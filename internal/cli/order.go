@@ -57,7 +57,7 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	trailAmount := fs.Float64("trail-amount", 0, "broker trail offset amount")
 	initialStop := fs.Float64("initial-stop", 0, "optional initial broker trail stop price; omitted means use live bid/ask")
 	limitOffset := fs.Float64("limit-offset", 0, "TRAIL LIMIT offset from the dynamic stop")
-	tif := fs.String("tif", "", "time in force; DAY only")
+	tif := fs.String("tif", "", "time in force: DAY (default), or GTC for TRAIL/TRAIL-LIMIT")
 	outsideRTH := fs.Bool("outside-rth", false, "allow outside regular trading hours when supported")
 	replaceID := fs.String("replace-order", "", "preview a replacement for an existing open order ref/order-id/perm-id")
 	timeout := fs.Duration("timeout", 5*time.Second, "quote snapshot timeout")
@@ -229,7 +229,11 @@ func runOrderPlace(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "order place: --preview-token is required")
 	}
 	var res rpc.OrderPlaceResult
-	if err := env.Conn.Call(ctx, rpc.MethodOrderPlace, rpc.OrderPlaceParams{PreviewToken: strings.TrimSpace(*token)}, &res); err != nil {
+	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "order place")
+	if !ok {
+		return fail(env, "order place: live confirmation aborted")
+	}
+	if err := env.Conn.Call(ctx, rpc.MethodOrderPlace, rpc.OrderPlaceParams{PreviewToken: strings.TrimSpace(*token), Origin: env.Origin, LiveConfirmation: liveConfirmation}, &res); err != nil {
 		return fail(env, "order place: %v", err)
 	}
 	if *jsonOut {
@@ -253,7 +257,11 @@ func runOrderModify(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "order modify: --preview-token is required")
 	}
 	var res rpc.OrderModifyResult
-	if err := env.Conn.Call(ctx, rpc.MethodOrderModify, rpc.OrderModifyParams{ID: strings.TrimSpace(fs.Arg(0)), PreviewToken: strings.TrimSpace(*token)}, &res); err != nil {
+	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "order modify")
+	if !ok {
+		return fail(env, "order modify: live confirmation aborted")
+	}
+	if err := env.Conn.Call(ctx, rpc.MethodOrderModify, rpc.OrderModifyParams{ID: strings.TrimSpace(fs.Arg(0)), PreviewToken: strings.TrimSpace(*token), Origin: env.Origin, LiveConfirmation: liveConfirmation}, &res); err != nil {
 		return fail(env, "order modify: %v", err)
 	}
 	if *jsonOut {
@@ -273,7 +281,7 @@ func runOrderCancel(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "order cancel: usage is `ibkr order cancel <order-ref|order-id|perm-id>`")
 	}
 	var res rpc.OrderCancelResult
-	if err := env.Conn.Call(ctx, rpc.MethodOrderCancel, rpc.OrderCancelParams{ID: strings.TrimSpace(fs.Arg(0))}, &res); err != nil {
+	if err := env.Conn.Call(ctx, rpc.MethodOrderCancel, rpc.OrderCancelParams{ID: strings.TrimSpace(fs.Arg(0)), Origin: env.Origin}, &res); err != nil {
 		return fail(env, "order cancel: %v", err)
 	}
 	if *jsonOut {

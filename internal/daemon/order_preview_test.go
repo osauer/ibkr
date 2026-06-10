@@ -104,12 +104,11 @@ func TestPreviewTrailSpecAcceptsUnavailableQuoteContextAndRejectsLimitRuleDrift(
 	bid, ask, pctValue, offset := 100.0, 101.0, 2.0, 0.05
 	delayed := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataDelayed}
 	stock := rpc.ContractParams{SecType: "STK"}
-	delayedTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, delayed)
-	if err != nil {
-		t.Fatalf("TRAIL preview on delayed data: %v", err)
-	}
-	if delayedTrail.InitialStopPrice != 0 {
-		t.Fatalf("delayed-data initial stop = %.2f, want broker-derived zero value", delayedTrail.InitialStopPrice)
+	// A percent trail with no seedable stop can never transmit (the wire
+	// validators reject trailStopPrice <= 0), so the preview must say why
+	// instead of leaving a zero stop for the broker to reject confusingly.
+	if _, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, delayed); err == nil || !strings.Contains(err.Error(), "live bid/ask") {
+		t.Fatalf("TRAIL preview on delayed data err = %v, want live-reference bad request", err)
 	}
 
 	live := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}
@@ -132,22 +131,25 @@ func TestPreviewTrailSpecAcceptsUnavailableQuoteContextAndRejectsLimitRuleDrift(
 	stale := live
 	stale.Stale = true
 	stale.StaleReason = "market is open but quote data is frozen"
-	staleTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, stale)
-	if err != nil {
-		t.Fatalf("TRAIL preview on stale data: %v", err)
-	}
-	if staleTrail.InitialStopPrice != 0 {
-		t.Fatalf("stale-data initial stop = %.2f, want broker-derived zero value", staleTrail.InitialStopPrice)
+	if _, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, stale); err == nil || !strings.Contains(err.Error(), "live bid/ask") {
+		t.Fatalf("TRAIL preview on stale data err = %v, want live-reference bad request", err)
 	}
 
 	closed := live
 	closed.SessionContext = &rpc.MarketSession{Market: "de", State: "closed", IsOpen: false}
-	closedTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, closed)
-	if err != nil {
-		t.Fatalf("TRAIL preview on closed session: %v", err)
+	if _, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, closed); err == nil || !strings.Contains(err.Error(), "live bid/ask") {
+		t.Fatalf("TRAIL preview on closed session err = %v, want live-reference bad request", err)
 	}
-	if closedTrail.InitialStopPrice != 0 {
-		t.Fatalf("closed-session initial stop = %.2f, want broker-derived zero value", closedTrail.InitialStopPrice)
+
+	// An explicit initial stop keeps off-hours placement available: the
+	// caller supplied the reference, so no live quote is required.
+	explicitStop := rpc.OrderTrailSpec{TrailingPercent: &pctValue, InitialStopPrice: 95}
+	seeded, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &explicitStop, stock, delayed)
+	if err != nil {
+		t.Fatalf("TRAIL preview with explicit stop on delayed data: %v", err)
+	}
+	if seeded.InitialStopPrice != 95 {
+		t.Fatalf("explicit initial stop = %.2f, want 95 preserved", seeded.InitialStopPrice)
 	}
 }
 
@@ -414,6 +416,50 @@ func TestOrderPreviewDisabledGateFailsBeforeMarketData(t *testing.T) {
 	})
 	if !errors.Is(err, ErrTradingDisabled) {
 		t.Fatalf("previewOrder err = %v, want ErrTradingDisabled", err)
+	}
+}
+
+func TestOrderPreviewTIFGate(t *testing.T) {
+	t.Parallel()
+	pct := 8.0
+	trail := &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetPercent, TrailingPercent: &pct}
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(10, 0, rpc.OrderPositionEffectClose)
+
+	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:    "sell",
+		Contract:  rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity:  10,
+		OrderType: rpc.OrderTypeTRAIL,
+		Trail:     trail,
+		TIF:       "gtc",
+	})
+	if err != nil {
+		t.Fatalf("GTC TRAIL preview: %v", err)
+	}
+	if res.Draft.TIF != rpc.OrderTIFGTC {
+		t.Fatalf("draft TIF = %q, want GTC", res.Draft.TIF)
+	}
+
+	if _, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:   "sell",
+		Contract: rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity: 10,
+		TIF:      rpc.OrderTIFGTC,
+	}); err == nil || !strings.Contains(err.Error(), "GTC for TRAIL") {
+		t.Fatalf("GTC LMT err = %v, want trail-only GTC rejection", err)
+	}
+
+	if _, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:    "sell",
+		Contract:  rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity:  10,
+		OrderType: rpc.OrderTypeTRAIL,
+		Trail:     trail,
+		TIF:       "IOC",
+	}); err == nil || !strings.Contains(err.Error(), "time-in-force") {
+		t.Fatalf("IOC err = %v, want time-in-force rejection", err)
 	}
 }
 

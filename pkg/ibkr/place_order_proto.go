@@ -152,8 +152,10 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	if orderType != "LMT" && orderType != "TRAIL" && orderType != "TRAIL LIMIT" {
 		return unsupportedPlaceOrderProtoValue("orderType", order.OrderType, "LMT/TRAIL/TRAIL LIMIT only")
 	}
-	if strings.ToUpper(order.TIF) != "DAY" {
-		return unsupportedPlaceOrderProtoValue("tif", order.TIF, "DAY only")
+	tif := strings.ToUpper(order.TIF)
+	gtcTrail := tif == "GTC" && (orderType == "TRAIL" || orderType == "TRAIL LIMIT")
+	if tif != "DAY" && !gtcTrail {
+		return unsupportedPlaceOrderProtoValue("tif", order.TIF, "DAY, or GTC for TRAIL/TRAIL LIMIT")
 	}
 	if err := validateProtoOrderTypePrices(orderType, order); err != nil {
 		return err

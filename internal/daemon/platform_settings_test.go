@@ -99,6 +99,35 @@ func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	}
 }
 
+func TestPlatformSettingsLiveTradingPatchRefusesAgentOrigin(t *testing.T) {
+	t.Parallel()
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeLive})
+
+	// Agent origin (explicit or missing) may not touch trading settings on a
+	// live route, regardless of which trading key is inside the patch.
+	for _, params := range []string{
+		`{"trading":{"limits":{"max_notional":50000}},"origin":"agent"}`,
+		`{"trading":{"limits":{"max_notional":50000}}}`,
+	} {
+		_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(params)})
+		if err == nil || !strings.Contains(err.Error(), "agent-origin") {
+			t.Fatalf("live agent trading patch (%s) err = %v, want agent-origin refusal", params, err)
+		}
+	}
+
+	// A human origin passes the origin gate; whatever error remains must be
+	// about limit writability, not origin.
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":50000}},"origin":"human-tty"}`)}); err != nil && strings.Contains(err.Error(), "agent-origin") {
+		t.Fatalf("live human trading patch err = %v, want no origin refusal", err)
+	}
+
+	// Feature toggles stay origin-free even on live: they cannot loosen
+	// broker-write limits.
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"features":{"stock_protection":{"enabled":true}},"origin":"agent"}`)}); err != nil {
+		t.Fatalf("live agent feature patch err = %v, want success", err)
+	}
+}
+
 func TestPlatformSettingsPurgeDisabledBlocksPurgeWrites(t *testing.T) {
 	t.Parallel()
 	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
@@ -123,7 +152,7 @@ func TestPlatformSettingsStockProtectionDisabledBlocksStockTrailProposal(t *test
 	}
 	bid, ask := 100.0, 100.2
 	status := protectionPolicyStatus(defaultProtectionPolicy(), rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())
-	prop, ok := trailingStopStockProposal(defaultProtectionPolicy(), status, rpc.PositionView{Symbol: "MSFT", SecType: "STK", Quantity: 10, Bid: &bid, Ask: &ask, Mark: 100.1, Multiplier: 1, Currency: "USD"}, rpc.TradeProposalSourceFingerprints{}, time.Now(), srv.stockProtectionEnabled())
+	prop, ok := trailingStopStockProposal(defaultProtectionPolicy(), status, rpc.PositionView{Symbol: "MSFT", SecType: "STK", Quantity: 10, Bid: &bid, Ask: &ask, Mark: 100.1, Multiplier: 1, Currency: "USD"}, rpc.TradeProposalSourceFingerprints{}, time.Now(), srv.stockProtectionEnabled(), 0)
 	if !ok {
 		t.Fatal("stock trail proposal missing")
 	}

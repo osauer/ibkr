@@ -80,6 +80,63 @@ func TestOrderPlaceRejectsRejectedWhatIfTokenBeforeBrokerSend(t *testing.T) {
 	}
 }
 
+func TestOrderPlaceOriginPolicy(t *testing.T) {
+	t.Parallel()
+
+	// Paper: agent origin is unrestricted and journaled for audit.
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv.orderReserveBrokerID = func(context.Context) (int, error) { return 1001, nil }
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error { return nil }
+	token := mintPreviewTokenForConfirmTest(t, srv, rpc.OrderWhatIfResult{
+		Status:    rpc.OrderWhatIfStatusAccepted,
+		Available: true,
+	})
+	res, err := srv.placeOrder(context.Background(), rpc.OrderPlaceParams{PreviewToken: token, Origin: rpc.OrderOriginAgent})
+	if err != nil || !res.Accepted {
+		t.Fatalf("paper agent placeOrder = %+v, %v; want accepted", res, err)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	var sendEvent *orderJournalEvent
+	for i := range events {
+		if events[i].Type == orderJournalEventSendAttempted {
+			sendEvent = &events[i]
+		}
+	}
+	if sendEvent == nil || sendEvent.Origin != rpc.OrderOriginAgent {
+		t.Fatalf("send-attempted journal event = %+v, want origin=agent stamped", sendEvent)
+	}
+
+	// Live: agent origin yields the hard blocker in the request-time gate;
+	// a human origin with the typed phrase clears the origin layer (other
+	// live-readiness blockers remain, which is fine — we assert only the
+	// origin codes here).
+	liveSrv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive})
+	hasCode := func(blockers []rpc.TradingBlocker, code string) bool {
+		for _, b := range blockers {
+			if b.Code == code {
+				return true
+			}
+		}
+		return false
+	}
+	agentAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginAgent, "")
+	if agentAuth.Allowed || !hasCode(agentAuth.Blockers, "live_agent_origin_blocked") {
+		t.Fatalf("live agent auth = %+v, want live_agent_origin_blocked", agentAuth.Blockers)
+	}
+	humanNoPhrase := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY, "")
+	if !hasCode(humanNoPhrase.Blockers, "live_confirmation_required") {
+		t.Fatalf("live human auth without phrase = %+v, want live_confirmation_required", humanNoPhrase.Blockers)
+	}
+	phrase := liveWriteConfirmationPhrase(liveSrv.currentTradingStatus().Account)
+	humanWithPhrase := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY, phrase)
+	if hasCode(humanWithPhrase.Blockers, "live_agent_origin_blocked") || hasCode(humanWithPhrase.Blockers, "live_confirmation_required") {
+		t.Fatalf("live human auth with phrase = %+v, want no origin blockers", humanWithPhrase.Blockers)
+	}
+}
+
 func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})

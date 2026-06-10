@@ -60,7 +60,7 @@ func (h *handler) handleOrderCancel(w nethttp.ResponseWriter, r *nethttp.Request
 		writeBrokerWriteConfirmationError(w, err)
 		return
 	}
-	res, err := h.deps.Daemon.OrderCancel(r.Context(), rpc.OrderCancelParams{ID: r.PathValue("id"), TimeoutMs: 10000})
+	res, err := h.deps.Daemon.OrderCancel(r.Context(), rpc.OrderCancelParams{ID: r.PathValue("id"), TimeoutMs: 10000, Origin: rpc.OrderOriginPairedDevice})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())
 		return
@@ -114,6 +114,7 @@ func (h *handler) handleOrderModify(w nethttp.ResponseWriter, r *nethttp.Request
 		ID:           r.PathValue("id"),
 		PreviewToken: strings.TrimSpace(req.PreviewToken),
 		TimeoutMs:    10000,
+		Origin:       rpc.OrderOriginPairedDevice,
 	})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())

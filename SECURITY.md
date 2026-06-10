@@ -38,6 +38,29 @@ For the v1 stable line, only the latest minor release receives security fixes. O
 
 Reports that demonstrate a deviation from any of those properties — a successful place / modify / cancel / trade reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or data egress beyond the local IB Gateway — take priority.
 
+### Agent-origin write gating (trading builds)
+
+Builds with the `trading` tag accept broker writes behind a layered gate
+(see `docs/design/agent-origin-gating.md`). Every write request carries an
+origin; when the trading gate routes **live**, agent-origin requests are
+refused with no override, and human origins must supply a typed
+`live/<account>` confirmation. Paper routes are origin-free so agent
+sessions can exercise the full order path against paper TWS.
+
+Honest limits of this interlock:
+
+- It is a **safety interlock, not a security boundary**. Origin is asserted
+  by the calling process; any same-uid process can forge it, call the daemon
+  socket directly, or edit the config. The live acknowledgement stack
+  (`allow_live`, account/endpoint acks, paper-smoke evidence) still applies
+  on top.
+- **Cancel is exempt** from the live agent block (refusing a cancel can
+  strand a worse position), but note the asymmetry: cancelling a protective
+  stop *removes* protection. Cancels journal their origin; a future
+  tightening can restrict agent cancels to agent-placed orders.
+- An agent driving the paired PWA inherits the `human-paired-device` origin;
+  pairing approval on the phone is the human act that scopes that risk.
+
 ## Release integrity (v1.0.0+)
 
 Every GitHub release from v1.0.0 onward ships signed checksums for the published install assets:

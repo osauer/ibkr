@@ -82,6 +82,10 @@ func runSettingsSet(ctx context.Context, env *Env, args []string) int {
 	if err != nil {
 		return fail(env, "settings set: %v", err)
 	}
+	patch, err = settingsPatchWithOrigin(patch, env.Origin)
+	if err != nil {
+		return fail(env, "settings set: %v", err)
+	}
 	var res rpc.PlatformSettings
 	if err := env.Conn.Call(ctx, rpc.MethodSettingsUpdate, patch, &res); err != nil {
 		return fail(env, "settings set: %v", err)
@@ -91,6 +95,22 @@ func runSettingsSet(ctx context.Context, env *Env, args []string) int {
 	}
 	renderSettingsText(env, &res)
 	return 0
+}
+
+// settingsPatchWithOrigin stamps the request origin into the settings patch;
+// the daemon pops the reserved "origin" key before validating settings keys
+// and uses it to gate trading-limit writes on live routes.
+func settingsPatchWithOrigin(patch json.RawMessage, origin string) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &obj); err != nil {
+		return nil, err
+	}
+	rawOrigin, err := json.Marshal(origin)
+	if err != nil {
+		return nil, err
+	}
+	obj["origin"] = rawOrigin
+	return json.Marshal(obj)
 }
 
 func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {

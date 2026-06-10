@@ -161,22 +161,27 @@ func formatOrderViewTitle(order rpc.OrderView) string {
 	if qty == 0 && order.Filled+order.Remaining > 0 {
 		qty = order.Filled + order.Remaining
 	}
-	return fmt.Sprintf("%s  %s %.4g %s %s %.4f %s",
+	title := fmt.Sprintf("%s  %s %.4g %s %s",
 		id,
 		nonEmpty(order.Action, "?"),
 		qty,
 		nonEmpty(order.Symbol, "?"),
 		nonEmpty(order.OrderType, "?"),
-		order.LimitPrice,
-		nonEmpty(order.TIF, "?"),
 	)
+	switch {
+	case order.Trail != nil:
+		title += " " + formatOrderTrail(order.Trail)
+	case order.LimitPrice != 0:
+		title += fmt.Sprintf(" %.4f", order.LimitPrice)
+	}
+	return title + " " + nonEmpty(order.TIF, "?")
 }
 
 func orderStatusConcernLevel(status string) statusConcernLevel {
 	switch status {
 	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled:
 		return statusConcernNone
-	case rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive, rpc.OrderLifecycleUnknownReconcileRequired:
+	case rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive, rpc.OrderLifecycleUnknownReconcileRequired, rpc.OrderLifecycleExpiredInferred:
 		return statusConcernWarn
 	default:
 		return statusConcernNotice

@@ -53,6 +53,9 @@ func (h *handler) handleProposalsSubmit(w nethttp.ResponseWriter, r *nethttp.Req
 		writeBrokerWriteConfirmationError(w, err)
 		return
 	}
+	// Origin is server-assigned, never client-claimed: every authenticated
+	// app caller is a paired device regardless of what the body says.
+	req.TradeProposalSubmitParams.Origin = rpc.OrderOriginPairedDevice
 	res, err := h.deps.Daemon.TradeProposalsSubmit(r.Context(), req.TradeProposalSubmitParams)
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())

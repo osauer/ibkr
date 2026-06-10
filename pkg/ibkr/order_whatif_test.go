@@ -391,6 +391,48 @@ func TestValidateOrderRejectsInvalidBrokerTrailCombinations(t *testing.T) {
 	}
 }
 
+func TestValidatePlaceOrderProtoTIFMatrix(t *testing.T) {
+	t.Parallel()
+	mk := func(orderType, tif string) *IBKROrder {
+		o := &IBKROrder{Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD", Action: "SELL", TotalQty: 10, OrderType: orderType, TIF: tif, Account: "DU123456", Transmit: true}
+		switch orderType {
+		case "TRAIL":
+			o.TrailingPercent = 2
+			o.TrailStopPrice = 98
+		case "TRAIL LIMIT":
+			o.TrailingPercent = 2
+			o.TrailStopPrice = 98
+			o.LmtPriceOffset = 0.05
+		case "LMT":
+			o.LmtPrice = 100
+		}
+		return o
+	}
+	for _, tc := range []struct {
+		orderType, tif string
+		ok             bool
+	}{
+		{"LMT", "DAY", true},
+		{"TRAIL", "DAY", true},
+		{"TRAIL", "GTC", true},
+		{"TRAIL LIMIT", "GTC", true},
+		{"LMT", "GTC", false},
+		{"TRAIL", "IOC", false},
+	} {
+		err := validatePlaceOrderProtoSupported(mk(tc.orderType, tc.tif))
+		if tc.ok && err != nil {
+			t.Fatalf("%s %s rejected: %v", tc.orderType, tc.tif, err)
+		}
+		if !tc.ok && err == nil {
+			t.Fatalf("%s %s accepted, want rejection", tc.orderType, tc.tif)
+		}
+	}
+	// GTC must survive the full encode path, not just validation.
+	if _, err := encodePlaceOrderProtoFrame(mk("TRAIL", "GTC")); err != nil {
+		t.Fatalf("encode GTC TRAIL: %v", err)
+	}
+}
+
 func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()

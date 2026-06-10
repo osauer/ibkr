@@ -28,15 +28,6 @@
       "Bash(ibkr version*)"
     ],
     "deny": [
-      "Bash(ibkr order place*)",
-      "Bash(ibkr order submit*)",
-      "Bash(ibkr order execute*)",
-      "Bash(ibkr order modify*)",
-      "Bash(ibkr order cancel*)",
-      "Bash(ibkr order close*)",
-      "Bash(ibkr proposals submit*)",
-      "Bash(ibkr purge execute*)",
-      "Bash(ibkr purge --all*)",
       "Bash(ibkr daemon purge*)",
       "Bash(ibkr daemon reset*)",
       "Bash(ibkr daemon wipe*)"

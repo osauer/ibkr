@@ -115,7 +115,7 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 		Multiplier: 1,
 		Currency:   "USD",
 	}
-	prop, ok := trailingStopStockProposal(policy, status, longRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true)
+	prop, ok := trailingStopStockProposal(policy, status, longRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
 	if !ok {
 		t.Fatal("stock trail proposal missing")
 	}
@@ -135,7 +135,7 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	shortRow := longRow
 	shortRow.Quantity = -5
 	shortRow.SpreadPct = nil
-	prop, ok = trailingStopStockProposal(policy, status, shortRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true)
+	prop, ok = trailingStopStockProposal(policy, status, shortRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
 	if !ok {
 		t.Fatal("short stock trail proposal missing")
 	}
@@ -147,7 +147,7 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	offHoursRow.Bid = nil
 	offHoursRow.Ask = nil
 	offHoursRow.SpreadPct = nil
-	prop, ok = trailingStopStockProposal(policy, status, offHoursRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true)
+	prop, ok = trailingStopStockProposal(policy, status, offHoursRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
 	if !ok {
 		t.Fatal("off-hours stock trail proposal missing")
 	}
@@ -178,7 +178,7 @@ func TestTrailingStopStockProposalRoutesXetraPositionForPreview(t *testing.T) {
 		Bid:          &bid,
 		Ask:          &ask,
 	}
-	prop, ok := trailingStopStockProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), true)
+	prop, ok := trailingStopStockProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
 	if !ok {
 		t.Fatal("stock trail proposal missing")
 	}
@@ -293,7 +293,7 @@ func TestTrailingStopOptionProposalRequiresOptInAndBlocksUnsafeShapes(t *testing
 		SpreadPct:      &spreadPct,
 		SessionContext: open,
 	}
-	prop, ok := trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), false)
+	prop, ok := trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), false, 0)
 	if !ok {
 		t.Fatal("option trail proposal missing")
 	}
@@ -311,7 +311,7 @@ func TestTrailingStopOptionProposalRequiresOptInAndBlocksUnsafeShapes(t *testing
 	}
 
 	row.Quantity = -1
-	prop, ok = trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), false)
+	prop, ok = trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), false, 0)
 	if !ok {
 		t.Fatal("short option trail proposal missing")
 	}
@@ -324,7 +324,7 @@ func TestTrailingStopOptionProposalRequiresOptInAndBlocksUnsafeShapes(t *testing
 
 	row.Quantity = 1
 	row.SessionContext = nil
-	prop, ok = trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), true)
+	prop, ok = trailingStopOptionProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
 	if !ok {
 		t.Fatal("nil-session option trail proposal missing")
 	}
@@ -447,6 +447,96 @@ func TestProposalOrderPreviewParamsPreserveTrailStopPrice(t *testing.T) {
 	}
 }
 
+func TestProposalOrderPreviewParamsCarriesProposalTIF(t *testing.T) {
+	t.Parallel()
+	prop := rpc.TradeProposal{Action: rpc.OrderActionSell, Quantity: 1, OrderType: rpc.OrderTypeTRAIL, TIF: rpc.OrderTIFGTC}
+	if params := proposalOrderPreviewParams(prop, 1, 5000); params.TIF != rpc.OrderTIFGTC {
+		t.Fatalf("params TIF = %q, want GTC", params.TIF)
+	}
+	// Proposals persisted before the TIF field existed mean DAY.
+	prop.TIF = ""
+	if params := proposalOrderPreviewParams(prop, 1, 5000); params.TIF != rpc.OrderTIFDay {
+		t.Fatalf("legacy params TIF = %q, want DAY", params.TIF)
+	}
+}
+
+func TestProposalPreviewSafetyBlocksTIFDrift(t *testing.T) {
+	t.Parallel()
+	pct := 8.0
+	mkTrail := func() *rpc.OrderTrailSpec {
+		return &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetPercent, TrailingPercent: &pct}
+	}
+	prop := rpc.TradeProposal{
+		Action: rpc.OrderActionSell, MaxQuantity: 1, PositionEffect: rpc.OrderPositionEffectClose,
+		SecType: "STK", OrderType: rpc.OrderTypeTRAIL, TIF: rpc.OrderTIFGTC, Trail: mkTrail(),
+	}
+	preview := &rpc.OrderPreviewResult{
+		Mode: "paper",
+		Draft: rpc.OrderDraft{
+			Action:    rpc.OrderActionSell,
+			Contract:  rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+			Quantity:  1,
+			OrderType: rpc.OrderTypeTRAIL,
+			TIF:       rpc.OrderTIFDay,
+			Trail:     mkTrail(),
+			Source:    proposalOrderSource,
+		},
+		Position: rpc.OrderPositionImpact{Effect: rpc.OrderPositionEffectClose},
+	}
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); !hasBlocker(blockers, "tif_drift") {
+		t.Fatalf("blockers = %+v, want tif_drift", blockers)
+	}
+	preview.Draft.TIF = rpc.OrderTIFGTC
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) != 0 {
+		t.Fatalf("matched GTC blockers = %+v, want none", blockers)
+	}
+	preview.Draft.TIF = "IOC"
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); !hasBlocker(blockers, "unsupported_tif") {
+		t.Fatalf("blockers = %+v, want unsupported_tif", blockers)
+	}
+}
+
+func TestTrailingStopProposalTIFFromPolicy(t *testing.T) {
+	t.Parallel()
+	policy := defaultProtectionPolicy()
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	status := protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusActive, "test", "", now)
+	bid, ask := 99.0, 100.0
+	row := rpc.PositionView{Symbol: "MBG", SecType: "STK", ConID: 29622935, Exchange: "IBIS", Currency: "EUR", Quantity: 10, Mark: 99.5, MarketValue: 995, Multiplier: 1, Bid: &bid, Ask: &ask}
+
+	day, ok := trailingStopStockProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, now, true, 0.01)
+	if !ok {
+		t.Fatal("expected stock trailing proposal")
+	}
+	if day.TIF != rpc.OrderTIFDay {
+		t.Fatalf("default policy proposal TIF = %q, want DAY", day.TIF)
+	}
+	if !hasDetailContaining(day.Details, "tif=DAY") || !hasDetailContaining(day.Details, "overnight gaps") {
+		t.Fatalf("details = %+v, want DAY session-close caveat", day.Details)
+	}
+
+	policy.Buckets.TrailingStop.TIF = rpc.OrderTIFGTC
+	gtc, ok := trailingStopStockProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, now, true, 0.01)
+	if !ok {
+		t.Fatal("expected GTC stock trailing proposal")
+	}
+	if gtc.TIF != rpc.OrderTIFGTC {
+		t.Fatalf("GTC policy proposal TIF = %q, want GTC", gtc.TIF)
+	}
+	if !hasDetailContaining(gtc.Details, "tif=GTC") || hasDetailContaining(gtc.Details, "overnight gaps") {
+		t.Fatalf("details = %+v, want GTC persistence note without the DAY caveat", gtc.Details)
+	}
+}
+
+func hasDetailContaining(details []string, substr string) bool {
+	for _, d := range details {
+		if strings.Contains(d, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
@@ -520,6 +610,79 @@ func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
 	}
 	if res.Proposal.Key != prop.Key || res.Preview.Draft.OrderType != rpc.OrderTypeTRAIL {
 		t.Fatalf("preview proposal/draft = %s/%s, want %s/TRAIL", res.Proposal.Key, res.Preview.Draft.OrderType, prop.Key)
+	}
+}
+
+// A GTC trailing-stop proposal must clear the whole preview chain — params,
+// daemon preview validator, WhatIf, and the proposal-vs-preview drift gate —
+// with zero blockers; each unit gate passing individually does not prove a
+// missed DAY assumption isn't hiding between them.
+func TestTrailingStopFastPathPreviewGTCEndToEnd(t *testing.T) {
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+	now := time.Date(2026, 6, 10, 13, 0, 0, 0, time.UTC)
+	policyFingerprint := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
+	trailPercent := 8.0
+	prop := rpc.TradeProposal{
+		Key:               "trailing_stop:sap",
+		Revision:          "sha256:rev",
+		State:             rpc.TradeProposalStateGenerated,
+		Bucket:            rpc.TradeProposalBucketTrailingStop,
+		Symbol:            "SAP",
+		SecType:           "STK",
+		Action:            rpc.OrderActionSell,
+		Quantity:          1,
+		MaxQuantity:       1,
+		PositionQuantity:  1,
+		PositionEffect:    rpc.OrderPositionEffectClose,
+		OrderType:         rpc.OrderTypeTRAIL,
+		Trail:             &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetPercent, TrailingPercent: &trailPercent, InitialStopPrice: 92},
+		TIF:               rpc.OrderTIFGTC,
+		Contract:          rpc.ContractParams{Symbol: "SAP", SecType: "STK", Exchange: "SMART", Currency: "EUR", Multiplier: 1},
+		PolicyID:          "protection-mvp",
+		PolicyVersion:     1,
+		PolicyFingerprint: policyFingerprint,
+		CreatedAt:         now,
+	}
+	srv.tradeProposals = &proposalEngine{
+		server:  srv,
+		store:   testProposalStore(t),
+		now:     func() time.Time { return now },
+		ignored: map[string]struct{}{},
+		snapshot: rpc.TradeProposalSnapshot{
+			Kind:              rpc.TradeProposalSnapshotKind,
+			SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
+			AsOf:              now,
+			Revision:          "sha256:rev",
+			PolicyID:          "protection-mvp",
+			PolicyVersion:     1,
+			PolicyFingerprint: policyFingerprint,
+			PolicyStatus:      rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault, PolicyID: "protection-mvp", Fingerprint: policyFingerprint},
+			AutoTrade:         rpc.AutoTradeStatus{Trading: srv.tradingStatus(srv.endpoint), ProposalsEnabled: true, FastPathEnabled: true},
+			Trading:           srv.tradingStatus(srv.endpoint),
+			Proposals:         []rpc.TradeProposal{prop},
+		},
+	}
+
+	res, err := srv.tradeProposals.Preview(context.Background(), rpc.TradeProposalPreviewParams{
+		Key:       prop.Key,
+		Revision:  prop.Revision,
+		Quantity:  1,
+		TimeoutMs: 20,
+		FastPath:  true,
+	})
+	if err != nil {
+		t.Fatalf("GTC fast preview err = %v", err)
+	}
+	if !res.Accepted || !res.SubmitEligible || res.Preview == nil || len(res.Blockers) != 0 {
+		t.Fatalf("GTC fast preview = %+v, want accepted submit-eligible with no blockers", res)
+	}
+	if res.Preview.Draft.TIF != rpc.OrderTIFGTC {
+		t.Fatalf("GTC preview draft TIF = %q, want GTC end-to-end", res.Preview.Draft.TIF)
 	}
 }
 

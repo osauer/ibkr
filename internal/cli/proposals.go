@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -131,8 +133,12 @@ func runProposalsSubmit(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() != 2 {
 		return fail(env, "proposals submit: usage is `ibkr proposals submit KEY REVISION`")
 	}
+	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "proposals submit")
+	if !ok {
+		return fail(env, "proposals submit: live confirmation aborted")
+	}
 	var res rpc.TradeProposalSubmitResult
-	params := rpc.TradeProposalSubmitParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, FastPath: *fastPath, TimeoutMs: int(timeout.Milliseconds())}
+	params := rpc.TradeProposalSubmitParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, FastPath: *fastPath, TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin, LiveConfirmation: liveConfirmation}
 	if err := env.Conn.Call(ctx, rpc.MethodTradeProposalsSubmit, params, &res); err != nil {
 		return fail(env, "proposals submit: %v", err)
 	}
@@ -178,11 +184,21 @@ func renderProposalStatusText(env *Env, st *rpc.AutoTradeStatus) {
 	statusRow(env, out, "Policy", fmt.Sprintf("%s v%d %s", st.Policy.PolicyID, st.Policy.PolicyVersion, st.Policy.Fingerprint.Key))
 	if len(st.Blockers) > 0 {
 		fmt.Fprintln(out, "Blockers:")
-		for _, b := range st.Blockers {
-			fmt.Fprintf(out, "  - %s: %s\n", b.Code, b.Message)
-		}
+		printTradingBlockers(out, "  ", st.Blockers)
 	}
 	fmt.Fprintln(out)
+}
+
+// printTradingBlockers renders blockers with their remediation action: under
+// market stress the action text is the difference between a dead end and the
+// next command to run.
+func printTradingBlockers(out io.Writer, indent string, blockers []rpc.TradingBlocker) {
+	for _, b := range blockers {
+		fmt.Fprintf(out, "%s- %s: %s\n", indent, b.Code, b.Message)
+		if b.Action != "" {
+			fmt.Fprintf(out, "%s  action: %s\n", indent, b.Action)
+		}
+	}
 }
 
 func renderProposalsText(env *Env, snap *rpc.TradeProposalSnapshot) {
@@ -192,15 +208,24 @@ func renderProposalsText(env *Env, snap *rpc.TradeProposalSnapshot) {
 	statusRow(env, out, "Revision", snap.Revision)
 	statusRow(env, out, "Policy", fmt.Sprintf("%s v%d", snap.PolicyID, snap.PolicyVersion))
 	statusRow(env, out, "Theta/day", fmt.Sprintf("%.2f", snap.Counts.ThetaPerDay))
-	for _, b := range snap.Blockers {
-		fmt.Fprintf(out, "  blocker: %s: %s\n", b.Code, b.Message)
-	}
+	printTradingBlockers(out, "  ", snap.Blockers)
 	for _, p := range snap.Proposals {
 		state := "ready"
 		if len(p.Blockers) > 0 {
 			state = "blocked"
 		}
-		fmt.Fprintf(out, "  %s  %s  %s %d %s  %s  [%s]\n", p.Key, p.Bucket, p.Action, p.Quantity, p.Symbol, p.Reason, state)
+		head := fmt.Sprintf("%s  %s  %s %d %s", p.Key, p.Bucket, p.Action, p.Quantity, p.Symbol)
+		if p.OrderType != "" {
+			head += "  " + p.OrderType
+		}
+		if p.Trail != nil {
+			head += " " + formatOrderTrail(p.Trail)
+		}
+		fmt.Fprintf(out, "  %s  %s  [%s]\n", head, p.Reason, state)
+		for _, d := range p.Details {
+			fmt.Fprintf(out, "      %s\n", d)
+		}
+		printTradingBlockers(out, "      ", p.Blockers)
 	}
 	fmt.Fprintln(out)
 }
@@ -211,10 +236,38 @@ func renderProposalPreviewText(env *Env, res *rpc.TradeProposalPreviewResult) {
 	fmt.Fprintf(out, "Proposal Preview  accepted=%v submit_eligible=%v\n", res.Accepted, res.SubmitEligible)
 	statusRow(env, out, "Proposal", res.Proposal.Key)
 	statusRow(env, out, "Token ID", res.PreviewTokenID)
-	for _, b := range res.Blockers {
-		fmt.Fprintf(out, "  blocker: %s: %s\n", b.Code, b.Message)
-	}
+	renderProposalOrderPreview(env, out, res.Preview)
+	printTradingBlockers(out, "  ", res.Blockers)
 	fmt.Fprintln(out)
+}
+
+// renderProposalOrderPreview shows what the user is one submit away from
+// placing: the bound draft (incl. trail spec), live quote, position impact,
+// and the broker WhatIf verdict with its failure detail when present.
+func renderProposalOrderPreview(env *Env, out io.Writer, p *rpc.TradeProposalOrderPreview) {
+	if p == nil {
+		return
+	}
+	statusRow(env, out, "Draft", formatOrderDraftSummary(p.Draft))
+	statusRow(env, out, "Notional", fmt.Sprintf("%.2f", p.Notional))
+	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", p.Position.Before, p.Position.After, p.Position.Effect))
+	statusRow(env, out, "Quote", formatOrderPreviewQuote(p.Quote))
+	statusRow(env, out, "WhatIf", fmt.Sprintf("%s (required=%v)", p.WhatIf.Status, p.WhatIf.RequiredForSubmit))
+	if p.WhatIf.Message != "" {
+		statusRow(env, out, "WhatIf detail", p.WhatIf.Message)
+	}
+	if p.WhatIf.Action != "" {
+		statusRow(env, out, "WhatIf action", p.WhatIf.Action)
+	}
+	if len(p.Warnings) > 0 {
+		fmt.Fprintln(out, "Warnings:")
+		for _, w := range p.Warnings {
+			fmt.Fprintf(out, "  - %s: %s\n", w.Code, w.Message)
+			if w.Action != "" {
+				fmt.Fprintf(out, "    action: %s\n", w.Action)
+			}
+		}
+	}
 }
 
 func renderProposalSubmitText(env *Env, res *rpc.TradeProposalSubmitResult) {
@@ -224,11 +277,19 @@ func renderProposalSubmitText(env *Env, res *rpc.TradeProposalSubmitResult) {
 	statusRow(env, out, "Proposal", res.Proposal.Key)
 	statusRow(env, out, "Token ID", res.PreviewTokenID)
 	statusRow(env, out, "Order ref", res.OrderRef)
+	if res.Place != nil {
+		statusRow(env, out, "Broker ID", strconv.Itoa(res.Place.ReservedOrderID))
+		statusRow(env, out, "Lifecycle", nonEmpty(res.Place.LifecycleStatus, res.Place.SendState))
+		if res.Place.Status != "" {
+			statusRow(env, out, "Status", res.Place.Status)
+		}
+		if res.Place.Message != "" && res.Place.Message != res.Message {
+			statusRow(env, out, "Broker message", res.Place.Message)
+		}
+	}
 	if res.Message != "" {
 		statusRow(env, out, "Message", res.Message)
 	}
-	for _, b := range res.Blockers {
-		fmt.Fprintf(out, "  blocker: %s: %s\n", b.Code, b.Message)
-	}
+	printTradingBlockers(out, "  ", res.Blockers)
 	fmt.Fprintln(out)
 }
