@@ -356,8 +356,9 @@ func TestGammaZeroStore_DefaultDirHonoursXDG(t *testing.T) {
 
 // TestNewGammaZeroCacheWithStore_LoadsPersistedScopes confirms that
 // when the store holds per-scope files keyed to today, each scope's
-// slot is installed as current — the first caller for each scope
-// after restart skips its compute and serves the cached value.
+// slot is installed as current on first cache use — the first caller
+// for each scope after restart skips its compute and serves the
+// cached value.
 func TestNewGammaZeroCacheWithStore_LoadsPersistedScopes(t *testing.T) {
 	dir := t.TempDir()
 	store := newGammaZeroStore(dir)
@@ -376,6 +377,7 @@ func TestNewGammaZeroCacheWithStore_LoadsPersistedScopes(t *testing.T) {
 	}
 
 	cache := newGammaZeroCacheWithStore(store, now, nil)
+	cache.ensureLoaded()
 	combinedSlot, ok := cache.slots[rpc.GammaZeroScopeCombined]
 	if !ok || combinedSlot.current == nil {
 		t.Fatal("expected combined slot to be seeded from persisted result")
@@ -424,6 +426,7 @@ func TestNewGammaZeroCacheWithStore_LoadsYesterdaysSessionAsLKG(t *testing.T) {
 	}
 
 	cache := newGammaZeroCacheWithStore(store, today, nil)
+	cache.ensureLoaded()
 	slot, ok := cache.slots[rpc.GammaZeroScopeCombined]
 	if !ok || slot.current == nil || slot.current.result == nil {
 		t.Fatal("expected combined slot to be seeded from last-known-good persisted result")

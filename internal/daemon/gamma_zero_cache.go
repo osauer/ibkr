@@ -70,6 +70,13 @@ type gammaZeroCache struct {
 	// log is the logger used for persistence warnings. nil-safe via
 	// gammaLogf wrapper.
 	log gammaLogger
+
+	// loadOnce gates the one-shot persisted-result read (see
+	// newGammaZeroCacheWithStore for why it is deferred to first use).
+	// loadNow is the construction wall time the load's session-key gate
+	// evaluates against — the same instant the pre-lazy eager load used.
+	loadOnce sync.Once
+	loadNow  time.Time
 }
 
 const gammaColdCacheAction = "Run `ibkr gamma --force` for a diagnostic off-hours recompute, or call again during the next regular U.S. options session."
@@ -286,33 +293,59 @@ var knownGammaScopes = []string{
 }
 
 // newGammaZeroCacheWithStore returns a cache wired to an on-disk
-// store. The store is consulted immediately for each known scope: any
-// scope holding a result keyed to today's NY trading session has its
-// slot seeded with a synthetic already-done gammaComputation, so the
-// first caller for that scope skips the multi-minute compute.
+// store. The store is consulted on first cache use — not at
+// construction — for each known scope: any scope holding a result
+// keyed to today's NY trading session has its slot seeded with a
+// synthetic already-done gammaComputation, so the first caller for
+// that scope skips the multi-minute compute.
+//
+// Lazy, not eager, because daemon.New runs before Server.Start
+// acquires the single-instance lock: every autospawn race loser builds
+// a full Server, and an eager load made each loser re-read the store
+// and re-log "loaded persisted result" into the shared daemon log
+// (2026-06-09: ~10 interleaved triples per spawn burst). Losers never
+// serve a cache call, so the lazy gate keeps them off the store; the
+// winning daemon still reads each scope exactly once.
 //
 // Per-scope independence is the load-bearing guarantee — a stale
 // SPY-only file doesn't block a combined call from kicking, and vice
 // versa.
 //
 // Persistence errors during load are warnings, not failures —
-// returning a cache with empty slots is fine, the next caller for that
-// scope kicks a fresh compute as it would with a pure in-memory cache.
+// a cache with empty slots is fine, the next caller for that scope
+// kicks a fresh compute as it would with a pure in-memory cache.
 //
 // log may be nil; gammaLogf nil-safe-wraps it.
 func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaLogger) *gammaZeroCache {
-	c := &gammaZeroCache{
-		slots: make(map[string]*gammaSlot, len(knownGammaScopes)),
-		store: store,
-		log:   log,
+	return &gammaZeroCache{
+		slots:   make(map[string]*gammaSlot, len(knownGammaScopes)),
+		store:   store,
+		log:     log,
+		loadNow: now,
 	}
-	if store == nil {
-		return c
+}
+
+// ensureLoaded runs the one-shot persisted read. Every externally
+// called entry point (kickOrJoin, force, IsComputing, snapshot*)
+// invokes it before taking c.mu; internal helpers and the
+// promote/outcome goroutines are only reachable after one of those
+// has run, so they never need the gate. Must not be called with c.mu
+// held — loadPersisted takes the lock itself.
+func (c *gammaZeroCache) ensureLoaded() {
+	c.loadOnce.Do(c.loadPersisted)
+}
+
+func (c *gammaZeroCache) loadPersisted() {
+	if c.store == nil {
+		return
 	}
-	wrap := gammaLogf{inner: log}
+	now := c.loadNow
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	wrap := gammaLogf{inner: c.log}
 	for _, scope := range knownGammaScopes {
 		slot := c.getOrCreateSlotLocked(scope)
-		persisted, err := store.Load(scope, now)
+		persisted, err := c.store.Load(scope, now)
 		if err != nil {
 			slot.setColdReason(
 				"persisted_cache_load_error",
@@ -329,7 +362,7 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 			// hours kickOrJoin refreshes behind this value; outside
 			// regular option hours it is served without a non-force
 			// refresh.
-			stale, stErr := store.LoadStale(scope)
+			stale, stErr := c.store.LoadStale(scope)
 			if stErr != nil {
 				slot.setColdReason(
 					"persisted_stale_cache_load_error",
@@ -362,7 +395,6 @@ func newGammaZeroCacheWithStore(store *gammaZeroStore, now time.Time, log gammaL
 		wrap.Infof("gamma cache: loaded persisted result scope=%s session=%s as_of=%s",
 			scope, nySessionKey(now), persisted.AsOf.Format(time.RFC3339))
 	}
-	return c
 }
 
 // newPersistedComputation wraps a persisted result in a
@@ -441,6 +473,7 @@ func gammaProfileAllZero(profile []rpc.GammaProfilePoint) bool {
 // whenever any compute is happening, so they understand why the
 // next call may briefly carry a stale AsOf.
 func (c *gammaZeroCache) IsComputing() bool {
+	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, slot := range c.slots {
@@ -498,6 +531,7 @@ type computeFn func(ctx context.Context, progress *atomic.Int32) (*rpc.GammaZero
 // sessions never trigger refresh — see the kickOrJoin body comment for
 // the gating logic.
 func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now time.Time, etaSeconds int, compute computeFn) (job *gammaComputation, fresh bool) {
+	c.ensureLoaded()
 	key := nySessionKey(now)
 
 	c.mu.Lock()
@@ -643,6 +677,7 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 // Any in-flight soft-TTL refresh is also cancelled and discarded —
 // force is the active diagnostic attempt for this scope.
 func (c *gammaZeroCache) force(parent context.Context, scope string, now time.Time, etaSeconds int, compute computeFn) *gammaComputation {
+	c.ensureLoaded()
 	key := nySessionKey(now)
 
 	c.mu.Lock()
@@ -835,6 +870,7 @@ func (c *gammaZeroCache) snapshot(g *gammaComputation, nowFn func() time.Time) r
 }
 
 func (c *gammaZeroCache) snapshotCombinedSlice(scope string, nowFn func() time.Time) (rpc.GammaZeroSPXResult, bool) {
+	c.ensureLoaded()
 	key := ""
 	switch scope {
 	case rpc.GammaZeroScopeSPY:
@@ -873,6 +909,7 @@ func (c *gammaZeroCache) snapshotCombinedSlice(scope string, nowFn func() time.T
 }
 
 func (c *gammaZeroCache) snapshotCurrent(scope string, nowFn func() time.Time) rpc.GammaZeroSPXResult {
+	c.ensureLoaded()
 	c.mu.Lock()
 	slot := c.slots[scope]
 	var job *gammaComputation
@@ -884,6 +921,7 @@ func (c *gammaZeroCache) snapshotCurrent(scope string, nowFn func() time.Time) r
 }
 
 func (c *gammaZeroCache) snapshotForScope(scope string, g *gammaComputation, nowFn func() time.Time) rpc.GammaZeroSPXResult {
+	c.ensureLoaded()
 	if g == nil {
 		env := rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
 		if scope != "" {
