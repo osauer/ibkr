@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/rpc"
@@ -22,8 +23,14 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 	if !got.Features.PurgeRestore.Enabled.Value {
 		t.Fatal("purge_restore.enabled default = false, want true")
 	}
+	if !got.Features.StockProtection.Enabled.Value {
+		t.Fatal("stock_protection.enabled default = false, want true")
+	}
 	if got.Features.PurgeRestore.Enabled.Access != rpc.SettingsAccessWrite {
 		t.Fatalf("purge_restore.enabled access = %q, want write", got.Features.PurgeRestore.Enabled.Access)
+	}
+	if got.Features.StockProtection.Enabled.Access != rpc.SettingsAccessWrite {
+		t.Fatalf("stock_protection.enabled access = %q, want write", got.Features.StockProtection.Enabled.Access)
 	}
 	if !got.AutoTrade.ProposalsEnabled.Value {
 		t.Fatal("auto_trade.proposals_enabled default = false, want true")
@@ -36,10 +43,13 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 	}
 
 	patch := mustRaw(t, map[string]any{
-		"features": map[string]any{"purge_restore": map[string]any{"enabled": false}},
+		"features": map[string]any{
+			"purge_restore":    map[string]any{"enabled": false},
+			"stock_protection": map[string]any{"enabled": false},
+		},
 	})
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: patch}); err != nil {
-		t.Fatalf("disable purge_restore: %v", err)
+		t.Fatalf("disable runtime settings: %v", err)
 	}
 	reopened, err := newPlatformSettingsStore(srv.platformSettings.path)
 	if err != nil {
@@ -53,14 +63,20 @@ func TestPlatformSettingsDefaultsAndPersistence(t *testing.T) {
 	if got.Features.PurgeRestore.Enabled.Value {
 		t.Fatal("purge_restore.enabled persisted true, want false")
 	}
+	if got.Features.StockProtection.Enabled.Value {
+		t.Fatal("stock_protection.enabled persisted true, want false")
+	}
 
-	reset := []byte(`{"features":{"purge_restore":{"enabled":null}}}`)
+	reset := []byte(`{"features":{"purge_restore":{"enabled":null},"stock_protection":{"enabled":null}}}`)
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: reset}); err != nil {
-		t.Fatalf("reset purge_restore: %v", err)
+		t.Fatalf("reset runtime settings: %v", err)
 	}
 	got, _ = srv.handleSettingsGet()
 	if !got.Features.PurgeRestore.Enabled.Value {
 		t.Fatal("purge_restore.enabled reset = false, want default true")
+	}
+	if !got.Features.StockProtection.Enabled.Value {
+		t.Fatal("stock_protection.enabled reset = false, want default true")
 	}
 }
 
@@ -96,6 +112,23 @@ func TestPlatformSettingsPurgeDisabledBlocksPurgeWrites(t *testing.T) {
 	preview := srv.purgeRestorePreviewBlockers(rpc.TradingStatus{Mode: config.TradingModePaper})
 	if !hasBlocker(preview, "purge_restore_disabled") {
 		t.Fatalf("restore preview blockers missing purge_restore_disabled: %#v", preview)
+	}
+}
+
+func TestPlatformSettingsStockProtectionDisabledBlocksStockTrailProposal(t *testing.T) {
+	t.Parallel()
+	srv := newPlatformSettingsTestServer(t, config.Trading{})
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"features":{"stock_protection":{"enabled":false}}}`)}); err != nil {
+		t.Fatalf("disable stock_protection: %v", err)
+	}
+	bid, ask := 100.0, 100.2
+	status := protectionPolicyStatus(defaultProtectionPolicy(), rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())
+	prop, ok := trailingStopStockProposal(defaultProtectionPolicy(), status, rpc.PositionView{Symbol: "MSFT", SecType: "STK", Quantity: 10, Bid: &bid, Ask: &ask, Mark: 100.1, Multiplier: 1, Currency: "USD"}, rpc.TradeProposalSourceFingerprints{}, time.Now(), srv.stockProtectionEnabled())
+	if !ok {
+		t.Fatal("stock trail proposal missing")
+	}
+	if !hasBlocker(prop.Blockers, "stock_protection_disabled") {
+		t.Fatalf("proposal blockers = %+v, want stock_protection_disabled", prop.Blockers)
 	}
 }
 

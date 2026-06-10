@@ -25,7 +25,8 @@ const (
 	orderPreviewTokenPrefix  = "ibkrp1"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
-	orderPreviewWhatIfWait   = 3 * time.Minute
+	orderPreviewDefaultWait  = 5 * time.Second
+	orderPreviewMaxWait      = 3 * time.Minute
 )
 
 type orderPreviewTokenPayload struct {
@@ -269,8 +270,8 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if orderType == "" {
 		orderType = rpc.OrderTypeLMT
 	}
-	if orderType != rpc.OrderTypeLMT {
-		return nil, errBadRequest("order preview supports LMT orders only")
+	if !previewSupportedOrderType(orderType) {
+		return nil, errBadRequest("order preview supports LMT, TRAIL, and TRAIL LIMIT orders only")
 	}
 	tif := strings.ToUpper(strings.TrimSpace(p.TIF))
 	if tif == "" {
@@ -280,20 +281,16 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		return nil, errBadRequest("order preview supports DAY time-in-force only")
 	}
 
-	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
+	timeout := orderPreviewTimeout(p.TimeoutMs)
 	quote, err := s.fetchPreviewQuote(ctx, contract, timeout)
 	if err != nil {
 		return nil, err
 	}
-	strategy := normalizePreviewStrategy(p.Strategy, p.LimitPrice)
-	limit, err := previewLimitPrice(action, strategy, p.LimitPrice, quote)
+	strategy, limit, trail, notionalPrice, err := previewOrderPricing(action, orderType, p.Strategy, p.LimitPrice, p.Trail, contract, quote)
 	if err != nil {
 		return nil, err
 	}
-	notional := float64(p.Quantity) * limit * float64(contractMultiplier(contract))
+	notional := float64(p.Quantity) * notionalPrice * float64(contractMultiplier(contract))
 	if notional > cfg.MaxNotional {
 		return nil, errBadRequest(fmt.Sprintf("order notional %.2f exceeds [trading].max_notional %.2f", notional, cfg.MaxNotional))
 	}
@@ -318,6 +315,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Quantity:   p.Quantity,
 		OrderType:  orderType,
 		LimitPrice: limit,
+		Trail:      trail,
 		TIF:        tif,
 		OutsideRTH: p.OutsideRTH,
 		Strategy:   strategy,
@@ -333,9 +331,9 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	}
 	var whatIf rpc.OrderWhatIfResult
 	if scope == rpc.OrderTokenScopeModify {
-		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, status, replaceView, draft)
+		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, status, replaceView, draft, timeout)
 	} else {
-		whatIf, err = s.fetchPreviewWhatIf(ctx, status, draft)
+		whatIf, err = s.fetchPreviewWhatIf(ctx, status, draft, timeout)
 	}
 	if err != nil {
 		return nil, err
@@ -384,6 +382,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		OutsideRTH:     draft.OutsideRTH,
 		Quantity:       float64(draft.Quantity),
 		LimitPrice:     draft.LimitPrice,
+		Trail:          cloneTrailSpec(draft.Trail),
 		OpenClose:      draft.OpenClose,
 		Source:         draft.Source,
 		Message:        previewWhatIfJournalMessage(whatIf),
@@ -440,16 +439,24 @@ func (s *Server) fetchPreviewPositionImpact(ctx context.Context, contract rpc.Co
 	return s.previewPositionImpact(ctx, contract, action, qty)
 }
 
-func (s *Server) fetchPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+func orderPreviewTimeout(timeoutMs int) time.Duration {
+	timeout := time.Duration(timeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		return orderPreviewDefaultWait
+	}
+	return min(timeout, orderPreviewMaxWait)
+}
+
+func (s *Server) fetchPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, draft rpc.OrderDraft, timeout time.Duration) (rpc.OrderWhatIfResult, error) {
+	whatIfCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if s.orderPreviewWhatIf != nil {
-		return s.orderPreviewWhatIf(ctx, draft)
+		return s.orderPreviewWhatIf(whatIfCtx, draft)
 	}
 	c := s.gatewayConnector()
 	if c == nil {
 		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
 	}
-	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
-	defer cancel()
 	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status))
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
@@ -457,16 +464,16 @@ func (s *Server) fetchPreviewWhatIf(ctx context.Context, status rpc.TradingStatu
 	return rpcWhatIfResultFromBroker(result), nil
 }
 
-func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, view rpc.OrderView, draft rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, view rpc.OrderView, draft rpc.OrderDraft, timeout time.Duration) (rpc.OrderWhatIfResult, error) {
+	whatIfCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if s.orderPreviewWhatIf != nil {
-		return s.orderPreviewWhatIf(ctx, draft)
+		return s.orderPreviewWhatIf(whatIfCtx, draft)
 	}
 	c := s.gatewayConnector()
 	if c == nil {
 		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
 	}
-	whatIfCtx, cancel := context.WithTimeout(ctx, orderPreviewWhatIfWait)
-	defer cancel()
 	result, err := c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status), view.ReservedOrderID)
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
@@ -508,7 +515,7 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 }
 
 func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
-	return &ibkrlib.RawOrder{
+	order := &ibkrlib.RawOrder{
 		Action:     strings.ToUpper(strings.TrimSpace(draft.Action)),
 		TotalQty:   draft.Quantity,
 		OrderType:  strings.ToUpper(strings.TrimSpace(draft.OrderType)),
@@ -518,6 +525,19 @@ func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
 		OutsideRth: draft.OutsideRTH,
 		OpenClose:  strings.ToUpper(strings.TrimSpace(draft.OpenClose)),
 	}
+	if draft.Trail != nil {
+		order.TrailStopPrice = draft.Trail.InitialStopPrice
+		if draft.Trail.TrailingPercent != nil {
+			order.TrailingPercent = *draft.Trail.TrailingPercent
+		}
+		if draft.Trail.TrailingAmount != nil {
+			order.AuxPrice = *draft.Trail.TrailingAmount
+		}
+		if draft.Trail.LimitOffset != nil {
+			order.LmtPriceOffset = *draft.Trail.LimitOffset
+		}
+	}
+	return order
 }
 
 func previewIBKROrderForStatus(draft rpc.OrderDraft, status rpc.TradingStatus) *ibkrlib.RawOrder {
@@ -668,6 +688,162 @@ func normalizePreviewStrategy(strategy string, limit *float64) string {
 	return strategy
 }
 
+func previewSupportedOrderType(orderType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(orderType)) {
+	case rpc.OrderTypeLMT, rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		return true
+	default:
+		return false
+	}
+}
+
+func previewOrderPricing(action, orderType, rawStrategy string, explicit *float64, rawTrail *rpc.OrderTrailSpec, contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot) (strategy string, limit float64, trail *rpc.OrderTrailSpec, notionalPrice float64, err error) {
+	switch strings.ToUpper(strings.TrimSpace(orderType)) {
+	case rpc.OrderTypeLMT:
+		if rawTrail != nil {
+			return "", 0, nil, 0, errBadRequest("LMT order preview must not include trail fields")
+		}
+		strategy = normalizePreviewStrategy(rawStrategy, explicit)
+		limit, err = previewLimitPrice(action, strategy, explicit, quote)
+		return strategy, limit, nil, limit, err
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		strategy = strings.ToLower(strings.TrimSpace(rawStrategy))
+		if strategy == "" {
+			strategy = rpc.OrderStrategyBrokerTrail
+		}
+		if strategy != rpc.OrderStrategyBrokerTrail {
+			return "", 0, nil, 0, errBadRequest("TRAIL order preview requires broker-trail strategy")
+		}
+		if explicit != nil {
+			return "", 0, nil, 0, errBadRequest("TRAIL order preview must not include limit_price")
+		}
+		trail, err = previewTrailSpec(action, orderType, rawTrail, contract, quote)
+		if err != nil {
+			return "", 0, nil, 0, err
+		}
+		notionalPrice = trailNotionalReferencePrice(action, trail, quote)
+		return strategy, 0, trail, notionalPrice, nil
+	default:
+		return "", 0, nil, 0, errBadRequest("unsupported order type")
+	}
+}
+
+func previewTrailSpec(action, orderType string, raw *rpc.OrderTrailSpec, contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot) (*rpc.OrderTrailSpec, error) {
+	if raw == nil {
+		return nil, errBadRequest("TRAIL order preview requires trail fields")
+	}
+	out := cloneTrailSpec(raw)
+	out.Basis = strings.ToLower(strings.TrimSpace(out.Basis))
+	if out.Basis == "" {
+		out.Basis = rpc.OrderTrailBasisInstrumentPrice
+	}
+	if out.Basis != rpc.OrderTrailBasisInstrumentPrice {
+		return nil, errBadRequest("trail basis must be instrument_price")
+	}
+	out.OffsetType = strings.ToLower(strings.TrimSpace(out.OffsetType))
+	hasPercent := out.TrailingPercent != nil
+	hasAmount := out.TrailingAmount != nil
+	switch {
+	case hasPercent == hasAmount:
+		return nil, errBadRequest("trail requires exactly one of trailing_percent or trailing_amount")
+	case hasPercent:
+		if !positiveFinite(*out.TrailingPercent) {
+			return nil, errBadRequest("trailing_percent must be positive")
+		}
+		if out.OffsetType == "" {
+			out.OffsetType = rpc.OrderTrailOffsetPercent
+		}
+		if out.OffsetType != rpc.OrderTrailOffsetPercent {
+			return nil, errBadRequest("trail offset_type must match trailing_percent")
+		}
+	case hasAmount:
+		if !positiveFinite(*out.TrailingAmount) {
+			return nil, errBadRequest("trailing_amount must be positive")
+		}
+		if out.OffsetType == "" {
+			out.OffsetType = rpc.OrderTrailOffsetAmount
+		}
+		if out.OffsetType != rpc.OrderTrailOffsetAmount {
+			return nil, errBadRequest("trail offset_type must match trailing_amount")
+		}
+		amount := ceilPriceToTick(*out.TrailingAmount, trailMinimumTick(contract, *out.TrailingAmount))
+		out.TrailingAmount = &amount
+	}
+	switch strings.ToUpper(strings.TrimSpace(orderType)) {
+	case rpc.OrderTypeTRAIL:
+		if out.LimitOffset != nil {
+			return nil, errBadRequest("TRAIL order preview must not include limit_offset")
+		}
+	case rpc.OrderTypeTRAILLIMIT:
+		if out.LimitOffset == nil || !positiveFinite(*out.LimitOffset) {
+			return nil, errBadRequest("TRAIL LIMIT order preview requires positive limit_offset")
+		}
+		offset := ceilPriceToTick(*out.LimitOffset, trailMinimumTick(contract, *out.LimitOffset))
+		out.LimitOffset = &offset
+	}
+	if out.InitialStopPrice <= 0 {
+		if reference, err := trailQuoteReferencePrice(action, quote); err == nil && reference > 0 {
+			offset := trailOffsetAmount(out, reference)
+			out.InitialStopPrice = trailingStopInitialPriceForContract(action, reference, offset, contract)
+		}
+	} else if !positiveFinite(out.InitialStopPrice) {
+		return nil, errBadRequest("initial_stop_price must be positive")
+	} else {
+		out.InitialStopPrice = roundStopPriceForContract(action, out.InitialStopPrice, contract)
+	}
+	return out, nil
+}
+
+func trailQuoteReferencePrice(action string, quote rpc.OrderQuoteSnapshot) (float64, error) {
+	if err := requireFreshPreviewQuote(quote, "broker-trail"); err != nil {
+		return 0, err
+	}
+	if !rpc.IsLiveDataType(quote.DataType) {
+		return 0, errBadRequest("broker-trail requires live bid/ask data")
+	}
+	switch action {
+	case rpc.OrderActionSell:
+		if quote.Bid == nil || *quote.Bid <= 0 {
+			return 0, errBadRequest("broker-trail SELL requires a positive bid")
+		}
+		return *quote.Bid, nil
+	case rpc.OrderActionBuy:
+		if quote.Ask == nil || *quote.Ask <= 0 {
+			return 0, errBadRequest("broker-trail BUY requires a positive ask")
+		}
+		return *quote.Ask, nil
+	default:
+		return 0, errBadRequest("action must be buy or sell")
+	}
+}
+
+func trailOffsetAmount(trail *rpc.OrderTrailSpec, reference float64) float64 {
+	if trail == nil {
+		return 0
+	}
+	if trail.TrailingPercent != nil {
+		return reference * *trail.TrailingPercent / 100
+	}
+	if trail.TrailingAmount != nil {
+		return *trail.TrailingAmount
+	}
+	return 0
+}
+
+func trailNotionalReferencePrice(action string, trail *rpc.OrderTrailSpec, quote rpc.OrderQuoteSnapshot) float64 {
+	if ref, err := trailQuoteReferencePrice(action, quote); err == nil && ref > 0 {
+		return ref
+	}
+	if trail != nil && trail.InitialStopPrice > 0 {
+		return trail.InitialStopPrice
+	}
+	return 0
+}
+
+func positiveFinite(v float64) bool {
+	return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
 func (s *Server) previewQuote(ctx context.Context, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
 	params := rpc.QuoteSnapshotParams{
 		Contract:         contract,
@@ -686,17 +862,21 @@ func (s *Server) previewQuote(ctx context.Context, contract rpc.ContractParams, 
 		return rpc.OrderQuoteSnapshot{}, errBadRequest("quote snapshot unavailable")
 	}
 	out := rpc.OrderQuoteSnapshot{
-		Symbol:       q.Symbol,
-		Bid:          q.Bid,
-		Ask:          q.Ask,
-		Last:         q.Last,
-		Mark:         q.Mark,
-		DataType:     q.DataType,
-		QuoteQuality: q.QuoteQuality,
-		SpreadPct:    q.SpreadPct,
-		PriceAt:      q.PriceAt,
-		AsOf:         q.AsOf,
-		Warnings:     append([]rpc.DataWarning{}, q.WarningDetails...),
+		Symbol:         q.Symbol,
+		Bid:            q.Bid,
+		Ask:            q.Ask,
+		Last:           q.Last,
+		Mark:           q.Mark,
+		DataType:       q.DataType,
+		QuoteQuality:   q.QuoteQuality,
+		SpreadPct:      q.SpreadPct,
+		PriceAt:        q.PriceAt,
+		PriceAsOf:      q.PriceAsOf,
+		Stale:          q.Stale,
+		StaleReason:    q.StaleReason,
+		AsOf:           q.AsOf,
+		SessionContext: q.SessionContext,
+		Warnings:       append([]rpc.DataWarning{}, q.WarningDetails...),
 	}
 	if q.Bid != nil && q.Ask != nil && *q.Bid > 0 && *q.Ask > *q.Bid {
 		mid := (*q.Bid + *q.Ask) / 2
@@ -719,6 +899,9 @@ func previewLimitPrice(action, strategy string, explicit *float64, quote rpc.Ord
 		if explicit != nil {
 			return 0, errBadRequest("--limit uses explicit-limit strategy; omit --strategy or set --strategy explicit-limit")
 		}
+		if err := requireFreshPreviewQuote(quote, "patient-limit"); err != nil {
+			return 0, err
+		}
 		if !rpc.IsLiveDataType(quote.DataType) {
 			return 0, errBadRequest("patient-limit requires live bid/ask data; use --limit for explicit-limit preview on stale or delayed data")
 		}
@@ -740,6 +923,24 @@ func previewLimitPrice(action, strategy string, explicit *float64, quote rpc.Ord
 	}
 }
 
+func requireFreshPreviewQuote(quote rpc.OrderQuoteSnapshot, useCase string) error {
+	if quote.Stale {
+		reason := strings.TrimSpace(quote.StaleReason)
+		if reason == "" {
+			reason = "quote data is stale"
+		}
+		return errBadRequest(fmt.Sprintf("%s requires fresh quote data: %s", useCase, reason))
+	}
+	if quote.SessionContext != nil && !quote.SessionContext.IsOpen {
+		label := strings.TrimSpace(quote.SessionContext.State)
+		if label == "" {
+			label = "market is closed"
+		}
+		return errBadRequest(fmt.Sprintf("%s requires an open market session: %s", useCase, label))
+	}
+	return nil
+}
+
 func priceTick(price float64) float64 {
 	if price < 1 {
 		return 0.0001
@@ -749,6 +950,47 @@ func priceTick(price float64) float64 {
 
 func roundPrice(price float64) float64 {
 	return math.Round(price*10000) / 10000
+}
+
+func trailMinimumTick(contract rpc.ContractParams, price float64) float64 {
+	switch strings.ToUpper(strings.TrimSpace(contract.SecType)) {
+	case "STK", "ETF":
+		return 0.01
+	default:
+		return priceTick(price)
+	}
+}
+
+func ceilPriceToTick(price, tick float64) float64 {
+	if tick <= 0 {
+		return roundPrice(price)
+	}
+	return roundPrice(math.Ceil((price-1e-9)/tick) * tick)
+}
+
+func floorPriceToTick(price, tick float64) float64 {
+	if tick <= 0 {
+		return roundPrice(price)
+	}
+	return roundPrice(math.Floor((price+1e-9)/tick) * tick)
+}
+
+func roundStopPriceForContract(action string, price float64, contract rpc.ContractParams) float64 {
+	tick := trailMinimumTick(contract, price)
+	if strings.EqualFold(action, rpc.OrderActionBuy) {
+		return ceilPriceToTick(price, tick)
+	}
+	return floorPriceToTick(price, tick)
+}
+
+func trailingStopInitialPriceForContract(action string, reference, trailAbs float64, contract rpc.ContractParams) float64 {
+	if reference <= 0 || trailAbs <= 0 {
+		return 0
+	}
+	if strings.EqualFold(action, rpc.OrderActionBuy) {
+		return roundStopPriceForContract(action, reference+trailAbs, contract)
+	}
+	return roundStopPriceForContract(action, max(reference-trailAbs, 0.0001), contract)
 }
 
 func contractMultiplier(contract rpc.ContractParams) int {

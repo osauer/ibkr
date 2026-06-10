@@ -47,6 +47,110 @@ func TestPreviewLimitRejectsDelayedPatientLimit(t *testing.T) {
 	}
 }
 
+func TestPreviewLimitRejectsStaleOrClosedPatientLimit(t *testing.T) {
+	t.Parallel()
+	bid, ask := 100.10, 100.15
+	stale := rpc.OrderQuoteSnapshot{
+		Bid:         &bid,
+		Ask:         &ask,
+		DataType:    rpc.MarketDataLive,
+		Stale:       true,
+		StaleReason: "price timestamp is 20m old during market hours",
+	}
+	if _, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, stale); err == nil || !strings.Contains(err.Error(), "fresh quote data") {
+		t.Fatalf("stale patient-limit err = %v, want freshness rejection", err)
+	}
+
+	closed := rpc.OrderQuoteSnapshot{
+		Bid:            &bid,
+		Ask:            &ask,
+		DataType:       rpc.MarketDataLive,
+		SessionContext: &rpc.MarketSession{Market: "de", State: "closed", IsOpen: false},
+	}
+	if _, err := previewLimitPrice(rpc.OrderActionSell, rpc.OrderStrategyPatientLimit, nil, closed); err == nil || !strings.Contains(err.Error(), "open market session") {
+		t.Fatalf("closed-session patient-limit err = %v, want session rejection", err)
+	}
+}
+
+func TestPreviewTrailSpecUsesBidAskAndIBKRPercentUnits(t *testing.T) {
+	t.Parallel()
+	bid, ask, pctValue := 100.0, 101.0, 2.0
+	quote := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}
+	sellTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{
+		OffsetType:      rpc.OrderTrailOffsetPercent,
+		TrailingPercent: &pctValue,
+	}, rpc.ContractParams{SecType: "STK"}, quote)
+	if err != nil {
+		t.Fatalf("sell previewTrailSpec: %v", err)
+	}
+	if sellTrail.InitialStopPrice != 98 {
+		t.Fatalf("SELL initial stop = %.2f, want bid-based 98.00", sellTrail.InitialStopPrice)
+	}
+
+	buyTrail, err := previewTrailSpec(rpc.OrderActionBuy, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{
+		OffsetType:      rpc.OrderTrailOffsetPercent,
+		TrailingPercent: &pctValue,
+	}, rpc.ContractParams{SecType: "STK"}, quote)
+	if err != nil {
+		t.Fatalf("buy previewTrailSpec: %v", err)
+	}
+	if buyTrail.InitialStopPrice != 103.02 {
+		t.Fatalf("BUY initial stop = %.2f, want ask-based 103.02", buyTrail.InitialStopPrice)
+	}
+}
+
+func TestPreviewTrailSpecAcceptsUnavailableQuoteContextAndRejectsLimitRuleDrift(t *testing.T) {
+	t.Parallel()
+	bid, ask, pctValue, offset := 100.0, 101.0, 2.0, 0.05
+	delayed := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataDelayed}
+	stock := rpc.ContractParams{SecType: "STK"}
+	delayedTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, delayed)
+	if err != nil {
+		t.Fatalf("TRAIL preview on delayed data: %v", err)
+	}
+	if delayedTrail.InitialStopPrice != 0 {
+		t.Fatalf("delayed-data initial stop = %.2f, want broker-derived zero value", delayedTrail.InitialStopPrice)
+	}
+
+	live := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}
+	if _, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAILLIMIT, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, live); err == nil {
+		t.Fatal("TRAIL LIMIT without limit_offset succeeded")
+	}
+	trail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAILLIMIT, &rpc.OrderTrailSpec{TrailingPercent: &pctValue, LimitOffset: &offset}, stock, live)
+	if err != nil {
+		t.Fatalf("TRAIL LIMIT with offset: %v", err)
+	}
+	if trail.LimitOffset == nil || *trail.LimitOffset != offset {
+		t.Fatalf("limit offset = %v, want %.2f", trail.LimitOffset, offset)
+	}
+
+	limit := 99.0
+	if _, _, _, _, err := previewOrderPricing(rpc.OrderActionSell, rpc.OrderTypeTRAILLIMIT, rpc.OrderStrategyBrokerTrail, &limit, &rpc.OrderTrailSpec{TrailingPercent: &pctValue, LimitOffset: &offset}, stock, live); err == nil {
+		t.Fatal("TRAIL LIMIT with explicit limit_price succeeded")
+	}
+
+	stale := live
+	stale.Stale = true
+	stale.StaleReason = "market is open but quote data is frozen"
+	staleTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, stale)
+	if err != nil {
+		t.Fatalf("TRAIL preview on stale data: %v", err)
+	}
+	if staleTrail.InitialStopPrice != 0 {
+		t.Fatalf("stale-data initial stop = %.2f, want broker-derived zero value", staleTrail.InitialStopPrice)
+	}
+
+	closed := live
+	closed.SessionContext = &rpc.MarketSession{Market: "de", State: "closed", IsOpen: false}
+	closedTrail, err := previewTrailSpec(rpc.OrderActionSell, rpc.OrderTypeTRAIL, &rpc.OrderTrailSpec{TrailingPercent: &pctValue}, stock, closed)
+	if err != nil {
+		t.Fatalf("TRAIL preview on closed session: %v", err)
+	}
+	if closedTrail.InitialStopPrice != 0 {
+		t.Fatalf("closed-session initial stop = %.2f, want broker-derived zero value", closedTrail.InitialStopPrice)
+	}
+}
+
 func TestPreviewIBKRContractOmitsStockMultiplier(t *testing.T) {
 	t.Parallel()
 
@@ -496,6 +600,38 @@ func TestOrderPreviewBindsAcceptedBrokerWhatIf(t *testing.T) {
 	}
 	if payload.WhatIf.Status != rpc.OrderWhatIfStatusAccepted || payload.WhatIf.Margin == nil || payload.WhatIf.Margin.Commission == nil || *payload.WhatIf.Margin.Commission != commission {
 		t.Fatalf("token did not bind accepted WhatIf margin: %+v", payload.WhatIf)
+	}
+}
+
+func TestOrderPreviewTimeoutAppliesToWhatIf(t *testing.T) {
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 1, rpc.OrderPositionEffectOpen)
+	srv.orderPreviewWhatIf = func(ctx context.Context, _ rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		<-ctx.Done()
+		return rpc.OrderWhatIfResult{
+			Status:  rpc.OrderWhatIfStatusUnavailable,
+			Message: "test WhatIf timeout",
+		}, nil
+	}
+
+	limit := 100.0
+	start := time.Now()
+	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:     "buy",
+		Contract:   rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity:   1,
+		LimitPrice: &limit,
+		TimeoutMs:  20,
+	})
+	if err != nil {
+		t.Fatalf("previewOrder: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("previewOrder ignored WhatIf timeout, elapsed %s", elapsed)
+	}
+	if res.WhatIf.Status != rpc.OrderWhatIfStatusUnavailable || res.SubmitEligible {
+		t.Fatalf("WhatIf = %+v submitEligible=%v, want unavailable/not eligible", res.WhatIf, res.SubmitEligible)
 	}
 }
 

@@ -152,34 +152,37 @@ func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, 
 	}
 
 	ibkrOrder := &IBKROrder{
-		ConID:        contract.ConID,
-		Symbol:       contract.Symbol,
-		SecType:      contract.SecType,
-		Expiry:       contract.Expiry,
-		Strike:       contract.Strike,
-		Right:        contract.Right,
-		Multiplier:   multiplierToString(contract.Multiplier),
-		Exchange:     contract.Exchange,
-		PrimaryExch:  contract.PrimaryExch,
-		Currency:     contract.Currency,
-		LocalSymbol:  contract.LocalSymbol,
-		TradingClass: contract.TradingClass,
-		SecIDType:    contract.SecIDType,
-		SecID:        contract.SecID,
-		ClientID:     order.ClientID,
-		Action:       order.Action,
-		TotalQty:     order.TotalQty,
-		OrderType:    order.OrderType,
-		LmtPrice:     order.LmtPrice,
-		AuxPrice:     order.AuxPrice,
-		TIF:          order.TIF,
-		OrderRef:     order.OrderRef,
-		OutsideRth:   order.OutsideRth,
-		Account:      order.Account,
-		Transmit:     false,
-		WhatIf:       true,
-		OpenClose:    strings.ToUpper(strings.TrimSpace(order.OpenClose)),
-		Origin:       0,
+		ConID:           contract.ConID,
+		Symbol:          contract.Symbol,
+		SecType:         contract.SecType,
+		Expiry:          contract.Expiry,
+		Strike:          contract.Strike,
+		Right:           contract.Right,
+		Multiplier:      multiplierToString(contract.Multiplier),
+		Exchange:        contract.Exchange,
+		PrimaryExch:     contract.PrimaryExch,
+		Currency:        contract.Currency,
+		LocalSymbol:     contract.LocalSymbol,
+		TradingClass:    contract.TradingClass,
+		SecIDType:       contract.SecIDType,
+		SecID:           contract.SecID,
+		ClientID:        order.ClientID,
+		Action:          order.Action,
+		TotalQty:        order.TotalQty,
+		OrderType:       order.OrderType,
+		LmtPrice:        order.LmtPrice,
+		AuxPrice:        order.AuxPrice,
+		TrailStopPrice:  order.TrailStopPrice,
+		TrailingPercent: order.TrailingPercent,
+		LmtPriceOffset:  order.LmtPriceOffset,
+		TIF:             order.TIF,
+		OrderRef:        order.OrderRef,
+		OutsideRth:      order.OutsideRth,
+		Account:         order.Account,
+		Transmit:        false,
+		WhatIf:          true,
+		OpenClose:       strings.ToUpper(strings.TrimSpace(order.OpenClose)),
+		Origin:          0,
 	}
 	if ibkrOrder.OpenClose == "" {
 		ibkrOrder.OpenClose = "O"
@@ -242,6 +245,9 @@ func (c *Connection) sendPlaceOrderFrame(order *IBKROrder) error {
 			return err
 		}
 		return c.sendMessageWithType(msg, RequestTypeOrder)
+	}
+	if order.LmtPriceOffset != 0 {
+		return fmt.Errorf("legacy placeOrder encoder does not support lmtPriceOffset")
 	}
 
 	fields := clonePlaceOrderFields()

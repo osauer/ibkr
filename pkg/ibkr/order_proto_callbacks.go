@@ -36,6 +36,9 @@ type inboundOrderProtoSummary struct {
 	orderType            string
 	lmtPrice             float64
 	auxPrice             float64
+	trailingPercent      float64
+	trailStopPrice       float64
+	lmtPriceOffset       float64
 	tif                  string
 	account              string
 	orderRef             string
@@ -197,6 +200,9 @@ func appendOrderSummaryFields(fields []string, summary inboundOrderProtoSummary)
 		"orderType="+summary.orderType,
 		"lmtPrice="+formatProtoSummaryFloat(summary.lmtPrice),
 		"auxPrice="+formatProtoSummaryFloat(summary.auxPrice),
+		"trailingPercent="+formatProtoSummaryFloat(summary.trailingPercent),
+		"trailStopPrice="+formatProtoSummaryFloat(summary.trailStopPrice),
+		"lmtPriceOffset="+formatProtoSummaryFloat(summary.lmtPriceOffset),
 		"tif="+summary.tif,
 		"account="+summary.account,
 		"orderRef="+summary.orderRef,
@@ -405,6 +411,18 @@ func parseInboundOrderProto(body []byte, summary *inboundOrderProtoSummary) erro
 				return err
 			}
 			summary.outsideRth = v != 0
+		case 22:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.trailingPercent = math.Float64frombits(v)
+		case 23:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.trailStopPrice = math.Float64frombits(v)
 		case 28:
 			summary.orderRef = string(value)
 		case 65:
@@ -419,6 +437,12 @@ func parseInboundOrderProto(body []byte, summary *inboundOrderProtoSummary) erro
 				return err
 			}
 			summary.transmit = v != 0
+		case 99:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.lmtPriceOffset = math.Float64frombits(v)
 		}
 		return nil
 	})

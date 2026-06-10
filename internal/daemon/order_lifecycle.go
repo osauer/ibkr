@@ -220,6 +220,9 @@ func copyOrderJournalIdentityFromView(ev *orderJournalEvent, view rpc.OrderView)
 	if ev.LimitPrice == 0 {
 		ev.LimitPrice = view.LimitPrice
 	}
+	if ev.Trail == nil {
+		ev.Trail = cloneTrailSpec(view.Trail)
+	}
 	if ev.OpenClose == "" {
 		ev.OpenClose = view.OpenClose
 	}

@@ -44,6 +44,7 @@ func TestCatalogValueFlagsDriveHoisting(t *testing.T) {
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
 		"min-dte", "max-dte", "target-dte", "class",
 		"account", "preview-token", "strategy", "tif", "replace-order",
+		"order-type", "trail-percent", "trail-amount", "initial-stop", "limit-offset",
 		"addr", "public-url", "state-dir", "config", "socket",
 		"profile", "view", "wait",
 	} {

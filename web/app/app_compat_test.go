@@ -165,6 +165,65 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function renderSettings()",
 		"function setPurgeRestoreEnabled(enabled)",
 		"function purgeRestoreSettingEnabled()",
+		"function setStockProtectionEnabled(enabled)",
+		"function stockProtectionSettingEnabled()",
+		"function protectionTrailText(proposal = {})",
+		"function protectionLiveTrailStop(proposal = {}, trail = {})",
+		"function protectionSubmitLabel(proposal = {})",
+		"function protectionUsesPreviewFlow(proposal = {})",
+		"function protectionNeedsSnapshotSync(proposals = {}, autoTrade = {})",
+		"function queueProtectionSnapshotSync()",
+		"function syncProtectionSnapshot()",
+		"function applyProtectionSnapshot(proposals = {})",
+		"trading: proposals.trading",
+		`fetch("/api/proposals", { credentials: "include", cache: "no-store" })`,
+		"function protectionPreviewGate(proposal = {})",
+		"function protectionPreviewSubmitGate(proposal = {}, previewResult = null)",
+		"function protectionWriteUnavailableReason(trading = {})",
+		"function protectionPreviewStateKey(proposal = {})",
+		"function protectionPreviewText(result = null, proposal = {})",
+		"function protectionPreviewOutcomeLabel(",
+		"function protectionPreviewSubmitEligible(result = {})",
+		"function protectionPreviewSubmitBlockedReason(result = {})",
+		"function protectionWhatIfDetails(whatIf = {})",
+		"function protectionSubmitStateText(",
+		"function protectionSubmitResultText(result = {})",
+		"function protectionSubmitButtonTitle(",
+		"function protectionWriteConfirmation(proposal = {})",
+		"function protectionWriteConfirmationLabel()",
+		"function protectionStopDraftSummary(proposal = {})",
+		"function shortPreviewMessage(message = \"\")",
+		"function protectionPreviewTimeoutMs(proposal = {})",
+		"function previewProtectionProposal(proposal)",
+		"protection-row__blocker",
+		"Stop draft ready; broker WhatIf running",
+		`fetch("/api/proposals/preview"`,
+		`fetch("/api/proposals/submit"`,
+		"timeout_ms: protectionPreviewTimeoutMs(proposal)",
+		`fast_path: proposal.bucket === "trailing_stop"`,
+		"confirm_account: confirmation.account",
+		"confirm_mode: confirmation.mode",
+		"Broker WhatIf accepted; no order placed",
+		"Submit stop",
+		"Confirm stop",
+		"Confirm broker write",
+		"state.protectionConfirmKey",
+		"confirm_account: confirmation.account",
+		"confirm_mode: confirmation.mode",
+		"Submit blocked",
+		"write_blockers",
+		"Broker preview is not enabled by trading.status",
+		"function protectionSideLabel(proposal = {})",
+		"Buy to cover stop",
+		"function protectionInferredReference(proposal = {}, trail = {}, action = \"\")",
+		"function protectionEffectiveBlockers(proposal = {}, events = {})",
+		"function protectionMarketCalendar(proposal = {})",
+		"function proposalMarketKey(proposal = {})",
+		"function protectionQuoteStatusLabel(quote = null)",
+		"broker WhatIf remains the submit authority",
+		"broker may queue the stop after fresh WhatIf",
+		"IBKR lifts it as price rises above submission reference",
+		`body: JSON.stringify({ features: { stock_protection: { enabled } } })`,
 		"function refreshBootstrapIfSSEUnavailable()",
 		"function renderAccountDailyPnlPct(account = {})",
 		"function accountDailyPnlPct(account = {})",
@@ -185,6 +244,9 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function setPortfolioExpansion(open)",
 		"function portfolioDeltaPosture(portfolio = {}, account = {})",
 		"function regimePostureDetailTone(posture = {})",
+		`setupBottomTabs();`,
+		`tabs.addEventListener("pointerup", activate);`,
+		`tabs.dataset.bound = "true";`,
 		`$("underlyingDetailToggle").addEventListener("click"`,
 		`$("underlyingPanel").addEventListener("click", handleUnderlyingPanelTap);`,
 		`$("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);`,
@@ -223,6 +285,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`id="alertsTab" data-tab-panel="alerts"`,
 		`id="settingsTab" data-tab-panel="settings"`,
 		`id="purgeRestoreToggle"`,
+		`id="stockProtectionToggle"`,
 		`id="settingsTradingLimits"`,
 		`id="settingsMarketDataStatus"`,
 	} {
@@ -235,6 +298,9 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	}
 	if strings.Contains(html, `<details class="panel underlying-panel"`) {
 		t.Fatalf("underlyings panel should not hide summary/actions inside native details")
+	}
+	if strings.Contains(js, "Disabled while") {
+		t.Fatalf("protection submit gate should not hard-block paper broker stops only because the market calendar is closed")
 	}
 	for _, want := range []string{
 		".source-banner",
@@ -255,20 +321,27 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"overflow-y: auto;",
 		"overscroll-behavior: contain;",
 		".bottom-tabs",
-		".bottom-tabs {\n  position: relative;",
+		"--bottom-tabs-space: 92px;",
+		"padding-bottom: calc(var(--bottom-tabs-space) + var(--bottom-tab-safe));",
+		".bottom-tabs {\n  position: absolute;",
+		"bottom: calc(14px + var(--bottom-tab-safe));",
+		"transform: translateX(-50%);",
 		"--bottom-tab-safe: 0px;",
 		"@media (display-mode: standalone), (display-mode: fullscreen)",
 		"--bottom-tab-safe: env(safe-area-inset-bottom);",
 		".bottom-tab.active",
 		".settings-panel",
 		".toggle-switch input:checked + span",
+		".protection-row:first-child",
+		".protection-row__trail",
+		".protection-preview",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
 		}
 	}
 	if strings.Contains(css, ".bottom-tabs {\n  position: fixed;") {
-		t.Fatalf("bottom tabs must be pinned by shell layout, not floated over app content")
+		t.Fatalf("bottom tabs must be pinned by shell layout, not fixed to the browser viewport")
 	}
 }
 
@@ -355,10 +428,13 @@ func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 		"function underlyingHeroMarketFlags(rows, events = {})",
 		"function protectionHeroMarketFlags(rows = [], marketEvents = {})",
 		"marketFlagRow(row.marketFlags || [])",
-		"marketFlagRow(proposal.market_flags || [])",
+		"marketFlagRow(protectionEffectiveMarketFlags(proposal, marketEvents))",
 		"function protectionActionLabel(proposal = {})",
 		`if (proposalIsBuyToCover(proposal)) return "Buy to cover";`,
 		"function proposalIsBuyToCover(proposal = {})",
+		"function protectionTrailText(proposal = {})",
+		"function protectionStopChanged(snapshotStop, liveStop)",
+		"`quote ${live.quoteLabel} ${numberRead(live.reference)}`",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing borrow-fee market-event rendering contract %q", want)

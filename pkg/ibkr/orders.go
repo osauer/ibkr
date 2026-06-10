@@ -103,6 +103,7 @@ type IBKROrder struct {
 	ReferencePriceType             int
 	TrailStopPrice                 float64
 	TrailingPercent                float64
+	LmtPriceOffset                 float64
 	BasisPoints                    float64
 	BasisPointsType                int
 	ScaleInitLevelSize             int
@@ -162,6 +163,25 @@ func ValidateOrder(order *IBKROrder) error {
 	// Validate stop price for stop orders
 	if (order.OrderType == "STP" || order.OrderType == "STP LMT") && order.AuxPrice <= 0 {
 		return fmt.Errorf("stop price required for stop orders")
+	}
+	if order.OrderType == "TRAIL" || order.OrderType == "TRAIL LIMIT" {
+		if order.TrailStopPrice <= 0 {
+			return fmt.Errorf("trail stop price required for trailing stop orders")
+		}
+		hasAmount := order.AuxPrice > 0
+		hasPercent := order.TrailingPercent > 0
+		if hasAmount == hasPercent {
+			return fmt.Errorf("trailing stop orders require exactly one of aux price or trailing percent")
+		}
+		if order.OrderType == "TRAIL LIMIT" && order.LmtPriceOffset <= 0 {
+			return fmt.Errorf("limit price offset required for trailing stop limit orders")
+		}
+		if order.OrderType == "TRAIL" && order.LmtPriceOffset != 0 {
+			return fmt.Errorf("limit price offset is only supported for trailing stop limit orders")
+		}
+		if order.LmtPrice != 0 {
+			return fmt.Errorf("limit price must not be set on trailing stop orders; use limit price offset for TRAIL LIMIT")
+		}
 	}
 
 	// Default TIF if not specified

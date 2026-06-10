@@ -147,7 +147,11 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 
 	status.Blocked = len(status.Blockers) > 0
 	status.CanPreview = tr.OrderEntryEnabled() && !status.Blocked
-	status.CanWrite = s.brokerWriteAuthorization(status).Allowed
+	writeAuth := s.brokerWriteAuthorization(status)
+	status.CanWrite = writeAuth.Allowed
+	if !writeAuth.Allowed && !status.Blocked {
+		status.WriteBlockers = writeAuth.Blockers
+	}
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
 	}

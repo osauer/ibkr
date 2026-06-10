@@ -100,6 +100,7 @@ func runProposalsPreview(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	qty := fs.Int("quantity", 0, "selected quantity; defaults to proposal quantity")
 	timeout := fs.Duration("timeout", 5*time.Second, "quote/WhatIf timeout")
+	fastPath := fs.Bool("fast-path", false, "use current snapshot for supported fast previews such as trailing stops")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
@@ -107,7 +108,7 @@ func runProposalsPreview(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "proposals preview: usage is `ibkr proposals preview KEY REVISION`")
 	}
 	var res rpc.TradeProposalPreviewResult
-	params := rpc.TradeProposalPreviewParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, TimeoutMs: int(timeout.Milliseconds())}
+	params := rpc.TradeProposalPreviewParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, TimeoutMs: int(timeout.Milliseconds()), FastPath: *fastPath}
 	if err := env.Conn.Call(ctx, rpc.MethodTradeProposalsPreview, params, &res); err != nil {
 		return fail(env, "proposals preview: %v", err)
 	}

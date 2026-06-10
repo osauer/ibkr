@@ -108,6 +108,53 @@ func TestParseAccountSummary_GarbageValuesIgnored(t *testing.T) {
 	}
 }
 
+func TestCachedAccountSummaryParsesStreamingCache(t *testing.T) {
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	c := NewConnector(&ConnectorConfig{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.SeedAccountIDForTest("DU7654321")
+	conn.accountMu.Lock()
+	conn.accountSummary["NetLiquidation_EUR"] = "1013214.07"
+	conn.accountSummary["BuyingPower_EUR"] = "500000.00"
+	conn.accountSummary["TotalCashValue_EUR"] = "1000.25"
+	conn.accountMu.Unlock()
+
+	got := c.CachedAccountSummary()
+	if got == nil {
+		t.Fatalf("CachedAccountSummary returned nil for core account values")
+	}
+	if got.AccountID != "DU7654321" {
+		t.Fatalf("AccountID = %q, want DU7654321", got.AccountID)
+	}
+	if got.Currency != "EUR" {
+		t.Fatalf("Currency = %q, want EUR", got.Currency)
+	}
+	if got.NetLiquidation == nil || *got.NetLiquidation != 1013214.07 {
+		t.Fatalf("NetLiquidation = %v, want 1013214.07", got.NetLiquidation)
+	}
+}
+
+func TestCachedAccountSummaryEmptyOrNonCoreCacheReturnsNil(t *testing.T) {
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	c := NewConnector(&ConnectorConfig{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	if got := c.CachedAccountSummary(); got != nil {
+		t.Fatalf("CachedAccountSummary = %+v, want nil for empty cache", got)
+	}
+	conn.accountMu.Lock()
+	conn.accountSummary["AccountType"] = "INDIVIDUAL"
+	conn.accountMu.Unlock()
+	if got := c.CachedAccountSummary(); got != nil {
+		t.Fatalf("CachedAccountSummary = %+v, want nil without core account values", got)
+	}
+}
+
 func TestLookupAccountValue_OrderingDeterministic(t *testing.T) {
 	raw := map[string]string{
 		"NetLiquidation_EUR": "90000.00",

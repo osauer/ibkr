@@ -416,6 +416,7 @@ func orderJournalEventForDraft(draft rpc.OrderDraft, eventType string, status rp
 		OutsideRTH:      draft.OutsideRTH,
 		Quantity:        float64(draft.Quantity),
 		LimitPrice:      draft.LimitPrice,
+		Trail:           cloneTrailSpec(draft.Trail),
 		OpenClose:       draft.OpenClose,
 		Source:          draft.Source,
 	}
@@ -454,6 +455,7 @@ func orderJournalEventFromView(view rpc.OrderView, eventType string, at time.Tim
 		OutsideRTH:      view.OutsideRTH,
 		Quantity:        view.Quantity,
 		LimitPrice:      view.LimitPrice,
+		Trail:           cloneTrailSpec(view.Trail),
 		OpenClose:       view.OpenClose,
 		Status:          view.Status,
 		Filled:          view.Filled,
@@ -497,6 +499,7 @@ func orderDraftFromView(view rpc.OrderView) rpc.OrderDraft {
 		Quantity:   int(view.Quantity),
 		OrderType:  view.OrderType,
 		LimitPrice: view.LimitPrice,
+		Trail:      cloneTrailSpec(view.Trail),
 		TIF:        view.TIF,
 		OutsideRTH: view.OutsideRTH,
 		OrderRef:   view.OrderRef,

@@ -52,6 +52,11 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	limit := fs.Float64("limit", 0, "explicit LMT limit price")
 	strategy := fs.String("strategy", "", "pricing strategy: patient-limit (default) or explicit-limit")
+	orderTypeFlag := fs.String("order-type", "", "order type: LMT, TRAIL, or TRAIL-LIMIT")
+	trailPercent := fs.Float64("trail-percent", 0, "broker trail offset percent; 2 means 2%, not 0.02")
+	trailAmount := fs.Float64("trail-amount", 0, "broker trail offset amount")
+	initialStop := fs.Float64("initial-stop", 0, "optional initial broker trail stop price; omitted means use live bid/ask")
+	limitOffset := fs.Float64("limit-offset", 0, "TRAIL LIMIT offset from the dynamic stop")
 	tif := fs.String("tif", "", "time in force; DAY only")
 	outsideRTH := fs.Bool("outside-rth", false, "allow outside regular trading hours when supported")
 	replaceID := fs.String("replace-order", "", "preview a replacement for an existing open order ref/order-id/perm-id")
@@ -67,36 +72,102 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	if len(rest) > 0 && rest[0] == "preview" {
 		rest = rest[1:]
 	}
-	if len(rest) != 3 {
-		if len(rest) == 6 {
-			return fail(env, "order preview: single-leg options are not enabled in this slice")
-		}
-		return fail(env, "order preview: usage is `ibkr order preview buy|sell SYMBOL QTY`")
+	if len(rest) != 3 && len(rest) != 6 {
+		return fail(env, "order preview: usage is `ibkr order preview buy|sell SYMBOL QTY` or `ibkr order preview buy|sell SYMBOL YYYYMMDD C|P STRIKE QTY`")
 	}
-	qty, err := strconv.Atoi(rest[2])
+	qtyArg := rest[2]
+	if len(rest) == 6 {
+		qtyArg = rest[5]
+	}
+	qty, err := strconv.Atoi(qtyArg)
 	if err != nil || qty <= 0 {
 		return fail(env, "order preview: quantity must be a positive integer")
 	}
 	var limitPtr *float64
+	var trailPercentPtr, trailAmountPtr, initialStopPtr, limitOffsetPtr *float64
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "limit" {
 			v := *limit
 			limitPtr = &v
 		}
+		if f.Name == "trail-percent" {
+			v := *trailPercent
+			trailPercentPtr = &v
+		}
+		if f.Name == "trail-amount" {
+			v := *trailAmount
+			trailAmountPtr = &v
+		}
+		if f.Name == "initial-stop" {
+			v := *initialStop
+			initialStopPtr = &v
+		}
+		if f.Name == "limit-offset" {
+			v := *limitOffset
+			limitOffsetPtr = &v
+		}
 	})
+	orderType, err := previewCLIOrderType(*orderTypeFlag, trailPercentPtr != nil || trailAmountPtr != nil || initialStopPtr != nil, limitOffsetPtr != nil)
+	if err != nil {
+		return fail(env, "order preview: %v", err)
+	}
+	var trail *rpc.OrderTrailSpec
+	if orderType == rpc.OrderTypeTRAIL || orderType == rpc.OrderTypeTRAILLIMIT {
+		trail = &rpc.OrderTrailSpec{
+			Basis:           rpc.OrderTrailBasisInstrumentPrice,
+			TrailingPercent: trailPercentPtr,
+			TrailingAmount:  trailAmountPtr,
+		}
+		if trail.TrailingPercent != nil {
+			trail.OffsetType = rpc.OrderTrailOffsetPercent
+		}
+		if trail.TrailingAmount != nil {
+			trail.OffsetType = rpc.OrderTrailOffsetAmount
+		}
+		if initialStopPtr != nil {
+			trail.InitialStopPrice = *initialStopPtr
+		}
+		trail.LimitOffset = limitOffsetPtr
+	}
+	contract := rpc.ContractParams{
+		Symbol:      strings.ToUpper(strings.TrimSpace(rest[1])),
+		SecType:     "STK",
+		Market:      strings.TrimSpace(*market),
+		Exchange:    strings.ToUpper(strings.TrimSpace(*exchange)),
+		PrimaryExch: strings.ToUpper(strings.TrimSpace(*primary)),
+		Currency:    strings.ToUpper(strings.TrimSpace(*currency)),
+	}
+	if len(rest) == 6 {
+		strike, err := strconv.ParseFloat(rest[4], 64)
+		if err != nil || strike <= 0 {
+			return fail(env, "order preview: option strike must be positive")
+		}
+		right := strings.ToUpper(strings.TrimSpace(rest[3]))
+		if right != "C" && right != "P" && right != "CALL" && right != "PUT" {
+			return fail(env, "order preview: option right must be C or P")
+		}
+		if right == "CALL" {
+			right = "C"
+		}
+		if right == "PUT" {
+			right = "P"
+		}
+		contract.SecType = "OPT"
+		contract.Expiry = strings.TrimSpace(rest[2])
+		contract.Right = right
+		contract.Strike = strike
+		contract.Multiplier = 100
+		if contract.Exchange == "" {
+			contract.Exchange = "SMART"
+		}
+	}
 	params := rpc.OrderPreviewParams{
-		Action: strings.ToUpper(strings.TrimSpace(rest[0])),
-		Contract: rpc.ContractParams{
-			Symbol:      strings.ToUpper(strings.TrimSpace(rest[1])),
-			SecType:     "STK",
-			Market:      strings.TrimSpace(*market),
-			Exchange:    strings.ToUpper(strings.TrimSpace(*exchange)),
-			PrimaryExch: strings.ToUpper(strings.TrimSpace(*primary)),
-			Currency:    strings.ToUpper(strings.TrimSpace(*currency)),
-		},
+		Action:     strings.ToUpper(strings.TrimSpace(rest[0])),
+		Contract:   contract,
 		Quantity:   qty,
-		OrderType:  rpc.OrderTypeLMT,
+		OrderType:  orderType,
 		LimitPrice: limitPtr,
+		Trail:      trail,
 		Strategy:   strings.TrimSpace(*strategy),
 		TIF:        strings.ToUpper(strings.TrimSpace(*tif)),
 		OutsideRTH: *outsideRTH,
@@ -115,6 +186,33 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	}
 	renderOrderPreviewText(env, &res)
 	return 0
+}
+
+func previewCLIOrderType(raw string, hasTrail, hasLimitOffset bool) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(raw))
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		if hasLimitOffset {
+			return rpc.OrderTypeTRAILLIMIT, nil
+		}
+		if hasTrail {
+			return rpc.OrderTypeTRAIL, nil
+		}
+		return rpc.OrderTypeLMT, nil
+	}
+	switch normalized {
+	case rpc.OrderTypeLMT:
+		if hasTrail || hasLimitOffset {
+			return "", fmt.Errorf("LMT order type cannot include trail fields")
+		}
+		return normalized, nil
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("order type must be LMT, TRAIL, or TRAIL-LIMIT")
+	}
 }
 
 func runOrderPlace(ctx context.Context, env *Env, args []string) int {
@@ -192,8 +290,7 @@ func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 	statusRow(env, out, "Mode", res.Mode)
 	statusRow(env, out, "Account", res.Account)
 	statusRow(env, out, "Endpoint", fmt.Sprintf("%s client %d", res.Endpoint, res.ClientID))
-	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s outside_rth=%v",
-		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF, res.Draft.OutsideRTH))
+	statusRow(env, out, "Draft", formatOrderDraftSummary(res.Draft))
 	statusRow(env, out, "Strategy", res.Draft.Strategy)
 	statusRow(env, out, "Notional", fmt.Sprintf("%.2f", res.Notional))
 	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", res.Position.Before, res.Position.After, res.Position.Effect))
@@ -222,6 +319,38 @@ func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 	fmt.Fprintln(out)
 }
 
+func formatOrderDraftSummary(draft rpc.OrderDraft) string {
+	price := fmt.Sprintf("%.4f", draft.LimitPrice)
+	if draft.Trail != nil {
+		price = formatOrderTrail(draft.Trail)
+	}
+	return fmt.Sprintf("%s %d %s %s %s %s outside_rth=%v",
+		draft.Action, draft.Quantity, draft.Contract.Symbol, draft.OrderType, price, draft.TIF, draft.OutsideRTH)
+}
+
+func formatOrderTrail(trail *rpc.OrderTrailSpec) string {
+	if trail == nil {
+		return "--"
+	}
+	parts := make([]string, 0, 4)
+	if trail.TrailingPercent != nil {
+		parts = append(parts, fmt.Sprintf("trail %.4g%%", *trail.TrailingPercent))
+	}
+	if trail.TrailingAmount != nil {
+		parts = append(parts, fmt.Sprintf("trail %.4f", *trail.TrailingAmount))
+	}
+	if trail.InitialStopPrice > 0 {
+		parts = append(parts, fmt.Sprintf("stop %.4f", trail.InitialStopPrice))
+	}
+	if trail.LimitOffset != nil {
+		parts = append(parts, fmt.Sprintf("limit_offset %.4f", *trail.LimitOffset))
+	}
+	if len(parts) == 0 {
+		return "trail --"
+	}
+	return strings.Join(parts, " ")
+}
+
 func renderOrderPlaceText(env *Env, res *rpc.OrderPlaceResult) {
 	out := env.Stdout
 	fmt.Fprintln(out)
@@ -229,8 +358,7 @@ func renderOrderPlaceText(env *Env, res *rpc.OrderPlaceResult) {
 	statusRow(env, out, "Mode", res.Mode)
 	statusRow(env, out, "Account", res.Account)
 	statusRow(env, out, "Order", fmt.Sprintf("%s broker_id=%d", res.OrderRef, res.ReservedOrderID))
-	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s",
-		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF))
+	statusRow(env, out, "Draft", formatOrderDraftSummary(res.Draft))
 	statusRow(env, out, "State", nonEmpty(res.LifecycleStatus, res.SendState))
 	if res.Message != "" {
 		statusRow(env, out, "Message", res.Message)
@@ -243,8 +371,7 @@ func renderOrderModifyText(env *Env, res *rpc.OrderModifyResult) {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "IBKR Order Modify  %s\n", env.statusBadge(statusConcern{Text: "SENT", Level: statusConcernNotice}))
 	statusRow(env, out, "Order", fmt.Sprintf("%s broker_id=%d", res.OrderRef, res.ReservedOrderID))
-	statusRow(env, out, "Draft", fmt.Sprintf("%s %d %s %s %.4f %s",
-		res.Draft.Action, res.Draft.Quantity, res.Draft.Contract.Symbol, res.Draft.OrderType, res.Draft.LimitPrice, res.Draft.TIF))
+	statusRow(env, out, "Draft", formatOrderDraftSummary(res.Draft))
 	statusRow(env, out, "State", nonEmpty(res.LifecycleStatus, res.SendState))
 	if res.Message != "" {
 		statusRow(env, out, "Message", res.Message)
@@ -280,6 +407,18 @@ func formatOrderPreviewQuote(q rpc.OrderQuoteSnapshot) string {
 	}
 	if q.QuoteQuality != "" {
 		parts = append(parts, "quality "+q.QuoteQuality)
+	}
+	if q.Stale {
+		parts = append(parts, "stale")
+		if q.StaleReason != "" {
+			parts = append(parts, q.StaleReason)
+		}
+	}
+	if q.PriceAsOf != "" {
+		parts = append(parts, q.PriceAsOf)
+	}
+	if q.SessionContext != nil && !q.SessionContext.IsOpen {
+		parts = append(parts, "session "+nonEmpty(q.SessionContext.State, "closed"))
 	}
 	return strings.Join(parts, " | ")
 }

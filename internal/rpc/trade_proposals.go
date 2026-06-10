@@ -23,6 +23,7 @@ const (
 
 	TradeProposalBucketThetaHygiene  = "theta_hygiene"
 	TradeProposalBucketRiskReduction = "risk_reduction"
+	TradeProposalBucketTrailingStop  = "trailing_stop"
 
 	TradeProposalStateGenerated = "generated"
 	TradeProposalStateBlocked   = "blocked"
@@ -91,6 +92,7 @@ type TradeProposalCounts struct {
 	Actionable                  int     `json:"actionable"`
 	ThetaHygiene                int     `json:"theta_hygiene"`
 	RiskReduction               int     `json:"risk_reduction"`
+	TrailingStop                int     `json:"trailing_stop"`
 	MarketFlags                 int     `json:"market_flags,omitempty"`
 	ThetaPerDay                 float64 `json:"theta_per_day,omitempty"`
 	RiskReductionExcessNotional float64 `json:"risk_reduction_excess_notional,omitempty"`
@@ -111,6 +113,7 @@ type TradeProposal struct {
 	PositionQuantity   float64                         `json:"position_quantity"`
 	PositionEffect     string                          `json:"position_effect"`
 	OrderType          string                          `json:"order_type"`
+	Trail              *OrderTrailSpec                 `json:"trail,omitempty"`
 	TIF                string                          `json:"tif"`
 	OutsideRTH         bool                            `json:"outside_rth"`
 	Contract           ContractParams                  `json:"contract"`
@@ -145,6 +148,7 @@ type TradeProposalPreviewParams struct {
 	Revision  string `json:"revision"`
 	Quantity  int    `json:"quantity,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	FastPath  bool   `json:"fast_path,omitempty"`
 }
 
 type TradeProposalPreviewResult struct {

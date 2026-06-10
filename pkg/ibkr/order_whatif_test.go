@@ -318,6 +318,79 @@ func TestEncodePlaceOrderProtoSupportsOptionClose(t *testing.T) {
 	}
 }
 
+func TestEncodePlaceOrderProtoSupportsBrokerTrailLimit(t *testing.T) {
+	order := &IBKROrder{
+		OrderID:         89,
+		ClientID:        31,
+		Symbol:          "SPY",
+		SecType:         "STK",
+		Exchange:        "SMART",
+		Currency:        "USD",
+		Action:          "SELL",
+		TotalQty:        10,
+		OrderType:       "TRAIL LIMIT",
+		TIF:             "DAY",
+		Account:         "DU123456",
+		OrderRef:        "trail-test",
+		Transmit:        true,
+		TrailingPercent: 2,
+		TrailStopPrice:  98,
+		LmtPriceOffset:  0.05,
+	}
+	payload, err := encodePlaceOrderProtoFrame(order)
+	if err != nil {
+		t.Fatalf("encodePlaceOrderProtoFrame trail limit: %v", err)
+	}
+	summary, err := parsePlaceOrderProtoSummary(payload[4:])
+	if err != nil {
+		t.Fatalf("parse trail protobuf summary: %v", err)
+	}
+	if summary.orderType != "TRAIL LIMIT" || summary.lmtPrice != 0 || summary.trailingPercent != 2 || summary.trailStopPrice != 98 || summary.lmtPriceOffset != 0.05 {
+		t.Fatalf("trail limit summary = %+v, want percent/stop/offset and no limit price", summary)
+	}
+	fields := summarizePlaceOrderProtoFrame(payload)
+	for _, want := range []string{"orderType=TRAIL LIMIT", "trailingPercent=2", "trailStopPrice=98", "lmtPriceOffset=0.05"} {
+		if summaryFieldValue(fields, strings.Split(want, "=")[0]+"=") != strings.TrimPrefix(want, strings.Split(want, "=")[0]+"=") {
+			t.Fatalf("protobuf log fields = %#v, missing %s", fields, want)
+		}
+	}
+}
+
+func TestValidateOrderRejectsInvalidBrokerTrailCombinations(t *testing.T) {
+	base := IBKROrder{
+		Symbol:         "SPY",
+		SecType:        "STK",
+		Exchange:       "SMART",
+		Currency:       "USD",
+		Action:         "SELL",
+		TotalQty:       10,
+		OrderType:      "TRAIL",
+		TIF:            "DAY",
+		TrailStopPrice: 98,
+	}
+	if err := ValidateOrder(&IBKROrder{Symbol: base.Symbol, SecType: base.SecType, Exchange: base.Exchange, Currency: base.Currency, Action: base.Action, TotalQty: base.TotalQty, OrderType: base.OrderType, TIF: base.TIF, TrailStopPrice: base.TrailStopPrice, TrailingPercent: 2}); err != nil {
+		t.Fatalf("valid TRAIL percent rejected: %v", err)
+	}
+	both := base
+	both.AuxPrice = 2
+	both.TrailingPercent = 2
+	if err := ValidateOrder(&both); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("TRAIL with amount+percent err=%v, want exactly one", err)
+	}
+	limitOffsetOnTrail := base
+	limitOffsetOnTrail.TrailingPercent = 2
+	limitOffsetOnTrail.LmtPriceOffset = 0.05
+	if err := ValidateOrder(&limitOffsetOnTrail); err == nil || !strings.Contains(err.Error(), "limit price offset") {
+		t.Fatalf("TRAIL with limit offset err=%v, want limit price offset rejection", err)
+	}
+	trailLimitMissingOffset := base
+	trailLimitMissingOffset.OrderType = "TRAIL LIMIT"
+	trailLimitMissingOffset.TrailingPercent = 2
+	if err := ValidateOrder(&trailLimitMissingOffset); err == nil || !strings.Contains(err.Error(), "offset") {
+		t.Fatalf("TRAIL LIMIT missing offset err=%v, want offset rejection", err)
+	}
+}
+
 func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	defer conn.rateLimiter.Stop()

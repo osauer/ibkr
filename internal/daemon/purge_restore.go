@@ -359,7 +359,7 @@ func (s *Server) addPurgeRestoreLeg(ctx context.Context, res *rpc.PurgeRestoreRe
 		OrderRef:   purgeRestoreOrderRef(s.orderNow()),
 		OpenClose:  orderOpenCloseForEffect(position.Effect),
 	}
-	whatIf, err := s.fetchPreviewWhatIf(ctx, status, draft)
+	whatIf, err := s.fetchPreviewWhatIf(ctx, status, draft, timeout)
 	if err != nil {
 		addPurgeRestoreError(res, leg, "what-if: "+err.Error())
 		return

@@ -380,6 +380,21 @@ func (c *Connector) AccountID() string {
 	return conn.GetAccountCode()
 }
 
+// SeedAccountIDForTest installs the managed-account code returned by AccountID.
+// Test-only — production code must learn this from the IBKR managedAccounts or
+// accountSummary frames.
+func (c *Connector) SeedAccountIDForTest(account string) {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return
+	}
+	conn.accountMu.Lock()
+	conn.account = account
+	conn.accountMu.Unlock()
+}
+
 // SeedPositionDailyPnLForTest installs a cache entry for the named
 // conId without going through the wire. Test-only — production code
 // must go through SubscribePositionDailyPnL so the gateway emits real

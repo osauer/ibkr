@@ -82,7 +82,12 @@ func encodePlaceOrderOrderProto(order *IBKROrder) ([]byte, error) {
 	msg = protoAppendString(msg, 6, strconv.Itoa(order.TotalQty))
 	msg = protoAppendInt32(msg, 7, int32(order.DisplaySize))
 	msg = protoAppendString(msg, 8, strings.ToUpper(order.OrderType))
-	msg = protoAppendDouble(msg, 9, order.LmtPrice)
+	if order.LmtPrice != 0 {
+		msg = protoAppendDouble(msg, 9, order.LmtPrice)
+	}
+	if order.AuxPrice != 0 {
+		msg = protoAppendDouble(msg, 10, order.AuxPrice)
+	}
 	msg = protoAppendString(msg, 11, strings.ToUpper(order.TIF))
 	msg = protoAppendString(msg, 12, order.Account)
 	if order.OutsideRth {
@@ -91,6 +96,12 @@ func encodePlaceOrderOrderProto(order *IBKROrder) ([]byte, error) {
 	msg = protoAppendString(msg, 28, order.OrderRef)
 	msg = protoAppendInt32(msg, 30, int32(order.OcaType))
 	msg = protoAppendInt32(msg, 31, int32(order.TriggerMethod))
+	if order.TrailingPercent != 0 {
+		msg = protoAppendDouble(msg, 22, order.TrailingPercent)
+	}
+	if order.TrailStopPrice != 0 {
+		msg = protoAppendDouble(msg, 23, order.TrailStopPrice)
+	}
 	msg = protoAppendInt32(msg, 43, int32(order.DeltaNeutralConID))
 	msg = protoAppendInt32(msg, 46, int32(order.DeltaNeutralShortSaleSlot))
 	if order.WhatIf {
@@ -107,6 +118,9 @@ func encodePlaceOrderOrderProto(order *IBKROrder) ([]byte, error) {
 	msg = protoAppendInt32(msg, 88, 0)
 	msg = protoAppendDouble(msg, 89, 0)
 	msg = protoAppendDouble(msg, 91, 0)
+	if order.LmtPriceOffset != 0 {
+		msg = protoAppendDouble(msg, 99, order.LmtPriceOffset)
+	}
 	msg = protoAppendInt32(msg, 98, 0)
 	msg = protoAppendMessage(msg, 105, nil)
 	return msg, nil
@@ -134,14 +148,15 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	if secType != "STK" && secType != "ETF" && secType != "OPT" {
 		return unsupportedPlaceOrderProtoValue("secType", order.SecType, "STK/ETF/OPT only")
 	}
-	if strings.ToUpper(order.OrderType) != "LMT" {
-		return unsupportedPlaceOrderProtoValue("orderType", order.OrderType, "LMT only")
+	orderType := strings.ToUpper(strings.TrimSpace(order.OrderType))
+	if orderType != "LMT" && orderType != "TRAIL" && orderType != "TRAIL LIMIT" {
+		return unsupportedPlaceOrderProtoValue("orderType", order.OrderType, "LMT/TRAIL/TRAIL LIMIT only")
 	}
 	if strings.ToUpper(order.TIF) != "DAY" {
 		return unsupportedPlaceOrderProtoValue("tif", order.TIF, "DAY only")
 	}
-	if order.LmtPrice <= 0 {
-		return fmt.Errorf("protobuf placeOrder requires positive lmtPrice")
+	if err := validateProtoOrderTypePrices(orderType, order); err != nil {
+		return err
 	}
 	if secType == "OPT" {
 		if strings.TrimSpace(order.Expiry) == "" {
@@ -247,7 +262,6 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 		name  string
 		value float64
 	}{
-		{"auxPrice", order.AuxPrice},
 		{"discretionaryAmt", order.DiscretionaryAmt},
 		{"percentOffset", order.PercentOffset},
 		{"nbboPriceCap", order.NbboPriceCap},
@@ -258,8 +272,6 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 		{"stockRangeUpper", order.StockRangeUpper},
 		{"volatility", order.Volatility},
 		{"deltaNeutralAuxPrice", order.DeltaNeutralAuxPrice},
-		{"trailStopPrice", order.TrailStopPrice},
-		{"trailingPercent", order.TrailingPercent},
 		{"basisPoints", order.BasisPoints},
 		{"scalePriceIncrement", order.ScalePriceIncrement},
 		{"scalePriceAdjustValue", order.ScalePriceAdjustValue},
@@ -292,6 +304,47 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 		}
 	}
 
+	return nil
+}
+
+func validateProtoOrderTypePrices(orderType string, order *IBKROrder) error {
+	hasAmount := order.AuxPrice > 0
+	hasPercent := order.TrailingPercent > 0
+	switch orderType {
+	case "LMT":
+		if order.LmtPrice <= 0 {
+			return fmt.Errorf("protobuf placeOrder requires positive lmtPrice")
+		}
+		if order.AuxPrice != 0 || order.TrailStopPrice != 0 || order.TrailingPercent != 0 || order.LmtPriceOffset != 0 {
+			return fmt.Errorf("protobuf placeOrder LMT does not support populated trail/auxiliary price fields")
+		}
+	case "TRAIL":
+		if order.LmtPrice != 0 {
+			return unsupportedPlaceOrderProtoField("lmtPrice")
+		}
+		if order.TrailStopPrice <= 0 {
+			return fmt.Errorf("protobuf placeOrder TRAIL requires positive trailStopPrice")
+		}
+		if hasAmount == hasPercent {
+			return fmt.Errorf("protobuf placeOrder TRAIL requires exactly one of auxPrice or trailingPercent")
+		}
+		if order.LmtPriceOffset != 0 {
+			return unsupportedPlaceOrderProtoField("lmtPriceOffset")
+		}
+	case "TRAIL LIMIT":
+		if order.LmtPrice != 0 {
+			return fmt.Errorf("protobuf placeOrder TRAIL LIMIT must use lmtPriceOffset, not lmtPrice")
+		}
+		if order.TrailStopPrice <= 0 {
+			return fmt.Errorf("protobuf placeOrder TRAIL LIMIT requires positive trailStopPrice")
+		}
+		if hasAmount == hasPercent {
+			return fmt.Errorf("protobuf placeOrder TRAIL LIMIT requires exactly one of auxPrice or trailingPercent")
+		}
+		if order.LmtPriceOffset <= 0 {
+			return fmt.Errorf("protobuf placeOrder TRAIL LIMIT requires positive lmtPriceOffset")
+		}
+	}
 	return nil
 }
 
@@ -390,6 +443,10 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 		"qty="+summary.quantity,
 		"orderType="+summary.orderType,
 		"lmtPrice="+formatProtoSummaryFloat(summary.lmtPrice),
+		"auxPrice="+formatProtoSummaryFloat(summary.auxPrice),
+		"trailingPercent="+formatProtoSummaryFloat(summary.trailingPercent),
+		"trailStopPrice="+formatProtoSummaryFloat(summary.trailStopPrice),
+		"lmtPriceOffset="+formatProtoSummaryFloat(summary.lmtPriceOffset),
 		"tif="+summary.tif,
 		"account="+summary.account,
 		"orderRef="+summary.orderRef,
@@ -402,26 +459,30 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 }
 
 type placeOrderProtoSummary struct {
-	orderID    int
-	conID      int
-	symbol     string
-	secType    string
-	expiry     string
-	strike     float64
-	right      string
-	multiplier string
-	clientID   int
-	action     string
-	quantity   string
-	orderType  string
-	lmtPrice   float64
-	tif        string
-	account    string
-	orderRef   string
-	outsideRth bool
-	whatIf     bool
-	transmit   bool
-	openClose  string
+	orderID         int
+	conID           int
+	symbol          string
+	secType         string
+	expiry          string
+	strike          float64
+	right           string
+	multiplier      string
+	clientID        int
+	action          string
+	quantity        string
+	orderType       string
+	lmtPrice        float64
+	auxPrice        float64
+	trailingPercent float64
+	trailStopPrice  float64
+	lmtPriceOffset  float64
+	tif             string
+	account         string
+	orderRef        string
+	outsideRth      bool
+	whatIf          bool
+	transmit        bool
+	openClose       string
 }
 
 func parsePlaceOrderProtoSummary(body []byte) (placeOrderProtoSummary, error) {
@@ -495,6 +556,12 @@ func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error 
 				return err
 			}
 			summary.lmtPrice = math.Float64frombits(v)
+		case 10:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.auxPrice = math.Float64frombits(v)
 		case 11:
 			summary.tif = string(value)
 		case 12:
@@ -507,6 +574,18 @@ func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error 
 			summary.outsideRth = v != 0
 		case 28:
 			summary.orderRef = string(value)
+		case 22:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.trailingPercent = math.Float64frombits(v)
+		case 23:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.trailStopPrice = math.Float64frombits(v)
 		case 65:
 			v, err := protoVarintValue(fieldNumber, wireType, value)
 			if err != nil {
@@ -521,6 +600,12 @@ func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error 
 			summary.transmit = v != 0
 		case 68:
 			summary.openClose = string(value)
+		case 99:
+			v, err := protoFixed64Value(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.lmtPriceOffset = math.Float64frombits(v)
 		}
 		return nil
 	})
