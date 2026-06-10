@@ -93,7 +93,7 @@
             "name": "Does ibkr expose trading or order-entry tools?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. The bundled MCP server exposes account and market-data tools, but it has no place, modify, or cancel order tools."
+              "text": "Not in the standard downloads. The MCP bundle and the plain ibkr tarballs are read-only builds with no place, modify, or cancel order tools compiled in. Each release also publishes a clearly marked ibkr-trading tarball for users who explicitly opt into order management; it ships with warnings and layered safeguards and is never installed by default."
             }
           }
         ]
@@ -841,7 +841,7 @@ ibkr setup claude-desktop</code></pre>
         </article>
         <article class="card">
           <h3>Does it expose trading tools?</h3>
-          <p>No. The bundled MCP server exposes account and market-data tools, but no place, modify, or cancel order tools.</p>
+          <p>Not in the standard downloads: the MCP bundle and the plain <code>ibkr</code> tarballs are read-only builds with no place, modify, or cancel order tools compiled in. Each release also publishes a clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management — it ships with warnings and layered safeguards.</p>
         </article>
       </div>
     </section>
