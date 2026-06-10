@@ -108,7 +108,7 @@
             "name": "Can this MCP server place Interactive Brokers orders?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. The bundled CLI and MCP server expose account and market data, but they do not expose order placement, order modification, or order cancellation tools."
+              "text": "Not in the standard downloads. The installer, the Claude Desktop bundle, and the plain ibkr tarballs are read-only builds with no order placement, modification, or cancellation tools compiled in. Each release also publishes a clearly marked ibkr-trading tarball for users who explicitly opt into order management; it ships with warnings and layered safeguards and is never installed by default."
             }
           },
           {
@@ -875,7 +875,7 @@ ibkr setup claude-desktop
         </article>
         <article class="feature">
           <h3>Can it place orders?</h3>
-          <p>No. The bundled CLI and MCP server expose account and market data, but no place, modify, or cancel order tools.</p>
+          <p>Not in the standard downloads: the installer, the Claude Desktop bundle, and the plain <code>ibkr</code> tarballs are read-only builds with no place, modify, or cancel tools compiled in. Each release also publishes a clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management — it ships with warnings and layered safeguards.</p>
         </article>
         <article class="feature">
           <h3>Does it use TWS or IB Gateway?</h3>

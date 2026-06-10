@@ -210,7 +210,7 @@ ibkr status</code></pre>
   }
 }</code></pre>
 <h2 id="controlled-execution-boundary">Controlled execution boundary</h2>
-<p>The bundled CLI and MCP server do not expose order placement, order modification, or order cancellation. The sizing tool performs math against net liquidation value; it does not submit an order ticket.</p>
+<p>The standard downloads do not expose order placement, order modification, or order cancellation — those tools are not compiled into the installer, the Claude Desktop bundle, or the plain <code>ibkr</code> tarballs. The sizing tool performs math against net liquidation value; it does not submit an order ticket. A separately published <code>ibkr-trading</code> build exists for explicit opt-in order management.</p>
 <h2 id="references">References</h2>
 <ul>
 <li><a href="../guides/agentic-use.html">Agentic use guide</a> for natural-language examples.</li>
