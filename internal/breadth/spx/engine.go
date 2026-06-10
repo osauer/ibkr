@@ -41,11 +41,22 @@ type Options struct {
 	// during the same-session retry path.
 	WarmLookbackDays int
 	// Members lets the caller seed the engine with a non-embedded
-	// constituent list — typically loaded from
-	// `~/.cache/ibkr/spx-members/sp500-members.json` by the daemon's
-	// startup path. nil/empty falls back to MemberList()'s embedded
-	// list, preserving every existing caller.
+	// constituent list. nil/empty falls back to MembersFn when set,
+	// else to MemberList()'s embedded list, preserving every existing
+	// caller.
 	Members []string
+	// MembersFn defers constituent-list resolution to first actual
+	// use. When Members is empty and MembersFn is non-nil, the engine
+	// calls it exactly once — behind a sync.Once, from the first
+	// operation that touches the list (Refresh, Members, SetMembers) —
+	// instead of resolving at construction. The daemon uses this to
+	// keep the members-cache disk read and its INFO log line out of
+	// daemon.New, which runs before Server.Start acquires the
+	// single-instance lock: autospawn race losers build a full Server
+	// but never serve a call, so a deferred load keeps them off the
+	// cache file and out of the shared log. An empty return falls back
+	// to MemberList()'s embedded list. Ignored when Members is set.
+	MembersFn func() []string
 }
 
 // Engine is the breadth-spx state machine: it loads the on-disk
@@ -84,6 +95,13 @@ type Engine struct {
 	windows  map[string]ConstituentWindow
 	history  []HistoryPoint
 	members  []string
+	// membersFn / membersOnce implement the deferred resolution
+	// documented on Options.MembersFn. membersFn is set once at
+	// construction and never modified after; membersOnce gates its
+	// single invocation (see ensureMembers). nil membersFn means the
+	// list was resolved eagerly and e.members is already final.
+	membersFn   func() []string
+	membersOnce sync.Once
 	// lastCoverage / lastMemberCount record the result of the most
 	// recent finalise(). The scheduler reads these to decide whether
 	// to retry sooner than the daily tick when coverage is below
@@ -111,8 +129,10 @@ type Engine struct {
 
 // New constructs an Engine. Loads any persisted state from store
 // (best effort — a corrupted or missing cache results in a cold
-// start, not an error). Members come from the checked-in list in
-// members_data.go; the engine never re-reads members at runtime.
+// start, not an error). Members come from Options: an explicit
+// Members list, a deferred MembersFn resolver, or the checked-in
+// embedded list in members_data.go as the fallback. Runtime updates
+// arrive only via SetMembers (the daemon's members refresher).
 func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 	if store == nil {
 		panic("spx.New: store is required")
@@ -121,7 +141,10 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 		panic("spx.New: fetcher is required")
 	}
 	members := opts.Members
-	if len(members) == 0 {
+	membersFn := opts.MembersFn
+	if len(members) > 0 {
+		membersFn = nil // explicit list wins; nothing left to defer
+	} else if membersFn == nil {
 		members, _ = MemberList()
 	}
 	members = slices.Clone(members)
@@ -135,6 +158,7 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 		warmLookback: opts.WarmLookbackDays,
 		windows:      map[string]ConstituentWindow{},
 		members:      members,
+		membersFn:    membersFn,
 	}
 	if e.clock == nil {
 		e.clock = time.Now
@@ -269,6 +293,7 @@ func (e *Engine) MarkPendingBootstrap() {
 // (some names succeeded, some didn't) do NOT return an error — they
 // surface as Excluded entries in the resulting Snapshot.
 func (e *Engine) Refresh(ctx context.Context) error {
+	e.ensureMembers()
 	e.refreshMu.Lock()
 	defer e.refreshMu.Unlock()
 
@@ -533,12 +558,36 @@ func (e *Engine) warnf(format string, args ...any) {
 	}
 }
 
+// ensureMembers runs the deferred Options.MembersFn resolution. Every
+// operation that touches the constituent list (Refresh, Members,
+// SetMembers) invokes it before taking e.mu; the read-only paths
+// (Get, Status, IsBusy, History) never need the list, so they stay
+// gate-free and a daemon that only polls state never pays the load.
+// No-op when the list was resolved eagerly at construction. Must not
+// be called with e.mu held — the resolved list is installed under the
+// lock here.
+func (e *Engine) ensureMembers() {
+	if e.membersFn == nil {
+		return
+	}
+	e.membersOnce.Do(func() {
+		members := e.membersFn()
+		if len(members) == 0 {
+			members, _ = MemberList()
+		}
+		e.mu.Lock()
+		e.members = slices.Clone(members)
+		e.mu.Unlock()
+	})
+}
+
 // Members returns the constituent list the engine is currently using.
 // Defensive copy: callers cannot mutate engine state by editing the
 // returned slice. Used by the daemon's status renderer to surface
 // member count, and by the runtime refresher to compare its newly
 // fetched list against the in-process snapshot before swapping.
 func (e *Engine) Members() []string {
+	e.ensureMembers()
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return slices.Clone(e.members)
@@ -567,6 +616,10 @@ func (e *Engine) Members() []string {
 // A follow-up can add per-symbol inclusion dates and the strict
 // "exclude for 50d regardless of bar count" semantics.
 func (e *Engine) SetMembers(members []string) bool {
+	// Resolve the deferred list first so a refresher push can't be
+	// clobbered by a later lazy load — once the Once has fired, the
+	// swap below is the newest write and stays final.
+	e.ensureMembers()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if slices.Equal(e.members, members) {

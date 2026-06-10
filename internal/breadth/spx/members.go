@@ -42,7 +42,8 @@ func MembersDefaultPath() (string, error) {
 // the cached file at `~/.cache/ibkr/spx-members/sp500-members.json`.
 // Callers that want runtime-current membership should:
 //   - try LoadExternal first, fall back to MemberList on miss (this
-//     is what server.go's startup wiring does, see installBreadth), or
+//     is what the daemon's deferred members resolver does, see
+//     server.go's resolveBreadthMembers), or
 //   - read the live engine via engine.Members() (which the runtime
 //     refresher updates via engine.SetMembers as reconstitutions land).
 //
