@@ -15,6 +15,11 @@ Use read-only subagents for exploration/review, then keep implementation
 writes in the main session unless the user explicitly asks for parallel
 implementation.
 
+Trading safety: paper-account broker writes are open to agents; live writes
+are hard-blocked daemon-side by origin checks, and the trading freeze switch
+(`ibkr settings set trading.freeze=true`) is human-only. Never weaken these
+guardrails in code, config, or hooks without an explicit human go.
+
 Public marketing/site pages for `osauer.dev/ibkr` are deployed from this
 product repo's GitHub Pages config, currently `main:/docs` with
 `html_url=https://osauer.dev/ibkr/`. Before editing or pushing public site copy,
@@ -41,12 +46,12 @@ session so broker-adjacent guardrails actually run.
 ## Done means
 `make check && make smoke` pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.
 
-`make check` is static (gofmt, vet, staticcheck, govulncheck, modernize, parity). `make smoke` runs the binary against a live TWS gateway and skips cleanly if no gateway is reachable; if you touched daemon or CLI code paths, ensure TWS is up and watch it bind.
+`make check` is the static gate — no gateway needed; it bundles the format/vet/lint/vuln/docs/changelog/account-data checks. The Makefile (`make help`) is the canonical list, not this file. `make smoke` runs the binary against a live TWS gateway and skips cleanly if no gateway is reachable; if you touched daemon or CLI code paths, ensure TWS is up and watch it bind.
 
 After editing daemon/CLI code, restart the installed daemon through the CLI: `make install && ibkr restart --timeout 15s`, then run `ibkr status` plus a command exercising your change. Do not use `pkill` for normal restarts; reserve it only for a broken/stuck daemon when `ibkr restart` cannot stop it. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
 
 ## Releases
-`make release RELEASE_VERSION=vX.Y.Z`. It orchestrates refresh-spx-members → check/test → build → release-smoke (strict: TWS required) → tag → release-binaries → push → plugin-tag → release-publish. `release-smoke` runs the actual version-stamped binary against a live TWS gateway and checks both JSON contracts and wire-level invariants — a release without TWS is a failed release. Never tag, push, or `gh release create` directly. If `make release` fails, fix the root cause.
+`make release RELEASE_VERSION=vX.Y.Z`. Fail-fast preconditions: clean tree, HEAD == origin/main, unused tag, `.claude-plugin/plugin.json` version matches, changelog-lint, release-site-check (non-patch). Then it orchestrates refresh-spx-members → test → build → release-smoke (strict: TWS required) → paper smoke (`scripts/release-paper-smoke.sh`, binding: 1-share paper round-trip; no paper login aborts the release) → tag → release-binaries → push → plugin-tag → release-publish → registry-publish. `release-smoke` runs the actual version-stamped binary against a live TWS gateway and checks both JSON contracts and wire-level invariants — a release without TWS is a failed release. Never tag, push, or `gh release create` directly. If `make release` fails, fix the root cause. After it succeeds, verify artifacts landed (`gh release view`, `git ls-remote --tags origin`, registry check) — registry-publish can strand silently.
 
 ## Canary app browser preview
 When the user asks to open or show the canary/mobile app in the Codex browser side panel, use the Browser plugin/in-app Browser and make it visible. Do not use macOS `open`.
