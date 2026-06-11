@@ -603,24 +603,37 @@ func (c *Connector) clearInactiveCandidate(symbol string) {
 	c.inactiveMu.Unlock()
 }
 
+// inactiveConfirmations and inactiveCandidateWindow gate the in-memory
+// inactive mark: a definition error must repeat within the window before a
+// key is suppressed. A single code-200/162 is routinely transient (gateway
+// hiccup, contract-cache race) — observed 2026-06-11 on the currency-ledger
+// FX repair path, where one transient 200 suppressed an IDEALPRO route for
+// the connector's lifetime. Inactive means delisted/unknown contract
+// (docs/architecture.md), and steady pollers re-request every cycle, so a
+// genuinely dead name confirms within a couple of poll intervals.
+const (
+	inactiveConfirmations   = 2
+	inactiveCandidateWindow = 10 * time.Minute
+)
+
 func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	if symbol == "" {
 		return false
 	}
 	symbol = strings.ToUpper(symbol)
 
-	forceInactive := false
 	upperReason := strings.ToUpper(reason)
-	if c.hasActiveContract(symbol) {
-		if strings.Contains(upperReason, "NO SECURITY DEFINITION") || strings.Contains(upperReason, "NO DATA") {
-			forceInactive = true
-		} else {
-			c.clearInactiveCandidate(symbol)
-			return false
-		}
+	definitionDead := strings.Contains(upperReason, "NO SECURITY DEFINITION") || strings.Contains(upperReason, "NO DATA")
+	// An actively cached contract vetoes non-definition reasons outright.
+	// Definition-grade errors still count toward the confirmation
+	// threshold below — they no longer mark on first sight.
+	if c.hasActiveContract(symbol) && !definitionDead {
+		c.clearInactiveCandidate(symbol)
+		return false
 	}
 
 	reason = strings.TrimSpace(reason)
+	now := time.Now()
 	c.inactiveMu.Lock()
 	if c.inactiveSymbols != nil {
 		if _, exists := c.inactiveSymbols[symbol]; exists {
@@ -632,14 +645,18 @@ func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 		c.inactiveCandidates = make(map[string]inactiveCandidateState)
 	}
 	state := c.inactiveCandidates[symbol]
+	if !state.lastUpdated.IsZero() && now.Sub(state.lastUpdated) > inactiveCandidateWindow {
+		// Occurrences far apart are independent transients, not a
+		// confirmation.
+		state = inactiveCandidateState{}
+	}
 	state.count++
 	state.lastReason = reason
-	state.lastUpdated = time.Now()
-	shouldMark := forceInactive || state.count >= 1
+	state.lastUpdated = now
+	shouldMark := state.count >= inactiveConfirmations
 	if shouldMark {
 		delete(c.inactiveCandidates, symbol)
-	}
-	if !shouldMark {
+	} else {
 		c.inactiveCandidates[symbol] = state
 	}
 	c.inactiveMu.Unlock()
@@ -700,35 +717,33 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 	// frames, so handleIBKRError/handleErrorMessage never see them
 	// (observed 2026-06-11: 779 system notices, zero msgErrMsg errors).
 	c.recoverFromSystemNotice(alias, note)
-	symbol := strings.ToUpper(strings.TrimSpace(alias.symbol))
-	inactiveKey := inactiveKeyForAlias(alias)
-	if inactiveKey == "" {
-		return
-	}
-	if symbol == "" {
-		symbol = inactiveKey
-	}
-
-	secType := strings.ToUpper(strings.TrimSpace(alias.secType))
-	isDerivative := secType == "OPT" || secType == "FOP" || secType == "WAR" || secType == "BAG"
 
 	upperMsg := strings.ToUpper(note.message)
+	definitionDead := false
 	switch note.code {
 	case 200:
-		if strings.Contains(upperMsg, "NO SECURITY DEFINITION") {
-			if isDerivative {
-				c.logDebug("Ignoring system notice code %d for derivative request %s (%s): %s", note.code, symbol, alias.localSymbol, note.message)
-				return
-			}
-			c.registerInactiveCandidate(inactiveKey, note.message)
-		}
+		definitionDead = strings.Contains(upperMsg, "NO SECURITY DEFINITION")
 	case 162:
-		if strings.Contains(upperMsg, "NO DATA") {
-			c.registerInactiveCandidate(inactiveKey, note.message)
-		}
+		definitionDead = strings.Contains(upperMsg, "NO DATA")
 	case 366:
-		c.registerInactiveCandidate(inactiveKey, note.message)
+		definitionDead = true
 	}
+	if !definitionDead {
+		return
+	}
+	// Record the inactive candidate under the connector's own subscription
+	// key — exactly what SubscribeMarketData / SubscribeMarketDataWithContract
+	// check before re-requesting. The former alias-derived route key embedded
+	// gateway-hydrated localSymbol/tradingClass/primaryExch fields that no
+	// check-time key contains, so marks never suppressed anything (observed
+	// 2026-06-11: HGENQ re-marked every reconnect under
+	// HGENQ|STK|SMART|DOLLR4LOT|USD|HGENQ|HGENQ).
+	key := c.subscriptionKeyForNotice(int(note.tickerID), alias)
+	if key == "" {
+		c.logDebug("Ignoring definition error code %d for unowned or derivative request %s (%s): %s", note.code, alias.symbol, alias.localSymbol, note.message)
+		return
+	}
+	c.registerInactiveCandidate(key, note.message)
 }
 
 // recoverFromSystemNotice drives the request-scoped recovery that the
@@ -840,34 +855,51 @@ func (c *Connector) markSubscriptionRejected(reqID int) {
 }
 
 // maybeRememberAbsenceForReqID feeds the market-data absence memory for a
-// terminal 354, keyed by the connector's own subscription key
-// (reqIDMap[reqID]) so the record key is identical to what the subscribe
-// paths check — bare symbol for SubscribeMarketData, route key for
-// SubscribeMarketDataWithContract. Never keyed by alias.symbol: for
-// option-IV subscriptions that is the underlying and would blind the
-// stock. Skipped while a farm is impaired (a bounce-window 354 says
-// nothing about entitlement) and for derivative requests.
+// terminal 354, keyed by the connector's own subscription key (see
+// subscriptionKeyForNotice) so the record key is identical to what the
+// subscribe paths check.
 func (c *Connector) maybeRememberAbsenceForReqID(reqID int, alias reqAliasEntry, code int, message string) {
+	key := c.subscriptionKeyForNotice(reqID, alias)
+	if key == "" {
+		return
+	}
+	c.rememberMarketDataAbsence(key, code, message)
+}
+
+// subscriptionKeyForNotice resolves the connector-owned subscription key a
+// request-scoped notice may act on: reqIDMap[reqID], i.e. exactly what the
+// subscribe paths check before re-requesting — bare symbol for
+// SubscribeMarketData, route key for SubscribeMarketDataWithContract. Never
+// alias.symbol: for option-IV subscriptions that is the underlying and a
+// record there would blind the stock. Returns "" when the notice must not
+// feed symbol-level memory: reqIDs the connector does not own
+// (contract-details probes, snapshots, historical), option reqIDs and
+// derivative aliases, and notices arriving while a market-data farm is
+// impaired (a bounce-window error is not a verdict on the contract).
+func (c *Connector) subscriptionKeyForNotice(reqID int, alias reqAliasEntry) string {
+	if reqID <= 0 {
+		return ""
+	}
 	c.subMu.RLock()
 	key := c.reqIDMap[reqID]
 	c.subMu.RUnlock()
 	if key == "" {
-		return
+		return ""
 	}
 	c.optMu.RLock()
 	_, isOptionReq := c.optReqIDs[reqID]
 	c.optMu.RUnlock()
 	if isOptionReq {
-		return
+		return ""
 	}
 	switch strings.ToUpper(strings.TrimSpace(alias.secType)) {
 	case "OPT", "FOP", "WAR", "BAG":
-		return
+		return ""
 	}
 	if c.marketDataFarmImpaired() {
-		return
+		return ""
 	}
-	c.rememberMarketDataAbsence(key, code, message)
+	return key
 }
 
 func (c *Connector) recordDataFarmNotice(code int, message string, asOf time.Time) {
@@ -1324,18 +1356,6 @@ func normalizeMarketDataContract(contract Contract) Contract {
 	return contract
 }
 
-func inactiveKeyForAlias(alias reqAliasEntry) string {
-	return MarketDataKeyForContract(Contract{
-		Symbol:       alias.symbol,
-		SecType:      alias.secType,
-		Exchange:     alias.exchange,
-		PrimaryExch:  alias.primaryExch,
-		Currency:     alias.currency,
-		LocalSymbol:  alias.localSymbol,
-		TradingClass: alias.tradingClass,
-	})
-}
-
 func shouldPersistInactiveReason(reason string) bool {
 	if reason == "" {
 		return false
@@ -1357,9 +1377,24 @@ func (c *Connector) getInactiveStore() inactiveSymbolStore {
 	return store
 }
 
+// isCashRouteKey reports whether an inactive-record key denotes an FX/CASH
+// route — the bare dotted/slash pair form ("USD.EUR") the symbol-only
+// subscribe path uses, or a route key whose secType field is CASH. FX routes
+// are repair infrastructure (currency-ledger FX rates), not listings: the
+// inverted direction of a pair legitimately draws "no security definition",
+// and persisting that across sessions could silently break positions FX-rate
+// repair. In-memory suppression, which a restart clears, is the ceiling.
+func isCashRouteKey(key string) bool {
+	if _, _, ok := FxPair(key); ok {
+		return true
+	}
+	parts := strings.SplitN(key, "|", 3)
+	return len(parts) >= 2 && parts[1] == "CASH"
+}
+
 func (c *Connector) persistInactiveSymbol(symbol string, state inactiveSymbolState) {
 	store := c.getInactiveStore()
-	if store == nil || !shouldPersistInactiveReason(state.reason) {
+	if store == nil || !shouldPersistInactiveReason(state.reason) || isCashRouteKey(symbol) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
