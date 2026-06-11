@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- md-source: protocol.md sha256:4afef50dc34a879292c6accb917e0ff920ba0874c91fd714d15e0dc906d36d1d -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T21:23:00+02:00",
+    "dateModified": "2026-06-11T08:17:00+02:00",
     "description": "pkg/ibkr is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls...",
     "headline": "TWS protocol coverage",
     "isPartOf": {
@@ -157,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="tws-protocol-coverage">TWS protocol coverage</h1>
-<p>Last reviewed: 2026-05-31 21:23 CEST</p>
+<p>Last reviewed: 2026-06-11 08:17 CEST</p>
 <p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the <code>ibkr</code> binary, daemon, CLI, and MCP server need.</p>
 <p>Order-writing methods exist only for wire-format completeness and downstream forks. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket; intentionally order-capable forks must rebuild with <code>-tags trading</code>. The shipped daemon, CLI, MCP server, and Claude plugin expose no order interface.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
@@ -165,8 +166,14 @@
 <pre><code>{&#34;version&#34;: &#34;canary-fp-v1&#34;, &#34;key&#34;: &#34;sha256:...&#34;}</code></pre>
 <p>The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.</p>
 <p><code>regime.snapshot</code> emits <code>regime-fp-v1</code> from indicator bands/statuses, composite counts, lifecycle stage/severity/readiness buckets, warning codes/scopes/severities, high-level data quality, source-health buckets, and gamma/breadth semantic state.</p>
-<p><code>canary</code> emits <code>canary-fp-v1</code> from policy, direction, severity, planner mode/readiness, lifecycle stage/severity/readiness buckets, confidence classes, primary drivers, signal semantics, classified market state, source-health buckets, row titles/states, and <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, and <code>source_fingerprints.regime</code>.</p>
-<p>Both surfaces also expose a nested <code>lifecycle.fingerprint</code> for consumers that dedupe by lifecycle transition rather than by full alert posture. Source fingerprints and source-health entries use semantic buckets only; timestamps, tiny raw-value movement inside a bucket, and prose changes must not churn the hash.</p>
+<p><code>market_events.snapshot</code> emits <code>market-events-fp-v1</code> from requested symbols, semantic flag categories/statuses/severities/roles/sources, and source-health buckets. It excludes timestamps, exact rates/share counts inside the same flag classification, source prose, and rendering order.</p>
+<p><code>canary</code> emits <code>canary-fp-v1</code> from policy, action, market confirmation, portfolio fit, input health, direction, severity, planner mode/readiness, primary drivers, signal semantics including held-underlying stress buckets, classified market state, source-health buckets, row titles/states, and <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, <code>source_fingerprints.regime</code>, and <code>source_fingerprints.market_events</code>.</p>
+<p>Regime also exposes a nested <code>lifecycle.fingerprint</code> for consumers that dedupe by broad-market lifecycle transition rather than by the full regime snapshot. Canary is stateless and does not expose a canary lifecycle fingerprint. Source fingerprints and source-health entries use semantic buckets only; timestamps, tiny raw-value movement inside a bucket, and prose changes must not churn the hash.</p>
+<h2 id="market-events">Market events</h2>
+<p><code>market_events.snapshot</code> returns <code>MarketEventsResult</code> for explicit symbols or, when symbols are omitted, held stock/ETF underlyings from the positions snapshot. The result contains <code>flags[]</code>, <code>by_symbol</code>, <code>source_health[]</code>, <code>warning_details[]</code>, <code>fingerprint</code>, and <code>not_execution</code>.</p>
+<p><code>MarketEventFlag.id</code> is one of <code>borrow_inventory_tight</code>, <code>borrow_fee_extreme</code>, <code>reg_sho_threshold</code>, <code>luld_pause</code>, or <code>halt_regulatory_or_news</code>. Event <code>status</code> uses event terms such as <code>active</code> and <code>recent</code>; source freshness uses <code>source_health[].status</code> values such as <code>ok</code>, <code>stale</code>, <code>unknown</code>, or <code>degraded</code>.</p>
+<p>Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes from IBKR short-stock availability fee-rate evidence and emits <code>borrow_fee_extreme</code> only at or above 50% annualized. Reg SHO V1 uses Nasdaq's threshold list, so non-Nasdaq listing-exchange absence remains outside coverage. LULD and halt context comes from Nasdaq trade-halt evidence.</p>
+<p>Flags are context and safety gates, not execution authority. Active halt/LULD can block proposal preview/submit; borrow flags modify existing short buy-to-cover reductions only; <code>reg_sho_threshold</code> is regulatory context unless paired with an existing reduce/cover proposal.</p>
 <table>
 <thead><tr><th>Capability</th><th>Wire opcodes</th><th>Library entry point</th><th>Status</th></tr></thead>
 <tbody>
@@ -191,6 +198,6 @@
 </table>
 <p>Tested against IB Gateway server versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on.</p>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-06-07 08:48 CEST
+Last reviewed: 2026-06-11 08:17 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
