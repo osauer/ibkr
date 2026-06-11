@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The project adheres to 
 
 - Live order entry is faster: the typed `live/<account>` confirmation and the `allow_live` / `live_ack_account` / `live_ack_endpoint` config keys are gone. Live trading now needs only `[trading].mode = "live"` plus the pinned gateway port, account, and client ID — cross-checked against the connected TWS session.
 - The web app submits, modifies, and cancels with a single click after preview — no arm/confirm double-click, no typed phrases, no popup dialogs. Purge keeps its one typed confirm because it bulk-cancels protective stops without a preview token.
+- The agent skill now covers protection-proposal reads (`ibkr proposals status|list|refresh`) and runtime settings reads (`ibkr settings show`), matching the MCP tool surface, and its trading-policy wording matches reality: paper-account broker writes are open to agents via the gated CLI flow, live agent-origin writes are blocked daemon-side.
 
 ### Removed
 
@@ -77,6 +78,7 @@ All notable changes to this project are documented here. The project adheres to 
 - Integration lifecycle tests register daemon teardown via `t.Cleanup` plus a detached reaper in `TestMain`, so interrupted runs leave no orphaned test daemons.
 - Release tooling now validates the changelog entry, requires a pushed site update for non-patch releases, and runs the paper round-trip before tagging; vet, staticcheck, and tests cover the trading build tag.
 - Claude artifacts were re-worded agent-agnostic; the hook-regex check was replaced by a hook-version drift gate.
+- New skill-layer drift gates: a Go test asserts every CLI command is documented in the skill, the skill allowlist mirrors the shipped settings allowlist, and no broker/state write is allowlisted; the MCP Registry template's version field is pinned to the plugin version.
 - The relay worker's sliding-TTL change requires a separate, manually gated deploy; the Go connector self-heals against the undeployed worker.
 
 ## v1.8.0 — 2026-06-09 06:12 CEST
