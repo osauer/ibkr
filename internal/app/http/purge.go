@@ -13,10 +13,6 @@ type purgeActionRequest struct {
 	All     bool     `json:"all,omitempty"`
 	Symbols []string `json:"symbols,omitempty"`
 	Scale   float64  `json:"scale,omitempty"`
-	// LiveConfirmation is the removed typed live phrase. Tolerated (and
-	// ignored) for one release because decodeJSON rejects unknown fields and
-	// a stale cached app.js still sends it on live writes.
-	LiveConfirmation string `json:"live_confirmation,omitempty"`
 	BrokerWriteConfirmation
 }
 

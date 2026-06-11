@@ -22,10 +22,6 @@ type orderModifyPreviewRequest struct {
 
 type orderModifyRequest struct {
 	PreviewToken string `json:"preview_token"`
-	// LiveConfirmation is the removed typed live phrase. Tolerated (and
-	// ignored) for one release because decodeJSON rejects unknown fields and
-	// a stale cached app.js still sends it on live writes.
-	LiveConfirmation string `json:"live_confirmation,omitempty"`
 	BrokerWriteConfirmation
 }
 

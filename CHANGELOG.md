@@ -17,7 +17,7 @@ All notable changes to this project are documented here. The project adheres to 
 ### Security
 
 - What still gates a live broker write after this simplification: a submit-eligible single-use preview token per write (WhatIf-backed), the daemon-side hard block of agent-origin requests on live routes (no override), gateway pins cross-checked against the connected session's account, paper/live endpoint heuristics in both directions, the runtime `trading.freeze` switch, and the app's server-validated `confirm_account`/`confirm_mode` fields on every HTTP write. The v1.9.0 paper-smoke release gate is unchanged.
-- The app HTTP layer tolerates (and ignores) the removed `live_confirmation` field for one release so stale cached web-app tabs do not fail on live writes; run `ibkr restart` after upgrading so the app serves the new embedded assets.
+- The app HTTP layer rejects the removed `live_confirmation` field like any unknown field (the flow never shipped to a paired device, so no stale clients exist); run `ibkr restart` after upgrading so the app serves the new embedded assets.
 
 ## v1.9.0 — 2026-06-10 21:55 CEST
 
