@@ -1752,7 +1752,10 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	case msgAccountSummary:
 		c.handleAccountSummary(fields)
 	case msgAccountSummaryEnd:
-		portfolioLogger.Infof("Account summary sync complete")
+		// Wire-cadence event: the daemon re-polls the summary every few
+		// seconds, so at Info this line alone dominated the log (~9% of
+		// volume observed 2026-06-11).
+		portfolioLogger.Debugf("Account summary sync complete")
 		// Signal that account summary is complete
 		select {
 		case c.acctSummaryEndChan <- struct{}{}:
@@ -1765,7 +1768,10 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		c.handleAccountValue(fields)
 	case msgAcctUpdateTime:
 		if len(fields) > 1 {
-			portfolioLogger.Infof("Account update time: %s", fields[1])
+			// Wire-cadence event, streamed continuously while account
+			// updates are subscribed; at Info it was 75% of all daemon
+			// log volume (observed 2026-06-11).
+			portfolioLogger.Debugf("Account update time: %s", fields[1])
 		}
 	case msgAcctDownloadEnd:
 		portfolioLogger.Infof("Account download complete")
