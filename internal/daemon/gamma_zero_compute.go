@@ -1350,10 +1350,12 @@ func buildSkewCurves(legs []legData, snapshotSpot float64) (map[string]SkewCurve
 			fallbacks = append(fallbacks, expYMD)
 			continue
 		}
+		r2, residualRMS := skewFitStats(curve, expLegs, snapshotSpot)
 		quality[expYMD] = rpc.SkewFitInfo{
-			Points:   curve.nPoints,
-			RSquared: skewFitRSquared(curve, expLegs, snapshotSpot),
-			Range:    [2]float64{curve.mLo, curve.mHi},
+			Points:      curve.nPoints,
+			RSquared:    r2,
+			ResidualRMS: residualRMS,
+			Range:       [2]float64{curve.mLo, curve.mHi},
 		}
 	}
 	return curves, quality, fallbacks
