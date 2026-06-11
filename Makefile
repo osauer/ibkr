@@ -6,7 +6,13 @@
 # earlier plugin tag at the same commit.
 VERSION  ?= $(shell git describe --tags --match='v*' --always --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse HEAD 2>/dev/null || echo none)
-DATE     ?= $(shell TZ=UTC date +%Y-%m-%dT%H:%M:%SZ)
+# Dev builds stamp the HEAD commit date, not wall-clock build time, so an
+# unchanged tree rebuilds to a byte-identical binary — that identity is
+# what lets install/restart-daemon skip the daemon bounce when nothing
+# changed. Releases already stamp the tag's commit date (RELEASE_DATE in
+# release-binaries), so this matches the release convention rather than
+# diverging from it. Falls back to wall clock outside a git checkout.
+DATE     ?= $(shell TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD 2>/dev/null || TZ=UTC date +%Y-%m-%dT%H:%M:%SZ)
 
 # `-s -w` strip the external symbol table and DWARF debug info. Cuts the
 # binary by ~32% (9.6 MB → 6.5 MB on darwin/arm64). Go runtime keeps its
@@ -46,7 +52,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -67,15 +73,31 @@ build: ## Compile bin/ibkr with version stamped via ldflags
 		echo "      For order placement build with: make install GO_TAGS=trading"; \
 	;; esac
 
-install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin)
-	install -d $(PREFIX)/bin
-	install -m 0755 bin/ibkr  $(PREFIX)/bin/ibkr
-	@echo "Installed ibkr to $(PREFIX)/bin"
-	@echo "Make sure $(PREFIX)/bin is on your PATH."
-	@echo "Restart the daemon and any running app with: $(PREFIX)/bin/ibkr restart"
+install: build ## Install ibkr to $(PREFIX)/bin (default ~/.local/bin); skips the copy when byte-identical
+	@if cmp -s bin/ibkr $(PREFIX)/bin/ibkr; then \
+		echo "ibkr unchanged at $(PREFIX)/bin/ibkr — skipping copy"; \
+	else \
+		install -d $(PREFIX)/bin && \
+		install -m 0755 bin/ibkr $(PREFIX)/bin/ibkr && \
+		echo "Installed ibkr to $(PREFIX)/bin" && \
+		echo "Restart the daemon and any running app with: $(PREFIX)/bin/ibkr restart"; \
+	fi
 
-restart-daemon: install ## Install, restart/start daemon, and refresh any running app (FORCE=1 escalates to --force)
-	$(PREFIX)/bin/ibkr restart --timeout $(RESTART_TIMEOUT) $(if $(FORCE),--force,)
+# Skip the bounce when the freshly-built binary is byte-identical to the
+# installed one AND the canonical daemon is already running — restarting
+# then buys nothing, disturbs other sessions' in-flight CLI calls, and
+# re-rolls the TWS client-slot retention race on the pinned client ID.
+# Byte-identity is meaningful because DATE stamps the commit date (above),
+# so unchanged source ⇒ unchanged binary. A daemon that is NOT running is
+# left alone too (the next CLI call autospawns it — that is the design).
+# FORCE=1 always installs and restarts.
+restart-daemon: build ## Install + restart daemon, skipped when the binary is unchanged (FORCE=1 always bounces)
+	@if [ -z "$(FORCE)" ] && cmp -s bin/ibkr $(PREFIX)/bin/ibkr && pgrep -f "$(PREFIX)/bin/ibkr daemon" >/dev/null 2>&1; then \
+		echo "binary unchanged and daemon running — skipping restart (FORCE=1 to bounce anyway)"; \
+	else \
+		$(MAKE) --no-print-directory install && \
+		$(PREFIX)/bin/ibkr restart --timeout $(RESTART_TIMEOUT) $(if $(FORCE),--force,); \
+	fi
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
 APP_SMOKE_BROWSER ?= chromium
@@ -91,7 +113,7 @@ app-check: app-contract-check ## Fast SPA gate: JS syntax + static app contracts
 # no Playwright, no running app), so it lives in `make check`; see
 # TestBrowserScriptIDsMatchSPA in web/app/browser_script_ids_test.go.
 app-contract-check: ## Browser-script ↔ SPA element-id drift gate + static app contracts (pure Go)
-	go test -count=1 ./web/app
+	go test ./web/app
 
 app-refresh: install ## Install, restart the shared app host, and print a local pairing URL
 	$(PREFIX)/bin/ibkr restart --app --timeout $(RESTART_TIMEOUT)
@@ -194,8 +216,24 @@ vet-check: ## Run go vet (both default and trading-tag builds)
 staticcheck-check: ## Run staticcheck
 	go tool staticcheck ./...
 
-govulncheck-check: ## Run govulncheck
-	go tool govulncheck ./...
+# govulncheck's verdict is keyed on the dependency set + toolchain + the
+# vulnerability DB — not on local code edits — so re-running it on every
+# commit only pays cold-cache compile cost for the same answer. Skip when
+# go.mod/go.sum/toolchain are unchanged AND a scan already passed today
+# (the date bound keeps DB updates flowing in daily). The release path
+# forces a full run via GOVULN_FORCE=1; CI runners have no stamp cache
+# and always run.
+GOVULN_STAMP ?= $(HOME)/.cache/ibkr/govulncheck.stamp
+govulncheck-check: ## Run govulncheck (skipped when deps unchanged and already scanned today; GOVULN_FORCE=1 forces)
+	@depshash=$$( (cat go.mod go.sum 2>/dev/null; go version) | shasum -a 256 | cut -d' ' -f1); \
+	today=$$(date +%Y-%m-%d); \
+	if [ "$(GOVULN_FORCE)" != "1" ] && [ -r "$(GOVULN_STAMP)" ] && [ "$$(cat "$(GOVULN_STAMP)")" = "$$depshash $$today" ]; then \
+		echo "govulncheck: deps/toolchain unchanged, already scanned today — skipping (GOVULN_FORCE=1 to force)"; \
+	else \
+		go tool govulncheck ./... && \
+		mkdir -p "$$(dirname "$(GOVULN_STAMP)")" && \
+		echo "$$depshash $$today" > "$(GOVULN_STAMP)"; \
+	fi
 
 # Validate the Claude Code plugin + marketplace manifests with the official
 # `claude plugin validate` tool. The TestSkill* gates in internal/cli (run
@@ -263,8 +301,8 @@ hook-version-check: ## Ensure session-start.sh fallback version tracks .claude-p
 # settings/ibkr.settings.json, and no broker/state write allowlisted.
 # Cheap enough to live in the pre-commit gate.
 parity-check: ## Verify MCP tool inventory matches the CLI surface
-	go test -count=1 -run 'TestParity|TestStreamingParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
-	go test -count=1 -run 'TestSkill' ./internal/cli/
+	go test -run 'TestParity|TestStreamingParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
+	go test -run 'TestSkill' ./internal/cli/
 
 # Idiom-drift gate. `go fix -diff` is the toolchain-native fixer (tracks the
 # Go version pinned in go.mod); `go tool modernize` runs the broader gopls
@@ -361,17 +399,28 @@ fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
 # driven handshake tests; no live gateway is required. The end-to-end
 # gateway path is covered by test/integration. Timeout sized for CI's
 # slower runners — local runs typically finish in <30s.
-test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library)
-	go test -count=1 -timeout=180s ./pkg/ibkr/...
+#
+# Hermetic suites run WITHOUT -count=1 so Go's content-addressed test
+# cache applies: unchanged packages report cached passes in ~0s and only
+# edited packages re-run. The cache only ever serves passes for identical
+# inputs, so nothing green is taken on faith — a flake reruns on any
+# input change. test/integration keeps -count=1 below because gateway
+# state is invisible to the cache key.
+test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library; cached when unchanged)
+	go test -timeout=180s ./pkg/ibkr/...
 
 # Daemon + CLI integration tests. -race is on for the daemon path because
 # this layer carries the goroutines (subscriptions, idle timer, signal
 # handlers); race detector earns its slot here. Integration tests skip
 # cleanly when no IBKR gateway is reachable.
+#
+# The integration leg is serialized across sessions via with-gateway-lock:
+# its client IDs and daemon spawns hit the shared TWS gateway, and two
+# overlapping runs used to flake with error 326 and force a full re-run.
 test-daemon: ## Run internal/... and test/integration/... under -race (incl. trading-tag write path)
-	go test -race -count=1 -timeout=240s ./internal/...
-	go test -race -count=1 -timeout=420s ./test/integration/...
-	go test -race -count=1 -timeout=240s -tags trading ./internal/daemon/...
+	go test -race -timeout=240s ./internal/...
+	./scripts/with-gateway-lock.sh go test -race -count=1 -timeout=420s ./test/integration/...
+	go test -race -timeout=240s -tags trading ./internal/daemon/...
 
 # Install the Claude Code skill bundle directly under ~/.claude/skills/.
 # Dogfood path only — end users get the skill via `/plugin install ibkr`.
@@ -426,7 +475,7 @@ release-verify: ## Smoke-test the local bin/ibkr against a live gateway (called 
 		echo "release-verify: bin/ibkr missing — run 'make build' first" >&2; \
 		exit 1; \
 	fi
-	./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
+	./scripts/with-gateway-lock.sh ./scripts/release-verify.sh bin/ibkr $(RELEASE_VERSION)
 
 release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one reachable TWS/Gateway daemon session
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -437,7 +486,7 @@ release-smoke: smoke-build ## Release gate: JSON contract + wire smoke in one re
 		echo "release-smoke: bin/ibkr missing — run 'make build VERSION=$(RELEASE_VERSION)' first" >&2; \
 		exit 1; \
 	fi
-	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/release-smoke.sh bin/ibkr $(RELEASE_VERSION) bin/wire-assert
+	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/with-gateway-lock.sh ./scripts/release-smoke.sh bin/ibkr $(RELEASE_VERSION) bin/wire-assert
 
 release-site-check: ## Require osauer.dev/ibkr static site sync for non-patch releases
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -487,9 +536,17 @@ smoke-only: smoke-build ## Run wire smoke against existing bin/ibkr (no rebuild)
 		echo "smoke-only: bin/ibkr missing — run 'make build' first" >&2; \
 		exit 1; \
 	fi
-	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
+	IBKR_SMOKE_STRICT=$(SMOKE_STRICT) SPX_EXPECTED_REACHABLE=$(SPX_EXPECTED_REACHABLE) ./scripts/with-gateway-lock.sh ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 
 smoke: build smoke-only ## Wire-level smoke vs. reachable TWS/Gateway (rebuilds bin/ibkr; SKIP if no gateway)
+
+# The per-commit inner-loop gate: boot + handshake + quote + account
+# against a real gateway (~15s) instead of the full wire matrix. The full
+# `make smoke` stays binding for daemon/CLI wire-path changes and for
+# releases — this tier exists so a docs/proposal/SPA change doesn't pay
+# the chain/regime/gamma fan-out every commit.
+smoke-fast: build smoke-build ## Fast wire smoke: boot + quote + account only (~15s; full matrix stays in `make smoke`)
+	IBKR_SMOKE_FAST=1 IBKR_SMOKE_STRICT=$(SMOKE_STRICT) ./scripts/with-gateway-lock.sh ./scripts/wire-smoke.sh bin/ibkr bin/wire-assert
 
 release-binaries: ## Cross-compile read-only + trading tarballs and the (read-only) MCPB into dist/ — needs RELEASE_VERSION=vX.Y.Z
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -723,7 +780,8 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	fi
 	@# Run the existing full test gate with parallel prerequisites. This
 	@# keeps the same checks/tests but overlaps check, pkg, and daemon work.
-	$(MAKE) -j$(RELEASE_TEST_JOBS) test
+	@# GOVULN_FORCE=1: the release gate never takes the daily-stamp skip.
+	$(MAKE) -j$(RELEASE_TEST_JOBS) test GOVULN_FORCE=1
 	@# Build the release binary with the target version stamped BEFORE
 	@# tagging — pass VERSION explicitly so the build doesn't fall back
 	@# to `git describe` (which wouldn't see the tag yet). The smoke
@@ -738,7 +796,7 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	@# a 1-share paper round-trip via an isolated daemon pinned to the
 	@# local PAPER session. No SKIP: a missing paper login aborts the
 	@# release. This replaces the human-certified runtime live gate.
-	./scripts/release-paper-smoke.sh bin/ibkr
+	./scripts/with-gateway-lock.sh ./scripts/release-paper-smoke.sh bin/ibkr
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	git tag -a $(RELEASE_VERSION) -m "$$msg"
 	@$(MAKE) release-binaries RELEASE_VERSION=$(RELEASE_VERSION) || { \

@@ -226,15 +226,15 @@ boot_offset="$(wire_offset)"
 status_json=""
 connected=""
 daemon_version=""
-for attempt in $(seq 1 25); do
+for attempt in $(seq 1 100); do
     status_json="$(run_cli status "$JSON_TIMEOUT" status --json)"
     connected="$(json_field connected "$status_json")"
     daemon_version="$(json_field daemon_version "$status_json")"
     if [[ "$connected" == "True" ]]; then
         break
     fi
-    sleep 1
-    if [[ "$attempt" -eq 25 ]]; then
+    sleep 0.25
+    if [[ "$attempt" -eq 100 ]]; then
         echo "release-smoke: FAIL: gateway not reachable after 25s of polling (status.connected=$connected)" >&2
         echo "$status_json" >&2
         exit 1
