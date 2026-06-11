@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-06-09 07:38 CEST
+Updated: 2026-06-11 19:41 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -1766,3 +1766,651 @@ Field meanings:
   Render its `label`/`tone`; do not derive risk-off from raw red-cluster counts.
 - `not_execution` is part of the contract. Canary does not place, preview,
   submit, modify, cancel, draft, size, or select orders.
+
+## trading-status
+
+`ibkr trading status --json` — local order-entry readiness. This surface is
+deliberately separate from broker permission: TWS / IB Gateway can still
+reject writes after every local gate passes. The MCP twin is
+`ibkr_trading_status`.
+
+```json
+{
+  "mode": "paper",
+  "endpoint": "127.0.0.1:7497",
+  "gateway_host": "127.0.0.1",
+  "gateway_port": 7497,
+  "port_origin": "pinned",
+  "account": "DU1234567",
+  "account_origin": "pinned",
+  "client_id": 15,
+  "client_id_origin": "pinned",
+  "mcp_trading": "preview-only",
+  "can_preview": true,
+  "can_write": true,
+  "open_orders": 2,
+  "last_order_event": "status-updated BUY 25 AAPL at 2026-06-11T15:02:11Z",
+  "live_override": "blocked",
+  "blocked": false
+}
+```
+
+Field meanings:
+
+- `mode` — `disabled` | `paper` | `live`, from `[trading].mode`. On
+  `disabled` only the identity fields are populated; no gate evaluation
+  runs and `blockers` stays empty.
+- `endpoint` / `gateway_host` / `gateway_port` / `port_origin` — the
+  broker route writes would use. `port_origin` is `pinned` | `discovered`
+  | `default`; order entry requires pinned values.
+- `account` / `account_origin` — pinned account evidence;
+  `account_origin` is `pinned` or `auto`. `client_id` /
+  `client_id_origin` (`pinned` or `default`) — the API client ID the
+  daemon connects with.
+- `mcp_trading` — how much of the order surface MCP exposes:
+  `disabled` | `preview-only` | `paper-write` | `live-write`.
+- `can_preview` — order entry is enabled and no blockers are active;
+  gates `order preview` / `ibkr_order_preview`.
+- `can_write` — true only when the full broker-write authorization
+  passes (trading-capable build, writable order journal, not frozen, no
+  blockers). When `can_write` is false while `blocked` is false,
+  `write_blockers[]` carries the write-only reasons — e.g.
+  `order_writes_unavailable` (read-only build) or `trading_frozen` (the
+  runtime brake; cancels stay allowed while frozen).
+- `blocked` — true when `blockers` is non-empty. The CLI text view exits
+  1 on blocked; the JSON path exits 0 either way, so branch on this
+  field, not the exit code.
+- `blockers[]` — `{code, message, action}` rows naming each unmet local
+  gate. Codes include `gateway_port_unpinned`,
+  `gateway_account_unpinned`, `gateway_account_not_concrete` (the
+  aggregate account "All" is never writable), `gateway_account_mismatch`,
+  `gateway_client_id_unpinned`, `gateway_client_id_mismatch`,
+  `paper_endpoint_unconfirmed`, `live_endpoint_unconfirmed`,
+  `order_journal_unavailable`, and `invalid_mode`. Always render
+  `action` — under stress it is the difference between a dead end and
+  the next command to run.
+- `open_orders` (integer) / `last_order_event` — journal-derived count
+  of open orders in the current broker account/mode scope and the most
+  recent journal event line. Omitted when the journal is unreadable.
+- `paper_smoke`, `paper_smoke_at`, `paper_smoke_max_age`,
+  `paper_smoke_account`, `paper_smoke_endpoint`,
+  `paper_smoke_client_id`, `paper_smoke_version` — live mode only:
+  the latest paper round-trip evidence (`paper_smoke_at` is RFC 3339).
+  Informational since 2026-06-10 — the smoke is enforced as a binding
+  release gate, not a runtime live blocker.
+- `live_override` — `blocked` | `ready`. `ready` only on live mode with
+  zero blockers (the simplified pins+mode gate; there is no ack or
+  typed-confirmation field). Independently of this, live routes refuse
+  agent-origin writes outright at place/modify time; only cancel is
+  exempt.
+
+## orders-open
+
+`ibkr orders open --json` (bare `ibkr orders` is the same) — locally
+tracked open orders, reduced from the daemon's append-only order journal.
+Broker callbacks remain authoritative for acknowledgement/fill/cancel
+state; the daemon never requests a broker open-order snapshot.
+
+```json
+{
+  "orders": [
+    {
+      "order_ref": "ibkr-20260611-150210",
+      "preview_token_id": "tok-7f3a2c91",
+      "reserved_order_id": 1842,
+      "client_id": 15,
+      "perm_id": 902117344,
+      "account": "DU1234567",
+      "endpoint": "127.0.0.1:7497",
+      "mode": "paper",
+      "symbol": "AAPL",
+      "sec_type": "STK",
+      "con_id": 265598,
+      "exchange": "SMART",
+      "currency": "USD",
+      "action": "BUY",
+      "order_type": "LMT",
+      "tif": "DAY",
+      "outside_rth": false,
+      "quantity": 25,
+      "limit_price": 207.85,
+      "status": "Submitted",
+      "lifecycle_status": "submitted",
+      "filled": 0,
+      "remaining": 25,
+      "send_state": "broker_acknowledged",
+      "last_event": "broker-acknowledged",
+      "updated_at": "2026-06-11T15:02:11Z",
+      "open": true,
+      "modify_eligible": true,
+      "cancel_eligible": true
+    }
+  ],
+  "as_of": "2026-06-11T15:04:02Z"
+}
+```
+
+Field meanings:
+
+- `orders` is always present (possibly empty), sorted newest
+  `updated_at` first, and scoped to the **currently connected broker
+  account/mode**: paper/test journal rows are intentionally not returned
+  while connected live and vice versa. This is not a historical audit
+  across old accounts or modes.
+- Identity trio — `order_ref` (local ref), `reserved_order_id` (IBKR API
+  order ID, integer), `perm_id` (IBKR permanent ID, integer). Any of the
+  three is a valid `ibkr order status` lookup id. `preview_token_id` is
+  the redacted token identifier; the raw submit-capable token never
+  appears on read surfaces.
+- Contract fields (`symbol`, `sec_type`, `con_id`, `exchange`,
+  `primary_exch`, `currency`, `local_symbol`, `trading_class`, `expiry`,
+  `strike`, `right`, `multiplier`) are populated as journaled; option
+  rows carry `expiry`/`strike`/`right`. Most are `omitempty` — absence
+  means "not journaled for this order", not zero.
+- `action` is `BUY` | `SELL`; `order_type` is `LMT` | `TRAIL` |
+  `TRAIL LIMIT`; `tif` is `DAY` | `GTC` (GTC is accepted for broker
+  trails only). `trail` has the same shape as the order-preview
+  `draft.trail` block.
+- `status` — the raw broker status string (e.g. `Submitted`,
+  `PreSubmitted`). `lifecycle_status` — always present, the daemon's
+  normalized state: `previewed`, `pending_submit`, `pre_submitted`,
+  `submitted`, `partially_filled`, `filled`, `pending_cancel`,
+  `cancelled`, `rejected`, `inactive`, `unknown_reconcile_required`, or
+  `expired_inferred`. `orders open` returns only rows still considered
+  open, so terminal states show up via `order status`, not here.
+- `send_state` — write-path progress: `reserved`, `send_attempted`,
+  `broker_acknowledged`, `uncertain_send` (a send may or may not have
+  reached the broker — reconcile before retrying), or `terminal`.
+- `filled`, `remaining`, `avg_fill_price`, `last_fill_price` —
+  broker-callback fill state. `why_held` and `mkt_cap_price` are IBKR
+  hold/price-cap disclosures, present only when the broker sent them.
+- `open`, `modify_eligible`, `cancel_eligible` — always present.
+  Modify is restricted to broker-acknowledged stock rows: DAY LMT, or
+  DAY/GTC TRAIL / TRAIL LIMIT (protective trails are amended in place so
+  a re-price never opens an unprotected cancel/replace window). Cancel
+  requires a broker-acknowledged order ID and not `pending_cancel`.
+- `purge_id`, `leg_id`, `source`, `bypass_preview` — provenance for
+  purge/proposal-originated orders.
+
+## order-status
+
+`ibkr order status <order-ref|order-id|perm-id> --json` — one
+journal-backed order plus its full audit trail. The MCP twin is
+`ibkr_order_status`.
+
+```json
+{
+  "found": true,
+  "order": { "...": "OrderView — same shape as orders open rows" },
+  "events": [
+    {
+      "at": "2026-06-11T15:02:09Z",
+      "type": "previewed",
+      "order_ref": "ibkr-20260611-150210",
+      "preview_token_id": "tok-7f3a2c91",
+      "symbol": "AAPL",
+      "action": "BUY",
+      "order_type": "LMT",
+      "quantity": 25,
+      "limit_price": 207.85,
+      "lifecycle_status": "previewed"
+    },
+    {
+      "at": "2026-06-11T15:02:11Z",
+      "type": "broker-acknowledged",
+      "status": "Submitted",
+      "lifecycle_status": "submitted",
+      "send_state": "broker_acknowledged"
+    }
+  ],
+  "as_of": "2026-06-11T15:04:02Z"
+}
+```
+
+Field meanings:
+
+- The lookup `id` matches `order_ref` exactly, or the decimal IBKR order
+  ID / permanent ID. Matching honors the current broker account/mode
+  scope, so `found: false` can mean "belongs to a different account or
+  paper/live session", not only "unknown id".
+- `found: false` → `order` and `events` are omitted; only `as_of`
+  remains.
+- `order` — the same `OrderView` shape documented under
+  [orders-open](#orders-open), including terminal rows that `orders
+  open` no longer lists.
+- `events[]` — the append-only audit rows for this order, sorted oldest
+  → newest. `type` is one of `previewed`, `token-confirmed`,
+  `send-attempted`, `send-error`, `broker-acknowledged`,
+  `status-updated`, `modify-requested`, `cancel-requested`,
+  `broker-error`, `reconciled-unknown`. Each row carries the same
+  contract/draft fields as `OrderView` plus `at` (RFC 3339), `status`,
+  `lifecycle_status`, `send_state`, fill fields, `exec_id`/`exec_time`
+  for executions, and `message` (raw broker text on errors). Full
+  preview tokens are redacted; an event never implies a broker write
+  unless `type`/`send_state` explicitly say one was attempted.
+- `expired_inferred` lifecycle rows are DAY stock/ETF orders whose
+  effective session closed (plus an hour of callback grace) without a
+  terminal broker callback. This is local calendar inference — never
+  broker-confirmed — and such rows stay modify- and cancel-ineligible.
+  GTC trails are exempt from calendar inference; their only self-heal is
+  IBKR error 135 ("can't find order"), which maps the row to `inactive`.
+
+## order-preview
+
+`ibkr order preview buy|sell SYMBOL QTY [flags] --json` (stock/ETF) or
+`ibkr order preview buy|sell SYMBOL YYYYMMDD C|P STRIKE QTY [flags]
+--json` (single-leg option) — validate and price an order draft, then
+mint a short-lived preview token. **This RPC never transmits anything to
+IBKR as an order**; place/modify/cancel are separate gated RPCs. Use only
+after [trading-status](#trading-status) shows the local gate ready.
+
+```json
+{
+  "preview_token": "v1.eyJhbGciOi...",
+  "preview_token_id": "tok-7f3a2c91",
+  "preview_token_scope": "place",
+  "preview_token_expires_at": "2026-06-11T15:07:09Z",
+  "token_minted": true,
+  "submit_eligible": true,
+  "executable": true,
+  "mode": "paper",
+  "account": "DU1234567",
+  "endpoint": "127.0.0.1:7497",
+  "client_id": 15,
+  "draft": {
+    "action": "BUY",
+    "contract": {"symbol": "AAPL", "sec_type": "STK", "currency": "USD"},
+    "quantity": 25,
+    "order_type": "LMT",
+    "limit_price": 207.85,
+    "tif": "DAY",
+    "outside_rth": false,
+    "strategy": "patient-limit",
+    "order_ref": "ibkr-20260611-150210"
+  },
+  "quote": {
+    "symbol": "AAPL",
+    "bid": 207.84, "ask": 207.88, "last": 207.86, "midpoint": 207.86,
+    "data_type": "live",
+    "quote_quality": "firm",
+    "spread_pct": 0.02,
+    "price_at": "2026-06-11T11:02:08-04:00",
+    "price_as_of": "As of: Jun 11 at 11:02:08 AM EDT",
+    "as_of": "2026-06-11T15:02:09Z"
+  },
+  "position": {"before": 0, "after": 25, "effect": "open"},
+  "notional": 5196.25,
+  "max_notional": 25000,
+  "what_if": {
+    "status": "accepted",
+    "required_for_submit": true,
+    "available": true,
+    "margin": {
+      "currency": "USD",
+      "initial_margin_before": 3520.55,
+      "initial_margin_after": 4818.32,
+      "maintenance_margin_before": 2815.04,
+      "maintenance_margin_after": 3982.17,
+      "commission": 1.05,
+      "commission_currency": "USD"
+    }
+  },
+  "as_of": "2026-06-11T15:02:09Z"
+}
+```
+
+Field meanings:
+
+- `preview_token` — the raw daemon-signed bearer token for a later
+  `ibkr order place --preview-token` / `order modify` flow. **CLI JSON
+  includes it; the MCP tool strips it** and returns only the redacted
+  `preview_token_id` — agents must mint their own token through the
+  origin-gated CLI path to place even a paper order.
+  `preview_token_scope` is `place`, or `modify` when `--replace-order`
+  bound the draft to an existing open order.
+  `preview_token_expires_at` is RFC 3339; tokens are short-lived and
+  single-use.
+- `token_minted` vs `submit_eligible` vs `executable` — `token_minted`
+  means the local preview artifact exists. `submit_eligible` is true
+  only when IBKR accepted a non-transmitting WhatIf for this exact
+  draft; `executable` is a legacy alias kept for older clients.
+- `mode` / `account` / `endpoint` / `client_id` — the pinned route the
+  token is bound to; place revalidates the binding before any socket
+  write.
+- `draft` — the canonical intent bound into the token: `action`,
+  `contract`, `quantity`, `order_type` (`LMT` | `TRAIL` |
+  `TRAIL LIMIT`), `limit_price`, `trail`, `tif` (`DAY` default; `GTC`
+  accepted for trails only), `outside_rth`, `strategy`, `order_ref`,
+  optional `open_close`/`source`.
+  - `strategy` — `patient-limit` (default): bid/ask midpoint rounded one
+    tick toward the passive side and clamped inside the spread; requires
+    a fresh, live, two-sided quote and rejects stale/delayed data.
+    `explicit-limit` (`--limit`): your price, works on stale or delayed
+    data. `broker-trail` for TRAIL / TRAIL LIMIT drafts.
+  - `trail` — `basis` (`instrument_price`; option trails trail the
+    option premium, not the underlying), `offset_type` (`percent` |
+    `amount`), `trailing_percent` (IBKR units: `2` means 2%, not 0.02),
+    `trailing_amount`, `initial_stop_price` (0 means the daemon binds it
+    from live bid/ask), `limit_offset` (TRAIL LIMIT only; nullable).
+- `quote` — the market-data inputs preview pricing used. `bid`, `ask`,
+  `last`, `mark`, `midpoint` are nullable: `null` means not delivered,
+  never zero-substituted. `quote_quality` is `firm`, `indicative`
+  (off-hours session), `wide` (spread > 2%), `stale`, `prev_close`, or
+  `missing`. `stale`/`stale_reason`, `price_at`/`price_as_of`,
+  `session_context`, and `warnings[]` follow the [quote](#quote)
+  conventions.
+- `position` — local position-effect math: `before` → `after` signed
+  quantity and `effect` one of `open`, `increase`, `reduce`, `close`,
+  `flip`, `open_short`. Disclosure plus local policy gate (short/flip
+  and option sell-to-open policies are enforced here); broker
+  permissions and margin remain authoritative.
+- `notional` / `max_notional` — order notional and the configured cap it
+  was checked against (`max_notional` omitted when uncapped).
+- `what_if` — the broker preview surface. `status` is `accepted` (IBKR
+  returned a successful WhatIf for this exact draft), `rejected`
+  (`message`/`action`/`advanced_reject_json` carry the broker detail),
+  or `unavailable` (no WhatIf path — `submit_eligible` stays false).
+  `margin` fields are all nullable floats: initial/maintenance margin
+  and equity-with-loan before/after, plus
+  commission/min_commission/max_commission with `commission_currency`.
+- `warnings[]` — structured `{code, scope, severity, message, impact,
+  action}` rows, same shape as other surfaces' `warning_details`.
+
+Live routes refuse agent-origin place/modify regardless of token
+validity; only cancel is exempt from the origin block.
+
+## proposals-status
+
+`ibkr proposals status --json` — protection-proposal engine readiness:
+the auto-trade config gates, the loaded protection policy, and the
+embedded trading gate. Part of the `ibkr_proposals` MCP surface (which
+returns snapshots; status is CLI-only).
+
+```json
+{
+  "kind": "ibkr.auto_trade_status",
+  "as_of": "2026-06-11T15:10:00Z",
+  "trading": { "...": "TradingStatus — same shape as trading-status" },
+  "proposals_enabled": true,
+  "enabled": false,
+  "auto_submit": false,
+  "fast_path_enabled": true,
+  "hot_reload": true,
+  "reload_interval": "30s",
+  "proposal_cadence": "5m0s",
+  "policy": {
+    "kind": "ibkr.protection_policy_status",
+    "status": "active",
+    "policy_id": "protection-default",
+    "policy_version": 3,
+    "profile": "default",
+    "fingerprint": {"version": "protection-policy-fp-v1", "key": "sha256:..."},
+    "source": "file",
+    "path": "/Users/me/.config/ibkr/protection-policy.toml",
+    "loaded_at": "2026-06-11T12:00:04Z",
+    "last_checked_at": "2026-06-11T15:09:34Z"
+  },
+  "blocked": false
+}
+```
+
+Field meanings:
+
+- `trading` — the full [trading-status](#trading-status) shape embedded,
+  so one call answers both "is the engine on" and "could a submit
+  actually route".
+- `proposals_enabled` — the manual proposal-generation gate
+  (`[auto_trade].proposals_enabled`). When false, a `proposals_disabled`
+  blocker is added.
+- `enabled` / `auto_submit` — future autonomous gates. Both must remain
+  false in MVP; setting either adds an `autonomous_not_available` /
+  `auto_submit_not_available` blocker rather than activating anything.
+- `fast_path_enabled` — one-confirm preview+submit support for
+  snapshot-backed proposals (currently trailing stops).
+- `hot_reload`, `reload_interval`, `proposal_cadence` — policy-file hot
+  reload and the background recompute cadence. Durations are Go strings
+  (`"5m0s"`), not seconds.
+- `policy.status` — `active` | `default` (built-in policy, no file) |
+  `drift` (file changed on disk vs the loaded copy) | `error` |
+  `disabled`. On `drift`/`error` the policy's own `blockers` are merged
+  into the top-level list. `fingerprint` is the semantic policy hash that
+  also stamps every proposal row.
+- `blocked` / `blockers[]` — same `{code, message, action}` shape as
+  trading status.
+
+## proposals-list
+
+`ibkr proposals list --json` (bare `ibkr proposals` is the same) returns
+the latest daemon snapshot; `ibkr proposals refresh --json` recomputes
+from live account/positions/regime/market-events first. Both return the
+same envelope, and both record a "shown" audit event for the returned
+rows. MCP: `ibkr_proposals` with optional `refresh`/`show` booleans.
+
+```json
+{
+  "kind": "ibkr.trade_proposal_snapshot",
+  "schema_version": "trade-proposal-snapshot-v2",
+  "as_of": "2026-06-11T15:10:02Z",
+  "revision": "sha256:9c41...",
+  "account_id": "DU1234567",
+  "account_mode": "paper",
+  "policy_id": "protection-default",
+  "policy_version": 3,
+  "policy_fingerprint": {"version": "protection-policy-fp-v1", "key": "sha256:..."},
+  "policy_status": { "...": "same shape as proposals-status policy" },
+  "auto_trade": { "...": "same shape as proposals-status" },
+  "trading": { "...": "same shape as trading-status" },
+  "source_fingerprints": {
+    "account": {"version": "account-fp-v1", "key": "sha256:..."},
+    "positions": {"version": "positions-fp-v1", "key": "sha256:..."}
+  },
+  "proposals": [
+    {
+      "key": "trailing_stop:5e1f0a2b9c3d4e5f",
+      "revision": "sha256:9c41...",
+      "state": "generated",
+      "bucket": "trailing_stop",
+      "rank": 1,
+      "symbol": "NVDA",
+      "sec_type": "STK",
+      "action": "SELL",
+      "quantity": 120,
+      "max_quantity": 120,
+      "position_quantity": 120,
+      "position_effect": "close",
+      "order_type": "TRAIL",
+      "trail": {"basis": "instrument_price", "offset_type": "percent",
+                "trailing_percent": 8, "initial_stop_price": 440.27},
+      "tif": "GTC",
+      "outside_rth": false,
+      "contract": {"symbol": "NVDA", "sec_type": "STK", "currency": "USD"},
+      "reason": "unprotected stock position above policy threshold",
+      "details": ["market value 12.4% NLV", "no open protective order"],
+      "market_value_pct_nlv": 12.4,
+      "created_at": "2026-06-11T15:10:02Z"
+    }
+  ],
+  "counts": {
+    "total": 3,
+    "actionable": 2,
+    "theta_hygiene": 1,
+    "risk_reduction": 0,
+    "trailing_stop": 2,
+    "theta_per_day": -42.18
+  }
+}
+```
+
+Field meanings:
+
+- `kind` / `schema_version` — discriminators. v2 added account/mode
+  scoping; persisted v1 snapshots (no `account_mode`) fail closed at
+  daemon-startup adoption.
+- `revision` — `sha256:…` hash anchored to the policy fingerprint,
+  account/mode scope, account+positions source fingerprints, and the
+  proposal set (regime/market-event fingerprints are deliberately
+  excluded so the one-confirm path doesn't false-stale). `"empty"` marks
+  an engine-unavailable shell. Preview/submit require the exact
+  `(key, revision)` pair; after a recompute, old pairs are refused with a
+  `stale_revision` blocker — refresh and re-read before acting.
+- `account_id` / `account_mode` — concrete single account (never the
+  "All" aggregate) and the `paper`/`live` session the proposals were
+  generated under.
+- `auto_trade` / `trading` / `policy_status` — full embedded copies of
+  the [proposals-status](#proposals-status) and
+  [trading-status](#trading-status) shapes.
+- `source_fingerprints` — semantic-bucket fingerprints of the consumed
+  inputs (`account`, `positions`, `regime`, `market_events`); each entry
+  is nullable.
+- `market_events` — embedded [market-events](#market-events) result when
+  flags exist for held symbols; proposals affected by a flag also carry
+  per-row `market_flags[]`.
+- `proposals[]` — always present (possibly empty).
+  - `key` — stable `bucket:hash` identity per bucket+contract+action;
+    `state` is `generated` | `blocked`.
+  - `bucket` — `theta_hygiene` (close/reduce short-dated options),
+    `risk_reduction` (trim single-name concentration), or
+    `trailing_stop` (broker-side protective trail). `rank` orders rows
+    within the snapshot.
+  - `quantity` / `max_quantity` — proposed and maximum selectable size;
+    `position_quantity` and `position_effect` (same vocabulary as
+    order-preview `position.effect`) describe the held position the
+    proposal acts on.
+  - `order_type` / `trail` / `tif` / `outside_rth` / `contract` — the
+    draft the engine would preview; trail rows carry the computed
+    `initial_stop_price`. `limit_price` is nullable.
+  - `reason` + `details[]` — human-readable evidence. `score`,
+    `theta_per_day`, `notional`, `risk_excess_notional` /
+    `risk_excess_currency`, and `market_value_pct_nlv` (nullable) are
+    bucket-specific metrics, omitted when not applicable.
+  - per-row `blockers[]` — why this row is not actionable (e.g.
+    `stock_protection_disabled`, duplicate-protection guards) with
+    remediation `action` text.
+- `counts` — `total`, `actionable` (rows with zero blockers), per-bucket
+  counts, `market_flags`, summed `theta_per_day`, and
+  `risk_reduction_excess_notional`/`_currency`.
+- `blockers[]` (snapshot level) and `loaded_from_state` — the latter is
+  true when the daemon is serving a snapshot adopted from persisted
+  state at startup rather than a fresh compute this session.
+- Read-only contract: list/refresh never preview, submit, place, modify,
+  cancel, or expose raw preview tokens.
+
+## settings-show
+
+`ibkr settings show --json` — platform settings and observed read-only
+state. The MCP twin is `ibkr_settings` (read-only; there is intentionally
+no MCP settings write tool in v1). Every leaf is a typed cell
+`{value, access, source, reason}`: `access` (`read` | `write`) says
+whether `ibkr settings set` can change it, `source` (`runtime` | `config`
+| `build` | `observed`) names the owning layer, and `reason` explains
+read-only cells or how to change them.
+
+```json
+{
+  "kind": "ibkr.platform_settings",
+  "features": {
+    "purge_restore": {
+      "enabled": {"value": true, "access": "write", "source": "runtime"}
+    },
+    "stock_protection": {
+      "enabled": {"value": true, "access": "write", "source": "runtime"}
+    }
+  },
+  "trading": {
+    "freeze": {"value": false, "access": "write", "source": "runtime",
+               "reason": "runtime brake: true blocks new broker writes; cancels stay allowed"},
+    "mode": {"value": "paper", "access": "read", "source": "config",
+             "reason": "set [trading].mode in config.toml to \"disabled\", \"paper\", or \"live\""},
+    "account": {"value": "DU1234567", "access": "read", "source": "config",
+                "reason": "set [gateway].account in config.toml"},
+    "endpoint": {"value": "127.0.0.1:7497", "access": "read", "source": "observed",
+                 "reason": "observed from daemon gateway discovery/config"},
+    "client_id": {"value": 15, "access": "read", "source": "config",
+                  "reason": "set [gateway].client_id in config.toml"},
+    "mcp_trading": {"value": "preview-only", "access": "read", "source": "config",
+                    "reason": "set [trading].mcp_* in config.toml"},
+    "live_override": {"value": "blocked", "access": "read", "source": "config",
+                      "reason": "set live acknowledgements in config.toml"},
+    "build_writes_available": {"value": true, "access": "read", "source": "build",
+                               "reason": "controlled by the ibkr build"},
+    "limits": {
+      "max_notional": {"value": 25000, "access": "write", "source": "runtime"},
+      "max_option_contracts": {"value": 10, "access": "write", "source": "config"},
+      "allow_stock_short": {"value": false, "access": "write", "source": "config"},
+      "allow_option_sell_to_open": {"value": false, "access": "write", "source": "config"},
+      "allow_option_market_orders": {"value": false, "access": "write", "source": "config"}
+    }
+  },
+  "auto_trade": {
+    "proposals_enabled": {"value": true, "access": "read", "source": "config",
+                          "reason": "set [auto_trade].proposals_enabled in config.toml"},
+    "enabled": {"value": false, "access": "read", "source": "config",
+                "reason": "future autonomous gate; set [auto_trade].enabled in config.toml"},
+    "auto_submit": {"value": false, "access": "read", "source": "config",
+                    "reason": "future autonomous submit gate; set [auto_trade].auto_submit in config.toml"},
+    "fast_path_enabled": {"value": true, "access": "read", "source": "config",
+                          "reason": "set [auto_trade].fast_path_enabled in config.toml"},
+    "policy_file": {"value": "protection-policy.toml", "access": "read", "source": "config",
+                    "reason": "set [auto_trade].policy_file in config.toml"},
+    "hot_reload": {"value": true, "access": "read", "source": "config",
+                   "reason": "set [auto_trade].hot_reload in config.toml"},
+    "reload_interval": {"value": "30s", "access": "read", "source": "config",
+                        "reason": "set [auto_trade].reload_interval in config.toml"},
+    "proposal_cadence": {"value": "5m0s", "access": "read", "source": "config",
+                         "reason": "set [auto_trade].proposal_cadence in config.toml"}
+  },
+  "market_data": {
+    "quality": {
+      "status": "ok",
+      "summary": "observed quotes look live or usable",
+      "quote_counts": {"live": 12, "frozen": 2},
+      "access": "read",
+      "source": "observed",
+      "reason": "observed from quote, position, chain, and status surfaces; entitlements are never stored",
+      "observed_at": "2026-06-11T15:12:00Z"
+    }
+  },
+  "build": {
+    "channel": {"value": "experimental-trading", "access": "read", "source": "build",
+                "reason": "controlled by the ibkr build"},
+    "trading_writes_available": {"value": true, "access": "read", "source": "build",
+                                 "reason": "controlled by the ibkr build"},
+    "experimental_trading_note": "experimental trading build; runtime limit overrides are writable only when [trading].mode is paper or live"
+  },
+  "as_of": "2026-06-11T15:12:00Z"
+}
+```
+
+Field meanings:
+
+- `features.purge_restore.enabled` / `features.stock_protection.enabled`
+  — runtime user preferences (always `write`/`runtime`). Default `true`
+  when never set; `ibkr settings set ...=null` clears the override back
+  to the default.
+- `trading.freeze` — the runtime trading brake. `true` blocks every new
+  broker write (place/modify/purge/restore/proposal submits) while
+  cancels stay allowed; it engages even when order entry is otherwise
+  misconfigured. Human-only on live routes.
+- `trading.mode`, `account`, `client_id`, `mcp_trading`,
+  `live_override` — read-only mirrors of config (the same values
+  trading-status reports); `trading.endpoint` is `observed` from
+  discovery/config. `build_writes_available` mirrors the build
+  capability.
+- `trading.limits.*` — the five runtime safety limits. `access` is
+  `write` only on a trading-capable build with `[trading].mode` set to
+  paper or live; otherwise `read` with the reason in each cell. `source`
+  is `runtime` when a runtime override is in effect, else `config`
+  (config defaults). On a live route, agent-origin sessions cannot
+  change them at all — a human must edit limits from an interactive
+  terminal.
+- `auto_trade.*` — read-only config mirrors of the proposal-engine gates
+  (the same values [proposals-status](#proposals-status) reports as
+  plain booleans/strings).
+- `market_data.quality` — observed feed quality, never stored
+  entitlements: `status` is `ok` | `delayed` | `degraded` (some decision
+  surface reported degraded data quality) | `unknown` (nothing observed
+  yet), with `quote_counts` keyed by data_type, optional
+  `data_quality[]` rows (same shape as `status.health`), and
+  `observed_at` (RFC 3339, omitted until something was observed).
+- `build` — `channel` is `stable` | `experimental-trading`;
+  `experimental_trading_note` is display prose for the active build.
