@@ -28,7 +28,6 @@ const state = {
   openOrderEdits: {},
   protectionPreviewBusy: "",
   protectionPreviews: {},
-  protectionConfirmKey: "",
   protectionSubmitBusy: "",
   protectionSubmits: {},
   protectionSnapshotBusy: false,
@@ -1875,7 +1874,6 @@ function protectionRow(proposal) {
   const previewBusy = state.protectionPreviewBusy === previewKey;
   const previewResult = state.protectionPreviews[previewKey] || null;
   const finalSubmitGate = previewFlow ? protectionPreviewSubmitGate(proposal, previewResult) : null;
-  const submitConfirming = state.protectionConfirmKey === previewKey;
   const submitBusy = state.protectionSubmitBusy === previewKey;
   const submitResult = state.protectionSubmits[previewKey] || null;
   const copy = document.createElement("div");
@@ -1914,7 +1912,6 @@ function protectionRow(proposal) {
     busy: submitBusy,
     previewResult,
     proposal,
-    confirming: submitConfirming,
   }) : "";
   if (submitStateText) {
     const submitState = document.createElement("small");
@@ -1947,18 +1944,11 @@ function protectionRow(proposal) {
   if (previewFlow && (submitResult || submitBusy || (previewResult && !previewResult.pending))) {
     const finalSubmit = document.createElement("button");
     finalSubmit.type = "button";
-    finalSubmit.className = submitConfirming ? "protection-submit protection-submit--confirm" : "protection-submit";
-    finalSubmit.textContent = submitBusy ? "Submitting" : submitConfirming ? "Confirm stop" : "Submit stop";
+    finalSubmit.className = "protection-submit";
+    finalSubmit.textContent = submitBusy ? "Submitting" : "Submit stop";
     finalSubmit.disabled = blocked || previewBusy || submitBusy || !finalSubmitGate.ready;
-    finalSubmit.title = protectionSubmitButtonTitle({ blocked, previewBusy, submitBusy, gate: finalSubmitGate, confirming: submitConfirming });
-    finalSubmit.addEventListener("click", () => {
-      if (!submitConfirming) {
-        state.protectionConfirmKey = previewKey;
-        renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
-        return;
-      }
-      submitProtectionProposal(proposal);
-    });
+    finalSubmit.title = protectionSubmitButtonTitle({ blocked, previewBusy, submitBusy, gate: finalSubmitGate });
+    finalSubmit.addEventListener("click", () => submitProtectionProposal(proposal));
     actions.append(finalSubmit);
   }
   const ignore = document.createElement("button");
@@ -2301,15 +2291,14 @@ function protectionWhatIfDetails(whatIf = {}) {
   return parts.join(" · ");
 }
 
-function protectionSubmitStateText({ result = null, gate = {}, busy = false, previewResult = null, confirming = false } = {}) {
+function protectionSubmitStateText({ result = null, gate = {}, busy = false, previewResult = null } = {}) {
   if (busy) return "Submitting stop; fresh broker WhatIf running";
   if (result) return protectionSubmitResultText(result);
   if (!previewResult) return "";
   if (previewResult.pending) return "";
   if (!gate.ready) return `Submit blocked · ${gate.reason}`;
   if (!protectionPreviewSubmitEligible(previewResult)) return `Submit unavailable · ${protectionPreviewSubmitBlockedReason(previewResult)}`;
-  if (confirming) return `Confirm broker write to ${protectionWriteConfirmationLabel()}; fresh WhatIf runs first`;
-  return "Ready to submit; click Submit stop to confirm the broker write";
+  return `Ready; Submit stop sends the broker write to ${protectionWriteConfirmationLabel()}`;
 }
 
 function protectionSubmitStateClass({ result = null, gate = {}, busy = false } = {}) {
@@ -2339,13 +2328,12 @@ function protectionSubmitResultText(result = {}) {
   return message ? `Submit returned · ${message}` : "Submit returned without an accepted broker order";
 }
 
-function protectionSubmitButtonTitle({ blocked = false, previewBusy = false, submitBusy = false, gate = {}, confirming = false } = {}) {
+function protectionSubmitButtonTitle({ blocked = false, previewBusy = false, submitBusy = false, gate = {} } = {}) {
   if (blocked) return "Proposal is blocked";
   if (previewBusy) return "Broker WhatIf preview is still running";
   if (submitBusy) return "Submitting stop order";
   if (!gate.ready) return gate.reason || "Submit unavailable";
-  if (confirming) return `Submit the stop to ${protectionWriteConfirmationLabel()}; the daemon runs a fresh broker WhatIf first`;
-  return gate.reason || "Submit the previewed stop order";
+  return gate.reason || `Submit the previewed stop to ${protectionWriteConfirmationLabel()}; the daemon runs a fresh broker WhatIf first`;
 }
 
 function protectionPreviewStale(result = {}, proposal = {}) {
@@ -2412,11 +2400,6 @@ async function submitProtectionProposal(proposal) {
     renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
     return;
   }
-  if (protectionUsesPreviewFlow(proposal) && state.protectionConfirmKey !== previewKey) {
-    state.protectionConfirmKey = previewKey;
-    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
-    return;
-  }
   const confirmation = protectionWriteConfirmation(proposal);
   if (!confirmation) {
     state.protectionSubmits = {
@@ -2426,17 +2409,7 @@ async function submitProtectionProposal(proposal) {
     renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
     return;
   }
-  const liveConfirmation = liveWriteConfirmation("proposal submit");
-  if (liveConfirmation === null) {
-    state.protectionSubmits = {
-      ...state.protectionSubmits,
-      [previewKey]: { blockers: [{ code: "confirmation_cancelled", message: "typed live confirmation was cancelled or mistyped" }], as_of: new Date().toISOString() },
-    };
-    renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
-    return;
-  }
   state.protectionSubmitBusy = previewKey;
-  state.protectionConfirmKey = "";
   state.protectionSubmits = {
     ...state.protectionSubmits,
     [previewKey]: { local: true, pending: true, proposal, as_of: new Date().toISOString() },
@@ -2455,7 +2428,6 @@ async function submitProtectionProposal(proposal) {
         timeout_ms: protectionPreviewTimeoutMs(proposal),
         confirm_account: confirmation.account,
         confirm_mode: confirmation.mode,
-        live_confirmation: liveConfirmation || undefined,
       }),
     });
     const body = await readJSONOrText(res);
@@ -2485,21 +2457,6 @@ function protectionWriteConfirmation(proposal = {}) {
   return { account: trading.account, mode: trading.mode };
 }
 
-// liveWriteConfirmation collects the typed "live/<account>" phrase the daemon
-// requires from human origins for live broker writes. Paper and unknown modes
-// need none and return "". Returns null when the user declines or mistypes —
-// the daemon would refuse the write anyway, so abort before transmitting.
-function liveWriteConfirmation(verb) {
-  const trading = state.snapshot?.trading || {};
-  if (trading.mode !== "live") return "";
-  const expected = `live/${trading.account}`;
-  const got = window.prompt([
-    `LIVE broker write (${verb}) against ${trading.account}.`,
-    `Type ${expected} to confirm.`,
-  ].join("\n"));
-  return got === expected ? expected : null;
-}
-
 function protectionWriteConfirmationLabel() {
   const trading = state.snapshot?.trading || {};
   return [trading.mode, trading.account].filter(Boolean).join("/") || "broker account";
@@ -2508,7 +2465,6 @@ function protectionWriteConfirmationLabel() {
 async function previewProtectionProposal(proposal) {
   const previewKey = protectionPreviewStateKey(proposal);
   state.protectionPreviewBusy = previewKey;
-  if (state.protectionConfirmKey === previewKey) state.protectionConfirmKey = "";
   state.protectionPreviews = {
     ...state.protectionPreviews,
     [previewKey]: {
@@ -4429,17 +4385,10 @@ async function applyOrderModify(order) {
     renderOpenOrders();
     return;
   }
-  if (!window.confirm(modifyConfirmationText(order, edit.preview))) {
-    return;
-  }
   const modifyConfirmation = protectionWriteConfirmation();
   if (!modifyConfirmation) {
     edit.error = "Trading account/mode unavailable; cannot confirm broker write.";
     renderOpenOrders();
-    return;
-  }
-  const modifyLiveConfirmation = liveWriteConfirmation("order modify");
-  if (modifyLiveConfirmation === null) {
     return;
   }
   edit.busy = "modify";
@@ -4454,7 +4403,6 @@ async function applyOrderModify(order) {
         preview_token: edit.preview.preview_token,
         confirm_account: modifyConfirmation.account,
         confirm_mode: modifyConfirmation.mode,
-        live_confirmation: modifyLiveConfirmation || undefined,
       }),
     });
     const body = await readJSONOrText(res);
@@ -4478,9 +4426,6 @@ async function cancelOpenOrder(order) {
   if (!gate.ready) {
     edit.error = gate.reason;
     renderOpenOrders();
-    return;
-  }
-  if (!window.confirm(cancelConfirmationText(order, trading))) {
     return;
   }
   const cancelConfirmation = protectionWriteConfirmation();
@@ -4675,7 +4620,6 @@ async function runUnderlyingAction(action, target = {}) {
     if (!confirmation) return;
     body.confirm_account = confirmation.account;
     body.confirm_mode = confirmation.mode;
-    if (confirmation.liveConfirmation) body.live_confirmation = confirmation.liveConfirmation;
   }
 
   state.underlyingBusy = action;
@@ -4734,14 +4678,7 @@ function underlyingWriteConfirmation(action, label) {
     renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
     return null;
   }
-  // On a live gate the typed phrase is verbatim "live/<account>" — exactly
-  // the live confirmation the daemon requires; forward it instead of
-  // prompting twice.
-  return {
-    account: trading.account,
-    mode: trading.mode,
-    liveConfirmation: trading.mode === "live" ? got : "",
-  };
+  return { account: trading.account, mode: trading.mode };
 }
 
 function purgeResultSummary(result = {}) {
@@ -4793,59 +4730,12 @@ function staleAlertReason(alert) {
   return "previous context";
 }
 
-function modifyConfirmationText(order, preview) {
-  const warnings = warningMessages(preview.warnings).join(" / ") || "--";
-  return [
-    "Apply previewed order change?",
-    "",
-    `Mode: ${labelize(preview.mode || order.mode || "--")}`,
-    `Account: ${preview.account || order.account || "--"}`,
-    `Endpoint: ${venueLabel(preview || order)}`,
-    `Order: ${preview.draft?.action || order.action || "--"} ${preview.draft?.quantity || "--"} ${preview.draft?.contract?.symbol || order.symbol || "--"} ${preview.draft?.order_type || order.order_type || "LMT"} ${preview.draft?.trail ? trailLabel(preview.draft.trail) : priceLabel(preview.draft?.limit_price || order.limit_price)} ${preview.draft?.tif || order.tif || "DAY"}`,
-    `WhatIf: ${preview.what_if?.status || "--"}${preview.what_if?.message ? " / " + preview.what_if.message : ""}`,
-    `Broker warning/message: ${warnings}`,
-    `Submit eligibility: ${preview.submit_eligible ? "eligible" : "not eligible"} / ${preview.preview_token_id ? "token " + preview.preview_token_id : "no token"}`,
-  ].join("\n");
-}
-
-function cancelConfirmationText(order, trading) {
-  return [
-    "Cancel order?",
-    "",
-    `Mode: ${labelize(order.mode || trading.mode || "--")}`,
-    `Account: ${order.account || trading.account || "--"}`,
-    `Endpoint: ${venueLabel(order.endpoint ? order : trading)}`,
-    `Order: ${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"} ${order.order_type || "LMT"} ${order.trail ? trailLabel(order.trail) : priceLabel(order.limit_price)} ${order.tif || "DAY"}`,
-    `Status: ${[order.lifecycle_status, order.send_state, order.last_message].filter(Boolean).join(" / ") || "--"}`,
-  ].join("\n");
-}
-
 function warningMessages(warnings = []) {
   return warnings.map((warning) => {
     if (!warning) return "";
     if (typeof warning === "string") return warning;
     return warning.message || warning.code || JSON.stringify(warning);
   }).filter(Boolean);
-}
-
-function venueLabel(value = {}) {
-  if (value.endpoint) return value.endpoint;
-  if (value.gateway_host && value.gateway_port) return `${value.gateway_host}:${value.gateway_port}`;
-  return "broker endpoint unavailable";
-}
-
-function priceLabel(value) {
-  return typeof value === "number" ? value.toFixed(2) : "auto";
-}
-
-function trailLabel(trail) {
-  if (!trail) return "auto";
-  const parts = [];
-  if (trail.trailing_percent > 0) parts.push(`trail ${trail.trailing_percent}%`);
-  if (trail.trailing_amount > 0) parts.push(`trail ${priceLabel(trail.trailing_amount)}`);
-  if (trail.initial_stop_price > 0) parts.push(`stop ${priceLabel(trail.initial_stop_price)}`);
-  if (trail.limit_offset > 0) parts.push(`offset ${priceLabel(trail.limit_offset)}`);
-  return parts.join(" ") || "trail auto";
 }
 
 async function refreshAlerts() {

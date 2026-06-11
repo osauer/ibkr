@@ -81,7 +81,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		return res, nil
 	}
 	blockers := s.purgeExecuteBlockers(status)
-	for _, blocker := range liveOriginBlockers(status, p.Origin, p.LiveConfirmation) {
+	for _, blocker := range liveOriginBlockers(status, p.Origin) {
 		blockers = appendTradingBlockerOnce(blockers, blocker)
 	}
 	if len(blockers) > 0 {

@@ -59,12 +59,12 @@ func (s *Server) currentBrokerWriteAuthorization() brokerWriteAuthorization {
 // brokerWriteAuthorizationForRequest is the request-time write gate: the
 // origin-agnostic authorization (which also feeds trading-status CanWrite)
 // plus the live origin policy for this specific request.
-func (s *Server) brokerWriteAuthorizationForRequest(origin, liveConfirmation string) brokerWriteAuthorization {
+func (s *Server) brokerWriteAuthorizationForRequest(origin string) brokerWriteAuthorization {
 	auth := s.currentBrokerWriteAuthorization()
 	if s == nil {
 		return auth
 	}
-	for _, blocker := range liveOriginBlockers(auth.Status, origin, liveConfirmation) {
+	for _, blocker := range liveOriginBlockers(auth.Status, origin) {
 		auth.Blockers = appendTradingBlockerOnce(auth.Blockers, blocker)
 		auth.Allowed = false
 	}
@@ -72,7 +72,7 @@ func (s *Server) brokerWriteAuthorizationForRequest(origin, liveConfirmation str
 }
 
 func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.OrderPlaceResult, error) {
-	auth := s.brokerWriteAuthorizationForRequest(p.Origin, p.LiveConfirmation)
+	auth := s.brokerWriteAuthorizationForRequest(p.Origin)
 	if !auth.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}
@@ -126,7 +126,7 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 }
 
 func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc.OrderModifyResult, error) {
-	auth := s.brokerWriteAuthorizationForRequest(p.Origin, p.LiveConfirmation)
+	auth := s.brokerWriteAuthorizationForRequest(p.Origin)
 	if !auth.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
 	}

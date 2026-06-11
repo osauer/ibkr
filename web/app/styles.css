@@ -2360,10 +2360,6 @@ p {
   background: #047857;
 }
 
-.protection-submit--confirm {
-  background: #065f46;
-}
-
 .protection-ignore {
   border: 1px solid var(--line);
   color: var(--ink-2);

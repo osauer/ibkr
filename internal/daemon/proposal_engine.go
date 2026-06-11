@@ -866,7 +866,7 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
-	place, err := e.server.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs, Origin: p.Origin, LiveConfirmation: p.LiveConfirmation})
+	place, err := e.server.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs, Origin: p.Origin})
 	if err != nil {
 		blockers := []rpc.TradingBlocker{{Code: "submit_failed", Message: err.Error()}}
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, err)

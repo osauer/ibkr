@@ -359,13 +359,6 @@ func runPurgeRestore(ctx context.Context, env *Env, args []string) int {
 		TimeoutMs: int(timeout.Milliseconds()),
 		Origin:    env.Origin,
 	}
-	if *execute {
-		liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "purge restore --execute")
-		if !ok {
-			return fail(env, "purge restore: live confirmation aborted")
-		}
-		params.LiveConfirmation = liveConfirmation
-	}
 	if len(params.Symbols) == 0 {
 		params.All = true
 	}
@@ -410,18 +403,13 @@ func runPurgeExecute(ctx context.Context, env *Env, args []string) int {
 }
 
 func runPurgeDirect(ctx context.Context, env *Env, verb string, target purgeTarget, wait time.Duration, jsonOut bool) int {
-	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, verb)
-	if !ok {
-		return fail(env, "%s: live confirmation aborted", verb)
-	}
 	purgeProgress(env, jsonOut, "%s %s: refreshing current positions and submitting close orders", verb, target.label())
 	params := rpc.PurgeExecuteParams{
-		PurgeID:          purgeBookID(time.Now()),
-		All:              target.All,
-		Symbols:          target.onlySymbols(),
-		WaitMs:           int(wait.Milliseconds()),
-		Origin:           env.Origin,
-		LiveConfirmation: liveConfirmation,
+		PurgeID: purgeBookID(time.Now()),
+		All:     target.All,
+		Symbols: target.onlySymbols(),
+		WaitMs:  int(wait.Milliseconds()),
+		Origin:  env.Origin,
 	}
 	if len(params.Symbols) == 0 {
 		params.All = true

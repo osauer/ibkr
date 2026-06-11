@@ -1,16 +1,20 @@
 # Agent-origin gating for broker writes
 
-Updated: 2026-06-10 09:12 CEST
-Status: draft — pending implementation review
+Updated: 2026-06-11 08:15 CEST (live-gate simplification: the typed
+`live/<account>` human confirmation described below was removed; the
+agent-origin hard block, origin detection, journaling, and MCP redaction all
+stand. See CHANGELOG. Earlier: 2026-06-10 09:12 CEST.)
+Status: implemented; confirmation layer since removed
 
 Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 ## Scope
 
 - **Goal:** order placement originating from AI-agent contexts is hard-blocked
-  when the trading gate routes live, with no override flag; humans at an
-  interactive terminal keep a live path behind explicit confirmation. Paper
-  stays fully open to agents so protection flows can be tested end-to-end.
+  when the trading gate routes live, with no override flag; humans keep the
+  live path (since 2026-06-11 with no per-write typed ritual — live order
+  entry is latency-sensitive). Paper stays fully open to agents so protection
+  flows can be tested end-to-end.
 - **User-facing command/tool/API:** `ibkr proposals submit`, `ibkr order
   place|modify`, `ibkr purge … / purge restore --execute`, app HTTP write
   endpoints, MCP `ibkr_order_preview` (token redaction only).
@@ -28,7 +32,7 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 |---|---|---|---|---|
 | Request origin | invoking adapter at call time | `origin` field on broker-write params (`agent`, `human-tty`, `human-paired-device`) | journaled per order event; surfaced in blockers | missing/unknown → treated as `agent` (fail closed) |
 | Origin policy | daemon `brokerWriteAuthorization` | blocker `live_agent_origin_blocked` | `ibkr trading status`, submit/place errors | n/a — no config knob, no override |
-| Live human confirmation | CLI prompt on a real TTY | typed `live/<account>` ack, compared verbatim | CLI only | non-TTY cannot confirm → write refused |
+| ~~Live human confirmation~~ | removed 2026-06-11 | was: typed `live/<account>` ack, compared verbatim | — | human origins write on live with preview token + pins only |
 | Agent detection (CLI) | process env + stdin | env markers `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_SANDBOX`, `OPENAI_CODEX`, or `IBKR_AGENT_CONTEXT=1`, or `!isatty(stdin)` | n/a | any marker or non-TTY → `agent` |
 | App origin | paired-device auth in `internal/app` | app sets `human-paired-device` on daemon calls | SPA | unauthenticated callers never reach writes |
 
@@ -81,11 +85,15 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 ## Residual risks (accepted, documented)
 
 - Agent driving the paired PWA (e.g. browser automation) inherits
-  `human-paired-device`. Mitigation: pairing approval is a human act on the
-  phone; purge/submit confirmations remain in the UI.
+  `human-paired-device`. Since 2026-06-11 its live submits are single-tap:
+  gated by the preview token and the server-validated
+  `confirm_account`/`confirm_mode` fields, with no typed ritual. Mitigation
+  remains pairing approval as a human act on the phone; accepted as the
+  price of fast live order entry.
 - Direct socket callers can claim `human-tty`. Same-uid trust boundary as
-  today; the live ack stack (allow_live + acks + paper-smoke evidence) still
-  applies on top.
+  today; the preview-token invariant, gateway pins with session cross-check,
+  and the `trading.freeze` switch still apply on top (the config ack stack
+  was removed 2026-06-11).
 
 ## Before/After artifact
 

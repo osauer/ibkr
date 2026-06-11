@@ -229,11 +229,7 @@ func runOrderPlace(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "order place: --preview-token is required")
 	}
 	var res rpc.OrderPlaceResult
-	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "order place")
-	if !ok {
-		return fail(env, "order place: live confirmation aborted")
-	}
-	if err := env.Conn.Call(ctx, rpc.MethodOrderPlace, rpc.OrderPlaceParams{PreviewToken: strings.TrimSpace(*token), Origin: env.Origin, LiveConfirmation: liveConfirmation}, &res); err != nil {
+	if err := env.Conn.Call(ctx, rpc.MethodOrderPlace, rpc.OrderPlaceParams{PreviewToken: strings.TrimSpace(*token), Origin: env.Origin}, &res); err != nil {
 		return fail(env, "order place: %v", err)
 	}
 	if *jsonOut {
@@ -257,11 +253,7 @@ func runOrderModify(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "order modify: --preview-token is required")
 	}
 	var res rpc.OrderModifyResult
-	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "order modify")
-	if !ok {
-		return fail(env, "order modify: live confirmation aborted")
-	}
-	if err := env.Conn.Call(ctx, rpc.MethodOrderModify, rpc.OrderModifyParams{ID: strings.TrimSpace(fs.Arg(0)), PreviewToken: strings.TrimSpace(*token), Origin: env.Origin, LiveConfirmation: liveConfirmation}, &res); err != nil {
+	if err := env.Conn.Call(ctx, rpc.MethodOrderModify, rpc.OrderModifyParams{ID: strings.TrimSpace(fs.Arg(0)), PreviewToken: strings.TrimSpace(*token), Origin: env.Origin}, &res); err != nil {
 		return fail(env, "order modify: %v", err)
 	}
 	if *jsonOut {

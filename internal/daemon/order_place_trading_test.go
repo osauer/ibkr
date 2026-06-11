@@ -111,7 +111,7 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 	}
 
 	// Live: agent origin yields the hard blocker in the request-time gate;
-	// a human origin with the typed phrase clears the origin layer (other
+	// a human origin clears the origin layer with no further ritual (other
 	// live-readiness blockers remain, which is fine — we assert only the
 	// origin codes here).
 	liveSrv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive})
@@ -123,18 +123,17 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 		}
 		return false
 	}
-	agentAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginAgent, "")
+	agentAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginAgent)
 	if agentAuth.Allowed || !hasCode(agentAuth.Blockers, "live_agent_origin_blocked") {
 		t.Fatalf("live agent auth = %+v, want live_agent_origin_blocked", agentAuth.Blockers)
 	}
-	humanNoPhrase := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY, "")
-	if !hasCode(humanNoPhrase.Blockers, "live_confirmation_required") {
-		t.Fatalf("live human auth without phrase = %+v, want live_confirmation_required", humanNoPhrase.Blockers)
+	humanAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY)
+	if hasCode(humanAuth.Blockers, "live_agent_origin_blocked") {
+		t.Fatalf("live human auth = %+v, want no origin blockers", humanAuth.Blockers)
 	}
-	phrase := liveWriteConfirmationPhrase(liveSrv.currentTradingStatus().Account)
-	humanWithPhrase := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY, phrase)
-	if hasCode(humanWithPhrase.Blockers, "live_agent_origin_blocked") || hasCode(humanWithPhrase.Blockers, "live_confirmation_required") {
-		t.Fatalf("live human auth with phrase = %+v, want no origin blockers", humanWithPhrase.Blockers)
+	pairedAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginPairedDevice)
+	if hasCode(pairedAuth.Blockers, "live_agent_origin_blocked") {
+		t.Fatalf("live paired-device auth = %+v, want no origin blockers", pairedAuth.Blockers)
 	}
 }
 
@@ -150,12 +149,12 @@ func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 		Endpoint: "127.0.0.1:4001",
 		ClientID: 31,
 		Blockers: []rpc.TradingBlocker{{
-			Code:    "live_not_allowed",
-			Message: "live trading requires an explicit local override",
-			Action:  "Set [trading].allow_live = true.",
+			Code:    "gateway_port_unpinned",
+			Message: "order submission requires a pinned gateway port",
+			Action:  "Set [gateway].port.",
 		}},
 	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay})
-	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "explicit local override") {
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "pinned gateway port") {
 		t.Fatalf("submitConfiguredOrder err = %v, want live-readiness trading refusal", err)
 	}
 }

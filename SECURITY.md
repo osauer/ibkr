@@ -43,31 +43,37 @@ Reports that demonstrate a deviation from any of those properties — a successf
 Builds with the `trading` tag accept broker writes behind a layered gate
 (see `docs/design/agent-origin-gating.md`). Every write request carries an
 origin; when the trading gate routes **live**, agent-origin requests are
-refused with no override, and human origins must supply a typed
-`live/<account>` confirmation. Paper routes are origin-free so agent
-sessions can exercise the full order path against paper TWS.
+refused with no override. Paper routes are origin-free so agent sessions
+can exercise the full order path against paper TWS. Live human writes ride
+on the structural gates: a submit-eligible preview token per write, the
+gateway pins cross-checked against the connected session, and the runtime
+`trading.freeze` switch. (The typed `live/<account>` confirmation and the
+config acknowledgement keys were removed 2026-06-11 as same-file
+duplication that only slowed live order entry.)
 
 Honest limits of this interlock:
 
 - It is a **safety interlock, not a security boundary**. Origin is asserted
   by the calling process; any same-uid process can forge it, call the daemon
-  socket directly, or edit the config. The live acknowledgement stack
-  (`allow_live`, account/endpoint acks) still applies on top.
+  socket directly, or edit the config.
 - **Cancel is exempt** from the live agent block (refusing a cancel can
   strand a worse position), but note the asymmetry: cancelling a protective
   stop *removes* protection. Cancels journal their origin; a future
   tightening can restrict agent cancels to agent-placed orders.
 - An agent driving the paired PWA inherits the `human-paired-device` origin;
-  pairing approval on the phone is the human act that scopes that risk.
+  pairing approval on the phone is the human act that scopes that risk. Its
+  live submits are gated by the same preview-token and server-validated
+  account/mode confirmation fields as any app write — single-tap, no typed
+  ritual.
 - **Paper-smoke evidence is MAC'd, not secret.** `ibkr trading paper-smoke`
   writes evidence signed with the order-token HMAC key, so hand-written or
   edited `trading-readiness.json` files surface as `unsigned` in trading
   status. Since 2026-06-10 the evidence is a release-pipeline quality gate
   (`make release` runs the smoke at version bump and aborts on failure),
   not a runtime live precondition — live enablement rests on the TWS-side
-  API toggle, the trading-capable binary, and the config pins and
-  acknowledgements. The MAC remains an interlock against casual forgery
-  and accidental edits of the status display, nothing more.
+  API toggle, the trading-capable binary, and the config pins. The MAC
+  remains an interlock against casual forgery and accidental edits of the
+  status display, nothing more.
 
 ## Release integrity (v1.0.0+)
 

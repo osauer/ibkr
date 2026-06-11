@@ -11,29 +11,24 @@ func TestLiveOriginBlockersMatrix(t *testing.T) {
 	t.Parallel()
 	live := rpc.TradingStatus{Mode: config.TradingModeLive, Account: "U7654321"}
 	paper := rpc.TradingStatus{Mode: config.TradingModePaper, Account: "DU1234567"}
-	phrase := "live/U7654321"
 
 	cases := []struct {
-		name         string
-		status       rpc.TradingStatus
-		origin       string
-		confirmation string
-		wantCode     string
+		name     string
+		status   rpc.TradingStatus
+		origin   string
+		wantCode string
 	}{
 		{name: "paper agent unrestricted", status: paper, origin: rpc.OrderOriginAgent},
 		{name: "paper empty origin unrestricted", status: paper, origin: ""},
 		{name: "live agent hard-blocked", status: live, origin: rpc.OrderOriginAgent, wantCode: "live_agent_origin_blocked"},
 		{name: "live empty origin fails closed as agent", status: live, origin: "", wantCode: "live_agent_origin_blocked"},
 		{name: "live unknown origin fails closed as agent", status: live, origin: "human-definitely", wantCode: "live_agent_origin_blocked"},
-		{name: "live agent with correct phrase still blocked", status: live, origin: rpc.OrderOriginAgent, confirmation: phrase, wantCode: "live_agent_origin_blocked"},
-		{name: "live human without phrase needs confirmation", status: live, origin: rpc.OrderOriginHumanTTY, wantCode: "live_confirmation_required"},
-		{name: "live human with wrong phrase needs confirmation", status: live, origin: rpc.OrderOriginHumanTTY, confirmation: "live/U0000000", wantCode: "live_confirmation_required"},
-		{name: "live human with phrase passes", status: live, origin: rpc.OrderOriginHumanTTY, confirmation: phrase},
-		{name: "live paired device with phrase passes", status: live, origin: rpc.OrderOriginPairedDevice, confirmation: phrase},
+		{name: "live human passes with no confirmation", status: live, origin: rpc.OrderOriginHumanTTY},
+		{name: "live paired device passes with no confirmation", status: live, origin: rpc.OrderOriginPairedDevice},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			blockers := liveOriginBlockers(tc.status, tc.origin, tc.confirmation)
+			blockers := liveOriginBlockers(tc.status, tc.origin)
 			if tc.wantCode == "" {
 				if len(blockers) != 0 {
 					t.Fatalf("liveOriginBlockers = %+v, want none", blockers)

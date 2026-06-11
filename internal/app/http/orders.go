@@ -22,9 +22,9 @@ type orderModifyPreviewRequest struct {
 
 type orderModifyRequest struct {
 	PreviewToken string `json:"preview_token"`
-	// LiveConfirmation carries the user-typed "live/<account>" phrase the
-	// daemon requires for human-origin live writes. Client-typed, never
-	// auto-filled; paper submits leave it empty.
+	// LiveConfirmation is the removed typed live phrase. Tolerated (and
+	// ignored) for one release because decodeJSON rejects unknown fields and
+	// a stale cached app.js still sends it on live writes.
 	LiveConfirmation string `json:"live_confirmation,omitempty"`
 	BrokerWriteConfirmation
 }
@@ -116,11 +116,10 @@ func (h *handler) handleOrderModify(w nethttp.ResponseWriter, r *nethttp.Request
 		return
 	}
 	res, err := h.deps.Daemon.OrderModify(r.Context(), rpc.OrderModifyParams{
-		ID:               r.PathValue("id"),
-		PreviewToken:     strings.TrimSpace(req.PreviewToken),
-		TimeoutMs:        10000,
-		Origin:           rpc.OrderOriginPairedDevice,
-		LiveConfirmation: strings.TrimSpace(req.LiveConfirmation),
+		ID:           r.PathValue("id"),
+		PreviewToken: strings.TrimSpace(req.PreviewToken),
+		TimeoutMs:    10000,
+		Origin:       rpc.OrderOriginPairedDevice,
 	})
 	if err != nil {
 		writeError(w, nethttp.StatusBadGateway, err.Error())

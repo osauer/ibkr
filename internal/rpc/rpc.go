@@ -3057,21 +3057,18 @@ type OrderPlaceParams struct {
 	PreviewToken string `json:"preview_token"`
 	TimeoutMs    int    `json:"timeout_ms,omitempty"`
 	// Origin identifies who is asking (OrderOrigin*); live routes refuse
-	// agent origins. LiveConfirmation carries the typed "live/<account>"
-	// phrase a human origin must supply for live writes.
-	Origin           string `json:"origin,omitempty"`
-	LiveConfirmation string `json:"live_confirmation,omitempty"`
+	// agent origins.
+	Origin string `json:"origin,omitempty"`
 }
 
 // OrderModifyParams applies a constrained modify to a locally tracked open
 // order. The preview token must describe the replacement draft; the daemon
 // reuses the existing broker order ID instead of creating a new one.
 type OrderModifyParams struct {
-	ID               string `json:"id"`
-	PreviewToken     string `json:"preview_token"`
-	TimeoutMs        int    `json:"timeout_ms,omitempty"`
-	Origin           string `json:"origin,omitempty"`
-	LiveConfirmation string `json:"live_confirmation,omitempty"`
+	ID           string `json:"id"`
+	PreviewToken string `json:"preview_token"`
+	TimeoutMs    int    `json:"timeout_ms,omitempty"`
+	Origin       string `json:"origin,omitempty"`
 }
 
 // OrderCancelParams requests cancellation of a locally tracked order. Cancel
@@ -3105,14 +3102,13 @@ type OrderPlaceResult struct {
 }
 
 type PurgeExecuteParams struct {
-	PurgeID          string            `json:"purge_id"`
-	All              bool              `json:"all,omitempty"`
-	Symbols          []string          `json:"symbols,omitempty"`
-	Legs             []PurgeExecuteLeg `json:"legs,omitempty"`
-	BypassPreview    *bool             `json:"bypass_preview,omitempty"`
-	WaitMs           int               `json:"wait_ms,omitempty"`
-	Origin           string            `json:"origin,omitempty"`
-	LiveConfirmation string            `json:"live_confirmation,omitempty"`
+	PurgeID       string            `json:"purge_id"`
+	All           bool              `json:"all,omitempty"`
+	Symbols       []string          `json:"symbols,omitempty"`
+	Legs          []PurgeExecuteLeg `json:"legs,omitempty"`
+	BypassPreview *bool             `json:"bypass_preview,omitempty"`
+	WaitMs        int               `json:"wait_ms,omitempty"`
+	Origin        string            `json:"origin,omitempty"`
 }
 
 type PurgeExecuteLeg struct {
@@ -3239,14 +3235,13 @@ type PurgeLedgerRow struct {
 }
 
 type PurgeRestoreParams struct {
-	PurgeID          string   `json:"purge_id,omitempty"`
-	All              bool     `json:"all,omitempty"`
-	Symbols          []string `json:"symbols,omitempty"`
-	Scale            float64  `json:"scale,omitempty"`
-	WaitMs           int      `json:"wait_ms,omitempty"`
-	TimeoutMs        int      `json:"timeout_ms,omitempty"`
-	Origin           string   `json:"origin,omitempty"`
-	LiveConfirmation string   `json:"live_confirmation,omitempty"`
+	PurgeID   string   `json:"purge_id,omitempty"`
+	All       bool     `json:"all,omitempty"`
+	Symbols   []string `json:"symbols,omitempty"`
+	Scale     float64  `json:"scale,omitempty"`
+	WaitMs    int      `json:"wait_ms,omitempty"`
+	TimeoutMs int      `json:"timeout_ms,omitempty"`
+	Origin    string   `json:"origin,omitempty"`
 }
 
 type PurgeRestoreResult struct {

@@ -1,6 +1,6 @@
 # Experimental trading config
 
-Updated: 2026-06-07 08:48 CEST
+Updated: 2026-06-11 08:15 CEST
 
 Stable `ibkr` is read-only. It can read account and market data, compute risk context, size positions, and preview stock/ETF LMT order drafts without broker submission. It does not place, modify, cancel, or transmit broker orders.
 
@@ -45,7 +45,7 @@ Every broker write requires a submit-eligible preview token; this is invariant, 
 
 Paper mode should use a paper endpoint or account, such as TWS paper on `7497` or a `DU...` account.
 
-Live mode is intentionally heavier. It requires a live-looking endpoint and account, a live override, and matching live acknowledgement fields. Do not enable live trading from a copied template; fill the fields deliberately for the account and endpoint in front of you. Paper-smoke evidence is reported in trading status as context but does not gate live mode: the smoke is enforced in the release pipeline instead (`make release` runs it at version bump and aborts on failure).
+Live mode requires a live-looking endpoint and account — port `4001`/`7496` and a non-`DU` account — and the pinned account must match what the connected TWS session advertises. That is the whole config gate: the former `allow_live` / `live_ack_account` / `live_ack_endpoint` keys were removed 2026-06-11 (they restated the gateway pins from the same file) and now fail config load with a targeted error if left in place. Pin the account and endpoint deliberately for the session in front of you. Paper-smoke evidence is reported in trading status as context but does not gate live mode: the smoke is enforced in the release pipeline instead (`make release` runs it at version bump and aborts on failure).
 
 ## Protection Market Flags
 

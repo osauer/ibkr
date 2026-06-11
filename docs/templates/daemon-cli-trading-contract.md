@@ -24,8 +24,8 @@ market-data semantics.
 
 - Codex cannot place, modify, cancel, close, submit, or transmit broker orders.
 - Preview tokens are not submit eligibility. Report both fields separately.
-- Trading capability and live acknowledgements remain operator-owned config/build
-  state, not inferred daemon policy.
+- Trading capability and mode remain operator-owned config/build state, not
+  inferred daemon policy.
 - Nil means unavailable, not zero, for IV, Greeks, FX, open interest, and money
   fields.
 - `data_type`, `as_of`, stale flags, warning details, and source health are
