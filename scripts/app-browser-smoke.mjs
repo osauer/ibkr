@@ -516,10 +516,13 @@ async function exerciseCanaryControlsRemoved(page) {
     warningToggle: document.querySelectorAll("#canaryWarningsToggle").length,
     checksToggle: document.querySelectorAll("#canaryChecksToggle").length,
     inlineDetail: document.querySelectorAll("#canaryInlineDetailPanel").length,
+    mitigationButton: document.querySelectorAll("#canaryMitigationButton").length,
+    orderReviewPanel: document.querySelectorAll("#orderReviewPanel").length,
+    riskPlanQuickAction: document.querySelectorAll("#quickRiskPlanButton").length,
   }));
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   if (total > 0) {
-    throw new Error(`canary summary controls should be removed: ${JSON.stringify(counts)}`);
+    throw new Error(`canary summary controls and risk-plan surfaces should be removed: ${JSON.stringify(counts)}`);
   }
   return counts;
 }
@@ -625,6 +628,9 @@ async function exerciseUnderlyingPanelFixture(page) {
   await page.evaluate(() => localStorage.removeItem("ibkrPurgeBook"));
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector("#dashboard:not([hidden])", { timeout: 15000 });
+  // The reload resets __ibkrSmoke and the rendered canary/regime state; later
+  // exercises assume the same arrived-snapshot barrier as the initial load.
+  await waitForSnapshotEvent(page, 0);
 
   return {
     virtual_rows: info.rows.length,
@@ -639,7 +645,7 @@ async function exerciseUnderlyingPanelFixture(page) {
 
 async function exerciseCanaryDetail(page) {
   let timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
-  if ((timestamp === "no timestamp" || timestamp === "updated --") && !lifecycle) {
+  if (canaryTimestampMissing(timestamp)) {
     try {
       await page.waitForFunction(() => {
         const text = document.getElementById("canaryAsOf")?.textContent?.trim() || "";
@@ -647,35 +653,22 @@ async function exerciseCanaryDetail(page) {
       }, { timeout: 30000 });
       timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
     } catch {
-      // Keep the explicit assertion below for app instances without live canary data.
+      // A first canary poll can legitimately outlast this wait (fresh app
+      // instance against an off-hours live session); the pending-copy
+      // assertion below still pins the rendered no-data contract.
     }
   }
-  const timestampMissing = !timestamp || timestamp === "--" || timestamp === "updated --" || timestamp === "no timestamp";
+  const timestampMissing = canaryTimestampMissing(timestamp);
   const initiallyOpen = await page.locator("#canaryDetailPanel").evaluate((el) => !el.hidden);
   if (initiallyOpen) {
     throw new Error("Portfolio Canary detail should be collapsed by default");
   }
-  const mitigation = await page.evaluate(() => {
-    const button = document.getElementById("canaryMitigationButton");
-    return {
-      text: button?.textContent?.trim() || "",
-      disabled: button?.disabled || false,
-      title: button?.title || "",
-      orderReviewFoldedHidden: document.getElementById("orderReviewPanel")?.hidden ?? true,
-    };
-  });
-  if (mitigation.text !== "Mitigation plan" || (mitigation.disabled && !mitigation.title) || !mitigation.orderReviewFoldedHidden) {
-    throw new Error(`folded Canary mitigation affordance is wrong: ${JSON.stringify(mitigation)}`);
-  }
-  if (timestampMissing && !lifecycle) {
+  if (timestampMissing) {
     const pending = await page.locator("#canaryHero").textContent();
     if (!/waiting for canary snapshot/i.test(pending || "")) {
       throw new Error(`canary timestamp is missing without pending copy: ${JSON.stringify({ timestamp, pending })}`);
     }
-    return { opens: false, initially_open: initiallyOpen, timestamp, mitigation, no_value: true };
-  }
-  if (timestampMissing) {
-    throw new Error("canary timestamp is missing");
+    return { opens: false, initially_open: initiallyOpen, timestamp, no_value: true };
   }
   await page.locator("#canaryDetailToggle").click();
   await page.waitForFunction(() => {
@@ -696,7 +689,11 @@ async function exerciseCanaryDetail(page) {
     const canary = document.getElementById("canaryDetailPanel");
     return canary?.hidden;
   }, { timeout: 5000 });
-  return { opens: true, initially_open: initiallyOpen, timestamp, mitigation, cards: counts.cards, drivers: counts.drivers, held_stress: counts.held_stress };
+  return { opens: true, initially_open: initiallyOpen, timestamp, cards: counts.cards, drivers: counts.drivers, held_stress: counts.held_stress };
+}
+
+function canaryTimestampMissing(value) {
+  return !value || value === "--" || value === "updated --" || value === "no timestamp";
 }
 
 async function exerciseMarketContext(page) {
