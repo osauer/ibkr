@@ -280,18 +280,6 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 	if modifyRes.Code != http.StatusOK {
 		t.Fatalf("modify status=%d, want 200; body=%s", modifyRes.Code, modifyRes.Body.String())
 	}
-
-	// A stale cached app.js still sends the removed live_confirmation field
-	// on live writes; decodeJSON rejects unknown fields, so the DTO tolerates
-	// (and ignores) it for one release rather than 400ing those clients.
-	staleBody := bytes.NewReader([]byte(`{"preview_token":"modify-token","confirm_account":"DU123","confirm_mode":"paper","live_confirmation":"live/DU123"}`))
-	staleReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/modify", staleBody)
-	staleReq.AddCookie(cookie)
-	staleRes := httptest.NewRecorder()
-	handler.ServeHTTP(staleRes, staleReq)
-	if staleRes.Code != http.StatusOK {
-		t.Fatalf("modify with stale live_confirmation status=%d, want 200 (tolerated field); body=%s", staleRes.Code, staleRes.Body.String())
-	}
 }
 
 func TestPurgeHTTPAdaptersPreviewAndStatus(t *testing.T) {
