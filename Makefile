@@ -144,9 +144,9 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check account-data-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check (binding pre-commit gate)
+check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + account-data-check (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
@@ -566,6 +566,13 @@ release-publish: ## Create the GitHub Release page (notes + binaries) — RELEAS
 
 changelog-check: ## Verify CHANGELOG.md has no template or maintainer-process leakage
 	@./scripts/check-changelog-public.sh
+
+# Born of the 2026-06-11 incident: a root-level scratch page with real
+# margin/net-liq figures shipped in the v1.9.0 tag and needed a history
+# rewrite. Fails on root HTML, *lab*.html / *scratch* names, and IBKR
+# account IDs (U/DU + 6-9 digits) in non-Go files.
+account-data-check: ## No IBKR account data or scratch pages in tracked files
+	@./scripts/check-no-account-data.sh
 
 changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
