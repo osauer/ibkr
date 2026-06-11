@@ -157,10 +157,11 @@ func daemonReachedGateway(socketPath string) bool {
 // lives in its own session so a terminal Ctrl-C doesn't take it down along
 // with the suite before it can sweep.
 //
-// The kill pattern "<binpath> daemon" matches both the shared daemon
-// (launchSharedDaemon) and anything the lifecycle tests autospawn through
-// the CLI, and nothing else: the binary path is unique to this run's temp
-// dir. SIGTERM first so daemons unlink their socket/lock files; SIGKILL the
+// The kill pattern "<binpath> (daemon|app)" matches the shared daemon
+// (launchSharedDaemon), anything the lifecycle tests autospawn through
+// the CLI, and any `ibkr app` a regression spawns from the test binary
+// (no test does so on purpose — see the leak tripwire in lifecycleEnv),
+// and nothing else: the binary path is unique to this run's temp dir. SIGTERM first so daemons unlink their socket/lock files; SIGKILL the
 // stragglers (e.g. a SIGSTOPped daemon from the stuck-daemon test) two
 // seconds later. The pattern travels via the environment, not argv —
 // embedding it in argv would make the shell match its own pkill -f pattern
@@ -173,7 +174,7 @@ func startReaper(cliBin string) {
 	}
 	cmd := exec.Command("/bin/sh", "-c",
 		`cat >/dev/null; pkill -TERM -f "$IBKR_REAP_PATTERN"; sleep 2; pkill -KILL -f "$IBKR_REAP_PATTERN"; exit 0`)
-	cmd.Env = append(os.Environ(), "IBKR_REAP_PATTERN="+regexp.QuoteMeta(cliBin)+" daemon")
+	cmd.Env = append(os.Environ(), "IBKR_REAP_PATTERN="+regexp.QuoteMeta(cliBin)+" (daemon|app)")
 	cmd.Stdin = r
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

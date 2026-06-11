@@ -44,6 +44,16 @@ func DefaultSocketPath() string {
 	return filepath.Join(home, ".cache", "ibkr", "ibkr.sock")
 }
 
+// SocketPathOverridden reports whether IBKR_SOCKET points the CLI at a
+// non-default daemon scope. Commands that manage system-wide state by
+// process name (e.g. `ibkr restart`'s implicit app management) use this
+// to stay hands-off: a process found by name cannot be attributed to the
+// overridden scope, so signaling it would cross scopes.
+func SocketPathOverridden() bool {
+	// docgen:env IBKR_SOCKET | Override the daemon IPC socket path. Defaults to `$XDG_RUNTIME_DIR/ibkr/ibkr.sock` or `$HOME/.cache/ibkr/ibkr.sock`.
+	return os.Getenv("IBKR_SOCKET") != ""
+}
+
 // DefaultLogPath returns the canonical daemon log location.
 func DefaultLogPath() string {
 	// docgen:env IBKR_LOG | Override the daemon log file path. Defaults to `$HOME/.local/state/ibkr/ibkr-daemon.log`.

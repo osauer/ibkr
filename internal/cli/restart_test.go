@@ -169,7 +169,10 @@ func TestRunRestartCoreTimeoutWithoutForceFails(t *testing.T) {
 }
 
 func TestRunRestartAllCoreRestartsDaemonAndRunningApp(t *testing.T) {
-	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+	// Empty = default daemon scope: a set IBKR_SOCKET makes plain restart
+	// skip app management entirely, which is tested separately below. All
+	// deps are fakes, so the default scope touches nothing real.
+	t.Setenv("IBKR_SOCKET", "")
 
 	var out, errBuf bytes.Buffer
 	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
@@ -244,7 +247,7 @@ func TestRunRestartAllCoreRestartsDaemonAndRunningApp(t *testing.T) {
 }
 
 func TestRunRestartAllCoreSkipsAppWhenNotRunning(t *testing.T) {
-	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+	t.Setenv("IBKR_SOCKET", "")
 
 	var out, errBuf bytes.Buffer
 	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
@@ -277,6 +280,47 @@ func TestRunRestartAllCoreSkipsAppWhenNotRunning(t *testing.T) {
 	}
 	if res.App != nil {
 		t.Fatalf("app result = %+v, want omitted", res.App)
+	}
+}
+
+func TestRunRestartAllCoreSkipsAppWhenSocketOverridden(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	appFindCalled := false
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			return update.DaemonProcess{}, update.ErrDaemonNotRunning
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			return 71, rpc.HealthResult{DaemonVersion: "test"}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			appFindCalled = true
+			return appProcess{}, errAppNotRunning
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("app start must not run when IBKR_SOCKET is overridden")
+			return 0, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if appFindCalled {
+		t.Fatal("app discovery must not run when IBKR_SOCKET is overridden")
+	}
+	var res restartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.App == nil {
+		t.Fatalf("app result missing, want explicit skip marker: %+v", res)
+	}
+	if res.App.Action != "skipped" || res.App.Reason != "socket_overridden" || res.App.Target != "app" {
+		t.Fatalf("app result = %+v", *res.App)
 	}
 }
 

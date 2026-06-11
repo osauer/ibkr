@@ -91,6 +91,7 @@ type appRestartBehavior struct {
 
 type appRestartResult struct {
 	Action     string   `json:"action"`
+	Reason     string   `json:"reason,omitempty"`
 	Target     string   `json:"target"`
 	WasRunning bool     `json:"was_running"`
 	Started    bool     `json:"started"`
@@ -192,6 +193,19 @@ func runRestartAllCore(ctx context.Context, opts *restartOptions, daemonDeps res
 	}
 	if !opts.jsonOut {
 		renderRestartStarted(opts.out, res)
+	}
+	// App discovery is by process name (findAppProcess) and cannot tell
+	// which daemon scope a found app belongs to. When IBKR_SOCKET points
+	// at a non-default scope, the only app this command could find is one
+	// outside that scope, so implicit app management must stay hands-off.
+	// `ibkr restart --app` remains available as the explicit path.
+	if dial.SocketPathOverridden() {
+		res.App = &appRestartResult{Action: "skipped", Reason: "socket_overridden", Target: "app"}
+		if opts.jsonOut {
+			return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+		}
+		fmt.Fprintln(opts.out, "ibkr restart: IBKR_SOCKET is set; skipping app management (use `ibkr restart --app` to manage the app explicitly)")
+		return 0
 	}
 	appRes, appRan, appExit := restartApp(ctx, opts, appDeps, appRestartBehavior{
 		startWhenMissing: false,

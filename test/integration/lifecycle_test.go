@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -55,8 +57,33 @@ func lifecycleEnv(t *testing.T) (env []string, socketPath, logPath string) {
 			killDaemonTree(pid)
 		}
 		_ = os.RemoveAll(dir)
+		reapLeakedTestApps(t)
 	})
 	return env, socketPath, logPath
+}
+
+// reapLeakedTestApps fails the test if any `ibkr app` process spawned from
+// this run's test binary is still alive, and kills it. No lifecycle test
+// may legitimately spawn an app: lifecycleEnv sets IBKR_SOCKET, which makes
+// plain `ibkr restart` skip app management entirely — a surviving app means
+// that scoping regressed (the bug that once SIGTERMed the developer's real
+// `ibkr app --remote` and leaked a test-binary replacement on :8765).
+// Because this runs in every parallel test's cleanup against one global
+// pattern, it stays a pure tripwire only as long as that invariant holds.
+func reapLeakedTestApps(t *testing.T) {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", regexp.QuoteMeta(sharedCLI)+" app").Output()
+	if err != nil {
+		return // pgrep exits 1 when nothing matches
+	}
+	for pidText := range strings.FieldsSeq(string(out)) {
+		pid, err := strconv.Atoi(pidText)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		t.Errorf("test binary leaked an `ibkr app` process (pid %d) — restart's app management escaped the IBKR_SOCKET scope; killing it", pid)
+		killDaemonTree(pid)
+	}
 }
 
 // killDaemonTree terminates a daemon and anything it spawned. Autospawned
@@ -256,6 +283,10 @@ func TestLifecycle_RestartStartsWhenAbsent(t *testing.T) {
 		WasRunning bool   `json:"was_running"`
 		Started    bool   `json:"started"`
 		NewPID     int    `json:"new_pid"`
+		App        *struct {
+			Action string `json:"action"`
+			Reason string `json:"reason"`
+		} `json:"app"`
 	}
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("decode restart json: %v\n%s", err, out)
@@ -265,6 +296,11 @@ func TestLifecycle_RestartStartsWhenAbsent(t *testing.T) {
 	}
 	if pid := daemonPID(socketPath); pid != res.NewPID {
 		t.Fatalf("lock PID = %d, restart new_pid=%d", pid, res.NewPID)
+	}
+	// IBKR_SOCKET is set by lifecycleEnv, so restart must not have touched
+	// any app process — least of all the developer's real one.
+	if res.App == nil || res.App.Action != "skipped" || res.App.Reason != "socket_overridden" {
+		t.Fatalf("app result = %+v, want skipped/socket_overridden", res.App)
 	}
 }
 
@@ -290,12 +326,19 @@ func TestLifecycle_RestartReplacesRunningDaemon(t *testing.T) {
 		Graceful   bool   `json:"graceful"`
 		OldPID     int    `json:"old_pid"`
 		NewPID     int    `json:"new_pid"`
+		App        *struct {
+			Action string `json:"action"`
+			Reason string `json:"reason"`
+		} `json:"app"`
 	}
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("decode restart json: %v\n%s", err, out)
 	}
 	if res.Action != "restarted" || !res.WasRunning || !res.Graceful || res.OldPID != oldPID || res.NewPID <= 0 {
 		t.Fatalf("restart result = %+v, oldPID=%d", res, oldPID)
+	}
+	if res.App == nil || res.App.Action != "skipped" || res.App.Reason != "socket_overridden" {
+		t.Fatalf("app result = %+v, want skipped/socket_overridden", res.App)
 	}
 	if res.NewPID == oldPID {
 		t.Fatalf("restart kept same PID: %d", oldPID)
