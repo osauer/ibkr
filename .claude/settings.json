@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make check)",
+      "Bash(make smoke)",
+      "Bash(make test)",
+      "Bash(make changelog-lint)",
+      "Bash(make hook-version-check)",
+      "Bash(make plugin-check)",
+      "Bash(go vet *)",
+      "Bash(ibkr status)",
+      "Bash(ibkr status *)",
+      "Bash(ibkr gamma)",
+      "Bash(ibkr gamma *)",
+      "Bash(ibkr regime)",
+      "Bash(ibkr regime *)",
+      "Bash(ibkr version)",
+      "Bash(ibkr trading status *)",
+      "Bash(ibkr orders *)",
+      "Bash(ibkr proposals preview *)",
+      "Bash(ibkr chain *)",
+      "Bash(ibkr quote *)",
+      "Bash(ibkr order status *)",
+      "Bash(ibkr positions *)",
+      "Bash(ibkr breadth *)"
+    ]
+  }
+}
