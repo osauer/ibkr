@@ -34,6 +34,13 @@
 #                             (default: process-derived ID in the 200-799 range)
 #   IBKR_SMOKE_TIMEOUT      — per-command wall-clock timeout in seconds (default: 60)
 #   IBKR_SMOKE_STRICT       — 1 = FAIL on no-gateway instead of SKIP (release path)
+#   IBKR_SMOKE_FAST         — 1 = stop after boot + quote + account (~15s inner-loop
+#                             tier, `make smoke-fast`); chain/regime/gamma/SPX
+#                             stay in the full run
+#   IBKR_SMOKE_GAMMA_DERIVED — 1 = run the off-hours derived-pricing gamma
+#                             assertion (5 polls × up to 60s ≈ 5 min). Default
+#                             0: release-smoke.sh carries this assertion on the
+#                             release path, so the dev inner loop doesn't pay it
 #   IBKR_SMOKE_STOP_EXISTING — 1 = stop existing ibkr daemons before smoke
 #   SPX_EXPECTED_REACHABLE  — 1 (default in `make smoke`) = `ibkr gamma --only=spx`
 #                             must return real SPX data; banner-seen FAILS the run.
@@ -222,12 +229,14 @@ echo "wire-smoke: client IDs → primary=$SMOKE_CLIENT_ID breadth=$BREADTH_CLIEN
 # 25s, same budget as the integration suite.
 echo "  [boot] autospawning daemon..."
 
-for attempt in $(seq 1 25); do
+# 0.25s poll granularity: the daemon typically connects in 2-4s, and a 1s
+# grain wasted most of a second on every smoke run. Budget stays 25s.
+for attempt in $(seq 1 100); do
     if "$BIN" status --json 2>/dev/null | grep -q '"connected": *true'; then
         break
     fi
-    sleep 1
-    if [[ $attempt -eq 25 ]]; then
+    sleep 0.25
+    if [[ $attempt -eq 100 ]]; then
         echo "wire-smoke: FAIL: daemon never reached connected=true within 25s" >&2
         exit 1
     fi
@@ -285,6 +294,16 @@ if [[ $LAST_CMD_EXIT -ne 0 ]]; then
 fi
 assert_wire account-summary
 
+# Fast tier exits here: handshake, quote, and account-summary wire paths
+# are pinned; the chain/regime/gamma fan-out belongs to the full smoke
+# (`make smoke`) and the release gates.
+if [[ "${IBKR_SMOKE_FAST:-0}" == "1" ]]; then
+    echo ""
+    echo "wire-smoke: PASS (fast tier) — boot + quote + account wire flow is healthy"
+    echo "wire-smoke: run the full \`make smoke\` for daemon/CLI wire-path changes"
+    exit 0
+fi
+
 # 7. chain with a near expiry — pins the IV-source path that the
 # v0.24.x bug broke. In loose mode this check warns instead of failing.
 echo "  [chain SPY 1-wide]..."
@@ -340,7 +359,12 @@ assert_wire gamma-noflag
 # returns Status=computing if the compute outlives the budget. We poll
 # up to 5 times (≈4-5 min total) to give the compute room to complete
 # on a cold contract cache.
-if [[ "${LOOSE:-0}" -eq 1 ]]; then
+#
+# Opt-in (IBKR_SMOKE_GAMMA_DERIVED=1): those ≈5 minutes dominated every
+# off-hours `make smoke` and the assertion is release-grade, not
+# per-commit — release-smoke.sh runs its own copy of this block on the
+# release path, so the dev inner loop skips it by default.
+if [[ "${LOOSE:-0}" -eq 1 && "${IBKR_SMOKE_GAMMA_DERIVED:-0}" == "1" ]]; then
     echo "  [gamma (loose: off-hours pricing assertion)]..."
     GAMMA_ENV="$SMOKE_DIR/gamma-envelope.json"
     for attempt in 1 2 3 4 5; do

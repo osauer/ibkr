@@ -97,10 +97,10 @@ EOF
 # stays empty until the gateway handshake completes, so poll like
 # release-smoke.sh does for status.connected.
 ACCOUNT=""
-for _ in $(seq 1 25); do
+for _ in $(seq 1 100); do
     ACCOUNT="$(timeout 30 "$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("connected_account",""))')"
     [[ -n "$ACCOUNT" ]] && break
-    sleep 1
+    sleep 0.25
 done
 if [[ -z "$ACCOUNT" ]]; then
     echo "release-paper-smoke: FAIL — could not resolve the connected account on ${HOST}:${PORT} after 25s" >&2
@@ -133,10 +133,10 @@ EOF
 # Fresh autospawned daemon: wait for the gateway handshake before the
 # smoke, or its reference-quote leg fails fast with gateway_unavailable.
 CONNECTED=""
-for _ in $(seq 1 25); do
+for _ in $(seq 1 100); do
     CONNECTED="$(timeout 30 "$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("connected",False))')"
     [[ "$CONNECTED" == "True" ]] && break
-    sleep 1
+    sleep 0.25
 done
 if [[ "$CONNECTED" != "True" ]]; then
     echo "release-paper-smoke: FAIL — daemon did not connect to ${HOST}:${PORT} within 25s" >&2

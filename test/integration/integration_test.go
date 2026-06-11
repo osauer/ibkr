@@ -294,9 +294,18 @@ func launchSharedDaemon(cliBin string) (string, func(), error) {
 
 // nextClientID generates a unique client ID per daemon process so the IBKR
 // gateway doesn't reject overlapping handshakes (one connection per ID).
-// Range chosen well clear of regime's 100-104 reservation and the default
-// daemon client ID 15.
-var clientIDCounter int32 = 19
+//
+// The counter base is PID-bucketed: a fixed base meant two concurrent
+// suite runs (parallel dev sessions) both claimed 20, 21, … against the
+// shared gateway and flaked with TWS error 326. Eight 19-wide windows
+// spanning 20-96 and 105-181 keep clear of the default daemon client ID
+// 15, regime's 100-104 reservation, and the smoke scripts' 200+ range.
+// scripts/with-gateway-lock.sh serializes whole runs across sessions;
+// this is defense in depth for anything not routed through make.
+var clientIDCounter = func() int32 {
+	buckets := []int32{20, 39, 58, 77, 105, 124, 143, 162}
+	return buckets[os.Getpid()%len(buckets)]
+}()
 
 func nextClientID() int { return int(atomic.AddInt32(&clientIDCounter, 1)) }
 

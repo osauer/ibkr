@@ -44,11 +44,13 @@ When those files change, inspect/trust hooks with `/hooks` in the next Codex
 session so broker-adjacent guardrails actually run.
 
 ## Done means
-`make check && make smoke` pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.
+`make check` plus the right smoke tier pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.
 
-`make check` is the static gate — no gateway needed; it bundles the format/vet/lint/vuln/docs/changelog/account-data checks. The Makefile (`make help`) is the canonical list, not this file. `make smoke` runs the binary against a live TWS gateway and skips cleanly if no gateway is reachable; if you touched daemon or CLI code paths, ensure TWS is up and watch it bind.
+Smoke tiers: `make smoke-fast` (~15s: boot + quote + account against a real gateway) is the default per-change gate. The full `make smoke` (chain/regime/gamma/SPX wire matrix) is binding when you touched daemon, CLI, or wire-path code — and always at release. Both tiers serialize against other sessions via `scripts/with-gateway-lock.sh`, so a busy gateway means a short wait, not a 326 flake.
 
-After editing daemon/CLI code, restart the installed daemon through the CLI: `make install && ibkr restart --timeout 15s`, then run `ibkr status` plus a command exercising your change. Do not use `pkill` for normal restarts; reserve it only for a broken/stuck daemon when `ibkr restart` cannot stop it. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
+`make check` is the static gate — no gateway needed; it bundles the format/vet/lint/vuln/docs/changelog/account-data checks. The Makefile (`make help`) is the canonical list, not this file. Hermetic test suites use Go's test cache (only edited packages re-run); govulncheck skips when deps are unchanged and already scanned today. Both run in full on the release path.
+
+After editing daemon/CLI code, refresh the installed daemon with `make restart-daemon` — it skips the bounce when the binary is byte-identical and the daemon is running (FORCE=1 bounces anyway), then run `ibkr status` plus a command exercising your change. Do not use `pkill` for normal restarts; reserve it only for a broken/stuck daemon when `ibkr restart` cannot stop it. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
 
 ## Releases
 `make release RELEASE_VERSION=vX.Y.Z`. Fail-fast preconditions: clean tree, HEAD == origin/main, unused tag, `.claude-plugin/plugin.json` version matches, changelog-lint, release-site-check (non-patch). Then it orchestrates refresh-spx-members → test → build → release-smoke (strict: TWS required) → paper smoke (`scripts/release-paper-smoke.sh`, binding: 1-share paper round-trip; no paper login aborts the release) → tag → release-binaries → push → plugin-tag → release-publish → registry-publish. `release-smoke` runs the actual version-stamped binary against a live TWS gateway and checks both JSON contracts and wire-level invariants — a release without TWS is a failed release. Never tag, push, or `gh release create` directly. If `make release` fails, fix the root cause. After it succeeds, verify artifacts landed (`gh release view`, `git ls-remote --tags origin`, registry check) — registry-publish can strand silently.
