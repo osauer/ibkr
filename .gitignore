@@ -22,12 +22,12 @@ cloudflare/remote-relay/.dev.vars
 # Local test outputs
 /test/integration/run-*/
 
-# Personal Claude Code state (project-shared settings would go in settings.json)
+# Personal Claude Code state (project-shared settings would go in settings.json).
+# CLAUDE.md shims and .claude_memory.md are deliberately tracked: worktree
+# agents check out commits, so untracked instruction files never reach them.
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock
-CLAUDE.md
-/.claude_memory.md
 
 # Claude Code agent worktrees — created at the repo root with
 # <adjective>-<noun>-<6 hex chars> names (e.g. optimistic-newton-2eb23f/)
