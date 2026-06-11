@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- md-source: regime-backtest-plan.md sha256:5aea5d37b315cae8bb03e096bfe49d82669ff3bcf0e9ae3b4f0ded6a6d147a04 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T21:23:00+02:00",
+    "dateModified": "2026-06-04T07:42:00+02:00",
     "description": "This is the single umbrella for proving and tuning ibkr regime and ibkr canary. Keep the work here. Do not add another experiment plan, tuning plan, or...",
     "headline": "Regime and Canary Backtest Runbook",
     "isPartOf": {
@@ -157,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="regime-and-canary-backtest-runbook">Regime and Canary Backtest Runbook</h1>
-<p><strong>Updated:</strong> 2026-05-31 21:23 CEST</p>
+<p><strong>Updated:</strong> 2026-06-04 07:42 CEST</p>
 <p>This is the single umbrella for proving and tuning <code>ibkr regime</code> and <code>ibkr canary</code>. Keep the work here. Do not add another experiment plan, tuning plan, or backtest framework unless this runbook says to.</p>
 <p>The goal is simple: prove that regime and canary produce useful stress detection without overfitting to named events.</p>
 <h2 id="plain-definitions">Plain Definitions</h2>
@@ -172,9 +173,9 @@
 </ul>
 <p>stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?</p>
 <ul>
-<li>Portfolio-only stress belongs to canary. Regime can keep those rows for</li>
+<li>Portfolio-only stress, including positions-only held-underlying stress,</li>
 </ul>
-<p>context, but they are out-of-scope for market-regime precision and recall.</p>
+<p>belongs to canary. Regime can keep those rows for context, but they are out-of-scope for market-regime precision and recall.</p>
 <h2 id="artifact-map">Artifact Map</h2>
 <p>All backtest artifacts live in one of these places:</p>
 <table>
@@ -279,13 +280,13 @@ python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
 </ul>
 <p>portfolio-stress recall moves from 75% regime-only to 100% canary, with one additional portfolio true positive.</p>
 <ul>
-<li>Canary lifecycle metrics are now first-class: early-warning recall of later</li>
+<li>Canary action/readiness metrics are now first-class: watch recall of later</li>
 </ul>
-<p>confirmed stress is 100% on the sourced holdout, median lead is 1.0 day, panic/forced-defense recall is 100%, and stabilization/opportunity false starts are 0.</p>
+<p>confirmed stress is 100% on the sourced holdout, median lead is 1.0 day, and action buckets are tracked separately from the stateless canary JSON surface.</p>
 <ul>
 <li>Category reporting is split for market-driven, portfolio-driven,</li>
 </ul>
-<p>concentration-driven, margin-driven, options-driven, and data-quality cases. Current sourced holdout has no options-driven rows, so that slice is instrumented but not yet proven.</p>
+<p>concentration-driven, margin-driven, options-driven, and data-quality cases; held-underlying P&amp;L shock maps to concentration-driven, near-expiry held-option delta maps to options-driven, and held-liquidity degradation maps to data-quality. Current sourced holdout has no options-driven rows, so that slice is instrumented but not yet proven.</p>
 <ul>
 <li>Tier 1 exposes the broader problem: current <code>any red cluster</code> stress signals</li>
 </ul>
@@ -392,8 +393,7 @@ python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
 <pre><code>make check
 make smoke</code></pre>
 <p>After CLI or daemon changes, also install and smoke the actual binary:</p>
-<pre><code>pkill -f &#39;ibkr daemon&#39; || true
-make install
+<pre><code>make restart-daemon
 ibkr status
 ibkr backtest build-regime --input internal/cli/testdata/regime_pit_panel_sample.jsonl \
   &gt; /tmp/ibkr-build-regime-smoke.jsonl
@@ -409,6 +409,6 @@ ibkr backtest regime --input /tmp/ibkr-build-regime-smoke.jsonl</code></pre>
 <li>No MOVE/rates-vol input without a clean source.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -144,9 +144,9 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check changelog-check account-data-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check docs-html-check changelog-check account-data-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + changelog-check + account-data-check (binding pre-commit gate)
+check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + docs-html-check + changelog-check + account-data-check (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
@@ -292,6 +292,18 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 		fi; \
 	done; \
 	exit $$fail
+
+# The docs/ md↔html twins (concepts, guides, reference, design, specs)
+# are hand-converted; nothing regenerates the html when the md moves.
+# Each twin html carries an `<!-- md-source: ... sha256:... -->` marker
+# recording the md hash it was last synced against; docs-html-check
+# fails when the md has changed since. Workflow: edit md → check fails →
+# update the html content to match → `make docs-html-stamp`.
+docs-html-check: ## Verify docs/ html twins were synced after their md last changed
+	@./scripts/check-docs-html-sync.sh
+
+docs-html-stamp: ## Re-stamp md-source markers in docs/ html twins (after syncing content)
+	@./scripts/check-docs-html-sync.sh --stamp
 
 # Pull the current S&P-500 membership list from Wikipedia and rewrite
 # internal/breadth/spx/members_data.go. Invoked by `make release` so a

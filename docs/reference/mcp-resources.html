@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- md-source: mcp-resources.md sha256:18563a06baae2d056a8eb1ec33399acc90bcf81d154072f0b3a59ea349ba6895 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-26T20:12:00+02:00",
+    "dateModified": "2026-06-11T08:17:00+02:00",
     "description": "These are the non-tool resources ibkr mcp exposes to MCP clients. Tools are documented separately in MCP tools reference.",
     "headline": "MCP resources reference",
     "isPartOf": {
@@ -157,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="mcp-resources-reference">MCP resources reference</h1>
-<p>Last reviewed: 2026-05-26 20:12 CEST</p>
+<p>Last reviewed: 2026-06-11 08:17 CEST</p>
 <p>These are the non-tool resources <code>ibkr mcp</code> exposes to MCP clients. Tools are documented separately in <a href="mcp-tools.html">MCP tools reference</a>.</p>
 <h2 id="ibkrquotesymbol"><code>ibkr://quote/{symbol}</code></h2>
 <p>Live stock / ETF quote resource.</p>
@@ -168,6 +169,6 @@
 <p><code>resources/subscribe</code> returns <code>{}</code> and then streams coalesced tick frames through <code>notifications/resources/updated</code> until the client calls <code>resources/unsubscribe</code> or closes the MCP session. Notification payloads embed a JSON frame in <code>params.contents[].text</code>; the frame shape matches <code>ibkr quote AAPL --watch --json</code>.</p>
 <p>Only stock and ETF symbols are supported. Option contract streaming is not exposed as an MCP resource today; use <code>ibkr_chain</code> or CLI option quotes for option snapshots.</p>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- md-source: updating.md sha256:da1a861a69636c017ea04e8958360d93b165d8939cc61511e60b34a56edae435 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-26T22:02:00+02:00",
+    "dateModified": "2026-06-03T17:04:00+02:00",
     "description": "Four things can affect data freshness: the binary (ibkr itself), the Claude Desktop MCPB when installed through Desktop Extensions, the S\u0026P 500 constituent...",
     "headline": "Updating",
     "isPartOf": {
@@ -157,13 +158,25 @@
   </header>
   <main class="wrap doc">
 <h1 id="updating">Updating</h1>
-<p>Updated: 2026-05-26 22:02 CEST</p>
+<p>Updated: 2026-06-03 17:04 CEST</p>
 <p>Four things can affect data freshness: the <strong>binary</strong> (<code>ibkr</code> itself), the <strong>Claude Desktop MCPB</strong> when installed through Desktop Extensions, the <strong>S&amp;P 500 constituent list</strong> the breadth indicator uses, and the embedded <strong>official market calendars</strong>. They update independently because they have different sources and cadences.</p>
 <h2 id="updating-the-binary-ibkr-update">Updating the binary — <code>ibkr update</code></h2>
 <p>Once you&#39;re on v1.0.0 or later, the next upgrade is one command:</p>
 <pre><code>ibkr update            # fetch latest, prompt to restart daemon</code></pre>
-<p>The CLI checks the <a href="https://api.github.com/repos/osauer/ibkr/releases/latest">GitHub <code>/releases/latest</code></a> endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on <code>SHA256SUMS</code>** against the maintainer&#39;s public key embedded in your current <code>ibkr</code> binary, then SHA-verifies the tarball and atomically replaces <code>~/.local/bin/ibkr</code>. The prior binary is stashed as <code>~/.local/bin/ibkr.bak</code> for one-step rollback (<code>mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr</code>).</p>
+<p>The CLI checks the <a href="https://api.github.com/repos/osauer/ibkr/releases/latest">GitHub <code>/releases/latest</code></a> endpoint, matches your OS/arch against the published tarballs, verifies the <strong>PGP signature on <code>SHA256SUMS</code></strong> against the maintainer&#39;s public key embedded in your current <code>ibkr</code> binary, then SHA-verifies the tarball and atomically replaces <code>~/.local/bin/ibkr</code>. The prior binary is stashed as <code>~/.local/bin/ibkr.bak</code> for one-step rollback (<code>mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr</code>).</p>
 <p>A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.</p>
+<h2 id="restarting-local-processes-ibkr-restart">Restarting local processes - <code>ibkr restart</code></h2>
+<p>Use <code>ibkr restart</code> when you changed daemon-loaded config, installed a new binary outside <code>ibkr update</code>, or want to clear stale gateway connection state:</p>
+<pre><code>ibkr restart</code></pre>
+<p>The command verifies the pidfile holder is really an <code>ibkr daemon</code> process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. It also refreshes an already-running <code>ibkr app</code> host, preserving app flags such as <code>--remote</code>; if no app host is running, it leaves the app stopped. If no daemon was running, it starts one and says so.</p>
+<p><code>--force</code> is an explicit fallback for a daemon that ignores SIGTERM:</p>
+<pre><code>ibkr restart --force          # escalate to SIGKILL only after graceful timeout
+ibkr restart --timeout 30s    # wait longer before failing or forcing
+ibkr restart --json           # scriptable result: daemon health plus any refreshed app process
+ibkr restart --app            # app-only restart/start for the HyperServe app process</code></pre>
+<p>JSON mode is for automation and CI. It avoids text parsing and includes the post-start <code>status.health</code> payload so a script can distinguish &#34;process restarted but gateway offline&#34; from &#34;restart failed.&#34; When an app host was running, JSON also includes an <code>app</code> object with its old/new PID and preserved args.</p>
+<p><code>ibkr restart</code> restarts the shared daemon that CLI commands and MCP tools dial, plus any currently running local or remote app host. It does not restart the <code>ibkr mcp</code> stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.</p>
+<p><code>ibkr restart --app</code> targets only the long-running <code>ibkr app</code> HyperServe process. It finds a local <code>ibkr app</code> server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as <code>--addr</code>, <code>--public-url</code>, or <code>--remote</code>, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts <code>ibkr app</code> with default/env configuration.</p>
 <h3 id="release-integrity">Release integrity</h3>
 <p>From v1.0.0 onward, every release ships <code>SHA256SUMS.asc</code> — a PGP detached signature over <code>SHA256SUMS</code>, produced by the maintainer&#39;s Ed25519 key (fingerprint <code>D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D</code>). The public key is embedded in every ibkr binary, so <code>ibkr update</code> verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.</p>
 <p>Releases that publish an MCP Bundle include both <code>ibkr-vX.Y.Z.mcpb</code> and the stable latest-download asset <code>ibkr.mcpb</code> in <code>SHA256SUMS</code>. The MCP Registry publish artifact also records the versioned MCPB file&#39;s SHA-256 in <code>server.json</code> as <code>fileSha256</code>.</p>
@@ -183,7 +196,7 @@ ibkr update --force          # re-install latest even if same version (corrupt-b
 <h2 id="updating-claude-desktop-mcpb-installs">Updating Claude Desktop MCPB installs</h2>
 <p>Claude Desktop MCPB installs carry their own embedded <code>ibkr</code> binary. <code>ibkr update</code> updates shell-managed installs such as <code>~/.local/bin/ibkr</code>; it does not replace a binary embedded inside Claude Desktop&#39;s extension store.</p>
 <p>To update a Claude Desktop MCPB install, download the latest bundle and reinstall it in Claude Desktop:</p>
-<p>&lt;https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb&gt;</p>
+<p><a href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</a></p>
 <p>After reinstalling, fully quit Claude Desktop and reopen it so it respawns the MCP server from the updated bundle.</p>
 <h2 id="updating-the-sp-500-list-automatic">Updating the S&amp;P 500 list — automatic</h2>
 <p>The daemon refreshes the constituent list from <a href="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies">Wikipedia&#39;s &#34;List of S&amp;P 500 companies&#34;</a> on three triggers, all converging on one shared fetch:</p>
@@ -227,6 +240,6 @@ Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS 
 <li>The updater keeps one <code>.bak</code> binary beside <code>~/.local/bin/ibkr</code>, and the SPX members cache lives under <code>~/.cache/ibkr/</code> unless XDG paths override it.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>
