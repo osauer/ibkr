@@ -6,16 +6,17 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
-  or explicitly requests an order preview/status read. Agent broker writes are blocked; live
-  broker writes are always blocked.
+  reading daemon protection proposals or runtime settings/freeze state,
+  or explicitly requests an order preview/status read. This skill is read-only and never
+  runs broker writes; live agent-origin broker writes are blocked daemon-side.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-10 07:21 CEST
+Updated: 2026-06-11 19:32 CEST
 
 ## When to use
 
@@ -42,12 +43,23 @@ LULD, or halt context, run `ibkr market-events --json` with `--symbol` when
 the symbol is explicit. Market-event flags are observational/protection context
 and daemon safety gates, not buy-add or open-exposure recommendations.
 
+If the user asks what protective actions ibkr currently recommends — or why a
+proposal is blocked — run `ibkr proposals status --json` (proposal-engine state)
+or `ibkr proposals list --json` (the latest proposal snapshot with per-row
+blockers); `ibkr proposals refresh` asks the daemon to recompute first. These
+are read paths: `proposals preview|submit|ignore` are broker-write verbs
+outside this skill. If the user asks about runtime platform preferences or
+whether trading is frozen, run `ibkr settings show --json`; `ibkr settings set`
+is a write, and the `trading.freeze` switch is human-only.
+
 If the user explicitly asks for a stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from
 `submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
-minted token submit-eligible. If the user explicitly asks to place, modify, or
-cancel an order, refuse and tell them a human must run broker-write commands
-outside the agent session. Do not invent or simulate trade execution.
+minted token submit-eligible. This skill never runs broker writes: if the user
+explicitly asks to place, modify, or cancel an order, paper-account writes are
+open to agents through the gated CLI flow outside this skill's allowlist, while
+live agent-origin writes are hard-blocked daemon-side — a human must run live
+broker-write commands. Do not invent or simulate trade execution.
 
 ## Output discipline
 
@@ -65,7 +77,7 @@ outside the agent session. Do not invent or simulate trade execution.
   official exchange-calendar state such as holidays, early closes, closed
   regular sessions, or the next known open.
 - Never claim an order was placed unless the CLI returned a successful paper
-  order write result. Live order writes are always blocked.
+  order write result. Live agent-origin order writes are blocked daemon-side.
 - Never fabricate Greeks or implied volatility. If the JSON returns
   `"iv": null` and `"iv_status": "unavailable"`, say so plainly. The same
   applies to `delta`/`gamma`/`theta`/`vega` on option positions and to
@@ -98,6 +110,8 @@ outside the agent session. Do not invent or simulate trade execution.
 | `ibkr regime` | Broad-market stress lifecycle: equity vol, credit, funding, FX carry, SPY+SPX gamma, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
 | `ibkr canary` | Portfolio-aware stress lifecycle, source health, fingerprints, and planner readiness | [schemas.md#canary](schemas.md#canary) |
 | `ibkr market-events` | Held or requested stock/ETF market-event flags: borrow inventory, extreme borrow fee, Nasdaq Reg SHO, LULD, and halt context | [schemas.md#market-events](schemas.md#market-events) |
+| `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are broker-write verbs outside this skill) | — |
+| `ibkr settings show` | Runtime platform preferences and observed read-only state, incl. `trading.freeze` | — |
 | `ibkr version` | Print version, commit, build date, binary path | — |
 
 Add `--json` to any command for parseable output. Flags can come after positional
@@ -113,7 +127,8 @@ broker-data command and is not exposed as an MCP tool.
 
 - `ibkr status [--json]`
 - `ibkr account [--watch [--rate 1s]] [--json]` — `--watch` re-polls on the rate (default 1s) and redraws in place on a TTY; appends snapshots separated by a dim rule when piped. `--watch` and `--json` are mutually exclusive.
-- `ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--by underlying] [--watch [--rate 1s]] [--json]`
+- `ibkr positions [--symbol SYM] [--type stk|opt] [--sort alpha|pnl|value] [--quotes] [--by underlying] [--watch [--rate 1s]] [--json]`
+  - `--quotes` adds quote-detail columns on stock rows: previous close, ranges, volume.
   - `--by underlying` groups stock + option legs per underlying with group P&L totals; the JSON `by_underlying` array is always populated regardless of this flag.
   - `--watch` re-polls on the rate (default 1s); same TTY/pipe behaviour as `account --watch`. Mutually exclusive with `--json`.
 - `ibkr quote SYM[,SYM…] [--timeout 5s] [--json]`
@@ -146,6 +161,8 @@ broker-data command and is not exposed as an MCP tool.
 - `ibkr market-events [--symbol SYM[,SYM...]] [SYM ...] [--json]` — single-name market-event context for held or requested stock/ETF symbols. Explicit symbols evaluate those names; omitting symbols evaluates held stock/ETF underlyings from the daemon positions snapshot. JSON returns `flags[]`, `by_symbol`, `source_health[]`, `warning_details[]`, `fingerprint`, and `not_execution`. Unknown source health is unavailable evidence, not inactive. `borrow_inventory_tight` and `borrow_fee_extreme` only modify existing short buy-to-cover reductions; `halt_regulatory_or_news` and active `luld_pause` are hard blockers; `reg_sho_threshold` is regulatory context. V1 never creates buy-add/open-exposure recommendations.
   - **MCP params**: `symbol` (optional single or comma-separated symbols), `symbols` (optional array; omit both for held underlyings).
   - **CLI-only flags**: `--json`.
+- `ibkr proposals status|list|refresh [--json]` — daemon-owned protection proposals, read paths. `status` reports the proposal-engine state, `list` returns the latest proposal snapshot (per-row blockers carry codes plus remediation text), `refresh` asks the daemon to recompute before returning. `preview`, `submit`, and `ignore` are broker-write verbs outside this skill's allowlist.
+- `ibkr settings show [--json]` — runtime platform preferences plus observed read-only state, including the `trading.freeze` switch. `ibkr settings set key=value` is a write; the freeze switch is human-only.
 - `ibkr size --symbol SYM --entry F --stop F [--target F] [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]` — fixed-fractional sizing. Reads NLV from `account.summary` so `risk_pct` is pegged to the live account. `--fx` converts the base-currency risk budget into the trade's quote currency (e.g. `--fx 1.085` for a USD trade against an EUR account); default `1.0` is correct for same-currency trades. `--lot` rounds shares down (use `100` for one option contract's worth of stock). `--target` is optional: when set, the response also carries `r` (reward-to-risk multiple = `|target − entry| / |entry − stop|`; the standard "is this trade worth taking" filter, ≥ 2R typical), `reward_quote`, `reward_base`, and `breakeven_win_rate` (= `1 / (1 + R)`). Output `status` is `ok` | `tight_risk` (budget < per-share risk × lot — widen the stop or raise risk-pct) | `exceeds_buying_power`. The CLI never derives entry/stop/target from quotes — those are the user's trade plan; if the user asks "and what about the current price?" run `ibkr quote SYM --json` separately.
 
 ## Errors
@@ -167,8 +184,9 @@ a code prefix when applicable:
 - `bad_request` → wrong arguments or unknown preset. Show the user the usage
   hint emitted on stderr.
 - `trading_disabled` → an order verb failed the daemon trading gate. Surface the
-  blocker exactly; broker writes require a human-run command outside the agent
-  session, a ready trading route, and a submit-eligible preview token.
+  blocker exactly; broker writes need a ready trading route and a submit-eligible
+  preview token, run outside this skill's allowlist, and live agent-origin
+  writes are daemon-blocked (human-only).
 
 For `breadth`, `gamma`, and `regime`, the JSON carries a per-row `state` /
 `status` field rather than an error code — the CLI exits 0 because the

@@ -1,26 +1,27 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. Codex broker writes are blocked; live broker writes are always blocked.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
 ---
 
-Updated: 2026-06-07 10:34 CEST
+Updated: 2026-06-11 19:32 CEST
 
 ## Contract
 
 Use this skill when the user asks about their IBKR account, positions, exposure,
 daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
-market breadth, portfolio canary posture, order preview, order status, or
-broker-write context that should be refused inside Codex.
+market breadth, portfolio canary posture, held-name market events, protection
+proposals, runtime settings/freeze state, order preview, or order status.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
 workflow explicitly needs CLI output. Parse JSON before answering.
 
-The MCP surface remains read-oriented for agents. Never attempt broker
-mutations, enable live trading, or run destructive purge execution from Codex.
-Order preview can mint a local token; `token_minted` is not the same as
-`submit_eligible`.
+The MCP surface remains read-oriented for agents. Paper-account broker writes
+are open to agents through the gated CLI flow; live agent-origin broker writes
+are hard-blocked daemon-side. Never attempt live broker writes, live-trading
+enablement, or destructive purge execution from an agent session. Order preview
+can mint a local token; `token_minted` is not the same as `submit_eligible`.
 
 ## Output Discipline
 
