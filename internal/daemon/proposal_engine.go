@@ -663,13 +663,24 @@ func proposalBlock(p *rpc.TradeProposal, code, message string) {
 	p.Blockers = appendTradingBlockerOnce(p.Blockers, rpc.TradingBlocker{Code: code, Message: message})
 }
 
-func baseProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, sources rpc.TradeProposalSourceFingerprints, now time.Time, bucket string, row rpc.PositionView, action string, qty int, effect string, reason string) rpc.TradeProposal {
-	secType := "STK"
-	if strings.EqualFold(row.SecType, "OPTION") || strings.EqualFold(row.SecType, "OPT") {
-		secType = "OPT"
-	} else if strings.EqualFold(row.SecType, "ETF") {
-		secType = "ETF"
+// positionWireSecType maps PositionView.SecType — the canonical AssetType
+// enum carried on position rows ("STOCK", "OPTION", …; positionSecType is
+// the forward mapping) — to the IBKR wire security type for broker contract
+// fields. The enum forms are not valid on the wire: TWS rejects secType
+// "STOCK" with error 321 "Please enter a valid security type".
+func positionWireSecType(raw string) string {
+	switch {
+	case strings.EqualFold(raw, "OPTION") || strings.EqualFold(raw, "OPT"):
+		return "OPT"
+	case strings.EqualFold(raw, "ETF"):
+		return "ETF"
+	default:
+		return "STK"
 	}
+}
+
+func baseProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, sources rpc.TradeProposalSourceFingerprints, now time.Time, bucket string, row rpc.PositionView, action string, qty int, effect string, reason string) rpc.TradeProposal {
+	secType := positionWireSecType(row.SecType)
 	contract := proposalContractFromPosition(row, secType)
 	p := rpc.TradeProposal{Key: proposalKey(bucket, contract, action), State: rpc.TradeProposalStateGenerated, Bucket: bucket, Symbol: contract.Symbol, SecType: secType, Action: action, Quantity: qty, MaxQuantity: int(math.Ceil(math.Abs(row.Quantity))), PositionQuantity: row.Quantity, PositionEffect: effect, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Contract: contract, Reason: reason, PolicyID: policy.PolicyID, PolicyVersion: policy.PolicyVersion, PolicyFingerprint: status.Fingerprint, SourceFingerprints: sources, CreatedAt: now}
 	if row.Mark > 0 {
@@ -932,17 +943,19 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 // resolveRowMinTick returns the broker-reported minimum increment for a held
 // position's contract, fetched once per conID and cached for the daemon
 // lifetime. Generation and preview must round trail prices on the same grid:
-// the proposal-vs-preview drift gate compares them exactly.
+// the proposal-vs-preview drift gate compares them exactly — so the fetch
+// uses the same contract shape proposals carry into previews, with
+// row.SecType mapped to its wire code. Passing the row's enum form
+// ("STOCK") verbatim made TWS reject the contract-details request with
+// error 321 on every refresh: the failure is never cached, so each held
+// stock row re-burned a request plus the full fetch timeout per cadence
+// (observed 2026-06-11, five names × 15-minute proposal cadence).
 func (e *proposalEngine) resolveRowMinTick(row rpc.PositionView) float64 {
 	if e == nil || e.server == nil {
 		return 0
 	}
-	return e.server.resolveContractMinTick(context.Background(), rpc.ContractParams{
-		ConID:    row.ConID,
-		Symbol:   row.Symbol,
-		SecType:  row.SecType,
-		Currency: row.Currency,
-	}, previewMinTickTimeout)
+	contract := proposalContractFromPosition(row, positionWireSecType(row.SecType))
+	return e.server.resolveContractMinTick(context.Background(), contract, previewMinTickTimeout)
 }
 
 // closeReduceQuantity sizes a close/reduce order for a possibly fractional
