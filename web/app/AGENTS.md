@@ -70,6 +70,14 @@ Use the narrow loop while iterating:
 make app-check
 ```
 
+`make check` runs `app-contract-check`: the `web/app` Go tests statically pin
+every element id that `scripts/app-browser-smoke.mjs` and
+`scripts/app-screenshots.mjs` assert against `index.html`/`app.js`. Removing
+or renaming an SPA id the scripts reference fails pre-commit — update the
+script assertions in the same change, and keep the `removedSPAIDs` allowlist
+in `web/app/browser_script_ids_test.go` in sync for surfaces the smoke
+asserts as deliberately removed.
+
 When rendered behavior matters, refresh the embedded app assets and smoke the
 browser:
 
@@ -102,6 +110,13 @@ Use red/soft-red for hard blockers such as active halt or active LULD, amber for
 execution/carry friction such as borrow tight, fee extreme, and Reg SHO,
 neutral/blue for context-only future flags, and muted gray for stale/unknown
 source states.
+
+Borrow-inventory and borrow-fee *source-health* chips are relevance-gated:
+they render only while the book holds short stock, because buy-to-cover
+friction is the only consumer of borrow data. For an all-long book a
+permanently unreachable borrow feed (e.g. FTP filtered by the local network)
+is noise, not risk disclosure. Halt/LULD/Reg SHO source health stays
+unconditional, and active borrow *flags* on held names still render.
 
 V1 is reduce-only. Do not add an opportunities panel, buy-add controls, or
 standalone squeeze recommendations. When a proposal is a reducing short `BUY`,

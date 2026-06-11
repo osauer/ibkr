@@ -1573,7 +1573,27 @@ function underlyingHeroMarketFlags(rows, events = {}) {
 }
 
 function marketEventHealthItems(events = {}) {
-  return (events.source_health || []).filter(marketEventHealthVisible).map((sourceHealth) => ({ sourceHealth }));
+  const includeBorrow = bookHasShortStock();
+  return (events.source_health || [])
+    .filter(marketEventHealthVisible)
+    .filter((health) => includeBorrow || !borrowSourceHealth(health))
+    .map((sourceHealth) => ({ sourceHealth }));
+}
+
+// Borrow-inventory / borrow-fee feed health only changes a decision when
+// the book can be forced to cover — i.e. it holds short stock (the only
+// daemon consumer is buy-to-cover proposal friction). For an all-long
+// book a permanently unreachable borrow feed is noise, not risk
+// disclosure, so those health chips stay hidden until a short stock
+// position exists. Active borrow flags on held names still render.
+function borrowSourceHealth(health = {}) {
+  const source = String(health.source || "").toLowerCase();
+  return source.includes("borrow_inventory") || source.includes("borrow_fee");
+}
+
+function bookHasShortStock() {
+  const groups = state.snapshot?.positions?.by_underlying || [];
+  return groups.some((group) => typeof group.stock?.quantity === "number" && group.stock.quantity < 0);
 }
 
 function marketEventLabel(flag = {}, options = {}) {

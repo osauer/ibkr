@@ -46,7 +46,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -79,9 +79,19 @@ restart-daemon: install ## Install, restart/start daemon, and refresh any runnin
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
 APP_SMOKE_BROWSER ?= chromium
-app-check: ## Fast SPA gate: JS syntax + static app contracts
+app-check: app-contract-check ## Fast SPA gate: JS syntax + static app contracts
 	node --check web/app/app.js
-	go test ./web/app
+
+# Static drift gate between the Playwright app scripts and the SPA they
+# assert against, plus the other web/app contract tests. Born of the
+# 0574bd3 incident (2026-06-09): risk-plan ids were removed from
+# index.html while app-browser-smoke.mjs kept asserting them — the
+# browser smoke sat red for two days and v1.9.0 shipped anyway, because
+# the browser smokes run outside check/test/release. Pure Go (no node,
+# no Playwright, no running app), so it lives in `make check`; see
+# TestBrowserScriptIDsMatchSPA in web/app/browser_script_ids_test.go.
+app-contract-check: ## Browser-script ↔ SPA element-id drift gate + static app contracts (pure Go)
+	go test -count=1 ./web/app
 
 app-refresh: install ## Install, restart the shared app host, and print a local pairing URL
 	$(PREFIX)/bin/ibkr restart --app --timeout $(RESTART_TIMEOUT)
@@ -151,9 +161,9 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check docs-html-check changelog-check account-data-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + docs-html-check + changelog-check + account-data-check (binding pre-commit gate)
+check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + docs-html-check + changelog-check + account-data-check + app-contract-check (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
@@ -188,13 +198,29 @@ govulncheck-check: ## Run govulncheck
 	go tool govulncheck ./...
 
 # Validate the Claude Code plugin + marketplace manifests with the official
-# `claude plugin validate` tool. The Go test in internal/cli that asserts
-# every cli.commands name appears in SKILL.md catches the drift class
-# `claude plugin validate` doesn't see (it checks the JSON, not the prose).
+# `claude plugin validate` tool. The TestSkill* gates in internal/cli (run
+# via parity-check) catch the prose-drift class `claude plugin validate`
+# doesn't see (it checks the JSON, not SKILL.md).
 plugin-check: ## Validate plugin/marketplace manifests with `claude plugin validate`
 	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code or skip with: make check plugin-check= "; exit 1; }
 	claude plugin validate .
 	@$(MAKE) --no-print-directory hook-version-check
+	@$(MAKE) --no-print-directory registry-version-check
+
+# Root server.json is the MCP Registry template: release-registry-server
+# reads its name/description and stamps version/packages from
+# RELEASE_VERSION into dist/server.json. The checked-in version field is
+# therefore never published — which is exactly how it drifted to 1.6.1
+# while the plugin shipped 1.9.0. Pin it to plugin.json so the release
+# version bump touches both files or fails the gate.
+registry-version-check: ## Ensure server.json version tracks .claude-plugin/plugin.json
+	@command -v jq >/dev/null 2>&1 || { echo "jq missing on PATH; install jq or skip"; exit 1; }
+	@reg=$$(jq -r '.version // empty' server.json); \
+	plg=$$(jq -r '.version // empty' .claude-plugin/plugin.json); \
+	if [ -z "$$reg" ] || [ -z "$$plg" ] || [ "$$reg" != "$$plg" ]; then \
+		echo "registry-version-check: server.json version ($$reg) != .claude-plugin/plugin.json version ($$plg); keep them in lockstep" >&2; \
+		exit 1; \
+	fi
 
 # Drift gate for the session-start hook's fallback plugin version. When
 # CLAUDE_PLUGIN_ROOT is unset the hook compares the binary against this
@@ -231,9 +257,14 @@ hook-version-check: ## Ensure session-start.sh fallback version tracks .claude-p
 # every cli.Commands() entry has a matching ibkr_<name> MCP tool (or is on
 # the documented exclude list). TestStreamingParity is the streaming-
 # resource counterpart — it pins the ibkr://… template inventory the
-# server actually exposes. Cheap enough to live in the pre-commit gate.
+# server actually exposes. TestSkill* in internal/cli is the skill-layer
+# counterpart: every CLI command documented in skills/ibkr/SKILL.md (or
+# excluded with a reason), the allowed-tools list mirrored exactly in
+# settings/ibkr.settings.json, and no broker/state write allowlisted.
+# Cheap enough to live in the pre-commit gate.
 parity-check: ## Verify MCP tool inventory matches the CLI surface
 	go test -count=1 -run 'TestParity|TestStreamingParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
+	go test -count=1 -run 'TestSkill' ./internal/cli/
 
 # Idiom-drift gate. `go fix -diff` is the toolchain-native fixer (tracks the
 # Go version pinned in go.mod); `go tool modernize` runs the broader gopls
