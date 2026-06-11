@@ -22,10 +22,18 @@ const (
 	gammaBlockOIPositivePct       = 1.0
 	gammaContextDerivedIVPct      = 40.0
 	gammaBlockDerivedIVPct        = 80.0
-	gammaContextSPYSkewRSquared   = 0.70
 	gammaContextConcentrationPct  = 50.0
 	gammaBlockConcentrationPct    = 90.0
-	gammaContextSkewRSquared      = 0.75
+	// Skew-fit R² bars. Below the preferred bar the gate still passes
+	// with a disclosing reason — median R² is amplitude-relative and
+	// tracks intraday smile noise (2026-06-11: 0.60-0.68 all morning,
+	// 0.96 by midday, on constant leg coverage), so a sub-preferred
+	// median is disclosure-worthy but not rank-blocking. Below the
+	// block bar the fitted curves the sweep repriced with are bad
+	// enough to hard-block ranking. Both bars are heuristic pending
+	// calibration from the gamma-skew-diagnostics journal.
+	gammaPreferredSPYSkewRSquared = 0.70
+	gammaPreferredSkewRSquared    = 0.75
 	gammaBlockSkewRSquared        = 0.50
 )
 
@@ -174,7 +182,16 @@ func gammaQualityCombinedGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComput
 			gammaQualityAddGate(q, "spy_coverage", rpc.GammaQualityGateContext, "SPY slice is not rankable")
 		}
 	}
-	gammaQualityCommonModelGates(q, c)
+	// No pooled model gates (derived_iv_share, top_strike_concentration,
+	// skew_fit_quality) at the combined node: the pooled numbers judge
+	// neither book — derived-IV share is leg-count weighted across both
+	// chains and the cross-book concentration ratio matches no per-slice
+	// calibration — so gating them here would let a present-but-degraded
+	// SPY drag a clean SPX below the bars, which the spec's SPX-canonical
+	// posture forbids (absent SPY already cannot downgrade SPX). Each
+	// slice gates its own values; the SPX verdict reaches the combined
+	// node through spx_coverage above. Pooled numbers stay visible in
+	// Coverage as disclosed diagnostics.
 }
 
 func gammaCombinedSPXQualityReason(q *rpc.GammaSignalQuality, fallback string) string {
@@ -298,14 +315,15 @@ func gammaQualityCommonModelGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCom
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateContext, "skew-fit diagnostics unavailable")
 		return
 	}
-	contextSkewThreshold := gammaContextSkewThreshold(c)
+	preferredSkewThreshold := gammaPreferredSkewThreshold(c)
 	switch {
 	case cov.MedianSkewRSquared < gammaBlockSkewRSquared:
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateBlock,
 			fmt.Sprintf("median skew-fit R2 %.2f below %.2f", cov.MedianSkewRSquared, gammaBlockSkewRSquared))
-	case cov.MedianSkewRSquared < contextSkewThreshold:
-		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGateContext,
-			fmt.Sprintf("median skew-fit R2 %.2f below %.2f", cov.MedianSkewRSquared, contextSkewThreshold))
+	case cov.MedianSkewRSquared < preferredSkewThreshold:
+		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGatePass,
+			fmt.Sprintf("median skew-fit R2 %.2f below preferred %.2f; ranked with disclosure (hard block below %.2f)",
+				cov.MedianSkewRSquared, preferredSkewThreshold, gammaBlockSkewRSquared))
 	default:
 		gammaQualityAddGate(q, "skew_fit_quality", rpc.GammaQualityGatePass, "skew fit quality acceptable")
 	}
@@ -537,11 +555,11 @@ func gammaOIObservedThreshold(c *rpc.GammaZeroComputed) float64 {
 	return gammaMinDefaultOIObservedPct
 }
 
-func gammaContextSkewThreshold(c *rpc.GammaZeroComputed) float64 {
+func gammaPreferredSkewThreshold(c *rpc.GammaZeroComputed) float64 {
 	if gammaQualityScope(c) == "SPY" {
-		return gammaContextSPYSkewRSquared
+		return gammaPreferredSPYSkewRSquared
 	}
-	return gammaContextSkewRSquared
+	return gammaPreferredSkewRSquared
 }
 
 func gammaQualityScope(c *rpc.GammaZeroComputed) string {

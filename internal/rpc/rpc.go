@@ -1011,9 +1011,17 @@ type GammaZeroSummary struct {
 // scenario spots that push a leg's moneyness outside the window are
 // clamped to the boundary during the sweep.
 type SkewFitInfo struct {
-	Points   int        `json:"points"`
-	RSquared float64    `json:"r_squared"`
-	Range    [2]float64 `json:"range"`
+	Points   int     `json:"points"`
+	RSquared float64 `json:"r_squared"`
+	// ResidualRMS is the root-mean-square fit residual in IV (vol)
+	// units over the fitted legs. R² is amplitude-relative — a flat
+	// smile reads as a poor fit even when residuals are tiny, and a
+	// steep one as a good fit despite large absolute errors — so the
+	// RMS is the number that actually bounds the repricing error the
+	// sticky-moneyness sweep consumes. Additive since v1.10; zero on
+	// records written before the field existed.
+	ResidualRMS float64    `json:"residual_rms,omitempty"`
+	Range       [2]float64 `json:"range"`
 }
 
 // GammaZeroComputed is the actual zero-gamma payload — populated when

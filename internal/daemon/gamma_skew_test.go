@@ -109,6 +109,37 @@ func TestSkewFitRSquared_PerfectFit(t *testing.T) {
 	}
 }
 
+// TestSkewFitStats_ResidualRMS: the RMS is ~0 on noise-free data and
+// recovers the planted noise amplitude when the observed IVs scatter
+// around the curve — the absolute-error diagnostic R² cannot provide.
+func TestSkewFitStats_ResidualRMS(t *testing.T) {
+	spot := 5000.0
+	var legs []legData
+	for k := 4500.0; k <= 5500; k += 50 {
+		m := math.Log(k / spot)
+		legs = append(legs, legData{strike: k, iv: 0.18 - 0.40*m + 1.80*m*m})
+	}
+	curve := fitSkewCurve(legs, spot)
+	r2, rms := skewFitStats(curve, legs, spot)
+	if math.Abs(r2-1.0) > 1e-9 || rms > 1e-9 {
+		t.Fatalf("noise-free fit: r2=%v rms=%v, want 1.0 and ~0", r2, rms)
+	}
+	// Alternate ±2 vol-pts around the curve: the quadratic ignores the
+	// high-frequency scatter, so the residual RMS recovers ~0.02.
+	for i := range legs {
+		if i%2 == 0 {
+			legs[i].iv += 0.02
+		} else {
+			legs[i].iv -= 0.02
+		}
+	}
+	curve = fitSkewCurve(legs, spot)
+	_, rms = skewFitStats(curve, legs, spot)
+	if rms < 0.015 || rms > 0.025 {
+		t.Fatalf("rms = %v, want ~0.02 planted noise amplitude", rms)
+	}
+}
+
 // TestSweepProfile_StickyMoneynessReprice: with a fitted skew curve the
 // sweep should produce a different IV per scenario spot than the sticky-IV
 // recipe. Verifies the skew lookup is actually plumbed through.

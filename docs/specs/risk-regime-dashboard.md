@@ -176,6 +176,27 @@ does not by itself make an otherwise healthy SPX read context-only when the
 1-7DTE and term buckets are present. After the expiring SPXW series closes, the
 0DTE bucket can be absent while the broader SPX surface remains usable.
 
+Model-quality gates judge per slice, never pooled. Each underlying's
+derived-IV share, top-strike concentration, and median per-expiry skew-fit R²
+are judged on that underlying's own slice. The skew bars are preferred ≥ 0.75
+SPX, ≥ 0.70 SPY, with a hard block below 0.50; a median between the block and
+preferred bars still ranks, with the gate's reason disclosing the
+sub-preferred fit — median R² is amplitude-relative and tracks intraday smile
+noise rather than coverage health, so it is disclosure-worthy but not
+rank-blocking on its own. The combined node carries no pooled model gates:
+the pooled derived-IV share is leg-count weighted across both chains and the
+cross-book concentration ratio matches no per-slice calibration, so gating
+them there would let a present-but-degraded SPY downgrade a rankable SPX (the
+same posture violation as the absent-SPY rule above forbids). The pooled
+numbers stay visible in `quality.coverage` as diagnostics, and the SPX
+slice's own verdict reaches the combined node through the `spx_coverage`
+gate. One consequence: a SPY slice ranking inside the disclosed skew window
+votes in the combined band weighting. Every successful compute appends
+per-slice skew diagnostics (per-expiry R² and residual RMS, coverage,
+rankability) to `$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl` — offline
+calibration input for these heuristic bars; nothing reads it at runtime and
+it is safe to delete.
+
 ### Breadth
 
 This cluster watches how many S&P 500 stocks are participating. A rally led by

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: risk-regime-dashboard.md sha256:c8819b456ea541f5e8665bc175deb3e02eab1e07f310644fee842351e9bd2e6a -->
+<!-- md-source: risk-regime-dashboard.md sha256:c2f13ead11160463af058bed6f604fb188ca4bd1257e8c71adcf0ee0fab054ec -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -264,6 +264,7 @@
 </tbody>
 </table>
 <p>Missing 0DTE is disclosed in the horizon coverage and warning details, but it does not by itself make an otherwise healthy SPX read context-only when the 1-7DTE and term buckets are present. After the expiring SPXW series closes, the 0DTE bucket can be absent while the broader SPX surface remains usable.</p>
+<p>Model-quality gates judge per slice, never pooled. Each underlying's derived-IV share, top-strike concentration, and median per-expiry skew-fit R² are judged on that underlying's own slice. The skew bars are preferred ≥ 0.75 SPX, ≥ 0.70 SPY, with a hard block below 0.50; a median between the block and preferred bars still ranks, with the gate's reason disclosing the sub-preferred fit — median R² is amplitude-relative and tracks intraday smile noise rather than coverage health, so it is disclosure-worthy but not rank-blocking on its own. The combined node carries no pooled model gates: the pooled derived-IV share is leg-count weighted across both chains and the cross-book concentration ratio matches no per-slice calibration, so gating them there would let a present-but-degraded SPY downgrade a rankable SPX (the same posture violation as the absent-SPY rule above forbids). The pooled numbers stay visible in <code>quality.coverage</code> as diagnostics, and the SPX slice's own verdict reaches the combined node through the <code>spx_coverage</code> gate. One consequence: a SPY slice ranking inside the disclosed skew window votes in the combined band weighting. Every successful compute appends per-slice skew diagnostics (per-expiry R² and residual RMS, coverage, rankability) to <code>$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl</code> — offline calibration input for these heuristic bars; nothing reads it at runtime and it is safe to delete.</p>
 <h3 id="breadth">Breadth</h3>
 <p>This cluster watches how many S&amp;P 500 stocks are participating. A rally led by many stocks is healthier than a rally carried by a few mega-caps. Weak breadth near index highs warns that the headline index may be hiding fragility.</p>
 <p>There is no single live IBKR symbol for this row. The daemon computes it from daily bars for the individual S&amp;P 500 member stocks and caches the post-close result.</p>

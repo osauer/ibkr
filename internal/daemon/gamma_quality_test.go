@@ -451,6 +451,178 @@ func TestRegimeCompositeDoesNotRankContextOnlyGamma(t *testing.T) {
 	}
 }
 
+func TestGammaQualitySubPreferredSkewRanksWithDisclosure(t *testing.T) {
+	// Morning regression: 2026-06-11 printed sub-preferred medians
+	// (0.60-0.68) all morning on constant, healthy leg coverage and the
+	// dashboard showed dealer gamma unranked until midday. A median in
+	// [block, preferred) must rank with a disclosing pass instead.
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.SkewFitQuality = map[string]rpc.SkewFitInfo{
+		"20260602": {Points: 134, RSquared: 0.50},
+		"20260605": {Points: 148, RSquared: 0.55},
+		"20260619": {Points: 148, RSquared: 0.62},
+	}
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.SkewFitQuality = map[string]rpc.SkewFitInfo{
+		"20260602": {Points: 160, RSquared: 0.55},
+		"20260605": {Points: 160, RSquared: 0.62},
+		"20260619": {Points: 160, RSquared: 0.68},
+	}
+	combined := combineGammaResults(spy, spx)
+
+	annotateGammaQuality(combined, now)
+
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("combined rankability = %q, want rankable with sub-preferred skew fits: %+v", got, combined.Quality)
+	}
+	for _, gate := range combined.Quality.Gates {
+		if gate.Name == "skew_fit_quality" {
+			t.Fatalf("combined node must not gate on pooled skew values: %+v", combined.Quality.Gates)
+		}
+	}
+	// Pooled medians stay visible as disclosed coverage diagnostics.
+	if got := combined.Quality.Coverage.MedianSkewRSquared; got < 0.58 || got > 0.59 {
+		t.Fatalf("combined coverage median = %.3f, want pooled ~0.585", got)
+	}
+	spxQ := combined.PerIndex["SPX"].Quality
+	var sawDisclosure bool
+	for _, gate := range spxQ.Gates {
+		if gate.Name == "skew_fit_quality" {
+			if gate.Status != rpc.GammaQualityGatePass || !strings.Contains(gate.Reason, "below preferred") {
+				t.Fatalf("SPX skew gate = %+v, want disclosing pass", gate)
+			}
+			sawDisclosure = true
+		}
+	}
+	if !sawDisclosure {
+		t.Fatalf("SPX slice missing skew_fit_quality gate: %+v", spxQ.Gates)
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "red" {
+		t.Fatalf("bandForGamma = %q, want red ranked band with sub-preferred skew fits", got)
+	}
+	res := &rpc.RegimeSnapshotResult{GammaZero: rpc.RegimeGammaZero{
+		Status:   rpc.RegimeStatusOK,
+		Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined},
+	}}
+	if got := buildRegimeComposite(res); got.ClusterRankedCount == 0 || got.ClusterRedCount == 0 {
+		t.Fatalf("composite = %+v, want gamma ranked as a red cluster vote", got)
+	}
+}
+
+func TestGammaQualitySkewMedianBelowBlockBlocks(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spx.SkewFitQuality = map[string]rpc.SkewFitInfo{
+		"20260602": {Points: 147, RSquared: 0.05},
+		"20260605": {Points: 154, RSquared: 0.22},
+		"20260619": {Points: 160, RSquared: 0.71},
+	}
+
+	annotateGammaQuality(spx, now)
+
+	if got := spx.Quality.Rankability; got != rpc.GammaRankabilityBlocked {
+		t.Fatalf("rankability = %q, want blocked below the skew block bar: %+v", got, spx.Quality)
+	}
+	if !strings.Contains(spx.Quality.RankabilityReason, "median skew-fit R2") {
+		t.Fatalf("rankability reason = %q, want skew block reason", spx.Quality.RankabilityReason)
+	}
+}
+
+func TestGammaCombinedBandCountsSubPreferredSPYVote(t *testing.T) {
+	// A SPY slice in the sub-preferred skew window is now rankable, so
+	// it votes in the combined band weighting. Disagreeing sub-bands
+	// where the red (SPX) weight is under half resolve to yellow —
+	// previously SPY was context_only and SPX alone made the band red.
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.GammaSign = "positive"
+	spy.GammaTotalAbs = 10_000_000_000
+	spy.SkewFitQuality = map[string]rpc.SkewFitInfo{
+		"20260602": {Points: 134, RSquared: 0.55},
+		"20260605": {Points: 148, RSquared: 0.60},
+		"20260619": {Points: 148, RSquared: 0.65},
+	}
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	combined := combineGammaResults(spy, spx)
+
+	annotateGammaQuality(combined, now)
+
+	if got := combined.PerIndex["SPY"].Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("SPY rankability = %q, want rankable in sub-preferred skew window: %+v", got, combined.PerIndex["SPY"].Quality)
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "yellow" {
+		t.Fatalf("bandForGamma = %q, want yellow when dominant-weight SPY long-gamma vote disagrees with SPX", got)
+	}
+}
+
+func TestGammaCombinedSkipsPooledDerivedIVAndConcentrationGates(t *testing.T) {
+	// Same structural contradiction the pooled skew gate had: the
+	// combined node's DerivedIVPct pools leg counts across both chains
+	// and its TopConcentrationPct is a cross-book ratio, so a present-
+	// but-degraded SPY could drag either across the context/block bars
+	// while the canonical SPX slice is clean. The combined node must
+	// not gate on pooled model numbers; each slice gates its own and
+	// the SPX verdict propagates through spx_coverage.
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spy.DerivedIVLegs = spy.PricedLegCount // SPY slice: 100% derived IV (block on its own slice)
+	spy.GammaTotalAbs = 8_000_000_000
+	spy.TopConcentrationPct = 95
+	spy.TopStrikes = []rpc.StrikeConcentration{{
+		Underlying: "SPY",
+		Strike:     750,
+		Expiry:     "2026-06-02",
+		Right:      "P",
+		AbsGEX:     7_600_000_000,
+		OI:         10_000,
+	}}
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	combined := combineGammaResults(spy, spx)
+
+	annotateGammaQuality(combined, now)
+
+	// Pooled numbers would cross the bars if gated: derived-IV share
+	// (200+10)/400 = 52.5% ≥ 40% context, concentration 7.6/12 = 63.3%
+	// ≥ 50% context. They stay visible as coverage diagnostics only.
+	if got := combined.Quality.Coverage.DerivedIVPct; got < 52 || got > 53 {
+		t.Fatalf("pooled DerivedIVPct = %.1f, want ~52.5 visible in coverage", got)
+	}
+	if got := combined.Quality.Coverage.TopConcentrationPct; got < 63 || got > 64 {
+		t.Fatalf("pooled TopConcentrationPct = %.1f, want ~63.3 visible in coverage", got)
+	}
+	for _, gate := range combined.Quality.Gates {
+		if gate.Name == "derived_iv_share" || gate.Name == "top_strike_concentration" {
+			t.Fatalf("combined node must not gate on pooled model values: %+v", combined.Quality.Gates)
+		}
+	}
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("combined rankability = %q, want rankable with clean SPX and degraded SPY: %+v", got, combined.Quality)
+	}
+	spyQ := combined.PerIndex["SPY"].Quality
+	if spyQ.Rankability != rpc.GammaRankabilityBlocked {
+		t.Fatalf("SPY slice rankability = %q, want blocked on its own model gates: %+v", spyQ.Rankability, spyQ)
+	}
+	if !gammaQualityHasBlocker(spyQ, "derived_iv_share") || !gammaQualityHasBlocker(spyQ, "top_strike_concentration") {
+		t.Fatalf("SPY slice missing its own model blockers: %+v", spyQ.Blockers)
+	}
+	for _, gate := range combined.Quality.Gates {
+		if gate.Name == "spy_coverage" && gate.Status != rpc.GammaQualityGatePass {
+			t.Fatalf("degraded SPY must stay non-blocking when SPX is rankable: %+v", gate)
+		}
+	}
+	row := rpc.RegimeGammaZero{Status: rpc.RegimeStatusOK, Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined}}
+	if got := bandForGamma(row); got != "red" {
+		t.Fatalf("bandForGamma = %q, want red ranked SPX-canonical band", got)
+	}
+}
+
 func rankableCombinedGammaFixture(asOf time.Time) *rpc.GammaZeroComputed {
 	return hydrateGammaComputed(combineGammaResults(
 		rankableGammaFixture(rpc.GammaZeroScopeSPY, asOf),
