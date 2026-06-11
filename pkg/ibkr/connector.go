@@ -73,6 +73,19 @@ type Connector struct {
 	inactiveCandidates map[string]inactiveCandidateState
 	inactiveStore      inactiveSymbolStore
 
+	// mktDataAbsent remembers subscription keys whose market-data request
+	// the gateway terminally rejected as not-entitled (error 354), so the
+	// next marketDataAbsenceRetry window skips the futile resubscribe
+	// instead of re-burning a request + poll budget per caller cycle.
+	// In-memory only — broker entitlements must never persist (see
+	// docs/architecture.md) — and the daemon rebuilds the Connector on
+	// every reconnect, which is the "cleared on reconnect" path.
+	// absenceNow is a test seam, nil meaning time.Now (same pattern as
+	// contractTimingHook).
+	absenceMu     sync.Mutex
+	mktDataAbsent map[string]marketDataAbsence
+	absenceNow    func() time.Time
+
 	// acctUpdatesMu guards the account-updates resubscribe throttle (see
 	// maybeResubscribeAccountUpdates).
 	acctUpdatesMu     sync.Mutex
@@ -224,6 +237,22 @@ type Subscription struct {
 	// the error-handler goroutine. A nil channel means fast-abort is
 	// disabled (used by test fixtures that bypass the Subscribe path).
 	RejectCh chan SubscriptionRejection
+	// rejectedReqID records the reqID the gateway reported dead via a
+	// terminal entitlement/definition error (200/354): the server tears
+	// the ticker down itself, so a wire CancelMarketData for that exact
+	// reqID only draws error 300 "Can't find EId". Stored as the reqID
+	// (not a bool) so a refresh that re-issues the subscription under a
+	// new reqID naturally re-arms the cancel. See wireCancelNeeded.
+	rejectedReqID int
+}
+
+// wireCancelNeeded reports whether sub still names a gateway-side
+// subscription that needs a wire CancelMarketData on teardown. False when
+// the gateway already killed this exact reqID via a terminal rejection —
+// the rate-limiter slot is released separately (idempotently) in that
+// case, never skipped (2026-05-21 slot-leak lesson).
+func wireCancelNeeded(sub *Subscription) bool {
+	return sub != nil && sub.ReqID != 0 && sub.ReqID != sub.rejectedReqID
 }
 
 // SubscriptionRejection captures a terminal IBKR error for a market-data
@@ -254,6 +283,109 @@ func isTerminalSubscriptionError(code int) bool {
 	switch code {
 	case 200, 320, 321, 322, 354, 10197:
 		return true
+	}
+	return false
+}
+
+// marketDataAbsenceRetry bounds how long a terminal entitlement rejection
+// (error 354) suppresses re-subscribing the same key. Mirrors the daemon's
+// marketEventsShortableAbsentRetry: long enough that steady pollers (the
+// app host quotes every held name each ~5 s) stop hammering a dead name,
+// short enough that a subscription purchased mid-session starts flowing
+// within half an hour. A gateway reconnect re-arms immediately because the
+// daemon rebuilds the Connector per connect.
+const marketDataAbsenceRetry = 30 * time.Minute
+
+type marketDataAbsence struct {
+	code    int
+	message string
+	at      time.Time
+}
+
+// MarketDataAbsenceError is returned by the market-data subscribe paths
+// when the gateway recently rejected this subscription key with a terminal
+// entitlement error and the retry window has not elapsed. It carries the
+// original rejection so callers can render an honest "asked and missed"
+// state instead of a silent empty stream.
+type MarketDataAbsenceError struct {
+	Key        string
+	Code       int
+	Message    string
+	ObservedAt time.Time
+	RetryAt    time.Time
+}
+
+func (e *MarketDataAbsenceError) Error() string {
+	return fmt.Sprintf("market data for %s unavailable (IBKR %d at %s; retry after %s)",
+		e.Key, e.Code, e.ObservedAt.Format("15:04:05"), e.RetryAt.Format("15:04:05"))
+}
+
+func (c *Connector) absenceClock() time.Time {
+	if c.absenceNow != nil {
+		return c.absenceNow()
+	}
+	return time.Now()
+}
+
+// rememberMarketDataAbsence records a terminal entitlement rejection for a
+// subscription key. Logged at Info once per window so the log shows one
+// honest probe per key per marketDataAbsenceRetry instead of a churn loop.
+func (c *Connector) rememberMarketDataAbsence(key string, code int, message string) {
+	now := c.absenceClock()
+	c.absenceMu.Lock()
+	if c.mktDataAbsent == nil {
+		c.mktDataAbsent = make(map[string]marketDataAbsence)
+	}
+	prev, had := c.mktDataAbsent[key]
+	c.mktDataAbsent[key] = marketDataAbsence{code: code, message: message, at: now}
+	c.absenceMu.Unlock()
+	if !had || now.Sub(prev.at) >= marketDataAbsenceRetry {
+		c.logInfo("Market data for %s rejected (code %d); suppressing resubscribes for %s", key, code, marketDataAbsenceRetry)
+	}
+}
+
+// marketDataAbsenceFor returns the active absence record for key, or nil
+// when none is remembered or the retry window has elapsed (expired entries
+// are dropped so the map cannot grow unbounded).
+func (c *Connector) marketDataAbsenceFor(key string) *MarketDataAbsenceError {
+	now := c.absenceClock()
+	c.absenceMu.Lock()
+	defer c.absenceMu.Unlock()
+	entry, ok := c.mktDataAbsent[key]
+	if !ok {
+		return nil
+	}
+	if now.Sub(entry.at) >= marketDataAbsenceRetry {
+		delete(c.mktDataAbsent, key)
+		return nil
+	}
+	return &MarketDataAbsenceError{
+		Key:        key,
+		Code:       entry.code,
+		Message:    entry.message,
+		ObservedAt: entry.at,
+		RetryAt:    entry.at.Add(marketDataAbsenceRetry),
+	}
+}
+
+// marketDataFarmImpaired reports whether any market-data (or TWS-server
+// connectivity) farm is currently disconnected/broken. Absence recording
+// is gated on this: a 354 raised while a farm is bouncing says nothing
+// about entitlement, and remembering it would blind an entitled name (the
+// SPY/zero-gamma worst case) for a full retry window — a farm bounce does
+// not rebuild the Connector, so the reconnect-clears-memory path would not
+// save it. "inactive" farms stay eligible: that status is the normal
+// off-hours idle state, not an outage.
+func (c *Connector) marketDataFarmImpaired() bool {
+	c.dataFarmMu.RLock()
+	defer c.dataFarmMu.RUnlock()
+	for _, farm := range c.dataFarms {
+		switch farm.Type {
+		case "market", "connectivity":
+			if farm.Status == "disconnected" || farm.Status == "broken" {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -560,6 +692,14 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 		c.notifyOrderErrorLifecycle(int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
 	}
 	c.recordDataFarmNotice(note.code, note.message, note.timestamp)
+	// Request-scoped recovery must run before the alias-based inactive
+	// logic below: historical reqIDs never register an alias, so the
+	// inactiveKey early-return would skip them entirely. This is the only
+	// live error path on current gateways — TWS API server ≥203 delivers
+	// request errors as system notifications (msg 204), not msgErrMsg
+	// frames, so handleIBKRError/handleErrorMessage never see them
+	// (observed 2026-06-11: 779 system notices, zero msgErrMsg errors).
+	c.recoverFromSystemNotice(alias, note)
 	symbol := strings.ToUpper(strings.TrimSpace(alias.symbol))
 	inactiveKey := inactiveKeyForAlias(alias)
 	if inactiveKey == "" {
@@ -589,6 +729,145 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 	case 366:
 		c.registerInactiveCandidate(inactiveKey, note.message)
 	}
+}
+
+// recoverFromSystemNotice drives the request-scoped recovery that the
+// legacy msgErrMsg path (handleIBKRError / handleErrorMessage) promised
+// but never receives on current gateways:
+//
+//   - a pending historical request fails immediately instead of burning
+//     its timeout and then wire-cancelling a query the server already
+//     killed (the recurring error-366 source); the error — including 200
+//     "no security definition" — propagates to the caller;
+//   - in-flight market-data pollers get the RejectCh fast-abort;
+//   - terminal entitlement/definition rejections (200/354) release the
+//     rate-limiter slot, mark the exact reqID server-dead so teardown
+//     skips the futile wire cancel (the recurring error-300 source), and
+//     — for 354 — feed the absence memory so steady pollers stop
+//     re-requesting a name with no data entitlement (the recurring
+//     354+2129 source);
+//   - 10197 keeps its force-delayed side effect.
+//
+// Deliberately NOT ported from handleIBKRError: refreshSubscription's
+// blind alternate-routing resubscribe on 200/320/321/354 — re-requesting
+// a terminally rejected subscription is exactly the churn loop this
+// recovery exists to stop, and recovery-after-the-window is owned by the
+// absence TTL.
+func (c *Connector) recoverFromSystemNotice(alias reqAliasEntry, note *systemNotification) {
+	if note.tickerID <= 0 {
+		return
+	}
+	reqID := int(note.tickerID)
+	code := note.code
+
+	if c.failPendingHistorical(reqID, code, note.message) {
+		return
+	}
+
+	c.pushSubscriptionRejection(reqID, code, note.message)
+
+	switch code {
+	case 200, 354:
+		c.markSubscriptionRejected(reqID)
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
+		if conn != nil {
+			conn.releaseMarketDataSlot(reqID)
+		}
+	case 10197:
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
+		if conn != nil {
+			conn.handleCompetingLiveSession(strconv.Itoa(reqID), note.message)
+		}
+	}
+
+	if code == 354 {
+		c.maybeRememberAbsenceForReqID(reqID, alias, code, note.message)
+	}
+}
+
+// failPendingHistorical fails the historical request owning reqID, if
+// any, mirroring handleIBKRError's histPending branch (162 keeps its
+// pacing backoff, anything else resets it). Informational codes leave the
+// request running. Returns true when reqID belonged to a pending
+// historical request.
+func (c *Connector) failPendingHistorical(reqID, code int, message string) bool {
+	if code == 0 || code == -1 || (code >= 2100 && code < 2200) {
+		return false
+	}
+	c.historicalMu.Lock()
+	hr, ok := c.historicalReqs[reqID]
+	c.historicalMu.Unlock()
+	if !ok {
+		return false
+	}
+	hErr := &HistoricalRequestError{Code: code, Message: message}
+	switch code {
+	case 162:
+		if hErr.Message == "" {
+			hErr.Message = "historical data pacing violation"
+		}
+		hErr.RetryAfter = c.nextHistoricalBackoff(hr.symbol)
+	case 321:
+		if hErr.Message == "" {
+			hErr.Message = "historical data request failed validation"
+		}
+		c.resetHistoricalBackoff(hr.symbol)
+	default:
+		c.resetHistoricalBackoff(hr.symbol)
+	}
+	c.failHistoricalRequest(reqID, hErr)
+	return true
+}
+
+// markSubscriptionRejected records that the gateway terminally killed
+// reqID's subscription server-side. Guarded on sub.ReqID == reqID so a
+// notice for a stale reqID can never poison a live replacement
+// subscription that reused the key.
+func (c *Connector) markSubscriptionRejected(reqID int) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	key, ok := c.reqIDMap[reqID]
+	if !ok {
+		return
+	}
+	if sub, ok := c.subscriptions[key]; ok && sub != nil && sub.ReqID == reqID {
+		sub.rejectedReqID = reqID
+	}
+}
+
+// maybeRememberAbsenceForReqID feeds the market-data absence memory for a
+// terminal 354, keyed by the connector's own subscription key
+// (reqIDMap[reqID]) so the record key is identical to what the subscribe
+// paths check — bare symbol for SubscribeMarketData, route key for
+// SubscribeMarketDataWithContract. Never keyed by alias.symbol: for
+// option-IV subscriptions that is the underlying and would blind the
+// stock. Skipped while a farm is impaired (a bounce-window 354 says
+// nothing about entitlement) and for derivative requests.
+func (c *Connector) maybeRememberAbsenceForReqID(reqID int, alias reqAliasEntry, code int, message string) {
+	c.subMu.RLock()
+	key := c.reqIDMap[reqID]
+	c.subMu.RUnlock()
+	if key == "" {
+		return
+	}
+	c.optMu.RLock()
+	_, isOptionReq := c.optReqIDs[reqID]
+	c.optMu.RUnlock()
+	if isOptionReq {
+		return
+	}
+	switch strings.ToUpper(strings.TrimSpace(alias.secType)) {
+	case "OPT", "FOP", "WAR", "BAG":
+		return
+	}
+	if c.marketDataFarmImpaired() {
+		return
+	}
+	c.rememberMarketDataAbsence(key, code, message)
 }
 
 func (c *Connector) recordDataFarmNotice(code int, message string, asOf time.Time) {
@@ -706,10 +985,15 @@ func (c *Connector) dropSubscription(symbol string) {
 	// while subMu is held: every other subscription reader (handleTick,
 	// GetMarketData, scan enrichment) blocks on subMu.
 	c.subMu.Lock()
-	var cancelReqID int
+	var cancelReqID, releaseReqID int
 	if sub, ok := c.subscriptions[upper]; ok {
-		if sub.ReqID != 0 {
+		// Same wire-cancel exception as UnsubscribeMarketData: a reqID
+		// the gateway already reported dead only draws error 300 on
+		// cancel — release its slot instead (idempotent).
+		if wireCancelNeeded(sub) {
 			cancelReqID = sub.ReqID
+		} else {
+			releaseReqID = sub.ReqID
 		}
 		delete(c.subscriptions, upper)
 	}
@@ -723,6 +1007,9 @@ func (c *Connector) dropSubscription(symbol string) {
 
 	if cancelReqID != 0 && conn != nil && conn.IsConnected() {
 		_ = conn.CancelMarketData(cancelReqID)
+	}
+	if releaseReqID != 0 && conn != nil {
+		conn.releaseMarketDataSlot(releaseReqID)
 	}
 
 	c.optMu.Lock()
@@ -1801,6 +2088,10 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 			return ErrSymbolInactive
 		}
 	}
+	if absErr := c.marketDataAbsenceFor(symbol); absErr != nil {
+		c.logDebug("Skipping SubscribeMarketData for %s (%v)", symbol, absErr)
+		return absErr
+	}
 	c.subMu.RLock()
 	if sub, exists := c.subscriptions[symbol]; exists {
 		c.subMu.RUnlock()
@@ -1885,6 +2176,10 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 		}
 		c.logDebug("Skipping routed SubscribeMarketData for %s (%s)", key, reason)
 		return key, ErrSymbolInactive
+	}
+	if absErr := c.marketDataAbsenceFor(key); absErr != nil {
+		c.logDebug("Skipping routed SubscribeMarketData for %s (%v)", key, absErr)
+		return key, absErr
 	}
 
 	c.subMu.RLock()
@@ -1985,6 +2280,10 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 		}
 		c.logDebug("Skipping EnsureMarketDataSubscription for inactive symbol %s (%s)", symbol, reason)
 		return false, ErrSymbolInactive
+	}
+	if absErr := c.marketDataAbsenceFor(symbol); absErr != nil {
+		c.logDebug("Skipping EnsureMarketDataSubscription for %s (%v)", symbol, absErr)
+		return false, absErr
 	}
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
@@ -2126,9 +2425,20 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 	// post-disconnect, so the cancel still skips. The only remaining
 	// downside is occasional 300 warnings when canceling a sub the gateway
 	// never accepted — strictly cosmetic, vs slot-leak which is functional.
+	//
+	// One narrow exception (wireCancelNeeded): when the gateway itself
+	// reported this exact reqID terminally dead (200/354 system notice),
+	// the wire cancel is guaranteed to draw error 300 — skip it, but
+	// still release the rate-limiter slot (idempotent with the release
+	// done at notice time; never skipped, per the slot-leak lesson).
 	if c.conn != nil && c.conn.IsConnected() && sub.ReqID != 0 {
-		if err := c.conn.CancelMarketData(sub.ReqID); err != nil {
-			marketDataLogger.Warnf("%s: Failed to cancel market data %s (ReqID: %d): %v", c.name, symbol, sub.ReqID, err)
+		if wireCancelNeeded(sub) {
+			if err := c.conn.CancelMarketData(sub.ReqID); err != nil {
+				marketDataLogger.Warnf("%s: Failed to cancel market data %s (ReqID: %d): %v", c.name, symbol, sub.ReqID, err)
+			}
+		} else {
+			c.conn.releaseMarketDataSlot(sub.ReqID)
+			marketDataLogger.Debugf("%s: Skipping wire cancel for %s (ReqID %d already rejected server-side)", c.name, symbol, sub.ReqID)
 		}
 	}
 

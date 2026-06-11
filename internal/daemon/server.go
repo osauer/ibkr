@@ -2262,11 +2262,18 @@ func writeError(enc *json.Encoder, id, code, message string) {
 func classifyError(err error) (string, string) {
 	var bad *badRequestError
 	var contractTimeout *chainContractTimeoutError
+	var mdAbsent *ibkrlib.MarketDataAbsenceError
 	switch {
 	case errors.As(err, &bad):
 		return rpc.CodeBadRequest, err.Error()
 	case errors.As(err, &contractTimeout):
 		return rpc.CodeTimeout, err.Error()
+	case errors.As(err, &mdAbsent):
+		// Entitlement-absence suppression (recent IBKR 354). Reuses the
+		// symbol_inactive wire code — same caller semantics ("this symbol
+		// will not produce data right now; do not hot-retry") — while the
+		// message carries the precise rejection and retry time.
+		return rpc.CodeSymbolInactive, err.Error()
 	case errors.Is(err, ibkrlib.ErrSymbolInactive):
 		return rpc.CodeSymbolInactive, err.Error()
 	case errors.Is(err, ibkrlib.ErrIBKRUnavailable):
