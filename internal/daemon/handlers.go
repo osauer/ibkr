@@ -1713,6 +1713,9 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	if routedQuote {
 		key, err := c.SubscribeMarketDataWithContract(ctx, routeContract, defaultGenericTicks)
 		if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+			if shell := s.absentQuoteShell(q, err, sessionMarket, hasSessionMarket); shell != nil {
+				return shell, nil
+			}
 			return nil, err
 		}
 		pollKey = key
@@ -1725,6 +1728,9 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		// to cancel the watcher's sub mid-stream.
 		release, err := s.subs.Hold(ctx, sym)
 		if err != nil && !errors.Is(err, ibkrlib.ErrIBKRUnavailable) {
+			if shell := s.absentQuoteShell(q, err, sessionMarket, hasSessionMarket); shell != nil {
+				return shell, nil
+			}
 			return nil, err
 		}
 		releaseSub = release
@@ -1747,7 +1753,8 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		}
 		return ready || fallback
 	}); err != nil {
-		if err == context.DeadlineExceeded {
+		switch {
+		case err == context.DeadlineExceeded:
 			inactiveKey := pollKey
 			if !routedQuote {
 				inactiveKey = ibkrlib.DefaultMarketDataKeyForSymbol(sym)
@@ -1757,7 +1764,15 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 					return nil, ibkrlib.ErrSymbolInactive
 				}
 			}
-		} else {
+		case IsSubscriptionRejected(err):
+			// Terminal gateway rejection (354/200): this is the
+			// once-per-absence-window honest probe. Fall through to the
+			// same shell + historical-fallback shape a quiet timeout
+			// produces — a hard error here would red-flag the app's
+			// whole market_quotes source over one dead symbol.
+			q.Stale = true
+			q.StaleReason = err.Error()
+		default:
 			return nil, err
 		}
 	}
@@ -1775,6 +1790,29 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	s.decorateQuote(q, sessionMarket)
 
 	return q, nil
+}
+
+// absentQuoteShell converts a MarketDataAbsenceError from a subscribe
+// path into the honest shell quote callers received before the absence
+// memory existed (then: after burning the full poll budget): symbol and
+// contract echo, no prices, stale with the stored gateway rejection as
+// the reason. Returns nil when err is not an absence error, letting the
+// caller propagate normally. A hard RPC error would be dishonest in the
+// other direction: the app folds any per-symbol quote error into a red
+// market_quotes source-health state for the whole snapshot.
+func (s *Server) absentQuoteShell(q *rpc.Quote, err error, market marketcal.Market, hasSessionMarket bool) *rpc.Quote {
+	var absent *ibkrlib.MarketDataAbsenceError
+	if !errors.As(err, &absent) {
+		return nil
+	}
+	q.AsOf = time.Now()
+	if hasSessionMarket {
+		s.attachQuoteSessionContext(q, market)
+	}
+	s.decorateQuote(q, market)
+	q.Stale = true
+	q.StaleReason = absent.Error()
+	return q
 }
 
 func isOptionQuoteContract(c rpc.ContractParams) bool {
@@ -1918,7 +1956,14 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 		}
 		return q.Bid != nil || q.Ask != nil || q.Last != nil || q.PrevClose != nil || q.IV != nil
 	}); err != nil && err != context.DeadlineExceeded {
-		return nil, err
+		// A terminal gateway rejection degrades to the same decorated
+		// shell a quiet timeout produces (no fabricated values, stale
+		// reason carries the rejection) — mirrors the stock path.
+		if !IsSubscriptionRejected(err) {
+			return nil, err
+		}
+		q.Stale = true
+		q.StaleReason = err.Error()
 	}
 	q.AsOf = time.Now()
 	s.attachQuoteSessionContext(q, marketcal.MarketUSOptions)
