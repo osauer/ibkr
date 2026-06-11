@@ -92,9 +92,18 @@ client_id = $CLIENT_ID
 tls = false
 EOF
 
-ACCOUNT="$(timeout 90 "$BIN" account --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("account_id",""))')"
+# `account --json` reports the aggregate "All" summary on an unpinned
+# daemon; `status --json` carries the concrete session account. The field
+# stays empty until the gateway handshake completes, so poll like
+# release-smoke.sh does for status.connected.
+ACCOUNT=""
+for _ in $(seq 1 25); do
+    ACCOUNT="$(timeout 30 "$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("connected_account",""))')"
+    [[ -n "$ACCOUNT" ]] && break
+    sleep 1
+done
 if [[ -z "$ACCOUNT" ]]; then
-    echo "release-paper-smoke: FAIL — could not resolve the connected account on ${HOST}:${PORT}" >&2
+    echo "release-paper-smoke: FAIL — could not resolve the connected account on ${HOST}:${PORT} after 25s" >&2
     exit 1
 fi
 case "$ACCOUNT" in
@@ -120,6 +129,19 @@ tls = false
 [trading]
 mode = "paper"
 EOF
+
+# Fresh autospawned daemon: wait for the gateway handshake before the
+# smoke, or its reference-quote leg fails fast with gateway_unavailable.
+CONNECTED=""
+for _ in $(seq 1 25); do
+    CONNECTED="$(timeout 30 "$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("connected",False))')"
+    [[ "$CONNECTED" == "True" ]] && break
+    sleep 1
+done
+if [[ "$CONNECTED" != "True" ]]; then
+    echo "release-paper-smoke: FAIL — daemon did not connect to ${HOST}:${PORT} within 25s" >&2
+    exit 1
+fi
 
 OUT="$(timeout 150 "$BIN" trading paper-smoke --json)" || {
     echo "release-paper-smoke: FAIL — paper-smoke command errored:" >&2
