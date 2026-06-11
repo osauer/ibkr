@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 
-import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
+import { createPairingSession, launchBrowser, loadPlaywright, parseArgs } from "./lib-app-browser.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const baseURL = trimRight(args["base-url"] || "http://127.0.0.1:8765", "/");
@@ -18,7 +16,7 @@ const stopRestartedApp = args["stop-restarted-app"] === "true";
 const mobile = args.mobile !== "false";
 const rawGatewayCopyPattern = /gateway_unavailable|ibkr connection unavailable|quote\.snapshot|account\.summary|positions\.list/i;
 
-const playwright = loadPlaywright();
+const playwright = loadPlaywright("app-browser-smoke");
 
 if (!playwright[browserName]) {
   console.error(`app-browser-smoke: unknown browser ${browserName}`);
@@ -30,7 +28,7 @@ const launchOptions = { headless: true };
 if (channel) {
   launchOptions.channel = channel;
 }
-const launched = await launchBrowser(playwright[browserName], launchOptions);
+const launched = await launchBrowser(playwright[browserName], browserName, launchOptions);
 const browser = launched.browser;
 let cleanupPID = 0;
 const context = await browser.newContext({
@@ -984,101 +982,6 @@ function execFilePromise(file, argv) {
       resolve({ stdout, stderr });
     });
   });
-}
-
-async function launchBrowser(browserType, launchOptions) {
-  try {
-    return {
-      browser: await browserType.launch(launchOptions),
-      channel: launchOptions.channel || "",
-    };
-  } catch (err) {
-    if (launchOptions.channel || browserName !== "chromium") {
-      throw err;
-    }
-    try {
-      return {
-        browser: await browserType.launch({ ...launchOptions, channel: "chrome" }),
-        channel: "chrome",
-      };
-    } catch (chromeErr) {
-      throw new Error([
-        "chromium launch failed, and the fallback to installed Chrome also failed.",
-        `chromium: ${String(err?.message || err)}`,
-        `chrome: ${String(chromeErr?.message || chromeErr)}`,
-      ].join("\n"));
-    }
-  }
-}
-
-function loadPlaywright() {
-  const require = createRequire(import.meta.url);
-  const errors = [];
-  try {
-    return require("playwright");
-  } catch (err) {
-    errors.push(`default resolution: ${String(err?.message || err)}`);
-  }
-
-  for (const moduleRoot of candidateModuleRoots()) {
-    try {
-      return require(path.join(moduleRoot, "playwright"));
-    } catch (err) {
-      errors.push(`${moduleRoot}: ${String(err?.message || err)}`);
-    }
-  }
-
-  console.error("app-browser-smoke: Playwright is not installed for this Node runtime.");
-  console.error("Install it with `npm install playwright`, or run inside Codex where the bundled runtime can be discovered.");
-  console.error(errors.join("\n"));
-  process.exit(2);
-}
-
-function candidateModuleRoots() {
-  const roots = [];
-  if (process.env.PLAYWRIGHT_NODE_MODULES) {
-    roots.push(process.env.PLAYWRIGHT_NODE_MODULES);
-  }
-  if (process.env.NODE_PATH) {
-    roots.push(...process.env.NODE_PATH.split(path.delimiter));
-  }
-  if (process.env.HOME) {
-    roots.push(path.join(process.env.HOME, ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules"));
-  }
-  return [...new Set(roots)].filter((root) => root && fs.existsSync(path.join(root, "playwright")));
-}
-
-async function createPairingSession(baseURL, publicURL) {
-  const res = await fetch(`${baseURL}/api/pairing/sessions`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ public_url: publicURL }),
-  });
-  if (!res.ok) {
-    throw new Error(`create pairing session failed ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (!arg.startsWith("--")) {
-      continue;
-    }
-    const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
-    if (inlineValue !== undefined) {
-      out[rawKey] = inlineValue;
-      continue;
-    }
-    if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
-      out[rawKey] = argv[++i];
-      continue;
-    }
-    out[rawKey] = "true";
-  }
-  return out;
 }
 
 function trimRight(value, suffix) {
