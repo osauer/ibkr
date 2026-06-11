@@ -18,7 +18,10 @@ find the supporting surfaces quickly.
 
 - `make help` is the target inventory.
 - `make check` is the static gate.
-- `make smoke` is the live gateway proof when it matters.
+- `make smoke-fast` is the per-change live-gateway gate (~8s); the full
+  `make smoke` wire matrix is binding for daemon/CLI/wire-path changes and
+  releases. Both wait on `scripts/with-gateway-lock.sh` instead of racing
+  other sessions for the gateway.
 - Use read-only subagents for exploration and review, and keep writes in the
   main session.
 - For broker-adjacent or SPA work, start from the canonical templates instead
