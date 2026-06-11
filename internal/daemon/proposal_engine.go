@@ -95,21 +95,69 @@ func (s *Server) installProposalEngine() {
 	s.tradeProposals = e
 }
 
+// proposalRefreshRetryBase is the first quick-retry delay after a refresh
+// that failed on a transient session condition (gateway still connecting,
+// account/positions fetch failure, no concrete account identity yet). It
+// doubles per consecutive transient failure and caps at the configured
+// cadence. Without it the startup refresh races the gateway connect and
+// the cached "ibkr connection unavailable" blocker is served for a full
+// cadence (observed 2026-06-11: the SPA protection panel sat on the error
+// for 15 minutes after every `ibkr restart`).
+const proposalRefreshRetryBase = 30 * time.Second
+
 func (e *proposalEngine) Run(ctx context.Context) {
 	if e == nil {
 		return
 	}
-	_, _ = e.Refresh(ctx, false)
-	t := time.NewTicker(e.cadence)
-	defer t.Stop()
+	failures := 0
 	for {
+		snap, err := e.Refresh(ctx, false)
+		if err != nil || proposalRefreshTransient(snap) {
+			failures++
+		} else {
+			failures = 0
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			_, _ = e.Refresh(ctx, false)
+		case <-time.After(proposalRefreshWait(e.cadence, failures)):
 		}
 	}
+}
+
+// proposalRefreshWait returns the pause before the next automatic refresh:
+// the full cadence after a clean refresh, an escalating 30s/1m/2m/…
+// backoff capped at the cadence while refreshes keep failing on transient
+// session conditions. The wait <= 0 branch guards shift overflow on
+// absurd streaks, mirroring gammaRetryBackoff.
+func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
+	if failures <= 0 || cadence <= proposalRefreshRetryBase {
+		return cadence
+	}
+	wait := proposalRefreshRetryBase << (failures - 1)
+	if wait <= 0 || wait > cadence {
+		return cadence
+	}
+	return wait
+}
+
+// proposalRefreshTransient reports whether the installed snapshot is
+// blocked on a condition the next broker heartbeat can clear (connection
+// not yet up, session identity not yet concrete, session switch still
+// settling). Refresh failures that preserve a last-good snapshot return
+// err == nil but still carry these blocker codes, so the codes are the
+// signal, not the returned error. Persistent variants (a deliberately
+// un-pinned data-only gateway stays account_identity_unscoped forever)
+// converge to the cadence cap, where a scope-blocked refresh is one cheap
+// no-broker-call pass.
+func proposalRefreshTransient(snap rpc.TradeProposalSnapshot) bool {
+	for _, b := range snap.Blockers {
+		switch b.Code {
+		case "account_identity_unscoped", "account_unavailable", "positions_unavailable", "proposal_scope_mismatch":
+			return true
+		}
+	}
+	return false
 }
 
 func (e *proposalEngine) Snapshot(show bool) rpc.TradeProposalSnapshot {
@@ -1243,6 +1291,16 @@ func (e *proposalEngine) replaceSnapshot(snap rpc.TradeProposalSnapshot) {
 	if e.store == nil {
 		return
 	}
+	// Only generated, concretely scoped snapshots survive a restart.
+	// Error/unscoped shells (revision "empty") serve in-memory only:
+	// the startup refresh runs before the gateway connects, and
+	// persisting its shell overwrote the last good snapshot on every
+	// start — installProposalEngine then warned "ignoring persisted
+	// snapshot without a concrete account/mode scope" and warm-start
+	// adoption never happened.
+	if !proposalSnapshotPersistable(snap) {
+		return
+	}
 	if err := e.store.SaveCurrent(snap); err != nil && e.server != nil {
 		e.server.warnf("trade proposals: save current snapshot: %v", err)
 	}
@@ -1279,6 +1337,15 @@ func (e *proposalEngine) preserveSnapshotOnRefreshFailure(scope brokerStateScope
 
 func proposalSnapshotUsable(snap rpc.TradeProposalSnapshot) bool {
 	return snap.Kind == rpc.TradeProposalSnapshotKind && snap.Revision != "" && snap.Revision != "empty" && len(snap.Proposals) > 0
+}
+
+// proposalSnapshotPersistable reports whether snap is a generated,
+// concretely scoped snapshot (including a legitimate zero-proposal
+// generation) rather than a transient error/unscoped shell. Only these
+// are written to disk; see replaceSnapshot.
+func proposalSnapshotPersistable(snap rpc.TradeProposalSnapshot) bool {
+	return snap.Revision != "" && snap.Revision != "empty" &&
+		brokerScopeConcrete(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode})
 }
 
 func sameProposalPolicy(snap rpc.TradeProposalSnapshot, status rpc.ProtectionPolicyStatus) bool {

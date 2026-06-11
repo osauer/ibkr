@@ -57,6 +57,15 @@ const (
 	marketEventsRegSHORetryAfter    = 15 * time.Minute
 	marketEventsBorrowFeeRetryAfter = 15 * time.Minute
 
+	// marketEventsShortableAbsentRetry bounds how long a "tick 236 never
+	// arrived" observation suppresses re-polling that symbol. Pre-market
+	// and off-hours probes legitimately see no shortable tick, so the
+	// absence must be re-tested once the tape can plausibly have changed;
+	// 30 minutes keeps the dead-symbol protection (a never-ticking EUR
+	// name costs one extra 2.5 s parallel probe per half hour) while
+	// letting borrow inventory heal intra-session.
+	marketEventsShortableAbsentRetry = 30 * time.Minute
+
 	// marketEventsFTPDialTimeout bounds the borrow-fee FTP connect. A
 	// healthy connect is ~100 ms; filtered networks silently drop the
 	// SYN, and the previous 10 s dial timeout gated the first snapshot
@@ -93,14 +102,16 @@ type marketEventCache struct {
 	now            func() time.Time
 
 	// shortableAbsent remembers symbols whose shortable tick (236) did
-	// not arrive within a full poll budget, keyed to the NY session the
-	// absence was observed in. Non-US listings never deliver the tick,
-	// so without this memory every market-events snapshot re-burns
-	// marketEventsBorrowPollBudget per dead symbol. Session-scoped
-	// rather than TTL'd: the one realistic event that makes a dead tick
-	// start flowing is a gateway/farm reconnect, which clears the map
-	// via clearShortableAbsence from postConnectSetup.
-	shortableAbsent map[string]string // symbol → nySessionKey of observation
+	// not arrive within a full poll budget. Non-US listings never
+	// deliver the tick, so without this memory every market-events
+	// snapshot re-burns marketEventsBorrowPollBudget per dead symbol.
+	// The memory expires after marketEventsShortableAbsentRetry: the
+	// original whole-NY-session scope turned a legitimately quiet
+	// pre-market probe into "Borrow Unknown" for the entire trading day
+	// (observed 2026-06-11 — all six held US names stayed unknown
+	// through RTH). A gateway/farm reconnect still clears the map
+	// early via clearShortableAbsence from postConnectSetup.
+	shortableAbsent map[string]time.Time // symbol → when observed absent
 
 	// *FailedAt remember the last failed fetch per external source so
 	// the marketEvents*RetryAfter windows can suppress immediate
@@ -110,23 +121,24 @@ type marketEventCache struct {
 	borrowFeesFailedAt time.Time
 }
 
-// shortableAbsentThisSession reports whether sym's shortable tick was
-// already observed absent during the given NY session.
-func (c *marketEventCache) shortableAbsentThisSession(sym, session string) bool {
+// shortableAbsentRecently reports whether sym's shortable tick was
+// observed absent within the last marketEventsShortableAbsentRetry.
+func (c *marketEventCache) shortableAbsentRecently(sym string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.shortableAbsent[sym] == session
+	at, ok := c.shortableAbsent[sym]
+	return ok && now.Sub(at) < marketEventsShortableAbsentRetry
 }
 
-// rememberShortableAbsent records that sym ran a full poll budget this
-// session without the shortable tick arriving.
-func (c *marketEventCache) rememberShortableAbsent(sym, session string) {
+// rememberShortableAbsent records that sym ran a full poll budget at now
+// without the shortable tick arriving.
+func (c *marketEventCache) rememberShortableAbsent(sym string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.shortableAbsent == nil {
-		c.shortableAbsent = make(map[string]string)
+		c.shortableAbsent = make(map[string]time.Time)
 	}
-	c.shortableAbsent[sym] = session
+	c.shortableAbsent[sym] = now
 }
 
 // clearShortableAbsence drops all absence records. Called on gateway
@@ -951,8 +963,6 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 	if connector == nil || subs == nil {
 		return marketEventSourceHealth("borrow_inventory", rpc.SourceStatusUnknown, now, now, 2*time.Minute, "low", []string{"IBKR gateway is unavailable; shortable-share inventory is unknown"})
 	}
-	session := nySessionKey(now)
-
 	// Per-symbol probe results land in index-addressed slots so the
 	// bounded workers never share mutable state; flags are merged after
 	// the fan-out (res.Flags gets a global sort downstream anyway).
@@ -965,7 +975,7 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 	var jobs []int
 	skipped := 0
 	for i, sym := range symbols {
-		if c.shortableAbsentThisSession(sym, session) {
+		if c.shortableAbsentRecently(sym, now) {
 			skipped++
 			continue
 		}
@@ -991,13 +1001,12 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 			}
 			return
 		}
-		// Tick absent. Record the per-session absence only when this
-		// probe genuinely ran out its own budget (or the gateway
-		// terminally rejected the subscription) while the parent request
-		// was still alive — an expired parent context says nothing about
-		// the symbol.
+		// Tick absent. Record the absence only when this probe genuinely
+		// ran out its own budget (or the gateway terminally rejected the
+		// subscription) while the parent request was still alive — an
+		// expired parent context says nothing about the symbol.
 		if ctx.Err() == nil && pollErr != nil {
-			c.rememberShortableAbsent(sym, session)
+			c.rememberShortableAbsent(sym, now)
 		}
 	})
 
@@ -1023,7 +1032,7 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 		}
 	}
 	if skipped > 0 {
-		notes = append(notes, fmt.Sprintf("skipped %d symbols whose shortable tick was already absent this session", skipped))
+		notes = append(notes, fmt.Sprintf("skipped %d symbols whose shortable tick was recently absent; re-probing every %s", skipped, marketEventsShortableAbsentRetry))
 	}
 	return marketEventSourceHealth("borrow_inventory", status, now, now, 2*time.Minute, confidence, notes)
 }

@@ -436,6 +436,11 @@ func (s *Server) installGammaZeroCache() {
 		return
 	}
 	s.zeroGamma = newGammaZeroCacheWithStore(newGammaZeroStore(dir), time.Now(), s.logger)
+	if diagPath, diagErr := gammaSkewDiagDefaultPath(); diagErr == nil {
+		s.zeroGamma.skewDiag = &gammaSkewDiagJournal{path: diagPath}
+	} else {
+		s.logger.Warnf("gamma skew diag: resolve path: %v (journaling disabled)", diagErr)
+	}
 	s.gammaOI = newGammaOpenInterestStore(dir)
 	s.gammaGrids = newExpiryGridStore(dir)
 }
@@ -1415,18 +1420,31 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 		s.zeroGamma.resetRetryBackoff()
 	}
 	// Start the streaming account+portfolio subscription so position
-	// rows carry live mark/value/P&L.
-	if err := a.RequestAccountUpdates(ep.Account); err != nil {
+	// rows carry live mark/value/P&L. The discovered session account can
+	// be the aggregate "All" (or a multi-account list); those are not
+	// account codes — TWS rejects them with error 321 and the portfolio
+	// stream never starts, leaving positions empty for the entire daemon
+	// lifetime (observed 2026-06-11). Prefer a concrete session account,
+	// then the concrete scope account (config pin), then let the
+	// connector resolve its bound code.
+	account := strings.TrimSpace(ep.Account)
+	if !brokerScopeAccountConcrete(account) {
+		account = s.currentBrokerStateScope().Account
+	}
+	if !brokerScopeAccountConcrete(account) {
+		account = ""
+	}
+	if err := a.RequestAccountUpdates(account); err != nil {
 		s.logger.Warnf("RequestAccountUpdates failed (positions will lack marks): %v", err)
 	}
 	// Subscribe to the account-level Daily P&L stream (TWS msg 94). Failure
 	// is non-fatal: account.summary keeps working without daily fields,
 	// and per-position daily lookups still degrade gracefully because the
 	// connector cache returns nil pointers on miss. Empty account means
-	// the discover/config path couldn't pin one — skip the call entirely
-	// since reqPnL requires an account.
-	if ep.Account != "" {
-		if err := a.SubscribeAccountPnL(ep.Account); err != nil {
+	// neither the session nor the discover/config path yielded a concrete
+	// one — skip the call entirely since reqPnL requires an account.
+	if account != "" {
+		if err := a.SubscribeAccountPnL(account); err != nil {
 			s.logger.Warnf("SubscribeAccountPnL failed (account.summary will lack daily P&L): %v", err)
 		}
 	}

@@ -73,6 +73,11 @@ type Connector struct {
 	inactiveCandidates map[string]inactiveCandidateState
 	inactiveStore      inactiveSymbolStore
 
+	// acctUpdatesMu guards the account-updates resubscribe throttle (see
+	// maybeResubscribeAccountUpdates).
+	acctUpdatesMu     sync.Mutex
+	acctUpdatesLastAt time.Time
+
 	// Option IV tracking (by underlying symbol or per-contract key)
 	optMu           sync.RWMutex
 	optIV           map[string]float64 // last observed implied vol (fraction, e.g., 0.30)
@@ -181,8 +186,9 @@ type Subscription struct {
 	// zero OI" from "gateway has not delivered the OI tick yet".
 	OpenInt         int64
 	OpenIntObserved bool
-	// ShortableShares is generic tick 236. ShortableObserved distinguishes
-	// "IBKR observed zero shares available" from "this subscription has not
+	// ShortableShares is wire tick 89 (a tickSize), delivered for the
+	// generic-tick-236 request. ShortableObserved distinguishes "IBKR
+	// observed zero shares available" from "this subscription has not
 	// delivered borrow inventory".
 	ShortableShares   int64
 	ShortableObserved bool
@@ -2707,14 +2713,66 @@ func (c *Connector) PrewarmOptionChain(
 // The gateway pushes mark prices, market values, and unrealized P&L for each
 // open position via msgPortfolioValue, populating the internal map that
 // GetCachedPositions reads. Pass an empty account to use the connector's bound one.
+//
+// Aggregate values ("All", comma-separated managedAccounts lists) are not
+// account codes — TWS rejects them with error 321 and the portfolio stream
+// never starts. They are reduced to a concrete code (or to "", which TWS
+// resolves itself for single-account logins) before hitting the wire.
 func (c *Connector) RequestAccountUpdates(account string) error {
 	if !c.isConnected() {
 		return ErrIBKRUnavailable
 	}
-	if account == "" {
+	if !accountCodeConcrete(account) {
 		account = c.conn.GetAccountCode()
 	}
+	if !accountCodeConcrete(account) {
+		account = firstConcreteAccountCode(account)
+	}
+	c.acctUpdatesMu.Lock()
+	c.acctUpdatesLastAt = time.Now()
+	c.acctUpdatesMu.Unlock()
 	return c.conn.RequestAccountUpdates(account)
+}
+
+// maybeResubscribeAccountUpdates re-issues the account+portfolio stream
+// subscription when the position cache is empty even though the account
+// summary reports gross position value. The TWS account-updates stream
+// occasionally fails to start after a rapid reconnect (observed
+// 2026-06-11: one boot delivered no msgPortfolioValue at all while
+// quotes and account summary flowed normally — positions stayed empty
+// for the whole daemon lifetime). Throttled to one attempt per 30 s,
+// counted from the last subscribe; a genuinely flat account (no gross
+// position value) never triggers.
+func (c *Connector) maybeResubscribeAccountUpdates() {
+	if !c.isConnected() {
+		return
+	}
+	if !accountSummaryShowsPositions(c.conn.GetAccountSummary()) {
+		return
+	}
+	c.acctUpdatesMu.Lock()
+	stale := time.Since(c.acctUpdatesLastAt) >= 30*time.Second
+	c.acctUpdatesMu.Unlock()
+	if !stale {
+		return
+	}
+	ibkrLogger.Warnf("positions cache empty while account summary shows gross position value; resubscribing account updates")
+	_ = c.RequestAccountUpdates("")
+}
+
+// accountSummaryShowsPositions reports whether any GrossPositionValue
+// entry in the summary map (keys may carry a currency suffix, e.g.
+// "GrossPositionValue_EUR") parses to a positive value.
+func accountSummaryShowsPositions(summary map[string]string) bool {
+	for key, raw := range summary {
+		if key != "GrossPositionValue" && !strings.HasPrefix(key, "GrossPositionValue_") {
+			continue
+		}
+		if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil && v > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // GetCachedPositions returns whatever positions are currently in the
@@ -2758,6 +2816,12 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 			continue
 		}
 		result = append(result, pos)
+	}
+	if len(result) == 0 {
+		// Self-heal a dead portfolio stream behind the read: consumers
+		// poll this path constantly, so a failed account-updates
+		// subscription recovers within a poll cycle.
+		c.maybeResubscribeAccountUpdates()
 	}
 	return result, nil
 }
@@ -3131,8 +3195,18 @@ func (c *Connector) handleTickPrice(fields []string) {
 	sub.LastTime = time.Now()
 }
 
-// handleTickGeneric processes generic tick updates such as 106 (option
-// implied vol) and 236 (shortable shares).
+// handleTickGeneric processes generic tick updates. The wire tick ids
+// differ from the generic-tick REQUEST list ids: requesting generic tick
+// 106 delivers wire tick 24 (chain-averaged option implied vol of the
+// underlying), and requesting generic tick 236 delivers wire tick 46
+// (shortable difficulty level) plus wire tick 89 (shortable share count,
+// a tickSize — see handleTickSize). An earlier revision matched the
+// request ids (106/236) here, which never appear as wire tick types, so
+// both surfaces were silently dead: quote IV stayed null and borrow
+// inventory reported "unknown" for every symbol (observed 2026-06-11).
+// Wire tick 46 is deliberately not handled: its 0–3 difficulty float
+// cannot feed the share-count thresholds, and storing it as a share
+// count would fire false Borrow-scarce flags.
 func (c *Connector) handleTickGeneric(fields []string) {
 	// Expected format: [msgID, version, reqID, tickType, value]
 	if len(fields) < 5 {
@@ -3155,9 +3229,10 @@ func (c *Connector) handleTickGeneric(fields []string) {
 	}
 
 	switch {
-	case tickType == 106 && val > 0:
-		// 106 = Option Implied Volatility (averaged across the chain — the
-		// "IV of the underlying" that retail platforms display).
+	case tickType == 24 && val > 0:
+		// 24 = Option Implied Volatility (averaged across the chain — the
+		// "IV of the underlying" that retail platforms display), delivered
+		// for the generic-tick-106 request.
 		iv := val
 		if iv > 1.5 { // normalize percent inputs
 			iv = iv / 100.0
@@ -3172,15 +3247,6 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		if sub, ok := c.subscriptions[symbol]; ok {
 			sub.IV = iv
 			sub.LastTime = time.Now()
-		}
-		c.subMu.Unlock()
-	case tickType == 236 && val >= 0:
-		c.subMu.Lock()
-		if sub, ok := c.subscriptions[symbol]; ok {
-			sub.ShortableShares = int64(val)
-			sub.ShortableObserved = true
-			sub.LastTime = time.Now()
-			sub.Observed = true
 		}
 		c.subMu.Unlock()
 	}
@@ -4441,6 +4507,14 @@ func (c *Connector) handleTickSize(fields []string) {
 	case 27, 28:
 		sub.OpenInt = size
 		sub.OpenIntObserved = true
+	case 89:
+		// Shortable share count, delivered for the generic-tick-236
+		// request (TWS build 974+). Feeds the borrow-inventory market-
+		// event flags. ShortableObserved means "a share COUNT landed" —
+		// never the tick-46 difficulty level, whose 0–3 float would read
+		// as ≤1000 shares and fire false Borrow-scarce flags.
+		sub.ShortableShares = size
+		sub.ShortableObserved = true
 	}
 	sub.LastTime = time.Now()
 }

@@ -1271,19 +1271,31 @@ func TestProposalInstallScopedFailsClosedOnScopeChange(t *testing.T) {
 	if len(got.Proposals) != 0 || !hasBlocker(got.Blockers, "proposal_scope_mismatch") {
 		t.Fatalf("installScoped result = %+v, want proposal_scope_mismatch shell", got)
 	}
-	raw, err := os.ReadFile(e.store.currentPath)
-	if err != nil {
+	// The wrong-scope generated snapshot must never reach disk. Shells
+	// serve in-memory only (see replaceSnapshot), so the fail-closed
+	// install writes nothing and a fresh store stays empty.
+	if raw, err := os.ReadFile(e.store.currentPath); err == nil {
+		if strings.Contains(string(raw), "theta_hygiene:abc") {
+			t.Fatalf("persisted snapshot carries stale-scope proposals: %s", raw)
+		}
+		t.Fatalf("fail-closed install must not persist anything, got: %s", raw)
+	} else if !os.IsNotExist(err) {
 		t.Fatalf("read persisted snapshot: %v", err)
 	}
-	if !strings.Contains(string(raw), "proposal_scope_mismatch") || strings.Contains(string(raw), "theta_hygiene:abc") {
-		t.Fatalf("persisted snapshot carries stale-scope proposals: %s", raw)
-	}
 
-	// Stable scope installs the generated snapshot unchanged.
+	// Stable scope installs the generated snapshot unchanged — and that
+	// one IS persisted for warm-start adoption.
 	e.scope = func() brokerStateScope { return brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper} }
 	got = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false)
 	if len(got.Proposals) != 1 || len(got.Blockers) != 0 {
 		t.Fatalf("stable scope install = %+v, want generated snapshot", got)
+	}
+	raw, err := os.ReadFile(e.store.currentPath)
+	if err != nil {
+		t.Fatalf("stable-scope install should persist the generated snapshot: %v", err)
+	}
+	if !strings.Contains(string(raw), "theta_hygiene:abc") {
+		t.Fatalf("persisted snapshot missing the generated proposal: %s", raw)
 	}
 }
 
@@ -1453,5 +1465,102 @@ func TestProposalRevisionChangesWithScope(t *testing.T) {
 	again := proposalRevision(policy, sources, brokerStateScope{Account: "du7654321", Mode: rpc.AccountModePaper}, proposals)
 	if paper != again {
 		t.Fatalf("revision not case-stable for the same scope: %s != %s", paper, again)
+	}
+}
+
+// TestReplaceSnapshotDoesNotPersistShells pins the restart-survival rule:
+// a transient error/unscoped shell installed by the startup refresh
+// (which races the gateway connect) must not overwrite the persisted
+// last-good snapshot. That overwrite made installProposalEngine warn
+// "ignoring persisted snapshot without a concrete account/mode scope"
+// on every start, so warm-start adoption never happened.
+func TestReplaceSnapshotDoesNotPersistShells(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 11, 13, 39, 0, 0, time.UTC)
+	store := &proposalStore{
+		currentPath: filepath.Join(t.TempDir(), "trade-proposals-current.json"),
+		eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
+	}
+	engine := &proposalEngine{
+		store:   store,
+		now:     func() time.Time { return now },
+		ignored: map[string]struct{}{},
+	}
+
+	good := rpc.TradeProposalSnapshot{
+		Kind:          rpc.TradeProposalSnapshotKind,
+		SchemaVersion: rpc.TradeProposalSnapshotSchemaVersion,
+		AsOf:          now,
+		Revision:      "sha256:good",
+		AccountID:     "U1234567",
+		AccountMode:   rpc.AccountModeLive,
+		Proposals:     []rpc.TradeProposal{},
+	}
+	engine.replaceSnapshot(good)
+
+	shell := emptyProposalSnapshot(now.Add(time.Minute))
+	shell.Blockers = []rpc.TradingBlocker{{Code: "account_unavailable", Message: "ibkr connection unavailable"}}
+	engine.replaceSnapshot(shell)
+
+	persisted, err := store.LoadCurrent()
+	if err != nil {
+		t.Fatalf("LoadCurrent: %v", err)
+	}
+	if persisted.Revision != "sha256:good" {
+		t.Fatalf("persisted revision = %q, want the generated snapshot to survive the shell install", persisted.Revision)
+	}
+	if got := engine.Snapshot(false).Revision; got != "empty" {
+		t.Fatalf("in-memory snapshot revision = %q, want the shell to keep serving in-memory", got)
+	}
+}
+
+// TestProposalRefreshWaitBacksOffTransientFailures pins the Run-loop
+// retry schedule: a clean refresh waits the full cadence, transient
+// failures retry at 30s doubling up to the cadence cap. Without the
+// quick retry, a daemon restart that races the gateway connect serves
+// the "ibkr connection unavailable" blocker for a full 15-minute cadence
+// (observed 2026-06-11 in the SPA protection panel).
+func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
+	t.Parallel()
+	cadence := 15 * time.Minute
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, cadence},
+		{1, 30 * time.Second},
+		{2, time.Minute},
+		{3, 2 * time.Minute},
+		{4, 4 * time.Minute},
+		{5, 8 * time.Minute},
+		{6, cadence},   // 16m, capped
+		{200, cadence}, // shift-overflow guard
+	}
+	for _, tc := range cases {
+		if got := proposalRefreshWait(cadence, tc.failures); got != tc.want {
+			t.Errorf("proposalRefreshWait(%v, %d) = %v, want %v", cadence, tc.failures, got, tc.want)
+		}
+	}
+	if got := proposalRefreshWait(10*time.Second, 3); got != 10*time.Second {
+		t.Errorf("a cadence below the retry base must win: got %v", got)
+	}
+}
+
+func TestProposalRefreshTransientClassifiesBlockers(t *testing.T) {
+	t.Parallel()
+	for _, code := range []string{"account_identity_unscoped", "account_unavailable", "positions_unavailable", "proposal_scope_mismatch"} {
+		snap := rpc.TradeProposalSnapshot{Blockers: []rpc.TradingBlocker{{Code: code}}}
+		if !proposalRefreshTransient(snap) {
+			t.Errorf("blocker %q should classify as transient", code)
+		}
+	}
+	for _, snap := range []rpc.TradeProposalSnapshot{
+		{},
+		{Blockers: []rpc.TradingBlocker{{Code: "proposals_disabled"}}},
+		{Blockers: []rpc.TradingBlocker{{Code: "policy_drift"}}},
+	} {
+		if proposalRefreshTransient(snap) {
+			t.Errorf("snapshot with blockers %+v should not classify as transient", snap.Blockers)
+		}
 	}
 }

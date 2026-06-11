@@ -3,10 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 // TestClassifyRegimeAgreement pins the four classifier outcomes plus
@@ -391,6 +393,58 @@ func TestSummarizeGammaPhaseFailureLowUsableLegCount(t *testing.T) {
 	if got := summarizeGammaPhaseFailure(err); got != "low_coverage" {
 		t.Fatalf("summarizeGammaPhaseFailure = %q, want low_coverage", got)
 	}
+}
+
+// TestComputeGammaCombinedAbortsOnCancelledJobContext pins the
+// degrade-vs-abort contract: an SPX phase failure with the job's own
+// context dead must fail the whole combined compute — the failure is our
+// cancellation (daemon shutdown, force() supersede), not a
+// data-availability verdict, and a degraded "success" would be promoted
+// and persisted as the session-final result (2026-06-10 incident: a
+// post-release shutdown cancelled the SPX phase mid-fetch and the
+// SPY-only context_only result was served as unranked regime evidence
+// all of the following day). The same failure with a live job context
+// keeps the SPY side, degrading per design §8.2.
+func TestComputeGammaCombinedAbortsOnCancelledJobContext(t *testing.T) {
+	orig := runGammaUnderlyingPhase
+	t.Cleanup(func() { runGammaUnderlyingPhase = orig })
+
+	spy := gammaCombineFallbackFixture(time.Now().Add(-time.Minute), gammaMinPricedLegs, gammaMinGEXLegs)
+
+	t.Run("cancelled job context aborts", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runGammaUnderlyingPhase = func(_ context.Context, _ *Server, _ *ibkrlib.Connector, underlying string, _ rpc.GammaZeroParams, _ *atomic.Int32, _ int32) (*rpc.GammaZeroComputed, error) {
+			if underlying == "SPY" {
+				return cloneGammaComputed(spy), nil
+			}
+			cancel() // shutdown/supersede arrives mid-SPX-fetch
+			return nil, context.Canceled
+		}
+		res, err := computeGammaCombined(ctx, nil, nil, rpc.GammaZeroParams{}, new(atomic.Int32))
+		if err == nil {
+			t.Fatalf("cancelled job must fail the combined compute, got result %+v", res)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want wrapped context.Canceled", err)
+		}
+		if res != nil {
+			t.Fatalf("cancelled job must not return a persistable result, got %+v", res)
+		}
+	})
+
+	t.Run("live job context keeps the SPY side", func(t *testing.T) {
+		runGammaUnderlyingPhase = func(_ context.Context, _ *Server, _ *ibkrlib.Connector, underlying string, _ rpc.GammaZeroParams, _ *atomic.Int32, _ int32) (*rpc.GammaZeroComputed, error) {
+			if underlying == "SPY" {
+				return cloneGammaComputed(spy), nil
+			}
+			return nil, errors.New("error 354: not subscribed")
+		}
+		res, err := computeGammaCombined(context.Background(), nil, nil, rpc.GammaZeroParams{}, new(atomic.Int32))
+		if res == nil {
+			t.Fatalf("SPX data failure with a live job context must keep the SPY side, err=%v", err)
+		}
+	})
 }
 
 func gammaCombineFallbackFixture(asOf time.Time, pricedLegs, gexLegs int) *rpc.GammaZeroComputed {

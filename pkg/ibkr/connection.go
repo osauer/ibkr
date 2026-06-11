@@ -2326,9 +2326,15 @@ func (c *Connection) handleAccountSummary(fields []string) {
 	currency := fields[6]
 	account := strings.TrimSpace(fields[3])
 
-	// Store in account summary map and update active account
+	// Store in account summary map and update active account. Summary
+	// rows can carry the aggregate group ("All") because the summary
+	// subscription spans the whole session; never let that overwrite a
+	// concrete code. c.account feeds account-scoped requests
+	// (reqAcctData, reqPnL) which TWS rejects for aggregates with error
+	// 321 — observed 2026-06-11: the portfolio stream never started and
+	// positions stayed empty for an entire daemon lifetime.
 	c.accountMu.Lock()
-	if account != "" {
+	if accountCodeConcrete(account) {
 		c.account = account
 	}
 	key := tag
@@ -2992,6 +2998,36 @@ func managedAccountsField(fields []string) string {
 		}
 	}
 	return strings.TrimSpace(fields[1])
+}
+
+// accountCodeConcrete reports whether account names one concrete account
+// code usable in account-scoped requests (reqAcctData, reqPnL). The
+// aggregate "All" and comma-separated managedAccounts lists are session
+// aggregates, not account codes — TWS rejects them with error 321.
+func accountCodeConcrete(account string) bool {
+	account = strings.TrimSpace(account)
+	if account == "" || strings.EqualFold(account, "All") {
+		return false
+	}
+	return !strings.ContainsAny(account, ", \t")
+}
+
+// firstConcreteAccountCode extracts a usable account code from a
+// managedAccounts-style value: a concrete code passes through, a
+// comma-separated list yields its first entry, and aggregates ("All",
+// empty) yield "" — TWS resolves an empty acctCode to the session's
+// account for single-account logins.
+func firstConcreteAccountCode(account string) string {
+	account = strings.TrimSpace(account)
+	if strings.EqualFold(account, "All") {
+		return ""
+	}
+	first, _, _ := strings.Cut(account, ",")
+	first = strings.TrimSpace(first)
+	if accountCodeConcrete(first) {
+		return first
+	}
+	return ""
 }
 
 // readMessage reads a length-prefixed message

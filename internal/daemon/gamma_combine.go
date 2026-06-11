@@ -253,6 +253,11 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
+// runGammaUnderlyingPhase is a package seam over runUnderlyingPhase so
+// computeGammaCombined's abort-vs-degrade decision is testable without a
+// live connector (same pattern as fetchIBKRBorrowFees).
+var runGammaUnderlyingPhase = runUnderlyingPhase
+
 // computeGammaCombined runs SPY then SPX serially under separate
 // underlying-holds and combines the two halves into one envelope.
 //
@@ -268,6 +273,15 @@ func dedupeStrings(in []string) []string {
 // (354 entitlement, 200 contract, no-data, zero magnitude, etc.) but
 // the other side succeeds, return the successful side with a structured
 // warning rather than failing the whole default/regime gamma row.
+//
+// Degradation is a data-availability verdict, so it is forbidden when
+// the combined job's own context is dead: then the phase error is our
+// cancellation (daemon shutdown or a force() supersede), and degrading
+// would hand spawnJob a half-fetched "success" that gets promoted and
+// persisted as the session-final result. Observed 2026-06-10: the
+// post-release daemon shutdown cancelled the SPX phase mid-fetch, the
+// SPY-only context_only result was persisted at 21:56:23, and every
+// daemon start the next day reloaded it as 5/6-ranked regime evidence.
 func computeGammaCombined(
 	bgCtx context.Context,
 	s *Server,
@@ -275,12 +289,15 @@ func computeGammaCombined(
 	params rpc.GammaZeroParams,
 	prog *atomic.Int32,
 ) (*rpc.GammaZeroComputed, error) {
-	spyRes, err := runUnderlyingPhase(bgCtx, s, c, "SPY", params, prog, 0)
+	spyRes, err := runGammaUnderlyingPhase(bgCtx, s, c, "SPY", params, prog, 0)
 	if err != nil {
+		if bgCtx.Err() != nil {
+			return nil, fmt.Errorf("zero-gamma: SPY phase: %w", err)
+		}
 		if s != nil && s.logger != nil {
 			s.logger.Warnf("gamma.combine.spy_unavailable err=%v (trying SPX-only)", err)
 		}
-		spxRes, spxErr := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
+		spxRes, spxErr := runGammaUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
 		if spxErr != nil {
 			return nil, fmt.Errorf("zero-gamma: SPY phase: %w; SPX phase: %w", err, spxErr)
 		}
@@ -291,8 +308,11 @@ func computeGammaCombined(
 		return hydrateGammaComputed(spxRes), nil
 	}
 
-	spxRes, spxErr := runUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
+	spxRes, spxErr := runGammaUnderlyingPhase(bgCtx, s, c, "SPX", params, prog, 50)
 	if spxErr != nil {
+		if bgCtx.Err() != nil {
+			return nil, fmt.Errorf("zero-gamma: SPX phase: %w", spxErr)
+		}
 		if s != nil && s.logger != nil {
 			s.logger.Warnf("gamma.combine.spx_unavailable err=%v (degrading to SPY-only)", spxErr)
 		}

@@ -375,6 +375,55 @@ func TestHandleTickPrice_VerySmallPrice(t *testing.T) {
 	}
 }
 
+// TestShortableAndUnderlyingIVArriveOnWireTickIDs pins the wire-id vs
+// request-id distinction for the generic-tick bundle: requesting generic
+// tick 236 delivers wire tick 89 (shortable share count, a tickSize) and
+// wire tick 46 (difficulty level, ignored); requesting generic tick 106
+// delivers wire tick 24 (chain-averaged underlying IV, a tickGeneric).
+// An earlier dispatch matched the request ids (236/106), which never
+// appear on the wire — borrow inventory reported "unknown" for every
+// symbol and quote IV stayed null (observed 2026-06-11). The request-id
+// cases must stay dead: tick 46's 0–3 float stored as a share count
+// would fire false Borrow-scarce flags.
+func TestShortableAndUnderlyingIVArriveOnWireTickIDs(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	c.subMu.Lock()
+	c.reqIDMap[7] = "AMD"
+	c.subscriptions["AMD"] = &Subscription{Symbol: "AMD"}
+	c.subMu.Unlock()
+
+	// Request-id lookalikes must be ignored.
+	c.handleTickGeneric([]string{"45", "6", "7", "236", "2.9"}) // request id, not a wire tick
+	c.handleTickGeneric([]string{"45", "6", "7", "46", "2.9"})  // difficulty level — ignored
+	c.handleTickGeneric([]string{"45", "6", "7", "106", "0.35"})
+
+	c.subMu.RLock()
+	sub := c.subscriptions["AMD"]
+	c.subMu.RUnlock()
+	if sub.ShortableObserved || sub.ShortableShares != 0 {
+		t.Fatalf("request-id/difficulty ticks must not set shortable state: shares=%d observed=%v",
+			sub.ShortableShares, sub.ShortableObserved)
+	}
+	if sub.IV != 0 {
+		t.Fatalf("request-id tick 106 must not set IV, got %v", sub.IV)
+	}
+
+	// The real wire ticks land.
+	c.handleTickSize([]string{"2", "6", "7", "89", "8500"})     // shortable share count
+	c.handleTickGeneric([]string{"45", "6", "7", "24", "0.35"}) // underlying IV
+
+	c.subMu.RLock()
+	sub = c.subscriptions["AMD"]
+	c.subMu.RUnlock()
+	if !sub.ShortableObserved || sub.ShortableShares != 8500 {
+		t.Fatalf("wire tick 89 should set shortable shares: shares=%d observed=%v",
+			sub.ShortableShares, sub.ShortableObserved)
+	}
+	if sub.IV != 0.35 {
+		t.Fatalf("wire tick 24 should set underlying IV, got %v", sub.IV)
+	}
+}
+
 // TestHandleTickSize_DispatchesByTickType verifies bid_size (0), ask_size (3),
 // volume (8), and average volume (21) ticks land on the right Subscription
 // field. Other tick types (e.g. 5=last_size) are intentionally dropped.
@@ -646,11 +695,12 @@ func TestHandleTickPrice_WeekRangeCapture(t *testing.T) {
 }
 
 // TestHandleTickGeneric_IVRoutesToSubscription pins the v0.12 change that
-// also writes tick 106 (averaged option implied vol) into the per-symbol
-// subscription struct — not just into the optIV map. Without this, the
-// scan-row IV column would stay blank even when the gateway delivers the
-// tick, because the enrichment path reads from GetMarketData() which is
-// derived from subscriptions.
+// also writes the averaged option implied vol (wire tick 24, requested
+// via generic tick 106) into the per-symbol subscription struct — not
+// just into the optIV map. Without this, the scan-row IV column would
+// stay blank even when the gateway delivers the tick, because the
+// enrichment path reads from GetMarketData() which is derived from
+// subscriptions.
 func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.subMu.Lock()
@@ -659,7 +709,7 @@ func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	c.subMu.Unlock()
 
 	// Fraction-form: 0.234 → IV = 0.234 (23.4%)
-	c.handleTickGeneric([]string{"45", "1", "7", "106", "0.234"})
+	c.handleTickGeneric([]string{"45", "1", "7", "24", "0.234"})
 	c.subMu.RLock()
 	if got := c.subscriptions["AAPL"].IV; got != 0.234 {
 		t.Errorf("fraction-form IV: got %.4f, want 0.234", got)
@@ -671,7 +721,7 @@ func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	c.reqIDMap[8] = "MSFT"
 	c.subscriptions["MSFT"] = &Subscription{Symbol: "MSFT"}
 	c.subMu.Unlock()
-	c.handleTickGeneric([]string{"45", "1", "8", "106", "23.4"})
+	c.handleTickGeneric([]string{"45", "1", "8", "24", "23.4"})
 	c.subMu.RLock()
 	got := c.subscriptions["MSFT"].IV
 	c.subMu.RUnlock()
@@ -680,14 +730,16 @@ func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	}
 }
 
-func TestHandleTickGenericShortableSharesRoutesToMarketData(t *testing.T) {
+func TestHandleTickSizeShortableSharesRoutesToMarketData(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.subMu.Lock()
 	c.reqIDMap[9] = "CRWV"
 	c.subscriptions["CRWV"] = &Subscription{Symbol: "CRWV"}
 	c.subMu.Unlock()
 
-	c.handleTickGeneric([]string{"45", "1", "9", "236", "750"})
+	// Wire tick 89 (tickSize) carries the share count for the
+	// generic-tick-236 request.
+	c.handleTickSize([]string{"2", "1", "9", "89", "750"})
 	md := c.GetMarketData()["CRWV"]
 	if md == nil {
 		t.Fatal("market data missing for CRWV")
