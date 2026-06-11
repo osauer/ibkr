@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/internal/config"
@@ -11,15 +10,12 @@ import (
 )
 
 func runTrading(ctx context.Context, env *Env, args []string) int {
+	// The dispatcher hoists flags ahead of positionals, so the subcommand
+	// token can sit anywhere in args (mirrors runProposals).
 	sub := "status"
-	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		return runTradingStatus(ctx, env, args)
-	}
-	if len(args) > 0 && args[0] != "status" {
-		sub = args[0]
-		args = args[1:]
-	} else if len(args) > 0 {
-		args = args[1:]
+	if idx := tradingSubcommandIndex(args); idx >= 0 {
+		sub = args[idx]
+		args = append(append([]string{}, args[:idx]...), args[idx+1:]...)
 	}
 	switch sub {
 	case "status":
@@ -31,12 +27,25 @@ func runTrading(ctx context.Context, env *Env, args []string) int {
 	}
 }
 
+func tradingSubcommandIndex(args []string) int {
+	for i, arg := range args {
+		switch arg {
+		case "status", "paper-smoke":
+			return i
+		}
+	}
+	return -1
+}
+
 func runTradingPaperSmoke(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "trading paper-smoke")
 	timeout := fs.Duration("timeout", 30*time.Second, "maximum wait for broker acknowledgement")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
+	}
+	if fs.NArg() > 0 {
+		return fail(env, "trading paper-smoke: unexpected argument %q", fs.Arg(0))
 	}
 	var res rpc.TradingPaperSmokeResult
 	if err := env.Conn.Call(ctx, rpc.MethodTradingPaperSmoke, rpc.TradingPaperSmokeParams{TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin}, &res); err != nil {
@@ -95,6 +104,9 @@ func runTradingStatus(ctx context.Context, env *Env, args []string) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
+	}
+	if fs.NArg() > 0 {
+		return fail(env, "trading: unknown subcommand %q (try `ibkr trading status` or `ibkr trading paper-smoke`)", fs.Arg(0))
 	}
 	var res rpc.TradingStatus
 	if err := env.Conn.Call(ctx, rpc.MethodTradingStatus, nil, &res); err != nil {
