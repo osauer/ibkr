@@ -120,16 +120,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		}
 	case config.TradingModeLive:
 		if cfg.Gateway.Port != nil && cfg.Gateway.Account != "" && looksPaper(port, account) {
-			add("live_endpoint_unconfirmed", "live trading requires a live-looking endpoint and account", "Use port 4001/7496 and a live account, then update [trading].live_ack_endpoint and live_ack_account.")
-		}
-		if !tr.AllowLive {
-			add("live_not_allowed", "live trading requires an explicit local override", "Set [trading].allow_live = true.")
-		}
-		if tr.LiveAckAccount == "" || tr.LiveAckAccount != account {
-			add("live_account_ack_mismatch", "live trading requires a matching account acknowledgement", "Set [trading].live_ack_account to the pinned live account.")
-		}
-		if tr.LiveAckEndpoint == "" || tr.LiveAckEndpoint != status.Endpoint {
-			add("live_endpoint_ack_mismatch", "live trading requires a matching endpoint acknowledgement", "Set [trading].live_ack_endpoint to the pinned live endpoint.")
+			add("live_endpoint_unconfirmed", "live trading requires a live-looking endpoint and account", "Use port 4001/7496 and pin the live account in [gateway].account.")
 		}
 		check := s.checkPaperSmoke(account, status.Endpoint, clientID, tr.PaperSmokeMaxAgeDuration())
 		status.PaperSmoke = check.Status
@@ -147,7 +138,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		// smoke is enforced in the release pipeline — `make release` runs
 		// it at version bump and aborts on failure — so runtime live
 		// enablement rests on the TWS API toggle, the trading-capable
-		// binary, and the config pins/acks checked above.
+		// binary, and the config pins checked above.
 	}
 
 	status.Blocked = len(status.Blockers) > 0
@@ -254,17 +245,11 @@ func originIsHuman(origin string) bool {
 	return false
 }
 
-// liveWriteConfirmationPhrase is the exact phrase a human origin must supply
-// with a live broker write.
-func liveWriteConfirmationPhrase(account string) string {
-	return "live/" + account
-}
-
 // liveOriginBlockers layers per-request origin policy over the routed mode:
-// live routes refuse agent origins outright (no override) and require the
-// typed confirmation phrase from human origins. Paper carries no origin
-// blockers so agents can exercise the full order path against paper TWS.
-func liveOriginBlockers(status rpc.TradingStatus, origin, liveConfirmation string) []rpc.TradingBlocker {
+// live routes refuse agent origins outright (no override). Paper carries no
+// origin blockers so agents can exercise the full order path against paper
+// TWS.
+func liveOriginBlockers(status rpc.TradingStatus, origin string) []rpc.TradingBlocker {
 	if status.Mode != config.TradingModeLive {
 		return nil
 	}
@@ -273,13 +258,6 @@ func liveOriginBlockers(status rpc.TradingStatus, origin, liveConfirmation strin
 			Code:    "live_agent_origin_blocked",
 			Message: "live broker writes are blocked for agent-origin requests",
 			Action:  "Agent sessions may place broker orders on paper only. A human must run this write from an interactive terminal.",
-		}}
-	}
-	if want := liveWriteConfirmationPhrase(status.Account); liveConfirmation != want {
-		return []rpc.TradingBlocker{{
-			Code:    "live_confirmation_required",
-			Message: "live broker writes require the typed live confirmation phrase",
-			Action:  fmt.Sprintf("Re-run interactively and type %q when prompted.", want),
 		}}
 	}
 	return nil

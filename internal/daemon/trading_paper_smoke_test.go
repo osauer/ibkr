@@ -112,12 +112,7 @@ func TestPaperSmokeRefusesLiveRoute(t *testing.T) {
 	}
 	srv.cfg.Gateway.Port = new(4001)
 	srv.cfg.Gateway.Account = "U1234567"
-	srv.cfg.Trading = config.Trading{
-		Mode:            config.TradingModeLive,
-		AllowLive:       true,
-		LiveAckAccount:  "U1234567",
-		LiveAckEndpoint: "127.0.0.1:4001",
-	}.WithDefaults()
+	srv.cfg.Trading = config.Trading{Mode: config.TradingModeLive}.WithDefaults()
 	srv.endpoint.Port = 4001
 	srv.endpoint.Account = "U1234567"
 

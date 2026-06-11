@@ -133,12 +133,8 @@ func runProposalsSubmit(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() != 2 {
 		return fail(env, "proposals submit: usage is `ibkr proposals submit KEY REVISION`")
 	}
-	liveConfirmation, ok := confirmLiveBrokerWrite(ctx, env, "proposals submit")
-	if !ok {
-		return fail(env, "proposals submit: live confirmation aborted")
-	}
 	var res rpc.TradeProposalSubmitResult
-	params := rpc.TradeProposalSubmitParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, FastPath: *fastPath, TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin, LiveConfirmation: liveConfirmation}
+	params := rpc.TradeProposalSubmitParams{Key: fs.Arg(0), Revision: fs.Arg(1), Quantity: *qty, FastPath: *fastPath, TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin}
 	if err := env.Conn.Call(ctx, rpc.MethodTradeProposalsSubmit, params, &res); err != nil {
 		return fail(env, "proposals submit: %v", err)
 	}

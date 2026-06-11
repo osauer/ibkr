@@ -77,13 +77,13 @@ func TestPurgeExecuteBlockersUseBrokerWriteAuthorization(t *testing.T) {
 		Endpoint:   "127.0.0.1:4001",
 		ClientID:   31,
 		Blockers: []rpc.TradingBlocker{{
-			Code:    "live_not_allowed",
-			Message: "live trading requires an explicit local override",
-			Action:  "Set [trading].allow_live = true.",
+			Code:    "gateway_port_unpinned",
+			Message: "order submission requires a pinned gateway port",
+			Action:  "Set [gateway].port.",
 		}},
 	})
-	if !hasBlocker(blockers, "live_not_allowed") {
-		t.Fatalf("blockers = %+v, want live_not_allowed", blockers)
+	if !hasBlocker(blockers, "gateway_port_unpinned") {
+		t.Fatalf("blockers = %+v, want gateway_port_unpinned", blockers)
 	}
 	if hasBlocker(blockers, "paper_writes_only") {
 		t.Fatalf("blockers = %+v, did not expect a paper-only gate", blockers)

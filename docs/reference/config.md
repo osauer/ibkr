@@ -25,12 +25,9 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[gateway]` | `port` | `*int` | Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery. |
 | `[gateway]` | `tls` | `*bool` | TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, `true` forces TLS-only with no plain fallback, `false` forces plain — setting the field disables fallback in either direction. |
 | `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off). |
-| `[trading]` | `allow_live` | `bool` | AllowLive is the explicit local live-trading override for experimental, as-is trading builds. |
 | `[trading]` | `allow_option_market_orders` | `bool` | AllowOptionMarketOrders permits option market orders when true. |
 | `[trading]` | `allow_option_sell_to_open` | `bool` | AllowOptionSellToOpen permits option sell-to-open previews when true. |
 | `[trading]` | `allow_stock_short` | `bool` | AllowStockShort permits stock short/opening flip previews when true. |
-| `[trading]` | `live_ack_account` | `string` | LiveAckAccount must match the pinned live account before live writes are allowed. |
-| `[trading]` | `live_ack_endpoint` | `string` | LiveAckEndpoint must match host:port for the pinned live endpoint before live writes are allowed. |
 | `[trading]` | `max_notional` | `float64` | MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency. |
 | `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps first-release single-leg option quantity; default 5. |
 | `[trading]` | `mcp_enabled` | `bool` | MCPEnabled controls whether MCP write tools may progress beyond preview/status. |

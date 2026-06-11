@@ -205,21 +205,12 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"confirm_mode: confirmation.mode",
 		"Broker WhatIf accepted; no order placed",
 		"Submit stop",
-		"Confirm stop",
-		"Confirm broker write",
-		"state.protectionConfirmKey",
 		"confirm_account: confirmation.account",
 		"confirm_mode: confirmation.mode",
 		"confirm_account: modifyConfirmation.account",
 		"confirm_mode: modifyConfirmation.mode",
 		"confirm_account: cancelConfirmation.account",
 		"confirm_mode: cancelConfirmation.mode",
-		// Live writes carry the user-typed "live/<account>" phrase the daemon
-		// requires from human origins; paper bodies omit the field.
-		"function liveWriteConfirmation(verb)",
-		"live_confirmation: liveConfirmation || undefined",
-		"live_confirmation: modifyLiveConfirmation || undefined",
-		"if (confirmation.liveConfirmation) body.live_confirmation = confirmation.liveConfirmation",
 		"Submit blocked",
 		"write_blockers",
 		"Broker preview is not enabled by trading.status",
@@ -352,6 +343,41 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	}
 	if strings.Contains(css, ".bottom-tabs {\n  position: fixed;") {
 		t.Fatalf("bottom tabs must be pinned by shell layout, not fixed to the browser viewport")
+	}
+}
+
+// TestAppJSLiveWritesCarryNoTypedConfirmation pins the live-gate
+// simplification of 2026-06-11: the SPA must not prompt for, hard-code, or
+// forward the removed typed "live/<account>" phrase, and the arm/confirm
+// double-click is gone. Live writes ride on the preview token, the
+// server-validated confirm_account/confirm_mode fields, and the daemon's
+// origin policy.
+func TestAppJSLiveWritesCarryNoTypedConfirmation(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	for _, banned := range []string{
+		"live_confirmation",
+		"liveWriteConfirmation",
+		"protectionConfirmKey",
+		"modifyConfirmationText",
+		"cancelConfirmationText",
+	} {
+		if strings.Contains(js, banned) {
+			t.Fatalf("app.js must not reference removed live-confirmation surface %q", banned)
+		}
+	}
+	// The purge typed prompt is the one deliberate window.prompt that stays:
+	// purge bypasses the preview-token gate, so it keeps its own
+	// destructive-action confirm. No other prompt may exist.
+	if got := strings.Count(js, "window.prompt"); got != 1 {
+		t.Fatalf("app.js window.prompt count = %d, want exactly 1 (the purge confirm)", got)
+	}
+	if strings.Contains(js, "window.confirm") {
+		t.Fatalf("app.js must not use window.confirm; broker writes confirm via single-click buttons")
 	}
 }
 

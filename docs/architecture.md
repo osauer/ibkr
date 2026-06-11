@@ -29,8 +29,7 @@ state; every other surface is an adapter over typed RPC contracts.
 ## State
 
 Configuration in TOML/env/build flags is operator-owned and should remain the
-source of truth for gateway identity, trading mode, live acknowledgements, and
-build capability. Daemon XDG state is runtime-owned and may hold caches,
+source of truth for gateway identity, trading mode, and build capability. Daemon XDG state is runtime-owned and may hold caches,
 journals, observed facts, and user preferences. Never persist broker
 entitlements; expose only observed quality on read surfaces.
 

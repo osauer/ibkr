@@ -130,12 +130,6 @@ type Trading struct {
 	AllowOptionSellToOpen bool `toml:"allow_option_sell_to_open"`
 	// AllowOptionMarketOrders permits option market orders when true. Default false; first trading release still blocks this.
 	AllowOptionMarketOrders bool `toml:"allow_option_market_orders"`
-	// AllowLive is the explicit local live-trading override for experimental, as-is trading builds. Default false.
-	AllowLive bool `toml:"allow_live"`
-	// LiveAckAccount must match the pinned live account before live writes are allowed.
-	LiveAckAccount string `toml:"live_ack_account"`
-	// LiveAckEndpoint must match host:port for the pinned live endpoint before live writes are allowed.
-	LiveAckEndpoint string `toml:"live_ack_endpoint"`
 	// PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. Defaults to 168h.
 	PaperSmokeMaxAge duration `toml:"paper_smoke_max_age"`
 	// MCPEnabled controls whether MCP write tools may progress beyond preview/status. Default false.
@@ -163,7 +157,7 @@ type AutoTrade struct {
 	ProposalCadence duration `toml:"proposal_cadence"`
 	// FastPathEnabled allows manual proposal preview/submit to use the immediate
 	// revalidation path; default true so paper protection stops remain usable.
-	// Trading write and live-ack gates still own broker-submit authority.
+	// Trading write gates still own broker-submit authority.
 	FastPathEnabled *bool `toml:"fast_path_enabled"`
 }
 
@@ -403,10 +397,23 @@ func Load(path string) (*Config, error) {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
 			keys[i] = k.String()
+			if removedKeys[keys[i]] {
+				return nil, fmt.Errorf("config %s: key %s was removed: live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key", path, keys[i])
+			}
 		}
 		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
+}
+
+// removedKeys maps once-valid config keys to a targeted load error. A failed
+// load kills the autospawned daemon and with it every CLI command, so a
+// leftover key from an older schema deserves "removed, delete it" rather
+// than the generic unknown-key message.
+var removedKeys = map[string]bool{
+	"trading.allow_live":        true,
+	"trading.live_ack_account":  true,
+	"trading.live_ack_endpoint": true,
 }
 
 // Resolve applies daemon-level defaults and returns the Resolved view.

@@ -232,7 +232,7 @@ For normal read-only use, no config file is required. The daemon TCP-probes `400
 
 `config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
 
-[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading mode, account, client ID, live acknowledgements, and MCP trading mode stay in TOML/build-controlled surfaces.
+[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading mode, account, client ID, and MCP trading mode stay in TOML/build-controlled surfaces.
 
 For example, this read-only config pins TWS live and leaves everything else automatic:
 

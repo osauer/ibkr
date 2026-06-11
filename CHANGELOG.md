@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.10.0 — 2026-06-11 08:15 CEST
+
+### What's new
+
+- Live order entry is faster: the typed `live/<account>` confirmation and the `allow_live` / `live_ack_account` / `live_ack_endpoint` config keys are gone. Live trading now needs only `[trading].mode = "live"` plus the pinned gateway port, account, and client ID — cross-checked against the connected TWS session.
+- The web app submits, modifies, and cancels with a single click after preview — no arm/confirm double-click, no typed phrases, no popup dialogs. Purge keeps its one typed confirm because it bulk-cancels protective stops without a preview token.
+
+### Removed
+
+- Removed `[trading].allow_live`, `live_ack_account`, and `live_ack_endpoint`. They restated the `[gateway]` pins from the same file and gated nothing the pins did not already gate. A leftover key now fails config load with a targeted "removed — delete this key" error (a plain unknown-key error would kill every CLI command with a less helpful message). Note for downgrades: an older binary with the slimmed config fails closed and asks for `allow_live = true`; re-adding it and upgrading again trips the removed-key error, so delete the key after any downgrade round-trip.
+- Removed the typed `live/<account>` confirmation from the CLI, web app, and daemon (`live_confirmation_required` blocker). Live order execution is latency-sensitive; a per-write typing ritual was the wrong layer for deliberateness.
+
+### Security
+
+- What still gates a live broker write after this simplification: a submit-eligible single-use preview token per write (WhatIf-backed), the daemon-side hard block of agent-origin requests on live routes (no override), gateway pins cross-checked against the connected session's account, paper/live endpoint heuristics in both directions, the runtime `trading.freeze` switch, and the app's server-validated `confirm_account`/`confirm_mode` fields on every HTTP write. The v1.9.0 paper-smoke release gate is unchanged.
+- The app HTTP layer tolerates (and ignores) the removed `live_confirmation` field for one release so stale cached web-app tabs do not fail on live writes; run `ibkr restart` after upgrading so the app serves the new embedded assets.
+
 ## v1.9.0 — 2026-06-10 21:55 CEST
 
 ### What's new

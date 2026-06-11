@@ -3,6 +3,12 @@
 Updated: 2026-06-10 17:05 CEST
 Status: shipped, then re-gated same day by owner decision (see Revision below)
 
+> **Removed 2026-06-11 (live-gate simplification, see CHANGELOG):** the typed
+> `live/<account>` confirmation and the `allow_live` / `live_ack_*` config
+> keys referenced throughout this document no longer exist. This doc is kept
+> as the historical design record of the paper-smoke itself, which is
+> unchanged: a release-pipeline gate, informational in trading status.
+
 ## Revision 2026-06-10 — release-time gate, no human ceremony
 
 Owner decision after shipping: the runtime gate stack was too deep (TWS API

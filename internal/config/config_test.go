@@ -101,9 +101,6 @@ max_option_contracts = 3
 allow_stock_short = true
 allow_option_sell_to_open = true
 allow_option_market_orders = false
-allow_live = true
-live_ack_account = "U111"
-live_ack_endpoint = "127.0.0.1:4001"
 paper_smoke_max_age = "24h"
 mcp_enabled = true
 mcp_mode = "live-write"
@@ -162,15 +159,6 @@ timeout    = "30s"
 	}
 	if !res.Trading.AllowOptionSellToOpen {
 		t.Error("Trading.AllowOptionSellToOpen should parse true")
-	}
-	if !res.Trading.AllowLive {
-		t.Error("Trading.AllowLive should parse true")
-	}
-	if res.Trading.LiveAckAccount != "U111" {
-		t.Errorf("Trading.LiveAckAccount = %q, want U111", res.Trading.LiveAckAccount)
-	}
-	if res.Trading.LiveAckEndpoint != "127.0.0.1:4001" {
-		t.Errorf("Trading.LiveAckEndpoint = %q, want 127.0.0.1:4001", res.Trading.LiveAckEndpoint)
 	}
 	if res.Trading.PaperSmokeMaxAgeDuration() != 24*time.Hour {
 		t.Errorf("Trading.PaperSmokeMaxAge = %v, want 24h", res.Trading.PaperSmokeMaxAgeDuration())
@@ -261,6 +249,52 @@ client_id = 15
 	}
 	if !strings.Contains(msg, "[trading]") {
 		t.Errorf("error %q must mention supported [trading] schema", msg)
+	}
+}
+
+// TestLoad_RemovedLiveAckKeys_TargetedError guards the live-gate
+// simplification: a leftover allow_live / live_ack_* key must fail load with
+// a "removed, delete it" message, not the generic unknown-key error — a
+// failed load kills the autospawned daemon and with it every CLI command.
+func TestLoad_RemovedLiveAckKeys_TargetedError(t *testing.T) {
+	for _, key := range []string{"allow_live = true", `live_ack_account = "DU111"`, `live_ack_endpoint = "127.0.0.1:7497"`} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		body := "[trading]\nmode = \"paper\"\n" + key + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("expected removed-key error for %q, got nil", key)
+		}
+		msg := err.Error()
+		for _, want := range []string{"was removed", "delete this key"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error %q for %q must mention %q", msg, key, want)
+			}
+		}
+		if strings.Contains(msg, "unknown key") {
+			t.Errorf("error %q for %q must use the targeted message, not the generic unknown-key one", msg, key)
+		}
+	}
+}
+
+// A non-removed unknown [trading] key must still get the generic message —
+// the removed-key special case must not widen.
+func TestLoad_UnknownTradingKey_StillGeneric(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[trading]\nmode = \"paper\"\nnot_a_real_knob = true\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown TOML key, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown key") {
+		t.Errorf("error %q must use the generic unknown-key message", err.Error())
 	}
 }
 

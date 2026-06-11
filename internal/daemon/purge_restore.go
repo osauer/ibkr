@@ -179,7 +179,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 	blockers := s.purgeRestorePreviewBlockers(status)
 	if execute {
 		blockers = s.purgeExecuteBlockers(status)
-		for _, blocker := range liveOriginBlockers(status, p.Origin, p.LiveConfirmation) {
+		for _, blocker := range liveOriginBlockers(status, p.Origin) {
 			blockers = appendTradingBlockerOnce(blockers, blocker)
 		}
 	}

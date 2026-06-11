@@ -195,20 +195,24 @@ func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 	}
 }
 
-func TestTradingStatusLiveModeRequiresOverrideAndReadiness(t *testing.T) {
+func TestTradingStatusLiveReadyWithPinsOnly(t *testing.T) {
 	t.Parallel()
 	port := 4001
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
 		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-	}}
+	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
-	for _, code := range []string{"live_not_allowed", "live_account_ack_mismatch", "live_endpoint_ack_mismatch"} {
-		if !hasTradingBlocker(st, code) {
-			t.Fatalf("missing blocker %q in %+v", code, st.Blockers)
-		}
+	// Live-gate simplification 2026-06-11: mode="live" plus the gateway pins
+	// on a live-looking endpoint is the whole config gate — no allow_live,
+	// no ack keys.
+	if st.Blocked {
+		t.Fatalf("live status with pins should be ready, got blockers %+v", st.Blockers)
+	}
+	if st.LiveOverride != rpc.TradingLiveOverrideReady {
+		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
 	}
 	// Re-gated 2026-06-10: paper-smoke evidence is informational, never a
 	// live blocker - the smoke is enforced in the release pipeline instead.
@@ -228,11 +232,7 @@ func TestTradingStatusBlocksLiveModeOnPaperLookingEndpoint(t *testing.T) {
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
-		Trading: config.Trading{Mode: config.TradingModeLive,
-			AllowLive:       true,
-			LiveAckAccount:  "DU1234567",
-			LiveAckEndpoint: "127.0.0.1:4002",
-		}.WithDefaults(),
+		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
 	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
@@ -261,11 +261,7 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	srv := &Server{
 		cfg: &config.Resolved{
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
-			Trading: config.Trading{Mode: config.TradingModeLive,
-				AllowLive:       true,
-				LiveAckAccount:  "U1234567",
-				LiveAckEndpoint: "127.0.0.1:4001",
-			}.WithDefaults(),
+			Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
 		},
 		version:          "test-version",
 		now:              func() time.Time { return now },
