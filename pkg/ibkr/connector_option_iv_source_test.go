@@ -13,8 +13,9 @@ import (
 // optIV[OPRA_key] — readable via GetOptionIV — and NOT in
 // subscriptions[OPRA_key].IV (which is exposed through GetMarketData's
 // MarketData.IV field). subscriptions[…].IV is only written by
-// handleTickGeneric when generic tick 106 fires; tick 106 is documented
-// for STK/IND ("30-day chain-averaged IV of the underlying") and is not
+// handleTickGeneric when the chain-averaged underlying IV arrives (wire
+// tick 24, requested via generic tick 106); that tick is documented for
+// STK/IND ("30-day chain-averaged IV of the underlying") and is not
 // reliably delivered for individual OPT subscriptions, regardless of
 // whether the generic-tick list requests it.
 //
@@ -66,7 +67,7 @@ func TestModelTickPopulatesOptionIVNotSubscriptionIV(t *testing.T) {
 
 	// The bug surface: anyone reading d.IV via GetMarketData sees zero
 	// because handleOptionComputation does not write into sub.IV. Only
-	// handleTickGeneric for tick type 106 does — and that tick is not
+	// handleTickGeneric for wire tick 24 does — and that tick is not
 	// delivered for OPT subscriptions in practice. This assertion is
 	// the regression pin: if a future refactor makes the model tick
 	// also write to sub.IV, this test fails loudly and the maintainer

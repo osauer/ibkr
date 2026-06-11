@@ -280,34 +280,38 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-// TestMarketEventCacheShortableAbsence pins the session-scoped negative
-// cache behind the borrow-inventory polls: a symbol observed absent in
-// one NY session is skipped for that session only, and a gateway
-// reconnect (clearShortableAbsence) re-arms the probe immediately.
-// Without this memory, every market-events snapshot re-burned the full
-// poll budget per non-US name whose shortable tick never arrives.
+// TestMarketEventCacheShortableAbsence pins the TTL'd negative cache
+// behind the borrow-inventory polls: a symbol observed absent is skipped
+// for marketEventsShortableAbsentRetry, then re-probed (a pre-market
+// absence must not blind borrow inventory for the whole trading day),
+// and a gateway reconnect (clearShortableAbsence) re-arms the probe
+// immediately. Without this memory, every market-events snapshot
+// re-burned the full poll budget per non-US name whose shortable tick
+// never arrives.
 func TestMarketEventCacheShortableAbsence(t *testing.T) {
 	t.Parallel()
 	cache := newMarketEventCache(nil)
-	sessionA := "2026-06-09"
-	sessionB := "2026-06-10"
+	observedAt := time.Date(2026, 6, 11, 8, 30, 0, 0, time.UTC)
+	withinTTL := observedAt.Add(marketEventsShortableAbsentRetry - time.Minute)
+	pastTTL := observedAt.Add(marketEventsShortableAbsentRetry)
 
-	if cache.shortableAbsentThisSession("DTE", sessionA) {
+	if cache.shortableAbsentRecently("DTE", observedAt) {
 		t.Fatal("fresh cache should not report absence")
 	}
-	cache.rememberShortableAbsent("DTE", sessionA)
-	if !cache.shortableAbsentThisSession("DTE", sessionA) {
-		t.Error("absence recorded for session A should skip within session A")
+	cache.rememberShortableAbsent("DTE", observedAt)
+	if !cache.shortableAbsentRecently("DTE", withinTTL) {
+		t.Error("absence within the retry TTL should skip the probe")
 	}
-	if cache.shortableAbsentThisSession("DTE", sessionB) {
-		t.Error("absence from session A must not carry into session B")
+	if cache.shortableAbsentRecently("DTE", pastTTL) {
+		t.Error("absence past the retry TTL must re-arm the probe")
 	}
-	if cache.shortableAbsentThisSession("SAP", sessionA) {
+	if cache.shortableAbsentRecently("SAP", withinTTL) {
 		t.Error("absence is per-symbol")
 	}
 
+	cache.rememberShortableAbsent("DTE", observedAt)
 	cache.clearShortableAbsence()
-	if cache.shortableAbsentThisSession("DTE", sessionA) {
+	if cache.shortableAbsentRecently("DTE", withinTTL) {
 		t.Error("clearShortableAbsence (reconnect) should re-arm the probe")
 	}
 }

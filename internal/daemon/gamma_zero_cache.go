@@ -67,6 +67,11 @@ type gammaZeroCache struct {
 	// newGammaZeroCacheWithStore — never modified after, so reads
 	// from the spawnJob goroutine don't need the cache mutex.
 	store *gammaZeroStore
+	// skewDiag is the optional skew-fit calibration journal. nil = no
+	// journaling (tests, store-less constructions). Set once before
+	// the cache serves callers and never modified after, so the
+	// spawnJob goroutine reads it lock-less like store.
+	skewDiag *gammaSkewDiagJournal
 	// log is the logger used for persistence warnings. nil-safe via
 	// gammaLogf wrapper.
 	log gammaLogger
@@ -785,15 +790,26 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 		// Persist to disk on success. Failed computes do not persist
 		// (no Save call on the err != nil path) — mirrors breadth's
 		// MinCoverageFraction policy of "do not persist runs that
-		// did not converge."
+		// did not converge." Cancelled jobs do not persist either: a
+		// result finalised while the job was being torn down (daemon
+		// shutdown, force() supersede) must not overwrite the last
+		// cleanly-computed snapshot on disk.
 		//
 		// Persistence runs off the cache mutex; c.store is set once
 		// at construction and never modified, so reading it lock-
 		// less is safe. Save errors degrade to warnings only — the
 		// in-memory cache still serves callers correctly.
-		if c.store != nil {
+		if c.store != nil && bgCtx.Err() == nil {
 			if saveErr := c.store.Save(scope, key, res); saveErr != nil {
 				gammaLogf{inner: c.log}.Warnf("gamma cache: persist scope=%s: %v", scope, saveErr)
+			}
+		}
+		// Skew-fit calibration journal, under the same cancellation
+		// guard as Save: a force()-superseded or shutdown-torn result
+		// must not enter the calibration set either.
+		if c.skewDiag != nil && bgCtx.Err() == nil {
+			if diagErr := c.skewDiag.append(time.Now(), scope, key, job.result); diagErr != nil {
+				gammaLogf{inner: c.log}.Warnf("gamma skew diag: append scope=%s: %v", scope, diagErr)
 			}
 		}
 	}()
