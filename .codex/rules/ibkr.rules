@@ -77,7 +77,7 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["make", ["help", "check", "smoke", "install", "restart-daemon", "app-check", "app-refresh", "app-refresh-smoke", "app-smoke", "app-lifecycle-smoke", "docs-check", "docs-regen", "test"]],
+    pattern = ["make", ["help", "check", "smoke", "smoke-fast", "install", "restart-daemon", "app-check", "app-refresh", "app-refresh-smoke", "app-smoke", "app-lifecycle-smoke", "docs-check", "docs-regen", "test"]],
     decision = "allow",
     justification = "Standard project verification and local refresh commands.",
     match = [
@@ -85,6 +85,7 @@ prefix_rule(
         "make check",
         "make docs-check",
         "make smoke",
+        "make smoke-fast",
         "make restart-daemon",
         "make app-refresh-smoke APP_SMOKE_BROWSER=webkit",
     ],
