@@ -46,7 +46,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check changelog-check changelog-lint changelog-stub
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -92,6 +92,13 @@ app-refresh-smoke: app-refresh ## Refresh the shared app host, then run the brow
 
 app-smoke: ## Browser-smoke a running ibkr app without scanning a QR code
 	node scripts/app-browser-smoke.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER) --no-notification
+
+# Account id and balances are rewritten to fixture values inside the page
+# before the SPA renders, so no real account data can reach the pixels —
+# the script aborts if any id-shaped string other than the placeholder is
+# visible. See docs/social/canary-app-{mobile,desktop}.png.
+app-screenshots: ## Regenerate the published app screenshots from a running ibkr app (fixture account data)
+	node scripts/app-screenshots.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER)
 
 APP_LIFECYCLE_ADDR ?= 127.0.0.1:18765
 APP_LIFECYCLE_URL ?= http://$(APP_LIFECYCLE_ADDR)
