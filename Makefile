@@ -52,7 +52,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -234,6 +234,9 @@ govulncheck-check: ## Run govulncheck (skipped when deps unchanged and already s
 		mkdir -p "$$(dirname "$(GOVULN_STAMP)")" && \
 		echo "$$depshash $$today" > "$(GOVULN_STAMP)"; \
 	fi
+
+govuln-prewarm-install: ## Install a 06:00 LaunchAgent that pre-warms the daily govulncheck stamp (uninstall: scripts/install-govuln-prewarm.sh --uninstall)
+	@./scripts/install-govuln-prewarm.sh
 
 # Validate the Claude Code plugin + marketplace manifests with the official
 # `claude plugin validate` tool. The TestSkill* gates in internal/cli (run

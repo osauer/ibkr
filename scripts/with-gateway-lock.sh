@@ -51,9 +51,15 @@ perl -e '
     exit 0 if flock($fh, LOCK_EX | LOCK_NB);
     print STDERR "with-gateway-lock: gateway busy (another session holds $lockfile); waiting up to ${timeout}s...\n";
     my $deadline = time + $timeout;
+    my $next_note = time + 30;
     until (flock($fh, LOCK_EX | LOCK_NB)) {
         die "with-gateway-lock: timed out after ${timeout}s waiting for $lockfile\n"
             if time >= $deadline;
+        if (time >= $next_note) {
+            printf STDERR "with-gateway-lock: still waiting for %s (%ds left)\n",
+                $lockfile, $deadline - time;
+            $next_note = time + 30;
+        }
         sleep 1;
     }
     print STDERR "with-gateway-lock: lock acquired, continuing\n";
