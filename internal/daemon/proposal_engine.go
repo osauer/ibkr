@@ -37,6 +37,16 @@ type proposalEngine struct {
 	// proposal keys hash contract identity only, so an unscoped set would
 	// suppress the same contract across paper/live sessions.
 	ignored map[string]struct{}
+	// refreshFailStreak counts consecutive refreshes that ended on a
+	// transient session blocker (see proposalRefreshTransient), with the
+	// streak start time and the latest failure's blocker codes alongside.
+	// Observability only — Run's backoff keeps its own counter — but
+	// without it a preserved-snapshot outage is invisible: the failures
+	// return err == nil and the served as_of silently freezes (observed
+	// 2026-06-11: 44 minutes stale, zero log lines).
+	refreshFailStreak int
+	refreshFailSince  time.Time
+	refreshFailCodes  []string
 }
 
 type proposalStore struct {
@@ -192,7 +202,100 @@ func (e *proposalEngine) Snapshot(show bool) rpc.TradeProposalSnapshot {
 	return snap
 }
 
+// proposalRefreshWarnStreak is how many consecutive transient-failed
+// refreshes stay quiet before the engine starts warning. The first
+// refreshes after a daemon start routinely race the gateway connect and
+// self-heal within the 30s/1m quick retries; warning from the third
+// failure on keeps boot logs clean while a real outage surfaces within
+// a few minutes.
+const proposalRefreshWarnStreak = 3
+
 func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradeProposalSnapshot, error) {
+	snap, err := e.refresh(ctx, show)
+	e.noteRefreshOutcome(snap, err)
+	return snap, err
+}
+
+// noteRefreshOutcome advances the transient-failure streak after every
+// refresh, regardless of caller, and emits the throttled log trail.
+// Transient failures preserve the last-good snapshot and return err == nil
+// — the blocker codes are the only signal — so this is where a stalled
+// panel becomes diagnosable. Quiet below proposalRefreshWarnStreak, then
+// one warn per failed attempt: Run's backoff paces those at 30s/1m/2m/…
+// capped at the cadence, so a persistent outage logs once per escalation
+// and then once per cadence, not once per poll. One info line closes the
+// streak when a refresh finally lands.
+func (e *proposalEngine) noteRefreshOutcome(snap rpc.TradeProposalSnapshot, err error) {
+	failed := err != nil || proposalRefreshTransient(snap)
+	now := e.clock()
+	e.mu.Lock()
+	if !failed {
+		streak, since := e.refreshFailStreak, e.refreshFailSince
+		e.refreshFailStreak, e.refreshFailSince, e.refreshFailCodes = 0, time.Time{}, nil
+		e.mu.Unlock()
+		if streak >= proposalRefreshWarnStreak && e.server != nil {
+			e.server.infof("trade proposals: refresh recovered after %d blocked attempts over %s", streak, now.Sub(since).Round(time.Second))
+		}
+		return
+	}
+	e.refreshFailStreak++
+	if e.refreshFailStreak == 1 {
+		e.refreshFailSince = now
+	}
+	e.refreshFailCodes = proposalBlockerCodes(snap, err)
+	streak, since, codes := e.refreshFailStreak, e.refreshFailSince, e.refreshFailCodes
+	e.mu.Unlock()
+	if streak < proposalRefreshWarnStreak || e.server == nil {
+		return
+	}
+	e.server.warnf("trade proposals: refresh blocked %d consecutive times over %s (codes: %s); serving snapshot as_of %s (%s old)",
+		streak, now.Sub(since).Round(time.Second), strings.Join(codes, ","),
+		snap.AsOf.Format(time.RFC3339), now.Sub(snap.AsOf).Round(time.Second))
+}
+
+// proposalBlockerCodes flattens the installed snapshot's blocker codes for
+// the refresh-streak trail; the raw fetch error stands in when a failure
+// path produced no blockers.
+func proposalBlockerCodes(snap rpc.TradeProposalSnapshot, err error) []string {
+	var out []string
+	for _, b := range snap.Blockers {
+		if b.Code != "" && !slices.Contains(out, b.Code) {
+			out = append(out, b.Code)
+		}
+	}
+	if len(out) == 0 && err != nil {
+		out = append(out, err.Error())
+	}
+	return out
+}
+
+// proposalRefreshHealth is the engine's refresh-streak view for the
+// status.health proposals subsystem row.
+type proposalRefreshHealth struct {
+	Streak     int
+	Since      time.Time
+	Codes      []string
+	ServedAsOf time.Time
+}
+
+// RefreshHealth reports the current transient-failure streak and the as_of
+// of the snapshot being served. Zero streak means the last refresh
+// installed cleanly.
+func (e *proposalEngine) RefreshHealth() proposalRefreshHealth {
+	if e == nil {
+		return proposalRefreshHealth{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return proposalRefreshHealth{
+		Streak:     e.refreshFailStreak,
+		Since:      e.refreshFailSince,
+		Codes:      append([]string(nil), e.refreshFailCodes...),
+		ServedAsOf: e.snapshot.AsOf,
+	}
+}
+
+func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradeProposalSnapshot, error) {
 	now := e.clock()
 	cfg := e.server.cfg.AutoTrade.WithDefaults()
 	autoStatus := e.server.autoTradeStatus()
@@ -379,7 +482,46 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 			}
 		}
 	}
+	applyNotionalCapToProposals(out, e.effectiveMaxNotional())
 	return out
+}
+
+// effectiveMaxNotional resolves the notional cap previewOrder will enforce,
+// through the same merged TOML+runtime accessor the gate reads. A free-
+// standing engine without a server resolves to 0: disclose nothing rather
+// than guess a default the gate might not use.
+func (e *proposalEngine) effectiveMaxNotional() float64 {
+	if e == nil || e.server == nil {
+		return 0
+	}
+	return e.server.effectiveTradingConfig().MaxNotional
+}
+
+// applyNotionalCapToProposals discloses the order-preview notional gate at
+// generation time: previewOrder rejects any order whose notional exceeds the
+// effective [trading].max_notional, so a proposal estimated above the cap can
+// never preview or submit and must not render as ready. The mark-based
+// estimate can drift either way from the gate's live reference price by
+// preview time — the gate stays authoritative; this only moves the refusal
+// from a failed preview to a disclosed blocker. Zero notional means the
+// position had no usable mark, so there is nothing honest to compare.
+func applyNotionalCapToProposals(proposals []rpc.TradeProposal, maxNotional float64) {
+	if maxNotional <= 0 {
+		return
+	}
+	for i := range proposals {
+		p := &proposals[i]
+		p.MaxNotional = maxNotional
+		if p.Notional <= maxNotional {
+			continue
+		}
+		p.State = rpc.TradeProposalStateBlocked
+		p.Blockers = appendTradingBlockerOnce(p.Blockers, rpc.TradingBlocker{
+			Code:    "order_notional_exceeds_max",
+			Message: fmt.Sprintf("estimated order notional %.2f exceeds [trading].max_notional %.2f", p.Notional, maxNotional),
+			Action:  fmt.Sprintf("Raise the limit with `ibkr settings set trading.limits.max_notional=%.0f` and refresh proposals, or protect this position with a smaller manual order.", math.Ceil(p.Notional)),
+		})
+	}
 }
 
 func (e *proposalEngine) marketEventsSnapshot(ctx context.Context, pos *rpc.PositionsResult) *rpc.MarketEventsResult {

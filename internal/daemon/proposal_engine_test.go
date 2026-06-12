@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -1561,6 +1563,254 @@ func TestProposalRefreshTransientClassifiesBlockers(t *testing.T) {
 	} {
 		if proposalRefreshTransient(snap) {
 			t.Errorf("snapshot with blockers %+v should not classify as transient", snap.Blockers)
+		}
+	}
+}
+
+// failedRefreshSnapshot mimics the preserve path's output: last-good
+// proposals with the transient blocker merged in and as_of frozen at the
+// original generation time.
+func failedRefreshSnapshot(asOf time.Time, code string) rpc.TradeProposalSnapshot {
+	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, asOf)
+	snap.Blockers = []rpc.TradingBlocker{{Code: code, Message: "fetch failed"}}
+	return snap
+}
+
+// Not parallel: NewLogger redirects the global pkg/ibkr logger, so a
+// concurrent test's library output could land in this buffer.
+func TestNoteRefreshOutcomeWarnsAfterStreakAndLogsRecovery(t *testing.T) {
+	start := time.Date(2026, 6, 11, 18, 23, 41, 0, time.UTC)
+	now := start
+	var buf bytes.Buffer
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, start)
+	srv.logger = NewLogger(&buf, "info")
+	e := newProposalScopeTestEngine(t, srv)
+	e.now = func() time.Time { return now }
+	good := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, start)
+
+	// Failures below proposalRefreshWarnStreak stay quiet: startup
+	// refreshes race the gateway connect by design.
+	for range proposalRefreshWarnStreak - 1 {
+		e.noteRefreshOutcome(failedRefreshSnapshot(start, "account_unavailable"), nil)
+		now = now.Add(time.Minute)
+	}
+	if got := buf.String(); strings.Contains(got, "refresh blocked") {
+		t.Fatalf("warned before the streak threshold: %s", got)
+	}
+
+	// The threshold failure warns with the streak, blocker codes, and the
+	// age of the snapshot still being served.
+	e.noteRefreshOutcome(failedRefreshSnapshot(start, "account_unavailable"), nil)
+	if got := buf.String(); !strings.Contains(got, "refresh blocked 3 consecutive times over 2m0s") ||
+		!strings.Contains(got, "codes: account_unavailable") ||
+		!strings.Contains(got, "(2m0s old)") {
+		t.Fatalf("threshold warn missing streak/codes/age: %s", got)
+	}
+
+	// Every further failed attempt warns again — Run's backoff paces these
+	// at the escalation/cadence rate, so this is one line per escalation.
+	now = now.Add(time.Minute)
+	e.noteRefreshOutcome(failedRefreshSnapshot(start, "positions_unavailable"), nil)
+	if got := buf.String(); strings.Count(got, "refresh blocked") != 2 ||
+		!strings.Contains(got, "codes: positions_unavailable") {
+		t.Fatalf("escalation warn missing: %s", got)
+	}
+
+	// Recovery closes the streak with one info line and resets the state.
+	now = now.Add(time.Minute)
+	e.noteRefreshOutcome(good, nil)
+	if got := buf.String(); !strings.Contains(got, "refresh recovered after 4 blocked attempts over 4m0s") {
+		t.Fatalf("recovery info missing: %s", got)
+	}
+	if h := e.RefreshHealth(); h.Streak != 0 || len(h.Codes) != 0 || !h.Since.IsZero() {
+		t.Fatalf("streak not reset on recovery: %+v", h)
+	}
+
+	// A short blip that never crossed the threshold recovers silently.
+	buf.Reset()
+	e.noteRefreshOutcome(failedRefreshSnapshot(start, "account_unavailable"), nil)
+	e.noteRefreshOutcome(good, nil)
+	if got := buf.String(); strings.Contains(got, "refresh blocked") || strings.Contains(got, "refresh recovered") {
+		t.Fatalf("short blip should stay quiet: %s", got)
+	}
+}
+
+func TestProposalBlockerCodesFlattensAndFallsBackToError(t *testing.T) {
+	t.Parallel()
+	snap := rpc.TradeProposalSnapshot{Blockers: []rpc.TradingBlocker{
+		{Code: "account_unavailable"}, {Code: "account_unavailable"}, {Code: "wide_spread"}, {Code: ""},
+	}}
+	if got := strings.Join(proposalBlockerCodes(snap, nil), ","); got != "account_unavailable,wide_spread" {
+		t.Fatalf("codes = %q, want deduped account_unavailable,wide_spread", got)
+	}
+	if got := proposalBlockerCodes(rpc.TradeProposalSnapshot{}, errors.New("dial tcp: refused")); len(got) != 1 || got[0] != "dial tcp: refused" {
+		t.Fatalf("blocker-less failure should fall back to the error: %v", got)
+	}
+}
+
+func TestProposalSubsystemHealthReportsRefreshStreak(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 6, 11, 18, 23, 41, 0, time.UTC)
+	now := start
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, start)
+	e := newProposalScopeTestEngine(t, srv)
+	e.now = func() time.Time { return now }
+	srv.tradeProposals = e
+	e.replaceSnapshot(scopedTestSnapshot("DU7654321", rpc.AccountModePaper, start))
+
+	find := func() (rpc.SubsystemHealth, bool) {
+		for _, sub := range srv.subsystemHealth(true) {
+			if sub.Name == "proposals" {
+				return sub, true
+			}
+		}
+		return rpc.SubsystemHealth{}, false
+	}
+
+	sub, ok := find()
+	if !ok || sub.Status != "ready" || sub.Message != "" {
+		t.Fatalf("clean engine should report ready: %+v ok=%v", sub, ok)
+	}
+
+	for range proposalRefreshWarnStreak - 1 {
+		e.noteRefreshOutcome(failedRefreshSnapshot(start, "account_unavailable"), nil)
+		now = now.Add(time.Minute)
+	}
+	if sub, _ := find(); sub.Status != "ready" {
+		t.Fatalf("sub-threshold streak should stay ready: %+v", sub)
+	}
+
+	e.noteRefreshOutcome(failedRefreshSnapshot(start, "account_unavailable"), nil)
+	sub, _ = find()
+	if sub.Status != "degraded" {
+		t.Fatalf("threshold streak should degrade: %+v", sub)
+	}
+	if !strings.Contains(sub.Message, "blocked 3 consecutive times") ||
+		!strings.Contains(sub.Message, start.Format(time.RFC3339)) {
+		t.Fatalf("degraded message missing streak/as_of: %q", sub.Message)
+	}
+	if sub.LastError != "account_unavailable" || !sub.LastErrorAt.Equal(start) {
+		t.Fatalf("degraded row missing codes/since: %+v", sub)
+	}
+
+	e.noteRefreshOutcome(scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now), nil)
+	if sub, _ := find(); sub.Status != "ready" || sub.LastError != "" {
+		t.Fatalf("recovered engine should report ready: %+v", sub)
+	}
+
+	srv.cfg.AutoTrade.ProposalsEnabled = new(false)
+	if sub, _ := find(); sub.Status != "disabled" {
+		t.Fatalf("disabled config should report disabled: %+v", sub)
+	}
+
+	srv.tradeProposals = nil
+	if _, ok := find(); ok {
+		t.Fatal("nil engine must not report a proposals subsystem")
+	}
+}
+
+func TestApplyNotionalCapToProposalsDisclosesPreviewGate(t *testing.T) {
+	t.Parallel()
+	proposals := []rpc.TradeProposal{
+		{Key: "trailing_stop:over", State: rpc.TradeProposalStateGenerated, Notional: 72396},
+		{Key: "trailing_stop:under", State: rpc.TradeProposalStateGenerated, Notional: 9500},
+		{Key: "trailing_stop:atcap", State: rpc.TradeProposalStateGenerated, Notional: 10000},
+		{Key: "trailing_stop:nomark", State: rpc.TradeProposalStateGenerated},
+	}
+	applyNotionalCapToProposals(proposals, 10000)
+
+	over := proposals[0]
+	if over.State != rpc.TradeProposalStateBlocked || !hasBlocker(over.Blockers, "order_notional_exceeds_max") {
+		t.Fatalf("over-cap proposal = %+v, want blocked with order_notional_exceeds_max", over)
+	}
+	if over.MaxNotional != 10000 {
+		t.Fatalf("over-cap MaxNotional = %.2f, want disclosed cap 10000", over.MaxNotional)
+	}
+	blocker := over.Blockers[0]
+	if !strings.Contains(blocker.Message, "72396.00") || !strings.Contains(blocker.Message, "10000.00") {
+		t.Fatalf("blocker message %q, want both sides of the comparison", blocker.Message)
+	}
+	if !strings.Contains(blocker.Action, "trading.limits.max_notional=72396") {
+		t.Fatalf("blocker action %q, want runtime settings remediation with the needed value", blocker.Action)
+	}
+	for _, tc := range []struct {
+		name string
+		got  rpc.TradeProposal
+	}{{"under-cap", proposals[1]}, {"at-cap", proposals[2]}, {"no-mark", proposals[3]}} {
+		if tc.got.State != rpc.TradeProposalStateGenerated || len(tc.got.Blockers) != 0 {
+			t.Fatalf("%s proposal = %+v, want generated without blockers (gate passes notional <= cap)", tc.name, tc.got)
+		}
+		if tc.got.MaxNotional != 10000 {
+			t.Fatalf("%s MaxNotional = %.2f, want disclosed cap 10000", tc.name, tc.got.MaxNotional)
+		}
+	}
+
+	unresolved := []rpc.TradeProposal{{Key: "trailing_stop:x", State: rpc.TradeProposalStateGenerated, Notional: 1e9}}
+	applyNotionalCapToProposals(unresolved, 0)
+	if unresolved[0].MaxNotional != 0 || len(unresolved[0].Blockers) != 0 {
+		t.Fatalf("unresolved-cap proposal = %+v, want untouched (no honest cap to disclose)", unresolved[0])
+	}
+}
+
+// TestGenerateDisclosesEffectiveMaxNotional proves generation discloses the
+// same merged TOML+runtime cap the preview gate enforces. On trading-capable
+// builds the runtime trading.limits.max_notional override (5000) must block
+// an 8000-notional proposal; on stable builds runtime limit overrides are
+// read-only and the TOML default (10000) lets the same proposal stay ready.
+func TestGenerateDisclosesEffectiveMaxNotional(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 11, 14, 0, 0, 0, time.UTC)
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv.now = func() time.Time { return now }
+	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":5000}}}`)})
+	if orderWritesAvailable && err != nil {
+		t.Fatalf("set runtime max_notional override: %v", err)
+	}
+	if !orderWritesAvailable && err == nil {
+		t.Fatal("stable build accepted a trading.limits write, want read-only refusal")
+	}
+
+	engine := &proposalEngine{
+		server:  srv,
+		now:     srv.now,
+		ignored: map[string]struct{}{},
+	}
+	policy := defaultProtectionPolicy()
+	status := protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusDefault, "test", "", now)
+	pos := &rpc.PositionsResult{Stocks: []rpc.PositionView{{
+		Symbol:     "AMD",
+		SecType:    "STK",
+		Quantity:   80,
+		Mark:       100,
+		Multiplier: 1,
+		Currency:   "USD",
+	}}}
+	scope := brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
+	props := engine.generate(policy, status, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
+	if len(props) != 1 {
+		t.Fatalf("generated %d proposals, want 1: %+v", len(props), props)
+	}
+	p := props[0]
+	if p.Notional != 8000 {
+		t.Fatalf("proposal notional = %.2f, want mark-based 8000", p.Notional)
+	}
+	gateCap := srv.effectiveTradingConfig().MaxNotional
+	if p.MaxNotional != gateCap {
+		t.Fatalf("disclosed MaxNotional = %.2f, want the gate's effective cap %.2f", p.MaxNotional, gateCap)
+	}
+	if orderWritesAvailable {
+		if gateCap != 5000 {
+			t.Fatalf("effective cap = %.2f, want runtime override 5000", gateCap)
+		}
+		if p.State != rpc.TradeProposalStateBlocked || !hasBlocker(p.Blockers, "order_notional_exceeds_max") {
+			t.Fatalf("proposal = %+v, want blocked: 8000 estimated notional exceeds the 5000 runtime cap", p)
+		}
+	} else {
+		if gateCap != 10000 {
+			t.Fatalf("effective cap = %.2f, want TOML default 10000 on a stable build", gateCap)
+		}
+		if p.State != rpc.TradeProposalStateGenerated || len(p.Blockers) != 0 {
+			t.Fatalf("proposal = %+v, want ready: 8000 estimated notional is under the 10000 default cap", p)
 		}
 	}
 }

@@ -8,7 +8,7 @@ These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-deskt
 
 ## `ibkr_status`
 
-Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness ("why is data missing / stale / wrong-account?", "will scanner or gamma be busy?", "are downstream risk reads stale?"). `subsystems[].status` can be ready/computing/unavailable and is more specific than the top-level gateway connection; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.
+Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth/proposals, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness ("why is data missing / stale / wrong-account?", "will scanner or gamma be busy?", "are downstream risk reads stale?", "why is the protection panel stale?"). `subsystems[].status` can be ready/computing/unavailable/degraded/disabled and is more specific than the top-level gateway connection — the `proposals` entry turns degraded with the blocker codes and the served snapshot's as_of when protection-proposal refreshes keep failing while an older snapshot is still served; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.
 
 *No parameters.*
 
@@ -203,7 +203,7 @@ Run a market scanner. Three call shapes: (1) preset by name — `{preset: "top-m
 
 ## `ibkr_scan_params`
 
-Discover the scanner catalog this IBKR gateway supports: every scanCode (the `type` for ad-hoc `ibkr_scan`) and every locationCode (`exchange`), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version, market-data permissions, and region. Pass `instrument: "STK"` to narrow scan_types to US stocks or `instrument: "STOCK.EU"` for European stocks; pass `include_raw_xml: true` only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB).
+Discover the scanner catalog this IBKR gateway supports: every scanCode (the `type` for ad-hoc `ibkr_scan`) and every locationCode (`exchange`), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version, market-data permissions, and region. Pass `instrument: "STK"` to narrow scan_types to US stocks or `instrument: "STOCK.EU"` for European stocks; pass `include_raw_xml: true` only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB). NOT for actually running a scan (use `ibkr_scan` — including `{}` to enumerate configured presets), and NOT for quotes or technicals on known symbols (use `ibkr_quote` or `ibkr_technical`).
 
 **Parameters:**
 
@@ -269,7 +269,7 @@ Read daemon-owned protection proposals for existing positions. Use when the user
 
 ## `ibkr_size`
 
-Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.
+Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate. NOT for drafting an actual order ticket (use `ibkr_order_preview` after `ibkr_trading_status` shows readiness), NOT for protective stops on existing positions (use `ibkr_proposals`), and NOT for account cash/margin context on its own (use `ibkr_account`).
 
 **Parameters:**
 

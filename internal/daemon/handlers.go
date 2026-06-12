@@ -3601,7 +3601,36 @@ func (s *Server) subsystemHealth(connected bool) []rpc.SubsystemHealth {
 		breadth.Message = "S&P 500 breadth refresh is running or waiting to retry"
 	}
 	out = append(out, breadth)
+	if sub, ok := s.proposalSubsystemHealth(); ok {
+		out = append(out, sub)
+	}
 	return out
+}
+
+// proposalSubsystemHealth reports the protection-proposal engine's refresh
+// health. The engine preserves the last-good snapshot through transient
+// refresh failures (err == nil, served as_of frozen), so the gateway can
+// look healthy while the protection panel serves stale data — this row
+// makes that state diagnosable from `ibkr status` alone. It stays "ready"
+// below proposalRefreshWarnStreak because the first refreshes after a
+// daemon start race the gateway connect by design.
+func (s *Server) proposalSubsystemHealth() (rpc.SubsystemHealth, bool) {
+	if s.tradeProposals == nil {
+		return rpc.SubsystemHealth{}, false
+	}
+	if s.cfg != nil && !s.cfg.AutoTrade.WithDefaults().ProposalsEnabledResolved() {
+		return rpc.SubsystemHealth{Name: "proposals", Status: "disabled", Message: "manual protection proposals are disabled by config"}, true
+	}
+	sub := rpc.SubsystemHealth{Name: "proposals", Status: "ready"}
+	h := s.tradeProposals.RefreshHealth()
+	if h.Streak >= proposalRefreshWarnStreak {
+		sub.Status = "degraded"
+		sub.Message = fmt.Sprintf("refresh blocked %d consecutive times since %s; serving snapshot as_of %s",
+			h.Streak, h.Since.Format(time.RFC3339), h.ServedAsOf.Format(time.RFC3339))
+		sub.LastError = strings.Join(h.Codes, ",")
+		sub.LastErrorAt = h.Since
+	}
+	return sub, true
 }
 
 // membersHealth assembles the rpc.MembersHealth wire shape for the

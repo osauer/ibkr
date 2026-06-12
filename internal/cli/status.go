@@ -366,7 +366,7 @@ func formatSubsystemsValue(env *Env, subs []rpc.SubsystemHealth) string {
 		switch s.Status {
 		case "ready":
 			status = env.green(status)
-		case "computing":
+		case "computing", "degraded":
 			status = env.yellow(status)
 		case "unavailable", "error":
 			status = env.red(status)
