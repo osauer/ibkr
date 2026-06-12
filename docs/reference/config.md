@@ -13,7 +13,7 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[auto_trade]` | `fast_path_enabled` | `*bool` | FastPathEnabled allows manual proposal preview/submit to use the immediate revalidation path; default true so paper protection stops remain usable. |
 | `[auto_trade]` | `hot_reload` | `*bool` | HotReload controls whether policy changes are reloaded while the daemon runs; default true. |
 | `[auto_trade]` | `policy_file` | `string` | PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml. |
-| `[auto_trade]` | `proposal_cadence` | `duration` | ProposalCadence controls how often the daemon refreshes protection proposals; default 15m. |
+| `[auto_trade]` | `proposal_cadence` | `duration` | ProposalCadence controls how often the daemon refreshes protection proposals; default 2m. |
 | `[auto_trade]` | `proposals_enabled` | `*bool` | ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path. |
 | `[auto_trade]` | `reload_interval` | `duration` | ReloadInterval controls how often the daemon checks policy-file changes; default 30s. |
 | `[daemon]` | `idle_timeout` | `duration` | IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like "1h" or "0s"); set "0s" to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under `ibkr daemon --foreground`. |

@@ -1555,6 +1555,17 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 		})
 	}
 
+	// Kick the proposal engine for an immediate refresh now that the
+	// session is handshaken and RequestAccountUpdates (above) has started
+	// the portfolio stream. Without this a reconnect after an outage
+	// leaves the protection panel serving the stale snapshot until the
+	// backed-off timer fires (observed 2026-06-12: gateway back at 10:53,
+	// panel recovered 10:59:15). Ordered last so the kicked refresh races
+	// as little of the post-handshake setup as possible; the engine's
+	// positions_pending guard covers the residual window where the
+	// portfolio burst hasn't landed yet.
+	s.tradeProposals.Kick()
+
 	// Latch the postConnectSetup-done barrier. handleStatusHealth gates
 	// its Connected field on this so a status RPC arriving in the brief
 	// window between c.ready flipping true (set by the connection read

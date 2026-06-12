@@ -2253,8 +2253,16 @@ p {
   border-top: 0;
 }
 
-.protection-row__bucket {
-  font-size: 10px;
+/* Scoped under .protection-row to outrank the `.protection-row span`
+   muted-color rule above — the bucket label is the row's cluster heading
+   and was unreadably dim at var(--muted). var(--ink-2) keeps it clearly
+   secondary to the var(--ink) title while restoring contrast; --red is
+   deliberately NOT used here: the panel reserves red for hard blockers
+   and stress (blocker badges, stale stamps, theta burn), and a taxonomy
+   label on every healthy row must not cry wolf. */
+.protection-row .protection-row__bucket {
+  color: var(--ink-2);
+  font-size: 12px;
   font-weight: 780;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2274,6 +2282,85 @@ p {
   color: var(--ink-2);
   font-variant-numeric: tabular-nums;
   font-weight: 650;
+}
+
+.protection-row .protection-row__quote {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+/* The price span needs its own rule: `.protection-row span` would
+   otherwise re-mute it — the original "grey and hard to read" complaint.
+   Unchanged quotes read in the same secondary ink as the metric line. */
+.protection-row .protection-quote {
+  color: var(--ink-2);
+}
+
+/* Tick-direction coloring on protection quote prices: green up, red
+   down, inherited gray when unchanged — same market tokens as
+   .market-change.signed. Stale/frozen quotes render muted and never
+   carry a direction color. */
+.protection-row .protection-quote--up {
+  color: var(--market-green);
+}
+
+.protection-row .protection-quote--down {
+  color: var(--market-red);
+}
+
+.protection-row .protection-quote--stale {
+  color: var(--muted);
+  font-weight: 550;
+}
+
+.protection-qty {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 3px;
+}
+
+.protection-qty__step {
+  min-width: 40px;
+  min-height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink-2);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.protection-qty__step:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.protection-row .protection-qty__value {
+  min-width: 62px;
+  text-align: center;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.protection-qty__reset {
+  border: 0;
+  padding: 0 4px;
+  background: none;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.protection-row .protection-qty__approx {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .protection-row__reason {
