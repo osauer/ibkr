@@ -1,4 +1,15 @@
 {
+  "enabledPlugins": {
+    "ibkr@ibkr": true
+  },
+  "extraKnownMarketplaces": {
+    "ibkr": {
+      "source": {
+        "source": "github",
+        "repo": "osauer/ibkr"
+      }
+    }
+  },
   "permissions": {
     "allow": [
       "Bash(make check)",
