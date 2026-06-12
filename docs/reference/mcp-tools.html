@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: mcp-tools.md sha256:4893001d34d18e91cb13a54d6fcca4e3bb4a3bb42d4006a6e05f833d4eec2bd8 -->
+<!-- md-source: mcp-tools.md sha256:77e2acc0d4f432e3f7a798a0c25ebceb444f04167f28238cef9a58ae0e3fff75 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -331,7 +331,7 @@
 </tbody>
 </table>
 <h2 id="ibkrscanparams"><code>ibkr_scan_params</code></h2>
-<p>Discover the scanner catalog this IBKR gateway supports: every scanCode (the <code>type</code> for ad-hoc <code>ibkr_scan</code>) and every locationCode (<code>exchange</code>), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version, market-data permissions, and region. Pass <code>instrument: &#34;STK&#34;</code> to narrow scan_types to US stocks or <code>instrument: &#34;STOCK.EU&#34;</code> for European stocks; pass <code>include_raw_xml: true</code> only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB).</p>
+<p>Discover the scanner catalog this IBKR gateway supports: every scanCode (the <code>type</code> for ad-hoc <code>ibkr_scan</code>) and every locationCode (<code>exchange</code>), plus the instrument types each scanCode applies to. Use this before composing an ad-hoc scan — the catalog varies by gateway version, market-data permissions, and region. Pass <code>instrument: &#34;STK&#34;</code> to narrow scan_types to US stocks or <code>instrument: &#34;STOCK.EU&#34;</code> for European stocks; pass <code>include_raw_xml: true</code> only when you need a field not surfaced in the parsed result (the XML payload is ~200 KB). NOT for actually running a scan (use <code>ibkr_scan</code> — including <code>{}</code> to enumerate configured presets), and NOT for quotes or technicals on known symbols (use <code>ibkr_quote</code> or <code>ibkr_technical</code>).</p>
 <p><strong>Parameters:</strong></p>
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
@@ -391,7 +391,7 @@
 </tbody>
 </table>
 <h2 id="ibkrsize"><code>ibkr_size</code></h2>
-<p>Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate.</p>
+<p>Fixed-fractional position sizing pegged to live NLV. Pure math against the account snapshot — never proposes or executes an order. Pass an optional target to also get the R-multiple (reward:risk) and breakeven win rate. NOT for drafting an actual order ticket (use <code>ibkr_order_preview</code> after <code>ibkr_trading_status</code> shows readiness), NOT for protective stops on existing positions (use <code>ibkr_proposals</code>), and NOT for account cash/margin context on its own (use <code>ibkr_account</code>).</p>
 <p><strong>Parameters:</strong></p>
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
