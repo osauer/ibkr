@@ -282,6 +282,52 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 	}
 }
 
+func TestOrderCancelAllowedWhileFrozen(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeFrozenFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/cancel", bytes.NewReader([]byte(`{"confirm_account":"DU123","confirm_mode":"paper"}`)))
+	cancelReq.AddCookie(cookie)
+	cancelRes := httptest.NewRecorder()
+	handler.ServeHTTP(cancelRes, cancelReq)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel while frozen status=%d, want 200; body=%s", cancelRes.Code, cancelRes.Body.String())
+	}
+
+	modifyBody := bytes.NewReader([]byte(`{"preview_token":"modify-token","confirm_account":"DU123","confirm_mode":"paper"}`))
+	modifyReq := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/modify", modifyBody)
+	modifyReq.AddCookie(cookie)
+	modifyRes := httptest.NewRecorder()
+	handler.ServeHTTP(modifyRes, modifyReq)
+	if modifyRes.Code != http.StatusBadRequest {
+		t.Fatalf("modify while frozen status=%d, want 400; body=%s", modifyRes.Code, modifyRes.Body.String())
+	}
+}
+
+func TestProposalRoutesRejectUnknownFields(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	for name, tc := range map[string]struct{ path, body string }{
+		"submit_live_confirmation": {path: "/api/proposals/submit", body: `{"key":"p","revision":"r","confirm_account":"DU123","confirm_mode":"paper","live_confirmation":"live/DU123"}`},
+		"preview_unknown":          {path: "/api/proposals/preview", body: `{"key":"p","revision":"r","bogus":true}`},
+		"ignore_unknown":           {path: "/api/proposals/ignore", body: `{"key":"p","revision":"r","bogus":true}`},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader([]byte(tc.body)))
+		req.AddCookie(cookie)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d, want 400; body=%s", name, res.Code, res.Body.String())
+		}
+		if !strings.Contains(res.Body.String(), "unknown field") {
+			t.Fatalf("%s error should name the unknown field; body=%s", name, res.Body.String())
+		}
+	}
+}
+
 func TestPurgeHTTPAdaptersPreviewAndStatus(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t).Handler()
@@ -751,6 +797,28 @@ func (routeFakeClient) PurgeRestoreExecute(context.Context, rpc.PurgeRestorePara
 
 type routeWriteFakeClient struct {
 	routeFakeClient
+}
+
+// routeFrozenFakeClient reports a runtime trading freeze: writes blocked,
+// cancels still expected to reach the daemon (which strips the freeze
+// blocker on its cancel path).
+type routeFrozenFakeClient struct {
+	routeWriteFakeClient
+}
+
+func (routeFrozenFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
+	return &rpc.TradingStatus{
+		Mode:       "paper",
+		Account:    "DU123",
+		Endpoint:   "127.0.0.1:7497",
+		ClientID:   7,
+		CanPreview: true,
+		CanWrite:   false,
+		WriteBlockers: []rpc.TradingBlocker{{
+			Code:    "trading_frozen",
+			Message: "trading writes are frozen by runtime platform settings",
+		}},
+	}, nil
 }
 
 func (routeWriteFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
