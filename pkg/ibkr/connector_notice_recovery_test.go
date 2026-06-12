@@ -239,3 +239,92 @@ func TestSystemNotice10197ForcesDelayed(t *testing.T) {
 		t.Fatal("10197 notice must flag the competing live session")
 	}
 }
+
+// TestSystemNoticeOrderIDCollisionSkipsRequestRecovery pins the msg-204
+// id-space guard: order errors and request errors arrive through the same
+// id field, and TWS order IDs (nextValidId) are independent from the
+// connection's reqIDSeq. A rejection for an order this connector owns must
+// not fail an innocent colliding historical request, mark a live
+// subscription server-dead (releasing a slot it still holds), or strike
+// the symbol's inactive-candidate counter.
+func TestSystemNoticeOrderIDCollisionSkipsRequestRecovery(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	defer c.conn.rateLimiter.Stop()
+
+	c.orderMu.Lock()
+	c.brokerOrderIndex["202"] = "ibkr-20260611-202"
+	c.orderMu.Unlock()
+
+	req := c.createHistoricalRequest(202, "AAPL")
+	sub := &Subscription{Symbol: "AAPL", ReqID: 202}
+	c.subMu.Lock()
+	c.reqIDMap[202] = "AAPL"
+	c.subscriptions["AAPL"] = sub
+	c.subMu.Unlock()
+
+	c.processSystemNotice(reqAliasEntry{symbol: "AAPL", secType: "STK"}, &systemNotification{
+		tickerID: 202,
+		code:     200,
+		message:  "No security definition has been found for the request",
+	})
+
+	select {
+	case res := <-req.result:
+		t.Fatalf("order-scoped notice must not fail the colliding historical request, got %v", res.err)
+	default:
+	}
+	if sub.rejectedReqID != 0 {
+		t.Fatalf("order-scoped notice must not mark the colliding subscription rejected (rejectedReqID=%d)", sub.rejectedReqID)
+	}
+	c.inactiveMu.RLock()
+	candidates := len(c.inactiveCandidates)
+	c.inactiveMu.RUnlock()
+	if candidates != 0 {
+		t.Fatalf("order-scoped notice must not strike inactive candidates, got %d", candidates)
+	}
+}
+
+// TestStaleRefreshAfterServerRejectionKeepsSlotAccounting pins the
+// EnsureMarketDataSubscription stale-refresh seam: once the notice path
+// has released a rejected reqID's rate-limiter slot, a later stale
+// refresh across a disconnect must go through the idempotent per-reqID
+// release. The raw rateLimiter release this path used to make would
+// double-release and panic the semaphore ("Release called without
+// matching Acquire").
+func TestStaleRefreshAfterServerRejectionKeepsSlotAccounting(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	defer c.conn.rateLimiter.Stop()
+	ctx := context.Background()
+
+	if err := c.conn.rateLimiter.AcquireMarketDataSlot(ctx); err != nil {
+		t.Fatalf("acquire slot: %v", err)
+	}
+	c.conn.marketDataSlotsMu.Lock()
+	c.conn.marketDataSlots[9] = struct{}{}
+	c.conn.marketDataSlotsMu.Unlock()
+
+	sub := &Subscription{Symbol: "HGENQ", ReqID: 9, LastTime: time.Now().Add(-time.Hour)}
+	c.subMu.Lock()
+	c.reqIDMap[9] = "HGENQ"
+	c.subscriptions["HGENQ"] = sub
+	c.subMu.Unlock()
+
+	// Terminal definition rejection: the notice path releases the slot and
+	// marks the exact reqID server-dead.
+	c.processSystemNotice(reqAliasEntry{symbol: "HGENQ", secType: "STK"}, &systemNotification{
+		tickerID: 9,
+		code:     200,
+		message:  "No security definition has been found for the request",
+	})
+	if got := c.conn.rateLimiter.marketDataSubs.Count(); got != 0 {
+		t.Fatalf("notice path must release the slot, count=%d", got)
+	}
+
+	// The refresh fails (no live session) — but it must not over-release.
+	if _, err := c.EnsureMarketDataSubscription(ctx, "HGENQ", nil, time.Millisecond); err == nil {
+		t.Fatal("expected refresh to fail without a live session")
+	}
+	if got := c.conn.rateLimiter.marketDataSubs.Count(); got != 0 {
+		t.Fatalf("stale refresh must keep slot accounting at zero, count=%d", got)
+	}
+}
