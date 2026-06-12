@@ -1,6 +1,6 @@
 # ibkr canary full context
 
-Updated: 2026-06-08 07:25 CEST
+Updated: 2026-06-11 21:20 CEST
 
 `ibkr canary` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app.
 
@@ -8,9 +8,9 @@ The public project home is https://osauer.dev/ibkr/. The source repository is ht
 
 ## Boundary
 
-The shipped CLI and MCP server are read-only. They expose account and market data, diagnostics, sizing math, and analysis workflows, but no order-entry interface. Do not describe the bundled project as an automated trading system, trade execution system, order placement tool, order modification tool, or order cancellation tool.
+The standard downloads (installer, Claude Desktop MCPB, plain `ibkr` tarballs) are read-only builds: account and market data, diagnostics, sizing math, and analysis workflows, with no order placement, modification, or cancellation compiled in. The MCP tool surface is preview-only in every variant — it can draft an order preview and mint a local preview token, but cannot place, modify, cancel, or transmit a broker order.
 
-The underlying Go protocol package includes disabled order-writing primitives for wire-format completeness and downstream forks. Default builds return an error before any order write reaches the socket; order-capable forks require an explicit trading build tag and are not the published CLI, daemon, MCP server, MCPB, or Claude plugin surface.
+Each release also publishes a clearly marked `ibkr-trading` tarball whose CLI carries broker-write capability for users who explicitly opt into order management. It ships with warnings and layered safeguards: paper accounts are open for agent-driven testing, live broker writes are pinned to a verified gateway session and hard-block agent origins daemon-side, and a runtime freeze switch (`trading.freeze`) blocks new broker writes instantly. Do not describe any published variant as an automated trading system: order writes are preview-backed, journaled, and human-gated on live accounts.
 
 ## Who It Is For
 
@@ -113,6 +113,14 @@ Important tools:
 - `ibkr_gamma`: SPY and SPX dealer gamma context with zero-gamma estimates and cache provenance.
 - `ibkr_canary`: portfolio stress-check tool that combines account, positions, market, and regime context into a watch/warn/critical status.
 - `ibkr_size`: fixed-fractional position sizing from entry, stop, account equity, and configured risk rules.
+- `ibkr_scan_params`: scanner catalog discovery — every gateway-supported scan code, location code, and instrument type for composing ad-hoc scans.
+- `ibkr_market_events`: observed market-event flags for held or requested symbols — borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts.
+- `ibkr_proposals`: read daemon-owned protection proposals (trailing stops, theta hygiene, risk reduction) with per-row blockers; read-only.
+- `ibkr_trading_status`: read-only order-entry readiness — disabled, paper-ready, live-ready, or blocked, with pinned-session evidence and concrete blockers.
+- `ibkr_orders_open`: read-only open-order lifecycle state for the connected broker account and mode.
+- `ibkr_order_status`: read-only lifecycle and audit events for one locally journaled order.
+- `ibkr_order_preview`: draft a locally gated order and mint a short-lived local preview token; cannot place, modify, cancel, or transmit a broker order.
+- `ibkr_settings`: read platform settings and observed state — feature enablement, trading mode/account/build capability, safety limits; cannot change settings.
 
 See the canonical tool schema and parameter descriptions at https://osauer.dev/ibkr/reference/mcp-tools.html.
 
@@ -138,9 +146,9 @@ Good user requests for `ibkr`:
 
 Bad or out-of-bound descriptions:
 
-- Do not say `ibkr` places trades.
-- Do not say `ibkr` modifies or cancels orders.
-- Do not say Claude receives order authority through the published MCP server.
+- Do not say the read-only downloads or the MCP server place, modify, or cancel orders.
+- Do not say Claude receives order authority through the published MCP server; its tool surface is preview-only in every variant.
+- Do not describe the `ibkr-trading` variant as autonomous trading on live accounts: live agent-origin writes are blocked daemon-side and live order entry requires a human-confirmed paired session.
 - Do not imply broker credentials are sent to a remote SaaS service; the published workflows use a local TWS or IB Gateway session.
 
 ## Search Phrases

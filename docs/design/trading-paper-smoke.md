@@ -78,7 +78,7 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 | Paper-smoke evidence | daemon `trading.paper_smoke` run (place→ack→cancel→confirm observed in-daemon) | `trading-readiness.json` v1: `paper_smoke{…}` + new `mac` | `ibkr trading status` (`PaperSmoke*` fields), live blockers | missing/stale/mismatch → live blocked (unchanged) |
 | Evidence integrity | HMAC-SHA256 with the order-token key (`order-preview-key`), domain-separated prefix `ibkr-paper-smoke-v1\|` | `paper_smoke.mac` (base64url) | new status `unsigned`, blocker `paper_smoke_unsigned` | missing/invalid MAC → live blocked; hand-written JSON era ends |
 | Smoke invocation origin | invoking adapter (CLI `DetectWriteOrigin`) | `origin` on `TradingPaperSmokeParams` | refusal error text | non-human origin → refused daemon-side (no override) |
-| Live human confirmation (SPA) | typed input in the PWA, verbatim `live/<account>` | `live_confirmation` on proposals-submit / order-modify / purge HTTP bodies → rpc params | SPA prompt; daemon blocker `live_confirmation_required` | absent/mismatched phrase → live write refused |
+| Live human confirmation (SPA) — **removed in v1.10.0** | ~~typed input in the PWA, verbatim `live/<account>`~~ the typed phrase, `live_confirmation` field, and `live_confirmation_required` blocker were removed end-to-end in v1.10.0; the app HTTP layer now rejects the field as an unknown field on every broker-write route | server-validated `confirm_account`/`confirm_mode` on every HTTP write (unchanged) | single-click after preview; purge keeps its typed confirm | mismatched confirm fields → write refused |
 | Smoke order lifecycle | broker callbacks via order journal read model | `SendState=broker_acknowledged`, `LifecycleStatus ∈ {pre_submitted, submitted}` then `cancelled` | result fields `ack_lifecycle_status`, `cancel_lifecycle_status` | timeout → `result=failed` evidence (fail closed) |
 
 ## Mechanism
@@ -175,6 +175,14 @@ never relays lifecycle claims — otherwise evidence would trust the client):
 
 ### SPA / HTTP live confirmation
 
+> **Removed in v1.10.0.** The typed `live/<account>` phrase, the
+> `live_confirmation` request field, and the `live_confirmation_required`
+> blocker were removed end-to-end; the app HTTP layer strict-decodes every
+> broker-write body and rejects the field as unknown. Server-validated
+> `confirm_account`/`confirm_mode` and the daemon-side agent-origin block
+> remain. The bullets below describe the v1.9.0 mechanism for historical
+> context only.
+
 - HTTP: `orderModifyRequest` and `purgeActionRequest` gain
   `live_confirmation` mapped onto the rpc params (proposals submit already
   embeds `rpc.TradeProposalSubmitParams`, which has the field). Origin stays
@@ -237,7 +245,7 @@ completion message.
   - signer: sign/verify round-trip, tamper detection, domain separation.
   - `CheckPaperSmoke`: unsigned/forged/legacy-v1-file → `unsigned` blocker.
   - CLI: render + exit codes; catalog/docs.
-  - SPA: `app_compat_test.go` live-confirmation contracts.
+  - SPA: `app_compat_test.go` broker-write confirmation contracts (the typed live-confirmation flow was removed in v1.10.0).
 - Generated docs needed: yes (`make docs-regen` — new subcommand, new env
   none, config unchanged).
 - Static gate: `make check`. Tests: `make test` (incl. `-tags trading` leg).

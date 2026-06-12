@@ -9,10 +9,12 @@
 #   1. No HTML files at the repo root — real pages live under docs/ or
 #      web/; root HTML is a scratch page by definition here.
 #   2. No scratch-page names anywhere (*lab*.html, *scratch*).
-#   3. No IBKR account IDs (U / DU followed by 6-9 digits) outside Go
-#      files. Go code under internal/ and test/ legitimately references
-#      the DU7654321 paper account, so *.go is out of scope; the
-#      documentation placeholders U1234567 / DU1234567 are allowlisted.
+#   3. No IBKR account IDs (U / DU followed by 6-9 digits) anywhere,
+#      Go files included — the 2026-06-11 follow-up incident put the live
+#      U-account ID in two Go test files while *.go was still excluded
+#      here. Only the documentation/test placeholders (U1234567-style
+#      dummies) and the DU7654321 paper account (committed by deliberate
+#      policy) are allowlisted.
 set -eu
 
 # Byte-wise grep: the locale-aware path is ~5x slower over the docs tree.
@@ -46,18 +48,19 @@ if [ -n "$scratch" ]; then
   status=1
 fi
 
-# 3) Account IDs in non-Go files. git grep scans staged blob contents
-#    (multithreaded, ~3x faster than xargs grep over the worktree here).
-#    Boundary classes instead of \b for BSD/GNU regex portability; the
-#    trailing class rejects longer digit runs.
+# 3) Account IDs anywhere in the index. git grep scans staged blob
+#    contents (multithreaded, ~3x faster than xargs grep over the worktree
+#    here). Boundary classes instead of \b for BSD/GNU regex portability;
+#    the trailing class rejects longer digit runs.
 id_re='(^|[^[:alnum:]_])D?U[0-9]{6,9}([^[:alnum:]]|$)'
-candidates=$(git grep --cached -lIE "$id_re" -- ':!*.go' ":!$self" || true)
+allow_re='D?U1234567|D?U7654321|DU123456|DU0000000|DU7654321'
+candidates=$(git grep --cached -lIE "$id_re" -- ":!$self" || true)
 for f in $candidates; do
   ids=$(git grep --cached -hoIE "$id_re" -- "$f" | grep -oE 'D?U[0-9]{6,9}' |
-    grep -vxE 'D?U1234567' | sort -u || true)
+    grep -vxE "$allow_re" | sort -u || true)
   if [ -n "$ids" ]; then
     echo "check-no-account-data: $f contains IBKR account ID(s): $(printf '%s ' $ids)" >&2
-    echo "                       real IDs must never be committed; docs use the U1234567 / DU1234567 placeholders" >&2
+    echo "                       real IDs must never be committed; use the U1234567 / DU1234567 placeholders" >&2
     status=1
   fi
 done

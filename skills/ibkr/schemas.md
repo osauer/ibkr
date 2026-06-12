@@ -2335,7 +2335,7 @@ read-only cells or how to change them.
     "mcp_trading": {"value": "preview-only", "access": "read", "source": "config",
                     "reason": "set [trading].mcp_* in config.toml"},
     "live_override": {"value": "blocked", "access": "read", "source": "config",
-                      "reason": "set live acknowledgements in config.toml"},
+                      "reason": "computed from [trading].mode and active blockers; \"ready\" only on an unblocked live route"},
     "build_writes_available": {"value": true, "access": "read", "source": "build",
                                "reason": "controlled by the ibkr build"},
     "limits": {
