@@ -14,6 +14,20 @@ type BrokerWriteConfirmation struct {
 }
 
 func (h *handler) requireBrokerWriteConfirmation(ctx context.Context, req BrokerWriteConfirmation) (*rpc.TradingStatus, error) {
+	return h.requireBrokerConfirmation(ctx, req, true)
+}
+
+// requireBrokerCancelConfirmation validates the same confirm_account /
+// confirm_mode affirmation as requireBrokerWriteConfirmation but does not
+// require CanWrite: a runtime trading freeze must never strand an open order
+// that needs cancelling. Write-policy authorization stays daemon-side, where
+// the cancel path strips only the freeze blocker (forCancel) and every other
+// blocker still rejects.
+func (h *handler) requireBrokerCancelConfirmation(ctx context.Context, req BrokerWriteConfirmation) (*rpc.TradingStatus, error) {
+	return h.requireBrokerConfirmation(ctx, req, false)
+}
+
+func (h *handler) requireBrokerConfirmation(ctx context.Context, req BrokerWriteConfirmation, requireCanWrite bool) (*rpc.TradingStatus, error) {
 	status, err := h.deps.Daemon.TradingStatus(ctx)
 	if err != nil {
 		return nil, err
@@ -21,7 +35,7 @@ func (h *handler) requireBrokerWriteConfirmation(ctx context.Context, req Broker
 	if status.Mode == config.TradingModeDisabled {
 		return nil, &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "trading is disabled"}
 	}
-	if !status.CanWrite {
+	if requireCanWrite && !status.CanWrite {
 		return nil, &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "broker writes are not enabled by trading.status"}
 	}
 	if strings.TrimSpace(status.Account) == "" || strings.TrimSpace(status.Mode) == "" {

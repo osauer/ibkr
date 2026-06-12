@@ -1,7 +1,6 @@
 package apphttp
 
 import (
-	"encoding/json"
 	"errors"
 	nethttp "net/http"
 
@@ -28,8 +27,8 @@ func (h *handler) handleProposalsRefresh(w nethttp.ResponseWriter, r *nethttp.Re
 
 func (h *handler) handleProposalsPreview(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req rpc.TradeProposalPreviewParams
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "invalid JSON")
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 	res, err := h.deps.Daemon.TradeProposalsPreview(r.Context(), req)
@@ -45,8 +44,8 @@ func (h *handler) handleProposalsSubmit(w nethttp.ResponseWriter, r *nethttp.Req
 		rpc.TradeProposalSubmitParams
 		BrokerWriteConfirmation
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "invalid JSON")
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
@@ -75,8 +74,8 @@ func writeBrokerWriteConfirmationError(w nethttp.ResponseWriter, err error) {
 
 func (h *handler) handleProposalsIgnore(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req rpc.TradeProposalIgnoreParams
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "invalid JSON")
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 	res, err := h.deps.Daemon.TradeProposalsIgnore(r.Context(), req)

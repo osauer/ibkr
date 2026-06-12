@@ -57,7 +57,7 @@ func (h *handler) handleOrderCancel(w nethttp.ResponseWriter, r *nethttp.Request
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
+	if _, err := h.requireBrokerCancelConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
 		writeBrokerWriteConfirmationError(w, err)
 		return
 	}
