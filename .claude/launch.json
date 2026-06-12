@@ -6,6 +6,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "4173", "--directory", "docs"],
       "port": 4173
+    },
+    {
+      "name": "canary-app",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [".claude/preview-canary-app.sh"],
+      "port": 8766,
+      "autoPort": true
     }
   ]
 }

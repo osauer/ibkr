@@ -1814,7 +1814,10 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
 }
 
 function renderProtectionTimestamp(proposals = {}) {
-  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes: 15 });
+  // Proposal refresh cadence is 15m daemon-side ([auto_trade].proposal_cadence);
+  // a 15m badge threshold brushed "stale" in healthy operation, so allow one
+  // full cycle plus grace before flagging.
+  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes: 20 });
 }
 
 function protectionReason(proposals = {}, autoTrade = {}) {
