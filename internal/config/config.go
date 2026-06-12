@@ -120,9 +120,9 @@ type Daemon struct {
 type Trading struct {
 	// Mode selects the local order-entry state: "disabled" (default), "paper", or "live".
 	Mode string `toml:"mode"`
-	// MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency.
+	// MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency.
 	MaxNotional float64 `toml:"max_notional"`
-	// MaxOptionContracts caps first-release single-leg option quantity; default 5.
+	// MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5.
 	MaxOptionContracts int `toml:"max_option_contracts"`
 	// AllowStockShort permits stock short/opening flip previews when true. Default false.
 	AllowStockShort bool `toml:"allow_stock_short"`

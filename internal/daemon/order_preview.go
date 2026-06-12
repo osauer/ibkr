@@ -269,7 +269,16 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if p.Quantity <= 0 {
 		return nil, errBadRequest("quantity must be positive")
 	}
-	if contract.SecType == "OPT" && p.Quantity > cfg.MaxOptionContracts {
+	// Position impact resolves before the size caps because the caps are
+	// intent-aware: they bind risk-increasing orders only. A failed
+	// position read fails the preview right here, so the exemption below
+	// never runs on unknown intent (fail closed).
+	position, err := s.fetchPreviewPositionImpact(ctx, contract, action, p.Quantity)
+	if err != nil {
+		return nil, err
+	}
+	riskReducing := isRiskReducing(position.Effect)
+	if !riskReducing && contract.SecType == "OPT" && p.Quantity > cfg.MaxOptionContracts {
 		return nil, errBadRequest(fmt.Sprintf("option quantity %d exceeds [trading].max_option_contracts %d", p.Quantity, cfg.MaxOptionContracts))
 	}
 	orderType := strings.ToUpper(strings.TrimSpace(p.OrderType))
@@ -302,12 +311,8 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		return nil, err
 	}
 	notional := float64(p.Quantity) * notionalPrice * float64(contractMultiplier(contract))
-	if notional > cfg.MaxNotional {
+	if !riskReducing && notional > cfg.MaxNotional {
 		return nil, errBadRequest(fmt.Sprintf("order notional %.2f exceeds [trading].max_notional %.2f", notional, cfg.MaxNotional))
-	}
-	position, err := s.fetchPreviewPositionImpact(ctx, contract, action, p.Quantity)
-	if err != nil {
-		return nil, err
 	}
 	switch {
 	case contract.SecType == "STK" && stockShortOrFlip(position.Effect) && !cfg.AllowStockShort:
@@ -413,6 +418,13 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	tokenMinted := token != "" && tokenID != ""
 	submitEligible := tokenMinted && whatIf.Status == rpc.OrderWhatIfStatusAccepted && !whatIf.RequiredForSubmit
 
+	maxNotional := cfg.MaxNotional
+	if riskReducing {
+		// A reduce-only preview was not checked against the cap; echoing
+		// the configured value would claim a gate that did not bind.
+		// omitempty drops the zero from the wire result.
+		maxNotional = 0
+	}
 	return &rpc.OrderPreviewResult{
 		PreviewToken:          token,
 		PreviewTokenID:        tokenID,
@@ -429,7 +441,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Quote:                 quote,
 		Position:              position,
 		Notional:              notional,
-		MaxNotional:           cfg.MaxNotional,
+		MaxNotional:           maxNotional,
 		WhatIf:                whatIf,
 		Warnings:              warnings,
 		AsOf:                  now,
@@ -1195,6 +1207,17 @@ func classifyPositionEffect(before, after float64) string {
 
 func stockShortOrFlip(effect string) bool {
 	return effect == rpc.OrderPositionEffectFlip || effect == rpc.OrderPositionEffectOpenShort
+}
+
+// isRiskReducing reports whether the previewed order only closes or reduces
+// existing exposure. The [trading].max_notional and max_option_contracts caps
+// bind risk-increasing orders only: a close/reduce order is bounded by the
+// position itself, and capping it would block the daemon's own protection
+// proposals (e.g. a full-position protective trail above the notional cap).
+// Flip is deliberately not in the allowlist — its through-zero portion opens
+// new exposure — so flips and every unrecognized effect stay capped.
+func isRiskReducing(effect string) bool {
+	return effect == rpc.OrderPositionEffectClose || effect == rpc.OrderPositionEffectReduce
 }
 
 func optionSellToOpen(action, effect string) bool {
