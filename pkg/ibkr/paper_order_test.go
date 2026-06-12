@@ -2,7 +2,6 @@ package ibkr
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"strconv"
 	"strings"
@@ -66,7 +65,7 @@ func TestCancelPaperOrderModernServerSendsProtobufCancel(t *testing.T) {
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	err := conn.CancelPaperOrder(PaperOrderGate{
@@ -108,7 +107,7 @@ func TestCancelPaperOrderLegacyV202OmitsDeprecatedVersionField(t *testing.T) {
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	err := conn.CancelPaperOrder(PaperOrderGate{

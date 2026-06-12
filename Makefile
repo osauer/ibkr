@@ -400,14 +400,18 @@ fmt: ## Apply gofmt -w to every tracked / non-gitignored .go file
 # gateway path is covered by test/integration. Timeout sized for CI's
 # slower runners — local runs typically finish in <30s.
 #
+# -race is on: this layer carries the wire-path goroutines (rate-limiter
+# dispatch, msg-204 notice recovery, slot accounting) and was the last
+# package family without race coverage.
+#
 # Hermetic suites run WITHOUT -count=1 so Go's content-addressed test
 # cache applies: unchanged packages report cached passes in ~0s and only
 # edited packages re-run. The cache only ever serves passes for identical
 # inputs, so nothing green is taken on faith — a flake reruns on any
 # input change. test/integration keeps -count=1 below because gateway
 # state is invisible to the cache key.
-test-pkg: ## Run pkg/ibkr/... tests (TWS protocol library; cached when unchanged)
-	go test -timeout=180s ./pkg/ibkr/...
+test-pkg: ## Run pkg/ibkr/... tests under -race (TWS protocol library; cached when unchanged)
+	go test -race -timeout=180s ./pkg/ibkr/...
 
 # Daemon + CLI integration tests. -race is on for the daemon path because
 # this layer carries the goroutines (subscriptions, idle timer, signal
