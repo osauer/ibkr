@@ -13,7 +13,10 @@ other), not just one tool.
 
 Use read-only subagents for exploration/review, then keep implementation
 writes in the main session unless the user explicitly asks for parallel
-implementation.
+implementation. Standing carve-out: once fix batches are reviewed and
+independent, dispatch them to fresh-context worktree agents instead of
+grinding them through a large main context — base worktrees on local main,
+not origin/main.
 
 Trading safety: paper-account broker writes are open to agents; live writes
 are hard-blocked daemon-side by origin checks, and the trading freeze switch
@@ -43,12 +46,28 @@ The repo has a project `.codex` layer with hooks, rules, and custom agents.
 When those files change, inspect/trust hooks with `/hooks` in the next Codex
 session so broker-adjacent guardrails actually run.
 
+## Session hygiene
+Binding defaults for long sessions; rationale and measured numbers in
+`docs/guides/agent-session-hygiene.md`.
+- Compact or hand off at phase boundaries (explore → implement → verify)
+  once context is large; never carry a fat context across a topic pivot or
+  a multi-hour pause. Handoff notes restate guardrail state: gateway pins,
+  freeze status, committed vs in-flight work.
+- Batch independent one-liner probes into one call; read files by range,
+  not wholesale; after changing a file via shell, re-read the target hunk
+  before using the Edit tool on it.
+- Waits are backgrounded until-loops or Monitor conditions, never
+  foreground sleeps or repeated polls from a large context.
+- `make test` already runs `check` first — run it alone, backgrounded or
+  teed to a file, never as a foreground pipe (the 600s tool cap kills the
+  run and loses its output).
+
 ## Done means
 `make check` plus the right smoke tier pass, and the relevant `ibkr` output is pasted in the completion message — that output is the artifact.
 
 Smoke tiers: `make smoke-fast` (~15s: boot + quote + account against a real gateway) is the default per-change gate. The full `make smoke` (chain/regime/gamma/SPX wire matrix) is binding when you touched daemon, CLI, or wire-path code — and always at release. Both tiers serialize against other sessions via `scripts/with-gateway-lock.sh`, so a busy gateway means a short wait, not a 326 flake.
 
-`make check` is the static gate — no gateway needed; it bundles the format/vet/lint/vuln/docs/changelog/account-data checks. The Makefile (`make help`) is the canonical list, not this file. Hermetic test suites use Go's test cache (only edited packages re-run); govulncheck skips when deps are unchanged and already scanned today. Both run in full on the release path.
+`make check` is the static gate — no gateway needed; it bundles the format/vet/lint/vuln/docs/changelog/account-data checks. The Makefile (`make help`) is the canonical list, not this file. Hermetic test suites use Go's test cache (only edited packages re-run); govulncheck skips when deps are unchanged and already scanned today (`make govuln-prewarm-install` schedules the daily cold scan at 06:00, outside the dev loop). Both run in full on the release path.
 
 After editing daemon/CLI code, refresh the installed daemon with `make restart-daemon` — it skips the bounce when the binary is byte-identical and the daemon is running (FORCE=1 bounces anyway), then run `ibkr status` plus a command exercising your change. Do not use `pkill` for normal restarts; reserve it only for a broken/stuck daemon when `ibkr restart` cannot stop it. `make smoke` uses an isolated daemon — it doesn't refresh the one you run.
 
