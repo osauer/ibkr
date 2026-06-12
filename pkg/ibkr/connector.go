@@ -87,9 +87,11 @@ type Connector struct {
 	absenceNow    func() time.Time
 
 	// acctUpdatesMu guards the account-updates resubscribe throttle (see
-	// maybeResubscribeAccountUpdates).
+	// maybeResubscribeAccountUpdates). acctUpdatesNow is a test seam, nil
+	// meaning time.Now (same pattern as absenceNow).
 	acctUpdatesMu     sync.Mutex
 	acctUpdatesLastAt time.Time
+	acctUpdatesNow    func() time.Time
 
 	// Option IV tracking (by underlying symbol or per-contract key)
 	optMu           sync.RWMutex
@@ -3088,10 +3090,22 @@ func (c *Connector) RequestAccountUpdates(account string) error {
 	if !accountCodeConcrete(account) {
 		account = firstConcreteAccountCode(account)
 	}
+	now := c.acctUpdatesClock()
 	c.acctUpdatesMu.Lock()
-	c.acctUpdatesLastAt = time.Now()
+	c.acctUpdatesLastAt = now
 	c.acctUpdatesMu.Unlock()
 	return c.conn.RequestAccountUpdates(account)
+}
+
+// acctUpdatesResubscribeThrottle bounds the dead-stream self-heal below to
+// one resubscribe attempt per window, counted from the last subscribe.
+const acctUpdatesResubscribeThrottle = 30 * time.Second
+
+func (c *Connector) acctUpdatesClock() time.Time {
+	if c.acctUpdatesNow != nil {
+		return c.acctUpdatesNow()
+	}
+	return time.Now()
 }
 
 // maybeResubscribeAccountUpdates re-issues the account+portfolio stream
@@ -3100,9 +3114,9 @@ func (c *Connector) RequestAccountUpdates(account string) error {
 // occasionally fails to start after a rapid reconnect (observed
 // 2026-06-11: one boot delivered no msgPortfolioValue at all while
 // quotes and account summary flowed normally — positions stayed empty
-// for the whole daemon lifetime). Throttled to one attempt per 30 s,
-// counted from the last subscribe; a genuinely flat account (no gross
-// position value) never triggers.
+// for the whole daemon lifetime). Throttled to one attempt per
+// acctUpdatesResubscribeThrottle window, counted from the last subscribe;
+// a genuinely flat account (no gross position value) never triggers.
 func (c *Connector) maybeResubscribeAccountUpdates() {
 	if !c.isConnected() {
 		return
@@ -3110,8 +3124,9 @@ func (c *Connector) maybeResubscribeAccountUpdates() {
 	if !accountSummaryShowsPositions(c.conn.GetAccountSummary()) {
 		return
 	}
+	now := c.acctUpdatesClock()
 	c.acctUpdatesMu.Lock()
-	stale := time.Since(c.acctUpdatesLastAt) >= 30*time.Second
+	stale := now.Sub(c.acctUpdatesLastAt) >= acctUpdatesResubscribeThrottle
 	c.acctUpdatesMu.Unlock()
 	if !stale {
 		return
