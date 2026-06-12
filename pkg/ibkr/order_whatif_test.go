@@ -21,7 +21,7 @@ func TestPreviewOrderWhatIfSendsBrokerWhatIfAndWaitsForOpenOrder(t *testing.T) {
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
 	conn.nextOrderID = 77
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -91,7 +91,7 @@ func TestPreviewOrderWhatIfModernServerSendsProtobufWhatIfAndWaitsForOpenOrder(t
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
 	conn.nextOrderID = 77
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -220,7 +220,7 @@ func TestConnectorPreviewOrderWhatIfBindsRawOrderAccountAndClientID(t *testing.T
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
 	conn.nextOrderID = 88
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	c := NewConnector(&ConnectorConfig{BaseConfig: cfg})
@@ -440,7 +440,7 @@ func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
 	conn.nextOrderID = 88
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -486,7 +486,7 @@ func TestPreviewOrderWhatIfRejectsBrokerSystemNotice(t *testing.T) {
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
 	conn.nextOrderID = 91
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -561,7 +561,7 @@ func TestEncodePlaceOrderProtoRejectsUnsupportedPopulatedOrderField(t *testing.T
 	}
 }
 
-func waitForWhatIfFrame(t *testing.T, buf *bytes.Buffer) {
+func waitForWhatIfFrame(t *testing.T, buf *safeBuffer) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -573,7 +573,7 @@ func waitForWhatIfFrame(t *testing.T, buf *bytes.Buffer) {
 	t.Fatal("timed out waiting for outbound whatIf frame")
 }
 
-func extractWhatIfPayloadFields(t *testing.T, buf *bytes.Buffer) []string {
+func extractWhatIfPayloadFields(t *testing.T, buf *safeBuffer) []string {
 	t.Helper()
 	payload := extractFramePayload(t, buf)
 	fields := make([]string, 0, 32)
@@ -592,7 +592,7 @@ func extractWhatIfPayloadFields(t *testing.T, buf *bytes.Buffer) []string {
 	return fields
 }
 
-func extractFramePayload(t *testing.T, buf *bytes.Buffer) []byte {
+func extractFramePayload(t *testing.T, buf *safeBuffer) []byte {
 	t.Helper()
 	data := buf.Bytes()
 	if len(data) < 4 {
