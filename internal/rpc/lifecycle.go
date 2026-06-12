@@ -44,19 +44,37 @@ const (
 // Evidence preserves weak/unconfirmed inputs without letting them dominate the
 // trigger.
 type LifecycleState struct {
-	Stage        string              `json:"stage,omitempty"`
-	Scope        string              `json:"scope,omitempty"`
-	Severity     string              `json:"severity,omitempty"`
-	Readiness    string              `json:"readiness,omitempty"`
-	Timing       string              `json:"timing,omitempty"`
-	Confidence   string              `json:"confidence,omitempty"`
-	Evidence     []LifecycleEvidence `json:"evidence,omitempty"`
-	ConfirmedBy  []string            `json:"confirmed_by,omitempty"`
-	Unconfirmed  []string            `json:"unconfirmed,omitempty"`
-	Suppressed   []string            `json:"suppressed,omitempty"`
-	RejectedBy   []string            `json:"rejected_by,omitempty"`
-	Fingerprint  Fingerprint         `json:"fingerprint,omitzero"`
-	NotExecution string              `json:"not_execution,omitempty"`
+	Stage       string              `json:"stage,omitempty"`
+	Scope       string              `json:"scope,omitempty"`
+	Severity    string              `json:"severity,omitempty"`
+	Readiness   string              `json:"readiness,omitempty"`
+	Timing      string              `json:"timing,omitempty"`
+	Confidence  string              `json:"confidence,omitempty"`
+	Evidence    []LifecycleEvidence `json:"evidence,omitempty"`
+	ConfirmedBy []string            `json:"confirmed_by,omitempty"`
+	Unconfirmed []string            `json:"unconfirmed,omitempty"`
+	Suppressed  []string            `json:"suppressed,omitempty"`
+	RejectedBy  []string            `json:"rejected_by,omitempty"`
+	// Governors discloses every policy downgrade applied after stage
+	// selection (provenance gate, evidence-keyed quality cap). Nothing is
+	// silently weakened: when severity reads lower than the stage suggests,
+	// this is where the reason lives.
+	Governors    []GovernorAction `json:"governors,omitempty"`
+	Fingerprint  Fingerprint      `json:"fingerprint,omitzero"`
+	NotExecution string           `json:"not_execution,omitempty"`
+}
+
+// GovernorAction is one disclosed policy downgrade. Reasons are stable
+// tokens: "pending_backtest_no_tape_cosign" (heuristic threshold sets
+// confirmed the stage but no fresh tape co-signature was present) and
+// "confirming_cluster_quality" (a confirming cluster's data quality is
+// stale/partial/degraded).
+type GovernorAction struct {
+	Action   string   `json:"action"`
+	From     string   `json:"from,omitempty"`
+	To       string   `json:"to,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+	Clusters []string `json:"clusters,omitempty"`
 }
 
 type LifecycleEvidence struct {
@@ -86,19 +104,28 @@ type SourceHealth struct {
 // BuildRegimeLifecycle classifies broad-market-only regime evidence into the
 // stress lifecycle used by downstream orchestration. It does not look at
 // account, position, margin, or execution state.
+//
+// Confirmation policy (docs/design/regime-calibration.md): only ELIGIBLE
+// reds — deep, persistent, cadence-fresh evidence per the shared gates —
+// count toward confirmed_stress/panic and confirmed_by. Provisional reds
+// stay visible, land in unconfirmed, and drive early_warning only. A
+// severity governor then applies the provenance gate (heuristic
+// pending_backtest evidence without a tape co-signature is capped one rung
+// down) and the evidence-keyed quality cap, disclosing every downgrade in
+// Governors.
 func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if r == nil {
 		return LifecycleState{Stage: LifecycleDataQuality, Scope: "market", Severity: "watch", Readiness: "blocked", Timing: LifecycleTimingDataQuality, Confidence: "low"}
 	}
-	c := r.Composite
-	raw, confirmed := regimeLifecycleClusterBands(*r)
-	confirmedNames := regimeLifecycleClusterNames(confirmed, "red")
-	yellowNames := regimeLifecycleClusterNames(confirmed, "yellow")
-	unconfirmed := regimeUnconfirmedRedClusters(raw, confirmed)
-	evidence := regimeLifecycleEvidence(raw, confirmed, *r)
+	cb := BuildRegimeClusterBands(r)
+	tally := tallyRegimeClusters(cb)
+	confirmedNames := regimeEligibleRedNames(cb)
+	yellowNames := regimeClusterNamesWithBand(cb.Confirmed, "yellow")
+	unconfirmed := regimeProvisionalRedNames(cb)
+	evidence := regimeLifecycleEvidence(cb, *r)
 	confidence := r.Summary.Confidence
 	if strings.TrimSpace(confidence) == "" {
-		confidence = regimeLifecycleConfidence(c)
+		confidence = regimeLifecycleConfidence(tally)
 	}
 	state := LifecycleState{
 		Scope:        "market",
@@ -111,28 +138,28 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 		NotExecution: "Regime read only; no orders are placed by ibkr.",
 	}
 	switch {
-	case c.ClusterRankedCount < 3:
+	case tally.ranked < RegimeVerdictFloor:
 		state.Stage = LifecycleDataQuality
 		state.Severity = "watch"
 		state.Readiness = "blocked"
 		state.Timing = LifecycleTimingDataQuality
-	case regimeLifecyclePanic(*r, c):
+	case regimeLifecyclePanic(*r, tally):
 		state.Stage = LifecyclePanic
 		state.Severity = "urgent"
 		state.Timing = LifecycleTimingContemporary
-	case regimeLifecycleConfirmedStress(*r, c):
+	case regimeLifecycleConfirmedStress(*r, tally):
 		state.Stage = LifecycleConfirmedStress
 		state.Severity = "act"
 		state.Timing = LifecycleTimingContemporary
-	case regimeLifecycleEarlyWarning(*r, c, unconfirmed):
+	case regimeLifecycleEarlyWarning(*r, tally, unconfirmed):
 		state.Stage = LifecycleEarlyWarning
 		state.Severity = "watch"
 		state.Timing = LifecycleTimingForwardWarning
-	case regimeLifecycleOpportunity(*r, c):
+	case regimeLifecycleOpportunity(*r, tally):
 		state.Stage = LifecycleOpportunity
 		state.Severity = "watch"
 		state.Timing = LifecycleTimingRecovery
-	case regimeLifecycleStabilization(*r, c):
+	case regimeLifecycleStabilization(*r, tally):
 		state.Stage = LifecycleStabilization
 		state.Severity = "observe"
 		state.Timing = LifecycleTimingRecovery
@@ -153,8 +180,204 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 		state.Readiness = "degraded"
 		state.Confidence = capLifecycleConfidence(state.Confidence)
 	}
+	applyRegimeSeverityGovernor(&state, r, tally)
 	state.Fingerprint = lifecycleFingerprint(state)
 	return state
+}
+
+// regimeClusterTally is the lifecycle's working view of the combined cluster
+// bands. red/yellow/green count CONFIRMED bands; eligibleRed and
+// provisionalRed split the raw reds by confirmation eligibility.
+type regimeClusterTally struct {
+	ranked         int
+	green          int
+	yellow         int
+	red            int
+	unranked       int
+	eligibleRed    int
+	provisionalRed int
+}
+
+func tallyRegimeClusters(cb RegimeClusterBands) regimeClusterTally {
+	t := regimeClusterTally{
+		eligibleRed:    cb.EligibleRedCount(),
+		provisionalRed: cb.ProvisionalRedCount(),
+	}
+	for _, band := range cb.Confirmed {
+		switch band {
+		case "green":
+			t.green++
+			t.ranked++
+		case "yellow":
+			t.yellow++
+			t.ranked++
+		case "red":
+			t.red++
+			t.ranked++
+		default:
+			t.unranked++
+		}
+	}
+	return t
+}
+
+// applyRegimeSeverityGovernor applies, in order, the provenance gate and the
+// evidence-keyed quality cap. Pure-tape panic (SPY ≤ −4% / −7%) is exempt
+// from both — the tape is its own co-signature and its own evidence quality.
+func applyRegimeSeverityGovernor(state *LifecycleState, r *RegimeSnapshotResult, tally regimeClusterTally) {
+	if state.Stage != LifecycleConfirmedStress && state.Stage != LifecyclePanic {
+		return
+	}
+	tapePanic := state.Stage == LifecyclePanic && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0)
+	pending := regimePendingBacktestClusters(r, state.ConfirmedBy)
+	if len(pending) > 0 && !tapePanic && !regimeTapeCosign(r) {
+		from := state.Severity
+		to := from
+		switch state.Stage {
+		case LifecycleConfirmedStress:
+			to = "watch"
+		case LifecyclePanic:
+			to = "act"
+		}
+		if to != from {
+			state.Severity = to
+			state.Governors = append(state.Governors, GovernorAction{
+				Action:   "severity_capped",
+				From:     from,
+				To:       to,
+				Reason:   "pending_backtest_no_tape_cosign",
+				Clusters: pending,
+			})
+		}
+	}
+	impaired := regimeImpairedConfirmingClusters(r, state.ConfirmedBy)
+	if len(impaired) > 0 && !tapePanic && severityRank(state.Severity) > severityRank("watch") {
+		from := state.Severity
+		state.Severity = "watch"
+		state.Governors = append(state.Governors, GovernorAction{
+			Action:   "severity_capped",
+			From:     from,
+			To:       "watch",
+			Reason:   "confirming_cluster_quality",
+			Clusters: impaired,
+		})
+	}
+}
+
+func severityRank(severity string) int {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "urgent":
+		return 3
+	case "act":
+		return 2
+	case "watch":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// regimeTapeCosign reports whether the tape itself corroborates stress in
+// this snapshot: SPY down 1.5%+, VIX up 10%+, or a fresh same-session
+// VIX-term inversion. While threshold sets are pending_backtest, "act"
+// requires one of these as the second witness.
+func regimeTapeCosign(r *RegimeSnapshotResult) bool {
+	if pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) || pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0) {
+		return true
+	}
+	return r.VIXTermStructure.Status == RegimeStatusOK &&
+		r.VIXTermStructure.Ratio != nil && *r.VIXTermStructure.Ratio >= 1.0
+}
+
+// regimePendingBacktestClusters returns the confirming clusters whose red
+// rows classify on threshold sets still flagged pending_backtest. The flag
+// finally becomes load-bearing here: per-set promotion (version-label bump
+// via the backtest plan) relaxes the gate without policy edits.
+func regimePendingBacktestClusters(r *RegimeSnapshotResult, confirmedBy []string) []string {
+	var out []string
+	for _, name := range confirmedBy {
+		for _, meta := range regimeClusterRowMetas(r, name) {
+			if meta.Band == "red" && meta.Thresholds != nil && meta.Thresholds.PendingBacktest {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// regimeImpairedConfirmingClusters returns confirming clusters whose source
+// health is stale/partial/degraded — the evidence-keyed readiness cap.
+// Deliberately scoped to the CONFIRMING clusters: one dead unrelated feed
+// must not mute a fresh multi-cluster confirmation.
+func regimeImpairedConfirmingClusters(r *RegimeSnapshotResult, confirmedBy []string) []string {
+	var out []string
+	for _, name := range confirmedBy {
+		for _, src := range r.SourceHealth {
+			if !strings.EqualFold(src.Source, name) {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(src.Status)) {
+			case SourceStatusStale, SourceStatusDegraded, SourceStatusPartial:
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+// regimeClusterRowMetas maps a cluster wire name to its row metadata.
+func regimeClusterRowMetas(r *RegimeSnapshotResult, cluster string) []RegimeIndicatorMeta {
+	switch cluster {
+	case "vol":
+		return []RegimeIndicatorMeta{r.VIXTermStructure.RegimeIndicatorMeta, r.VolOfVol.RegimeIndicatorMeta}
+	case "credit":
+		return []RegimeIndicatorMeta{r.HYGSPYDivergence.RegimeIndicatorMeta, r.CreditSpreads.RegimeIndicatorMeta}
+	case "funding":
+		return []RegimeIndicatorMeta{r.FundingStress.RegimeIndicatorMeta}
+	case "fx":
+		return []RegimeIndicatorMeta{r.USDJPY.RegimeIndicatorMeta}
+	case "gamma":
+		return []RegimeIndicatorMeta{r.GammaZero.RegimeIndicatorMeta}
+	case "breadth":
+		return []RegimeIndicatorMeta{r.Breadth.RegimeIndicatorMeta}
+	default:
+		return nil
+	}
+}
+
+func regimeEligibleRedNames(cb RegimeClusterBands) []string {
+	var out []string
+	for i, band := range cb.Confirmed {
+		if band == "red" && i < len(cb.Eligible) && cb.Eligible[i] && i < len(RegimeClusterNames) {
+			out = append(out, RegimeClusterNames[i])
+		}
+	}
+	return out
+}
+
+func regimeProvisionalRedNames(cb RegimeClusterBands) []string {
+	var out []string
+	for i, band := range cb.Raw {
+		if band != "red" || i >= len(RegimeClusterNames) {
+			continue
+		}
+		if i < len(cb.Confirmed) && cb.Confirmed[i] == "red" && i < len(cb.Eligible) && cb.Eligible[i] {
+			continue
+		}
+		out = append(out, RegimeClusterNames[i])
+	}
+	return out
+}
+
+func regimeClusterNamesWithBand(bands []string, want string) []string {
+	var out []string
+	for i, band := range bands {
+		if band == want && i < len(RegimeClusterNames) {
+			out = append(out, RegimeClusterNames[i])
+		}
+	}
+	return out
 }
 
 func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
@@ -168,7 +391,7 @@ func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
 			Confidence: "low",
 		}
 	}
-	label := regimePostureLabel(r.Composite)
+	label := RegimeHeadline(r.Composite, r.Lifecycle.Stage)
 	confidence := strings.TrimSpace(r.Lifecycle.Confidence)
 	if confidence == "" {
 		confidence = strings.TrimSpace(r.Summary.Confidence)
@@ -185,42 +408,23 @@ func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
 	}
 }
 
-func regimePostureLabel(c RegimeComposite) string {
-	switch {
-	case c.ClusterRankedCount == 0:
-		return "No usable signal yet"
-	case c.ClusterRankedCount < 3:
-		return "Insufficient signal — too few inputs ready"
-	case c.ClusterUnrankedCount == 0 && c.ClusterRedCount == c.ClusterRankedCount:
-		return "Full risk-off conditions"
-	case c.ClusterRedCount >= 2:
-		return "Broad stress regime"
-	case c.ClusterRedCount >= 1:
-		return "Stress signal present"
-	case c.ClusterYellowCount >= 3:
-		return "Elevated stress watch"
-	default:
-		return "Normal regime"
-	}
-}
-
+// regimePostureTone maps the unified headline + lifecycle stage to a display
+// tone. Stage-aware rows take precedence over the label fallback: a
+// confirmed/panic stage renders stress even when the severity governor has
+// capped the demanded response — deep fresh confirmed evidence earned its
+// color; the governor record explains the withheld severity.
 func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
-	label := strings.TrimSpace(c.Verdict)
-	if label == "" {
-		label = regimePostureLabel(c)
-	}
+	label := RegimeHeadline(c, lifecycle.Stage)
 	if label == "Full risk-off conditions" {
 		return RegimeToneRiskOff
 	}
-	if c.ClusterRankedCount < 3 {
+	if c.ClusterRankedCount < RegimeVerdictFloor {
 		return RegimeToneDataQuality
 	}
 	switch lifecycle.Stage {
 	case LifecycleDataQuality:
 		return RegimeToneDataQuality
-	case LifecyclePanic:
-		return RegimeToneStress
-	case LifecycleConfirmedStress, LifecycleForcedDefense:
+	case LifecyclePanic, LifecycleConfirmedStress, LifecycleForcedDefense:
 		return RegimeToneStress
 	}
 	if regimeLifecycleReadinessDegraded(lifecycle.Readiness) {
@@ -237,11 +441,11 @@ func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
 		return RegimeToneNormal
 	}
 	switch label {
-	case "Broad stress regime":
+	case "Broad stress regime", "Confirmed stress regime":
 		return RegimeToneStress
 	case "Stress signal present", "Elevated stress watch":
 		return RegimeToneWatch
-	case "No usable signal yet", "Insufficient signal — too few inputs ready", "No ranked indicators — see rows below for state":
+	case "No usable signal yet", "Insufficient signal — too few inputs ready":
 		return RegimeToneDataQuality
 	default:
 		return RegimeToneNormal
@@ -278,7 +482,7 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 	if now.IsZero() {
 		now = r.AsOf
 	}
-	_, bands := regimeLifecycleClusterBands(*r)
+	bands := BuildRegimeClusterBands(r).Confirmed
 	volPartial := regimeSourceMissingRequiredFields(r.VIXTermStructure.Status, r.VIXTermStructure.Band, r.VIXTermStructure.FieldsMissing)
 	creditPartial := regimeSourceMissingRequiredFields(r.HYGSPYDivergence.Status, r.HYGSPYDivergence.Band, r.HYGSPYDivergence.FieldsMissing) ||
 		regimeSourceMissingRequiredFields(r.CreditSpreads.Status, r.CreditSpreads.Band, r.CreditSpreads.FieldsMissing)
@@ -306,6 +510,7 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 			Status:               status,
 			AsOf:                 asOf,
 			AgeSeconds:           sourceAgeSeconds(now, asOf),
+			MaxAgeSeconds:        RegimeSourceMaxAgeSeconds(row.name),
 			Confidence:           regimeSourceConfidence(status),
 			FingerprintStability: FingerprintStabilitySemanticBuckets,
 		})
@@ -313,11 +518,45 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 	return out
 }
 
+// RegimeSourceMaxAgeSeconds is the served per-cluster staleness policy for
+// the cluster's weakest-leg as_of: older than this is unambiguously overdue.
+// Wall-clock documentation values sized to each cluster's slowest native
+// cadence (VVIX daily close over a weekend, FRED publication lag, a Friday
+// gamma compute read on Monday pre-open); the binding eligibility gate uses
+// trading-date logic daemon-side. Served so renderers derive their stale
+// badges from the wire instead of hardcoding twins.
+func RegimeSourceMaxAgeSeconds(source string) int64 {
+	const day = int64(24 * 60 * 60)
+	switch source {
+	case "vol":
+		return 4 * day
+	case "credit":
+		return 7 * day
+	case "funding":
+		return 7 * day
+	case "fx":
+		return 4 * day
+	case "gamma":
+		return 3 * day
+	case "breadth":
+		return 4 * day
+	default:
+		return 0
+	}
+}
+
 func BuildLifecycleFingerprint(state LifecycleState) Fingerprint {
 	return lifecycleFingerprint(state)
 }
 
 func lifecycleFingerprint(state LifecycleState) Fingerprint {
+	// Governors enter the projection as action:reason tokens only — never
+	// ages, depths, or other continuous values, which would churn the
+	// fingerprint (and downstream alert dedupe) without a semantic change.
+	governors := make([]string, 0, len(state.Governors))
+	for _, g := range state.Governors {
+		governors = append(governors, strings.ToLower(strings.TrimSpace(g.Action))+":"+strings.ToLower(strings.TrimSpace(g.Reason)))
+	}
 	projection := struct {
 		Scope       string              `json:"scope,omitempty"`
 		Stage       string              `json:"stage,omitempty"`
@@ -330,6 +569,7 @@ func lifecycleFingerprint(state LifecycleState) Fingerprint {
 		Unconfirmed []string            `json:"unconfirmed,omitempty"`
 		Suppressed  []string            `json:"suppressed,omitempty"`
 		RejectedBy  []string            `json:"rejected_by,omitempty"`
+		Governors   []string            `json:"governors,omitempty"`
 	}{
 		Scope:       strings.ToLower(strings.TrimSpace(state.Scope)),
 		Stage:       strings.ToLower(strings.TrimSpace(state.Stage)),
@@ -342,51 +582,62 @@ func lifecycleFingerprint(state LifecycleState) Fingerprint {
 		Unconfirmed: cleanSorted(state.Unconfirmed),
 		Suppressed:  cleanSorted(state.Suppressed),
 		RejectedBy:  cleanSorted(state.RejectedBy),
+		Governors:   cleanSorted(governors),
 	}
-	return semanticFingerprint("lifecycle-fp-v1", projection)
+	// lifecycle-fp-v2: eligibility-aware evidence (Confirmed now means
+	// eligible-confirmed) + governors. The version bump re-fires active
+	// alerts once on upgrade — accepted and changelog-noted.
+	return semanticFingerprint("lifecycle-fp-v2", projection)
 }
 
-func regimeLifecyclePanic(r RegimeSnapshotResult, c RegimeComposite) bool {
-	return c.ClusterRedCount >= 3 ||
-		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && c.ClusterRedCount >= 1) ||
+// regimeLifecyclePanic: three deep/fresh/persistent independent reds, or
+// tape-grade crashes. Eligible reds only — provisional evidence never
+// reaches the panic tally.
+func regimeLifecyclePanic(r RegimeSnapshotResult, t regimeClusterTally) bool {
+	return t.eligibleRed >= 3 ||
+		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.eligibleRed >= 1) ||
 		pctAtMost(r.HYGSPYDivergence.SPYChangePct, -7.0)
 }
 
-func regimeLifecycleConfirmedStress(r RegimeSnapshotResult, c RegimeComposite) bool {
-	return c.ClusterRedCount >= 2 ||
-		(c.ClusterRedCount >= 1 && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -2.5)) ||
-		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && c.ClusterYellowCount >= 2) ||
-		(c.ClusterRedCount >= 1 && pctAtLeast(r.VIXTermStructure.VIXChangePct, 20.0))
+func regimeLifecycleConfirmedStress(r RegimeSnapshotResult, t regimeClusterTally) bool {
+	return t.eligibleRed >= 2 ||
+		(t.eligibleRed >= 1 && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -2.5)) ||
+		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.yellow >= 2) ||
+		(t.eligibleRed >= 1 && pctAtLeast(r.VIXTermStructure.VIXChangePct, 20.0))
 }
 
-func regimeLifecycleEarlyWarning(r RegimeSnapshotResult, c RegimeComposite, unconfirmed []string) bool {
-	return c.ClusterRedCount >= 1 ||
-		c.ClusterYellowCount >= 3 ||
+// regimeLifecycleEarlyWarning is the home of provisional reds: any raw red
+// (eligible or not) warns immediately, even though only eligible reds may
+// confirm.
+func regimeLifecycleEarlyWarning(r RegimeSnapshotResult, t regimeClusterTally, unconfirmed []string) bool {
+	return t.eligibleRed+t.provisionalRed >= 1 ||
+		t.red >= 1 ||
+		t.yellow >= 3 ||
 		len(unconfirmed) > 0 ||
 		pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) ||
 		pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)
 }
 
-func regimeLifecycleOpportunity(r RegimeSnapshotResult, c RegimeComposite) bool {
-	return c.ClusterRedCount == 0 &&
-		c.ClusterYellowCount <= 1 &&
-		c.ClusterRankedCount >= 3 &&
+func regimeLifecycleOpportunity(r RegimeSnapshotResult, t regimeClusterTally) bool {
+	return t.red == 0 &&
+		t.yellow <= 1 &&
+		t.ranked >= 3 &&
 		pctAtLeast(r.HYGSPYDivergence.SPYChangePct, 1.5) &&
 		pctAtMost(r.VIXTermStructure.VIXChangePct, -10.0)
 }
 
-func regimeLifecycleStabilization(r RegimeSnapshotResult, c RegimeComposite) bool {
-	return c.ClusterRedCount == 0 &&
-		c.ClusterYellowCount > 0 &&
-		c.ClusterYellowCount <= 2 &&
+func regimeLifecycleStabilization(r RegimeSnapshotResult, t regimeClusterTally) bool {
+	return t.red == 0 &&
+		t.yellow > 0 &&
+		t.yellow <= 2 &&
 		(pctAtLeast(r.HYGSPYDivergence.SPYChangePct, 1.0) || pctAtMost(r.VIXTermStructure.VIXChangePct, -10.0))
 }
 
-func regimeLifecycleConfidence(c RegimeComposite) string {
+func regimeLifecycleConfidence(t regimeClusterTally) string {
 	switch {
-	case c.ClusterRankedCount < 3:
+	case t.ranked < RegimeVerdictFloor:
 		return "low"
-	case c.ClusterUnrankedCount > 0:
+	case t.unranked > 0:
 		return "medium"
 	default:
 		return "high"
@@ -433,28 +684,6 @@ func capLifecycleConfidence(confidence string) string {
 	}
 }
 
-func regimeLifecycleClusterBands(r RegimeSnapshotResult) ([]string, []string) {
-	raw := []string{
-		strongestLifecycleBand(r.VIXTermStructure.Band, r.VolOfVol.Band),
-		strongestLifecycleBand(r.HYGSPYDivergence.Band, r.CreditSpreads.Band),
-		strongestLifecycleBand(r.FundingStress.Band),
-		strongestLifecycleBand(r.USDJPY.Band),
-		strongestLifecycleBand(rankableLifecycleGammaBand(r.GammaZero)),
-		strongestLifecycleBand(r.Breadth.Band),
-	}
-	out := append([]string(nil), raw...)
-	if r.HYGSPYDivergence.Band == "red" && r.CreditSpreads.Band != "red" && !hasIndependentLifecycleRed(raw, 1) {
-		out[1] = "yellow"
-	}
-	if r.USDJPY.Band == "red" && !hasIndependentLifecycleRed(raw, 3) {
-		out[3] = "yellow"
-	}
-	if out[0] == "red" && !hasIndependentLifecycleRed(out, 0) && !isolatedLifecycleEquityVolConfirmed(r) {
-		out[0] = "yellow"
-	}
-	return raw, out
-}
-
 func rankableLifecycleGammaBand(g RegimeGammaZero) string {
 	if g.Envelope.Result == nil || g.Envelope.Result.Quality == nil ||
 		g.Envelope.Result.Quality.Rankability != GammaRankabilityRankable {
@@ -463,18 +692,22 @@ func rankableLifecycleGammaBand(g RegimeGammaZero) string {
 	return g.Band
 }
 
-func regimeLifecycleEvidence(raw, confirmed []string, r RegimeSnapshotResult) []LifecycleEvidence {
-	names := []string{"vol", "credit", "funding", "fx", "gamma", "breadth"}
-	out := make([]LifecycleEvidence, 0, len(names)+2)
-	for i, name := range names {
-		if i >= len(raw) || raw[i] == "" {
+func regimeLifecycleEvidence(cb RegimeClusterBands, r RegimeSnapshotResult) []LifecycleEvidence {
+	out := make([]LifecycleEvidence, 0, len(RegimeClusterNames)+2)
+	for i, name := range RegimeClusterNames {
+		if i >= len(cb.Raw) || cb.Raw[i] == "" {
 			continue
 		}
-		band := raw[i]
-		confirmedSignal := i < len(confirmed) && confirmed[i] == band && band == "red"
+		band := cb.Raw[i]
+		// Timing honesty: only an ELIGIBLE confirmed red is contemporaneous
+		// act-grade evidence. Provisional reds (marginal depth, short
+		// streak, or overdue data) are forward warnings, never confirmation.
+		confirmedSignal := band == "red" &&
+			i < len(cb.Confirmed) && cb.Confirmed[i] == "red" &&
+			i < len(cb.Eligible) && cb.Eligible[i]
 		timing := LifecycleTimingForwardWarning
 		severity := "watch"
-		if band == "red" && confirmedSignal {
+		if confirmedSignal {
 			timing = LifecycleTimingContemporary
 			severity = "act"
 		}
@@ -533,28 +766,6 @@ func tapeLifecycleEvidence(source string, observed, watch, act float64) Lifecycl
 	return ev
 }
 
-func regimeLifecycleClusterNames(bands []string, want string) []string {
-	names := []string{"vol", "credit", "funding", "fx", "gamma", "breadth"}
-	var out []string
-	for i, band := range bands {
-		if band == want && i < len(names) {
-			out = append(out, names[i])
-		}
-	}
-	return out
-}
-
-func regimeUnconfirmedRedClusters(raw, confirmed []string) []string {
-	names := []string{"vol", "credit", "funding", "fx", "gamma", "breadth"}
-	var out []string
-	for i, band := range raw {
-		if band == "red" && i < len(confirmed) && confirmed[i] != "red" && i < len(names) {
-			out = append(out, names[i])
-		}
-	}
-	return out
-}
-
 func strongestLifecycleBand(bands ...string) string {
 	seenYellow, seenGreen := false, false
 	for _, band := range bands {
@@ -574,15 +785,6 @@ func strongestLifecycleBand(bands ...string) string {
 		return "green"
 	}
 	return ""
-}
-
-func hasIndependentLifecycleRed(bands []string, self int) bool {
-	for i, band := range bands {
-		if i != self && band == "red" {
-			return true
-		}
-	}
-	return false
 }
 
 func isolatedLifecycleEquityVolConfirmed(r RegimeSnapshotResult) bool {

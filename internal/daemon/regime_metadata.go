@@ -16,7 +16,12 @@ const (
 	regimeFreshnessComputing   = "computing"
 )
 
-func annotateRegimeMetadata(r *rpc.RegimeSnapshotResult) {
+// annotateRegimeMetadata attaches the interpretation layer to each row. The
+// band comes from the policy pass (populateStreaks): post-hysteresis, with
+// freshness and confirmation eligibility computed once daemon-side. When a
+// policy entry is absent (direct test callers), the raw classifier output is
+// used — no hysteresis, no eligibility.
+func annotateRegimeMetadata(r *rpc.RegimeSnapshotResult, policies map[string]regimeRowPolicy) {
 	if r == nil {
 		return
 	}
@@ -24,54 +29,109 @@ func annotateRegimeMetadata(r *rpc.RegimeSnapshotResult) {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	band := func(key, raw string) string {
+		if p, ok := policies[key]; ok {
+			return bandOrUnranked(p.band)
+		}
+		return bandOrUnranked(raw)
+	}
+	reason := func(key, raw, text string) string {
+		p, ok := policies[key]
+		if !ok || p.band != "red" || raw == "red" {
+			return text
+		}
+		if p.freshness != nil && p.freshness.Class == rpc.RegimeFreshnessOverdue {
+			return text + " · prior-session band shown for awareness"
+		}
+		return text + " · hysteresis holding red"
+	}
+	policy := func(key string) (*rpc.RegimeEligibility, *rpc.RegimeFreshness) {
+		p, ok := policies[key]
+		if !ok {
+			return nil, nil
+		}
+		return p.eligibility, p.freshness
+	}
 
+	vixRaw := bandForVIX(r.VIXTermStructure)
+	vixElig, vixFresh := policy(StreakKeyVIXTerm)
 	r.VIXTermStructure.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForVIX(r.VIXTermStructure)),
-		BandReason: vixBandReason(r.VIXTermStructure),
-		Thresholds: heuristicThresholds("vix_term_structure_v1", "VIX/VIX3M < 0.92", "0.92 <= VIX/VIX3M < 1.00", "VIX/VIX3M >= 1.00"),
-		AsOf:       gatewayAsOf(now, r.VIXTermStructure.Status, r.VIXTermStructure.DataType, "Cboe VIX and VIX3M via IBKR index market data", r.VIXTermStructure.VIXQuality, r.VIXTermStructure.VIX3MQuality),
+		Band:        band(StreakKeyVIXTerm, vixRaw),
+		BandReason:  reason(StreakKeyVIXTerm, vixRaw, vixBandReason(r.VIXTermStructure)),
+		Thresholds:  heuristicThresholds("vix_term_structure_v1", "VIX/VIX3M < 0.92", "0.92 <= VIX/VIX3M < 1.00", "VIX/VIX3M >= 1.00"),
+		AsOf:        gatewayAsOf(now, r.VIXTermStructure.Status, r.VIXTermStructure.DataType, "Cboe VIX and VIX3M via IBKR index market data", r.VIXTermStructure.VIXQuality, r.VIXTermStructure.VIX3MQuality),
+		Eligibility: vixElig,
+		Freshness:   vixFresh,
 	}
+	vvixRaw := bandForVolOfVol(r.VolOfVol)
+	vvixElig, vvixFresh := policy(StreakKeyVolOfVol)
 	r.VolOfVol.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForVolOfVol(r.VolOfVol)),
-		BandReason: volOfVolBandReason(r.VolOfVol),
-		Thresholds: heuristicThresholds("vvix_daily_v1", "VVIX < 90", "90 <= VVIX < 110", "VVIX >= 110"),
-		AsOf:       officialRowAsOf(now, r.VolOfVol.AsOfDate, "Cboe official VVIX daily close", r.VolOfVol.Status),
+		Band:        band(StreakKeyVolOfVol, vvixRaw),
+		BandReason:  reason(StreakKeyVolOfVol, vvixRaw, volOfVolBandReason(r.VolOfVol)),
+		Thresholds:  heuristicThresholds("vvix_daily_v1", "VVIX < 90", "90 <= VVIX < 110", "VVIX >= 110"),
+		AsOf:        officialRowAsOf(now, r.VolOfVol.AsOfDate, "Cboe official VVIX daily close", r.VolOfVol.Status),
+		Eligibility: vvixElig,
+		Freshness:   vvixFresh,
 	}
+	hygRaw := bandForHYGSPY(r.HYGSPYDivergence)
+	hygElig, hygFresh := policy(StreakKeyHYGSPY)
 	r.HYGSPYDivergence.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForHYGSPY(r.HYGSPYDivergence)),
-		BandReason: hygSPYBandReason(r.HYGSPYDivergence),
-		Thresholds: heuristicThresholds("hyg_spy_credit_proxy_v1", "HYG >= 50-day SMA", "HYG < 50-day SMA", "HYG < 50-day SMA and SPY >= 97% of 52-week high"),
-		AsOf:       gatewayAsOf(now, r.HYGSPYDivergence.Status, r.HYGSPYDivergence.HYGDataType, "IBKR HYG/SPY quotes plus HMDS daily bars", r.HYGSPYDivergence.HYGQuality, r.HYGSPYDivergence.HYG50DMAQuality, r.HYGSPYDivergence.SPYQuality, r.HYGSPYDivergence.SPY52WHighQuality),
+		Band:        band(StreakKeyHYGSPY, hygRaw),
+		BandReason:  reason(StreakKeyHYGSPY, hygRaw, hygSPYBandReason(r.HYGSPYDivergence)),
+		Thresholds:  heuristicThresholds("hyg_spy_credit_proxy_v1", "HYG >= 50-day SMA", "HYG < 50-day SMA", "HYG < 50-day SMA and SPY >= 97% of 52-week high"),
+		AsOf:        gatewayAsOf(now, r.HYGSPYDivergence.Status, r.HYGSPYDivergence.HYGDataType, "IBKR HYG/SPY quotes plus HMDS daily bars", r.HYGSPYDivergence.HYGQuality, r.HYGSPYDivergence.HYG50DMAQuality, r.HYGSPYDivergence.SPYQuality, r.HYGSPYDivergence.SPY52WHighQuality),
+		Eligibility: hygElig,
+		Freshness:   hygFresh,
 	}
+	oasRaw := bandForCreditSpreads(r.CreditSpreads)
+	oasElig, oasFresh := policy(StreakKeyCredit)
 	r.CreditSpreads.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForCreditSpreads(r.CreditSpreads)),
-		BandReason: creditSpreadBandReason(r.CreditSpreads),
-		Thresholds: heuristicThresholds("hy_ig_oas_v1", "HY OAS < 4.0 and 20d widening < 0.50 pp", "HY OAS 4.0-5.5 or 20d widening >= 0.50 pp", "HY OAS >= 5.5 or 20d widening >= 1.00 pp"),
-		AsOf:       officialRowAsOf(now, r.CreditSpreads.AsOfDate, "FRED/St. Louis Fed official ICE BofA OAS series", r.CreditSpreads.Status),
+		Band:        band(StreakKeyCredit, oasRaw),
+		BandReason:  reason(StreakKeyCredit, oasRaw, creditSpreadBandReason(r.CreditSpreads)),
+		Thresholds:  heuristicThresholds("hy_ig_oas_v1", "HY OAS < 4.0 and 20d widening < 0.50 pp", "HY OAS 4.0-5.5 or 20d widening >= 0.50 pp", "HY OAS >= 5.5 or 20d widening >= 1.00 pp"),
+		AsOf:        officialRowAsOf(now, r.CreditSpreads.AsOfDate, "FRED/St. Louis Fed official ICE BofA OAS series", r.CreditSpreads.Status),
+		Eligibility: oasElig,
+		Freshness:   oasFresh,
 	}
+	fundRaw := bandForFundingStress(r.FundingStress)
+	fundElig, fundFresh := policy(StreakKeyFunding)
 	r.FundingStress.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForFundingStress(r.FundingStress)),
-		BandReason: fundingBandReason(r.FundingStress),
-		Thresholds: heuristicThresholds("funding_cp_tbill_v1", "CP/T-bill spread < 25 bp", "25 <= spread < 75 bp", "spread >= 75 bp"),
-		AsOf:       officialRowAsOf(now, r.FundingStress.AsOfDate, "Federal Reserve CP DDP plus U.S. Treasury Daily Treasury Bill Rates", r.FundingStress.Status),
+		Band:        band(StreakKeyFunding, fundRaw),
+		BandReason:  reason(StreakKeyFunding, fundRaw, fundingBandReason(r.FundingStress)),
+		Thresholds:  heuristicThresholds("funding_cp_tbill_v1", "CP/T-bill spread < 25 bp", "25 <= spread < 75 bp", "spread >= 75 bp"),
+		AsOf:        officialRowAsOf(now, r.FundingStress.AsOfDate, "Federal Reserve CP DDP plus U.S. Treasury Daily Treasury Bill Rates", r.FundingStress.Status),
+		Eligibility: fundElig,
+		Freshness:   fundFresh,
 	}
+	fxRaw := bandForUSDJPY(r.USDJPY)
+	fxElig, fxFresh := policy(StreakKeyUSDJPY)
 	r.USDJPY.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForUSDJPY(r.USDJPY)),
-		BandReason: usdJPYBandReason(r.USDJPY),
-		Thresholds: heuristicThresholds("usd_jpy_carry_proxy_v1", "yen strengthening < 1% over the week", "yen strengthening 1-2% over the week", "yen strengthening >= 2% over the week"),
-		AsOf:       gatewayAsOf(now, r.USDJPY.Status, r.USDJPY.DataType, "IBKR CASH/IDEALPRO USD.JPY plus HMDS midpoint bars", r.USDJPY.LastQuality, r.USDJPY.Close7DAgoQuality),
+		Band:        band(StreakKeyUSDJPY, fxRaw),
+		BandReason:  reason(StreakKeyUSDJPY, fxRaw, usdJPYBandReason(r.USDJPY)),
+		Thresholds:  heuristicThresholds("usd_jpy_carry_proxy_v1", "yen strengthening < 1% over the week", "yen strengthening 1-2% over the week", "yen strengthening >= 2% over the week"),
+		AsOf:        gatewayAsOf(now, r.USDJPY.Status, r.USDJPY.DataType, "IBKR CASH/IDEALPRO USD.JPY plus HMDS midpoint bars", r.USDJPY.LastQuality, r.USDJPY.Close7DAgoQuality),
+		Eligibility: fxElig,
+		Freshness:   fxFresh,
 	}
+	gammaRaw := bandForGamma(r.GammaZero)
+	gammaElig, gammaFresh := policy(StreakKeyGammaZero)
 	r.GammaZero.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForGamma(r.GammaZero)),
-		BandReason: gammaBandReason(r.GammaZero),
-		Thresholds: heuristicThresholds("dealer_gamma_v3", "spot > 2% above gamma-zero or profile wholly long-gamma", "spot within +/-2% of gamma-zero or mixed gamma profile", "spot below gamma-zero, profile wholly short-gamma, or dominant/equal exposure is amplifying"),
-		AsOf:       gammaAsOf(now, r.GammaZero),
+		Band:        band(StreakKeyGammaZero, gammaRaw),
+		BandReason:  reason(StreakKeyGammaZero, gammaRaw, gammaBandReason(r.GammaZero)),
+		Thresholds:  heuristicThresholds("dealer_gamma_v3", "spot > 2% above gamma-zero or profile wholly long-gamma", "spot within +/-2% of gamma-zero or mixed gamma profile", "spot below gamma-zero, profile wholly short-gamma, or dominant/equal exposure is amplifying"),
+		AsOf:        gammaAsOf(now, r.GammaZero),
+		Eligibility: gammaElig,
+		Freshness:   gammaFresh,
 	}
+	breadthRaw := bandForBreadth(r.Breadth)
+	breadthElig, breadthFresh := policy(StreakKeyBreadth)
 	r.Breadth.RegimeIndicatorMeta = rpc.RegimeIndicatorMeta{
-		Band:       bandOrUnranked(bandForBreadth(r.Breadth)),
-		BandReason: breadthBandReason(r.Breadth),
-		Thresholds: heuristicThresholds("spx_breadth_50dma_v1", "SPX members above 50-DMA > 55%", "40% <= members above 50-DMA <= 55%", "members above 50-DMA < 40%"),
-		AsOf:       breadthAsOf(now, r.Breadth),
+		Band:        band(StreakKeyBreadth, breadthRaw),
+		BandReason:  reason(StreakKeyBreadth, breadthRaw, breadthBandReason(r.Breadth)),
+		Thresholds:  heuristicThresholds("spx_breadth_50dma_v1", "SPX members above 50-DMA > 55%", "40% <= members above 50-DMA <= 55%", "members above 50-DMA < 40%"),
+		AsOf:        breadthAsOf(now, r.Breadth),
+		Eligibility: breadthElig,
+		Freshness:   breadthFresh,
 	}
 }
 

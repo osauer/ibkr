@@ -1,12 +1,21 @@
 package daemon
 
-import "github.com/osauer/ibkr/internal/rpc"
+import (
+	"time"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
 
 // streakIndicator is the per-indicator surface populateStreaks iterates.
 // Each implementation is a zero-state struct — pure dispatch, no fields.
 // Variations between indicators (status gate, classifier inputs, value
 // extraction, slot to attach the streak to) are encapsulated here so
 // populateStreaks itself is one loop.
+//
+// The confirmation-policy methods (displayBand, depth, fresh, exitHoldsRed)
+// implement docs/design/regime-calibration.md: classification + hysteresis
+// run HERE, once, daemon-side; every downstream consumer reads the served
+// post-hysteresis band and eligibility verdict.
 type streakIndicator interface {
 	key() string
 	// bandAndValue inspects res and returns the band/value the streak
@@ -15,6 +24,21 @@ type streakIndicator interface {
 	bandAndValue(res *rpc.RegimeSnapshotResult) (band string, value float64)
 	// attachStreak writes s into the indicator's slot in res.
 	attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo)
+	// displayBand is the band shown on the row's meta. Usually identical
+	// to bandAndValue's band; gamma diverges on stale (band stays visible
+	// for awareness while the streak freezes and the cluster unranks).
+	displayBand(res *rpc.RegimeSnapshotResult) string
+	// depth extracts the eligibility depth metric in the indicator's gate
+	// units (rpc.RegimeGateFor). Nil when the indicator has none — the
+	// band threshold itself is the depth gate.
+	depth(res *rpc.RegimeSnapshotResult) *float64
+	// fresh is the cadence-relative freshness verdict: no newer
+	// observation should exist under the indicator's native cadence.
+	fresh(res *rpc.RegimeSnapshotResult, nowNY time.Time) bool
+	// exitHoldsRed reports whether the red-exit hysteresis threshold
+	// still holds — consulted only when the previous tick was red and the
+	// fresh classification left red, to prevent boundary flapping.
+	exitHoldsRed(res *rpc.RegimeSnapshotResult) bool
 }
 
 var streakIndicators = []streakIndicator{
@@ -186,4 +210,206 @@ func (breadthStreaks) bandAndValue(res *rpc.RegimeSnapshotResult) (string, float
 
 func (breadthStreaks) attachStreak(res *rpc.RegimeSnapshotResult, s *rpc.StreakInfo) {
 	res.Breadth.Streak = s
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation-policy methods (eligibility depth, cadence freshness,
+// red-exit hysteresis, display band). Gate values live in
+// internal/rpc/regime_policy.go; exit thresholds here mirror the design
+// doc's per-indicator table.
+
+func (v vixTermStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := v.bandAndValue(res)
+	return band
+}
+
+func (vixTermStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
+	return res.VIXTermStructure.Ratio
+}
+
+// VIX freshness: ticks flow from ~03:00 ET, so a live row (status ok) is
+// fresh at any hour; a frozen/delayed row (status stale) is overdue because
+// a newer tick should exist.
+func (vixTermStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.VIXTermStructure.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red only when the ratio falls below 0.98.
+func (vixTermStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	return res.VIXTermStructure.Ratio != nil && *res.VIXTermStructure.Ratio >= 0.98
+}
+
+func (v volOfVolStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := v.bandAndValue(res)
+	return band
+}
+
+func (volOfVolStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
+	return res.VolOfVol.Last
+}
+
+// VVIX freshness: the official daily close, allowing weekend + publication
+// lag. Beyond ~4 calendar days a newer close must exist.
+func (volOfVolStreaks) fresh(res *rpc.RegimeSnapshotResult, nowNY time.Time) bool {
+	if res.VolOfVol.Status != rpc.RegimeStatusOK {
+		return false
+	}
+	return officialDateWithinDays(res.VolOfVol.AsOfDate, nowNY, 4)
+}
+
+// Exit hysteresis: leave red below 105.
+func (volOfVolStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	return res.VolOfVol.Last != nil && *res.VolOfVol.Last >= 105
+}
+
+func (h hygSpyStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := h.bandAndValue(res)
+	return band
+}
+
+// Depth in percent below the 50DMA: (dma − price) / dma × 100.
+func (hygSpyStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
+	r := res.HYGSPYDivergence
+	if r.HYGPrice == nil || r.HYG50DMA == nil || *r.HYG50DMA <= 0 {
+		return nil
+	}
+	d := (*r.HYG50DMA - *r.HYGPrice) / *r.HYG50DMA * 100
+	return &d
+}
+
+// HYG freshness: an RTH tick or the latest official close (the off-hours
+// banding input) is the newest possible observation — both land status ok.
+func (hygSpyStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.HYGSPYDivergence.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red only after HYG closes back above its 50DMA —
+// SPY drifting off the near-high line alone does not end a credit break.
+func (hygSpyStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	r := res.HYGSPYDivergence
+	return r.HYGPrice != nil && r.HYG50DMA != nil && *r.HYGPrice < *r.HYG50DMA
+}
+
+func (c creditSpreadsStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := c.bandAndValue(res)
+	return band
+}
+
+// Official series red levels are already deep — no separate depth metric.
+func (creditSpreadsStreaks) depth(_ *rpc.RegimeSnapshotResult) *float64 { return nil }
+
+func (creditSpreadsStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.CreditSpreads.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red when HY OAS < 5.25 and the 20-obs widening
+// < 0.85 pp.
+func (creditSpreadsStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	r := res.CreditSpreads
+	if r.HYOAS != nil && *r.HYOAS >= 5.25 {
+		return true
+	}
+	return r.HY20DChange != nil && *r.HY20DChange >= 0.85
+}
+
+func (f fundingStressStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := f.bandAndValue(res)
+	return band
+}
+
+func (fundingStressStreaks) depth(_ *rpc.RegimeSnapshotResult) *float64 { return nil }
+
+func (fundingStressStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.FundingStress.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red below 65 bp.
+func (fundingStressStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	return res.FundingStress.SpreadBps != nil && *res.FundingStress.SpreadBps >= 65
+}
+
+func (u usdJpyStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := u.bandAndValue(res)
+	return band
+}
+
+// Speed is the depth for the carry proxy — the 2%/week red band is the gate.
+func (usdJpyStreaks) depth(_ *rpc.RegimeSnapshotResult) *float64 { return nil }
+
+func (usdJpyStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.USDJPY.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red when the weekly yen move falls below 1.5%.
+func (usdJpyStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	if res.USDJPY.WeeklyChange == nil {
+		return false
+	}
+	return -*res.USDJPY.WeeklyChange >= 1.5
+}
+
+// gamma's display band stays visible on STALE rows (prior-trading-date
+// cache): the red is awareness evidence even though the streak freezes, the
+// cluster unranks, and eligibility reports data_overdue.
+func (gammaZeroStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	if res.GammaZero.Status != rpc.RegimeStatusOK && res.GammaZero.Status != rpc.RegimeStatusStale {
+		return ""
+	}
+	if res.GammaZero.Envelope.Result == nil {
+		return ""
+	}
+	return classifyGammaComputedBand(res.GammaZero.Envelope.Result)
+}
+
+// Depth in percent below gamma-zero (−gap); see rpc.RegimeGammaDepth.
+func (gammaZeroStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
+	return rpc.RegimeGammaDepth(res.GammaZero.Envelope.Result)
+}
+
+// Gamma freshness: fetchRegimeGamma already downgrades prior-trading-date
+// computes to status stale, so status ok ⇔ cadence-fresh.
+func (gammaZeroStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.GammaZero.Status == rpc.RegimeStatusOK && res.GammaZero.Envelope.Result != nil
+}
+
+// Exit hysteresis: leave red when spot clears +0.5% above gamma-zero.
+func (gammaZeroStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	d := rpc.RegimeGammaDepth(res.GammaZero.Envelope.Result)
+	return d != nil && *d >= -0.5
+}
+
+func (b breadthStreaks) displayBand(res *rpc.RegimeSnapshotResult) string {
+	band, _ := b.bandAndValue(res)
+	return band
+}
+
+// Depth in points below the 40% band floor.
+func (breadthStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
+	if res.Breadth.Envelope.State != rpc.BreadthStateReady {
+		return nil
+	}
+	d := 40 - res.Breadth.Envelope.PctAbove50DMA
+	return &d
+}
+
+// Breadth freshness: the post-close compute of the last completed session
+// is inherently the newest possible observation; the session-key staleness
+// check already runs in fetchRegimeBreadth, so status ok ⇔ fresh.
+func (breadthStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return res.Breadth.Status == rpc.RegimeStatusOK
+}
+
+// Exit hysteresis: leave red above 45% of members over their 50DMA.
+func (breadthStreaks) exitHoldsRed(res *rpc.RegimeSnapshotResult) bool {
+	return res.Breadth.Envelope.State == rpc.BreadthStateReady && res.Breadth.Envelope.PctAbove50DMA < 45
+}
+
+// officialDateWithinDays reports whether a YYYY-MM-DD observation date is
+// within n calendar days of nowNY. Unparseable/empty dates are not fresh.
+func officialDateWithinDays(date string, nowNY time.Time, n int) bool {
+	d, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return false
+	}
+	return nowNY.Sub(d) <= time.Duration(n)*24*time.Hour
 }

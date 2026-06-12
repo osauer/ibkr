@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/internal/marketcal"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -26,6 +27,14 @@ type StreakEntry struct {
 	LastSession string  `json:"last_session"`
 	Sessions    int     `json:"sessions"`
 	LastValue   float64 `json:"last_value"`
+	// EligibleLatched records that this red streak earned confirmation
+	// eligibility (depth + persistence + freshness) at some point in its
+	// life. Once latched, eligibility holds until the band exits red even
+	// if the measurement wobbles back inside the minimum depth — the
+	// depth-boundary churn guard from docs/design/regime-calibration.md.
+	// Cleared on any band change. Freshness is NOT latched: overdue data
+	// drops eligibility regardless.
+	EligibleLatched bool `json:"eligible_latched,omitempty"`
 }
 
 // streakStoreFile is the on-disk shape. Version field for future
@@ -178,7 +187,11 @@ func (s *StreakStore) Tick(indicatorKey string, value float64, band string, nowN
 	defer s.mu.Unlock()
 	s.loadLocked()
 
-	today := nowNY.Format("2006-01-02")
+	// Sessions are NY TRADING days. A weekend or holiday poll keys to the
+	// most recent trading day, so it can never inflate the counter — the
+	// pre-fix behavior counted bare calendar dates and a Saturday call
+	// added a phantom session.
+	today := nyTradingSessionKey(nowNY)
 
 	// Empty band = freeze: return whatever's already there without
 	// mutating. nil if we've never seen a band for this indicator.
@@ -206,12 +219,14 @@ func (s *StreakStore) Tick(indicatorKey string, value float64, band string, nowN
 		// NY session shouldn't inflate the counter.
 		entry.LastValue = value
 	case entry.LastBand == band:
-		// Same band, new session — increment.
+		// Same band, new session — increment. EligibleLatched survives:
+		// the latch lives for the streak's whole life.
 		entry.LastSession = today
 		entry.Sessions++
 		entry.LastValue = value
 	default:
-		// Band change — reset to day 1 of the new band.
+		// Band change — reset to day 1 of the new band and drop the
+		// eligibility latch (it is a property of the ended red streak).
 		entry = StreakEntry{
 			LastBand:    band,
 			SinceDate:   today,
@@ -240,6 +255,40 @@ func (s *StreakStore) Get(indicatorKey string) *StreakInfo {
 		return nil
 	}
 	return entryToInfo(entry)
+}
+
+// PrevBand returns the band recorded on the most recent tick — the input
+// exit-hysteresis classification needs. Empty when never seen.
+func (s *StreakStore) PrevBand(indicatorKey string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	return s.entries[indicatorKey].LastBand
+}
+
+// Latched reports the eligibility latch for an indicator's current streak.
+func (s *StreakStore) Latched(indicatorKey string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	return s.entries[indicatorKey].EligibleLatched
+}
+
+// Latch marks the indicator's current red streak as having earned
+// confirmation eligibility. No-op when the entry is missing or not red —
+// the latch only ever decorates a live red streak. Best-effort persist,
+// same contract as Tick.
+func (s *StreakStore) Latch(indicatorKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	entry, ok := s.entries[indicatorKey]
+	if !ok || entry.LastBand != "red" || entry.EligibleLatched {
+		return
+	}
+	entry.EligibleLatched = true
+	s.entries[indicatorKey] = entry
+	_ = s.saveLocked()
 }
 
 func entryToInfo(e StreakEntry) *rpc.StreakInfo {
@@ -533,4 +582,41 @@ func nyDateNow() time.Time {
 		return now.In(loc)
 	}
 	return now.UTC()
+}
+
+// nyTime converts a timestamp to NY local time (UTC fallback).
+func nyTime(t time.Time) time.Time {
+	if loc, err := time.LoadLocation("America/New_York"); err == nil {
+		return t.In(loc)
+	}
+	return t.UTC()
+}
+
+// usEquityRTHOpen reports whether the regular US cash-equity session is open
+// at the given instant.
+func usEquityRTHOpen(now time.Time) bool {
+	s, err := marketcal.New().SessionAt(marketcal.MarketUSEquity, now)
+	return err == nil && s.IsOpen
+}
+
+// nyTradingSessionKey returns the YYYY-MM-DD key of the current NY trading
+// day: today when US equities trade today, otherwise the most recent
+// trading day (weekends and holidays key backwards, never forwards). Falls
+// back to the bare calendar date outside the embedded calendar coverage.
+func nyTradingSessionKey(nowNY time.Time) string {
+	cal := marketcal.New()
+	for i := range 7 {
+		d := nowNY.AddDate(0, 0, -i)
+		s, err := cal.SessionAt(marketcal.MarketUSEquity, d)
+		if err != nil {
+			break
+		}
+		switch s.State {
+		case marketcal.StateRegular, marketcal.StateEarlyClose:
+			return s.Date
+		case marketcal.StateUnknown:
+			return nowNY.Format("2006-01-02")
+		}
+	}
+	return nowNY.Format("2006-01-02")
 }

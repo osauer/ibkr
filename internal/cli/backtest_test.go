@@ -40,7 +40,11 @@ func TestCanaryBacktestSampleProducesSignalMetrics(t *testing.T) {
 	if got, want := res.Metrics.ActTruePositive, 0; got != want {
 		t.Fatalf("act_true_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.RebalanceWatch, 7; got != want {
+	// One more day lands here under the eligibility gates: exposure rows
+	// only escalate past watch on ELIGIBLE red clusters, so a high-exposure
+	// day with marginal (day-1, no-depth-context) reds reads
+	// rebalance/watch instead of stress-act.
+	if got, want := res.Metrics.RebalanceWatch, 8; got != want {
 		t.Fatalf("rebalance_watch = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.DataQualityWatch, 5; got != want {
@@ -107,7 +111,14 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	if got, want := res.Metrics.WatchFalsePositive, 2; got != want {
 		t.Fatalf("watch_false_positive = %d, want %d", got, want)
 	}
-	if got, want := res.Metrics.StressTruePositive, 5; got != want {
+	// 4 of 5 detectable stress days confirm same-day under the eligibility
+	// gates. The fifth (2023-03-13, SVB Monday) demotes to early_warning by
+	// design: its funding red is eligible but the VIX-term red is day 1
+	// without a deep inversion and the tape (SPY −1.4%, VIX +18%) misses
+	// the co-sign bars — confirmation arrives with persistence or tape
+	// (docs/design/regime-calibration.md, slow-bleed trade-off). The watch
+	// tier still catches it same-day (watch_recall stays 1 below).
+	if got, want := res.Metrics.StressTruePositive, 4; got != want {
 		t.Fatalf("stress_true_positive = %d, want %d", got, want)
 	}
 	if got, want := res.Metrics.StressFalsePositive, 0; got != want {
@@ -122,7 +133,9 @@ func TestRegimeBacktestSampleProducesMarketMetrics(t *testing.T) {
 	if res.Baseline.StressPrecision == nil || *res.Baseline.StressPrecision != 1 {
 		t.Fatalf("baseline stress precision = %v, want 1", res.Baseline.StressPrecision)
 	}
-	if got, want := res.Lifecycle.EarlyWarning, 3; got != want {
+	// Includes 2023-03-13, demoted from confirmed_stress by the
+	// eligibility gates (see stress_true_positive above).
+	if got, want := res.Lifecycle.EarlyWarning, 4; got != want {
 		t.Fatalf("early_warning = %d, want %d", got, want)
 	}
 	if got, want := res.Lifecycle.EarlyWarningFalseCalmRally, 2; got != want {

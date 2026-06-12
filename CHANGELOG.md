@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.12.0 — 2026-06-12 17:21 CEST
+
+### What's new
+
+- A red regime indicator now has to earn confirmation before it can escalate the headline: it must be meaningfully past its threshold (e.g. HYG at least 0.25% below its 50-day average, not 7 bps), persistent (2 NY trading sessions for the vol, credit-proxy, and breadth rows, with deep day-one breaks fast-tracked), and current under its own data cadence. Reds that fail a gate stay fully visible — row red, listed under `unconfirmed`, CLI marked `provisional (day 1 of 2, …)` — but they only warn (`early_warning`), never confirm, and never vouch for another cluster. This closes the 2026-06-12 pre-open false positive where a 7 bps HYG wobble and a prior-evening gamma cache mutually confirmed "Broad stress regime / act" against a green tape.
+- While regime thresholds remain `pending_backtest`, the engine cannot demand its strongest responses on heuristic evidence alone: severity "act" needs a fresh tape co-sign (SPY down 1.5%+, VIX up 10%+, or a same-session term-structure inversion), and a heuristic-only three-red panic reads "act" instead of "urgent". Every cap is disclosed in `lifecycle.governors[]` and on the CLI's new `Governed:` line — severity "watch" beside two red rows is explained policy, not a mystery. Pure-tape panic (SPY −4%/−7%) is never governed.
+- Dealer gamma from a prior trading date now serves `status: stale`: the band stays visible for awareness, but yesterday evening's cache (which still contains the day's expired 0DTE exposure) can no longer pose as contemporaneous confirmation. Off-hours, the HYG credit row bands on the latest official close instead of thin pre/post-market prints.
+- The headline is now one wording table for every surface: `composite.verdict`, `posture.label`, CLI, MCP, app, and the backtest all render the same served string. Previously four copies drifted — at exactly two red clusters the posture said "Broad stress regime" while the composite said "Stress signal present". Two eligible reds now read "Confirmed stress regime"; "Broad stress regime" again means three or more.
+- Every regime decision is journaled to `$XDG_STATE_HOME/ibkr/regime-decisions.jsonl` (semantic-fingerprint deduped, hourly heartbeat): raw values, depths, streaks, eligibility, lifecycle, and governor records — the forward-collection corpus that finally makes the heuristic thresholds calibratable. Disable with `ibkr settings set regime.journal.enabled=false`.
+
+### Changed
+
+- Regime streaks count NY trading sessions: a weekend or holiday poll keys to the most recent trading day and no longer inflates the "day N" counter. Red bands also get exit hysteresis (e.g. VIX/VIX3M leaves red below 0.98 after entering at 1.00), so boundary wobble cannot flap the band and reset the streak; held sessions count toward persistence and are disclosed in the band reason.
+- The canary consumes the served confirmation policy instead of recomputing it from raw bands: act/urgent-grade rows, exposure escalation, and the `regime_stress_confirmed` signal key on `eligible_red_clusters`; two visible-but-provisional reds now produce a "Stress pending confirmation" watch row instead of "Confirmed market stress / act".
+- `SourceHealth.max_age_seconds` is populated for regime clusters and the app's regime stale badge derives from the served values instead of a hardcoded 60-minute twin; the app's regime status line discloses pending-confirmation reds and governor caps.
+- The lifecycle fingerprint is now `lifecycle-fp-v2` (eligibility-aware evidence + governor tokens): active regime/canary alerts re-key once on upgrade.
+
+### Added
+
+- Wire contract (additive): per-row `eligibility` (`eligible`, `latched`, `reasons[]`) and `freshness` (`class`, `max_age_seconds`); `lifecycle.governors[]`; `composite.cluster_eligible_red_count` / `cluster_provisional_red_count`; canary `market.eligible_red_clusters` + names. `ibkr regime --explain` prints the confirmation-policy rule and the gate table sourced from the same constants the daemon enforces.
+
+### Engineering notes
+
+- Cluster combination, isolated-red rescue (now eligibility-keyed), eligibility gates, and the headline table live once in `internal/rpc/regime_policy.go`; the daemon composite, lifecycle builder, CLI renderer, canary, and backtest builder all consume it. The four former copies (rpc posture, daemon `verdictFor`, CLI `verdict()`, backtest) are gone.
+- PIT backtest replay applies day-1 gates (depth + freshness; persistence sessions=1), so streak-gated indicators confirm only via fast paths — 2023-03-13 (SVB Monday) deliberately demotes to `early_warning` day 0 in the curated sample (watch recall stays 1.0); sequence-aware streak replay is follow-up work on the decisions journal. Threshold promotion out of `pending_backtest` is per versioned set label with measured false-alarm/recall rates (docs/specs/regime-backtest-plan.md).
+- The 2026-06-12 incident is pinned as regression fixtures on both surfaces: `TestRegimeIncident20260612Regression` (daemon pipeline) and `TestCanaryIncident20260612Regression` (canary rows/signals).
+
 ## v1.11.0 — 2026-06-12 12:19 CEST
 
 ### What's new

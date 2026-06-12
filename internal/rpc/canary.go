@@ -117,22 +117,29 @@ type CanaryHeldStress struct {
 }
 
 type CanaryMarketSummary struct {
-	RegimeVerdict              string        `json:"regime_verdict,omitempty"`
-	RegimePosture              RegimePosture `json:"regime_posture,omitzero"`
-	RedClusters                int           `json:"red_clusters"`
-	YellowClusters             int           `json:"yellow_clusters"`
-	RankedClusters             int           `json:"ranked_clusters"`
-	UnrankedClusters           int           `json:"unranked_clusters"`
-	RedClusterNames            []string      `json:"red_cluster_names,omitempty"`
-	YellowClusterNames         []string      `json:"yellow_cluster_names,omitempty"`
-	UnconfirmedRedClusterNames []string      `json:"unconfirmed_red_cluster_names,omitempty"`
-	AmbiguousClusters          []string      `json:"ambiguous_clusters,omitempty"`
-	PartialClusters            []string      `json:"partial_clusters,omitempty"`
-	ComputingClusters          []string      `json:"computing_clusters,omitempty"`
-	DegradedClusters           []string      `json:"degraded_clusters,omitempty"`
-	StaleClusters              []string      `json:"stale_clusters,omitempty"`
-	SPYPrice                   *float64      `json:"spy_price,omitempty"`
-	SPYChangePct               *float64      `json:"spy_change_pct,omitempty"`
-	VIX                        *float64      `json:"vix,omitempty"`
-	VIXChangePct               *float64      `json:"vix_change_pct,omitempty"`
+	RegimeVerdict string        `json:"regime_verdict,omitempty"`
+	RegimePosture RegimePosture `json:"regime_posture,omitzero"`
+	RedClusters   int           `json:"red_clusters"`
+	// EligibleRedClusters counts reds that passed the confirmation gates
+	// (depth + persistence + freshness) — the only reds canary's
+	// act/urgent-grade decisions key on. RedClusters keeps the visible
+	// (confirmed-band) reds for watch-grade evidence; the difference is
+	// disclosed in UnconfirmedRedClusterNames.
+	EligibleRedClusters        int      `json:"eligible_red_clusters"`
+	EligibleRedClusterNames    []string `json:"eligible_red_cluster_names,omitempty"`
+	YellowClusters             int      `json:"yellow_clusters"`
+	RankedClusters             int      `json:"ranked_clusters"`
+	UnrankedClusters           int      `json:"unranked_clusters"`
+	RedClusterNames            []string `json:"red_cluster_names,omitempty"`
+	YellowClusterNames         []string `json:"yellow_cluster_names,omitempty"`
+	UnconfirmedRedClusterNames []string `json:"unconfirmed_red_cluster_names,omitempty"`
+	AmbiguousClusters          []string `json:"ambiguous_clusters,omitempty"`
+	PartialClusters            []string `json:"partial_clusters,omitempty"`
+	ComputingClusters          []string `json:"computing_clusters,omitempty"`
+	DegradedClusters           []string `json:"degraded_clusters,omitempty"`
+	StaleClusters              []string `json:"stale_clusters,omitempty"`
+	SPYPrice                   *float64 `json:"spy_price,omitempty"`
+	SPYChangePct               *float64 `json:"spy_change_pct,omitempty"`
+	VIX                        *float64 `json:"vix,omitempty"`
+	VIXChangePct               *float64 `json:"vix_change_pct,omitempty"`
 }

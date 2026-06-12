@@ -79,6 +79,13 @@ type RegimeMonitorIndicator struct {
 	Band    string             `json:"band,omitempty"`
 	AsOf    *RegimeAsOfSummary `json:"as_of,omitempty"`
 	Reading string             `json:"reading,omitempty"`
+	// Eligibility and FreshnessClass mirror the detail view's
+	// confirmation-eligibility verdict so monitor consumers can tell an
+	// eligible red from a provisional one without fetching the full
+	// snapshot. Semantic values only — no ticking ages (SSE-hash
+	// stability).
+	Eligibility    *RegimeEligibility `json:"eligibility,omitempty"`
+	FreshnessClass string             `json:"freshness_class,omitempty"`
 }
 
 type PositionsRiskResult struct {
@@ -188,14 +195,14 @@ func CompactRegimeMonitor(r *RegimeSnapshotResult) RegimeMonitorResult {
 		DataQuality:    r.DataQuality,
 		SourceHealth:   compactSourceHealth(r.SourceHealth),
 		Indicators: []RegimeMonitorIndicator{
-			{Name: "VIX/VIX3M", Status: r.VIXTermStructure.Status, Band: r.VIXTermStructure.Band, AsOf: r.VIXTermStructure.AsOf, Reading: readingJoin(formatPtr("ratio", r.VIXTermStructure.Ratio), formatPtr("VIX", r.VIXTermStructure.VIX), formatPtr("VIX3M", r.VIXTermStructure.VIX3M))},
-			{Name: "VVIX", Status: r.VolOfVol.Status, Band: r.VolOfVol.Band, AsOf: regimeAsOf(r.VolOfVol.AsOf, r.VolOfVol.AsOfDate), Reading: readingJoin(formatPtr("last", r.VolOfVol.Last), formatPtr("20d", r.VolOfVol.Change20D))},
-			{Name: "HYG/SPY", Status: r.HYGSPYDivergence.Status, Band: r.HYGSPYDivergence.Band, AsOf: r.HYGSPYDivergence.AsOf, Reading: readingJoin(formatPtr("HYG", r.HYGSPYDivergence.HYGPrice), formatPtr("SPY", r.HYGSPYDivergence.SPYPrice), formatPtr("SPY chg%", r.HYGSPYDivergence.SPYChangePct))},
-			{Name: "HY/IG OAS", Status: r.CreditSpreads.Status, Band: r.CreditSpreads.Band, AsOf: regimeAsOf(r.CreditSpreads.AsOf, r.CreditSpreads.AsOfDate), Reading: readingJoin(formatPtr("HY", r.CreditSpreads.HYOAS), formatPtr("IG", r.CreditSpreads.IGOAS), formatPtr("HY-IG", r.CreditSpreads.HYIGSpread))},
-			{Name: "Funding", Status: r.FundingStress.Status, Band: r.FundingStress.Band, AsOf: regimeAsOf(r.FundingStress.AsOf, r.FundingStress.AsOfDate), Reading: formatPtr("spread bp", r.FundingStress.SpreadBps)},
-			{Name: "USD/JPY", Status: r.USDJPY.Status, Band: r.USDJPY.Band, AsOf: r.USDJPY.AsOf, Reading: readingJoin(formatPtr("last", r.USDJPY.Last), formatPtr("week%", r.USDJPY.WeeklyChange))},
-			{Name: "Gamma", Status: r.GammaZero.Status, Band: r.GammaZero.Band, AsOf: r.GammaZero.AsOf, Reading: gammaMonitorReading(r.GammaZero)},
-			{Name: "Breadth", Status: r.Breadth.Status, Band: r.Breadth.Band, AsOf: r.Breadth.AsOf, Reading: readingJoin(formatFloat("50dma%", r.Breadth.PctAbove50DMA), formatFloat("200dma%", r.Breadth.PctAbove200DMA), formatFloat("net highs%", r.Breadth.NetNewHighsPct))},
+			{Name: "VIX/VIX3M", Status: r.VIXTermStructure.Status, Band: r.VIXTermStructure.Band, AsOf: r.VIXTermStructure.AsOf, Reading: readingJoin(formatPtr("ratio", r.VIXTermStructure.Ratio), formatPtr("VIX", r.VIXTermStructure.VIX), formatPtr("VIX3M", r.VIXTermStructure.VIX3M)), Eligibility: r.VIXTermStructure.Eligibility, FreshnessClass: freshnessClass(r.VIXTermStructure.Freshness)},
+			{Name: "VVIX", Status: r.VolOfVol.Status, Band: r.VolOfVol.Band, AsOf: regimeAsOf(r.VolOfVol.AsOf, r.VolOfVol.AsOfDate), Reading: readingJoin(formatPtr("last", r.VolOfVol.Last), formatPtr("20d", r.VolOfVol.Change20D)), Eligibility: r.VolOfVol.Eligibility, FreshnessClass: freshnessClass(r.VolOfVol.Freshness)},
+			{Name: "HYG/SPY", Status: r.HYGSPYDivergence.Status, Band: r.HYGSPYDivergence.Band, AsOf: r.HYGSPYDivergence.AsOf, Reading: readingJoin(formatPtr("HYG", r.HYGSPYDivergence.HYGPrice), formatPtr("SPY", r.HYGSPYDivergence.SPYPrice), formatPtr("SPY chg%", r.HYGSPYDivergence.SPYChangePct)), Eligibility: r.HYGSPYDivergence.Eligibility, FreshnessClass: freshnessClass(r.HYGSPYDivergence.Freshness)},
+			{Name: "HY/IG OAS", Status: r.CreditSpreads.Status, Band: r.CreditSpreads.Band, AsOf: regimeAsOf(r.CreditSpreads.AsOf, r.CreditSpreads.AsOfDate), Reading: readingJoin(formatPtr("HY", r.CreditSpreads.HYOAS), formatPtr("IG", r.CreditSpreads.IGOAS), formatPtr("HY-IG", r.CreditSpreads.HYIGSpread)), Eligibility: r.CreditSpreads.Eligibility, FreshnessClass: freshnessClass(r.CreditSpreads.Freshness)},
+			{Name: "Funding", Status: r.FundingStress.Status, Band: r.FundingStress.Band, AsOf: regimeAsOf(r.FundingStress.AsOf, r.FundingStress.AsOfDate), Reading: formatPtr("spread bp", r.FundingStress.SpreadBps), Eligibility: r.FundingStress.Eligibility, FreshnessClass: freshnessClass(r.FundingStress.Freshness)},
+			{Name: "USD/JPY", Status: r.USDJPY.Status, Band: r.USDJPY.Band, AsOf: r.USDJPY.AsOf, Reading: readingJoin(formatPtr("last", r.USDJPY.Last), formatPtr("week%", r.USDJPY.WeeklyChange)), Eligibility: r.USDJPY.Eligibility, FreshnessClass: freshnessClass(r.USDJPY.Freshness)},
+			{Name: "Gamma", Status: r.GammaZero.Status, Band: r.GammaZero.Band, AsOf: r.GammaZero.AsOf, Reading: gammaMonitorReading(r.GammaZero), Eligibility: r.GammaZero.Eligibility, FreshnessClass: freshnessClass(r.GammaZero.Freshness)},
+			{Name: "Breadth", Status: r.Breadth.Status, Band: r.Breadth.Band, AsOf: r.Breadth.AsOf, Reading: readingJoin(formatFloat("50dma%", r.Breadth.PctAbove50DMA), formatFloat("200dma%", r.Breadth.PctAbove200DMA), formatFloat("net highs%", r.Breadth.NetNewHighsPct)), Eligibility: r.Breadth.Eligibility, FreshnessClass: freshnessClass(r.Breadth.Freshness)},
 		},
 	}
 }
@@ -225,6 +232,13 @@ func CompactPositionsRisk(p *PositionsResult, topN int) PositionsRiskResult {
 		}
 	}
 	return out
+}
+
+func freshnessClass(f *RegimeFreshness) string {
+	if f == nil {
+		return ""
+	}
+	return f.Class
 }
 
 func compactSourceHealth(in []SourceHealth) []CompactSourceHealth {

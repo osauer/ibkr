@@ -507,6 +507,7 @@ func TestGammaQualitySubPreferredSkewRanksWithDisclosure(t *testing.T) {
 		Status:   rpc.RegimeStatusOK,
 		Envelope: rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: combined},
 	}}
+	annotateRegimeMetadata(res, nil)
 	if got := buildRegimeComposite(res); got.ClusterRankedCount == 0 || got.ClusterRedCount == 0 {
 		t.Fatalf("composite = %+v, want gamma ranked as a red cluster vote", got)
 	}

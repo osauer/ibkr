@@ -276,6 +276,7 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 		rowGamma(now, r.GammaZero),
 		rowBreadth(now, r.Breadth),
 	}
+	decorateRegimeRowPolicy(rows, r)
 	c := tallyCompositeFromSnapshot(r, rows)
 
 	// Shared hero: only the title + timestamp live here. The regime
@@ -289,13 +290,19 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 		"")
 	fmt.Fprintln(out)
 
-	// Hero summary: regime label + usable-signal coverage. Raw band and
-	// rankability words stay out of the default readout; the table below is
-	// the audit trail and --explain carries the mechanics.
-	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeLabel(env, c, c.verdict())), env.dim("· "+c.evidence()))
+	// Hero summary: SERVED regime verdict + usable-signal coverage. The
+	// daemon owns the headline words and tone (single wording table in
+	// internal/rpc); the renderer-local tally only sizes the coverage
+	// counts and layout. Raw band and rankability words stay out of the
+	// default readout; the table below is the audit trail and --explain
+	// carries the mechanics.
+	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeVerdict(env, r, c, regimeServedVerdict(r, c))), env.dim("· "+c.evidence()))
 	fmt.Fprintln(out)
 	renderRegimeSummaryLine(out, "Read:", regimeReadLine(c), width, nil)
 	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows, r.DataQuality), width, regimeInputHealthColor(env, c, rows, r.DataQuality))
+	if governed := regimeGovernorLine(r.Lifecycle.Governors); governed != "" {
+		renderRegimeSummaryLine(out, "Governed:", governed, width, env.yellow)
+	}
 	if support := regimeSupportLine(rows); support != "" {
 		renderRegimeSummaryLine(out, "Support:", support, width, nil)
 	}
@@ -725,7 +732,7 @@ func tallyCompositeFromSnapshot(r *rpc.RegimeSnapshotResult, rows []regimeRow) r
 		return c
 	}
 	rendered := renderedBandSnapshot(*r, rows)
-	bands := confirmedRegimeClusterBands(rendered, rawRegimeClusterBands(rendered))
+	bands := rpc.BuildRegimeClusterBands(&rendered).Confirmed
 	c.clusterGreen = 0
 	c.clusterYellow = 0
 	c.clusterRed = 0
@@ -813,31 +820,129 @@ func worstRegimeBand(a, b regimeBand) regimeBand {
 // coverage before it stops being a guess.
 const verdictFloor = 3
 
-// verdict maps the (red, yellow) tally onto the spec's interpretation
-// table (docs/specs/risk-regime-dashboard.md:109-115). Honest about
-// "no ranked indicators" — a renderer that pretends to have a verdict
-// when every row is computing/unavailable would just be lying. The
-// verdictFloor extends the same honesty: a bold-green "Normal regime"
-// with 1-of-5 ranked is misleading even when the count summary
-// underneath names the unranked tally, because readers scan the bold
-// line first.
-func (c regimeComposite) verdict() string {
-	switch {
-	case c.clusterRanked == 0:
-		return "No usable signal yet"
-	case c.clusterRanked < verdictFloor:
-		return "Insufficient signal — too few inputs ready"
-	case c.clusterRanked == c.clusterTotal && c.clusterRed == c.clusterTotal:
-		return "Full risk-off conditions"
-	case c.clusterRed >= 3:
-		return "Broad stress regime"
-	case c.clusterRed >= 1:
-		return "Stress signal present"
-	case c.clusterYellow >= 3:
-		return "Elevated stress watch"
-	default:
-		return "Normal regime"
+// regimeServedVerdict prefers the daemon's served verdict — the single
+// wording table in internal/rpc that posture.label shares — and only falls
+// back to the shared function over the renderer-local tally (older daemon /
+// synthetic snapshot). The former renderer-local verdict() copy was one of
+// the four drifting headline implementations behind the 2026-06-12 incident.
+func regimeServedVerdict(r *rpc.RegimeSnapshotResult, c regimeComposite) string {
+	if v := strings.TrimSpace(r.Composite.Verdict); v != "" {
+		return v
 	}
+	// No eligibility context exists client-side, so fallback reds count as
+	// provisional — the label degrades gracefully to "Stress signal
+	// present" rather than claiming confirmation the renderer can't verify.
+	comp := rpc.RegimeComposite{
+		ClusterGreenCount:          c.clusterGreen,
+		ClusterYellowCount:         c.clusterYellow,
+		ClusterRedCount:            c.clusterRed,
+		ClusterProvisionalRedCount: c.clusterRed,
+		ClusterRankedCount:         c.clusterRanked,
+		ClusterUnrankedCount:       c.clusterUnranked,
+	}
+	return rpc.RegimeHeadline(comp, r.Lifecycle.Stage)
+}
+
+// colorRegimeVerdict colors the headline from the SERVED posture tone so
+// the terminal, SPA, and MCP read the same color policy; the local-tally
+// heuristic only covers snapshots without a posture.
+func colorRegimeVerdict(env *Env, r *rpc.RegimeSnapshotResult, c regimeComposite, label string) string {
+	switch strings.TrimSpace(r.Posture.Tone) {
+	case rpc.RegimeToneStress, rpc.RegimeToneRiskOff:
+		return env.red(label)
+	case rpc.RegimeToneWatch, rpc.RegimeToneDataQuality:
+		return env.yellow(label)
+	case rpc.RegimeToneNormal:
+		return env.green(label)
+	default:
+		return colorRegimeLabel(env, c, label)
+	}
+}
+
+// regimeGovernorLine renders the lifecycle's severity-governor disclosures:
+// when policy withheld a severity rung, the reader sees what was capped and
+// why instead of wondering why two red rows read "watch".
+func regimeGovernorLine(govs []rpc.GovernorAction) string {
+	if len(govs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(govs))
+	for _, g := range govs {
+		reason := g.Reason
+		switch g.Reason {
+		case "pending_backtest_no_tape_cosign":
+			reason = "thresholds pending backtest, no tape co-sign"
+		case "confirming_cluster_quality":
+			reason = "confirming-cluster data quality impaired"
+		}
+		part := fmt.Sprintf("severity %s (capped from %s) — %s", g.To, g.From, reason)
+		if len(g.Clusters) > 0 {
+			part += " [" + strings.Join(g.Clusters, ", ") + "]"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// decorateRegimeRowPolicy reconciles the renderer-local row classification
+// with the served confirmation policy: a daemon-side hysteresis hold keeps
+// the row red, and a red whose evidence failed the eligibility gates is
+// marked provisional so the reader knows it warns but cannot confirm.
+func decorateRegimeRowPolicy(rows []regimeRow, r *rpc.RegimeSnapshotResult) {
+	metas := []rpc.RegimeIndicatorMeta{
+		r.VIXTermStructure.RegimeIndicatorMeta,
+		r.VolOfVol.RegimeIndicatorMeta,
+		r.HYGSPYDivergence.RegimeIndicatorMeta,
+		r.CreditSpreads.RegimeIndicatorMeta,
+		r.FundingStress.RegimeIndicatorMeta,
+		r.USDJPY.RegimeIndicatorMeta,
+		r.GammaZero.RegimeIndicatorMeta,
+		r.Breadth.RegimeIndicatorMeta,
+	}
+	for i := range rows {
+		if i >= len(metas) {
+			return
+		}
+		meta := metas[i]
+		if meta.Band != "red" {
+			continue
+		}
+		if rows[i].band != bandRed && rows[i].band != bandUnranked {
+			// Served hysteresis hold: the raw value left the red band but
+			// the exit threshold has not cleared daemon-side.
+			rows[i].band = bandRed
+			if meta.BandReason != "" {
+				rows[i].reason = meta.BandReason
+			}
+		}
+		if rows[i].band == bandRed && meta.Eligibility != nil && !meta.Eligibility.Eligible {
+			rows[i].reason = strings.TrimSpace(rows[i].reason + " · provisional (" + regimeEligibilityReasonText(meta.Eligibility.Reasons) + ")")
+		}
+	}
+}
+
+func regimeEligibilityReasonText(reasons []string) string {
+	if len(reasons) == 0 {
+		return "not confirmation-eligible"
+	}
+	out := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		switch {
+		case reason == "depth_below_min":
+			out = append(out, "depth below floor")
+		case reason == "data_overdue":
+			out = append(out, "data overdue")
+		case strings.HasPrefix(reason, "streak_"):
+			if parts := strings.Split(reason, "_"); len(parts) == 4 {
+				out = append(out, "day "+parts[1]+" of "+parts[3])
+			} else {
+				out = append(out, reason)
+			}
+		default:
+			out = append(out, reason)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 func (c regimeComposite) evidence() string {
@@ -1949,6 +2054,10 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, di
 		renderExplainKV(env, out, "Full methodology", r.SpecDoc, nil)
 	}
 	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %s\n", env.bold("Confirmation policy"))
+	renderExplainKV(env, out, "Rule", "A red row may CONFIRM stress only when it is deep, persistent, and cadence-fresh; otherwise it is provisional — visible, drives early_warning, never confirms or rescues another cluster. While threshold sets carry pending_backtest, severity \"act\" additionally needs a tape co-sign (SPY ≤ −1.5%, VIX +10%, or a fresh same-session term inversion); pure-tape panic (SPY ≤ −4%/−7%) is exempt. Governed downgrades are disclosed on the Governed line.", nil)
+	renderExplainKV(env, out, "Gates", regimeGateExplainLine(), nil)
+	fmt.Fprintln(out)
 	for _, e := range entries {
 		fmt.Fprintf(out, "  %s\n", env.bold(e.name))
 		if bandLine := explainBandLine(e.band, e.bandReason); bandLine != "" {
@@ -1996,6 +2105,29 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, di
 		}
 		fmt.Fprintln(out)
 	}
+}
+
+// regimeGateExplainLine renders the eligibility gate table from the shared
+// rpc policy constants, so the explain text can never drift from the values
+// the daemon enforces.
+func regimeGateExplainLine() string {
+	g := func(key string) rpc.RegimeGate {
+		gate, _ := rpc.RegimeGateFor(key)
+		return gate
+	}
+	vix := g(rpc.RegimeIndicatorVIXTerm)
+	vvix := g(rpc.RegimeIndicatorVolOfVol)
+	hyg := g(rpc.RegimeIndicatorHYGSPY)
+	gamma := g(rpc.RegimeIndicatorGammaZero)
+	breadth := g(rpc.RegimeIndicatorBreadth)
+	return fmt.Sprintf(
+		"VIX/VIX3M ratio ≥%.2f ×%d sessions (fast ≥%.2f); VVIX ≥%.0f ×%d (fast ≥%.0f); HYG ≥%.2f%% below 50DMA ×%d (fast ≥%.1f%%); gamma gap ≤−%.1f%% below γ-zero (wholly-short profile = fast path); breadth ≤%.0f%% ×%d (fast ≤%.0f%%); HY OAS, funding, USD/JPY: the red band itself is the gate, 1 session.",
+		vix.MinDepth, vix.MinSessions, vix.FastDepth,
+		vvix.MinDepth, vvix.MinSessions, vvix.FastDepth,
+		hyg.MinDepth, hyg.MinSessions, hyg.FastDepth,
+		gamma.MinDepth,
+		40-breadth.MinDepth, breadth.MinSessions, 40-breadth.FastDepth,
+	)
 }
 
 func explainSourceSummary(name string) string {
