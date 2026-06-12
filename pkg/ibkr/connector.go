@@ -709,6 +709,16 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 		c.notifyOrderErrorLifecycle(int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
 	}
 	c.recordDataFarmNotice(note.code, note.message, note.timestamp)
+	// msg-204 delivers order errors and request errors through the same id
+	// field, and TWS order IDs (nextValidId) are independent from
+	// reqIDSeq with no disjointness. When the id names an order this
+	// connector owns, notifyOrderErrorLifecycle above owns the notice:
+	// request-scoped recovery and inactive-candidate marking must not act
+	// on an innocent historical request or live subscription that happens
+	// to share the integer.
+	if note.tickerID > 0 && c.isKnownBrokerOrderID(int(note.tickerID)) {
+		return
+	}
 	// Request-scoped recovery must run before the alias-based inactive
 	// logic below: historical reqIDs never register an alias, so the
 	// inactiveKey early-return would skip them entirely. This is the only
@@ -2363,13 +2373,18 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 		// Refresh if stale
 		if staleAfter > 0 && time.Since(sub.LastTime) >= staleAfter {
 			if sub.ReqID != 0 {
-				if conn := c.conn; conn != nil && conn.IsConnected() {
+				if conn := c.conn; conn != nil && conn.IsConnected() && wireCancelNeeded(sub) {
 					if err := conn.CancelMarketData(sub.ReqID); err != nil {
 						marketDataLogger.Warnf("%s: Failed to cancel stale market data for %s (ReqID: %d): %v", c.name, symbol, sub.ReqID, err)
 					}
-				} else if conn != nil && conn.rateLimiter != nil {
-					// Connection not available – ensure local slot accounting stays in sync
-					conn.rateLimiter.ReleaseMarketDataSlot()
+				} else if conn != nil {
+					// Server-side-rejected reqID or no live session: the wire
+					// cancel would only draw error 300, but slot accounting
+					// must stay in sync. The per-reqID release is idempotent
+					// with the release the notice path may already have done —
+					// the raw rateLimiter release this replaces could
+					// double-release and panic the semaphore.
+					conn.releaseMarketDataSlot(sub.ReqID)
 				}
 				// Reset subscription metadata so the new request can cleanly re-register
 				sub.ReqID = 0
@@ -5132,6 +5147,22 @@ func (c *Connector) isWhatIfOrderID(orderID int) bool {
 	conn := c.conn
 	c.mu.RUnlock()
 	return conn != nil && conn.IsWhatIfOrderID(orderID)
+}
+
+// isKnownBrokerOrderID reports whether id names a broker order this
+// connector owns: a journaled/open order or an in-flight WhatIf preview.
+// Used to keep request-scoped notice recovery off order-scoped msg-204
+// errors when the two integer id spaces collide.
+func (c *Connector) isKnownBrokerOrderID(id int) bool {
+	if c == nil || id <= 0 {
+		return false
+	}
+	brokerID := strconv.Itoa(id)
+	c.orderMu.RLock()
+	_, indexed := c.brokerOrderIndex[brokerID]
+	_, direct := c.openOrders[brokerID]
+	c.orderMu.RUnlock()
+	return indexed || direct || c.isWhatIfOrderID(id)
 }
 
 func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advancedRejectJSON string) {
