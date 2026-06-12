@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.11.0 — 2026-06-12 08:16 CEST
+
+### What's new
+
+- `ibkr account` can no longer end up reporting zeroed balances next to correct P&L when another API client shares the TWS session ([#12](https://github.com/osauer/ibkr/issues/12)): the values the gateway returns for the account request itself are now what gets served. Previously the request read a cache shared with the streaming account-update feed, and a zeroed or foreign-account batch landing mid-request overwrote the valid snapshot — deterministic in setups where a second client holds a long-lived `reqAccountUpdates` on the same account, because TWS shares that subscription across clients.
+
+### Added
+
+- `Connection.AwaitAccountSummarySnapshot(reqID, timeout)` waits for `accountSummaryEnd` and returns only the rows the gateway emitted for that request. `Connector.RequestAccountSummary` reads this per-request snapshot instead of the shared streaming cache; `WaitForAccountSummaryEnd` and `GetAccountSummary` remain available but can race streaming overwrites.
+
+### Fixed
+
+- Streaming account-value rows (`reqAccountUpdates`) that name a concrete account other than the session's bound one are dropped instead of merged into the shared summary cache — a displaced or foreign-account batch could clobber valid balances ([#12](https://github.com/osauer/ibkr/issues/12)). Rows with an empty account name still pass through, since single-account logins may omit the code.
+- The `Account update time:` debug line printed the wire protocol version (always `1`) instead of the gateway's HH:MM timestamp, which misdirected the debugging in [#12](https://github.com/osauer/ibkr/issues/12).
+
 ## v1.10.0 — 2026-06-12 06:44 CEST
 
 ### What's new

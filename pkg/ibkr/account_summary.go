@@ -100,7 +100,8 @@ const (
 //   - timeout <= 0 falls back to defaultAccountSummaryTimeout (5s).
 //
 // The method is safe to call concurrently; each invocation uses a fresh
-// reqID and reads the connection's accumulated map after end-of-stream.
+// reqID and reads a per-request snapshot of the rows the gateway emitted
+// for that reqID, isolated from the streaming account-updates cache.
 func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Duration) (*RawAccountSummary, error) {
 	if !c.isConnected() {
 		return nil, ErrIBKRUnavailable
@@ -125,21 +126,36 @@ func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Dura
 		}
 	}()
 
-	endCh := make(chan error, 1)
+	type snapshotResult struct {
+		rows map[string]string
+		err  error
+	}
+	resCh := make(chan snapshotResult, 1)
 	go func() {
-		endCh <- c.conn.WaitForAccountSummaryEnd(timeout)
+		rows, err := c.conn.AwaitAccountSummarySnapshot(reqID, timeout)
+		resCh <- snapshotResult{rows: rows, err: err}
 	}()
 
+	var raw map[string]string
 	select {
-	case err := <-endCh:
-		if err != nil {
-			return nil, fmt.Errorf("await account summary end: %w", err)
+	case res := <-resCh:
+		if res.err != nil {
+			return nil, fmt.Errorf("await account summary end: %w", res.err)
 		}
+		raw = res.rows
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	raw := c.conn.GetAccountSummary()
+	// The per-request snapshot keeps this read isolated from the streaming
+	// reqAccountUpdates writes that share the connection cache — a zeroed
+	// or foreign-account batch arriving mid-request must not clobber the
+	// values this request received (issue #12). A request that produced
+	// no rows at all (end marker only) falls back to the streaming cache,
+	// matching the pre-isolation behavior.
+	if len(raw) == 0 {
+		raw = c.conn.GetAccountSummary()
+	}
 	summary := parseAccountSummary(raw, c.conn.GetAccountCode())
 	return summary, nil
 }

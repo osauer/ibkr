@@ -219,6 +219,78 @@ func TestConnection_HandleAccountSummaryUpdatesAccount(t *testing.T) {
 	}
 }
 
+func TestAccountSummarySnapshotIsolatedFromStreamingZeros(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatalf("NewConnection returned nil")
+	}
+
+	conn.registerSummarySnapshot(7)
+	conn.handleAccountSummary([]string{"63", "2", "7", "U111", "NetLiquidation", "311599.04", "EUR"})
+
+	// A streaming zero batch for the same account lands before the read —
+	// the issue #12 sequence. It may clobber the shared map, but not the
+	// per-request snapshot.
+	conn.handleAccountValue([]string{"6", "2", "NetLiquidation", "0.00", "EUR", "U111"})
+	conn.processMessage(conn.encodeMsg(msgAccountSummaryEnd, "1", 7))
+
+	rows, err := conn.AwaitAccountSummarySnapshot(7, time.Second)
+	if err != nil {
+		t.Fatalf("AwaitAccountSummarySnapshot: %v", err)
+	}
+	if got := rows["NetLiquidation_EUR"]; got != "311599.04" {
+		t.Fatalf("snapshot NetLiquidation_EUR = %q, want 311599.04", got)
+	}
+	if got := conn.GetAccountSummary()["NetLiquidation_EUR"]; got != "0.00" {
+		t.Fatalf("shared map NetLiquidation_EUR = %q, want streaming overwrite 0.00", got)
+	}
+}
+
+func TestAwaitAccountSummarySnapshotTimeoutCleansUp(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatalf("NewConnection returned nil")
+	}
+
+	conn.registerSummarySnapshot(9)
+	if _, err := conn.AwaitAccountSummarySnapshot(9, 10*time.Millisecond); err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	conn.accountMu.RLock()
+	_, present := conn.summarySnapshots[9]
+	conn.accountMu.RUnlock()
+	if present {
+		t.Fatalf("expected snapshot 9 to be dropped after timeout")
+	}
+	if _, err := conn.AwaitAccountSummarySnapshot(9, time.Millisecond); err == nil {
+		t.Fatalf("expected unregistered-reqID error after drop")
+	}
+}
+
+func TestHandleAccountValueDropsForeignAccountRows(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatalf("NewConnection returned nil")
+	}
+	conn.account = "U111"
+
+	conn.handleAccountValue([]string{"6", "2", "NetLiquidation", "0.00", "EUR", "U999"})
+	if _, ok := conn.GetAccountSummary()["NetLiquidation_EUR"]; ok {
+		t.Fatalf("foreign-account row must not be stored")
+	}
+
+	conn.handleAccountValue([]string{"6", "2", "NetLiquidation", "5.00", "EUR", "U111"})
+	if got := conn.GetAccountSummary()["NetLiquidation_EUR"]; got != "5.00" {
+		t.Fatalf("bound-account row = %q, want 5.00", got)
+	}
+
+	// Single-account logins may omit the account code — accept those.
+	conn.handleAccountValue([]string{"6", "2", "BuyingPower", "7.00", "EUR", ""})
+	if got := conn.GetAccountSummary()["BuyingPower_EUR"]; got != "7.00" {
+		t.Fatalf("empty-account row = %q, want 7.00", got)
+	}
+}
+
 func TestConnectionManagedAccountsStoresVersionedAccountList(t *testing.T) {
 	conn := NewConnection(DefaultConfig())
 	if conn == nil {
