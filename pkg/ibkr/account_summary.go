@@ -132,7 +132,7 @@ func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Dura
 	}
 	resCh := make(chan snapshotResult, 1)
 	go func() {
-		rows, err := c.conn.AwaitAccountSummarySnapshot(reqID, timeout)
+		rows, err := c.conn.awaitAccountSummarySnapshot(reqID, timeout)
 		resCh <- snapshotResult{rows: rows, err: err}
 	}()
 

@@ -2,18 +2,15 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v1.11.0 — 2026-06-12 08:16 CEST
+## v1.10.1 — 2026-06-12 08:16 CEST
 
 ### What's new
 
 - `ibkr account` can no longer end up reporting zeroed balances next to correct P&L when another API client shares the TWS session ([#12](https://github.com/osauer/ibkr/issues/12)): the values the gateway returns for the account request itself are now what gets served. Previously the request read a cache shared with the streaming account-update feed, and a zeroed or foreign-account batch landing mid-request overwrote the valid snapshot — deterministic in setups where a second client holds a long-lived `reqAccountUpdates` on the same account, because TWS shares that subscription across clients.
 
-### Added
-
-- `Connection.AwaitAccountSummarySnapshot(reqID, timeout)` waits for `accountSummaryEnd` and returns only the rows the gateway emitted for that request. `Connector.RequestAccountSummary` reads this per-request snapshot instead of the shared streaming cache; `WaitForAccountSummaryEnd` and `GetAccountSummary` remain available but can race streaming overwrites.
-
 ### Fixed
 
+- `Connector.RequestAccountSummary` reads a per-request snapshot of the rows the gateway emitted for its own request ID instead of the connection-wide cache the streaming subscription also writes. A request that produced no rows (end marker only) falls back to the streaming cache as before. `Connection.WaitForAccountSummaryEnd` and `GetAccountSummary` are unchanged for importers driving the wire connection directly, but they can race streaming overwrites.
 - Streaming account-value rows (`reqAccountUpdates`) that name a concrete account other than the session's bound one are dropped instead of merged into the shared summary cache — a displaced or foreign-account batch could clobber valid balances ([#12](https://github.com/osauer/ibkr/issues/12)). Rows with an empty account name still pass through, since single-account logins may omit the code.
 - The `Account update time:` debug line printed the wire protocol version (always `1`) instead of the gateway's HH:MM timestamp, which misdirected the debugging in [#12](https://github.com/osauer/ibkr/issues/12).
 
