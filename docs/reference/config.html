@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:50acc6abf93abea2b6ddb169367122538483391657dc1b0428318a8b0843a57a -->
+<!-- md-source: config.md sha256:796ba70ad48ee813f7cfe17811ac38356a3bcb3431f8c66f5f99347383d96e99 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -184,8 +184,8 @@
 <tr><td><code>[trading]</code></td><td><code>allow_option_market_orders</code></td><td><code>bool</code></td><td>AllowOptionMarketOrders permits option market orders when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_option_sell_to_open</code></td><td><code>bool</code></td><td>AllowOptionSellToOpen permits option sell-to-open previews when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_stock_short</code></td><td><code>bool</code></td><td>AllowStockShort permits stock short/opening flip previews when true.</td></tr>
-<tr><td><code>[trading]</code></td><td><code>max_notional</code></td><td><code>float64</code></td><td>MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency.</td></tr>
-<tr><td><code>[trading]</code></td><td><code>max_option_contracts</code></td><td><code>int</code></td><td>MaxOptionContracts caps first-release single-leg option quantity; default 5.</td></tr>
+<tr><td><code>[trading]</code></td><td><code>max_notional</code></td><td><code>float64</code></td><td>MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency.</td></tr>
+<tr><td><code>[trading]</code></td><td><code>max_option_contracts</code></td><td><code>int</code></td><td>MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>mcp_enabled</code></td><td><code>bool</code></td><td>MCPEnabled controls whether MCP write tools may progress beyond preview/status.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>mcp_mode</code></td><td><code>string</code></td><td>MCPMode selects MCP scope: &#34;preview&#34; (default), &#34;paper-write&#34;, or &#34;live-write&#34;.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>mcp_nonce_ttl</code></td><td><code>duration</code></td><td>MCPNonceTTL controls how long CLI-minted human nonces remain valid.</td></tr>

@@ -129,7 +129,6 @@ type TradeProposal struct {
 	Score              float64                         `json:"score,omitempty"`
 	ThetaPerDay        float64                         `json:"theta_per_day,omitempty"`
 	Notional           float64                         `json:"notional,omitempty"`
-	MaxNotional        float64                         `json:"max_notional,omitempty"`
 	RiskExcessNotional float64                         `json:"risk_excess_notional,omitempty"`
 	RiskExcessCurrency string                          `json:"risk_excess_currency,omitempty"`
 	MarketValuePctNLV  *float64                        `json:"market_value_pct_nlv,omitempty"`

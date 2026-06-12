@@ -28,8 +28,8 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[trading]` | `allow_option_market_orders` | `bool` | AllowOptionMarketOrders permits option market orders when true. |
 | `[trading]` | `allow_option_sell_to_open` | `bool` | AllowOptionSellToOpen permits option sell-to-open previews when true. |
 | `[trading]` | `allow_stock_short` | `bool` | AllowStockShort permits stock short/opening flip previews when true. |
-| `[trading]` | `max_notional` | `float64` | MaxNotional caps first-release equity/ETF order notional before broker WhatIf; default 10000 in account currency. |
-| `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps first-release single-leg option quantity; default 5. |
+| `[trading]` | `max_notional` | `float64` | MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency. |
+| `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5. |
 | `[trading]` | `mcp_enabled` | `bool` | MCPEnabled controls whether MCP write tools may progress beyond preview/status. |
 | `[trading]` | `mcp_mode` | `string` | MCPMode selects MCP scope: "preview" (default), "paper-write", or "live-write". |
 | `[trading]` | `mcp_nonce_ttl` | `duration` | MCPNonceTTL controls how long CLI-minted human nonces remain valid. |

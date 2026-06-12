@@ -1,6 +1,6 @@
 # Daemon/CLI Trading Contract Template
 
-Updated: 2026-06-06 06:35 CEST
+Updated: 2026-06-11 22:14 CEST
 
 Use this before changing daemon, RPC, CLI, MCP, trading capability, order
 preview/status, purge, account, position, canary, regime, gamma, breadth, or
@@ -18,7 +18,7 @@ market-data semantics.
 
 | Concept | Authoritative source | Typed field/contract | Renderer/tool | Fallback or unavailable state |
 |---|---|---|---|---|
-|  |  |  |  |  |
+| Order-size caps (`max_notional`, `max_option_contracts`) bind risk-increasing intent only | Order-preview position impact effect (`classifyPositionEffect`): `close`/`reduce` ⇒ exempt; `open`/`increase`/`flip`/`open_short` ⇒ capped | `rpc.OrderPreviewResult.Position.Effect`; `max_notional` echo omitted when the cap did not bind | `ibkr order preview`, `ibkr_order_preview` MCP tool, proposal preview/submit | Position impact unavailable ⇒ preview fails before the caps (fail closed; never exempt on unknown intent) |
 
 ## Safety Invariants
 

@@ -482,46 +482,7 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 			}
 		}
 	}
-	applyNotionalCapToProposals(out, e.effectiveMaxNotional())
 	return out
-}
-
-// effectiveMaxNotional resolves the notional cap previewOrder will enforce,
-// through the same merged TOML+runtime accessor the gate reads. A free-
-// standing engine without a server resolves to 0: disclose nothing rather
-// than guess a default the gate might not use.
-func (e *proposalEngine) effectiveMaxNotional() float64 {
-	if e == nil || e.server == nil {
-		return 0
-	}
-	return e.server.effectiveTradingConfig().MaxNotional
-}
-
-// applyNotionalCapToProposals discloses the order-preview notional gate at
-// generation time: previewOrder rejects any order whose notional exceeds the
-// effective [trading].max_notional, so a proposal estimated above the cap can
-// never preview or submit and must not render as ready. The mark-based
-// estimate can drift either way from the gate's live reference price by
-// preview time — the gate stays authoritative; this only moves the refusal
-// from a failed preview to a disclosed blocker. Zero notional means the
-// position had no usable mark, so there is nothing honest to compare.
-func applyNotionalCapToProposals(proposals []rpc.TradeProposal, maxNotional float64) {
-	if maxNotional <= 0 {
-		return
-	}
-	for i := range proposals {
-		p := &proposals[i]
-		p.MaxNotional = maxNotional
-		if p.Notional <= maxNotional {
-			continue
-		}
-		p.State = rpc.TradeProposalStateBlocked
-		p.Blockers = appendTradingBlockerOnce(p.Blockers, rpc.TradingBlocker{
-			Code:    "order_notional_exceeds_max",
-			Message: fmt.Sprintf("estimated order notional %.2f exceeds [trading].max_notional %.2f", p.Notional, maxNotional),
-			Action:  fmt.Sprintf("Raise the limit with `ibkr settings set trading.limits.max_notional=%.0f` and refresh proposals, or protect this position with a smaller manual order.", math.Ceil(p.Notional)),
-		})
-	}
 }
 
 func (e *proposalEngine) marketEventsSnapshot(ctx context.Context, pos *rpc.PositionsResult) *rpc.MarketEventsResult {

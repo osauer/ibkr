@@ -765,6 +765,151 @@ func TestTrailingStopPreviewBlocksWhenWhatIfNotSubmitEligible(t *testing.T) {
 	}
 }
 
+// TestProposalPreviewExemptsRiskReducingFromCaps drives all three protection
+// buckets through the full fast-path preview chain with order sizes far above
+// [trading].max_notional (10k) and max_option_contracts (5): reduce-only
+// protective orders must reach SubmitEligible instead of dying at the size
+// caps on orders the daemon itself proposed (preview_failed).
+func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
+	now := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)
+	policyFingerprint := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
+	trailAmount := 8.0
+	cases := []struct {
+		name     string
+		bid, ask float64
+		position func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
+		prop     rpc.TradeProposal
+		quantity int
+	}{
+		{
+			name: "trailing stop full position",
+			bid:  479.90, ask: 480.10,
+			position: fixedPreviewPosition(150, 0, rpc.OrderPositionEffectClose),
+			prop: rpc.TradeProposal{
+				Key: "trailing_stop:amd", Bucket: rpc.TradeProposalBucketTrailingStop,
+				Symbol: "AMD", SecType: "STK", Action: rpc.OrderActionSell,
+				Quantity: 150, MaxQuantity: 150, PositionQuantity: 150,
+				PositionEffect: rpc.OrderPositionEffectClose,
+				OrderType:      rpc.OrderTypeTRAIL,
+				Trail:          &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetAmount, TrailingAmount: &trailAmount, InitialStopPrice: 441.50},
+				TIF:            rpc.OrderTIFDay,
+				Contract:       rpc.ContractParams{Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD", Multiplier: 1},
+			},
+			quantity: 150,
+		},
+		{
+			name: "risk reduction half position",
+			bid:  479.90, ask: 480.10,
+			position: fixedPreviewPosition(150, 75, rpc.OrderPositionEffectReduce),
+			prop: rpc.TradeProposal{
+				Key: "risk_reduction:amd", Bucket: rpc.TradeProposalBucketRiskReduction,
+				Symbol: "AMD", SecType: "STK", Action: rpc.OrderActionSell,
+				Quantity: 75, MaxQuantity: 150, PositionQuantity: 150,
+				PositionEffect: rpc.OrderPositionEffectReduce,
+				OrderType:      rpc.OrderTypeLMT,
+				TIF:            rpc.OrderTIFDay,
+				Contract:       rpc.ContractParams{Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD", Multiplier: 1},
+			},
+			quantity: 75,
+		},
+		{
+			name: "theta hygiene 30 contracts",
+			bid:  3.95, ask: 4.05,
+			position: fixedPreviewPosition(30, 0, rpc.OrderPositionEffectClose),
+			prop: rpc.TradeProposal{
+				Key: "theta_hygiene:spy", Bucket: rpc.TradeProposalBucketThetaHygiene,
+				Symbol: "SPY", SecType: "OPT", Action: rpc.OrderActionSell,
+				Quantity: 30, MaxQuantity: 30, PositionQuantity: 30,
+				PositionEffect: rpc.OrderPositionEffectClose,
+				OrderType:      rpc.OrderTypeLMT,
+				TIF:            rpc.OrderTIFDay,
+				Contract:       rpc.ContractParams{Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100},
+			},
+			quantity: 30,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+			srv.orderPreviewQuote = fixedPreviewQuote(tc.bid, tc.ask)
+			srv.orderPreviewPositionImpact = tc.position
+			srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+				return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+			}
+			prop := tc.prop
+			prop.Revision = "sha256:rev"
+			prop.State = rpc.TradeProposalStateGenerated
+			prop.PolicyID = "protection-mvp"
+			prop.PolicyVersion = 1
+			prop.PolicyFingerprint = policyFingerprint
+			prop.CreatedAt = now
+			if prop.Bucket != rpc.TradeProposalBucketTrailingStop {
+				// The preview fast path serves trailing-stop buckets only and
+				// the slow path's Refresh needs a live gateway, so exercise
+				// the identical post-resolution chain Preview runs.
+				preview, err := srv.previewOrder(context.Background(), proposalOrderPreviewParams(prop, selectedProposalQty(prop, tc.quantity), 20))
+				if err != nil {
+					t.Fatalf("previewOrder err = %v, want reduce-only order exempt from size caps", err)
+				}
+				if !preview.SubmitEligible {
+					t.Fatalf("preview = %+v, want submit eligible", preview)
+				}
+				if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) != 0 {
+					t.Fatalf("safety blockers = %+v, want none", blockers)
+				}
+				if preview.Notional <= 10_000 {
+					t.Fatalf("preview notional = %.2f, want above the 10k cap to prove the exemption", preview.Notional)
+				}
+				if preview.MaxNotional != 0 {
+					t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", preview.MaxNotional)
+				}
+				return
+			}
+			srv.tradeProposals = &proposalEngine{
+				server:  srv,
+				store:   testProposalStore(t),
+				now:     func() time.Time { return now },
+				ignored: map[string]struct{}{},
+				snapshot: rpc.TradeProposalSnapshot{
+					Kind:              rpc.TradeProposalSnapshotKind,
+					SchemaVersion:     rpc.TradeProposalSnapshotSchemaVersion,
+					AsOf:              now,
+					Revision:          "sha256:rev",
+					AccountID:         "DU1234567",
+					AccountMode:       rpc.AccountModePaper,
+					PolicyID:          "protection-mvp",
+					PolicyVersion:     1,
+					PolicyFingerprint: policyFingerprint,
+					PolicyStatus:      rpc.ProtectionPolicyStatus{Status: rpc.ProtectionPolicyStatusDefault, PolicyID: "protection-mvp", Fingerprint: policyFingerprint},
+					AutoTrade:         rpc.AutoTradeStatus{Trading: srv.tradingStatus(srv.endpoint), ProposalsEnabled: true, FastPathEnabled: true},
+					Trading:           srv.tradingStatus(srv.endpoint),
+					Proposals:         []rpc.TradeProposal{prop},
+				},
+			}
+
+			res, err := srv.tradeProposals.Preview(context.Background(), rpc.TradeProposalPreviewParams{
+				Key:       prop.Key,
+				Revision:  prop.Revision,
+				Quantity:  tc.quantity,
+				TimeoutMs: 20,
+				FastPath:  true,
+			})
+			if err != nil {
+				t.Fatalf("fast preview err = %v", err)
+			}
+			if !res.Accepted || !res.SubmitEligible || res.Preview == nil || len(res.Blockers) != 0 {
+				t.Fatalf("fast preview = %+v, want accepted submit-eligible with no blockers", res)
+			}
+			if res.Preview.Notional <= 10_000 {
+				t.Fatalf("preview notional = %.2f, want above the 10k cap to prove the exemption", res.Preview.Notional)
+			}
+			if res.Preview.MaxNotional != 0 {
+				t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", res.Preview.MaxNotional)
+			}
+		})
+	}
+}
+
 func preservedTrailingStopProposal(now time.Time) rpc.TradeProposal {
 	trailPercent := 8.0
 	policyFingerprint := fingerprintProtectionPolicy(defaultProtectionPolicy())
@@ -1709,55 +1854,13 @@ func TestProposalSubsystemHealthReportsRefreshStreak(t *testing.T) {
 	}
 }
 
-func TestApplyNotionalCapToProposalsDisclosesPreviewGate(t *testing.T) {
-	t.Parallel()
-	proposals := []rpc.TradeProposal{
-		{Key: "trailing_stop:over", State: rpc.TradeProposalStateGenerated, Notional: 72396},
-		{Key: "trailing_stop:under", State: rpc.TradeProposalStateGenerated, Notional: 9500},
-		{Key: "trailing_stop:atcap", State: rpc.TradeProposalStateGenerated, Notional: 10000},
-		{Key: "trailing_stop:nomark", State: rpc.TradeProposalStateGenerated},
-	}
-	applyNotionalCapToProposals(proposals, 10000)
-
-	over := proposals[0]
-	if over.State != rpc.TradeProposalStateBlocked || !hasBlocker(over.Blockers, "order_notional_exceeds_max") {
-		t.Fatalf("over-cap proposal = %+v, want blocked with order_notional_exceeds_max", over)
-	}
-	if over.MaxNotional != 10000 {
-		t.Fatalf("over-cap MaxNotional = %.2f, want disclosed cap 10000", over.MaxNotional)
-	}
-	blocker := over.Blockers[0]
-	if !strings.Contains(blocker.Message, "72396.00") || !strings.Contains(blocker.Message, "10000.00") {
-		t.Fatalf("blocker message %q, want both sides of the comparison", blocker.Message)
-	}
-	if !strings.Contains(blocker.Action, "trading.limits.max_notional=72396") {
-		t.Fatalf("blocker action %q, want runtime settings remediation with the needed value", blocker.Action)
-	}
-	for _, tc := range []struct {
-		name string
-		got  rpc.TradeProposal
-	}{{"under-cap", proposals[1]}, {"at-cap", proposals[2]}, {"no-mark", proposals[3]}} {
-		if tc.got.State != rpc.TradeProposalStateGenerated || len(tc.got.Blockers) != 0 {
-			t.Fatalf("%s proposal = %+v, want generated without blockers (gate passes notional <= cap)", tc.name, tc.got)
-		}
-		if tc.got.MaxNotional != 10000 {
-			t.Fatalf("%s MaxNotional = %.2f, want disclosed cap 10000", tc.name, tc.got.MaxNotional)
-		}
-	}
-
-	unresolved := []rpc.TradeProposal{{Key: "trailing_stop:x", State: rpc.TradeProposalStateGenerated, Notional: 1e9}}
-	applyNotionalCapToProposals(unresolved, 0)
-	if unresolved[0].MaxNotional != 0 || len(unresolved[0].Blockers) != 0 {
-		t.Fatalf("unresolved-cap proposal = %+v, want untouched (no honest cap to disclose)", unresolved[0])
-	}
-}
-
-// TestGenerateDisclosesEffectiveMaxNotional proves generation discloses the
-// same merged TOML+runtime cap the preview gate enforces. On trading-capable
-// builds the runtime trading.limits.max_notional override (5000) must block
-// an 8000-notional proposal; on stable builds runtime limit overrides are
-// read-only and the TOML default (10000) lets the same proposal stay ready.
-func TestGenerateDisclosesEffectiveMaxNotional(t *testing.T) {
+// TestGenerateDoesNotCapProtectiveProposals proves generation no longer
+// renders an over-cap protective proposal blocked: the preview gate exempts
+// reduce-only orders from [trading].max_notional, so an 8000-notional
+// proposal must stay ready even under a 5000 runtime cap (trading-capable
+// builds; on stable builds the runtime limits write is refused and the cap
+// stays at the 10000 TOML default — ready either way).
+func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 11, 14, 0, 0, 0, time.UTC)
 	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
@@ -1794,23 +1897,7 @@ func TestGenerateDisclosesEffectiveMaxNotional(t *testing.T) {
 	if p.Notional != 8000 {
 		t.Fatalf("proposal notional = %.2f, want mark-based 8000", p.Notional)
 	}
-	gateCap := srv.effectiveTradingConfig().MaxNotional
-	if p.MaxNotional != gateCap {
-		t.Fatalf("disclosed MaxNotional = %.2f, want the gate's effective cap %.2f", p.MaxNotional, gateCap)
-	}
-	if orderWritesAvailable {
-		if gateCap != 5000 {
-			t.Fatalf("effective cap = %.2f, want runtime override 5000", gateCap)
-		}
-		if p.State != rpc.TradeProposalStateBlocked || !hasBlocker(p.Blockers, "order_notional_exceeds_max") {
-			t.Fatalf("proposal = %+v, want blocked: 8000 estimated notional exceeds the 5000 runtime cap", p)
-		}
-	} else {
-		if gateCap != 10000 {
-			t.Fatalf("effective cap = %.2f, want TOML default 10000 on a stable build", gateCap)
-		}
-		if p.State != rpc.TradeProposalStateGenerated || len(p.Blockers) != 0 {
-			t.Fatalf("proposal = %+v, want ready: 8000 estimated notional is under the 10000 default cap", p)
-		}
+	if p.State != rpc.TradeProposalStateGenerated || len(p.Blockers) != 0 {
+		t.Fatalf("proposal = %+v, want ready: size caps bind risk-increasing orders only, never a protective close/reduce", p)
 	}
 }

@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.11.0 — 2026-06-11 22:16 CEST
+
+### What's new
+
+- The order-size safety caps are now intent-aware: `[trading].max_notional` and `[trading].max_option_contracts` cap risk-increasing orders only — opening, adding, or flipping a position. Reduce-only protective orders (closing or trimming what you hold) are exempt, because the position itself bounds them and the flat cap was blocking the daemon's own protection proposals: a full-position protective trail on 150 shares ≈ $72k could never preview against the default $10k cap, and a stop loss is exactly the order a size cap should never refuse. Opening orders above the caps still fail, flips stay capped (their through-zero portion opens new exposure), and a preview without usable position data fails closed before the exemption is considered. `ibkr settings show` labels the two limits "(opening)" with a "Reduce-only: exempt" line.
+
+### Changed
+
+- `order.preview` omits `max_notional` from the result when the cap did not bind the preview (reduce-only orders), not only when uncapped — the echo no longer claims a gate that was never applied. Purge **restore** legs re-open positions and stay fully capped.
+
+### Engineering notes
+
+- The reduce-only proof remains enforced end-to-end at proposal submit: close/reduce intent on both the proposal and the fresh preview position effect, plus quantity within the live position. The preview position impact reads cached positions and does not subtract open working sell quantity, so stacked sell previews can each claim the same shares; `duplicateProtectiveBlockers` and broker rejection backstop this today, and reserved-quantity accounting is a flagged fast-follow.
+- The unreleased generation-time `order_notional_exceeds_max` disclosure blocker and the `TradeProposal.max_notional` field it populated are removed: they mirrored the flat preview cap that no longer applies to protective close/reduce orders, and would otherwise have kept large protective proposals blocked before preview.
+
 ## v1.10.0 — 2026-06-11 08:15 CEST
 
 ### What's new

@@ -2105,7 +2105,12 @@ Field meanings:
   and option sell-to-open policies are enforced here); broker
   permissions and margin remain authoritative.
 - `notional` / `max_notional` — order notional and the configured cap it
-  was checked against (`max_notional` omitted when uncapped).
+  was checked against. The size caps (`[trading].max_notional`,
+  `max_option_contracts`) bind risk-increasing orders only — `effect`
+  `open`/`increase`/`flip`/`open_short`; reduce-only `close`/`reduce`
+  orders are exempt, bounded by the position itself, and `max_notional`
+  is omitted because no cap bound the preview (also omitted when
+  uncapped).
 - `what_if` — the broker preview surface. `status` is `accepted` (IBKR
   returned a successful WhatIf for this exact draft), `rejected`
   (`message`/`action`/`advanced_reject_json` carry the broker detail),

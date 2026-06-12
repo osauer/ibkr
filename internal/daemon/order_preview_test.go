@@ -856,6 +856,174 @@ func TestOrderPreviewAllowsSingleLegOption(t *testing.T) {
 	}
 }
 
+// TestOrderPreviewExemptsRiskReducingFromCaps proves the size caps are
+// intent-aware: close/reduce orders are bounded by the position itself and
+// pass the [trading].max_notional / max_option_contracts gates regardless of
+// size, while the exempted preview stops echoing a cap that did not bind.
+func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
+	t.Parallel()
+	tr := config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000}
+	limit := 480.0
+
+	t.Run("stock reduce above cap passes", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(200, 50, rpc.OrderPositionEffectReduce)
+		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "sell",
+			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
+			Quantity:   150,
+			LimitPrice: &limit,
+		})
+		if err != nil {
+			t.Fatalf("reduce preview above cap: %v", err)
+		}
+		if res.Notional != 72_000 || !res.TokenMinted {
+			t.Fatalf("reduce preview notional/token = %.2f %v, want 72000.00 with minted token", res.Notional, res.TokenMinted)
+		}
+		if res.MaxNotional != 0 {
+			t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", res.MaxNotional)
+		}
+	})
+
+	t.Run("stock close above cap passes", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(150, 0, rpc.OrderPositionEffectClose)
+		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "sell",
+			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
+			Quantity:   150,
+			LimitPrice: &limit,
+		})
+		if err != nil {
+			t.Fatalf("close preview above cap: %v", err)
+		}
+		if res.Notional != 72_000 || res.MaxNotional != 0 {
+			t.Fatalf("close preview notional/MaxNotional = %.2f %.2f, want 72000.00 and 0", res.Notional, res.MaxNotional)
+		}
+	})
+
+	t.Run("option close above both caps passes", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr) // MaxOptionContracts defaults to 5
+		srv.orderPreviewQuote = fixedPreviewQuote(3.95, 4.05)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(30, 0, rpc.OrderPositionEffectClose)
+		optLimit := 4.0
+		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action: "sell",
+			Contract: rpc.ContractParams{
+				Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100,
+			},
+			Quantity:   30,
+			LimitPrice: &optLimit,
+		})
+		if err != nil {
+			t.Fatalf("option close preview qty 30: %v", err)
+		}
+		if res.Notional != 12_000 || res.Draft.OpenClose != "C" {
+			t.Fatalf("option close notional/open_close = %.2f %q, want 12000.00 C", res.Notional, res.Draft.OpenClose)
+		}
+	})
+
+	t.Run("opening above cap still fails", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 150, rpc.OrderPositionEffectOpen)
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "buy",
+			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
+			Quantity:   150,
+			LimitPrice: &limit,
+		})
+		var bad *badRequestError
+		if !errors.As(err, &bad) || !strings.Contains(err.Error(), "max_notional") {
+			t.Fatalf("opening preview err = %v, want max_notional bad request", err)
+		}
+	})
+
+	t.Run("flip above cap still fails even with shorting allowed", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000, AllowStockShort: true})
+		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(10, -140, rpc.OrderPositionEffectFlip)
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "sell",
+			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
+			Quantity:   150,
+			LimitPrice: &limit,
+		})
+		var bad *badRequestError
+		if !errors.As(err, &bad) || !strings.Contains(err.Error(), "max_notional") {
+			t.Fatalf("flip preview err = %v, want max_notional bad request (flip is risk-increasing)", err)
+		}
+	})
+
+	t.Run("option opening above qty cap still fails", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = fixedPreviewQuote(3.95, 4.05)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 6, rpc.OrderPositionEffectOpen)
+		optLimit := 4.0
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action: "buy",
+			Contract: rpc.ContractParams{
+				Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100,
+			},
+			Quantity:   6,
+			LimitPrice: &optLimit,
+		})
+		var bad *badRequestError
+		if !errors.As(err, &bad) || !strings.Contains(err.Error(), "max_option_contracts") {
+			t.Fatalf("option opening err = %v, want max_option_contracts bad request", err)
+		}
+	})
+
+	t.Run("capped preview still echoes the cap", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = fixedPreviewQuote(99.90, 100.10)
+		srv.orderPreviewPositionImpact = fixedPreviewPosition(0, 10, rpc.OrderPositionEffectOpen)
+		smallLimit := 100.0
+		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "buy",
+			Contract:   rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+			Quantity:   10,
+			LimitPrice: &smallLimit,
+		})
+		if err != nil {
+			t.Fatalf("small opening preview: %v", err)
+		}
+		if res.MaxNotional != 10_000 {
+			t.Fatalf("capped preview MaxNotional = %.2f, want 10000.00", res.MaxNotional)
+		}
+	})
+
+	t.Run("position unavailable fails closed before quote", func(t *testing.T) {
+		t.Parallel()
+		srv := newOrderPreviewTestServer(t, tr)
+		srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
+			t.Fatal("quote hook must not run when position impact is unavailable")
+			return rpc.OrderQuoteSnapshot{}, nil
+		}
+		srv.orderPreviewPositionImpact = func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
+			return rpc.OrderPositionImpact{}, errors.New("cached positions unavailable")
+		}
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+			Action:     "sell",
+			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
+			Quantity:   150,
+			LimitPrice: &limit,
+		})
+		if err == nil || !strings.Contains(err.Error(), "cached positions unavailable") {
+			t.Fatalf("position-unavailable preview err = %v, want fail-closed error", err)
+		}
+	})
+}
+
 func newOrderPreviewTestServer(t *testing.T, trading config.Trading) *Server {
 	t.Helper()
 	now := time.Date(2026, 5, 28, 8, 45, 0, 0, time.UTC)
