@@ -1062,9 +1062,11 @@ func TestComputeCanarySurfacesDegradedGammaSeparately(t *testing.T) {
 func TestComputeCanaryDoesNotDegradeRankableWarningOnlyGamma(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
-	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterGreenCount: 4, ClusterRankedCount: 6}
+	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterEligibleRedCount: 2, ClusterGreenCount: 4, ClusterRankedCount: 6}
 	r.HYGSPYDivergence.Band = "red"
+	r.HYGSPYDivergence.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.GammaZero.Band = "red"
+	r.GammaZero.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
 		Quality:        rankableCanaryGammaQuality(),
 		WarningDetails: []rpc.GammaWarningDetail{{Code: "oi_missing", Severity: "data_quality"}},
@@ -1421,12 +1423,15 @@ func TestComputeCanaryStaleRedClusterDoesNotConfirmLifecycle(t *testing.T) {
 		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 
-	sig, ok := findSignal(res.Signals, risk.SignalRegimeStressConfirmed)
-	if !ok {
-		t.Fatalf("missing regime stress signal: %+v", res.Signals)
+	// Pre-eligibility this emitted an act-grade confirmed signal with a
+	// BlockedBy disclosure. Under the confirmation gates a stale red is
+	// not eligible at all, so the confirmed signal must not fire — the
+	// visible reds warn through the early signal instead.
+	if _, confirmed := findSignal(res.Signals, risk.SignalRegimeStressConfirmed); confirmed {
+		t.Fatalf("stale red clusters must not emit confirmed stress: %+v", res.Signals)
 	}
-	if !containsString(sig.BlockedBy, "vol") {
-		t.Fatalf("regime stress blocked_by = %+v, want stale vol", sig.BlockedBy)
+	if _, ok := findSignal(res.Signals, risk.SignalRegimeStressEarly); !ok {
+		t.Fatalf("missing early regime stress signal: %+v", res.Signals)
 	}
 	if res.MarketConfirmation == canaryMarketConfirmed {
 		t.Fatalf("market_confirmation = %s, want stale vol to block confirmed market stress", res.MarketConfirmation)
@@ -1815,11 +1820,15 @@ func rankableCanaryGammaQuality() *rpc.GammaSignalQuality {
 
 func redVolCreditRegimeWithComputingSlowRows() rpc.RegimeSnapshotResult {
 	r := healthyCanaryRegime()
-	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterGreenCount: 2, ClusterRankedCount: 4, ClusterUnrankedCount: 2}
+	r.Composite = rpc.RegimeComposite{ClusterRedCount: 2, ClusterEligibleRedCount: 2, ClusterGreenCount: 2, ClusterRankedCount: 4, ClusterUnrankedCount: 2}
 	r.VIXTermStructure.Band = "red"
+	r.VIXTermStructure.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.VolOfVol.Band = "red"
+	r.VolOfVol.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.HYGSPYDivergence.Band = "red"
+	r.HYGSPYDivergence.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.CreditSpreads.Band = "red"
+	r.CreditSpreads.Eligibility = &rpc.RegimeEligibility{Eligible: true}
 	r.GammaZero.Band = ""
 	r.GammaZero.Status = rpc.RegimeStatusComputing
 	r.Breadth.Band = ""

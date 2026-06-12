@@ -25,6 +25,15 @@ type platformSettingsData struct {
 	Version  int                         `json:"version"`
 	Features platformFeatureSettingsData `json:"features"`
 	Trading  platformTradingSettingsData `json:"trading"`
+	Regime   platformRegimeSettingsData  `json:"regime"`
+}
+
+type platformRegimeSettingsData struct {
+	Journal platformRegimeJournalSettingsData `json:"journal"`
+}
+
+type platformRegimeJournalSettingsData struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 type platformFeatureSettingsData struct {
@@ -165,7 +174,7 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, origin string) error {
 	for key := range patch {
 		switch key {
-		case "features", "trading":
+		case "features", "trading", "regime":
 		default:
 			return errBadRequest("unknown settings field " + key)
 		}
@@ -190,10 +199,45 @@ func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, or
 				if err := applyTradingSettingsPatch(next, raw, limitsWritable, reason); err != nil {
 					return err
 				}
+			case "regime":
+				if err := applyRegimeSettingsPatch(next, raw); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	})
+}
+
+func applyRegimeSettingsPatch(next *platformSettingsData, raw json.RawMessage) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return errBadRequest("regime must be an object")
+	}
+	for key, raw := range obj {
+		switch key {
+		case "journal":
+			var journal map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &journal); err != nil {
+				return errBadRequest("regime.journal must be an object")
+			}
+			for jkey, jraw := range journal {
+				switch jkey {
+				case "enabled":
+					v, err := nullableBool(jraw)
+					if err != nil {
+						return errBadRequest("regime.journal.enabled must be true, false, or null")
+					}
+					next.Regime.Journal.Enabled = v
+				default:
+					return errBadRequest("unknown settings field regime.journal." + jkey)
+				}
+			}
+		default:
+			return errBadRequest("unknown settings field regime." + key)
+		}
+	}
+	return nil
 }
 
 func applyFeatureSettingsPatch(next *platformSettingsData, raw json.RawMessage) error {
@@ -407,6 +451,11 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 			ReloadInterval:   settingsString(autoTrade.ReloadIntervalDuration().String(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].reload_interval in config.toml"),
 			ProposalCadence:  settingsString(autoTrade.ProposalCadenceDuration().String(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].proposal_cadence in config.toml"),
 		},
+		Regime: rpc.PlatformRegimeSettings{
+			Journal: rpc.RegimeJournalSettings{
+				Enabled: settingsBool(regimeJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "regime-decisions forward-collection journal (calibration corpus); safe to disable"),
+			},
+		},
 		MarketData: rpc.PlatformMarketDataSetting{Quality: observedMarketDataQuality(observed)},
 		Build: rpc.PlatformBuildSettings{
 			Channel:                settingsString(buildChannel(), rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "controlled by the ibkr build"),
@@ -420,6 +469,13 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 		out.Build.ExperimentalTradingNote = "stable read-only build; trading limit edits are disabled"
 	}
 	return out
+}
+
+func regimeJournalEnabledFrom(data platformSettingsData) bool {
+	if data.Regime.Journal.Enabled == nil {
+		return true
+	}
+	return *data.Regime.Journal.Enabled
 }
 
 func buildChannel() string {

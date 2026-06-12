@@ -1505,6 +1505,43 @@ type RegimeIndicatorMeta struct {
 	BandReason string             `json:"band_reason,omitempty"`
 	Thresholds *RegimeThresholds  `json:"thresholds,omitempty"`
 	AsOf       *RegimeAsOfSummary `json:"as_of,omitempty"`
+	// Freshness is the cadence-relative freshness verdict for the row's
+	// banding input: "fresh" when no newer observation should exist under
+	// the indicator's native cadence, "overdue" otherwise. Overdue data can
+	// never make a red confirmation-eligible. MaxAgeSeconds documents the
+	// served staleness policy so renderers never hardcode a twin.
+	Freshness *RegimeFreshness `json:"freshness,omitempty"`
+	// Eligibility says whether a red band may CONFIRM stress (depth +
+	// persistence + freshness gates) or is provisional (visible, warns via
+	// early_warning, never confirms). Nil on non-red rows.
+	Eligibility *RegimeEligibility `json:"eligibility,omitempty"`
+}
+
+// RegimeFreshness is the cadence-relative freshness verdict plus the served
+// staleness policy for one regime row. No wall-clock age field by design —
+// ages tick every poll and would churn fingerprints and SSE hashes; clients
+// derive age from the row's as_of.
+type RegimeFreshness struct {
+	Class         string `json:"class"`
+	MaxAgeSeconds int64  `json:"max_age_seconds,omitempty"`
+}
+
+const (
+	RegimeFreshnessFresh   = "fresh"
+	RegimeFreshnessOverdue = "overdue"
+)
+
+// RegimeEligibility is the confirmation-eligibility verdict for a red row.
+// Eligible reds may confirm stress (count toward confirmed_stress/panic,
+// rescue other clusters, appear in confirmed_by); provisional reds stay
+// visible and drive early_warning only. Latched reports that eligibility is
+// held by the streak-lifetime latch even though the measurement wobbled back
+// inside the minimum depth. Reasons name the failed gates when not eligible:
+// "depth_below_min", "streak_N_of_M", "data_overdue".
+type RegimeEligibility struct {
+	Eligible bool     `json:"eligible"`
+	Latched  bool     `json:"latched,omitempty"`
+	Reasons  []string `json:"reasons,omitempty"`
 }
 
 // RegimeThresholds names the heuristic threshold set used to classify an
@@ -1890,6 +1927,13 @@ type RegimeComposite struct {
 	ClusterRedCount      int    `json:"cluster_red_count"`
 	ClusterRankedCount   int    `json:"cluster_ranked_count"`
 	ClusterUnrankedCount int    `json:"cluster_unranked_count"`
+	// ClusterEligibleRedCount counts red clusters whose evidence passed the
+	// confirmation-eligibility gates (depth + persistence + freshness) and
+	// survived the isolated-red downgrades. Only these reds may confirm
+	// stress. ClusterProvisionalRedCount counts the remaining raw reds —
+	// visible, early-warning evidence, never confirmation.
+	ClusterEligibleRedCount    int `json:"cluster_eligible_red_count"`
+	ClusterProvisionalRedCount int `json:"cluster_provisional_red_count,omitempty"`
 }
 
 // Quote is the daemon's snapshot result.

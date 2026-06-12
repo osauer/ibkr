@@ -8,13 +8,34 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
+// regimeTestFinalize runs the post-fanout pipeline exactly as
+// handleRegimeSnapshot does — policy pass (fresh streak store), metadata,
+// composite, lifecycle, unified verdict — so tests assert the served
+// contract, not an intermediate. Fresh store ⇒ every red is streak day 1.
+func regimeTestFinalize(t *testing.T, r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
+	t.Helper()
+	s := &Server{streaks: NewStreakStore(t.TempDir())}
+	policies := s.populateStreaks(r)
+	annotateRegimeMetadata(r, policies)
+	r.Composite = buildRegimeComposite(r)
+	r.Summary = buildRegimeSummary(r)
+	r.WarningDetails = buildRegimeWarnings(r)
+	r.DataQuality = regimeSnapshotDataQuality(r)
+	r.SourceHealth = rpc.BuildRegimeSourceHealth(r, r.AsOf)
+	r.Lifecycle = rpc.BuildRegimeLifecycle(r)
+	r.Composite.Verdict = rpc.RegimeHeadline(r.Composite, r.Lifecycle.Stage)
+	r.Summary.Label = r.Composite.Verdict
+	r.Posture = rpc.BuildRegimePosture(r)
+	return r.Composite
+}
+
 // TestBuildRegimeComposite_AllGreenIsNormalRegime pins the happy path:
 // eight green rows produce a "Normal regime" verdict with six ranked
 // clusters, no unranked.
 func TestBuildRegimeComposite_AllGreenIsNormalRegime(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.Verdict != "Normal regime" {
 		t.Errorf("verdict: got %q want %q", c.Verdict, "Normal regime")
 	}
@@ -63,7 +84,7 @@ func TestBuildRegimeComposite_ThreeRedTriggersRegimeShift(t *testing.T) {
 	weekly := -3.0 // yen strengthening 3% = red
 	r.USDJPY.WeeklyChange = &weekly
 	r.Breadth.Envelope.PctAbove50DMA = 30 // <40 = red
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 3 {
 		t.Errorf("red: got %d want 3", c.RedCount)
 	}
@@ -79,7 +100,7 @@ func TestBuildRegimeComposite_SingleRedTriggersWatch(t *testing.T) {
 	r := mkAllGreenRegime()
 	ratio := 1.05
 	r.VIXTermStructure.Ratio = &ratio
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 {
 		t.Errorf("red: got %d want 1", c.RedCount)
 	}
@@ -93,7 +114,7 @@ func TestBuildRegimeComposite_RedClusterCannotBeHiddenByGreenRows(t *testing.T) 
 	r := mkAllGreenRegime()
 	vvix := 125.0
 	r.VolOfVol.Last = &vvix
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 || c.GreenCount != 7 {
 		t.Fatalf("red/green counts = %d/%d, want 1/7", c.RedCount, c.GreenCount)
 	}
@@ -110,15 +131,18 @@ func TestBuildRegimeComposite_IsolatedVVIXRedStaysVisibleButClusterIsWatch(t *te
 	r := mkAllGreenRegime()
 	vvix := 112.0
 	r.VolOfVol.Last = &vvix
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 {
 		t.Fatalf("indicator red count = %d, want isolated VVIX row still red", c.RedCount)
 	}
 	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
 		t.Fatalf("isolated non-severe VVIX red should count as cluster yellow, got %+v", c)
 	}
-	if c.Verdict != "Normal regime" {
-		t.Fatalf("verdict = %q, want normal with a single unconfirmed vol watch", c.Verdict)
+	// Unified headline: a raw red row — even downgraded at cluster level —
+	// reads "Stress signal present" (early_warning), never "Normal regime".
+	// Pre-unification the verdict said Normal while the lifecycle warned.
+	if c.Verdict != "Stress signal present" {
+		t.Fatalf("verdict = %q, want provisional red disclosed as stress signal", c.Verdict)
 	}
 }
 
@@ -133,12 +157,12 @@ func TestBuildRegimeComposite_MixedClusterDisagreementUsesWorstBand(t *testing.T
 	r.HYGSPYDivergence.HYG50DMA = &hyg50
 	r.HYGSPYDivergence.SPYPrice = &spy
 	r.HYGSPYDivergence.SPY52WHigh = &spy52
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
 		t.Fatalf("unconfirmed HYG/SPY proxy red should be cluster yellow with green OAS companion, got %+v", c)
 	}
-	if c.Verdict != "Normal regime" {
-		t.Errorf("verdict: got %q", c.Verdict)
+	if c.Verdict != "Stress signal present" {
+		t.Errorf("verdict: got %q, want the raw red disclosed", c.Verdict)
 	}
 }
 
@@ -151,7 +175,7 @@ func TestBuildRegimeComposite_UnrankedDoesntCountTowardBand(t *testing.T) {
 	r := mkAllGreenRegime()
 	r.GammaZero.Status = rpc.RegimeStatusComputing
 	r.GammaZero.Envelope.Result = nil
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.GreenCount != 7 {
 		t.Errorf("green: got %d want 7 (gamma row should not count)", c.GreenCount)
 	}
@@ -177,7 +201,7 @@ func TestBuildRegimeComposite_GammaRequiresExplicitRankableQuality(t *testing.T)
 			r := mkAllGreenRegime()
 			r.GammaZero.Envelope.Result.Quality = tc.quality
 
-			c := buildRegimeComposite(r)
+			c := regimeTestFinalize(t, r)
 			if c.GreenCount != 7 || c.RankedCount != 7 || c.UnrankedCount != 1 {
 				t.Fatalf("indicator counts = green %d ranked %d unranked %d, want 7/7/1", c.GreenCount, c.RankedCount, c.UnrankedCount)
 			}
@@ -202,15 +226,15 @@ func TestBuildRegimeComposite_HYGSPYNearHighCountsRed(t *testing.T) {
 	r.HYGSPYDivergence.HYG50DMA = &hyg50
 	r.HYGSPYDivergence.SPYPrice = &spy
 	r.HYGSPYDivergence.SPY52WHigh = &spy52
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 {
 		t.Errorf("HYG/SPY current divergence should count as one red row, got %d", c.RedCount)
 	}
 	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
 		t.Fatalf("unconfirmed HYG/SPY proxy red should be cluster yellow, got %+v", c)
 	}
-	if c.Verdict != "Normal regime" {
-		t.Errorf("verdict: got %q", c.Verdict)
+	if c.Verdict != "Stress signal present" {
+		t.Errorf("verdict: got %q, want the raw red disclosed", c.Verdict)
 	}
 }
 
@@ -226,25 +250,30 @@ func TestBuildRegimeComposite_HYGSPYRedRequiresConfirmation(t *testing.T) {
 	r.HYGSPYDivergence.SPYPrice = &spy
 	r.HYGSPYDivergence.SPY52WHigh = &spy52
 
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 {
 		t.Fatalf("indicator red count = %d, want HYG/SPY row still red", c.RedCount)
 	}
 	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
 		t.Fatalf("cluster counts = red %d yellow %d, want 0/1 for unconfirmed proxy red", c.ClusterRedCount, c.ClusterYellowCount)
 	}
-	if c.Verdict != "Normal regime" {
-		t.Fatalf("verdict = %q, want normal until an independent cluster confirms", c.Verdict)
+	if c.Verdict != "Stress signal present" {
+		t.Fatalf("verdict = %q, want the unconfirmed proxy red disclosed", c.Verdict)
 	}
 
 	ratio := 1.05
 	r.VIXTermStructure.Ratio = &ratio
-	c = buildRegimeComposite(r)
+	c = regimeTestFinalize(t, r)
 	if c.ClusterRedCount != 2 {
 		t.Fatalf("confirmed proxy red should count once vol is also red, got %+v", c)
 	}
-	if c.Verdict != "Stress signal present" {
-		t.Fatalf("verdict = %q, want stress signal with confirmed proxy red", c.Verdict)
+	// HYG 1.25% below its DMA is fast-path eligible and the vol inversion
+	// is fast-path eligible — two eligible reds confirm.
+	if c.ClusterEligibleRedCount != 2 {
+		t.Fatalf("eligible red count = %d, want 2", c.ClusterEligibleRedCount)
+	}
+	if c.Verdict != "Confirmed stress regime" {
+		t.Fatalf("verdict = %q, want confirmed stress with two eligible reds", c.Verdict)
 	}
 }
 
@@ -254,25 +283,28 @@ func TestBuildRegimeComposite_USDJPYRedRequiresConfirmation(t *testing.T) {
 	weekly := -2.5
 	r.USDJPY.WeeklyChange = &weekly
 
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.RedCount != 1 {
 		t.Fatalf("indicator red count = %d, want USD/JPY row still red", c.RedCount)
 	}
 	if c.ClusterRedCount != 0 || c.ClusterYellowCount != 1 {
 		t.Fatalf("cluster counts = red %d yellow %d, want 0/1 for unconfirmed FX proxy red", c.ClusterRedCount, c.ClusterYellowCount)
 	}
-	if c.Verdict != "Normal regime" {
-		t.Fatalf("verdict = %q, want normal until an independent cluster confirms", c.Verdict)
+	if c.Verdict != "Stress signal present" {
+		t.Fatalf("verdict = %q, want the unconfirmed FX red disclosed", c.Verdict)
 	}
 
-	breadth := 35.0
+	// Breadth at 30 is fast-path eligible (≤30) — an ELIGIBLE independent
+	// red, which is what the FX rescue now requires. A marginal day-one
+	// breadth red (e.g. 38) would no longer rescue FX.
+	breadth := 30.0
 	r.Breadth.Envelope.PctAbove50DMA = breadth
-	c = buildRegimeComposite(r)
+	c = regimeTestFinalize(t, r)
 	if c.ClusterRedCount != 2 {
-		t.Fatalf("confirmed FX red should count once breadth is also red, got %+v", c)
+		t.Fatalf("confirmed FX red should count once breadth is eligibly red, got %+v", c)
 	}
-	if c.Verdict != "Stress signal present" {
-		t.Fatalf("verdict = %q, want stress signal with confirmed FX red", c.Verdict)
+	if c.Verdict != "Confirmed stress regime" {
+		t.Fatalf("verdict = %q, want confirmed stress with two eligible reds", c.Verdict)
 	}
 }
 
@@ -288,11 +320,11 @@ func TestBuildRegimeComposite_BelowFloorIsInsufficient(t *testing.T) {
 	r.FundingStress.Status = rpc.RegimeStatusError
 	r.USDJPY.Status = rpc.RegimeStatusError
 	r.Breadth.Status = rpc.RegimeStatusError
-	c := buildRegimeComposite(r)
+	c := regimeTestFinalize(t, r)
 	if c.ClusterRankedCount >= verdictFloor {
 		t.Fatalf("test setup wrong: ranked clusters %d, want < %d", c.ClusterRankedCount, verdictFloor)
 	}
-	if c.Verdict != "Insufficient signal — too few indicators ranked" {
+	if c.Verdict != "Insufficient signal — too few inputs ready" {
 		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
@@ -319,9 +351,9 @@ func TestBuildRegimeSummaryAndWarnings(t *testing.T) {
 	r.USDJPY.ErrorMessage = "USD.JPY: gateway delivered no FX tick"
 	r.GammaZero.Status = rpc.RegimeStatusComputing
 	r.GammaZero.Envelope = rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusComputing, EtaSeconds: 42}
-	r.Composite = buildRegimeComposite(r)
+	regimeTestFinalize(t, r)
 
-	s := buildRegimeSummary(r)
+	s := r.Summary
 	if s.Label != "Normal regime" {
 		t.Errorf("summary label: got %q", s.Label)
 	}
@@ -354,9 +386,9 @@ func TestBuildRegimeSummaryStaleRankedRowsLowerConfidence(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
 	r.CreditSpreads.Status = rpc.RegimeStatusStale
-	r.Composite = buildRegimeComposite(r)
+	regimeTestFinalize(t, r)
 
-	s := buildRegimeSummary(r)
+	s := r.Summary
 	if s.Confidence != "medium" {
 		t.Fatalf("confidence=%q, want medium when a ranked row is stale", s.Confidence)
 	}
@@ -378,7 +410,7 @@ func TestAnnotateRegimeMetadataAddsBandThresholdsAndAsOf(t *testing.T) {
 	r.Breadth.Envelope.Source = "local breadth cache"
 	r.Breadth.Envelope.Method = "constituent-fanout"
 
-	annotateRegimeMetadata(r)
+	annotateRegimeMetadata(r, nil)
 
 	if r.VIXTermStructure.Band != "green" || r.VIXTermStructure.AsOf.Label != "live" {
 		t.Fatalf("VIX metadata = band %q as_of %#v, want green/live", r.VIXTermStructure.Band, r.VIXTermStructure.AsOf)

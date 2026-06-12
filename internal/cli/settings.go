@@ -170,6 +170,13 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 		return marshalPatch([]string{"trading", "limits", "allow_option_sell_to_open"}, value)
 	case "trading.limits.allow_option_market_orders":
 		return marshalPatch([]string{"trading", "limits", "allow_option_market_orders"}, value)
+	case "regime.journal.enabled":
+		if value != nil {
+			if _, ok := value.(bool); !ok {
+				return nil, fmt.Errorf("%s must be true, false, or null", key)
+			}
+		}
+		return marshalPatch([]string{"regime", "journal", "enabled"}, value)
 	default:
 		return nil, fmt.Errorf("unsupported setting key %q", key)
 	}

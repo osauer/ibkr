@@ -53,56 +53,119 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
 		s.regimeContentionMessage,
 	)
-	// Tick the streak counters after the fan-out completes. The store
-	// classifies each indicator's band using the spec's default
-	// thresholds (a slight violation of the wire-shape posture, accepted
-	// because streak persistence requires a stable daemon-side
-	// classification — see regime_streaks.go for the rationale). Each
-	// indicator's StreakInfo is attached to its row before returning.
-	s.populateStreaks(res)
-	annotateRegimeMetadata(res)
-	// Roll up the per-row bands into the composite verdict + counts
-	// the CLI shows above the indicator rows. Reading off the same
-	// daemon-side classifiers used for streak persistence keeps the
-	// wire surface internally consistent. CLI continues to compute its
-	// own renderer-local tally for layout reasons, but both paths
-	// share the verdict words via the helper.
+	// Classification + confirmation policy run once, here: band (with
+	// red-exit hysteresis), streak tick, cadence freshness, and
+	// eligibility per row. Every downstream consumer — composite,
+	// lifecycle, CLI, canary, SPA — reads the served results
+	// (docs/design/regime-calibration.md).
+	policies := s.populateStreaks(res)
+	annotateRegimeMetadata(res, policies)
+	// Cluster tallies via the shared rpc combination. The verdict needs
+	// the lifecycle stage (single wording table), so it is assigned after
+	// the lifecycle below.
 	res.Composite = buildRegimeComposite(res)
 	res.Summary = buildRegimeSummary(res)
 	res.WarningDetails = buildRegimeWarnings(res)
 	res.DataQuality = regimeSnapshotDataQuality(res)
 	res.SourceHealth = rpc.BuildRegimeSourceHealth(res, res.AsOf)
 	res.Lifecycle = rpc.BuildRegimeLifecycle(res)
+	res.Composite.Verdict = rpc.RegimeHeadline(res.Composite, res.Lifecycle.Stage)
+	res.Summary.Label = res.Composite.Verdict
 	res.Posture = rpc.BuildRegimePosture(res)
 	res.Fingerprint = rpc.BuildRegimeFingerprint(res)
 	s.updateRegimeStatusQuality(res)
+	s.journalRegimeDecision(res)
 	return res, nil
 }
 
-// populateStreaks ticks the streak counter for each regime row and
-// attaches the resulting *rpc.StreakInfo. Nil-safe on the store side
-// (the field stays nil when streaks aren't persisted), and nil-safe on
-// the band side (Tick freezes the counter when band=""). Per-indicator
-// logic lives in regime_indicators.go.
-func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) {
-	if s.streaks == nil || res == nil {
-		return
+// regimeRowPolicy is one row's classification + confirmation-policy output:
+// the post-hysteresis band the row serves, plus the eligibility and
+// freshness verdicts that decide whether a red may confirm stress.
+type regimeRowPolicy struct {
+	band        string
+	eligibility *rpc.RegimeEligibility
+	freshness   *rpc.RegimeFreshness
+}
+
+// populateStreaks runs classification (with red-exit hysteresis), ticks the
+// streak counter, evaluates cadence freshness and confirmation eligibility
+// for each regime row, attaches the *rpc.StreakInfo, and returns the
+// per-indicator policy for annotateRegimeMetadata to serve. Nil-safe on the
+// store side (no persistence ⇒ no hysteresis/latch, eligibility evaluated at
+// sessions=1) and on the band side (Tick freezes the counter when band="").
+func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regimeRowPolicy {
+	policies := make(map[string]regimeRowPolicy, len(streakIndicators))
+	if res == nil {
+		return policies
 	}
 	now := nyDateNow()
 	for _, ind := range streakIndicators {
+		key := ind.key()
 		band, value := ind.bandAndValue(res)
-		streak := s.streaks.Tick(ind.key(), value, band, now)
-		if band == "" {
-			// Freeze the persisted counter internally, but do not attach a
-			// stale prior-band streak to today's unranked row. JSON/MCP
-			// consumers otherwise read "status:error" beside "streak:green",
-			// which looks like usable evidence when it is only historical
-			// memory.
-			ind.attachStreak(res, nil)
-			continue
+		display := ind.displayBand(res)
+		// Red-exit hysteresis: a red streak holds until the indicator's
+		// exit threshold clears, so boundary wobble can't flap the band
+		// (and reset the streak) at the entry threshold.
+		held := false
+		if s.streaks != nil && band != "" && band != "red" &&
+			s.streaks.PrevBand(key) == "red" && ind.exitHoldsRed(res) {
+			band = "red"
+			held = true
 		}
-		ind.attachStreak(res, streak)
+		if held || (display != "" && band == "red") {
+			display = "red"
+		}
+		var streak *rpc.StreakInfo
+		if s.streaks != nil {
+			streak = s.streaks.Tick(key, value, band, now)
+			if band == "" {
+				// Freeze the persisted counter internally, but do not attach a
+				// stale prior-band streak to today's unranked row. JSON/MCP
+				// consumers otherwise read "status:error" beside "streak:green",
+				// which looks like usable evidence when it is only historical
+				// memory.
+				ind.attachStreak(res, nil)
+			} else {
+				ind.attachStreak(res, streak)
+			}
+		}
+		fresh := ind.fresh(res, now)
+		freshness := &rpc.RegimeFreshness{
+			Class:         rpc.RegimeFreshnessFresh,
+			MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(rpc.RegimeIndicatorCluster(key)),
+		}
+		if !fresh {
+			freshness.Class = rpc.RegimeFreshnessOverdue
+		}
+		var elig *rpc.RegimeEligibility
+		if display == "red" {
+			sessions := 1
+			latched := false
+			if streak != nil && streak.Band == "red" {
+				sessions = streak.Sessions
+			} else if s.streaks != nil {
+				if prev := s.streaks.Get(key); prev != nil && prev.Band == "red" {
+					sessions = prev.Sessions
+				}
+			}
+			if s.streaks != nil {
+				latched = s.streaks.Latched(key)
+			}
+			elig = rpc.EvaluateRegimeEligibility(rpc.RegimeEligibilityInput{
+				Indicator:      key,
+				Band:           "red",
+				Depth:          ind.depth(res),
+				StreakSessions: sessions,
+				Fresh:          fresh,
+				Latched:        latched,
+			})
+			if elig != nil && elig.Eligible && s.streaks != nil && band == "red" {
+				s.streaks.Latch(key)
+			}
+		}
+		policies[key] = regimeRowPolicy{band: display, eligibility: elig, freshness: freshness}
 	}
+	return policies
 }
 
 // regimeContentionMessage produces the partial-envelope ErrorMessage
@@ -419,7 +482,7 @@ func boundedSnapshotWith52WHigh(ctx context.Context, deps *regimeDeps, sym strin
 	}
 }
 
-const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing). Signal requires sustained inversion over 2-3 sessions, not a single Fed-day spike."
+const vixTermNotes = "VIX (30-day implied vol) divided by VIX3M (3-month implied vol). Spec thresholds: <0.92 green (healthy contango), 0.92-1.00 yellow (flattening), >1.00 red (backwardation — acute stress pricing). Signal requires sustained inversion over 2-3 sessions, not a single Fed-day spike. Confirmation gate: a red may confirm stress only after 2 consecutive NY trading sessions of inversion (or ratio >= 1.05 day one) on a fresh same-session tick; earlier or stale reds are provisional and warn only."
 
 func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm {
 	out := rpc.RegimeVIXTerm{Notes: vixTermNotes}
@@ -484,7 +547,7 @@ func fetchRegimeVIXTerm(ctx context.Context, deps *regimeDeps) rpc.RegimeVIXTerm
 	return out
 }
 
-const volOfVolNotes = "VVIX (Cboe VIX-of-VIX) from Cboe's official daily VVIX time series. Default heuristic bands: <90 green (vol-of-vol contained), 90-110 yellow (volatility demand rising), >110 red (vol-of-vol shock / convexity demand). This is an evidence-balance input, not a volatility forecast; use with VIX term structure because both live in the equity-vol cluster and can disagree."
+const volOfVolNotes = "VVIX (Cboe VIX-of-VIX) from Cboe's official daily VVIX time series. Default heuristic bands: <90 green (vol-of-vol contained), 90-110 yellow (volatility demand rising), >110 red (vol-of-vol shock / convexity demand). This is an evidence-balance input, not a volatility forecast; use with VIX term structure because both live in the equity-vol cluster and can disagree. Confirmation gate: a red confirms after 2 sessions at >= 110 (or >= 120 day one) on a current official close."
 
 func fetchRegimeVolOfVol(ctx context.Context, deps *regimeDeps) rpc.RegimeVolOfVol {
 	out := rpc.RegimeVolOfVol{
@@ -522,7 +585,7 @@ func fetchRegimeVolOfVol(ctx context.Context, deps *regimeDeps) rpc.RegimeVolOfV
 	return out
 }
 
-const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when HYG is above its 50-day SMA; yellow when HYG breaks below its 50-day SMA; red when HYG is below its 50-day SMA while SPY remains within 3% of its 52-week high. Use the row's streak.sessions to distinguish an early one-session divergence from a sustained 5+ session credit downtrend. Observation window 2-4 weeks; single-day moves are noise."
+const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when HYG is above its 50-day SMA; yellow when HYG breaks below its 50-day SMA; red when HYG is below its 50-day SMA while SPY remains within 3% of its 52-week high. Use the row's streak.sessions to distinguish an early one-session divergence from a sustained 5+ session credit downtrend. Observation window 2-4 weeks; single-day moves are noise. Confirmation gate: a red confirms only when HYG is at least 0.25% below the 50DMA for 2 sessions (or 1.0% below day one); outside regular hours the banding input is the latest official close, never a thin pre/post-market print."
 
 // HYGLookbackDays is the calendar-day window passed to the HMDS
 // history fetch when computing HYG's 50-day SMA. 50 trading days ≈ 70
@@ -625,13 +688,29 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		}
 	}
 
+	// Outside the regular US equity session the HYG banding input is the
+	// latest official daily close, never a thin pre/post-market print —
+	// the 2026-06-12 incident classified a credit red off a 7 bps
+	// pre-open wobble. The settled close is the newest cadence-fresh
+	// observation off-hours, so the row stays status ok. SPY keeps its
+	// tick: the 97%-of-52w-high condition carries a 3% buffer that a thin
+	// print cannot meaningfully move, and the SPY day-change tape fields
+	// must keep reflecting the live tape.
+	if !usEquityRTHOpen(now) && len(bars) > 0 {
+		if c := bars[len(bars)-1].Close; c > 0 {
+			out.HYGPrice = new(c)
+			out.HYGDataType = "close"
+			out.HYGQuality = derivedQuality(historyBarAsOf(bars[len(bars)-1], now), "HYG latest official daily close (off-hours banding input)")
+		}
+	}
+
 	if out.HYGPrice == nil || out.SPYPrice == nil {
 		out.Status = rpc.RegimeStatusError
 		out.ErrorMessage = "HYG or SPY spot missing"
 		return out
 	}
 	out.Status = rpc.RegimeStatusOK
-	if !rpc.IsLiveDataType(hygDT) {
+	if out.HYGDataType != "close" && !rpc.IsLiveDataType(hygDT) {
 		out.Status = rpc.RegimeStatusStale
 	}
 	// Advisory sub-field annotations — the row's primary measurements
@@ -653,7 +732,7 @@ const (
 
 var regimeOfficialSeriesBudget = 12 * time.Second
 
-const creditSpreadsNotes = "Cash credit spreads from official ICE BofA OAS series via FRED/St. Louis Fed: high-yield OAS (BAMLH0A0HYM2) and investment-grade corporate OAS (BAMLC0A0CM). Units are percentage points. Default heuristic bands use HY OAS: <4.0 green, 4.0-5.5 yellow, >5.5 red; a 20-observation HY OAS widening of >0.50 pp is mixed and >1.00 pp is stressed. This complements HYG/SPY: HYG is faster intraday, OAS is the official cash-credit close."
+const creditSpreadsNotes = "Cash credit spreads from official ICE BofA OAS series via FRED/St. Louis Fed: high-yield OAS (BAMLH0A0HYM2) and investment-grade corporate OAS (BAMLC0A0CM). Units are percentage points. Default heuristic bands use HY OAS: <4.0 green, 4.0-5.5 yellow, >5.5 red; a 20-observation HY OAS widening of >0.50 pp is mixed and >1.00 pp is stressed. This complements HYG/SPY: HYG is faster intraday, OAS is the official cash-credit close. Confirmation gate: the red levels are already deep, so a fresh red confirms after 1 session."
 
 func fetchRegimeCreditSpreads(ctx context.Context, deps *regimeDeps) rpc.RegimeCreditSpreads {
 	out := rpc.RegimeCreditSpreads{
@@ -769,7 +848,7 @@ const (
 	fredSeriesTBill3M = "DTB3"
 )
 
-const fundingStressNotes = "Funding stress proxy from the OFR FSI source set: 90-day AA financial commercial paper rate minus 13-week Treasury bill bank-discount rate. The commercial-paper leg comes from the Federal Reserve Commercial Paper Data Download Program; the bill leg comes from U.S. Treasury Daily Treasury Bill Rates. Units are basis points. Default heuristic bands: <25 bp green, 25-75 bp yellow, >75 bp red. This is a slow daily funding/liquidity check, not an intraday funding-stress detector."
+const fundingStressNotes = "Funding stress proxy from the OFR FSI source set: 90-day AA financial commercial paper rate minus 13-week Treasury bill bank-discount rate. The commercial-paper leg comes from the Federal Reserve Commercial Paper Data Download Program; the bill leg comes from U.S. Treasury Daily Treasury Bill Rates. Units are basis points. Default heuristic bands: <25 bp green, 25-75 bp yellow, >75 bp red. This is a slow daily funding/liquidity check, not an intraday funding-stress detector. Confirmation gate: the 75 bp red level is the depth gate; a fresh red confirms after 1 session."
 
 func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeFundingStress {
 	out := rpc.RegimeFundingStress{
@@ -824,7 +903,7 @@ func fetchRegimeFundingStress(ctx context.Context, deps *regimeDeps) rpc.RegimeF
 	return out
 }
 
-const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier. If the gateway has no live/frozen FX tick, the row falls back to the latest HMDS MIDPOINT daily close and reports Status=stale; it is unavailable only when both the tick and midpoint history are unusable."
+const usdJpyNotes = "USD/JPY exchange rate. Spec thresholds: stable or <1% weekly move (green); 1-2% weekly yen strength i.e. USD/JPY falling (yellow); >2% in 3 days or >3% in a week (red). Speed of move matters more than absolute level; August 2024 carry unwind played out in 3 sessions. Daemon returns last + close 7 trading days ago so the consumer can compute weekly_change_pct themselves. Source: IBKR CASH/IDEALPRO FX (Symbol=USD, Currency=JPY, SecType=CASH) — routed via the dotted-pair classifier. If the gateway has no live/frozen FX tick, the row falls back to the latest HMDS MIDPOINT daily close and reports Status=stale; it is unavailable only when both the tick and midpoint history are unusable. Confirmation gate: speed is the depth — a fresh >= 2% weekly yen move confirms after 1 session."
 
 // USDJPYLookbackDays is the calendar-day window passed to the HMDS
 // history fetch when computing the 7-trading-day close for USD/JPY.
@@ -915,7 +994,7 @@ func fetchRegimeUSDJPY(ctx context.Context, deps *regimeDeps) rpc.RegimeUSDJPY {
 	return out
 }
 
-const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are reported as separate per-index γ-zero readings because their price scales differ; the combined top level intentionally has no spot, zero_gamma, gap_pct, or gamma_sign. Regime thresholds are applied to each per_index entry: spot >2% above γ-zero is green/stabilizing, within ±2% is yellow/transition, and below γ-zero is red/amplifying; when no crossing exists, a wholly long-γ sweep is green and a wholly short-γ sweep is red. The combined row uses per-index agreement and exposure weighting: both green => green, both red => red, a mixed book is red when the dominant/equal gamma exposure is red and yellow otherwise, no usable per-index profile => unranked. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × the nearest 80 listed strikes per expiry inside the ±10% candidate window. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit fall back to sticky-IV for that expiry only and appear in `warning_details`. Each per-index envelope carries 0DTE, 1-7 DTE, and term γ-zero buckets because 0DTE flow can mask weekly/monthly positioning. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is a sign-convention agnostic gross gamma concentration read and is the more robust surface when customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). When the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's bid/ask mid or prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's summary, per_index, gamma_total_abs, and top_strikes are the primary agent/tooling surface."
+const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are reported as separate per-index γ-zero readings because their price scales differ; the combined top level intentionally has no spot, zero_gamma, gap_pct, or gamma_sign. Regime thresholds are applied to each per_index entry: spot >2% above γ-zero is green/stabilizing, within ±2% is yellow/transition, and below γ-zero is red/amplifying; when no crossing exists, a wholly long-γ sweep is green and a wholly short-γ sweep is red. The combined row uses per-index agreement and exposure weighting: both green => green, both red => red, a mixed book is red when the dominant/equal gamma exposure is red and yellow otherwise, no usable per-index profile => unranked. Methodology v3 (`bs-gamma-profile-v3-stickymoneyness-0dte-split`): BS gamma profile over 6 nearest non-0DTE-post-settlement expirations × the nearest 80 listed strikes per expiry inside the ±10% candidate window. The sweep reprices each leg's IV at the scenario-spot's moneyness via a per-expiry quadratic skew curve fitted at snapshot time — sticky-moneyness rather than sticky-IV. Curves that fail to fit fall back to sticky-IV for that expiry only and appear in `warning_details`. Each per-index envelope carries 0DTE, 1-7 DTE, and term γ-zero buckets because 0DTE flow can mask weekly/monthly positioning. Disclosure: the signed γ-zero applies the SqueezeMetrics-2017 \"dealers long calls, short puts\" convention, which the literature has materially deprecated since 2022 (SqueezeMetrics DDOI, SpotGamma TRACE, Glassnode taker-flow GEX). Treat the signed level as a regime hint; the dealer-hedging magnitude (`gamma_total_abs`, convention `sign-agnostic`) is a sign-convention agnostic gross gamma concentration read and is the more robust surface when customer-flow asymmetry is uncertain (e.g. covered-call ETF supply, autocallable hedging). When the gateway's model-computation engine is idle, the compute falls back to Black-Scholes Newton-Raphson on each option's bid/ask mid or prior-session close to back-solve IV; legs using the fallback are counted in derived_iv_legs. First regime call of an NY trading day auto-kicks the heavy compute; subsequent calls return the cached result. The envelope's summary, per_index, gamma_total_abs, and top_strikes are the primary agent/tooling surface. Confirmation gate: gamma confirms only from a compute made during the current NY trading date with spot at least 0.5% below gamma-zero (a wholly short-gamma profile is day-one eligible); a prior-date cache serves status=stale, stays visible, and warns only."
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
@@ -936,6 +1015,19 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	switch envelope.Status {
 	case rpc.GammaZeroStatusReady:
 		out.Status = rpc.RegimeStatusOK
+		// Cadence-relative staleness: gamma is intraday-capable during
+		// option RTH and its inputs roll at the open (the cached profile
+		// still contains the prior day's now-expired 0DTE exposure), so a
+		// compute from a prior NY TRADING DATE is overdue — status stale,
+		// band still visible for awareness, never confirmation-eligible.
+		// A Friday-evening compute read on Saturday stays fresh: no newer
+		// observation can exist until Monday. This closes the 2026-06-12
+		// path where a 22:19-prior-evening cache confirmed
+		// "contemporaneous" stress.
+		if envelope.Result != nil && !envelope.Result.AsOf.IsZero() &&
+			nyTradingSessionKey(nyTime(envelope.Result.AsOf)) != nyTradingSessionKey(nyDateNow()) {
+			out.Status = rpc.RegimeStatusStale
+		}
 		if envelope.Result != nil {
 			// Both scalars derive from the same compute, so AsOf is the
 			// compute's completion timestamp. ZeroGamma is modelled (the
@@ -976,7 +1068,7 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	return out
 }
 
-const breadthNotes = "S&P 500 breadth — the daemon computes two SMA readings and the new-52-week-highs/lows count locally from the 500 constituent daily closes (IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions). Refresh runs once per US trading day after the equity-session close plus a 35-minute settle pad (normally 16:35 ET). Method token: constituent-fanout-50/200dma+nh-v2. The 50-day reading (`pct_above_50dma`) keeps the spec's bands: >55 green / 40-55 yellow / <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). The 200-day reading (`pct_above_200dma`) uses 60/40 bands calibrated to the post-Mag-7 era: >60 green / 40-60 yellow / <40 red (the StockCharts 70/30 default fires red far too often in this regime). New-highs/lows surface as a sub-signal: when SPX is near highs and `net_new_highs_pct` is near zero or negative, that's the classic narrow-rally pattern — a small set of mega-caps carrying the index while the median name is rolling over."
+const breadthNotes = "S&P 500 breadth — the daemon computes two SMA readings and the new-52-week-highs/lows count locally from the 500 constituent daily closes (IBKR doesn't redistribute the underlying S&P DJI / NYSE breadth indices on retail subscriptions). Refresh runs once per US trading day after the equity-session close plus a 35-minute settle pad (normally 16:35 ET). Method token: constituent-fanout-50/200dma+nh-v2. The 50-day reading (`pct_above_50dma`) keeps the spec's bands: >55 green / 40-55 yellow / <40 with SPX within 3% of 52-week high is the textbook late-cycle divergence (red). The 200-day reading (`pct_above_200dma`) uses 60/40 bands calibrated to the post-Mag-7 era: >60 green / 40-60 yellow / <40 red (the StockCharts 70/30 default fires red far too often in this regime). New-highs/lows surface as a sub-signal: when SPX is near highs and `net_new_highs_pct` is near zero or negative, that's the classic narrow-rally pattern — a small set of mega-caps carrying the index while the median name is rolling over. Confirmation gate: a red confirms at <= 38% above-50DMA for 2 sessions (or <= 30% day one)."
 
 func fetchRegimeBreadth(ctx context.Context, s *Server) rpc.RegimeBreadth {
 	out := rpc.RegimeBreadth{Notes: breadthNotes}

@@ -45,9 +45,25 @@ type PlatformSettings struct {
 	Features   PlatformFeatureSettings   `json:"features"`
 	Trading    PlatformTradingSettings   `json:"trading"`
 	AutoTrade  PlatformAutoTradeSettings `json:"auto_trade"`
+	Regime     PlatformRegimeSettings    `json:"regime"`
 	MarketData PlatformMarketDataSetting `json:"market_data"`
 	Build      PlatformBuildSettings     `json:"build"`
 	AsOf       time.Time                 `json:"as_of"`
+}
+
+// PlatformRegimeSettings holds the regime engine's runtime preferences.
+// Deliberately one knob: the confirmation-gate values (depth, streaks,
+// co-sign, max ages) are code-owned pending_backtest policy — user-tunable
+// gates would fork the decisions journal's comparability
+// (docs/design/regime-calibration.md Part 6).
+type PlatformRegimeSettings struct {
+	Journal RegimeJournalSettings `json:"journal"`
+}
+
+// RegimeJournalSettings controls the regime-decisions forward-collection
+// journal ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).
+type RegimeJournalSettings struct {
+	Enabled SettingsBool `json:"enabled"`
 }
 
 type PlatformFeatureSettings struct {

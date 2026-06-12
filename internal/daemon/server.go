@@ -269,6 +269,13 @@ type Server struct {
 	// restart resets the counters).
 	streaks *StreakStore
 
+	// regimeDecisions is the append-only forward-collection journal for
+	// regime lifecycle decisions ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl)
+	// — the calibration corpus for the pending_backtest thresholds. Nil on
+	// the rare XDG/HOME-unset path; journaling is best-effort and never
+	// fails a snapshot.
+	regimeDecisions *regimeDecisionJournal
+
 	// tradingReadiness persists daemon-owned evidence for local write
 	// gates, starting with the recent paper-smoke proof required before
 	// live mode. It deliberately lives outside config so a TOML edit cannot
@@ -457,6 +464,11 @@ func (s *Server) installStreakStore() {
 		return
 	}
 	s.streaks = NewStreakStore(dir)
+	if path, err := regimeDecisionsDefaultPath(); err != nil {
+		s.logger.Warnf("regime decisions: resolve state path: %v (journal disabled)", err)
+	} else {
+		s.regimeDecisions = &regimeDecisionJournal{path: path}
+	}
 }
 
 func (s *Server) installTradingReadinessStore() {

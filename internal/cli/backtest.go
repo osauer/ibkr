@@ -1006,6 +1006,7 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 	if r == nil {
 		return
 	}
+	backfillBacktestRegimeEligibility(r)
 	r.Composite = rpc.RegimeComposite{}
 	indicatorBands := []string{
 		r.VIXTermStructure.Band,
@@ -1032,120 +1033,59 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 			r.Composite.UnrankedCount++
 		}
 	}
-	clusterBands := regimeClusterBandStrings(*r)
-	for _, band := range clusterBands {
-		switch band {
-		case "green":
-			r.Composite.ClusterGreenCount++
-			r.Composite.ClusterRankedCount++
-		case "yellow":
-			r.Composite.ClusterYellowCount++
-			r.Composite.ClusterRankedCount++
-		case "red":
-			r.Composite.ClusterRedCount++
-			r.Composite.ClusterRankedCount++
-		default:
-			r.Composite.ClusterUnrankedCount++
-		}
-	}
-	r.Composite.Verdict = backtestRegimeVerdict(r.Composite, len(clusterBands))
+	// Cluster combination, lifecycle, and headline all come from the shared
+	// rpc policy — the backtest builder was one of the four drifting copies.
+	rpc.ApplyRegimeClusterTallies(&r.Composite, rpc.BuildRegimeClusterBands(r))
 	r.SourceHealth = rpc.BuildRegimeSourceHealth(r, r.AsOf)
 	r.Lifecycle = rpc.BuildRegimeLifecycle(r)
+	r.Composite.Verdict = rpc.RegimeHeadline(r.Composite, r.Lifecycle.Stage)
 }
 
-const (
-	regimeClusterEquityVol = iota
-	regimeClusterCredit
-	regimeClusterFunding
-	regimeClusterFX
-	regimeClusterGamma
-	regimeClusterBreadth
-)
-
-const (
-	isolatedVVIXStressLevel = 120.0
-	isolatedVIXStressChange = 20.0
-	isolatedSPYStressMove   = -1.0
-)
-
-func regimeClusterBandStrings(r rpc.RegimeSnapshotResult) []string {
-	raw := rawRegimeClusterBands(r)
-	return confirmedRegimeClusterBands(r, raw)
-}
-
-func rawRegimeClusterBands(r rpc.RegimeSnapshotResult) []string {
-	return []string{
-		strongestBand([]string{r.VIXTermStructure.Band, r.VolOfVol.Band}),
-		strongestBand([]string{r.HYGSPYDivergence.Band, r.CreditSpreads.Band}),
-		strongestBand([]string{r.FundingStress.Band}),
-		strongestBand([]string{r.USDJPY.Band}),
-		strongestBand([]string{rankableGammaSnapshotBand(r.GammaZero)}),
-		strongestBand([]string{r.Breadth.Band}),
-	}
-}
-
-func rankableGammaSnapshotBand(g rpc.RegimeGammaZero) string {
-	if g.Envelope.Result == nil || g.Envelope.Result.Quality == nil ||
-		g.Envelope.Result.Quality.Rankability != rpc.GammaRankabilityRankable {
-		return ""
-	}
-	return g.Band
-}
-
-func confirmedRegimeClusterBands(r rpc.RegimeSnapshotResult, raw []string) []string {
-	out := append([]string(nil), raw...)
-	if r.HYGSPYDivergence.Band == "red" && r.CreditSpreads.Band != "red" && !hasIndependentRegimeRedCluster(raw, regimeClusterCredit) {
-		out[regimeClusterCredit] = "yellow"
-	}
-	if r.USDJPY.Band == "red" && !hasIndependentRegimeRedCluster(raw, regimeClusterFX) {
-		out[regimeClusterFX] = "yellow"
-	}
-	if len(out) > regimeClusterEquityVol && out[regimeClusterEquityVol] == "red" && !hasIndependentRegimeRedCluster(out, regimeClusterEquityVol) && !isolatedEquityVolConfirmed(r) {
-		out[regimeClusterEquityVol] = "yellow"
-	}
-	return out
-}
-
-func hasIndependentRegimeRedCluster(bands []string, self int) bool {
-	for i, band := range bands {
-		if i != self && band == "red" {
-			return true
+// backfillBacktestRegimeEligibility applies the confirmation gates to PIT
+// rows. Point-in-time panels are independent daily observations, so the
+// replay evaluates day-1 gates: depth and freshness bind, persistence is
+// sessions=1 — streak-gated indicators confirm only through their fast-path
+// depths (the crash-day escape hatch). Sequence-aware streak replay over
+// chronological panels is follow-up work on the decisions journal
+// (docs/specs/regime-backtest-plan.md).
+func backfillBacktestRegimeEligibility(r *rpc.RegimeSnapshotResult) {
+	set := func(meta *rpc.RegimeIndicatorMeta, indicator string, depth *float64) {
+		if meta.Band != "red" {
+			meta.Eligibility = nil
+			return
 		}
+		meta.Eligibility = rpc.EvaluateRegimeEligibility(rpc.RegimeEligibilityInput{
+			Indicator:      indicator,
+			Band:           "red",
+			Depth:          depth,
+			StreakSessions: 1,
+			Fresh:          true,
+		})
 	}
-	return false
+	set(&r.VIXTermStructure.RegimeIndicatorMeta, rpc.RegimeIndicatorVIXTerm, r.VIXTermStructure.Ratio)
+	set(&r.VolOfVol.RegimeIndicatorMeta, rpc.RegimeIndicatorVolOfVol, r.VolOfVol.Last)
+	var hygDepth *float64
+	if h := r.HYGSPYDivergence; h.HYGPrice != nil && h.HYG50DMA != nil && *h.HYG50DMA > 0 {
+		d := (*h.HYG50DMA - *h.HYGPrice) / *h.HYG50DMA * 100
+		hygDepth = &d
+	}
+	set(&r.HYGSPYDivergence.RegimeIndicatorMeta, rpc.RegimeIndicatorHYGSPY, hygDepth)
+	set(&r.CreditSpreads.RegimeIndicatorMeta, rpc.RegimeIndicatorCredit, nil)
+	set(&r.FundingStress.RegimeIndicatorMeta, rpc.RegimeIndicatorFunding, nil)
+	set(&r.USDJPY.RegimeIndicatorMeta, rpc.RegimeIndicatorUSDJPY, nil)
+	set(&r.GammaZero.RegimeIndicatorMeta, rpc.RegimeIndicatorGammaZero, rpc.RegimeGammaDepth(r.GammaZero.Envelope.Result))
+	var breadthDepth *float64
+	if r.Breadth.Envelope.State == rpc.BreadthStateReady {
+		d := 40 - r.Breadth.Envelope.PctAbove50DMA
+		breadthDepth = &d
+	}
+	set(&r.Breadth.RegimeIndicatorMeta, rpc.RegimeIndicatorBreadth, breadthDepth)
 }
 
-func isolatedEquityVolConfirmed(r rpc.RegimeSnapshotResult) bool {
-	if r.VIXTermStructure.Band == "red" {
-		return true
-	}
-	if r.VolOfVol.Last != nil && *r.VolOfVol.Last >= isolatedVVIXStressLevel {
-		return true
-	}
-	if r.VIXTermStructure.VIXChangePct != nil && *r.VIXTermStructure.VIXChangePct >= isolatedVIXStressChange {
-		return true
-	}
-	return r.HYGSPYDivergence.SPYChangePct != nil && *r.HYGSPYDivergence.SPYChangePct <= isolatedSPYStressMove
-}
-
-func backtestRegimeVerdict(c rpc.RegimeComposite, clusterCount int) string {
-	switch {
-	case c.ClusterRankedCount == 0:
-		return "No ranked indicators - see rows below for state"
-	case c.ClusterRankedCount < verdictFloor:
-		return "Insufficient ranked indicators - see rows below for state"
-	case c.ClusterRedCount == clusterCount:
-		return "Full risk-off conditions"
-	case c.ClusterRedCount >= 3:
-		return "Broad stress regime"
-	case c.ClusterRedCount >= 1:
-		return "Stress signal present"
-	case c.ClusterYellowCount >= 3:
-		return "Elevated stress watch"
-	default:
-		return "Normal regime"
-	}
-}
+// Cluster combination, isolated-red rescue, and headline wording all live
+// in internal/rpc/regime_policy.go — the single shared copy. The former
+// backtest-local implementations were one of the four drifting headline
+// copies behind the 2026-06-12 incident.
 
 func canaryBacktestDefensiveAtLeast(res CanaryResult, severity risk.SignalSeverity) bool {
 	if !severityRankAtLeast(res.Severity, severity) {

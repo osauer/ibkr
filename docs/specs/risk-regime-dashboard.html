@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: risk-regime-dashboard.md sha256:c2f13ead11160463af058bed6f604fb188ca4bd1257e8c71adcf0ee0fab054ec -->
+<!-- md-source: risk-regime-dashboard.md sha256:e9389e0f9780e537fffeaa1c03e16733c79d98eb262521e37b795e596883361d -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -274,39 +274,66 @@
 <tr><td>S&amp;P 500 breadth</td><td>&gt; 55% above 50-DMA</td><td>40-55%, or weakening near highs</td><td>&lt; 40%, especially while SPX is near highs</td></tr>
 </tbody>
 </table>
+<h2 id="confirmation-eligibility-and-severity-governance">Confirmation Eligibility and Severity Governance</h2>
+<p>A red row may CONFIRM stress only when its evidence is deep, persistent, and cadence-fresh. Otherwise it is PROVISIONAL: visible on the row, listed in <code>lifecycle.unconfirmed</code>, able to drive <code>early_warning</code> — but it never counts toward <code>confirmed_stress</code>/<code>panic</code>, never rescues another cluster from its isolated-red downgrade, and never reaches <code>confirmed_by</code>. This policy exists because of the 2026-06-12 false positive, where a 7 bps HYG break (one session old, thin pre-open tick) and a prior-evening gamma cache mutually confirmed "Broad stress regime / act" against a green tape (docs/design/regime-calibration.md).</p>
+<p>Eligibility gates per indicator (heuristic noise floors, pending_backtest like the band thresholds; values live in <code>internal/rpc/regime_policy.go</code>):</p>
+<table>
+<thead><tr><th>Indicator</th><th>Min depth for eligible red</th><th>Fast path (eligible day 1)</th><th>Min streak (NY trading sessions)</th><th>Cadence freshness</th><th>Exit hysteresis (leave red)</th></tr></thead>
+<tbody>
+<tr><td>VIX/VIX3M</td><td>ratio &gt;= 1.00</td><td>ratio &gt;= 1.05</td><td>2</td><td>same-session tick</td><td>ratio &lt; 0.98</td></tr>
+<tr><td>VVIX</td><td>&gt;= 110</td><td>&gt;= 120</td><td>2</td><td>latest official daily close (&lt;= 4d)</td><td>&lt; 105</td></tr>
+<tr><td>HYG/SPY</td><td>HYG &gt;= 0.25% below 50DMA</td><td>&gt;= 1.0% below</td><td>2</td><td>RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print)</td><td>HYG closes back above 50DMA</td></tr>
+<tr><td>HY OAS</td><td>band is the gate</td><td>n/a</td><td>1</td><td>series &lt;= 7d</td><td>&lt; 5.25 and widening &lt; 0.85 pp</td></tr>
+<tr><td>Funding</td><td>band is the gate</td><td>n/a</td><td>1</td><td>series &lt;= 7d</td><td>&lt; 65 bp</td></tr>
+<tr><td>USD/JPY</td><td>band is the gate (speed is depth)</td><td>n/a</td><td>1</td><td>same-day tick/close</td><td>yen move &lt; 1.5%</td></tr>
+<tr><td>Dealer gamma</td><td>gap &lt;= -0.5% below gamma-zero</td><td>gap &lt;= -2.0% or wholly-short profile</td><td>1</td><td>compute within current NY trading date (prior-date cache = <code>stale</code>, warns only)</td><td>gap &gt; +0.5%</td></tr>
+<tr><td>Breadth</td><td>&lt;= 38%</td><td>&lt;= 30%</td><td>2</td><td>last completed session's compute</td><td>&gt; 45%</td></tr>
+</tbody>
+</table>
+<p>Eligibility latches for the life of the red streak (a depth wobble back inside the floor does not flip it); freshness is never latched — overdue data drops eligibility immediately. Streaks count NY trading days; a weekend or holiday poll keys to the most recent trading day.</p>
+<p>Severity governance, applied after stage selection and disclosed in <code>lifecycle.governors[]</code>:</p>
+<ol>
+<li>While a confirming cluster's threshold set carries <code>pending_backtest</code>, heuristic evidence without a fresh tape co-sign (SPY &lt;= -1.5%, VIX +10%, or a same-session term inversion) reads one severity rung down: <code>confirmed_stress</code> -&gt; watch, 3-red <code>panic</code> -&gt; act. Pure-tape panic (SPY &lt;= -4%/-7%) always reaches urgent. Promotion out of <code>pending_backtest</code> happens per versioned threshold-set label via the backtest plan.</li>
+<li>If a confirming cluster's source health is stale/partial/degraded, severity caps at watch (evidence-keyed: an unrelated dead feed does not mute a fresh confirmation).</li>
+</ol>
+<p>Tone follows stage: deep, fresh, persistent confirmed evidence keeps a red headline even when the governor holds the demanded response at watch.</p>
 <h2 id="composite-logic">Composite Logic</h2>
+<p>The headline label is a single wording table shared by <code>composite.verdict</code> and <code>posture.label</code> (<code>rpc.RegimeHeadline</code>); CLI, MCP, and SPA render the served string:</p>
 <table>
 <thead><tr><th>Cluster state</th><th>Regime label</th></tr></thead>
 <tbody>
 <tr><td>0 red and 0-2 yellow</td><td>Normal regime</td></tr>
 <tr><td>0 red and 3+ yellow</td><td>Elevated stress watch</td></tr>
-<tr><td>1-2 red</td><td>Stress signal present</td></tr>
-<tr><td>3+ red</td><td>Broad stress regime</td></tr>
-<tr><td>all ranked clusters red</td><td>Full risk-off conditions</td></tr>
+<tr><td>any visible red (eligible or provisional) below confirmation</td><td>Stress signal present</td></tr>
+<tr><td>stage <code>confirmed_stress</code>/<code>panic</code> (2 eligible reds, or 1 + tape)</td><td>Confirmed stress regime</td></tr>
+<tr><td>3+ eligible red</td><td>Broad stress regime</td></tr>
+<tr><td>all ranked clusters eligible red</td><td>Full risk-off conditions</td></tr>
 </tbody>
 </table>
-<p>The output may also show raw indicator counts for transparency. Cluster counts are the primary signal because related rows, such as VIX and VVIX, are not fully independent votes.</p>
+<p>The output may also show raw indicator counts for transparency. Cluster counts are the primary signal because related rows, such as VIX and VVIX, are not fully independent votes; <code>cluster_eligible_red_count</code> and <code>cluster_provisional_red_count</code> split the reds by confirmation eligibility.</p>
 <p>Lifecycle is a second layer on top of the row and cluster evidence:</p>
 <table>
 <thead><tr><th>Lifecycle stage</th><th>Broad-market meaning</th></tr></thead>
 <tbody>
 <tr><td><code>quiet</code></td><td>Enough data is ranked and no material stress or recovery/opportunity evidence is present.</td></tr>
-<tr><td><code>early_warning</code></td><td>Weak, isolated, or forward-looking evidence is visible, but independent confirmation is not yet present.</td></tr>
-<tr><td><code>confirmed_stress</code></td><td>At least two independent stress clusters, or one severe cluster plus confirming SPY/VIX tape, are active.</td></tr>
-<tr><td><code>panic</code></td><td>Stress is broad or tape is severe enough that the regime should be treated as acute.</td></tr>
+<tr><td><code>early_warning</code></td><td>Weak, isolated, provisional, or forward-looking evidence is visible, but eligible independent confirmation is not yet present.</td></tr>
+<tr><td><code>confirmed_stress</code></td><td>At least two ELIGIBLE stress clusters, or one eligible cluster plus confirming SPY/VIX tape, are active.</td></tr>
+<tr><td><code>panic</code></td><td>Three or more eligible stress clusters, or tape severe enough (SPY &lt;= -4%/-7%) that the regime should be treated as acute.</td></tr>
 <tr><td><code>stabilization</code></td><td>Stress evidence is easing, but this is not yet a deployable opportunity by itself.</td></tr>
 <tr><td><code>opportunity</code></td><td>Constructive tape and low stress evidence are present; this is broad-market context only, not a trade instruction.</td></tr>
 <tr><td><code>data_quality</code></td><td>Missing, stale, computing, or degraded inputs prevent a confident lifecycle read.</td></tr>
 </tbody>
 </table>
-<p>The lifecycle layer must keep unconfirmed red evidence visible without letting a single fragile proxy dominate the trigger. <code>readiness</code> should be <code>blocked</code> or degraded when critical source health is stale, partial, computing, or degraded.</p>
-<p>An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row details, but it is counted as yellow at the cluster level. This keeps fast proxies useful without letting one fragile proxy dominate the broad-market read.</p>
+<p>The lifecycle layer must keep unconfirmed red evidence visible without letting a single fragile or stale proxy dominate the trigger. <code>readiness</code> should be <code>blocked</code> or degraded when critical source health is stale, partial, computing, or degraded; the severity governor additionally caps the demanded response when the CONFIRMING clusters themselves are impaired.</p>
+<p>An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row details, but it is counted as yellow at the cluster level; the independence rescue that waives this downgrade counts ELIGIBLE reds only, so two marginal reds can no longer confirm each other.</p>
 <p>The expanded Tier 1 backtest shows that isolated red equity-volatility clusters are also the main source of repeated false alarms. They should not be deleted: major stress often starts in volatility before credit, funding, or FX confirms. The live rule therefore keeps VIX/VIX3M inversion as stress, but downgrades an isolated moderate VVIX-only red to yellow unless the already-visible SPY/VIX tape or another cluster confirms it.</p>
 <h2 id="method-notes">Method Notes</h2>
 <p>Breadth is computed locally from S&amp;P 500 constituent daily bars because the retail IBKR feed does not provide the official S&amp;P breadth series directly. The daemon caches the post-close result; reads should not trigger a 500-name fanout.</p>
 <p>Dealer gamma is an SPX/SPXW-canonical zero-gamma estimate from IBKR option chain data, with SPY used as additive context when usable. The live sweep uses the nearest 80 listed strikes per expiry inside the +/-10% candidate window to keep the IBKR fan-out bounded, especially for SPX/SPXW. Historical backtests should exclude gamma unless the row has a trusted point-in-time gamma snapshot with method, source, coverage, and timestamp.</p>
 <p>Open interest is a required input for OI-weighted dealer GEX, but missing OI is unknown, never zero. Priced legs without observed OI may still fit the IV/skew surface, but they must be omitted from OI-weighted GEX and surfaced through <code>warning_details</code> / <code>data_quality</code>. SPY option OI can be absent outside regular U.S. option hours. SPX option OI should normally be stable across session phases; missing SPX OI is unexpected data-quality evidence even pre-market, after-hours, overnight, or on closed-session cache reads.</p>
 <p>MOVE/rates-vol is outside the live surface until a verified IBKR contract or licensed official connector exists. Do not proxy it with ETFs or futures.</p>
+<h2 id="decisions-journal">Decisions Journal</h2>
+<p>Every decision-relevant regime snapshot appends one line to <code>$XDG_STATE_HOME/ibkr/regime-decisions.jsonl</code>: raw values, bands, depth metrics, streaks, freshness, eligibility, cluster tallies, lifecycle decision, and governor records. Lines dedupe on the snapshot's semantic fingerprint with an hourly heartbeat. The file is append-only, never read at runtime, and safe to delete — the same contract as <code>gamma-skew-diagnostics.jsonl</code>. It is the forward-collection corpus that makes the <code>pending_backtest</code> thresholds calibratable: a threshold set drops <code>pending_backtest</code> only with months of journal coverage, measured false-alarm/recall rates against labeled episodes, and a version-label bump documented here. Disable via <code>ibkr settings set regime.journal.enabled=false</code>.</p>
 <h2 id="backtesting">Backtesting</h2>
 <p>The active backtest sequence, tuning gates, and source-data backlog live in <a href="regime-backtest-plan.html">Regime and Canary Backtest Runbook</a>. Keep this file as the product contract for <code>ibkr regime</code>; do not use it as a second tuning backlog.</p>
   </main>

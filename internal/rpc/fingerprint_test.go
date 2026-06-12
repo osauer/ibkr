@@ -130,18 +130,25 @@ func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
 	}
 }
 
+// eligibleRedMeta is a red row whose evidence passed the confirmation gates
+// (depth + persistence + freshness) — the only kind of red that may confirm.
+func eligibleRedMeta() RegimeIndicatorMeta {
+	return RegimeIndicatorMeta{Band: "red", Eligibility: &RegimeEligibility{Eligible: true}}
+}
+
+func greenMeta() RegimeIndicatorMeta { return RegimeIndicatorMeta{Band: "green"} }
+
 func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.T) {
 	t.Parallel()
 	spyDrop := -2.0
 	base := RegimeSnapshotResult{
-		Composite: RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterYellowCount: 1, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
-		VIXTermStructure: RegimeVIXTerm{
-			RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "red"},
-		},
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: eligibleRedMeta()},
 		HYGSPYDivergence: RegimeHYGSPYDivergence{
-			RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "green"},
+			RegimeIndicatorMeta: greenMeta(),
 			SPYChangePct:        &spyDrop,
 		},
+		FundingStress: RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:        RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 	}
 	early := BuildRegimeLifecycle(&base)
 	if early.Stage != LifecycleEarlyWarning || early.Severity != "watch" {
@@ -152,8 +159,7 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 	}
 
 	confirmed := base
-	confirmed.Composite.ClusterRedCount = 2
-	confirmed.CreditSpreads.RegimeIndicatorMeta.Band = "red"
+	confirmed.FundingStress.RegimeIndicatorMeta = eligibleRedMeta()
 	got := BuildRegimeLifecycle(&confirmed)
 	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" {
 		t.Fatalf("confirmed lifecycle = %+v, want confirmed_stress/act", got)
@@ -166,11 +172,50 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 	}
 }
 
+// TestRegimeLifecycleProvisionalRedsDoNotConfirm pins the 2026-06-12
+// incident fix at the policy layer: two raw reds whose evidence failed the
+// eligibility gates (marginal depth, day-1 streak, overdue gamma cache) must
+// warn, not confirm — no confirmed_stress, no act, both clusters disclosed
+// in unconfirmed.
+func TestRegimeLifecycleProvisionalRedsDoNotConfirm(t *testing.T) {
+	t.Parallel()
+	provisionalCredit := RegimeIndicatorMeta{Band: "red", Eligibility: &RegimeEligibility{Reasons: []string{"depth_below_min", "streak_1_of_2"}}}
+	provisionalGamma := RegimeIndicatorMeta{Band: "red", Eligibility: &RegimeEligibility{Reasons: []string{"data_overdue"}}}
+	spyUp := 0.3
+	r := RegimeSnapshotResult{
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: provisionalCredit, SPYChangePct: &spyUp},
+		FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+		GammaZero: RegimeGammaZero{
+			RegimeIndicatorMeta: provisionalGamma,
+			Status:              RegimeStatusStale,
+			Envelope: GammaZeroSPXResult{Result: &GammaZeroComputed{
+				Quality: &GammaSignalQuality{Rankability: GammaRankabilityRankable},
+			}},
+		},
+	}
+	got := BuildRegimeLifecycle(&r)
+	if got.Stage != LifecycleEarlyWarning || got.Severity != "watch" {
+		t.Fatalf("lifecycle = stage %q severity %q, want early_warning/watch", got.Stage, got.Severity)
+	}
+	if len(got.ConfirmedBy) != 0 {
+		t.Fatalf("confirmed_by = %+v, want empty for provisional reds", got.ConfirmedBy)
+	}
+	if len(got.Unconfirmed) == 0 {
+		t.Fatalf("unconfirmed = %+v, want the provisional reds disclosed", got.Unconfirmed)
+	}
+}
+
 func TestRegimeLifecycleDegradesReadinessForDataQuality(t *testing.T) {
 	t.Parallel()
 	base := RegimeSnapshotResult{
-		Summary:   RegimeSummary{Confidence: "high"},
-		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
+		Summary:          RegimeSummary{Confidence: "high"},
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+		FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
 		DataQuality: []DataQualityHealth{
 			{Surface: "regime", Status: "stale", StaleClusters: []string{"breadth"}},
 		},
@@ -190,9 +235,13 @@ func TestRegimeLifecycleDegradesReadinessForDataQuality(t *testing.T) {
 func TestRegimeLifecycleDegradesReadinessForWeakRows(t *testing.T) {
 	t.Parallel()
 	base := RegimeSnapshotResult{
-		Summary:   RegimeSummary{Confidence: "high"},
-		Composite: RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
-		GammaZero: RegimeGammaZero{Status: RegimeStatusComputing},
+		Summary:          RegimeSummary{Confidence: "high"},
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+		FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
+		GammaZero:        RegimeGammaZero{Status: RegimeStatusComputing},
 	}
 	got := BuildRegimeLifecycle(&base)
 	if got.Stage != LifecycleQuiet {
@@ -209,49 +258,98 @@ func TestRegimeLifecycleDegradesReadinessForWeakRows(t *testing.T) {
 func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 	t.Parallel()
 
+	rankableGamma := func(meta RegimeIndicatorMeta) RegimeGammaZero {
+		return RegimeGammaZero{
+			RegimeIndicatorMeta: meta,
+			Status:              RegimeStatusOK,
+			Envelope: GammaZeroSPXResult{Result: &GammaZeroComputed{
+				Quality: &GammaSignalQuality{Rankability: GammaRankabilityRankable},
+			}},
+		}
+	}
+	yellowMeta := RegimeIndicatorMeta{Band: "yellow"}
+
 	tests := []struct {
 		name         string
-		composite    RegimeComposite
+		build        func() RegimeSnapshotResult
 		wantLabel    string
 		wantTone     string
 		wantStage    string
 		wantSeverity string
 	}{
 		{
-			name:         "one red plus one yellow is watch",
-			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRedCount: 1, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
+			name: "one eligible red plus one yellow is early warning watch",
+			build: func() RegimeSnapshotResult {
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+					HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: eligibleRedMeta()},
+					USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+					Breadth:          RegimeBreadth{RegimeIndicatorMeta: yellowMeta},
+				}
+			},
 			wantLabel:    "Stress signal present",
 			wantTone:     RegimeToneWatch,
 			wantStage:    LifecycleEarlyWarning,
 			wantSeverity: "watch",
 		},
 		{
-			name:         "two red clusters are confirmed stress",
-			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterRedCount: 2, ClusterRankedCount: 5, ClusterUnrankedCount: 1},
-			wantLabel:    "Broad stress regime",
+			name: "two eligible red clusters are confirmed stress",
+			build: func() RegimeSnapshotResult {
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+					HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: eligibleRedMeta()},
+					USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+					Breadth:          RegimeBreadth{RegimeIndicatorMeta: eligibleRedMeta()},
+				}
+			},
+			wantLabel:    "Confirmed stress regime",
 			wantTone:     RegimeToneStress,
 			wantStage:    LifecycleConfirmedStress,
 			wantSeverity: "act",
 		},
 		{
-			name:         "all ranked clusters red is risk off",
-			composite:    RegimeComposite{ClusterRedCount: 6, ClusterRankedCount: 6},
+			name: "all ranked clusters eligible red is risk off",
+			build: func() RegimeSnapshotResult {
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: eligibleRedMeta()},
+					HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: eligibleRedMeta()},
+					CreditSpreads:    RegimeCreditSpreads{RegimeIndicatorMeta: eligibleRedMeta()},
+					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: eligibleRedMeta()},
+					USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: eligibleRedMeta()},
+					GammaZero:        rankableGamma(eligibleRedMeta()),
+					Breadth:          RegimeBreadth{RegimeIndicatorMeta: eligibleRedMeta()},
+				}
+			},
 			wantLabel:    "Full risk-off conditions",
 			wantTone:     RegimeToneRiskOff,
 			wantStage:    LifecyclePanic,
 			wantSeverity: "urgent",
 		},
 		{
-			name:         "too few ranked clusters is data quality",
-			composite:    RegimeComposite{ClusterGreenCount: 1, ClusterRedCount: 1, ClusterRankedCount: 2, ClusterUnrankedCount: 4},
+			name: "too few ranked clusters is data quality",
+			build: func() RegimeSnapshotResult {
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: eligibleRedMeta()},
+				}
+			},
 			wantLabel:    "Insufficient signal — too few inputs ready",
 			wantTone:     RegimeToneDataQuality,
 			wantStage:    LifecycleDataQuality,
 			wantSeverity: "watch",
 		},
 		{
-			name:         "one yellow cluster is amber normal watch",
-			composite:    RegimeComposite{ClusterGreenCount: 3, ClusterYellowCount: 1, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
+			name: "one yellow cluster is amber normal watch",
+			build: func() RegimeSnapshotResult {
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+					HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+					USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: yellowMeta},
+				}
+			},
 			wantLabel:    "Normal regime",
 			wantTone:     RegimeToneWatch,
 			wantStage:    LifecycleQuiet,
@@ -262,11 +360,16 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			regime := RegimeSnapshotResult{Composite: tt.composite}
+			regime := tt.build()
+			ApplyRegimeClusterTallies(&regime.Composite, BuildRegimeClusterBands(&regime))
 			regime.Lifecycle = BuildRegimeLifecycle(&regime)
+			regime.Composite.Verdict = RegimeHeadline(regime.Composite, regime.Lifecycle.Stage)
 			got := BuildRegimePosture(&regime)
 			if got.Label != tt.wantLabel || got.Tone != tt.wantTone || got.Stage != tt.wantStage || got.Severity != tt.wantSeverity {
 				t.Fatalf("posture = %+v, want label=%q tone=%q stage=%q severity=%q", got, tt.wantLabel, tt.wantTone, tt.wantStage, tt.wantSeverity)
+			}
+			if regime.Composite.Verdict != got.Label {
+				t.Fatalf("verdict %q != posture label %q — headline drift", regime.Composite.Verdict, got.Label)
 			}
 		})
 	}
@@ -275,12 +378,16 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 func TestRegimePostureMarksDegradedNormalAsDataQuality(t *testing.T) {
 	t.Parallel()
 	regime := RegimeSnapshotResult{
-		Summary:   RegimeSummary{Confidence: "high"},
-		Composite: RegimeComposite{ClusterGreenCount: 4, ClusterRankedCount: 4, ClusterUnrankedCount: 2},
+		Summary:          RegimeSummary{Confidence: "high"},
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+		FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 		DataQuality: []DataQualityHealth{
 			{Surface: "regime", Status: "partial", PartialClusters: []string{"credit", "FX"}},
 		},
 	}
+	ApplyRegimeClusterTallies(&regime.Composite, BuildRegimeClusterBands(&regime))
 	regime.Lifecycle = BuildRegimeLifecycle(&regime)
 	got := BuildRegimePosture(&regime)
 	if got.Label != "Normal regime" {

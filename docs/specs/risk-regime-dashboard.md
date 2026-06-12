@@ -211,40 +211,95 @@ result.
 | --- | --- | --- | --- |
 | S&P 500 breadth | > 55% above 50-DMA | 40-55%, or weakening near highs | < 40%, especially while SPX is near highs |
 
+## Confirmation Eligibility and Severity Governance
+
+A red row may CONFIRM stress only when its evidence is deep, persistent, and
+cadence-fresh. Otherwise it is PROVISIONAL: visible on the row, listed in
+`lifecycle.unconfirmed`, able to drive `early_warning` — but it never counts
+toward `confirmed_stress`/`panic`, never rescues another cluster from its
+isolated-red downgrade, and never reaches `confirmed_by`. This policy exists
+because of the 2026-06-12 false positive, where a 7 bps HYG break (one session
+old, thin pre-open tick) and a prior-evening gamma cache mutually confirmed
+"Broad stress regime / act" against a green tape
+(docs/design/regime-calibration.md).
+
+Eligibility gates per indicator (heuristic noise floors, pending_backtest like
+the band thresholds; values live in `internal/rpc/regime_policy.go`):
+
+| Indicator | Min depth for eligible red | Fast path (eligible day 1) | Min streak (NY trading sessions) | Cadence freshness | Exit hysteresis (leave red) |
+| --- | --- | --- | --- | --- | --- |
+| VIX/VIX3M | ratio >= 1.00 | ratio >= 1.05 | 2 | same-session tick | ratio < 0.98 |
+| VVIX | >= 110 | >= 120 | 2 | latest official daily close (<= 4d) | < 105 |
+| HYG/SPY | HYG >= 0.25% below 50DMA | >= 1.0% below | 2 | RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print) | HYG closes back above 50DMA |
+| HY OAS | band is the gate | n/a | 1 | series <= 7d | < 5.25 and widening < 0.85 pp |
+| Funding | band is the gate | n/a | 1 | series <= 7d | < 65 bp |
+| USD/JPY | band is the gate (speed is depth) | n/a | 1 | same-day tick/close | yen move < 1.5% |
+| Dealer gamma | gap <= -0.5% below gamma-zero | gap <= -2.0% or wholly-short profile | 1 | compute within current NY trading date (prior-date cache = `stale`, warns only) | gap > +0.5% |
+| Breadth | <= 38% | <= 30% | 2 | last completed session's compute | > 45% |
+
+Eligibility latches for the life of the red streak (a depth wobble back inside
+the floor does not flip it); freshness is never latched — overdue data drops
+eligibility immediately. Streaks count NY trading days; a weekend or holiday
+poll keys to the most recent trading day.
+
+Severity governance, applied after stage selection and disclosed in
+`lifecycle.governors[]`:
+
+1. While a confirming cluster's threshold set carries `pending_backtest`,
+   heuristic evidence without a fresh tape co-sign (SPY <= -1.5%, VIX +10%, or
+   a same-session term inversion) reads one severity rung down:
+   `confirmed_stress` -> watch, 3-red `panic` -> act. Pure-tape panic
+   (SPY <= -4%/-7%) always reaches urgent. Promotion out of `pending_backtest`
+   happens per versioned threshold-set label via the backtest plan.
+2. If a confirming cluster's source health is stale/partial/degraded, severity
+   caps at watch (evidence-keyed: an unrelated dead feed does not mute a fresh
+   confirmation).
+
+Tone follows stage: deep, fresh, persistent confirmed evidence keeps a red
+headline even when the governor holds the demanded response at watch.
+
 ## Composite Logic
+
+The headline label is a single wording table shared by `composite.verdict` and
+`posture.label` (`rpc.RegimeHeadline`); CLI, MCP, and SPA render the served
+string:
 
 | Cluster state | Regime label |
 | --- | --- |
 | 0 red and 0-2 yellow | Normal regime |
 | 0 red and 3+ yellow | Elevated stress watch |
-| 1-2 red | Stress signal present |
-| 3+ red | Broad stress regime |
-| all ranked clusters red | Full risk-off conditions |
+| any visible red (eligible or provisional) below confirmation | Stress signal present |
+| stage `confirmed_stress`/`panic` (2 eligible reds, or 1 + tape) | Confirmed stress regime |
+| 3+ eligible red | Broad stress regime |
+| all ranked clusters eligible red | Full risk-off conditions |
 
 The output may also show raw indicator counts for transparency. Cluster counts
 are the primary signal because related rows, such as VIX and VVIX, are not
-fully independent votes.
+fully independent votes; `cluster_eligible_red_count` and
+`cluster_provisional_red_count` split the reds by confirmation eligibility.
 
 Lifecycle is a second layer on top of the row and cluster evidence:
 
 | Lifecycle stage | Broad-market meaning |
 | --- | --- |
 | `quiet` | Enough data is ranked and no material stress or recovery/opportunity evidence is present. |
-| `early_warning` | Weak, isolated, or forward-looking evidence is visible, but independent confirmation is not yet present. |
-| `confirmed_stress` | At least two independent stress clusters, or one severe cluster plus confirming SPY/VIX tape, are active. |
-| `panic` | Stress is broad or tape is severe enough that the regime should be treated as acute. |
+| `early_warning` | Weak, isolated, provisional, or forward-looking evidence is visible, but eligible independent confirmation is not yet present. |
+| `confirmed_stress` | At least two ELIGIBLE stress clusters, or one eligible cluster plus confirming SPY/VIX tape, are active. |
+| `panic` | Three or more eligible stress clusters, or tape severe enough (SPY <= -4%/-7%) that the regime should be treated as acute. |
 | `stabilization` | Stress evidence is easing, but this is not yet a deployable opportunity by itself. |
 | `opportunity` | Constructive tape and low stress evidence are present; this is broad-market context only, not a trade instruction. |
 | `data_quality` | Missing, stale, computing, or degraded inputs prevent a confident lifecycle read. |
 
-The lifecycle layer must keep unconfirmed red evidence visible without letting a
-single fragile proxy dominate the trigger. `readiness` should be `blocked` or
-degraded when critical source health is stale, partial, computing, or degraded.
+The lifecycle layer must keep unconfirmed red evidence visible without letting
+a single fragile or stale proxy dominate the trigger. `readiness` should be
+`blocked` or degraded when critical source health is stale, partial,
+computing, or degraded; the severity governor additionally caps the demanded
+response when the CONFIRMING clusters themselves are impaired.
 
 An unconfirmed HYG/SPY-only red or USD/JPY-only red remains visible in the row
-details, but it is counted as yellow at the cluster level. This keeps fast
-proxies useful without letting one fragile proxy dominate the broad-market
-read.
+details, but it is counted as yellow at the cluster level; the independence
+rescue that waives this downgrade counts ELIGIBLE reds only, so two marginal
+reds can no longer confirm each other.
 
 The expanded Tier 1 backtest shows that isolated red equity-volatility clusters
 are also the main source of repeated false alarms. They should not be deleted:
@@ -276,6 +331,20 @@ after-hours, overnight, or on closed-session cache reads.
 
 MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.
+
+## Decisions Journal
+
+Every decision-relevant regime snapshot appends one line to
+`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`: raw values, bands, depth
+metrics, streaks, freshness, eligibility, cluster tallies, lifecycle decision,
+and governor records. Lines dedupe on the snapshot's semantic fingerprint with
+an hourly heartbeat. The file is append-only, never read at runtime, and safe
+to delete — the same contract as `gamma-skew-diagnostics.jsonl`. It is the
+forward-collection corpus that makes the `pending_backtest` thresholds
+calibratable: a threshold set drops `pending_backtest` only with months of
+journal coverage, measured false-alarm/recall rates against labeled episodes,
+and a version-label bump documented here. Disable via
+`ibkr settings set regime.journal.enabled=false`.
 
 ## Backtesting
 

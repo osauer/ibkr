@@ -504,55 +504,60 @@ func TestSignedFloat(t *testing.T) {
 	}
 }
 
-// ----- composite-table verdict mapping (spec table, lines 109-115) -----
+// ----- shared headline wording table (rpc.RegimeHeadline) -----
+// The renderer no longer owns a verdict copy: it shows the served verdict,
+// and the wording table lives once in internal/rpc. This table pins the
+// new eligible/provisional semantics through the shared function.
 
 func TestRegimeComposite_VerdictTable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name   string
-		green  int
-		yellow int
-		red    int
-		total  int
-		want   string
+		name        string
+		green       int
+		yellow      int
+		red         int
+		eligible    int
+		provisional int
+		ranked      int
+		unranked    int
+		stage       string
+		want        string
 	}{
-		{"all green = normal", 5, 0, 0, 5, "Normal regime"},
-		{"two yellow = normal", 3, 2, 0, 5, "Normal regime"},
-		{"three yellow = elevated", 2, 3, 0, 5, "Elevated stress watch"},
-		{"five yellow = elevated", 0, 5, 0, 5, "Elevated stress watch"},
-		{"one red = watch", 2, 2, 1, 5, "Stress signal present"},
-		{"two red = watch", 1, 2, 2, 5, "Stress signal present"},
-		{"three red = regime shift", 0, 2, 3, 5, "Broad stress regime"},
-		{"four red = regime shift", 0, 1, 4, 5, "Broad stress regime"},
-		{"five red (full ranked) = full risk-off", 0, 0, 5, 5, "Full risk-off conditions"},
-		// Coverage edge: 3 red but two unranked → still "regime shift", not "full"
-		{"three red with two unranked", 0, 0, 3, 5, "Broad stress regime"},
-		// Coverage edge: nothing ranked → no verdict claim
-		{"all unranked", 0, 0, 0, 5, "No usable signal yet"},
-		// Honesty floor: a positive "Normal regime" verdict requires
-		// at least verdictFloor (3) ranked rows. Below that the
-		// renderer surfaces "Insufficient signal" instead of bold-
-		// green-on-thin-coverage. Confirmed in review: the original
-		// v0.22.0 dashboard on weekend frozen data printed "Normal
-		// regime" with 1 of 5 ranked — exactly the misleading state
-		// this floor blocks.
-		{"one green ranked = insufficient", 1, 0, 0, 5, "Insufficient signal — too few inputs ready"},
-		{"two green ranked = insufficient", 2, 0, 0, 5, "Insufficient signal — too few inputs ready"},
-		{"one red + one yellow = insufficient (below floor even with reds)", 0, 1, 1, 5, "Insufficient signal — too few inputs ready"},
+		{"all green = normal", 5, 0, 0, 0, 0, 5, 0, rpc.LifecycleQuiet, "Normal regime"},
+		{"two yellow = normal", 3, 2, 0, 0, 0, 5, 0, rpc.LifecycleQuiet, "Normal regime"},
+		{"three yellow = elevated", 2, 3, 0, 0, 0, 5, 0, rpc.LifecycleEarlyWarning, "Elevated stress watch"},
+		{"one eligible red = stress signal", 2, 2, 1, 1, 0, 5, 0, rpc.LifecycleEarlyWarning, "Stress signal present"},
+		{"one provisional red = stress signal", 2, 2, 1, 0, 1, 5, 0, rpc.LifecycleEarlyWarning, "Stress signal present"},
+		// Two PROVISIONAL reds stay a stress signal — the 2026-06-12
+		// incident headline ("Broad stress regime" at red==2) is gone.
+		{"two provisional reds = stress signal", 1, 2, 2, 0, 2, 5, 0, rpc.LifecycleEarlyWarning, "Stress signal present"},
+		// Two ELIGIBLE reds confirm — new explicit label.
+		{"two eligible reds = confirmed stress", 1, 2, 2, 2, 0, 5, 0, rpc.LifecycleConfirmedStress, "Confirmed stress regime"},
+		{"three eligible reds = broad stress", 0, 2, 3, 3, 0, 5, 0, rpc.LifecyclePanic, "Broad stress regime"},
+		{"four eligible reds = broad stress", 0, 1, 4, 4, 0, 5, 0, rpc.LifecyclePanic, "Broad stress regime"},
+		{"five eligible reds full ranked = full risk-off", 0, 0, 5, 5, 0, 5, 0, rpc.LifecyclePanic, "Full risk-off conditions"},
+		// Coverage edge: 3 eligible red but two unranked → broad, not full.
+		{"three eligible reds with two unranked", 0, 0, 3, 3, 0, 3, 2, rpc.LifecyclePanic, "Broad stress regime"},
+		{"all unranked", 0, 0, 0, 0, 0, 0, 5, rpc.LifecycleDataQuality, "No usable signal yet"},
+		// Honesty floor: below verdictFloor ranked clusters no positive
+		// claim is made, even with reds visible.
+		{"one green ranked = insufficient", 1, 0, 0, 0, 0, 1, 4, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
+		{"two green ranked = insufficient", 2, 0, 0, 0, 0, 2, 3, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
+		{"one red + one yellow = insufficient", 0, 1, 1, 1, 0, 2, 3, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := regimeComposite{green: tc.green, yellow: tc.yellow, red: tc.red, total: tc.total}
-			c.ranked = c.green + c.yellow + c.red
-			c.unranked = c.total - c.ranked
-			c.clusterGreen = tc.green
-			c.clusterYellow = tc.yellow
-			c.clusterRed = tc.red
-			c.clusterRanked = c.ranked
-			c.clusterUnranked = c.unranked
-			c.clusterTotal = tc.total
-			if got := c.verdict(); got != tc.want {
-				t.Errorf("verdict for %v = %q, want %q", tc, got, tc.want)
+			c := rpc.RegimeComposite{
+				ClusterGreenCount:          tc.green,
+				ClusterYellowCount:         tc.yellow,
+				ClusterRedCount:            tc.red,
+				ClusterEligibleRedCount:    tc.eligible,
+				ClusterProvisionalRedCount: tc.provisional,
+				ClusterRankedCount:         tc.ranked,
+				ClusterUnrankedCount:       tc.unranked,
+			}
+			if got := rpc.RegimeHeadline(c, tc.stage); got != tc.want {
+				t.Errorf("headline for %v = %q, want %q", tc, got, tc.want)
 			}
 		})
 	}

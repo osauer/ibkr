@@ -550,12 +550,20 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMark
 		VIXChangePct:  r.VIXTermStructure.VIXChangePct,
 	}
 	contextClusters := canaryMarketContextClusters(r, now)
-	rawBands := rawRegimeClusterBands(r)
-	bands := confirmedRegimeClusterBands(r, rawBands)
+	// Shared rpc combination: raw worst-of bands, eligibility-keyed
+	// isolated-red downgrades, and the eligible/provisional split. Canary
+	// previously recomputed this from raw bands (a third policy copy) and
+	// confirmed "market stress" on two marginal reds — the 2026-06-12
+	// false-positive surface the user actually watches.
+	cb := rpc.BuildRegimeClusterBands(&r)
 	clusterBands := map[string]string{}
-	for i, name := range []string{"vol", "credit", "funding", "fx", "gamma", "breadth"} {
-		clusterBands[name] = bands[i]
-		if rawBands[i] == "red" && bands[i] != "red" {
+	for i, name := range rpc.RegimeClusterNames {
+		clusterBands[name] = cb.Confirmed[i]
+		eligible := cb.Confirmed[i] == "red" && cb.Eligible[i]
+		if eligible {
+			out.EligibleRedClusterNames = append(out.EligibleRedClusterNames, name)
+		}
+		if cb.Raw[i] == "red" && !eligible {
 			out.UnconfirmedRedClusterNames = append(out.UnconfirmedRedClusterNames, name)
 		}
 	}
@@ -599,6 +607,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMark
 	}
 	slices.Sort(out.RedClusterNames)
 	slices.Sort(out.YellowClusterNames)
+	slices.Sort(out.EligibleRedClusterNames)
 	slices.Sort(out.UnconfirmedRedClusterNames)
 	slices.Sort(out.AmbiguousClusters)
 	slices.Sort(out.PartialClusters)
@@ -606,6 +615,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMark
 	slices.Sort(out.DegradedClusters)
 	slices.Sort(out.StaleClusters)
 	out.RedClusters = len(out.RedClusterNames)
+	out.EligibleRedClusters = len(out.EligibleRedClusterNames)
 	out.YellowClusters = len(out.YellowClusterNames)
 	return out
 }
@@ -794,27 +804,6 @@ func weakestStatus(statuses []string) string {
 	}
 }
 
-func strongestBand(bands []string) string {
-	seenYellow, seenGreen := false, false
-	for _, b := range bands {
-		switch strings.ToLower(strings.TrimSpace(b)) {
-		case "red":
-			return "red"
-		case "yellow":
-			seenYellow = true
-		case "green":
-			seenGreen = true
-		}
-	}
-	if seenYellow {
-		return "yellow"
-	}
-	if seenGreen {
-		return "green"
-	}
-	return ""
-}
-
 func canaryRow(title string, direction risk.SignalDirection, severity risk.SignalSeverity, guidance, evidence string) CanaryRow {
 	return CanaryRow{
 		Title:     title,
@@ -866,12 +855,14 @@ func canaryPnLShockRow(p CanaryPortfolioSummary) CanaryRow {
 func canaryMarketRow(m CanaryMarketSummary) CanaryRow {
 	evidence := canaryMarketEvidence(m)
 	switch {
-	case m.RedClusters >= 3 && m.RankedClusters >= 4:
+	case m.EligibleRedClusters >= 3 && m.RankedClusters >= 4:
 		return canaryRow("Confirmed market stress", risk.DirectionDefensive, risk.SeverityAct, "Reduce equity beta materially; reserve urgent action for margin or exposure rows.", evidence)
-	case m.RedClusters >= 2 && m.RankedClusters >= 3:
+	case m.EligibleRedClusters >= 2 && m.RankedClusters >= 3:
 		return canaryRow("Confirmed market stress", risk.DirectionDefensive, risk.SeverityAct, "Cut marginal longs and short-convexity exposure; keep only intentional hedged risk.", evidence)
 	case canaryFastCarryUnwind(m):
 		return canaryRow("Fast carry unwind", risk.DirectionDefensive, risk.SeverityAct, "Reduce fragile beta and short-vol exposure; FX stress is confirmed by tape or breadth.", evidence)
+	case m.RedClusters >= 2:
+		return canaryRow("Stress pending confirmation", risk.DirectionDefensive, risk.SeverityWatch, "Stress clusters are visible but not confirmation-eligible (depth, persistence, or freshness missing); hold de-risking at watch.", evidence)
 	case m.RedClusters == 1 && m.YellowClusters >= 1:
 		return canaryRow("Early stress filtered", risk.DirectionDefensive, risk.SeverityWatch, "Wait for a second independent red cluster before major de-risking.", evidence)
 	case m.YellowClusters >= 3:
@@ -891,13 +882,13 @@ func canaryTapeShockRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryR
 	spyCrash := pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct)
 	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
 	vixHardSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct)
-	confirmed := (spyDrop && vixSpike) || m.RedClusters >= 1
+	confirmed := (spyDrop && vixSpike) || m.EligibleRedClusters >= 1
 	switch {
 	case spyCrash && confirmed:
 		return canaryRow("Index tape shock", risk.DirectionDefensive, risk.SeverityAct, "Cut broad equity beta now; SPY is in a severe direct tape drawdown with confirmation.", evidence)
 	case spyHardDrop && confirmed:
 		return canaryRow("Index tape shock", risk.DirectionDefensive, risk.SeverityAct, "Cut marginal longs and pre-hedge remaining beta; direct SPY stress is confirmed.", evidence)
-	case vixHardSpike && (spyDrop || m.RedClusters >= 1):
+	case vixHardSpike && (spyDrop || m.EligibleRedClusters >= 1):
 		return canaryRow("Index tape shock", risk.DirectionDefensive, risk.SeverityAct, "Reduce short-vol and high-beta exposure; direct VIX stress is confirmed.", evidence)
 	case spyHardDrop || vixHardSpike || (spyDrop && vixSpike):
 		return canaryRow("Index tape shock", risk.DirectionDefensive, risk.SeverityWatch, "Freeze new risk and run a second pass; direct overnight tape stress needs confirmation before urgent action.", evidence)
@@ -913,7 +904,7 @@ func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRo
 	delta := derefPct(p.NetDeltaPctNLV)
 	grossDelta := derefPct(p.GrossDeltaPctNLV)
 	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV; gross delta %.0f%% NLV", gross, delta, grossDelta)
-	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
+	stressed := m.EligibleRedClusters >= 2 || canaryConfirmedTapeStress(m)
 	switch {
 	case (gross >= canaryPolicy.GrossExposureStressUrgentPct || delta >= canaryPolicy.NetDeltaStressUrgentPct || grossDelta >= canaryPolicy.GrossDeltaStressUrgentPct) && stressed:
 		return canaryRow("US equity/options exposure", risk.DirectionDefensive, risk.SeverityUrgent, "Go near-flat on broad equity beta; close or hedge option delta first.", evidence)
@@ -933,7 +924,7 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 	pct := math.Abs(derefPct(p.LargestExposurePct))
 	deltaPct := derefPct(p.LargestDeltaPctNLV)
 	evidence := canaryConcentrationEvidence(p)
-	if (pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct) && (m.RedClusters >= 2 || canaryConfirmedTapeStress(m)) {
+	if (pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct) && (m.EligibleRedClusters >= 2 || canaryConfirmedTapeStress(m)) {
 		return canaryRow("Largest concentration", risk.DirectionDefensive, risk.SeverityAct, fmt.Sprintf("Trim this concentration before smaller positions; cap it below %.0f%% NLV in stress.", canaryPolicy.SingleNameTargetPct), evidence)
 	}
 	if pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct {
@@ -996,7 +987,7 @@ func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m Canar
 	if coverage < canaryPolicy.OptionGreeksMinCoveragePct {
 		return canaryRow("Options convexity", risk.DirectionDataQuality, risk.SeverityWatch, fmt.Sprintf("Do not escalate options-specific actions until greeks coverage is at least %.0f%%.", canaryPolicy.OptionGreeksMinCoveragePct), evidence)
 	}
-	if pos.Portfolio.Gamma != nil && *pos.Portfolio.Gamma < 0 && m.RedClusters >= 2 {
+	if pos.Portfolio.Gamma != nil && *pos.Portfolio.Gamma < 0 && m.EligibleRedClusters >= 2 {
 		return canaryRow("Options convexity", risk.DirectionDefensive, risk.SeverityAct, "Reduce negative-gamma structures first; prefer defined-risk or hedged residuals.", evidence)
 	}
 	return canaryRow("Options convexity", "", risk.SeverityObserve, "No option-convexity de-risking trigger.", evidence)
@@ -1060,7 +1051,7 @@ func canaryMarketConfirmation(m CanaryMarketSummary) string {
 }
 
 func canaryConfirmedMarketStress(m CanaryMarketSummary) bool {
-	return (m.RedClusters >= 2 && len(unhealthyConfirmingClusters(m)) == 0) || canaryConfirmedTapeStress(m)
+	return (m.EligibleRedClusters >= 2 && len(unhealthyConfirmingClusters(m)) == 0) || canaryConfirmedTapeStress(m)
 }
 
 func canaryPartialMarketPressure(m CanaryMarketSummary) bool {
@@ -1194,9 +1185,9 @@ func canaryHasConfirmedConstructiveSignal(signals []risk.Signal) bool {
 }
 
 func canaryPanicMarket(m CanaryMarketSummary) bool {
-	return m.RedClusters >= 3 ||
+	return m.EligibleRedClusters >= 3 ||
 		pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct) ||
-		(pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct) && m.RedClusters >= 1)
+		(pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct) && m.EligibleRedClusters >= 1)
 }
 
 func canaryAction(direction risk.SignalDirection, severity risk.SignalSeverity, marketConfirmation, portfolioFit, inputHealth string) string {
@@ -1404,8 +1395,8 @@ func canaryTapeSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.S
 	out := []risk.Signal{}
 	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
 	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
-	confirmedDrop := (spyDrop && vixSpike) || m.RedClusters >= 1
-	confirmedVIXSpike := spyDrop || m.RedClusters >= 1
+	confirmedDrop := (spyDrop && vixSpike) || m.EligibleRedClusters >= 1
+	confirmedVIXSpike := spyDrop || m.EligibleRedClusters >= 1
 	if m.SPYChangePct != nil {
 		switch {
 		case *m.SPYChangePct <= canaryPolicy.SPYCrashPct:
@@ -1467,10 +1458,12 @@ func tapeSignal(id risk.SignalID, direction risk.SignalDirection, severity risk.
 func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
 	out := []risk.Signal{}
 	switch {
-	case m.RedClusters >= 2 && m.RankedClusters >= 3:
-		observed := float64(m.RedClusters)
+	case m.EligibleRedClusters >= 2 && m.RankedClusters >= 3:
+		// Confirmation-grade: only ELIGIBLE reds (depth + persistence +
+		// freshness) may put the act-severity stress signal on the wire.
+		observed := float64(m.EligibleRedClusters)
 		threshold := 2.0
-		sig := risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"}
+		sig := risk.Signal{ID: risk.SignalRegimeStressConfirmed, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Metric: "eligible_red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"}
 		if unhealthy := unhealthyConfirmingClusters(m); len(unhealthy) > 0 {
 			sig.BlockedBy = unhealthy
 			sig.ConfidenceImpact = "confirmed stress includes unhealthy cluster input; verify before severe market-only action"
@@ -1480,7 +1473,8 @@ func canaryRegimeSignals(m CanaryMarketSummary) []risk.Signal {
 		observed := 1.0
 		threshold := 1.0
 		out = append(out, risk.Signal{ID: risk.SignalFXCarryUnwind, Direction: risk.DirectionDefensive, Severity: risk.SeverityAct, Subject: "fx", Metric: "red_fx_cluster_with_tape_confirmation", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
-	case m.RedClusters == 1 && m.YellowClusters >= 1:
+	case m.RedClusters >= 2 || (m.RedClusters == 1 && m.YellowClusters >= 1):
+		// Visible reds without confirmation eligibility warn, never act.
 		observed := float64(m.RedClusters)
 		threshold := 1.0
 		out = append(out, risk.Signal{ID: risk.SignalRegimeStressEarly, Direction: risk.DirectionDefensive, Severity: risk.SeverityWatch, Metric: "red_clusters", Observed: &observed, Threshold: &threshold, Evidence: canaryMarketEvidence(m), Confidence: "medium"})
@@ -1504,7 +1498,7 @@ func unhealthyConfirmingClusters(m CanaryMarketSummary) []string {
 }
 
 func canaryExposureSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
-	stressed := m.RedClusters >= 2 || canaryConfirmedTapeStress(m)
+	stressed := m.EligibleRedClusters >= 2 || canaryConfirmedTapeStress(m)
 	out := []risk.Signal{}
 	out = appendExposureSignal(out, risk.SignalGrossExposureHigh, "gross_exposure_pct_nlv", p.GrossExposurePctNLV, canaryPolicy.GrossExposureWatchPct, canaryPolicy.GrossExposureStressActPct, canaryPolicy.GrossExposureStressUrgentPct, stressed)
 	out = appendExposureSignal(out, risk.SignalNetDeltaHigh, "net_delta_pct_nlv", p.NetDeltaPctNLV, canaryPolicy.NetDeltaWatchPct, canaryPolicy.NetDeltaStressActPct, canaryPolicy.NetDeltaStressUrgentPct, stressed)

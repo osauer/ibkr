@@ -34,22 +34,28 @@ const verdictFloor = 3
 // computed from the daemon-side classifiers. Always non-zero shape:
 // when every row is unranked the verdict still surfaces honestly
 // ("No ranked indicators — see rows below for state").
+// buildRegimeComposite tallies the SERVED row bands (post-hysteresis, set by
+// annotateRegimeMetadata) and fills the cluster counts through the shared
+// rpc combination — the single copy of rescue/eligibility policy. Verdict is
+// intentionally left empty here: the unified headline needs the lifecycle
+// stage, so the handler assigns it via rpc.RegimeHeadline after
+// BuildRegimeLifecycle runs.
 func buildRegimeComposite(r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 	if r == nil {
-		return rpc.RegimeComposite{Verdict: "No ranked indicators — see rows below for state"}
+		return rpc.RegimeComposite{Verdict: "No usable signal yet"}
 	}
-	bands := []string{
-		bandForVIX(r.VIXTermStructure),
-		bandForVolOfVol(r.VolOfVol),
-		bandForHYGSPY(r.HYGSPYDivergence),
-		bandForCreditSpreads(r.CreditSpreads),
-		bandForFundingStress(r.FundingStress),
-		bandForUSDJPY(r.USDJPY),
-		bandForGamma(r.GammaZero),
-		bandForBreadth(r.Breadth),
+	rowBands := []string{
+		r.VIXTermStructure.Band,
+		r.VolOfVol.Band,
+		r.HYGSPYDivergence.Band,
+		r.CreditSpreads.Band,
+		r.FundingStress.Band,
+		r.USDJPY.Band,
+		r.GammaZero.Band,
+		r.Breadth.Band,
 	}
 	var c rpc.RegimeComposite
-	for _, b := range bands {
+	for _, b := range rowBands {
 		switch b {
 		case "green":
 			c.GreenCount++
@@ -64,23 +70,7 @@ func buildRegimeComposite(r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 			c.UnrankedCount++
 		}
 	}
-	clusterBands := regimeClusterBands(r)
-	for _, b := range clusterBands {
-		switch b {
-		case "green":
-			c.ClusterGreenCount++
-			c.ClusterRankedCount++
-		case "yellow":
-			c.ClusterYellowCount++
-			c.ClusterRankedCount++
-		case "red":
-			c.ClusterRedCount++
-			c.ClusterRankedCount++
-		default:
-			c.ClusterUnrankedCount++
-		}
-	}
-	c.Verdict = verdictFor(c, len(clusterBands))
+	rpc.ApplyRegimeClusterTallies(&c, rpc.BuildRegimeClusterBands(r))
 	return c
 }
 
@@ -464,28 +454,6 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// verdictFor maps the cluster-level (red, yellow, ranked, total) tally
-// onto the interpretation table. Mirrors cli.regimeComposite.verdict —
-// same words so MCP consumers can show the CLI's headline verbatim.
-func verdictFor(c rpc.RegimeComposite, total int) string {
-	switch {
-	case c.ClusterRankedCount == 0:
-		return "No ranked indicators — see rows below for state"
-	case c.ClusterRankedCount < verdictFloor:
-		return "Insufficient signal — too few indicators ranked"
-	case c.ClusterRankedCount == total && c.ClusterRedCount == total:
-		return "Full risk-off conditions"
-	case c.ClusterRedCount >= 3:
-		return "Broad stress regime"
-	case c.ClusterRedCount >= 1:
-		return "Stress signal present"
-	case c.ClusterYellowCount >= 3:
-		return "Elevated stress watch"
-	default:
-		return "Normal regime"
-	}
-}
-
 // bandForVIX classifies the VIX/VIX3M row. Mirrors the CLI's
 // rowVIXTerm path: unranked when status is anything other than ok/stale
 // or when the ratio is missing.
@@ -575,93 +543,7 @@ func bandForBreadth(r rpc.RegimeBreadth) string {
 	return classifyBreadthBand(r.Envelope.PctAbove50DMA)
 }
 
-func regimeClusterBands(r *rpc.RegimeSnapshotResult) []string {
-	if r == nil {
-		return nil
-	}
-	raw := []string{
-		worstBand(bandForVIX(r.VIXTermStructure), bandForVolOfVol(r.VolOfVol)),
-		worstBand(bandForHYGSPY(r.HYGSPYDivergence), bandForCreditSpreads(r.CreditSpreads)),
-		worstBand(bandForFundingStress(r.FundingStress)),
-		worstBand(bandForUSDJPY(r.USDJPY)),
-		worstBand(bandForGamma(r.GammaZero)),
-		worstBand(bandForBreadth(r.Breadth)),
-	}
-	return confirmedRegimeClusterBands(r, raw)
-}
-
-const (
-	regimeClusterEquityVol = iota
-	regimeClusterCredit
-	regimeClusterFunding
-	regimeClusterFX
-	regimeClusterGamma
-	regimeClusterBreadth
-)
-
-const (
-	isolatedVVIXStressLevel = 120.0
-	isolatedVIXStressChange = 20.0
-	isolatedSPYStressMove   = -1.0
-)
-
-func confirmedRegimeClusterBands(r *rpc.RegimeSnapshotResult, raw []string) []string {
-	out := append([]string(nil), raw...)
-	if r == nil {
-		return out
-	}
-	hygSPYBand := bandForHYGSPY(r.HYGSPYDivergence)
-	creditBand := bandForCreditSpreads(r.CreditSpreads)
-	if hygSPYBand == "red" && creditBand != "red" && !hasIndependentRedCluster(raw, regimeClusterCredit) {
-		out[regimeClusterCredit] = "yellow"
-	}
-	if bandForUSDJPY(r.USDJPY) == "red" && !hasIndependentRedCluster(raw, regimeClusterFX) {
-		out[regimeClusterFX] = "yellow"
-	}
-	if len(out) > regimeClusterEquityVol && out[regimeClusterEquityVol] == "red" && !hasIndependentRedCluster(out, regimeClusterEquityVol) && !isolatedEquityVolConfirmed(r) {
-		out[regimeClusterEquityVol] = "yellow"
-	}
-	return out
-}
-
-func hasIndependentRedCluster(bands []string, self int) bool {
-	for i, band := range bands {
-		if i != self && band == "red" {
-			return true
-		}
-	}
-	return false
-}
-
-func isolatedEquityVolConfirmed(r *rpc.RegimeSnapshotResult) bool {
-	if r == nil {
-		return false
-	}
-	if bandForVIX(r.VIXTermStructure) == "red" {
-		return true
-	}
-	if r.VolOfVol.Last != nil && *r.VolOfVol.Last >= isolatedVVIXStressLevel {
-		return true
-	}
-	if r.VIXTermStructure.VIXChangePct != nil && *r.VIXTermStructure.VIXChangePct >= isolatedVIXStressChange {
-		return true
-	}
-	return r.HYGSPYDivergence.SPYChangePct != nil && *r.HYGSPYDivergence.SPYChangePct <= isolatedSPYStressMove
-}
-
-func worstBand(bands ...string) string {
-	out := ""
-	for _, band := range bands {
-		switch band {
-		case "red":
-			return "red"
-		case "yellow":
-			out = "yellow"
-		case "green":
-			if out == "" {
-				out = "green"
-			}
-		}
-	}
-	return out
-}
+// Cluster combination (raw worst-of bands, isolated-red downgrades,
+// eligibility-keyed independence) lives in internal/rpc/regime_policy.go —
+// the single copy the daemon, lifecycle builder, CLI, canary, and backtest
+// all share.

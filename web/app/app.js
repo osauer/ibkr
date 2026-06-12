@@ -3157,10 +3157,54 @@ function renderRegimePanel(snap) {
   $("marketRegimeMix").textContent = regimeStatus.detail;
   $("marketRegimeMix").title = regimeStatus.title;
   renderFreshnessTimestamp("regimeAsOf", latestRegimeTimestamp(canary, indicators), {
-    staleMinutes: 60,
+    staleMinutes: regimeStaleBudgetMinutes(snap),
   });
   renderMarketWeather(posture);
   renderRegimeDetail(indicators, snap, canary);
+}
+
+// The stale-badge threshold derives from the SERVED per-cluster staleness
+// policy (regime.source_health[].max_age_seconds) — same no-hardcoded-twins
+// pattern as renderProtectionTimestamp. The timestamp shown is the freshest
+// indicator read, so its budget is the tightest served max-age, floored at
+// 60 minutes so an intraday tick lull doesn't flap the badge. Fallback when
+// no policy is served: the historical 60m.
+function regimeStaleBudgetMinutes(snap) {
+  const entries = snap.regime?.source_health || [];
+  let tightest = null;
+  for (const src of entries) {
+    const secs = Number(src?.max_age_seconds);
+    if (Number.isFinite(secs) && secs > 0 && (tightest === null || secs < tightest)) {
+      tightest = secs;
+    }
+  }
+  if (tightest === null) return 60;
+  return Math.max(60, Math.round(tightest / 60));
+}
+
+// regimeGovernedNote surfaces the confirmation-policy detail: provisional
+// (visible-but-unconfirmed) stress signals and any severity-governor caps,
+// so the panel never shows an unqualified red while the engine itself is
+// withholding confirmation.
+function regimeGovernedNote(snap, market) {
+  const parts = [];
+  const unconfirmed = market?.unconfirmed_red_cluster_names || [];
+  if (unconfirmed.length > 0) {
+    const plural = unconfirmed.length === 1 ? "" : "s";
+    parts.push(`${unconfirmed.length} stress signal${plural} pending confirmation (${unconfirmed.join(", ")})`);
+  }
+  for (const g of snap.regime?.lifecycle?.governors || []) {
+    if (g?.action === "severity_capped") {
+      parts.push(`severity held at ${g.to} — ${regimeGovernorReasonLabel(g.reason)}`);
+    }
+  }
+  return parts.join(" · ");
+}
+
+function regimeGovernorReasonLabel(reason) {
+  if (reason === "pending_backtest_no_tape_cosign") return "thresholds pending backtest, no tape co-sign";
+  if (reason === "confirming_cluster_quality") return "confirming data quality impaired";
+  return reason || "governed";
 }
 
 function marketSourceIssueLabels(snap = {}) {
@@ -3289,6 +3333,10 @@ function marketRegimeStatusLine(snap, canary, market, indicators) {
   const unranked = Number(market.unranked_clusters || 0);
   const total = ranked + unranked;
   if (!canaryNeedsInputCheck(canary) && !marketHasDataGaps(market)) {
+    const governed = regimeGovernedNote(snap, market);
+    if (governed) {
+      return { summary: "Regime read", detail: governed, title: `${governed}; updated ${latest}` };
+    }
     return { summary: "Regime read", detail: latest, title: latest };
   }
 
