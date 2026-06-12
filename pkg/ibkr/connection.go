@@ -330,7 +330,12 @@ type Connection struct {
 	positions      map[string]*RawPosition
 	positionsMu    sync.RWMutex
 	accountSummary map[string]string
-	accountMu      sync.RWMutex
+	// summarySnapshots accumulates account-summary rows per reqID so a
+	// synchronous reqAccountSummary read cannot be clobbered by the
+	// streaming reqAccountUpdates subscription, which writes the shared
+	// accountSummary map (issue #12). Guarded by accountMu.
+	summarySnapshots map[int]*summarySnapshot
+	accountMu        sync.RWMutex
 
 	// Completion signals for async operations
 	positionsEndChan   chan struct{} // Signals when position sync is complete
@@ -491,6 +496,7 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		mktDataType:         make(map[int]int),
 		positions:           make(map[string]*RawPosition),
 		accountSummary:      make(map[string]string),
+		summarySnapshots:    make(map[int]*summarySnapshot),
 		reqIDSeq:            1,
 		openOrders:          make(map[int]*IBKROrder),
 		orderStatus:         make(map[int]string),
@@ -1756,7 +1762,8 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		// seconds, so at Info this line alone dominated the log (~9% of
 		// volume observed 2026-06-11).
 		portfolioLogger.Debugf("Account summary sync complete")
-		// Signal that account summary is complete
+		c.signalSummaryEnd(fields)
+		// Legacy shared signal for WaitForAccountSummaryEnd callers
 		select {
 		case c.acctSummaryEndChan <- struct{}{}:
 		default:
@@ -1767,11 +1774,14 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	case msgAcctValue:
 		c.handleAccountValue(fields)
 	case msgAcctUpdateTime:
-		if len(fields) > 1 {
+		// fields: [msgID, version, HH:MM]. fields[1] is the protocol
+		// version (always "1") — logging it instead of the timestamp
+		// misdirected the debugging in issue #12.
+		if len(fields) > 2 {
 			// Wire-cadence event, streamed continuously while account
 			// updates are subscribed; at Info it was 75% of all daemon
 			// log volume (observed 2026-06-11).
-			portfolioLogger.Debugf("Account update time: %s", fields[1])
+			portfolioLogger.Debugf("Account update time: %s", fields[2])
 		}
 	case msgAcctDownloadEnd:
 		portfolioLogger.Infof("Account download complete")
@@ -2348,6 +2358,13 @@ func (c *Connection) handleAccountSummary(fields []string) {
 		key = fmt.Sprintf("%s_%s", tag, currency)
 	}
 	c.accountSummary[key] = value
+	// Mirror the row into the per-request snapshot so the synchronous
+	// reqAccountSummary read is isolated from streaming overwrites.
+	if reqID, err := strconv.Atoi(strings.TrimSpace(fields[2])); err == nil {
+		if snap := c.summarySnapshots[reqID]; snap != nil {
+			snap.values[key] = value
+		}
+	}
 	c.accountMu.Unlock()
 
 	// Log important values
@@ -2494,9 +2511,22 @@ func (c *Connection) handleAccountValue(fields []string) {
 	key := fields[2]
 	value := fields[3]
 	currency := fields[4]
+	account := strings.TrimSpace(fields[5])
 
-	// Store in account summary
+	// Streaming account-value rows carry the account they belong to.
+	// TWS shares the account-updates service across API clients, so a
+	// displaced or foreign-account batch can land on this stream;
+	// merging it blindly clobbers the bound account's values in the
+	// shared map (issue #12). Drop rows naming a different concrete
+	// account; rows with an empty or aggregate account name pass
+	// through because single-account logins may omit the code.
 	c.accountMu.Lock()
+	if accountCodeConcrete(account) && accountCodeConcrete(c.account) && !strings.EqualFold(account, c.account) {
+		bound := c.account
+		c.accountMu.Unlock()
+		portfolioLogger.Debugf("Dropping %s update for foreign account %s (bound %s)", key, account, bound)
+		return
+	}
 	mapKey := key
 	if currency != "" && currency != "BASE" {
 		mapKey = fmt.Sprintf("%s_%s", key, currency)
@@ -4883,6 +4913,67 @@ func (c *Connection) WaitForPositionsEnd(timeout time.Duration) error {
 	}
 }
 
+// summarySnapshot accumulates the account-summary rows for one
+// reqAccountSummary request, keyed like the shared accountSummary map
+// (`<tag>` or `<tag>_<CCY>`). done is closed when the gateway emits
+// accountSummaryEnd for the request's reqID.
+type summarySnapshot struct {
+	values map[string]string
+	done   chan struct{}
+}
+
+// registerSummarySnapshot opens a per-request accumulation for reqID.
+// Must run before the request hits the wire so no row can be missed.
+func (c *Connection) registerSummarySnapshot(reqID int) {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	if c.summarySnapshots == nil {
+		c.summarySnapshots = make(map[int]*summarySnapshot)
+	}
+	c.summarySnapshots[reqID] = &summarySnapshot{
+		values: make(map[string]string),
+		done:   make(chan struct{}),
+	}
+}
+
+// dropSummarySnapshot removes the per-request accumulation for reqID and
+// returns whatever rows arrived. Safe against late rows: the row handler
+// looks the snapshot up under the same mutex, so after removal further
+// rows only touch the shared map.
+func (c *Connection) dropSummarySnapshot(reqID int) map[string]string {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	snap := c.summarySnapshots[reqID]
+	delete(c.summarySnapshots, reqID)
+	if snap == nil {
+		return nil
+	}
+	return snap.values
+}
+
+// signalSummaryEnd closes the per-request done channel for the reqID
+// carried by an accountSummaryEnd message ([msgID, version, reqID]).
+func (c *Connection) signalSummaryEnd(fields []string) {
+	if len(fields) < 3 {
+		return
+	}
+	reqID, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+	if err != nil {
+		return
+	}
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	snap := c.summarySnapshots[reqID]
+	if snap == nil {
+		return
+	}
+	select {
+	case <-snap.done:
+	default:
+		close(snap.done)
+	}
+}
+
 // RequestAccountSummary requests account summary data
 func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
 	if !c.IsConnected() {
@@ -4894,7 +4985,9 @@ func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
 		tags = "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue,UnrealizedPnL,RealizedPnL"
 	}
 
-	// Clear the end channel to ensure we wait for new data
+	c.registerSummarySnapshot(reqID)
+
+	// Clear the legacy end channel to ensure we wait for new data
 	select {
 	case <-c.acctSummaryEndChan:
 	default:
@@ -4907,7 +5000,11 @@ func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
 	// 3: group ("All" to get all accounts)
 	// 4: tags (comma-separated list)
 	msg := c.encodeMsg(reqAccountSummary, "1", reqID, "All", tags)
-	return c.sendMessage(msg)
+	if err := c.sendMessage(msg); err != nil {
+		c.dropSummarySnapshot(reqID)
+		return err
+	}
+	return nil
 }
 
 // WaitForAccountSummaryEnd waits for account summary to complete with timeout
@@ -4917,6 +5014,29 @@ func (c *Connection) WaitForAccountSummaryEnd(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		return fmt.Errorf("timeout waiting for account summary end")
+	}
+}
+
+// AwaitAccountSummarySnapshot blocks until the gateway emits
+// accountSummaryEnd for reqID (or timeout elapses) and returns only the
+// rows that arrived for that request. The isolation matters: the shared
+// accountSummary map is also fed by the streaming reqAccountUpdates
+// subscription, and a zeroed or foreign-account update batch landing
+// between end-of-stream and the read could clobber a valid snapshot
+// (issue #12). The per-request accumulation is removed on both paths.
+func (c *Connection) AwaitAccountSummarySnapshot(reqID int, timeout time.Duration) (map[string]string, error) {
+	c.accountMu.RLock()
+	snap := c.summarySnapshots[reqID]
+	c.accountMu.RUnlock()
+	if snap == nil {
+		return nil, fmt.Errorf("no account summary request registered for reqID %d", reqID)
+	}
+	select {
+	case <-snap.done:
+		return c.dropSummarySnapshot(reqID), nil
+	case <-time.After(timeout):
+		c.dropSummarySnapshot(reqID)
+		return nil, fmt.Errorf("timeout waiting for account summary end")
 	}
 }
 
