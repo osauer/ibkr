@@ -2,7 +2,7 @@
   "serverInfo": {
     "name": "ibkr",
     "title": "IBKR MCP Server",
-    "version": "1.9.0",
+    "version": "1.10.0",
     "description": "Local Interactive Brokers MCP server for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
     "homepage": "https://osauer.dev/ibkr/",
     "repository": "https://github.com/osauer/ibkr",
@@ -234,6 +234,87 @@
         "required": ["symbol", "entry", "stop"],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "ibkr_market_events",
+      "description": "Observed market-event flags for held or requested symbols: borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbols": {"type": "array", "items": {"type": "string"}},
+          "symbol": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ibkr_trading_status",
+      "description": "Read-only local order-entry readiness: disabled, paper-ready, live-ready, or blocked, with pinned-session evidence and concrete blockers.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    },
+    {
+      "name": "ibkr_orders_open",
+      "description": "Read-only open-order lifecycle state for the connected broker account and mode; reports journal and broker-callback state only.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    },
+    {
+      "name": "ibkr_order_status",
+      "description": "Read-only lifecycle and audit events for one locally journaled order by order ref, IBKR order ID, or permanent ID.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"}
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ibkr_order_preview",
+      "description": "Draft a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token; cannot place, modify, cancel, or transmit a broker order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "enum": ["buy", "sell"]},
+          "symbol": {"type": "string"},
+          "quantity": {"type": "integer", "minimum": 1},
+          "sec_type": {"type": "string", "enum": ["STK", "ETF", "OPT"]},
+          "expiry": {"type": "string"},
+          "right": {"type": "string", "enum": ["C", "P"]},
+          "strike": {"type": "number"},
+          "order_type": {"type": "string", "enum": ["LMT", "TRAIL", "TRAIL LIMIT"]},
+          "limit": {"type": "number"},
+          "strategy": {"type": "string", "enum": ["patient-limit", "explicit-limit", "broker-trail"]},
+          "trail_offset_type": {"type": "string", "enum": ["percent", "amount"]},
+          "trailing_percent": {"type": "number"},
+          "trailing_amount": {"type": "number"},
+          "initial_stop_price": {"type": "number"},
+          "limit_offset": {"type": "number"},
+          "tif": {"type": "string", "enum": ["DAY", "GTC"]},
+          "outside_rth": {"type": "boolean"},
+          "timeout_ms": {"type": "integer"},
+          "market": {"type": "string", "enum": ["us", "de"]}
+        },
+        "required": ["action", "symbol", "quantity"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ibkr_proposals",
+      "description": "Read daemon-owned protection proposals (trailing stops, theta hygiene, risk reduction) with per-row blockers; never previews, submits, or transmits.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "refresh": {"type": "boolean"},
+          "show": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ibkr_settings",
+      "description": "Read platform settings and observed state: feature enablement, trading mode/account/build capability, safety limits, and market-data quality; cannot change settings.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
     }
   ],
   "resources": [
@@ -248,7 +329,7 @@
     "canPlaceOrders": false,
     "canModifyOrders": false,
     "canCancelOrders": false,
-    "summary": "Current bundled CLI and MCP releases expose analysis and sizing tools, but no order-entry interface."
+    "summary": "The MCP tool surface is preview-only in every release variant: ibkr_order_preview can draft an order and mint a local preview token, but no MCP tool can place, modify, cancel, or transmit a broker order. Standard downloads are read-only builds; each release also publishes a clearly marked ibkr-trading CLI tarball for explicit opt-in order management."
   },
   "links": {
     "portfolioReview": "https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/",

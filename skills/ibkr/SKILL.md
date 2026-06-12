@@ -110,8 +110,12 @@ broker-write commands. Do not invent or simulate trade execution.
 | `ibkr regime` | Broad-market stress lifecycle: equity vol, credit, funding, FX carry, SPY+SPX gamma, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
 | `ibkr canary` | Portfolio-aware stress lifecycle, source health, fingerprints, and planner readiness | [schemas.md#canary](schemas.md#canary) |
 | `ibkr market-events` | Held or requested stock/ETF market-event flags: borrow inventory, extreme borrow fee, Nasdaq Reg SHO, LULD, and halt context | [schemas.md#market-events](schemas.md#market-events) |
-| `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are broker-write verbs outside this skill) | — |
-| `ibkr settings show` | Runtime platform preferences and observed read-only state, incl. `trading.freeze` | — |
+| `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are broker-write verbs outside this skill) | [schemas.md#proposals-status](schemas.md#proposals-status), [schemas.md#proposals-list](schemas.md#proposals-list) |
+| `ibkr settings show` | Runtime platform preferences and observed read-only state, incl. `trading.freeze` | [schemas.md#settings-show](schemas.md#settings-show) |
+| `ibkr trading status` | Local order-entry readiness: mode, pinned session evidence, `can_preview`/`can_write`, concrete blockers | [schemas.md#trading-status](schemas.md#trading-status) |
+| `ibkr orders open` | Open-order lifecycle rows for the connected account/mode (read-only journal view) | [schemas.md#orders-open](schemas.md#orders-open) |
+| `ibkr order status ID` | One journaled order's lifecycle and audit events | [schemas.md#order-status](schemas.md#order-status) |
+| `ibkr order preview …` | Tokenized stock/ETF/option order draft; report `token_minted` and `submit_eligible` separately, never transmits | [schemas.md#order-preview](schemas.md#order-preview) |
 | `ibkr version` | Print version, commit, build date, binary path | — |
 
 Add `--json` to any command for parseable output. Flags can come after positional

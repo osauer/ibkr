@@ -74,4 +74,18 @@ if ! grep -q "\"softwareVersion\": \"$plain\"" docs/index.html; then
   exit 1
 fi
 
+# Every public version stamp must move together: spoke-page JSON-LD plus the
+# MCP discovery JSONs (the v1.10.0 prep caught all of these lagging at the
+# previous release version while only index.html was gated).
+if ! grep -q "\"softwareVersion\": \"$plain\"" docs/interactive-brokers-mcp-server/index.html; then
+  echo "release-site-check: docs/interactive-brokers-mcp-server/index.html softwareVersion is not $plain" >&2
+  exit 1
+fi
+for f in docs/mcp-server.json docs/.well-known/mcp/server.json docs/.well-known/mcp/server-card.json; do
+  if ! grep -q "\"version\": \"$plain\"" "$f"; then
+    echo "release-site-check: $f version is not $plain" >&2
+    exit 1
+  fi
+done
+
 echo "release-site-check: $version requires and has a pushed osauer.dev/ibkr docs update"
