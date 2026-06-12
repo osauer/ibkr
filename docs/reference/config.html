@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:796ba70ad48ee813f7cfe17811ac38356a3bcb3431f8c66f5f99347383d96e99 -->
+<!-- md-source: config.md sha256:1365927c6b073e49e0b88de2e07ab6d4c0edaf2206113a920b8d80550420aa44 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -169,7 +169,7 @@
 <tr><td><code>[auto_trade]</code></td><td><code>fast_path_enabled</code></td><td><code>*bool</code></td><td>FastPathEnabled allows manual proposal preview/submit to use the immediate revalidation path; default true so paper protection stops remain usable.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>hot_reload</code></td><td><code>*bool</code></td><td>HotReload controls whether policy changes are reloaded while the daemon runs; default true.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>policy_file</code></td><td><code>string</code></td><td>PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml.</td></tr>
-<tr><td><code>[auto_trade]</code></td><td><code>proposal_cadence</code></td><td><code>duration</code></td><td>ProposalCadence controls how often the daemon refreshes protection proposals; default 15m.</td></tr>
+<tr><td><code>[auto_trade]</code></td><td><code>proposal_cadence</code></td><td><code>duration</code></td><td>ProposalCadence controls how often the daemon refreshes protection proposals; default 2m.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>proposals_enabled</code></td><td><code>*bool</code></td><td>ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>reload_interval</code></td><td><code>duration</code></td><td>ReloadInterval controls how often the daemon checks policy-file changes; default 30s.</td></tr>
 <tr><td><code>[daemon]</code></td><td><code>idle_timeout</code></td><td><code>duration</code></td><td>IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like &#34;1h&#34; or &#34;0s&#34;); set &#34;0s&#34; to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under <code>ibkr daemon --foreground</code>.</td></tr>

@@ -167,7 +167,10 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function purgeRestoreSettingEnabled()",
 		"function setStockProtectionEnabled(enabled)",
 		"function stockProtectionSettingEnabled()",
-		"function protectionTrailText(proposal = {})",
+		"function protectionMetricText(proposal = {})",
+		"function protectionQuoteLine(proposal = {})",
+		"function protectionQuantityStepper(proposal = {})",
+		"function protectionEffectiveQuantity(proposal = {})",
 		"function protectionLiveTrailStop(proposal = {}, trail = {})",
 		"function protectionSubmitLabel(proposal = {})",
 		"function protectionUsesPreviewFlow(proposal = {})",
@@ -223,7 +226,10 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function protectionQuoteStatusLabel(quote = null)",
 		"broker WhatIf remains the submit authority",
 		"broker may queue the stop after fresh WhatIf",
-		"IBKR lifts it as price rises above submission reference",
+		// The broker-managed-stop mechanics moved from per-row reason
+		// boilerplate into the action-button title (2026-06-12 noise
+		// reduction); the contract is that the explanation still ships.
+		"IBKR maintains the stop and raises it as the instrument price rises above the submission reference",
 		`body: JSON.stringify({ features: { stock_protection: { enabled } } })`,
 		"function refreshBootstrapIfSSEUnavailable()",
 		"function renderAccountDailyPnlPct(account = {})",
@@ -464,13 +470,16 @@ func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 		"function underlyingHeroMarketFlags(rows, events = {})",
 		"function protectionHeroMarketFlags(rows = [], marketEvents = {})",
 		"marketFlagRow(row.marketFlags || [])",
-		"marketFlagRow(protectionEffectiveMarketFlags(proposal, marketEvents))",
+		"marketFlagRow(protectionDecisionFlags(proposal, marketEvents))",
+		"function protectionDecisionFlags(proposal = {}, events = {})",
+		`return tone === "hard" || tone === "friction";`,
 		"function protectionActionLabel(proposal = {})",
-		`if (proposalIsBuyToCover(proposal)) return "Buy to cover";`,
+		`return secType === "OPT" || secType === "OPTION" ? "Buy to close" : "Buy to cover";`,
 		"function proposalIsBuyToCover(proposal = {})",
-		"function protectionTrailText(proposal = {})",
+		"function protectionMetricText(proposal = {})",
 		"function protectionStopChanged(snapshotStop, liveStop)",
-		"`quote ${live.quoteLabel} ${numberRead(live.reference)}`",
+		"function protectionQuoteFor(proposal = {})",
+		"function protectionQuoteTickDir(key, price, at = \"\")",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing borrow-fee market-event rendering contract %q", want)

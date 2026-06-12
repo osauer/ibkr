@@ -47,6 +47,10 @@ type proposalEngine struct {
 	refreshFailStreak int
 	refreshFailSince  time.Time
 	refreshFailCodes  []string
+	// kick wakes Run for an immediate refresh (gateway reconnect). Lazily
+	// created under mu by kickCh so tests constructing engines directly
+	// need no extra setup. Buffered: senders never block.
+	kick chan struct{}
 }
 
 type proposalStore struct {
@@ -115,6 +119,15 @@ func (s *Server) installProposalEngine() {
 // for 15 minutes after every `ibkr restart`).
 const proposalRefreshRetryBase = 30 * time.Second
 
+// proposalRefreshBackoffCap bounds the sustained-failure retry interval
+// independently of the cadence. With a 2m cadence, capping failure waits
+// at the cadence would mean a blocked attempt (and its warn line) every
+// 2 minutes for the whole length of a gateway outage; capping at 15m keeps
+// outage logs as quiet as the old 15m-cadence behavior. Post-outage
+// recovery latency does not ride on this cap — the gateway reconnect kicks
+// the loop directly (see Kick).
+const proposalRefreshBackoffCap = 15 * time.Minute
+
 func (e *proposalEngine) Run(ctx context.Context) {
 	if e == nil {
 		return
@@ -130,25 +143,77 @@ func (e *proposalEngine) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-e.kickCh():
+			// A fresh gateway handshake invalidates the escalated wait:
+			// restart the quick-retry ladder so a transient failure on the
+			// immediate post-reconnect refresh waits 30s, not the
+			// accumulated outage backoff. The logging streak in
+			// noteRefreshOutcome is deliberately untouched so the
+			// "recovered after N blocked attempts" line still closes the
+			// outage trail.
+			failures = 0
 		case <-time.After(proposalRefreshWait(e.cadence, failures)):
 		}
 	}
 }
 
+// Kick wakes Run for an immediate refresh, dropping the wake when one is
+// already pending. Called from postConnectSetup after RequestAccountUpdates
+// so a gateway reconnect refreshes the panel within seconds instead of
+// waiting out a backed-off timer (observed 2026-06-12: gateway back at
+// 10:53, panel stale until the 10:59:15 scheduled attempt).
+func (e *proposalEngine) Kick() {
+	if e == nil {
+		return
+	}
+	select {
+	case e.kickCh() <- struct{}{}:
+	default:
+	}
+}
+
+func (e *proposalEngine) kickCh() chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.kick == nil {
+		e.kick = make(chan struct{}, 1)
+	}
+	return e.kick
+}
+
 // proposalRefreshWait returns the pause before the next automatic refresh:
 // the full cadence after a clean refresh, an escalating 30s/1m/2m/…
-// backoff capped at the cadence while refreshes keep failing on transient
-// session conditions. The wait <= 0 branch guards shift overflow on
-// absurd streaks, mirroring gammaRetryBackoff.
+// backoff while refreshes keep failing on transient session conditions,
+// capped at proposalRefreshBackoffCap (or the cadence when that is longer,
+// so slow-cadence overrides never retry faster on failure than on success).
+// The wait <= 0 branch guards shift overflow on absurd streaks, mirroring
+// gammaRetryBackoff.
 func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
 	if failures <= 0 || cadence <= proposalRefreshRetryBase {
 		return cadence
 	}
+	ceil := max(cadence, proposalRefreshBackoffCap)
 	wait := proposalRefreshRetryBase << (failures - 1)
-	if wait <= 0 || wait > cadence {
-		return cadence
+	if wait <= 0 || wait > ceil {
+		return ceil
 	}
 	return wait
+}
+
+// proposalPositionsUnprimed reports whether an empty positions list
+// contradicts the account summary. A connected session serves an empty
+// position cache (no error) until the account-updates portfolio burst
+// lands; when the summary reports gross position value, the empty list is
+// the unprimed stream, not a flat book — generating "no proposals" from
+// it would replace a last-good snapshot with a silently wrong empty
+// panel. Same heuristic as the connector's maybeResubscribeAccountUpdates
+// self-heal. A genuinely flat account (gross position value 0) never
+// trips this, so an emptied book still converges to an empty panel.
+func proposalPositionsUnprimed(pos *rpc.PositionsResult, acct *rpc.AccountResult) bool {
+	if pos == nil || acct == nil {
+		return false
+	}
+	return len(pos.Stocks) == 0 && len(pos.Options) == 0 && acct.GrossPositionValue > 0
 }
 
 // proposalRefreshTransient reports whether the installed snapshot is
@@ -163,7 +228,7 @@ func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
 func proposalRefreshTransient(snap rpc.TradeProposalSnapshot) bool {
 	for _, b := range snap.Blockers {
 		switch b.Code {
-		case "account_identity_unscoped", "account_unavailable", "positions_unavailable", "proposal_scope_mismatch":
+		case "account_identity_unscoped", "account_unavailable", "positions_unavailable", "positions_pending", "proposal_scope_mismatch":
 			return true
 		}
 	}
@@ -360,6 +425,20 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.Blockers = blockers
 		e.installSnapshot(snap, show)
 		return snap, err
+	}
+	if proposalPositionsUnprimed(pos, acct) {
+		blockers := []rpc.TradingBlocker{{Code: "positions_pending", Message: "portfolio stream not yet primed; account summary reports open positions"}}
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, autoStatus, policyStatus, blockers, show); ok {
+			return snap, nil
+		}
+		snap := emptyProposalSnapshot(now)
+		snap.AutoTrade = autoStatus
+		snap.PolicyStatus = policyStatus
+		snap.AccountID = scope.Account
+		snap.AccountMode = scope.Mode
+		snap.Blockers = blockers
+		e.installSnapshot(snap, show)
+		return snap, nil
 	}
 	accountFP := rpc.BuildAccountFingerprint(acct)
 	positionsFP := rpc.BuildPositionsFingerprint(pos, acct.NetLiquidation)
@@ -1379,10 +1458,26 @@ func sanitizeProposalPreview(in *rpc.OrderPreviewResult) *rpc.TradeProposalOrder
 }
 
 func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bool) {
+	e.mu.Lock()
+	prevRevision := e.snapshot.Revision
+	prevMarkDate := e.snapshot.AsOf.Format(time.DateOnly)
+	e.mu.Unlock()
 	e.replaceSnapshot(snap)
+	// "generated" events and daily outcome marks record new generation
+	// work. At a 2m cadence most refreshes re-derive a revision-identical
+	// proposal set; appending per-proposal duplicates would grow the
+	// unbounded trade-proposals.jsonl ~7.5x faster and rescan the outcomes
+	// file per proposal per cycle for nothing. Marks still pass on a date
+	// change: their identity is daily (proposalOutcomeIdentity includes
+	// MarkDate), so a revision frozen across midnight still owes the new
+	// day's mark.
+	newRevision := snap.Revision != prevRevision
+	newMarkDate := snap.AsOf.Format(time.DateOnly) != prevMarkDate
 	for _, prop := range snap.Proposals {
-		e.appendEvent(proposalEventForProposal("generated", prop, snap.AsOf, "", "", "proposal generated"))
-		if e.server != nil && e.server.proposalOutcomes != nil {
+		if newRevision {
+			e.appendEvent(proposalEventForProposal("generated", prop, snap.AsOf, "", "", "proposal generated"))
+		}
+		if (newRevision || newMarkDate) && e.server != nil && e.server.proposalOutcomes != nil {
 			if err := e.server.proposalOutcomes.AppendMark(proposalOutcomeMarked(prop, snap.AsOf)); err != nil {
 				e.server.warnf("trade proposal outcomes: append daily mark: %v", err)
 			}
@@ -1603,6 +1698,14 @@ func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
 		case rpc.TradeProposalBucketTrailingStop:
 			out.TrailingStop++
 		}
+	}
+	// A raw sum across different local currencies is meaningless. Rather
+	// than serve EUR+USD arithmetic under a fake currency label (the SPA
+	// used to coerce the "MIX" sentinel to USD), omit the aggregate until
+	// a base-currency conversion exists; renderers show "--".
+	if out.RiskReductionExcessCurrency == "MIX" {
+		out.RiskReductionExcessNotional = 0
+		out.RiskReductionExcessCurrency = ""
 	}
 	return out
 }

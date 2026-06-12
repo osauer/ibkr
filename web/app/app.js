@@ -33,6 +33,8 @@ const state = {
   protectionSnapshotBusy: false,
   protectionSnapshotLastAt: 0,
   protectionSnapshotNotice: "",
+  protectionQuoteTicks: {},
+  protectionQtyOverrides: {},
   underlyingNotice: "",
   underlyingBusy: "",
   latestPurgeStatus: null,
@@ -756,7 +758,7 @@ function renderAccountLargestExposure(portfolio = {}, canary = {}, baseCurrency 
   const exposures = (portfolio.exposure_base || []).slice(0, 5);
   const largest = exposures[0];
   const label = largest?.underlying
-    ? `${largest.underlying}${typeof largest.market_value_pct_nlv === "number" ? ` ${pct(largest.market_value_pct_nlv)}` : ""}`
+    ? `${largest.underlying}${typeof largest.market_value_pct_nlv === "number" ? ` ${pct(largest.market_value_pct_nlv)} of NLV` : ""}`
     : "--";
   $("accountLargestExposureLabel").textContent = label;
   panel.hidden = !state.accountExposureOpen;
@@ -1792,10 +1794,12 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   toggle.setAttribute("aria-expanded", String(state.protectionOpen));
   renderProtectionTimestamp(proposals);
   $("protectionTheta").textContent = typeof counts.theta_per_day === "number" ? money(counts.theta_per_day, "") : "--";
-  $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number"
-    ? money(counts.risk_reduction_excess_notional, protectionRiskExcessCurrency(counts))
+  const riskExcessCurrency = protectionRiskExcessCurrency(counts);
+  $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
+    ? money(counts.risk_reduction_excess_notional, riskExcessCurrency)
     : "--";
   $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
+  renderProtectionExposure();
   renderMarketFlagRail("protectionFlagRail", protectionHeroMarketFlags(rows, marketEvents));
   const autoButton = $("protectionAutoButton");
   autoButton.disabled = true;
@@ -1814,10 +1818,51 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
 }
 
 function renderProtectionTimestamp(proposals = {}) {
-  // Proposal refresh cadence is 15m daemon-side ([auto_trade].proposal_cadence);
-  // a 15m badge threshold brushed "stale" in healthy operation, so allow one
-  // full cycle plus grace before flagging.
-  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes: 20 });
+  // The badge threshold derives from the served refresh cadence
+  // ([auto_trade].proposal_cadence rides inside the proposal snapshot), so
+  // the SPA never hardcodes a twin of daemon policy: one full cycle plus
+  // grace — max(3m, cadence/3) — keeps a healthy panel out of "stale"
+  // while a genuinely missed cycle flags within minutes. 2m cadence → 5m
+  // threshold; a 15m override keeps the historical 20m.
+  const cadence = goDurationMinutes(proposals.auto_trade?.proposal_cadence) ?? 2;
+  const staleMinutes = Math.ceil(cadence + Math.max(3, cadence / 3));
+  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes });
+}
+
+// goDurationMinutes parses a Go time.Duration string ("2m0s", "1h2m3s",
+// "90s") into minutes; null when unparseable so callers keep a fallback.
+function goDurationMinutes(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  let seconds = 0;
+  let matched = false;
+  for (const [, num, unit] of raw.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s)/g)) {
+    matched = true;
+    const v = Number(num);
+    if (unit === "h") seconds += v * 3600;
+    else if (unit === "m") seconds += v * 60;
+    else if (unit === "ms") seconds += v / 1000;
+    else seconds += v;
+  }
+  return matched && seconds > 0 ? seconds / 60 : null;
+}
+
+// Single-name "% of NLV" figures are concentration vs equity — under
+// margin they legitimately sum past 100%. Surfacing the account's served
+// gross exposure beside them lets the panel arithmetic reconcile on
+// sight instead of looking like broken math.
+function renderProtectionExposure() {
+  const el = $("protectionExposure");
+  if (!el) return;
+  const gross = state.snapshot?.canary?.portfolio?.gross_exposure_pct_nlv;
+  if (typeof gross !== "number") {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.textContent = `Gross exposure ${pct(gross)} of NLV`;
+  el.title = "Position market value vs net liquidation. Above 100% means margin: per-name % of NLV figures can sum past 100%.";
+  el.hidden = false;
 }
 
 function protectionReason(proposals = {}, autoTrade = {}) {
@@ -1853,6 +1898,7 @@ function protectionTransientSnapshotBlocker(code = "") {
   return [
     "account_unavailable",
     "positions_unavailable",
+    "positions_pending",
     "trading_status_unavailable",
     "market_events_unavailable",
   ].includes(code);
@@ -1908,12 +1954,16 @@ function protectionRow(proposal) {
   title.className = "protection-row__title";
   title.textContent = protectionProposalTitle(proposal);
   copy.append(bucket, title);
-  const trailText = protectionTrailText(proposal);
-  if (trailText) {
-    const trail = document.createElement("small");
-    trail.className = "protection-row__trail";
-    trail.textContent = trailText;
-    copy.append(trail);
+  const stepper = protectionQuantityStepper(proposal);
+  if (stepper) copy.append(stepper);
+  const quoteLine = protectionQuoteLine(proposal);
+  if (quoteLine) copy.append(quoteLine);
+  const metricText = protectionMetricText(proposal);
+  if (metricText) {
+    const metric = document.createElement("small");
+    metric.className = "protection-row__trail";
+    metric.textContent = metricText;
+    copy.append(metric);
   }
   const blockerText = blocked ? protectionBlockerText({ ...proposal, blockers: effectiveBlockers }) : "";
   if (blockerText) {
@@ -1942,11 +1992,14 @@ function protectionRow(proposal) {
     submitState.textContent = submitStateText;
     copy.append(submitState);
   }
-  const reason = document.createElement("small");
-  reason.className = "protection-row__reason";
-  reason.textContent = protectionReasonText(proposal);
-  copy.append(reason);
-  const flagRow = marketFlagRow(protectionEffectiveMarketFlags(proposal, marketEvents));
+  const reasonText = protectionReasonText(proposal, { metricShown: Boolean(metricText) });
+  if (reasonText) {
+    const reason = document.createElement("small");
+    reason.className = "protection-row__reason";
+    reason.textContent = reasonText;
+    copy.append(reason);
+  }
+  const flagRow = marketFlagRow(protectionDecisionFlags(proposal, marketEvents));
   if (flagRow) copy.append(flagRow);
   const actions = document.createElement("div");
   actions.className = "protection-row__actions";
@@ -1988,7 +2041,7 @@ function protectionRow(proposal) {
 function protectionProposalTitle(proposal = {}) {
   return [
     protectionSideLabel(proposal),
-    proposal.quantity || 0,
+    protectionEffectiveQuantity(proposal) || 0,
     proposal.symbol || "--",
     protectionContractLabel(proposal.contract || {}),
   ].filter(Boolean).join(" ");
@@ -2022,7 +2075,12 @@ function protectionBucketLabel(proposal = {}) {
 }
 
 function protectionActionLabel(proposal = {}) {
-  if (proposalIsBuyToCover(proposal)) return "Buy to cover";
+  if (proposalIsBuyToCover(proposal)) {
+    // "Buy to cover" is stock-borrow terminology; a reducing BUY on a
+    // short option is a buy-to-close.
+    const secType = String(proposal.sec_type || proposal.contract?.sec_type || "").toUpperCase();
+    return secType === "OPT" || secType === "OPTION" ? "Buy to close" : "Buy to cover";
+  }
   return String(proposal.action || "--").toUpperCase() === "BUY" ? "Buy" : "Sell";
 }
 
@@ -2036,60 +2094,265 @@ function protectionActionTitle(proposal = {}, fallback = "") {
   return fallback || "Preview this protection proposal";
 }
 
-function protectionReasonText(proposal = {}) {
-  if (proposal.bucket === "trailing_stop") {
-    const policy = protectionTrailPolicyLabel(proposal);
-    if (String(proposal.action || "").toUpperCase() === "SELL") {
-      return policy
-        ? `Broker-managed stop; IBKR lifts it as price rises above submission reference (policy ${policy})`
-        : "Broker-managed stop; IBKR lifts it as price rises above submission reference";
-    }
-    return policy
-      ? `Broker-managed stop; IBKR adjusts it as price moves in favor (policy ${policy})`
-      : "Broker-managed stop; IBKR adjusts it as price moves in favor";
-  }
+// protectionReasonText keeps reason prose off rows where it restates what
+// the row already shows: trailing-stop reasons were constant boilerplate
+// (the mechanics live in the action-button titles), and the theta/risk
+// reason sentences duplicate the metric line. The prose remains as the
+// fallback when the typed fields behind the metric line are missing.
+function protectionReasonText(proposal = {}, { metricShown = false } = {}) {
+  if (proposal.bucket === "trailing_stop") return "";
+  if (metricShown) return "";
   return proposal.reason || "";
 }
 
-function protectionTrailText(proposal = {}) {
-  const trail = proposal.trail || null;
-  if (!trail) return "";
-  const orderType = String(proposal.order_type || "TRAIL").toUpperCase();
-  const offset = protectionTrailOffsetLabel(trail);
-  const live = protectionLiveTrailStop(proposal, trail);
-  const parts = [
-    orderType === "TRAIL LIMIT" ? "TRAIL LIMIT order" : "TRAIL order",
-    live ? `quote ${live.quoteLabel} ${numberRead(live.reference)}` : "",
-    live?.quoteInfo || "",
-    offset,
-  ].filter(Boolean);
-  if (live && protectionStopChanged(trail.initial_stop_price, live.stop)) {
-    parts.push(`stop ${numberRead(live.stop)}`);
-  } else if (hasNumericValue(trail.initial_stop_price) && trail.initial_stop_price > 0) {
-    parts.push(`stop ${numberRead(trail.initial_stop_price)}`);
-  } else if (live) {
-    parts.push(`stop ${numberRead(live.stop)}`);
+// protectionMetricText renders the one decision number per bucket:
+// trailing stop → live stop level + offset + TIF; theta hygiene → daily
+// theta burn + DTE; risk reduction → concentration vs NLV + excess to
+// trim. Parts vanish individually when their typed field is missing —
+// never fabricated.
+function protectionMetricText(proposal = {}) {
+  if (proposal.bucket === "trailing_stop") {
+    const trail = proposal.trail || null;
+    if (!trail) return "";
+    const parts = [];
+    const live = protectionLiveTrailStop(proposal, trail);
+    if (live && protectionStopChanged(trail.initial_stop_price, live.stop)) {
+      parts.push(`stop ${numberRead(live.stop)}`);
+    } else if (hasNumericValue(trail.initial_stop_price) && trail.initial_stop_price > 0) {
+      parts.push(`stop ${numberRead(trail.initial_stop_price)}`);
+    } else if (live) {
+      parts.push(`stop ${numberRead(live.stop)}`);
+    }
+    const offset = protectionTrailOffsetLabel(trail);
+    if (offset) parts.push(offset);
+    if (hasNumericValue(trail.limit_offset)) {
+      parts.push(`limit offset ${numberRead(trail.limit_offset)}`);
+    }
+    const tif = String(proposal.tif || "").trim().toUpperCase();
+    if (tif) parts.push(tif);
+    return parts.join(" · ");
   }
-  if (hasNumericValue(trail.limit_offset)) {
-    parts.push(`limit offset ${numberRead(trail.limit_offset)}`);
+  if (proposal.bucket === "theta_hygiene") {
+    const parts = [];
+    if (hasNumericValue(proposal.theta_per_day) && proposal.theta_per_day > 0) {
+      parts.push(`theta ${money(proposal.theta_per_day, "")}/day`);
+    }
+    const dte = protectionProposalDTE(proposal);
+    if (dte !== null) parts.push(`${dte} DTE`);
+    return parts.join(" · ");
   }
-  return parts.join(" · ");
+  if (proposal.bucket === "risk_reduction") {
+    const parts = [];
+    if (typeof proposal.market_value_pct_nlv === "number") {
+      parts.push(`${pct(Math.abs(proposal.market_value_pct_nlv))} of NLV`);
+    }
+    if (hasNumericValue(proposal.risk_excess_notional) && proposal.risk_excess_notional > 0) {
+      parts.push(`${money(proposal.risk_excess_notional, proposal.risk_excess_currency || "")} over target`);
+    }
+    return parts.join(" · ");
+  }
+  return "";
+}
+
+function protectionProposalDTE(proposal = {}) {
+  for (const value of proposal.details || []) {
+    const match = String(value || "").match(/^dte=(\d+)$/);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+// protectionDecisionFlags keeps only the flag chips that bear on acting
+// on this row: hard blockers (halt/LULD) and execution friction (borrow
+// tight, fee extreme, Reg SHO). Context-only and stale/unknown-source
+// chips stay on the hero rail and detail surfaces — repeated per row they
+// are noise, not risk disclosure.
+function protectionDecisionFlags(proposal = {}, events = {}) {
+  return protectionEffectiveMarketFlags(proposal, events).filter((flag) => {
+    const tone = marketEventTone(flag);
+    return tone === "hard" || tone === "friction";
+  });
+}
+
+// protectionQuoteFor resolves the live quote a row's action would execute
+// against: stocks/ETFs read the shared market-quote poller (~15s tick);
+// option rows read the position leg's own premium bid/ask from the greeks
+// cache (~60s tick). Null when unavailable — nil means unavailable, the
+// row simply shows no quote line.
+function protectionQuoteFor(proposal = {}) {
+  const action = String(proposal.action || "").toUpperCase();
+  const secType = String(proposal.sec_type || proposal.contract?.sec_type || "").toUpperCase();
+  if (secType === "OPT" || secType === "OPTION") {
+    const leg = protectionOptionLeg(proposal);
+    if (!leg) return null;
+    const price = action === "BUY" ? leg.option_ask : leg.option_bid;
+    if (!hasNumericValue(price) || price <= 0) return null;
+    return {
+      label: action === "BUY" ? "ask premium" : "bid premium",
+      price,
+      at: leg.quote_price_at || "",
+      stale: Boolean(leg.stale),
+      info: leg.stale ? `stale option quote${leg.stale_reason ? `: ${leg.stale_reason}` : ""}` : "",
+    };
+  }
+  const symbol = proposal.symbol || proposal.contract?.symbol || "";
+  const quote = quoteBySymbol(state.snapshot?.market_quotes?.quotes || {}, symbol);
+  if (!quote) return null;
+  const price = action === "BUY" ? firstNumber(quote.ask, quote.ask_price) : firstNumber(quote.bid, quote.bid_price);
+  if (!hasNumericValue(price) || price <= 0) return null;
+  return {
+    label: action === "BUY" ? "ask" : "bid",
+    price,
+    at: quote.quote_price_at || quote.price_at || quote.as_of || "",
+    stale: protectionQuoteFrozen(quote),
+    info: protectionQuoteStatusLabel(quote),
+  };
+}
+
+function protectionOptionLeg(proposal = {}) {
+  const legs = state.snapshot?.positions?.options || [];
+  const contract = proposal.contract || {};
+  const conID = Number(contract.con_id || 0);
+  if (conID > 0) {
+    const byID = legs.find((leg) => Number(leg.con_id || 0) === conID);
+    if (byID) return byID;
+  }
+  const symbol = normalizeSymbol(proposal.symbol || contract.symbol || "");
+  return legs.find((leg) =>
+    normalizeSymbol(leg.symbol) === symbol &&
+    String(leg.expiry || "") === String(contract.expiry || "") &&
+    Number(leg.strike || 0) === Number(contract.strike || 0) &&
+    String(leg.right || "").toUpperCase() === String(contract.right || "").toUpperCase()) || null;
+}
+
+// protectionQuoteFrozen mirrors the muted-gray rule for stale/unknown
+// data: anything not firm+live renders muted and never tick-colored, so
+// a frozen close can't masquerade as a live tick.
+function protectionQuoteFrozen(quote = {}) {
+  const quality = String(quote.quote_quality || "").trim().toLowerCase();
+  const dataType = String(quote.data_type || "").trim().toLowerCase();
+  return (quality !== "" && quality !== "firm") || (dataType !== "" && dataType !== "live");
+}
+
+function protectionQuoteLine(proposal = {}) {
+  const quote = protectionQuoteFor(proposal);
+  if (!quote) return null;
+  const line = document.createElement("small");
+  line.className = "protection-row__quote";
+  const label = document.createElement("span");
+  label.textContent = `${quote.label} `;
+  const price = document.createElement("span");
+  price.className = "protection-quote";
+  if (quote.stale) {
+    price.classList.add("protection-quote--stale");
+  } else {
+    const dir = protectionQuoteTickDir(proposal.key, quote.price, quote.at);
+    if (dir) price.classList.add(`protection-quote--${dir}`);
+  }
+  price.textContent = numberRead(quote.price);
+  line.append(label, price);
+  if (quote.info) line.title = quote.info;
+  return line;
+}
+
+// protectionQuoteTickDir colors the latest observed move: green up, red
+// down, neutral (inherited gray) on first observation or when fresh data
+// repeats the price. "Settled" means a NEWER data timestamp served the
+// same price — re-renders without fresh data keep the current color, so
+// expanding an unrelated panel doesn't wipe a flash; option legs without
+// timestamps keep their direction until the premium actually changes.
+function protectionQuoteTickDir(key, price, at = "") {
+  const ticks = state.protectionQuoteTicks;
+  const prev = ticks[key];
+  if (!prev || !hasNumericValue(prev.price)) {
+    ticks[key] = { price, at, dir: "" };
+    return "";
+  }
+  if (price === prev.price) {
+    if (at && prev.at && at !== prev.at) {
+      ticks[key] = { price, at, dir: "" };
+    }
+    return ticks[key].dir;
+  }
+  const dir = price > prev.price ? "up" : "down";
+  ticks[key] = { price, at: at || prev.at, dir };
+  return dir;
+}
+
+// protectionQuantityStepper lets the trader trim more or less than the
+// daemon proposed on risk-reduction rows. The choice is presentation
+// state only: the daemon re-clamps to [1, max_quantity] at preview and
+// submit, and the override dies with the proposal revision so a newly
+// generated proposal always starts from its own quantity.
+function protectionQuantityStepper(proposal = {}) {
+  if (proposal.bucket !== "risk_reduction") return null;
+  const max = Number(proposal.max_quantity || 0);
+  if (max <= 1) return null;
+  const proposed = Number(proposal.quantity || 0);
+  const current = protectionEffectiveQuantity(proposal);
+  const wrap = document.createElement("div");
+  wrap.className = "protection-qty";
+  const dec = document.createElement("button");
+  dec.type = "button";
+  dec.className = "protection-qty__step";
+  dec.textContent = "−";
+  dec.disabled = current <= 1;
+  dec.setAttribute("aria-label", "Sell one fewer");
+  dec.addEventListener("click", () => setProtectionQuantity(proposal, current - 1));
+  const value = document.createElement("span");
+  value.className = "protection-qty__value";
+  value.textContent = `${current} of ${max}`;
+  const inc = document.createElement("button");
+  inc.type = "button";
+  inc.className = "protection-qty__step";
+  inc.textContent = "+";
+  inc.disabled = current >= max;
+  inc.setAttribute("aria-label", "Sell one more");
+  inc.addEventListener("click", () => setProtectionQuantity(proposal, current + 1));
+  wrap.append(dec, value, inc);
+  const unit = proposed > 0 && hasNumericValue(proposal.notional) && proposal.notional > 0
+    ? proposal.notional / proposed
+    : null;
+  if (unit) {
+    const approx = document.createElement("span");
+    approx.className = "protection-qty__approx";
+    approx.textContent = `≈ ${money(current * unit, proposal.contract?.currency || "")}`;
+    wrap.append(approx);
+  }
+  if (current !== proposed) {
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "protection-qty__reset";
+    reset.textContent = `proposed ${proposed} ↺`;
+    reset.title = "Reset to the proposed quantity";
+    reset.addEventListener("click", () => setProtectionQuantity(proposal, proposed));
+    wrap.append(reset);
+  }
+  return wrap;
+}
+
+function protectionEffectiveQuantity(proposal = {}) {
+  const override = state.protectionQtyOverrides[proposal.key];
+  if (!override || override.revision !== proposal.revision) {
+    return Number(proposal.quantity || 0);
+  }
+  return override.qty;
+}
+
+function setProtectionQuantity(proposal, qty) {
+  const max = Number(proposal.max_quantity || 0) || 1;
+  const clamped = Math.min(Math.max(Math.round(qty), 1), max);
+  state.protectionQtyOverrides = {
+    ...state.protectionQtyOverrides,
+    [proposal.key]: { revision: proposal.revision, qty: clamped },
+  };
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
 }
 
 function protectionTrailOffsetLabel(trail = {}) {
   if (hasNumericValue(trail.trailing_percent)) return `offset ${pct(trail.trailing_percent)}`;
   if (hasNumericValue(trail.trailing_amount)) return `offset ${numberRead(trail.trailing_amount)}`;
   return "";
-}
-
-function protectionTrailPolicyLabel(proposal = {}) {
-  for (const value of proposal.details || []) {
-    const match = String(value || "").match(/trail=([0-9.]+%)/i);
-    if (match) return match[1];
-  }
-  const reason = String(proposal.reason || "");
-  const match = reason.match(/([0-9.]+%)/);
-  return match ? match[1] : "";
 }
 
 function protectionLiveTrailStop(proposal = {}, trail = {}) {
@@ -2381,7 +2644,7 @@ function shortPreviewMessage(message = "") {
 function protectionStopDraftSummary(proposal = {}) {
   const parts = [
     protectionProposalTitle(proposal),
-    protectionTrailText(proposal),
+    protectionMetricText(proposal),
   ].filter(Boolean);
   return parts.join(" · ");
 }
@@ -2394,8 +2657,11 @@ function protectionBlockerText(proposal = {}) {
 
 function protectionRiskExcessCurrency(counts = {}) {
   const currency = String(counts.risk_reduction_excess_currency || "").trim().toUpperCase();
-  if (currency && currency !== "MIX") return currency;
-  return "USD";
+  // "MIX" marked a raw sum across currencies in pre-2026-06-12 persisted
+  // snapshots — not a number in any currency, so render "--" instead of
+  // the old (wrong) USD coercion. New daemons omit the aggregate instead.
+  if (currency === "MIX") return "";
+  return currency || "USD";
 }
 
 function formatStrike(value) {
@@ -2432,10 +2698,15 @@ async function submitProtectionProposal(proposal) {
     renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
     return;
   }
+  // The trader-adjusted quantity rides into the submit body and the
+  // pending record so every surface (title, busy badge, confirmation)
+  // shows the size actually being sent. The daemon re-clamps to
+  // [1, max_quantity] regardless.
+  const submitQuantity = protectionEffectiveQuantity(proposal);
   state.protectionSubmitBusy = previewKey;
   state.protectionSubmits = {
     ...state.protectionSubmits,
-    [previewKey]: { local: true, pending: true, proposal, as_of: new Date().toISOString() },
+    [previewKey]: { local: true, pending: true, proposal: { ...proposal, quantity: submitQuantity }, as_of: new Date().toISOString() },
   };
   renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {}, state.snapshot?.market_events || {});
   try {
@@ -2446,7 +2717,7 @@ async function submitProtectionProposal(proposal) {
       body: JSON.stringify({
         key: proposal.key,
         revision: proposal.revision,
-        quantity: proposal.quantity,
+        quantity: submitQuantity,
         fast_path: true,
         timeout_ms: protectionPreviewTimeoutMs(proposal),
         confirm_account: confirmation.account,
@@ -2487,13 +2758,14 @@ function protectionWriteConfirmationLabel() {
 
 async function previewProtectionProposal(proposal) {
   const previewKey = protectionPreviewStateKey(proposal);
+  const previewQuantity = protectionEffectiveQuantity(proposal);
   state.protectionPreviewBusy = previewKey;
   state.protectionPreviews = {
     ...state.protectionPreviews,
     [previewKey]: {
       local: true,
       pending: true,
-      proposal,
+      proposal: { ...proposal, quantity: previewQuantity },
       as_of: new Date().toISOString(),
     },
   };
@@ -2506,7 +2778,7 @@ async function previewProtectionProposal(proposal) {
       body: JSON.stringify({
         key: proposal.key,
         revision: proposal.revision,
-        quantity: proposal.quantity,
+        quantity: previewQuantity,
         timeout_ms: protectionPreviewTimeoutMs(proposal),
         fast_path: proposal.bucket === "trailing_stop",
       }),

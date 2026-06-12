@@ -2293,7 +2293,10 @@ Field meanings:
     remediation `action` text.
 - `counts` — `total`, `actionable` (rows with zero blockers), per-bucket
   counts, `market_flags`, summed `theta_per_day`, and
-  `risk_reduction_excess_notional`/`_currency`.
+  `risk_reduction_excess_notional`/`_currency`. The excess aggregate is
+  omitted entirely when risk-reduction proposals span different local
+  currencies — a raw cross-currency sum is not a number in any currency
+  (pre-2026-06-12 snapshots used a `"MIX"` currency sentinel instead).
 - `blockers[]` (snapshot level) and `loaded_from_state` — the latter is
   true when the daemon is serving a snapshot adopted from persisted
   state at startup rather than a fresh compute this session.

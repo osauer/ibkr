@@ -1663,13 +1663,15 @@ func TestReplaceSnapshotDoesNotPersistShells(t *testing.T) {
 
 // TestProposalRefreshWaitBacksOffTransientFailures pins the Run-loop
 // retry schedule: a clean refresh waits the full cadence, transient
-// failures retry at 30s doubling up to the cadence cap. Without the
+// failures retry at 30s doubling up to proposalRefreshBackoffCap — NOT
+// the cadence, so a fast cadence (2m default) does not retry a dead
+// session every 2 minutes for the length of an outage. Without the
 // quick retry, a daemon restart that races the gateway connect serves
-// the "ibkr connection unavailable" blocker for a full 15-minute cadence
+// the "ibkr connection unavailable" blocker for a full cadence
 // (observed 2026-06-11 in the SPA protection panel).
 func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 	t.Parallel()
-	cadence := 15 * time.Minute
+	cadence := 2 * time.Minute
 	cases := []struct {
 		failures int
 		want     time.Duration
@@ -1680,13 +1682,22 @@ func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 		{3, 2 * time.Minute},
 		{4, 4 * time.Minute},
 		{5, 8 * time.Minute},
-		{6, cadence},   // 16m, capped
-		{200, cadence}, // shift-overflow guard
+		{6, proposalRefreshBackoffCap},   // 16m, capped at 15m
+		{200, proposalRefreshBackoffCap}, // shift-overflow guard
 	}
 	for _, tc := range cases {
 		if got := proposalRefreshWait(cadence, tc.failures); got != tc.want {
 			t.Errorf("proposalRefreshWait(%v, %d) = %v, want %v", cadence, tc.failures, got, tc.want)
 		}
+	}
+	// A cadence above the backoff cap keeps the old cap-at-cadence
+	// behavior: failure retries never outrun the healthy schedule.
+	slow := 30 * time.Minute
+	if got := proposalRefreshWait(slow, 7); got != slow {
+		t.Errorf("slow-cadence failure cap = %v, want %v", got, slow)
+	}
+	if got := proposalRefreshWait(slow, 5); got != 8*time.Minute {
+		t.Errorf("slow-cadence mid-ladder = %v, want 8m", got)
 	}
 	if got := proposalRefreshWait(10*time.Second, 3); got != 10*time.Second {
 		t.Errorf("a cadence below the retry base must win: got %v", got)
@@ -1695,7 +1706,7 @@ func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 
 func TestProposalRefreshTransientClassifiesBlockers(t *testing.T) {
 	t.Parallel()
-	for _, code := range []string{"account_identity_unscoped", "account_unavailable", "positions_unavailable", "proposal_scope_mismatch"} {
+	for _, code := range []string{"account_identity_unscoped", "account_unavailable", "positions_unavailable", "positions_pending", "proposal_scope_mismatch"} {
 		snap := rpc.TradeProposalSnapshot{Blockers: []rpc.TradingBlocker{{Code: code}}}
 		if !proposalRefreshTransient(snap) {
 			t.Errorf("blocker %q should classify as transient", code)
@@ -1899,5 +1910,153 @@ func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 	}
 	if p.State != rpc.TradeProposalStateGenerated || len(p.Blockers) != 0 {
 		t.Fatalf("proposal = %+v, want ready: size caps bind risk-increasing orders only, never a protective close/reduce", p)
+	}
+}
+
+func TestProposalPositionsUnprimedDecision(t *testing.T) {
+	t.Parallel()
+	flat := &rpc.PositionsResult{Stocks: []rpc.PositionView{}, Options: []rpc.PositionView{}}
+	held := &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "MSFT", Quantity: 10}}}
+	cases := []struct {
+		name string
+		pos  *rpc.PositionsResult
+		acct *rpc.AccountResult
+		want bool
+	}{
+		{"empty cache, summary shows positions", flat, &rpc.AccountResult{GrossPositionValue: 120_000}, true},
+		{"empty cache, genuinely flat book", flat, &rpc.AccountResult{GrossPositionValue: 0}, false},
+		{"primed cache", held, &rpc.AccountResult{GrossPositionValue: 120_000}, false},
+		{"nil positions", nil, &rpc.AccountResult{GrossPositionValue: 120_000}, false},
+		{"nil account", flat, nil, false},
+	}
+	for _, tc := range cases {
+		if got := proposalPositionsUnprimed(tc.pos, tc.acct); got != tc.want {
+			t.Errorf("%s: proposalPositionsUnprimed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestProposalCountsOmitsMixedCurrencyExcess(t *testing.T) {
+	t.Parallel()
+	mixed := []rpc.TradeProposal{
+		{Bucket: rpc.TradeProposalBucketRiskReduction, RiskExcessNotional: 15_000, RiskExcessCurrency: "USD"},
+		{Bucket: rpc.TradeProposalBucketRiskReduction, RiskExcessNotional: 9_000, RiskExcessCurrency: "EUR"},
+	}
+	counts := proposalCounts(mixed)
+	if counts.RiskReduction != 2 {
+		t.Fatalf("risk reduction count = %d, want 2", counts.RiskReduction)
+	}
+	if counts.RiskReductionExcessNotional != 0 || counts.RiskReductionExcessCurrency != "" {
+		t.Fatalf("mixed-currency aggregate = %v %q, want omitted: a EUR+USD raw sum is not a number in any currency",
+			counts.RiskReductionExcessNotional, counts.RiskReductionExcessCurrency)
+	}
+	single := proposalCounts(mixed[1:])
+	if single.RiskReductionExcessNotional != 9_000 || single.RiskReductionExcessCurrency != "EUR" {
+		t.Fatalf("single-currency aggregate = %v %q, want 9000 EUR", single.RiskReductionExcessNotional, single.RiskReductionExcessCurrency)
+	}
+}
+
+// TestInstallSnapshotGatesJournalOnRevisionChange pins the 2m-cadence
+// journal-growth guard: revision-identical installs append no "generated"
+// events and no outcome marks, while a date rollover still owes the new
+// day's mark even when the revision is frozen across midnight.
+func TestInstallSnapshotGatesJournalOnRevisionChange(t *testing.T) {
+	t.Parallel()
+	day1 := time.Date(2026, 6, 12, 14, 0, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{}, day1)
+	srv.proposalOutcomes = &proposalOutcomeStore{Path: filepath.Join(t.TempDir(), "outcomes.jsonl")}
+	e := newProposalScopeTestEngine(t, srv)
+
+	countLines := func(path, needle string) int {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return 0
+		}
+		return strings.Count(string(raw), needle)
+	}
+
+	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, day1)
+	e.installSnapshot(snap, false)
+	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+		t.Fatalf("first install appended %d generated events, want 1", got)
+	}
+	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 1 {
+		t.Fatalf("first install appended %d marks, want 1", got)
+	}
+
+	// Same revision, same day: a 2m-cadence re-derive must not append.
+	snap.AsOf = day1.Add(2 * time.Minute)
+	e.installSnapshot(snap, false)
+	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+		t.Fatalf("revision-identical install appended events: %d, want 1", got)
+	}
+	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 1 {
+		t.Fatalf("revision-identical install appended marks: %d, want 1", got)
+	}
+
+	// Same revision across midnight: marks are daily, so the new date
+	// passes; generated events stay gated.
+	snap.AsOf = day1.Add(24 * time.Hour)
+	e.installSnapshot(snap, false)
+	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+		t.Fatalf("date rollover appended generated events: %d, want 1", got)
+	}
+	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 2 {
+		t.Fatalf("date rollover appended %d marks total, want 2", got)
+	}
+
+	// A new revision appends again.
+	snap.Revision = "sha256:test-2"
+	snap.Proposals[0].Revision = snap.Revision
+	e.installSnapshot(snap, false)
+	if got := countLines(e.store.eventsPath, `"generated"`); got != 2 {
+		t.Fatalf("new revision appended %d generated events total, want 2", got)
+	}
+}
+
+// TestProposalEngineKickWakesRunAndResetsLadder pins the reconnect-kick
+// contract: Kick is non-blocking (dropped when one is already pending,
+// safe on a nil engine) and a kicked Run iteration refreshes immediately
+// instead of waiting out the backed-off timer.
+func TestProposalEngineKickWakesRunAndResetsLadder(t *testing.T) {
+	t.Parallel()
+	var nilEngine *proposalEngine
+	nilEngine.Kick() // must not panic
+
+	now := time.Date(2026, 6, 12, 10, 53, 0, 0, time.UTC)
+	srv := newProposalScopeTestServer(t, discover.Endpoint{Host: "127.0.0.1", Port: 7496, Account: "All"}, now)
+	e := newProposalScopeTestEngine(t, srv)
+	e.cadence = time.Hour // Run must not advance on the timer in this test
+
+	e.Kick()
+	e.Kick() // buffered: second kick drops instead of blocking
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		e.Run(ctx)
+		close(done)
+	}()
+
+	// First iteration refreshes unconditionally; the pending kick lets the
+	// loop pass the hour-long wait for a second refresh. Each refresh on
+	// this unscoped endpoint installs an account_identity_unscoped shell.
+	deadline := time.After(5 * time.Second)
+	for {
+		if e.RefreshHealth().Streak >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("kicked Run never reached a second refresh: streak=%d", e.RefreshHealth().Streak)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop on context cancel")
 	}
 }

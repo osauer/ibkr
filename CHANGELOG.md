@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.11.0 — 2026-06-12 12:19 CEST
+
+### What's new
+
+- Protection proposals refresh every 2 minutes instead of every 15 (`[auto_trade].proposal_cadence` default), and a gateway reconnect now triggers an immediate refresh — after an outage the panel recovers in seconds instead of waiting out the next scheduled attempt (observed 2026-06-12: gateway back at 10:53, panel stale until 10:59). Sustained-failure retries are decoupled from the cadence (30s doubling, capped at 15m), so an outage stays as quiet in the logs as before. A refresh costs one account-summary round-trip plus cache reads, well inside IBKR pacing at the new rate.
+- The app's protection rows now show the live quote the action would execute against — bid/ask for stock rows, the option's own premium bid/ask for theta-hygiene and option-stop rows — with tick-direction coloring (green up, red down, gray unchanged; frozen or stale quotes render muted and never carry a direction color).
+- Risk-reduction proposals are trader-adjustable in the app: a stepper on each row sets how many shares/contracts to trim (clamped to the position; the daemon re-clamps at preview and submit), with the approximate order value and a one-tap reset to the proposed quantity.
+- Protection rows lead with the decision number per bucket — stop level · offset · TIF for broker stops, theta burn · DTE for theta hygiene, % of NLV · excess to trim for risk reduction — and drop the boilerplate prose, order-type prefixes, and context-only flag chips that crowded them. Hard blockers and execution-friction flags (halt, LULD, borrow, Reg SHO) stay on the row.
+- The protection panel header shows the account's gross exposure as % of NLV next to the per-name concentration figures, so the numbers reconcile on sight under margin (per-name % of NLV legitimately sums past 100% when levered; the per-name math was correct all along).
+
+### Changed
+
+- The app's protection stale badge derives from the served refresh cadence instead of a hardcoded 20-minute twin: one full cycle plus grace (5 minutes at the default 2m cadence; a configured 15m cadence keeps the historical 20m threshold).
+- `counts.risk_reduction_excess_notional` is omitted when risk-reduction proposals span different local currencies — the previous raw EUR+USD sum under a `"MIX"` currency sentinel was not a number in any currency, and the app rendered it as USD. Single-currency aggregates are unchanged.
+- A reducing BUY on a short option reads "Buy to close" in the app ("Buy to cover" is stock-borrow terminology and stays for short stock).
+
+### Fixed
+
+- A refresh racing the post-reconnect portfolio stream can no longer install an empty "no proposals" snapshot over the last-good one: when the account summary reports open positions but the position cache is still empty, the refresh preserves the last-good snapshot under a `positions_pending` blocker and retries on the quick ladder.
+- Proposal journal growth is gated on revision change: revision-identical refreshes (the common case at a 2-minute cadence) no longer append duplicate per-proposal "generated" events and outcome marks to the unbounded JSONL state files; daily outcome marks still land on date rollover.
+- The protection cluster label (bucket heading) was unreadably dim — it inherited the muted row-text color; it now renders in the secondary ink tone, deliberately not red so the panel's red stays reserved for blockers and stress.
+
 ## v1.10.1 — 2026-06-12 08:36 CEST
 
 ### What's new
