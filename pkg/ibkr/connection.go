@@ -5017,14 +5017,14 @@ func (c *Connection) WaitForAccountSummaryEnd(timeout time.Duration) error {
 	}
 }
 
-// AwaitAccountSummarySnapshot blocks until the gateway emits
+// awaitAccountSummarySnapshot blocks until the gateway emits
 // accountSummaryEnd for reqID (or timeout elapses) and returns only the
 // rows that arrived for that request. The isolation matters: the shared
 // accountSummary map is also fed by the streaming reqAccountUpdates
 // subscription, and a zeroed or foreign-account update batch landing
 // between end-of-stream and the read could clobber a valid snapshot
 // (issue #12). The per-request accumulation is removed on both paths.
-func (c *Connection) AwaitAccountSummarySnapshot(reqID int, timeout time.Duration) (map[string]string, error) {
+func (c *Connection) awaitAccountSummarySnapshot(reqID int, timeout time.Duration) (map[string]string, error) {
 	c.accountMu.RLock()
 	snap := c.summarySnapshots[reqID]
 	c.accountMu.RUnlock()

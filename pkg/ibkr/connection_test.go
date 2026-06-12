@@ -234,9 +234,9 @@ func TestAccountSummarySnapshotIsolatedFromStreamingZeros(t *testing.T) {
 	conn.handleAccountValue([]string{"6", "2", "NetLiquidation", "0.00", "EUR", "U111"})
 	conn.processMessage(conn.encodeMsg(msgAccountSummaryEnd, "1", 7))
 
-	rows, err := conn.AwaitAccountSummarySnapshot(7, time.Second)
+	rows, err := conn.awaitAccountSummarySnapshot(7, time.Second)
 	if err != nil {
-		t.Fatalf("AwaitAccountSummarySnapshot: %v", err)
+		t.Fatalf("awaitAccountSummarySnapshot: %v", err)
 	}
 	if got := rows["NetLiquidation_EUR"]; got != "311599.04" {
 		t.Fatalf("snapshot NetLiquidation_EUR = %q, want 311599.04", got)
@@ -253,7 +253,7 @@ func TestAwaitAccountSummarySnapshotTimeoutCleansUp(t *testing.T) {
 	}
 
 	conn.registerSummarySnapshot(9)
-	if _, err := conn.AwaitAccountSummarySnapshot(9, 10*time.Millisecond); err == nil {
+	if _, err := conn.awaitAccountSummarySnapshot(9, 10*time.Millisecond); err == nil {
 		t.Fatalf("expected timeout error")
 	}
 	conn.accountMu.RLock()
@@ -262,7 +262,7 @@ func TestAwaitAccountSummarySnapshotTimeoutCleansUp(t *testing.T) {
 	if present {
 		t.Fatalf("expected snapshot 9 to be dropped after timeout")
 	}
-	if _, err := conn.AwaitAccountSummarySnapshot(9, time.Millisecond); err == nil {
+	if _, err := conn.awaitAccountSummarySnapshot(9, time.Millisecond); err == nil {
 		t.Fatalf("expected unregistered-reqID error after drop")
 	}
 }
