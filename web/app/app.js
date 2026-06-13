@@ -2946,9 +2946,6 @@ function opportunityReason(opportunities = {}) {
   if (policy.status && policy.status !== "active" && policy.status !== "default") {
     return `Policy ${policy.status}${policy.policy_id ? ` · ${policy.policy_id} v${policy.policy_version || "--"}` : ""}`;
   }
-  if (policy.fingerprint?.key) {
-    return `${policy.policy_id || "policy"} v${policy.policy_version || "--"} · ${shortPreviewTokenID(policy.fingerprint.key)}`;
-  }
   return "";
 }
 
