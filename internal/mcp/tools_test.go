@@ -132,6 +132,27 @@ func TestTradingToolAllowlist(t *testing.T) {
 	}
 }
 
+func TestOpportunitiesToolIsReadOnlyDiscovery(t *testing.T) {
+	t.Parallel()
+	idx := slices.IndexFunc(Tools, func(tool Tool) bool { return tool.Name == "ibkr_opportunities" })
+	if idx < 0 {
+		t.Fatal("missing ibkr_opportunities tool")
+	}
+	tool := Tools[idx]
+	if tool.ReadOnlyHint == nil || !*tool.ReadOnlyHint {
+		t.Fatalf("ibkr_opportunities ReadOnlyHint=%v, want true", tool.ReadOnlyHint)
+	}
+	desc := strings.ToLower(tool.Description)
+	for _, want := range []string{"read-only", "option exercise", "does not preview", "submit exercise"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("ibkr_opportunities description missing %q: %s", want, tool.Description)
+		}
+	}
+	if strings.Contains(string(tool.JSONSchema), "exercise") {
+		t.Fatalf("ibkr_opportunities schema must not expose exercise controls: %s", tool.JSONSchema)
+	}
+}
+
 func TestNormalizeMCPPreviewOrderTypeRejectsLMTTrailContradiction(t *testing.T) {
 	t.Parallel()
 	if _, err := normalizeMCPPreviewOrderType("LMT", true, false); err == nil || !strings.Contains(err.Error(), "cannot include trail") {

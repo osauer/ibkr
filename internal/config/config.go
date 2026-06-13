@@ -161,6 +161,19 @@ type AutoTrade struct {
 	FastPathEnabled *bool `toml:"fast_path_enabled"`
 }
 
+type Opportunities struct {
+	// Enabled controls whether the daemon may produce advisory opportunities; default true, and opportunities are not broker writes unless separately submitted by an explicitly enabled trading path.
+	Enabled *bool `toml:"enabled"`
+	// PolicyFile points to the local opportunity-policy TOML; default ~/.config/ibkr/policies/opportunity-policy.toml.
+	PolicyFile string `toml:"policy_file"`
+	// RefreshCadence controls how often the daemon refreshes opportunities; default 2m.
+	RefreshCadence duration `toml:"refresh_cadence"`
+	// HotReload controls whether opportunity policy changes are reloaded while the daemon runs; default true.
+	HotReload *bool `toml:"hot_reload"`
+	// ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s.
+	ReloadInterval duration `toml:"reload_interval"`
+}
+
 const (
 	TradingModeDisabled = "disabled"
 	TradingModePaper    = "paper"
@@ -228,6 +241,53 @@ func (a AutoTrade) ProposalCadenceDuration() time.Duration {
 		return defaultProposalCadence
 	}
 	return a.ProposalCadence.Std()
+}
+
+func (o Opportunities) WithDefaults() Opportunities {
+	if o.PolicyFile == "" {
+		o.PolicyFile = "~/.config/ibkr/policies/opportunity-policy.toml"
+	}
+	if o.HotReload == nil {
+		v := true
+		o.HotReload = &v
+	}
+	if o.ReloadInterval == 0 {
+		o.ReloadInterval = duration(30 * time.Second)
+	}
+	if o.RefreshCadence == 0 {
+		o.RefreshCadence = duration(defaultOpportunityRefreshCadence)
+	}
+	return o
+}
+
+const defaultOpportunityRefreshCadence = 2 * time.Minute
+
+func (o Opportunities) EnabledResolved() bool {
+	if o.Enabled == nil {
+		return true
+	}
+	return *o.Enabled
+}
+
+func (o Opportunities) HotReloadEnabled() bool {
+	if o.HotReload == nil {
+		return true
+	}
+	return *o.HotReload
+}
+
+func (o Opportunities) ReloadIntervalDuration() time.Duration {
+	if o.ReloadInterval == 0 {
+		return 30 * time.Second
+	}
+	return o.ReloadInterval.Std()
+}
+
+func (o Opportunities) RefreshCadenceDuration() time.Duration {
+	if o.RefreshCadence == 0 {
+		return defaultOpportunityRefreshCadence
+	}
+	return o.RefreshCadence.Std()
 }
 
 // WithDefaults returns t with default values applied without granting trading.
@@ -321,24 +381,26 @@ type Scan struct {
 
 // Config is the on-disk shape of ~/.config/ibkr/config.toml.
 type Config struct {
-	Gateway   Gateway         `toml:"gateway"`
-	Daemon    Daemon          `toml:"daemon"`
-	Trading   Trading         `toml:"trading"`
-	AutoTrade AutoTrade       `toml:"auto_trade"`
-	SPX       SPX             `toml:"spx"`
-	Scans     map[string]Scan `toml:"scans"`
+	Gateway       Gateway         `toml:"gateway"`
+	Daemon        Daemon          `toml:"daemon"`
+	Trading       Trading         `toml:"trading"`
+	AutoTrade     AutoTrade       `toml:"auto_trade"`
+	Opportunities Opportunities   `toml:"opportunities"`
+	SPX           SPX             `toml:"spx"`
+	Scans         map[string]Scan `toml:"scans"`
 }
 
 // Resolved is the validated, defaults-applied view a daemon actually uses.
 // Gateway carries the raw (pointer-fielded) user input; discovery happens
 // later in internal/discover and produces concrete values.
 type Resolved struct {
-	Gateway   Gateway
-	Daemon    Daemon
-	Trading   Trading
-	AutoTrade AutoTrade
-	SPX       SPX
-	Scans     map[string]Scan
+	Gateway       Gateway
+	Daemon        Daemon
+	Trading       Trading
+	AutoTrade     AutoTrade
+	Opportunities Opportunities
+	SPX           SPX
+	Scans         map[string]Scan
 }
 
 // duration is a time.Duration that decodes from a TOML string ("5m").
@@ -408,7 +470,7 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("config %s: key %s was removed: live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key", path, keys[i])
 			}
 		}
-		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
+		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [opportunities], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
 }
@@ -445,12 +507,13 @@ func (c *Config) Resolve() (*Resolved, error) {
 	}
 
 	return &Resolved{
-		Gateway:   c.Gateway,
-		Daemon:    dae,
-		Trading:   c.Trading.WithDefaults(),
-		AutoTrade: c.AutoTrade.WithDefaults(),
-		SPX:       c.SPX,
-		Scans:     scans,
+		Gateway:       c.Gateway,
+		Daemon:        dae,
+		Trading:       c.Trading.WithDefaults(),
+		AutoTrade:     c.AutoTrade.WithDefaults(),
+		Opportunities: c.Opportunities.WithDefaults(),
+		SPX:           c.SPX,
+		Scans:         scans,
 	}, nil
 }
 

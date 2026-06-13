@@ -4,11 +4,11 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**23 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**24 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
-Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth/proposals, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness ("why is data missing / stale / wrong-account?", "will scanner or gamma be busy?", "are downstream risk reads stale?", "why is the protection panel stale?"). `subsystems[].status` can be ready/computing/unavailable/degraded/disabled and is more specific than the top-level gateway connection — the `proposals` entry turns degraded with the blocker codes and the served snapshot's as_of when protection-proposal refreshes keep failing while an older snapshot is still served; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.
+Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth/proposals/opportunities, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness ("why is data missing / stale / wrong-account?", "will scanner or gamma be busy?", "are downstream risk reads stale?", "why is the protection or opportunities panel stale?"). `subsystems[].status` can be ready/computing/unavailable/degraded/disabled and is more specific than the top-level gateway connection — the `proposals` and `opportunities` entries turn degraded with blocker codes and the served snapshot's as_of when refreshes keep failing while an older snapshot is still served; `opportunities.message` also carries active opportunity policy id/version/status/fingerprint when available; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.
 
 *No parameters.*
 
@@ -266,6 +266,17 @@ Read daemon-owned protection proposals for existing positions. Use when the user
 |------|------|----------|-------------|
 | `refresh` | boolean | no | when true, ask the daemon to recompute proposals before returning; otherwise returns the latest daemon snapshot |
 | `show` | boolean | no | when true, records a shown audit event for returned proposal rows |
+
+## `ibkr_opportunities`
+
+Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings use `ibkr_positions`; for protective stops use `ibkr_proposals`; for local broker-write readiness use `ibkr_trading_status`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `refresh` | boolean | no | when true, ask the daemon to recompute opportunities before returning; otherwise returns the latest daemon snapshot |
+| `show` | boolean | no | when true, records a shown audit event for returned opportunity rows |
 
 ## `ibkr_size`
 

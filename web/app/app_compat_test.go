@@ -156,7 +156,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function handleExpandablePanelTap(event, which)",
 		`$("regimePanel").addEventListener("click"`,
 		`$("canaryHero").addEventListener("click"`,
-		`"trading", "auto_trade", "proposals", "settings", "regime", "canary"`,
+		`"trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary"`,
 		"function setupLiveRefreshLoop()",
 		"function setupBottomTabs()",
 		"function renderTabs()",
@@ -170,16 +170,36 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function protectionMetricText(proposal = {})",
 		"function protectionQuoteLine(proposal = {})",
 		"function protectionQuantityStepper(proposal = {})",
+		"function protectionQuantityStepDelta(current = 0, direction = 1)",
+		"function nudgeProtectionQuantity(proposal = {}, direction = 1)",
 		"function protectionEffectiveQuantity(proposal = {})",
 		"function protectionLiveTrailStop(proposal = {}, trail = {})",
 		"function protectionSubmitLabel(proposal = {})",
 		"function protectionUsesPreviewFlow(proposal = {})",
 		"function protectionNeedsSnapshotSync(proposals = {}, autoTrade = {})",
+		"function protectionVisibleRows(rows = [], marketEvents = {})",
+		"existing_protective_order",
+		"No protection proposals requiring action.",
 		"function queueProtectionSnapshotSync()",
 		"function syncProtectionSnapshot()",
 		"function applyProtectionSnapshot(proposals = {})",
 		"trading: proposals.trading",
 		`fetch("/api/proposals", { credentials: "include", cache: "no-store" })`,
+		"function renderOpportunitiesPanel(opportunities = {})",
+		"function opportunityMetricRow(opportunity = {})",
+		"function opportunityPreviewGate(opportunity = {})",
+		"function opportunitySubmitGate(opportunity = {}, previewResult = null)",
+		"function previewOpportunityExercise(opportunity)",
+		"function submitOpportunityExercise(opportunity)",
+		"function refreshOpportunities()",
+		"function applyOpportunitySnapshot(opportunities = {})",
+		`fetch("/api/opportunities", { credentials: "include", cache: "no-store" })`,
+		`fetch("/api/opportunities/preview-exercise"`,
+		`fetch("/api/opportunities/exercise"`,
+		`fetch("/api/opportunities/ignore"`,
+		`fetch("/api/opportunities/refresh"`,
+		"Exercise blocked",
+		"Preview is not submit eligible",
 		"function protectionPreviewGate(proposal = {})",
 		"function protectionPreviewSubmitGate(proposal = {}, previewResult = null)",
 		"function protectionWriteUnavailableReason(trading = {})",
@@ -295,6 +315,13 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`id="stockProtectionToggle"`,
 		`id="settingsTradingLimits"`,
 		`id="settingsMarketDataStatus"`,
+		`id="opportunitiesPanel" data-open="false"`,
+		`id="opportunitiesToggle"`,
+		`id="opportunitiesCount"`,
+		`id="opportunitiesExpectedGain"`,
+		`id="opportunitiesRefreshButton"`,
+		`id="opportunitiesDetailPanel" hidden`,
+		`id="opportunitiesRows"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index.html missing mobile dashboard contract %q", want)
@@ -342,6 +369,12 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".protection-row:first-child",
 		".protection-row__trail",
 		".protection-preview",
+		".opportunities-panel",
+		".opportunities-summary",
+		".opportunity-row",
+		".opportunity-row__metric--gain",
+		".opportunity-preview",
+		".opportunity-exercise",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
@@ -384,6 +417,47 @@ func TestAppJSLiveWritesCarryNoTypedConfirmation(t *testing.T) {
 	}
 	if strings.Contains(js, "window.confirm") {
 		t.Fatalf("app.js must not use window.confirm; broker writes confirm via single-click buttons")
+	}
+}
+
+func TestAppJSProtectionQuantityStepperAcceleratesAtTenBoundary(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	stepper := jsFunctionBlock(t, js, "protectionQuantityStepper")
+	for _, want := range []string{
+		`nudgeProtectionQuantity(proposal, -1)`,
+		`nudgeProtectionQuantity(proposal, 1)`,
+		`dec.setAttribute("aria-label", "Decrease sell size")`,
+		`inc.setAttribute("aria-label", "Increase sell size")`,
+	} {
+		if !strings.Contains(stepper, want) {
+			t.Fatalf("protectionQuantityStepper missing accelerated-step wiring %q", want)
+		}
+	}
+	delta := jsFunctionBlock(t, js, "protectionQuantityStepDelta")
+	for _, want := range []string{
+		"const protectionQuantityAcceleratedStep = 10",
+		"qty < protectionQuantityAcceleratedStep",
+		"qty <= protectionQuantityAcceleratedStep && dir < 0",
+		"qty % protectionQuantityAcceleratedStep !== 0",
+		"return dir * protectionQuantityAcceleratedStep",
+	} {
+		if !strings.Contains(js, want) && !strings.Contains(delta, want) {
+			t.Fatalf("protectionQuantityStepDelta missing boundary logic %q", want)
+		}
+	}
+	nudge := jsFunctionBlock(t, js, "nudgeProtectionQuantity")
+	for _, want := range []string{
+		"const current = protectionEffectiveQuantity(proposal)",
+		"setProtectionQuantity(proposal, current + protectionQuantityStepDelta(current, direction))",
+	} {
+		if !strings.Contains(nudge, want) {
+			t.Fatalf("nudgeProtectionQuantity must read current quantity at click time; missing %q", want)
+		}
 	}
 }
 

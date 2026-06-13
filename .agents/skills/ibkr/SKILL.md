@@ -1,9 +1,9 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
 ---
 
-Updated: 2026-06-11 19:32 CEST
+Updated: 2026-06-13 10:04 CEST
 
 ## Contract
 
@@ -11,11 +11,17 @@ Use this skill when the user asks about their IBKR account, positions, exposure,
 daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
 market breadth, portfolio canary posture, held-name market events, protection
-proposals, runtime settings/freeze state, order preview, or order status.
+proposals, option-exercise opportunities, runtime settings/freeze state, order
+preview, or order status.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
 workflow explicitly needs CLI output. Parse JSON before answering.
+
+Use `ibkr opportunities status --json`, `ibkr opportunities list --json`, or
+`ibkr opportunities refresh --json` only for read-only opportunity discovery.
+`ibkr opportunities preview`, `ibkr opportunities exercise`, and
+`ibkr opportunities ignore` are outside this read-only skill contract.
 
 The MCP surface remains read-oriented for agents. Paper-account broker writes
 are open to agents through the gated CLI flow; live agent-origin broker writes

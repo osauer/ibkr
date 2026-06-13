@@ -231,6 +231,31 @@
           </div>
         </article>
 
+        <article class="panel opportunities-panel" id="opportunitiesPanel" data-open="false">
+          <div class="panel-head">
+            <span>Opportunities</span>
+            <span class="panel-time" id="opportunitiesAsOf">--</span>
+            <button class="panel-chevron" id="opportunitiesToggle" type="button" aria-expanded="false" aria-controls="opportunitiesDetailPanel">
+              Show opportunities
+            </button>
+          </div>
+          <div class="opportunities-summary">
+            <div>
+              <span>Opportunities</span>
+              <b id="opportunitiesCount">--</b>
+            </div>
+            <div>
+              <span>Expected gain</span>
+              <b id="opportunitiesExpectedGain">--</b>
+            </div>
+            <button class="text-button opportunities-refresh" id="opportunitiesRefreshButton" type="button">Refresh</button>
+          </div>
+          <div class="source-inline" id="opportunitiesReason" hidden></div>
+          <div class="detail-panel opportunities-detail" id="opportunitiesDetailPanel" hidden>
+            <div class="opportunities-rows" id="opportunitiesRows"></div>
+          </div>
+        </article>
+
         <article class="panel underlying-panel" id="underlyingPanel" data-open="false">
           <div class="panel-head underlying-panel__head">
             <span>Underlyings</span>

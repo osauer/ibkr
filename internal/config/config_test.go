@@ -74,6 +74,21 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.AutoTrade.ProposalCadenceDuration() != 2*time.Minute {
 		t.Errorf("auto_trade proposal_cadence = %v, want 2m", res.AutoTrade.ProposalCadenceDuration())
 	}
+	if !res.Opportunities.EnabledResolved() {
+		t.Error("opportunities should default enabled")
+	}
+	if res.Opportunities.PolicyFile != "~/.config/ibkr/policies/opportunity-policy.toml" {
+		t.Errorf("opportunities policy_file = %q, want default opportunity-policy path", res.Opportunities.PolicyFile)
+	}
+	if !res.Opportunities.HotReloadEnabled() {
+		t.Error("opportunity hot_reload should default enabled")
+	}
+	if res.Opportunities.ReloadIntervalDuration() != 30*time.Second {
+		t.Errorf("opportunities reload_interval = %v, want 30s", res.Opportunities.ReloadIntervalDuration())
+	}
+	if res.Opportunities.RefreshCadenceDuration() != 2*time.Minute {
+		t.Errorf("opportunities refresh_cadence = %v, want 2m", res.Opportunities.RefreshCadenceDuration())
+	}
 	if _, ok := res.Scans["top-movers"]; !ok {
 		t.Errorf("top-movers preset missing from defaults")
 	}
@@ -105,6 +120,13 @@ paper_smoke_max_age = "24h"
 mcp_enabled = true
 mcp_mode = "live-write"
 mcp_nonce_ttl = "2m"
+
+[opportunities]
+enabled = false
+policy_file = "/tmp/opportunity-policy.toml"
+refresh_cadence = "5m"
+hot_reload = false
+reload_interval = "45s"
 
 [scans.movers]
 type       = "TOP_PERC_GAIN"
@@ -171,6 +193,21 @@ timeout    = "30s"
 	}
 	if res.Trading.MCPNonceTTLDuration() != 2*time.Minute {
 		t.Errorf("Trading.MCPNonceTTL = %v, want 2m", res.Trading.MCPNonceTTLDuration())
+	}
+	if res.Opportunities.EnabledResolved() {
+		t.Error("Opportunities.Enabled should parse false")
+	}
+	if res.Opportunities.PolicyFile != "/tmp/opportunity-policy.toml" {
+		t.Errorf("Opportunities.PolicyFile = %q", res.Opportunities.PolicyFile)
+	}
+	if res.Opportunities.RefreshCadenceDuration() != 5*time.Minute {
+		t.Errorf("Opportunities.RefreshCadence = %v, want 5m", res.Opportunities.RefreshCadenceDuration())
+	}
+	if res.Opportunities.HotReloadEnabled() {
+		t.Error("Opportunities.HotReload should parse false")
+	}
+	if res.Opportunities.ReloadIntervalDuration() != 45*time.Second {
+		t.Errorf("Opportunities.ReloadInterval = %v, want 45s", res.Opportunities.ReloadIntervalDuration())
 	}
 	got, ok := res.Scans["movers"]
 	if !ok {

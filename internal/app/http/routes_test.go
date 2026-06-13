@@ -232,6 +232,11 @@ func TestOrderWritesRequireCurrentConfirmation(t *testing.T) {
 			path:   "/api/proposals/submit",
 			body:   `{"key":"proposal","revision":"rev-1"}`,
 		},
+		"opportunity_exercise_missing": {
+			method: http.MethodPost,
+			path:   "/api/opportunities/exercise",
+			body:   `{"key":"opportunity","revision":"rev-1"}`,
+		},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader([]byte(tc.body)))
 		req.AddCookie(cookie)
@@ -240,6 +245,86 @@ func TestOrderWritesRequireCurrentConfirmation(t *testing.T) {
 		if res.Code != http.StatusBadRequest {
 			t.Fatalf("%s status=%d, want 400; body=%s", name, res.Code, res.Body.String())
 		}
+	}
+}
+
+func TestOpportunityHTTPAdapters(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeWriteFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	snapshotReq := httptest.NewRequest(http.MethodGet, "/api/opportunities", nil)
+	snapshotReq.AddCookie(cookie)
+	snapshotRes := httptest.NewRecorder()
+	handler.ServeHTTP(snapshotRes, snapshotReq)
+	if snapshotRes.Code != http.StatusOK {
+		t.Fatalf("opportunities snapshot status=%d, want 200; body=%s", snapshotRes.Code, snapshotRes.Body.String())
+	}
+	var snapshot rpc.OpportunitySnapshot
+	if err := json.NewDecoder(snapshotRes.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode opportunities snapshot: %v", err)
+	}
+	if snapshot.Kind != rpc.OpportunitySnapshotKind {
+		t.Fatalf("snapshot kind=%q, want %q", snapshot.Kind, rpc.OpportunitySnapshotKind)
+	}
+
+	previewReq := httptest.NewRequest(http.MethodPost, "/api/opportunities/preview-exercise", bytes.NewReader([]byte(`{"key":"opportunity","revision":"rev-1"}`)))
+	previewReq.AddCookie(cookie)
+	previewRes := httptest.NewRecorder()
+	handler.ServeHTTP(previewRes, previewReq)
+	if previewRes.Code != http.StatusOK {
+		t.Fatalf("opportunities preview status=%d, want 200; body=%s", previewRes.Code, previewRes.Body.String())
+	}
+	var preview rpc.OpportunityExercisePreviewResult
+	if err := json.NewDecoder(previewRes.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode opportunities preview: %v", err)
+	}
+	if !preview.Accepted || preview.PreviewTokenID == "" {
+		t.Fatalf("unexpected opportunity preview: %#v", preview)
+	}
+
+	exerciseReq := httptest.NewRequest(http.MethodPost, "/api/opportunities/exercise", bytes.NewReader([]byte(`{"key":"opportunity","revision":"rev-1","confirm_account":"DU123","confirm_mode":"paper"}`)))
+	exerciseReq.AddCookie(cookie)
+	exerciseRes := httptest.NewRecorder()
+	handler.ServeHTTP(exerciseRes, exerciseReq)
+	if exerciseRes.Code != http.StatusOK {
+		t.Fatalf("opportunities exercise status=%d, want 200; body=%s", exerciseRes.Code, exerciseRes.Body.String())
+	}
+	var exercise rpc.OpportunityExerciseSubmitResult
+	if err := json.NewDecoder(exerciseRes.Body).Decode(&exercise); err != nil {
+		t.Fatalf("decode opportunities exercise: %v", err)
+	}
+	if exercise.Accepted || len(exercise.Blockers) == 0 {
+		t.Fatalf("unexpected opportunity exercise result: %#v", exercise)
+	}
+
+	ignoreReq := httptest.NewRequest(http.MethodPost, "/api/opportunities/ignore", bytes.NewReader([]byte(`{"key":"opportunity","revision":"rev-1"}`)))
+	ignoreReq.AddCookie(cookie)
+	ignoreRes := httptest.NewRecorder()
+	handler.ServeHTTP(ignoreRes, ignoreReq)
+	if ignoreRes.Code != http.StatusOK {
+		t.Fatalf("opportunities ignore status=%d, want 200; body=%s", ignoreRes.Code, ignoreRes.Body.String())
+	}
+}
+
+func TestOpportunityExerciseHTTPDoesNotAuthorizeWrites(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandlerWithClient(t, routeFrozenFakeClient{}).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/opportunities/exercise", bytes.NewReader([]byte(`{"key":"opportunity","revision":"rev-1","confirm_account":"DU123","confirm_mode":"paper"}`)))
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("opportunities exercise status=%d, want daemon-level response; body=%s", res.Code, res.Body.String())
+	}
+	var exercise rpc.OpportunityExerciseSubmitResult
+	if err := json.NewDecoder(res.Body).Decode(&exercise); err != nil {
+		t.Fatalf("decode opportunities exercise: %v", err)
+	}
+	if exercise.Accepted || len(exercise.Blockers) == 0 {
+		t.Fatalf("unexpected opportunity exercise result: %#v", exercise)
 	}
 }
 
@@ -311,9 +396,12 @@ func TestProposalRoutesRejectUnknownFields(t *testing.T) {
 	cookie := routeSessionCookie(t, handler)
 
 	for name, tc := range map[string]struct{ path, body string }{
-		"submit_live_confirmation": {path: "/api/proposals/submit", body: `{"key":"p","revision":"r","confirm_account":"DU123","confirm_mode":"paper","live_confirmation":"live/DU123"}`},
-		"preview_unknown":          {path: "/api/proposals/preview", body: `{"key":"p","revision":"r","bogus":true}`},
-		"ignore_unknown":           {path: "/api/proposals/ignore", body: `{"key":"p","revision":"r","bogus":true}`},
+		"submit_live_confirmation":     {path: "/api/proposals/submit", body: `{"key":"p","revision":"r","confirm_account":"DU123","confirm_mode":"paper","live_confirmation":"live/DU123"}`},
+		"preview_unknown":              {path: "/api/proposals/preview", body: `{"key":"p","revision":"r","bogus":true}`},
+		"ignore_unknown":               {path: "/api/proposals/ignore", body: `{"key":"p","revision":"r","bogus":true}`},
+		"opportunity_preview_unknown":  {path: "/api/opportunities/preview-exercise", body: `{"key":"p","revision":"r","bogus":true}`},
+		"opportunity_exercise_unknown": {path: "/api/opportunities/exercise", body: `{"key":"p","revision":"r","confirm_account":"DU123","confirm_mode":"paper","bogus":true}`},
+		"opportunity_ignore_unknown":   {path: "/api/opportunities/ignore", body: `{"key":"p","revision":"r","bogus":true}`},
 	} {
 		req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader([]byte(tc.body)))
 		req.AddCookie(cookie)
@@ -635,6 +723,30 @@ func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error
 
 func (routeFakeClient) AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error) {
 	return &rpc.AutoTradeStatus{ProposalsEnabled: true, FastPathEnabled: true}, nil
+}
+
+func (routeFakeClient) OpportunitiesStatus(context.Context) (*rpc.OpportunityStatus, error) {
+	return &rpc.OpportunityStatus{Enabled: true}, nil
+}
+
+func (routeFakeClient) OpportunitiesSnapshot(context.Context, rpc.OpportunitySnapshotParams) (*rpc.OpportunitySnapshot, error) {
+	return &rpc.OpportunitySnapshot{Kind: rpc.OpportunitySnapshotKind, SchemaVersion: rpc.OpportunitySnapshotSchemaVersion, Revision: "empty", Opportunities: []rpc.Opportunity{}}, nil
+}
+
+func (routeFakeClient) OpportunitiesRefresh(context.Context, rpc.OpportunityRefreshParams) (*rpc.OpportunitySnapshot, error) {
+	return routeFakeClient{}.OpportunitiesSnapshot(context.Background(), rpc.OpportunitySnapshotParams{})
+}
+
+func (routeFakeClient) OpportunitiesPreviewExercise(context.Context, rpc.OpportunityExercisePreviewParams) (*rpc.OpportunityExercisePreviewResult, error) {
+	return &rpc.OpportunityExercisePreviewResult{Accepted: true, PreviewTokenID: "opprev-1"}, nil
+}
+
+func (routeFakeClient) OpportunitiesSubmitExercise(context.Context, rpc.OpportunityExerciseSubmitParams) (*rpc.OpportunityExerciseSubmitResult, error) {
+	return &rpc.OpportunityExerciseSubmitResult{Accepted: false, Blockers: []rpc.TradingBlocker{{Code: "test", Message: "blocked"}}}, nil
+}
+
+func (routeFakeClient) OpportunitiesIgnore(context.Context, rpc.OpportunityIgnoreParams) (*rpc.OpportunityIgnoreResult, error) {
+	return &rpc.OpportunityIgnoreResult{Accepted: true, Key: "opportunity"}, nil
 }
 
 func (routeFakeClient) TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error) {

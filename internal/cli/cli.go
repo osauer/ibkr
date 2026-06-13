@@ -174,6 +174,7 @@ func init() {
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--json]", runCanary},
 		{"proposals", "Daemon-owned close/reduce-only protection proposals", "ibkr proposals status|refresh|list|preview|submit|ignore [--json]", runProposals},
+		{"opportunities", "Daemon-owned option exercise opportunities", "ibkr opportunities status|refresh|list|preview|exercise|ignore [--json]", runOpportunities},
 		{"purge", "Emergency fast-path close for current stock/ETF and single-leg option positions", "ibkr purge SYMBOL|'*' [--wait 2s] [--json] | ibkr purge --all [--wait 2s] [--json] | ibkr purge restore SYMBOL|'*' [--scale 0.5] [--execute] [--json] | ibkr purge status [PURGE_ID] [--json] | ibkr purge monitor [PURGE_ID] [--watch --rate 1s] | ibkr purge dry-run [--json]", runPurge},
 		{"backtest", "Offline canary/regime/opportunity backtest harness from JSONL snapshots", "ibkr backtest canary|regime|opportunity|build-regime --input PATH [--json]", runBacktest},
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},

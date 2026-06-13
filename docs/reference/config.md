@@ -24,6 +24,11 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[gateway]` | `host` | `string` | Host pins the IB Gateway / TWS host; empty (the default) defers to auto-discovery on loopback (127.0.0.1), any non-empty value skips probing. |
 | `[gateway]` | `port` | `*int` | Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery. |
 | `[gateway]` | `tls` | `*bool` | TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, `true` forces TLS-only with no plain fallback, `false` forces plain — setting the field disables fallback in either direction. |
+| `[opportunities]` | `enabled` | `*bool` | Enabled controls whether the daemon may produce advisory opportunities; default true, and opportunities are not broker writes unless separately submitted by an explicitly enabled trading path. |
+| `[opportunities]` | `hot_reload` | `*bool` | HotReload controls whether opportunity policy changes are reloaded while the daemon runs; default true. |
+| `[opportunities]` | `policy_file` | `string` | PolicyFile points to the local opportunity-policy TOML; default ~/.config/ibkr/policies/opportunity-policy.toml. |
+| `[opportunities]` | `refresh_cadence` | `duration` | RefreshCadence controls how often the daemon refreshes opportunities; default 2m. |
+| `[opportunities]` | `reload_interval` | `duration` | ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s. |
 | `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off). |
 | `[trading]` | `allow_option_market_orders` | `bool` | AllowOptionMarketOrders permits option market orders when true. |
 | `[trading]` | `allow_option_sell_to_open` | `bool` | AllowOptionSellToOpen permits option sell-to-open previews when true. |

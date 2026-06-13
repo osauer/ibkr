@@ -70,7 +70,7 @@ Canary does not call option chains, scanners, short-interest feeds, paid borrow 
 
 Market events answer a single-name context question: *does this held or requested stock/ETF have borrow, threshold-list, LULD, or halt evidence that should affect risk review or protection proposals?*
 
-V1 flags are reduce-only context and gates. They can annotate, prioritize, or block an existing protection proposal, but they never create buy-to-open, buy-add, or opportunity recommendations. When a `BUY` proposal reduces an existing short, the user-facing copy is `Buy to cover`.
+V1 flags are reduce-only context and gates. They can annotate, prioritize, or block an existing protection proposal, but they never create buy-to-open, buy-add, or squeeze-style opportunity recommendations. The separate Opportunities surface is daemon-calculated from positions and executable market data; its MVP bucket is option exercise only. When a `BUY` proposal reduces an existing short, the user-facing copy is `Buy to cover`.
 
 The five V1 flags are:
 

@@ -32,22 +32,23 @@ type Service struct {
 }
 
 type Snapshot struct {
-	Version      int64                      `json:"version"`
-	UpdatedAt    time.Time                  `json:"updated_at,omitzero"`
-	Status       *rpc.HealthResult          `json:"status,omitempty"`
-	Calendar     *rpc.MarketCalendarResult  `json:"market_calendar,omitempty"`
-	Account      *rpc.AccountResult         `json:"account,omitempty"`
-	Positions    *rpc.PositionsResult       `json:"positions,omitempty"`
-	Quotes       *MarketQuotes              `json:"market_quotes,omitempty"`
-	MarketEvents *rpc.MarketEventsResult    `json:"market_events,omitempty"`
-	Regime       *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
-	Canary       *rpc.CanaryResult          `json:"canary,omitempty"`
-	Trading      *rpc.TradingStatus         `json:"trading,omitempty"`
-	AutoTrade    *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
-	Proposals    *rpc.TradeProposalSnapshot `json:"proposals,omitempty"`
-	Settings     *rpc.PlatformSettings      `json:"settings,omitempty"`
-	Errors       []SourceError              `json:"errors,omitempty"`
-	Sources      map[string]SourceMeta      `json:"sources,omitempty"`
+	Version       int64                      `json:"version"`
+	UpdatedAt     time.Time                  `json:"updated_at,omitzero"`
+	Status        *rpc.HealthResult          `json:"status,omitempty"`
+	Calendar      *rpc.MarketCalendarResult  `json:"market_calendar,omitempty"`
+	Account       *rpc.AccountResult         `json:"account,omitempty"`
+	Positions     *rpc.PositionsResult       `json:"positions,omitempty"`
+	Quotes        *MarketQuotes              `json:"market_quotes,omitempty"`
+	MarketEvents  *rpc.MarketEventsResult    `json:"market_events,omitempty"`
+	Regime        *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
+	Canary        *rpc.CanaryResult          `json:"canary,omitempty"`
+	Trading       *rpc.TradingStatus         `json:"trading,omitempty"`
+	AutoTrade     *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
+	Opportunities *rpc.OpportunitySnapshot   `json:"opportunities,omitempty"`
+	Proposals     *rpc.TradeProposalSnapshot `json:"proposals,omitempty"`
+	Settings      *rpc.PlatformSettings      `json:"settings,omitempty"`
+	Errors        []SourceError              `json:"errors,omitempty"`
+	Sources       map[string]SourceMeta      `json:"sources,omitempty"`
 }
 
 type MarketQuotes struct {
@@ -292,6 +293,16 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources["proposals"] = SourceMeta{UpdatedAt: now}
 		if s.changed("proposals", proposals) {
 			events = append(events, Event{Type: "proposals", Data: proposals})
+		}
+	}
+	if opportunities, err := s.client.OpportunitiesSnapshot(ctx, rpc.OpportunitySnapshotParams{}); err != nil {
+		errors = append(errors, sourceErr("opportunities", err, now))
+		snap.Sources["opportunities"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+	} else {
+		snap.Opportunities = opportunities
+		snap.Sources["opportunities"] = SourceMeta{UpdatedAt: now}
+		if s.changed("opportunities", opportunities) {
+			events = append(events, Event{Type: "opportunities", Data: opportunities})
 		}
 	}
 	if settings, err := s.client.Settings(ctx); err != nil {

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:1365927c6b073e49e0b88de2e07ab6d4c0edaf2206113a920b8d80550420aa44 -->
+<!-- md-source: config.md sha256:254246844afbab536addefe5dff6aae53657a7988e21a470e418b61cc00cc3bd -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -180,6 +180,11 @@
 <tr><td><code>[gateway]</code></td><td><code>host</code></td><td><code>string</code></td><td>Host pins the IB Gateway / TWS host; empty (the default) defers to auto-discovery on loopback (127.0.0.1), any non-empty value skips probing.</td></tr>
 <tr><td><code>[gateway]</code></td><td><code>port</code></td><td><code>*int</code></td><td>Port pins the IB Gateway / TWS API port (typically 4001/4002 for IB Gateway live/paper, 7496/7497 for TWS live/paper); absent (nil) defers to port-probing during discovery.</td></tr>
 <tr><td><code>[gateway]</code></td><td><code>tls</code></td><td><code>*bool</code></td><td>TLS pins TLS mode for the API socket: absent (nil) auto-tries plain first then TLS, <code>true</code> forces TLS-only with no plain fallback, <code>false</code> forces plain — setting the field disables fallback in either direction.</td></tr>
+<tr><td><code>[opportunities]</code></td><td><code>enabled</code></td><td><code>*bool</code></td><td>Enabled controls whether the daemon may produce advisory opportunities; default true, and opportunities are not broker writes unless separately submitted by an explicitly enabled trading path.</td></tr>
+<tr><td><code>[opportunities]</code></td><td><code>hot_reload</code></td><td><code>*bool</code></td><td>HotReload controls whether opportunity policy changes are reloaded while the daemon runs; default true.</td></tr>
+<tr><td><code>[opportunities]</code></td><td><code>policy_file</code></td><td><code>string</code></td><td>PolicyFile points to the local opportunity-policy TOML; default ~/.config/ibkr/policies/opportunity-policy.toml.</td></tr>
+<tr><td><code>[opportunities]</code></td><td><code>refresh_cadence</code></td><td><code>duration</code></td><td>RefreshCadence controls how often the daemon refreshes opportunities; default 2m.</td></tr>
+<tr><td><code>[opportunities]</code></td><td><code>reload_interval</code></td><td><code>duration</code></td><td>ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s.</td></tr>
 <tr><td><code>[spx]</code></td><td><code>members_auto_refresh</code></td><td><code>*bool</code></td><td>MembersAutoRefresh controls whether the daemon refreshes the S&amp;P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the <code>IBKR_SPX_MEMBERS_AUTO_REFRESH</code> env var (<code>1</code> force-on, <code>0</code> force-off).</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_option_market_orders</code></td><td><code>bool</code></td><td>AllowOptionMarketOrders permits option market orders when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_option_sell_to_open</code></td><td><code>bool</code></td><td>AllowOptionSellToOpen permits option sell-to-open previews when true.</td></tr>

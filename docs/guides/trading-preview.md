@@ -1,6 +1,6 @@
 # Experimental trading config
 
-Updated: 2026-06-11 08:15 CEST
+Updated: 2026-06-13 10:15 CEST
 
 Stable `ibkr` is read-only. It can read account and market data, compute risk context, size positions, and preview stock/ETF LMT order drafts without broker submission. It does not place, modify, cancel, or transmit broker orders.
 
@@ -55,7 +55,7 @@ Active `halt_regulatory_or_news` and active `luld_pause` are hard blockers for p
 
 Borrow flags are modifier-only. `borrow_inventory_tight` and `borrow_fee_extreme` can strengthen context for a proposal that buys to cover an existing short, but they must not create standalone long sells or buy-add proposals. `reg_sho_threshold` is regulatory context unless paired with an existing reduce/cover proposal.
 
-User-facing proposal copy should render any reducing short `BUY` as `Buy to cover`. V1 has no opportunities panel; squeeze-like context remains observational in Underlyings.
+User-facing proposal copy should render any reducing short `BUY` as `Buy to cover`. Market-event squeeze-like context remains observational in Underlyings; the separate Opportunities panel is limited to daemon-calculated option-exercise opportunities and does not create buy-add or buy-to-open recommendations.
 
 ## Release Channel
 
