@@ -1816,7 +1816,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   $("protectionTheta").textContent = typeof counts.theta_per_day === "number" ? money(counts.theta_per_day, "") : "--";
   const riskExcessCurrency = protectionRiskExcessCurrency(counts);
   $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
-    ? money(counts.risk_reduction_excess_notional, riskExcessCurrency)
+    ? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)
     : "--";
   $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
   renderProtectionExposure();
@@ -2191,7 +2191,7 @@ function protectionMetricText(proposal = {}) {
       parts.push(`${pct(Math.abs(proposal.market_value_pct_nlv))} of NLV`);
     }
     if (hasNumericValue(proposal.risk_excess_notional) && proposal.risk_excess_notional > 0) {
-      parts.push(`${money(proposal.risk_excess_notional, proposal.risk_excess_currency || "")} over target`);
+      parts.push(`${compactWholeMoney(proposal.risk_excess_notional, proposal.risk_excess_currency || "")} over target`);
     }
     return parts.join(" · ");
   }
@@ -5944,6 +5944,23 @@ function compactMoney(value, currency) {
     return `${currency || "USD"} ${(value / 1000).toFixed(1)}k`;
   }
   return money(value, currency);
+}
+
+function compactWholeMoney(value, currency) {
+  if (!hasNumericValue(value)) return "--";
+  const ccy = normalizeCurrency(currency) || "USD";
+  const compact = Math.abs(value) >= 1000;
+  const amountOptions = { minimumFractionDigits: 0, maximumFractionDigits: 0 };
+  if (compact) amountOptions.notation = "compact";
+  if (/^[A-Z]{3}$/.test(ccy) && ccy !== "MIX") {
+    return new Intl.NumberFormat(undefined, {
+      ...amountOptions,
+      style: "currency",
+      currency: ccy,
+    }).format(value);
+  }
+  const amount = new Intl.NumberFormat(undefined, amountOptions).format(value);
+  return ccy ? `${amount} ${ccy}` : amount;
 }
 
 function renderSignedMoney(id, value, currency) {
