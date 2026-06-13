@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,33 @@ func TestOpportunitiesSubcommandIndexFindsHoistedSubcommand(t *testing.T) {
 		if got := opportunitiesSubcommandIndex(tc.args); got != tc.want {
 			t.Fatalf("opportunitiesSubcommandIndex(%v)=%d, want %d", tc.args, got, tc.want)
 		}
+	}
+}
+
+func TestRunOpportunitiesGroupHelp(t *testing.T) {
+	t.Parallel()
+	for _, help := range []string{"--help", "-h", "-help", "help"} {
+		t.Run(help, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			env := &Env{Stdout: &stdout, Stderr: &stderr}
+			if code := Run(context.Background(), env, "opportunities", []string{help}); code != 0 {
+				t.Fatalf("Run(opportunities, %s)=%d, want 0", help, code)
+			}
+			got := stdout.String()
+			for _, want := range []string{
+				"ibkr opportunities",
+				"Daemon-owned option exercise opportunities",
+				"status|refresh|list|preview|exercise|ignore",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("opportunities help missing %q:\n%s", want, got)
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr=%q, want empty", stderr.String())
+			}
+		})
 	}
 }
 
