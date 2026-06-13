@@ -435,16 +435,10 @@ func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityP
 	if intrinsicPerShare <= 0 {
 		return rpc.Opportunity{}, false
 	}
-	closePerShare := 0.0
 	if row.OptionBid == nil || *row.OptionBid < 0 {
-		if !policyBucket.AllowNoOptionBid {
-			addBlocker("option_bid_unavailable", "option bid is unavailable, so sell-versus-exercise value cannot be compared", "Refresh during regular option hours or adjust policy.")
-		} else {
-			opp.Details = append(opp.Details, "no executable option bid observed; close value assumes zero")
-		}
-	} else {
-		closePerShare = max(*row.OptionBid, 0)
+		return rpc.Opportunity{}, false
 	}
+	closePerShare := max(*row.OptionBid, 0)
 	opp.IntrinsicValue = intrinsicPerShare * float64(qty) * float64(multiplier)
 	opp.CloseValue = closePerShare * float64(qty) * float64(multiplier)
 	opp.ExpectedGain = opp.IntrinsicValue - opp.CloseValue
@@ -458,12 +452,9 @@ func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityP
 		fmt.Sprintf("sell-at-bid value %.2f %s", opp.CloseValue, opp.ExpectedGainCurrency),
 		fmt.Sprintf("expected gain %.2f %s", opp.ExpectedGain, opp.ExpectedGainCurrency),
 	)
-	switch {
-	case row.OptionBid == nil || *row.OptionBid < 0:
-		opp.Reason = "exercise has intrinsic value and no executable option bid"
-	case len(opp.Blockers) == 0:
+	if len(opp.Blockers) == 0 {
 		opp.Reason = "exercise value exceeds executable option close value"
-	default:
+	} else {
 		opp.Reason = "blocked exercise value exceeds executable option close value"
 	}
 	if len(opp.Blockers) > 0 {

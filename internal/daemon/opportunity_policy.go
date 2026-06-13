@@ -42,13 +42,15 @@ type opportunityPolicyBuckets struct {
 }
 
 type opportunityOptionExercisePolicy struct {
-	Enabled              bool    `toml:"enabled" json:"enabled"`
-	MinTotalGain         float64 `toml:"min_total_gain" json:"min_total_gain"`
-	MinGainPctIntrinsic  float64 `toml:"min_gain_pct_intrinsic" json:"min_gain_pct_intrinsic"`
-	RequireRTH           bool    `toml:"require_rth" json:"require_rth"`
-	MaxQuoteAge          string  `toml:"max_quote_age" json:"max_quote_age"`
-	AllowNoOptionBid     bool    `toml:"allow_no_option_bid" json:"allow_no_option_bid"`
-	RequireAmericanStyle bool    `toml:"require_american_style" json:"require_american_style"`
+	Enabled             bool    `toml:"enabled" json:"enabled"`
+	MinTotalGain        float64 `toml:"min_total_gain" json:"min_total_gain"`
+	MinGainPctIntrinsic float64 `toml:"min_gain_pct_intrinsic" json:"min_gain_pct_intrinsic"`
+	RequireRTH          bool    `toml:"require_rth" json:"require_rth"`
+	MaxQuoteAge         string  `toml:"max_quote_age" json:"max_quote_age"`
+	// AllowNoOptionBid is retained for schema compatibility. Exercise
+	// opportunities require an executable option bid in the MVP detector.
+	AllowNoOptionBid     bool `toml:"allow_no_option_bid" json:"allow_no_option_bid"`
+	RequireAmericanStyle bool `toml:"require_american_style" json:"require_american_style"`
 }
 
 type opportunityPolicyManager struct {
@@ -228,7 +230,7 @@ func defaultOpportunityPolicy() opportunityPolicy {
 				MinGainPctIntrinsic:  0.5,
 				RequireRTH:           true,
 				MaxQuoteAge:          "30s",
-				AllowNoOptionBid:     true,
+				AllowNoOptionBid:     false,
 				RequireAmericanStyle: true,
 			},
 		},
