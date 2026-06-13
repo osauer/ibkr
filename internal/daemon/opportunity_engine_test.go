@@ -8,7 +8,7 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-func TestOptionExerciseOpportunityCallUsesExecutableCloseAndReduceOnly(t *testing.T) {
+func TestOptionExerciseOpportunityCallUsesExecutableClose(t *testing.T) {
 	t.Parallel()
 	now := opportunityTestRTH()
 	policy := defaultOpportunityPolicy()
@@ -136,12 +136,11 @@ func TestOptionExerciseOpportunityBlockersFailClosed(t *testing.T) {
 			wantSkip: true,
 		},
 		{
-			name:       "exercise would increase stock exposure",
+			name:       "exercise can increase stock exposure",
 			policy:     func(p opportunityPolicy) opportunityPolicy { return p },
 			row:        func(r rpc.PositionView) rpc.PositionView { return r },
 			stock:      func(s rpc.PositionView) rpc.PositionView { s.Quantity = 100; return s },
 			at:         now,
-			wantCode:   "exercise_would_open_underlying_exposure",
 			wantEffect: rpc.ExercisePositionEffectIncrease,
 		},
 	}
@@ -162,13 +161,22 @@ func TestOptionExerciseOpportunityBlockersFailClosed(t *testing.T) {
 				return
 			}
 			if !ok {
-				t.Fatal("blocked opportunity should still be surfaced")
+				t.Fatal("expected opportunity to be surfaced")
 			}
-			if !hasBlocker(opp.Blockers, tc.wantCode) {
-				t.Fatalf("blockers=%+v, want %q", opp.Blockers, tc.wantCode)
-			}
-			if opp.State != rpc.OpportunityStateBlocked {
-				t.Fatalf("state=%q, want blocked", opp.State)
+			if tc.wantCode == "" {
+				if len(opp.Blockers) != 0 {
+					t.Fatalf("blockers=%+v, want none", opp.Blockers)
+				}
+				if opp.State != rpc.OpportunityStateGenerated {
+					t.Fatalf("state=%q, want generated", opp.State)
+				}
+			} else {
+				if !hasBlocker(opp.Blockers, tc.wantCode) {
+					t.Fatalf("blockers=%+v, want %q", opp.Blockers, tc.wantCode)
+				}
+				if opp.State != rpc.OpportunityStateBlocked {
+					t.Fatalf("state=%q, want blocked", opp.State)
+				}
 			}
 			if tc.wantEffect != "" && opp.PositionEffect != tc.wantEffect {
 				t.Fatalf("position effect=%q, want %q", opp.PositionEffect, tc.wantEffect)

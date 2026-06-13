@@ -31,6 +31,8 @@ type opportunityPolicy struct {
 }
 
 type opportunityPolicyAuthority struct {
+	// ExerciseReduceOnly is retained for schema compatibility. Option exercise
+	// exposure effects are informational; broker writes are centrally gated.
 	ExerciseReduceOnly bool `toml:"exercise_reduce_only" json:"exercise_reduce_only"`
 	AutoSubmit         bool `toml:"auto_submit" json:"auto_submit"`
 }
@@ -216,7 +218,7 @@ func defaultOpportunityPolicy() opportunityPolicy {
 		PolicyVersion: 1,
 		Profile:       "conservative-exercise-mvp",
 		Authority: opportunityPolicyAuthority{
-			ExerciseReduceOnly: true,
+			ExerciseReduceOnly: false,
 			AutoSubmit:         false,
 		},
 		Buckets: opportunityPolicyBuckets{
@@ -267,9 +269,6 @@ func validateOpportunityPolicy(p opportunityPolicy) error {
 	}
 	if p.PolicyVersion <= 0 {
 		return fmt.Errorf("opportunity policy policy_version must be positive")
-	}
-	if !p.Authority.ExerciseReduceOnly {
-		return fmt.Errorf("opportunity policy authority.exercise_reduce_only must be true in MVP")
 	}
 	if p.Authority.AutoSubmit {
 		return fmt.Errorf("opportunity policy authority.auto_submit must be false in MVP")

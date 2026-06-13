@@ -46,8 +46,8 @@ func TestOpportunityPolicyDefaultsValidationAndFingerprint(t *testing.T) {
 	if policy.Kind != opportunityPolicyKind || policy.SchemaVersion != 1 {
 		t.Fatalf("default identity = %q/%d", policy.Kind, policy.SchemaVersion)
 	}
-	if !policy.Authority.ExerciseReduceOnly || policy.Authority.AutoSubmit {
-		t.Fatalf("default authority = %+v, want reduce-only without auto-submit", policy.Authority)
+	if policy.Authority.ExerciseReduceOnly || policy.Authority.AutoSubmit {
+		t.Fatalf("default authority = %+v, want no exposure-effect gate and no auto-submit", policy.Authority)
 	}
 	if !policy.Buckets.OptionExercise.Enabled {
 		t.Fatal("default option_exercise bucket disabled")
@@ -66,9 +66,9 @@ func TestOpportunityPolicyDefaultsValidationAndFingerprint(t *testing.T) {
 	}
 
 	invalid := policy
-	invalid.Authority.ExerciseReduceOnly = false
-	if err := validateOpportunityPolicy(invalid); err == nil || !strings.Contains(err.Error(), "exercise_reduce_only") {
-		t.Fatalf("invalid reduce-only err=%v, want exercise_reduce_only", err)
+	invalid.Authority.ExerciseReduceOnly = true
+	if err := validateOpportunityPolicy(invalid); err != nil {
+		t.Fatalf("legacy exercise_reduce_only flag should be accepted for compatibility: %v", err)
 	}
 	invalid = policy
 	invalid.Authority.AutoSubmit = true

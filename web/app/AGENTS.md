@@ -122,5 +122,6 @@ V1 protection remains reduce-only: do not add buy-add controls or standalone
 squeeze recommendations. The Opportunities panel is allowed for
 daemon-calculated option-exercise opportunities only; it must render blockers
 and keep submit unavailable unless the daemon snapshot and preview say the
-exercise is reduce-only and submit-eligible. When a proposal is a reducing
-short `BUY`, render it as `Buy to cover`.
+exercise is submit-eligible. Option exercise exposure effect is informational
+in the app; central daemon trading gates decide whether submit is allowed. When
+a proposal is a reducing short `BUY`, render it as `Buy to cover`.

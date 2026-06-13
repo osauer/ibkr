@@ -466,11 +466,6 @@ func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityP
 	default:
 		opp.Reason = "blocked exercise value exceeds executable option close value"
 	}
-	switch effect {
-	case rpc.ExercisePositionEffectClose, rpc.ExercisePositionEffectReduce:
-	default:
-		addBlocker("exercise_would_open_underlying_exposure", "exercise would open, increase, or flip underlying exposure", "MVP exercise submit is reduce-only; use TWS manually for opening exercise intent.")
-	}
 	if len(opp.Blockers) > 0 {
 		opp.State = rpc.OpportunityStateBlocked
 	}
