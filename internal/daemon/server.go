@@ -296,11 +296,14 @@ type Server struct {
 	// platformSettings persists daemon-owned runtime preferences. Gateway,
 	// account, trading mode, and build capability stay config/build owned;
 	// this store only carries settings ibkr may edit at runtime.
-	platformSettings   *platformSettingsStore
-	protectionPolicies *protectionPolicyManager
-	tradeProposals     *proposalEngine
-	marketEvents       *marketEventCache
-	proposalsStarted   sync.Once
+	platformSettings     *platformSettingsStore
+	protectionPolicies   *protectionPolicyManager
+	tradeProposals       *proposalEngine
+	opportunityPolicies  *opportunityPolicyManager
+	opportunities        *opportunityEngine
+	marketEvents         *marketEventCache
+	proposalsStarted     sync.Once
+	opportunitiesStarted sync.Once
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
 	// gated place handler exists.
@@ -419,6 +422,8 @@ func New(opts Options) *Server {
 	s.installPlatformSettingsStore()
 	s.installProtectionPolicyManager()
 	s.installProposalEngine()
+	s.installOpportunityPolicyManager()
+	s.installOpportunityEngine()
 	s.installMarketEventCache()
 	s.installRegimeSeriesCache()
 	s.installRegimeHistoryCache()
@@ -1059,9 +1064,17 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.protectionPolicies != nil {
 		go s.protectionPolicies.Run(serverCtx, s.logger.Infof)
 	}
+	if s.opportunityPolicies != nil {
+		go s.opportunityPolicies.Run(serverCtx, s.logger.Infof)
+	}
 	if s.tradeProposals != nil {
 		s.proposalsStarted.Do(func() {
 			go s.tradeProposals.Run(serverCtx)
+		})
+	}
+	if s.opportunities != nil {
+		s.opportunitiesStarted.Do(func() {
+			go s.opportunities.Run(serverCtx)
 		})
 	}
 	// Breadth scheduler launches from postConnectSetup behind a
@@ -1577,6 +1590,9 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// positions_pending guard covers the residual window where the
 	// portfolio burst hasn't landed yet.
 	s.tradeProposals.Kick()
+	if s.opportunities != nil {
+		s.opportunities.Kick()
+	}
 
 	// Latch the postConnectSetup-done barrier. handleStatusHealth gates
 	// its Connected field on this so a status RPC arriving in the brief
@@ -2121,6 +2137,18 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSubmit(ctx, req) })
 	case rpc.MethodTradeProposalsIgnore:
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsIgnore(req), nil })
+	case rpc.MethodOpportunitiesStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesStatus(), nil })
+	case rpc.MethodOpportunitiesSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesSnapshot(req), nil })
+	case rpc.MethodOpportunitiesRefresh:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesRefresh(ctx, req) })
+	case rpc.MethodOpportunitiesPreviewExercise:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesPreviewExercise(ctx, req) })
+	case rpc.MethodOpportunitiesSubmitExercise:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesSubmitExercise(ctx, req) })
+	case rpc.MethodOpportunitiesIgnore:
+		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesIgnore(req), nil })
 	case rpc.MethodSettingsGet:
 		s.unary(req, enc, func() (any, error) { return s.handleSettingsGet() })
 	case rpc.MethodSettingsUpdate:
@@ -2244,7 +2272,7 @@ func unaryDeadline(method string) time.Duration {
 		// a fast quote path on a v203 TWS session; leave enough room for
 		// it while still beating the CLI's default 60 s unary ceiling.
 		return 55 * time.Second
-	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute, rpc.MethodTradeProposalsRefresh, rpc.MethodTradeProposalsPreview, rpc.MethodTradeProposalsSubmit:
+	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute, rpc.MethodTradeProposalsRefresh, rpc.MethodTradeProposalsPreview, rpc.MethodTradeProposalsSubmit, rpc.MethodOpportunitiesRefresh, rpc.MethodOpportunitiesPreviewExercise, rpc.MethodOpportunitiesSubmitExercise:
 		return 55 * time.Second
 	case rpc.MethodTradingPaperSmoke:
 		// Quote + WhatIf preview, place, ≤60 s ack wait, 15 s detached
@@ -2253,7 +2281,7 @@ func unaryDeadline(method string) time.Duration {
 		return 100 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodAutoTradeStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodTradeProposalsSnapshot, rpc.MethodTradeProposalsIgnore, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodAutoTradeStatus, rpc.MethodOpportunitiesStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodTradeProposalsSnapshot, rpc.MethodTradeProposalsIgnore, rpc.MethodOpportunitiesSnapshot, rpc.MethodOpportunitiesIgnore, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0

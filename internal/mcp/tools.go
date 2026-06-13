@@ -36,7 +36,7 @@ var Tools = []Tool{
 	{
 		Name:               "ibkr_status",
 		Title:              "IBKR Status",
-		Description:        "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth/proposals, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\", \"are downstream risk reads stale?\", \"why is the protection panel stale?\"). `subsystems[].status` can be ready/computing/unavailable/degraded/disabled and is more specific than the top-level gateway connection — the `proposals` entry turns degraded with the blocker codes and the served snapshot's as_of when protection-proposal refreshes keep failing while an older snapshot is still served; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.",
+		Description:        "Daemon + gateway health snapshot: connection state, account, server version, members-list source, last-error, background tasks, per-subsystem health for quote/watchlist/scanner/chain/gamma/breadth/proposals/opportunities, unhealthy IBKR data farms, and high-level `data_quality` warnings for degraded gamma or stale regime clusters. Run this first when troubleshooting connectivity or tool-specific slowness (\"why is data missing / stale / wrong-account?\", \"will scanner or gamma be busy?\", \"are downstream risk reads stale?\", \"why is the protection or opportunities panel stale?\"). `subsystems[].status` can be ready/computing/unavailable/degraded/disabled and is more specific than the top-level gateway connection — the `proposals` and `opportunities` entries turn degraded with blocker codes and the served snapshot's as_of when refreshes keep failing while an older snapshot is still served; `opportunities.message` also carries active opportunity policy id/version/status/fingerprint when available; `data_farms[]` is omitted when farms are healthy and only lists farms currently broken/disconnected; `data_quality[]` means the daemon can serve data but decision surfaces should be interpreted carefully. NOT for portfolio state — use `ibkr_account` for cash/margin or `ibkr_positions` for what you own, and NOT for full risk evidence — use `ibkr_regime` or `ibkr_canary`.",
 		MonitorDescription: "Connectivity and data-health check for the scheduled monitor. Use only when `ibkr_canary` reports degraded/failed inputs or the gateway may be disconnected. Read-only.",
 		JSONSchema:         schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
@@ -757,6 +757,34 @@ var Tools = []Tool{
 					return nil, err
 				}
 			} else if err := conn.Call(ctx, rpc.MethodTradeProposalsSnapshot, rpc.TradeProposalSnapshotParams{Show: in.Show}, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
+		Name:         "ibkr_opportunities",
+		Title:        "IBKR Opportunities",
+		Description:  "Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings use `ibkr_positions`; for protective stops use `ibkr_proposals`; for local broker-write readiness use `ibkr_trading_status`.",
+		ReadOnlyHint: new(true),
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"refresh": json.RawMessage(`{"type":"boolean","description":"when true, ask the daemon to recompute opportunities before returning; otherwise returns the latest daemon snapshot"}`),
+			"show":    json.RawMessage(`{"type":"boolean","description":"when true, records a shown audit event for returned opportunity rows"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				Refresh bool `json:"refresh"`
+				Show    bool `json:"show"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.OpportunitySnapshot
+			if in.Refresh {
+				if err := conn.Call(ctx, rpc.MethodOpportunitiesRefresh, rpc.OpportunityRefreshParams{Show: in.Show}, &res); err != nil {
+					return nil, err
+				}
+			} else if err := conn.Call(ctx, rpc.MethodOpportunitiesSnapshot, rpc.OpportunitySnapshotParams{Show: in.Show}, &res); err != nil {
 				return nil, err
 			}
 			return json.Marshal(res)

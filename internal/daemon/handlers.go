@@ -3604,6 +3604,9 @@ func (s *Server) subsystemHealth(connected bool) []rpc.SubsystemHealth {
 	if sub, ok := s.proposalSubsystemHealth(); ok {
 		out = append(out, sub)
 	}
+	if sub, ok := s.opportunitySubsystemHealth(); ok {
+		out = append(out, sub)
+	}
 	return out
 }
 
@@ -3629,6 +3632,41 @@ func (s *Server) proposalSubsystemHealth() (rpc.SubsystemHealth, bool) {
 			h.Streak, h.Since.Format(time.RFC3339), h.ServedAsOf.Format(time.RFC3339))
 		sub.LastError = strings.Join(h.Codes, ",")
 		sub.LastErrorAt = h.Since
+	}
+	return sub, true
+}
+
+func (s *Server) opportunitySubsystemHealth() (rpc.SubsystemHealth, bool) {
+	if s.opportunities == nil {
+		return rpc.SubsystemHealth{}, false
+	}
+	if s.cfg != nil && !s.cfg.Opportunities.WithDefaults().EnabledResolved() {
+		return rpc.SubsystemHealth{Name: "opportunities", Status: "disabled", Message: "opportunities are disabled by config"}, true
+	}
+	sub := rpc.SubsystemHealth{Name: "opportunities", Status: "ready"}
+	if s.opportunityPolicies != nil {
+		policy := s.opportunityPolicies.Status()
+		if policy.PolicyID != "" {
+			sub.Message = fmt.Sprintf("policy %s v%d %s %s", policy.PolicyID, policy.PolicyVersion, policy.Status, policy.Fingerprint.Key)
+		}
+		if policy.Status == rpc.OpportunityPolicyStatusDrift || policy.Status == rpc.OpportunityPolicyStatusError {
+			sub.Status = "degraded"
+			sub.LastError = policy.Message
+			sub.LastErrorAt = policy.LastCheckedAt
+		}
+	}
+	h := s.opportunities.RefreshHealth()
+	if h.Streak >= proposalRefreshWarnStreak {
+		sub.Status = "degraded"
+		refreshMessage := fmt.Sprintf("refresh blocked %d consecutive times since %s; serving snapshot as_of %s",
+			h.Streak, h.LastAt.Format(time.RFC3339), h.LastServed.Format(time.RFC3339))
+		if sub.Message != "" {
+			sub.Message += "; " + refreshMessage
+		} else {
+			sub.Message = refreshMessage
+		}
+		sub.LastError = strings.Join(h.LastCodes, ",")
+		sub.LastErrorAt = h.LastAt
 	}
 	return sub, true
 }

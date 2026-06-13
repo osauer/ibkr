@@ -1,0 +1,17 @@
+//go:build !trading
+
+package daemon
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/osauer/ibkr/internal/rpc"
+)
+
+func (s *Server) submitOptionExercise(ctx context.Context, _ rpc.Opportunity, _ int, _ string, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: option exercise submit is unavailable in the read-only build", ErrTradingDisabled)
+}

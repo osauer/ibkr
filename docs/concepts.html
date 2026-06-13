@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: concepts.md sha256:31bc9f8c659d5336956e349b3ccf2d07f987017108c7d6f28a2fd935d4b795fb -->
+<!-- md-source: concepts.md sha256:72ca883e149ffb64d7906064a65e2f5a2fbf4d65f18ba91c665488f044498ee3 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -207,7 +207,7 @@
 <hr>
 <h2 id="market-events">Market Events</h2>
 <p>Market events answer a single-name context question: <em>does this held or requested stock/ETF have borrow, threshold-list, LULD, or halt evidence that should affect risk review or protection proposals?</em></p>
-<p>V1 flags are reduce-only context and gates. They can annotate, prioritize, or block an existing protection proposal, but they never create buy-to-open, buy-add, or opportunity recommendations. When a <code>BUY</code> proposal reduces an existing short, the user-facing copy is <code>Buy to cover</code>.</p>
+<p>V1 flags are reduce-only context and gates. They can annotate, prioritize, or block an existing protection proposal, but they never create buy-to-open, buy-add, or squeeze-style opportunity recommendations. The separate Opportunities surface is daemon-calculated from positions and executable market data; its MVP bucket is option exercise only. When a <code>BUY</code> proposal reduces an existing short, the user-facing copy is <code>Buy to cover</code>.</p>
 <p>The five V1 flags are:</p>
 <ul>
 <li><code>borrow_inventory_tight</code> — IBKR shortable-share inventory crossed the V1 tight/scarce thresholds. This strengthens buy-to-cover context for existing shorts and is observational for long holdings.</li>

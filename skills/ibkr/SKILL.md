@@ -6,17 +6,17 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   fixed-fractional risk, checking the market's stress lifecycle (S&P 500 breadth, combined
   SPY+SPX dealer zero-gamma with 0DTE / 1-7 / term horizon split, the broad-market
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
-  reading daemon protection proposals or runtime settings/freeze state,
+  reading daemon protection proposals, daemon opportunities, or runtime settings/freeze state,
   or explicitly requests an order preview/status read. This skill is read-only and never
   runs broker writes; live agent-origin broker writes are blocked daemon-side.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-11 19:32 CEST
+Updated: 2026-06-13 10:04 CEST
 
 ## When to use
 
@@ -48,9 +48,17 @@ proposal is blocked — run `ibkr proposals status --json` (proposal-engine stat
 or `ibkr proposals list --json` (the latest proposal snapshot with per-row
 blockers); `ibkr proposals refresh` asks the daemon to recompute first. These
 are read paths: `proposals preview|submit|ignore` are broker-write verbs
-outside this skill. If the user asks about runtime platform preferences or
-whether trading is frozen, run `ibkr settings show --json`; `ibkr settings set`
-is a write, and the `trading.freeze` switch is human-only.
+outside this skill.
+
+If the user asks what mechanical opportunities ibkr currently sees — especially
+option exercise candidates — run `ibkr opportunities status --json` or
+`ibkr opportunities list --json`; `ibkr opportunities refresh` asks the daemon
+to recompute first. These are read paths: `opportunities preview|exercise|ignore`
+are outside this skill.
+
+If the user asks about runtime platform preferences or whether trading is
+frozen, run `ibkr settings show --json`; `ibkr settings set` is a write, and the
+`trading.freeze` switch is human-only.
 
 If the user explicitly asks for a stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from

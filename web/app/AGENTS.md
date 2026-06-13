@@ -118,6 +118,9 @@ permanently unreachable borrow feed (e.g. FTP filtered by the local network)
 is noise, not risk disclosure. Halt/LULD/Reg SHO source health stays
 unconditional, and active borrow *flags* on held names still render.
 
-V1 is reduce-only. Do not add an opportunities panel, buy-add controls, or
-standalone squeeze recommendations. When a proposal is a reducing short `BUY`,
-render it as `Buy to cover`.
+V1 protection remains reduce-only: do not add buy-add controls or standalone
+squeeze recommendations. The Opportunities panel is allowed for
+daemon-calculated option-exercise opportunities only; it must render blockers
+and keep submit unavailable unless the daemon snapshot and preview say the
+exercise is reduce-only and submit-eligible. When a proposal is a reducing
+short `BUY`, render it as `Buy to cover`.

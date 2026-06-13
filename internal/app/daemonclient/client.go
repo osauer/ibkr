@@ -25,6 +25,12 @@ type Client interface {
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
 	AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error)
+	OpportunitiesStatus(context.Context) (*rpc.OpportunityStatus, error)
+	OpportunitiesSnapshot(context.Context, rpc.OpportunitySnapshotParams) (*rpc.OpportunitySnapshot, error)
+	OpportunitiesRefresh(context.Context, rpc.OpportunityRefreshParams) (*rpc.OpportunitySnapshot, error)
+	OpportunitiesPreviewExercise(context.Context, rpc.OpportunityExercisePreviewParams) (*rpc.OpportunityExercisePreviewResult, error)
+	OpportunitiesSubmitExercise(context.Context, rpc.OpportunityExerciseSubmitParams) (*rpc.OpportunityExerciseSubmitResult, error)
+	OpportunitiesIgnore(context.Context, rpc.OpportunityIgnoreParams) (*rpc.OpportunityIgnoreResult, error)
 	TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error)
 	TradeProposalsRefresh(context.Context, rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error)
 	TradeProposalsPreview(context.Context, rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error)
@@ -165,6 +171,54 @@ func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {
 func (c Real) AutoTradeStatus(ctx context.Context) (*rpc.AutoTradeStatus, error) {
 	var out rpc.AutoTradeStatus
 	if err := c.call(ctx, rpc.MethodAutoTradeStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesStatus(ctx context.Context) (*rpc.OpportunityStatus, error) {
+	var out rpc.OpportunityStatus
+	if err := c.call(ctx, rpc.MethodOpportunitiesStatus, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesSnapshot(ctx context.Context, params rpc.OpportunitySnapshotParams) (*rpc.OpportunitySnapshot, error) {
+	var out rpc.OpportunitySnapshot
+	if err := c.call(ctx, rpc.MethodOpportunitiesSnapshot, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesRefresh(ctx context.Context, params rpc.OpportunityRefreshParams) (*rpc.OpportunitySnapshot, error) {
+	var out rpc.OpportunitySnapshot
+	if err := c.call(ctx, rpc.MethodOpportunitiesRefresh, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesPreviewExercise(ctx context.Context, params rpc.OpportunityExercisePreviewParams) (*rpc.OpportunityExercisePreviewResult, error) {
+	var out rpc.OpportunityExercisePreviewResult
+	if err := c.call(ctx, rpc.MethodOpportunitiesPreviewExercise, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesSubmitExercise(ctx context.Context, params rpc.OpportunityExerciseSubmitParams) (*rpc.OpportunityExerciseSubmitResult, error) {
+	var out rpc.OpportunityExerciseSubmitResult
+	if err := c.call(ctx, rpc.MethodOpportunitiesSubmitExercise, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) OpportunitiesIgnore(ctx context.Context, params rpc.OpportunityIgnoreParams) (*rpc.OpportunityIgnoreResult, error) {
+	var out rpc.OpportunityIgnoreResult
+	if err := c.call(ctx, rpc.MethodOpportunitiesIgnore, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -17,6 +17,10 @@ func (h *handler) requireBrokerWriteConfirmation(ctx context.Context, req Broker
 	return h.requireBrokerConfirmation(ctx, req, true)
 }
 
+func (h *handler) requireBrokerSessionConfirmation(ctx context.Context, req BrokerWriteConfirmation) (*rpc.TradingStatus, error) {
+	return h.requireBrokerConfirmation(ctx, req, false)
+}
+
 // requireBrokerCancelConfirmation validates the same confirm_account /
 // confirm_mode affirmation as requireBrokerWriteConfirmation but does not
 // require CanWrite: a runtime trading freeze must never strand an open order
@@ -32,7 +36,7 @@ func (h *handler) requireBrokerConfirmation(ctx context.Context, req BrokerWrite
 	if err != nil {
 		return nil, err
 	}
-	if status.Mode == config.TradingModeDisabled {
+	if requireCanWrite && status.Mode == config.TradingModeDisabled {
 		return nil, &rpc.Error{Code: rpc.CodeTradingDisabled, Message: "trading is disabled"}
 	}
 	if requireCanWrite && !status.CanWrite {

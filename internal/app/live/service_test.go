@@ -72,7 +72,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	for range 13 {
+	for range 14 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -80,7 +80,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "settings", "regime", "canary", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -415,6 +415,30 @@ func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) 
 
 func (c *fakeClient) AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error) {
 	return &rpc.AutoTradeStatus{ProposalsEnabled: true, FastPathEnabled: true}, nil
+}
+
+func (c *fakeClient) OpportunitiesStatus(context.Context) (*rpc.OpportunityStatus, error) {
+	return &rpc.OpportunityStatus{Enabled: true}, nil
+}
+
+func (c *fakeClient) OpportunitiesSnapshot(context.Context, rpc.OpportunitySnapshotParams) (*rpc.OpportunitySnapshot, error) {
+	return &rpc.OpportunitySnapshot{Kind: rpc.OpportunitySnapshotKind, SchemaVersion: rpc.OpportunitySnapshotSchemaVersion, Revision: "empty", Opportunities: []rpc.Opportunity{}}, nil
+}
+
+func (c *fakeClient) OpportunitiesRefresh(context.Context, rpc.OpportunityRefreshParams) (*rpc.OpportunitySnapshot, error) {
+	return c.OpportunitiesSnapshot(context.Background(), rpc.OpportunitySnapshotParams{})
+}
+
+func (c *fakeClient) OpportunitiesPreviewExercise(context.Context, rpc.OpportunityExercisePreviewParams) (*rpc.OpportunityExercisePreviewResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) OpportunitiesSubmitExercise(context.Context, rpc.OpportunityExerciseSubmitParams) (*rpc.OpportunityExerciseSubmitResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) OpportunitiesIgnore(context.Context, rpc.OpportunityIgnoreParams) (*rpc.OpportunityIgnoreResult, error) {
+	return nil, nil
 }
 
 func (c *fakeClient) TradeProposalsSnapshot(context.Context, rpc.TradeProposalSnapshotParams) (*rpc.TradeProposalSnapshot, error) {
