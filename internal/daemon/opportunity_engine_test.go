@@ -93,15 +93,15 @@ func TestOptionExerciseOpportunityBlockersFailClosed(t *testing.T) {
 		wantSkip   bool
 	}{
 		{
-			name: "missing option bid when policy requires bid",
+			name: "missing option bid is not a candidate",
 			policy: func(p opportunityPolicy) opportunityPolicy {
-				p.Buckets.OptionExercise.AllowNoOptionBid = false
+				p.Buckets.OptionExercise.AllowNoOptionBid = true
 				return p
 			},
 			row:      func(r rpc.PositionView) rpc.PositionView { r.OptionBid = nil; return r },
 			stock:    func(s rpc.PositionView) rpc.PositionView { return s },
 			at:       now,
-			wantCode: "option_bid_unavailable",
+			wantSkip: true,
 		},
 		{
 			name:     "stale option quote",

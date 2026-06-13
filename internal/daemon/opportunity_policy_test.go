@@ -52,6 +52,9 @@ func TestOpportunityPolicyDefaultsValidationAndFingerprint(t *testing.T) {
 	if !policy.Buckets.OptionExercise.Enabled {
 		t.Fatal("default option_exercise bucket disabled")
 	}
+	if policy.Buckets.OptionExercise.AllowNoOptionBid {
+		t.Fatal("default option_exercise allow_no_option_bid = true, want false")
+	}
 	if got, err := policy.Buckets.OptionExercise.maxQuoteAgeDuration(); err != nil || got != 30*time.Second {
 		t.Fatalf("default max quote age = %v err=%v, want 30s", got, err)
 	}
