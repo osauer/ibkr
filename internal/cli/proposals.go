@@ -15,7 +15,13 @@ func runProposals(ctx context.Context, env *Env, args []string) int {
 	if len(args) == 0 {
 		args = []string{"list"}
 	}
-	subIdx := max(proposalsSubcommandIndex(args), 0)
+	subIdx := proposalsSubcommandIndex(args)
+	if subIdx < 0 {
+		if len(args) == 1 && helpArg(args[0]) {
+			return printCommandUsage(env, "proposals")
+		}
+		subIdx = 0
+	}
 	sub := args[subIdx]
 	args = append(append([]string{}, args[:subIdx]...), args[subIdx+1:]...)
 	switch sub {

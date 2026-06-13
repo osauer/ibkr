@@ -77,6 +77,21 @@ func parseExit(err error) int {
 	return 2
 }
 
+func helpArg(arg string) bool {
+	switch arg {
+	case "help", "--help", "-h", "-help":
+		return true
+	default:
+		return false
+	}
+}
+
+func printCommandUsage(env *Env, name string) int {
+	fs := flagSet(env, name)
+	fs.Usage()
+	return 0
+}
+
 // hoistFlags moves -flag and --flag tokens (and their values, if separate)
 // to the front of the slice while preserving relative order on each side.
 // Long-form `--flag=value` is treated as a single token.
