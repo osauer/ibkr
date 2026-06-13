@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.13.0 — 2026-06-13 13:00 CEST
+
+### What's new
+
+- A new daemon-owned Opportunities surface finds mechanical option-exercise candidates in existing positions. The MVP bucket is conservative: long American options only, regular-hours quotes, executable option bids, policy-gated minimum gain, and full blocker disclosure. Users can inspect it from `ibkr opportunities status|list|refresh`, the Canary app's Opportunities panel, and the read-only MCP `ibkr_opportunities` tool.
+- Exercise execution is deliberately separate from opportunity discovery. MCP remains read-only and never exposes submit-capable tokens; CLI/app exercise flows require a fresh preview for the exact opportunity revision, then re-check trading mode, session/account pins, freeze state, policy, and quote freshness before broker submission.
+- Opportunity policy is its own hot-reloaded TOML surface (`~/.config/ibkr/policies/opportunity-policy.toml`) rather than a hidden extension of protection proposals, so exercise-threshold experiments cannot degrade protective-stop health.
+
+### Added
+
+- Added typed RPC, daemon refresh/status handlers, config, status subsystem reporting, source fingerprints, ignore state, CLI rendering, and app HTTP routes for Opportunities.
+- Added an `ibkr_opportunities` MCP read tool and regenerated MCP/config references so LLM hosts can discover opportunity snapshots without gaining write authority.
+- Added option exercise wire support and trading-build submission plumbing for the CLI/app preview-then-exercise flow.
+
+### Changed
+
+- CLI help now groups protection proposals and opportunities under their own command families, keeping portfolio reads separate from broker-write-capable local workflows.
+- The app Opportunities panel hides the normal policy fingerprint in the common healthy state and keeps the detailed policy identity available through status/read surfaces.
+- Protection risk-reduction copy is more compact, with the excess value displayed without redundant prose.
+
+### Fixed
+
+- No-bid option exercise candidates are suppressed instead of showing a theoretical gain that cannot be captured through an executable option sale.
+- Exercise opportunities can now disclose exposure-increasing effects when that is the mechanical result of exercising a held option; the daemon classifies the position effect instead of pretending every exercise is reduce-only.
+
 ## v1.12.0 — 2026-06-12 17:21 CEST
 
 ### What's new
