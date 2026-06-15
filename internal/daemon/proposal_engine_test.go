@@ -15,6 +15,7 @@ import (
 	"github.com/osauer/ibkr/internal/config"
 	"github.com/osauer/ibkr/internal/discover"
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 func TestThetaProposalNeverOpensRisk(t *testing.T) {
@@ -959,6 +960,15 @@ func preservedProposalSnapshot(now time.Time, prop rpc.TradeProposal, blockers [
 	}
 }
 
+func hasOrderJournalEvent(events []orderJournalEvent, eventType string) bool {
+	for _, event := range events {
+		if event.Type == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 func testProposalStore(t *testing.T) *proposalStore {
 	t.Helper()
 	return &proposalStore{
@@ -1009,12 +1019,14 @@ func TestTrailingStopSubmitBlocksPreservedRefreshFailureBeforePreview(t *testing
 	}
 	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
 	prop := preservedTrailingStopProposal(now)
+	snap := preservedProposalSnapshot(now.Add(-time.Hour), prop, nil)
+	snap.LoadedFromState = true
 	srv.tradeProposals = &proposalEngine{
 		server:   srv,
 		store:    testProposalStore(t),
 		now:      func() time.Time { return now },
 		ignored:  map[string]struct{}{},
-		snapshot: preservedProposalSnapshot(now.Add(-time.Minute), prop, nil),
+		snapshot: snap,
 	}
 
 	res, err := srv.tradeProposals.Submit(context.Background(), rpc.TradeProposalSubmitParams{
@@ -1028,6 +1040,134 @@ func TestTrailingStopSubmitBlocksPreservedRefreshFailureBeforePreview(t *testing
 	}
 	if res.Accepted || res.Preview != nil || !hasBlocker(res.Blockers, "account_unavailable") {
 		t.Fatalf("submit = %+v, want blocked by preserved refresh failure", res)
+	}
+}
+
+func TestTrailingStopSubmitUsesFreshCachedSnapshotBeforeRefresh(t *testing.T) {
+	t.Parallel()
+	if !orderWritesAvailable {
+		t.Skip("proposal submit place path requires trading build")
+	}
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true}, nil
+	}
+	srv.orderReserveBrokerID = func(context.Context) (int, error) { return 1001, nil }
+	var sentOrder *ibkrlib.RawOrder
+	srv.orderPlaceBroker = func(_ context.Context, _ *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+		copy := *order
+		sentOrder = &copy
+		return nil
+	}
+	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
+	prop := preservedTrailingStopProposal(now)
+	submittedRevision := prop.Revision
+	prop.Revision = "sha256:refreshed"
+	srv.tradeProposals = &proposalEngine{
+		server:   srv,
+		store:    testProposalStore(t),
+		now:      func() time.Time { return now },
+		ignored:  map[string]struct{}{},
+		snapshot: preservedProposalSnapshot(now, prop, nil),
+	}
+
+	res, err := srv.tradeProposals.Submit(context.Background(), rpc.TradeProposalSubmitParams{
+		Key:       prop.Key,
+		Revision:  submittedRevision,
+		Quantity:  1,
+		TimeoutMs: 20,
+		FastPath:  true,
+		Origin:    rpc.OrderOriginAgent,
+	})
+	if err != nil {
+		t.Fatalf("submit err = %v", err)
+	}
+	if !res.Accepted || res.Preview == nil || res.Place == nil {
+		t.Fatalf("submit = %+v, want accepted preview-backed place", res)
+	}
+	if res.Proposal.Revision != prop.Revision {
+		t.Fatalf("submit proposal revision = %q, want current cached revision %q", res.Proposal.Revision, prop.Revision)
+	}
+	if res.Place.ReservedOrderID != 1001 || res.Place.Mode != config.TradingModePaper {
+		t.Fatalf("place = %+v, want paper order id 1001", res.Place)
+	}
+	if sentOrder == nil || sentOrder.OrderID != 1001 || sentOrder.Action != rpc.OrderActionSell || sentOrder.OrderType != rpc.OrderTypeTRAIL {
+		t.Fatalf("sent order = %+v, want paper trailing stop sell", sentOrder)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if !hasOrderJournalEvent(events, orderJournalEventPreviewed) ||
+		!hasOrderJournalEvent(events, orderJournalEventTokenConfirmed) ||
+		!hasOrderJournalEvent(events, orderJournalEventSendAttempted) {
+		t.Fatalf("order journal events = %+v, want previewed, token-confirmed, send-attempted", events)
+	}
+}
+
+func TestTrailingStopSubmitBlocksLiveAgentOriginBeforePreview(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive, MaxNotional: 10_000})
+	livePort := 4001
+	srv.cfg.Gateway.Port = &livePort
+	srv.cfg.Gateway.Account = "U1234567"
+	srv.endpoint.Port = livePort
+	srv.endpoint.Account = "U1234567"
+	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		t.Fatal("live agent-origin submit must block before preview quote")
+		return rpc.OrderQuoteSnapshot{}, nil
+	}
+	srv.orderPreviewPositionImpact = func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
+		t.Fatal("live agent-origin submit must block before preview position")
+		return rpc.OrderPositionImpact{}, nil
+	}
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		t.Fatal("live agent-origin submit must block before broker WhatIf preview")
+		return rpc.OrderWhatIfResult{}, nil
+	}
+	srv.orderReserveBrokerID = func(context.Context) (int, error) {
+		t.Fatal("live agent-origin submit must block before reserving broker order id")
+		return 0, nil
+	}
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("live agent-origin submit must block before broker place")
+		return nil
+	}
+	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
+	prop := preservedTrailingStopProposal(now)
+	snap := preservedProposalSnapshot(now, prop, nil)
+	snap.AccountID = "U1234567"
+	snap.AccountMode = rpc.AccountModeLive
+	srv.tradeProposals = &proposalEngine{
+		server:   srv,
+		store:    testProposalStore(t),
+		now:      func() time.Time { return now },
+		ignored:  map[string]struct{}{},
+		snapshot: snap,
+	}
+
+	res, err := srv.tradeProposals.Submit(context.Background(), rpc.TradeProposalSubmitParams{
+		Key:       prop.Key,
+		Revision:  prop.Revision,
+		Quantity:  1,
+		TimeoutMs: 20,
+		FastPath:  true,
+		Origin:    rpc.OrderOriginAgent,
+	})
+	if err != nil {
+		t.Fatalf("submit err = %v", err)
+	}
+	if res.Accepted || res.Preview != nil || res.Place != nil || !hasBlocker(res.Blockers, "live_agent_origin_blocked") {
+		t.Fatalf("submit = %+v, want live_agent_origin_blocked before preview/place", res)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("order journal events = %+v, want none before live-agent blocker", events)
 	}
 }
 

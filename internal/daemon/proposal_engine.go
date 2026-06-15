@@ -1016,7 +1016,24 @@ func (e *proposalEngine) previewProposal(ctx context.Context, p rpc.TradeProposa
 	return e.revalidatedProposal(ctx, p.Key, p.Revision)
 }
 
+func (e *proposalEngine) submitProposal(ctx context.Context, p rpc.TradeProposalSubmitParams, fastPathEnabled bool) (rpc.TradeProposal, []rpc.TradingBlocker, error) {
+	if p.FastPath && fastPathEnabled {
+		if prop, blockers, ok := e.fastPathSubmitProposal(p.Key, p.Revision); ok {
+			return prop, blockers, nil
+		}
+	}
+	return e.revalidatedProposal(ctx, p.Key, p.Revision)
+}
+
 func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
+	return e.fastPathCachedProposal(key, revision, false)
+}
+
+func (e *proposalEngine) fastPathSubmitProposal(key, revision string) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
+	return e.fastPathCachedProposal(key, revision, true)
+}
+
+func (e *proposalEngine) fastPathCachedProposal(key, revision string, allowRevisionChurn bool) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
 	key, revision = strings.TrimSpace(key), strings.TrimSpace(revision)
 	if key == "" || revision == "" {
 		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "bad_request", Message: "proposal key and revision are required"}}, true
@@ -1056,7 +1073,7 @@ func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.Trad
 	if len(snap.AutoTrade.Blockers) > 0 {
 		return rpc.TradeProposal{}, snap.AutoTrade.Blockers, true
 	}
-	if snap.Revision != revision {
+	if snap.Revision != revision && !allowRevisionChurn {
 		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "stale_revision", Message: "proposal revision is stale; refresh proposals before preview or submit"}}, true
 	}
 	for _, prop := range snap.Proposals {
@@ -1071,19 +1088,26 @@ func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.Trad
 		}
 		return prop, prop.Blockers, true
 	}
+	if snap.Revision != revision {
+		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "stale_revision", Message: "proposal revision is stale; refresh proposals before preview or submit"}}, true
+	}
 	return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "proposal_not_found", Message: "proposal key is not present in the current snapshot"}}, true
 }
 
 func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitParams) (rpc.TradeProposalSubmitResult, error) {
-	prop, blockers, err := e.revalidatedProposal(ctx, p.Key, p.Revision)
 	now := e.clock()
+	cfg := e.server.cfg.AutoTrade.WithDefaults()
+	prop, blockers, err := e.submitProposal(ctx, p, cfg.FastPathEnabledResolved())
 	if len(blockers) > 0 || err != nil {
 		e.appendBlocked(prop, p.Key, p.Revision, blockers, err)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Blockers: blockers, AsOf: now}, err
 	}
-	cfg := e.server.cfg.AutoTrade.WithDefaults()
 	if !cfg.FastPathEnabledResolved() || !p.FastPath {
 		blockers := []rpc.TradingBlocker{{Code: "fast_path_disabled", Message: "proposal submit requires fast_path=true and [auto_trade].fast_path_enabled=true"}}
+		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Blockers: blockers, AsOf: now}, nil
+	}
+	if blockers := e.server.proposalSubmitWriteBlockers(p.Origin); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Blockers: blockers, AsOf: now}, nil
 	}
