@@ -73,41 +73,61 @@ func (p OpportunitySplitProvenance) IsZero() bool {
 }
 
 type OpportunityPointInTimeFeatures struct {
-	Instrument         string             `json:"instrument,omitempty"`
-	SecType            string             `json:"sec_type,omitempty"`
-	Exchange           string             `json:"exchange,omitempty"`
-	Currency           string             `json:"currency,omitempty"`
-	LocalSymbol        string             `json:"local_symbol,omitempty"`
-	TradingClass       string             `json:"trading_class,omitempty"`
-	InstrumentTags     []string           `json:"instrument_tags,omitempty"`
-	ScanPreset         string             `json:"scan_preset,omitempty"`
-	ScanType           string             `json:"scan_type,omitempty"`
-	ScanRank           int                `json:"scan_rank,omitempty"`
-	DataType           string             `json:"data_type,omitempty"`
-	FeedType           string             `json:"feed_type,omitempty"`
-	QuoteQuality       string             `json:"quote_quality,omitempty"`
-	Indicative         bool               `json:"indicative,omitempty"`
-	Stale              bool               `json:"stale,omitempty"`
-	StaleReason        string             `json:"stale_reason,omitempty"`
-	QuoteError         string             `json:"quote_error,omitempty"`
-	TechnicalError     string             `json:"technical_error,omitempty"`
-	SessionContext     *rpc.MarketSession `json:"session_context,omitempty"`
-	PriceAsOf          string             `json:"price_as_of,omitempty"`
-	PriceAt            time.Time          `json:"price_at,omitzero"`
-	DataQuality        string             `json:"data_quality,omitempty"`
-	TrendState         string             `json:"trend_state,omitempty"`
-	Price              *float64           `json:"price,omitempty"`
-	SMA50              *float64           `json:"sma_50,omitempty"`
-	SMA200             *float64           `json:"sma_200,omitempty"`
-	PctAbove50DMA      *float64           `json:"pct_above_50dma,omitempty"`
-	PctAbove200DMA     *float64           `json:"pct_above_200dma,omitempty"`
-	RS63D              *float64           `json:"rs_63d,omitempty"`
-	RS126D             *float64           `json:"rs_126d,omitempty"`
-	AvgDollarVolume20D *float64           `json:"avg_dollar_volume_20d,omitempty"`
-	Volume             *int64             `json:"volume,omitempty"`
-	ChangePct          *float64           `json:"change_pct,omitempty"`
-	EventGapPct        *float64           `json:"event_gap_pct,omitempty"`
-	ExtendedChaseRisk  bool               `json:"extended_chase_risk,omitempty"`
+	Instrument         string                   `json:"instrument,omitempty"`
+	SecType            string                   `json:"sec_type,omitempty"`
+	Exchange           string                   `json:"exchange,omitempty"`
+	Currency           string                   `json:"currency,omitempty"`
+	LocalSymbol        string                   `json:"local_symbol,omitempty"`
+	TradingClass       string                   `json:"trading_class,omitempty"`
+	InstrumentTags     []string                 `json:"instrument_tags,omitempty"`
+	ScanPreset         string                   `json:"scan_preset,omitempty"`
+	ScanType           string                   `json:"scan_type,omitempty"`
+	ScanRank           int                      `json:"scan_rank,omitempty"`
+	DataType           string                   `json:"data_type,omitempty"`
+	FeedType           string                   `json:"feed_type,omitempty"`
+	QuoteQuality       string                   `json:"quote_quality,omitempty"`
+	Indicative         bool                     `json:"indicative,omitempty"`
+	Stale              bool                     `json:"stale,omitempty"`
+	StaleReason        string                   `json:"stale_reason,omitempty"`
+	QuoteError         string                   `json:"quote_error,omitempty"`
+	TechnicalError     string                   `json:"technical_error,omitempty"`
+	SessionContext     *rpc.MarketSession       `json:"session_context,omitempty"`
+	PriceAsOf          string                   `json:"price_as_of,omitempty"`
+	PriceAt            time.Time                `json:"price_at,omitzero"`
+	DataQuality        string                   `json:"data_quality,omitempty"`
+	TrendState         string                   `json:"trend_state,omitempty"`
+	Price              *float64                 `json:"price,omitempty"`
+	SMA50              *float64                 `json:"sma_50,omitempty"`
+	SMA200             *float64                 `json:"sma_200,omitempty"`
+	PctAbove50DMA      *float64                 `json:"pct_above_50dma,omitempty"`
+	PctAbove200DMA     *float64                 `json:"pct_above_200dma,omitempty"`
+	RS63D              *float64                 `json:"rs_63d,omitempty"`
+	RS126D             *float64                 `json:"rs_126d,omitempty"`
+	AvgDollarVolume20D *float64                 `json:"avg_dollar_volume_20d,omitempty"`
+	Volume             *int64                   `json:"volume,omitempty"`
+	ChangePct          *float64                 `json:"change_pct,omitempty"`
+	EventGapPct        *float64                 `json:"event_gap_pct,omitempty"`
+	ExtendedChaseRisk  bool                     `json:"extended_chase_risk,omitempty"`
+	Macro              *OpportunityMacroContext `json:"macro,omitempty"`
+}
+
+type OpportunityMacroContext struct {
+	Source                     string          `json:"source,omitempty"`
+	AsOf                       time.Time       `json:"as_of,omitzero"`
+	Fingerprint                rpc.Fingerprint `json:"fingerprint,omitzero"`
+	Label                      string          `json:"label,omitempty"`
+	Tone                       string          `json:"tone,omitempty"`
+	Stage                      string          `json:"stage,omitempty"`
+	Severity                   string          `json:"severity,omitempty"`
+	Readiness                  string          `json:"readiness,omitempty"`
+	Confidence                 string          `json:"confidence,omitempty"`
+	ClusterGreenCount          int             `json:"cluster_green_count,omitempty"`
+	ClusterYellowCount         int             `json:"cluster_yellow_count,omitempty"`
+	ClusterRedCount            int             `json:"cluster_red_count,omitempty"`
+	ClusterRankedCount         int             `json:"cluster_ranked_count,omitempty"`
+	ClusterEligibleRedCount    int             `json:"cluster_eligible_red_count,omitempty"`
+	ClusterProvisionalRedCount int             `json:"cluster_provisional_red_count,omitempty"`
+	Error                      string          `json:"error,omitempty"`
 }
 
 type opportunityCaptureOptions struct {
@@ -124,6 +144,8 @@ type opportunityCaptureOptions struct {
 	RequireLive      bool
 	ExcludePenny     bool
 	IncludeETFs      bool
+	IncludeRegime    bool
+	Macro            *OpportunityMacroContext
 	Split            string
 	HoldoutPlan      string
 	MarketCluster    string
@@ -556,6 +578,9 @@ func captureOpportunityPointInTimeRows(ctx context.Context, env *Env, opts oppor
 			return nil, err
 		}
 	}
+	if opts.IncludeRegime && opts.Macro == nil {
+		opts.Macro = opportunityCaptureRegimeContext(ctx, env)
+	}
 	if len(symbols) > 0 {
 		return captureOpportunitySymbolPointInTimeRows(ctx, env, symbols, opts)
 	}
@@ -627,6 +652,70 @@ func captureOpportunitySymbolPointInTimeRows(ctx context.Context, env *Env, symb
 		technicalErr = err.Error()
 	}
 	return opportunityPointInTimeRowsFromSymbolSnapshots(symbols, quotes, quoteErrors, technical, technicalErr, opts), nil
+}
+
+func opportunityCaptureRegimeContext(ctx context.Context, env *Env) *OpportunityMacroContext {
+	out := &OpportunityMacroContext{Source: rpc.MethodRegimeSnapshot}
+	if env == nil || env.Conn == nil {
+		out.Error = "daemon connection is required for regime context"
+		return out
+	}
+	var regime rpc.RegimeSnapshotResult
+	if err := env.Conn.Call(ctx, rpc.MethodRegimeSnapshot, rpc.RegimeSnapshotParams{}, &regime); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	return opportunityMacroContextFromRegime(regime)
+}
+
+func opportunityMacroContextFromRegime(regime rpc.RegimeSnapshotResult) *OpportunityMacroContext {
+	posture := regime.Posture
+	if strings.TrimSpace(posture.Tone) == "" {
+		posture = rpc.BuildRegimePosture(&regime)
+	}
+	fingerprint := regime.Fingerprint
+	if strings.TrimSpace(fingerprint.Key) == "" {
+		fingerprint = rpc.BuildRegimeFingerprint(&regime)
+	}
+	label := strings.TrimSpace(posture.Label)
+	if label == "" {
+		label = strings.TrimSpace(regime.Summary.Label)
+	}
+	if label == "" {
+		label = strings.TrimSpace(regime.Composite.Verdict)
+	}
+	confidence := strings.TrimSpace(posture.Confidence)
+	if confidence == "" {
+		confidence = strings.TrimSpace(regime.Lifecycle.Confidence)
+	}
+	if confidence == "" {
+		confidence = strings.TrimSpace(regime.Summary.Confidence)
+	}
+	return &OpportunityMacroContext{
+		Source:                     rpc.MethodRegimeSnapshot,
+		AsOf:                       regime.AsOf,
+		Fingerprint:                fingerprint,
+		Label:                      label,
+		Tone:                       strings.TrimSpace(posture.Tone),
+		Stage:                      strings.TrimSpace(posture.Stage),
+		Severity:                   strings.TrimSpace(posture.Severity),
+		Readiness:                  strings.TrimSpace(posture.Readiness),
+		Confidence:                 confidence,
+		ClusterGreenCount:          regime.Composite.ClusterGreenCount,
+		ClusterYellowCount:         regime.Composite.ClusterYellowCount,
+		ClusterRedCount:            regime.Composite.ClusterRedCount,
+		ClusterRankedCount:         regime.Composite.ClusterRankedCount,
+		ClusterEligibleRedCount:    regime.Composite.ClusterEligibleRedCount,
+		ClusterProvisionalRedCount: regime.Composite.ClusterProvisionalRedCount,
+	}
+}
+
+func cloneOpportunityMacroContext(in *OpportunityMacroContext) *OpportunityMacroContext {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func opportunityCaptureRequireLivePreflight(ctx context.Context, env *Env, useScanner bool) error {
@@ -796,6 +885,7 @@ func opportunityPointInTimeRowsFromSnapshots(scan rpc.ScanResult, quotes map[str
 		tech, techOK := techBySymbol[symbol]
 		quote, quoteOK := quotes[symbol]
 		features := opportunityCaptureFeatures(scan, scanRow, quote, quoteOK, quoteErrors[symbol], tech, techOK)
+		features.Macro = cloneOpportunityMacroContext(opts.Macro)
 		row := OpportunityPointInTimeRow{
 			Date:              opportunityCaptureRowDate(date, features),
 			AsOf:              asOf,
@@ -871,6 +961,7 @@ func opportunityPointInTimeRowsFromSymbolSnapshots(symbols []string, quotes map[
 		tech, techOK := techBySymbol[symbol]
 		quote, quoteOK := quotes[symbol]
 		features := opportunityCaptureFeaturesFromQuote(symbol, quote, quoteOK, quoteErrors[symbol], tech, techOK, technicalErr)
+		features.Macro = cloneOpportunityMacroContext(opts.Macro)
 		row := OpportunityPointInTimeRow{
 			Date:              opportunityCaptureRowDate(date, features),
 			AsOf:              asOf,

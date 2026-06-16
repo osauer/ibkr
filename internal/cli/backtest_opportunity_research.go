@@ -446,23 +446,19 @@ func opportunitySignalPlans() []opportunitySignalPlan {
 			Description: "Above 200dma, no more than 5% above 50dma, RS63 > 0.",
 			Hypothesis:  "Pullbacks inside an uptrend outperform raw breakout chasing.",
 			Evaluate: func(f OpportunityPointInTimeFeatures) OpportunityBacktestSignal {
-				reasons := opportunityResearchContextReasons(f)
-				pct50 := opportunityFeaturePctAbove50(f)
-				pct200 := opportunityFeaturePctAbove200(f)
-				if pct200 == nil {
-					reasons = append(reasons, "pct_above_200dma_missing")
-				} else if *pct200 <= 0 {
-					reasons = append(reasons, "below_200dma")
-				}
-				if pct50 == nil {
-					reasons = append(reasons, "pct_above_50dma_missing")
-				} else if *pct50 > 0.05 {
-					reasons = append(reasons, "too_far_above_50dma")
-				}
-				if f.RS63D == nil || *f.RS63D <= 0 {
-					reasons = append(reasons, "rs_63d_not_positive")
-				}
+				reasons := opportunityResearchPullbackUptrendRS63Reasons(f)
 				return opportunityResearchSignal("pullback_uptrend_rs63_v1", reasons)
+			},
+		},
+		{
+			ID:          "pullback_uptrend_rs63_macro_veto_v1",
+			Family:      "pullback_trend",
+			Description: "Pullback-uptrend RS63 rule, vetoed by stress/risk-off regime context.",
+			Hypothesis:  "Relative-strength pullbacks work best when broad-market stress is not confirmed.",
+			Evaluate: func(f OpportunityPointInTimeFeatures) OpportunityBacktestSignal {
+				reasons := opportunityResearchPullbackUptrendRS63Reasons(f)
+				reasons = append(reasons, opportunityResearchMacroVetoReasons(f)...)
+				return opportunityResearchSignal("pullback_uptrend_rs63_macro_veto_v1", reasons)
 			},
 		},
 		{
@@ -496,6 +492,50 @@ func opportunitySignalPlans() []opportunitySignalPlan {
 				return opportunityResearchSignal("avoid_extended_rs63_v1", reasons)
 			},
 		},
+	}
+}
+
+func opportunityResearchPullbackUptrendRS63Reasons(f OpportunityPointInTimeFeatures) []string {
+	reasons := opportunityResearchContextReasons(f)
+	pct50 := opportunityFeaturePctAbove50(f)
+	pct200 := opportunityFeaturePctAbove200(f)
+	if pct200 == nil {
+		reasons = append(reasons, "pct_above_200dma_missing")
+	} else if *pct200 <= 0 {
+		reasons = append(reasons, "below_200dma")
+	}
+	if pct50 == nil {
+		reasons = append(reasons, "pct_above_50dma_missing")
+	} else if *pct50 > 0.05 {
+		reasons = append(reasons, "too_far_above_50dma")
+	}
+	if f.RS63D == nil || *f.RS63D <= 0 {
+		reasons = append(reasons, "rs_63d_not_positive")
+	}
+	return reasons
+}
+
+func opportunityResearchMacroVetoReasons(f OpportunityPointInTimeFeatures) []string {
+	if f.Macro == nil {
+		return []string{"macro_context_missing"}
+	}
+	if strings.TrimSpace(f.Macro.Error) != "" {
+		return []string{"macro_context_error"}
+	}
+	tone := strings.ToLower(strings.TrimSpace(f.Macro.Tone))
+	switch tone {
+	case rpc.RegimeToneNormal, rpc.RegimeToneWatch:
+		return nil
+	case rpc.RegimeToneStress:
+		return []string{"macro_stress_veto"}
+	case rpc.RegimeToneRiskOff:
+		return []string{"macro_risk_off_veto"}
+	case rpc.RegimeToneDataQuality:
+		return []string{"macro_data_quality_veto"}
+	case "":
+		return []string{"macro_tone_missing"}
+	default:
+		return []string{"macro_tone_unknown"}
 	}
 }
 

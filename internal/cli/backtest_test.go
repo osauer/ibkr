@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -633,6 +634,7 @@ func TestOpportunityCaptureBuildsUnscoredPointInTimeRows(t *testing.T) {
 		Benchmark:        "QQQ",
 		HorizonDays:      126,
 		RoundTripCostBps: 50,
+		Macro:            testOpportunityMacroContext(rpc.RegimeToneNormal),
 	})
 	if got, want := len(rows), 1; got != want {
 		t.Fatalf("captured rows = %d, want %d", got, want)
@@ -652,6 +654,18 @@ func TestOpportunityCaptureBuildsUnscoredPointInTimeRows(t *testing.T) {
 	}
 	if err := validateOpportunityFeatureProvenance(row.FeatureProvenance, row.Features); err != nil {
 		t.Fatalf("feature provenance did not validate: %v", err)
+	}
+	if row.Features.Macro == nil || row.Features.Macro.Tone != rpc.RegimeToneNormal {
+		t.Fatalf("macro context not preserved: %+v", row.Features.Macro)
+	}
+	editedFeatures := row.Features
+	editedMacro := *editedFeatures.Macro
+	editedMacro.Tone = rpc.RegimeToneStress
+	editedFeatures.Macro = &editedMacro
+	if err := validateOpportunityFeatureProvenance(row.FeatureProvenance, editedFeatures); err == nil {
+		t.Fatal("feature provenance did not catch edited macro context")
+	} else if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("feature provenance error = %q, want checksum mismatch", err)
 	}
 	if row.FeatureProvenance.Source != "capture-opportunity" || row.FeatureProvenance.Method != "scanner_features_v1" {
 		t.Fatalf("feature provenance = %+v, want scanner capture source/method", row.FeatureProvenance)
@@ -687,6 +701,41 @@ func TestOpportunityCaptureBuildsUnscoredPointInTimeRows(t *testing.T) {
 	}
 	if got, want := len(filtered), 1; got != want {
 		t.Fatalf("filtered scanner rows = %d, want %d", got, want)
+	}
+}
+
+func TestOpportunityMacroContextFromRegime(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, 6, 15, 14, 30, 0, 0, time.UTC)
+	regime := rpc.RegimeSnapshotResult{
+		AsOf:        asOf,
+		Fingerprint: rpc.Fingerprint{Version: "test-fp", Key: "abc123"},
+		Posture: rpc.RegimePosture{
+			Label:      "Normal regime",
+			Tone:       rpc.RegimeToneNormal,
+			Stage:      rpc.LifecycleOpportunity,
+			Severity:   "observe",
+			Readiness:  "ready",
+			Confidence: "high",
+		},
+		Composite: rpc.RegimeComposite{
+			ClusterGreenCount:          5,
+			ClusterYellowCount:         1,
+			ClusterRedCount:            0,
+			ClusterRankedCount:         6,
+			ClusterEligibleRedCount:    0,
+			ClusterProvisionalRedCount: 0,
+		},
+	}
+	macro := opportunityMacroContextFromRegime(regime)
+	if macro == nil {
+		t.Fatal("macro context is nil")
+	}
+	if macro.Source != rpc.MethodRegimeSnapshot || !macro.AsOf.Equal(asOf) || macro.Fingerprint.Key != "abc123" {
+		t.Fatalf("macro provenance not preserved: %+v", macro)
+	}
+	if macro.Tone != rpc.RegimeToneNormal || macro.Stage != rpc.LifecycleOpportunity || macro.ClusterRankedCount != 6 {
+		t.Fatalf("macro posture not preserved: %+v", macro)
 	}
 }
 
@@ -3488,6 +3537,56 @@ func TestRunBacktestResearchOpportunityRendersText(t *testing.T) {
 	}
 }
 
+func TestOpportunityResearchPullbackMacroVetoPlan(t *testing.T) {
+	t.Parallel()
+	plan := testOpportunityResearchPlan(t, "pullback_uptrend_rs63_macro_veto_v1")
+
+	normal := testOpportunityPullbackMacroFeature(rpc.RegimeToneNormal)
+	if signal := plan.Evaluate(normal); !signal.Fired {
+		t.Fatalf("normal regime macro-veto signal did not fire: %+v", signal)
+	}
+
+	watch := testOpportunityPullbackMacroFeature(rpc.RegimeToneWatch)
+	if signal := plan.Evaluate(watch); !signal.Fired {
+		t.Fatalf("watch regime macro-veto signal did not fire: %+v", signal)
+	}
+
+	stress := testOpportunityPullbackMacroFeature(rpc.RegimeToneStress)
+	if signal := plan.Evaluate(stress); signal.Fired || !slices.Contains(signal.Reasons, "macro_stress_veto") {
+		t.Fatalf("stress regime macro-veto signal = %+v, want macro_stress_veto", signal)
+	}
+
+	missing := testOpportunityPullbackMacroFeature(rpc.RegimeToneNormal)
+	missing.Macro = nil
+	if signal := plan.Evaluate(missing); signal.Fired || !slices.Contains(signal.Reasons, "macro_context_missing") || !opportunitySignalContextBlocked(signal.Reasons) {
+		t.Fatalf("missing macro signal = %+v, want blocked macro_context_missing", signal)
+	}
+
+	dataQuality := testOpportunityPullbackMacroFeature(rpc.RegimeToneDataQuality)
+	if signal := plan.Evaluate(dataQuality); signal.Fired || !slices.Contains(signal.Reasons, "macro_data_quality_veto") || !opportunitySignalContextBlocked(signal.Reasons) {
+		t.Fatalf("data-quality macro signal = %+v, want blocked macro_data_quality_veto", signal)
+	}
+}
+
+func TestRunBacktestResearchOpportunityListPlansIncludesMacroVeto(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	code := Run(context.Background(), env, "backtest", []string{
+		"research-opportunity",
+		"--list-plans",
+	})
+	if code != 0 {
+		t.Fatalf("Run backtest research-opportunity --list-plans returned %d, stderr:\n%s", code, stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "pullback_uptrend_rs63_macro_veto_v1") {
+		t.Fatalf("list-plans output missing macro-veto plan:\n%s", out)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr should be empty, got:\n%s", stderr.String())
+	}
+}
+
 func TestRunBacktestResearchOpportunityJSON(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
@@ -3697,6 +3796,77 @@ func testOpportunityCapturePointInTimeRow(symbol, date string, horizonDays int) 
 			RoundTripCostBps: &cost,
 			CostModel:        "flat-50bps-test",
 		},
+	}
+}
+
+func testOpportunityResearchPlan(t *testing.T, id string) opportunitySignalPlan {
+	t.Helper()
+	for _, plan := range opportunitySignalPlans() {
+		if plan.ID == id {
+			return plan
+		}
+	}
+	t.Fatalf("research plan %q not registered", id)
+	return opportunitySignalPlan{}
+}
+
+func testOpportunityPullbackMacroFeature(tone string) OpportunityPointInTimeFeatures {
+	price := 100.0
+	sma50 := 98.0
+	sma200 := 80.0
+	pct50 := (price - sma50) / sma50
+	pct200 := (price - sma200) / sma200
+	rs63 := 0.10
+	rs126 := 0.08
+	advDollar := 120_000_000.0
+	return OpportunityPointInTimeFeatures{
+		Instrument:         "ALFA",
+		SecType:            "STK",
+		Exchange:           "SMART",
+		Currency:           "USD",
+		DataType:           rpc.MarketDataLive,
+		QuoteQuality:       "firm",
+		DataQuality:        "ok",
+		SessionContext:     &rpc.MarketSession{Market: "us_equity", Date: "2026-06-15", State: "regular", IsOpen: true},
+		Price:              &price,
+		SMA50:              &sma50,
+		SMA200:             &sma200,
+		PctAbove50DMA:      &pct50,
+		PctAbove200DMA:     &pct200,
+		RS63D:              &rs63,
+		RS126D:             &rs126,
+		AvgDollarVolume20D: &advDollar,
+		Macro:              testOpportunityMacroContext(tone),
+	}
+}
+
+func testOpportunityMacroContext(tone string) *OpportunityMacroContext {
+	stage := rpc.LifecycleOpportunity
+	if tone == rpc.RegimeToneStress {
+		stage = rpc.LifecycleConfirmedStress
+	}
+	if tone == rpc.RegimeToneRiskOff {
+		stage = rpc.LifecyclePanic
+	}
+	if tone == rpc.RegimeToneDataQuality {
+		stage = rpc.LifecycleDataQuality
+	}
+	return &OpportunityMacroContext{
+		Source:                     rpc.MethodRegimeSnapshot,
+		AsOf:                       time.Date(2026, 6, 15, 14, 30, 0, 0, time.UTC),
+		Fingerprint:                rpc.Fingerprint{Version: "test-regime", Key: "test-" + strings.ReplaceAll(tone, "_", "-")},
+		Label:                      "Test regime",
+		Tone:                       tone,
+		Stage:                      stage,
+		Severity:                   "observe",
+		Readiness:                  "ready",
+		Confidence:                 "high",
+		ClusterGreenCount:          5,
+		ClusterYellowCount:         1,
+		ClusterRedCount:            0,
+		ClusterRankedCount:         6,
+		ClusterEligibleRedCount:    0,
+		ClusterProvisionalRedCount: 0,
 	}
 }
 
