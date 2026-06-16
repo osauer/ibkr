@@ -178,6 +178,64 @@ func TestStatusDataFarmsKeepsOnlyUnhealthyFarms(t *testing.T) {
 	}
 }
 
+func TestSubsystemHealthDegradesWhenFarmNoticesAreMissing(t *testing.T) {
+	t.Parallel()
+	subs := (&Server{}).subsystemHealth(true, nil)
+	for _, name := range []string{"quote", "scanner", "chain"} {
+		sub := mustFindSubsystem(t, subs, name)
+		if sub.Status != "degraded" || !strings.Contains(sub.Message, "no market-data farm connection notice observed") {
+			t.Fatalf("%s subsystem = %+v, want degraded missing market-data notice", name, sub)
+		}
+	}
+	history := mustFindSubsystem(t, subs, "history")
+	if history.Status != "degraded" || !strings.Contains(history.Message, "no historical-data farm connection notice observed") {
+		t.Fatalf("history subsystem = %+v, want degraded missing historical-data notice", history)
+	}
+}
+
+func TestSubsystemHealthUsesHealthyFarmNotices(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)
+	subs := (&Server{}).subsystemHealth(true, []ibkrlib.DataFarmStatus{
+		{Name: "usfarm", Type: "market", Status: "ok", Code: 2104, AsOf: now},
+		{Name: "ushmds", Type: "historical", Status: "inactive", Code: 2107, AsOf: now},
+	})
+	for _, name := range []string{"quote", "scanner", "history", "chain"} {
+		sub := mustFindSubsystem(t, subs, name)
+		if sub.Status != "ready" {
+			t.Fatalf("%s subsystem = %+v, want ready", name, sub)
+		}
+	}
+}
+
+func TestSubsystemHealthDegradesChainOnSecurityDefinitionFarmIssue(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)
+	subs := (&Server{}).subsystemHealth(true, []ibkrlib.DataFarmStatus{
+		{Name: "usfarm", Type: "market", Status: "ok", Code: 2104, AsOf: now},
+		{Name: "ushmds", Type: "historical", Status: "ok", Code: 2106, AsOf: now},
+		{Name: "secdefeu", Type: "security_definition", Status: "disconnected", Code: 2157, Message: "Sec-def data farm connection is broken:secdefeu", AsOf: now},
+	})
+	chain := mustFindSubsystem(t, subs, "chain")
+	if chain.Status != "degraded" || !strings.Contains(chain.Message, "security-definition farm secdefeu disconnected") {
+		t.Fatalf("chain subsystem = %+v, want degraded security-definition farm", chain)
+	}
+	if chain.LastError != "IBKR 2157 disconnected" || !chain.LastErrorAt.Equal(now) {
+		t.Fatalf("chain error = %q at %s, want IBKR 2157 at %s", chain.LastError, chain.LastErrorAt, now)
+	}
+}
+
+func mustFindSubsystem(t *testing.T, subs []rpc.SubsystemHealth, name string) rpc.SubsystemHealth {
+	t.Helper()
+	for _, sub := range subs {
+		if sub.Name == name {
+			return sub
+		}
+	}
+	t.Fatalf("subsystem %q not found in %+v", name, subs)
+	return rpc.SubsystemHealth{}
+}
+
 func TestGammaStatusQualityReportsSPXExcluded(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.May, 30, 12, 0, 0, 0, time.UTC)

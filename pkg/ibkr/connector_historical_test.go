@@ -414,6 +414,74 @@ func TestFetchHistoricalDailyBarsUsesSmartExchange(t *testing.T) {
 	}
 }
 
+func TestFetchHistoricalDailyBarsWhatToShowForcesAdjustedLast(t *testing.T) {
+	c := NewConnector(&ConnectorConfig{})
+	conn := NewConnection(nil)
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, maxClientVersion)
+	var out bytes.Buffer
+	conn.writer = bufio.NewWriter(&out)
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	c.contractCache["GLD"] = ContractDetailsLite{
+		ConID:        1234567,
+		LocalSymbol:  "GLD",
+		TradingClass: "GLD",
+		Exchange:     "SMART",
+		PrimaryExch:  "ARCA",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		var reqID int
+		for time.Now().Before(deadline) {
+			c.historicalMu.Lock()
+			for id := range c.historicalReqs {
+				reqID = id
+				break
+			}
+			c.historicalMu.Unlock()
+			if reqID != 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if reqID != 0 {
+			fields := []string{
+				strconv.Itoa(msgHistoricalData),
+				strconv.Itoa(reqID),
+				"1",
+				"20240520",
+				"215.11",
+				"216.00",
+				"214.50",
+				"215.75",
+				"1200000",
+				"215.40",
+				"900",
+			}
+			c.handleHistoricalData(fields)
+		}
+		close(done)
+	}()
+
+	if _, err := c.FetchHistoricalDailyBarsWhatToShow("GLD", 10, time.Second, "ADJUSTED_LAST"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	<-done
+
+	payload := out.Bytes()
+	if !bytes.Contains(payload, []byte("ADJUSTED_LAST")) {
+		t.Fatalf("expected ADJUSTED_LAST request, payload=%q", payload)
+	}
+	if bytes.Contains(payload, []byte("TRADES")) || bytes.Contains(payload, []byte("MIDPOINT")) {
+		t.Fatalf("explicit whatToShow should not fallback through TRADES/MIDPOINT, payload=%q", payload)
+	}
+}
+
 func TestFetchHistoricalDailyBarsWithContractUsesExplicitRoute(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	conn := NewConnection(nil)
@@ -936,9 +1004,11 @@ func TestFormatHistoricalDuration(t *testing.T) {
 	}{
 		{name: "underYear", days: 120, want: "120 D"},
 		{name: "exactYear", days: 365, want: "365 D"},
-		{name: "overYear", days: 366, want: "1 Y"},
-		{name: "partialYear", days: 400, want: "1 Y"},
+		{name: "overYear", days: 366, want: "2 Y"},
+		{name: "partialYear", days: 400, want: "2 Y"},
+		{name: "sixHundredFiftyDays", days: 650, want: "2 Y"},
 		{name: "twoYears", days: 730, want: "2 Y"},
+		{name: "overTwoYears", days: 731, want: "3 Y"},
 	}
 
 	for _, tt := range tests {

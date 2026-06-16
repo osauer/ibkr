@@ -4268,10 +4268,7 @@ func formatHistoricalDuration(lookbackDays int) string {
 	if lookbackDays <= 365 {
 		return fmt.Sprintf("%d D", lookbackDays)
 	}
-	years := lookbackDays / 365
-	if years <= 0 {
-		years = 1
-	}
+	years := (lookbackDays + 364) / 365
 	if years == 1 {
 		return "1 Y"
 	}
@@ -4301,6 +4298,15 @@ func formatHistoricalDuration(lookbackDays int) string {
 func (c *Connector) FetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int) ([]HistoricalBar, error) {
 	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
 		bars, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
+		return bars, err
+	})
+}
+
+// FetchHistoricalDailyBarsWhatToShowCtx is FetchHistoricalDailyBarsWhatToShow
+// with prompt cancellation when ctx is done.
+func (c *Connector) FetchHistoricalDailyBarsWhatToShowCtx(ctx context.Context, symbol string, lookbackDays int, whatToShow string) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
+		bars, err := c.FetchHistoricalDailyBarsWhatToShow(symbol, lookbackDays, timeout, whatToShow)
 		return bars, err
 	})
 }
@@ -4341,6 +4347,22 @@ func (c *Connector) FetchHistoricalDailyBarsWithContractCtx(ctx context.Context,
 // FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol.
 // It returns an error if the connector is not ready or the request times out.
 func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBars(symbol, lookbackDays, timeout, "")
+}
+
+// FetchHistoricalDailyBarsWhatToShow requests HMDS daily bars for the provided
+// symbol using exactly the requested IBKR whatToShow value. It does not fall
+// back to TRADES/MIDPOINT, so callers can make provenance claims about the feed
+// they actually asked the gateway to serve.
+func (c *Connector) FetchHistoricalDailyBarsWhatToShow(symbol string, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
+	cleanWhat, err := normalizeHistoricalWhatToShow(whatToShow)
+	if err != nil {
+		return nil, err
+	}
+	return c.fetchHistoricalDailyBars(symbol, lookbackDays, timeout, cleanWhat)
+}
+
+func (c *Connector) fetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
 	if !c.IsReady() {
 		return nil, fmt.Errorf("IBKR connection not ready")
 	}
@@ -4375,7 +4397,7 @@ func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 		Currency:    currency,
 	}
 
-	return c.fetchHistoricalDailyBarsWithBase(symbol, baseContract, primary, lookbackDays, timeout, true)
+	return c.fetchHistoricalDailyBarsWithBase(symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
 }
 
 // FetchHistoricalDailyBarsWithContract requests HMDS daily bars using an
@@ -4432,10 +4454,10 @@ func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, look
 			c.logWarn("Routed contract details for %s unavailable (%v)", symbol, err)
 		}
 	}
-	return c.fetchHistoricalDailyBarsWithBase(symbol, contract, fallbackPrimary, lookbackDays, timeout, false)
+	return c.fetchHistoricalDailyBarsWithBase(symbol, contract, fallbackPrimary, lookbackDays, timeout, false, "")
 }
 
-func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool) ([]HistoricalBar, error) {
+func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool, forceWhatToShow string) ([]HistoricalBar, error) {
 	requestedContract := baseContract
 	graceWindow := contractDetailsLateGrace
 	if timeout > 0 {
@@ -4490,16 +4512,24 @@ func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract
 		return nil, fmt.Errorf("contract details unresolved for %s (exchange=%s primary=%s)", symbol, baseContract.Exchange, baseContract.PrimaryExch)
 	}
 
-	baseWhat := defaultHistoricalWhat(baseContract.SecType)
-	altWhat := alternateHistoricalWhat(baseWhat)
-
 	type attempt struct {
 		contract   Contract
 		whatToShow string
 		label      string
 	}
 
-	seq := historicalWhatSequence(symbol, baseContract.SecType, baseWhat, altWhat)
+	var seq []string
+	if strings.TrimSpace(forceWhatToShow) != "" {
+		cleanWhat, err := normalizeHistoricalWhatToShow(forceWhatToShow)
+		if err != nil {
+			return nil, err
+		}
+		seq = []string{cleanWhat}
+	} else {
+		baseWhat := defaultHistoricalWhat(baseContract.SecType)
+		altWhat := alternateHistoricalWhat(baseWhat)
+		seq = historicalWhatSequence(symbol, baseContract.SecType, baseWhat, altWhat)
+	}
 	attempts := make([]attempt, 0, len(seq)*2)
 	seen := make(map[string]struct{})
 	appendAttempt := func(contract Contract, what string) {
@@ -4619,6 +4649,16 @@ func historicalWhatSequence(symbol, secType, baseWhat, altWhat string) []string 
 	}
 
 	return seq
+}
+
+func normalizeHistoricalWhatToShow(value string) (string, error) {
+	clean := strings.ToUpper(strings.TrimSpace(value))
+	switch clean {
+	case "TRADES", "MIDPOINT", "ADJUSTED_LAST":
+		return clean, nil
+	default:
+		return "", fmt.Errorf("unsupported historical whatToShow %q", value)
+	}
 }
 
 func shouldRetryHistorical(err error) bool {

@@ -127,8 +127,10 @@ func main() {
 	}
 
 	// Offline research harnesses consume local JSONL fixtures and should not
-	// autospawn or depend on a live gateway.
-	if cmd == "backtest" {
+	// autospawn or depend on a live gateway. The opportunity capture/export
+	// subcommands intentionally sample live scanner, technical, or history
+	// snapshots, so they go through the normal daemon path.
+	if cmd == "backtest" && !isBacktestDaemonInvocation(rest) {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Color: color}
@@ -196,7 +198,7 @@ func main() {
 }
 
 func unaryInvocationBudget(cmd string, rest []string) time.Duration {
-	if cmd == "scan" || cmd == "technical" || cmd == "canary" {
+	if cmd == "scan" || cmd == "technical" || cmd == "canary" || (cmd == "backtest" && isBacktestDaemonInvocation(rest)) {
 		return parseDurationOr(cliLongUnaryTimeout, 90*time.Second)
 	}
 	// The daemon-side MethodTradingPaperSmoke deadline is 100 s (preview,
@@ -206,6 +208,20 @@ func unaryInvocationBudget(cmd string, rest []string) time.Duration {
 		return 120 * time.Second
 	}
 	return parseDurationOr(cliUnaryTimeout, 60*time.Second)
+}
+
+func isBacktestDaemonInvocation(rest []string) bool {
+	for _, arg := range rest {
+		if arg == "--help" || arg == "-h" || arg == "-help" || arg == "help" {
+			return false
+		}
+	}
+	for _, arg := range rest {
+		if arg == "capture-opportunity" || arg == "export-opportunity-bars" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseDurationOr(raw string, fallback time.Duration) time.Duration {

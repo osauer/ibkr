@@ -28,3 +28,26 @@ func TestIsWatchDaemonInvocation(t *testing.T) {
 		})
 	}
 }
+
+func TestIsBacktestDaemonInvocation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"offline canary stays local", []string{"canary", "--input", "rows.jsonl"}, false},
+		{"capture opportunity needs daemon", []string{"capture-opportunity", "--symbols", "SPY"}, true},
+		{"export opportunity bars needs daemon", []string{"export-opportunity-bars", "--symbols", "SPY"}, true},
+		{"subcommand help stays local", []string{"export-opportunity-bars", "--help"}, false},
+		{"top level help stays local", []string{"--help"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBacktestDaemonInvocation(tc.args); got != tc.want {
+				t.Fatalf("isBacktestDaemonInvocation(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}

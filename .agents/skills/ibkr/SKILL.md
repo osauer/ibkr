@@ -1,6 +1,6 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
 ---
 
 Updated: 2026-06-13 10:04 CEST
@@ -23,6 +23,14 @@ Use `ibkr opportunities status --json`, `ibkr opportunities list --json`, or
 `ibkr opportunities preview`, `ibkr opportunities exercise`, and
 `ibkr opportunities ignore` are outside this read-only skill contract.
 
+`ibkr backtest research-opportunity ...` is an offline/local research harness,
+not a daemon opportunity feed and not a broker-action surface. Use it only when
+the user explicitly asks to inspect scored opportunity research/backtest files.
+Treat `not_advice`, `evidence.status`, `evidence.reasons`, feature diagnostics,
+and reason diagnostics as the answer; never translate a passing/strong
+diagnostic into alpha proof, a live trade recommendation, or an order
+preview/place request.
+
 The MCP surface remains read-oriented for agents. Paper-account broker writes
 are open to agents through the gated CLI flow; live agent-origin broker writes
 are hard-blocked daemon-side. Never attempt live broker writes, live-trading
@@ -40,6 +48,11 @@ can mint a local token; `token_minted` is not the same as `submit_eligible`.
 - Render decision-making market/account data as compact Markdown tables or short
   summaries with the key freshness and quality fields included.
 - Use `ibkr status --json` first when daemon/gateway access fails.
+- For opportunity backtest/research output, say "diagnostic only" unless the
+  JSON explicitly clears the evidence gate; even `promising_diagnostic` is not
+  alpha proof without locked walk-forward/live paper evidence.
+- Surface `diagnostics.features[]` and `diagnostics.reasons[]` as diagnostics,
+  not prescriptions.
 
 ## Canonical References
 

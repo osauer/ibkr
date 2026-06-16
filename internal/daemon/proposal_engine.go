@@ -1026,14 +1026,14 @@ func (e *proposalEngine) submitProposal(ctx context.Context, p rpc.TradeProposal
 }
 
 func (e *proposalEngine) fastPathPreviewProposal(key, revision string) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
-	return e.fastPathCachedProposal(key, revision, false)
+	return e.fastPathCachedProposal(key, revision)
 }
 
 func (e *proposalEngine) fastPathSubmitProposal(key, revision string) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
-	return e.fastPathCachedProposal(key, revision, true)
+	return e.fastPathCachedProposal(key, revision)
 }
 
-func (e *proposalEngine) fastPathCachedProposal(key, revision string, allowRevisionChurn bool) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
+func (e *proposalEngine) fastPathCachedProposal(key, revision string) (rpc.TradeProposal, []rpc.TradingBlocker, bool) {
 	key, revision = strings.TrimSpace(key), strings.TrimSpace(revision)
 	if key == "" || revision == "" {
 		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "bad_request", Message: "proposal key and revision are required"}}, true
@@ -1073,7 +1073,7 @@ func (e *proposalEngine) fastPathCachedProposal(key, revision string, allowRevis
 	if len(snap.AutoTrade.Blockers) > 0 {
 		return rpc.TradeProposal{}, snap.AutoTrade.Blockers, true
 	}
-	if snap.Revision != revision && !allowRevisionChurn {
+	if snap.Revision != revision {
 		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "stale_revision", Message: "proposal revision is stale; refresh proposals before preview or submit"}}, true
 	}
 	for _, prop := range snap.Proposals {
@@ -1087,9 +1087,6 @@ func (e *proposalEngine) fastPathCachedProposal(key, revision string, allowRevis
 			return prop, mergeTradingBlockers(snap.Blockers, prop.Blockers), true
 		}
 		return prop, prop.Blockers, true
-	}
-	if snap.Revision != revision {
-		return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "stale_revision", Message: "proposal revision is stale; refresh proposals before preview or submit"}}, true
 	}
 	return rpc.TradeProposal{}, []rpc.TradingBlocker{{Code: "proposal_not_found", Message: "proposal key is not present in the current snapshot"}}, true
 }

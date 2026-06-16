@@ -47,6 +47,107 @@ func statusDataFarms(farms []ibkrlib.DataFarmStatus) []rpc.DataFarmHealth {
 	return out
 }
 
+type farmReadiness struct {
+	status      string
+	message     string
+	lastError   string
+	lastErrorAt time.Time
+}
+
+func statusSubsystemFromReadiness(name string, r farmReadiness) rpc.SubsystemHealth {
+	status := strings.TrimSpace(r.status)
+	if status == "" {
+		status = "ready"
+	}
+	return rpc.SubsystemHealth{
+		Name:        name,
+		Status:      status,
+		Message:     r.message,
+		LastError:   r.lastError,
+		LastErrorAt: r.lastErrorAt,
+	}
+}
+
+func marketDataFarmReadiness(connected bool, farms []ibkrlib.DataFarmStatus, impact string) farmReadiness {
+	return farmTypeReadiness(connected, farms, "market", "market-data", impact)
+}
+
+func historicalDataFarmReadiness(connected bool, farms []ibkrlib.DataFarmStatus) farmReadiness {
+	return farmTypeReadiness(connected, farms, "historical", "historical-data", "history and technical screens may time out")
+}
+
+func farmTypeReadiness(connected bool, farms []ibkrlib.DataFarmStatus, farmType, label, impact string) farmReadiness {
+	if !connected {
+		return farmReadiness{status: "unavailable"}
+	}
+	seenReady := false
+	for _, farm := range farms {
+		fType := strings.ToLower(strings.TrimSpace(farm.Type))
+		status := strings.ToLower(strings.TrimSpace(farm.Status))
+		if fType == "connectivity" && dataFarmNeedsAttention(status) {
+			return farmImpairedReadiness("unavailable", farm, "TWS/server connectivity")
+		}
+		if fType != farmType {
+			continue
+		}
+		switch status {
+		case "ok", "inactive":
+			seenReady = true
+		case "disconnected", "broken":
+			return farmImpairedReadiness("degraded", farm, label+" farm")
+		}
+	}
+	if seenReady {
+		return farmReadiness{status: "ready"}
+	}
+	return farmReadiness{
+		status:  "degraded",
+		message: fmt.Sprintf("no %s farm connection notice observed; %s", label, impact),
+	}
+}
+
+func chainSubsystemHealth(connected bool, farms []ibkrlib.DataFarmStatus) rpc.SubsystemHealth {
+	market := marketDataFarmReadiness(connected, farms, "option quote enrichment may time out")
+	if market.status != "ready" {
+		return statusSubsystemFromReadiness("chain", market)
+	}
+	for _, farm := range farms {
+		if strings.ToLower(strings.TrimSpace(farm.Type)) != "security_definition" {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(farm.Status))
+		if dataFarmNeedsAttention(status) {
+			return statusSubsystemFromReadiness("chain", farmImpairedReadiness("degraded", farm, "security-definition farm"))
+		}
+	}
+	return rpc.SubsystemHealth{Name: "chain", Status: "ready"}
+}
+
+func farmImpairedReadiness(status string, farm ibkrlib.DataFarmStatus, label string) farmReadiness {
+	farmName := strings.TrimSpace(farm.Name)
+	if farmName == "" {
+		farmName = strings.TrimSpace(farm.Type)
+	}
+	farmStatus := strings.TrimSpace(farm.Status)
+	if farmStatus == "" {
+		farmStatus = "unhealthy"
+	}
+	message := fmt.Sprintf("%s %s %s", label, farmName, farmStatus)
+	if detail := strings.TrimSpace(farm.Message); detail != "" {
+		message += ": " + detail
+	}
+	lastErr := farmStatus
+	if farm.Code != 0 {
+		lastErr = fmt.Sprintf("IBKR %d %s", farm.Code, farmStatus)
+	}
+	return farmReadiness{
+		status:      status,
+		message:     message,
+		lastError:   lastErr,
+		lastErrorAt: farm.AsOf,
+	}
+}
+
 func dataFarmNeedsAttention(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "broken", "disconnected":

@@ -182,6 +182,8 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 		}
 	case len(res.DataFarms) > 0:
 		return statusConcern{Text: "Data farm issue: " + formatDataFarmsValue(res.DataFarms), Level: statusConcernWarn}
+	case firstSubsystemConcernText(res.Subsystems) != "":
+		return statusConcern{Text: "Subsystem issue: " + firstSubsystemConcernText(res.Subsystems), Level: statusConcernWarn}
 	case res.Connected && !rpc.IsLiveDataType(res.DataType):
 		return statusConcern{Text: "Market data is " + dataTypeLabel(res.DataType), Level: statusConcernWarn}
 	case res.Connected && res.GatewayTLS != res.NegotiatedTLS:
@@ -198,6 +200,40 @@ func nextConcern(res rpc.HealthResult, cliVersion string) statusConcern {
 	default:
 		return statusConcern{Text: "None", Level: statusConcernNone}
 	}
+}
+
+func firstSubsystemIssue(subs []rpc.SubsystemHealth) (rpc.SubsystemHealth, bool) {
+	for _, sub := range subs {
+		switch strings.ToLower(strings.TrimSpace(sub.Status)) {
+		case "degraded", "unavailable", "error":
+			return sub, true
+		}
+	}
+	return rpc.SubsystemHealth{}, false
+}
+
+func firstSubsystemConcernText(subs []rpc.SubsystemHealth) string {
+	sub, ok := firstSubsystemIssue(subs)
+	if !ok {
+		return ""
+	}
+	return formatSubsystemConcern(sub)
+}
+
+func formatSubsystemConcern(sub rpc.SubsystemHealth) string {
+	name := strings.TrimSpace(sub.Name)
+	if name == "" {
+		name = "unknown"
+	}
+	status := strings.TrimSpace(sub.Status)
+	if status == "" {
+		status = "unhealthy"
+	}
+	out := name + " " + status
+	if msg := strings.TrimSpace(sub.Message); msg != "" {
+		out += ": " + msg
+	}
+	return out
 }
 
 func firstTradingBlockerMessage(st rpc.TradingStatus) string {
