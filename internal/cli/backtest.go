@@ -667,6 +667,7 @@ func runBacktest(ctx context.Context, env *Env, args []string) int {
 	captureRequireLive := fs.Bool("require-live", true, "capture-opportunity require live regular-session quote context")
 	captureExcludePenny := fs.Bool("exclude-penny", true, "capture-opportunity drop rows below $5")
 	captureIncludeETFs := fs.Bool("include-etfs", false, "capture-opportunity keep ETF/leveraged ETP scanner rows")
+	captureIncludeRegime := fs.Bool("include-regime", false, "capture-opportunity attach current regime context for macro-veto research plans")
 	captureSplit := fs.String("split", "tuning", "capture-opportunity split label: tuning or explicit holdout")
 	captureHoldoutPlan := fs.String("holdout-plan", "", "capture-opportunity holdout pre-registration plan id; required with --split holdout")
 	captureMarketCluster := fs.String("market-cluster", "", "capture-opportunity market cluster label")
@@ -689,7 +690,7 @@ func runBacktest(ctx context.Context, env *Env, args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 || (rest[0] != "canary" && rest[0] != "regime" && rest[0] != "opportunity" && rest[0] != "research-opportunity" && rest[0] != "build-regime" && rest[0] != "build-opportunity" && rest[0] != "build-opportunity-pit" && rest[0] != "score-opportunity" && rest[0] != "capture-opportunity" && rest[0] != "export-opportunity-bars") {
-		return fail(env, "backtest: usage: ibkr backtest canary|regime|opportunity|build-regime|build-opportunity --input PATH [--json] | ibkr backtest build-opportunity-pit --bars BARS.jsonl --bars-manifest MANIFEST.json [--symbols SYM[,SYM...]] [--sample-step-bars 21] [--holdout-start-date YYYY-MM-DD --holdout-plan ID] | ibkr backtest opportunity --input PATH [--max-slots N] [--bars BARS.jsonl] [--bars-manifest MANIFEST.json] | ibkr backtest research-opportunity --input SCORED_PIT.jsonl [--plan all|ID[,ID...]] [--max-slots N] [--bars BARS.jsonl] [--bars-manifest MANIFEST.json] [--json] | ibkr backtest score-opportunity --input PIT.jsonl --bars BARS.jsonl [--bars-manifest MANIFEST.json] [--target-policy net-excess-positive] | ibkr backtest capture-opportunity [--preset top-movers | --symbols SYM[,SYM...]] [--split tuning|holdout] [--holdout-plan ID] [--append PATH] [--json] | ibkr backtest export-opportunity-bars --symbols SYM[,SYM...] --bars BARS.jsonl --bars-manifest MANIFEST.json [--benchmark QQQ] [--lookback-days 420] [--json]")
+		return fail(env, "backtest: usage: ibkr backtest canary|regime|opportunity|build-regime|build-opportunity --input PATH [--json] | ibkr backtest build-opportunity-pit --bars BARS.jsonl --bars-manifest MANIFEST.json [--symbols SYM[,SYM...]] [--sample-step-bars 21] [--holdout-start-date YYYY-MM-DD --holdout-plan ID] | ibkr backtest opportunity --input PATH [--max-slots N] [--bars BARS.jsonl] [--bars-manifest MANIFEST.json] | ibkr backtest research-opportunity --input SCORED_PIT.jsonl [--plan all|ID[,ID...]] [--max-slots N] [--bars BARS.jsonl] [--bars-manifest MANIFEST.json] [--json] | ibkr backtest score-opportunity --input PIT.jsonl --bars BARS.jsonl [--bars-manifest MANIFEST.json] [--target-policy net-excess-positive] | ibkr backtest capture-opportunity [--preset top-movers | --symbols SYM[,SYM...]] [--include-regime] [--split tuning|holdout] [--holdout-plan ID] [--append PATH] [--json] | ibkr backtest export-opportunity-bars --symbols SYM[,SYM...] --bars BARS.jsonl --bars-manifest MANIFEST.json [--benchmark QQQ] [--lookback-days 420] [--json]")
 	}
 	if rest[0] == "research-opportunity" && *researchListPlans {
 		if *jsonOut {
@@ -788,6 +789,7 @@ func runBacktest(ctx context.Context, env *Env, args []string) int {
 			RequireLive:      *captureRequireLive,
 			ExcludePenny:     *captureExcludePenny,
 			IncludeETFs:      *captureIncludeETFs,
+			IncludeRegime:    *captureIncludeRegime,
 			Split:            strings.TrimSpace(*captureSplit),
 			HoldoutPlan:      strings.TrimSpace(*captureHoldoutPlan),
 			MarketCluster:    strings.TrimSpace(*captureMarketCluster),
@@ -1407,6 +1409,11 @@ func opportunitySignalContextBlocked(reasons []string) bool {
 			"technical_error",
 			"price_missing",
 			"session_context_missing",
+			"macro_context_missing",
+			"macro_context_error",
+			"macro_data_quality_veto",
+			"macro_tone_missing",
+			"macro_tone_unknown",
 			"pct_above_50dma_missing",
 			"pct_above_200dma_missing":
 			return true
