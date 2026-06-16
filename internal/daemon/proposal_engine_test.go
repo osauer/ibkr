@@ -162,6 +162,29 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 8.48 || prop.Trail.InitialStopPrice != 97.52 {
 		t.Fatalf("off-hours trail = %+v, want amount trail seeded from portfolio mark", prop.Trail)
 	}
+
+	zombieRow := rpc.PositionView{
+		Symbol:      "HGENQ",
+		SecType:     "STOCK",
+		Quantity:    20000,
+		Mark:        0,
+		MarketValue: 0,
+		Currency:    "USD",
+	}
+	if prop, ok := trailingStopStockProposal(policy, status, zombieRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0); ok {
+		t.Fatalf("mark-zero zombie emitted proposal: %+v", prop)
+	}
+}
+
+func TestProposalCountsSerializesZeroTheta(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(proposalCounts(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"theta_per_day":0`)) {
+		t.Fatalf("counts JSON = %s, want explicit zero theta_per_day", raw)
+	}
 }
 
 func TestTrailingStopStockProposalRoutesXetraPositionForPreview(t *testing.T) {

@@ -691,6 +691,9 @@ func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPol
 		action = rpc.OrderActionBuy
 	}
 	reference := trailingStopReferencePrice(row, action)
+	if reference <= 0 && stockPositionLooksInactive(row) {
+		return rpc.TradeProposal{}, false
+	}
 	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketTrailingStop, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("broker-side trailing stop at %.1f%% below/above the instrument price", cfg.DefaultPct))
 	p.Contract.MinTick = minTick
 	p.TIF = policy.Buckets.TrailingStop.effectiveTIF()
@@ -824,6 +827,15 @@ func trailingStopReferencePrice(row rpc.PositionView, action string) float64 {
 		return row.ValuationMark
 	}
 	return 0
+}
+
+func stockPositionLooksInactive(row rpc.PositionView) bool {
+	return row.Mark <= 0 &&
+		row.ValuationMark <= 0 &&
+		row.MarketValue == 0 &&
+		(row.QuotePrice == nil || *row.QuotePrice <= 0) &&
+		(row.Bid == nil || *row.Bid <= 0) &&
+		(row.Ask == nil || *row.Ask <= 0)
 }
 
 func optionTrailReference(row rpc.PositionView, action string) (reference float64, spreadAbs float64, ok bool) {
