@@ -1191,6 +1191,10 @@ func (s *Server) newConnector(ep discover.Endpoint) *ibkrlib.Connector {
 	conn.Account = ep.Account
 	conn.UseTLS = ep.TLS
 	conn.EnableTLSFallback = ep.EnableTLSFallback
+	// The daemon owns reconnect/failover through triggerReconnect and
+	// reconnectFlow. Keep the low-level connection from racing that owner with
+	// a second reconnect loop on the same client ID.
+	conn.AutoReconnect = false
 
 	cc := &ibkrlib.ConnectorConfig{
 		ServiceName:       "ibkrd",

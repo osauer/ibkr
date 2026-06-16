@@ -2,6 +2,7 @@ package ibkr
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 )
@@ -77,4 +78,40 @@ func TestConnectionDisconnectStatusCheck(t *testing.T) {
 
 	conn.rateLimiter.Stop()
 	t.Log("✓ Status check prevents queueing to disconnected connection")
+}
+
+func TestConnectionDisconnectClosesSocketWhenAlreadyDisconnected(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	conn := NewConnection(DefaultConfig())
+	conn.statusMu.Lock()
+	conn.status = StatusDisconnected
+	conn.conn = client
+	conn.statusMu.Unlock()
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := server.Read(buf)
+		readDone <- err
+	}()
+
+	if err := conn.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	conn.Disconnect()
+
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("server read returned nil after client close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Disconnect did not close socket for disconnected connection")
+	}
+
+	if conn.conn != nil || conn.reader != nil || conn.writer != nil || conn.scanner != nil {
+		t.Fatalf("connection fields not cleared after Disconnect: conn=%v reader=%v writer=%v scanner=%v", conn.conn, conn.reader, conn.writer, conn.scanner)
+	}
 }
