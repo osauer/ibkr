@@ -101,7 +101,7 @@ type TradeProposalCounts struct {
 	RiskReduction               int     `json:"risk_reduction"`
 	TrailingStop                int     `json:"trailing_stop"`
 	MarketFlags                 int     `json:"market_flags,omitempty"`
-	ThetaPerDay                 float64 `json:"theta_per_day,omitempty"`
+	ThetaPerDay                 float64 `json:"theta_per_day"`
 	RiskReductionExcessNotional float64 `json:"risk_reduction_excess_notional,omitempty"`
 	RiskReductionExcessCurrency string  `json:"risk_reduction_excess_currency,omitempty"`
 }

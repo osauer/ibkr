@@ -244,11 +244,13 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"Buy to cover stop",
 		"function protectionInferredReference(proposal = {}, trail = {}, action = \"\")",
 		"function protectionEffectiveBlockers(proposal = {}, events = {})",
+		"function protectionMarketEventBlocker(proposal = {}, events = {})",
 		"function protectionMarketCalendar(proposal = {})",
 		"function proposalMarketKey(proposal = {})",
 		"function protectionQuoteStatusLabel(quote = null)",
+		"function protectionMarketStateHint(proposal = {})",
 		"broker WhatIf remains the submit authority",
-		"broker may queue the stop after fresh WhatIf",
+		"broker may queue after fresh WhatIf",
 		// The broker-managed-stop mechanics moved from per-row reason
 		// boilerplate into the action-button title (2026-06-12 noise
 		// reduction); the contract is that the explanation still ships.
@@ -560,6 +562,38 @@ func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing borrow-fee market-event rendering contract %q", want)
+		}
+	}
+}
+
+func TestAppJSProtectionFastPathKeepsHardMarketEventBlocker(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	effectiveBlockers := jsFunctionBlock(t, js, "protectionEffectiveBlockers")
+	if !strings.Contains(effectiveBlockers, "protectionMarketEventBlocker(proposal, events)") {
+		t.Fatalf("protectionEffectiveBlockers must include current market-event blockers")
+	}
+	eventBlocker := jsFunctionBlock(t, js, "protectionMarketEventBlocker")
+	for _, want := range []string{
+		`status !== "active"`,
+		`id === "halt_regulatory_or_news"`,
+		`id === "luld_pause"`,
+		`flag.role === "hard_blocker"`,
+		`flag.severity === "block"`,
+		"`market_event_${id || \"blocker\"}`",
+	} {
+		if !strings.Contains(eventBlocker, want) {
+			t.Fatalf("protectionMarketEventBlocker missing hard-block contract %q", want)
+		}
+	}
+	for _, name := range []string{"protectionPreviewGate", "protectionSubmitGate"} {
+		body := jsFunctionBlock(t, js, name)
+		if !strings.Contains(body, "protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})") {
+			t.Fatalf("%s must gate against current market events", name)
 		}
 	}
 }

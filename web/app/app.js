@@ -1813,7 +1813,10 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   toggle.textContent = state.protectionOpen ? "Hide proposals" : "Show proposals";
   toggle.setAttribute("aria-expanded", String(state.protectionOpen));
   renderProtectionTimestamp(proposals);
-  $("protectionTheta").textContent = typeof counts.theta_per_day === "number" ? money(counts.theta_per_day, "") : "--";
+  const theta = protectionThetaSummary(proposals, rows);
+  const thetaEl = $("protectionTheta");
+  thetaEl.textContent = hasNumericValue(theta.value) ? money(theta.value, "") : "--";
+  thetaEl.title = theta.title;
   const riskExcessCurrency = protectionRiskExcessCurrency(counts);
   $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
     ? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)
@@ -1827,7 +1830,8 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   const reason = protectionReason(proposals, autoTrade);
   const reasonEl = $("protectionReason");
   const refreshReason = protectionSnapshotRefreshReason();
-  const reasonText = [reason, refreshReason].filter(Boolean).join(" · ");
+  const hiddenReason = protectionHiddenRowsText(rows, marketEvents);
+  const reasonText = [reason, hiddenReason, refreshReason].filter(Boolean).join(" · ");
   reasonEl.textContent = reasonText;
   reasonEl.hidden = !reasonText;
   if (!state.protectionOpen) return;
@@ -1842,6 +1846,14 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
 
 function protectionVisibleRows(rows = [], marketEvents = {}) {
   return rows.filter((proposal) => !protectionCoveredByExistingOrder(proposal, marketEvents));
+}
+
+function protectionHiddenRowsText(rows = [], marketEvents = {}) {
+  const covered = rows.filter((proposal) => protectionCoveredByExistingOrder(proposal, marketEvents)).length;
+  if (covered === 0) return "";
+  const parts = [];
+  if (covered > 0) parts.push(`${covered} already-covered ${covered === 1 ? "proposal" : "proposals"} hidden`);
+  return parts.join(" · ");
 }
 
 function protectionCoveredByExistingOrder(proposal = {}, marketEvents = {}) {
@@ -1859,6 +1871,33 @@ function protectionEmptyRow(message) {
   empty.className = "empty-row";
   empty.textContent = message;
   return empty;
+}
+
+function protectionThetaSummary(proposals = {}, rows = []) {
+  const counts = proposals.counts || {};
+  if (hasNumericValue(counts.theta_per_day)) {
+    return {
+      value: counts.theta_per_day,
+      title: "Theta/day represented by theta-hygiene proposals that crossed policy thresholds; zero means no theta-hygiene action is pending.",
+    };
+  }
+  const thetaRows = rows.filter((row) => row.bucket === "theta_hygiene" && hasNumericValue(row.theta_per_day));
+  if (thetaRows.length > 0) {
+    return {
+      value: thetaRows.reduce((sum, row) => sum + Math.abs(row.theta_per_day), 0),
+      title: "Theta/day summed from visible theta-hygiene proposal rows.",
+    };
+  }
+  if ((proposals.blockers || []).length === 0 && counts.theta_hygiene === 0) {
+    return {
+      value: 0,
+      title: "No theta-hygiene action is above policy threshold.",
+    };
+  }
+  return {
+    value: null,
+    title: "Actionable theta proposal exposure is unavailable in this snapshot.",
+  };
 }
 
 function renderProtectionTimestamp(proposals = {}) {
@@ -1901,11 +1940,15 @@ function renderProtectionExposure() {
   const gross = state.snapshot?.canary?.portfolio?.gross_exposure_pct_nlv;
   if (typeof gross !== "number") {
     el.hidden = true;
-    el.textContent = "";
+    el.replaceChildren();
     return;
   }
-  el.textContent = `Gross exposure ${pct(gross)} of NLV`;
-  el.title = "Position market value vs net liquidation. Above 100% means margin: per-name % of NLV figures can sum past 100%.";
+  const label = document.createElement("span");
+  label.textContent = "Portfolio context";
+  const value = document.createElement("b");
+  value.textContent = `Gross exposure ${pct(gross)} of NLV`;
+  el.replaceChildren(label, value);
+  el.title = "Source: canary portfolio snapshot. Gross market value can exceed NLV under margin, so per-name % of NLV figures can sum past 100%.";
   el.hidden = false;
 }
 
@@ -2130,12 +2173,33 @@ function protectionActionLabel(proposal = {}) {
 
 function protectionActionTitle(proposal = {}, fallback = "") {
   if (proposal.bucket === "trailing_stop" && String(proposal.action || "").toUpperCase() === "SELL") {
-    return "Preview a broker trailing stop sell order. Once submitted, IBKR maintains the stop and raises it as the instrument price rises above the submission reference.";
+    return [
+      "Preview a broker trailing stop sell order. Once submitted, IBKR maintains the stop and raises it as the instrument price rises above the submission reference.",
+      protectionMarketStateHint(proposal),
+    ].filter(Boolean).join(" ");
   }
   if (proposal.bucket === "trailing_stop" && String(proposal.action || "").toUpperCase() === "BUY") {
-    return "Preview a broker trailing stop buy-to-close order. Once submitted, IBKR maintains the stop as the instrument price moves in favor of the short position.";
+    return [
+      "Preview a broker trailing stop buy-to-close order. Once submitted, IBKR maintains the stop as the instrument price moves in favor of the short position.",
+      protectionMarketStateHint(proposal),
+    ].filter(Boolean).join(" ");
   }
   return fallback || "Preview this protection proposal";
+}
+
+function protectionMarketStateHint(proposal = {}) {
+  const calendar = protectionMarketCalendar(proposal);
+  const marketName = proposalMarketLabel(proposalMarketKey(proposal));
+  const session = calendar?.session;
+  if (!session) {
+    return `${marketName} calendar unavailable; broker WhatIf remains the submit authority.`;
+  }
+  if (session.is_open) {
+    return `${marketName} is currently tradable.`;
+  }
+  const label = marketSessionLabel(calendar);
+  const market = label.phase || label.text || `${marketName} is closed`;
+  return `${market}; broker may queue after fresh WhatIf.`;
 }
 
 // protectionReasonText keeps reason prose off rows where it restates what
@@ -2536,14 +2600,12 @@ function protectionSubmitGate(proposal = {}) {
   const calendar = protectionMarketCalendar(proposal);
   const session = calendar?.session;
   if (!session) {
-    return { ready: true, reason: `${proposalMarketLabel(proposalMarketKey(proposal))} calendar unavailable; broker WhatIf remains the submit authority` };
+    return { ready: true, reason: protectionMarketStateHint(proposal) };
   }
   if (session.is_open) {
-    return { ready: true, reason: `${proposalMarketLabel(proposalMarketKey(proposal))} is currently tradable` };
+    return { ready: true, reason: protectionMarketStateHint(proposal) };
   }
-  const label = marketSessionLabel(calendar);
-  const market = label.phase || label.text || `${proposalMarketLabel(proposalMarketKey(proposal))} is closed`;
-  return { ready: true, reason: `${market}; broker may queue the stop after fresh WhatIf` };
+  return { ready: true, reason: protectionMarketStateHint(proposal) };
 }
 
 function protectionPreviewSubmitGate(proposal = {}, previewResult = null) {

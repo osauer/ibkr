@@ -2208,6 +2208,31 @@ p {
   color: var(--blue);
 }
 
+.protection-exposure-note {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.protection-exposure-note span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.protection-exposure-note b {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .protection-auto:disabled,
 .protection-row__actions button:disabled {
   opacity: 0.45;
