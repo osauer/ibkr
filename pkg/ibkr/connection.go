@@ -243,6 +243,7 @@ type Connection struct {
 	// Reconnection control
 	reconnectChan chan struct{}
 	stopChan      chan struct{}
+	stopOnce      sync.Once
 	wg            sync.WaitGroup
 
 	// TCP connection
@@ -838,15 +839,18 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 // Disconnect closes the IBKR connection
 func (c *Connection) Disconnect() error {
 	c.statusMu.Lock()
-	if c.status != StatusConnected {
-		c.statusMu.Unlock()
-		return nil
-	}
+	wasConnected := c.status == StatusConnected
 	c.status = StatusDisconnected
 	c.statusMu.Unlock()
 
 	// Signal shutdown first - this stops new requests from being queued
-	close(c.stopChan)
+	c.stopOnce.Do(func() {
+		close(c.stopChan)
+	})
+
+	// A disconnect may race a reconnect pause. Wake any admitted writer so the
+	// rate limiter can drain instead of waiting forever on a final shutdown.
+	c.resumeTransport()
 
 	// Stop the rate limiter - this drains the queue and waits for in-flight requests
 	if c.rateLimiter != nil {
@@ -863,14 +867,16 @@ func (c *Connection) Disconnect() error {
 		c.cancel()
 	}
 
+	// Close TCP connection before waiting so a reader parked on Read() exits
+	// promptly even when Disconnect is called from a disconnected/degraded state.
+	c.closeConnection()
+
 	// Wait for goroutines to finish, bounded. The readMessages goroutine
 	// only checks stopChan between Read() calls, so a reader parked on a
-	// blocking socket read won't honour the close — it unblocks only when
-	// the TCP socket below is closed. Without this bound, SIGTERM would
-	// propagate through cmd/ibkr/daemon.go → Server.Stop → here and pin
-	// the process forever; user-visible symptom was "Quit doesn't work,
-	// only Force Quit." The leaked reader exits the moment c.conn.Close()
-	// below fires and the OS reaps any straggler at process exit.
+	// blocking socket read won't honour the close — it unblocks only when the
+	// TCP socket above is closed. Without this bound, SIGTERM would propagate
+	// through cmd/ibkr/daemon.go -> Server.Stop -> here and pin the process
+	// forever; user-visible symptom was "Quit doesn't work, only Force Quit."
 	waitDone := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -882,14 +888,9 @@ func (c *Connection) Disconnect() error {
 		connectLogger.Warnf("Disconnect: goroutines still running after 2s; closing socket to unblock (Client ID: %d)", c.config.ClientID)
 	}
 
-	// Close TCP connection - safe now that all writes are complete
-	if c.conn != nil {
-		c.conn.Close()
-	}
-
 	connectLogger.Infof("Connection closed (Client ID: %d)", c.config.ClientID)
 
-	if c.onDisconnect != nil {
+	if wasConnected && c.onDisconnect != nil {
 		c.onDisconnect(nil)
 	}
 
