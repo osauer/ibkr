@@ -335,6 +335,46 @@ func TestComputeCanaryStandalonePremarketSPYDropWatches(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryProvisionalRedDoesNotConfirmHardTapeStress(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.GrossPositionValue = 180_000
+	r := healthyCanaryRegime()
+	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRedCount: 1, ClusterRankedCount: 6}
+	r.GammaZero.Band = "red"
+	spyPct := -2.6
+	vixPct := 2.0
+	r.HYGSPYDivergence.SPYChangePct = &spyPct
+	r.VIXTermStructure.VIXChangePct = &vixPct
+	res := ComputeCanary(CanaryInput{
+		Account: acct,
+		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+			ExposureBase: []rpc.UnderlyingExposure{{
+				Underlying: "SPY", DollarDeltaBase: new(45_000.0),
+			}},
+		}},
+		Regime: r,
+		Now:    time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
+	})
+	if res.MarketConfirmation == canaryMarketConfirmed || res.Market.EligibleRedClusters != 0 {
+		t.Fatalf("market = confirmation %s eligible %d, want provisional/non-confirmed", res.MarketConfirmation, res.Market.EligibleRedClusters)
+	}
+	gross, ok := findSignal(res.Signals, risk.SignalGrossExposureHigh)
+	if !ok {
+		t.Fatalf("missing gross exposure signal, signals: %+v", res.Signals)
+	}
+	if gross.Severity != risk.SeverityWatch || gross.Direction != risk.DirectionRebalance {
+		t.Fatalf("gross exposure signal = %+v, want watch/rebalance for provisional red plus hard tape", gross)
+	}
+	concentration, ok := findSignal(res.Signals, risk.SignalSingleNameDeltaHigh)
+	if !ok {
+		t.Fatalf("missing concentration signal, signals: %+v", res.Signals)
+	}
+	if concentration.Severity != risk.SeverityWatch || concentration.Direction != risk.DirectionRebalance {
+		t.Fatalf("concentration signal = %+v, want watch/rebalance for provisional red plus hard tape", concentration)
+	}
+}
+
 func TestComputeCanaryConfirmedSPYVIXShockDelevers(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -438,6 +478,33 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	sig, ok := findSignal(res.Signals, risk.SignalSingleNameDeltaHigh)
 	if !ok || sig.Direction != risk.DirectionRebalance || sig.Posture != risk.PortfolioPostureRebalance {
 		t.Fatalf("single-name delta signal = %+v, want rebalance direction/posture", sig)
+	}
+}
+
+func TestComputeCanaryProvisionalRedsDoNotCreateShortConvexityActSignal(t *testing.T) {
+	t.Parallel()
+	gamma := -1.0
+	r := healthyCanaryRegime()
+	r.FundingStress.Band = "red"
+	r.GammaZero.Band = "red"
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+			Gamma:          &gamma,
+			GreeksCoverage: 1,
+			GreeksTotal:    1,
+		}},
+		Regime: r,
+		Now:    time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
+	})
+	if res.Market.EligibleRedClusters != 0 || res.Market.RedClusters < 2 {
+		t.Fatalf("market reds = %d eligible = %d, want multiple provisional reds", res.Market.RedClusters, res.Market.EligibleRedClusters)
+	}
+	if sig, ok := findSignal(res.Signals, risk.SignalShortConvexityHigh); ok {
+		t.Fatalf("short-convexity signal = %+v, want no act-grade convexity signal from provisional reds", sig)
+	}
+	if res.Severity != risk.SeverityWatch {
+		t.Fatalf("severity = %s, want watch for provisional reds", res.Severity)
 	}
 }
 
