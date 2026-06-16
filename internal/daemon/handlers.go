@@ -2331,8 +2331,12 @@ func quoteLiquidityCacheKey(q *rpc.Quote) quoteLiquidityKey {
 	if q == nil {
 		return quoteLiquidityKey{}
 	}
+	symbol := normSym(q.Contract.Symbol)
+	if symbol == "" {
+		symbol = normSym(q.Symbol)
+	}
 	return quoteLiquidityKey{
-		symbol:   normSym(q.Contract.Symbol),
+		symbol:   symbol,
 		market:   strings.ToLower(strings.TrimSpace(q.Contract.Market)),
 		exchange: normSym(q.Contract.Exchange),
 		primary:  normSym(q.Contract.PrimaryExch),
@@ -3530,6 +3534,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		LastError:     lastErr,
 	}
 	accountForMode := ep.Account
+	var farmStatuses []ibkrlib.DataFarmStatus
 	if c != nil {
 		res.ConnectedAccount = strings.TrimSpace(c.AccountID())
 		if res.ConnectedAccount != "" {
@@ -3559,7 +3564,8 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		res.Connected = c.IsReady() && s.postConnectSetupDone.Load()
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
-		res.DataFarms = statusDataFarms(c.DataFarmStatuses())
+		farmStatuses = c.DataFarmStatuses()
+		res.DataFarms = statusDataFarms(farmStatuses)
 	}
 	res.AccountMode = accountModeForStatus(ep.Port, accountForMode)
 
@@ -3571,23 +3577,24 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	// — the same source isBusy() and the regime partial-envelope
 	// contention message ride, so the three surfaces never diverge.
 	res.BackgroundTasks = s.backgroundTasks()
-	res.Subsystems = s.subsystemHealth(res.Connected)
+	res.Subsystems = s.subsystemHealth(res.Connected, farmStatuses)
 	res.DataQuality = s.statusDataQuality()
 	res.Members = s.membersHealth()
 	res.Trading = *s.handleTradingStatus()
 	return res
 }
 
-func (s *Server) subsystemHealth(connected bool) []rpc.SubsystemHealth {
+func (s *Server) subsystemHealth(connected bool, farms []ibkrlib.DataFarmStatus) []rpc.SubsystemHealth {
 	gatewayStatus := "ready"
 	if !connected {
 		gatewayStatus = "unavailable"
 	}
 	out := []rpc.SubsystemHealth{
 		{Name: "watchlist", Status: "ready", Message: "list-only path is local; quote enrichment requires gateway"},
-		{Name: "quote", Status: gatewayStatus},
-		{Name: "scanner", Status: gatewayStatus},
-		{Name: "chain", Status: gatewayStatus},
+		statusSubsystemFromReadiness("quote", marketDataFarmReadiness(connected, farms, "quotes may time out")),
+		statusSubsystemFromReadiness("scanner", marketDataFarmReadiness(connected, farms, "scanner requests may time out")),
+		statusSubsystemFromReadiness("history", historicalDataFarmReadiness(connected, farms)),
+		chainSubsystemHealth(connected, farms),
 	}
 	gamma := rpc.SubsystemHealth{Name: "gamma", Status: gatewayStatus}
 	if s.zeroGamma != nil && s.zeroGamma.IsComputing() {
@@ -3786,19 +3793,29 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 	if days <= 0 {
 		days = 90
 	}
+	whatToShow, err := normalizeHistoryWhatToShowParam(p.WhatToShow)
+	if err != nil {
+		return nil, err
+	}
 	c := s.gatewayConnector()
 	if c == nil {
 		return nil, s.gatewayUnavailableError()
 	}
-	bars, err := c.FetchHistoricalDailyBars(sym, days, 30*time.Second)
+	var bars []ibkrlib.HistoricalBar
+	if whatToShow != "" {
+		bars, err = c.FetchHistoricalDailyBarsWhatToShow(sym, days, 30*time.Second, whatToShow)
+	} else {
+		bars, err = c.FetchHistoricalDailyBars(sym, days, 30*time.Second)
+	}
 	if err != nil {
 		return nil, err
 	}
 	res := &rpc.HistoryDailyResult{
-		Symbol: sym,
-		Days:   days,
-		AsOf:   time.Now(),
-		Bars:   make([]rpc.HistoryBar, 0, len(bars)),
+		Symbol:     sym,
+		Days:       days,
+		WhatToShow: whatToShow,
+		AsOf:       time.Now(),
+		Bars:       make([]rpc.HistoryBar, 0, len(bars)),
 	}
 	for _, b := range bars {
 		res.Bars = append(res.Bars, rpc.HistoryBar{
@@ -3811,6 +3828,18 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 		})
 	}
 	return res, nil
+}
+
+func normalizeHistoryWhatToShowParam(value string) (string, error) {
+	clean := strings.ToUpper(strings.TrimSpace(value))
+	switch clean {
+	case "":
+		return "", nil
+	case "TRADES", "MIDPOINT", "ADJUSTED_LAST":
+		return clean, nil
+	default:
+		return "", errBadRequest("what_to_show must be TRADES, MIDPOINT, or ADJUSTED_LAST")
+	}
 }
 
 // handleBreadthSPX returns the current S&P 500 stocks-above-50DMA reading

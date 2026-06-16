@@ -415,6 +415,37 @@ func TestRenderStatus_DataFarmsIssueGetsAttention(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_SubsystemIssueGetsAttention(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.HealthResult{
+		DaemonVersion: "v1.0.0",
+		UptimeSeconds: 1842,
+		GatewayHost:   "127.0.0.1",
+		GatewayPort:   7496,
+		ClientID:      15,
+		Connected:     true,
+		ServerVersion: 203,
+		Subsystems: []rpc.SubsystemHealth{{
+			Name:    "quote",
+			Status:  "degraded",
+			Message: "no market-data farm connection notice observed; quotes may time out",
+		}},
+	}
+	renderStatusText(env, res)
+	got := stdout.String()
+	for _, want := range []string{
+		"IBKR Gateway  ATTENTION",
+		"Subsystems     quote:degraded",
+		"Next concern   Subsystem issue: quote degraded: no market-data farm connection notice observed; quotes may time out",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestNextConcernPriority(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -457,6 +488,37 @@ func TestNextConcernPriority(t *testing.T) {
 				}},
 			},
 			want: "Data farm issue: historical:ushmds disconnected (IBKR 2105)",
+		},
+		{
+			name: "data farm before subsystem",
+			in: rpc.HealthResult{
+				Connected: true,
+				DataFarms: []rpc.DataFarmHealth{{
+					Name:   "usfarm",
+					Type:   "market",
+					Status: "disconnected",
+					Code:   2103,
+				}},
+				Subsystems: []rpc.SubsystemHealth{{
+					Name:    "quote",
+					Status:  "degraded",
+					Message: "no market-data farm connection notice observed; quotes may time out",
+				}},
+			},
+			want: "Data farm issue: market:usfarm disconnected (IBKR 2103)",
+		},
+		{
+			name: "subsystem before market data",
+			in: rpc.HealthResult{
+				Connected: true,
+				DataType:  rpc.MarketDataFrozen,
+				Subsystems: []rpc.SubsystemHealth{{
+					Name:    "quote",
+					Status:  "degraded",
+					Message: "no market-data farm connection notice observed; quotes may time out",
+				}},
+			},
+			want: "Subsystem issue: quote degraded: no market-data farm connection notice observed; quotes may time out",
 		},
 		{
 			name: "market data before members",
@@ -609,6 +671,17 @@ func TestStatusVerdict(t *testing.T) {
 					Name:   "usopt",
 					Type:   "market",
 					Status: "disconnected",
+				}},
+			},
+			want: "ATTENTION",
+		},
+		{
+			name: "subsystem warning",
+			in: rpc.HealthResult{
+				Connected: true,
+				Subsystems: []rpc.SubsystemHealth{{
+					Name:   "scanner",
+					Status: "degraded",
 				}},
 			},
 			want: "ATTENTION",

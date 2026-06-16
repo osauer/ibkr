@@ -1010,6 +1010,58 @@ func TestTrailingStopFastPathPreviewBlocksPreservedSnapshotBlockers(t *testing.T
 	}
 }
 
+func TestTrailingStopPreviewBlocksStaleRevisionBeforeToken(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		t.Fatal("stale revision must block before preview quote")
+		return rpc.OrderQuoteSnapshot{}, nil
+	}
+	srv.orderPreviewPositionImpact = func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
+		t.Fatal("stale revision must block before preview position")
+		return rpc.OrderPositionImpact{}, nil
+	}
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		t.Fatal("stale revision must block before broker WhatIf preview")
+		return rpc.OrderWhatIfResult{}, nil
+	}
+	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
+	prop := preservedTrailingStopProposal(now)
+	submittedRevision := prop.Revision
+	prop.Revision = "sha256:changed-material-intent"
+	prop.Quantity = 2
+	prop.MaxQuantity = 2
+	prop.PositionQuantity = 2
+	srv.tradeProposals = &proposalEngine{
+		server:   srv,
+		store:    testProposalStore(t),
+		now:      func() time.Time { return now },
+		ignored:  map[string]struct{}{},
+		snapshot: preservedProposalSnapshot(now, prop, nil),
+	}
+
+	res, err := srv.tradeProposals.Preview(context.Background(), rpc.TradeProposalPreviewParams{
+		Key:       prop.Key,
+		Revision:  submittedRevision,
+		Quantity:  1,
+		TimeoutMs: 20,
+		FastPath:  true,
+	})
+	if err != nil {
+		t.Fatalf("preview err = %v", err)
+	}
+	if res.Accepted || res.Preview != nil || res.PreviewTokenID != "" || res.SubmitEligible || !hasBlocker(res.Blockers, "stale_revision") {
+		t.Fatalf("preview = %+v, want stale_revision before token mint", res)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("order journal events = %+v, want none before stale-revision blocker", events)
+	}
+}
+
 func TestTrailingStopSubmitBlocksPreservedRefreshFailureBeforePreview(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
@@ -1043,7 +1095,7 @@ func TestTrailingStopSubmitBlocksPreservedRefreshFailureBeforePreview(t *testing
 	}
 }
 
-func TestTrailingStopSubmitUsesFreshCachedSnapshotBeforeRefresh(t *testing.T) {
+func TestTrailingStopSubmitUsesFreshCachedSnapshotWhenRevisionMatches(t *testing.T) {
 	t.Parallel()
 	if !orderWritesAvailable {
 		t.Skip("proposal submit place path requires trading build")
@@ -1063,8 +1115,6 @@ func TestTrailingStopSubmitUsesFreshCachedSnapshotBeforeRefresh(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
 	prop := preservedTrailingStopProposal(now)
-	submittedRevision := prop.Revision
-	prop.Revision = "sha256:refreshed"
 	srv.tradeProposals = &proposalEngine{
 		server:   srv,
 		store:    testProposalStore(t),
@@ -1075,7 +1125,7 @@ func TestTrailingStopSubmitUsesFreshCachedSnapshotBeforeRefresh(t *testing.T) {
 
 	res, err := srv.tradeProposals.Submit(context.Background(), rpc.TradeProposalSubmitParams{
 		Key:       prop.Key,
-		Revision:  submittedRevision,
+		Revision:  prop.Revision,
 		Quantity:  1,
 		TimeoutMs: 20,
 		FastPath:  true,
@@ -1104,6 +1154,67 @@ func TestTrailingStopSubmitUsesFreshCachedSnapshotBeforeRefresh(t *testing.T) {
 		!hasOrderJournalEvent(events, orderJournalEventTokenConfirmed) ||
 		!hasOrderJournalEvent(events, orderJournalEventSendAttempted) {
 		t.Fatalf("order journal events = %+v, want previewed, token-confirmed, send-attempted", events)
+	}
+}
+
+func TestTrailingStopSubmitBlocksStaleRevisionBeforePreview(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
+		t.Fatal("stale revision must block before preview quote")
+		return rpc.OrderQuoteSnapshot{}, nil
+	}
+	srv.orderPreviewPositionImpact = func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
+		t.Fatal("stale revision must block before preview position")
+		return rpc.OrderPositionImpact{}, nil
+	}
+	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
+		t.Fatal("stale revision must block before broker WhatIf preview")
+		return rpc.OrderWhatIfResult{}, nil
+	}
+	srv.orderReserveBrokerID = func(context.Context) (int, error) {
+		t.Fatal("stale revision must block before reserving broker order id")
+		return 0, nil
+	}
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		t.Fatal("stale revision must block before broker place")
+		return nil
+	}
+	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
+	prop := preservedTrailingStopProposal(now)
+	submittedRevision := prop.Revision
+	prop.Revision = "sha256:changed-material-intent"
+	prop.Quantity = 2
+	prop.MaxQuantity = 2
+	prop.PositionQuantity = 2
+	srv.tradeProposals = &proposalEngine{
+		server:   srv,
+		store:    testProposalStore(t),
+		now:      func() time.Time { return now },
+		ignored:  map[string]struct{}{},
+		snapshot: preservedProposalSnapshot(now, prop, nil),
+	}
+
+	res, err := srv.tradeProposals.Submit(context.Background(), rpc.TradeProposalSubmitParams{
+		Key:       prop.Key,
+		Revision:  submittedRevision,
+		Quantity:  1,
+		TimeoutMs: 20,
+		FastPath:  true,
+		Origin:    rpc.OrderOriginAgent,
+	})
+	if err != nil {
+		t.Fatalf("submit err = %v", err)
+	}
+	if res.Accepted || res.Preview != nil || res.Place != nil || !hasBlocker(res.Blockers, "stale_revision") {
+		t.Fatalf("submit = %+v, want stale_revision before preview/place", res)
+	}
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("order journal events = %+v, want none before stale-revision blocker", events)
 	}
 }
 
@@ -1955,7 +2066,7 @@ func TestProposalSubsystemHealthReportsRefreshStreak(t *testing.T) {
 	e.replaceSnapshot(scopedTestSnapshot("DU7654321", rpc.AccountModePaper, start))
 
 	find := func() (rpc.SubsystemHealth, bool) {
-		for _, sub := range srv.subsystemHealth(true) {
+		for _, sub := range srv.subsystemHealth(true, nil) {
 			if sub.Name == "proposals" {
 				return sub, true
 			}

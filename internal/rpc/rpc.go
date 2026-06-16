@@ -405,8 +405,9 @@ type CancelParams struct {
 
 // HistoryDailyParams requests N days of daily OHLCV bars for a symbol.
 type HistoryDailyParams struct {
-	Symbol string `json:"symbol"`
-	Days   int    `json:"days,omitempty"` // default 90 when zero
+	Symbol     string `json:"symbol"`
+	Days       int    `json:"days,omitempty"` // default 90 when zero
+	WhatToShow string `json:"what_to_show,omitempty"`
 }
 
 // HistoryBar is one daily OHLCV row.
@@ -424,11 +425,12 @@ type HistoryBar struct {
 // is therefore unused on this response and kept only as a reserved field
 // (omitempty) for shape parity with the streaming surfaces.
 type HistoryDailyResult struct {
-	Symbol   string       `json:"symbol"`
-	Days     int          `json:"days"`
-	DataType string       `json:"data_type,omitempty"`
-	Bars     []HistoryBar `json:"bars"`
-	AsOf     time.Time    `json:"as_of"`
+	Symbol     string       `json:"symbol"`
+	Days       int          `json:"days"`
+	WhatToShow string       `json:"what_to_show,omitempty"`
+	DataType   string       `json:"data_type,omitempty"`
+	Bars       []HistoryBar `json:"bars"`
+	AsOf       time.Time    `json:"as_of"`
 }
 
 // TechnicalParams asks the daemon to compute weekly-screening indicators from

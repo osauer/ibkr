@@ -762,6 +762,28 @@ func TestQuoteHistoricalContractUsesQuoteRoute(t *testing.T) {
 	}
 }
 
+func TestQuoteLiquidityCacheKeyUsesQuoteSymbolFallback(t *testing.T) {
+	t.Parallel()
+	rgnt := quoteLiquidityCacheKey(&rpc.Quote{Symbol: "RGNT"})
+	cupr := quoteLiquidityCacheKey(&rpc.Quote{Symbol: "CUPR"})
+	if rgnt.symbol != "RGNT" || cupr.symbol != "CUPR" {
+		t.Fatalf("cache keys = %+v / %+v, want quote symbols", rgnt, cupr)
+	}
+	if rgnt == cupr {
+		t.Fatalf("cache keys collided for scanner quote shells: %+v", rgnt)
+	}
+
+	contractKey := quoteLiquidityCacheKey(&rpc.Quote{
+		Symbol: "ignored",
+		Contract: rpc.ContractParams{
+			Symbol: "IBM",
+		},
+	})
+	if contractKey.symbol != "IBM" {
+		t.Fatalf("contract-backed cache key = %+v, want contract symbol", contractKey)
+	}
+}
+
 func TestApplyQuoteHistoricalFallbackPreservesLastPrice(t *testing.T) {
 	t.Parallel()
 	loc := mustLocation(t, "America/New_York")
@@ -900,6 +922,21 @@ func TestHistoryDailyEmptySymbolIsBadRequest(t *testing.T) {
 	_, err := srv.handleHistoryDaily(context.Background(), req)
 	if err == nil {
 		t.Fatal("expected error for empty symbol")
+	}
+	code, _ := classifyError(err)
+	if code != rpc.CodeBadRequest {
+		t.Fatalf("classifyError code = %q, want %q", code, rpc.CodeBadRequest)
+	}
+}
+
+func TestHistoryDailyUnsupportedWhatToShowIsBadRequest(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	params, _ := json.Marshal(rpc.HistoryDailyParams{Symbol: "AAPL", Days: 30, WhatToShow: "BID"})
+	req := &rpc.Request{ID: "t7b", Method: rpc.MethodHistoryDaily, Params: params}
+	_, err := srv.handleHistoryDaily(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for unsupported what_to_show")
 	}
 	code, _ := classifyError(err)
 	if code != rpc.CodeBadRequest {
