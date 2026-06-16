@@ -1183,6 +1183,21 @@ p {
   background: #fff;
 }
 
+.detail-panel--dark .driver-row.risk {
+  border-color: rgba(224, 0, 34, 0.22);
+  background: var(--red-soft);
+}
+
+.detail-panel--dark .driver-row.warn {
+  border-color: rgba(255, 181, 33, 0.3);
+  background: rgba(255, 181, 33, 0.08);
+}
+
+.detail-panel--dark .driver-row.neutral {
+  border-color: var(--line-soft);
+  background: #fff;
+}
+
 .detail-card span,
 .detail-fact span,
 .driver-row span {
@@ -1386,7 +1401,7 @@ p {
 
 .regime-summary small,
 .regime-summary em,
-.canary-hero p {
+.canary-hero__copy p {
   max-width: 560px;
   color: var(--muted);
   font-size: 12px;
@@ -1396,14 +1411,14 @@ p {
 }
 
 .regime-summary em,
-.canary-hero p {
+.canary-hero__copy p {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
-.canary-hero p {
+.canary-hero__copy p {
   -webkit-line-clamp: 1;
 }
 

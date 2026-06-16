@@ -311,13 +311,14 @@ function renderAll() {
   $("canarySummary").textContent = canarySummaryText(canary, snap);
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
+  renderCanaryActions(canary);
   renderSelectedAlert();
   renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
   renderOpportunitiesPanel(snap.opportunities || {});
   renderOpenOrders();
   renderMarketContext(snap);
   renderRegimePanel(snap);
-  renderCanaryDetail(canary);
+  renderCanaryDetail(canary, snap);
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
   renderAlertMode();
@@ -1776,7 +1777,7 @@ function currentAccountContext(account = {}) {
   };
 }
 
-function renderCanaryDetail(canary) {
+function renderCanaryDetail(canary, snap = state.snapshot || {}) {
   const panel = $("canaryDetailPanel");
   const button = $("canaryDetailToggle");
   panel.hidden = !state.canaryDetailOpen;
@@ -1784,22 +1785,106 @@ function renderCanaryDetail(canary) {
   button.setAttribute("aria-expanded", String(state.canaryDetailOpen));
   if (!state.canaryDetailOpen) return;
 
-  $("canaryDetailGrid").replaceChildren(...canaryExplanationCards(canary).map(detailCard));
+  $("canaryDetailGrid").replaceChildren(...canaryExplanationCards(canary, snap).map(detailCard));
   renderHeldStress(canary);
 
-  const rows = (canary.rows || []).slice(0, 3);
-  $("canaryDrivers").replaceChildren(...rows.map((row) => {
-    const item = document.createElement("div");
-    item.className = "driver-row";
-    const label = document.createElement("span");
-    label.textContent = row.severity ? String(row.severity).replaceAll("_", " ") : "driver";
-    const title = document.createElement("b");
-    title.textContent = row.title || "Canary driver";
-    const body = document.createElement("p");
-    body.textContent = [row.guidance, row.evidence].filter(Boolean).join(" ") || "No extra detail for this driver.";
-    item.append(label, title, body);
-    return item;
-  }));
+  const rows = canaryDriverRows(canary);
+  $("canaryDrivers").replaceChildren(...(rows.length > 0 ? rows.map(canaryDriverRow) : [canaryEmptyDriverRow()]));
+}
+
+function renderCanaryActions(canary) {
+  const review = $("quickReviewBlockersButton");
+  if (!review) return;
+  const label = review.querySelector("span");
+  const sublabel = review.querySelector("small");
+  if (canaryInputCheckBlocksAction(canary)) {
+    if (label) label.textContent = "Review blockers";
+    if (sublabel) sublabel.textContent = "Open data gate";
+    return;
+  }
+  if (canaryNeedsInputCheck(canary)) {
+    if (label) label.textContent = "Check data";
+    if (sublabel) sublabel.textContent = "Open source health";
+    return;
+  }
+  if (label) label.textContent = "Review evidence";
+  if (sublabel) sublabel.textContent = "Open drivers";
+}
+
+function canaryDriverRows(canary) {
+  const rows = Array.isArray(canary.rows) ? canary.rows : [];
+  const detailRows = rows.filter((row) => cleanDetail(row.title).toLowerCase() !== "portfolio canary");
+  const active = detailRows
+    .filter(canaryRowNeedsAttention)
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => canaryDriverPriority(a.row) - canaryDriverPriority(b.row) || a.index - b.index)
+    .map((item) => item.row);
+  return (active.length > 0 ? active : detailRows).slice(0, 5);
+}
+
+function canaryRowNeedsAttention(row = {}) {
+  const severity = String(row.severity || "").toLowerCase();
+  const direction = String(row.direction || "").toLowerCase();
+  return ["urgent", "act", "watch"].includes(severity) ||
+    ["defensive", "rebalance", "data_quality"].includes(direction);
+}
+
+function canaryDriverPriority(row = {}) {
+  const severity = String(row.severity || "").toLowerCase();
+  const direction = String(row.direction || "").toLowerCase();
+  const title = cleanDetail(row.title).toLowerCase();
+  if (severity === "urgent") return 0;
+  if (severity === "act") return 1;
+  if (direction === "data_quality" || title.includes("ambiguity") || title.includes("data quality")) return 2;
+  if (title.includes("exposure") || title.includes("concentration")) return 3;
+  if (severity === "watch") return 4;
+  return 9;
+}
+
+function canaryDriverRow(row = {}) {
+  const item = document.createElement("div");
+  item.className = "driver-row " + canaryDriverTone(row);
+  const label = document.createElement("span");
+  label.textContent = canaryDriverLabel(row);
+  const title = document.createElement("b");
+  title.textContent = row.title || "Canary driver";
+  const body = document.createElement("p");
+  body.textContent = [row.guidance, row.evidence ? `Evidence: ${row.evidence}` : ""].filter(Boolean).join(" ");
+  item.append(label, title, body);
+  return item;
+}
+
+function canaryEmptyDriverRow() {
+  const item = document.createElement("div");
+  item.className = "driver-row neutral";
+  const label = document.createElement("span");
+  label.textContent = "Context";
+  const title = document.createElement("b");
+  title.textContent = "No active canary drivers";
+  const body = document.createElement("p");
+  body.textContent = "The current snapshot has no warning, action, or data-quality rows to review.";
+  item.append(label, title, body);
+  return item;
+}
+
+function canaryDriverTone(row = {}) {
+  const severity = String(row.severity || "").toLowerCase();
+  const direction = String(row.direction || "").toLowerCase();
+  if (["urgent", "act"].includes(severity)) return "risk";
+  if (severity === "watch" || ["defensive", "rebalance", "data_quality"].includes(direction)) return "warn";
+  if (severity === "observe") return "neutral";
+  return "neutral";
+}
+
+function canaryDriverLabel(row = {}) {
+  const severity = String(row.severity || "").toLowerCase();
+  const direction = String(row.direction || "").toLowerCase();
+  if (direction === "data_quality") return "Data quality";
+  if (direction === "rebalance") return "Rebalance";
+  if (severity === "urgent") return "Urgent";
+  if (severity === "act") return "Act";
+  if (severity === "watch") return "Watch";
+  return "Context";
 }
 
 function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}) {
@@ -3399,11 +3484,11 @@ function applyOpportunitySnapshot(opportunities = {}) {
   };
 }
 
-function canaryExplanationCards(canary) {
+function canaryExplanationCards(canary, snap = state.snapshot || {}) {
   return [
     marketExplanation(canary),
     portfolioExplanation(canary),
-    inputExplanation(canary),
+    inputExplanation(canary, snap),
     readinessExplanation(canary),
   ];
 }
@@ -3440,6 +3525,11 @@ function canaryStageLabel(canary) {
 
 function canarySummaryText(canary, snap = {}) {
   const fallback = canary.summary || "Waiting for canary snapshot.";
+  if (canaryHasProvisionalOnlyMarketWarning(canary)) {
+    const fit = String(canary.portfolio_fit || "").toLowerCase();
+    const exposure = ["high", "medium"].includes(fit) ? " and portfolio exposure is elevated" : "";
+    return `Provisional market warning${exposure}; review evidence before treating this as confirmed stress.`;
+  }
   if (!canaryInputCheckBlocksAction(canary)) return fallback;
 
   const verdict = cleanDetail(canary.market?.regime_posture?.label || canary.market?.regime_verdict);
@@ -3451,6 +3541,14 @@ function canarySummaryText(canary, snap = {}) {
     ? "verify before escalation."
     : "no market-stress action.";
   return `${prefix}; ${issueLine} before treating canary as a market signal; ${actionLine}`;
+}
+
+function canaryHasProvisionalOnlyMarketWarning(canary) {
+  const market = canary.market || {};
+  return String(canary.market_confirmation || "").toLowerCase() === "partial" &&
+    Number(market.eligible_red_clusters || 0) === 0 &&
+    Array.isArray(market.unconfirmed_red_cluster_names) &&
+    market.unconfirmed_red_cluster_names.length > 0;
 }
 
 function canaryNeedsInputCheck(canary) {
@@ -3481,6 +3579,15 @@ function marketExplanation(canary) {
     };
   }
   if (confirmation === "partial") {
+    if (canaryHasProvisionalOnlyMarketWarning(canary)) {
+      const names = humanList((canary.market?.unconfirmed_red_cluster_names || []).map(clusterInputLabel), 3);
+      return {
+        label: "Market",
+        title: "Provisional warning",
+        body: `${names || "One market signal"} needs confirmation or fresher data. Treat this as watch context, not confirmed stress.`,
+        tone: "warn",
+      };
+    }
     return {
       label: "Market",
       title: "Pressure is developing",
@@ -3528,11 +3635,15 @@ function portfolioExplanation(canary) {
   const heldStress = heldStressItems(canary);
   const heldStressLine = heldStress.length > 0 ? ` Held stress: ${heldStressSummary(heldStress, 2)}.` : "";
   if (fit === "high") {
+    const confirmed = String(canary.market_confirmation || "").toLowerCase() === "confirmed";
+    const severity = String(canary.severity || "").toLowerCase();
     return {
       label: "Portfolio",
       title: "Portfolio is exposed",
-      body: "The current portfolio shape is vulnerable if this market pressure continues." + heldStressLine,
-      tone: "risk",
+      body: confirmed
+        ? "The current portfolio shape is vulnerable to the confirmed market stress." + heldStressLine
+        : "The portfolio is vulnerable if the warning firms; this is exposure context until market stress confirms." + heldStressLine,
+      tone: confirmed && ["act", "urgent"].includes(severity) ? "risk" : "warn",
     };
   }
   if (fit === "medium") {
@@ -3559,7 +3670,7 @@ function portfolioExplanation(canary) {
   };
 }
 
-function inputExplanation(canary) {
+function inputExplanation(canary, snap = state.snapshot || {}) {
   const health = String(canary.input_health || "").toLowerCase();
   if (health === "ok") {
     return {
@@ -3569,10 +3680,13 @@ function inputExplanation(canary) {
       tone: "ok",
     };
   }
+  const issues = canaryInputIssueSummary(canary, snap);
   return {
     label: "Inputs",
-    title: "Check data quality",
-    body: "Some inputs are stale, missing, or degraded. " + canaryInputCheckSentence(canary),
+    title: issues ? `Check ${issues}` : "Check data quality",
+    body: issues
+      ? `Stale or degraded inputs: ${issues}. Refresh or verify before treating the canary as a market signal.`
+      : "Some inputs are stale, missing, or degraded. Use the detail rows before acting.",
     tone: "warn",
   };
 }
@@ -3601,6 +3715,22 @@ function readinessExplanation(canary) {
       title: "Confirm before acting",
       body: "The app is asking for one more data-quality or intent check before a major move.",
       tone: "warn",
+    };
+  }
+  if (readiness === "prestage") {
+    return {
+      label: "Readiness",
+      title: "Prestage only",
+      body: "Stage or review a reduction plan; this is not an automatic trading instruction.",
+      tone: "warn",
+    };
+  }
+  if (readiness === "watch") {
+    return {
+      label: "Readiness",
+      title: "Watch only",
+      body: "Keep the snapshot under review; no risk-plan action is ready from this canary alone.",
+      tone: "neutral",
     };
   }
   return {
@@ -4040,8 +4170,24 @@ function canaryInputIssueLabels(canary, snap = {}) {
   for (const source of canary.source_health || []) {
     const status = String(source.status || "").toLowerCase();
     if (!status || status === "ok") continue;
-    if (source.source === "account") add("account snapshot");
-    if (source.source === "positions") add("positions snapshot");
+    switch (String(source.source || "").toLowerCase()) {
+      case "account":
+        add("account snapshot");
+        break;
+      case "positions":
+        add("positions snapshot");
+        break;
+      case "regime":
+        if (sourceHealthMentions(source, "gamma")) add("gamma cache");
+        else add("regime snapshot");
+        break;
+      case "market_events":
+        add("market-event sources");
+        break;
+      default:
+        add(labelize(source.source));
+        break;
+    }
   }
 
   for (const warning of canary.warnings || []) {
@@ -4051,6 +4197,15 @@ function canaryInputIssueLabels(canary, snap = {}) {
     if (text.includes("gamma")) add("gamma cache");
   }
   return labels;
+}
+
+function sourceHealthMentions(source, needle) {
+  const text = [
+    source.source,
+    source.status,
+    ...(Array.isArray(source.notes) ? source.notes : []),
+  ].join(" ").toLowerCase();
+  return text.includes(String(needle || "").toLowerCase());
 }
 
 function clusterInputLabel(cluster) {

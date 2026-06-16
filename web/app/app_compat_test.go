@@ -133,6 +133,66 @@ func TestAppJSRegimeCardSeparatesDataGapsFromRegime(t *testing.T) {
 	}
 }
 
+func TestAppJSCanaryDetailUsesSourceBackedEvidenceRows(t *testing.T) {
+	t.Parallel()
+	appData, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	cssData, err := Files.ReadFile("styles.css")
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	js := string(appData)
+	css := string(cssData)
+
+	renderDetail := jsFunctionBlock(t, js, "renderCanaryDetail")
+	for _, want := range []string{
+		"canaryDriverRows(canary)",
+		"canaryExplanationCards(canary, snap)",
+	} {
+		if !strings.Contains(renderDetail, want) {
+			t.Fatalf("renderCanaryDetail missing canary evidence contract %q", want)
+		}
+	}
+	if strings.Contains(renderDetail, "(canary.rows || []).slice(0, 3)") {
+		t.Fatalf("renderCanaryDetail must not show the first three canary rows as drivers")
+	}
+
+	driverRows := jsFunctionBlock(t, js, "canaryDriverRows")
+	for _, want := range []string{
+		`cleanDetail(row.title).toLowerCase() !== "portfolio canary"`,
+		"canaryRowNeedsAttention",
+		"canaryDriverPriority",
+		".slice(0, 5)",
+	} {
+		if !strings.Contains(driverRows, want) {
+			t.Fatalf("canaryDriverRows missing source-backed driver contract %q", want)
+		}
+	}
+	if strings.Contains(driverRows, ".slice(0, 3)") {
+		t.Fatalf("canaryDriverRows must not cap evidence at the old first-three rows")
+	}
+
+	for _, want := range []string{
+		"function renderCanaryActions(canary)",
+		"function sourceHealthMentions(source, needle)",
+		"Provisional market warning",
+		"Prestage only",
+		"market-event sources",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing canary clarity contract %q", want)
+		}
+	}
+	if strings.Contains(css, ".canary-hero p {") {
+		t.Fatalf("styles.css must not clamp every paragraph inside the expanded canary panel")
+	}
+	if !strings.Contains(css, ".canary-hero__copy p") || !strings.Contains(css, ".detail-panel--dark .driver-row.warn") {
+		t.Fatalf("styles.css missing scoped canary summary/detail styling")
+	}
+}
+
 func TestAppMobileDashboardContracts(t *testing.T) {
 	t.Parallel()
 	appData, err := Files.ReadFile("app.js")
