@@ -3,7 +3,7 @@
   "name": "io.github.osauer/ibkr",
   "title": "canary ibkr MCP",
   "description": "Local IBKR MCP server for account, market research, risk checks, and preview-only order drafts.",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "websiteUrl": "https://osauer.dev/ibkr/",
   "repository": {
     "url": "https://github.com/osauer/ibkr",

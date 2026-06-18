@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.14.0 — 2026-06-18 13:37 CEST
+
+### What's new
+
+- Protection proposals now carry fresher row-backed state into the CLI and Canary app: no-stop exposure is surfaced explicitly, proposal refreshes run on the shorter 30-second cadence, and protection actions preserve more of the live broker read model across preview, submit, and status flows.
+- The daemon status surface reports history and farm-readiness health alongside quote, scanner, chain, gamma, breadth, proposals, and opportunities, making stale or unavailable market-data paths easier to diagnose before a higher-level read looks wrong.
+- The offline opportunity research harness gained additional local dataset-building, PIT scoring, and plan-comparison commands for calibration work. This remains an experimental research surface; treat its output as diagnostics, not a trading recommendation or finished workflow.
+
+### Added
+
+- Added `ibkr backtest build-opportunity`, `build-opportunity-pit`, `score-opportunity`, `research-opportunity`, `capture-opportunity`, and `export-opportunity-bars` subcommands for local opportunity-harness data capture and scoring.
+- Added historical-bar `what_to_show` plumbing and CLI/app test fixtures needed by the opportunity research harness.
+- Added the app Protection panel's "No-stop exposure" summary for visible trailing-stop proposals without a matching open protective order.
+
+### Changed
+
+- Protection proposals refresh every 30 seconds by default instead of every 2 minutes, while transient failure retries still back off to avoid noisy gateway outages.
+- Canary watch rendering and protection-panel action metrics now use clearer, row-derived posture labels.
+- Order preview tooling now exposes the TRAIL/TRAIL LIMIT trigger method, with stock/ETF protective trails defaulting to IBKR LAST.
+
+### Fixed
+
+- Fixed a daemon reconnect client-ID leak that could block later gamma and data requests.
+- Fixed stale protection-proposal submit/read-model edge cases by carrying order revisions, status, and broker lifecycle state through the daemon/app plumbing.
+- Fixed the app Protection headline coloring so zero actionable theta is neutral and positive risk-over-target exposure is highlighted.
+- Fixed quote-liquidity cache keys when a quote carries the symbol outside the contract payload.
+
 ## v1.13.0 — 2026-06-13 13:00 CEST
 
 ### What's new
@@ -15,20 +42,17 @@ All notable changes to this project are documented here. The project adheres to 
 - Added typed RPC, daemon refresh/status handlers, config, status subsystem reporting, source fingerprints, ignore state, CLI rendering, and app HTTP routes for Opportunities.
 - Added an `ibkr_opportunities` MCP read tool and regenerated MCP/config references so LLM hosts can discover opportunity snapshots without gaining write authority.
 - Added option exercise wire support and trading-build submission plumbing for the CLI/app preview-then-exercise flow.
-- The app Protection panel now shows "No-stop exposure", a row-backed summary of visible trailing-stop proposals that do not already have a matching open protective order.
 
 ### Changed
 
 - CLI help now groups protection proposals and opportunities under their own command families, keeping portfolio reads separate from broker-write-capable local workflows.
 - The app Opportunities panel hides the normal policy fingerprint in the common healthy state and keeps the detailed policy identity available through status/read surfaces.
 - Protection risk-reduction copy is more compact, with the excess value displayed without redundant prose.
-- Protection proposals now refresh every 30 seconds by default instead of every 2 minutes, while transient failure retries still back off to avoid noisy gateway outages.
 
 ### Fixed
 
 - No-bid option exercise candidates are suppressed instead of showing a theoretical gain that cannot be captured through an executable option sale.
 - Exercise opportunities can now disclose exposure-increasing effects when that is the mechanical result of exercising a held option; the daemon classifies the position effect instead of pretending every exercise is reduce-only.
-- The app Protection headline now colors zero actionable theta neutrally and highlights positive risk-over-target exposure in red.
 
 ## v1.12.0 — 2026-06-12 17:21 CEST
 
