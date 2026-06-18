@@ -204,6 +204,9 @@ func renderOpportunitiesText(env *Env, snap *rpc.OpportunitySnapshot) {
 		head := fmt.Sprintf("%s  %s  %s %d %s %s %.4g",
 			opp.Key, opp.Bucket, opp.Action, opp.Quantity, opp.Symbol, opp.Contract.Right, opp.Contract.Strike)
 		fmt.Fprintf(out, "  %s  gain=%s  effect=%s  [%s]\n", head, formatMoneyCcy(opp.ExpectedGain, opp.ExpectedGainCurrency), opp.PositionEffect, state)
+		if risk := opportunityPostExerciseRiskSummary(opp); risk != "" {
+			fmt.Fprintf(out, "      post-exercise risk: %s\n", risk)
+		}
 		for _, d := range opp.Details {
 			fmt.Fprintf(out, "      %s\n", d)
 		}
@@ -221,6 +224,9 @@ func renderOpportunityPreviewText(env *Env, res *rpc.OpportunityExercisePreviewR
 	statusRow(env, out, "Exercise", opportunityExerciseSummary(res.Opportunity))
 	statusRow(env, out, "Expected gain", formatMoneyCcy(res.Opportunity.ExpectedGain, res.Opportunity.ExpectedGainCurrency))
 	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", res.Opportunity.UnderlyingQuantityBefore, res.Opportunity.UnderlyingQuantityAfter, res.Opportunity.PositionEffect))
+	if risk := opportunityPostExerciseRiskSummary(res.Opportunity); risk != "" {
+		statusRow(env, out, "Post-exercise risk", risk)
+	}
 	printTradingBlockers(out, "  ", res.Blockers)
 	fmt.Fprintln(out)
 }
@@ -235,6 +241,9 @@ func renderOpportunitySubmitText(env *Env, res *rpc.OpportunityExerciseSubmitRes
 	if res.Message != "" {
 		statusRow(env, out, "Message", res.Message)
 	}
+	if risk := opportunityPostExerciseRiskSummary(res.Opportunity); risk != "" {
+		statusRow(env, out, "Post-exercise risk", risk)
+	}
 	printTradingBlockers(out, "  ", res.Blockers)
 	fmt.Fprintln(out)
 }
@@ -248,4 +257,58 @@ func opportunityExerciseSummary(opp rpc.Opportunity) string {
 		opp.Contract.Strike,
 		opp.Contract.Expiry,
 	)
+}
+
+func opportunityPostExerciseRiskSummary(opp rpc.Opportunity) string {
+	risk := opp.PostExerciseRisk
+	before := opp.UnderlyingQuantityBefore
+	after := opp.UnderlyingQuantityAfter
+	change := opp.UnderlyingShareChange
+	effect := opp.PositionEffect
+	underlying := strings.TrimSpace(opp.UnderlyingContract.Symbol)
+	if underlying == "" {
+		underlying = strings.TrimSpace(opp.Symbol)
+	}
+	if risk != nil {
+		before = risk.BeforeQuantity
+		after = risk.AfterQuantity
+		change = risk.ShareChange
+		if risk.PositionEffect != "" {
+			effect = risk.PositionEffect
+		}
+		if risk.Underlying != "" {
+			underlying = risk.Underlying
+		}
+	}
+	if underlying == "" && before == 0 && after == 0 && change == 0 && effect == "" {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("%s %.4g -> %.4g shares", nonEmpty(underlying, "underlying"), before, after)}
+	if change != 0 {
+		parts = append(parts, fmt.Sprintf("change %.4g", change))
+	}
+	if effect != "" {
+		parts = append(parts, fmt.Sprintf("effect %s", effect))
+	}
+	if risk != nil {
+		if risk.RiskOpened || risk.RiskIncreased || risk.RiskFlipped {
+			parts = append(parts, "risk "+nonEmpty(risk.RiskChange, "increased"))
+		} else if risk.RiskChange != "" {
+			parts = append(parts, "risk "+risk.RiskChange)
+		}
+		if risk.ProtectionCoverageState != "" {
+			parts = append(parts, "coverage "+risk.ProtectionCoverageState)
+		}
+		if risk.ProtectionReviewNeeded {
+			reason := strings.TrimSpace(risk.ProtectionReviewReason)
+			if reason != "" {
+				parts = append(parts, "protection review needed: "+reason)
+			} else {
+				parts = append(parts, "protection review needed")
+			}
+		} else {
+			parts = append(parts, "protection review not required")
+		}
+	}
+	return strings.Join(parts, "; ")
 }

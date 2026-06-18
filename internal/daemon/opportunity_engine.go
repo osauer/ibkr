@@ -335,9 +335,11 @@ func (e *opportunityEngine) generate(policy opportunityPolicy, status rpc.Opport
 	for _, row := range pos.Stocks {
 		stocks[strings.ToUpper(strings.TrimSpace(row.Symbol))] = row
 	}
+	coverage := opportunityCoverageByUnderlying(pos.ProtectionCoverage)
 	var out []rpc.Opportunity
 	for _, row := range pos.Options {
-		opp, ok := optionExerciseOpportunity(policy, status, row, stocks[strings.ToUpper(strings.TrimSpace(row.Symbol))], sources, now)
+		symbol := strings.ToUpper(strings.TrimSpace(row.Symbol))
+		opp, ok := optionExerciseOpportunity(policy, status, row, stocks[symbol], sources, now, coverage[symbol])
 		if !ok {
 			continue
 		}
@@ -349,9 +351,28 @@ func (e *opportunityEngine) generate(policy opportunityPolicy, status rpc.Opport
 	return out
 }
 
-func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityPolicyStatus, row, stock rpc.PositionView, sources rpc.OpportunitySourceFingerprints, now time.Time) (rpc.Opportunity, bool) {
+func opportunityCoverageByUnderlying(summary *rpc.ProtectionCoverageSummary) map[string]rpc.ProtectionCoverageRow {
+	out := map[string]rpc.ProtectionCoverageRow{}
+	if summary == nil {
+		return out
+	}
+	for _, row := range summary.ByUnderlying {
+		symbol := strings.ToUpper(strings.TrimSpace(row.Underlying))
+		if symbol == "" {
+			continue
+		}
+		out[symbol] = row
+	}
+	return out
+}
+
+func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityPolicyStatus, row, stock rpc.PositionView, sources rpc.OpportunitySourceFingerprints, now time.Time, coverageRows ...rpc.ProtectionCoverageRow) (rpc.Opportunity, bool) {
 	if !strings.EqualFold(positionWireSecType(row.SecType), "OPT") || row.Quantity <= 0 {
 		return rpc.Opportunity{}, false
+	}
+	var coverage rpc.ProtectionCoverageRow
+	if len(coverageRows) > 0 {
+		coverage = coverageRows[0]
 	}
 	qty := int(math.Floor(row.Quantity))
 	if qty <= 0 {
@@ -401,6 +422,7 @@ func optionExerciseOpportunity(policy opportunityPolicy, status rpc.OpportunityP
 		SourceFingerprints:       sources,
 		CreatedAt:                now,
 	}
+	opp.PostExerciseRisk = opportunityPostExerciseRisk(opp, coverage)
 	if opp.ExpectedGainCurrency == "" {
 		opp.ExpectedGainCurrency = "USD"
 	}
@@ -521,6 +543,83 @@ func classifyExercisePositionEffect(before, after float64) string {
 		return rpc.ExercisePositionEffectUnknown
 	}
 	return rpc.ExercisePositionEffectFlip
+}
+
+func opportunityPostExerciseRisk(opp rpc.Opportunity, coverage rpc.ProtectionCoverageRow) *rpc.OpportunityPostExerciseRisk {
+	riskChange := exerciseRiskChange(opp.PositionEffect)
+	ctx := &rpc.OpportunityPostExerciseRisk{
+		Underlying:     strings.ToUpper(strings.TrimSpace(nonEmptyString(opp.UnderlyingContract.Symbol, opp.Symbol))),
+		BeforeQuantity: opp.UnderlyingQuantityBefore,
+		AfterQuantity:  opp.UnderlyingQuantityAfter,
+		ShareChange:    opp.UnderlyingShareChange,
+		PositionEffect: opp.PositionEffect,
+		RiskChange:     riskChange,
+		RiskOpened:     riskChange == rpc.ExerciseRiskChangeOpened,
+		RiskIncreased:  riskChange == rpc.ExerciseRiskChangeIncreased,
+		RiskFlipped:    riskChange == rpc.ExerciseRiskChangeFlipped,
+	}
+	if coverage.State != "" {
+		ctx.ProtectionCoverageState = coverage.State
+		ctx.CurrentProtectedQuantity = coverage.ProtectedQuantity
+		ctx.CurrentUnprotectedQuantity = coverage.UnprotectedQuantity
+		ctx.CurrentUnprotectedNotionalBase = coverage.UnprotectedNotionalBase
+		ctx.UnprotectedNotionalBaseCurrency = coverage.UnprotectedNotionalBaseCurrency
+	} else if math.Abs(opp.UnderlyingQuantityAfter) > 1e-9 {
+		ctx.ProtectionCoverageState = rpc.ProtectionCoverageStateUnknown
+	}
+	review, reason, warnings := opportunityProtectionReview(opp, coverage)
+	ctx.ProtectionReviewNeeded = review
+	ctx.ProtectionReviewReason = reason
+	ctx.WarningCodes = append(ctx.WarningCodes, warnings...)
+	return ctx
+}
+
+func exerciseRiskChange(effect string) string {
+	switch strings.ToLower(strings.TrimSpace(effect)) {
+	case rpc.ExercisePositionEffectClose:
+		return rpc.ExerciseRiskChangeClosed
+	case rpc.ExercisePositionEffectReduce:
+		return rpc.ExerciseRiskChangeReduced
+	case rpc.ExercisePositionEffectOpen:
+		return rpc.ExerciseRiskChangeOpened
+	case rpc.ExercisePositionEffectIncrease:
+		return rpc.ExerciseRiskChangeIncreased
+	case rpc.ExercisePositionEffectFlip:
+		return rpc.ExerciseRiskChangeFlipped
+	default:
+		return rpc.ExerciseRiskChangeUnknown
+	}
+}
+
+func opportunityProtectionReview(opp rpc.Opportunity, coverage rpc.ProtectionCoverageRow) (bool, string, []string) {
+	state := strings.ToLower(strings.TrimSpace(coverage.State))
+	currentHasProtectiveOrder := coverage.ProtectedQuantity > 1e-9 || len(coverage.Orders) > 0
+	switch state {
+	case rpc.ProtectionCoverageStateOrphanedOrder, rpc.ProtectionCoverageStateReconcileRequired:
+		return true, "current protective order already needs reconciliation before relying on post-exercise coverage", []string{"stale_protective_order"}
+	}
+	if math.Abs(opp.UnderlyingQuantityAfter) <= 1e-9 {
+		if currentHasProtectiveOrder {
+			return true, "exercise would flatten the underlying; reconcile or cancel remaining protective stops after exercise", []string{"exercise_flattens_protected_underlying"}
+		}
+		return false, "", nil
+	}
+	switch exerciseRiskChange(opp.PositionEffect) {
+	case rpc.ExerciseRiskChangeOpened, rpc.ExerciseRiskChangeIncreased, rpc.ExerciseRiskChangeFlipped:
+		return true, "exercise opens, increases, or flips underlying exposure; review protective stops after exercise", []string{"exercise_increases_underlying_risk"}
+	case rpc.ExerciseRiskChangeReduced:
+		return true, "exercise reduces but leaves underlying exposure; reconcile protective stop quantity after exercise", []string{"exercise_changes_remaining_exposure"}
+	case rpc.ExerciseRiskChangeUnknown:
+		return true, "post-exercise exposure effect is unknown; review protection before relying on the new position", []string{"exercise_effect_unknown"}
+	}
+	switch state {
+	case "", rpc.ProtectionCoverageStateUnknown:
+		return true, "post-exercise protection coverage cannot be confirmed from the current snapshot", []string{"protection_coverage_unavailable"}
+	case rpc.ProtectionCoverageStateCovered:
+		return false, "", nil
+	default:
+		return true, "remaining underlying exposure is not fully covered by current protective stops", []string{"remaining_exposure_not_fully_covered"}
+	}
 }
 
 func (e *opportunityEngine) Preview(ctx context.Context, p rpc.OpportunityExercisePreviewParams) (rpc.OpportunityExercisePreviewResult, error) {
@@ -738,7 +837,15 @@ func opportunityRevision(policy rpc.Fingerprint, sources rpc.OpportunitySourceFi
 		Opportunity []string                          `json:"opportunity"`
 	}{Policy: policy, Account: strings.ToUpper(strings.TrimSpace(scope.Account)), Mode: strings.ToLower(strings.TrimSpace(scope.Mode)), Sources: sources}
 	for _, row := range rows {
-		projection.Opportunity = append(projection.Opportunity, row.Key+":"+strconv.Itoa(row.Quantity)+":"+row.PositionEffect+":"+fmt.Sprintf("%.2f", row.ExpectedGain))
+		risk := ""
+		if row.PostExerciseRisk != nil {
+			risk = ":" + row.PostExerciseRisk.RiskChange +
+				":" + row.PostExerciseRisk.ProtectionCoverageState +
+				":" + strconv.FormatBool(row.PostExerciseRisk.ProtectionReviewNeeded) +
+				":" + fmt.Sprintf("%.4f", row.PostExerciseRisk.CurrentProtectedQuantity) +
+				":" + fmt.Sprintf("%.4f", row.PostExerciseRisk.CurrentUnprotectedQuantity)
+		}
+		projection.Opportunity = append(projection.Opportunity, row.Key+":"+strconv.Itoa(row.Quantity)+":"+row.PositionEffect+":"+fmt.Sprintf("%.2f", row.ExpectedGain)+risk)
 	}
 	raw, _ := json.Marshal(projection)
 	sum := sha256.Sum256(raw)

@@ -62,6 +62,107 @@ func TestOptionExerciseOpportunityPutUsesUnderlyingAsk(t *testing.T) {
 	}
 }
 
+func TestOptionExercisePostExerciseRiskContext(t *testing.T) {
+	t.Parallel()
+	now := opportunityTestRTH()
+	policy := defaultOpportunityPolicy()
+	status := opportunityPolicyStatus(policy, rpc.OpportunityPolicyStatusDefault, "test", "", now)
+	bid, ask, optionBid := 103.0, 103.20, 2.0
+
+	tests := []struct {
+		name       string
+		right      string
+		stockQty   float64
+		coverage   rpc.ProtectionCoverageRow
+		wantEffect string
+		wantChange string
+		wantReview bool
+		wantOpened bool
+		wantIncr   bool
+		wantFlip   bool
+	}{
+		{
+			name:       "call closes short stock and needs no protection review",
+			right:      "C",
+			stockQty:   -100,
+			wantEffect: rpc.ExercisePositionEffectClose,
+			wantChange: rpc.ExerciseRiskChangeClosed,
+		},
+		{
+			name:       "call increases long stock and needs protection review",
+			right:      "C",
+			stockQty:   100,
+			coverage:   rpc.ProtectionCoverageRow{Underlying: "AAPL", State: rpc.ProtectionCoverageStateCovered, PositionQuantity: 100, ProtectedQuantity: 100},
+			wantEffect: rpc.ExercisePositionEffectIncrease,
+			wantChange: rpc.ExerciseRiskChangeIncreased,
+			wantReview: true,
+			wantIncr:   true,
+		},
+		{
+			name:       "call flips short stock and needs protection review",
+			right:      "C",
+			stockQty:   -50,
+			wantEffect: rpc.ExercisePositionEffectFlip,
+			wantChange: rpc.ExerciseRiskChangeFlipped,
+			wantReview: true,
+			wantFlip:   true,
+		},
+		{
+			name:       "put opens short stock and needs protection review",
+			right:      "P",
+			stockQty:   0,
+			wantEffect: rpc.ExercisePositionEffectOpen,
+			wantChange: rpc.ExerciseRiskChangeOpened,
+			wantReview: true,
+			wantOpened: true,
+		},
+		{
+			name:       "stale protective order forces review",
+			right:      "C",
+			stockQty:   -100,
+			coverage:   rpc.ProtectionCoverageRow{Underlying: "AAPL", State: rpc.ProtectionCoverageStateReconcileRequired, Orders: []rpc.ProtectionCoverageOrder{{Symbol: "AAPL", OrderType: rpc.OrderTypeTRAIL, Remaining: 100}}},
+			wantEffect: rpc.ExercisePositionEffectClose,
+			wantChange: rpc.ExerciseRiskChangeClosed,
+			wantReview: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			right := tc.right
+			strike := 100.0
+			if right == "P" {
+				strike = 105
+			}
+			optionBidForCase := optionBid
+			if right == "P" {
+				optionBidForCase = 1.0
+			}
+			row := opportunityTestOption(now, right, strike, &optionBidForCase)
+			stock := opportunityTestStock(now, tc.stockQty, &bid, &ask)
+			opp, ok := optionExerciseOpportunity(policy, status, row, stock, rpc.OpportunitySourceFingerprints{}, now, tc.coverage)
+			if !ok {
+				t.Fatal("expected opportunity")
+			}
+			risk := opp.PostExerciseRisk
+			if risk == nil {
+				t.Fatal("post exercise risk context missing")
+			}
+			if risk.PositionEffect != tc.wantEffect || risk.RiskChange != tc.wantChange || risk.ProtectionReviewNeeded != tc.wantReview {
+				t.Fatalf("risk context = %+v, want effect=%s change=%s review=%v", risk, tc.wantEffect, tc.wantChange, tc.wantReview)
+			}
+			if risk.RiskOpened != tc.wantOpened || risk.RiskIncreased != tc.wantIncr || risk.RiskFlipped != tc.wantFlip {
+				t.Fatalf("risk booleans = opened:%v increased:%v flipped:%v", risk.RiskOpened, risk.RiskIncreased, risk.RiskFlipped)
+			}
+			if risk.BeforeQuantity != tc.stockQty || risk.AfterQuantity != opp.UnderlyingQuantityAfter || risk.ShareChange != opp.UnderlyingShareChange {
+				t.Fatalf("risk before/after/change = %.0f/%.0f/%.0f, opportunity = %.0f/%.0f/%.0f",
+					risk.BeforeQuantity, risk.AfterQuantity, risk.ShareChange,
+					opp.UnderlyingQuantityBefore, opp.UnderlyingQuantityAfter, opp.UnderlyingShareChange)
+			}
+		})
+	}
+}
+
 func TestOptionExerciseOpportunityNegativeGainReasonDoesNotOverstate(t *testing.T) {
 	t.Parallel()
 	now := opportunityTestRTH()

@@ -270,7 +270,7 @@ Read daemon-owned protection proposals for existing positions. Use when the user
 
 ## `ibkr_opportunities`
 
-Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings use `ibkr_positions`; for protective stops use `ibkr_proposals`; for local broker-write readiness use `ibkr_trading_status`.
+Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. Option-exercise rows include `post_exercise_risk`: before/after underlying share exposure, whether exercise opens/increases/flips/reduces/closes risk, current protection coverage state when available, and whether a protection review is needed after exercise. That context is advisory and does not authorize exercise. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings and current protection coverage use `ibkr_positions`; for candidate protective stops use `ibkr_proposals`; for local broker-write readiness use `ibkr_trading_status`.
 
 **Parameters:**
 
