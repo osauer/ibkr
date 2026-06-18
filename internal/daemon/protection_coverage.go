@@ -130,7 +130,7 @@ func buildProtectionCoverage(pos *rpc.PositionsResult, orders []rpc.OrderView, o
 	}
 
 	for _, order := range orders {
-		if !protectionCoverageOrderIsProblem(order) || !protectionCoverageOrderIsStockLike(order) {
+		if !protectionCoverageOrderIsProblem(order) || !protectionCoverageOrderIsStopProtective(order) {
 			continue
 		}
 		current := positionQuantityForOrderView(pos, order)
@@ -231,10 +231,26 @@ func protectionCoverageBaseCurrency(pos *rpc.PositionsResult) string {
 }
 
 func protectionCoverageOrderMatchesPosition(order rpc.OrderView, row rpc.PositionView) bool {
-	if !protectionCoverageOrderIsStockLike(order) || !orderViewIsCloseProtective(order) || !order.Open {
+	if !protectionCoverageOrderIsStopProtective(order) {
 		return false
 	}
 	return positionViewMatchesOrderView(row, order)
+}
+
+func protectionCoverageOrderIsStopProtective(order rpc.OrderView) bool {
+	if !order.Open || !protectionCoverageOrderIsStockLike(order) || !protectionCoverageOrderIsStopLike(order) {
+		return false
+	}
+	return strings.EqualFold(order.OpenClose, "C") || strings.EqualFold(order.Source, proposalOrderSource)
+}
+
+func protectionCoverageOrderIsStopLike(order rpc.OrderView) bool {
+	switch strings.ToUpper(strings.TrimSpace(order.OrderType)) {
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT, "STP", "STP LMT", "STOP", "STOP LIMIT":
+		return true
+	default:
+		return false
+	}
 }
 
 func protectionCoverageOrderCounts(order rpc.OrderView, row rpc.PositionView) bool {
