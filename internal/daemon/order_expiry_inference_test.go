@@ -119,12 +119,14 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 	}
 	proposal := rpc.TradeProposal{
 		Symbol: "MBG", SecType: "STK", Action: rpc.OrderActionSell,
-		Contract: rpc.ContractParams{ConID: 29622935},
+		Bucket: rpc.TradeProposalBucketTrailingStop, OrderType: rpc.OrderTypeTRAIL,
+		PositionQuantity: 1,
+		Contract:         rpc.ContractParams{ConID: 29622935},
 	}
 
 	// Fresh open trail on the same contract+side blocks the duplicate…
 	appendOpenTrail("ibkr-live-trail", srv.now())
-	blockers := engine.duplicateProtectiveBlockers(proposal)
+	blockers := engine.duplicateProtectiveBlockers(context.Background(), proposal)
 	if len(blockers) != 1 || blockers[0].Code != "existing_protective_order" {
 		t.Fatalf("blockers = %+v, want existing_protective_order", blockers)
 	}
@@ -132,7 +134,7 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 	// …the opposite side does not…
 	buy := proposal
 	buy.Action = rpc.OrderActionBuy
-	if blockers := engine.duplicateProtectiveBlockers(buy); len(blockers) != 0 {
+	if blockers := engine.duplicateProtectiveBlockers(context.Background(), buy); len(blockers) != 0 {
 		t.Fatalf("opposite-side blockers = %+v, want none", blockers)
 	}
 
@@ -155,7 +157,7 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append zombie: %v", err)
 	}
-	if blockers := engine2.duplicateProtectiveBlockers(proposal); len(blockers) != 0 {
+	if blockers := engine2.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 0 {
 		t.Fatalf("zombie blockers = %+v, want none (expired_inferred must not block re-protection)", blockers)
 	}
 	views, _, err := srv2.loadOrderViews()
@@ -165,7 +167,47 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 	if len(views) != 1 || views[0].LifecycleStatus != rpc.OrderLifecycleExpiredInferred {
 		t.Fatalf("zombie view = %+v, want expired_inferred", views)
 	}
-	_ = context.Background()
+}
+
+func TestDuplicateProtectiveBlockersIgnorePlainLimitAndMismatchedStops(t *testing.T) {
+	t.Parallel()
+	proposal := rpc.TradeProposal{
+		Key:              "trailing_stop:mbg",
+		Bucket:           rpc.TradeProposalBucketTrailingStop,
+		Symbol:           "MBG",
+		SecType:          "STK",
+		Action:           rpc.OrderActionSell,
+		OrderType:        rpc.OrderTypeTRAIL,
+		PositionQuantity: 100,
+		Contract:         rpc.ContractParams{ConID: 29622935},
+	}
+	appendOrder := func(t *testing.T, srv *Server, ref, orderType string, qty float64) {
+		t.Helper()
+		if err := srv.orderJournal.Append(orderJournalEvent{
+			Version: 1, At: srv.orderNow(), Type: orderJournalEventSendAttempted,
+			OrderRef: ref, Symbol: "MBG", SecType: "STK", ConID: 29622935,
+			Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
+			Action: rpc.OrderActionSell, OrderType: orderType, TIF: rpc.OrderTIFGTC,
+			SendState: orderSendStateSendAttempted, Source: proposalOrderSource,
+			Account: "DU1234567", Quantity: qty,
+		}); err != nil {
+			t.Fatalf("append %s: %v", ref, err)
+		}
+	}
+
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	engine := &proposalEngine{server: srv, now: srv.now}
+	appendOrder(t, srv, "ibkr-limit-profit", rpc.OrderTypeLMT, 100)
+	if blockers := engine.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 0 {
+		t.Fatalf("plain limit blockers = %+v, want none", blockers)
+	}
+
+	srv2 := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	engine2 := &proposalEngine{server: srv2, now: srv2.now}
+	appendOrder(t, srv2, "ibkr-oversized-trail", rpc.OrderTypeTRAIL, 200)
+	if blockers := engine2.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 0 {
+		t.Fatalf("oversized stale trail blockers = %+v, want none", blockers)
+	}
 }
 
 // GTC orders never expiry-infer, so the broker's "can't find order" reply
@@ -179,6 +221,7 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 		Version: 1, OrderRef: "ibkr-gtc-trail", Symbol: "MBG", SecType: "STK",
 		ConID: 29622935, Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
 		Action: rpc.OrderActionSell, OrderType: rpc.OrderTypeTRAIL, TIF: rpc.OrderTIFGTC,
+		Source:  proposalOrderSource,
 		Account: "DU1234567", Quantity: 1, ReservedOrderID: 42,
 	}
 	at := srv.now()
@@ -202,8 +245,8 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 		ev.Status = "Submitted"
 	})
 
-	proposal := rpc.TradeProposal{Symbol: "MBG", SecType: "STK", Action: rpc.OrderActionSell, Contract: rpc.ContractParams{ConID: 29622935}}
-	if blockers := engine.duplicateProtectiveBlockers(proposal); len(blockers) != 1 {
+	proposal := rpc.TradeProposal{Symbol: "MBG", SecType: "STK", Action: rpc.OrderActionSell, Bucket: rpc.TradeProposalBucketTrailingStop, OrderType: rpc.OrderTypeTRAIL, PositionQuantity: 1, Contract: rpc.ContractParams{ConID: 29622935}}
+	if blockers := engine.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 1 {
 		t.Fatalf("working GTC blockers = %+v, want existing_protective_order", blockers)
 	}
 
@@ -212,7 +255,7 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 		ev.Type = orderJournalEventBrokerError
 		ev.Message = "broker error 2110: connectivity between TWS and server is broken"
 	})
-	if blockers := engine.duplicateProtectiveBlockers(proposal); len(blockers) != 1 {
+	if blockers := engine.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 1 {
 		t.Fatalf("post-noise blockers = %+v, want still blocked", blockers)
 	}
 
@@ -228,7 +271,7 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 	if len(views) != 1 || views[0].LifecycleStatus != rpc.OrderLifecycleInactive || views[0].Open {
 		t.Fatalf("healed view = %+v, want inactive closed", views)
 	}
-	if blockers := engine.duplicateProtectiveBlockers(proposal); len(blockers) != 0 {
+	if blockers := engine.duplicateProtectiveBlockers(context.Background(), proposal); len(blockers) != 0 {
 		t.Fatalf("healed blockers = %+v, want none", blockers)
 	}
 }
