@@ -107,41 +107,44 @@ type TradeProposalCounts struct {
 }
 
 type TradeProposal struct {
-	Key                string                          `json:"key"`
-	Revision           string                          `json:"revision"`
-	State              string                          `json:"state"`
-	Bucket             string                          `json:"bucket"`
-	Rank               int                             `json:"rank"`
-	Symbol             string                          `json:"symbol"`
-	SecType            string                          `json:"sec_type"`
-	Action             string                          `json:"action"`
-	Quantity           int                             `json:"quantity"`
-	MaxQuantity        int                             `json:"max_quantity"`
-	PositionQuantity   float64                         `json:"position_quantity"`
-	PositionEffect     string                          `json:"position_effect"`
-	OrderType          string                          `json:"order_type"`
-	Trail              *OrderTrailSpec                 `json:"trail,omitempty"`
-	TrailSizing        *TradeProposalTrailSizing       `json:"trail_sizing,omitempty"`
-	TriggerMethod      int                             `json:"trigger_method,omitempty"`
-	TIF                string                          `json:"tif"`
-	OutsideRTH         bool                            `json:"outside_rth"`
-	Contract           ContractParams                  `json:"contract"`
-	Reason             string                          `json:"reason"`
-	Details            []string                        `json:"details,omitempty"`
-	Score              float64                         `json:"score,omitempty"`
-	ThetaPerDay        float64                         `json:"theta_per_day,omitempty"`
-	Notional           float64                         `json:"notional,omitempty"`
-	RiskExcessNotional float64                         `json:"risk_excess_notional,omitempty"`
-	RiskExcessCurrency string                          `json:"risk_excess_currency,omitempty"`
-	MarketValuePctNLV  *float64                        `json:"market_value_pct_nlv,omitempty"`
-	MarketFlags        []MarketEventFlag               `json:"market_flags,omitempty"`
-	LimitPrice         *float64                        `json:"limit_price,omitempty"`
-	PolicyID           string                          `json:"policy_id,omitempty"`
-	PolicyVersion      int                             `json:"policy_version,omitempty"`
-	PolicyFingerprint  Fingerprint                     `json:"policy_fingerprint,omitzero"`
-	SourceFingerprints TradeProposalSourceFingerprints `json:"source_fingerprints,omitzero"`
-	Blockers           []TradingBlocker                `json:"blockers,omitempty"`
-	CreatedAt          time.Time                       `json:"created_at,omitzero"`
+	Key                string                           `json:"key"`
+	Revision           string                           `json:"revision"`
+	State              string                           `json:"state"`
+	Bucket             string                           `json:"bucket"`
+	Rank               int                              `json:"rank"`
+	Symbol             string                           `json:"symbol"`
+	SecType            string                           `json:"sec_type"`
+	Action             string                           `json:"action"`
+	Quantity           int                              `json:"quantity"`
+	MaxQuantity        int                              `json:"max_quantity"`
+	PositionQuantity   float64                          `json:"position_quantity"`
+	PositionEffect     string                           `json:"position_effect"`
+	OrderType          string                           `json:"order_type"`
+	Trail              *OrderTrailSpec                  `json:"trail,omitempty"`
+	TrailSizing        *TradeProposalTrailSizing        `json:"trail_sizing,omitempty"`
+	ExecutionSemantics *TradeProposalExecutionSemantics `json:"execution_semantics,omitempty"`
+	StopRisk           *TradeProposalStopRisk           `json:"stop_risk,omitempty"`
+	StopLadder         []TradeProposalStopLadderStep    `json:"stop_ladder,omitempty"`
+	TriggerMethod      int                              `json:"trigger_method,omitempty"`
+	TIF                string                           `json:"tif"`
+	OutsideRTH         bool                             `json:"outside_rth"`
+	Contract           ContractParams                   `json:"contract"`
+	Reason             string                           `json:"reason"`
+	Details            []string                         `json:"details,omitempty"`
+	Score              float64                          `json:"score,omitempty"`
+	ThetaPerDay        float64                          `json:"theta_per_day,omitempty"`
+	Notional           float64                          `json:"notional,omitempty"`
+	RiskExcessNotional float64                          `json:"risk_excess_notional,omitempty"`
+	RiskExcessCurrency string                           `json:"risk_excess_currency,omitempty"`
+	MarketValuePctNLV  *float64                         `json:"market_value_pct_nlv,omitempty"`
+	MarketFlags        []MarketEventFlag                `json:"market_flags,omitempty"`
+	LimitPrice         *float64                         `json:"limit_price,omitempty"`
+	PolicyID           string                           `json:"policy_id,omitempty"`
+	PolicyVersion      int                              `json:"policy_version,omitempty"`
+	PolicyFingerprint  Fingerprint                      `json:"policy_fingerprint,omitzero"`
+	SourceFingerprints TradeProposalSourceFingerprints  `json:"source_fingerprints,omitzero"`
+	Blockers           []TradingBlocker                 `json:"blockers,omitempty"`
+	CreatedAt          time.Time                        `json:"created_at,omitzero"`
 }
 
 // TradeProposalTrailSizing is the daemon-owned explanation for a protective
@@ -175,6 +178,59 @@ type TradeProposalTrailSizing struct {
 	AsOf              time.Time `json:"as_of,omitzero"`
 }
 
+// TradeProposalExecutionSemantics explains how a protective stop is expected
+// to behave at the broker. It is disclosure only; broker WhatIf/order status
+// remains authoritative for placement and lifecycle state.
+type TradeProposalExecutionSemantics struct {
+	ReferenceSide      string    `json:"reference_side,omitempty"`
+	ReferencePrice     *float64  `json:"reference_price,omitempty"`
+	ReferenceAsOf      time.Time `json:"reference_as_of,omitzero"`
+	TriggerMethod      int       `json:"trigger_method,omitempty"`
+	TriggerMethodLabel string    `json:"trigger_method_label,omitempty"`
+	TriggerSource      string    `json:"trigger_source,omitempty"`
+	TriggerEffect      string    `json:"trigger_effect,omitempty"`
+	PriceGuarantee     string    `json:"price_guarantee,omitempty"`
+}
+
+// TradeProposalStopRisk estimates the near-stop account impact from the
+// proposal's current reference price. It is not a fill guarantee and must not
+// be treated as a broker promise: stop orders can gap or slip.
+type TradeProposalStopRisk struct {
+	ReferencePrice      *float64                  `json:"reference_price,omitempty"`
+	StopPrice           *float64                  `json:"stop_price,omitempty"`
+	Distance            *float64                  `json:"distance,omitempty"`
+	DistancePct         *float64                  `json:"distance_pct,omitempty"`
+	Quantity            int                       `json:"quantity,omitempty"`
+	Multiplier          int                       `json:"multiplier,omitempty"`
+	EstimatedLoss       *float64                  `json:"estimated_loss_ccy,omitempty"`
+	Currency            string                    `json:"currency,omitempty"`
+	EstimatedLossBase   *float64                  `json:"estimated_loss_base,omitempty"`
+	BaseCurrency        string                    `json:"base_currency,omitempty"`
+	EstimatedLossPctNLV *float64                  `json:"estimated_loss_pct_nlv,omitempty"`
+	GapScenario         *TradeProposalStopRiskGap `json:"gap_scenario,omitempty"`
+	WarningCodes        []string                  `json:"warning_codes,omitempty"`
+}
+
+type TradeProposalStopRiskGap struct {
+	Label                 string   `json:"label,omitempty"`
+	GapPct                float64  `json:"gap_pct,omitempty"`
+	AssumedExecutionPrice *float64 `json:"assumed_execution_price,omitempty"`
+	EstimatedLoss         *float64 `json:"estimated_loss_ccy,omitempty"`
+	EstimatedLossBase     *float64 `json:"estimated_loss_base,omitempty"`
+	EstimatedLossPctNLV   *float64 `json:"estimated_loss_pct_nlv,omitempty"`
+}
+
+type TradeProposalStopLadderStep struct {
+	Label               string   `json:"label"`
+	Kind                string   `json:"kind,omitempty"`
+	Percent             *float64 `json:"percent,omitempty"`
+	StopPrice           *float64 `json:"stop_price,omitempty"`
+	EstimatedLoss       *float64 `json:"estimated_loss_ccy,omitempty"`
+	EstimatedLossBase   *float64 `json:"estimated_loss_base,omitempty"`
+	EstimatedLossPctNLV *float64 `json:"estimated_loss_pct_nlv,omitempty"`
+	ReferencePrice      *float64 `json:"reference_price,omitempty"`
+}
+
 type TradeProposalSnapshotParams struct {
 	Show bool `json:"show,omitempty"`
 }
@@ -203,23 +259,25 @@ type TradeProposalPreviewResult struct {
 }
 
 type TradeProposalOrderPreview struct {
-	PreviewTokenID        string              `json:"preview_token_id,omitempty"`
-	PreviewTokenScope     string              `json:"preview_token_scope,omitempty"`
-	PreviewTokenExpiresAt time.Time           `json:"preview_token_expires_at,omitzero"`
-	TokenMinted           bool                `json:"token_minted"`
-	SubmitEligible        bool                `json:"submit_eligible"`
-	Mode                  string              `json:"mode"`
-	Account               string              `json:"account"`
-	Endpoint              string              `json:"endpoint"`
-	ClientID              int                 `json:"client_id"`
-	Draft                 OrderDraft          `json:"draft"`
-	Quote                 OrderQuoteSnapshot  `json:"quote"`
-	Position              OrderPositionImpact `json:"position"`
-	Notional              float64             `json:"notional"`
-	MaxNotional           float64             `json:"max_notional,omitempty"`
-	WhatIf                OrderWhatIfResult   `json:"what_if"`
-	Warnings              []DataWarning       `json:"warnings,omitempty"`
-	AsOf                  time.Time           `json:"as_of"`
+	PreviewTokenID        string                           `json:"preview_token_id,omitempty"`
+	PreviewTokenScope     string                           `json:"preview_token_scope,omitempty"`
+	PreviewTokenExpiresAt time.Time                        `json:"preview_token_expires_at,omitzero"`
+	TokenMinted           bool                             `json:"token_minted"`
+	SubmitEligible        bool                             `json:"submit_eligible"`
+	Mode                  string                           `json:"mode"`
+	Account               string                           `json:"account"`
+	Endpoint              string                           `json:"endpoint"`
+	ClientID              int                              `json:"client_id"`
+	Draft                 OrderDraft                       `json:"draft"`
+	Quote                 OrderQuoteSnapshot               `json:"quote"`
+	Position              OrderPositionImpact              `json:"position"`
+	ExecutionSemantics    *TradeProposalExecutionSemantics `json:"execution_semantics,omitempty"`
+	StopRisk              *TradeProposalStopRisk           `json:"stop_risk,omitempty"`
+	Notional              float64                          `json:"notional"`
+	MaxNotional           float64                          `json:"max_notional,omitempty"`
+	WhatIf                OrderWhatIfResult                `json:"what_if"`
+	Warnings              []DataWarning                    `json:"warnings,omitempty"`
+	AsOf                  time.Time                        `json:"as_of"`
 }
 
 type TradeProposalSubmitParams struct {
