@@ -2168,6 +2168,142 @@ function protectionCoverageStaleOrderText(coverage = {}, limit = 2) {
   }).join(", ");
 }
 
+function protectionCoverageDisplayRows(coverage = {}) {
+  const rows = [];
+  const seen = new Set();
+  for (const row of coverage.by_underlying || []) {
+    const key = normalizeSymbol(row.underlying || row.symbol || "");
+    if (key) seen.add(key);
+    rows.push(row);
+  }
+  for (const order of [...(coverage.orphaned_orders || []), ...(coverage.reconcile_required_orders || [])]) {
+    const symbol = normalizeSymbol(order.symbol || order.underlying || "");
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    rows.push({
+      underlying: symbol,
+      state: order.reconciliation_state ? "reconcile_required" : "orphaned_order",
+      orders: [order],
+      warning_codes: [order.reconciliation_state || "orphaned_order"],
+      message: order.last_message || "Protective order needs broker reconciliation.",
+    });
+  }
+  return rows.slice().sort((a, b) => protectionCoverageRowPriority(a) - protectionCoverageRowPriority(b) ||
+    normalizeSymbol(a.underlying || a.symbol || "").localeCompare(normalizeSymbol(b.underlying || b.symbol || "")));
+}
+
+function protectionCoverageRowPriority(row = {}) {
+  const state = String(row.state || "").toLowerCase();
+  if (["orphaned_order", "reconcile_required"].includes(state)) return 0;
+  if (state === "partial") return 1;
+  if (state === "unprotected") return 2;
+  if (state === "unknown") return 3;
+  if (state === "covered") return 4;
+  return 5;
+}
+
+function protectionCoverageRowState(row = {}) {
+  const state = String(row.state || "").toLowerCase();
+  if (state === "orphaned_order") return "orphaned order";
+  if (state === "reconcile_required") return "reconcile required";
+  return labelize(state || "unknown");
+}
+
+function protectionCoverageRowClass(row = {}) {
+  const state = String(row.state || "").toLowerCase();
+  if (["orphaned_order", "reconcile_required", "partial", "unprotected"].includes(state)) return state;
+  if (state === "covered") return "covered";
+  return "unknown";
+}
+
+function protectionCoverageQuantityText(row = {}) {
+  const protectedQty = firstNumber(row.protected_quantity);
+  const unprotectedQty = firstNumber(row.unprotected_quantity);
+  const positionQty = firstNumber(row.position_quantity);
+  const state = String(row.state || "").toLowerCase();
+  if (["orphaned_order", "reconcile_required"].includes(state)) {
+    const order = (row.orders || [])[0] || {};
+    const remaining = firstNumber(order.remaining, order.quantity);
+    return hasNumericValue(remaining) ? `${numberRead(Math.abs(remaining))} remaining` : "open order";
+  }
+  if (state === "covered" && hasNumericValue(protectedQty)) return `${numberRead(Math.abs(protectedQty))} covered`;
+  if (state === "partial") {
+    const parts = [];
+    if (hasNumericValue(protectedQty)) parts.push(`${numberRead(Math.abs(protectedQty))} covered`);
+    if (hasNumericValue(unprotectedQty)) parts.push(`${numberRead(Math.abs(unprotectedQty))} uncovered`);
+    if (parts.length > 0) return parts.join(" / ");
+  }
+  if (state === "unprotected" && hasNumericValue(unprotectedQty)) return `${numberRead(Math.abs(unprotectedQty))} uncovered`;
+  if (hasNumericValue(positionQty)) return `${numberRead(Math.abs(positionQty))} position`;
+  return "";
+}
+
+function protectionCoverageNotionalText(row = {}, baseCurrency = "", { sensitive = true } = {}) {
+  const value = firstNumber(row.unprotected_notional_base, row.market_value_base);
+  if (!hasNumericValue(value)) return "";
+  const ccy = row.unprotected_notional_base_currency || row.base_currency || baseCurrency || protectionCoverageBaseCurrency();
+  const amount = sensitive ? sensitiveDisplayMoney(Math.abs(value), ccy) : compactWholeMoney(Math.abs(value), ccy);
+  const state = String(row.state || "").toLowerCase();
+  if (state === "covered") return "";
+  return `${amount} unprotected notional`;
+}
+
+function protectionCoverageOrderText(row = {}) {
+  const orders = row.orders || [];
+  if (orders.length === 0) return "";
+  return orders.slice(0, 2).map((order) => {
+    const type = String(order.order_type || "").toUpperCase();
+    const tif = String(order.tif || "").toUpperCase();
+    const stop = firstNumber(order.stop_price, order.trail?.initial_stop_price);
+    const limit = firstNumber(order.limit_price);
+    const parts = [type, tif].filter(Boolean);
+    if (hasNumericValue(stop)) parts.push(`stop ${numberRead(stop)}`);
+    if (hasNumericValue(limit) && type.includes("LIMIT")) parts.push(`limit ${numberRead(limit)}`);
+    return parts.join(" ");
+  }).filter(Boolean).join(", ");
+}
+
+function protectionCoverageLedger(coverage = {}, baseCurrency = "") {
+  const rows = protectionCoverageDisplayRows(coverage);
+  if (rows.length === 0) return null;
+  const visible = rows.slice(0, 6);
+  const ledger = document.createElement("div");
+  ledger.className = "protection-coverage-ledger";
+  ledger.setAttribute("aria-label", "Per-underlying protection coverage");
+  for (const row of visible) {
+    const item = document.createElement("div");
+    item.className = `protection-coverage-ledger__row protection-coverage-ledger__row--${protectionCoverageRowClass(row)}`;
+    const head = document.createElement("div");
+    head.className = "protection-coverage-ledger__head";
+    const symbol = document.createElement("span");
+    symbol.className = "protection-coverage-ledger__symbol";
+    symbol.textContent = normalizeSymbol(row.underlying || row.symbol || "") || "Unknown";
+    const state = document.createElement("span");
+    state.className = "protection-coverage-ledger__state";
+    state.textContent = protectionCoverageRowState(row);
+    head.append(symbol, state);
+    const meta = document.createElement("div");
+    meta.className = "protection-coverage-ledger__meta";
+    const message = row.message ? cleanDetail(row.message) : "";
+    const parts = [
+      protectionCoverageQuantityText(row),
+      protectionCoverageNotionalText(row, baseCurrency, { sensitive: true }),
+      protectionCoverageOrderText(row),
+      message,
+    ].filter(Boolean);
+    meta.textContent = parts.join(" · ");
+    item.append(head, meta);
+    ledger.append(item);
+  }
+  if (rows.length > visible.length) {
+    const more = document.createElement("div");
+    more.className = "protection-coverage-ledger__more";
+    more.textContent = `${rows.length - visible.length} more coverage ${rows.length - visible.length === 1 ? "row" : "rows"}`;
+    ledger.append(more);
+  }
+  return ledger;
+}
+
 function protectionCoverageTone(coverage = {}) {
   const counts = protectionCoverageCounts(coverage);
   const status = String(coverage.status || "").toLowerCase();
@@ -2379,6 +2515,8 @@ function protectionRow(proposal) {
   const riskTicket = protectionRiskTicket(proposal, metricText);
   if (riskTicket) {
     copy.append(riskTicket);
+    const ladder = protectionStopLadder(proposal);
+    if (ladder) copy.append(ladder);
   } else if (metricText) {
     const metric = document.createElement("small");
     metric.className = "protection-row__trail";
@@ -2688,6 +2826,90 @@ function protectionRiskTicketTitle(proposal = {}) {
   const ladder = protectionStopLadderLabel(proposal.stop_ladder || [], proposal.stop_risk);
   if (ladder) parts.push(`Stop ladder: ${ladder}`);
   return parts.join(" ");
+}
+
+function protectionStopLadder(proposal = {}) {
+  if (proposal.bucket !== "trailing_stop") return null;
+  const steps = protectionStopLadderDisplaySteps(proposal.stop_ladder || []);
+  if (steps.length === 0) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "protection-row__ladder";
+  wrap.setAttribute("aria-label", "Stop ladder comparison");
+  const heading = document.createElement("span");
+  heading.className = "protection-row__ladder-label";
+  heading.textContent = "Stop ladder";
+  wrap.append(heading);
+  for (const step of steps) {
+    const item = document.createElement("span");
+    item.className = `protection-row__ladder-step protection-row__ladder-step--${protectionStopLadderStepClass(step)}`;
+    const label = document.createElement("b");
+    label.textContent = protectionStopLadderShortLabel(step);
+    const detail = document.createElement("span");
+    detail.textContent = protectionStopLadderStepDetail(step, proposal.stop_risk || {});
+    item.title = protectionStopLadderStepTitle(step, proposal.stop_risk || {});
+    item.append(label, detail);
+    wrap.append(item);
+  }
+  return wrap;
+}
+
+function protectionStopLadderDisplaySteps(ladder = []) {
+  const preferred = ["fixed_5pct", "fixed_10pct", "policy_chosen", "atr_candidate", "matched_open_stop"];
+  const byKind = new Map();
+  for (const step of ladder || []) {
+    const kind = String(step.kind || step.label || "").toLowerCase();
+    if (kind && !byKind.has(kind)) byKind.set(kind, step);
+  }
+  const steps = [];
+  for (const kind of preferred) {
+    if (byKind.has(kind)) steps.push(byKind.get(kind));
+  }
+  for (const step of ladder || []) {
+    if (steps.includes(step)) continue;
+    steps.push(step);
+    if (steps.length >= 5) break;
+  }
+  return steps.slice(0, 5);
+}
+
+function protectionStopLadderStepClass(step = {}) {
+  const kind = String(step.kind || step.label || "").toLowerCase();
+  if (kind.includes("policy_chosen")) return "selected";
+  if (kind.includes("matched_open")) return "open";
+  if (kind.includes("max") || kind.includes("min")) return "bound";
+  return "plain";
+}
+
+function protectionStopLadderShortLabel(step = {}) {
+  const kind = String(step.kind || "").toLowerCase();
+  const label = String(step.label || "").trim();
+  if (kind === "fixed_5pct") return "5%";
+  if (kind === "fixed_10pct") return "10%";
+  if (kind === "policy_chosen") return "Policy";
+  if (kind === "atr_candidate") return "ATR";
+  if (kind === "policy_min") return "Min";
+  if (kind === "policy_max") return "Max";
+  if (kind === "matched_open_stop") return "Open";
+  return label || "Stop";
+}
+
+function protectionStopLadderStepDetail(step = {}, risk = {}) {
+  const parts = [];
+  if (hasNumericValue(step.stop_price)) parts.push(numberRead(step.stop_price));
+  const loss = firstNumber(step.estimated_loss_base, step.estimated_loss_ccy);
+  if (hasNumericValue(loss)) {
+    const currency = step.estimated_loss_base !== undefined
+      ? risk.base_currency || step.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
+      : step.currency || risk.currency || state.snapshot?.account?.base_currency || "USD";
+    parts.push(compactWholeMoney(Math.abs(loss), currency));
+  }
+  return parts.join(" / ") || "--";
+}
+
+function protectionStopLadderStepTitle(step = {}, risk = {}) {
+  const detail = protectionStopLadderStepDetail(step, risk);
+  const pctText = hasNumericValue(step.percent) ? `${pct(step.percent)} offset. ` : "";
+  return `${step.label || protectionStopLadderShortLabel(step)}: ${pctText}stop/loss ${detail}.`;
 }
 
 function protectionStopLadderLabel(ladder = [], risk = {}) {
@@ -5210,6 +5432,7 @@ function protectionCoverageDetailFact(coverage = null, baseCurrency = "") {
     title: protectionCoverageHeadline(coverage, ccy, { sensitive: true }),
     body: protectionCoverageDetailBody(coverage, ccy),
     tone: protectionCoverageTone(coverage),
+    detail: protectionCoverageLedger(coverage, ccy),
   };
 }
 
@@ -5270,6 +5493,7 @@ function detailFact(fact) {
   const body = document.createElement("p");
   body.textContent = cleanDetail(fact.body || "");
   row.append(label, title, body);
+  if (fact.detail instanceof Node) row.append(fact.detail);
   return row;
 }
 
