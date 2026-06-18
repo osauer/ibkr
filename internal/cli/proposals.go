@@ -227,6 +227,7 @@ func renderProposalsText(env *Env, snap *rpc.TradeProposalSnapshot) {
 		if sizing := formatProposalTrailSizing(p.TrailSizing); sizing != "" {
 			fmt.Fprintf(out, "      Trail sizing: %s\n", sizing)
 		}
+		renderProposalRiskTicket(env, out, &p)
 		for _, d := range p.Details {
 			fmt.Fprintf(out, "      %s\n", d)
 		}
@@ -287,6 +288,7 @@ func renderProposalOrderPreview(env *Env, out io.Writer, p *rpc.TradeProposalOrd
 	statusRow(env, out, "Notional", fmt.Sprintf("%.2f", p.Notional))
 	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", p.Position.Before, p.Position.After, p.Position.Effect))
 	statusRow(env, out, "Quote", formatOrderPreviewQuote(p.Quote))
+	renderProtectionRiskFields(env, out, p.Draft.Trail, p.Draft.TIF, p.Draft.Contract.Currency, p.ExecutionSemantics, p.StopRisk, nil)
 	statusRow(env, out, "WhatIf", fmt.Sprintf("%s (required=%v)", p.WhatIf.Status, p.WhatIf.RequiredForSubmit))
 	if p.WhatIf.Message != "" {
 		statusRow(env, out, "WhatIf detail", p.WhatIf.Message)
@@ -303,6 +305,172 @@ func renderProposalOrderPreview(env *Env, out io.Writer, p *rpc.TradeProposalOrd
 			}
 		}
 	}
+}
+
+func renderProposalRiskTicket(env *Env, out io.Writer, p *rpc.TradeProposal) {
+	if p == nil {
+		return
+	}
+	renderProtectionRiskFields(env, out, p.Trail, p.TIF, p.Contract.Currency, p.ExecutionSemantics, p.StopRisk, p.StopLadder)
+}
+
+func renderProtectionRiskFields(env *Env, out io.Writer, trail *rpc.OrderTrailSpec, tif, currency string, sem *rpc.TradeProposalExecutionSemantics, risk *rpc.TradeProposalStopRisk, ladder []rpc.TradeProposalStopLadderStep) {
+	ticket := proposalRiskTicketParts(trail, tif, currency, sem)
+	if len(ticket) > 0 {
+		statusRow(env, out, "Risk ticket", strings.Join(ticket, " | "))
+	}
+	if riskLine := formatProposalStopRisk(risk, currency); riskLine != "" {
+		statusRow(env, out, "Estimated loss", riskLine)
+	}
+	if gapLine := formatProposalGapScenario(risk, currency); gapLine != "" {
+		statusRow(env, out, "Gap scenario", gapLine)
+	}
+	if ladderLine := formatProposalStopLadder(ladder, currency); ladderLine != "" {
+		statusRow(env, out, "Stop ladder", ladderLine)
+	}
+	for _, warning := range proposalRiskWarnings(sem, risk) {
+		statusRow(env, out, "Warning", warning)
+	}
+}
+
+func proposalRiskTicketParts(trail *rpc.OrderTrailSpec, tif, currency string, sem *rpc.TradeProposalExecutionSemantics) []string {
+	var parts []string
+	if trail != nil && trail.InitialStopPrice > 0 {
+		parts = append(parts, "stop "+formatProposalMoney(trail.InitialStopPrice, currency))
+	}
+	if offset := formatProposalTrailOffset(trail, currency); offset != "" {
+		parts = append(parts, "offset "+offset)
+	}
+	if tif = strings.TrimSpace(tif); tif != "" {
+		parts = append(parts, "TIF "+strings.ToUpper(tif))
+	}
+	if trigger := formatProposalExecutionTrigger(sem); trigger != "" {
+		parts = append(parts, trigger)
+	}
+	return parts
+}
+
+func formatProposalTrailOffset(trail *rpc.OrderTrailSpec, currency string) string {
+	if trail == nil {
+		return ""
+	}
+	if trail.TrailingAmount != nil {
+		return formatProposalMoney(*trail.TrailingAmount, currency)
+	}
+	if trail.TrailingPercent != nil {
+		return fmt.Sprintf("%.2f%%", *trail.TrailingPercent)
+	}
+	return ""
+}
+
+func formatProposalExecutionTrigger(sem *rpc.TradeProposalExecutionSemantics) string {
+	if sem == nil {
+		return ""
+	}
+	label := strings.TrimSpace(sem.TriggerMethodLabel)
+	if label == "" {
+		label = formatOrderTriggerMethod(sem.TriggerMethod)
+	}
+	if label == "" {
+		return ""
+	}
+	if sem.ReferenceSide != "" && sem.ReferencePrice != nil {
+		return fmt.Sprintf("trigger %s on %s %s", label, sem.ReferenceSide, formatProposalMoney(*sem.ReferencePrice, ""))
+	}
+	if sem.ReferenceSide != "" {
+		return fmt.Sprintf("trigger %s on %s", label, sem.ReferenceSide)
+	}
+	return "trigger " + label
+}
+
+func formatProposalStopRisk(risk *rpc.TradeProposalStopRisk, fallbackCurrency string) string {
+	if risk == nil || risk.EstimatedLoss == nil {
+		return ""
+	}
+	currency := nonEmpty(strings.TrimSpace(risk.Currency), fallbackCurrency)
+	parts := []string{formatProposalMoney(*risk.EstimatedLoss, currency)}
+	if risk.EstimatedLossBase != nil && risk.BaseCurrency != "" && !strings.EqualFold(risk.BaseCurrency, currency) {
+		parts = append(parts, formatProposalMoney(*risk.EstimatedLossBase, risk.BaseCurrency))
+	}
+	if risk.EstimatedLossPctNLV != nil {
+		parts = append(parts, fmt.Sprintf("%.2f%% NLV", *risk.EstimatedLossPctNLV))
+	}
+	if risk.DistancePct != nil {
+		parts = append(parts, fmt.Sprintf("%.2f%% stop distance", *risk.DistancePct))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatProposalGapScenario(risk *rpc.TradeProposalStopRisk, fallbackCurrency string) string {
+	if risk == nil || risk.GapScenario == nil {
+		return ""
+	}
+	gap := risk.GapScenario
+	currency := nonEmpty(strings.TrimSpace(risk.Currency), fallbackCurrency)
+	parts := []string{}
+	if gap.AssumedExecutionPrice != nil {
+		parts = append(parts, fmt.Sprintf("%.1f%% beyond stop at %s", gap.GapPct, formatProposalMoney(*gap.AssumedExecutionPrice, currency)))
+	}
+	if gap.EstimatedLoss != nil {
+		parts = append(parts, "loss "+formatProposalMoney(*gap.EstimatedLoss, currency))
+	}
+	if gap.EstimatedLossBase != nil && risk.BaseCurrency != "" && !strings.EqualFold(risk.BaseCurrency, currency) {
+		parts = append(parts, formatProposalMoney(*gap.EstimatedLossBase, risk.BaseCurrency))
+	}
+	if gap.EstimatedLossPctNLV != nil {
+		parts = append(parts, fmt.Sprintf("%.2f%% NLV", *gap.EstimatedLossPctNLV))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatProposalStopLadder(ladder []rpc.TradeProposalStopLadderStep, fallbackCurrency string) string {
+	if len(ladder) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, min(len(ladder), 5))
+	for _, step := range ladder {
+		if step.StopPrice == nil {
+			continue
+		}
+		label := strings.TrimSpace(step.Label)
+		if label == "" {
+			label = strings.TrimSpace(step.Kind)
+		}
+		if label == "" {
+			label = "step"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", label, formatProposalMoney(*step.StopPrice, fallbackCurrency)))
+		if len(parts) == 5 {
+			break
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+func proposalRiskWarnings(sem *rpc.TradeProposalExecutionSemantics, risk *rpc.TradeProposalStopRisk) []string {
+	var warnings []string
+	if sem != nil {
+		switch sem.PriceGuarantee {
+		case "stop_price_is_not_execution_price":
+			warnings = append(warnings, "TRAIL converts to a market order when triggered; stop price is not the execution price.")
+		case "stop_limit_can_leave_position_unfilled":
+			warnings = append(warnings, "TRAIL LIMIT converts to a limit order when triggered; the position can remain open if the limit does not fill.")
+		}
+	}
+	if risk != nil {
+		for _, code := range risk.WarningCodes {
+			warnings = append(warnings, code)
+		}
+	}
+	return warnings
+}
+
+func formatProposalMoney(v float64, currency string) string {
+	currency = strings.TrimSpace(currency)
+	if currency == "" {
+		return fmt.Sprintf("%.2f", v)
+	}
+	return formatMoneyCcy(v, currency)
 }
 
 func renderProposalSubmitText(env *Env, res *rpc.TradeProposalSubmitResult) {

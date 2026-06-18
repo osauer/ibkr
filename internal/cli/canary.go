@@ -69,6 +69,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		canaryMarketRow(res.Market),
 		canaryExposureRow(res.Portfolio, res.Market),
 		canaryConcentrationRow(res.Portfolio, res.Market),
+		canaryProtectionCoverageRow(res.Portfolio),
 		canaryHeldStressRow(res.Portfolio, res.Market),
 		canaryOptionsRow(res.Portfolio, in.Positions, res.Market),
 		canaryDataQualityRow(res.Market, in.Regime),
@@ -141,6 +142,7 @@ func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, m
 			}
 		}
 	}
+	out.ProtectionCoverage = pos.ProtectionCoverage
 	out.HeldStress = canaryHeldStressSummaries(acct, pos, marketEvents, now)
 	return out
 }
@@ -931,6 +933,24 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 		return canaryRow("Largest concentration", risk.DirectionRebalance, risk.SeverityWatch, "Concentration is above risk limits; rebalance this title without treating it as confirmed market stress.", evidence)
 	}
 	return canaryRow("Largest concentration", "", risk.SeverityObserve, "No concentration trim required by the canary.", evidence)
+}
+
+func canaryProtectionCoverageRow(p CanaryPortfolioSummary) CanaryRow {
+	coverage := p.ProtectionCoverage
+	if coverage == nil {
+		return canaryRow("Protection coverage", risk.DirectionDataQuality, risk.SeverityWatch, "Protection coverage is unavailable; use positions risk and open orders before relying on stop coverage.", "coverage unavailable")
+	}
+	evidence := formatProtectionCoverageEvidence(coverage)
+	if coverage.Counts.OrphanedOrder > 0 || coverage.Counts.ReconcileRequired > 0 {
+		return canaryRow("Protection coverage", risk.DirectionRebalance, risk.SeverityWatch, "Reconcile stale protective orders before counting them as coverage.", evidence)
+	}
+	if coverage.Counts.Unprotected > 0 || coverage.Counts.Partial > 0 {
+		return canaryRow("Protection coverage", risk.DirectionRebalance, risk.SeverityWatch, "Review largest unprotected stock/ETF exposures before adding risk.", evidence)
+	}
+	if coverage.Counts.Unknown > 0 || coverage.Status == rpc.ProtectionCoverageStateUnknown {
+		return canaryRow("Protection coverage", risk.DirectionDataQuality, risk.SeverityWatch, "Open-order coverage is unknown; confirm open orders before relying on stop coverage.", evidence)
+	}
+	return canaryRow("Protection coverage", "", risk.SeverityObserve, "No stock/ETF protection coverage issue in the current open-order ledger.", evidence)
 }
 
 func canaryHeldStressRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRow {
@@ -2274,10 +2294,50 @@ func canaryAmbiguityEvidence(m CanaryMarketSummary) string {
 func canaryPortfolioEvidence(p CanaryPortfolioSummary) string {
 	out := fmt.Sprintf("%s, gross %.0f%% NLV, net delta %.0f%% NLV, gross delta %.0f%% NLV",
 		canaryCushionEvidence(p), derefPct(p.GrossExposurePctNLV), derefPct(p.NetDeltaPctNLV), derefPct(p.GrossDeltaPctNLV))
+	if p.ProtectionCoverage != nil {
+		out += ", protection " + formatProtectionCoverageEvidence(p.ProtectionCoverage)
+	}
 	if len(p.HeldStress) > 0 {
 		out += ", held stress " + canaryHeldStressNames(p.HeldStress, 2)
 	}
 	return out
+}
+
+func formatProtectionCoverageEvidence(c *rpc.ProtectionCoverageSummary) string {
+	if c == nil {
+		return "coverage unavailable"
+	}
+	parts := []string{nonEmpty(c.Status, "unknown")}
+	if c.UnprotectedNotionalBase != nil {
+		parts = append(parts, "unprotected "+formatMoneyCcy(*c.UnprotectedNotionalBase, c.UnprotectedNotionalBaseCurrency))
+	}
+	if c.Counts.Unprotected > 0 {
+		parts = append(parts, fmt.Sprintf("%d unprotected", c.Counts.Unprotected))
+	}
+	if c.Counts.Partial > 0 {
+		parts = append(parts, fmt.Sprintf("%d partial", c.Counts.Partial))
+	}
+	if c.Counts.OrphanedOrder > 0 {
+		parts = append(parts, fmt.Sprintf("%d orphaned", c.Counts.OrphanedOrder))
+	}
+	if c.Counts.ReconcileRequired > 0 {
+		parts = append(parts, fmt.Sprintf("%d reconcile-required", c.Counts.ReconcileRequired))
+	}
+	if len(c.LargestUnprotected) > 0 {
+		names := make([]string, 0, min(len(c.LargestUnprotected), 3))
+		for _, row := range c.LargestUnprotected {
+			if row.Underlying != "" {
+				names = append(names, row.Underlying)
+			}
+			if len(names) == 3 {
+				break
+			}
+		}
+		if len(names) > 0 {
+			parts = append(parts, "largest "+strings.Join(names, ","))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func canaryHasMarketDataIssue(m CanaryMarketSummary) bool {

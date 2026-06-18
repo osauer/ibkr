@@ -173,6 +173,7 @@ func CompactCanaryAlert(c *CanaryResult, positions *PositionsResult) CanaryAlert
 		out.OptionHealth = health
 		out.OptionHealth.FlaggedLegsReturned = len(legs)
 		out.ProtectionCoverage = positions.ProtectionCoverage
+		out.Portfolio.ProtectionCoverage = nil
 		out.SPYHedgeOffsetPct = spyHedgeOffsetPct(*positions)
 	}
 	return out

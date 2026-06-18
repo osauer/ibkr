@@ -347,6 +347,30 @@ func TestRenderPositions_DayDollarColumnRemoved(t *testing.T) {
 	}
 }
 
+func TestRenderPositionsShowsProtectionCoverage(t *testing.T) {
+	t.Parallel()
+	unprotected := 7500.0
+	res := &rpc.PositionsResult{
+		Portfolio: &rpc.PositionsPortfolio{},
+		ProtectionCoverage: &rpc.ProtectionCoverageSummary{
+			Status:                          "review",
+			UnprotectedNotionalBase:         &unprotected,
+			UnprotectedNotionalBaseCurrency: "USD",
+			Counts:                          rpc.ProtectionCoverageCounts{Unprotected: 1, OrphanedOrder: 1},
+			LargestUnprotected:              []rpc.ProtectionCoverageRow{{Underlying: "MSFT"}},
+		},
+	}
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderPortfolioSummaryTo(env, &stdout, res)
+	out := stdout.String()
+	for _, want := range []string{"Protection coverage", "unprotected $ 7,500.00", "1 orphaned", "largest MSFT"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("positions summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderPositionsStockQuoteContext(t *testing.T) {
 	t.Parallel()
 	loc := mustTestLocation(t, "America/New_York")

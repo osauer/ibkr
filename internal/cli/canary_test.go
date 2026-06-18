@@ -801,6 +801,33 @@ func TestComputeCanaryStandaloneVIXSpikeWatches(t *testing.T) {
 	}
 }
 
+func TestComputeCanarySurfacesProtectionCoverage(t *testing.T) {
+	t.Parallel()
+	unprotected := 12_000.0
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			ProtectionCoverage: &rpc.ProtectionCoverageSummary{
+				Status:                          "review",
+				UnprotectedNotionalBase:         &unprotected,
+				UnprotectedNotionalBaseCurrency: "USD",
+				Counts:                          rpc.ProtectionCoverageCounts{Unprotected: 1},
+				LargestUnprotected:              []rpc.ProtectionCoverageRow{{Underlying: "MSFT"}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if res.Portfolio.ProtectionCoverage == nil {
+		t.Fatal("portfolio protection coverage missing")
+	}
+	if !rowContains(res.Rows, "Protection coverage", "Review largest unprotected stock/ETF exposures") {
+		t.Fatalf("coverage guidance missing, rows: %+v", res.Rows)
+	}
+	if !rowContainsEvidence(res.Rows, "Protection coverage", "unprotected $ 12,000.00") {
+		t.Fatalf("coverage evidence missing, rows: %+v", res.Rows)
+	}
+}
+
 func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
