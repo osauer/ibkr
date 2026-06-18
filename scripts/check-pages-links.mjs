@@ -26,12 +26,14 @@ function localPath(raw) {
     return "";
   }
   let url;
-  if (raw.startsWith(siteOrigin)) {
-    url = new URL(raw);
-  } else if (raw.startsWith(`${projectBase}/`) || raw === projectBase) {
+  if (raw.startsWith(`${projectBase}/`) || raw === projectBase) {
     url = new URL(raw, siteOrigin);
   } else {
-    return "";
+    try {
+      url = new URL(raw);
+    } catch {
+      return "";
+    }
   }
   if (url.origin !== siteOrigin) {
     return "";
