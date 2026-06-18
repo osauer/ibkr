@@ -748,16 +748,16 @@ func ftpPassiveAddr(line string) (string, error) {
 	if len(match) != 7 {
 		return "", fmt.Errorf("parse PASV address from %q", line)
 	}
-	parts := make([]int, 6)
+	parts := make([]byte, 6)
 	for i := 1; i < len(match); i++ {
-		v, err := strconv.Atoi(match[i])
+		v, err := strconv.ParseUint(match[i], 10, 8)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("parse PASV address from %q: part %d out of byte range: %w", line, i, err)
 		}
-		parts[i-1] = v
+		parts[i-1] = byte(v)
 	}
-	host := net.IPv4(byte(parts[0]), byte(parts[1]), byte(parts[2]), byte(parts[3])).String()
-	port := parts[4]*256 + parts[5]
+	host := net.IPv4(parts[0], parts[1], parts[2], parts[3]).String()
+	port := int(parts[4])*256 + int(parts[5])
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 

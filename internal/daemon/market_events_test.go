@@ -153,6 +153,28 @@ func TestParseIBKRBorrowFeesAndEmitExtremeFlag(t *testing.T) {
 	}
 }
 
+func TestFTPPassiveAddrRejectsOutOfRangeParts(t *testing.T) {
+	t.Parallel()
+
+	got, err := ftpPassiveAddr("227 Entering Passive Mode (127,0,0,1,195,80)")
+	if err != nil {
+		t.Fatalf("valid PASV address: %v", err)
+	}
+	if got != "127.0.0.1:50000" {
+		t.Fatalf("valid PASV address = %q, want 127.0.0.1:50000", got)
+	}
+
+	for _, line := range []string{
+		"227 Entering Passive Mode (256,0,0,1,1,2)",
+		"227 Entering Passive Mode (127,0,0,999,1,2)",
+		"227 Entering Passive Mode (127,0,0,1,1,999)",
+	} {
+		if _, err := ftpPassiveAddr(line); err == nil {
+			t.Fatalf("ftpPassiveAddr(%q) succeeded; want byte-range error", line)
+		}
+	}
+}
+
 func TestMarketEventBorrowFeesSnapshotIndexesBySymbol(t *testing.T) {
 	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
 	cache := newMarketEventCache(func() time.Time { return now })
