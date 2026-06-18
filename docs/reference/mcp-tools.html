@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: mcp-tools.md sha256:fed7a16c4471483eecf52f6c201301f23adb51a9cd4584dcfada4632146f26f7 -->
+<!-- md-source: mcp-tools.md sha256:64178ec65ba06824edcb721c577809eefe4417963006cb371b5af517fc0fa819 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -392,7 +392,7 @@
 </tbody>
 </table>
 <h2 id="ibkropportunities"><code>ibkr_opportunities</code></h2>
-<p>Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings use <code>ibkr_positions</code>; for protective stops use <code>ibkr_proposals</code>; for local broker-write readiness use <code>ibkr_trading_status</code>.</p>
+<p>Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. Option-exercise rows include <code>post_exercise_risk</code>: before/after underlying share exposure, whether exercise opens/increases/flips/reduces/closes risk, current protection coverage state when available, and whether a protection review is needed after exercise. That context is advisory and does not authorize exercise. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings and current protection coverage use <code>ibkr_positions</code>; for candidate protective stops use <code>ibkr_proposals</code>; for local broker-write readiness use <code>ibkr_trading_status</code>.</p>
 <p><strong>Parameters:</strong></p>
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>

@@ -458,9 +458,7 @@ func proposalRiskWarnings(sem *rpc.TradeProposalExecutionSemantics, risk *rpc.Tr
 		}
 	}
 	if risk != nil {
-		for _, code := range risk.WarningCodes {
-			warnings = append(warnings, code)
-		}
+		warnings = append(warnings, risk.WarningCodes...)
 	}
 	return warnings
 }
