@@ -137,6 +137,30 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if prop.TriggerMethod != rpc.OrderTriggerMethodLast {
 		t.Fatalf("trigger method = %d, want LAST", prop.TriggerMethod)
 	}
+	if prop.ExecutionSemantics == nil {
+		t.Fatalf("execution semantics missing: %+v", prop)
+	}
+	if prop.ExecutionSemantics.ReferenceSide != "bid" || prop.ExecutionSemantics.TriggerMethod != rpc.OrderTriggerMethodLast || prop.ExecutionSemantics.TriggerMethodLabel != "last" {
+		t.Fatalf("execution semantics = %+v, want bid/LAST disclosure", prop.ExecutionSemantics)
+	}
+	if prop.ExecutionSemantics.TriggerEffect != "market_order_when_triggered" || prop.ExecutionSemantics.PriceGuarantee != "stop_price_is_not_execution_price" {
+		t.Fatalf("execution semantics = %+v, want TRAIL market-conversion warning", prop.ExecutionSemantics)
+	}
+	if prop.StopRisk == nil || prop.StopRisk.DistancePct == nil || *prop.StopRisk.DistancePct != 10 {
+		t.Fatalf("stop risk = %+v, want 10%% stop distance", prop.StopRisk)
+	}
+	if prop.StopRisk.EstimatedLoss == nil || *prop.StopRisk.EstimatedLoss != 100 {
+		t.Fatalf("stop estimated loss = %+v, want 100 USD", prop.StopRisk.EstimatedLoss)
+	}
+	if prop.StopRisk.GapScenario == nil || prop.StopRisk.GapScenario.AssumedExecutionPrice == nil || *prop.StopRisk.GapScenario.AssumedExecutionPrice != 85.5 {
+		t.Fatalf("gap scenario = %+v, want execution 5%% beyond stop at 85.50", prop.StopRisk.GapScenario)
+	}
+	if prop.StopRisk.GapScenario.EstimatedLoss == nil || *prop.StopRisk.GapScenario.EstimatedLoss != 145 {
+		t.Fatalf("gap loss = %+v, want 145 USD", prop.StopRisk.GapScenario.EstimatedLoss)
+	}
+	if !hasStopLadderStep(prop.StopLadder, "fixed_5pct", 5) || !hasStopLadderStep(prop.StopLadder, "fixed_10pct", 10) || !hasStopLadderStep(prop.StopLadder, "policy_chosen", 10) {
+		t.Fatalf("stop ladder = %+v, want fixed 5%%/10%% and policy chosen steps", prop.StopLadder)
+	}
 	if prop.LimitPrice != nil {
 		t.Fatalf("trail proposal limit price = %v, want nil", *prop.LimitPrice)
 	}
@@ -160,6 +184,9 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	}
 	if prop.Action != rpc.OrderActionBuy || prop.Trail.InitialStopPrice != 111.1 {
 		t.Fatalf("short stock action/stop = %s/%.2f, want BUY ask-based 111.10", prop.Action, prop.Trail.InitialStopPrice)
+	}
+	if prop.ExecutionSemantics == nil || prop.ExecutionSemantics.ReferenceSide != "ask" {
+		t.Fatalf("short execution semantics = %+v, want ask reference", prop.ExecutionSemantics)
 	}
 
 	offHoursRow := longRow
@@ -188,6 +215,47 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if prop, ok := trailingStopStockProposal(policy, status, zombieRow, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0); ok {
 		t.Fatalf("mark-zero zombie emitted proposal: %+v", prop)
 	}
+}
+
+func TestProtectiveStopRiskBaseCurrencyAndNLV(t *testing.T) {
+	t.Parallel()
+	policy := defaultProtectionPolicy()
+	status := protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())
+	bid, ask, fx := 100.0, 101.0, 0.9
+	row := rpc.PositionView{
+		Symbol:     "MSFT",
+		SecType:    "STK",
+		Quantity:   10,
+		Bid:        &bid,
+		Ask:        &ask,
+		Mark:       100,
+		Multiplier: 1,
+		Currency:   "USD",
+		FXRate:     &fx,
+	}
+	prop, ok := trailingStopStockProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Now(), true, 0)
+	if !ok {
+		t.Fatal("stock trail proposal missing")
+	}
+	enrichProtectiveStopProposal(&prop, row, &rpc.AccountResult{BaseCurrency: "EUR", NetLiquidation: 1000})
+	if prop.StopRisk == nil || prop.StopRisk.EstimatedLossBase == nil || *prop.StopRisk.EstimatedLossBase != 90 {
+		t.Fatalf("stop risk = %+v, want EUR 90 base loss", prop.StopRisk)
+	}
+	if prop.StopRisk.EstimatedLossPctNLV == nil || *prop.StopRisk.EstimatedLossPctNLV != 9 {
+		t.Fatalf("stop risk NLV = %+v, want 9%%", prop.StopRisk)
+	}
+	if prop.StopRisk.BaseCurrency != "EUR" || prop.StopRisk.Currency != "USD" {
+		t.Fatalf("stop risk currencies = %q/%q, want USD/EUR", prop.StopRisk.Currency, prop.StopRisk.BaseCurrency)
+	}
+}
+
+func hasStopLadderStep(steps []rpc.TradeProposalStopLadderStep, kind string, pct float64) bool {
+	for _, step := range steps {
+		if step.Kind == kind && step.Percent != nil && *step.Percent == pct {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProposalCountsSerializesZeroTheta(t *testing.T) {
@@ -391,6 +459,15 @@ func TestTrailingStopOptionProposalRequiresOptInAndBlocksUnsafeShapes(t *testing
 	}
 	if math.Abs(prop.Trail.InitialStopPrice-1.40) > 0.0001 {
 		t.Fatalf("long option stop = %.4f, want bid-premium 1.4000", prop.Trail.InitialStopPrice)
+	}
+	if prop.ExecutionSemantics == nil || prop.ExecutionSemantics.ReferenceSide != "bid" {
+		t.Fatalf("option execution semantics = %+v, want bid reference", prop.ExecutionSemantics)
+	}
+	if prop.ExecutionSemantics.TriggerEffect != "limit_order_when_triggered" || prop.ExecutionSemantics.PriceGuarantee != "stop_limit_can_leave_position_unfilled" {
+		t.Fatalf("option execution semantics = %+v, want TRAIL LIMIT non-fill warning", prop.ExecutionSemantics)
+	}
+	if prop.StopRisk == nil || prop.StopRisk.EstimatedLoss == nil || math.Abs(*prop.StopRisk.EstimatedLoss-60) > 0.0001 {
+		t.Fatalf("option stop risk = %+v, want 60 USD estimated loss", prop.StopRisk)
 	}
 
 	row.Quantity = -1
@@ -2262,7 +2339,7 @@ func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 		Currency:   "USD",
 	}}}
 	scope := brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
-	props := engine.generate(context.Background(), policy, status, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
+	props := engine.generate(context.Background(), policy, status, nil, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
 	if len(props) != 1 {
 		t.Fatalf("generated %d proposals, want 1: %+v", len(props), props)
 	}

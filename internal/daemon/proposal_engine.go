@@ -480,7 +480,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		sources.MarketEvents = &fp
 	}
-	proposals := e.generate(ctx, policy, policyStatus, pos, sources, marketEvents, scope, now)
+	proposals := e.generate(ctx, policy, policyStatus, acct, pos, sources, marketEvents, scope, now)
 	slices.SortStableFunc(proposals, func(a, b rpc.TradeProposal) int {
 		if a.Score > b.Score {
 			return -1
@@ -535,7 +535,7 @@ func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope bro
 	return snap
 }
 
-func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
+func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, acct *rpc.AccountResult, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
 	var out []rpc.TradeProposal
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
@@ -566,6 +566,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 			for _, row := range pos.Stocks {
 				trailSizing := e.stockTrailSizing(ctx, policy.Buckets.TrailingStop.StockETF, row, now)
 				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row), trailSizing); ok {
+					enrichProtectiveStopProposal(&p, row, acct)
 					applyMarketEventFlagsToProposal(&p, marketEvents)
 					for _, b := range e.duplicateProtectiveBlockers(p, pos) {
 						proposalBlock(&p, b.Code, b.Message)
@@ -580,6 +581,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 			multiLegBySymbol := multiLegOptionSymbols(pos.Options)
 			for _, row := range pos.Options {
 				if p, ok := trailingStopOptionProposal(policy, status, row, sources, now, multiLegBySymbol[strings.ToUpper(strings.TrimSpace(row.Symbol))], e.resolveRowMinTick(row)); ok {
+					enrichProtectiveStopProposal(&p, row, acct)
 					applyMarketEventFlagsToProposal(&p, marketEvents)
 					if !e.isIgnored(scope, p.Key) {
 						out = append(out, p)
@@ -910,6 +912,7 @@ func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPol
 		p.Details = append(p.Details, detail)
 	}
 	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, false))
+	enrichProtectiveStopProposal(&p, row, nil)
 	if !stockProtectionEnabled {
 		proposalBlock(&p, "stock_protection_disabled", "stock/ETF protection is disabled in platform settings")
 	}
@@ -947,6 +950,7 @@ func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPo
 	p.Score = math.Abs(row.MarketValue)
 	p.Details = append(p.Details, trailingStopPremiumTrailDetail(cfg.DefaultPct, p.Trail, p.Contract.Currency))
 	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, true))
+	enrichProtectiveStopProposal(&p, row, nil)
 	if row.Quantity < 0 && !cfg.AllowShortProfitTrail {
 		proposalBlock(&p, "short_option_trail_disabled", "short-option trailing stops require explicit buy-to-close profit-trail policy")
 	}
@@ -1278,18 +1282,18 @@ func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreview
 	e.appendEvent(proposalEventForProposal("previewed", prop, now, preview.PreviewTokenID, preview.Draft.OrderRef, "proposal previewed"))
 	if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
 	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
 	if !preview.SubmitEligible {
 		blockers := previewNotSubmitEligibleBlockers()
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: false, Preview: sanitizeProposalPreview(preview), Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: false, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
-	return rpc.TradeProposalPreviewResult{Accepted: true, Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: preview.SubmitEligible, Preview: sanitizeProposalPreview(preview), AsOf: now}, nil
+	return rpc.TradeProposalPreviewResult{Accepted: true, Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: preview.SubmitEligible, Preview: sanitizeProposalPreviewForProposal(preview, prop), AsOf: now}, nil
 }
 
 func (e *proposalEngine) previewProposal(ctx context.Context, p rpc.TradeProposalPreviewParams) (rpc.TradeProposal, []rpc.TradingBlocker, error) {
@@ -1402,22 +1406,22 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 	e.appendEvent(proposalEventForProposal("previewed", prop, now, preview.PreviewTokenID, preview.Draft.OrderRef, "proposal fast-path previewed"))
 	if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
 	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
 	if !preview.SubmitEligible {
 		blockers := previewNotSubmitEligibleBlockers()
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
-		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
 	place, err := e.server.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs, Origin: p.Origin})
 	if err != nil {
 		blockers := []rpc.TradingBlocker{{Code: "submit_failed", Message: err.Error()}}
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, err)
-		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreview(preview), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
+		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
 	e.appendEvent(proposalEventForProposal("submitted", prop, now, preview.PreviewTokenID, place.OrderRef, "proposal submitted through preview-backed fast path"))
 	if e.server.proposalOutcomes != nil {
@@ -1425,7 +1429,7 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 			e.server.warnf("trade proposal outcomes: append submitted mark: %v", err)
 		}
 	}
-	return rpc.TradeProposalSubmitResult{Accepted: place.Accepted, Proposal: prop, Preview: sanitizeProposalPreview(preview), Place: place, PreviewTokenID: preview.PreviewTokenID, OrderRef: place.OrderRef, Message: place.Message, AsOf: e.clock()}, nil
+	return rpc.TradeProposalSubmitResult{Accepted: place.Accepted, Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), Place: place, PreviewTokenID: preview.PreviewTokenID, OrderRef: place.OrderRef, Message: place.Message, AsOf: e.clock()}, nil
 }
 
 // resolveRowMinTick returns the broker-reported minimum increment for a held
@@ -1775,6 +1779,52 @@ func cloneTrailSizing(in *rpc.TradeProposalTrailSizing) *rpc.TradeProposalTrailS
 	return &out
 }
 
+func cloneExecutionSemantics(in *rpc.TradeProposalExecutionSemantics) *rpc.TradeProposalExecutionSemantics {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ReferencePrice = cloneFloat64Ptr(in.ReferencePrice)
+	return &out
+}
+
+func cloneStopRisk(in *rpc.TradeProposalStopRisk) *rpc.TradeProposalStopRisk {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ReferencePrice = cloneFloat64Ptr(in.ReferencePrice)
+	out.StopPrice = cloneFloat64Ptr(in.StopPrice)
+	out.Distance = cloneFloat64Ptr(in.Distance)
+	out.DistancePct = cloneFloat64Ptr(in.DistancePct)
+	out.EstimatedLoss = cloneFloat64Ptr(in.EstimatedLoss)
+	out.EstimatedLossBase = cloneFloat64Ptr(in.EstimatedLossBase)
+	out.EstimatedLossPctNLV = cloneFloat64Ptr(in.EstimatedLossPctNLV)
+	out.WarningCodes = append([]string(nil), in.WarningCodes...)
+	if in.GapScenario != nil {
+		gap := *in.GapScenario
+		gap.AssumedExecutionPrice = cloneFloat64Ptr(in.GapScenario.AssumedExecutionPrice)
+		gap.EstimatedLoss = cloneFloat64Ptr(in.GapScenario.EstimatedLoss)
+		gap.EstimatedLossBase = cloneFloat64Ptr(in.GapScenario.EstimatedLossBase)
+		gap.EstimatedLossPctNLV = cloneFloat64Ptr(in.GapScenario.EstimatedLossPctNLV)
+		out.GapScenario = &gap
+	}
+	return &out
+}
+
+func cloneStopLadder(in []rpc.TradeProposalStopLadderStep) []rpc.TradeProposalStopLadderStep {
+	out := append([]rpc.TradeProposalStopLadderStep(nil), in...)
+	for i := range out {
+		out[i].Percent = cloneFloat64Ptr(in[i].Percent)
+		out[i].StopPrice = cloneFloat64Ptr(in[i].StopPrice)
+		out[i].EstimatedLoss = cloneFloat64Ptr(in[i].EstimatedLoss)
+		out[i].EstimatedLossBase = cloneFloat64Ptr(in[i].EstimatedLossBase)
+		out[i].EstimatedLossPctNLV = cloneFloat64Ptr(in[i].EstimatedLossPctNLV)
+		out[i].ReferencePrice = cloneFloat64Ptr(in[i].ReferencePrice)
+	}
+	return out
+}
+
 func mergeTradingBlockers(first, second []rpc.TradingBlocker) []rpc.TradingBlocker {
 	out := append([]rpc.TradingBlocker(nil), first...)
 	for _, blocker := range second {
@@ -1792,11 +1842,15 @@ func proposalCloseReduceEffect(effect string) bool {
 	}
 }
 
-func sanitizeProposalPreview(in *rpc.OrderPreviewResult) *rpc.TradeProposalOrderPreview {
+func sanitizeProposalPreviewForProposal(in *rpc.OrderPreviewResult, prop rpc.TradeProposal) *rpc.TradeProposalOrderPreview {
 	if in == nil {
 		return nil
 	}
-	return &rpc.TradeProposalOrderPreview{PreviewTokenID: in.PreviewTokenID, PreviewTokenScope: in.PreviewTokenScope, PreviewTokenExpiresAt: in.PreviewTokenExpiresAt, TokenMinted: in.TokenMinted, SubmitEligible: in.SubmitEligible, Mode: in.Mode, Account: in.Account, Endpoint: in.Endpoint, ClientID: in.ClientID, Draft: in.Draft, Quote: in.Quote, Position: in.Position, Notional: in.Notional, MaxNotional: in.MaxNotional, WhatIf: in.WhatIf, Warnings: append([]rpc.DataWarning(nil), in.Warnings...), AsOf: in.AsOf}
+	return &rpc.TradeProposalOrderPreview{PreviewTokenID: in.PreviewTokenID, PreviewTokenScope: in.PreviewTokenScope, PreviewTokenExpiresAt: in.PreviewTokenExpiresAt, TokenMinted: in.TokenMinted, SubmitEligible: in.SubmitEligible, Mode: in.Mode, Account: in.Account, Endpoint: in.Endpoint, ClientID: in.ClientID, Draft: in.Draft, Quote: in.Quote, Position: in.Position, ExecutionSemantics: cloneExecutionSemantics(prop.ExecutionSemantics), StopRisk: cloneStopRisk(prop.StopRisk), Notional: in.Notional, MaxNotional: in.MaxNotional, WhatIf: in.WhatIf, Warnings: append([]rpc.DataWarning(nil), in.Warnings...), AsOf: in.AsOf}
+}
+
+func sanitizeProposalPreview(in *rpc.OrderPreviewResult) *rpc.TradeProposalOrderPreview {
+	return sanitizeProposalPreviewForProposal(in, rpc.TradeProposal{})
 }
 
 func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bool) {
@@ -2144,6 +2198,9 @@ func cloneProposalSnapshot(in rpc.TradeProposalSnapshot) rpc.TradeProposalSnapsh
 	for i := range out.Proposals {
 		out.Proposals[i].Trail = cloneTrailSpec(in.Proposals[i].Trail)
 		out.Proposals[i].TrailSizing = cloneTrailSizing(in.Proposals[i].TrailSizing)
+		out.Proposals[i].ExecutionSemantics = cloneExecutionSemantics(in.Proposals[i].ExecutionSemantics)
+		out.Proposals[i].StopRisk = cloneStopRisk(in.Proposals[i].StopRisk)
+		out.Proposals[i].StopLadder = cloneStopLadder(in.Proposals[i].StopLadder)
 		out.Proposals[i].Details = append([]string(nil), in.Proposals[i].Details...)
 		out.Proposals[i].MarketFlags = append([]rpc.MarketEventFlag(nil), in.Proposals[i].MarketFlags...)
 		out.Proposals[i].Blockers = append([]rpc.TradingBlocker(nil), in.Proposals[i].Blockers...)
