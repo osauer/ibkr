@@ -1925,7 +1925,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
     : "--";
   riskExcessEl.title = hasNumericValue(riskExcess) && riskExcess > 0 ? "Risk-reduction proposal exposure above policy target." : "No risk-reduction proposal exposure above target.";
   setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral");
-  const noStop = protectionNoStopExposureSummary(rows, marketEvents);
+  const noStop = protectionNoStopExposureSummary(rows, marketEvents, currentProtectionCoverage());
   const noStopEl = $("protectionNoStopExposure");
   noStopEl.textContent = noStop.text;
   noStopEl.title = noStop.title;
@@ -1957,7 +1957,10 @@ function protectionVisibleRows(rows = [], marketEvents = {}) {
   return rows.filter((proposal) => !protectionCoveredByExistingOrder(proposal, marketEvents));
 }
 
-function protectionNoStopExposureSummary(rows = [], marketEvents = {}) {
+function protectionNoStopExposureSummary(rows = [], marketEvents = {}, coverage = null) {
+  if (protectionCoverageHasData(coverage)) {
+    return protectionCoverageNoStopSummary(coverage);
+  }
   const visible = protectionVisibleRows(rows, marketEvents)
     .filter((proposal) => proposal.bucket === "trailing_stop");
   if (visible.length === 0) {
@@ -1991,6 +1994,152 @@ function protectionProposalNotional(proposal = {}) {
   const value = firstNumber(proposal.notional);
   const currency = normalizeCurrency(proposal.contract?.currency || proposal.currency || "");
   return { value, currency };
+}
+
+function currentProtectionCoverage() {
+  const snap = state.snapshot || {};
+  return protectionCoverageFor(snap, snap.canary || {});
+}
+
+function protectionCoverageFor(snap = state.snapshot || {}, canary = snap.canary || {}) {
+  const candidates = [
+    snap.positions?.protection_coverage,
+    canary.portfolio?.protection_coverage,
+    canary.protection_coverage,
+  ];
+  return candidates.find(protectionCoverageHasData) || null;
+}
+
+function protectionCoverageHasData(coverage = null) {
+  if (!coverage || typeof coverage !== "object") return false;
+  if (coverage.status || coverage.message) return true;
+  if (hasNumericValue(coverage.unprotected_notional_base)) return true;
+  if ((coverage.by_underlying || []).length > 0) return true;
+  if ((coverage.largest_unprotected || []).length > 0) return true;
+  if ((coverage.orphaned_orders || []).length > 0) return true;
+  if ((coverage.reconcile_required_orders || []).length > 0) return true;
+  return Object.values(coverage.counts || {}).some((value) => Number(value || 0) > 0);
+}
+
+function protectionCoverageBaseCurrency(coverage = {}, fallback = "") {
+  return normalizeCurrency(
+    coverage.unprotected_notional_base_currency ||
+    fallback ||
+    state.snapshot?.positions?.portfolio?.base_currency ||
+    state.snapshot?.account?.base_currency ||
+    "USD",
+  );
+}
+
+function protectionCoverageCounts(coverage = {}) {
+  const counts = coverage.counts || {};
+  const orphaned = Number(counts.orphaned_order || (coverage.orphaned_orders || []).length || 0);
+  const reconcile = Number(counts.reconcile_required || (coverage.reconcile_required_orders || []).length || 0);
+  return {
+    covered: Number(counts.covered || 0),
+    partial: Number(counts.partial || 0),
+    unprotected: Number(counts.unprotected || 0),
+    orphaned,
+    reconcile,
+    unknown: Number(counts.unknown || 0),
+    stale: orphaned + reconcile,
+  };
+}
+
+function protectionCoverageNoStopSummary(coverage = {}) {
+  const counts = protectionCoverageCounts(coverage);
+  const baseCurrency = protectionCoverageBaseCurrency(coverage);
+  const issueCount = counts.unprotected + counts.partial;
+  const status = String(coverage.status || "").toLowerCase();
+  const stale = protectionCoverageStaleText(coverage);
+  if (status === "unknown" || counts.unknown > 0) {
+    return {
+      text: "Unknown",
+      title: [coverage.message || "Protection coverage is unavailable for this snapshot.", stale].filter(Boolean).join(" "),
+      risk: true,
+    };
+  }
+  if (hasNumericValue(coverage.unprotected_notional_base)) {
+    const text = compactWholeMoney(coverage.unprotected_notional_base, baseCurrency);
+    const label = issueCount > 0
+      ? `${issueCount} ${issueCount === 1 ? "stock/ETF row has" : "stock/ETF rows have"} uncovered quantity`
+      : "No uncovered stock/ETF quantity in the coverage ledger";
+    return {
+      text,
+      title: [label, stale].filter(Boolean).join(" "),
+      risk: coverage.unprotected_notional_base > 0 || issueCount > 0 || counts.stale > 0,
+    };
+  }
+  if (issueCount > 0) {
+    return {
+      text: `${issueCount} ${issueCount === 1 ? "row" : "rows"}`,
+      title: [`Coverage ledger found uncovered stock/ETF quantity; base notional is unavailable.`, stale].filter(Boolean).join(" "),
+      risk: true,
+    };
+  }
+  return {
+    text: counts.stale > 0 ? "Review" : "--",
+    title: [counts.stale > 0 ? "Stale protective orders need reconciliation." : "No uncovered stock/ETF quantity in the coverage ledger.", stale].filter(Boolean).join(" "),
+    risk: counts.stale > 0,
+  };
+}
+
+function protectionCoverageStaleText(coverage = {}) {
+  const counts = protectionCoverageCounts(coverage);
+  const parts = [];
+  if (counts.orphaned > 0) parts.push(`${counts.orphaned} orphaned`);
+  if (counts.reconcile > 0) parts.push(`${counts.reconcile} reconcile-required`);
+  return parts.length > 0 ? `Stale stops: ${parts.join(", ")}.` : "";
+}
+
+function protectionCoverageLargestRows(coverage = {}) {
+  const largest = Array.isArray(coverage.largest_unprotected) ? coverage.largest_unprotected : [];
+  if (largest.length > 0) return largest;
+  return (coverage.by_underlying || [])
+    .filter((row) => ["partial", "unprotected"].includes(String(row.state || "").toLowerCase()))
+    .slice()
+    .sort((a, b) => Math.abs(firstNumber(b.unprotected_notional_base, 0)) - Math.abs(firstNumber(a.unprotected_notional_base, 0)));
+}
+
+function protectionCoverageLargestText(coverage = {}, baseCurrency = "", { sensitive = false } = {}) {
+  const rows = protectionCoverageLargestRows(coverage).slice(0, 3);
+  if (rows.length === 0) return "";
+  return rows.map((row) => {
+    const symbol = normalizeSymbol(row.underlying || row.symbol || "");
+    const value = firstNumber(row.unprotected_notional_base, row.market_value_base);
+    const ccy = row.unprotected_notional_base_currency || baseCurrency || protectionCoverageBaseCurrency(coverage);
+    const amount = hasNumericValue(value)
+      ? sensitive
+        ? sensitiveDisplayMoney(value, ccy)
+        : compactWholeMoney(value, ccy)
+      : "";
+    return [symbol || "Unknown", amount].filter(Boolean).join(" ");
+  }).join(", ");
+}
+
+function protectionCoverageStaleOrderText(coverage = {}, limit = 2) {
+  const orders = [
+    ...(coverage.orphaned_orders || []),
+    ...(coverage.reconcile_required_orders || []),
+  ].slice(0, limit);
+  if (orders.length === 0) return "";
+  return orders.map((order) => {
+    const symbol = normalizeSymbol(order.symbol || "");
+    const qty = hasNumericValue(order.remaining) && order.remaining > 0 ? `${numberRead(order.remaining)} ` : "";
+    const type = String(order.order_type || "").toUpperCase();
+    const state = String(order.reconciliation_state || "").replaceAll("_", " ");
+    return [symbol, `${qty}${type}`.trim(), state].filter(Boolean).join(" ");
+  }).join(", ");
+}
+
+function protectionCoverageTone(coverage = {}) {
+  const counts = protectionCoverageCounts(coverage);
+  const status = String(coverage.status || "").toLowerCase();
+  if (status === "unknown" || counts.unknown > 0) return "warn";
+  if (counts.unprotected > 0 || counts.partial > 0 || counts.stale > 0 || Number(coverage.unprotected_notional_base || 0) > 0) {
+    return "risk";
+  }
+  return "ok";
 }
 
 function protectionHiddenRowsText(rows = [], marketEvents = {}) {
@@ -2191,7 +2340,10 @@ function protectionRow(proposal) {
   const quoteLine = protectionQuoteLine(proposal);
   if (quoteLine) copy.append(quoteLine);
   const metricText = protectionMetricText(proposal);
-  if (metricText) {
+  const riskTicket = protectionRiskTicket(proposal, metricText);
+  if (riskTicket) {
+    copy.append(riskTicket);
+  } else if (metricText) {
     const metric = document.createElement("small");
     metric.className = "protection-row__trail";
     if (protectionTrailSizingFallback(proposal)) {
@@ -2410,6 +2562,99 @@ function protectionMetricText(proposal = {}) {
     return parts.join(" · ");
   }
   return "";
+}
+
+function protectionRiskTicket(proposal = {}, metricText = "") {
+  if (proposal.bucket !== "trailing_stop") return null;
+  const parts = protectionRiskTicketParts(proposal, metricText);
+  if (parts.length === 0) return null;
+  const ticket = document.createElement("small");
+  ticket.className = "protection-row__trail protection-row__risk-ticket";
+  if (protectionTrailSizingFallback(proposal)) {
+    ticket.classList.add("protection-row__trail--fallback");
+  }
+  for (const part of parts) {
+    const item = document.createElement("span");
+    item.textContent = part;
+    ticket.append(item);
+  }
+  const title = protectionRiskTicketTitle(proposal);
+  if (title) ticket.title = title;
+  return ticket;
+}
+
+function protectionRiskTicketParts(proposal = {}, metricText = "") {
+  const parts = [];
+  if (metricText) parts.push(metricText);
+  const trigger = protectionExecutionTriggerLabel(proposal.execution_semantics);
+  if (trigger) parts.push(`trigger ${trigger}`);
+  const loss = protectionStopRiskLossLabel(proposal.stop_risk);
+  if (loss) parts.push(`est. loss ${loss}`);
+  const gap = protectionStopRiskGapLabel(proposal.stop_risk);
+  if (gap) parts.push(`5% gap ${gap}`);
+  const warning = protectionExecutionWarningLabel(proposal.execution_semantics);
+  if (warning) parts.push(warning);
+  return parts;
+}
+
+function protectionExecutionTriggerLabel(semantics = {}) {
+  if (!semantics) return "";
+  const side = String(semantics.reference_side || "").trim().toLowerCase();
+  const trigger = String(semantics.trigger_method_label || semantics.trigger_source || "").trim();
+  return [side, trigger].filter(Boolean).join(" / ");
+}
+
+function protectionStopRiskLossLabel(risk = {}) {
+  if (!risk) return "";
+  const value = firstNumber(risk.estimated_loss_base, risk.estimated_loss_ccy);
+  if (!hasNumericValue(value)) return "";
+  const currency = risk.estimated_loss_base !== undefined
+    ? risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
+    : risk.currency || state.snapshot?.account?.base_currency || "USD";
+  const pctNLV = hasNumericValue(risk.estimated_loss_pct_nlv) ? ` (${pct(risk.estimated_loss_pct_nlv)} NLV)` : "";
+  return `${compactWholeMoney(Math.abs(value), currency)}${pctNLV}`;
+}
+
+function protectionStopRiskGapLabel(risk = {}) {
+  const gap = risk?.gap_scenario || null;
+  if (!gap) return "";
+  const value = firstNumber(gap.estimated_loss_base, gap.estimated_loss_ccy);
+  if (!hasNumericValue(value)) return "";
+  const currency = gap.estimated_loss_base !== undefined
+    ? risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
+    : risk.currency || state.snapshot?.account?.base_currency || "USD";
+  const pctNLV = hasNumericValue(gap.estimated_loss_pct_nlv) ? ` (${pct(gap.estimated_loss_pct_nlv)} NLV)` : "";
+  return `${compactWholeMoney(Math.abs(value), currency)}${pctNLV}`;
+}
+
+function protectionExecutionWarningLabel(semantics = {}) {
+  const guarantee = String(semantics?.price_guarantee || "").toLowerCase();
+  if (guarantee === "stop_limit_can_leave_position_unfilled") return "limit may not fill";
+  if (guarantee === "stop_price_is_not_execution_price") return "trigger becomes market";
+  return "";
+}
+
+function protectionRiskTicketTitle(proposal = {}) {
+  const semantics = proposal.execution_semantics || {};
+  const parts = [];
+  if (semantics.trigger_effect === "market_order_when_triggered") {
+    parts.push("TRAIL converts to a market order when triggered; stop price is not the execution price.");
+  } else if (semantics.trigger_effect === "limit_order_when_triggered") {
+    parts.push("TRAIL LIMIT converts to a limit order when triggered; the position can remain open if the limit does not fill.");
+  }
+  const ladder = protectionStopLadderLabel(proposal.stop_ladder || [], proposal.stop_risk);
+  if (ladder) parts.push(`Stop ladder: ${ladder}`);
+  return parts.join(" ");
+}
+
+function protectionStopLadderLabel(ladder = [], risk = {}) {
+  const currency = risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD";
+  return (ladder || []).slice(0, 5).map((step) => {
+    const loss = firstNumber(step.estimated_loss_base, step.estimated_loss_ccy);
+    const amount = hasNumericValue(loss) ? compactWholeMoney(Math.abs(loss), currency) : "";
+    const stop = hasNumericValue(step.stop_price) ? `stop ${numberRead(step.stop_price)}` : "";
+    return [step.label, stop, amount].filter(Boolean).join(" ");
+  }).filter(Boolean).join("; ");
 }
 
 function protectionProposalDTE(proposal = {}) {
@@ -3596,7 +3841,7 @@ function applyOpportunitySnapshot(opportunities = {}) {
 function canaryExplanationCards(canary, snap = state.snapshot || {}) {
   return [
     marketExplanation(canary),
-    portfolioExplanation(canary),
+    portfolioExplanation(canary, snap),
     inputExplanation(canary, snap),
     readinessExplanation(canary),
   ];
@@ -3739,10 +3984,11 @@ function regimePostureDetailTone(posture = {}) {
   }
 }
 
-function portfolioExplanation(canary) {
+function portfolioExplanation(canary, snap = state.snapshot || {}) {
   const fit = String(canary.portfolio_fit || "").toLowerCase();
   const heldStress = heldStressItems(canary);
   const heldStressLine = heldStress.length > 0 ? ` Held stress: ${heldStressSummary(heldStress, 2)}.` : "";
+  const protectionLine = protectionCoverageCanaryLine(canary, snap);
   if (fit === "high") {
     const confirmed = String(canary.market_confirmation || "").toLowerCase() === "confirmed";
     const severity = String(canary.severity || "").toLowerCase();
@@ -3750,8 +3996,8 @@ function portfolioExplanation(canary) {
       label: "Portfolio",
       title: "Portfolio is exposed",
       body: confirmed
-        ? "The current portfolio shape is vulnerable to the confirmed market stress." + heldStressLine
-        : "The portfolio is vulnerable if the warning firms; this is exposure context until market stress confirms." + heldStressLine,
+        ? "The current portfolio shape is vulnerable to the confirmed market stress." + heldStressLine + protectionLine
+        : "The portfolio is vulnerable if the warning firms; this is exposure context until market stress confirms." + heldStressLine + protectionLine,
       tone: confirmed && ["act", "urgent"].includes(severity) ? "risk" : "warn",
     };
   }
@@ -3759,7 +4005,7 @@ function portfolioExplanation(canary) {
     return {
       label: "Portfolio",
       title: "Exposure is meaningful",
-      body: "The portfolio has some sensitivity to the current stress. Size changes carefully." + heldStressLine,
+      body: "The portfolio has some sensitivity to the current stress. Size changes carefully." + heldStressLine + protectionLine,
       tone: "warn",
     };
   }
@@ -3767,16 +4013,29 @@ function portfolioExplanation(canary) {
     return {
       label: "Portfolio",
       title: "Held-name stress",
-      body: heldStressSummary(heldStress, 2),
+      body: heldStressSummary(heldStress, 2) + protectionLine,
       tone: "warn",
     };
   }
   return {
     label: "Portfolio",
     title: fit === "low" ? "Exposure looks contained" : cleanDetail(canary.portfolio?.largest_exposure),
-    body: "The current portfolio shape is not the main reason for a defensive canary action.",
+    body: "The current portfolio shape is not the main reason for a defensive canary action." + protectionLine,
     tone: "ok",
   };
+}
+
+function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {}) {
+  const coverage = protectionCoverageFor(snap, canary);
+  if (!protectionCoverageHasData(coverage)) return "";
+  const baseCurrency = protectionCoverageBaseCurrency(coverage, snap.account?.base_currency || "");
+  const headline = protectionCoverageHeadline(coverage, baseCurrency, { sensitive: true });
+  const largest = protectionCoverageLargestText(coverage, baseCurrency, { sensitive: true });
+  const stale = protectionCoverageStaleText(coverage);
+  const parts = [`Protection coverage: ${headline}`];
+  if (largest) parts.push(`largest unprotected ${largest}`);
+  if (stale) parts.push(stale.replace(/\.$/, ""));
+  return ` ${parts.join("; ")}.`;
 }
 
 function inputExplanation(canary, snap = state.snapshot || {}) {
@@ -4852,6 +5111,8 @@ function portfolioDetailRows(portfolio, positions, baseCurrency) {
       tone: "neutral",
     },
   ];
+  const coverageFact = protectionCoverageDetailFact(positions.protection_coverage, baseCurrency);
+  if (coverageFact) rows.push(coverageFact);
   if ((portfolio.exposure_base || []).length > 0) {
     rows.push({
       label: "Largest exposure",
@@ -4868,6 +5129,54 @@ function portfolioDetailRows(portfolio, positions, baseCurrency) {
     });
   }
   return rows;
+}
+
+function protectionCoverageDetailFact(coverage = null, baseCurrency = "") {
+  if (!protectionCoverageHasData(coverage)) return null;
+  const ccy = protectionCoverageBaseCurrency(coverage, baseCurrency);
+  return {
+    label: "Protection coverage",
+    title: protectionCoverageHeadline(coverage, ccy, { sensitive: true }),
+    body: protectionCoverageDetailBody(coverage, ccy),
+    tone: protectionCoverageTone(coverage),
+  };
+}
+
+function protectionCoverageHeadline(coverage = {}, baseCurrency = "", { sensitive = false } = {}) {
+  const counts = protectionCoverageCounts(coverage);
+  const status = String(coverage.status || "").toLowerCase();
+  const ccy = protectionCoverageBaseCurrency(coverage, baseCurrency);
+  if (status === "unknown" || counts.unknown > 0) return "Coverage unknown";
+  if (hasNumericValue(coverage.unprotected_notional_base)) {
+    const amount = sensitive
+      ? sensitiveDisplayMoney(coverage.unprotected_notional_base, ccy)
+      : compactWholeMoney(coverage.unprotected_notional_base, ccy);
+    const stale = counts.stale > 0 ? ` · ${counts.stale} stale` : "";
+    return `${amount} unprotected${stale}`;
+  }
+  const uncovered = counts.unprotected + counts.partial;
+  if (uncovered > 0) return `${uncovered} ${uncovered === 1 ? "position" : "positions"} unprotected`;
+  if (counts.stale > 0) return `${counts.stale} stale ${counts.stale === 1 ? "stop" : "stops"}`;
+  if (counts.covered > 0) return `${counts.covered} ${counts.covered === 1 ? "position" : "positions"} covered`;
+  return "Coverage ready";
+}
+
+function protectionCoverageDetailBody(coverage = {}, baseCurrency = "") {
+  const counts = protectionCoverageCounts(coverage);
+  const largest = protectionCoverageLargestText(coverage, baseCurrency, { sensitive: true });
+  const staleOrders = protectionCoverageStaleOrderText(coverage, 3);
+  const parts = [];
+  if (largest) {
+    parts.push(`Largest unprotected: ${largest}.`);
+  } else if (counts.unprotected === 0 && counts.partial === 0) {
+    parts.push("No unprotected stock/ETF notional in this snapshot.");
+  }
+  if (staleOrders) parts.push(`Stale protective orders: ${staleOrders}.`);
+  if (coverage.message) parts.push(cleanDetail(coverage.message));
+  if (parts.length === 0) {
+    parts.push("Coverage ledger compares stock/ETF positions to observed open stop orders.");
+  }
+  return parts.join(" ");
 }
 
 function portfolioDetailSummary(portfolio, positions) {

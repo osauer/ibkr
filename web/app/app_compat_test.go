@@ -269,6 +269,9 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function setStockProtectionEnabled(enabled)",
 		"function stockProtectionSettingEnabled()",
 		"function protectionMetricText(proposal = {})",
+		"function protectionRiskTicket(proposal = {}, metricText = \"\")",
+		"function protectionCoverageDetailFact(coverage = null, baseCurrency = \"\")",
+		"function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {})",
 		`? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)`,
 		"compactWholeMoney(proposal.risk_excess_notional, proposal.risk_excess_currency || \"\")",
 		"function compactWholeMoney(value, currency)",
@@ -475,6 +478,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".protection-row:first-child",
 		".protection-row__trail",
 		".protection-row__trail--fallback",
+		".protection-row__risk-ticket",
 		".protection-preview",
 		".opportunities-panel",
 		".opportunities-summary",
@@ -706,7 +710,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	for _, want := range []string{
 		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral")`,
 		`setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral")`,
-		`const noStop = protectionNoStopExposureSummary(rows, marketEvents);`,
+		`const noStop = protectionNoStopExposureSummary(rows, marketEvents, currentProtectionCoverage());`,
 		`$("protectionNoStopExposure")`,
 	} {
 		if !strings.Contains(render, want) {
@@ -715,6 +719,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	}
 	noStop := jsFunctionBlock(t, js, "protectionNoStopExposureSummary")
 	for _, want := range []string{
+		"protectionCoverageNoStopSummary(coverage)",
 		"protectionVisibleRows(rows, marketEvents)",
 		`proposal.bucket === "trailing_stop"`,
 		"protectionProposalNotional(proposal)",
@@ -731,13 +736,80 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 		}
 	}
 	css := string(cssData)
-	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral"} {
+	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral", ".detail-fact.risk", ".protection-row__risk-ticket"} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing protection metric tone rule %q", want)
 		}
 	}
 	if strings.Contains(css, "#protectionTheta {\n  color: var(--red);") {
 		t.Fatal("protection theta must not be unconditionally red")
+	}
+}
+
+func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
+	t.Parallel()
+	appData, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(appData)
+
+	riskTicket := jsFunctionBlock(t, js, "protectionRiskTicketParts")
+	for _, want := range []string{
+		"proposal.execution_semantics",
+		"proposal.stop_risk",
+		"trigger ${trigger}",
+		"est. loss ${loss}",
+		"5% gap ${gap}",
+		"protectionExecutionWarningLabel",
+	} {
+		if !strings.Contains(riskTicket, want) {
+			t.Fatalf("protectionRiskTicketParts missing stop-risk contract %q", want)
+		}
+	}
+	warnings := jsFunctionBlock(t, js, "protectionExecutionWarningLabel")
+	for _, want := range []string{
+		`stop_limit_can_leave_position_unfilled`,
+		`stop_price_is_not_execution_price`,
+		`limit may not fill`,
+		`trigger becomes market`,
+	} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("protectionExecutionWarningLabel missing Schwab-style warning %q", want)
+		}
+	}
+	detailRows := jsFunctionBlock(t, js, "portfolioDetailRows")
+	for _, want := range []string{
+		"protectionCoverageDetailFact(positions.protection_coverage, baseCurrency)",
+		"rows.push(coverageFact)",
+	} {
+		if !strings.Contains(detailRows, want) {
+			t.Fatalf("portfolioDetailRows missing coverage fact contract %q", want)
+		}
+	}
+	coverageBody := jsFunctionBlock(t, js, "protectionCoverageDetailBody")
+	for _, want := range []string{
+		"Largest unprotected:",
+		"Stale protective orders:",
+		"Coverage ledger compares stock/ETF positions to observed open stop orders.",
+	} {
+		if !strings.Contains(coverageBody, want) {
+			t.Fatalf("protectionCoverageDetailBody missing coverage wording %q", want)
+		}
+	}
+	portfolioExplanation := jsFunctionBlock(t, js, "portfolioExplanation")
+	if !strings.Contains(portfolioExplanation, "protectionCoverageCanaryLine(canary, snap)") {
+		t.Fatalf("portfolioExplanation must include canary protection coverage context")
+	}
+	canaryLine := jsFunctionBlock(t, js, "protectionCoverageCanaryLine")
+	for _, want := range []string{
+		"Protection coverage: ${headline}",
+		"largest unprotected",
+		"protectionCoverageStaleText(coverage)",
+	} {
+		if !strings.Contains(canaryLine, want) {
+			t.Fatalf("protectionCoverageCanaryLine missing canary coverage contract %q", want)
+		}
 	}
 }
 
