@@ -741,7 +741,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 		}
 	}
 	css := string(cssData)
-	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral", ".detail-fact.risk", ".protection-row__risk-ticket"} {
+	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral", ".detail-fact.risk", ".protection-row__risk-ticket", ".protection-coverage-ledger", ".protection-row__ladder"} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing protection metric tone rule %q", want)
 		}
@@ -776,6 +776,26 @@ func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 			t.Fatalf("protectionRiskTicketParts missing stop-risk contract %q", want)
 		}
 	}
+	protectionRow := jsFunctionBlock(t, js, "protectionRow")
+	for _, want := range []string{
+		"protectionStopLadder(proposal)",
+		"copy.append(ladder)",
+	} {
+		if !strings.Contains(protectionRow, want) {
+			t.Fatalf("protectionRow missing inline stop ladder contract %q", want)
+		}
+	}
+	ladder := jsFunctionBlock(t, js, "protectionStopLadder")
+	for _, want := range []string{
+		`proposal.bucket !== "trailing_stop"`,
+		"proposal.stop_ladder",
+		`aria-label", "Stop ladder comparison"`,
+		"protectionStopLadderDisplaySteps",
+	} {
+		if !strings.Contains(ladder, want) {
+			t.Fatalf("protectionStopLadder missing inline ladder contract %q", want)
+		}
+	}
 	warnings := jsFunctionBlock(t, js, "protectionExecutionWarningLabel")
 	for _, want := range []string{
 		`stop_limit_can_leave_position_unfilled`,
@@ -805,6 +825,22 @@ func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 		if !strings.Contains(coverageBody, want) {
 			t.Fatalf("protectionCoverageDetailBody missing coverage wording %q", want)
 		}
+	}
+	coverageLedger := jsFunctionBlock(t, js, "protectionCoverageLedger")
+	for _, want := range []string{
+		"protectionCoverageDisplayRows(coverage)",
+		`aria-label", "Per-underlying protection coverage"`,
+		"protectionCoverageQuantityText(row)",
+		"protectionCoverageNotionalText(row, baseCurrency",
+		"protectionCoverageOrderText(row)",
+	} {
+		if !strings.Contains(coverageLedger, want) {
+			t.Fatalf("protectionCoverageLedger missing per-underlying contract %q", want)
+		}
+	}
+	detailFact := jsFunctionBlock(t, js, "detailFact")
+	if !strings.Contains(detailFact, "fact.detail instanceof Node") {
+		t.Fatalf("detailFact must append structured protection coverage detail")
 	}
 	portfolioExplanation := jsFunctionBlock(t, js, "portfolioExplanation")
 	if !strings.Contains(portfolioExplanation, "protectionCoverageCanaryLine(canary, snap)") {

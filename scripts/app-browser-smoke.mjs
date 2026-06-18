@@ -829,6 +829,31 @@ async function exerciseProtectionRiskRendering(page) {
         unprotected_quantity: 10,
         unprotected_notional_base: 123,
         unprotected_notional_base_currency: "USD",
+      }, {
+        underlying: "PART",
+        state: "partial",
+        position_quantity: 40,
+        protected_quantity: 25,
+        unprotected_quantity: 15,
+        unprotected_notional_base: 456,
+        unprotected_notional_base_currency: "USD",
+        orders: [{
+          symbol: "PART",
+          order_type: "TRAIL",
+          tif: "GTC",
+          stop_price: 31.5,
+        }],
+      }, {
+        underlying: "COVER",
+        state: "covered",
+        position_quantity: 8,
+        protected_quantity: 8,
+        orders: [{
+          symbol: "COVER",
+          order_type: "TRAIL",
+          tif: "GTC",
+          stop_price: 50,
+        }],
       }],
       largest_unprotected: [{
         underlying: "SMOKE",
@@ -841,6 +866,7 @@ async function exerciseProtectionRiskRendering(page) {
         order_type: "TRAIL",
         remaining: 100,
         reconciliation_state: "position_mismatch",
+        last_message: "current position 0 no longer supports close-only protective order remaining 100; broker reconciliation required",
       }],
     };
     const canaryCoverage = {
@@ -906,9 +932,29 @@ async function exerciseProtectionRiskRendering(page) {
             },
           },
           stop_ladder: [{
-            label: "policy chosen",
+            label: "5%",
+            kind: "fixed_5pct",
+            percent: 5,
+            stop_price: 95,
+            estimated_loss_base: 50,
+          }, {
+            label: "10%",
+            kind: "fixed_10pct",
+            percent: 10,
             stop_price: 90,
             estimated_loss_base: 100,
+          }, {
+            label: "policy chosen",
+            kind: "policy_chosen",
+            percent: 10,
+            stop_price: 90,
+            estimated_loss_base: 100,
+          }, {
+            label: "ATR candidate",
+            kind: "atr_candidate",
+            percent: 12,
+            stop_price: 88,
+            estimated_loss_base: 120,
           }],
         }],
       },
@@ -918,12 +964,16 @@ async function exerciseProtectionRiskRendering(page) {
     const portfolio = document.getElementById("portfolioDetailList")?.textContent?.toLowerCase() || "";
     const canary = document.getElementById("canaryDetailGrid")?.textContent?.toLowerCase() || "";
     return document.querySelector(".protection-row__risk-ticket") &&
+      document.querySelector(".protection-row__ladder") &&
+      document.querySelector(".protection-coverage-ledger") &&
       portfolio.includes("protection coverage") &&
       canary.includes("protection coverage");
   }, { timeout: 5000 });
   const info = await page.evaluate(() => ({
     noStop: document.getElementById("protectionNoStopExposure")?.textContent?.trim() || "",
     riskTicket: document.querySelector(".protection-row__risk-ticket")?.textContent?.replace(/\s+/g, " ").trim() || "",
+    ladder: document.querySelector(".protection-row__ladder")?.textContent?.replace(/\s+/g, " ").trim() || "",
+    coverageLedger: document.querySelector(".protection-coverage-ledger")?.textContent?.replace(/\s+/g, " ").trim() || "",
     portfolioDetail: document.getElementById("portfolioDetailList")?.textContent?.replace(/\s+/g, " ").trim() || "",
     canaryDetail: document.getElementById("canaryDetailGrid")?.textContent?.replace(/\s+/g, " ").trim() || "",
   }));
@@ -933,6 +983,17 @@ async function exerciseProtectionRiskRendering(page) {
   for (const text of ["trigger bid / last", "est. loss", "7.5% gap", "trigger becomes market"]) {
     if (!info.riskTicket.includes(text)) {
       throw new Error(`Protection risk ticket missing ${JSON.stringify(text)}: ${JSON.stringify(info.riskTicket)}`);
+    }
+  }
+  for (const text of ["Stop ladder", "5%", "10%", "Policy", "ATR"]) {
+    if (!info.ladder.includes(text)) {
+      throw new Error(`Protection ladder missing ${JSON.stringify(text)}: ${JSON.stringify(info.ladder)}`);
+    }
+  }
+  const coverageLedgerLower = info.coverageLedger.toLowerCase();
+  for (const text of ["smoke", "unprotected", "part", "partial", "cover", "covered", "old", "reconcile required"]) {
+    if (!coverageLedgerLower.includes(text)) {
+      throw new Error(`Protection coverage ledger missing ${JSON.stringify(text)}: ${JSON.stringify(info.coverageLedger)}`);
     }
   }
   const portfolioDetailLower = info.portfolioDetail.toLowerCase();

@@ -1252,6 +1252,76 @@ p {
   font-size: 12px;
 }
 
+.protection-coverage-ledger {
+  display: grid;
+  gap: 0;
+  margin-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.protection-coverage-ledger__row {
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.protection-coverage-ledger__head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-fact .protection-coverage-ledger span {
+  display: inline;
+  margin: 0;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.detail-fact .protection-coverage-ledger__symbol {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.detail-fact .protection-coverage-ledger__state {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.protection-coverage-ledger__row--covered .protection-coverage-ledger__state {
+  color: #047857;
+}
+
+.protection-coverage-ledger__row--partial .protection-coverage-ledger__state,
+.protection-coverage-ledger__row--unprotected .protection-coverage-ledger__state,
+.protection-coverage-ledger__row--orphaned_order .protection-coverage-ledger__state,
+.protection-coverage-ledger__row--reconcile_required .protection-coverage-ledger__state {
+  color: var(--red);
+}
+
+.protection-coverage-ledger__row--unknown .protection-coverage-ledger__state {
+  color: var(--orange);
+}
+
+.protection-coverage-ledger__meta,
+.protection-coverage-ledger__more {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.protection-coverage-ledger__more {
+  padding-top: 7px;
+  font-weight: 650;
+}
+
 .detail-panel--dark .detail-card p,
 .detail-panel--dark .driver-row p {
   color: var(--muted);
@@ -2354,6 +2424,63 @@ p {
   color: inherit;
   font-size: inherit;
   font-weight: inherit;
+}
+
+.protection-row__ladder {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin-top: 5px;
+}
+
+.protection-row .protection-row__ladder-label {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.protection-row .protection-row__ladder-step {
+  display: inline-grid;
+  min-width: 74px;
+  max-width: 145px;
+  gap: 1px;
+  padding: 5px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.protection-row .protection-row__ladder-step b,
+.protection-row .protection-row__ladder-step span {
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 720;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.protection-row .protection-row__ladder-step span {
+  color: var(--muted);
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+.protection-row .protection-row__ladder-step--selected {
+  border-color: rgba(18, 104, 219, 0.22);
+  background: var(--blue-soft);
+}
+
+.protection-row .protection-row__ladder-step--open {
+  border-color: rgba(5, 150, 105, 0.22);
+  background: rgba(5, 150, 105, 0.08);
 }
 
 .protection-row__trail--fallback {
