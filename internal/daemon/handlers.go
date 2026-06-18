@@ -334,6 +334,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	res.Portfolio = buildPortfolioAggregatesWithBase(res.Stocks, res.Options, baseCcy)
 	addPortfolioBaseContext(res.Portfolio, res.ByUnderlying, baseCcy, netLiquidationBase)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
+	s.attachProtectionCoverage(res, wantSym, wantType)
 	return res, nil
 }
 

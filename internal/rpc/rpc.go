@@ -2254,13 +2254,14 @@ type PositionsResult struct {
 	// DataType reflects the per-position mark-price feed when the daemon
 	// can summarise it; left empty (omitted) when positions arrive purely
 	// from the portfolio update stream without per-symbol feed state.
-	DataType     string              `json:"data_type,omitempty"`
-	AsOf         time.Time           `json:"as_of"`
-	Stocks       []PositionView      `json:"stocks"`
-	Options      []PositionView      `json:"options"`
-	ByUnderlying []PositionGroup     `json:"by_underlying"`
-	Portfolio    *PositionsPortfolio `json:"portfolio,omitempty"`
-	AccountID    string              `json:"account_id,omitempty"`
+	DataType           string                     `json:"data_type,omitempty"`
+	AsOf               time.Time                  `json:"as_of"`
+	Stocks             []PositionView             `json:"stocks"`
+	Options            []PositionView             `json:"options"`
+	ByUnderlying       []PositionGroup            `json:"by_underlying"`
+	Portfolio          *PositionsPortfolio        `json:"portfolio,omitempty"`
+	ProtectionCoverage *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
+	AccountID          string                     `json:"account_id,omitempty"`
 }
 
 // PositionsPortfolio is the daemon-side aggregator across all open legs.
