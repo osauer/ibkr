@@ -568,7 +568,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row), trailSizing); ok {
 					enrichProtectiveStopProposal(&p, row, acct)
 					applyMarketEventFlagsToProposal(&p, marketEvents)
-					for _, b := range e.duplicateProtectiveBlockers(p, pos) {
+					for _, b := range e.duplicateProtectiveBlockers(ctx, p, pos) {
 						proposalBlock(&p, b.Code, b.Message)
 					}
 					if !e.isIgnored(scope, p.Key) {
@@ -1284,7 +1284,7 @@ func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreview
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
-	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
+	if blockers := e.duplicateProtectiveBlockers(ctx, prop); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
@@ -1408,7 +1408,7 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
-	if blockers := e.duplicateProtectiveBlockers(prop); len(blockers) > 0 {
+	if blockers := e.duplicateProtectiveBlockers(ctx, prop); len(blockers) > 0 {
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
@@ -1464,16 +1464,31 @@ func closeReduceQuantity(position float64) (int, float64) {
 	return qty, remainder
 }
 
-// duplicateProtectiveBlockers blocks a proposal when an open journaled order
-// already works the same contract and side: submitting would double the stop,
-// and a double fill flips the position. Inferred-expired and terminal rows do
-// not count (see inferDayOrderExpiry), so a stale zombie cannot block
-// re-protection forever.
-func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal, currentPositions ...*rpc.PositionsResult) []rpc.TradingBlocker {
+// duplicateProtectiveBlockers blocks a trailing-stop proposal when an open
+// journaled stop-like order already works the same contract and side:
+// submitting would double the stop, and a double fill flips the position.
+// Plain limit closes, inferred-expired rows, terminal rows, and reconciled
+// stale/orphaned stops do not count as protection.
+func (e *proposalEngine) duplicateProtectiveBlockers(ctx context.Context, p rpc.TradeProposal, currentPositions ...*rpc.PositionsResult) []rpc.TradingBlocker {
 	if e == nil || e.server == nil {
 		return nil
 	}
-	views, _, err := e.server.loadOrderViews()
+	if p.Bucket != "" && p.Bucket != rpc.TradeProposalBucketTrailingStop {
+		return nil
+	}
+	if !isTrailOrderType(p.OrderType) {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var views []rpc.OrderView
+	var err error
+	if len(currentPositions) > 0 && currentPositions[0] != nil {
+		views, _, err = e.server.loadOrderViews()
+	} else {
+		views, _, err = e.server.loadOrderViewsReconciled(ctx)
+	}
 	if err != nil {
 		// Journal unavailability blocks the write path through the trading
 		// gate on its own; the duplicate check just can't help here.
@@ -1483,10 +1498,7 @@ func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal, curren
 		reconcileFlatPositionProtectiveOrders(views, currentPositions[0], e.clock())
 	}
 	for _, v := range views {
-		if !v.Open || !strings.EqualFold(v.Action, p.Action) {
-			continue
-		}
-		if !orderViewMatchesProposalContract(v, p) {
+		if !proposalDuplicateOrderIsProtective(v, p) {
 			continue
 		}
 		return []rpc.TradingBlocker{{
@@ -1498,9 +1510,37 @@ func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal, curren
 	return nil
 }
 
+func proposalDuplicateOrderIsProtective(v rpc.OrderView, p rpc.TradeProposal) bool {
+	if !v.Open || !strings.EqualFold(v.Action, p.Action) {
+		return false
+	}
+	if !protectionCoverageOrderIsStopLike(v) || protectionCoverageOrderIsProblem(v) {
+		return false
+	}
+	if !strings.EqualFold(v.OpenClose, "C") && !strings.EqualFold(v.Source, proposalOrderSource) {
+		return false
+	}
+	if !orderViewMatchesProposalContract(v, p) {
+		return false
+	}
+	return orderViewActionCanCloseQuantity(v, p.PositionQuantity, orderViewRemainingQuantity(v))
+}
+
 func orderViewMatchesProposalContract(v rpc.OrderView, p rpc.TradeProposal) bool {
 	if v.ConID != 0 && p.Contract.ConID != 0 {
 		return v.ConID == p.Contract.ConID
+	}
+	if strings.EqualFold(v.SecType, "OPT") || strings.EqualFold(v.SecType, "OPTION") ||
+		strings.EqualFold(p.SecType, "OPT") || strings.EqualFold(p.SecType, "OPTION") ||
+		strings.EqualFold(p.Contract.SecType, "OPT") || strings.EqualFold(p.Contract.SecType, "OPTION") {
+		if v.LocalSymbol != "" && p.Contract.LocalSymbol != "" {
+			return strings.EqualFold(v.LocalSymbol, p.Contract.LocalSymbol)
+		}
+		return strings.EqualFold(v.Symbol, p.Symbol) &&
+			equivalentStockSecType(v.SecType, p.SecType) &&
+			strings.EqualFold(v.Expiry, p.Contract.Expiry) &&
+			strings.EqualFold(v.Right, p.Contract.Right) &&
+			math.Abs(v.Strike-p.Contract.Strike) < 1e-9
 	}
 	return strings.EqualFold(v.Symbol, p.Symbol) && equivalentStockSecType(v.SecType, p.SecType)
 }
