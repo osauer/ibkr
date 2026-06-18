@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -124,14 +125,27 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if !ok {
 		t.Fatal("stock trail proposal missing")
 	}
-	if prop.OrderType != rpc.OrderTypeTRAIL || prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 8 {
-		t.Fatalf("trail = %+v orderType=%q, want bid-derived 8.00 TRAIL amount", prop.Trail, prop.OrderType)
+	if prop.OrderType != rpc.OrderTypeTRAIL || prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 10 {
+		t.Fatalf("trail = %+v orderType=%q, want bid-derived 10.00 TRAIL amount", prop.Trail, prop.OrderType)
 	}
 	if prop.Trail.TrailingPercent != nil || prop.Trail.OffsetType != rpc.OrderTrailOffsetAmount {
 		t.Fatalf("trail = %+v, want amount offset without broker percent", prop.Trail)
 	}
-	if prop.Trail.InitialStopPrice != 92 {
-		t.Fatalf("initial stop = %.2f, want bid-based 92.00", prop.Trail.InitialStopPrice)
+	if prop.Trail.InitialStopPrice != 90 {
+		t.Fatalf("initial stop = %.2f, want bid-based 90.00", prop.Trail.InitialStopPrice)
+	}
+	if prop.TriggerMethod != rpc.OrderTriggerMethodLast {
+		t.Fatalf("trigger method = %d, want LAST", prop.TriggerMethod)
+	}
+	if prop.LimitPrice != nil {
+		t.Fatalf("trail proposal limit price = %v, want nil", *prop.LimitPrice)
+	}
+	if prop.TrailSizing == nil || !prop.TrailSizing.Fallback || prop.TrailSizing.ChosenPct != 10 || prop.TrailSizing.DataQuality != "fallback" {
+		t.Fatalf("trail sizing = %+v, want 10%% fallback sizing", prop.TrailSizing)
+	}
+	if got := strings.Join(prop.Details, "\n"); !strings.Contains(got, "fixed 10.00 USD broker trail") ||
+		!strings.Contains(got, "trail_sizing=fallback 10.0%") {
+		t.Fatalf("details = %q, want fixed trail disclosure", got)
 	}
 	if !hasBlocker(prop.Blockers, "wide_spread") {
 		t.Fatalf("blockers = %+v, want wide_spread", prop.Blockers)
@@ -144,8 +158,8 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if !ok {
 		t.Fatal("short stock trail proposal missing")
 	}
-	if prop.Action != rpc.OrderActionBuy || prop.Trail.InitialStopPrice != 109.08 {
-		t.Fatalf("short stock action/stop = %s/%.2f, want BUY ask-based 109.08", prop.Action, prop.Trail.InitialStopPrice)
+	if prop.Action != rpc.OrderActionBuy || prop.Trail.InitialStopPrice != 111.1 {
+		t.Fatalf("short stock action/stop = %s/%.2f, want BUY ask-based 111.10", prop.Action, prop.Trail.InitialStopPrice)
 	}
 
 	offHoursRow := longRow
@@ -159,7 +173,7 @@ func TestTrailingStopStockProposalUsesBidAskAndBlocksWideSpread(t *testing.T) {
 	if hasBlocker(prop.Blockers, "missing_reference_price") {
 		t.Fatalf("blockers = %+v, did not want missing_reference_price for percent broker trail", prop.Blockers)
 	}
-	if prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 8.48 || prop.Trail.InitialStopPrice != 97.52 {
+	if prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 10.6 || prop.Trail.InitialStopPrice != 95.4 {
 		t.Fatalf("off-hours trail = %+v, want amount trail seeded from portfolio mark", prop.Trail)
 	}
 
@@ -213,14 +227,49 @@ func TestTrailingStopStockProposalRoutesXetraPositionForPreview(t *testing.T) {
 	if prop.Contract.Market != "de" || prop.Contract.Exchange != "SMART" || prop.Contract.PrimaryExch != "IBIS" {
 		t.Fatalf("proposal contract route = market %q exchange %q primary %q, want de/SMART/IBIS", prop.Contract.Market, prop.Contract.Exchange, prop.Contract.PrimaryExch)
 	}
-	if prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 12.48 {
-		t.Fatalf("trailing amount = %+v, want 12.48", prop.Trail)
+	if prop.Trail == nil || prop.Trail.TrailingAmount == nil || *prop.Trail.TrailingAmount != 15.60 {
+		t.Fatalf("trailing amount = %+v, want 15.60", prop.Trail)
 	}
 	if prop.Trail.TrailingPercent != nil {
 		t.Fatalf("trailing percent = %+v, want no broker percent", prop.Trail)
 	}
-	if prop.Trail.InitialStopPrice != 143.52 {
-		t.Fatalf("initial stop = %.4f, want cent-rounded 143.52", prop.Trail.InitialStopPrice)
+	if prop.Trail.InitialStopPrice != 140.40 {
+		t.Fatalf("initial stop = %.4f, want cent-rounded 140.40", prop.Trail.InitialStopPrice)
+	}
+}
+
+func TestBuildStockTrailSizingUsesTenPctFallbackWithoutDynamicData(t *testing.T) {
+	t.Parallel()
+	policy := defaultProtectionPolicy()
+	row := rpc.PositionView{Symbol: "AMD", SecType: "STK", Quantity: 10, Mark: 100, Currency: "USD"}
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+
+	sizing := buildStockTrailSizing(policy.Buckets.TrailingStop.StockETF, row, 100, "mark", now, stockTrailVolatility{}, now)
+	if sizing == nil || !sizing.Fallback || sizing.ChosenPct != 10 || sizing.PolicyFallbackPct != 10 || sizing.DataQuality != "fallback" {
+		t.Fatalf("sizing = %+v, want explicit 10%% fallback", sizing)
+	}
+	if !slices.Contains(sizing.MissingReasons, "atr_14_unavailable") {
+		t.Fatalf("missing reasons = %+v, want atr_14_unavailable", sizing.MissingReasons)
+	}
+}
+
+func TestBuildStockTrailSizingUsesATRAndCapsToPolicyMax(t *testing.T) {
+	t.Parallel()
+	policy := defaultProtectionPolicy()
+	atr, atrPct := 4.2, 14.0
+	row := rpc.PositionView{Symbol: "AMD", SecType: "STK", Quantity: 10, Mark: 100, Currency: "USD"}
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+
+	sizing := buildStockTrailSizing(policy.Buckets.TrailingStop.StockETF, row, 100, "mark", now, stockTrailVolatility{
+		ATR14:  &atr,
+		ATRPct: &atrPct,
+		AsOf:   now.Add(-time.Hour),
+	}, now)
+	if sizing == nil || sizing.Fallback || !sizing.Capped || sizing.SelectedBy != "atr" || sizing.ChosenPct != policy.Buckets.TrailingStop.StockETF.MaxPct {
+		t.Fatalf("sizing = %+v, want ATR sizing capped to policy max", sizing)
+	}
+	if sizing.ATRCandidatePct == nil || *sizing.ATRCandidatePct != atrPct*stockTrailATRMultiplier {
+		t.Fatalf("ATR candidate = %+v, want %.2f", sizing.ATRCandidatePct, atrPct*stockTrailATRMultiplier)
 	}
 }
 
@@ -478,6 +527,40 @@ func TestProposalOrderPreviewParamsPreserveTrailStopPrice(t *testing.T) {
 	}
 	if params.Trail.TrailingAmount == nil || *params.Trail.TrailingAmount != amount {
 		t.Fatalf("preview params trail = %+v, want trailing amount preserved", params.Trail)
+	}
+	if params.TriggerMethod != rpc.OrderTriggerMethodLast {
+		t.Fatalf("preview params trigger method = %d, want stock trail LAST", params.TriggerMethod)
+	}
+}
+
+func TestProposalPreviewSafetyBlocksTriggerMethodDrift(t *testing.T) {
+	t.Parallel()
+	amount := 8.0
+	prop := rpc.TradeProposal{
+		Action:         rpc.OrderActionSell,
+		MaxQuantity:    1,
+		PositionEffect: rpc.OrderPositionEffectClose,
+		SecType:        "STK",
+		OrderType:      rpc.OrderTypeTRAIL,
+		Contract:       rpc.ContractParams{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Trail:          &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetAmount, TrailingAmount: &amount, InitialStopPrice: 92},
+		TriggerMethod:  rpc.OrderTriggerMethodLast,
+	}
+	preview := &rpc.OrderPreviewResult{
+		Draft: rpc.OrderDraft{
+			Action:        rpc.OrderActionSell,
+			Contract:      prop.Contract,
+			Quantity:      1,
+			OrderType:     rpc.OrderTypeTRAIL,
+			TIF:           rpc.OrderTIFDay,
+			Trail:         cloneTrailSpec(prop.Trail),
+			TriggerMethod: rpc.OrderTriggerMethodBidAsk,
+			Source:        proposalOrderSource,
+		},
+		Position: rpc.OrderPositionImpact{Effect: rpc.OrderPositionEffectClose},
+	}
+	if blockers := proposalPreviewSafetyBlockers(prop, preview); !hasBlocker(blockers, "trigger_method_drift") {
+		t.Fatalf("blockers = %+v, want trigger_method_drift", blockers)
 	}
 }
 
@@ -1938,14 +2021,14 @@ func TestReplaceSnapshotDoesNotPersistShells(t *testing.T) {
 // TestProposalRefreshWaitBacksOffTransientFailures pins the Run-loop
 // retry schedule: a clean refresh waits the full cadence, transient
 // failures retry at 30s doubling up to proposalRefreshBackoffCap — NOT
-// the cadence, so a fast cadence (2m default) does not retry a dead
-// session every 2 minutes for the length of an outage. Without the
+// the cadence, so the 30s default does not retry a dead session twice a
+// minute for the length of an outage. Without the
 // quick retry, a daemon restart that races the gateway connect serves
 // the "ibkr connection unavailable" blocker for a full cadence
 // (observed 2026-06-11 in the SPA protection panel).
 func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 	t.Parallel()
-	cadence := 2 * time.Minute
+	cadence := 30 * time.Second
 	cases := []struct {
 		failures int
 		want     time.Duration
@@ -1964,8 +2047,9 @@ func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 			t.Errorf("proposalRefreshWait(%v, %d) = %v, want %v", cadence, tc.failures, got, tc.want)
 		}
 	}
-	// A cadence above the backoff cap keeps the old cap-at-cadence
-	// behavior: failure retries never outrun the healthy schedule.
+	// A cadence above the backoff cap keeps the cap-at-cadence behavior:
+	// sustained failure retries never become less frequent than the healthy
+	// schedule.
 	slow := 30 * time.Minute
 	if got := proposalRefreshWait(slow, 7); got != slow {
 		t.Errorf("slow-cadence failure cap = %v, want %v", got, slow)
@@ -1973,8 +2057,12 @@ func TestProposalRefreshWaitBacksOffTransientFailures(t *testing.T) {
 	if got := proposalRefreshWait(slow, 5); got != 8*time.Minute {
 		t.Errorf("slow-cadence mid-ladder = %v, want 8m", got)
 	}
-	if got := proposalRefreshWait(10*time.Second, 3); got != 10*time.Second {
-		t.Errorf("a cadence below the retry base must win: got %v", got)
+	fast := 10 * time.Second
+	if got := proposalRefreshWait(fast, 0); got != fast {
+		t.Errorf("sub-base healthy cadence = %v, want %v", got, fast)
+	}
+	if got := proposalRefreshWait(fast, 3); got != 2*time.Minute {
+		t.Errorf("sub-base transient failure stays on retry ladder = %v, want 2m", got)
 	}
 }
 
@@ -2174,7 +2262,7 @@ func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 		Currency:   "USD",
 	}}}
 	scope := brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
-	props := engine.generate(policy, status, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
+	props := engine.generate(context.Background(), policy, status, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
 	if len(props) != 1 {
 		t.Fatalf("generated %d proposals, want 1: %+v", len(props), props)
 	}
@@ -2230,7 +2318,7 @@ func TestProposalCountsOmitsMixedCurrencyExcess(t *testing.T) {
 	}
 }
 
-// TestInstallSnapshotGatesJournalOnRevisionChange pins the 2m-cadence
+// TestInstallSnapshotGatesJournalOnRevisionChange pins the fast-cadence
 // journal-growth guard: revision-identical installs append no "generated"
 // events and no outcome marks, while a date rollover still owes the new
 // day's mark even when the revision is frozen across midnight.

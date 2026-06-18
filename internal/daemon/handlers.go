@@ -3803,11 +3803,14 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 	}
 	var bars []ibkrlib.HistoricalBar
 	if whatToShow != "" {
-		bars, err = c.FetchHistoricalDailyBarsWhatToShow(sym, days, 30*time.Second, whatToShow)
+		bars, err = c.FetchHistoricalDailyBarsWhatToShowCtx(ctx, sym, days, whatToShow)
 	} else {
-		bars, err = c.FetchHistoricalDailyBars(sym, days, 30*time.Second)
+		bars, err = c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
 	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("historical data deadline exceeded for %s (HMDS pacing or response exceeded request budget): %w", sym, err)
+		}
 		return nil, err
 	}
 	res := &rpc.HistoryDailyResult{

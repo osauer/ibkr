@@ -40,6 +40,7 @@ type inboundOrderProtoSummary struct {
 	trailStopPrice       float64
 	lmtPriceOffset       float64
 	tif                  string
+	triggerMethod        int
 	account              string
 	orderRef             string
 	outsideRth           bool
@@ -204,6 +205,7 @@ func appendOrderSummaryFields(fields []string, summary inboundOrderProtoSummary)
 		"trailStopPrice="+formatProtoSummaryFloat(summary.trailStopPrice),
 		"lmtPriceOffset="+formatProtoSummaryFloat(summary.lmtPriceOffset),
 		"tif="+summary.tif,
+		"triggerMethod="+strconv.Itoa(summary.triggerMethod),
 		"account="+summary.account,
 		"orderRef="+summary.orderRef,
 		"outsideRth="+strconv.FormatBool(summary.outsideRth),
@@ -425,6 +427,12 @@ func parseInboundOrderProto(body []byte, summary *inboundOrderProtoSummary) erro
 			summary.trailStopPrice = math.Float64frombits(v)
 		case 28:
 			summary.orderRef = string(value)
+		case 31:
+			v, err := protoVarintValue(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.triggerMethod = int(v)
 		case 65:
 			v, err := protoVarintValue(fieldNumber, wireType, value)
 			if err != nil {

@@ -33,6 +33,7 @@ ibkr restart --force          # escalate to SIGKILL only after graceful timeout
 ibkr restart --timeout 30s    # wait longer before failing or forcing
 ibkr restart --json           # scriptable result: daemon health plus any refreshed app process
 ibkr restart --app            # app-only restart/start for the HyperServe app process
+ibkr app restart              # same app-only restart path, grouped under app commands
 ```
 
 JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed." When an app host was running, JSON also includes an `app` object with its old/new PID and preserved args.
@@ -40,6 +41,12 @@ JSON mode is for automation and CI. It avoids text parsing and includes the post
 `ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial, plus any currently running local or remote app host. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
 
 `ibkr restart --app` targets only the long-running `ibkr app` HyperServe process. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr`, `--public-url`, or `--remote`, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts `ibkr app` with default/env configuration.
+
+In remote mode the hosted Cloudflare Worker is not restarted or redeployed by
+this command. The local app process restarts its outbound relay connector and
+reuses the persisted relay route while that route remains inside the relay TTL,
+so paired phones and Home Screen installs can keep opening the same relay
+origin across ordinary app restarts.
 
 ### Release integrity
 

@@ -1898,17 +1898,54 @@ func (c *Connector) cachedContractDetail(symbol string) *ContractDetailsLite {
 }
 
 func (c *Connector) awaitContractDetail(symbol string, wait time.Duration) *ContractDetailsLite {
+	return c.awaitContractDetailCtx(context.Background(), symbol, wait)
+}
+
+func (c *Connector) awaitContractDetailCtx(ctx context.Context, symbol string, wait time.Duration) *ContractDetailsLite {
 	if wait <= 0 {
 		return nil
 	}
-	deadline := time.Now().Add(wait)
-	for time.Now().Before(deadline) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	ticker := time.NewTicker(contractHydrationPoll)
+	defer ticker.Stop()
+	for {
 		if detail := c.cachedContractDetail(symbol); detail != nil && detail.ConID != 0 {
 			return detail
 		}
-		time.Sleep(contractHydrationPoll)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			return nil
+		case <-ticker.C:
+		}
 	}
-	return nil
+}
+
+func historicalTimeoutWithinContext(ctx context.Context, timeout time.Duration) (time.Duration, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		remaining := time.Until(dl)
+		if remaining <= 0 {
+			return 0, context.DeadlineExceeded
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout, nil
 }
 
 func safeGet(a []string, i int) string {
@@ -2512,6 +2549,7 @@ type RawOrder struct {
 	TrailingPercent float64
 	LmtPriceOffset  float64
 	TIF             string // Time in force: DAY, GTC, IOC, etc.
+	TriggerMethod   int    // IBKR stop trigger method for stop/trailing orders
 	Account         string
 	OrderRef        string // Our internal order ID
 	OutsideRth      bool   // Allow execution outside regular trading hours
@@ -2575,6 +2613,7 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 		TrailingPercent: order.TrailingPercent,
 		LmtPriceOffset:  order.LmtPriceOffset,
 		TIF:             order.TIF,
+		TriggerMethod:   order.TriggerMethod,
 		OrderRef:        order.OrderRef,
 		OutsideRth:      order.OutsideRth,
 		Account:         order.Account,
@@ -4275,13 +4314,12 @@ func formatHistoricalDuration(lookbackDays int) string {
 	return fmt.Sprintf("%d Y", years)
 }
 
-// FetchHistoricalDailyBarsCtx is a ctx-aware wrapper around
-// FetchHistoricalDailyBars. When the caller's ctx is cancelled (deadline
-// exceeded, parent cancellation), the wrapper returns ctx.Err() promptly
-// without waiting for the underlying gateway fetch to complete. The
-// in-flight goroutine continues until the inner timeout fires — that's
-// bounded by the ctx deadline (or 45 s default if none), so gateway slots
-// don't leak indefinitely.
+// FetchHistoricalDailyBarsCtx is FetchHistoricalDailyBars with ctx propagated
+// through the historical request's paced send and response wait. When the
+// caller's ctx is cancelled (deadline exceeded, parent cancellation), the
+// connector leaves the HMDS pacing queue promptly and best-effort cancels any
+// already-sent historical request without blocking the caller behind that same
+// paced queue.
 //
 // Use this from any caller that already has a per-request deadline it
 // wants the fetch to honour (most notably handleRegimeSnapshot's per-
@@ -4289,59 +4327,24 @@ func formatHistoricalDuration(lookbackDays int) string {
 // the v0.27.5 "regime: context deadline exceeded" report). Callers that
 // don't care about parent-ctx propagation can keep using
 // FetchHistoricalDailyBars.
-//
-// This is a deliberate minimal-blast-radius wrapper rather than a deep
-// refactor of fetchHistoricalWithContract. If more callers grow a need
-// for true ctx propagation into the HMDS layer, the right move is to
-// push ctx down through fetchHistoricalWithContract; until then, the
-// wrapper buys most of the value for one file's worth of code.
 func (c *Connector) FetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
-		bars, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
-		return bars, err
-	})
+	return c.fetchHistoricalDailyBarsCtx(ctx, symbol, lookbackDays, 0, "")
 }
 
 // FetchHistoricalDailyBarsWhatToShowCtx is FetchHistoricalDailyBarsWhatToShow
 // with prompt cancellation when ctx is done.
 func (c *Connector) FetchHistoricalDailyBarsWhatToShowCtx(ctx context.Context, symbol string, lookbackDays int, whatToShow string) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
-		bars, err := c.FetchHistoricalDailyBarsWhatToShow(symbol, lookbackDays, timeout, whatToShow)
-		return bars, err
-	})
-}
-
-func (c *Connector) fetchHistoricalDailyBarsCtx(ctx context.Context, fetch func(timeout time.Duration) ([]HistoricalBar, error)) ([]HistoricalBar, error) {
-	timeout := 45 * time.Second
-	if dl, ok := ctx.Deadline(); ok {
-		if d := time.Until(dl); d > 0 {
-			timeout = d
-		}
+	cleanWhat, err := normalizeHistoricalWhatToShow(whatToShow)
+	if err != nil {
+		return nil, err
 	}
-	type result struct {
-		bars []HistoricalBar
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		bars, err := fetch(timeout)
-		ch <- result{bars: bars, err: err}
-	}()
-	select {
-	case r := <-ch:
-		return r.bars, r.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return c.fetchHistoricalDailyBarsCtx(ctx, symbol, lookbackDays, 0, cleanWhat)
 }
 
 // FetchHistoricalDailyBarsWithContractCtx is FetchHistoricalDailyBarsWithContract
 // with prompt cancellation when ctx is done.
 func (c *Connector) FetchHistoricalDailyBarsWithContractCtx(ctx context.Context, contract Contract, lookbackDays int) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsCtx(ctx, func(timeout time.Duration) ([]HistoricalBar, error) {
-		bars, err := c.FetchHistoricalDailyBarsWithContract(contract, lookbackDays, timeout)
-		return bars, err
-	})
+	return c.fetchHistoricalDailyBarsWithContractCtx(ctx, contract, lookbackDays, 0)
 }
 
 // FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol.
@@ -4363,6 +4366,16 @@ func (c *Connector) FetchHistoricalDailyBarsWhatToShow(symbol string, lookbackDa
 }
 
 func (c *Connector) fetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBarsCtx(context.Background(), symbol, lookbackDays, timeout, forceWhatToShow)
+}
+
+func (c *Connector) fetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !c.IsReady() {
 		return nil, fmt.Errorf("IBKR connection not ready")
 	}
@@ -4377,6 +4390,10 @@ func (c *Connector) fetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 	}
 	if timeout <= 0 {
 		timeout = 45 * time.Second
+	}
+	timeout, err := historicalTimeoutWithinContext(ctx, timeout)
+	if err != nil {
+		return nil, err
 	}
 
 	secType, exchange, currency, primary := classifySymbol(symbol)
@@ -4397,13 +4414,23 @@ func (c *Connector) fetchHistoricalDailyBars(symbol string, lookbackDays int, ti
 		Currency:    currency,
 	}
 
-	return c.fetchHistoricalDailyBarsWithBase(symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
+	return c.fetchHistoricalDailyBarsWithBaseCtx(ctx, symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
 }
 
 // FetchHistoricalDailyBarsWithContract requests HMDS daily bars using an
 // already-routed contract. It is intended for callers that learned an exchange,
 // primary exchange, currency, local symbol, or conID while resolving a quote.
 func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBarsWithContractCtx(context.Background(), contract, lookbackDays, timeout)
+}
+
+func (c *Connector) fetchHistoricalDailyBarsWithContractCtx(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !c.IsReady() {
 		return nil, fmt.Errorf("IBKR connection not ready")
 	}
@@ -4420,6 +4447,10 @@ func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, look
 	}
 	if timeout <= 0 {
 		timeout = 45 * time.Second
+	}
+	timeout, err := historicalTimeoutWithinContext(ctx, timeout)
+	if err != nil {
+		return nil, err
 	}
 	fallbackPrimary := contract.PrimaryExch
 	if detail := c.cachedContractDetail(symbol); detail != nil && detail.ConID != 0 {
@@ -4454,10 +4485,21 @@ func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, look
 			c.logWarn("Routed contract details for %s unavailable (%v)", symbol, err)
 		}
 	}
-	return c.fetchHistoricalDailyBarsWithBase(symbol, contract, fallbackPrimary, lookbackDays, timeout, false, "")
+	return c.fetchHistoricalDailyBarsWithBaseCtx(ctx, symbol, contract, fallbackPrimary, lookbackDays, timeout, false, "")
 }
 
-func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool, forceWhatToShow string) ([]HistoricalBar, error) {
+func (c *Connector) fetchHistoricalDailyBarsWithBaseCtx(ctx context.Context, symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool, forceWhatToShow string) ([]HistoricalBar, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var err error
+	timeout, err = historicalTimeoutWithinContext(ctx, timeout)
+	if err != nil {
+		return nil, err
+	}
 	requestedContract := baseContract
 	graceWindow := contractDetailsLateGrace
 	if timeout > 0 {
@@ -4493,7 +4535,7 @@ func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract
 			}
 		} else {
 			fetchErr = err
-			late := c.awaitContractDetail(symbol, graceWindow)
+			late := c.awaitContractDetailCtx(ctx, symbol, graceWindow)
 			candidate := baseContract
 			if late != nil && c.applyContractDetail(*late, &candidate) {
 				normalizeEquityRouting(&candidate, primary)
@@ -4564,7 +4606,10 @@ func (c *Connector) fetchHistoricalDailyBarsWithBase(symbol string, baseContract
 	var lastBars []HistoricalBar
 	var lastErr error
 	for idx, att := range attempts {
-		bars, err := c.fetchHistoricalWithContract(symbol, att.contract, lookbackDays, timeout, att.whatToShow)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		bars, err := c.fetchHistoricalWithContractCtx(ctx, symbol, att.contract, lookbackDays, timeout, att.whatToShow)
 		if err != nil {
 			if shouldRetryHistorical(err) && idx < len(attempts)-1 {
 				c.logWarn("Historical data attempt %s for %s failed (%v); retrying with alternate route", att.label, symbol, err)
@@ -4672,17 +4717,32 @@ func shouldRetryHistorical(err error) bool {
 	return false
 }
 
-func (c *Connector) fetchHistoricalWithContract(symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
+func (c *Connector) fetchHistoricalWithContractCtx(ctx context.Context, symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	timeout, err := historicalTimeoutWithinContext(ctx, timeout)
+	if err != nil {
+		return nil, err
+	}
 	if contract.ConID == 0 {
 		c.logWarn("Skipping historical data request for %s: unresolved contract ID (exchange=%s primary=%s)", symbol, contract.Exchange, contract.PrimaryExch)
 		return nil, fmt.Errorf("contract ID unresolved for %s", symbol)
 	}
 	var req *historicalRequest
+	var registeredReqID int
 	duration := formatHistoricalDuration(lookbackDays)
-	reqID, err := c.conn.RequestHistoricalData(contract, "", duration, "1 day", whatToShow, true, false, 1, false, func(id int) {
+	reqID, err := c.conn.RequestHistoricalDataCtx(ctx, contract, "", duration, "1 day", whatToShow, true, false, 1, false, func(id int) {
+		registeredReqID = id
 		req = c.createHistoricalRequest(id, symbol)
 	})
 	if err != nil {
+		if registeredReqID != 0 {
+			c.failHistoricalRequest(registeredReqID, err)
+		}
 		return nil, err
 	}
 	if req == nil {
@@ -4698,11 +4758,28 @@ func (c *Connector) fetchHistoricalWithContract(symbol string, contract Contract
 			return nil, res.err
 		}
 		return res.bars, nil
+	case <-ctx.Done():
+		c.cancelHistoricalDataBestEffort(reqID)
+		c.failHistoricalRequest(reqID, ctx.Err())
+		return nil, ctx.Err()
 	case <-timer.C:
-		_ = c.conn.CancelHistoricalData(reqID)
+		c.cancelHistoricalDataBestEffort(reqID)
 		c.failHistoricalRequest(reqID, fmt.Errorf("historical data timeout after %s", timeout))
 		return nil, fmt.Errorf("historical data timeout for %s", symbol)
 	}
+}
+
+func (c *Connector) cancelHistoricalDataBestEffort(reqID int) {
+	if reqID == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := c.conn.CancelHistoricalDataCtx(ctx, reqID); err != nil {
+			c.logDebug("Historical cancel reqID=%d skipped/failed: %v", reqID, err)
+		}
+	}()
 }
 
 // GetOptionIV returns last observed implied volatility for an underlying

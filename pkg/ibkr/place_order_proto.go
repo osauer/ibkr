@@ -152,6 +152,9 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	if orderType != "LMT" && orderType != "TRAIL" && orderType != "TRAIL LIMIT" {
 		return unsupportedPlaceOrderProtoValue("orderType", order.OrderType, "LMT/TRAIL/TRAIL LIMIT only")
 	}
+	if err := validatePlaceOrderTriggerMethod(orderType, order.TriggerMethod); err != nil {
+		return err
+	}
 	tif := strings.ToUpper(order.TIF)
 	gtcTrail := tif == "GTC" && (orderType == "TRAIL" || orderType == "TRAIL LIMIT")
 	if tif != "DAY" && !gtcTrail {
@@ -230,7 +233,6 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 		{"permID", order.PermID},
 		{"parentID", order.ParentID},
 		{"displaySize", order.DisplaySize},
-		{"triggerMethod", order.TriggerMethod},
 		{"ocaType", order.OcaType},
 		{"shortSaleSlot", order.ShortSaleSlot},
 		{"minQty", order.MinQty},
@@ -307,6 +309,21 @@ func validatePlaceOrderProtoSupported(order *IBKROrder) error {
 	}
 
 	return nil
+}
+
+func validatePlaceOrderTriggerMethod(orderType string, method int) error {
+	if method == 0 {
+		return nil
+	}
+	if orderType != "TRAIL" && orderType != "TRAIL LIMIT" {
+		return unsupportedPlaceOrderProtoValue("triggerMethod", strconv.Itoa(method), "only for TRAIL/TRAIL LIMIT")
+	}
+	switch method {
+	case 1, 2, 3, 4, 7, 8:
+		return nil
+	default:
+		return unsupportedPlaceOrderProtoValue("triggerMethod", strconv.Itoa(method), "IBKR values 1,2,3,4,7,8")
+	}
 }
 
 func validateProtoOrderTypePrices(orderType string, order *IBKROrder) error {
@@ -450,6 +467,7 @@ func summarizePlaceOrderProtoFrame(msgBytes []byte) []string {
 		"trailStopPrice="+formatProtoSummaryFloat(summary.trailStopPrice),
 		"lmtPriceOffset="+formatProtoSummaryFloat(summary.lmtPriceOffset),
 		"tif="+summary.tif,
+		"triggerMethod="+strconv.Itoa(summary.triggerMethod),
 		"account="+summary.account,
 		"orderRef="+summary.orderRef,
 		"outsideRth="+strconv.FormatBool(summary.outsideRth),
@@ -479,6 +497,7 @@ type placeOrderProtoSummary struct {
 	trailStopPrice  float64
 	lmtPriceOffset  float64
 	tif             string
+	triggerMethod   int
 	account         string
 	orderRef        string
 	outsideRth      bool
@@ -576,6 +595,12 @@ func parseOrderProtoSummary(body []byte, summary *placeOrderProtoSummary) error 
 			summary.outsideRth = v != 0
 		case 28:
 			summary.orderRef = string(value)
+		case 31:
+			v, err := protoVarintValue(fieldNumber, wireType, value)
+			if err != nil {
+				return err
+			}
+			summary.triggerMethod = int(v)
 		case 22:
 			v, err := protoFixed64Value(fieldNumber, wireType, value)
 			if err != nil {

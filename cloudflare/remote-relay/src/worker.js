@@ -2,6 +2,7 @@ const ROUTE_COOKIE = "ibkr_remote_route";
 const CONNECTOR_TOKEN_KEY = "connector_token";
 const EXPIRES_AT_KEY = "expires_at";
 const ROUTE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ROUTE_ID_RE = /^r_[A-Za-z0-9_-]{16,128}$/;
 
 export default {
   async fetch(request, env) {
@@ -48,6 +49,13 @@ export class RelaySession {
     const url = new URL(request.url);
     if (url.pathname === "/internal/register" && request.method === "POST") {
       const body = await request.json();
+      const existing = await this.state.storage.get(CONNECTOR_TOKEN_KEY);
+      if (body.resume) {
+        if (await this.expired()) return json({ error: "route expired" }, 410);
+        if (!existing || existing !== body.token) {
+          return json({ error: "unauthorized route resume" }, 401);
+        }
+      }
       await this.state.storage.put(CONNECTOR_TOKEN_KEY, body.token);
       await this.state.storage.put(EXPIRES_AT_KEY, body.expires_at);
       return json({ ok: true });
@@ -178,17 +186,33 @@ export class RelaySession {
 }
 
 async function registerRoute(request, env) {
-  await request.arrayBuffer();
-  const routeID = `r_${randomToken(18)}`;
-  const token = randomToken(32);
+  const body = await registerRequestBody(request);
+  const wantsResume = !!(body.route_id || body.connector_token);
+  if (wantsResume && (!body.route_id || !body.connector_token)) {
+    return json({ error: "route_id and connector_token are both required to resume a route" }, 400);
+  }
+  if (body.route_id && !ROUTE_ID_RE.test(body.route_id)) {
+    return json({ error: "invalid route_id" }, 400);
+  }
+  const routeID = body.route_id || `r_${randomToken(18)}`;
+  const token = body.connector_token || randomToken(32);
   const expiresAt = new Date(Date.now() + ROUTE_TTL_MS).toISOString();
   const origin = new URL(request.url).origin;
   const stub = routeStub(env, routeID);
-  await stub.fetch(new Request(`${origin}/internal/register`, {
+  const register = await stub.fetch(new Request(`${origin}/internal/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, expires_at: expiresAt }),
+    body: JSON.stringify({ token, expires_at: expiresAt, resume: wantsResume }),
   }));
+  if (!register.ok) {
+    let err = { error: register.statusText || "register route failed" };
+    try {
+      err = await register.json();
+    } catch {
+      // Keep the generic body.
+    }
+    return json(err, register.status);
+  }
   return json({
     route_id: routeID,
     public_url: origin,
@@ -196,6 +220,16 @@ async function registerRoute(request, env) {
     connector_token: token,
     expires_at: expiresAt,
   });
+}
+
+async function registerRequestBody(request) {
+  const raw = await request.text();
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
 }
 
 function routeStub(env, routeID) {

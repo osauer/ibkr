@@ -31,6 +31,7 @@ type Data struct {
 	VAPID             *VAPIDKeys          `json:"vapid,omitempty"`
 	LastPush          *PushAttempt        `json:"last_push,omitempty"`
 	ProposalAudit     []ProposalAuditItem `json:"proposal_audit,omitempty"`
+	RelayRoute        *RelayRoute         `json:"relay_route,omitempty"`
 }
 
 type DeviceGrant struct {
@@ -41,6 +42,17 @@ type DeviceGrant struct {
 	CreatedAt        time.Time `json:"created_at"`
 	LastSeenAt       time.Time `json:"last_seen_at,omitzero"`
 	RevokedAt        time.Time `json:"revoked_at,omitzero"`
+}
+
+type RelayRoute struct {
+	RemoteURL      string    `json:"remote_url"`
+	RouteID        string    `json:"route_id"`
+	ConnectorToken string    `json:"connector_token"`
+	PublicURL      string    `json:"public_url,omitempty"`
+	ConnectorURL   string    `json:"connector_url,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
 }
 
 type AlertSettings struct {
@@ -293,6 +305,53 @@ func (s *Store) VAPID() (VAPIDKeys, bool) {
 	return *s.data.VAPID, true
 }
 
+func (s *Store) RelayRoute(remoteURL string, now time.Time) (RelayRoute, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.RelayRoute == nil {
+		return RelayRoute{}, false
+	}
+	route := *s.data.RelayRoute
+	if route.RemoteURL != remoteURL || route.RouteID == "" || route.ConnectorToken == "" {
+		return RelayRoute{}, false
+	}
+	if !route.ExpiresAt.IsZero() && now.After(route.ExpiresAt) {
+		return RelayRoute{}, false
+	}
+	return route, true
+}
+
+func (s *Store) SetRelayRoute(route RelayRoute) error {
+	if route.RemoteURL == "" {
+		return errors.New("relay remote URL required")
+	}
+	if route.RouteID == "" {
+		return errors.New("relay route id required")
+	}
+	if route.ConnectorToken == "" {
+		return errors.New("relay connector token required")
+	}
+	now := time.Now().UTC()
+	if route.CreatedAt.IsZero() {
+		route.CreatedAt = now
+	}
+	route.UpdatedAt = now
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.RelayRoute = &route
+	return s.save()
+}
+
+func (s *Store) ClearRelayRoute(remoteURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.RelayRoute == nil || s.data.RelayRoute.RemoteURL != remoteURL {
+		return nil
+	}
+	s.data.RelayRoute = nil
+	return s.save()
+}
+
 func (s *Store) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -333,6 +392,10 @@ func copyData(in Data) Data {
 	if in.LastPush != nil {
 		p := *in.LastPush
 		out.LastPush = &p
+	}
+	if in.RelayRoute != nil {
+		r := *in.RelayRoute
+		out.RelayRoute = &r
 	}
 	return out
 }

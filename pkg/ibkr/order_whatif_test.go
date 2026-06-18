@@ -336,6 +336,7 @@ func TestEncodePlaceOrderProtoSupportsBrokerTrailLimit(t *testing.T) {
 		TrailingPercent: 2,
 		TrailStopPrice:  98,
 		LmtPriceOffset:  0.05,
+		TriggerMethod:   2,
 	}
 	payload, err := encodePlaceOrderProtoFrame(order)
 	if err != nil {
@@ -345,11 +346,11 @@ func TestEncodePlaceOrderProtoSupportsBrokerTrailLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse trail protobuf summary: %v", err)
 	}
-	if summary.orderType != "TRAIL LIMIT" || summary.lmtPrice != 0 || summary.trailingPercent != 2 || summary.trailStopPrice != 98 || summary.lmtPriceOffset != 0.05 {
+	if summary.orderType != "TRAIL LIMIT" || summary.lmtPrice != 0 || summary.trailingPercent != 2 || summary.trailStopPrice != 98 || summary.lmtPriceOffset != 0.05 || summary.triggerMethod != 2 {
 		t.Fatalf("trail limit summary = %+v, want percent/stop/offset and no limit price", summary)
 	}
 	fields := summarizePlaceOrderProtoFrame(payload)
-	for _, want := range []string{"orderType=TRAIL LIMIT", "trailingPercent=2", "trailStopPrice=98", "lmtPriceOffset=0.05"} {
+	for _, want := range []string{"orderType=TRAIL LIMIT", "trailingPercent=2", "trailStopPrice=98", "lmtPriceOffset=0.05", "triggerMethod=2"} {
 		if summaryFieldValue(fields, strings.Split(want, "=")[0]+"=") != strings.TrimPrefix(want, strings.Split(want, "=")[0]+"=") {
 			t.Fatalf("protobuf log fields = %#v, missing %s", fields, want)
 		}
@@ -558,6 +559,31 @@ func TestEncodePlaceOrderProtoRejectsUnsupportedPopulatedOrderField(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "ocaGroup") {
 		t.Fatalf("unsupported error = %v, want ocaGroup", err)
+	}
+}
+
+func TestEncodePlaceOrderProtoRejectsTriggerMethodOnLimitOrder(t *testing.T) {
+	order := &IBKROrder{
+		OrderID:       90,
+		ClientID:      31,
+		Symbol:        "MSFT",
+		SecType:       "STK",
+		Exchange:      "SMART",
+		Currency:      "USD",
+		Action:        "SELL",
+		TotalQty:      2,
+		OrderType:     "LMT",
+		LmtPrice:      425.50,
+		TIF:           "DAY",
+		Account:       "DU123456",
+		TriggerMethod: 2,
+	}
+	_, err := encodePlaceOrderProtoFrame(order)
+	if err == nil {
+		t.Fatal("encodePlaceOrderProtoFrame succeeded with triggerMethod on LMT")
+	}
+	if !strings.Contains(err.Error(), "triggerMethod") {
+		t.Fatalf("unsupported error = %v, want triggerMethod", err)
 	}
 }
 

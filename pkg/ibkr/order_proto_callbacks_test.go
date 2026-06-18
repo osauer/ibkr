@@ -26,6 +26,7 @@ type testOpenOrderProtoCallback struct {
 	TrailStopPrice     float64
 	LmtPriceOffset     float64
 	TIF                string
+	TriggerMethod      int
 	Account            string
 	OrderRef           string
 	OutsideRth         bool
@@ -134,20 +135,21 @@ func TestDecodeMessageV203OpenOrderProtoCallbackPreservesTrailFields(t *testing.
 		TrailingPercent: 2,
 		TrailStopPrice:  98,
 		LmtPriceOffset:  0.05,
+		TriggerMethod:   2,
 		TIF:             "DAY",
 		Account:         "DU123456",
 		OrderRef:        "trail-test",
 		Transmit:        true,
 		Status:          "Submitted",
 	}))
-	if summaryFieldValue(fields, "trailingPercent=") != "2" || summaryFieldValue(fields, "trailStopPrice=") != "98" || summaryFieldValue(fields, "lmtPriceOffset=") != "0.05" {
+	if summaryFieldValue(fields, "trailingPercent=") != "2" || summaryFieldValue(fields, "trailStopPrice=") != "98" || summaryFieldValue(fields, "lmtPriceOffset=") != "0.05" || summaryFieldValue(fields, "triggerMethod=") != "2" {
 		t.Fatalf("decoded trail fields = %#v", fields)
 	}
 	ev, ok := ParseOrderLifecycleEvent(fields)
 	if !ok {
 		t.Fatalf("ParseOrderLifecycleEvent ok=false for fields %#v", fields)
 	}
-	if ev.OrderType != "TRAIL LIMIT" || ev.TrailingPercent != 2 || ev.TrailStopPrice != 98 || ev.LmtPriceOffset != 0.05 {
+	if ev.OrderType != "TRAIL LIMIT" || ev.TrailingPercent != 2 || ev.TrailStopPrice != 98 || ev.LmtPriceOffset != 0.05 || ev.TriggerMethod != 2 {
 		t.Fatalf("event trail fields = %+v", ev)
 	}
 }
@@ -238,6 +240,9 @@ func encodeOpenOrderProtoCallbackForTest(f testOpenOrderProtoCallback) []byte {
 		order = protoAppendBool(order, 19, true)
 	}
 	order = protoAppendString(order, 28, f.OrderRef)
+	if f.TriggerMethod != 0 {
+		order = protoAppendInt32(order, 31, int32(f.TriggerMethod))
+	}
 	if f.WhatIf {
 		order = protoAppendBool(order, 65, true)
 	}

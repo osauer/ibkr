@@ -20,6 +20,22 @@ function fakeState(initial = {}) {
   };
 }
 
+function fakeEnv() {
+  const sessions = new Map();
+  return {
+    sessions,
+    env: {
+      RELAY_SESSION: {
+        idFromName: (name) => name,
+        get: (name) => {
+          if (!sessions.has(name)) sessions.set(name, new RelaySession(fakeState(), {}));
+          return sessions.get(name);
+        },
+      },
+    },
+  };
+}
+
 test("requestPath preserves path and query", () => {
   assert.equal(
     __test.requestPath("https://remote.osauer.dev/pair.html?remote=r1&pair=p1"),
@@ -89,4 +105,54 @@ test("cookie-addressed requests refresh the route cookie", async () => {
   const setCookie = res.headers.get("Set-Cookie") || "";
   assert.match(setCookie, /ibkr_remote_route=r_abc/);
   assert.match(setCookie, /Max-Age=604800/);
+});
+
+test("register can resume an existing route with the connector token", async () => {
+  const { env } = fakeEnv();
+  const first = await worker.fetch(new Request("https://relay.example/api/register", { method: "POST" }), env);
+  assert.equal(first.status, 200);
+  const route = await first.json();
+  const resumed = await worker.fetch(new Request("https://relay.example/api/register", {
+    method: "POST",
+    body: JSON.stringify({
+      route_id: route.route_id,
+      connector_token: route.connector_token,
+    }),
+  }), env);
+  assert.equal(resumed.status, 200);
+  const body = await resumed.json();
+  assert.equal(body.route_id, route.route_id);
+  assert.equal(body.connector_token, route.connector_token);
+});
+
+test("register rejects resume with the wrong connector token", async () => {
+  const { env } = fakeEnv();
+  const first = await worker.fetch(new Request("https://relay.example/api/register", { method: "POST" }), env);
+  assert.equal(first.status, 200);
+  const route = await first.json();
+  const resumed = await worker.fetch(new Request("https://relay.example/api/register", {
+    method: "POST",
+    body: JSON.stringify({
+      route_id: route.route_id,
+      connector_token: "wrong",
+    }),
+  }), env);
+  assert.equal(resumed.status, 401);
+});
+
+test("internal register keeps expired route expired during resume", async () => {
+  const state = fakeState({
+    connector_token: "tok",
+    expires_at: new Date(Date.now() - 1000).toISOString(),
+  });
+  const session = new RelaySession(state, {});
+  const res = await session.fetch(new Request("https://relay.example/internal/register", {
+    method: "POST",
+    body: JSON.stringify({
+      token: "tok",
+      expires_at: new Date(Date.now() + 7 * DAY_MS).toISOString(),
+      resume: true,
+    }),
+  }));
+  assert.equal(res.status, 410);
 });

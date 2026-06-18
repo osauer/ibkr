@@ -3,7 +3,7 @@ name: ibkr
 description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
 ---
 
-Updated: 2026-06-13 10:04 CEST
+Updated: 2026-06-18 12:07 CEST
 
 ## Contract
 
@@ -70,14 +70,15 @@ Read the root AGENTS.md before editing. For daemon/CLI/MCP/trading semantic
 changes, use `docs/templates/daemon-cli-trading-contract.md`. For Canary SPA
 changes, use `docs/templates/spa-authority-matrix.md`.
 
-After daemon or CLI edits, the project requires:
+After daemon or CLI edits, refresh the installed daemon and capture artifacts:
 
 ```sh
-make install
-ibkr restart --timeout 15s
+make restart-daemon
 ibkr status --json
 ```
 
 Then run a command that exercises the changed behavior and include that output
-in the completion message. `make smoke` is the live gateway gate; a skip means
-the live artifact was not exercised and must be reported as such.
+in the completion message. `make smoke-fast` is the default per-change live
+gateway gate; full `make smoke` is binding for daemon/CLI/wire-path changes and
+release work. A skip means the live artifact was not exercised and must be
+reported as such.

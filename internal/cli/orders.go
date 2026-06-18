@@ -88,6 +88,9 @@ func renderOrdersOpenText(env *Env, res *rpc.OrdersOpenResult) {
 		if order.WhyHeld != "" {
 			fmt.Fprintf(out, "    held: %s\n", order.WhyHeld)
 		}
+		if order.TriggerMethod != 0 {
+			fmt.Fprintf(out, "    trigger: %s\n", formatOrderTriggerMethod(order.TriggerMethod))
+		}
 		if order.MktCapPrice != 0 {
 			fmt.Fprintf(out, "    capped price: %.4f\n", order.MktCapPrice)
 		}
@@ -114,6 +117,9 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 	statusRow(env, out, "Account", res.Order.Account)
 	statusRow(env, out, "Status", nonEmpty(res.Order.Status, res.Order.LifecycleStatus))
 	statusRow(env, out, "Filled", fmt.Sprintf("%.4g / %.4g", res.Order.Filled, res.Order.Quantity))
+	if res.Order.TriggerMethod != 0 {
+		statusRow(env, out, "Trigger", formatOrderTriggerMethod(res.Order.TriggerMethod))
+	}
 	if res.Order.LastMessage != "" {
 		statusRow(env, out, "Message", res.Order.LastMessage)
 	}
@@ -139,6 +145,9 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 			}
 			if ev.WhyHeld != "" {
 				fmt.Fprintf(out, "  held=%s", ev.WhyHeld)
+			}
+			if ev.TriggerMethod != 0 {
+				fmt.Fprintf(out, "  trigger=%s", formatOrderTriggerMethod(ev.TriggerMethod))
 			}
 			if ev.MktCapPrice != 0 {
 				fmt.Fprintf(out, "  capped_price=%.4f", ev.MktCapPrice)
@@ -174,7 +183,29 @@ func formatOrderViewTitle(order rpc.OrderView) string {
 	case order.LimitPrice != 0:
 		title += fmt.Sprintf(" %.4f", order.LimitPrice)
 	}
+	if order.TriggerMethod != 0 {
+		title += " trigger=" + formatOrderTriggerMethod(order.TriggerMethod)
+	}
 	return title + " " + nonEmpty(order.TIF, "?")
+}
+
+func formatOrderTriggerMethod(method int) string {
+	switch method {
+	case rpc.OrderTriggerMethodDoubleBidAsk:
+		return "DOUBLE_BID_ASK"
+	case rpc.OrderTriggerMethodLast:
+		return "LAST"
+	case rpc.OrderTriggerMethodDoubleLast:
+		return "DOUBLE_LAST"
+	case rpc.OrderTriggerMethodBidAsk:
+		return "BID_ASK"
+	case rpc.OrderTriggerMethodLastOrBidAsk:
+		return "LAST_OR_BID_ASK"
+	case rpc.OrderTriggerMethodMidpoint:
+		return "MIDPOINT"
+	default:
+		return strconv.Itoa(method)
+	}
 }
 
 func orderStatusConcernLevel(status string) statusConcernLevel {

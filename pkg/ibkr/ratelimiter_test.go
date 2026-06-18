@@ -2,9 +2,11 @@ package ibkr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -74,6 +76,41 @@ func TestTokenBucketRejectsImpossibleWait(t *testing.T) {
 	err := NewTokenBucket(1, 1).WaitForTokens(ctx, 2)
 	if err == nil || !strings.Contains(err.Error(), "exceeds bucket capacity") {
 		t.Fatalf("WaitForTokens err=%v, want capacity error", err)
+	}
+}
+
+func TestRateLimiterSubmitContextCancelsHistoricalTokenWait(t *testing.T) {
+	rl := NewRateLimiter(context.Background())
+	t.Cleanup(rl.Stop)
+
+	rl.historicalRate.mu.Lock()
+	rl.historicalRate.tokens = 0
+	rl.historicalRate.refillRate = 0.001 // one token about every 1000s unless ctx cancels first
+	rl.historicalRate.lastRefill = time.Now()
+	rl.historicalRate.mu.Unlock()
+
+	var called atomic.Bool
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := rl.SubmitWithRetriesContext(ctx, RequestTypeHistorical, func() error {
+		called.Store(true)
+		return nil
+	}, 3)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SubmitWithRetriesContext err=%v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("SubmitWithRetriesContext took %s, want prompt caller-context cancellation", elapsed)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if called.Load() {
+		t.Fatal("historical send function ran after caller context expired")
+	}
+	if metrics := rl.GetMetrics(); metrics.ConsecutiveErrors != 0 {
+		t.Fatalf("context cancellation opened/advanced rate-limit circuit errors: %+v", metrics)
 	}
 }
 

@@ -26,13 +26,16 @@ func TestTrailingStopStockProposalRoundsOnResolvedMinTick(t *testing.T) {
 	if !ok || prop.Trail == nil || prop.Trail.TrailingAmount == nil {
 		t.Fatalf("proposal = %+v ok=%v, want trail proposal", prop, ok)
 	}
-	// 8% of bid 154.80 = 12.384 → ceil on 0.02 grid = 12.40 (wider trail is
-	// the conservative direction); stop = 154.80 − 12.40 = 142.40 on-grid.
-	if *prop.Trail.TrailingAmount != 12.40 {
-		t.Fatalf("trailing amount = %.4f, want 12.40 on the 0.02 grid", *prop.Trail.TrailingAmount)
+	// With no dynamic ATR sizing supplied, the 10% fallback policy is used:
+	// bid 154.80 * 10% = 15.48, already on the 0.02 grid.
+	if *prop.Trail.TrailingAmount != 15.48 {
+		t.Fatalf("trailing amount = %.4f, want 15.48 on the 0.02 grid", *prop.Trail.TrailingAmount)
 	}
-	if prop.Trail.InitialStopPrice != 142.40 {
-		t.Fatalf("initial stop = %.4f, want 142.40 on the 0.02 grid", prop.Trail.InitialStopPrice)
+	if prop.Trail.InitialStopPrice != 139.32 {
+		t.Fatalf("initial stop = %.4f, want 139.32 on the 0.02 grid", prop.Trail.InitialStopPrice)
+	}
+	if prop.TrailSizing == nil || !prop.TrailSizing.Fallback || prop.TrailSizing.ChosenPct != 10 {
+		t.Fatalf("trail sizing = %+v, want 10%% fallback", prop.TrailSizing)
 	}
 	if prop.Contract.MinTick != 0.02 {
 		t.Fatalf("contract min tick = %v, want 0.02 carried for preview-side rounding", prop.Contract.MinTick)

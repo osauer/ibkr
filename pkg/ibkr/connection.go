@@ -2723,6 +2723,17 @@ func (c *Connection) sendMessage(msg []byte) error {
 
 // sendMessageWithType sends a message with specific request type for rate limiting
 func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error {
+	return c.sendMessageWithTypeContext(context.Background(), msg, reqType)
+}
+
+// sendMessageWithTypeContext sends a message with caller-owned cancellation
+// while waiting in the rate limiter. Historical requests use this so an
+// interactive caller can leave the paced HMDS queue when its RPC deadline
+// expires instead of lingering behind background fan-out.
+func (c *Connection) sendMessageWithTypeContext(ctx context.Context, msg []byte, reqType RequestType) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Check connection status before queueing - reject if disconnecting
 	c.statusMu.RLock()
 	status := c.status
@@ -2731,8 +2742,14 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 		return fmt.Errorf("cannot send message: connection status is %v", status)
 	}
 
-	return c.rateLimiter.Submit(reqType, func() error {
+	return c.rateLimiter.SubmitContext(ctx, reqType, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := c.waitForHandshakeReady(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		return c.withTransport(false, func() error {
@@ -4081,6 +4098,15 @@ func normalizeResolvedOptionMarketDataContract(contract *Contract) {
 // The beforeSend callback is invoked after the reqID is allocated but before
 // the message is sent, allowing callers to register tracking state safely.
 func (c *Connection) RequestHistoricalData(contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
+	return c.RequestHistoricalDataCtx(context.Background(), contract, endDateTime, duration, barSize, whatToShow, useRTH, includeExpired, formatDate, keepUpToDate, beforeSend)
+}
+
+// RequestHistoricalDataCtx submits an HMDS request for historical data and
+// honors ctx while waiting for rate-limiter admission.
+func (c *Connection) RequestHistoricalDataCtx(ctx context.Context, contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -4168,7 +4194,7 @@ func (c *Connection) RequestHistoricalData(contract Contract, endDateTime, durat
 		beforeSend(reqID)
 	}
 
-	if err := c.sendMessageWithType(msg, RequestTypeHistorical); err != nil {
+	if err := c.sendMessageWithTypeContext(ctx, msg, RequestTypeHistorical); err != nil {
 		return 0, fmt.Errorf("failed to request historical data: %w", err)
 	}
 
@@ -4203,12 +4229,21 @@ func normalizeHistoricalDuration(duration string) string {
 
 // CancelHistoricalData cancels an active historical data subscription/request.
 func (c *Connection) CancelHistoricalData(reqID int) error {
+	return c.CancelHistoricalDataCtx(context.Background(), reqID)
+}
+
+// CancelHistoricalDataCtx cancels an active historical request and honors ctx
+// while waiting for rate-limiter admission.
+func (c *Connection) CancelHistoricalDataCtx(ctx context.Context, reqID int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
 
 	msg := c.encodeMsg(cancelHistoricalData, 1, reqID)
-	return c.sendMessageWithType(msg, RequestTypeHistorical)
+	return c.sendMessageWithTypeContext(ctx, msg, RequestTypeHistorical)
 }
 
 // RequestSecDefOptParams issues msg 78 (reqSecDefOptParams) to enumerate the

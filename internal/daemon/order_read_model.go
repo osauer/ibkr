@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,12 +15,12 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-func (s *Server) handleOrdersOpen(_ context.Context, req *rpc.Request) (*rpc.OrdersOpenResult, error) {
+func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.OrdersOpenResult, error) {
 	var p rpc.OrdersOpenParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
-	views, _, err := s.loadOrderViews()
+	views, _, err := s.loadOrderViewsReconciled(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +38,7 @@ func (s *Server) handleOrdersOpen(_ context.Context, req *rpc.Request) (*rpc.Ord
 	return &rpc.OrdersOpenResult{Orders: out, AsOf: s.orderNow()}, nil
 }
 
-func (s *Server) handleOrderStatus(_ context.Context, req *rpc.Request) (*rpc.OrderStatusResult, error) {
+func (s *Server) handleOrderStatus(ctx context.Context, req *rpc.Request) (*rpc.OrderStatusResult, error) {
 	var p rpc.OrderStatusParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
@@ -46,7 +47,7 @@ func (s *Server) handleOrderStatus(_ context.Context, req *rpc.Request) (*rpc.Or
 	if id == "" {
 		return nil, errBadRequest("order status id is required")
 	}
-	views, eventsByKey, err := s.loadOrderViews()
+	views, eventsByKey, err := s.loadOrderViewsReconciled(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +82,115 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 	eventsByKey := buildOrderEventsByKey(events)
 	inferDayOrderExpiry(views, eventsByKey, s.orderNow())
 	return views, eventsByKey, nil
+}
+
+func (s *Server) loadOrderViewsReconciled(ctx context.Context) ([]rpc.OrderView, map[string][]rpc.OrderEvent, error) {
+	views, eventsByKey, err := s.loadOrderViews()
+	if err != nil {
+		return nil, nil, err
+	}
+	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
+	if posErr == nil {
+		reconcileFlatPositionProtectiveOrders(views, pos, s.orderNow())
+	}
+	return views, eventsByKey, nil
+}
+
+func reconcileFlatPositionProtectiveOrders(views []rpc.OrderView, pos *rpc.PositionsResult, now time.Time) {
+	if pos == nil {
+		return
+	}
+	for i := range views {
+		view := &views[i]
+		if !view.Open || !orderViewIsCloseProtective(*view) {
+			continue
+		}
+		current := positionQuantityForOrderView(pos, *view)
+		remaining := orderViewRemainingQuantity(*view)
+		if orderViewActionCanCloseQuantity(*view, current, remaining) {
+			continue
+		}
+		view.ModifyEligible = false
+		view.LifecycleStatus = rpc.OrderLifecycleUnknownReconcileRequired
+		view.ReconciliationState = "position_mismatch"
+		view.BrokerTruthAsOf = now
+		view.LastMessage = fmt.Sprintf("current position %.4g no longer supports close-only protective order remaining %.4g; broker reconciliation required", current, remaining)
+	}
+}
+
+func orderViewIsCloseProtective(view rpc.OrderView) bool {
+	if !strings.EqualFold(view.OpenClose, "C") && !strings.EqualFold(view.Source, proposalOrderSource) {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(view.OrderType)) {
+	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT, rpc.OrderTypeLMT:
+		return true
+	default:
+		return false
+	}
+}
+
+func orderViewRemainingQuantity(view rpc.OrderView) float64 {
+	if view.Remaining > 0 {
+		return view.Remaining
+	}
+	if view.Quantity > 0 && view.Filled < view.Quantity {
+		return view.Quantity - view.Filled
+	}
+	return view.Quantity
+}
+
+func orderViewActionCanCloseQuantity(view rpc.OrderView, current, remaining float64) bool {
+	if remaining <= 0 {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(view.Action)) {
+	case rpc.OrderActionSell:
+		return current > 0 && current+1e-9 >= remaining
+	case rpc.OrderActionBuy:
+		return current < 0 && math.Abs(current)+1e-9 >= remaining
+	default:
+		return false
+	}
+}
+
+func positionQuantityForOrderView(pos *rpc.PositionsResult, view rpc.OrderView) float64 {
+	if pos == nil {
+		return 0
+	}
+	if strings.EqualFold(view.SecType, "OPT") || strings.EqualFold(view.SecType, "OPTION") {
+		for _, row := range pos.Options {
+			if positionViewMatchesOrderView(row, view) {
+				return row.Quantity
+			}
+		}
+		return 0
+	}
+	var qty float64
+	for _, row := range pos.Stocks {
+		if positionViewMatchesOrderView(row, view) {
+			qty += row.Quantity
+		}
+	}
+	return qty
+}
+
+func positionViewMatchesOrderView(row rpc.PositionView, view rpc.OrderView) bool {
+	if view.ConID != 0 && row.ConID != 0 {
+		return view.ConID == row.ConID
+	}
+	if !strings.EqualFold(row.Symbol, view.Symbol) {
+		return false
+	}
+	if strings.EqualFold(view.SecType, "OPT") || strings.EqualFold(view.SecType, "OPTION") {
+		if !strings.EqualFold(row.SecType, "OPT") && !strings.EqualFold(row.SecType, "OPTION") {
+			return false
+		}
+		return strings.EqualFold(row.Expiry, view.Expiry) &&
+			strings.EqualFold(row.Right, view.Right) &&
+			math.Abs(row.Strike-view.Strike) < 1e-9
+	}
+	return equivalentStockSecType(row.SecType, view.SecType)
 }
 
 // inferDayOrderExpiry marks non-terminal stock/ETF DAY orders whose effective
@@ -273,6 +383,9 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.TIF != "" {
 		view.TIF = ev.TIF
 	}
+	if ev.TriggerMethod != 0 {
+		view.TriggerMethod = ev.TriggerMethod
+	}
 	if ev.OutsideRTH {
 		view.OutsideRTH = true
 	}
@@ -376,6 +489,7 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,
+		TriggerMethod:   ev.TriggerMethod,
 		OutsideRTH:      ev.OutsideRTH,
 		Quantity:        ev.Quantity,
 		LimitPrice:      ev.LimitPrice,
@@ -417,6 +531,7 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		Action:          ev.Action,
 		OrderType:       ev.OrderType,
 		TIF:             ev.TIF,
+		TriggerMethod:   ev.TriggerMethod,
 		OutsideRTH:      ev.OutsideRth,
 		Quantity:        ev.TotalQuantity,
 		LimitPrice:      ev.LimitPrice,
@@ -454,6 +569,11 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		out.Filled = ev.CumQty
 		out.LastFillPrice = ev.Price
 		out.AvgFillPrice = ev.AvgFillPrice
+		if out.Quantity > 0 && out.Filled >= out.Quantity-1e-9 {
+			out.Status = "Filled"
+			out.Remaining = 0
+			out.SendState = orderSendStateTerminal
+		}
 	case ibkrlib.OrderLifecycleEventError:
 		out.Type = orderJournalEventBrokerError
 		if out.Status == "" {

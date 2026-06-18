@@ -2224,7 +2224,13 @@ func unaryDeadline(method string) time.Duration {
 		// 50 s leaves room for the classified daemon error to surface
 		// before the socket times out.
 		return 50 * time.Second
-	case rpc.MethodHistoryDaily, rpc.MethodPositionsList:
+	case rpc.MethodHistoryDaily:
+		// 55 s — interactive daily-history reads may need a cold
+		// contract-details round trip plus an HMDS request admitted through
+		// the paced historical bucket. Keep this below the default 60 s CLI
+		// ceiling so timeout errors remain daemon-classified.
+		return 55 * time.Second
+	case rpc.MethodPositionsList:
 		return 30 * time.Second
 	case rpc.MethodTechnical:
 		return 75 * time.Second

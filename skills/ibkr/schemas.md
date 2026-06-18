@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-06-11 19:41 CEST
+Updated: 2026-06-18 12:07 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -194,16 +194,24 @@ and `expiry` / `strike` / `right` together identify the contract.
   COST column; JSON output stays IBKR-faithful. `market_value_ccy`,
   `market_value_base`, `unrealized_pnl_ccy`, and `unrealized_pnl_base`
   are already multiplier-applied.
-- `prev_close`, `day_change`, `day_change_pct` — populated on STOCK rows
-  via the daemon's prev-close prewarm. `null` when the gateway hasn't
-  delivered tick 9 (rare on the happy path; usually pre-market).
+- `regular_close`, `regular_close_at`, `prior_regular_close` — stock-only
+  close anchors from the same quote path as `ibkr quote` / `ibkr watch`.
+  `regular_close` is the latest completed regular-session close; do not treat
+  pre/post/overnight indications as the regular close.
+- `quote_price`, `quote_price_source`, `quote_price_at`, `quote_price_as_of`
+  — stock-only current live/pre/post/overnight indication. Use with
+  `quote_quality`, `data_type`, and `feed_type` to explain freshness; keep it
+  separate from the account valuation `mark`.
+- `prev_close`, `day_change`, `day_change_pct` — comparison anchor and
+  movement for the account valuation mark / selected price. `null` means the
+  daemon has no reliable anchor.
 - `day_high`, `day_low`, `week_52_high`, `week_52_low`, `volume`,
   `avg_volume`, `price_at`, `price_as_of`, `stale`, `stale_reason`,
-  and `data_type` — stock-only quote context reused from the same
-  market-data path as `ibkr quote` / `ibkr watch`. Nil fields
-  mean the gateway did not deliver that tick within the short prewarm
-  window. `price_as_of` is display-ready text; `price_at` is the typed
-  timestamp.
+  `quote_quality`, `feed_type`, and `data_type` — stock-only quote context
+  reused from the same market-data path as `ibkr quote` / `ibkr watch`. Nil
+  fields mean the gateway did not deliver that tick within the short prewarm
+  window. `price_as_of` / `quote_price_as_of` are display-ready text;
+  `price_at` / `quote_price_at` are typed timestamps.
 - `market_value_ccy`, `unrealized_pnl_ccy`, `realized_pnl_ccy`,
   `daily_pnl_ccy` — contract-currency row values.
 - `market_value_base`, `unrealized_pnl_base`, `realized_pnl_base`,
@@ -365,6 +373,14 @@ and `--json` are mutually exclusive.
   },
   "price": 207.87,
   "price_source": "last",
+  "regular_close": 205.52,
+  "regular_close_at": "2026-05-22T16:00:00-04:00",
+  "prior_regular_close": 204.10,
+  "quote_price": 207.87,
+  "quote_price_source": "last",
+  "quote_price_at": "2026-05-22T16:01:02-04:00",
+  "quote_price_as_of": "At close: May 22 at 04:01:02 PM EDT",
+  "quote_quality": "firm",
   "prev_close": 205.52,
   "change": 2.35,
   "change_pct": 1.14,
@@ -389,6 +405,7 @@ and `--json` are mutually exclusive.
   "iv": null,
   "iv_status": "unavailable",
   "data_type": "frozen",
+  "feed_type": "frozen",
   "price_at": "2026-05-22T16:01:02-04:00",
   "price_as_of": "At close: May 22 at 04:01:02 PM EDT",
   "as_of": "2026-05-25T16:32:11.421+02:00",
@@ -409,14 +426,19 @@ and `--json` are mutually exclusive.
 ```
 
 Field meanings:
-- `price` — the daemon's best display price. `price_source` names the
-  input used: `last`, `mark`, `mid`, `bid`, `ask`, `prev_close`,
-  or `historical_close`.
-  Use this for headline rendering; keep the source visible when it is not
-  a live last trade.
-- `prev_close`, `change`, `change_pct` — previous regular-session close
-  and movement from `price`. Pointers/nulls preserve "not delivered"
-  separately from an exactly flat day.
+- `regular_close` — latest completed regular-session close. `prior_regular_close`
+  is the close before that. `regular_change` / `regular_change_pct` compare
+  those two closes when present.
+- `quote_price` — current live/pre/post/overnight indication selected from
+  last -> mark -> bid/ask midpoint -> bid -> ask. `quote_price_source`,
+  `quote_price_at`, and `quote_price_as_of` describe that indication.
+- `price` — the legacy selected display price: `quote_price` when an
+  indication exists, otherwise `regular_close`. `price_source` names the input
+  used. Keep the source visible when it is not a live last trade.
+- `prev_close`, `change`, `change_pct` — comparison anchor and movement for
+  `price`; usually `regular_close` for live/indicative quotes and
+  `prior_regular_close` for close-only rows. Pointers/nulls preserve "not
+  delivered" separately from an exactly flat day.
 - `bid`, `ask`, `last` — `null` means not delivered. Do not substitute.
 - `mark` — optional IBKR tick 37 mark/fair price. It is most useful
   off-hours or for instruments where bid/ask/last do not flow; render it
@@ -444,7 +466,11 @@ Field meanings:
 - `iv` / `iv_status` — populated only when IBKR sends tick 106
   (Option Implied Volatility). For a stock snapshot this is almost always
   `null` / `"unavailable"` — that's an honest signal, not an error.
-- `data_type` — `live`, `delayed`, `frozen`, or `delayed-frozen`.
+- `data_type` — effective data context: `live`, `delayed`, `frozen`,
+  `delayed-frozen`, `prev_close`, or `closed`. `feed_type` preserves the
+  gateway feed type when it differs from the effective data context.
+- `quote_quality` — compact machine hint: `firm`, `indicative`, `wide`,
+  `prev_close`, `stale`, or `missing`. `warning_details` carries reasons.
 - `historical_close` — latest daily bar close fallback when market-data
   ticks are absent but historical bars are available.
 - `price_at` / `price_as_of` — timestamp for `price` and display-ready
@@ -1161,14 +1187,15 @@ its 52-week high is the classic late-cycle divergence.
 
 ## gamma
 
-`ibkr gamma --json` — dealer-gamma market-structure snapshot for SPY, SPX,
-or the default SPY+SPX view. The result is heavy (multi-minute fan-out
+`ibkr gamma --json` — dealer-gamma market-structure snapshot for SPX/SPXW,
+with SPY as corroborating ETF context when usable. The result is heavy (multi-minute fan-out
 across hundreds of legs); the first caller of an NY trading day kicks a
 background job, subsequent callers within the session receive the cached
 result instantly.
 
 **MCP params** (`ibkr_gamma`):
-- `scope` — `"spy" | "spx" | "spy+spx"`. Default `"spy+spx"`. CLI alias is `--only`.
+- `scope` — `"spy" | "spx" | "spy+spx"`. Default `"spy+spx"`. SPX/SPXW is
+  canonical; SPY-only is a labeled proxy/context read. CLI alias is `--only`.
 - `wait_ms` — integer ms to block on an in-flight compute. Default 0.
 - `force` — boolean; diagnostics-only — ignore cached result. Default false.
 - `include_profiles` — boolean; default false. Include full sweep profile
@@ -1176,6 +1203,7 @@ result instantly.
 
 **CLI-only flags** (no MCP equivalent — text-mode rendering controls):
 - `--explain` — extra methodology, per-bucket horizon breakdown, scaling caveat. JSON unchanged.
+- `--diagnostics` — with `--explain`, include raw source/provenance diagnostics.
 - `--no-wait` — CLI sugar for `wait_ms: 0`.
 - `--json` — switch the CLI from text to JSON output.
 - `--profiles` — with `--json`, include full sweep profile arrays. Default
@@ -1273,7 +1301,7 @@ Ready (combined scope, subsequent calls):
     ],
     "params": {"expiry_count": 6, "strike_width_pct": 0.10,
                "sweep_range_pct": 0.15, "worker_count": 4},
-    "source": "computed from IBKR SPY+SPX option chains",
+    "source": "computed from IBKR SPX/SPXW option chains with SPY ETF context",
     "method": "bs-gamma-profile-v3-stickymoneyness-0dte-split",
     "as_of": "2026-05-09T13:32:54Z",
     "duration_ms": 158420
@@ -1294,7 +1322,8 @@ Field meanings:
   `status: "cold"` when the daemon knows why no value is serveable (for
   example, a persisted cache existed but failed data-quality validation).
 - `result.scope` — `"spy"` | `"spx"` | `"spy+spx"`. Discriminator for
-  combined vs single-underlying envelopes.
+  combined vs single-underlying envelopes. SPX/SPXW is the production
+  S&P 500 dealer-gamma signal; SPY corroborates when fresh/rankable.
 - `result.summary` — agent-preferred readout. Start here. It tells you
   which zero-gamma crossing, if any, was identified; whether the signed
   profile stayed long-/short-gamma through the swept range; confidence;
@@ -1656,10 +1685,10 @@ Field meanings:
 
 ## canary
 
-`ibkr canary --json` — portfolio-aware stress lifecycle for monitor loops. It
-reads account, positions, and the current regime, then emits
-posture/readiness/evidence only. It never selects trades, sizes hedges, previews
-orders, or executes.
+`ibkr canary --json` — live stateless portfolio canary for monitor loops. It
+combines broad-market weather from `ibkr regime` with the current portfolio
+shape, then emits action/readiness/evidence only. It never selects trades,
+sizes hedges, previews orders, or executes.
 
 **MCP params** (`ibkr_canary`): none — the tool fetches account, positions, and
 regime itself.
@@ -1691,33 +1720,18 @@ regime itself.
      "fingerprint_stability": "semantic_buckets_only"}
   ],
   "policy": "canary-default",
-  "lifecycle": {
-    "stage": "forced_defense",
-    "severity": "urgent",
-    "readiness": "blocked",
-    "timing": "contemporaneous",
-    "confidence": "medium-low",
-    "evidence": [
-      {"source": "portfolio_exposure", "signal": "net_delta_high",
-       "bucket": "urgent", "timing": "contemporaneous",
-       "severity": "urgent", "confirmed": true}
-    ],
-    "confirmed_by": ["net_delta_high"],
-    "fingerprint": {"version": "lifecycle-fp-v1", "key": "sha256:..."},
-    "not_execution": "Read-only canary posture; no orders are placed by ibkr."
-  },
+  "action": "confirm_inputs",
+  "market_confirmation": "blocked",
+  "portfolio_fit": "high",
+  "input_health": "degraded",
   "direction": "defensive",
-  "portfolio_posture": "threat",
-  "severity": "urgent",
-  "planner_mode_hint": "defend",
+  "severity": "watch",
+  "planner_mode_hint": "confirm_data",
   "planner_readiness": "blocked",
   "summary": "Refresh or confirm degraded inputs before planning major portfolio changes.",
-  "confidence": "medium-low",
-  "data_confidence": "medium-low",
-  "signal_confidence": "high",
   "primary_drivers": ["net_delta_high", "regime_stress_confirmed"],
   "signals": [
-    {"id": "net_delta_high", "direction": "defensive", "posture": "threat",
+    {"id": "net_delta_high", "direction": "defensive",
      "severity": "urgent", "metric": "net_delta_pct_nlv", "observed": 250.4,
      "threshold": 125, "unit": "pct_nlv", "evidence": "net_delta_pct_nlv 250% NLV",
      "confidence": "high"}
@@ -1741,24 +1755,28 @@ regime itself.
 
 Field meanings:
 
-- `lifecycle.stage` is one of `quiet`, `early_warning`,
-  `confirmed_stress`, `panic`, `forced_defense`, `stabilization`,
-  `opportunity`, or `data_quality`. It is the high-level stress-lifecycle
-  bucket; use `readiness` to decide whether a downstream planner should act,
-  prestage, watch, or block on data.
+- `action` is one of `stand_down`, `watch`, `defend`, `rebalance`, `deploy`,
+  or `confirm_inputs`. Do not infer a stronger action from portfolio-only
+  signals when the top-level action says otherwise.
+- `market_confirmation` is `none`, `partial`, `confirmed`, or `blocked`;
+  `portfolio_fit` is `low`, `medium`, `high`, or `unknown`; `input_health` is
+  `ok`, `warming`, `degraded`, or `failed`. These fields explain why the
+  action is actionable, staged, or data-blocked.
 - `planner_mode_hint` and `planner_readiness` are posture/readiness evidence.
   They are intentionally not orders or trade recommendations.
 - `signals[]` is the canonical machine evidence. Use `id`, `direction`,
-  `posture`, `severity`, `observed`, `threshold`, `target`, `confidence`, and
+  `severity`, `observed`, `threshold`, `target`, `confidence`, and
   `blocked_by`; do not parse `rows[].guidance` for automation.
 - `source_fingerprints` identifies the semantic account, positions, regime, and
-  market-event buckets consumed by the canary run. `fingerprint` identifies the
-  whole alert posture; `lifecycle.fingerprint` identifies just the lifecycle
-  transition.
+  market-event buckets consumed by the canary run. `fingerprint` identifies
+  the whole alert posture.
 - `source_health[]` is the freshness/readiness surface for orchestration. During
   regular trading/pre-market, sources are expected to be fresh on a roughly
   five-minute cadence; outside trading, the max-age window is wider. Always
   respect `status`, `confidence`, and `planner_readiness`.
+- `market_indicators[]` lists each regime indicator with `green`, `amber`,
+  `red`, `context`, or `n/a` status; context-only gamma is awareness evidence,
+  not degraded input health.
 - `portfolio` and `market` are compact context blocks for rendering and quick
   diagnostics. Use `ibkr account`, `ibkr positions`, and `ibkr regime` for
   full underlying evidence.
@@ -2224,8 +2242,26 @@ rows. MCP: `ibkr_proposals` with optional `refresh`/`show` booleans.
       "position_quantity": 120,
       "position_effect": "close",
       "order_type": "TRAIL",
-      "trail": {"basis": "instrument_price", "offset_type": "percent",
-                "trailing_percent": 8, "initial_stop_price": 440.27},
+      "trail": {"basis": "instrument_price", "offset_type": "amount",
+                "trailing_amount": 44.03, "initial_stop_price": 396.24},
+      "trail_sizing": {
+        "method": "atr-spread-policy",
+        "version": "stock-trail-sizing-v1",
+        "data_quality": "fallback",
+        "selected_by": "fallback",
+        "fallback": true,
+        "reference_price": 440.27,
+        "reference_source": "bid",
+        "policy_min_pct": 6,
+        "policy_default_pct": 8,
+        "policy_fallback_pct": 10,
+        "policy_max_pct": 15,
+        "chosen_pct": 10,
+        "chosen_amount": 44.03,
+        "initial_stop_price": 396.24,
+        "missing_reasons": ["atr_14_unavailable"],
+        "as_of": "2026-06-11T15:10:02Z"
+      },
       "tif": "GTC",
       "outside_rth": false,
       "contract": {"symbol": "NVDA", "sec_type": "STK", "currency": "USD"},
@@ -2284,6 +2320,12 @@ Field meanings:
   - `order_type` / `trail` / `tif` / `outside_rth` / `contract` — the
     draft the engine would preview; trail rows carry the computed
     `initial_stop_price`. `limit_price` is nullable.
+  - `trail_sizing` — stock/ETF trailing-stop sizing explanation. Percent
+    fields are human units (`10` means 10%). Dynamic rows name the selected
+    input (`atr`, `spread_floor`, `policy_default`, etc.); if no dynamic
+    sizing could be calculated, `fallback=true`, `data_quality="fallback"`,
+    `selected_by="fallback"`, and `chosen_pct` uses the policy fallback
+    (10% by default) with `missing_reasons[]` explaining what was absent.
   - `reason` + `details[]` — human-readable evidence. `score`,
     `theta_per_day`, `notional`, `risk_excess_notional` /
     `risk_excess_currency`, and `market_value_pct_nlv` (nullable) are

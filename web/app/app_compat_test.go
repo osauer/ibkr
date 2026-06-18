@@ -41,6 +41,47 @@ func TestAppJSPushControlsUseCapabilityHelpers(t *testing.T) {
 	}
 }
 
+func TestAppJSStalePairingURLFallsBackToDeviceLogin(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	main := jsFunctionBlock(t, js, "main")
+	for _, want := range []string{
+		`history.replaceState({}, "", "/");`,
+		`bootstrapped = await bootstrap({ quiet: true });`,
+		"Pairing link expired; opening paired app.",
+	} {
+		if !strings.Contains(main, want) {
+			t.Fatalf("main missing stale pairing recovery contract %q", want)
+		}
+	}
+	fetchBootstrap := jsFunctionBlock(t, js, "fetchBootstrap")
+	if !strings.Contains(fetchBootstrap, "if (!options.quiet)") {
+		t.Fatalf("fetchBootstrap must honor quiet recovery mode before showing pairing copy")
+	}
+}
+
+func TestManifestUsesStableRootLaunchScope(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("manifest.webmanifest")
+	if err != nil {
+		t.Fatalf("read manifest.webmanifest: %v", err)
+	}
+	manifest := string(data)
+	for _, want := range []string{
+		`"id": "/"`,
+		`"start_url": "/"`,
+		`"scope": "/"`,
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Fatalf("manifest missing stable launch contract %q", want)
+		}
+	}
+}
+
 func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 	t.Parallel()
 	data, err := Files.ReadFile("app.js")
@@ -433,6 +474,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".toggle-switch input:checked + span",
 		".protection-row:first-child",
 		".protection-row__trail",
+		".protection-row__trail--fallback",
 		".protection-preview",
 		".opportunities-panel",
 		".opportunities-summary",
@@ -447,6 +489,25 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	}
 	if strings.Contains(css, ".bottom-tabs {\n  position: fixed;") {
 		t.Fatalf("bottom tabs must be pinned by shell layout, not fixed to the browser viewport")
+	}
+}
+
+func TestAppJSRendersTrailSizingFallback(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"protectionTrailSizingLabel(proposal.trail_sizing)",
+		"protectionTrailSizingFallback(proposal)",
+		"fallback trail used",
+		"dynamic stop unavailable",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing trail sizing UX contract %q", want)
+		}
 	}
 }
 
@@ -623,6 +684,60 @@ func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing borrow-fee market-event rendering contract %q", want)
 		}
+	}
+}
+
+func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
+	t.Parallel()
+	jsData, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	htmlData, err := Files.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	cssData, err := Files.ReadFile("styles.css")
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	js := string(jsData)
+	render := jsFunctionBlock(t, js, "renderProtectionPanel")
+	for _, want := range []string{
+		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral")`,
+		`setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral")`,
+		`const noStop = protectionNoStopExposureSummary(rows, marketEvents);`,
+		`$("protectionNoStopExposure")`,
+	} {
+		if !strings.Contains(render, want) {
+			t.Fatalf("renderProtectionPanel missing protection summary contract %q", want)
+		}
+	}
+	noStop := jsFunctionBlock(t, js, "protectionNoStopExposureSummary")
+	for _, want := range []string{
+		"protectionVisibleRows(rows, marketEvents)",
+		`proposal.bucket === "trailing_stop"`,
+		"protectionProposalNotional(proposal)",
+		"sum of visible trailing-stop proposal notionals",
+	} {
+		if !strings.Contains(noStop, want) {
+			t.Fatalf("protectionNoStopExposureSummary missing row-backed contract %q", want)
+		}
+	}
+	html := string(htmlData)
+	for _, want := range []string{`id="protectionNoStopExposure"`, "No-stop exposure"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("index.html missing no-stop summary element %q", want)
+		}
+	}
+	css := string(cssData)
+	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("styles.css missing protection metric tone rule %q", want)
+		}
+	}
+	if strings.Contains(css, "#protectionTheta {\n  color: var(--red);") {
+		t.Fatal("protection theta must not be unconditionally red")
 	}
 }
 

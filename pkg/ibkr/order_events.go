@@ -43,6 +43,7 @@ type OrderLifecycleEvent struct {
 	TrailStopPrice  float64
 	LmtPriceOffset  float64
 	TIF             string
+	TriggerMethod   int
 	OutsideRth      bool
 	WhatIf          bool
 	Filled          float64
@@ -195,7 +196,7 @@ func parseExecDetailsEvent(fields []string) (OrderLifecycleEvent, bool) {
 		OrderRef:      strings.TrimSpace(orderEventField(fields, start+24)),
 		Raw:           append([]string{}, fields...),
 	}
-	return ev, ev.OrderID > 0 && ev.ExecID != ""
+	return ev, ev.ExecID != "" && (ev.OrderID > 0 || ev.PermID > 0 || ev.OrderRef != "")
 }
 
 func parseOpenOrderProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
@@ -223,6 +224,7 @@ func parseOpenOrderProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
 		TrailStopPrice:  orderEventFloat(summaryFieldValue(fields, "trailStopPrice=")),
 		LmtPriceOffset:  orderEventFloat(summaryFieldValue(fields, "lmtPriceOffset=")),
 		TIF:             strings.ToUpper(strings.TrimSpace(summaryFieldValue(fields, "tif="))),
+		TriggerMethod:   orderEventInt(summaryFieldValue(fields, "triggerMethod=")),
 		OutsideRth:      protoSummaryBool(fields, "outsideRth="),
 		WhatIf:          protoSummaryBool(fields, "whatIf="),
 		Account:         strings.TrimSpace(summaryFieldValue(fields, "account=")),
@@ -292,7 +294,7 @@ func parseExecDetailsProtoEvent(fields []string) (OrderLifecycleEvent, bool) {
 		OrderRef:      strings.TrimSpace(summaryFieldValue(fields, "orderRef=")),
 		Raw:           append([]string{}, fields...),
 	}
-	return ev, ev.OrderID > 0 && ev.ExecID != ""
+	return ev, ev.ExecID != "" && (ev.OrderID > 0 || ev.PermID > 0 || ev.OrderRef != "")
 }
 
 func orderEventField(fields []string, idx int) string {
